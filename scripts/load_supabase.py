@@ -1,0 +1,120 @@
+"""Phase 0 load: cleaned CSVs in data/clean/ -> Supabase (idempotent upserts).
+
+Order:
+  1. products   (derived from selling_prices: distinct sku_code + item_name + unit + status)
+  2. customers  (derived from orders.customer_name + order_lines.customer_account)
+  3. orders, order_lines, stock_movements, ledger_entries, product_profitability, selling_prices
+
+Upserts use each table's natural key (on_conflict) so re-running never double-counts
+(data rules 2/6 friendly). Requires the tables created by migrate_supabase.py.
+
+Usage:  python scripts/load_supabase.py
+"""
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+CLEAN = ROOT / "data" / "clean"
+CHUNK = 500
+
+
+def _client():
+    # imported here so `ingest.py` users without Supabase config aren't forced to set it up
+    from app.database import get_client
+
+    return get_client()
+
+
+def _records(df: pd.DataFrame) -> list[dict]:
+    df = df.where(pd.notnull(df), None)
+    out = []
+    for rec in df.to_dict(orient="records"):
+        clean = {}
+        for k, v in rec.items():
+            if isinstance(v, float) and math.isnan(v):
+                v = None
+            clean[k] = v
+        out.append(clean)
+    return out
+
+
+def _upsert(client, table: str, records: list[dict], on_conflict: str) -> int:
+    n = 0
+    for i in range(0, len(records), CHUNK):
+        batch = records[i : i + CHUNK]
+        client.table(table).upsert(batch, on_conflict=on_conflict).execute()
+        n += len(batch)
+    print(f"  upserted {table:24} {n:7}")
+    return n
+
+
+def _read(name: str) -> pd.DataFrame | None:
+    p = CLEAN / f"{name}.csv"
+    if not p.exists():
+        print(f"  (skip {name}: {p.name} not found)")
+        return None
+    return pd.read_csv(p, dtype=object)
+
+
+def main() -> int:
+    if not CLEAN.exists():
+        print(f"ERROR: {CLEAN} not found. Run scripts/ingest.py first.")
+        return 1
+    client = _client()
+    print("Loading data/clean/ -> Supabase\n" + "=" * 60)
+
+    # 1) products from price books
+    sp = _read("selling_prices")
+    if sp is not None:
+        prods = (
+            sp[["sku_code", "item_name", "unit_name", "status"]]
+            .dropna(subset=["sku_code"])
+            .drop_duplicates(subset=["sku_code"])
+        )
+        _upsert(client, "products", _records(prods), on_conflict="sku_code")
+
+    # 2) customers from sales
+    names: set[str] = set()
+    od = _read("orders")
+    ol = _read("order_lines")
+    if od is not None:
+        names |= {x for x in od["customer_name"].dropna().tolist()}
+    if ol is not None:
+        names |= {x for x in ol["customer_account"].dropna().tolist()}
+    if names:
+        _upsert(client, "customers",
+                [{"name": n} for n in sorted(names)], on_conflict="name")
+
+    # 3) fact + pricing tables
+    if od is not None:
+        _upsert(client, "orders", _records(od), on_conflict="invoice_no")
+    if ol is not None:
+        _upsert(client, "order_lines", _records(ol), on_conflict="invoice_no,line_no")
+    sm = _read("stock_movements")
+    if sm is not None:
+        _upsert(client, "stock_movements", _records(sm),
+                on_conflict="voucher,item_name,row_hash")
+    le = _read("ledger_entries")
+    if le is not None:
+        _upsert(client, "ledger_entries", _records(le),
+                on_conflict="account,voucher,row_hash")
+    pp = _read("product_profitability")
+    if pp is not None:
+        _upsert(client, "product_profitability", _records(pp),
+                on_conflict="item_name,report_date")
+    if sp is not None:
+        _upsert(client, "selling_prices", _records(sp),
+                on_conflict="sku_code,price_book,customer_code,start_date")
+
+    print("=" * 60)
+    print("Load complete. Run scripts/reconcile_products.py to link item names -> SKUs.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

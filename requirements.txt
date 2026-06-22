@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+supabase
+python-dotenv
+openai
+tenacity
+requests
+PyJWT
+slowapi
+streamlit
+pandas
+openpyxl
+pdfplumber
+python-docx

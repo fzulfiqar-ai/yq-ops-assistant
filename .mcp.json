@@ -1,0 +1,4 @@
+{
+  "_comment": "SECURITY BOUNDARY. This file declares the ONLY MCP servers this project may use. It is intentionally empty in v1. Servers are added deliberately, one at a time, with review. The n8n MCP server is added in Phase 3 (not before). Do not add a server here without an explicit request.",
+  "mcpServers": {}
+}
