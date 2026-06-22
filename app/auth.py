@@ -10,10 +10,11 @@ Every data endpoint except /health depends on get_current_user.
 """
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
@@ -78,3 +79,32 @@ def require_roles(*allowed: str):
         return user
 
     return _dep
+
+
+def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    """Restrict an endpoint to admin users (mutating / governance actions)."""
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires admin role; you are '{user.role}'.",
+        )
+    return user
+
+
+AGENT_EMAIL = "agent@yqbahrain.local"
+
+
+def get_caller(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    x_agent_key: str | None = Header(default=None, alias="X-Agent-Key"),
+) -> CurrentUser:
+    """Accept EITHER a valid service key (X-Agent-Key) OR a Supabase user JWT.
+
+    Read-only automation endpoints (digests, agent runs) use this so schedulers /
+    n8n can call them with a machine key instead of a user login. If the key is
+    absent or wrong, it falls back to normal user-JWT auth.
+    """
+    key = settings.agent_api_key
+    if key and x_agent_key and hmac.compare_digest(x_agent_key, key):
+        return CurrentUser(user_id="agent", email=AGENT_EMAIL, role="agent")
+    return get_current_user(creds)

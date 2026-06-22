@@ -40,6 +40,9 @@ class Settings:
         ]
         self.rate_limit: str = os.getenv("RATE_LIMIT", "30/minute")
         self.dashboard_secret: str = os.getenv("DASHBOARD_SECRET", "yq2024")
+        # Machine-to-machine key for schedulers / n8n agent flows (X-Agent-Key header).
+        # Empty by default → agent-key auth is disabled until set in the environment.
+        self.agent_api_key: str = os.getenv("AGENT_API_KEY", "")
 
     def require_supabase(self) -> None:
         """Raise a clear error if Supabase config is missing (used by scripts/DB paths)."""

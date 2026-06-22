@@ -22,7 +22,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app.auth import CurrentUser, get_current_user
+from app.audit import log_event
+from app.auth import CurrentUser, get_caller, get_current_user, require_admin
 from app.config import settings
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit])
@@ -64,15 +65,33 @@ async def llm_health(_user: CurrentUser = Depends(get_current_user)) -> dict:
 
 
 @app.get("/digest/daily")
-async def digest_daily(_user: CurrentUser = Depends(get_current_user)) -> dict:
+async def digest_daily(_caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.digest import daily_summary
     return daily_summary()
 
 
 @app.get("/digest/alerts")
-async def digest_alerts(_user: CurrentUser = Depends(get_current_user)) -> dict:
+async def digest_alerts(_caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.digest import all_alerts
     return all_alerts()
+
+
+@app.get("/agents")
+async def agents_list(_caller: CurrentUser = Depends(get_caller)) -> list:
+    from app.agents import list_agents
+    return list_agents()
+
+
+@app.get("/agents/{name}")
+async def agents_run(name: str, caller: CurrentUser = Depends(get_caller)) -> dict:
+    from app.agents import run_agent
+    try:
+        result = run_agent(name)
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Unknown agent '{name}'.")
+    log_event(caller.email, "agent", detail={"agent": name, "summary": result.get("summary")})
+    return result
 
 
 class ActionRequest(BaseModel):
@@ -84,7 +103,9 @@ class ActionRequest(BaseModel):
 @app.post("/action")
 async def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.actions import submit_action as _submit
-    return _submit(body.action_type, {**body.payload, "notes": body.notes}, requested_by=user.email)
+    result = _submit(body.action_type, {**body.payload, "notes": body.notes}, requested_by=user.email)
+    log_event(user.email, "action.submit", detail={"action_type": body.action_type})
+    return result
 
 
 @app.get("/actions")
@@ -94,19 +115,23 @@ async def list_actions(status: str | None = None, _user: CurrentUser = Depends(g
 
 
 @app.patch("/actions/{action_id}/approve")
-async def approve_action(action_id: int, user: CurrentUser = Depends(get_current_user)) -> dict:
+async def approve_action(action_id: int, user: CurrentUser = Depends(require_admin)) -> dict:
     from app.actions import approve_action as _approve
-    return _approve(action_id, approved_by=user.email)
+    result = _approve(action_id, approved_by=user.email)
+    log_event(user.email, "action.approve", detail={"action_id": action_id})
+    return result
 
 
 @app.patch("/actions/{action_id}/reject")
-async def reject_action(action_id: int, reason: str = "", user: CurrentUser = Depends(get_current_user)) -> dict:
+async def reject_action(action_id: int, reason: str = "", user: CurrentUser = Depends(require_admin)) -> dict:
     from app.actions import reject_action as _reject
-    return _reject(action_id, approved_by=user.email, reason=reason)
+    result = _reject(action_id, approved_by=user.email, reason=reason)
+    log_event(user.email, "action.reject", detail={"action_id": action_id, "reason": reason})
+    return result
 
 
 @app.get("/actions/export")
-async def export_actions(_user: CurrentUser = Depends(get_current_user)) -> Response:
+async def export_actions(_user: CurrentUser = Depends(require_admin)) -> Response:
     from app.actions import export_approved_csv
     return Response(content=export_approved_csv(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=approved_actions.csv"})
@@ -116,7 +141,7 @@ async def export_actions(_user: CurrentUser = Depends(get_current_user)) -> Resp
 async def ingest_file(
     file: UploadFile = File(...),
     report_type: str = Form(default="auto"),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(require_admin),
 ) -> dict:
     import subprocess
     import sys
@@ -132,6 +157,9 @@ async def ingest_file(
         saved_to = tmp.name
     r1 = subprocess.run([sys.executable, "-m", "scripts.ingest"], cwd=ROOT, capture_output=True, text=True)
     r2 = subprocess.run([sys.executable, "-m", "scripts.load_supabase"], cwd=ROOT, capture_output=True, text=True)
+    log_event(user.email, "ingest", detail={
+        "filename": file.filename, "ingest_ok": r1.returncode == 0, "load_ok": r2.returncode == 0,
+    })
     return {
         "filename": file.filename,
         "report_type": report_type,

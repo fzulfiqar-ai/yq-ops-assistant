@@ -107,16 +107,34 @@ class Redactor:
 
 
 # --------------------------------------------------------------------------- chat
-def _candidates(tier: int) -> list[Provider]:
+def _candidates(tier: int, model_name: str | None = None) -> list[Provider]:
     now = time.time()
     live = [p for p in _ROTATION if p.disabled_until <= now]
+    if model_name:
+        matching = []
+        others = []
+        for p in live:
+            is_match = False
+            if model_name == "pro":
+                is_match = ("70b" in p.model.lower() or "glm" in p.model.lower() or p.tier2)
+            elif model_name == "thinking":
+                is_match = ("deepseek" in p.model.lower() or "glm" in p.model.lower() or "qwen" in p.model.lower())
+            elif model_name == "fast":
+                is_match = ("8b" in p.model.lower())
+            
+            if is_match:
+                matching.append(p)
+            else:
+                others.append(p)
+        return matching + others
+
     if tier == 2:
         return [p for p in live if p.tier2] + [p for p in live if not p.tier2]
     return live
 
 
 def chat(messages: list[dict[str, str]], *, tier: int = 1,
-         temperature: float = 0.2, max_tokens: int = 1024) -> str:
+         temperature: float = 0.2, max_tokens: int = 1024, model_name: str | None = None) -> str:
     """Send a chat completion through the rotation. Returns the assistant text.
 
     Caller is responsible for redacting PII in `messages` (use Redactor).
@@ -127,7 +145,7 @@ def chat(messages: list[dict[str, str]], *, tier: int = 1,
         )
 
     last_err: Exception | None = None
-    for prov in _candidates(tier):
+    for prov in _candidates(tier, model_name):
         client = OpenAI(base_url=prov.base_url, api_key=prov.api_key)
         for attempt in range(_MAX_429_RETRIES):
             try:

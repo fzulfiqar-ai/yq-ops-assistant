@@ -107,7 +107,7 @@ def exec_sql(sql: str) -> list[dict]:
     return data or []
 
 
-def _llm_sql(question: str) -> str:
+def _llm_sql(question: str, model_name: str | None = None) -> str:
     """Call LLM to generate SQL for the question. Returns raw SQL."""
     msgs = [
         {
@@ -121,12 +121,12 @@ def _llm_sql(question: str) -> str:
         },
         {"role": "user", "content": question},
     ]
-    raw = chat(msgs, tier=2, temperature=0.1, max_tokens=400)
+    raw = chat(msgs, tier=2, temperature=0.1, max_tokens=400, model_name=model_name)
     raw = re.sub(r"```\w*\s*", "", raw, flags=re.IGNORECASE)
     return raw.replace("```", "").strip().rstrip(";")
 
 
-def _llm_answer(question: str, rows: list[dict], redactor: Redactor) -> str:
+def _llm_answer(question: str, rows: list[dict], redactor: Redactor, model_name: str | None = None) -> str:
     """Format SQL result rows into a concise business answer via LLM."""
     if not rows:
         return "No data found for your question based on current records."
@@ -147,7 +147,7 @@ def _llm_answer(question: str, rows: list[dict], redactor: Redactor) -> str:
             "content": f"Question: {question}\n\nData:\n{redacted_rows}",
         },
     ]
-    answer = chat(msgs, tier=2, temperature=0.3, max_tokens=600)
+    answer = chat(msgs, tier=2, temperature=0.3, max_tokens=600, model_name=model_name)
     return redactor.restore(answer)
 
 
@@ -180,7 +180,7 @@ def _fmt_template(label: str, rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def ask(question: str, user_email: str = "system") -> dict[str, Any]:
+def ask(question: str, user_email: str = "system", model_name: str | None = None) -> dict[str, Any]:
     """Answer a natural-language question about YQ Bahrain operations.
 
     Returns dict with: reply, sql_used, cached, row_count
@@ -209,13 +209,13 @@ def ask(question: str, user_email: str = "system") -> dict[str, Any]:
         else:
             # 3 — LLM text-to-SQL
             redacted_q = redactor.redact(question, [])
-            raw_sql = _llm_sql(redacted_q)
+            raw_sql = _llm_sql(redacted_q, model_name)
             try:
                 sql_used = validate(raw_sql)
             except SQLValidationError as e:
                 return {"reply": f"I couldn't generate a valid query. ({e})", "sql_used": raw_sql, "cached": False, "row_count": 0}
             rows = exec_sql(sql_used)
-            reply = _llm_answer(question, rows, redactor)
+            reply = _llm_answer(question, rows, redactor, model_name)
 
     except Exception as e:
         log.exception("ask() error: %s", e)
