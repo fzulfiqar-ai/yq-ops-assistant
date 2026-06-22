@@ -13,3 +13,4 @@ openpyxl
 pdfplumber
 python-docx
 pyyaml
+plotly

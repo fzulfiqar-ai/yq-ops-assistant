@@ -181,3 +181,29 @@ GRANT SELECT ON
     v_sales, v_current_stock, v_product_margin, v_receivables,
     v_top_customers, v_sales_by_period, v_low_stock, shipments
 TO yq_readonly;
+
+-- ============================================================
+-- Safe SQL executor for the AI /ask query path (Phase 1)
+-- Only callable via service_role key (backend only).
+-- Input SQL must be pre-validated by app/sql_validator.py.
+-- ============================================================
+CREATE OR REPLACE FUNCTION run_readonly_query(sql_text text)
+RETURNS json
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE result json;
+BEGIN
+    EXECUTE format(
+        'SELECT COALESCE(json_agg(t), ''[]''::json) FROM (%s) t',
+        sql_text
+    ) INTO result;
+    RETURN result;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION run_readonly_query(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION run_readonly_query(text) FROM anon;
+REVOKE EXECUTE ON FUNCTION run_readonly_query(text) FROM authenticated;
+GRANT  EXECUTE ON FUNCTION run_readonly_query(text) TO service_role;

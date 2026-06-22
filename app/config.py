@@ -39,6 +39,7 @@ class Settings:
             "http://localhost:8501"
         ]
         self.rate_limit: str = os.getenv("RATE_LIMIT", "30/minute")
+        self.dashboard_secret: str = os.getenv("DASHBOARD_SECRET", "yq2024")
 
     def require_supabase(self) -> None:
         """Raise a clear error if Supabase config is missing (used by scripts/DB paths)."""
