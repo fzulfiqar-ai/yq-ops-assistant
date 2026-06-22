@@ -1,0 +1,171 @@
+# YQ Bahrain ops assistant — evaluation set (Phase 0.5)
+# Covers deterministic template questions (expected_template set)
+# and LLM-path questions (expected_template: null, expected_sql_contains set).
+# Run: python tests/run_eval.py  (validates templates only — no DB needed)
+
+questions:
+
+  # ── Sales totals ────────────────────────────────────────────────────────────
+  - id: 1
+    question: "What are total sales this month?"
+    expected_template: "Total sales this month"
+    expected_columns: [orders, total_qty, revenue_bhd]
+    notes: Core management KPI — must be instant, no LLM
+
+  - id: 2
+    question: "What are total sales today?"
+    expected_template: "Total sales today"
+    expected_columns: [orders, total_qty, revenue_bhd, vat_bhd]
+
+  - id: 3
+    question: "How much have we sold this week?"
+    expected_template: "Total sales this week"
+    expected_columns: [orders, total_qty, revenue_bhd]
+
+  - id: 4
+    question: "Show me monthly sales trend"
+    expected_template: "Monthly sales trend"
+    expected_columns: [period_month, order_count, net_revenue_bhd]
+
+  - id: 5
+    question: "Monthly breakdown of sales"
+    expected_template: "Monthly sales trend"
+    expected_columns: [period_month, net_revenue_bhd]
+
+  # ── Revenue breakdowns ───────────────────────────────────────────────────────
+  - id: 6
+    question: "Revenue by salesman"
+    expected_template: "Revenue by salesman"
+    expected_columns: [salesman, revenue_bhd, orders]
+
+  - id: 7
+    question: "Show best-selling products"
+    expected_template: "Best-selling products"
+    expected_columns: [item_name, qty_sold, revenue_bhd]
+
+  - id: 8
+    question: "Who are the top 10 customers?"
+    expected_template: "Top customers by revenue"
+    expected_columns: [customer_name, total_revenue_bhd, order_count]
+
+  - id: 9
+    question: "Sales by category"
+    expected_template: "Sales by category"
+    expected_columns: [category_name, revenue_bhd]
+
+  # ── Stock ────────────────────────────────────────────────────────────────────
+  - id: 10
+    question: "Show current stock levels"
+    expected_template: "Current stock summary"
+    expected_columns: [item_name, balance_qty, warehouse_name]
+
+  - id: 11
+    question: "What is in stock right now?"
+    expected_template: "Current stock summary"
+    expected_columns: [item_name, balance_qty]
+
+  - id: 12
+    question: "Which products have low stock?"
+    expected_template: "Low-stock items"
+    expected_columns: [item_name, balance_qty, warehouse_name]
+
+  - id: 13
+    question: "Show items running low"
+    expected_template: "Low-stock items"
+    expected_columns: [item_name, balance_qty]
+
+  - id: 14
+    question: "What is the total stock value?"
+    expected_template: "Total stock value"
+    expected_columns: [total_stock_value_bhd]
+
+  - id: 15
+    question: "What is our inventory worth?"
+    expected_template: "Total stock value"
+    expected_columns: [total_stock_value_bhd]
+
+  # ── Margins ───────────────────────────────────────────────────────────────────
+  - id: 16
+    question: "Show all product margins"
+    expected_template: "Product margins"
+    expected_columns: [item_name, gp_margin_pct]
+
+  - id: 17
+    question: "Which products have negative margins?"
+    expected_template: "Negative-margin products"
+    expected_columns: [item_name, gp_margin_pct]
+
+  - id: 18
+    question: "Show loss-making items"
+    expected_template: "Negative-margin products"
+    expected_columns: [item_name, gp_margin_pct]
+
+  # ── Receivables ───────────────────────────────────────────────────────────────
+  - id: 19
+    question: "What are the outstanding receivables?"
+    expected_template: "Outstanding receivables"
+    expected_columns: [account, outstanding_bhd, days_outstanding]
+
+  - id: 20
+    question: "Who owes us money?"
+    expected_template: "Outstanding receivables"
+    expected_columns: [account, outstanding_bhd]
+
+  - id: 21
+    question: "Total amount owed to us"
+    expected_template: "Total outstanding receivables"
+    expected_columns: [total_outstanding_bhd]
+
+  # ── Shipments ─────────────────────────────────────────────────────────────────
+  - id: 22
+    question: "Show recent shipments"
+    expected_template: "Recent shipments"
+    expected_columns: [received_date, mrn_no, item_name, received_qty]
+
+  - id: 23
+    question: "What stock did we receive?"
+    expected_template: "Recent shipments"
+    expected_columns: [received_date, item_name, received_qty]
+
+  # ── LLM-path questions (no deterministic template) ────────────────────────────
+  - id: 24
+    question: "What is the margin for VFAN F19 speakers?"
+    expected_template: null
+    expected_sql_contains: [v_product_margin, ILIKE]
+    notes: LLM path — product-specific margin lookup
+
+  - id: 25
+    question: "How much did Lulu Hypermarket buy last month?"
+    expected_template: null
+    expected_sql_contains: [v_sales, customer_name, ILIKE]
+    notes: LLM path — customer-filtered sales with date range
+
+  - id: 26
+    question: "Current stock of wireless earbuds in SIM warehouse?"
+    expected_template: null
+    expected_sql_contains: [v_current_stock, ILIKE]
+    notes: LLM path — product + warehouse filter
+
+  - id: 27
+    question: "Which warehouse has the most stock by value?"
+    expected_template: null
+    expected_sql_contains: [v_current_stock, warehouse_name, GROUP BY]
+    notes: LLM path — aggregation by warehouse
+
+  - id: 28
+    question: "Show all invoices over 500 BHD"
+    expected_template: null
+    expected_sql_contains: [v_sales, total_amount_bhd]
+    notes: LLM path — invoice amount filter
+
+  - id: 29
+    question: "What products did we receive in May 2026?"
+    expected_template: null
+    expected_sql_contains: [shipments, received_date]
+    notes: LLM path — date-filtered shipments
+
+  - id: 30
+    question: "Which customers haven't ordered in 60 days?"
+    expected_template: null
+    expected_sql_contains: [v_top_customers, last_order_date]
+    notes: LLM path — inactive customer detection
