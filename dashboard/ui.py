@@ -103,10 +103,14 @@ html, body, [class*="css"], .stApp {
 [data-testid="stSidebar"] * { color: var(--text) !important; }
 [data-testid="stSidebarNav"] { display: none; }
 
-/* ── Hide Streamlit chrome but keep sidebar toggle visible ── */
-#MainMenu, footer, [data-testid="stToolbar"] { visibility: hidden; }
-header { visibility: hidden; }
-[data-testid="collapsedControl"] { visibility: visible !important; color: #a78bfa !important; }
+/* ── Hide Streamlit chrome ── */
+#MainMenu, footer, [data-testid="stToolbar"],
+[data-testid="stDecoration"], [data-testid="stStatusWidget"] { visibility: hidden; }
+/* Keep sidebar always expanded — never allow it to collapse */
+[data-testid="stSidebar"] { transform: none !important; min-width: 270px !important; width: 270px !important; }
+[data-testid="stSidebarCollapseButton"] { display: none !important; }
+[data-testid="collapsedControl"] { display: none !important; }
+.block-container { margin-left: 270px !important; }
 .block-container { padding: 1.5rem 2rem 2rem !important; max-width: 100% !important; }
 
 /* ── KPI cards ── */
