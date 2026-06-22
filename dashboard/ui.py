@@ -593,29 +593,27 @@ def _low_stock_items() -> list[dict]:
         return []
 
 
-def _check_login(email: str, password: str) -> dict | None:
-    """Check password matches .env secret and email exists in user_roles.
+_ADMIN_EMAILS = {"fzulfiqar@pie-int.com", "furqanahmed223@gmail.com"}
 
-    Fallback: if Supabase is unreachable but password is correct and email
-    is a known admin, grant access so the dashboard is never locked out.
-    """
+
+def _check_login(email: str, password: str) -> dict | None:
+    """Verify password then look up role in user_roles (falls back to local list)."""
     secret = getattr(settings, "dashboard_secret", None) or "yq2024"
+    em = email.strip().lower()
     if password != secret:
         return None
+    # Try Supabase first
     try:
         client = get_client()
-        r = client.table("user_roles").select("email,role").eq("email", email.strip().lower()).limit(1).execute()
+        r = client.table("user_roles").select("email,role").eq("email", em).limit(1).execute()
         if r.data:
             return r.data[0]
-        # Email not found in DB
-        return None
-    except Exception as e:
-        # Supabase unreachable — allow known admin emails through on password alone
-        known_admins = {"fzulfiqar@pie-int.com", "furqanahmed223@gmail.com"}
-        if email.strip().lower() in known_admins:
-            return {"email": email.strip().lower(), "role": "admin"}
-        st.session_state.login_error = f"DB connection failed: {e}"
-        return None
+    except Exception:
+        pass
+    # Fallback: known admin list (works even if Supabase secrets not yet set)
+    if em in _ADMIN_EMAILS:
+        return {"email": em, "role": "admin"}
+    return None
 
 
 # ── Login page ───────────────────────────────────────────────────────────────
