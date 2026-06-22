@@ -6,7 +6,6 @@ Run: streamlit run dashboard/ui.py
 from __future__ import annotations
 
 import base64
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -104,8 +103,10 @@ html, body, [class*="css"], .stApp {
 [data-testid="stSidebar"] * { color: var(--text) !important; }
 [data-testid="stSidebarNav"] { display: none; }
 
-/* ── Hide Streamlit chrome ── */
-#MainMenu, footer, header, [data-testid="stToolbar"] { visibility: hidden; }
+/* ── Hide Streamlit chrome but keep sidebar toggle visible ── */
+#MainMenu, footer, [data-testid="stToolbar"] { visibility: hidden; }
+header { visibility: hidden; }
+[data-testid="collapsedControl"] { visibility: visible !important; color: #a78bfa !important; }
 .block-container { padding: 1.5rem 2rem 2rem !important; max-width: 100% !important; }
 
 /* ── KPI cards ── */
