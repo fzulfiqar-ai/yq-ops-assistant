@@ -30,7 +30,9 @@ VIEWS_SQL = r"""
 -- ============================================================
 
 -- v_sales: enriched sales lines ---------------------------
-CREATE OR REPLACE VIEW v_sales AS
+-- DROP first so column renames (warehouse_name -> salesman_resolved) apply cleanly.
+DROP VIEW IF EXISTS v_sales;
+CREATE VIEW v_sales AS
 SELECT
     ol.id                                          AS line_id,
     ol.invoice_no,
