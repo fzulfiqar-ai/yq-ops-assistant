@@ -1,0 +1,63 @@
+{
+  "name": "YQ Bahrain — Daily Ops Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 24 }] },
+        "triggerAtHour": 8,
+        "triggerAtMinute": 0
+      },
+      "name": "Every day at 8AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.RAILWAY_API_URL}}/digest/daily",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "name": "GET /digest/daily",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [460, 300],
+      "credentials": { "httpHeaderAuth": { "name": "YQ API Key" } }
+    },
+    {
+      "parameters": {
+        "url": "={{$env.RAILWAY_API_URL}}/digest/alerts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "name": "GET /digest/alerts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [460, 460],
+      "credentials": { "httpHeaderAuth": { "name": "YQ API Key" } }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.SMTP_USER}}",
+        "toEmail": "={{$env.ALERT_EMAIL_TO}}",
+        "subject": "=YQ Ops Daily Digest — {{$now.format('dd MMM yyyy')}}",
+        "emailType": "html",
+        "message": "=<div style='font-family:Inter,Arial,sans-serif;background:#080514;color:#f1f5f9;padding:24px;'><h2 style='color:#a78bfa;'>YQ Bahrain Daily Operations Digest</h2><p>Revenue MTD: <b>BHD {{$node['GET /digest/daily'].json.rev_mtd.toFixed(2)}}</b></p><p>Orders MTD: <b>{{$node['GET /digest/daily'].json.orders_mtd}}</b></p><p>Receivables: <b>BHD {{$node['GET /digest/daily'].json.total_receivables.toFixed(2)}}</b></p><hr style='border-color:#3730a3;'/><p style='color:#f59e0b;'>⚠️ Low Stock Items: {{$node['GET /digest/alerts'].json.low_stock_count}}</p><p style='color:#ef4444;'>🏦 Overdue Accounts: {{$node['GET /digest/alerts'].json.overdue_count}}</p><p style='color:#ec4899;'>📉 Negative Margins: {{$node['GET /digest/alerts'].json.negative_margin_count}}</p></div>",
+        "options": {}
+      },
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [700, 380]
+    }
+  ],
+  "connections": {
+    "Every day at 8AM": { "main": [[{ "node": "GET /digest/daily", "type": "main", "index": 0 }, { "node": "GET /digest/alerts", "type": "main", "index": 0 }]] },
+    "GET /digest/daily": { "main": [[{ "node": "Send Email", "type": "main", "index": 0 }]] },
+    "GET /digest/alerts": { "main": [[{ "node": "Send Email", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "notes": "Calls Railway API /digest/daily and /digest/alerts, sends combined email at 8AM daily. Set RAILWAY_API_URL and ALERT_EMAIL_TO env vars in n8n. Sanitized — no credentials in this file."
+}

@@ -950,7 +950,7 @@ def main_dashboard():
             """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Low stock + AI Chat
+    # ── AI Chat + Low Stock
     st.markdown('<div class="section-header">💬 AI Assistant</div>', unsafe_allow_html=True)
     col_chat, col_low = st.columns([1.7, 1])
 
@@ -980,6 +980,93 @@ def main_dashboard():
         else:
             st.markdown('<div style="text-align:center;color:#10b981;padding:20px;font-size:.85rem;">✅ All stock levels healthy</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Pending Actions (Phase 2)
+    st.markdown('<div class="section-header">⚡ Pending Actions</div>', unsafe_allow_html=True)
+    col_act, col_new = st.columns([1.6, 1])
+
+    with col_act:
+        st.markdown('<div class="glass">', unsafe_allow_html=True)
+        st.markdown('<div class="glass-title">📋 Action Queue</div>', unsafe_allow_html=True)
+        try:
+            from app.actions import approve_action, list_actions, reject_action
+            actions = list_actions()
+            pending = [a for a in actions if a.get("status") == "pending"]
+            if pending:
+                for a in pending[:10]:
+                    payload = a.get("payload") or {}
+                    if isinstance(payload, str):
+                        import json as _json
+                        try:
+                            payload = _json.loads(payload)
+                        except Exception:
+                            payload = {}
+                    notes = payload.get("notes", "")
+                    col_a, col_b, col_c = st.columns([3, 1, 1])
+                    with col_a:
+                        st.markdown(f'<div style="color:#c4b5fd;font-size:.85rem;font-weight:600;">{a.get("action_type","").replace("_"," ").title()}</div><div style="color:#94a3b8;font-size:.75rem;">{notes[:60]} · {a.get("requested_by","")}</div>', unsafe_allow_html=True)
+                    with col_b:
+                        if st.button("✓ Approve", key=f"ap_{a['id']}"):
+                            user_email = st.session_state.get("user", {}).get("email", "admin")
+                            approve_action(a["id"], user_email)
+                            st.success("Approved")
+                            st.rerun()
+                    with col_c:
+                        if st.button("✗ Reject", key=f"rj_{a['id']}"):
+                            user_email = st.session_state.get("user", {}).get("email", "admin")
+                            reject_action(a["id"], user_email, "Rejected via dashboard")
+                            st.warning("Rejected")
+                            st.rerun()
+                    st.markdown('<hr style="border-color:#1e1b4b;margin:6px 0;">', unsafe_allow_html=True)
+            else:
+                st.markdown('<div style="color:#64748b;font-size:.85rem;padding:12px 0;">No pending actions.</div>', unsafe_allow_html=True)
+        except Exception as e:
+            st.markdown(f'<div style="color:#64748b;font-size:.8rem;">Actions unavailable: {e}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_new:
+        st.markdown('<div class="glass">', unsafe_allow_html=True)
+        st.markdown('<div class="glass-title">➕ New Action</div>', unsafe_allow_html=True)
+        action_type = st.selectbox("Type", ["reorder_stock", "price_change", "write_off", "credit_note"], label_visibility="collapsed")
+        item_ref = st.text_input("Item / Account", placeholder="e.g. iPhone 15 Case", label_visibility="collapsed")
+        notes = st.text_area("Notes", placeholder="Details...", height=80, label_visibility="collapsed")
+        if st.button("Submit Action", use_container_width=True):
+            try:
+                from app.actions import submit_action
+                user_email = st.session_state.get("user", {}).get("email", "system")
+                submit_action(action_type, {"item": item_ref, "notes": notes}, requested_by=user_email)
+                st.success("Action submitted for approval.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Data Refresh (Phase 3)
+    st.markdown('<div class="section-header">📁 Data Refresh</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass">', unsafe_allow_html=True)
+    st.markdown('<div class="glass-title">Upload Focus ERP Export</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:.8rem;color:#64748b;margin-bottom:12px;">Export any report from Focus ERP and upload here — it will be automatically ingested and the dashboard will update.</div>', unsafe_allow_html=True)
+    col_up1, col_up2 = st.columns([2, 1])
+    with col_up1:
+        uploaded = st.file_uploader("Focus ERP Excel export (.xlsx)", type=["xlsx", "xls"], label_visibility="collapsed")
+    with col_up2:
+        report_type = st.selectbox("Report type", ["auto", "sales_day_book", "summary_sales", "stock_ledger", "ledger", "profitability", "price_book"], label_visibility="collapsed")
+    if uploaded and st.button("Upload & Ingest", use_container_width=True):
+        import tempfile, subprocess, sys
+        from pathlib import Path
+        ROOT = Path(__file__).resolve().parents[1]
+        dest = ROOT / "Focus ERP Data" / uploaded.name
+        dest.write_bytes(uploaded.read())
+        with st.spinner("Running ingest pipeline..."):
+            r1 = subprocess.run([sys.executable, "-m", "scripts.ingest"], cwd=ROOT, capture_output=True, text=True)
+            r2 = subprocess.run([sys.executable, "-m", "scripts.load_supabase"], cwd=ROOT, capture_output=True, text=True)
+        if r1.returncode == 0 and r2.returncode == 0:
+            st.success("Data loaded successfully. Refresh the page to see updated KPIs.")
+            st.cache_data.clear()
+        else:
+            st.error(f"Ingest: {r1.stderr[-200:]}\nLoad: {r2.stderr[-200:]}")
+    st.markdown('<div style="font-size:.75rem;color:#334155;margin-top:10px;">Or run locally: <code>python -m scripts.ingest && python -m scripts.load_supabase</code></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

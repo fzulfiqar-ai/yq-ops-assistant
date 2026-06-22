@@ -1,13 +1,21 @@
-"""FastAPI app — Phase 1.
+"""FastAPI app — Phase 2 / 2.5 / 3.
 
 Endpoints:
-  GET  /health        — liveness probe (no auth)
-  POST /ask           — AI query endpoint (auth required)
-  GET  /llm/health    — LLM provider status (auth required)
+  GET  /health                    — liveness (no auth)
+  POST /ask                       — AI query (auth)
+  GET  /llm/health                — LLM provider status (auth)
+  GET  /digest/daily              — daily ops summary (auth)
+  GET  /digest/alerts             — low-stock + overdue + margin alerts (auth)
+  POST /action                    — submit pending action (auth)
+  GET  /actions                   — list actions (auth)
+  PATCH /actions/{id}/approve     — approve action (auth)
+  PATCH /actions/{id}/reject      — reject action (auth)
+  GET  /actions/export            — download approved CSV (auth)
+  POST /ingest                    — upload Focus Excel → auto-ingest (auth)
 """
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -19,7 +27,7 @@ from app.config import settings
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit])
 
-app = FastAPI(title="YQ Bahrain Ops Assistant", version="0.2.0")
+app = FastAPI(title="YQ Bahrain Ops Assistant", version="0.3.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -44,19 +52,93 @@ class AskRequest(BaseModel):
 
 @app.post("/ask")
 @limiter.limit(settings.rate_limit)
-async def ask(
-    request: Request,
-    body: AskRequest,
-    user: CurrentUser = Depends(get_current_user),
-) -> dict:
-    """AI query endpoint. Auth required. Returns reply + sql_used."""
+async def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.ai import ask as ai_ask
-    result = ai_ask(body.question, user_email=user.email)
-    return result
+    return ai_ask(body.question, user_email=user.email)
 
 
 @app.get("/llm/health")
 async def llm_health(_user: CurrentUser = Depends(get_current_user)) -> dict:
-    """LLM provider health — no secrets exposed."""
     from app.llm_router import health
     return {"providers": health()}
+
+
+@app.get("/digest/daily")
+async def digest_daily(_user: CurrentUser = Depends(get_current_user)) -> dict:
+    from app.digest import daily_summary
+    return daily_summary()
+
+
+@app.get("/digest/alerts")
+async def digest_alerts(_user: CurrentUser = Depends(get_current_user)) -> dict:
+    from app.digest import all_alerts
+    return all_alerts()
+
+
+class ActionRequest(BaseModel):
+    action_type: str
+    payload: dict
+    notes: str = ""
+
+
+@app.post("/action")
+async def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+    from app.actions import submit_action as _submit
+    return _submit(body.action_type, {**body.payload, "notes": body.notes}, requested_by=user.email)
+
+
+@app.get("/actions")
+async def list_actions(status: str | None = None, _user: CurrentUser = Depends(get_current_user)) -> list:
+    from app.actions import list_actions as _list
+    return _list(status=status)
+
+
+@app.patch("/actions/{action_id}/approve")
+async def approve_action(action_id: int, user: CurrentUser = Depends(get_current_user)) -> dict:
+    from app.actions import approve_action as _approve
+    return _approve(action_id, approved_by=user.email)
+
+
+@app.patch("/actions/{action_id}/reject")
+async def reject_action(action_id: int, reason: str = "", user: CurrentUser = Depends(get_current_user)) -> dict:
+    from app.actions import reject_action as _reject
+    return _reject(action_id, approved_by=user.email, reason=reason)
+
+
+@app.get("/actions/export")
+async def export_actions(_user: CurrentUser = Depends(get_current_user)) -> Response:
+    from app.actions import export_approved_csv
+    return Response(content=export_approved_csv(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=approved_actions.csv"})
+
+
+@app.post("/ingest")
+async def ingest_file(
+    file: UploadFile = File(...),
+    report_type: str = Form(default="auto"),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+    ROOT = Path(__file__).resolve().parents[1]
+    contents = await file.read()
+    suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
+    dest_dir = ROOT / "Focus ERP Data"
+    dest_dir.mkdir(exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=dest_dir) as tmp:
+        tmp.write(contents)
+        saved_to = tmp.name
+    r1 = subprocess.run([sys.executable, "-m", "scripts.ingest"], cwd=ROOT, capture_output=True, text=True)
+    r2 = subprocess.run([sys.executable, "-m", "scripts.load_supabase"], cwd=ROOT, capture_output=True, text=True)
+    return {
+        "filename": file.filename,
+        "report_type": report_type,
+        "saved_to": saved_to,
+        "ingest_ok": r1.returncode == 0,
+        "load_ok": r2.returncode == 0,
+        "ingest_log": (r1.stdout or r1.stderr)[-400:],
+        "load_log": (r2.stdout or r2.stderr)[-400:],
+        "uploaded_by": user.email,
+    }
