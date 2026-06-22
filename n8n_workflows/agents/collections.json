@@ -1,0 +1,69 @@
+{
+  "name": "YQ Agent \u2014 Collections",
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        },
+        "triggerAtHour": 9,
+        "triggerAtMinute": 0
+      }
+    },
+    {
+      "id": "http",
+      "name": "Run collections + email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.RAILWAY_API_URL}}/agents/collections?email=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Agent-Key",
+              "value": "={{$env.AGENT_API_KEY}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Run collections + email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

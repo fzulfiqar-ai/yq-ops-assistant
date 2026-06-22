@@ -83,13 +83,16 @@ async def agents_list(_caller: CurrentUser = Depends(get_caller)) -> list:
 
 
 @app.get("/agents/{name}")
-async def agents_run(name: str, caller: CurrentUser = Depends(get_caller)) -> dict:
+async def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.agents import run_agent
     try:
         result = run_agent(name)
     except KeyError:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"Unknown agent '{name}'.")
+    if email:
+        from app.emailer import send_agent
+        result["email"] = send_agent(result)
     log_event(caller.email, "agent", detail={"agent": name, "summary": result.get("summary")})
     return result
 
