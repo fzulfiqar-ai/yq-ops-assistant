@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import smtplib
+import socket
+from contextlib import contextmanager
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -30,6 +32,28 @@ _META_KEYS = {"agent", "description", "generated_at", "summary", "email", "count
 
 def smtp_configured() -> bool:
     return bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and os.getenv("ALERT_EMAIL_TO"))
+
+
+@contextmanager
+def _force_ipv4():
+    """Force IPv4 DNS resolution for the duration of an SMTP send.
+
+    Railway (and many container hosts) have no IPv6 route, so Python resolving
+    smtp.gmail.com to an AAAA record fails with 'Errno 101 Network is unreachable'.
+    Filtering getaddrinfo to AF_INET keeps the real hostname (so TLS cert
+    verification still works) while connecting over IPv4. The endpoint send is
+    blocking on a single-threaded worker, so this temporary patch is request-local.
+    """
+    _orig = socket.getaddrinfo
+
+    def _ipv4_only(host, port, family=0, *args, **kwargs):
+        return _orig(host, port, socket.AF_INET, *args, **kwargs)
+
+    socket.getaddrinfo = _ipv4_only
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = _orig
 
 
 def send_html(subject: str, html: str) -> dict:
@@ -47,7 +71,7 @@ def send_html(subject: str, html: str) -> dict:
     msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html, "html"))
     try:
-        with smtplib.SMTP(host, port, timeout=20) as s:
+        with _force_ipv4(), smtplib.SMTP(host, port, timeout=20) as s:
             s.starttls()
             s.login(user, pw)
             s.sendmail(user, recipients, msg.as_string())
