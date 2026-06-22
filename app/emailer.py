@@ -184,7 +184,15 @@ def _table(title: str, rows: list[dict]) -> str:
 def _agent_html(result: dict) -> str:
     title = result.get("description") or str(result.get("agent", "Agent")).replace("_", " ").title()
     summary = result.get("summary", "")
-    generated = result.get("generated_at", "")
+    generated_raw = result.get("generated_at", "")
+    try:
+        from datetime import timezone
+        dt = datetime.fromisoformat(generated_raw.replace("Z", "+00:00"))
+        generated = dt.strftime("%d %b %Y, %I:%M %p UTC")
+    except Exception:
+        generated = generated_raw
+
+    date_str = datetime.now().strftime("%A, %d %B %Y")
 
     tables = ""
     for key, val in result.items():
@@ -194,28 +202,67 @@ def _agent_html(result: dict) -> str:
             tables += _table(key.replace("_", " ").title(), val)
 
     return f"""\
-<div style="background:#f4f3ef;padding:24px 12px;font-family:Inter,Arial,sans-serif;">
-  <div style="max-width:660px;margin:0 auto;background:#fff;border:1px solid #e9e6e0;border-radius:16px;overflow:hidden;">
-    <div style="background:linear-gradient(135deg,{PURPLE},{PURPLE_DARK});color:#fff;padding:20px 26px;">
-      <div style="font-size:1.15rem;font-weight:800;letter-spacing:.2px;">YQ Bahrain · {title}</div>
-      <div style="font-size:.8rem;color:#ddd6fe;margin-top:3px;">AI Agent Briefing</div>
-    </div>
-    <div style="padding:24px 26px;">
-      <p style="font-size:1.02rem;line-height:1.55;color:#111827;font-weight:600;margin:0 0 4px;">{summary}</p>
-      {tables}
-      <p style="font-size:.72rem;color:#9ca3af;margin-top:24px;padding-top:14px;border-top:1px solid #f1eefe;">
-        Generated {generated} · YQ Bahrain AI agent team. AI-generated — verify figures before acting.
-      </p>
-    </div>
-  </div>
-</div>"""
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f0eff4;font-family:Inter,Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0eff4;padding:32px 12px;">
+  <tr><td align="center">
+    <table width="100%" style="max-width:640px;" cellpadding="0" cellspacing="0">
+
+      <!-- Header -->
+      <tr><td style="background:linear-gradient(135deg,{PURPLE} 0%,{PURPLE_DARK} 100%);border-radius:16px 16px 0 0;padding:28px 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td>
+              <div style="font-size:.7rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#c4b5fd;margin-bottom:6px;">YQ BAHRAIN · MOBILE ACCESSORIES</div>
+              <div style="font-size:1.3rem;font-weight:800;color:#ffffff;line-height:1.3;">{title}</div>
+              <div style="font-size:.8rem;color:#ddd6fe;margin-top:4px;">Autonomous AI Agent Briefing &nbsp;·&nbsp; {date_str}</div>
+            </td>
+            <td align="right" style="vertical-align:top;">
+              <div style="background:rgba(255,255,255,.15);border-radius:8px;padding:6px 12px;font-size:.7rem;font-weight:700;color:#ede9fe;white-space:nowrap;">AI AGENT</div>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+      <!-- Summary banner -->
+      <tr><td style="background:#1e1b4b;padding:16px 32px;">
+        <p style="margin:0;font-size:.95rem;line-height:1.6;color:#e0e7ff;font-weight:500;">{summary}</p>
+      </td></tr>
+
+      <!-- Body -->
+      <tr><td style="background:#ffffff;padding:28px 32px;border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
+        {tables if tables else '<p style="color:#6b7280;font-size:.9rem;margin:0;">No detailed records to display for this briefing.</p>'}
+      </td></tr>
+
+      <!-- Footer -->
+      <tr><td style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:0 0 16px 16px;padding:18px 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="font-size:.7rem;color:#9ca3af;line-height:1.6;">
+              Generated {generated}<br>
+              <strong style="color:#6b7280;">YQ Bahrain W.L.L · Mobile Accessories Distribution · Bahrain</strong><br>
+              AI-generated briefing — verify all figures before taking action. For internal use only.
+            </td>
+            <td align="right" style="vertical-align:middle;">
+              <div style="width:36px;height:36px;background:linear-gradient(135deg,{PURPLE},{PURPLE_DARK});border-radius:8px;display:inline-block;"></div>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</body></html>"""
 
 
 def send_agent(result: dict) -> dict:
     """Render + email an agent result. Returns a status dict (never raises)."""
     name = str(result.get("agent", "agent"))
     title = result.get("description") or name.replace("_", " ").title()
-    subject = f"YQ {title} — {datetime.now().strftime('%d %b %Y')}"
+    subject = f"[YQ Mobile Accessories] {title} — {datetime.now().strftime('%d %b %Y')}"
     try:
         return send_html(subject, _agent_html(result))
     except Exception as e:  # defensive: emailing must never break the agent run
