@@ -575,6 +575,17 @@ def _kpi_data() -> dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _digest_data() -> dict:
+    try:
+        from app.digest import all_alerts, daily_summary
+        summary = daily_summary()
+        alerts  = all_alerts()
+        return {**summary, **alerts, "ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _monthly_trend() -> list[dict]:
     try:
         return exec_sql("SELECT period_month, net_revenue_bhd, order_count, total_qty FROM v_sales_by_period ORDER BY period_month LIMIT 24")
@@ -916,6 +927,44 @@ def main_dashboard():
     # ── KPIs
     kpi = _kpi_data()
     render_kpis(kpi)
+
+    # ── Daily Digest Panel
+    with st.expander("📋 Daily Operations Digest", expanded=True):
+        dig = _digest_data()
+        if not dig.get("ok"):
+            st.warning(f"Digest unavailable: {dig.get('error','')}")
+        else:
+            rev_mtd   = dig.get("rev_mtd", 0)
+            rev_prev  = dig.get("rev_prev_month", 0)
+            delta_pct = ((rev_mtd - rev_prev) / rev_prev * 100) if rev_prev else 0
+            delta_col = "#10b981" if delta_pct >= 0 else "#ef4444"
+            delta_str = f"{'up' if delta_pct >= 0 else 'down'} {abs(delta_pct):.1f}% vs last month"
+
+            d1, d2, d3, d4, d5 = st.columns(5)
+            d1.metric("Today Revenue", f"BHD {dig.get('rev_today',0):,.2f}", f"{dig.get('orders_today',0)} invoices")
+            d2.metric("MTD Revenue",   f"BHD {rev_mtd:,.2f}", delta_str)
+            d3.metric("MTD Orders",    str(dig.get("orders_mtd", 0)))
+            d4.metric("Low Stock",     str(dig.get("low_stock_count", 0)), "items need attention" if dig.get("low_stock_count",0) > 0 else "all healthy")
+            d5.metric("Overdue Accts", str(dig.get("overdue_count", 0)), f"BHD {dig.get('overdue_total_bhd',0):,.0f}")
+
+            # Alert banners
+            if dig.get("negative_margin_count", 0) > 0:
+                st.markdown(f'<div style="background:rgba(236,72,153,0.12);border:1px solid rgba(236,72,153,0.3);border-radius:10px;padding:10px 16px;font-size:.83rem;color:#f9a8d4;margin-top:8px;">📉 <b>{dig["negative_margin_count"]} products</b> have negative gross margins — review pricing.</div>', unsafe_allow_html=True)
+            if dig.get("overdue_count", 0) > 0:
+                st.markdown(f'<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);border-radius:10px;padding:10px 16px;font-size:.83rem;color:#fca5a5;margin-top:6px;">🏦 <b>{dig["overdue_count"]} accounts</b> overdue 30+ days — total BHD {dig.get("overdue_total_bhd",0):,.2f}.</div>', unsafe_allow_html=True)
+            if dig.get("low_stock_count", 0) > 0:
+                st.markdown(f'<div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.25);border-radius:10px;padding:10px 16px;font-size:.83rem;color:#fcd34d;margin-top:6px;">⚠️ <b>{dig["low_stock_count"]} items</b> below minimum stock level.</div>', unsafe_allow_html=True)
+
+            # Top customers mini table
+            if dig.get("top_customers"):
+                st.markdown('<div style="font-size:.78rem;font-weight:600;color:#a78bfa;margin-top:14px;margin-bottom:6px;">Top Customers This Month</div>', unsafe_allow_html=True)
+                rows_html = "".join(
+                    f'<tr><td style="padding:5px 10px;font-size:.8rem;">#{i} {str(r.get("customer_name",""))[:28]}</td>'
+                    f'<td style="padding:5px 10px;font-size:.8rem;color:#a78bfa;font-weight:700;">BHD {float(r.get("total_revenue_bhd",0)):,.0f}</td>'
+                    f'<td style="padding:5px 10px;font-size:.8rem;color:#64748b;">{r.get("order_count",0)} orders</td></tr>'
+                    for i, r in enumerate(dig["top_customers"][:5], 1)
+                )
+                st.markdown(f'<table style="width:100%;border-collapse:collapse;">{rows_html}</table>', unsafe_allow_html=True)
 
     # ── Charts + Top Customers
     col_chart, col_customers = st.columns([1.65, 1])
