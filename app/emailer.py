@@ -56,15 +56,71 @@ def _force_ipv4():
         socket.getaddrinfo = _orig
 
 
+def _send_via_http(subject: str, html: str, recipients: list[str]) -> dict | None:
+    """Send over an HTTPS email API (port 443) — works on Railway where SMTP is blocked.
+
+    Picks the provider whose API key is set (Resend, then Brevo). Returns a status
+    dict, or None if no HTTP provider is configured (caller falls back to SMTP)."""
+    import requests
+
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    brevo_key = os.getenv("BREVO_API_KEY", "")
+    sender = os.getenv("EMAIL_FROM", "YQ Bahrain <onboarding@resend.dev>")
+
+    try:
+        if resend_key:
+            r = requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+                json={"from": sender, "to": recipients, "subject": subject, "html": html},
+                timeout=20,
+            )
+            if r.status_code in (200, 201):
+                return {"emailed": True, "to": ", ".join(recipients), "via": "resend"}
+            return {"emailed": False, "reason": f"resend_error {r.status_code}: {r.text[:200]}"}
+
+        if brevo_key:
+            # parse "Name <email>" -> {name, email}
+            email_only = sender.split("<")[-1].rstrip(">").strip()
+            name = sender.split("<")[0].strip() or "YQ Bahrain"
+            r = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={"api-key": brevo_key, "Content-Type": "application/json"},
+                json={
+                    "sender": {"name": name, "email": email_only},
+                    "to": [{"email": a} for a in recipients],
+                    "subject": subject,
+                    "htmlContent": html,
+                },
+                timeout=20,
+            )
+            if r.status_code in (200, 201):
+                return {"emailed": True, "to": ", ".join(recipients), "via": "brevo"}
+            return {"emailed": False, "reason": f"brevo_error {r.status_code}: {r.text[:200]}"}
+    except Exception as e:
+        return {"emailed": False, "reason": f"http_email_error: {type(e).__name__}: {e}"}
+
+    return None  # no HTTP provider configured → caller tries SMTP
+
+
 def send_html(subject: str, html: str) -> dict:
+    to = os.getenv("ALERT_EMAIL_TO", "")
+    if not to:
+        return {"emailed": False, "reason": "no_recipient (set ALERT_EMAIL_TO)"}
+    recipients = [a.strip() for a in to.split(",") if a.strip()]
+
+    # Prefer an HTTPS email API — SMTP ports are blocked on Railway.
+    http_result = _send_via_http(subject, html, recipients)
+    if http_result is not None:
+        return http_result
+
+    # Fallback: direct SMTP (works locally; blocked on Railway's network).
     user = os.getenv("SMTP_USER", "")
     pw = os.getenv("SMTP_PASS", "")
-    to = os.getenv("ALERT_EMAIL_TO", "")
     host = os.getenv("SMTP_HOST", "smtp.gmail.com")
     port = int(os.getenv("SMTP_PORT", "587"))
-    if not (user and pw and to):
-        return {"emailed": False, "reason": "smtp_not_configured"}
-    recipients = [a.strip() for a in to.split(",") if a.strip()]
+    if not (user and pw):
+        return {"emailed": False, "reason": "no_email_provider (set RESEND_API_KEY or SMTP_USER/SMTP_PASS)"}
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = user
