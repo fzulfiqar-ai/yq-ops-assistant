@@ -27,8 +27,14 @@ SELECT
     ol.discount_bhd,
     ol.taxable_bhd,
     ol.vat_amount_bhd,
-    ol.total_amount_bhd,
-    ol.warehouse_name,
+    -- Focus export leaves total_amount_bhd blank when VAT is zero;
+    -- fall back to taxable then gross so revenue aggregations never return null.
+    COALESCE(ol.total_amount_bhd, ol.taxable_bhd, ol.gross_bhd) AS total_amount_bhd,
+    -- In YQ Bahrain's Focus Sales Day Book the "Warehouse Name" column holds
+    -- the salesman name, not a warehouse. Use orders.salesman first; fall back
+    -- to this field so salesman is always populated.
+    COALESCE(o.salesman, ol.warehouse_name)                      AS salesman_resolved,
+    ol.warehouse_name                                            AS salesman_raw,
     ol.narration
 FROM order_lines ol
 LEFT JOIN orders          o   ON o.invoice_no  = ol.invoice_no
@@ -114,19 +120,19 @@ ORDER BY outstanding_bhd DESC;
 -- v_top_customers: revenue ranking ------------------------
 CREATE OR REPLACE VIEW v_top_customers AS
 SELECT
-    COALESCE(o.customer_name, ol.customer_account) AS customer_name,
-    COUNT(DISTINCT ol.invoice_no)                   AS order_count,
-    SUM(ol.quantity)                                AS total_qty,
-    SUM(ol.gross_bhd)                               AS gross_bhd,
-    SUM(ol.discount_bhd)                            AS total_discount_bhd,
-    SUM(ol.total_amount_bhd)                        AS total_revenue_bhd,
-    MIN(COALESCE(ol.line_date, o.order_date))       AS first_order_date,
-    MAX(COALESCE(ol.line_date, o.order_date))       AS last_order_date
+    COALESCE(o.customer_name, ol.customer_account)                      AS customer_name,
+    COUNT(DISTINCT ol.invoice_no)                                        AS order_count,
+    SUM(ol.quantity)                                                     AS total_qty,
+    SUM(ol.gross_bhd)                                                    AS gross_bhd,
+    SUM(ol.discount_bhd)                                                 AS total_discount_bhd,
+    SUM(COALESCE(ol.total_amount_bhd, ol.taxable_bhd, ol.gross_bhd))    AS total_revenue_bhd,
+    MIN(COALESCE(ol.line_date, o.order_date))                           AS first_order_date,
+    MAX(COALESCE(ol.line_date, o.order_date))                           AS last_order_date
 FROM order_lines ol
 LEFT JOIN orders o ON o.invoice_no = ol.invoice_no
 WHERE COALESCE(o.customer_name, ol.customer_account) IS NOT NULL
 GROUP BY COALESCE(o.customer_name, ol.customer_account)
-ORDER BY total_revenue_bhd DESC;
+ORDER BY total_revenue_bhd DESC NULLS LAST;
 
 -- v_sales_by_period: monthly trend -----------------------
 CREATE OR REPLACE VIEW v_sales_by_period AS
@@ -137,7 +143,7 @@ SELECT
     SUM(ol.quantity)                 AS total_qty,
     SUM(ol.gross_bhd)                AS gross_bhd,
     SUM(ol.discount_bhd)             AS total_discount_bhd,
-    SUM(ol.total_amount_bhd)         AS net_revenue_bhd,
+    SUM(COALESCE(ol.total_amount_bhd, ol.taxable_bhd, ol.gross_bhd)) AS net_revenue_bhd,
     SUM(ol.vat_amount_bhd)           AS total_vat_bhd
 FROM order_lines ol
 LEFT JOIN orders o ON o.invoice_no = ol.invoice_no

@@ -83,10 +83,10 @@ TEMPLATES: list[dict] = [
         ),
         "label": "Revenue by salesman",
         "sql": (
-            "SELECT salesman, COUNT(DISTINCT invoice_no) AS orders, "
+            "SELECT salesman_resolved AS salesman, COUNT(DISTINCT invoice_no) AS orders, "
             "SUM(quantity) AS qty, SUM(total_amount_bhd) AS revenue_bhd "
-            "FROM v_sales WHERE salesman IS NOT NULL "
-            "GROUP BY salesman ORDER BY revenue_bhd DESC LIMIT 20"
+            "FROM v_sales WHERE salesman_resolved IS NOT NULL "
+            "GROUP BY salesman_resolved ORDER BY revenue_bhd DESC LIMIT 20"
         ),
     },
     {
