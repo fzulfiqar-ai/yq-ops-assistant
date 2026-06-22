@@ -97,14 +97,26 @@ def main() -> int:
         _upsert(client, "order_lines", _records(ol), on_conflict="invoice_no,line_no")
     sm = _read("stock_movements")
     if sm is not None:
+        before = len(sm)
+        sm = sm.dropna(subset=["item_name"])
+        dropped = before - len(sm)
+        if dropped:
+            print(f"  (dropped {dropped} stock_movements rows with null item_name)")
         _upsert(client, "stock_movements", _records(sm),
                 on_conflict="voucher,item_name,row_hash")
     le = _read("ledger_entries")
     if le is not None:
+        before = len(le)
+        le = le.dropna(subset=["account"])
+        le = le.drop_duplicates(subset=["account", "voucher", "row_hash"])
+        dropped = before - len(le)
+        if dropped:
+            print(f"  (dropped {dropped} ledger_entries rows with null account or duplicates)")
         _upsert(client, "ledger_entries", _records(le),
                 on_conflict="account,voucher,row_hash")
     pp = _read("product_profitability")
     if pp is not None:
+        pp = pp.dropna(subset=["item_name"])
         _upsert(client, "product_profitability", _records(pp),
                 on_conflict="item_name,report_date")
     if sp is not None:
