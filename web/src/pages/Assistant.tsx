@@ -20,6 +20,13 @@ const SUGGESTIONS = [
   'Who owes us the most, and how overdue?',
   "What's our gross margin?",
 ]
+const FOLLOWUPS = [
+  'Break it down by salesman',
+  'Compare to last month',
+  'Show only the top 5',
+  'Which are overdue 90+ days?',
+  'How does B2C compare to B2B?',
+]
 const STORE = 'yq-chats-v1'
 
 function loadChats(): Conversation[] {
@@ -234,6 +241,21 @@ export default function Assistant() {
                   </motion.div>
                 ))}
               </AnimatePresence>
+
+              {/* Follow-up suggestion chips */}
+              {!busy && active.messages.length > 0 && active.messages[active.messages.length - 1].role === 'assistant'
+                && !active.messages[active.messages.length - 1].pending && (
+                <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
+                  className="flex flex-wrap items-center gap-2 pl-11 pt-1">
+                  <span className="text-[11px] font-medium text-muted-foreground">Try:</span>
+                  {FOLLOWUPS.map((f) => (
+                    <button key={f} onClick={() => ask(f)}
+                      className="rounded-full border bg-card px-3 py-1.5 text-[12.5px] text-muted-foreground transition hover:border-primary/40 hover:text-foreground">
+                      {f}
+                    </button>
+                  ))}
+                </motion.div>
+              )}
             </div>
           )}
         </div>
