@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
+import { useToast } from '@/components/Toast'
 import { supabase } from '@/lib/supabase'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
@@ -12,6 +13,7 @@ import { Input } from '@/components/ui/input'
 export default function Settings() {
   const { me } = useAuth()
   const { theme, toggle } = useTheme()
+  const toast = useToast()
   const [p1, setP1] = useState('')
   const [p2, setP2] = useState('')
   const [busy, setBusy] = useState(false)
@@ -24,8 +26,8 @@ export default function Settings() {
     setBusy(true); setMsg(null)
     const { error } = await supabase.auth.updateUser({ password: p1 })
     setBusy(false)
-    if (error) setMsg({ ok: false, text: error.message })
-    else { setMsg({ ok: true, text: 'Password updated.' }); setP1(''); setP2('') }
+    if (error) { setMsg({ ok: false, text: error.message }); toast(error.message, 'error') }
+    else { setP1(''); setP2(''); setMsg(null); toast('Password updated successfully.', 'success') }
   }
 
   return (

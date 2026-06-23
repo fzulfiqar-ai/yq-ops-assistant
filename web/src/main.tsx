@@ -7,6 +7,7 @@ import { ThemeProvider } from '@/lib/theme'
 import { AuthProvider } from '@/lib/auth'
 import { ArcRevealHero } from '@/components/ui/arc-preloader-hero'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { ToastProvider } from '@/components/Toast'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 60_000, refetchOnWindowFocus: false, retry: 1 } },
@@ -20,9 +21,11 @@ createRoot(document.getElementById('root')!).render(
       <ThemeProvider>
         <ArcRevealHero storageKey="yq-intro-v2" greetings={INTRO} greetingHold={900} revealDuration={1900} className="!min-h-0">
           <QueryClientProvider client={queryClient}>
-            <AuthProvider>
-              <App />
-            </AuthProvider>
+            <ToastProvider>
+              <AuthProvider>
+                <App />
+              </AuthProvider>
+            </ToastProvider>
           </QueryClientProvider>
         </ArcRevealHero>
       </ThemeProvider>

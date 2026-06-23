@@ -8,6 +8,7 @@ import {
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
+import { useToast } from '@/components/Toast'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -59,6 +60,7 @@ interface RunState { loading?: boolean; data?: AgentResult; error?: string; emai
 export default function Agents() {
   const { data: agents, isLoading } = useQuery({ queryKey: ['agents'], queryFn: () => apiGet<AgentInfo[]>('/agents') })
   const [state, setState] = useState<Record<string, RunState>>({})
+  const toast = useToast()
   const set = (name: string, patch: RunState) => setState((s) => ({ ...s, [name]: { ...s[name], ...patch } }))
 
   async function run(name: string) {
@@ -74,9 +76,11 @@ export default function Agents() {
     try {
       await apiGet(`/agents/${name}?email=1`)
       set(name, { emailing: false, emailed: true })
+      toast(`${prettyTitle(name)} briefing emailed to you.`, 'success')
       setTimeout(() => set(name, { emailed: false }), 3000)
     } catch {
       set(name, { emailing: false })
+      toast('Could not send the email. Please try again.', 'error')
     }
   }
 

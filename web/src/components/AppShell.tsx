@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
-import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search } from 'lucide-react'
+import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search, Menu } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
@@ -64,6 +64,7 @@ export function AppShell() {
   const active = NAV.find((n) => (n.to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(n.to)))
   const initials = (me?.email?.[0] || 'U').toUpperCase()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [mobileOpen, setMobileOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     function onDoc(e: MouseEvent) {
@@ -72,6 +73,8 @@ export function AppShell() {
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [])
+  // close the mobile drawer whenever the route changes
+  useEffect(() => setMobileOpen(false), [loc.pathname])
 
   function toggleCollapse() {
     setCollapsed((c) => {
@@ -83,11 +86,16 @@ export function AppShell() {
   return (
     <div className="flex h-screen w-full overflow-hidden">
       <CommandPalette />
-      {/* Sidebar */}
+      {/* Mobile backdrop */}
+      {mobileOpen && (
+        <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm lg:hidden" onClick={() => setMobileOpen(false)} />
+      )}
+      {/* Sidebar (static on lg, slide-in drawer on mobile) */}
       <aside
         className={cn(
-          'relative flex shrink-0 flex-col text-white transition-[width] duration-300',
-          collapsed ? 'w-[76px]' : 'w-[260px]',
+          'fixed inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col text-white transition-transform duration-300 lg:static lg:z-auto lg:transition-[width]',
+          mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
+          collapsed ? 'lg:w-[76px]' : 'lg:w-[260px]',
         )}
         style={{ background: 'linear-gradient(180deg,#2a1259 0%,#190a3a 100%)' }}
       >
@@ -171,8 +179,15 @@ export function AppShell() {
         {/* Top bar */}
         <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b bg-background/80 px-5 backdrop-blur-xl">
           <button
+            onClick={() => setMobileOpen(true)}
+            className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground lg:hidden"
+            title="Menu"
+          >
+            <Menu size={18} />
+          </button>
+          <button
             onClick={toggleCollapse}
-            className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground"
+            className="hidden h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground lg:grid"
             title="Toggle sidebar"
           >
             {collapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
