@@ -30,7 +30,14 @@ create table if not exists app_invites (
 create index if not exists app_invites_token_idx  on app_invites (token);
 create index if not exists app_invites_email_idx  on app_invites (lower(email));
 
--- 3) Existing accounts: make sure the two seed admins have full access.
+-- 3) Allow the new role set. The Phase 0 schema only permitted
+--    ('admin','manager','viewer'); the team system uses 'member', so the original
+--    CHECK constraint must be relaxed or member invites fail with a 23514 violation.
+alter table user_roles drop constraint if exists user_roles_role_check;
+alter table user_roles
+  add constraint user_roles_role_check check (role in ('admin','member','manager','viewer'));
+
+-- 4) Existing accounts: make sure the two seed admins have full access.
 update user_roles
   set features = '["Dashboard","AI Agents","AI Assistant","Inventory","Sales","Margins","Receivables","Team"]'::jsonb,
       status   = 'active'

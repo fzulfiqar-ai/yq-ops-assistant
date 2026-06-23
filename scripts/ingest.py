@@ -293,6 +293,66 @@ def parse_pricebook(grid: pd.DataFrame, src: str, price_book: str) -> list[dict]
     return rows
 
 
+def parse_receivables(grid: pd.DataFrame, src: str) -> list[dict]:
+    """Customer ageing summary -> trade-debtor balances + aging buckets.
+
+    This is the AUTHORITATIVE source of receivables (one row per customer, Focus's
+    own AR). The Base-currency block is fixed-position: col 1 = Balance Amount,
+    cols 6-13 = the eight aging buckets (0-30 ... >210), col 14 = Total. Account
+    Code / Group Name / last-receipt are matched by header name (they sit far right,
+    after the Transaction & Local repeats of the same bucket labels).
+    """
+    as_of = report_date_from_title(grid)
+    # locate header row (col0 == 'Account', col1 startswith 'Balance')
+    hrow = None
+    for i in range(min(12, len(grid))):
+        r = list(grid.iloc[i])
+        if str(r[0]).strip().lower() == "account" and str(r[1]).strip().lower().startswith("balance"):
+            hrow = i
+            break
+    if hrow is None:
+        return []
+    header = [str(c).strip() if c is not None else "" for c in grid.iloc[hrow]]
+
+    def col(name: str) -> int | None:
+        for j, h in enumerate(header):
+            if h.lower() == name.lower():
+                return j
+        return None
+
+    c_code = col("Account Code")
+    c_group = col("Group Name")
+    c_last = col("LastReceiptDate")
+    rows = []
+    for i in range(hrow + 1, len(grid)):
+        r = list(grid.iloc[i])
+        acct = txt(r[0])
+        if acct is None or is_total(acct):
+            continue
+        bal = norm_num(r[1])
+        if bal is None:
+            continue
+        rows.append({
+            "account": acct,
+            "account_code": txt(r[c_code]) if c_code is not None and len(r) > c_code else None,
+            "group_name": txt(r[c_group]) if c_group is not None and len(r) > c_group else None,
+            "balance_bhd": bal,
+            "bucket_0_30": norm_num(r[6]),
+            "bucket_31_60": norm_num(r[7]),
+            "bucket_61_90": norm_num(r[8]),
+            "bucket_91_120": norm_num(r[9]),
+            "bucket_121_150": norm_num(r[10]),
+            "bucket_151_180": norm_num(r[11]),
+            "bucket_181_210": norm_num(r[12]),
+            "bucket_over_210": norm_num(r[13]),
+            "total_bhd": norm_num(r[14]) if len(r) > 14 else bal,
+            "last_receipt_date": norm_date(r[c_last]) if c_last is not None and len(r) > c_last else None,
+            "as_of_date": as_of,
+            "source_file": src,
+        })
+    return rows
+
+
 # --------------------------------------------------------------------------- dispatch
 def classify(name: str) -> str | None:
     n = name.lower()
@@ -312,19 +372,30 @@ def classify(name: str) -> str | None:
         return "selling_prices:MA_base"
     if "moderntradesellerbook" in n:
         return "selling_prices:modern_trade"
+    # Receivables: use ONLY the by-due-date summary (one row/customer + Group Name).
+    # The other three ageing exports are skipped to avoid double-counting.
+    if "customer_summary_ageing_by_due_date" in n:
+        return "receivables"
+    if "customer_ageing" in n or "customer_summary_ageing" in n:
+        return "skip:duplicate ageing report (using by_due_date summary)"
     return None
 
 
 def main() -> int:
-    if not SRC_DIR.exists():
-        print(f"ERROR: source folder not found: {SRC_DIR}")
+    # Optional source folder: `python scripts/ingest.py "Focus ERP Updated Reports"`.
+    # Defaults to "Focus ERP Data". Reused by the email-to-ingest automation.
+    src = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else SRC_DIR
+    if not src.is_absolute():
+        src = ROOT / src
+    if not src.exists():
+        print(f"ERROR: source folder not found: {src}")
         return 1
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     tables: dict[str, list[dict]] = {}
-    print(f"Ingesting from: {SRC_DIR}\n" + "=" * 70)
+    print(f"Ingesting from: {src}\n" + "=" * 70)
 
-    for path in sorted(SRC_DIR.glob("*.xls*")):
+    for path in sorted(src.glob("*.xls*")):
         kind = classify(path.name)
         if kind is None:
             print(f"  SKIP (unrecognized): {path.name}  -> stop & ask if this should map")
@@ -344,6 +415,8 @@ def main() -> int:
             recs = parse_ledger(grid, path.name)
         elif kind == "product_profitability":
             recs = parse_profitability(grid, path.name)
+        elif kind == "receivables":
+            recs = parse_receivables(grid, path.name)
         elif kind.startswith("selling_prices:"):
             recs = parse_pricebook(grid, path.name, kind.split(":")[1])
             kind = "selling_prices"

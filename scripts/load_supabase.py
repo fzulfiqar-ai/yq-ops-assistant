@@ -122,6 +122,10 @@ def main() -> int:
     if sp is not None:
         _upsert(client, "selling_prices", _records(sp),
                 on_conflict="sku_code,price_book,customer_code,start_date")
+    ar = _read("receivables")
+    if ar is not None:
+        ar = ar.dropna(subset=["account"])
+        _upsert(client, "ar_ageing", _records(ar), on_conflict="account,as_of_date")
 
     print("=" * 60)
     print("Load complete. Run scripts/reconcile_products.py to link item names -> SKUs.")

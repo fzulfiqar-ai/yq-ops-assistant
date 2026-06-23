@@ -37,34 +37,36 @@ def _f(row: dict, key: str, default: float = 0.0) -> float:
 # ── Collections agent ────────────────────────────────────────────────────────
 
 def collections() -> dict:
-    """Overdue receivables + a drafted reminder message per account."""
+    """Overdue receivables (trade debtors, from the AR ageing report) + a drafted
+    reminder per account. Uses bucket-based aging, not a raw ledger balance."""
     rows = _q(
-        "SELECT account, outstanding_bhd, days_outstanding, salesman, last_entry_date "
-        "FROM v_receivables WHERE days_outstanding >= 30 "
-        "ORDER BY outstanding_bhd DESC LIMIT 40"
+        "SELECT account, outstanding_bhd, overdue_bhd, over_90_bhd, group_name "
+        "FROM v_receivables WHERE overdue_bhd > 0 "
+        "ORDER BY overdue_bhd DESC LIMIT 40"
     )
     items = []
     for r in rows:
         acct = str(r.get("account", "")).strip()
         amt = _f(r, "outstanding_bhd")
-        days = int(r.get("days_outstanding") or 0)
+        overdue = _f(r, "overdue_bhd")
         items.append({
             "account": acct,
             "outstanding_bhd": amt,
-            "days_outstanding": days,
-            "salesman": r.get("salesman"),
+            "overdue_bhd": overdue,
+            "over_90_bhd": _f(r, "over_90_bhd"),
+            "group": r.get("group_name"),
             "draft_message": (
                 f"Dear {acct}, our records show an outstanding balance of "
-                f"BHD {amt:,.3f} that is {days} days overdue. We'd appreciate it if "
-                f"you could arrange settlement at your earliest convenience. "
+                f"BHD {amt:,.3f}, of which BHD {overdue:,.3f} is overdue (30+ days). "
+                f"We'd appreciate settlement at your earliest convenience. "
                 f"Thank you — YQ Bahrain."
             ),
         })
-    total = sum(i["outstanding_bhd"] for i in items)
+    total = sum(i["overdue_bhd"] for i in items)
     return {
         "count": len(items),
         "total_overdue_bhd": total,
-        "summary": f"{len(items)} accounts overdue 30+ days — BHD {total:,.2f} to collect.",
+        "summary": f"{len(items)} accounts with overdue balances — BHD {total:,.2f} past due.",
         "items": items,
     }
 
@@ -221,15 +223,11 @@ def customer_health() -> dict:
 def cashflow_forecast() -> dict:
     """Receivables aging buckets + debtor concentration."""
     buckets = _q(
-        "SELECT "
-        "SUM(CASE WHEN days_outstanding <= 30 THEN outstanding_bhd ELSE 0 END) AS b_0_30, "
-        "SUM(CASE WHEN days_outstanding BETWEEN 31 AND 60 THEN outstanding_bhd ELSE 0 END) AS b_31_60, "
-        "SUM(CASE WHEN days_outstanding BETWEEN 61 AND 90 THEN outstanding_bhd ELSE 0 END) AS b_61_90, "
-        "SUM(CASE WHEN days_outstanding > 90 THEN outstanding_bhd ELSE 0 END) AS b_90_plus, "
-        "SUM(outstanding_bhd) AS total FROM v_receivables LIMIT 1"
+        "SELECT SUM(b_0_30) AS b_0_30, SUM(b_31_60) AS b_31_60, SUM(b_61_90) AS b_61_90, "
+        "SUM(over_90_bhd) AS b_90_plus, SUM(outstanding_bhd) AS total FROM v_receivables LIMIT 1"
     )
     top_debtors = _q(
-        "SELECT account, outstanding_bhd, days_outstanding FROM v_receivables "
+        "SELECT account, outstanding_bhd, over_90_bhd FROM v_receivables "
         "ORDER BY outstanding_bhd DESC LIMIT 5"
     )
     b = buckets[0] if buckets else {}
