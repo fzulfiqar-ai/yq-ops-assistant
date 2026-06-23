@@ -90,8 +90,15 @@
 
 /* a11y: visible keyboard focus + honour reduced motion */
 :focus-visible {
-  outline: 2px solid hsl(var(--ring));
+  outline: 2px solid hsl(var(--ring) / 0.55);
   outline-offset: 2px;
+  border-radius: 8px;
+}
+/* Text inputs/textareas provide their own soft focus ring on their container —
+   suppress the boxy default outline so focus looks premium, not raw. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
