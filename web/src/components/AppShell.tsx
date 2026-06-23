@@ -17,22 +17,33 @@ const HEADER_QUOTES = [
   'The best inventory is the one already on its way to a customer.',
 ]
 
-function HeaderQuote() {
+function greeting() {
+  const h = new Date().getHours()
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
+}
+
+function HeaderMotivator({ name }: { name?: string }) {
   const [i, setI] = useState(() => Math.floor(Math.random() * HEADER_QUOTES.length))
   useEffect(() => {
     const t = setInterval(() => setI((n) => (n + 1) % HEADER_QUOTES.length), 9000)
     return () => clearInterval(t)
   }, [])
   return (
-    <div className="hidden min-w-0 flex-1 justify-center lg:flex">
+    <div className="hidden min-w-0 flex-1 flex-col items-center justify-center px-4 lg:flex">
+      <div className="text-[13px] font-semibold leading-tight">
+        <span className="bg-gradient-to-r from-violet-600 to-fuchsia-500 bg-clip-text text-transparent dark:from-violet-300 dark:to-fuchsia-300">
+          {greeting()}{name ? `, ${name}` : ''}
+        </span>{' '}
+        <span aria-hidden>✦</span>
+      </div>
       <AnimatePresence mode="wait">
         <motion.span
           key={i}
-          initial={{ opacity: 0, y: 6 }}
+          initial={{ opacity: 0, y: 4 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -6 }}
+          exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.5 }}
-          className="truncate text-[12.5px] italic text-muted-foreground/80"
+          className="max-w-full truncate text-[11px] italic text-muted-foreground/70"
         >
           “{HEADER_QUOTES[i]}”
         </motion.span>
@@ -121,19 +132,26 @@ export function AppShell() {
         </nav>
 
         <div className="mt-auto border-t border-white/10 p-3">
-          <div className={cn('flex items-center gap-3 px-2 py-2', collapsed && 'justify-center px-0')}>
+          <Link
+            to="/settings"
+            className={cn(
+              'flex items-center gap-3 rounded-xl px-2 py-2 transition hover:bg-white/10',
+              collapsed && 'justify-center px-0',
+            )}
+            title="Profile & settings"
+          >
             <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white/15 text-sm font-bold">
               {initials}
             </div>
             {!collapsed && (
-              <div className="min-w-0 leading-tight">
+              <div className="min-w-0 flex-1 leading-tight">
                 <div className="truncate text-[13px] font-semibold">
                   {me?.full_name || me?.email?.split('@')[0]}
                 </div>
-                <div className="text-[10px] uppercase tracking-wide text-white/50">{me?.role}</div>
+                <div className="text-[10px] uppercase tracking-wide text-white/50">{me?.role} · view profile</div>
               </div>
             )}
-          </div>
+          </Link>
           <button
             onClick={signOut}
             className={cn(
@@ -162,7 +180,7 @@ export function AppShell() {
           <div className="shrink-0">
             <div className="font-display text-[15px] font-semibold">{active?.label ?? 'Portal'}</div>
           </div>
-          <HeaderQuote />
+          <HeaderMotivator name={me?.full_name?.split(' ')[0] || me?.email?.split('@')[0]} />
           <div className="flex items-center gap-2">
             <button
               onClick={() => window.dispatchEvent(new Event('yq:open-cmdk'))}
@@ -175,14 +193,6 @@ export function AppShell() {
             <span className="hidden items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-[11px] font-semibold text-muted-foreground sm:flex">
               <span className="h-1.5 w-1.5 rounded-full bg-success" /> Live
             </span>
-            <button
-              onClick={toggle}
-              className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground"
-              title="Toggle theme"
-            >
-              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-
             {/* User menu */}
             <div className="relative" ref={menuRef}>
               <button
