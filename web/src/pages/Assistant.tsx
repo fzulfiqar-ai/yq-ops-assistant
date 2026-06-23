@@ -138,7 +138,7 @@ export default function Assistant() {
   const recent = [...chats].sort((a, b) => b.updatedAt - a.updatedAt)
 
   return (
-    <div className="flex h-[calc(100vh-7.75rem)] gap-4">
+    <div className="flex h-[calc(100vh-7.5rem)] gap-4">
       {/* Conversation rail */}
       <aside className="hidden w-60 shrink-0 flex-col rounded-2xl border bg-card/50 p-3 md:flex">
         <button onClick={newChat}
@@ -147,6 +147,11 @@ export default function Assistant() {
         </button>
         <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Recent</div>
         <div className="flex-1 space-y-1 overflow-y-auto">
+          {recent.length <= 1 && (recent[0]?.messages.length ?? 0) === 0 && (
+            <p className="px-2.5 py-3 text-[12px] leading-relaxed text-muted-foreground/70">
+              Your conversations will appear here. Ask about sales, stock, margins or receivables to get started.
+            </p>
+          )}
           {recent.map((c) => (
             <div key={c.id}
               className={cn('group flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition',
@@ -184,13 +189,13 @@ export default function Assistant() {
         </div>
 
         {/* Conversation */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto rounded-2xl border bg-card/40 p-4">
+        <div ref={scrollRef} className="flex flex-1 flex-col overflow-y-auto rounded-2xl border bg-card/40 p-4">
           {!active || active.messages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center">
-              <Logo float className="h-14 w-14 rounded-2xl shadow-lift" />
-              <h2 className="mt-4 font-display text-xl font-bold">Ask anything about your business</h2>
-              <p className="mt-1 text-sm text-muted-foreground">Sales, salesmen, stock, margins, receivables — in plain English.</p>
-              <div className="mt-5 grid w-full max-w-lg grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="flex flex-1 flex-col items-center justify-center px-4 py-8 text-center">
+              <Logo className="h-16 w-16 rounded-2xl shadow-lift" />
+              <h2 className="mt-5 font-display text-2xl font-bold">Ask anything about your business</h2>
+              <p className="mt-1.5 text-sm text-muted-foreground">Sales, salesmen, stock, margins, receivables — in plain English.</p>
+              <div className="mt-6 grid w-full max-w-xl grid-cols-1 gap-2.5 sm:grid-cols-2">
                 {SUGGESTIONS.map((s) => (
                   <button key={s} onClick={() => ask(s)}
                     className="rounded-xl border bg-card px-3.5 py-2.5 text-left text-sm text-muted-foreground transition hover:border-primary/40 hover:text-foreground">
