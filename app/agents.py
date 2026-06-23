@@ -73,28 +73,28 @@ def collections() -> dict:
 
 # ── Inventory / reorder agent ────────────────────────────────────────────────
 
-def inventory_reorder(target_level: int = 25) -> dict:
-    """Low-stock items with a suggested reorder quantity (advisory)."""
+def inventory_reorder() -> dict:
+    """Velocity-aware reorder list. A fast mover at zero stock is URGENT (lost sales);
+    days_cover = current stock ÷ 90-day average daily sales; alert under 30 days."""
     rows = _q(
-        "SELECT item_name, product_name, sku_code, category_name, warehouse_name, "
-        "balance_qty, as_of_date FROM v_low_stock LIMIT 60"
+        "SELECT item_name, current_stock, sold_90d, days_cover, suggested_reorder_qty, status "
+        "FROM v_stock_health WHERE status IN ('urgent_out_of_stock','low_stock') "
+        "ORDER BY (status='urgent_out_of_stock') DESC, days_cover ASC NULLS FIRST LIMIT 80"
     )
-    items = []
-    for r in rows:
-        bal = _f(r, "balance_qty")
-        suggest = max(int(target_level - bal), 0)
-        items.append({
-            "item_name": r.get("item_name"),
-            "sku_code": r.get("sku_code"),
-            "category_name": r.get("category_name"),
-            "warehouse_name": r.get("warehouse_name"),
-            "balance_qty": bal,
-            "suggested_reorder_qty": suggest,
-        })
+    items = [{
+        "item_name": r.get("item_name"),
+        "current_stock": _f(r, "current_stock"),
+        "sold_90d": _f(r, "sold_90d"),
+        "days_cover": r.get("days_cover"),
+        "suggested_reorder_qty": _f(r, "suggested_reorder_qty"),
+        "status": r.get("status"),
+    } for r in rows]
+    urgent = [i for i in items if i["status"] == "urgent_out_of_stock"]
     return {
         "count": len(items),
-        "summary": f"{len(items)} items at/below minimum stock — reorder suggested.",
-        "target_level": target_level,
+        "urgent_count": len(urgent),
+        "summary": (f"{len(items)} items need reordering (<30 days cover) — "
+                    f"{len(urgent)} URGENT: out of stock but still selling."),
         "items": items,
     }
 
@@ -123,20 +123,22 @@ def margin_guardian(thin_threshold: float = 5.0) -> dict:
 # ── Sales Insights ───────────────────────────────────────────────────────────
 
 def sales_insights() -> dict:
-    """Recent monthly trend + this month's top customers."""
+    """Recent monthly trend (gross + ex-VAT) + this month's top named customers.
+    Month-on-month only — the data is <12 months so year-on-year isn't available."""
     trend = _q(
-        "SELECT period_month, net_revenue_bhd, order_count, total_qty "
+        "SELECT period_month, gross_bhd, net_revenue_bhd, order_count, total_qty "
         "FROM v_sales_by_period ORDER BY period_month DESC LIMIT 6"
     )
     top = _q(
-        "SELECT customer_name, total_revenue_bhd, order_count FROM v_top_customers "
-        "WHERE last_order_date >= DATE_TRUNC('month',CURRENT_DATE) LIMIT 10"
+        "SELECT customer_name, gross_bhd AS total_revenue_bhd, order_count FROM v_top_customers "
+        "WHERE last_order_date >= DATE_TRUNC('month',(SELECT MAX(sale_date) FROM v_sales)) "
+        "AND customer_name NOT ILIKE 'cash customer%' ORDER BY gross_bhd DESC NULLS LAST LIMIT 10"
     )
-    this_m = _f(trend[0], "net_revenue_bhd") if trend else 0.0
-    prev_m = _f(trend[1], "net_revenue_bhd") if len(trend) > 1 else 0.0
+    this_m = _f(trend[0], "gross_bhd") if trend else 0.0
+    prev_m = _f(trend[1], "gross_bhd") if len(trend) > 1 else 0.0
     delta = ((this_m - prev_m) / prev_m * 100) if prev_m else 0.0
     return {
-        "summary": f"MTD revenue BHD {this_m:,.0f} ({delta:+.1f}% vs last month).",
+        "summary": f"This month gross BHD {this_m:,.0f} ({delta:+.1f}% MoM).",
         "month_revenue_bhd": this_m,
         "prev_month_revenue_bhd": prev_m,
         "delta_pct": delta,
@@ -148,67 +150,56 @@ def sales_insights() -> dict:
 # ── Sales Push agent ─────────────────────────────────────────────────────────
 
 def sales_push() -> dict:
-    """Top sellers, similar-but-not-moving stock (cross-sell), and aging reports."""
+    """Where to push sales: best sellers, fast movers we've run OUT of (restock = recover
+    lost sales), and dead/overstock to clear. Windows anchor to the data's latest date."""
     top = _q(
         "SELECT item_name, category_name, SUM(quantity) AS qty_sold, "
-        "SUM(total_amount_bhd) AS revenue_bhd FROM v_sales "
-        "WHERE sale_date >= CURRENT_DATE - INTERVAL '90 days' "
-        "GROUP BY item_name, category_name "
-        "ORDER BY qty_sold DESC NULLS LAST LIMIT 15"
+        "SUM(revenue_bhd) AS revenue_bhd FROM v_sales "
+        "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND item_name IS NOT NULL "
+        "GROUP BY item_name, category_name ORDER BY qty_sold DESC NULLS LAST LIMIT 15"
     )
-    hot_categories = {str(r.get("category_name")) for r in top if r.get("category_name")}
-
-    slow = _q(
-        "SELECT cs.item_name, cs.category_name, cs.balance_qty, cs.as_of_date "
-        "FROM v_current_stock cs "
-        "WHERE cs.balance_qty > 0 AND cs.item_name NOT IN ("
-        "  SELECT DISTINCT item_name FROM v_sales "
-        "  WHERE sale_date >= CURRENT_DATE - INTERVAL '60 days' AND item_name IS NOT NULL"
-        ") ORDER BY cs.balance_qty DESC LIMIT 30"
+    restock = _q(
+        "SELECT item_name, sold_90d, suggested_reorder_qty FROM v_stock_health "
+        "WHERE status='urgent_out_of_stock' ORDER BY sold_90d DESC LIMIT 20"
     )
-    # "similar but not moving" = slow stock in a category that has a current top seller
-    cross_sell = [r for r in slow if str(r.get("category_name")) in hot_categories]
-
-    inv_aging = _q(
-        "SELECT item_name, MAX(move_date) AS last_receipt, "
-        "(CURRENT_DATE - MAX(move_date)) AS days_since_receipt "
-        "FROM shipments WHERE item_name IS NOT NULL "
-        "GROUP BY item_name ORDER BY days_since_receipt DESC NULLS LAST LIMIT 20"
+    clear = _q(
+        "SELECT item_name, current_stock, stock_value, sold_90d FROM v_stock_health "
+        "WHERE status IN ('dead_stock','overstock') ORDER BY stock_value DESC LIMIT 20"
     )
     return {
         "summary": (
-            f"{len(top)} top sellers · {len(cross_sell)} slow items to cross-sell · "
-            f"{len(inv_aging)} aging stock lines."
+            f"{len(top)} top sellers · {len(restock)} fast movers OUT of stock (restock to "
+            f"recover sales) · {len(clear)} slow/overstock lines to clear."
         ),
         "top_sellers": top,
-        "slow_movers": slow,
-        "cross_sell_opportunities": cross_sell,
-        "inventory_aging": inv_aging,
+        "restock_opportunities": restock,
+        "clear_slow_overstock": clear,
     }
 
 
 # ── Customer Health agent ────────────────────────────────────────────────────
 
 def customer_health() -> dict:
-    """Customers whose last-30-day spend dropped vs the prior 30 days (churn risk)."""
+    """Named accounts whose last-30-day spend dropped vs the prior 30 days (churn risk).
+    Anchored to the data's latest date; excludes the walk-in 'Cash Customer' bucket."""
     rows = _q(
         "SELECT customer_name, "
-        "SUM(CASE WHEN sale_date >= CURRENT_DATE - INTERVAL '30 days' "
-        "         THEN total_amount_bhd ELSE 0 END) AS rev_30, "
-        "SUM(CASE WHEN sale_date >= CURRENT_DATE - INTERVAL '60 days' "
-        "         AND sale_date < CURRENT_DATE - INTERVAL '30 days' "
-        "         THEN total_amount_bhd ELSE 0 END) AS rev_prev_30, "
+        "SUM(CASE WHEN sale_date > (SELECT MAX(sale_date) FROM v_sales) - 30 "
+        "         THEN revenue_bhd ELSE 0 END) AS rev_30, "
+        "SUM(CASE WHEN sale_date > (SELECT MAX(sale_date) FROM v_sales) - 60 "
+        "         AND sale_date <= (SELECT MAX(sale_date) FROM v_sales) - 30 "
+        "         THEN revenue_bhd ELSE 0 END) AS rev_prev_30, "
         "MAX(sale_date) AS last_order "
-        "FROM v_sales WHERE customer_name IS NOT NULL "
+        "FROM v_sales WHERE customer_name IS NOT NULL AND NOT is_cash_customer "
         "GROUP BY customer_name "
-        "HAVING SUM(CASE WHEN sale_date >= CURRENT_DATE - INTERVAL '60 days' "
-        "         AND sale_date < CURRENT_DATE - INTERVAL '30 days' "
-        "         THEN total_amount_bhd ELSE 0 END) > 0 "
-        "ORDER BY (SUM(CASE WHEN sale_date >= CURRENT_DATE - INTERVAL '60 days' "
-        "         AND sale_date < CURRENT_DATE - INTERVAL '30 days' "
-        "         THEN total_amount_bhd ELSE 0 END) "
-        "       - SUM(CASE WHEN sale_date >= CURRENT_DATE - INTERVAL '30 days' "
-        "         THEN total_amount_bhd ELSE 0 END)) DESC LIMIT 25"
+        "HAVING SUM(CASE WHEN sale_date > (SELECT MAX(sale_date) FROM v_sales) - 60 "
+        "         AND sale_date <= (SELECT MAX(sale_date) FROM v_sales) - 30 "
+        "         THEN revenue_bhd ELSE 0 END) > 0 "
+        "ORDER BY (SUM(CASE WHEN sale_date > (SELECT MAX(sale_date) FROM v_sales) - 60 "
+        "         AND sale_date <= (SELECT MAX(sale_date) FROM v_sales) - 30 "
+        "         THEN revenue_bhd ELSE 0 END) "
+        "       - SUM(CASE WHEN sale_date > (SELECT MAX(sale_date) FROM v_sales) - 30 "
+        "         THEN revenue_bhd ELSE 0 END)) DESC LIMIT 25"
     )
     at_risk = [r for r in rows if _f(r, "rev_30") < 0.5 * _f(r, "rev_prev_30")]
     return {
@@ -253,36 +244,80 @@ def cashflow_forecast() -> dict:
 # ── Anomaly / audit agent ────────────────────────────────────────────────────
 
 def anomaly_scan() -> dict:
-    """Pricing and data anomalies that warrant a human look."""
+    """Pricing/data anomalies. Below-cost uses Focus's OWN gross-margin % (gp_margin_pct
+    < 0), NOT per-unit price vs cumulative-period COGS (which gave false positives)."""
     below_cost = _q(
-        "SELECT item_name, list_price_bhd, cogs_bhd FROM v_product_margin "
-        "WHERE list_price_bhd IS NOT NULL AND cogs_bhd IS NOT NULL "
-        "AND list_price_bhd < cogs_bhd ORDER BY (cogs_bhd - list_price_bhd) DESC LIMIT 20"
+        "SELECT item_name, gp_margin_pct, net_amount_bhd, cogs_bhd FROM v_product_margin "
+        "WHERE gp_margin_pct < 0 ORDER BY gp_margin_pct ASC LIMIT 20"
     )
     negative_stock = _q(
         "SELECT item_name, warehouse_name, balance_qty FROM v_current_stock "
         "WHERE balance_qty < 0 ORDER BY balance_qty ASC LIMIT 20"
     )
-    n = len(below_cost) + len(negative_stock)
+    dead_stock = _q(
+        "SELECT item_name, current_stock, stock_value FROM v_stock_health "
+        "WHERE status='dead_stock' ORDER BY stock_value DESC LIMIT 20"
+    )
+    n = len(below_cost) + len(negative_stock) + len(dead_stock)
+    dead_val = sum(_f(r, "stock_value") for r in dead_stock)
     return {
         "anomaly_count": n,
-        "summary": f"{len(below_cost)} priced below cost · {len(negative_stock)} negative-stock lines.",
+        "summary": (f"{len(below_cost)} below cost · {len(negative_stock)} negative-stock · "
+                    f"{len(dead_stock)} dead-stock lines (BHD {dead_val:,.0f} idle)."),
         "priced_below_cost": below_cost,
         "negative_stock": negative_stock,
+        "dead_stock": dead_stock,
     }
 
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 
+# ── Inventory Aging agent ─────────────────────────────────────────────────────
+
+def inventory_aging() -> dict:
+    """On-hand stock by days since last sale — capital sitting idle on the shelf."""
+    rows = _q(
+        "SELECT item_name, current_stock, stock_value, last_sold, days_since_sale "
+        "FROM v_inventory_aging WHERE days_since_sale IS NULL OR days_since_sale > 60 "
+        "ORDER BY stock_value DESC LIMIT 40"
+    )
+    idle = sum(_f(r, "stock_value") for r in rows)
+    return {
+        "count": len(rows),
+        "idle_value_bhd": idle,
+        "summary": f"{len(rows)} items idle >60 days — BHD {idle:,.0f} of stock not moving.",
+        "items": rows,
+    }
+
+
+# ── Salesman Performance agent ────────────────────────────────────────────────
+
+def salesman_performance() -> dict:
+    """Per-salesman value + volume and the B2C/B2B channel split."""
+    by_sm = _q("SELECT salesman, orders, qty, revenue_bhd, net_bhd FROM v_sales_by_salesman LIMIT 30")
+    by_ch = _q("SELECT channel, orders, qty, revenue_bhd, net_bhd FROM v_sales_by_channel")
+    total = sum(_f(r, "revenue_bhd") for r in by_sm)
+    top = by_sm[0] if by_sm else {}
+    return {
+        "count": len(by_sm),
+        "summary": (f"{len(by_sm)} salesmen · top: {top.get('salesman', '-')} "
+                    f"BHD {_f(top, 'revenue_bhd'):,.0f} · total BHD {total:,.0f}."),
+        "by_salesman": by_sm,
+        "by_channel": by_ch,
+    }
+
+
 AGENTS: dict[str, tuple[Callable[[], dict], str]] = {
     "collections": (collections, "Overdue receivables + drafted reminder messages"),
-    "inventory": (inventory_reorder, "Low stock + suggested reorder quantities"),
+    "inventory": (inventory_reorder, "Velocity-aware reorder (urgent out-of-stock first)"),
     "margin": (margin_guardian, "Negative & thin-margin products"),
-    "sales_insights": (sales_insights, "Monthly sales trend + top customers"),
-    "sales_push": (sales_push, "Top sellers, slow movers to cross-sell, aging reports"),
-    "customer_health": (customer_health, "Customers with declining spend (churn risk)"),
+    "sales_insights": (sales_insights, "Monthly sales trend (MoM) + top customers"),
+    "sales_push": (sales_push, "Best sellers, fast movers out of stock, slow/overstock to clear"),
+    "customer_health": (customer_health, "Named customers with declining spend (churn risk)"),
     "cashflow": (cashflow_forecast, "Receivables aging buckets + debtor concentration"),
-    "anomaly": (anomaly_scan, "Pricing/data anomalies (below cost, negative stock)"),
+    "anomaly": (anomaly_scan, "Below-cost (Focus GP%), negative & dead stock"),
+    "inventory_aging": (inventory_aging, "On-hand stock idle by days since last sale"),
+    "salesman_performance": (salesman_performance, "Per-salesman value+volume + B2C/B2B"),
 }
 
 

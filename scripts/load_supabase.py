@@ -139,6 +139,10 @@ def main() -> int:
                      total_value_bhd=("total_value_bhd", "sum"),
                      selling_rate_bhd=("selling_rate_bhd", "mean"),
                      source_file=("source_file", "first")))
+        # snapshot replace: clear each as_of_date first so a re-parse never leaves
+        # stale rows (e.g. items whose key changed) double-counting the total.
+        for d in sb["as_of_date"].dropna().unique():
+            client.table("stock_balance").delete().eq("as_of_date", str(d)).execute()
         _upsert(client, "stock_balance", _records(sb),
                 on_conflict="item_name,warehouse_name,as_of_date")
 

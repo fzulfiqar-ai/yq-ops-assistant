@@ -1,87 +1,163 @@
 """Shared, read-only report queries.
 
 Single source of truth consumed by BOTH the Streamlit dashboard and the React
-`GET /report/{key}` API, so the two never drift. All SQL targets the curated
-semantic views only.
+`GET /report/{key}` API, so the two never drift. All revenue is Gross (VAT-incl)
+with ex-VAT alongside; all windows anchor to the data's latest date.
 """
 from __future__ import annotations
+
+from collections import Counter
 
 from app.ai import exec_sql
 from app.digest import all_alerts, daily_summary
 
 
-def revenue_trend(months: int = 6) -> list[dict]:
-    rows = exec_sql(
-        "SELECT period_month, net_revenue_bhd, order_count, total_qty "
-        f"FROM v_sales_by_period ORDER BY period_month DESC LIMIT {int(months)}"
-    )
-    return list(reversed(rows or []))  # chronological for charting
-
-
 def data_as_of() -> str | None:
-    """Latest sale date in the warehouse — powers the 'Data as of' trust banner."""
     rows = exec_sql("SELECT MAX(sale_date) AS d FROM v_sales LIMIT 1")
     return (rows or [{}])[0].get("d")
+
+
+def revenue_trend(months: int = 12) -> list[dict]:
+    rows = exec_sql(
+        "SELECT period_month, gross_bhd, net_revenue_bhd, order_count, total_qty "
+        f"FROM v_sales_by_period ORDER BY period_month DESC LIMIT {int(months)}"
+    )
+    return list(reversed(rows or []))
+
+
+def sales_by_salesman() -> list[dict]:
+    return exec_sql(
+        "SELECT salesman, orders, qty, revenue_bhd, net_bhd FROM v_sales_by_salesman LIMIT 40"
+    )
+
+
+def sales_by_channel() -> list[dict]:
+    return exec_sql("SELECT channel, orders, qty, revenue_bhd, net_bhd FROM v_sales_by_channel")
+
+
+def top_sellers(limit: int = 15) -> list[dict]:
+    return exec_sql(
+        "SELECT item_name, category_name, SUM(quantity) AS qty, SUM(revenue_bhd) AS revenue_bhd "
+        "FROM v_sales WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 "
+        "AND item_name IS NOT NULL GROUP BY item_name, category_name "
+        f"ORDER BY qty DESC NULLS LAST LIMIT {int(limit)}"
+    )
+
+
+def stock_by_warehouse() -> list[dict]:
+    return exec_sql(
+        "SELECT warehouse_name, COALESCE(SUM(total_value_bhd),0) AS value_bhd, "
+        "COALESCE(SUM(net_qty),0) AS qty, COUNT(*) AS items FROM stock_balance "
+        "WHERE as_of_date=(SELECT MAX(as_of_date) FROM stock_balance) "
+        "GROUP BY warehouse_name ORDER BY value_bhd DESC"
+    )
+
+
+def agents_status() -> list[dict]:
+    """Latest run per agent for the Agent Performance panel (from audit_log)."""
+    return exec_sql(
+        "SELECT DISTINCT ON (detail->>'agent') detail->>'agent' AS agent, ts AS last_run, "
+        "detail->>'summary' AS summary FROM audit_log "
+        "WHERE event='agent' AND detail->>'agent' IS NOT NULL "
+        "ORDER BY detail->>'agent', ts DESC"
+    )
 
 
 def dashboard() -> dict:
     s = daily_summary()
     a = all_alerts()
     return {
-        "data_as_of": data_as_of(),
+        "data_as_of": s.get("data_date"),
         "kpis": {
-            "rev_mtd": s["rev_mtd"],
+            "rev_today": s["rev_today"], "net_today": s["net_today"], "orders_today": s["orders_today"],
+            "rev_yesterday": s["rev_yesterday"], "orders_yesterday": s["orders_yesterday"],
+            "rev_mtd": s["rev_mtd"], "net_mtd": s["net_mtd"], "orders_mtd": s["orders_mtd"],
             "rev_prev_month": s["rev_prev_month"],
-            "orders_mtd": s["orders_mtd"],
-            "rev_today": s["rev_today"],
-            "orders_today": s["orders_today"],
             "total_receivables": s["total_receivables"],
             "low_stock_count": a["low_stock_count"],
             "overdue_count": a["overdue_count"],
             "overdue_total_bhd": a["overdue_total_bhd"],
         },
         "top_customers": s["top_customers"],
-        "revenue_trend": revenue_trend(6),
+        "revenue_trend": revenue_trend(12),
+        "by_channel": sales_by_channel(),
+        "by_salesman": sales_by_salesman()[:8],
+        "agents": agents_status(),
         "alerts": a,
     }
 
 
 def inventory() -> dict:
     rows = exec_sql(
-        "SELECT item_name, warehouse_name, balance_qty, avg_rate_bhd, category_name, as_of_date "
-        "FROM v_current_stock ORDER BY balance_qty ASC LIMIT 200"
+        "SELECT item_name, current_stock, stock_value, sold_90d, days_cover, "
+        "suggested_reorder_qty, status FROM v_stock_health "
+        "ORDER BY (CASE status WHEN 'urgent_out_of_stock' THEN 0 WHEN 'low_stock' THEN 1 "
+        "WHEN 'dead_stock' THEN 2 WHEN 'overstock' THEN 3 ELSE 4 END), days_cover ASC NULLS FIRST "
+        "LIMIT 300"
     )
-    low = [r for r in rows if (r.get("balance_qty") or 0) <= 10]
-    return {"rows": rows, "count": len(rows), "low_stock_count": len(low)}
+    tv = exec_sql(
+        "SELECT COALESCE(SUM(total_value_bhd),0) AS v, COALESCE(SUM(net_qty),0) AS q "
+        "FROM stock_balance WHERE as_of_date=(SELECT MAX(as_of_date) FROM stock_balance) LIMIT 1"
+    )
+    t = (tv or [{}])[0]
+    return {
+        "rows": rows,
+        "by_status": dict(Counter(r["status"] for r in rows)),
+        "stock_value": float(t.get("v", 0)),
+        "stock_qty": float(t.get("q", 0)),
+        "by_warehouse": stock_by_warehouse(),
+    }
 
 
 def sales() -> dict:
     return {
         "trend": revenue_trend(12),
+        "by_salesman": sales_by_salesman(),
+        "by_channel": sales_by_channel(),
+        "top_sellers": top_sellers(15),
         "top_customers": exec_sql(
-            "SELECT customer_name, total_revenue_bhd, order_count, last_order_date "
-            "FROM v_top_customers ORDER BY total_revenue_bhd DESC LIMIT 50"
+            "SELECT customer_name, gross_bhd AS total_revenue_bhd, order_count, last_order_date "
+            "FROM v_top_customers WHERE customer_name NOT ILIKE 'cash customer%' "
+            "ORDER BY gross_bhd DESC NULLS LAST LIMIT 50"
         ),
     }
 
 
 def margins() -> dict:
     rows = exec_sql(
-        "SELECT item_name, category_name, gp_margin_pct, np_margin_pct, cogs_bhd, list_price_bhd "
-        "FROM v_product_margin WHERE gp_margin_pct IS NOT NULL ORDER BY gp_margin_pct ASC LIMIT 200"
+        "SELECT item_name, category_name, gp_margin_pct, np_margin_pct, gross_profit_bhd, "
+        "net_amount_bhd, cogs_bhd FROM v_product_margin WHERE gp_margin_pct IS NOT NULL "
+        "ORDER BY gp_margin_pct ASC LIMIT 200"
     )
     neg = [r for r in rows if (r.get("gp_margin_pct") or 0) < 0]
-    return {"rows": rows, "count": len(rows), "negative_count": len(neg)}
+    tt = exec_sql(
+        "SELECT COALESCE(SUM(net_amount_bhd),0) AS net, COALESCE(SUM(gross_profit_bhd),0) AS gp, "
+        "COALESCE(SUM(cogs_bhd),0) AS cogs FROM v_product_margin LIMIT 1"
+    )
+    t = (tt or [{}])[0]
+    net, gp = float(t.get("net", 0)), float(t.get("gp", 0))
+    return {
+        "rows": rows, "count": len(rows), "negative_count": len(neg),
+        "total_net_bhd": net, "total_gp_bhd": gp,
+        "gp_pct": (gp / net * 100) if net else 0.0,
+    }
 
 
 def receivables() -> dict:
     rows = exec_sql(
-        "SELECT account, outstanding_bhd, days_outstanding, salesman, last_entry_date "
+        "SELECT account, group_name, outstanding_bhd, overdue_bhd, over_90_bhd, "
+        "b_0_30, b_31_60, b_61_90, b_91_120, b_121_150, b_151_180, b_181_210, b_over_210 "
         "FROM v_receivables ORDER BY outstanding_bhd DESC LIMIT 200"
     )
     total = sum(float(r.get("outstanding_bhd") or 0) for r in rows)
-    overdue = [r for r in rows if (r.get("days_outstanding") or 0) >= 30]
-    return {"rows": rows, "count": len(rows), "total": total, "overdue_count": len(overdue)}
+    over90 = sum(float(r.get("over_90_bhd") or 0) for r in rows)
+    buckets = {k: sum(float(r.get(k) or 0) for r in rows) for k in
+               ("b_0_30", "b_31_60", "b_61_90", "b_91_120", "b_121_150", "b_151_180", "b_181_210", "b_over_210")}
+    overdue = [r for r in rows if (r.get("overdue_bhd") or 0) > 0]
+    return {
+        "rows": rows, "count": len(rows), "total": total, "over_90": over90,
+        "overdue_count": len(overdue), "buckets": buckets,
+    }
 
 
 REPORTS = {

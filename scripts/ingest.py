@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sys
 import warnings
 from datetime import date, datetime
@@ -34,7 +35,8 @@ def norm_num(v) -> float | None:
     if v is None:
         return None
     if isinstance(v, (int, float)):
-        return float(v)
+        f = float(v)
+        return None if math.isnan(f) else f  # pandas reads empty cells as NaN
     s = str(v).strip().replace(",", "")
     if s in ("", "-"):
         return None

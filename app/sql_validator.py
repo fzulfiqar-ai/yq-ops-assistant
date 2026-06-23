@@ -19,6 +19,11 @@ VIEW_ALLOWLIST: frozenset[str] = frozenset({
     "v_top_customers",
     "v_sales_by_period",
     "v_low_stock",
+    "v_stock_health",
+    "v_item_velocity",
+    "v_sales_by_salesman",
+    "v_sales_by_channel",
+    "v_inventory_aging",
     "shipments",
 })
 
