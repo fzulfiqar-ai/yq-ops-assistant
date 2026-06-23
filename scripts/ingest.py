@@ -293,6 +293,57 @@ def parse_pricebook(grid: pd.DataFrame, src: str, price_book: str) -> list[dict]
     return rows
 
 
+def _clean_wh(name: str | None) -> str | None:
+    """Focus repeats the warehouse name ('Devadas Devadas'); collapse the doubling."""
+    if not name:
+        return None
+    words = name.split()
+    n = len(words)
+    if n % 2 == 0 and words[: n // 2] == words[n // 2:]:
+        return " ".join(words[: n // 2])
+    return name.strip()
+
+
+def parse_stock_balance(grid: pd.DataFrame, src: str) -> list[dict]:
+    """Stock balance by warehouse -> current on-hand qty + value per item+warehouse.
+
+    AUTHORITATIVE current stock (Focus's own 'as on date' snapshot). Layout: a
+    warehouse header row (item col filled, qty/rate/value empty) followed by its
+    item rows. Cols: 0 Particulars(item), 1 Net Quantity, 2 Selling Rate, 3 Total Value.
+    """
+    as_of = report_date_from_title(grid)
+    hrow = None
+    for i in range(min(10, len(grid))):
+        cells = [str(c).strip().lower() if c is not None else "" for c in grid.iloc[i]]
+        if "particulars" in cells:
+            hrow = i
+            break
+    start = (hrow + 1) if hrow is not None else 6
+    rows = []
+    current_wh = None
+    for i in range(start, len(grid)):
+        r = list(grid.iloc[i])
+        name = txt(r[0])
+        if name is None or is_total(name):
+            continue
+        qty = norm_num(r[1]) if len(r) > 1 else None
+        rate = norm_num(r[2]) if len(r) > 2 else None
+        val = norm_num(r[3]) if len(r) > 3 else None
+        if qty is None and rate is None and val is None:
+            current_wh = _clean_wh(name)  # warehouse header row
+            continue
+        rows.append({
+            "item_name": name,
+            "warehouse_name": current_wh,
+            "net_qty": qty,
+            "selling_rate_bhd": rate,
+            "total_value_bhd": val,
+            "as_of_date": as_of,
+            "source_file": src,
+        })
+    return rows
+
+
 def parse_receivables(grid: pd.DataFrame, src: str) -> list[dict]:
     """Customer ageing summary -> trade-debtor balances + aging buckets.
 
@@ -360,6 +411,8 @@ def classify(name: str) -> str | None:
         return "orders"
     if "sales_day_book" in n:
         return "order_lines"
+    if "stock_balance_by_warehouse" in n:
+        return "stock_balance"
     if "stock_ledger" in n:
         return "stock_movements"
     if "ledger_detail" in n:
@@ -417,6 +470,8 @@ def main() -> int:
             recs = parse_profitability(grid, path.name)
         elif kind == "receivables":
             recs = parse_receivables(grid, path.name)
+        elif kind == "stock_balance":
+            recs = parse_stock_balance(grid, path.name)
         elif kind.startswith("selling_prices:"):
             recs = parse_pricebook(grid, path.name, kind.split(":")[1])
             kind = "selling_prices"

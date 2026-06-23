@@ -126,6 +126,21 @@ def main() -> int:
     if ar is not None:
         ar = ar.dropna(subset=["account"])
         _upsert(client, "ar_ageing", _records(ar), on_conflict="account,as_of_date")
+    sb = _read("stock_balance")
+    if sb is not None:
+        sb = sb.dropna(subset=["item_name"])
+        sb["warehouse_name"] = sb["warehouse_name"].fillna("(unassigned)")
+        for col in ("net_qty", "total_value_bhd", "selling_rate_bhd"):
+            sb[col] = pd.to_numeric(sb[col], errors="coerce")
+        # Focus can list an item twice in one warehouse — aggregate so the upsert
+        # key (item, warehouse, as_of) is unique (sum qty/value, average rate).
+        sb = (sb.groupby(["item_name", "warehouse_name", "as_of_date"], as_index=False, dropna=False)
+                .agg(net_qty=("net_qty", "sum"),
+                     total_value_bhd=("total_value_bhd", "sum"),
+                     selling_rate_bhd=("selling_rate_bhd", "mean"),
+                     source_file=("source_file", "first")))
+        _upsert(client, "stock_balance", _records(sb),
+                on_conflict="item_name,warehouse_name,as_of_date")
 
     print("=" * 60)
     print("Load complete. Run scripts/reconcile_products.py to link item names -> SKUs.")
