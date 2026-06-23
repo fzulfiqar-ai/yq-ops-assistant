@@ -1,6 +1,6 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Send, Sparkles, Zap, Brain, Gauge, User, Database } from 'lucide-react'
+import { Send, Plus, Zap, Brain, Gauge, User, Database } from 'lucide-react'
 import { apiPost } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
@@ -119,6 +119,19 @@ export default function Assistant() {
         })}
       </div>
 
+      {/* New chat */}
+      {messages.length > 0 && (
+        <div className="mb-2 flex items-center justify-between px-1">
+          <span className="text-xs text-muted-foreground">{messages.filter((m) => m.role === 'user').length} message(s)</span>
+          <button
+            onClick={() => setMessages([])}
+            className="flex items-center gap-1.5 rounded-lg border bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground transition hover:text-foreground"
+          >
+            <Plus size={13} /> New chat
+          </button>
+        </div>
+      )}
+
       {/* Conversation */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto rounded-2xl border bg-card/40 p-4">
         {messages.length === 0 ? (
@@ -150,9 +163,7 @@ export default function Assistant() {
                   className={cn('flex gap-3', m.role === 'user' ? 'justify-end' : 'justify-start')}
                 >
                   {m.role === 'assistant' && (
-                    <div className="grid h-8 w-8 shrink-0 place-items-center self-start rounded-lg bg-primary text-primary-foreground">
-                      <Sparkles size={15} />
-                    </div>
+                    <Logo className="h-8 w-8 shrink-0 self-start rounded-lg shadow-soft" />
                   )}
                   <div
                     className={cn(
@@ -194,7 +205,7 @@ export default function Assistant() {
 
       {/* Input */}
       <form onSubmit={submit} className="mt-3 flex items-end gap-2">
-        <div className="flex flex-1 items-center rounded-2xl border bg-card px-4 shadow-soft focus-within:border-primary">
+        <div className="flex flex-1 items-center rounded-2xl border bg-card px-4 shadow-soft transition focus-within:border-primary/40 focus-within:ring-4 focus-within:ring-primary/10">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}

@@ -1,14 +1,45 @@
-import { Suspense, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
-import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2 } from 'lucide-react'
+import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
-import { Search } from 'lucide-react'
 import { navFor, NAV } from '@/lib/nav'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
+
+const HEADER_QUOTES = [
+  'Decisions made one day faster compound into a year of advantage.',
+  'Automate the predictable, so the team can focus on the exceptional.',
+  'What gets measured gets managed; what gets surfaced gets fixed.',
+  'Cash is reality. Margin is truth. Velocity is momentum.',
+  'The best inventory is the one already on its way to a customer.',
+]
+
+function HeaderQuote() {
+  const [i, setI] = useState(() => Math.floor(Math.random() * HEADER_QUOTES.length))
+  useEffect(() => {
+    const t = setInterval(() => setI((n) => (n + 1) % HEADER_QUOTES.length), 9000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <div className="hidden min-w-0 flex-1 justify-center lg:flex">
+      <AnimatePresence mode="wait">
+        <motion.span
+          key={i}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.5 }}
+          className="truncate text-[12.5px] italic text-muted-foreground/80"
+        >
+          “{HEADER_QUOTES[i]}”
+        </motion.span>
+      </AnimatePresence>
+    </div>
+  )
+}
 
 export function AppShell() {
   const { me, signOut } = useAuth()
@@ -21,6 +52,15 @@ export function AppShell() {
   const items = navFor(me)
   const active = NAV.find((n) => (n.to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(n.to)))
   const initials = (me?.email?.[0] || 'U').toUpperCase()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
 
   function toggleCollapse() {
     setCollapsed((c) => {
@@ -119,9 +159,10 @@ export function AppShell() {
           >
             {collapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
           </button>
-          <div className="flex-1">
+          <div className="shrink-0">
             <div className="font-display text-[15px] font-semibold">{active?.label ?? 'Portal'}</div>
           </div>
+          <HeaderQuote />
           <div className="flex items-center gap-2">
             <button
               onClick={() => window.dispatchEvent(new Event('yq:open-cmdk'))}
@@ -141,8 +182,49 @@ export function AppShell() {
             >
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
             </button>
-            <div className="grid h-9 w-9 place-items-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
-              {initials}
+
+            {/* User menu */}
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={() => setMenuOpen((o) => !o)}
+                className="flex items-center gap-1.5 rounded-full py-0.5 pl-0.5 pr-1.5 transition hover:bg-accent"
+                title="Account"
+              >
+                <span className="grid h-9 w-9 place-items-center rounded-full bg-primary text-sm font-bold text-primary-foreground">{initials}</span>
+                <ChevronDown size={15} className={cn('text-muted-foreground transition-transform', menuOpen && 'rotate-180')} />
+              </button>
+              <AnimatePresence>
+                {menuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                    transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                    className="absolute right-0 top-12 w-60 overflow-hidden rounded-xl border bg-card shadow-lift"
+                  >
+                    <div className="border-b px-4 py-3">
+                      <div className="truncate text-sm font-semibold">{me?.full_name || me?.email?.split('@')[0]}</div>
+                      <div className="truncate text-xs text-muted-foreground">{me?.email}</div>
+                      <div className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-foreground">{me?.role}</div>
+                    </div>
+                    <div className="p-1.5">
+                      <Link to="/settings" onClick={() => setMenuOpen(false)}
+                        className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition hover:bg-accent">
+                        <Settings size={16} className="text-muted-foreground" /> Settings
+                      </Link>
+                      <button onClick={toggle}
+                        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition hover:bg-accent">
+                        {theme === 'dark' ? <Sun size={16} className="text-muted-foreground" /> : <Moon size={16} className="text-muted-foreground" />}
+                        {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+                      </button>
+                      <button onClick={signOut}
+                        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 dark:hover:bg-rose-500/10">
+                        <LogOut size={16} /> Sign out
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
         </header>

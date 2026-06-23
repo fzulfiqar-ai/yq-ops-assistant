@@ -21,42 +21,54 @@ log = logging.getLogger(__name__)
 _VIEW_SCHEMA = """
 DATABASE VIEWS — query ONLY these, never raw tables:
 
-v_sales               All sales lines with product + customer info
-  sale_date(date), customer_name, salesman_resolved, item_name, sku_code,
-  category_name, quantity, gross_bhd, total_amount_bhd[use for revenue],
-  narration, warehouse_name
+v_sales               Sales lines (one row per invoice line)
+  sale_date(date), customer_name, salesman_resolved, channel('B2C'|'B2B'),
+  is_cash_customer(bool), item_name, sku_code, category_name, quantity,
+  revenue_bhd[GROSS, VAT-incl — USE THIS FOR REVENUE], net_bhd[ex-VAT], gross_bhd
 
-v_current_stock       Latest stock balance per item+warehouse (MAX-id rule)
-  item_name, warehouse_name, balance_qty, avg_rate_bhd, as_of_date,
-  sku_code, product_name, category_name, is_low_stock(bool)
+v_sales_by_period     Monthly totals (period_month = 1st of month)
+  period_month, order_count, total_qty, gross_bhd[revenue], net_revenue_bhd[ex-VAT]
 
-v_product_margin      Profitability snapshot (Focus COGS basis — never use stock valuation)
-  item_name, report_date, cogs_bhd, gross_profit_bhd, gp_margin_pct,
-  net_profit_bhd, np_margin_pct, list_price_bhd, sku_code, category_name
+v_sales_by_salesman   Per-salesman totals
+  salesman, orders, qty, revenue_bhd[gross], net_bhd
 
-v_receivables         Outstanding debtor balances (positive = customer owes YQ)
-  account, last_entry_date, outstanding_bhd, days_outstanding, salesman
+v_sales_by_channel    B2C (Causeway/YQ Roadshow = retail) vs B2B (wholesale)
+  channel, orders, qty, revenue_bhd[gross], net_bhd
 
-v_top_customers       Customer revenue ranking
-  customer_name, order_count, total_revenue_bhd, total_qty, last_order_date
+v_top_customers       Customer revenue ranking (gross_bhd = gross revenue)
+  customer_name, order_count, total_qty, gross_bhd, total_revenue_bhd, last_order_date
 
-v_sales_by_period     Monthly aggregates (period_month = 1st day of month)
-  period_month, order_count, net_revenue_bhd, total_qty, gross_bhd
+v_current_stock       Current on-hand stock per item+warehouse (warehouse = salesman/location)
+  item_name, warehouse_name, balance_qty, balance_value_bhd, avg_rate_bhd,
+  as_of_date, category_name
 
-v_low_stock           Items with balance_qty <= 10
-  item_name, warehouse_name, balance_qty, as_of_date, sku_code, category_name
+v_stock_health        Velocity-aware stock signal (one row per item)
+  item_name, current_stock, sold_30d, sold_90d, avg_daily, days_cover,
+  suggested_reorder_qty,
+  status('urgent_out_of_stock'|'low_stock'|'dead_stock'|'overstock'|'healthy')
 
-shipments             Goods received (Material Receipt Notes only)
-  received_date, mrn_no, item_name, received_qty, received_rate_bhd, warehouse_name
+v_inventory_aging     On-hand stock by idleness
+  item_name, current_stock, stock_value, last_sold, days_since_sale
+
+v_product_margin      Profitability per item, latest period (Focus COGS basis)
+  item_name, category_name, net_amount_bhd, cogs_bhd, gross_profit_bhd,
+  gp_margin_pct[below cost if < 0], np_margin_pct
+
+v_receivables         Trade-debtor balances + ageing (positive = owes YQ)
+  account, group_name, outstanding_bhd, overdue_bhd[31+ days], over_90_bhd,
+  b_0_30, b_31_60, b_61_90, b_91_120, b_121_150, b_151_180, b_181_210, b_over_210
 
 RULES:
 - Return ONLY the SQL SELECT — no markdown, no explanation, no code blocks.
-- Use ILIKE '%value%' for all text searches (case-insensitive).
+- Use ILIKE '%value%' for text searches (case-insensitive).
 - Always include LIMIT (max 200). Default LIMIT 50.
-- Currency is BHD (numeric).
-- Current month: DATE_TRUNC('month', CURRENT_DATE)
-- Today: CURRENT_DATE
-- This week: DATE_TRUNC('week', CURRENT_DATE)
+- Currency is BHD. Revenue = revenue_bhd (gross). Receivables total = SUM(outstanding_bhd).
+- DATA IS HISTORICAL: "today"/"this month"/"latest" must anchor to the data's last day:
+  use (SELECT MAX(sale_date) FROM v_sales), NOT CURRENT_DATE.
+  This month = sale_date >= DATE_TRUNC('month',(SELECT MAX(sale_date) FROM v_sales)).
+- For "customers" exclude the walk-in bucket: customer_name NOT ILIKE 'cash customer%'.
+- Below cost = v_product_margin WHERE gp_margin_pct < 0. Low stock = v_stock_health
+  WHERE status IN ('urgent_out_of_stock','low_stock').
 """
 
 
@@ -129,17 +141,22 @@ def _llm_sql(question: str, model_name: str | None = None) -> str:
 def _llm_answer(question: str, rows: list[dict], redactor: Redactor, model_name: str | None = None) -> str:
     """Format SQL result rows into a concise business answer via LLM."""
     if not rows:
-        return "No data found for your question based on current records."
+        return (
+            "I checked the records but didn't find anything matching that. The data runs "
+            "to **22 Jun 2026** — try rephrasing, or ask about sales, a salesman, stock "
+            "health, margins, or who owes us money."
+        )
     row_text = json.dumps(rows[:50], indent=2, default=str)
     redacted_rows = redactor.redact(row_text, [])
     msgs = [
         {
             "role": "system",
             "content": (
-                "You are a concise business analyst for YQ Bahrain Mobile Accessories. "
-                "Answer the question directly using the data provided. "
-                "Format BHD values as 'BHD X,XXX.XX'. Use bullet points for lists. "
-                "Never invent data not present in the result."
+                "You are a sharp, confident business analyst for YQ Bahrain Mobile Accessories. "
+                "Answer the question directly and concisely from the data, then add ONE short "
+                "insight line ('Insight: …') only if it's genuinely useful. "
+                "Format BHD as 'BHD X,XXX.XX'. Use bullet points for lists. Bold key numbers. "
+                "Never invent data not present in the result. Be crisp — no filler."
             ),
         },
         {
@@ -180,6 +197,42 @@ def _fmt_template(label: str, rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_GREETING = re.compile(r"^\s*(hi|hey+|hello|h?ello|yo|salam|salaam|hola|good\s*(morning|afternoon|evening)|howdy)\b", re.I)
+_THANKS = re.compile(r"\b(thanks|thank you|thx|shukran|appreciate|great|awesome|perfect|nice work)\b", re.I)
+_IDENTITY = re.compile(r"\b(who are you|what are you|your name|what can you do|help me|what do you do|capabilities|how do you work)\b", re.I)
+
+
+def _smalltalk(question: str) -> str | None:
+    """Respond to greetings / identity / thanks conversationally — no SQL.
+
+    Keeps the assistant feeling intelligent and human instead of returning
+    'no data' to a simple 'hi'."""
+    q = question.strip()
+    if len(q) <= 60 and _GREETING.search(q) and not re.search(r"\d|sale|stock|revenue|customer|margin|owe|debtor", q, re.I):
+        return (
+            "Hello — I'm your YQ Bahrain operations analyst. I have your live "
+            "Mobile Accessories data (as of **22 Jun 2026**): sales, salesmen, stock, "
+            "margins and receivables.\n\n"
+            "Try asking me:\n"
+            "- **Who's our top salesman this month?**\n"
+            "- **Which fast movers are out of stock?**\n"
+            "- **Who owes us the most, and how overdue?**\n"
+            "- **What's our gross margin?**\n\n"
+            "What would you like to know?"
+        )
+    if _IDENTITY.search(q):
+        return (
+            "I'm the YQ Bahrain AI analyst. I read your live Focus ERP data and answer "
+            "in plain English — sales & revenue (gross and ex-VAT), salesman and B2C/B2B "
+            "performance, stock health and reorder needs, product margins, and customer "
+            "receivables with ageing. Ask me anything operational and I'll pull the numbers "
+            "and the insight. What shall we look at?"
+        )
+    if _THANKS.search(q) and len(q) <= 40:
+        return "Anytime. Ask me anything else about sales, stock, margins or receivables."
+    return None
+
+
 def ask(question: str, user_email: str = "system", model_name: str | None = None) -> dict[str, Any]:
     """Answer a natural-language question about YQ Bahrain operations.
 
@@ -187,6 +240,11 @@ def ask(question: str, user_email: str = "system", model_name: str | None = None
     """
     client = get_client()
     key = _cache_key(question)
+
+    # 0 — conversational (greetings / identity / thanks) — never run SQL on these
+    chat_reply = _smalltalk(question)
+    if chat_reply:
+        return {"reply": chat_reply, "sql_used": "", "cached": False, "row_count": 0}
 
     # 1 — cache hit
     hit = _check_cache(client, key)

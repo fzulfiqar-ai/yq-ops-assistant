@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import re
 
-_THIS_MONTH = "DATE_TRUNC('month', sale_date) = DATE_TRUNC('month', CURRENT_DATE)"
-_THIS_WEEK  = "sale_date >= DATE_TRUNC('week', CURRENT_DATE)"
-_TODAY      = "sale_date = CURRENT_DATE"
+# Data is historical — anchor "today/week/month" to the latest day WITH data, not the
+# server clock (which runs ahead and would return zero).
+_DD = "(SELECT MAX(sale_date) FROM v_sales)"
+_THIS_MONTH = f"DATE_TRUNC('month', sale_date) = DATE_TRUNC('month', {_DD})"
+_THIS_WEEK  = f"sale_date > {_DD} - 7"
+_TODAY      = f"sale_date = {_DD}"
 
 
 def _p(*patterns: str) -> re.Pattern[str]:
@@ -35,7 +38,7 @@ TEMPLATES: list[dict] = [
         "sql": (
             "SELECT COUNT(DISTINCT invoice_no) AS orders, "
             "SUM(quantity) AS total_qty, "
-            "SUM(total_amount_bhd) AS revenue_bhd, "
+            "SUM(revenue_bhd) AS revenue_bhd, "
             "SUM(vat_amount_bhd) AS vat_bhd "
             f"FROM v_sales WHERE {_TODAY} LIMIT 1"
         ),
@@ -49,7 +52,7 @@ TEMPLATES: list[dict] = [
         "sql": (
             "SELECT COUNT(DISTINCT invoice_no) AS orders, "
             "SUM(quantity) AS total_qty, "
-            "SUM(total_amount_bhd) AS revenue_bhd "
+            "SUM(revenue_bhd) AS revenue_bhd "
             f"FROM v_sales WHERE {_THIS_WEEK} LIMIT 1"
         ),
     },
@@ -62,7 +65,7 @@ TEMPLATES: list[dict] = [
         "sql": (
             "SELECT COUNT(DISTINCT invoice_no) AS orders, "
             "SUM(quantity) AS total_qty, "
-            "SUM(total_amount_bhd) AS revenue_bhd, "
+            "SUM(revenue_bhd) AS revenue_bhd, "
             "SUM(vat_amount_bhd) AS vat_bhd "
             f"FROM v_sales WHERE {_THIS_MONTH} LIMIT 1"
         ),
@@ -97,7 +100,7 @@ TEMPLATES: list[dict] = [
         "label": "Best-selling products",
         "sql": (
             "SELECT item_name, SUM(quantity) AS qty_sold, "
-            "SUM(total_amount_bhd) AS revenue_bhd "
+            "SUM(revenue_bhd) AS revenue_bhd "
             "FROM v_sales GROUP BY item_name "
             "ORDER BY qty_sold DESC LIMIT 20"
         ),
@@ -145,8 +148,12 @@ TEMPLATES: list[dict] = [
             r"(re)?order.{0,10}needed", r"out of stock",
             r"stock.{0,10}alert", r"(items?|products?).{0,10}below",
         ),
-        "label": "Low-stock items",
-        "sql": "SELECT * FROM v_low_stock LIMIT 50",
+        "label": "Low stock & out-of-stock (velocity-aware)",
+        "sql": (
+            "SELECT item_name, current_stock, sold_90d, days_cover, suggested_reorder_qty, status "
+            "FROM v_stock_health WHERE status IN ('urgent_out_of_stock','low_stock') "
+            "ORDER BY (status='urgent_out_of_stock') DESC, days_cover ASC NULLS FIRST LIMIT 50"
+        ),
     },
     {
         "pattern": _p(
@@ -208,7 +215,7 @@ TEMPLATES: list[dict] = [
         ),
         "label": "Outstanding receivables",
         "sql": (
-            "SELECT account, outstanding_bhd, last_entry_date, days_outstanding "
+            "SELECT account, group_name, outstanding_bhd, overdue_bhd, over_90_bhd "
             "FROM v_receivables ORDER BY outstanding_bhd DESC LIMIT 50"
         ),
     },

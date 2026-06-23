@@ -14,6 +14,7 @@ const Margins = lazy(() => import('@/pages/Margins'))
 const Receivables = lazy(() => import('@/pages/Receivables'))
 const DataPage = lazy(() => import('@/pages/DataPage'))
 const Team = lazy(() => import('@/pages/Team'))
+const Settings = lazy(() => import('@/pages/Settings'))
 
 export default function App() {
   return (
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="receivables" element={<Gate feature="Receivables"><Receivables /></Gate>} />
           <Route path="data" element={<Gate><DataPage /></Gate>} />
           <Route path="team" element={<Gate><Team /></Gate>} />
+          <Route path="settings" element={<Settings />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

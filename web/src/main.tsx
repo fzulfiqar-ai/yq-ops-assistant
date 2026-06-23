@@ -12,13 +12,13 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 60_000, refetchOnWindowFocus: false, retry: 1 } },
 })
 
-const INTRO = [{ text: 'YQ Bahrain' }, { text: 'Intelligence' }, { text: 'Welcome' }]
+const INTRO = [{ text: 'YQ Bahrain' }, { text: 'Mobile Accessories' }, { text: 'Intelligence' }]
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
       <ThemeProvider>
-        <ArcRevealHero storageKey="yq-intro-v1" greetings={INTRO} greetingHold={520} className="!min-h-0">
+        <ArcRevealHero storageKey="yq-intro-v2" greetings={INTRO} greetingHold={900} revealDuration={1900} className="!min-h-0">
           <QueryClientProvider client={queryClient}>
             <AuthProvider>
               <App />
