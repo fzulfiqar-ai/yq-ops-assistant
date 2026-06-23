@@ -61,6 +61,13 @@ async def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(ge
     return ai_ask(body.question, user_email=user.email, model_name=body.model)
 
 
+@app.get("/search")
+async def global_search(q: str = "", _user: CurrentUser = Depends(get_current_user)) -> list:
+    """Global ⌘K search across customers, items and salesmen."""
+    from app.reports import search
+    return search(q)
+
+
 @app.get("/report/{key}")
 async def report(key: str, user: CurrentUser = Depends(get_current_user)):
     """Read-only data for a portal page, gated by the matching feature."""

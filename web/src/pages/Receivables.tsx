@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { apiGet } from '@/lib/api'
 import { bhd, num } from '@/lib/format'
@@ -37,6 +38,7 @@ const cols: Column<Row>[] = [
 ]
 
 export default function Receivables() {
+  const [params] = useSearchParams()
   const { data, isLoading } = useQuery({ queryKey: ['report', 'receivables'], queryFn: () => apiGet<Data>('/report/receivables') })
   const bucketData = data ? BUCKET_LABELS.map(([k, label]) => ({ label, value: Number(data.buckets[k] || 0) })) : []
   return (
@@ -73,6 +75,7 @@ export default function Receivables() {
             rows={data.rows}
             cols={cols}
             exportName="receivables"
+            initialQuery={params.get('q') || ''}
             rowClass={(r) => (Number(r.over_90_bhd) > 0 ? 'bg-rose-50/60 dark:bg-rose-500/5' : Number(r.overdue_bhd) > 0 ? 'bg-amber-50/50 dark:bg-amber-500/5' : undefined)}
             empty="No receivables."
           />

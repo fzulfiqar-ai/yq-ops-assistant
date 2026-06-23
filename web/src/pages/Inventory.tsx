@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { apiGet } from '@/lib/api'
 import { bhd, num } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -56,6 +57,7 @@ const cols: Column<Row>[] = [
 ]
 
 export default function Inventory() {
+  const [params] = useSearchParams()
   const { data, isLoading } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
   const s = data?.by_status || {}
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
@@ -92,6 +94,7 @@ export default function Inventory() {
             rows={data.rows}
             cols={cols}
             exportName="inventory-health"
+            initialQuery={params.get('q') || ''}
             rowClass={(r) => (r.status === 'urgent_out_of_stock' ? 'bg-rose-50/60 dark:bg-rose-500/5'
               : r.status === 'low_stock' ? 'bg-amber-50/50 dark:bg-amber-500/5' : undefined)}
             empty="No stock records."

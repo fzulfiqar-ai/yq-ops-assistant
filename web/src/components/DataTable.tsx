@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Search, ArrowUp, ArrowDown, ChevronsUpDown, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { bhd } from '@/lib/format'
@@ -25,6 +25,7 @@ export function DataTable<T extends object>({
   maxHeight = '62vh',
   searchable = true,
   exportName,
+  initialQuery,
 }: {
   rows: T[]
   cols: Column<T>[]
@@ -33,9 +34,11 @@ export function DataTable<T extends object>({
   maxHeight?: string
   searchable?: boolean
   exportName?: string
+  initialQuery?: string
 }) {
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(initialQuery || '')
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null)
+  useEffect(() => { if (initialQuery !== undefined) setQuery(initialQuery) }, [initialQuery])
 
   const view = useMemo(() => {
     let r = rows

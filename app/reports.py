@@ -9,7 +9,38 @@ from __future__ import annotations
 from collections import Counter
 
 from app.ai import exec_sql
+from app.database import get_client
 from app.digest import all_alerts, daily_summary
+
+
+def search(q: str) -> list[dict]:
+    """Global search across customers, items and salesmen for the ⌘K palette.
+    Uses the parameterized client (.ilike) — never string-interpolated SQL."""
+    q = (q or "").strip()
+    if len(q) < 2:
+        return []
+    c = get_client()
+    pat = f"%{q}%"
+    out: list[dict] = []
+    try:
+        for r in (c.table("v_top_customers").select("customer_name,gross_bhd")
+                  .ilike("customer_name", pat).limit(6).execute().data or []):
+            name = r.get("customer_name") or ""
+            if name.lower().startswith("cash customer"):
+                continue
+            out.append({"type": "customer", "label": name,
+                        "sub": f"BHD {float(r.get('gross_bhd') or 0):,.0f} revenue"})
+        for r in (c.table("v_stock_health").select("item_name,current_stock,status")
+                  .ilike("item_name", pat).limit(6).execute().data or []):
+            out.append({"type": "item", "label": r.get("item_name") or "",
+                        "sub": f"{int(float(r.get('current_stock') or 0))} on hand · {str(r.get('status') or '').replace('_', ' ')}"})
+        for r in (c.table("v_sales_by_salesman").select("salesman,revenue_bhd")
+                  .ilike("salesman", pat).limit(4).execute().data or []):
+            out.append({"type": "salesman", "label": r.get("salesman") or "",
+                        "sub": f"BHD {float(r.get('revenue_bhd') or 0):,.0f} gross"})
+    except Exception:
+        pass
+    return out[:16]
 
 
 def data_as_of() -> str | None:
