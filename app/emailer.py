@@ -103,8 +103,9 @@ def _send_via_http(subject: str, html: str, recipients: list[str]) -> dict | Non
     return None  # no HTTP provider configured → caller tries SMTP
 
 
-def send_html(subject: str, html: str) -> dict:
-    to = os.getenv("ALERT_EMAIL_TO", "")
+def send_html(subject: str, html: str, to: str | None = None) -> dict:
+    """Send an HTML email. `to` overrides ALERT_EMAIL_TO (used for invites)."""
+    to = to or os.getenv("ALERT_EMAIL_TO", "")
     if not to:
         return {"emailed": False, "reason": "no_recipient (set ALERT_EMAIL_TO)"}
     recipients = [a.strip() for a in to.split(",") if a.strip()]

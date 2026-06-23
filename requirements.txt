@@ -6,6 +6,7 @@ openai
 tenacity
 requests
 PyJWT
+cryptography
 slowapi
 streamlit
 pandas

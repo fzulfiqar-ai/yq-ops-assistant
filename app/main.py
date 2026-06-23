@@ -32,9 +32,11 @@ app = FastAPI(title="YQ Bahrain Ops Assistant", version="0.3.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Local dev origins are always allowed; production origins come from ALLOWED_ORIGINS.
+_DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8501"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
+    allow_origins=sorted(set(settings.allowed_origins) | set(_DEV_ORIGINS)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,13 +51,27 @@ async def health(request: Request) -> dict:
 
 class AskRequest(BaseModel):
     question: str
+    model: str | None = None
 
 
 @app.post("/ask")
 @limiter.limit(settings.rate_limit)
 async def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.ai import ask as ai_ask
-    return ai_ask(body.question, user_email=user.email)
+    return ai_ask(body.question, user_email=user.email, model_name=body.model)
+
+
+@app.get("/report/{key}")
+async def report(key: str, user: CurrentUser = Depends(get_current_user)):
+    """Read-only data for a portal page, gated by the matching feature."""
+    from fastapi import HTTPException
+    from app.auth import has_feature
+    from app.reports import REPORTS, REPORT_FEATURE
+    if key not in REPORTS:
+        raise HTTPException(status_code=404, detail=f"Unknown report '{key}'.")
+    if not has_feature(user, REPORT_FEATURE[key]):
+        raise HTTPException(status_code=403, detail=f"Requires access to '{REPORT_FEATURE[key]}'.")
+    return REPORTS[key]()
 
 
 @app.get("/llm/health")
@@ -95,6 +111,103 @@ async def agents_run(name: str, email: bool = False, caller: CurrentUser = Depen
         result["email"] = send_agent(result)
     log_event(caller.email, "agent", detail={"agent": name, "summary": result.get("summary")})
     return result
+
+
+@app.get("/me")
+async def me(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Identity + access for the SPA: role + granted feature pages."""
+    role, features, full_name = user.role, [], ""
+    try:
+        from app.user_auth import _user_row
+        row = _user_row(user.email)
+        if row:
+            role = row.get("role", role)
+            features = row.get("features") or []
+            full_name = row.get("full_name") or ""
+    except Exception:  # columns may predate the team migration
+        pass
+    return {"email": user.email, "role": role, "features": features, "full_name": full_name}
+
+
+# ── Team & access management (admin) ─────────────────────────────────────────
+
+class InviteRequest(BaseModel):
+    email: str
+    full_name: str = ""
+    role: str = "member"
+    features: list[str] = []
+    method: str = "temp"  # "temp" (set a temp password) | "email" (send a link)
+
+
+class UpdateAccessRequest(BaseModel):
+    role: str | None = None
+    features: list[str] | None = None
+    status: str | None = None
+
+
+class AcceptRequest(BaseModel):
+    token: str
+    password: str
+    full_name: str | None = None
+
+
+@app.get("/team")
+async def team_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.user_auth import list_members
+    return list_members()
+
+
+@app.post("/team/invite")
+async def team_invite(body: InviteRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.user_auth import FEATURES, create_email_invite, create_member, generate_temp_password
+    grant = body.features if body.role == "member" else list(FEATURES)
+    if body.method == "email":
+        res = create_email_invite(body.email, body.full_name, body.role, grant, invited_by=admin.email)
+        log_event(admin.email, "team.invite", detail={"email": body.email, "mode": "email"})
+        return {"mode": "email", **res}
+    tmp = generate_temp_password()
+    create_member(body.email, body.full_name, body.role, grant, tmp, invited_by=admin.email, must_reset=True)
+    log_event(admin.email, "team.invite", detail={"email": body.email, "mode": "temp"})
+    return {"mode": "temp", "email": body.email, "temp_password": tmp}
+
+
+@app.patch("/team/{email}")
+async def team_update(email: str, body: UpdateAccessRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.user_auth import update_access
+    update_access(email, role=body.role, features=body.features, status=body.status)
+    log_event(admin.email, "team.update", detail={"email": email})
+    return {"ok": True}
+
+
+@app.delete("/team/{email}")
+async def team_remove(email: str, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from fastapi import HTTPException
+    from app.user_auth import remove_user
+    if email.strip().lower() == admin.email:
+        raise HTTPException(status_code=400, detail="You cannot remove your own account.")
+    remove_user(email)
+    log_event(admin.email, "team.remove", detail={"email": email})
+    return {"ok": True}
+
+
+@app.get("/team/invite/{token}")
+async def team_invite_info(token: str) -> dict:
+    from fastapi import HTTPException
+    from app.user_auth import get_invite
+    inv = get_invite(token)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invalid or expired invite.")
+    return {"email": inv["email"], "role": inv["role"], "features": inv.get("features") or []}
+
+
+@app.post("/team/accept")
+async def team_accept(body: AcceptRequest) -> dict:
+    from fastapi import HTTPException
+    from app.user_auth import accept_invite
+    res = accept_invite(body.token, body.password, body.full_name)
+    if not res:
+        raise HTTPException(status_code=400, detail="Invalid or expired invite.")
+    return res
 
 
 class ActionRequest(BaseModel):
@@ -163,6 +276,19 @@ async def ingest_file(
     log_event(user.email, "ingest", detail={
         "filename": file.filename, "ingest_ok": r1.returncode == 0, "load_ok": r2.returncode == 0,
     })
+    # Record an ingest run for the "Data as of" freshness banner (best-effort).
+    try:
+        from datetime import datetime, timezone
+        from app.database import get_client
+        ok = r1.returncode == 0 and r2.returncode == 0
+        get_client().table("ingest_runs").insert({
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ok" if ok else "error",
+            "file": file.filename,
+            "errors": None if ok else ((r1.stderr or "") + (r2.stderr or ""))[-500:],
+        }).execute()
+    except Exception:
+        pass
     return {
         "filename": file.filename,
         "report_type": report_type,

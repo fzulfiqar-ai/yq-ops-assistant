@@ -1,0 +1,8 @@
+INFO:     Started server process [23020]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8088 (Press CTRL+C to quit)
+INFO:     127.0.0.1:55351 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55352 - "GET /agents HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:55353 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55354 - "GET /digest/daily HTTP/1.1" 200 OK
