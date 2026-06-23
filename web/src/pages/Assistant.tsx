@@ -138,7 +138,7 @@ export default function Assistant() {
   const recent = [...chats].sort((a, b) => b.updatedAt - a.updatedAt)
 
   return (
-    <div className="flex h-[calc(100vh-9rem)] gap-4">
+    <div className="flex h-[calc(100vh-7.75rem)] gap-4">
       {/* Conversation rail */}
       <aside className="hidden w-60 shrink-0 flex-col rounded-2xl border bg-card/50 p-3 md:flex">
         <button onClick={newChat}
