@@ -174,6 +174,48 @@ def chat(messages: list[dict[str, str]], *, tier: int = 1,
     raise AllProvidersFailed(f"All providers failed. Last error: {last_err}")
 
 
+def chat_stream(messages: list[dict[str, str]], *, tier: int = 2,
+                temperature: float = 0.3, max_tokens: int = 700, model_name: str | None = None):
+    """Stream a chat completion, yielding text deltas as they arrive.
+
+    Falls across providers on connect/auth errors. Caller redacts PII (Redactor)."""
+    if not _ROTATION:
+        yield "No LLM providers configured."
+        return
+    last_err: Exception | None = None
+    for prov in _candidates(tier, model_name):
+        client = OpenAI(base_url=prov.base_url, api_key=prov.api_key)
+        try:
+            stream = client.chat.completions.create(
+                model=prov.model, messages=messages, temperature=temperature,
+                max_tokens=max_tokens, stream=True,
+            )
+            got = False
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    got = True
+                    yield delta
+            if got:
+                prov.failures = 0
+                return
+        except RateLimitError as exc:
+            last_err = exc
+            continue
+        except APIStatusError as exc:
+            last_err = exc
+            if exc.status_code in (401, 402, 403):
+                prov.disabled_until = time.time() + _CB_COOLDOWN
+                prov.failures += 1
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            continue
+    yield "\n(All AI providers are busy right now — please try again.)"
+
+
 def health() -> list[dict]:
     """Snapshot of the rotation for observability (no secrets)."""
     now = time.time()

@@ -22,6 +22,7 @@ interface Data {
   rows: Row[]
   by_status: Record<string, number>
   stock_value: number
+  stock_value_cost: number
   stock_qty: number
   by_warehouse: Warehouse[]
 }
@@ -68,8 +69,12 @@ export default function Inventory() {
         <Skeleton className="h-[60vh]" />
       ) : (
         <>
-          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-6">
             <Stat label="Stock value (selling)" value={bhd(data.stock_value, 0)} tone="violet" />
+            {data.stock_value_cost > 0 && (
+              <Stat label="Stock value (at cost)" value={bhd(data.stock_value_cost, 0)} tone="blue"
+                foot="capital invested" />
+            )}
             <Stat label="Units on hand" value={num(data.stock_qty)} />
             <Stat label="Low stock (<30d)" value={num(alerts)} tone="amber" />
             <Stat label="Urgent out-of-stock" value={num(s.urgent_out_of_stock || 0)} tone="rose" />

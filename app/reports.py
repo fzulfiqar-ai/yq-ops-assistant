@@ -131,10 +131,19 @@ def inventory() -> dict:
         "FROM stock_balance WHERE as_of_date=(SELECT MAX(as_of_date) FROM stock_balance) LIMIT 1"
     )
     t = (tv or [{}])[0]
+    # Inventory at landed COST (capital invested) — join items to purchase_costs by the
+    # leading product code (e.g. 'X01' from 'X01 UC 3A …'). Partial coverage is fine.
+    cv = exec_sql(
+        "SELECT COALESCE(SUM(sb.net_qty * pc.landed_cost_bhd),0) AS v "
+        "FROM stock_balance sb JOIN purchase_costs pc "
+        "ON UPPER(SPLIT_PART(sb.item_name,' ',1)) = UPPER(pc.sku_code) "
+        "WHERE sb.as_of_date=(SELECT MAX(as_of_date) FROM stock_balance) LIMIT 1"
+    )
     return {
         "rows": rows,
         "by_status": dict(Counter(r["status"] for r in rows)),
         "stock_value": float(t.get("v", 0)),
+        "stock_value_cost": float((cv or [{}])[0].get("v", 0)),
         "stock_qty": float(t.get("q", 0)),
         "by_warehouse": stock_by_warehouse(),
     }

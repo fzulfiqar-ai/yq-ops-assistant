@@ -8,11 +8,12 @@ import hashlib
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.database import get_client
-from app.llm_router import Redactor, chat
+from app.llm_router import Redactor, chat, chat_stream
 from app.sql_validator import SQLValidationError, validate
 from app.templates import match as template_match
 
@@ -281,3 +282,77 @@ def ask(question: str, user_email: str = "system", model_name: str | None = None
 
     _store_cache(client, key, question, reply, sql_used, rows)
     return {"reply": reply, "sql_used": sql_used, "cached": False, "row_count": len(rows)}
+
+
+def _stream_words(text: str):
+    """Yield a ready-made reply in word-sized chunks for a typed feel."""
+    for i, w in enumerate(text.split(" ")):
+        yield w if i == 0 else " " + w
+        time.sleep(0.012)
+
+
+def ask_stream(question: str, user_email: str = "system", model_name: str | None = None):
+    """Streaming variant of ask(): yields answer text as it is produced.
+
+    Conversational/cached/template replies are word-streamed for a consistent typed
+    feel; LLM answers are true token-streamed from the provider."""
+    client = get_client()
+
+    chat_reply = _smalltalk(question)
+    if chat_reply:
+        yield from _stream_words(chat_reply)
+        return
+
+    key = _cache_key(question)
+    hit = _check_cache(client, key)
+    if hit:
+        yield from _stream_words(hit["reply"])
+        return
+
+    redactor = Redactor()
+    try:
+        tmpl = template_match(question)
+        if tmpl:
+            label, raw_sql = tmpl
+            sql_used = validate(raw_sql)
+            rows = exec_sql(sql_used)
+            reply = _fmt_template(label, rows)
+            yield from _stream_words(reply)
+            _store_cache(client, key, question, reply, sql_used, rows)
+            return
+
+        redacted_q = redactor.redact(question, [])
+        raw_sql = _llm_sql(redacted_q, model_name)
+        try:
+            sql_used = validate(raw_sql)
+        except SQLValidationError as e:
+            yield from _stream_words(f"I couldn't turn that into a valid query. ({e})")
+            return
+        rows = exec_sql(sql_used)
+        if not rows:
+            yield from _stream_words(
+                "I checked the records but didn't find anything matching that. The data "
+                "runs to 22 Jun 2026 — try rephrasing, or ask about sales, a salesman, "
+                "stock health, margins, or who owes us money."
+            )
+            return
+
+        row_text = json.dumps(rows[:50], indent=2, default=str)
+        msgs = [
+            {"role": "system", "content": (
+                "You are a sharp, confident business analyst for YQ Bahrain Mobile Accessories. "
+                "Answer the question directly and concisely from the data, then add ONE short "
+                "insight line ('Insight: …') only if it's genuinely useful. Format BHD as "
+                "'BHD X,XXX.XX'. Use bullet points for lists. Bold key numbers. Never invent "
+                "data not present. Be crisp — no filler.")},
+            {"role": "user", "content": f"Question: {question}\n\nData:\n{row_text}"},
+        ]
+        full = ""
+        for delta in chat_stream(msgs, tier=2, model_name=model_name):
+            full += delta
+            yield delta
+        if full.strip():
+            _store_cache(client, key, question, full, sql_used, rows)
+    except Exception as e:  # noqa: BLE001
+        log.exception("ask_stream error: %s", e)
+        yield "\nSomething went wrong. Please try rephrasing your question."

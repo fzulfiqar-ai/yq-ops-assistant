@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Send, Plus, Mic, MicOff, Trash2, MessageSquare, User, Database } from 'lucide-react'
-import { apiPost } from '@/lib/api'
+import { apiStream } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
 
@@ -94,24 +94,29 @@ export default function Assistant() {
   async function ask(question: string) {
     const q = question.trim()
     if (!q || busy || !active) return
+    const convId = active.id
     setInput('')
     setBusy(true)
     const title = active.messages.length === 0 ? q.slice(0, 40) : active.title
-    setChats((prev) => prev.map((c) => c.id === active.id
+    setChats((prev) => prev.map((c) => c.id === convId
       ? { ...c, title, updatedAt: Date.now(), messages: [...c.messages, { role: 'user', content: q }, { role: 'assistant', content: '', pending: true }] }
       : c))
     scrollDown()
     try {
-      const r = await apiPost<{ reply: string; sql_used?: string; cached?: boolean }>('/ask', { question: q, model })
-      setChats((prev) => prev.map((c) => {
-        if (c.id !== active.id) return c
-        const msgs = [...c.messages]
-        msgs[msgs.length - 1] = { role: 'assistant', content: r.reply, sql: r.sql_used, cached: r.cached }
-        return { ...c, messages: msgs, updatedAt: Date.now() }
-      }))
+      // token-stream the answer; append each chunk to the last (assistant) message
+      await apiStream('/ask/stream', { question: q, model }, (chunk) => {
+        setChats((prev) => prev.map((c) => {
+          if (c.id !== convId) return c
+          const msgs = [...c.messages]
+          const last = msgs[msgs.length - 1]
+          msgs[msgs.length - 1] = { role: 'assistant', content: (last.pending ? '' : last.content) + chunk, pending: false }
+          return { ...c, messages: msgs, updatedAt: Date.now() }
+        }))
+        scrollDown()
+      })
     } catch {
       setChats((prev) => prev.map((c) => {
-        if (c.id !== active.id) return c
+        if (c.id !== convId) return c
         const msgs = [...c.messages]
         msgs[msgs.length - 1] = { role: 'assistant', content: 'Something went wrong. Please try again.' }
         return { ...c, messages: msgs }
