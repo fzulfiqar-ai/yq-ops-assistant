@@ -23,9 +23,9 @@ export const NAV: NavItem[] = [
   { label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
   { label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents' },
   { label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
-  { label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
   { label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
-  { label: 'Margins', to: '/margins', icon: Percent, feature: 'Margins' },
+  { label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
+  { label: 'Profitability', to: '/margins', icon: Percent, feature: 'Margins' },
   { label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
   { label: 'Data', to: '/data', icon: Database }, // admin-only
   { label: 'Team', to: '/team', icon: Users }, // admin-only

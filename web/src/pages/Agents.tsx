@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Landmark, Boxes, Percent, TrendingUp, Megaphone, HeartPulse, Wallet, ShieldAlert,
-  Play, Mail, Check, Loader2, ChevronRight, type LucideIcon,
+  Hourglass, Award, Play, Mail, Check, Loader2, ChevronRight, Clock, type LucideIcon,
 } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -23,6 +23,17 @@ const ICONS: Record<string, LucideIcon> = {
   customer_health: HeartPulse,
   cashflow: Wallet,
   anomaly: ShieldAlert,
+  inventory_aging: Hourglass,
+  salesman_performance: Award,
+}
+
+function relTime(iso?: string) {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  const h = Math.floor(ms / 3.6e6)
+  if (h < 1) return 'just now'
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
 }
 const META = new Set(['agent', 'description', 'generated_at', 'summary', 'count', 'email'])
 
@@ -119,6 +130,11 @@ export default function Agents() {
                     >
                       <div className="bg-accent/30 px-5 py-3">
                         <p className="text-sm font-medium">{st.data.summary}</p>
+                        {st.data.generated_at && (
+                          <div className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground">
+                            <Clock size={11} /> Ran {relTime(st.data.generated_at)}
+                          </div>
+                        )}
                       </div>
                       {list && (
                         <div className="px-5 py-3">

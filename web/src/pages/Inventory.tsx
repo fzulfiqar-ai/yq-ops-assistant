@@ -61,7 +61,7 @@ export default function Inventory() {
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
   return (
     <div>
-      <PageHeader title="Inventory Health" subtitle="Velocity-aware stock — what to reorder, what's stuck" />
+      <PageHeader title="Inventory" subtitle="Velocity-aware stock health — what to reorder, what's stuck" />
       {isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
@@ -91,6 +91,7 @@ export default function Inventory() {
           <DataTable
             rows={data.rows}
             cols={cols}
+            exportName="inventory-health"
             rowClass={(r) => (r.status === 'urgent_out_of_stock' ? 'bg-rose-50/60 dark:bg-rose-500/5'
               : r.status === 'low_stock' ? 'bg-amber-50/50 dark:bg-amber-500/5' : undefined)}
             empty="No stock records."

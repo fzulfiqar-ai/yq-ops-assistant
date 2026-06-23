@@ -42,7 +42,7 @@ export default function Sales() {
 
   return (
     <div>
-      <PageHeader title="Sales Performance" subtitle="Revenue, salesmen and channel — gross (VAT-incl)" />
+      <PageHeader title="Sales" subtitle="Performance · salesmen · B2C/B2B channel — gross (VAT-incl)" />
       {isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
@@ -111,11 +111,11 @@ export default function Sales() {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card className="p-5">
               <div className="mb-4 font-display text-base font-semibold">Top sellers (last 90 days)</div>
-              <DataTable rows={data.top_sellers} cols={sellerCols} empty="No sales yet." />
+              <DataTable rows={data.top_sellers} cols={sellerCols} exportName="top-sellers" searchable={false} empty="No sales yet." />
             </Card>
             <Card className="p-5">
               <div className="mb-4 font-display text-base font-semibold">Top customers (named accounts)</div>
-              <DataTable rows={data.top_customers} cols={custCols} empty="No customers yet." />
+              <DataTable rows={data.top_customers} cols={custCols} exportName="top-customers" searchable={false} empty="No customers yet." />
             </Card>
           </div>
         </div>

@@ -57,6 +57,7 @@ export default function Margins() {
           <DataTable
             rows={data.rows}
             cols={cols}
+            exportName="profitability"
             rowClass={(r) => (Number(r.gp_margin_pct) < 0 ? 'bg-rose-50/60 dark:bg-rose-500/5' : undefined)}
             empty="No margin data."
           />

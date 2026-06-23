@@ -41,7 +41,7 @@ export default function Receivables() {
   const bucketData = data ? BUCKET_LABELS.map(([k, label]) => ({ label, value: Number(data.buckets[k] || 0) })) : []
   return (
     <div>
-      <PageHeader title="Cash & Receivables" subtitle="Trade-debtor balances and ageing (Focus AR)" />
+      <PageHeader title="Receivables" subtitle="Cash & trade-debtor balances with ageing (Focus AR)" />
       {isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
@@ -72,6 +72,7 @@ export default function Receivables() {
           <DataTable
             rows={data.rows}
             cols={cols}
+            exportName="receivables"
             rowClass={(r) => (Number(r.over_90_bhd) > 0 ? 'bg-rose-50/60 dark:bg-rose-500/5' : Number(r.overdue_bhd) > 0 ? 'bg-amber-50/50 dark:bg-amber-500/5' : undefined)}
             empty="No receivables."
           />
