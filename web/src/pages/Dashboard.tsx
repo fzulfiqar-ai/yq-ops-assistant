@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Area, AreaChart, Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, AreaChart, Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { motion } from 'motion/react'
 import {
   DollarSign, FileText, Boxes, Landmark, TrendingUp, TrendingDown, Crown, TriangleAlert,
@@ -59,17 +59,36 @@ function relTime(iso?: string) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-function KpiCard({ accent, icon: Icon, label, value, foot }: {
-  accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode; foot?: React.ReactNode
+function Sparkline({ data, color = '#7c3aed' }: { data: number[]; color?: string }) {
+  const d = data.map((v, i) => ({ i, v }))
+  const id = `sp-${color.replace('#', '')}`
+  return (
+    <ResponsiveContainer width="100%" height={34}>
+      <AreaChart data={d} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
+        <defs>
+          <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+            <stop offset="100%" stopColor={color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <Area type="monotone" dataKey="v" stroke={color} strokeWidth={1.6} fill={`url(#${id})`} isAnimationActive={false} />
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+}
+
+function KpiCard({ accent, icon: Icon, label, value, foot, spark }: {
+  accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode; foot?: React.ReactNode; spark?: number[]
 }) {
   return (
     <motion.div variants={item}>
-      <Card className="relative h-full overflow-hidden p-5 transition-shadow hover:shadow-lift">
+      <Card className="relative flex h-full flex-col overflow-hidden p-5 transition-shadow hover:shadow-lift">
         <div className="absolute inset-x-0 top-0 h-1" style={{ background: accent }} />
         <Icon className="text-muted-foreground" size={20} />
-        <div className="mt-3 font-display text-[1.6rem] font-extrabold leading-none tracking-tight">{value}</div>
+        <div className="mt-3 font-display text-[1.6rem] font-extrabold leading-none tracking-tight tabular-nums">{value}</div>
         <div className="mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
         {foot && <div className="mt-2 text-[12.5px]">{foot}</div>}
+        {spark && spark.length > 1 && <div className="-mx-1 mt-auto pt-3">{<Sparkline data={spark} />}</div>}
       </Card>
     </motion.div>
   )
@@ -104,6 +123,7 @@ export default function Dashboard() {
           className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)"
             value={<CountUp value={k.rev_mtd} format={(n) => bhd(n, 0)} />}
+            spark={trend.map((t) => Number(t.gross_bhd) || 0)}
             foot={<span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
               {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
               {up ? '+' : ''}{deltaPct.toFixed(1)}% MoM · ex-VAT {bhd(k.net_mtd, 0)}</span>} />
@@ -148,28 +168,41 @@ export default function Dashboard() {
         </Card>
 
         <Card className="p-5">
-          <div className="mb-4 font-display text-base font-semibold">Sales by channel</div>
+          <div className="mb-2 font-display text-base font-semibold">Sales by channel</div>
           {isLoading ? <Skeleton className="h-[220px]" /> : (
-            <div className="space-y-4">
-              {channels.map((c) => {
-                const isB2C = c.channel === 'B2C'
-                const share = (Number(c.revenue_bhd) / channelTotal) * 100
-                return (
-                  <div key={c.channel}>
-                    <div className="mb-1.5 flex items-center justify-between text-sm">
+            <div>
+              <div className="relative">
+                <ResponsiveContainer width="100%" height={168}>
+                  <PieChart>
+                    <Pie data={channels.map((c) => ({ name: c.channel, value: Number(c.revenue_bhd) || 0 }))}
+                      dataKey="value" nameKey="name" innerRadius={54} outerRadius={78} paddingAngle={2} stroke="none">
+                      {channels.map((c, i) => <Cell key={i} fill={c.channel === 'B2C' ? '#8b5cf6' : '#3b82f6'} />)}
+                    </Pie>
+                    <Tooltip formatter={(v) => [bhd(Number(v), 0), 'Gross']}
+                      contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                  <div className="font-display text-lg font-extrabold tabular-nums">{bhd(channelTotal, 0)}</div>
+                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">total gross</div>
+                </div>
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {channels.map((c) => {
+                  const isB2C = c.channel === 'B2C'
+                  const share = (Number(c.revenue_bhd) / channelTotal) * 100
+                  return (
+                    <div key={c.channel} className="flex items-center justify-between text-sm">
                       <span className="flex items-center gap-2 font-medium">
-                        {isB2C ? <Store size={15} className="text-violet-500" /> : <Truck size={15} className="text-blue-500" />}
-                        {c.channel} {isB2C ? '· Retail' : '· Wholesale'}
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: isB2C ? '#8b5cf6' : '#3b82f6' }} />
+                        {isB2C ? <Store size={14} className="text-violet-500" /> : <Truck size={14} className="text-blue-500" />}
+                        {c.channel} · {isB2C ? 'Retail' : 'Wholesale'}
                       </span>
-                      <span className="font-semibold">{bhd(c.revenue_bhd, 0)}</span>
+                      <span className="font-semibold tabular-nums">{bhd(c.revenue_bhd, 0)} <span className="text-muted-foreground">({share.toFixed(0)}%)</span></span>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full" style={{ width: `${share}%`, background: isB2C ? '#8b5cf6' : '#3b82f6' }} />
-                    </div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">{share.toFixed(0)}% · {num(c.orders)} orders · {num(c.qty)} units</div>
-                  </div>
-                )
-              })}
+                  )
+                })}
+              </div>
             </div>
           )}
         </Card>
