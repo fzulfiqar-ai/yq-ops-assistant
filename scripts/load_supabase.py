@@ -146,6 +146,21 @@ def main() -> int:
         _upsert(client, "stock_balance", _records(sb),
                 on_conflict="item_name,warehouse_name,as_of_date")
 
+    # Record the load for the "Data as of" freshness banner (best-effort).
+    try:
+        from datetime import datetime, timezone
+        latest = client.table("order_lines").select("line_date").order(
+            "line_date", desc=True).limit(1).execute().data
+        data_date = (latest or [{}])[0].get("line_date")
+        client.table("ingest_runs").insert({
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ok",
+            "file": f"Focus refresh (data as of {data_date})",
+            "rows_loaded": (ol is not None and len(ol)) or 0,
+        }).execute()
+    except Exception as e:
+        print(f"  (ingest_runs not recorded: {e})")
+
     print("=" * 60)
     print("Load complete. Run scripts/reconcile_products.py to link item names -> SKUs.")
     return 0
