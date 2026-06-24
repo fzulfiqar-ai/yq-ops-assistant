@@ -134,9 +134,13 @@ def _candidates(tier: int, model_name: str | None = None) -> list[Provider]:
 
 
 def chat(messages: list[dict[str, str]], *, tier: int = 1,
-         temperature: float = 0.2, max_tokens: int = 1024, model_name: str | None = None) -> str:
+         temperature: float = 0.2, max_tokens: int = 1024, model_name: str | None = None,
+         request_timeout: float | None = None, max_429_retries: int | None = None,
+         max_providers: int | None = None) -> str:
     """Send a chat completion through the rotation. Returns the assistant text.
 
+    Latency caps (used by the router so it never hangs): `request_timeout` per call,
+    `max_429_retries` (0 = no backoff), `max_providers` (try at most N then give up).
     Caller is responsible for redacting PII in `messages` (use Redactor).
     """
     if not _ROTATION:
@@ -144,10 +148,17 @@ def chat(messages: list[dict[str, str]], *, tier: int = 1,
             "No LLM providers configured. Set at least one provider key in .env."
         )
 
+    retries = _MAX_429_RETRIES if max_429_retries is None else max_429_retries
+    cands = _candidates(tier, model_name)
+    if max_providers:
+        cands = cands[:max_providers]
+
     last_err: Exception | None = None
-    for prov in _candidates(tier, model_name):
-        client = OpenAI(base_url=prov.base_url, api_key=prov.api_key)
-        for attempt in range(_MAX_429_RETRIES):
+    for prov in cands:
+        # never inherit the SDK's 10-minute default — cap so a slow provider can't hang a request
+        client = OpenAI(base_url=prov.base_url, api_key=prov.api_key,
+                        timeout=request_timeout if request_timeout is not None else 35)
+        for attempt in range(retries + 1):  # retries=0 -> a single attempt, no backoff
             try:
                 resp = client.chat.completions.create(
                     model=prov.model,
@@ -157,17 +168,19 @@ def chat(messages: list[dict[str, str]], *, tier: int = 1,
                 )
                 prov.failures = 0
                 return resp.choices[0].message.content or ""
-            except RateLimitError as exc:  # 429 -> backoff, retry SAME provider
+            except RateLimitError as exc:  # 429 -> backoff & retry SAME provider, else move on
                 last_err = exc
-                time.sleep(2 ** attempt)
-                continue
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+                    continue
+                break
             except APIStatusError as exc:
                 last_err = exc
                 if exc.status_code in (401, 402, 403):  # auth/quota -> skip provider now
                     prov.disabled_until = time.time() + _CB_COOLDOWN
                     prov.failures += 1
                 break  # other API errors -> next provider
-            except Exception as exc:  # noqa: BLE001 - network etc -> next provider
+            except Exception as exc:  # noqa: BLE001 - network/timeout -> next provider
                 last_err = exc
                 break
 
@@ -182,9 +195,8 @@ def chat_stream(messages: list[dict[str, str]], *, tier: int = 2,
     if not _ROTATION:
         yield "No LLM providers configured."
         return
-    last_err: Exception | None = None
     for prov in _candidates(tier, model_name):
-        client = OpenAI(base_url=prov.base_url, api_key=prov.api_key)
+        client = OpenAI(base_url=prov.base_url, api_key=prov.api_key, timeout=35)
         try:
             stream = client.chat.completions.create(
                 model=prov.model, messages=messages, temperature=temperature,

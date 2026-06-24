@@ -3,9 +3,9 @@ import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   Landmark, Boxes, Percent, TrendingUp, Megaphone, HeartPulse, Wallet, ShieldAlert,
-  Hourglass, Award, Play, Mail, Check, Loader2, ChevronRight, Clock, type LucideIcon,
+  Hourglass, Award, Play, Mail, Check, Loader2, ChevronRight, Clock, ClipboardList, type LucideIcon,
 } from 'lucide-react'
-import { apiGet } from '@/lib/api'
+import { apiGet, apiPost } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { useToast } from '@/components/Toast'
@@ -37,6 +37,7 @@ function relTime(iso?: string) {
   return `${Math.floor(h / 24)}d ago`
 }
 const META = new Set(['agent', 'description', 'generated_at', 'summary', 'count', 'email'])
+const DRAFTS = new Set(['inventory', 'margin', 'anomaly', 'collections'])  // agents that can draft
 
 function prettyTitle(name: string) {
   return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
@@ -55,7 +56,7 @@ function firstList(d: AgentResult): { key: string; rows: Record<string, unknown>
   return null
 }
 
-interface RunState { loading?: boolean; data?: AgentResult; error?: string; emailing?: boolean; emailed?: boolean }
+interface RunState { loading?: boolean; data?: AgentResult; error?: string; emailing?: boolean; emailed?: boolean; drafting?: boolean }
 
 export default function Agents() {
   const { data: agents, isLoading } = useQuery({ queryKey: ['agents'], queryFn: () => apiGet<AgentInfo[]>('/agents') })
@@ -81,6 +82,19 @@ export default function Agents() {
     } catch {
       set(name, { emailing: false })
       toast('Could not send the email. Please try again.', 'error')
+    }
+  }
+  async function draft(name: string) {
+    set(name, { drafting: true })
+    try {
+      const r = await apiPost<{ drafted?: number; count?: number; skipped?: number; reason?: string }>(`/agents/${name}/draft-actions`)
+      set(name, { drafting: false })
+      if (name === 'collections') toast(`${r.count ?? 0} bilingual reminders drafted — ready to send.`, 'success')
+      else if (r.reason) toast(r.reason, 'info')
+      else toast(`${r.drafted ?? 0} action(s) sent for approval${r.skipped ? ` · ${r.skipped} already pending` : ''}.`, 'success')
+    } catch {
+      set(name, { drafting: false })
+      toast('Could not draft actions.', 'error')
     }
   }
 
@@ -185,7 +199,18 @@ export default function Agents() {
                           )}
                         </div>
                       )}
-                      <div className="flex items-center justify-end border-t px-5 py-2.5">
+                      <div className="flex items-center justify-between border-t px-5 py-2.5">
+                        {DRAFTS.has(a.name) ? (
+                          <button
+                            onClick={() => draft(a.name)}
+                            disabled={st.drafting}
+                            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold text-primary transition hover:bg-accent disabled:opacity-50"
+                            title="Draft actions/reminders for human approval"
+                          >
+                            {st.drafting ? <Loader2 className="animate-spin" size={14} /> : <ClipboardList size={14} />}
+                            {a.name === 'collections' ? 'Draft reminders' : 'Draft actions'}
+                          </button>
+                        ) : <span />}
                         <button
                           onClick={() => email(a.name)}
                           disabled={st.emailing}

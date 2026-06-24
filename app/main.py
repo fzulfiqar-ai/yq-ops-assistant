@@ -121,6 +121,20 @@ async def global_search(q: str = "", _user: CurrentUser = Depends(get_current_us
     return search(q)
 
 
+@app.post("/agents/{name}/draft-actions")
+async def draft_agent_actions(name: str, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Draft pending actions (or bilingual reminders) from an agent — admin only, human-approved.
+    Drafted actions land in the existing pending-actions queue (approve/reject/export)."""
+    from app.agent_actions import draft_for_agent, draft_reminders
+    if name == "collections":
+        result = draft_reminders()
+        log_event(admin.email, "draft_reminders", detail={"count": result.get("count")})
+        return result
+    result = draft_for_agent(name, requested_by=admin.email)
+    log_event(admin.email, "draft_actions", detail={"agent": name, "drafted": result.get("drafted")})
+    return result
+
+
 @app.get("/report/{key}")
 async def report(key: str, user: CurrentUser = Depends(get_current_user)):
     """Read-only data for a portal page, gated by the matching feature."""

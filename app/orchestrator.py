@@ -87,7 +87,10 @@ def route(question: str, allowed: list[str], history: list[dict] | None = None) 
     )
     msgs = [{"role": "system", "content": sys}, {"role": "user", "content": hist + "Question: " + question}]
     try:
-        raw = chat(msgs, tier=1, temperature=0.1, max_tokens=200, model_name="fast")
+        # routing must never hang: fast model, short timeout, no backoff, few providers —
+        # any failure drops straight to the deterministic keyword router below.
+        raw = chat(msgs, tier=1, temperature=0.1, max_tokens=200, model_name="fast",
+                   request_timeout=7, max_429_retries=0, max_providers=3)
         raw = _FENCE.sub("", raw).replace("```", "").strip()
         m = re.search(r"\{.*\}", raw, re.S)
         obj = json.loads(m.group(0) if m else raw)
