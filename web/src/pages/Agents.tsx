@@ -139,6 +139,19 @@ export default function Agents() {
                             <Clock size={11} /> Ran {relTime(st.data.generated_at)}
                           </div>
                         )}
+                        {(() => {
+                          const ch = st.data.changes as { first_run?: boolean; metric_deltas?: Record<string, number>; new_items?: string[]; resolved_items?: string[] } | undefined
+                          if (!ch || ch.first_run) return null
+                          const parts: string[] = []
+                          Object.entries(ch.metric_deltas || {}).forEach(([k, v]) => { if (v) parts.push(`${k.replace(/_/g, ' ')} ${v > 0 ? '+' : ''}${v.toLocaleString()}`) })
+                          if (ch.new_items?.length) parts.push(`${ch.new_items.length} new`)
+                          if (ch.resolved_items?.length) parts.push(`${ch.resolved_items.length} resolved`)
+                          return (
+                            <div className="mt-1 text-[11px] font-medium text-primary">
+                              vs last run: {parts.length ? parts.join(' · ') : 'no change'}
+                            </div>
+                          )
+                        })()}
                       </div>
                       {list && (
                         <div className="px-5 py-3">

@@ -334,9 +334,19 @@ def run_agent(name: str, triggered_by: str = "user") -> dict:
         raise KeyError(name)
     spec = AGENTS[name]
     result = spec.run()
-    return {
+    wrapped = {
         "agent": name,
         "description": spec.description,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         **result,
     }
+    # Memory: diff vs the last baseline + record this run (best-effort — never break the run).
+    try:
+        from app import memory
+        snap = memory.snapshot(spec, wrapped)
+        wrapped["changes"] = memory.diff(memory.last_snapshot(name), snap)
+        memory.record(name, wrapped.get("summary"), snap, triggered_by)
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("memory hook failed for %s: %s", name, e)
+    return wrapped

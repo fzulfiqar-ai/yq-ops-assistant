@@ -12,9 +12,7 @@ import logging
 import re
 
 from app.agents import AGENTS, run_agent
-from app.ai import (
-    _entity_names, _smalltalk, _stream_restore, _stream_words, ask, ask_stream, exec_sql,  # noqa: F401
-)
+from app.ai import _entity_names, _smalltalk, _stream_restore, _stream_words, ask, ask_stream
 from app.llm_router import Redactor, chat, chat_stream
 
 log = logging.getLogger(__name__)
@@ -78,8 +76,11 @@ def route(question: str, allowed: list[str], history: list[dict] | None = None) 
     sys = (
         "You route a question for a Bahrain mobile-accessories distributor's analyst. "
         "Pick ONE mode; for 'agents' pick up to 3 specialists FROM THE LIST ONLY.\n"
-        "- agents: needs specialist briefing(s) (overdue, stock health, margins, salesmen, churn…)\n"
-        "- data: a specific number/lookup best done by a direct query (a total, one customer's balance, top N)\n"
+        "- agents: the question is about a specialist's DOMAIN (overdue/debtors, stock health & "
+        "reorder, margins/below-cost, salesman/channel performance, customer churn, cash/aging) — "
+        "give a briefing. PREFER THIS for operational questions.\n"
+        "- data: ONLY a precise figure/lookup (a single total, a count, one named customer's "
+        "balance, a top-N list) that needs no briefing.\n"
         "- smalltalk: greeting/thanks/identity\n\n"
         f"SPECIALISTS (closed list):\n{catalog}\n\n"
         'Return ONLY JSON: {"mode":"agents|data|smalltalk","agents":["name"],"reason":"…"}'
