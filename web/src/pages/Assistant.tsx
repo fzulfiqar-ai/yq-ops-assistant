@@ -42,6 +42,7 @@ function mdToHtml(s: string): string {
   const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return esc
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^_(.+?)_$/gm, '<span class="italic text-muted-foreground">$1</span>')
     .replace(/^### (.*)$/gm, '<div class="font-semibold mt-2">$1</div>')
     .replace(/^[-•]\s(.*)$/gm, '<div class="flex gap-2"><span>•</span><span>$1</span></div>')
     .replace(/\n/g, '<br/>')
@@ -95,6 +96,8 @@ export default function Assistant() {
     const q = question.trim()
     if (!q || busy || !active) return
     const convId = active.id
+    // conversation context for follow-ups ("draft a reminder for them")
+    const history = active.messages.filter((m) => !m.pending).slice(-6).map((m) => ({ role: m.role, content: m.content }))
     setInput('')
     setBusy(true)
     const title = active.messages.length === 0 ? q.slice(0, 40) : active.title
@@ -103,8 +106,8 @@ export default function Assistant() {
       : c))
     scrollDown()
     try {
-      // token-stream the answer; append each chunk to the last (assistant) message
-      await apiStream('/ask/stream', { question: q, model }, (chunk) => {
+      // stream the agentic briefing (routing → specialists → synthesis); append each chunk live
+      await apiStream('/orchestrate/stream', { question: q, model, history }, (chunk) => {
         setChats((prev) => prev.map((c) => {
           if (c.id !== convId) return c
           const msgs = [...c.messages]
