@@ -14,8 +14,9 @@ humans (or a future approval step) act.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
+from app.agent_base import AgentSpec
 from app.ai import exec_sql
 
 
@@ -307,33 +308,35 @@ def salesman_performance() -> dict:
     }
 
 
-AGENTS: dict[str, tuple[Callable[[], dict], str]] = {
-    "collections": (collections, "Overdue receivables + drafted reminder messages"),
-    "inventory": (inventory_reorder, "Velocity-aware reorder (urgent out-of-stock first)"),
-    "margin": (margin_guardian, "Negative & thin-margin products"),
-    "sales_insights": (sales_insights, "Monthly sales trend (MoM) + top customers"),
-    "sales_push": (sales_push, "Best sellers, fast movers out of stock, slow/overstock to clear"),
-    "customer_health": (customer_health, "Named customers with declining spend (churn risk)"),
-    "cashflow": (cashflow_forecast, "Receivables aging buckets + debtor concentration"),
-    "anomaly": (anomaly_scan, "Below-cost (Focus GP%), negative & dead stock"),
-    "inventory_aging": (inventory_aging, "On-hand stock idle by days since last sale"),
-    "salesman_performance": (salesman_performance, "Per-salesman value+volume + B2C/B2B"),
+AGENTS: dict[str, AgentSpec] = {
+    "collections": AgentSpec("collections", "Overdue receivables + drafted reminder messages", collections),
+    "inventory": AgentSpec("inventory", "Velocity-aware reorder (urgent out-of-stock first)", inventory_reorder),
+    "margin": AgentSpec("margin", "Negative & thin-margin products", margin_guardian),
+    "sales_insights": AgentSpec("sales_insights", "Monthly sales trend (MoM) + top customers", sales_insights),
+    "sales_push": AgentSpec("sales_push", "Best sellers, fast movers out of stock, slow/overstock to clear", sales_push),
+    "customer_health": AgentSpec("customer_health", "Named customers with declining spend (churn risk)", customer_health),
+    "cashflow": AgentSpec("cashflow", "Receivables aging buckets + debtor concentration", cashflow_forecast),
+    "anomaly": AgentSpec("anomaly", "Below-cost (Focus GP%), negative & dead stock", anomaly_scan),
+    "inventory_aging": AgentSpec("inventory_aging", "On-hand stock idle by days since last sale", inventory_aging),
+    "salesman_performance": AgentSpec("salesman_performance", "Per-salesman value+volume + B2C/B2B", salesman_performance),
 }
 
 
 def list_agents() -> list[dict]:
-    return [{"name": name, "description": desc} for name, (_fn, desc) in AGENTS.items()]
+    return [{"name": s.name, "description": s.description, "category": s.category} for s in AGENTS.values()]
 
 
-def run_agent(name: str) -> dict:
-    """Run one agent and wrap with metadata. Raises KeyError for unknown agents."""
+def run_agent(name: str, triggered_by: str = "user") -> dict:
+    """Run one agent and wrap with metadata. Raises KeyError for unknown agents.
+
+    `triggered_by` ('user'|'schedule'|'escalation') is recorded by the memory layer (Phase B)."""
     if name not in AGENTS:
         raise KeyError(name)
-    fn, desc = AGENTS[name]
-    result = fn()
+    spec = AGENTS[name]
+    result = spec.run()
     return {
         "agent": name,
-        "description": desc,
+        "description": spec.description,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         **result,
     }

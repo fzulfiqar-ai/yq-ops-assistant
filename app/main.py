@@ -78,6 +78,42 @@ async def ask_stream_endpoint(request: Request, body: AskRequest, user: CurrentU
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+class OrchestrateRequest(BaseModel):
+    question: str
+    model: str | None = None
+    history: list[dict] | None = None
+
+
+@app.post("/orchestrate")
+@limiter.limit(settings.rate_limit)
+async def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
+                               user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Agentic entry point — routes to specialist agents, synthesizes one briefing."""
+    from app.orchestrator import orchestrate
+    result = orchestrate(body.question, user, history=body.history, model_name=body.model)
+    log_event(user.email, "orchestrate", detail={"mode": result.get("mode"), "agents": result.get("agents_used")})
+    return result
+
+
+@app.post("/orchestrate/stream")
+@limiter.limit(settings.rate_limit)
+async def orchestrate_stream_endpoint(request: Request, body: OrchestrateRequest,
+                                      user: CurrentUser = Depends(get_current_user)):
+    """Streaming agentic briefing: routing preamble → per-agent headlines → synthesis."""
+    from fastapi.responses import StreamingResponse
+    from app.orchestrator import orchestrate_stream
+    log_event(user.email, "orchestrate_stream", detail={})
+
+    def gen():
+        try:
+            yield from orchestrate_stream(body.question, user, history=body.history, model_name=body.model)
+        except Exception:  # noqa: BLE001
+            yield "\nSomething went wrong. Please try again."
+
+    return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.get("/search")
 async def global_search(q: str = "", _user: CurrentUser = Depends(get_current_user)) -> list:
     """Global ⌘K search across customers, items and salesmen."""

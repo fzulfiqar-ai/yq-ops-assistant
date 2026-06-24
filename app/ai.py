@@ -120,6 +120,21 @@ def exec_sql(sql: str) -> list[dict]:
     return data or []
 
 
+_NAME_KEYS = ("account", "customer_name")
+
+
+def _entity_names(rows: list[dict]) -> list[str]:
+    """Commercial PII (customer/account names) to tokenize before any external LLM call.
+    Excludes the generic 'Cash Customer' walk-in bucket (not a real account)."""
+    names: set[str] = set()
+    for r in rows or []:
+        for k in _NAME_KEYS:
+            v = r.get(k)
+            if isinstance(v, str) and v.strip() and not v.lower().startswith("cash customer"):
+                names.add(v.strip())
+    return sorted(names, key=len, reverse=True)
+
+
 def _llm_sql(question: str, model_name: str | None = None) -> str:
     """Call LLM to generate SQL for the question. Returns raw SQL."""
     msgs = [
@@ -148,7 +163,7 @@ def _llm_answer(question: str, rows: list[dict], redactor: Redactor, model_name:
             "health, margins, or who owes us money."
         )
     row_text = json.dumps(rows[:50], indent=2, default=str)
-    redacted_rows = redactor.redact(row_text, [])
+    redacted_rows = redactor.redact(row_text, _entity_names(rows))
     msgs = [
         {
             "role": "system",
@@ -291,6 +306,27 @@ def _stream_words(text: str):
         time.sleep(0.012)
 
 
+_TOK_TAIL = re.compile(r"CUST_\d*$")
+
+
+def _stream_restore(chunks, restore):
+    """Wrap a token stream so redaction tokens (CUST_n) are restored to real names
+    even when a token is split across chunks: hold back a trailing partial 'CUST_…'
+    until it completes, then restore and flush."""
+    buf = ""
+    for ch in chunks:
+        buf += ch
+        m = _TOK_TAIL.search(buf)
+        if m and m.end() == len(buf):  # possible partial token at the tail — keep buffering
+            safe, buf = buf[:m.start()], buf[m.start():]
+        else:
+            safe, buf = buf, ""
+        if safe:
+            yield restore(safe)
+    if buf:
+        yield restore(buf)
+
+
 def ask_stream(question: str, user_email: str = "system", model_name: str | None = None):
     """Streaming variant of ask(): yields answer text as it is produced.
 
@@ -337,7 +373,7 @@ def ask_stream(question: str, user_email: str = "system", model_name: str | None
             )
             return
 
-        row_text = json.dumps(rows[:50], indent=2, default=str)
+        row_text = redactor.redact(json.dumps(rows[:50], indent=2, default=str), _entity_names(rows))
         msgs = [
             {"role": "system", "content": (
                 "You are a sharp, confident business analyst for YQ Bahrain Mobile Accessories. "
@@ -348,9 +384,9 @@ def ask_stream(question: str, user_email: str = "system", model_name: str | None
             {"role": "user", "content": f"Question: {question}\n\nData:\n{row_text}"},
         ]
         full = ""
-        for delta in chat_stream(msgs, tier=2, model_name=model_name):
-            full += delta
-            yield delta
+        for piece in _stream_restore(chat_stream(msgs, tier=2, model_name=model_name), redactor.restore):
+            full += piece
+            yield piece
         if full.strip():
             _store_cache(client, key, question, full, sql_used, rows)
     except Exception as e:  # noqa: BLE001
