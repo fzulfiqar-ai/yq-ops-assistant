@@ -80,6 +80,88 @@
   }
 }
 
+/* ───────────────────────── Luxe layer ─────────────────────────
+   Premium light+purple polish: ambient depth, glass surfaces, gradient
+   ink and multi-layer shadows. All token-driven so dark mode follows. */
+@layer components {
+  /* Ambient canvas — soft layered violet glows behind the content area.
+     pointer-events:none so it never intercepts clicks; sits at z-0. */
+  .luxe-canvas {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+    background:
+      radial-gradient(60rem 60rem at 8% -10%, hsl(262 83% 60% / 0.10), transparent 60%),
+      radial-gradient(50rem 50rem at 100% 0%, hsl(290 80% 62% / 0.08), transparent 55%),
+      radial-gradient(70rem 50rem at 50% 120%, hsl(255 80% 58% / 0.07), transparent 60%);
+  }
+  /* faint dot-grid texture for tactile depth */
+  .luxe-canvas::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(hsl(var(--foreground) / 0.04) 1px, transparent 1px);
+    background-size: 22px 22px;
+    mask-image: radial-gradient(ellipse 100% 80% at 50% 0%, #000 30%, transparent 75%);
+  }
+  [data-theme='dark'] .luxe-canvas {
+    background:
+      radial-gradient(60rem 60rem at 8% -10%, hsl(262 83% 60% / 0.18), transparent 60%),
+      radial-gradient(50rem 50rem at 100% 0%, hsl(290 80% 62% / 0.14), transparent 55%),
+      radial-gradient(70rem 50rem at 50% 120%, hsl(255 80% 58% / 0.12), transparent 60%);
+  }
+
+  /* Premium surface — gradient-tinted border + layered depth. The ::before
+     paints a subtle top sheen; hover lifts with a colored shadow. */
+  .card-luxe {
+    position: relative;
+    background:
+      linear-gradient(180deg, hsl(var(--card)) 0%, hsl(var(--card)) 100%) padding-box,
+      linear-gradient(160deg, hsl(262 70% 86% / 0.9), hsl(258 30% 92% / 0.4) 40%, hsl(258 30% 92% / 0.25)) border-box;
+    border: 1px solid transparent;
+    box-shadow:
+      0 1px 0 0 hsl(0 0% 100% / 0.6) inset,
+      0 1px 2px hsl(257 50% 20% / 0.04),
+      0 12px 32px -12px hsl(262 60% 30% / 0.14);
+  }
+  [data-theme='dark'] .card-luxe {
+    background:
+      linear-gradient(180deg, hsl(var(--card)) 0%, hsl(var(--card)) 100%) padding-box,
+      linear-gradient(160deg, hsl(262 60% 50% / 0.5), hsl(257 30% 30% / 0.4)) border-box;
+    box-shadow:
+      0 1px 0 0 hsl(0 0% 100% / 0.04) inset,
+      0 14px 36px -14px hsl(262 80% 8% / 0.7);
+  }
+
+  /* Frosted glass — for floating/hero surfaces over the ambient canvas. */
+  .glass {
+    background: hsl(var(--card) / 0.72);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border: 1px solid hsl(var(--border) / 0.7);
+  }
+
+  /* Gradient ink — for hero numbers and brand emphasis. */
+  .text-gradient {
+    background-image: linear-gradient(120deg, hsl(262 83% 52%), hsl(290 75% 56%) 55%, hsl(255 85% 62%));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  [data-theme='dark'] .text-gradient {
+    background-image: linear-gradient(120deg, hsl(262 90% 78%), hsl(290 85% 80%) 55%, hsl(255 90% 82%));
+  }
+}
+
+/* a slow, GPU-cheap drift so the ambient glows feel alive, not static */
+@keyframes luxe-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(0, -1.5%, 0) scale(1.04); }
+}
+.luxe-canvas { animation: luxe-drift 18s ease-in-out infinite; }
+
 /* thin, branded scrollbars */
 * {
   scrollbar-width: thin;

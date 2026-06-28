@@ -11,6 +11,7 @@ slowapi
 streamlit
 pandas
 openpyxl
+xlrd
 pdfplumber
 python-docx
 pyyaml

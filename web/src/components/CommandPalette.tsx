@@ -78,7 +78,7 @@ export function CommandPalette() {
     <AnimatePresence>
       {open && (
         <motion.div
-          className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 pt-[12vh] backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-[12vh] backdrop-blur-md"
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
           onClick={() => setOpen(false)}
         >
@@ -99,14 +99,14 @@ export function CommandPalette() {
                   if (e.key === 'Enter' && rows[active]) go(rows[active].to)
                 }}
                 placeholder="Search pages, customers, items, salesmen…"
-                className="h-14 flex-1 bg-transparent text-[15px] outline-none placeholder:text-muted-foreground"
+                className="h-14 flex-1 bg-transparent text-[15px] text-foreground outline-none placeholder:text-foreground/75"
               />
               <kbd className="rounded-md border bg-card px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground shadow-sm">ESC</kbd>
             </div>
 
             <div className="max-h-[52vh] overflow-y-auto p-2">
               {filteredPages.length > 0 && (
-                <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Pages</div>
+                <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-foreground/70">Pages</div>
               )}
               {rows.map((row, idx) => {
                 const on = idx === active
@@ -114,7 +114,7 @@ export function CommandPalette() {
                 return (
                   <div key={idx}>
                     {isFirstData && (
-                      <div className="px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Results</div>
+                      <div className="px-2.5 pb-1 pt-2 text-[10px] font-bold uppercase tracking-[0.14em] text-foreground/70">Results</div>
                     )}
                     <button
                       onMouseEnter={() => setActive(idx)} onClick={() => go(row.to)}
@@ -127,7 +127,7 @@ export function CommandPalette() {
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium">{row.kind === 'page' ? row.label : row.hit.label}</span>
-                        {row.kind === 'data' && <span className="block truncate text-[12px] text-muted-foreground">{row.hit.type} · {row.hit.sub}</span>}
+                        {row.kind === 'data' && <span className="block truncate text-[12px] text-foreground/70">{row.hit.type} · {row.hit.sub}</span>}
                       </span>
                       {on && <span className="flex items-center gap-1 rounded-md border bg-card px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground"><CornerDownLeft size={11} /> Enter</span>}
                     </button>

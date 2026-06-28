@@ -33,6 +33,25 @@ class Settings:
         self.cerebras_api_key: str = os.getenv("CEREBRAS_API_KEY", "")
         self.scaleway_api_key: str = os.getenv("SCALEWAY_API_KEY", "")
         self.together_api_key: str = os.getenv("TOGETHER_API_KEY", "")
+        # Additional free providers — each auto-joins the rotation only when its key is set.
+        self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")          # aistudio.google.com
+        self.mistral_api_key: str = os.getenv("MISTRAL_API_KEY", "")        # console.mistral.ai
+        self.cohere_api_key: str = os.getenv("COHERE_API_KEY", "")          # dashboard.cohere.com
+        self.github_models_token: str = os.getenv("GITHUB_MODELS_TOKEN", "")  # github.com/marketplace/models
+        self.cloudflare_account_id: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+        self.cloudflare_api_token: str = os.getenv("CLOUDFLARE_API_TOKEN", "")
+        self.sambanova_api_key: str = os.getenv("SAMBANOVA_API_KEY", "")      # cloud.sambanova.ai (very fast)
+        self.nvidia_api_key: str = os.getenv("NVIDIA_API_KEY", "")            # build.nvidia.com (DeepSeek/Llama/Nemotron)
+        self.moonshot_api_key: str = os.getenv("MOONSHOT_API_KEY", "")        # platform.moonshot.ai (Kimi K2, long-context)
+        # Local embeddings (Phase 1 RAG) — model is CPU/ONNX, no network, no PII egress.
+        self.embed_model: str = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+        # Notifications — Telegram (free) for reminders/alerts; absent token => disabled.
+        self.telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")    # @BotFather
+        self.telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")        # your chat/group id
+        # Optional web search (Phase 2 vendor-sourcing tool) — Tavily free tier.
+        self.tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")            # tavily.com (free)
+        # YouTube Data API v3 — trend_radar video signals (accessory unboxing/review volume).
+        self.youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")          # console.cloud.google.com
 
         # App
         self.allowed_origins: list[str] = _split_csv(os.getenv("ALLOWED_ORIGINS")) or [

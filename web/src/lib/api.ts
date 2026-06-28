@@ -48,6 +48,27 @@ export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
   return handle<T>(res)
 }
 
+/** POST JSON and download the binary response as a file (used to export the order .xlsx). */
+export async function apiDownload(path: string, body?: unknown, fallbackName = 'download'): Promise<void> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ''))
+  const blob = await res.blob()
+  const cd = res.headers.get('content-disposition') || ''
+  const m = cd.match(/filename="?([^"]+)"?/)
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = m ? m[1] : fallbackName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 /**
  * Stream Server-Sent-Events-ish text from the backend (used by /ask/stream).
  * Calls onChunk for each decoded text fragment. Bearer auth is attached.

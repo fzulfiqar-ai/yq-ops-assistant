@@ -1,11 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { Area, AreaChart, Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { motion } from 'motion/react'
 import {
   DollarSign, FileText, Boxes, Landmark, TrendingUp, TrendingDown, Crown, TriangleAlert,
-  CalendarDays, Bot, Store, Truck,
+  CalendarDays, Bot, Store, Truck, ListChecks, ArrowRight, Percent, Clock, Snowflake,
+  Flame, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
 import { apiGet } from '@/lib/api'
+import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
 import { CountUp } from '@/components/CountUp'
 import { DataBanner } from '@/components/DataBanner'
@@ -23,8 +26,20 @@ interface Kpis {
 interface ChannelRow { channel: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
 interface SalesmanRow { salesman: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
 interface AgentRow { agent: string; last_run: string; summary: string }
+interface ActionItem { action: string; to: string; bhd: number; urgency: number }
+interface Health {
+  gp_bhd: number; gp_pct: number; ar_overdue_pct: number
+  dso_days: number; dead_stock_bhd: number; dead_stock_count: number
+  margin_basis?: string; cost_coverage_pct?: number; below_cost_count?: number
+}
+interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
 interface DashboardData {
   data_as_of?: string | null
+  data_stale?: boolean
+  data_days_behind?: number | null
+  actions?: ActionItem[]
+  health?: Health
+  movers?: { rising: MoverRow[]; falling: MoverRow[] }
   kpis: Kpis
   top_customers: { customer_name: string; total_revenue_bhd: number; order_count: number }[]
   revenue_trend: { period_month: string; gross_bhd: number; net_revenue_bhd: number }[]
@@ -59,38 +74,79 @@ function relTime(iso?: string) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-function Sparkline({ data, color = '#7c3aed' }: { data: number[]; color?: string }) {
-  const d = data.map((v, i) => ({ i, v }))
-  const id = `sp-${color.replace('#', '')}`
-  return (
-    <ResponsiveContainer width="100%" height={34}>
-      <AreaChart data={d} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
-        <defs>
-          <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.3} />
-            <stop offset="100%" stopColor={color} stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        <Area type="monotone" dataKey="v" stroke={color} strokeWidth={1.6} fill={`url(#${id})`} isAnimationActive={false} />
-      </AreaChart>
-    </ResponsiveContainer>
-  )
-}
-
-function KpiCard({ accent, icon: Icon, label, value, foot, spark }: {
-  accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode; foot?: React.ReactNode; spark?: number[]
+function KpiCard({ accent, icon: Icon, label, value, foot, hero }: {
+  accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode
+  foot?: React.ReactNode; hero?: boolean
 }) {
   return (
     <motion.div variants={item}>
-      <Card className="relative flex h-full flex-col overflow-hidden p-5 transition-shadow hover:shadow-lift">
-        <div className="absolute inset-x-0 top-0 h-1" style={{ background: accent }} />
-        <Icon className="text-muted-foreground" size={20} />
-        <div className="mt-3 font-display text-[1.6rem] font-extrabold leading-none tracking-tight tabular-nums">{value}</div>
-        <div className="mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-        {foot && <div className="mt-2 text-[12.5px]">{foot}</div>}
-        {spark && spark.length > 1 && <div className="-mx-1 mt-auto pt-3">{<Sparkline data={spark} />}</div>}
+      <Card className="group relative flex h-full flex-col overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
+        {/* top accent rail */}
+        <div className="absolute inset-x-0 top-0 h-[3px]" style={{ background: accent }} />
+        {/* soft accent glow that intensifies on hover */}
+        <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-500 group-hover:opacity-70"
+          style={{ background: accent }} />
+        <div className="relative grid h-9 w-9 place-items-center rounded-xl bg-accent/60 text-accent-foreground ring-1 ring-inset ring-white/40">
+          <Icon size={18} />
+        </div>
+        <div className={cn(
+          'relative mt-3 font-display font-extrabold leading-none tracking-tight tabular-nums',
+          hero ? 'text-gradient text-[1.85rem]' : 'text-[1.6rem]',
+        )}>{value}</div>
+        <div className="relative mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+        {foot && <div className="relative mt-1.5 text-[12.5px]">{foot}</div>}
       </Card>
     </motion.div>
+  )
+}
+
+const TONES = {
+  green: { glow: '#10b981', text: 'text-emerald-600' },
+  amber: { glow: '#f59e0b', text: 'text-amber-600' },
+  red: { glow: '#f43f5e', text: 'text-rose-600' },
+  violet: { glow: '#8b5cf6', text: 'text-violet-600' },
+}
+
+function HealthStat({ icon: Icon, label, value, sub, tone, to }: {
+  icon: typeof Percent; label: string; value: React.ReactNode; sub?: React.ReactNode
+  tone: keyof typeof TONES; to?: string
+}) {
+  const t = TONES[tone]
+  const inner = (
+    <Card className="group relative h-full overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
+      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-30 blur-2xl transition-opacity group-hover:opacity-60" style={{ background: t.glow }} />
+      <div className="relative flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <Icon size={15} className={t.text} /> {label}
+      </div>
+      <div className="relative mt-2 font-display text-[1.5rem] font-extrabold leading-none tabular-nums">{value}</div>
+      {sub && <div className="relative mt-1.5 text-[12px] text-muted-foreground">{sub}</div>}
+    </Card>
+  )
+  return to ? <Link to={to} className="block h-full">{inner}</Link> : inner
+}
+
+function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: boolean }) {
+  const Icon = up ? ArrowUpRight : ArrowDownRight
+  return (
+    <div>
+      <div className={cn('mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide',
+        up ? 'text-emerald-600' : 'text-rose-600')}>
+        <Icon size={14} /> {title}
+      </div>
+      <ul className="space-y-0.5">
+        {rows.map((r, i) => {
+          const pct = Math.round((Number(r.momentum) - 1) * 100)
+          return (
+            <li key={i} className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-accent/40">
+              <span className="truncate font-medium">{r.item_name}</span>
+              <span className={cn('shrink-0 font-semibold tabular-nums', up ? 'text-emerald-600' : 'text-rose-600')}>
+                {pct > 0 ? '+' : ''}{pct}%
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 
@@ -113,6 +169,35 @@ export default function Dashboard() {
       <PageHeader title="AI Operations Center" subtitle="Mobile Accessories Intelligence" />
       <DataBanner date={data?.data_as_of} />
 
+      {/* Stale-data guard */}
+      {data?.data_stale && (
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700">
+          <TriangleAlert size={16} className="shrink-0" />
+          Data is {data.data_days_behind ?? '—'} day(s) old — upload the latest Focus exports for accurate figures.
+        </div>
+      )}
+
+      {/* Today's priority actions — the morning brief, on screen */}
+      {!!data?.actions?.length && (
+        <Card className="mb-5 p-5">
+          <div className="mb-3 flex items-center gap-2 font-display text-base font-semibold">
+            <ListChecks size={18} className="text-primary" /> Today's priority actions
+          </div>
+          <div className="space-y-1">
+            {data.actions.map((a, i) => (
+              <Link key={i} to={a.to}
+                className="group flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-accent/50">
+                <span className={cn('h-2 w-2 shrink-0 rounded-full',
+                  a.urgency >= 3 ? 'bg-rose-500' : a.urgency === 2 ? 'bg-amber-500' : 'bg-slate-400')} />
+                <span className="flex-1 font-medium">{a.action}</span>
+                {a.bhd > 0 && <span className="shrink-0 tabular-nums text-muted-foreground">{bhd(a.bhd, 0)}</span>}
+                <ArrowRight size={15} className="shrink-0 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
+              </Link>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* KPI row */}
       {isLoading || !k ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
@@ -121,9 +206,8 @@ export default function Dashboard() {
       ) : (
         <motion.div variants={container} initial="hidden" animate="show"
           className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)"
+          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)" hero
             value={<CountUp value={k.rev_mtd} format={(n) => bhd(n, 0)} />}
-            spark={trend.map((t) => Number(t.gross_bhd) || 0)}
             foot={<span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
               {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
               {up ? '+' : ''}{deltaPct.toFixed(1)}% MoM · ex-VAT {bhd(k.net_mtd, 0)}</span>} />
@@ -140,6 +224,23 @@ export default function Dashboard() {
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
         </motion.div>
+      )}
+
+      {/* Business health — the CEO truth the totals hide: margin, cash speed, frozen capital */}
+      {data?.health && (
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <HealthStat icon={Percent} label="True gross margin · landed cost" tone={data.health.gp_pct < 20 ? 'amber' : 'green'}
+            value={`${data.health.gp_pct.toFixed(1)}%`}
+            sub={<>{bhd(data.health.gp_bhd, 0)} GP · {Math.round(data.health.cost_coverage_pct ?? 0)}% of revenue costed
+              {(data.health.below_cost_count ?? 0) > 0 && <> · <span className="font-semibold text-rose-600">{data.health.below_cost_count} below cost</span></>}</>}
+            to="/margins" />
+          <HealthStat icon={Clock} label="Collection speed · DSO" tone={data.health.ar_overdue_pct > 40 ? 'red' : 'amber'}
+            value={`${Math.round(data.health.dso_days)} days`}
+            sub={<><span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
+          <HealthStat icon={Snowflake} label="Capital frozen in dead stock" tone="red"
+            value={bhd(data.health.dead_stock_bhd, 0)}
+            sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash</>} to="/inventory" />
+        </div>
       )}
 
       {/* Trend + channel split */}
@@ -250,6 +351,20 @@ export default function Dashboard() {
           )}
         </Card>
       </div>
+
+      {/* Momentum — what's accelerating vs fading (restock risers, investigate faders) */}
+      {data?.movers && (data.movers.rising?.length > 0 || data.movers.falling?.length > 0) && (
+        <Card className="mt-5 p-5">
+          <div className="mb-3 flex items-center gap-2 font-display text-base font-semibold">
+            <Flame size={18} className="text-primary" /> Momentum
+            <span className="text-[12px] font-normal text-muted-foreground">· last 30 days vs the 90-day run-rate</span>
+          </div>
+          <div className="grid gap-x-10 gap-y-4 md:grid-cols-2">
+            <MoverList title="Rising — restock & push" rows={data.movers.rising} up />
+            <MoverList title="Fading — investigate before it goes dead" rows={data.movers.falling} />
+          </div>
+        </Card>
+      )}
 
       {/* Agent Performance panel */}
       <Card className="mt-5 p-5">

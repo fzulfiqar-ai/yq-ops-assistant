@@ -15,7 +15,7 @@ Endpoints:
 """
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, File, Form, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -33,7 +33,13 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Local dev origins are always allowed; production origins come from ALLOWED_ORIGINS.
-_DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8501"]
+# Include Vite's fallback ports (5174/5175) so a busy 5173 doesn't break CORS for /me.
+_DEV_ORIGINS = [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:5174", "http://127.0.0.1:5174",
+    "http://localhost:5175", "http://127.0.0.1:5175",
+    "http://localhost:8501",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(set(settings.allowed_origins) | set(_DEV_ORIGINS)),
@@ -41,6 +47,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _warm_embeddings() -> None:
+    """Warm the local embedding model in a background thread so the first chat that uses
+    semantic memory isn't slowed by the one-time model load."""
+    import threading
+
+    def _warm():
+        try:
+            from app.embeddings import available
+            available()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 @app.get("/health")
@@ -58,7 +79,9 @@ class AskRequest(BaseModel):
 @limiter.limit(settings.rate_limit)
 async def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.ai import ask as ai_ask
-    return ai_ask(body.question, user_email=user.email, model_name=body.model)
+    from app.auth import feature_set
+    return ai_ask(body.question, user_email=user.email, model_name=body.model,
+                  allowed_features=feature_set(user))
 
 
 @app.post("/ask/stream")
@@ -67,10 +90,13 @@ async def ask_stream_endpoint(request: Request, body: AskRequest, user: CurrentU
     """Token-streaming answer — yields text chunks as they're produced."""
     from fastapi.responses import StreamingResponse
     from app.ai import ask_stream
+    from app.auth import feature_set
+    feats = feature_set(user)
 
     def gen():
         try:
-            yield from ask_stream(body.question, user_email=user.email, model_name=body.model)
+            yield from ask_stream(body.question, user_email=user.email, model_name=body.model,
+                                  allowed_features=feats)
         except Exception:  # noqa: BLE001
             yield "\nSomething went wrong. Please try again."
 
@@ -164,6 +190,557 @@ async def digest_daily(_caller: CurrentUser = Depends(get_caller)) -> dict:
 async def digest_alerts(_caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.digest import all_alerts
     return all_alerts()
+
+
+@app.get("/escalation/check")
+def escalation_check(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
+    """Evaluate the escalation rules and fire the freshly-triggered ones (deduped 24h) to
+    email + Telegram. Schedulers (n8n) call this hourly with X-Agent-Key. `send=false` previews."""
+    from app.escalation import check
+    return check(send=send)
+
+
+@app.get("/escalation/brief")
+def escalation_brief(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
+    """Run every agent and send ONE combined morning briefing (email + Telegram). Schedulers
+    (n8n) call this each morning with X-Agent-Key. `send=false` previews without sending."""
+    from app.escalation import daily_brief
+    return daily_brief(send=send)
+
+
+class ScheduleRequest(BaseModel):
+    cadence: str  # off | daily | weekly
+
+
+@app.get("/schedules")
+def schedules_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    """{agent: cadence} for the per-agent scheduler."""
+    from app.schedules import get_schedules
+    return get_schedules()
+
+
+@app.post("/schedules/{name}")
+def schedule_set(name: str, body: ScheduleRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.schedules import set_schedule
+    r = set_schedule(name, body.cadence, by=admin.email)
+    log_event(admin.email, "agent.schedule", detail=r)
+    return r
+
+
+@app.get("/scheduler/run-due")
+def scheduler_run_due(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
+    """Called hourly by n8n: runs + emails the agents due now (08:00 Bahrain, idempotent per day)."""
+    from app.schedules import run_due
+    return run_due(send=send)
+
+
+class FieldNoteRequest(BaseModel):
+    note: str
+    category: str = "other"
+    image_path: str | None = None
+
+
+@app.post("/field-notes")
+def field_note_add(body: FieldNoteRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Capture a rep's field observation (+ optional photo); stored + embedded into RAG for recall."""
+    from app.field_notes import add_note
+    r = add_note(body.note, body.category, by=user.email, image_path=body.image_path)
+    log_event(user.email, "field_note", detail={"category": r.get("category"), "ok": r.get("ok"),
+                                                "photo": bool(body.image_path)})
+    return r
+
+
+@app.post("/field-notes/photo")
+async def field_note_photo(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Upload a field-note photo (reps snap a competitor tag / empty shelf on their phone).
+    Validated + stored in a PRIVATE bucket; returns the object path to attach to the note."""
+    from app.uploads import MAX_PHOTO_BYTES, PHOTO_TYPES, UploadTooLarge, content_matches, photo_ext, read_capped
+    ext = photo_ext(file.filename or "")
+    if not ext:
+        return {"error": "Please upload a photo (JPG, PNG, WEBP or HEIC)."}
+    try:
+        data = await read_capped(file, MAX_PHOTO_BYTES)
+    except UploadTooLarge as e:
+        return {"error": f"Photo too large ({e})."}
+    if not content_matches(file.filename or "", data):
+        return {"error": "That file isn't a valid image."}
+    from app.field_notes import upload_photo
+    path = upload_photo(data, ext, PHOTO_TYPES[ext])
+    if not path:
+        return {"error": "Could not save the photo — try again."}
+    log_event(user.email, "field_note_photo", detail={"ext": ext, "bytes": len(data)})
+    return {"image_path": path}
+
+
+@app.get("/field-notes")
+def field_notes_list(_user: CurrentUser = Depends(get_current_user)) -> list:
+    from app.field_notes import list_notes
+    return list_notes()
+
+
+@app.post("/purchase-orders/upload")
+async def po_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Upload a Focus Purchase Order PDF → parse + load. Powers the Orders page (no scripts)."""
+    from app.uploads import UploadTooLarge, content_matches, read_capped
+    if not (file.filename or "").lower().endswith(".pdf"):
+        return {"error": "Please upload a Focus Purchase Order PDF (.pdf)."}
+    try:
+        data = await read_capped(file)
+    except UploadTooLarge as e:
+        return {"error": f"File too large ({e})."}
+    if not content_matches(file.filename or "", data):
+        return {"error": "That file isn't a valid PDF."}
+    try:
+        from scripts.ingest_po import load_pos, parse_po_bytes
+        rows = parse_po_bytes(data, file.filename or "upload.pdf")
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Could not read the PDF ({type(e).__name__})."}
+    if not rows:
+        return {"error": "No PO lines found — is this a Focus Purchase Order PDF? "
+                         "(Proforma / packing list: open the order and use 'Attach file'.)"}
+    load_pos(rows)
+    try:  # keep the PO PDF in the order's file vault
+        from app.orders import store_order_file
+        store_order_file(rows[0]["po_no"], "po", data, ".pdf", "application/pdf", admin.email)
+    except Exception:  # noqa: BLE001
+        pass
+    log_event(admin.email, "po_upload", detail={"po_no": rows[0]["po_no"], "lines": len(rows)})
+    return {"po_no": rows[0]["po_no"], "po_date": rows[0]["po_date"], "vendor": rows[0]["vendor"],
+            "lines": len(rows), "value_bhd": round(sum((r.get("gross_bhd") or 0) for r in rows), 3)}
+
+
+@app.post("/material-receipts/upload")
+async def mrn_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Upload a Focus Material Receipt Note XML (Transactions_*.xml) → update the REAL landed costs
+    (StockValue ÷ Qty, all freight in), keyed on the full ProdCode. Margins recompute on next read."""
+    from app.uploads import UploadTooLarge, read_capped
+    if not (file.filename or "").lower().endswith(".xml"):
+        return {"error": "Please upload a Focus MRN export (.xml)."}
+    try:
+        data = await read_capped(file)
+    except UploadTooLarge as e:
+        return {"error": f"File too large ({e})."}
+    if not data.lstrip()[:1] == b"<":
+        return {"error": "That file isn't valid XML."}
+    try:
+        from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
+        rows = parse_mrn_bytes(data)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Could not read the MRN XML ({type(e).__name__})."}
+    if not rows:
+        return {"error": "No received lines found — is this a Focus MRN export?"}
+    summary = load_mrn_costs(rows)
+    try:  # keep the MRN XML in the order's file vault
+        from app.orders import store_order_file
+        for doc in summary.get("docs", []):
+            store_order_file(doc, "mrn", data, ".xml", "application/xml", admin.email)
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # costs changed → flush cached query results so margins refresh
+        from app.ai import flush_cache
+        flush_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    log_event(admin.email, "mrn_upload", detail={"docs": summary["docs"], "skus": summary["skus"]})
+    return summary
+
+
+@app.post("/orders/{po_no}/photo")
+async def order_photo(po_no: str, file: UploadFile = File(...),
+                      user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Attach a shelf/shipment photo to an order (rear camera on mobile). Stored in the order vault."""
+    from app.uploads import (MAX_PHOTO_BYTES, PHOTO_TYPES, UploadTooLarge,
+                             content_matches, photo_ext, read_capped)
+    ext = photo_ext(file.filename or "")
+    if not ext:
+        return {"error": "Please upload a photo (JPG, PNG, WEBP or HEIC)."}
+    try:
+        data = await read_capped(file, MAX_PHOTO_BYTES)
+    except UploadTooLarge as e:
+        return {"error": f"Photo too large ({e})."}
+    if not content_matches(file.filename or "", data):
+        return {"error": "That file isn't a valid image."}
+    from app.orders import store_order_file
+    path = store_order_file(po_no, "photo", data, ext, PHOTO_TYPES[ext], user.email)
+    if not path:
+        return {"error": "Could not save the photo — try again."}
+    log_event(user.email, "order_photo", detail={"po_no": po_no})
+    return {"ok": True}
+
+
+@app.post("/orders/{po_no}/file")
+async def order_file(po_no: str, file: UploadFile = File(...),
+                     user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Attach ANY related document to an order (proforma invoice, packing list, Excel, photo …),
+    so everything about the order lives in one place."""
+    import mimetypes
+    from app.uploads import UploadTooLarge, content_matches, photo_ext, read_capped
+    name = file.filename or ""
+    low = name.lower()
+    ext = "." + low.rsplit(".", 1)[-1] if "." in low else ""
+    if ext not in {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".xlsx", ".xls", ".csv", ".xml"}:
+        return {"error": "Allowed: PDF, image, Excel/CSV or XML."}
+    try:
+        data = await read_capped(file)
+    except UploadTooLarge as e:
+        return {"error": f"File too large ({e})."}
+    if not content_matches(name, data):
+        return {"error": "That file doesn't match its type."}
+    import re as _re
+    is_packing = " pl " in f" {low} " or "packing" in low
+    if photo_ext(name):
+        kind = "photo"
+    elif low.startswith("po_") or "purchase order" in low:
+        kind = "po"
+    elif "mrn" in low or "receipt" in low or ext == ".xml":
+        kind = "mrn"
+    elif is_packing:
+        kind = "doc"                                  # packing list = a document, not an invoice
+    elif ext in (".xls", ".xlsx") or "invoice" in low or "proforma" in low or _re.search(r"vf\d{6}", low):
+        kind = "invoice"
+    else:
+        kind = "doc"
+
+    # Smart processing — actually LOAD the data so the order calculates, not just store the file.
+    processed = None
+    if ext == ".xml":
+        try:
+            from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
+            rows = parse_mrn_bytes(data)
+            if rows:
+                load_mrn_costs(rows)
+                processed = "landed cost loaded"
+                from app.ai import flush_cache
+                flush_cache()
+        except Exception:  # noqa: BLE001
+            pass
+    elif kind == "invoice":
+        try:
+            from app.invoices import load_supplier_prices, parse_invoice
+            rows = parse_invoice(data, name)
+            if rows:
+                load_supplier_prices(rows)
+                processed = "supplier prices loaded"
+        except Exception:  # noqa: BLE001
+            pass
+
+    ct = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    from app.orders import store_order_file
+    path = store_order_file(po_no, kind, data, ext, ct, user.email, filename=name)
+    if not path:
+        return {"error": "Could not save the file — try again."}
+    log_event(user.email, "order_file", detail={"po_no": po_no, "kind": kind, "processed": processed})
+    return {"ok": True, "kind": kind, "processed": processed}
+
+
+@app.post("/orders/attach-doc")
+async def attach_loose_doc(file: UploadFile = File(...),
+                           user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Attach a shipment document (packing list, etc.) dropped on the main page — auto-matched to its
+    order by the VFAN invoice number that already appears on one of the order's files."""
+    import mimetypes
+    import re as _re
+    from app.database import get_client
+    from app.uploads import UploadTooLarge, read_capped
+    name = file.filename or ""
+    ext = "." + name.lower().rsplit(".", 1)[-1] if "." in name else ""
+    if ext not in {".pdf", ".xls", ".xlsx", ".csv", ".jpg", ".jpeg", ".png", ".webp", ".heic"}:
+        return {"error": "Allowed: PDF, Excel/CSV or image."}
+    try:
+        data = await read_capped(file)
+    except UploadTooLarge as e:
+        return {"error": f"File too large ({e})."}
+    m = _re.search(r"VF\d{6,}", name, _re.I)
+    po_no = None
+    if m:
+        vf = m.group(0)
+        row = (get_client().table("order_files").select("po_no")
+               .ilike("filename", f"%{vf}%").limit(1).execute().data or [None])[0]
+        po_no = row.get("po_no") if row else None
+    if not po_no:
+        return {"error": "Couldn't match this to an order — open the order and use 'Attach file'."}
+    ct = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    from app.orders import store_order_file
+    store_order_file(po_no, "doc", data, ext, ct, user.email, filename=name)
+    log_event(user.email, "attach_doc", detail={"po_no": po_no, "file": name})
+    return {"ok": True, "po_no": po_no}
+
+
+@app.post("/invoices/upload")
+async def invoice_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Upload a VFAN proforma invoice (PDF or .xls) → supplier RMB price history (price-change tracking)."""
+    from app.uploads import UploadTooLarge, read_capped
+    if not (file.filename or "").lower().endswith((".pdf", ".xls", ".xlsx")):
+        return {"error": "Please upload a proforma invoice (PDF or Excel)."}
+    try:
+        data = await read_capped(file)
+    except UploadTooLarge as e:
+        return {"error": f"File too large ({e})."}
+    try:
+        from app.invoices import load_supplier_prices, parse_invoice
+        rows = parse_invoice(data, file.filename or "invoice")
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Could not read the invoice ({type(e).__name__})."}
+    if not rows:
+        return {"error": "No price lines found — is this a VFAN proforma invoice?"}
+    r = load_supplier_prices(rows)
+    log_event(admin.email, "invoice_upload", detail={"invoice": r.get("invoice"), "models": r.get("models")})
+    return r
+
+
+@app.get("/supplier-prices")
+def supplier_prices(_user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Supplier RMB price history per model — latest vs previous invoice, with the change %."""
+    from app.ai import exec_sql
+    rows = exec_sql("SELECT model, latest_invoice, latest_date, latest_rmb, latest_list_rmb, "
+                    "prev_rmb, prev_date, change_pct, invoice_count FROM v_supplier_price_history "
+                    "ORDER BY ABS(COALESCE(change_pct,0)) DESC, model LIMIT 300") or []
+    changed = [r for r in rows if r.get("change_pct")]
+    return {"count": len(rows), "changed_count": len(changed), "rows": rows}
+
+
+class OrderExportLine(BaseModel):
+    model: str | None = None
+    spec: str | None = None
+    qty: float | None = None
+    unit_price_rmb: float | None = None
+
+
+class OrderExportRequest(BaseModel):
+    vendor: str | None = "VFAN"
+    order_ref: str | None = None
+    lines: list[OrderExportLine] = []
+
+
+@app.post("/orders/proposal/export")
+def order_proposal_export(body: OrderExportRequest,
+                          _user: CurrentUser = Depends(get_current_user)) -> Response:
+    """Generate the reviewed proposal as a VFAN-format order .xlsx for the owner to send to the vendor."""
+    from datetime import date as _date
+
+    from fastapi import HTTPException
+
+    from app.order_sheet import build_order_xlsx
+    lines = [ln.model_dump() for ln in body.lines if (ln.model or ln.qty)]
+    if not lines:
+        raise HTTPException(status_code=400, detail="No lines to export.")
+    data = build_order_xlsx(lines, vendor=body.vendor or "VFAN", order_ref=body.order_ref)
+    fn = f"YQ Order {(body.vendor or 'VFAN')} {_date.today().isoformat()}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+    )
+
+
+@app.post("/orders/verify")
+async def order_verify(file: UploadFile = File(...),
+                       user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Verify an order .xlsx (price vs last VFAN, math/discount, margin, qty sanity) — the human gate."""
+    from app.uploads import UploadTooLarge, read_capped
+    if not (file.filename or "").lower().endswith((".xls", ".xlsx")):
+        return {"ok": False, "verdict": "unreadable", "lines": [], "flags": 0,
+                "summary": "Upload the order as Excel (.xlsx)."}
+    try:
+        data = await read_capped(file)
+    except UploadTooLarge as e:
+        return {"ok": False, "verdict": "unreadable", "lines": [], "flags": 0,
+                "summary": f"File too large ({e})."}
+    try:
+        from app.order_verify import verify_order
+        rep = verify_order(data, file.filename or "order.xlsx")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "verdict": "unreadable", "lines": [], "flags": 0,
+                "summary": f"Could not read the order ({type(e).__name__})."}
+    log_event(user.email, "order_verify", detail={"verdict": rep.get("verdict"), "flags": rep.get("flags")})
+    return rep
+
+
+@app.delete("/orders/{po_no}")
+def order_delete(po_no: str, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Admin: remove an order and everything tied to it (PO lines, MRN lines, stored files)."""
+    from app.database import get_client
+    from app.orders import _BUCKET
+    c = get_client()
+    try:
+        files = c.table("order_files").select("path").eq("po_no", po_no).execute().data or []
+        if files:
+            try:
+                c.storage.from_(_BUCKET).remove([f["path"] for f in files])
+            except Exception:  # noqa: BLE001
+                pass
+        c.table("order_files").delete().eq("po_no", po_no).execute()
+        c.table("mrn_lines").delete().eq("doc_no", po_no).execute()
+        c.table("purchase_orders").delete().eq("po_no", po_no).execute()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:140]}
+    log_event(admin.email, "order_delete", detail={"po_no": po_no})
+    return {"ok": True}
+
+
+@app.delete("/orders/files/{file_id}")
+def order_file_delete(file_id: int, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Admin: remove a single attached file from an order."""
+    from app.database import get_client
+    from app.orders import _BUCKET
+    c = get_client()
+    try:
+        row = (c.table("order_files").select("path").eq("id", file_id).limit(1).execute().data or [None])[0]
+        if row and row.get("path"):
+            try:
+                c.storage.from_(_BUCKET).remove([row["path"]])
+            except Exception:  # noqa: BLE001
+                pass
+        c.table("order_files").delete().eq("id", file_id).execute()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:140]}
+    log_event(admin.email, "order_file_delete", detail={"file_id": file_id})
+    return {"ok": True}
+
+
+@app.get("/purchase-orders")
+def po_list(_user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Orders page data: recent orders, per-item cost change across orders, and what's on order."""
+    from app.ai import exec_sql
+
+    def q(sql: str) -> list:
+        try:
+            return exec_sql(sql)
+        except Exception:  # noqa: BLE001
+            return []
+
+    try:
+        from app.agents import reorder_proposal
+        proposal = reorder_proposal()
+    except Exception:  # noqa: BLE001
+        proposal = {"count": 0, "summary": "", "lines": [], "by_vendor": []}
+
+    return {
+        "proposal": proposal,
+        "recent": q("SELECT o.po_no, MAX(o.po_date) AS po_date, MAX(o.vendor) AS vendor, COUNT(*) AS lines, "
+                    "ROUND(SUM(o.gross_bhd)::numeric,3) AS value_bhd, "
+                    "(EXISTS(SELECT 1 FROM mrn_lines m WHERE m.doc_no = o.po_no) "
+                    " OR EXISTS(SELECT 1 FROM order_files f WHERE f.po_no = o.po_no AND f.kind='mrn')) AS received "
+                    "FROM purchase_orders o GROUP BY o.po_no ORDER BY MAX(o.po_date) DESC LIMIT 50"),
+        "cost_changes": q("SELECT item_code, description, prev_rate_bhd, current_rate_bhd, "
+                          "rate_change_pct, prev_ordered, last_ordered FROM v_po_cost_change "
+                          "ORDER BY ABS(rate_change_pct) DESC NULLS LAST LIMIT 40"),
+        "on_order": q("SELECT po_no, code, qty_ordered, rate_bhd, po_date FROM v_purchase_lifecycle "
+                      "WHERE status = 'on_order' ORDER BY po_date DESC LIMIT 40"),
+    }
+
+
+@app.get("/orders/{po_no}")
+def order_detail(po_no: str, _user: CurrentUser = Depends(get_current_user)) -> dict:
+    """One order's full record (PO=MRN number): ordered vs received, real landed cost, margin-on-
+    arrival, reconciliation flags, and the linked 8-stage pipeline timeline."""
+    from app.orders import detail
+    return detail(po_no)
+
+
+# ── Procurement workflow (Phase 3): pipeline board + stage transitions ────────
+
+class ProcOrderRequest(BaseModel):
+    title: str
+    vendor: str | None = None
+    est_value_bhd: float | None = None
+    lines: list[dict] | None = None
+    note: str | None = None
+    stage: str | None = None  # a verified order can open straight at 'reviewed'
+
+
+class ProcAdvanceRequest(BaseModel):
+    stage: str
+    note: str | None = None
+    po_no: str | None = None
+
+
+@app.get("/procurement/board")
+def procurement_board(_user: CurrentUser = Depends(get_current_user)) -> dict:
+    """The procurement pipeline: open orders by stage, days-in-stage, and stuck flags."""
+    from app.procurement import board
+    return board()
+
+
+@app.get("/procurement/orders/{order_id}")
+def procurement_get(order_id: int, _user: CurrentUser = Depends(get_current_user)) -> dict:
+    """One order + its full stage-transition timeline."""
+    from app.procurement import get_order
+    return get_order(order_id)
+
+
+@app.post("/procurement/orders")
+def procurement_create(body: ProcOrderRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Open a procurement order (e.g. from an AI reorder proposal vendor group)."""
+    from app.procurement import create_order
+    r = create_order(body.title, body.vendor, body.est_value_bhd, body.lines, body.note,
+                     actor=admin.email, stage=body.stage)
+    log_event(admin.email, "proc_create", detail={"ref": r.get("ref"), "vendor": body.vendor})
+    return r
+
+
+@app.post("/procurement/orders/{order_id}/advance")
+def procurement_advance(order_id: int, body: ProcAdvanceRequest,
+                        admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Move an order to a new stage (logs the transition + links a Focus PO when given)."""
+    from app.procurement import advance
+    try:
+        r = advance(order_id, body.stage, body.note, body.po_no, actor=admin.email)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+    log_event(admin.email, "proc_advance", detail={"order_id": order_id, "stage": body.stage})
+    return r
+
+
+# ── Lead generation (Tier 2): free B2B prospecting from OpenStreetMap ──────────
+
+class LeadStatusRequest(BaseModel):
+    status: str
+
+
+@app.get("/leads")
+def leads_list(status: str | None = None, _user: CurrentUser = Depends(get_current_user)) -> dict:
+    """The leads pipeline + the prioritised list (highest-fit first)."""
+    from app.leadgen import ATTRIBUTION, list_leads, pipeline
+    return {"pipeline": pipeline(), "leads": list_leads(status=status, limit=200), "attribution": ATTRIBUTION}
+
+
+@app.post("/leads/discover")
+def leads_discover(admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Discover new B2B leads from OpenStreetMap (free), dedupe vs our customers, score + import."""
+    from app.leadgen import discover_and_import
+    res = discover_and_import()
+    log_event(admin.email, "leads_discover", detail=res)
+    return res
+
+
+@app.post("/leads/{lead_id}/status")
+def leads_set_status(lead_id: int, body: LeadStatusRequest,
+                     user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Advance a lead through the pipeline (new→contacted→visited→quoted→ordered/rejected)."""
+    from app.leadgen import set_status
+    ok = set_status(int(lead_id), body.status, by=user.email)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid lead status.")
+    return {"ok": True, "status": body.status}
+
+
+# ── Coaching Brain (Tier 3): per-account pre-visit brief for reps ──────────────
+
+@app.get("/coaching/accounts")
+def coaching_accounts(_user: CurrentUser = Depends(get_current_user)) -> list:
+    """Named accounts (by revenue) for the rep to pick before a call/visit."""
+    from app.coaching import accounts
+    return accounts()
+
+
+@app.get("/coaching/brief")
+def coaching_brief(account: str, _user: CurrentUser = Depends(get_current_user)) -> dict:
+    """The pre-visit brief: what they buy, owe, what to cross-sell + talking points."""
+    from app.coaching import brief
+    return brief(account)
 
 
 @app.get("/agents")
@@ -327,49 +904,137 @@ async def export_actions(_user: CurrentUser = Depends(require_admin)) -> Respons
                     headers={"Content-Disposition": "attachment; filename=approved_actions.csv"})
 
 
+@app.get("/ingest/purge-targets")
+def ingest_purge_targets(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    """The reports that can be purged by date (for the Data-page repair tool)."""
+    from app.data_admin import targets
+    return {"targets": targets()}
+
+
+class PurgeRequest(BaseModel):
+    report: str
+    date_from: str | None = None
+    date_to: str | None = None
+    blanks: bool = False
+
+
+@app.post("/ingest/purge")
+def ingest_purge(body: PurgeRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Admin: remove a report's rows for a date/range (or its null-date junk) so a wrong upload can be
+    deleted and re-uploaded. Flushes the answer cache so the dashboard recomputes."""
+    from app.data_admin import PURGE_TARGETS, purge_by_date
+    if body.report not in PURGE_TARGETS:
+        return {"error": "Unknown report."}
+    if not body.blanks and not body.date_from:
+        return {"error": "Pick a date, or choose the blank/no-date rows."}
+    try:
+        n = purge_by_date(body.report, body.date_from, body.date_to, body.blanks)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:160]}
+    try:
+        from app.ai import flush_cache
+        flush_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    log_event(admin.email, "ingest_purge", detail={
+        "report": body.report, "from": body.date_from, "to": body.date_to,
+        "blanks": body.blanks, "deleted": n})
+    return {"ok": True, "deleted": n, "report": body.report}
+
+
 @app.post("/ingest")
 async def ingest_file(
-    file: UploadFile = File(...),
-    report_type: str = Form(default="auto"),
+    files: list[UploadFile] = File(...),
     user: CurrentUser = Depends(require_admin),
 ) -> dict:
-    import subprocess
-    import sys
-    import tempfile
+    """Upload one or more Focus exports from the dashboard → one verified refresh + briefing.
+
+    Each upload is staged FRESH (Focus export filenames vary per export, so a persistent folder
+    would pile up old reports); data/clean is cleared too so a partial upload never reloads a stale
+    table. Upload the full daily set together for a complete refresh; upload a subset to refresh
+    just those reports (the rest keep their last-known data in Supabase)."""
+    import re
+    import shutil
     from pathlib import Path
+
+    from app.uploads import MAX_INGEST_FILES, UploadTooLarge, content_matches, read_capped
+    if len(files) > MAX_INGEST_FILES:
+        return {"error": f"Too many files (max {MAX_INGEST_FILES}). Upload the daily Focus set."}
     ROOT = Path(__file__).resolve().parents[1]
-    contents = await file.read()
-    suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
-    dest_dir = ROOT / "Focus ERP Data"
-    dest_dir.mkdir(exist_ok=True)
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=dest_dir) as tmp:
-        tmp.write(contents)
-        saved_to = tmp.name
-    r1 = subprocess.run([sys.executable, "-m", "scripts.ingest"], cwd=ROOT, capture_output=True, text=True)
-    r2 = subprocess.run([sys.executable, "-m", "scripts.load_supabase"], cwd=ROOT, capture_output=True, text=True)
+    staging = ROOT / "data" / "_upload"
+    clean = ROOT / "data" / "clean"
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(clean, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for f in files:
+        suffix = (Path(f.filename or "upload.xlsx").suffix or ".xlsx").lower()
+        if suffix not in (".xlsx", ".xls", ".csv"):
+            return {"error": f"{f.filename}: unsupported type '{suffix}'. Use .xlsx, .xls or .csv."}
+        try:
+            contents = await read_capped(f)
+        except UploadTooLarge as e:
+            return {"error": f"{f.filename}: too large ({e})."}
+        if not content_matches(f.filename or "", contents):
+            return {"error": f"{f.filename}: content doesn't match a {suffix} file."}
+        # Save under the REAL (sanitized) filename so scripts.ingest classify() recognises the type.
+        safe_name = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(f.filename or f"upload{suffix}").name)
+        (staging / safe_name).write_bytes(contents)
+        saved.append(safe_name)
+    # Smart validation: keep only GENUINE Focus reports (filename classify + 'YQ Bahrain' title
+    # sniff). Anything else is ignored and reported back — never loaded.
+    from scripts.ingest import classify, sniff_focus
+    recognised: list[dict] = []
+    ignored: list[dict] = []
+    for name in saved:
+        p = staging / name
+        kind = classify(name)
+        if kind is None:
+            ignored.append({"file": name, "reason": "not a recognised Focus report"})
+            p.unlink(missing_ok=True)
+        elif kind.startswith("skip:"):
+            ignored.append({"file": name, "reason": kind[5:]})
+            p.unlink(missing_ok=True)
+        elif not sniff_focus(p):
+            ignored.append({"file": name, "reason": "does not look like a Focus export (no 'YQ Bahrain' title)"})
+            p.unlink(missing_ok=True)
+        else:
+            recognised.append({"file": name, "report": kind})
+    if not recognised:
+        log_event(user.email, "ingest", detail={"recognised": 0, "ignored": [i["file"] for i in ignored]})
+        return {"files": saved, "recognised": [], "ignored": ignored, "ok": False,
+                "error": "No recognised Focus reports in the upload — nothing was loaded."}
+
+    # Verified refresh engine: ingest (de-dup by type) -> load -> flush cache -> verify ->
+    # what-changed -> briefing -> ingest_runs. (Synchronous; admin-only, infrequent.)
+    from scripts.refresh import refresh
+    res = refresh(folder=str(staging), send=True)
     log_event(user.email, "ingest", detail={
-        "filename": file.filename, "ingest_ok": r1.returncode == 0, "load_ok": r2.returncode == 0,
+        "recognised": [r["report"] for r in recognised],
+        "ignored": [i["file"] for i in ignored], "ok": res.get("ok"),
     })
-    # Record an ingest run for the "Data as of" freshness banner (best-effort).
     try:
-        from datetime import datetime, timezone
-        from app.database import get_client
-        ok = r1.returncode == 0 and r2.returncode == 0
-        get_client().table("ingest_runs").insert({
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "status": "ok" if ok else "error",
-            "file": file.filename,
-            "errors": None if ok else ((r1.stderr or "") + (r2.stderr or ""))[-500:],
-        }).execute()
+        from app.reports import coverage
+        cov = coverage()
     except Exception:
-        pass
+        cov = []
     return {
-        "filename": file.filename,
-        "report_type": report_type,
-        "saved_to": saved_to,
-        "ingest_ok": r1.returncode == 0,
-        "load_ok": r2.returncode == 0,
-        "ingest_log": (r1.stdout or r1.stderr)[-400:],
-        "load_log": (r2.stdout or r2.stderr)[-400:],
+        "files": saved,
+        "recognised": recognised,
+        "ignored": ignored,
+        "ok": res.get("ok"),
+        "data_as_of": res.get("data_as_of"),
+        "verify_pass": (res.get("verify") or {}).get("ok"),
+        "verify": res.get("verify"),
+        "changes": res.get("changes"),
+        "error": res.get("error"),
+        "coverage": cov,
         "uploaded_by": user.email,
     }
+
+
+@app.get("/data/coverage")
+def data_coverage(user: CurrentUser = Depends(require_admin)) -> list[dict]:
+    """Per-report data freshness for the Data-page upload panel (Zoho-style)."""
+    from app.reports import coverage
+    return coverage()

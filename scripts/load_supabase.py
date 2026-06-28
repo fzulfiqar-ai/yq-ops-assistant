@@ -117,6 +117,9 @@ def main() -> int:
     pp = _read("product_profitability")
     if pp is not None:
         pp = pp.dropna(subset=["item_name"])
+        # Focus can list the same product twice — keep one so the upsert key (item, report_date)
+        # is unique (avoids "ON CONFLICT cannot affect row a second time").
+        pp = pp.drop_duplicates(subset=["item_name", "report_date"], keep="last")
         _upsert(client, "product_profitability", _records(pp),
                 on_conflict="item_name,report_date")
     if sp is not None:
@@ -125,6 +128,21 @@ def main() -> int:
     ar = _read("receivables")
     if ar is not None:
         ar = ar.dropna(subset=["account"])
+        # Focus can list two accounts under one display NAME (different account codes, e.g. STAR LINE
+        # MOBILES under 52517-42 and 52517-12). The upsert key is (account, as_of_date), so aggregate
+        # by name first — SUM the balances/buckets (never drop a real balance), keep first for text.
+        num_cols = [c for c in ("balance_bhd", "bucket_0_30", "bucket_31_60", "bucket_61_90",
+                                "bucket_91_120", "bucket_121_150", "bucket_151_180", "bucket_181_210",
+                                "bucket_over_210", "total_bhd") if c in ar.columns]
+        for c in num_cols:
+            ar[c] = pd.to_numeric(ar[c], errors="coerce")
+        txt_cols = [c for c in ar.columns if c not in num_cols and c not in ("account", "as_of_date")]
+        aggs = {c: (c, "sum") for c in num_cols}
+        aggs.update({c: (c, "first") for c in txt_cols})
+        ar = ar.groupby(["account", "as_of_date"], as_index=False, dropna=False).agg(**aggs)
+        # snapshot replace: clear each as_of_date first so a re-parse never leaves stale accounts.
+        for d in ar["as_of_date"].dropna().unique():
+            client.table("ar_ageing").delete().eq("as_of_date", str(d)).execute()
         _upsert(client, "ar_ageing", _records(ar), on_conflict="account,as_of_date")
     sb = _read("stock_balance")
     if sb is not None:

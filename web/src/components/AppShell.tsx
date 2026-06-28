@@ -175,9 +175,11 @@ export function AppShell() {
       </aside>
 
       {/* Main column */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        {/* Ambient luxe canvas — soft violet glows + faint grid behind everything */}
+        <div className="luxe-canvas" aria-hidden />
         {/* Top bar */}
-        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b bg-background/80 px-5 backdrop-blur-xl">
+        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-border/60 bg-background/70 px-5 backdrop-blur-xl">
           <button
             onClick={() => setMobileOpen(true)}
             className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground lg:hidden"
@@ -255,7 +257,7 @@ export function AppShell() {
         </header>
 
         {/* Page content with cross-fade */}
-        <main className="flex-1 overflow-y-auto">
+        <main className="relative z-10 flex-1 overflow-y-auto">
           <AnimatePresence mode="wait">
             <motion.div
               key={loc.pathname}
@@ -263,7 +265,7 @@ export function AppShell() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-              className="mx-auto max-w-[1400px] px-5 py-7 md:px-8"
+              className="w-full px-5 py-6 md:px-7 lg:px-8"
             >
               <Suspense
                 fallback={

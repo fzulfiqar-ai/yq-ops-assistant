@@ -6,12 +6,21 @@
 # YQ Bahrain commercial data — never commit
 data/
 Focus ERP Data/
+Focus ERP Updated Reports/
+Order received/
+Shipments/
 roadmap_sources/
 Vfan Item List And Pricing/
 New vendor shotlist Accessories/
 vendor_research/
 MT Pricing May 2026.xlsx
 docs/*.docx
+# Focus exports / data spreadsheets dropped anywhere in the repo
+*.xlsx
+*.xls
+# Local logs + throwaway diagnostic scripts
+*.log
+scripts/_*.py
 
 # Python
 __pycache__/

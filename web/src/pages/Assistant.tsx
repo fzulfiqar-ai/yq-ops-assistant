@@ -1,19 +1,23 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'motion/react'
 import { Send, Plus, Mic, MicOff, Trash2, MessageSquare, User, Database } from 'lucide-react'
-import { apiStream } from '@/lib/api'
+import { apiGet, apiStream } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
 
 type Model = 'pro' | 'thinking' | 'fast'
-interface Msg { role: 'user' | 'assistant'; content: string; sql?: string; cached?: boolean; pending?: boolean }
+interface Msg { role: 'user' | 'assistant' | 'system'; content: string; sql?: string; cached?: boolean; pending?: boolean; model?: Model; agents?: string[] }
+const prettyAgent = (a: string) => a.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 interface Conversation { id: string; title: string; messages: Msg[]; updatedAt: number }
 
-const MODELS: { id: Model; label: string }[] = [
-  { id: 'pro', label: 'Pro' },
-  { id: 'thinking', label: 'Thinking' },
-  { id: 'fast', label: 'Fast' },
+const MODELS: { id: Model; label: string; brain: string; desc: string }[] = [
+  { id: 'pro', label: 'Pro', brain: 'gpt-oss-120B', desc: 'Strongest all-round brain — best for briefings & analysis' },
+  { id: 'thinking', label: 'Thinking', brain: 'GLM-4.7', desc: 'Reasoning model — shows its thinking, best for tricky questions' },
+  { id: 'fast', label: 'Fast', brain: 'Llama-3.3-70B', desc: 'Snappiest replies for quick lookups' },
 ]
+const BRAIN: Record<Model, string> = { pro: 'gpt-oss-120B', thinking: 'GLM-4.7', fast: 'Llama-3.3-70B' }
+const MODEL_LABEL: Record<Model, string> = { pro: 'Pro', thinking: 'Thinking', fast: 'Fast' }
 const SUGGESTIONS = [
   "Who's our top salesman this month?",
   'Which fast movers are out of stock?',
@@ -66,6 +70,7 @@ export default function Assistant() {
   const [busy, setBusy] = useState(false)
   const [listening, setListening] = useState(false)
   const [lang, setLang] = useState<'en-US' | 'ar-SA'>('en-US')
+  const { data: agents } = useQuery({ queryKey: ['agents'], queryFn: () => apiGet<{ name: string }[]>('/agents') })
   const scrollRef = useRef<HTMLDivElement>(null)
   const recogRef = useRef<any>(null)
 
@@ -96,13 +101,19 @@ export default function Assistant() {
     const q = question.trim()
     if (!q || busy || !active) return
     const convId = active.id
-    // conversation context for follow-ups ("draft a reminder for them")
-    const history = active.messages.filter((m) => !m.pending).slice(-6).map((m) => ({ role: m.role, content: m.content }))
+    // conversation context for follow-ups ("draft a reminder for them") — exclude system notes
+    const history = active.messages.filter((m) => !m.pending && m.role !== 'system').slice(-6).map((m) => ({ role: m.role, content: m.content }))
+    // surface a model switch inline so the user sees which brain is now answering
+    const lastModel = [...active.messages].reverse().find((m) => m.role === 'assistant' && m.model)?.model
+    const switched = lastModel && lastModel !== model
     setInput('')
     setBusy(true)
     const title = active.messages.length === 0 ? q.slice(0, 40) : active.title
+    const prelude: Msg[] = switched
+      ? [{ role: 'system', content: `Switched to ${MODEL_LABEL[model]} · ${BRAIN[model]}` }]
+      : []
     setChats((prev) => prev.map((c) => c.id === convId
-      ? { ...c, title, updatedAt: Date.now(), messages: [...c.messages, { role: 'user', content: q }, { role: 'assistant', content: '', pending: true }] }
+      ? { ...c, title, updatedAt: Date.now(), messages: [...c.messages, ...prelude, { role: 'user', content: q }, { role: 'assistant', content: '', pending: true, model }] }
       : c))
     scrollDown()
     try {
@@ -112,7 +123,11 @@ export default function Assistant() {
           if (c.id !== convId) return c
           const msgs = [...c.messages]
           const last = msgs[msgs.length - 1]
-          msgs[msgs.length - 1] = { role: 'assistant', content: (last.pending ? '' : last.content) + chunk, pending: false }
+          let content = (last.pending ? '' : last.content) + chunk
+          let agents = last.agents
+          const mk = content.match(/⟦agents:([^⟧]*)⟧/)  // consulted-agent chips marker
+          if (mk) { agents = mk[1].split(',').map((s) => s.trim()).filter(Boolean); content = content.replace(mk[0], '') }
+          msgs[msgs.length - 1] = { role: 'assistant', content, agents, pending: false, model: last.model || model }
           return { ...c, messages: msgs, updatedAt: Date.now() }
         }))
         scrollDown()
@@ -190,11 +205,11 @@ export default function Assistant() {
           <Logo className="h-9 w-9 rounded-xl shadow-soft" />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold">YQ AI Analyst</div>
-            <div className="text-[11px] text-muted-foreground">Live ops data · as of 22 Jun 2026</div>
+            <div className="text-[11px] text-muted-foreground">Live ops data · {agents?.length ? `${agents.length} agents` : 'live agents'} across 4 departments</div>
           </div>
           <div className="flex items-center gap-1 rounded-lg border bg-background p-0.5">
             {MODELS.map((mo) => (
-              <button key={mo.id} onClick={() => setModel(mo.id)}
+              <button key={mo.id} onClick={() => setModel(mo.id)} title={`${mo.brain} — ${mo.desc}`}
                 className={cn('rounded-md px-2.5 py-1 text-xs font-medium transition',
                   model === mo.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')}>
                 {mo.label}
@@ -223,30 +238,56 @@ export default function Assistant() {
             <div className="space-y-4">
               <AnimatePresence initial={false}>
                 {active.messages.map((m, i) => (
+                  m.role === 'system' ? (
+                    <motion.div key={i} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                      className="flex justify-center py-0.5">
+                      <span className="rounded-full border bg-accent/40 px-3 py-1 text-[11px] font-medium text-muted-foreground">
+                        {m.content}
+                      </span>
+                    </motion.div>
+                  ) : (
                   <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
                     className={cn('flex gap-3', m.role === 'user' ? 'justify-end' : 'justify-start')}>
                     {m.role === 'assistant' && <Logo className="h-8 w-8 shrink-0 self-start rounded-lg shadow-soft" />}
-                    <div className={cn('max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed',
-                      m.role === 'user' ? 'rounded-br-md bg-primary text-primary-foreground' : 'rounded-bl-md border bg-card')}>
-                      {m.pending ? <span className="text-muted-foreground"><TypingDots /></span> : (
-                        <>
-                          <div dangerouslySetInnerHTML={{ __html: mdToHtml(m.content) }} />
-                          {m.sql && (
-                            <details className="mt-2 text-xs">
-                              <summary className="flex cursor-pointer items-center gap-1.5 text-muted-foreground">
-                                <Database size={12} /> SQL{m.cached ? ' · cached' : ''}
-                              </summary>
-                              <pre className="mt-1.5 overflow-x-auto rounded-lg bg-muted p-2 text-[11px] text-muted-foreground">{m.sql}</pre>
-                            </details>
-                          )}
-                        </>
+                    <div className="flex max-w-[80%] flex-col gap-1">
+                      {m.role === 'assistant' && m.agents?.length ? (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">Consulted</span>
+                          {m.agents.map((a) => (
+                            <span key={a} className="rounded-full bg-accent px-2 py-0.5 text-[10.5px] font-medium text-accent-foreground">
+                              {prettyAgent(a)}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className={cn('rounded-2xl px-4 py-2.5 text-sm leading-relaxed',
+                        m.role === 'user' ? 'self-end rounded-br-md bg-primary text-primary-foreground' : 'rounded-bl-md border bg-card')}>
+                        {m.pending ? <span className="text-muted-foreground"><TypingDots /></span> : (
+                          <>
+                            <div dangerouslySetInnerHTML={{ __html: mdToHtml(m.content) }} />
+                            {m.sql && (
+                              <details className="mt-2 text-xs">
+                                <summary className="flex cursor-pointer items-center gap-1.5 text-muted-foreground">
+                                  <Database size={12} /> SQL{m.cached ? ' · cached' : ''}
+                                </summary>
+                                <pre className="mt-1.5 overflow-x-auto rounded-lg bg-muted p-2 text-[11px] text-muted-foreground">{m.sql}</pre>
+                              </details>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {m.role === 'assistant' && !m.pending && m.model && (
+                        <div className="pl-1 text-[10.5px] font-medium text-muted-foreground/70">
+                          {MODEL_LABEL[m.model]} · {BRAIN[m.model]}
+                        </div>
                       )}
                     </div>
                     {m.role === 'user' && (
                       <div className="grid h-8 w-8 shrink-0 place-items-center self-start rounded-lg bg-muted text-muted-foreground"><User size={15} /></div>
                     )}
                   </motion.div>
+                  )
                 ))}
               </AnimatePresence>
 

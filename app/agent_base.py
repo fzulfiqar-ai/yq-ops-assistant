@@ -17,9 +17,13 @@ class AgentSpec:
     description: str
     run: Callable[[], dict]
     category: str = "ops"  # "ops" | "growth"
+    department: str = "Operations"  # org-map grouping: Finance | Supply | Sales & Growth | Risk
     # result -> {"metrics": {flat numbers}, "item_keys": [stable ids]} for memory diffing (Phase B)
     extractor: Callable[[dict], dict] | None = None
     # result -> [draft payloads] for human-approval actions (Phase C)
     drafter: Callable[[dict], list] | None = None
     # named tools the agent may use beyond SQL reads (Phase C): calc / communication / action
     tools: tuple[str, ...] = field(default_factory=tuple)
+    # whether this agent runs in the daily fan-out brief. False for external/web agents so the
+    # brief stays fast and doesn't burn third-party quota (they're run on-demand instead).
+    in_brief: bool = True

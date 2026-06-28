@@ -51,11 +51,14 @@ where balance_qty is not null and balance_qty <= 10
 order by balance_qty asc;
 
 -- 3) Sales velocity per item (the "is it moving?" signal) from the day-book.
+--    KEPT IN SYNC with scripts/revenue_channel_migration.sql (the source of truth) so that
+--    re-applying migrations in ANY order yields the same view. Windows anchor to MAX(line_date),
+--    never CURRENT_DATE (the server clock can run ahead of the last loaded data).
 create or replace view v_item_velocity as
 select
   item_name,
-  sum(case when line_date >= current_date - 30 then quantity else 0 end) as sold_30d,
-  sum(case when line_date >= current_date - 90 then quantity else 0 end) as sold_90d,
+  sum(case when line_date > (select max(line_date) from order_lines) - 30 then quantity else 0 end) as sold_30d,
+  sum(case when line_date > (select max(line_date) from order_lines) - 90 then quantity else 0 end) as sold_90d,
   sum(quantity)                                                          as sold_total,
   max(line_date)                                                         as last_sold
 from order_lines
@@ -65,6 +68,11 @@ group by item_name;
 -- 4) Smart stock health: combine on-hand with velocity. This is what makes reorder
 --    intelligent — a fast mover at zero stock is URGENT (lost sales), a non-mover
 --    sitting on stock is DEAD (trapped cash).
+--    CANONICAL low-stock definition (KEEP IN SYNC with revenue_channel_migration.sql):
+--    days_cover = current_stock / (sold_90d/90); status 'low_stock' when < 30 days of cover,
+--    'urgent_out_of_stock' when out of stock and still selling. The verified low-stock count
+--    (36) = low_stock + urgent_out_of_stock. Do NOT revert to sold_30d/'reorder_soon' — that
+--    silently changes the dashboard KPI and the inventory agent.
 create or replace view v_stock_health as
 with stock as (
   select item_name, sum(net_qty) as current_stock, sum(total_value_bhd) as stock_value
@@ -73,28 +81,24 @@ with stock as (
   group by item_name
 )
 select
-  coalesce(s.item_name, v.item_name)            as item_name,
-  coalesce(s.current_stock, 0)                  as current_stock,
-  coalesce(s.stock_value, 0)                    as stock_value,
-  coalesce(v.sold_30d, 0)                       as sold_30d,
-  coalesce(v.sold_90d, 0)                       as sold_90d,
-  round(coalesce(v.sold_30d, 0) / 30.0, 3)      as avg_daily,
+  coalesce(s.item_name, v.item_name)           as item_name,
+  coalesce(s.current_stock, 0)                 as current_stock,
+  coalesce(s.stock_value, 0)                   as stock_value,
+  coalesce(v.sold_30d, 0)                      as sold_30d,
+  coalesce(v.sold_90d, 0)                      as sold_90d,
+  round(coalesce(v.sold_90d, 0) / 90.0, 3)     as avg_daily,
   v.last_sold,
-  case when coalesce(v.sold_30d, 0) > 0
-       then round(coalesce(s.current_stock, 0) / (v.sold_30d / 30.0), 1)
-       else null end                            as days_cover,
-  greatest(ceil(coalesce(v.sold_30d, 0)) - coalesce(s.current_stock, 0), 0) as suggested_reorder_qty,
+  case when coalesce(v.sold_90d, 0) > 0
+       then round(coalesce(s.current_stock, 0) / (v.sold_90d / 90.0), 1)
+       else null end                           as days_cover,
+  greatest(ceil(coalesce(v.sold_90d, 0) / 3.0) - coalesce(s.current_stock, 0), 0) as suggested_reorder_qty,
   case
-    when coalesce(s.current_stock, 0) <= 0 and coalesce(v.sold_30d, 0) > 0
-      then 'urgent_out_of_stock'
-    when coalesce(v.sold_30d, 0) > 0 and s.current_stock / (v.sold_30d / 30.0) < 21
-      then 'reorder_soon'
-    when coalesce(v.sold_90d, 0) = 0 and coalesce(s.current_stock, 0) > 0
-      then 'dead_stock'
-    when coalesce(v.sold_30d, 0) > 0 and s.current_stock / (v.sold_30d / 30.0) > 120
-      then 'overstock'
+    when coalesce(s.current_stock, 0) <= 0 and coalesce(v.sold_90d, 0) > 0 then 'urgent_out_of_stock'
+    when coalesce(v.sold_90d, 0) > 0 and s.current_stock / (v.sold_90d / 90.0) < 30 then 'low_stock'
+    when coalesce(v.sold_90d, 0) = 0 and coalesce(s.current_stock, 0) > 0 then 'dead_stock'
+    when coalesce(v.sold_90d, 0) > 0 and s.current_stock / (v.sold_90d / 90.0) > 120 then 'overstock'
     else 'healthy'
-  end                                           as status
+  end                                          as status
 from stock s
 full outer join v_item_velocity v on v.item_name = s.item_name;
 

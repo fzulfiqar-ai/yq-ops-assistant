@@ -124,6 +124,20 @@ def has_feature(user: CurrentUser, feature: str) -> bool:
     return feature in feats
 
 
+def feature_set(user) -> set[str] | None:
+    """The caller's granted feature pages as a set, or None = unrestricted (admin / trusted
+    agent-key caller). Used to feature-scope free-text data queries (app/sql_validator.validate)
+    so a member can't pull data outside their pages."""
+    role = getattr(user, "role", "")
+    if role in ("admin", "agent"):
+        return None
+    try:
+        from app.user_auth import _user_row
+        return set((_user_row(getattr(user, "email", "")) or {}).get("features") or [])
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def require_feature(feature: str):
     """Dependency factory: gate an endpoint behind a granted feature page.
 

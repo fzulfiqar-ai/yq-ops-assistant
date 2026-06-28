@@ -8,6 +8,10 @@ import {
   CreditCard,
   Users,
   Database,
+  NotebookPen,
+  ShoppingCart,
+  Target,
+  MessageSquareQuote,
   type LucideIcon,
 } from 'lucide-react'
 import type { Me } from './auth'
@@ -23,8 +27,12 @@ export const NAV: NavItem[] = [
   { label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
   { label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents' },
   { label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
+  { label: 'Field Notes', to: '/field-notes', icon: NotebookPen, feature: 'AI Assistant' },
+  { label: 'Leads', to: '/leads', icon: Target, feature: 'Sales' },
+  { label: 'Coach', to: '/coaching', icon: MessageSquareQuote, feature: 'Sales' },
   { label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
   { label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
+  { label: 'Orders', to: '/orders', icon: ShoppingCart, feature: 'Inventory' },
   { label: 'Profitability', to: '/margins', icon: Percent, feature: 'Margins' },
   { label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
   { label: 'Data', to: '/data', icon: Database }, // admin-only

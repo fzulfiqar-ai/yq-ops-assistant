@@ -63,8 +63,14 @@ def norm_date(v) -> str | None:
 def txt(v) -> str | None:
     if v is None:
         return None
+    # pandas reads blank cells as NaN (a float) — str(NaN) is the non-empty 'nan', which would
+    # otherwise look like real text (e.g. a blank 'Opening Balance' row clobbering the item group).
+    if isinstance(v, float) and math.isnan(v):
+        return None
     s = str(v).strip()
-    return s or None
+    if not s or s.lower() in ("nan", "nat", "none"):
+        return None
+    return s
 
 
 def is_total(first_cell) -> bool:
@@ -194,15 +200,20 @@ def parse_stock(grid: pd.DataFrame, src: str) -> list[dict]:
 
 
 def _voucher_prefix(voucher: str | None) -> str | None:
+    # Fallback only — parse_stock prefers the human-readable "Voucher name" column (col 14).
+    # Keys are the Focus voucher-number prefixes seen in the Stock_ledger export.
     if not voucher:
         return None
     head = voucher.split(":")[0].strip().upper()
     return {
         "MRN": "Material Receipt Note",
         "SI": "Sales Invoice",
-        "SIO": "Sales Issue",
-        "STRV": "Stock Reversal",
+        "SIO": "Stock Issue Voucher",     # issues stock OUT of warehouse_name -> to_warehouse_name
+        "STRV": "Stock Receive Voucher",  # the receiving mirror of an issue
         "STN": "Stock Transfer",
+        "SRV": "Sales Return",
+        "SHOSTK": "Shortages in Stock",   # physical-count shortage (leakage signal)
+        "STIV": "Excesses in Stocks",     # physical-count excess
         "PHY": "Physical Stock",
     }.get(head, head or None)
 
@@ -417,6 +428,13 @@ def classify(name: str) -> str | None:
         return "stock_balance"
     if "stock_ledger" in n:
         return "stock_movements"
+    # Multi-level stock movement = Focus's ITEM-GROUP grouping → the category source
+    # (consumed by scripts/category_backfill, not loaded as a table).
+    if "multi_level_stock_movement" in n or "multi-level" in n:
+        return "categories"
+    # Plain stock-movement summary has no per-voucher/warehouse detail — Stock_ledger has it.
+    if "stock_movement" in n:
+        return "skip:stock movement summary (item summary; transfers come from Stock_ledger)"
     if "ledger_detail" in n:
         return "skip:ledger_detail (subset of Ledger)"
     if "ledger" in n:
@@ -436,6 +454,24 @@ def classify(name: str) -> str | None:
     return None
 
 
+def sniff_focus(path: Path) -> bool:
+    """True if the file looks like a genuine Focus export — its title block names 'YQ Bahrain'.
+    Guards against a mis-named non-Focus spreadsheet polluting the load. xlsx/xls only; a .csv
+    passes (Focus exports are xlsx, and csv has no title block to sniff)."""
+    if path.suffix.lower() not in (".xlsx", ".xls"):
+        return True
+    try:
+        grid = pd.read_excel(path, header=None, dtype=object, engine="openpyxl", nrows=6)
+    except Exception:
+        return False
+    for r in range(min(6, len(grid))):
+        for c in range(grid.shape[1]):
+            cell = grid.iat[r, c]
+            if isinstance(cell, str) and "yq bahrain" in cell.lower():
+                return True
+    return False
+
+
 def main() -> int:
     # Optional source folder: `python scripts/ingest.py "Focus ERP Updated Reports"`.
     # Defaults to "Focus ERP Data". Reused by the email-to-ingest automation.
@@ -450,6 +486,9 @@ def main() -> int:
     tables: dict[str, list[dict]] = {}
     print(f"Ingesting from: {src}\n" + "=" * 70)
 
+    # De-dup by report type: Focus export filenames vary per export, so a folder/upload can hold
+    # several files of the same report. Keep only the NEWEST (by mtime) of each -> no double load.
+    candidates: dict[str, Path] = {}
     for path in sorted(src.glob("*.xls*")):
         kind = classify(path.name)
         if kind is None:
@@ -458,7 +497,16 @@ def main() -> int:
         if kind.startswith("skip:"):
             print(f"  SKIP {path.name}  -> {kind[5:]}")
             continue
+        if kind == "categories":  # consumed by category_backfill, not loaded as a table
+            print(f"  CAT  {path.name}  -> product categories (via category_backfill)")
+            continue
+        prev = candidates.get(kind)
+        if prev is None or path.stat().st_mtime > prev.stat().st_mtime:
+            if prev is not None:
+                print(f"  DUP {path.name}  -> newer than {prev.name}; using newest ({kind})")
+            candidates[kind] = path
 
+    for kind, path in candidates.items():
         grid = read_grid(path)
         if kind == "orders":
             recs = parse_orders(grid, path.name)

@@ -223,7 +223,7 @@ TEMPLATES: list[dict] = [
     {
         "pattern": _p(
             r"(recent )?shipments?", r"goods? receiv(ed)?",
-            r"(stock |items? )?receiv(ed)?", r"(recent )?mrn",
+            r"(stock |goods? )?receiv(ed)? from", r"(recent )?mrn",
             r"material receipt",
         ),
         "label": "Recent shipments",
@@ -236,8 +236,18 @@ TEMPLATES: list[dict] = [
 ]
 
 
+# A SKU-like code (UK20, C15, X01, K105, F30) or a per-item lookup means the user wants a
+# SPECIFIC product — skip the generic templates and let the LLM build a precise query against
+# v_price_list / v_product_economics / v_price_history.
+_SKU_CODE = re.compile(r"\b[A-Z]{1,4}\s?\d{1,4}[A-Z]{0,3}\b")
+_ITEM_LOOKUP = re.compile(r"\b(margin|price|cost|profit|sell|rate)\b[\w\s]{0,15}\b(on|of|for|for the)\b", re.I)
+
+
 def match(question: str) -> tuple[str, str] | None:
     """Return (label, sql) if the question matches a deterministic template, else None."""
+    # product-specific question -> bypass templates so the LLM answers precisely (price/margin/cost)
+    if _SKU_CODE.search(question) or _ITEM_LOOKUP.search(question):
+        return None
     for t in TEMPLATES:
         if t["pattern"].search(question):
             return t["label"], t["sql"]

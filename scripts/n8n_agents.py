@@ -89,12 +89,56 @@ def build_workflow(name: str) -> dict:
     }
 
 
+# Scheduled proactive flows (not per-agent): the morning brief + hourly alert check.
+# Each calls an escalation endpoint with X-Agent-Key (read from n8n env).
+ESCALATION: list[tuple[str, str, dict]] = [
+    # (title, path, schedule)  schedule: {"every": "day", "hour": H} | {"every": "hour"}
+    ("Morning Brief", "/escalation/brief", {"every": "day", "hour": 8}),
+    ("Hourly Alerts", "/escalation/check", {"every": "hour"}),
+    ("Run Due Agents", "/scheduler/run-due", {"every": "hour"}),  # per-agent schedules (08:00 Bahrain)
+]
+
+
+def _esc_schedule_node(sched: dict) -> dict:
+    if sched["every"] == "hour":
+        params = {"rule": {"interval": [{"field": "hours", "hoursInterval": 1}]}, "triggerAtMinute": 5}
+    else:
+        params = {"rule": {"interval": [{"field": "hours", "hoursInterval": 24}]},
+                  "triggerAtHour": sched.get("hour", 8), "triggerAtMinute": 0}
+    return {"id": "trigger", "name": "Schedule", "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1.2, "position": [260, 300], "parameters": params}
+
+
+def _esc_http_node(path: str) -> dict:
+    return {"id": "http", "name": "Call API", "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2, "position": [520, 300],
+            "parameters": {"method": "GET", "url": f"={{{{$env.RAILWAY_API_URL}}}}{path}",
+                           "sendHeaders": True,
+                           "headerParameters": {"parameters": [
+                               {"name": "X-Agent-Key", "value": "={{$env.AGENT_API_KEY}}"}]},
+                           "options": {"timeout": 120000}}}
+
+
+def build_escalation_workflow(title: str, path: str, sched: dict) -> dict:
+    return {
+        "name": f"YQ — {title}",
+        "nodes": [_esc_schedule_node(sched), _esc_http_node(path)],
+        "connections": {"Schedule": {"main": [[{"node": "Call API", "type": "main", "index": 0}]]}},
+        "settings": {"executionOrder": "v1"},
+    }
+
+
 def write_all() -> list[Path]:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     paths = []
     for name in AGENTS:
         wf = build_workflow(name)
         p = OUT_DIR / f"{name}.json"
+        p.write_text(json.dumps(wf, indent=2), encoding="utf-8")
+        paths.append(p)
+    for title, path_, sched in ESCALATION:
+        wf = build_escalation_workflow(title, path_, sched)
+        p = OUT_DIR / f"{title.lower().replace(' ', '_')}.json"
         p.write_text(json.dumps(wf, indent=2), encoding="utf-8")
         paths.append(p)
     return paths
@@ -109,16 +153,18 @@ def push_all(activate: bool = True) -> None:
         raise SystemExit("Set N8N_API_URL and N8N_API_KEY to push (e.g. https://n8n-production-5fc2.up.railway.app).")
     headers = {"X-N8N-API-KEY": key, "Content-Type": "application/json"}
 
-    # 1 — remove old YQ Agent flows so we don't pile up duplicates
+    # 1 — remove old YQ flows (per-agent + scheduled) so we don't pile up duplicates
     existing = requests.get(f"{base}/api/v1/workflows?limit=200", headers=headers, timeout=30).json().get("data", [])
     for wf in existing:
-        if str(wf.get("name", "")).startswith("YQ Agent — "):
+        nm = str(wf.get("name", ""))
+        if nm.startswith("YQ Agent — ") or nm.startswith("YQ — "):
             requests.delete(f"{base}/api/v1/workflows/{wf['id']}", headers=headers, timeout=30)
-            print(f"  deleted old: {wf['name']}")
+            print(f"  deleted old: {nm}")
 
-    # 2 — create + activate fresh
-    for name in AGENTS:
-        wf = build_workflow(name)
+    # 2 — create + activate fresh (per-agent flows + the scheduled brief/alerts)
+    workflows = [build_workflow(name) for name in AGENTS]
+    workflows += [build_escalation_workflow(t, p, s) for t, p, s in ESCALATION]
+    for wf in workflows:
         payload = {"name": wf["name"], "nodes": wf["nodes"], "connections": wf["connections"], "settings": wf["settings"]}
         r = requests.post(f"{base}/api/v1/workflows", headers=headers, json=payload, timeout=30)
         if r.status_code not in (200, 201):

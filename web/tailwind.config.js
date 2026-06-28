@@ -32,15 +32,21 @@ export default {
       boxShadow: {
         soft: '0 1px 2px rgba(24,16,48,.04), 0 8px 24px -8px rgba(24,16,48,.10)',
         lift: '0 8px 30px -8px rgba(109,40,217,.28)',
+        // premium tiers — colored, multi-layer depth for the luxe surfaces
+        luxe: '0 1px 0 0 rgba(255,255,255,.6) inset, 0 2px 4px rgba(24,16,48,.04), 0 18px 40px -16px rgba(109,40,217,.20)',
+        'luxe-hover': '0 1px 0 0 rgba(255,255,255,.7) inset, 0 4px 8px rgba(24,16,48,.06), 0 28px 56px -18px rgba(109,40,217,.34)',
+        glow: '0 0 0 1px rgba(124,58,237,.18), 0 8px 32px -8px rgba(124,58,237,.40)',
       },
       keyframes: {
         'fade-up': { from: { opacity: '0', transform: 'translateY(8px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
         float: { '0%,100%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-6px)' } },
         shimmer: { '100%': { transform: 'translateX(100%)' } },
+        sheen: { '0%': { transform: 'translateX(-120%) skewX(-12deg)' }, '60%,100%': { transform: 'translateX(220%) skewX(-12deg)' } },
       },
       animation: {
         'fade-up': 'fade-up .5s cubic-bezier(.16,1,.3,1) both',
         float: 'float 5s ease-in-out infinite',
+        sheen: 'sheen 1.1s cubic-bezier(.16,1,.3,1)',
       },
     },
   },
