@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
+import { Eye, EyeOff } from 'lucide-react'
 import GlowHorizon from '@/components/ui/glow-horizon'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,6 +16,7 @@ export default function Login() {
   const [pw, setPw] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  const [showPw, setShowPw] = useState(false)
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -27,7 +29,7 @@ export default function Login() {
     const r = await signIn(email, pw)
     setBusy(false)
     if (r.ok) nav('/', { replace: true })
-    else setErr('Invalid credentials or access not granted.')
+    else setErr(r.error || 'Invalid credentials or access not granted.')
   }
 
   return (
@@ -61,13 +63,25 @@ export default function Login() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
               />
-              <Input
-                type="password"
-                placeholder="••••••••"
-                autoComplete="current-password"
-                value={pw}
-                onChange={(e) => setPw(e.target.value)}
-              />
+              <div className="relative">
+                <Input
+                  type={showPw ? 'text' : 'password'}
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                  value={pw}
+                  onChange={(e) => setPw(e.target.value)}
+                  className="pr-11"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPw((s) => !s)}
+                  aria-label={showPw ? 'Hide password' : 'Show password'}
+                  className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-[#6b6480] transition-colors hover:text-[#1a1430]"
+                  tabIndex={-1}
+                >
+                  {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
               {err && (
                 <div className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{err}</div>
               )}

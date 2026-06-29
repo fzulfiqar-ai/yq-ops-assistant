@@ -8,6 +8,9 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // Temporarily ship a self-destroying SW: unregisters any stuck service
+      // worker and clears its caches so clients always get the latest build.
+      selfDestroying: true,
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'yq-icon-32.png'],
       manifest: {
