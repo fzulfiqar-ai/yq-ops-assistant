@@ -1,0 +1,39 @@
+{
+  "name": "YQ Bahrain — Weekly Lead Discovery",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "weeks", "weeksInterval": 1 }] },
+        "triggerAtDay": [1],
+        "triggerAtHour": 9,
+        "triggerAtMinute": 0
+      },
+      "name": "Every Monday 9AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.RAILWAY_API_URL}}/leads/discover",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 180000 }
+      },
+      "name": "POST /leads/discover",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [480, 300],
+      "credentials": { "httpHeaderAuth": { "name": "YQ API Key" } }
+    }
+  ],
+  "connections": {
+    "Every Monday 9AM": { "main": [[{ "node": "POST /leads/discover", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "notes": "Weekly Mon 9AM: POST Railway /leads/discover to refresh the lead pipeline (discover -> dedupe -> score -> upsert; merge-safe, keeps status/notes). Empty JSON body uses backend defaults; add {\"area\":..,\"category\":..} if you want to scope. Set RAILWAY_API_URL env + the 'YQ API Key' httpHeaderAuth credential. Sanitized — no credentials in this file."
+}

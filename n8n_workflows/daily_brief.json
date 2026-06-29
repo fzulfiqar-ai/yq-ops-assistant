@@ -1,0 +1,36 @@
+{
+  "name": "YQ Bahrain — Daily Brief (Today's Actions)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 24 }] },
+        "triggerAtHour": 7,
+        "triggerAtMinute": 30
+      },
+      "name": "Every day at 7:30AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.RAILWAY_API_URL}}/escalation/brief",
+        "sendQuery": true,
+        "queryParameters": { "parameters": [{ "name": "send", "value": "true" }] },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 120000 }
+      },
+      "name": "GET /escalation/brief?send=true",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [480, 300],
+      "credentials": { "httpHeaderAuth": { "name": "YQ API Key" } }
+    }
+  ],
+  "connections": {
+    "Every day at 7:30AM": { "main": [[{ "node": "GET /escalation/brief?send=true", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "notes": "Daily 7:30AM: calls Railway /escalation/brief?send=true so the backend builds and delivers the ranked 'today's actions' brief (email/Telegram per backend config). Set RAILWAY_API_URL env + the 'YQ API Key' httpHeaderAuth credential (header name X-Agent-Key = AGENT_API_KEY). Sanitized — no credentials in this file."
+}
