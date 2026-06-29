@@ -199,7 +199,7 @@ def _send_alerts(items: list[dict]) -> dict:
         send_telegram(f"<b>⚠ {len(items)} YQ operational alert(s)</b>\n\n{lines}")
     except Exception:  # noqa: BLE001
         pass
-    return send_html(f"[YQ Mobile Accessories] {len(items)} operational alert(s) — {datetime.now().strftime('%d %b %Y')}", html)
+    return send_html(f"YQ Bahrain · {len(items)} operational alert(s) — {datetime.now().strftime('%d %b %Y')}", html)
 
 
 def _send_brief(results: list[dict], actions: list[dict], fresh: dict | None = None) -> dict:
@@ -248,4 +248,4 @@ def _send_brief(results: list[dict], actions: list[dict], fresh: dict | None = N
                       f"<b>Today's actions:</b>\n{act_txt}")
     except Exception:  # noqa: BLE001
         pass
-    return send_html(f"[YQ Mobile Accessories] Daily brief — {datetime.now().strftime('%d %b %Y')}", html)
+    return send_html(f"YQ Bahrain · Daily intelligence brief — {datetime.now().strftime('%d %b %Y')}", html)

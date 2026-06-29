@@ -104,7 +104,7 @@ export function AppShell() {
           {!collapsed && (
             <div className="leading-tight">
               <div className="font-display text-[15px] font-bold">YQ Bahrain</div>
-              <div className="text-[11px] text-white/55">Mobile Accessories · AI Ops</div>
+              <div className="text-[11px] font-medium text-white/85">Mobile Accessories · AI Ops</div>
             </div>
           )}
         </Link>
