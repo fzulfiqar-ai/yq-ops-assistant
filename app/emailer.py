@@ -212,7 +212,7 @@ def _agent_html(result: dict) -> str:
     <table width="100%" style="max-width:640px;" cellpadding="0" cellspacing="0">
 
       <!-- Header -->
-      <tr><td style="background:linear-gradient(135deg,{PURPLE} 0%,{PURPLE_DARK} 100%);border-radius:16px 16px 0 0;padding:28px 32px;">
+      <tr><td bgcolor="{PURPLE_DARK}" style="background-color:{PURPLE_DARK};background:linear-gradient(135deg,{PURPLE} 0%,{PURPLE_DARK} 100%);border-radius:16px 16px 0 0;padding:28px 32px;">
         <table width="100%" cellpadding="0" cellspacing="0">
           <tr>
             <td>

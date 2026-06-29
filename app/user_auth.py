@@ -260,7 +260,7 @@ def _send_invite_email(email: str, full_name: str, role: str, link: str) -> dict
 <!DOCTYPE html><html><body style="margin:0;background:#f0eff4;font-family:Inter,Arial,sans-serif;">
 <table width="100%" cellpadding="0" cellspacing="0" style="padding:32px 12px;"><tr><td align="center">
 <table width="100%" style="max-width:560px;" cellpadding="0" cellspacing="0">
-  <tr><td style="background:linear-gradient(135deg,{PURPLE},{PURPLE_DARK});border-radius:16px 16px 0 0;padding:28px 32px;">
+  <tr><td bgcolor="{PURPLE_DARK}" style="background-color:{PURPLE_DARK};background:linear-gradient(135deg,{PURPLE},{PURPLE_DARK});border-radius:16px 16px 0 0;padding:28px 32px;">
     <div style="font-size:.7rem;font-weight:700;letter-spacing:2px;color:#c4b5fd;">YQ BAHRAIN · MOBILE ACCESSORIES</div>
     <div style="font-size:1.3rem;font-weight:800;color:#fff;margin-top:6px;">You're invited to the AI Portal</div>
   </td></tr>
