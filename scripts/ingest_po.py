@@ -64,8 +64,11 @@ def parse_po_text(text: str, source_file: str = "upload.pdf") -> list[dict]:
     items: list[dict] = []
     n = 0
     for line in (x.strip() for x in text.splitlines() if x.strip()):
-        if re.match(r"^(Narration|Taxable|Net Amount|PREPARED|CHECKED|User Name)", line):
-            break
+        # Multi-page POs repeat the footer (PREPARED/CHECKED/page no.) and per-page subtotals on
+        # EVERY page — skip those lines and keep scanning instead of stopping at the first one
+        # (the strict ITEM regex below guarantees only real line items are captured).
+        if re.match(r"^(Narration|Taxable|Net Amount|PREPARED|CHECKED|User Name|Page\b|Sub Total|Grand Total|S No)", line):
+            continue
         m = ITEM.match(line)
         if m:
             n += 1
