@@ -995,7 +995,10 @@ async def ingest_file(
         elif kind.startswith("skip:"):
             ignored.append({"file": name, "reason": kind[5:]})
             p.unlink(missing_ok=True)
-        elif not sniff_focus(p):
+        elif not kind.startswith("selling_prices") and not sniff_focus(p):
+            # Price books (MASellingPriceBook / ModernTradeSellerBook) are reliably classified by
+            # filename and legitimately have NO 'YQ Bahrain' title block — exempt them from the
+            # Focus-title sniff so a genuine price-book upload isn't wrongly ignored.
             ignored.append({"file": name, "reason": "does not look like a Focus export (no 'YQ Bahrain' title)"})
             p.unlink(missing_ok=True)
         else:
