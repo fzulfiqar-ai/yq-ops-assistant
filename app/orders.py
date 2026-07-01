@@ -142,9 +142,11 @@ def detail(po_no: str, with_files: bool = True) -> dict:
     if codes:
         names = ",".join("'" + _safe(c) + "'" for c in codes)
         for r in exec_sql(
-            "SELECT sku_code AS code, MAX(rate_bhd) AS sell FROM selling_prices "
+            # Match on the BASE code (first token): the price book lists variants like 'X33 CCL 1.2 Mtr'
+            # while an order line is the base 'X33', so an exact match silently missed those prices.
+            "SELECT SPLIT_PART(sku_code,' ',1) AS code, MAX(rate_bhd) AS sell FROM selling_prices "
             "WHERE price_book='MA_base' AND warehouse_name IS NULL AND rate_bhd > 0 "
-            f"AND sku_code IN ({names}) GROUP BY sku_code") or []:
+            f"AND SPLIT_PART(sku_code,' ',1) IN ({names}) GROUP BY SPLIT_PART(sku_code,' ',1)") or []:
             if r.get("sell"):
                 sell_by[r["code"]] = float(r["sell"])
         missing = [c for c in codes if c not in sell_by]
