@@ -97,10 +97,17 @@ def load_mrn_costs(rows: list[dict]) -> dict:
     for r in rows:
         if not r.get("doc_no"):
             continue
-        seen[(r["doc_no"], r["code"].upper())] = {
-            "doc_no": r["doc_no"], "sku_code": r["code"], "qty": r["qty"],
-            "landed_unit_bhd": round(r["landed"], 4), "product_unit_bhd": round(r["product"], 4),
-        }
+        # A single receipt can list the SAME doc+SKU on several lines (split boxes / a variant
+        # received in multiple lots). SUM their quantities — overwriting silently dropped units and
+        # made fully-received orders look short. Keep the first line's per-unit landed/product cost.
+        key = (r["doc_no"], r["code"].upper())
+        if key in seen:
+            seen[key]["qty"] += r["qty"]
+        else:
+            seen[key] = {
+                "doc_no": r["doc_no"], "sku_code": r["code"], "qty": r["qty"],
+                "landed_unit_bhd": round(r["landed"], 4), "product_unit_bhd": round(r["product"], 4),
+            }
     if seen:
         c.table("mrn_lines").upsert(list(seen.values()), on_conflict="doc_no,sku_code").execute()
 
