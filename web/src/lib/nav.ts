@@ -1,6 +1,7 @@
 import {
   LayoutGrid,
   Cpu,
+  Activity,
   MessageSquare,
   Boxes,
   TrendingUp,
@@ -25,6 +26,7 @@ export interface NavItem {
 
 export const NAV: NavItem[] = [
   { label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
+  { label: 'Live Feed', to: '/feed', icon: Activity, feature: 'AI Agents' },
   { label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents' },
   { label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
   { label: 'Field Notes', to: '/field-notes', icon: NotebookPen, feature: 'AI Assistant' },

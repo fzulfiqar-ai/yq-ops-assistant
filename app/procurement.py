@@ -115,7 +115,19 @@ def advance(order_id: int, to_stage: str, note: str | None = None,
         patch["note"] = note
     res = _client().table("procurement_orders").update(patch).eq("id", order_id).execute()
     _log(order_id, to_stage, note, actor)
-    return (res.data or [{}])[0]
+    row = (res.data or [{}])[0]
+    # Emit a procurement.stage event (feed-only) so the timeline shows in the ops feed.
+    try:
+        from app import events as _events
+        _events.emit("procurement", "procurement.stage",
+                     entity_type="po", entity_key=str(row.get("po_no") or order_id),
+                     payload={"stage": to_stage, "ref": row.get("ref"),
+                              "vendor": row.get("vendor"),
+                              "summary": f"{row.get('ref') or order_id} → {to_stage}"},
+                     dedupe=False)
+    except Exception:  # noqa: BLE001
+        pass
+    return row
 
 
 def _board_rows() -> list[dict]:

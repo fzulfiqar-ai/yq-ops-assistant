@@ -152,6 +152,26 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
         changes = {"error": str(e)[:160]}
 
     ok = bool(verify and verify.get("ok"))
+
+    # 6 - emit ingest.completed so the event backbone reacts (demand_forecast → reorder
+    #     drafts on the next dispatch; failures alert immediately).
+    try:
+        from app import events
+        events.emit(
+            "ingest", "ingest.completed",
+            severity="info" if ok else "critical",
+            payload={
+                "ok": ok,
+                "cost_change_count": int(changes.get("cost_changes") or 0),
+                "price_change_count": int(changes.get("price_changes") or 0),
+                "new_skus": (changes.get("new_skus") or [])[:10],
+                "summary": (changes.get("catalog") or "") if ok else "ingest verify FAILED",
+            },
+            dedupe=False,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return _finish(ok, src_path, None if ok else "verify FAILED - DB totals drifted from the reports",
                    changes, verify, send)
 

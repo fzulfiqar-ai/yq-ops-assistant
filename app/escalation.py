@@ -135,6 +135,17 @@ def check(send: bool = True) -> dict:
         for t in fresh:
             log_event("agent@yqbahrain.local", "escalation",
                       detail={"rule": t["key"], "severity": t["severity"], "fingerprint": t["fingerprint"]})
+        # Mirror fired alerts into the event feed (feed-only; the email/Telegram already went out).
+        try:
+            from app import events
+            _sevmap = {"high": "critical", "medium": "warn", "low": "info"}
+            for t in fresh:
+                events.emit("escalation", "platform.alert",
+                            severity=_sevmap.get(t["severity"], "warn"),
+                            payload={"rule": t["key"], "summary": t["message"]},
+                            fingerprint=t["fingerprint"], dedupe=False)
+        except Exception:  # noqa: BLE001
+            pass
     return {
         "triggered": [t["key"] for t in triggered],
         "fired": [{"key": t["key"], "severity": t["severity"], "message": t["message"]} for t in fresh],

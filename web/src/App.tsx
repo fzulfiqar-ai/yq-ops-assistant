@@ -6,6 +6,7 @@ import AcceptInvite from '@/pages/AcceptInvite'
 
 // Route-level code-splitting — each page is its own chunk.
 const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const Feed = lazy(() => import('@/pages/Feed'))
 const Assistant = lazy(() => import('@/pages/Assistant'))
 const FieldNotes = lazy(() => import('@/pages/FieldNotes'))
 const Orders = lazy(() => import('@/pages/Orders'))
@@ -30,6 +31,7 @@ export default function App() {
 
         <Route element={<ProtectedRoute />}>
           <Route index element={<Gate feature="Dashboard"><Dashboard /></Gate>} />
+          <Route path="feed" element={<Gate feature="AI Agents"><Feed /></Gate>} />
           <Route path="agents" element={<Gate feature="AI Agents"><Agents /></Gate>} />
           <Route path="assistant" element={<Gate feature="AI Assistant"><Assistant /></Gate>} />
           <Route path="field-notes" element={<Gate feature="AI Assistant"><FieldNotes /></Gate>} />

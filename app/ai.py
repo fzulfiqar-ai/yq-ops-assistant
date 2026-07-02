@@ -199,29 +199,14 @@ def flush_cache() -> int:
         return 0
 
 
-def exec_sql(sql: str) -> list[dict]:
-    """Execute pre-validated SQL via Supabase RPC and return rows."""
-    client = get_client()
-    r = client.rpc("run_readonly_query", {"sql_text": sql}).execute()
-    data = r.data
-    if isinstance(data, str):
-        data = json.loads(data)
-    return data or []
+# Re-exported so the many existing `from app.ai import exec_sql` imports keep working;
+# the implementation now lives in app.db_read (data access without the LLM engine).
+from app.db_read import exec_sql, exec_sql_params  # noqa: E402,F401
 
 
-_NAME_KEYS = ("account", "customer_name")
-
-
-def _entity_names(rows: list[dict]) -> list[str]:
-    """Commercial PII (customer/account names) to tokenize before any external LLM call.
-    Excludes the generic 'Cash Customer' walk-in bucket (not a real account)."""
-    names: set[str] = set()
-    for r in rows or []:
-        for k in _NAME_KEYS:
-            v = r.get(k)
-            if isinstance(v, str) and v.strip() and not v.lower().startswith("cash customer"):
-                names.add(v.strip())
-    return sorted(names, key=len, reverse=True)
+# Shared with prompt_guard (single implementation); kept under the old name because
+# orchestrator/mcp_server import `_entity_names` from here.
+from app.prompt_guard import FENCE_RULE, entity_names as _entity_names, fence  # noqa: E402
 
 
 def _fmt_hist(history: list[dict] | None, n: int = 6) -> str:
@@ -304,14 +289,16 @@ def _llm_answer(question: str, rows: list[dict], redactor: Redactor,
                 "Answer the question directly and concisely from the data, then add ONE short "
                 "insight line ('Insight: …') only if it's genuinely useful. "
                 "Format BHD as 'BHD X,XXX.XX'. Use bullet points for lists. Bold key numbers. "
-                "Never invent data not present in the result. Be crisp — no filler."
+                "Never invent data not present in the result. Be crisp — no filler. "
+                + FENCE_RULE
             ),
         },
     ]
     hist = _fmt_hist(history)
     if hist:
         msgs.append({"role": "system", "content": "Recent conversation for context:\n" + hist})
-    msgs.append({"role": "user", "content": f"Question: {question}\n\nData:\n{redacted_rows}"})
+    msgs.append({"role": "user",
+                 "content": f"Question: {question}\n\n{fence(redacted_rows, 'sql_rows')}"})
     answer = chat(msgs, tier=2, temperature=0.3, max_tokens=600, model_name=model_name,
                   task="synthesis", request_timeout=12, max_429_retries=0, max_providers=3)
     answer = redactor.restore(answer)
@@ -549,21 +536,22 @@ def ask_stream(question: str, user_email: str = "system", model_name: str | None
                 "Answer the question directly and concisely from the data, then add ONE short "
                 "insight line ('Insight: …') only if it's genuinely useful. Format BHD as "
                 "'BHD X,XXX.XX'. Use bullet points for lists. Bold key numbers. Never invent "
-                "data not present. Be crisp — no filler.")},
+                "data not present. Be crisp — no filler. " + FENCE_RULE)},
         ]
         hist = _fmt_hist(history)
         if hist:
             msgs.append({"role": "system", "content": "Recent conversation for context:\n" + hist})
-        try:  # semantic memory: glossary / past briefings / decisions (redacted)
+        try:  # semantic memory: glossary / past briefings / decisions (redacted + fenced)
             from app.knowledge import recall_text
             mem = recall_text(question, k=3)
             if mem:
                 msgs.append({"role": "system", "content":
                              "Background from memory (use if relevant):\n"
-                             + redactor.redact(mem, _entity_names(rows))})
+                             + fence(redactor.redact(mem, _entity_names(rows)), "memory")})
         except Exception:  # noqa: BLE001
             pass
-        msgs.append({"role": "user", "content": f"Question: {question}\n\nData:\n{row_text}"})
+        msgs.append({"role": "user",
+                     "content": f"Question: {question}\n\n{fence(row_text, 'sql_rows')}"})
         full = ""
         for piece in _stream_restore(
             chat_stream(msgs, tier=2, model_name=model_name, task="synthesis",

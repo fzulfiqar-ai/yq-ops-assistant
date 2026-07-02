@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import DOMPurify from 'dompurify'
 import { AnimatePresence, motion } from 'motion/react'
 import { Send, Plus, Mic, MicOff, Trash2, MessageSquare, User, Database } from 'lucide-react'
 import { apiGet, apiStream } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
+import { ContextCards, parseCards, type ContextCardData } from '@/components/ContextCard'
 
 type Model = 'pro' | 'thinking' | 'fast'
-interface Msg { role: 'user' | 'assistant' | 'system'; content: string; sql?: string; cached?: boolean; pending?: boolean; model?: Model; agents?: string[] }
+interface Msg { role: 'user' | 'assistant' | 'system'; content: string; sql?: string; cached?: boolean; pending?: boolean; model?: Model; agents?: string[]; cards?: ContextCardData[] }
 const prettyAgent = (a: string) => a.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 interface Conversation { id: string; title: string; messages: Msg[]; updatedAt: number }
 
@@ -44,12 +46,15 @@ function newConv(): Conversation {
 }
 function mdToHtml(s: string): string {
   const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  return esc
+  const html = esc
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/^_(.+?)_$/gm, '<span class="italic text-muted-foreground">$1</span>')
     .replace(/^### (.*)$/gm, '<div class="font-semibold mt-2">$1</div>')
     .replace(/^[-•]\s(.*)$/gm, '<div class="flex gap-2"><span>•</span><span>$1</span></div>')
     .replace(/\n/g, '<br/>')
+  // Escaping above already neutralizes raw HTML; DOMPurify is the safety net if that
+  // invariant ever breaks (the output goes into dangerouslySetInnerHTML).
+  return DOMPurify.sanitize(html, { ALLOWED_TAGS: ['strong', 'span', 'div', 'br'], ALLOWED_ATTR: ['class'] })
 }
 function TypingDots() {
   return (
@@ -125,9 +130,12 @@ export default function Assistant() {
           const last = msgs[msgs.length - 1]
           let content = (last.pending ? '' : last.content) + chunk
           let agents = last.agents
+          let cards = last.cards
           const mk = content.match(/⟦agents:([^⟧]*)⟧/)  // consulted-agent chips marker
           if (mk) { agents = mk[1].split(',').map((s) => s.trim()).filter(Boolean); content = content.replace(mk[0], '') }
-          msgs[msgs.length - 1] = { role: 'assistant', content, agents, pending: false, model: last.model || model }
+          const ck = content.match(/⟦card:([^⟧]*)⟧/)  // context-cards marker (base64 JSON)
+          if (ck) { cards = parseCards(ck[1]); content = content.replace(ck[0], '') }
+          msgs[msgs.length - 1] = { role: 'assistant', content, agents, cards, pending: false, model: last.model || model }
           return { ...c, messages: msgs, updatedAt: Date.now() }
         }))
         scrollDown()
@@ -261,6 +269,7 @@ export default function Assistant() {
                           ))}
                         </div>
                       ) : null}
+                      {m.role === 'assistant' && m.cards?.length ? <ContextCards cards={m.cards} /> : null}
                       <div className={cn('rounded-2xl px-4 py-2.5 text-sm leading-relaxed',
                         m.role === 'user' ? 'self-end rounded-br-md bg-primary text-primary-foreground' : 'rounded-bl-md border bg-card')}>
                         {m.pending ? <span className="text-muted-foreground"><TypingDots /></span> : (

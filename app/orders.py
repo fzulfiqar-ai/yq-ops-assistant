@@ -6,25 +6,23 @@ variants to 'X05', so we aggregate the MRN receipt + sales to match):
   RECEIVED  mrn_lines        (qty, real landed cost — all freight in)   [+ shipments cross-check]
   SELLING   v_sales          (current avg net price)  ->  margin-on-arrival
 Adds ordered-vs-received reconciliation (short / over / cost-overrun) and the linked 8-stage
-procurement timeline. Read-only + advise-only; po_no is escaped before interpolation.
+procurement timeline. Read-only + advise-only; po_no is bound as a $N parameter via
+run_readonly_query_params — never interpolated into the SQL string.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
 
-from app.ai import exec_sql
+from app.db_read import exec_sql, exec_sql_params
 from app.database import get_client
 
 log = logging.getLogger(__name__)
 
 _BUCKET = "orders"          # PRIVATE storage bucket for order documents
 _SIGNED_TTL = 60 * 60       # 1h signed URLs
-
-
-def _safe(s: object) -> str:
-    return str(s or "").replace("'", "''")[:80]
 
 
 # ── File vault — PO PDF / MRN XML / shelf photos, per order ───────────────────
@@ -111,28 +109,28 @@ def order_attention(limit: int = 8) -> list[dict]:
 
 
 def detail(po_no: str, with_files: bool = True) -> dict:
-    p = _safe(po_no)
+    p = str(po_no or "").strip()[:80]
     if not p:
         return {"po_no": po_no, "found": False, "summary": "No order number given."}
 
-    header = (exec_sql(
+    header = (exec_sql_params(
         "SELECT po_no, MAX(po_date) AS po_date, MAX(vendor) AS vendor, "
         "ROUND(SUM(gross_bhd)::numeric,3) AS ordered_value_bhd, COUNT(*) AS line_count "
-        f"FROM purchase_orders WHERE po_no = '{p}' GROUP BY po_no") or [{}])
+        "FROM purchase_orders WHERE po_no = $1 GROUP BY po_no", [p]) or [{}])
     head = header[0] if header else {}
     if not head.get("po_no"):
         return {"po_no": po_no, "found": False, "summary": f"No order {po_no} on file."}
 
-    ordered = exec_sql(
+    ordered = exec_sql_params(
         "SELECT code, MAX(description) AS description, SUM(qty) AS ordered_qty, "
         "ROUND((SUM(gross_bhd)/NULLIF(SUM(qty),0))::numeric,4) AS ordered_rate "
-        f"FROM v_po_item WHERE po_no='{p}' GROUP BY code") or []
+        "FROM v_po_item WHERE po_no = $1 GROUP BY code", [p]) or []
 
-    received = exec_sql(
+    received = exec_sql_params(
         "SELECT SPLIT_PART(sku_code,' ',1) AS code, SUM(qty) AS recv_qty, "
         "ROUND((SUM(qty*landed_unit_bhd)/NULLIF(SUM(qty),0))::numeric,4) AS landed_unit, "
         "ROUND((SUM(qty*product_unit_bhd)/NULLIF(SUM(qty),0))::numeric,4) AS product_unit "
-        f"FROM mrn_lines WHERE doc_no='{p}' GROUP BY SPLIT_PART(sku_code,' ',1)") or []
+        "FROM mrn_lines WHERE doc_no = $1 GROUP BY SPLIT_PART(sku_code,' ',1)", [p]) or []
     recv_by = {r["code"]: r for r in received}
 
     # selling price per leading code — the AUTHORITATIVE MA Seller Price Book base rate (the list
@@ -140,23 +138,24 @@ def detail(po_no: str, with_files: bool = True) -> dict:
     codes = sorted({r["code"] for r in ordered} | set(recv_by))
     sell_by: dict[str, float] = {}
     if codes:
-        names = ",".join("'" + _safe(c) + "'" for c in codes)
-        for r in exec_sql(
+        names = json.dumps(codes)
+        for r in exec_sql_params(
             # Match on the BASE code (first token): the price book lists variants like 'X33 CCL 1.2 Mtr'
             # while an order line is the base 'X33', so an exact match silently missed those prices.
             "SELECT SPLIT_PART(sku_code,' ',1) AS code, MAX(rate_bhd) AS sell FROM selling_prices "
             "WHERE price_book='MA_base' AND warehouse_name IS NULL AND rate_bhd > 0 "
-            f"AND SPLIT_PART(sku_code,' ',1) IN ({names}) GROUP BY SPLIT_PART(sku_code,' ',1)") or []:
+            "AND SPLIT_PART(sku_code,' ',1) IN (SELECT jsonb_array_elements_text($1::jsonb)) "
+            "GROUP BY SPLIT_PART(sku_code,' ',1)", [names]) or []:
             if r.get("sell"):
                 sell_by[r["code"]] = float(r["sell"])
         missing = [c for c in codes if c not in sell_by]
         if missing:
-            mn = ",".join("'" + _safe(c) + "'" for c in missing)
-            for r in exec_sql(
+            mn = json.dumps(missing)
+            for r in exec_sql_params(
                 "SELECT SPLIT_PART(item_name,' ',1) AS code, "
                 "ROUND((SUM(net_bhd)/NULLIF(SUM(quantity),0))::numeric,4) AS sell_unit "
-                f"FROM v_sales WHERE SPLIT_PART(item_name,' ',1) IN ({mn}) "
-                "GROUP BY SPLIT_PART(item_name,' ',1)") or []:
+                "FROM v_sales WHERE SPLIT_PART(item_name,' ',1) IN (SELECT jsonb_array_elements_text($1::jsonb)) "
+                "GROUP BY SPLIT_PART(item_name,' ',1)", [mn]) or []:
                 if r.get("sell_unit"):
                     sell_by[r["code"]] = float(r["sell_unit"])
 
@@ -164,8 +163,10 @@ def detail(po_no: str, with_files: bool = True) -> dict:
     # when an order has no MRN landed cost yet, so margin still calculates from the invoice you uploaded.
     vfan_by: dict[str, float] = {}
     if codes:
-        for r in (exec_sql("SELECT model, latest_rmb FROM v_supplier_price_history "
-                           f"WHERE model IN ({names}) AND latest_rmb > 0") or []):
+        for r in (exec_sql_params(
+                "SELECT model, latest_rmb FROM v_supplier_price_history "
+                "WHERE model IN (SELECT jsonb_array_elements_text($1::jsonb)) AND latest_rmb > 0",
+                [json.dumps(codes)]) or []):
             vfan_by[r["model"]] = round(float(r["latest_rmb"]) * 0.0525 * 1.15, 4)  # ¥→BHD × ~15% freight
 
     any_recv = bool(received)
@@ -276,7 +277,8 @@ def detail(po_no: str, with_files: bool = True) -> dict:
     # linked 8-stage pipeline order + timeline (if this PO went through the cockpit)
     timeline, stage = [], None
     try:
-        link = exec_sql(f"SELECT id, stage FROM procurement_orders WHERE po_no='{p}' ORDER BY id DESC LIMIT 1") or []
+        link = exec_sql_params(
+            "SELECT id, stage FROM procurement_orders WHERE po_no = $1 ORDER BY id DESC LIMIT 1", [p]) or []
         if link:
             stage = link[0].get("stage")
             from app.procurement import get_order

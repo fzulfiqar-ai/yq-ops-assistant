@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 
 from app.actions import list_actions, submit_action
 from app.agents import run_agent
@@ -21,7 +22,63 @@ log = logging.getLogger(__name__)
 
 MAX_DRAFTS = 10
 AGENT_EMAIL = "agent@yqbahrain.local"
-SUPPORTED = {"inventory", "margin", "anomaly", "collections"}  # agents that can draft
+SUPPORTED = {"inventory", "margin", "anomaly", "collections", "reorder_proposal"}  # agents that can draft
+
+# ── Circuit breaker (the "governor") ─────────────────────────────────────────
+# Bounds what an agent draft can even PROPOSE. The human approval step is the real breaker;
+# these caps stop an agent from flooding the queue or drafting a reckless value. A violation is
+# logged + emitted as platform.alert and simply NOT drafted (never silently executed).
+POLICIES: dict[str, dict] = {
+    "create_po":     {"max_value_bhd": 3000.0, "max_per_day": 3},
+    "price_change":  {"max_change_pct": 20.0,  "max_per_day": 10},
+    "reorder_stock": {"max_per_day": 10},
+    "write_off":     {"max_value_bhd": 500.0,  "max_per_day": 5},
+}
+
+# Global kill switch — set AGENT_DRAFTS_ENABLED=0 to stop ALL agent drafting instantly.
+def _drafts_enabled() -> bool:
+    return os.getenv("AGENT_DRAFTS_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+
+
+def _drafted_today(action_type: str) -> int:
+    """How many of this action type the agent has already drafted today (per-day cap)."""
+    today = datetime.date.today().isoformat()
+    n = 0
+    for a in list_actions():
+        if a.get("action_type") != action_type or a.get("requested_by") != AGENT_EMAIL:
+            continue
+        if str(a.get("requested_at", ""))[:10] == today:
+            n += 1
+    return n
+
+
+def policy_check(action_type: str, payload: dict) -> tuple[bool, str]:
+    """Return (ok, reason). Enforces per-value and per-day caps from POLICIES."""
+    pol = POLICIES.get(action_type)
+    if not pol:
+        return True, ""
+    if "max_value_bhd" in pol:
+        val = float(payload.get("est_value_bhd") or payload.get("stock_value") or 0)
+        if val > pol["max_value_bhd"]:
+            return False, f"value BHD {val:,.0f} exceeds cap BHD {pol['max_value_bhd']:,.0f}"
+    if "max_change_pct" in pol and payload.get("change_pct") is not None:
+        # Only caps an EXPLICIT proposed price-change magnitude. The margin drafter carries
+        # gp_margin_pct (a diagnosis, not a proposed change), so it isn't gated here.
+        chg = abs(float(payload.get("change_pct") or 0))
+        if chg > pol["max_change_pct"]:
+            return False, f"proposed change {chg:.0f}% exceeds cap {pol['max_change_pct']:.0f}%"
+    if "max_per_day" in pol and _drafted_today(action_type) >= pol["max_per_day"]:
+        return False, f"daily cap of {pol['max_per_day']} {action_type} drafts reached"
+    return True, ""
+
+
+def _alert(msg: str) -> None:
+    try:
+        from app import events
+        events.emit("agent_actions", "platform.alert", severity="warn",
+                    payload={"summary": msg}, dedupe=False)
+    except Exception:  # noqa: BLE001
+        pass
 
 # agent -> (action_type, result_list_key, item_field, payload_builder)
 _DRAFTERS = {
@@ -68,24 +125,36 @@ def _pending_items(action_type: str) -> set[str]:
 
 def draft_for_agent(name: str, result: dict | None = None, requested_by: str = AGENT_EMAIL) -> dict:
     """Draft pending actions from an agent's result. Returns a status dict (never raises)."""
-    if name not in _DRAFTERS:
-        return {"drafted": 0, "skipped": 0, "action_ids": [], "reason": f"{name} does not draft actions"}
+    if not _drafts_enabled():
+        return {"drafted": 0, "skipped": 0, "action_ids": [], "reason": "agent drafting is disabled (AGENT_DRAFTS_ENABLED=0)"}
     fresh, as_of = _data_fresh()
     if not fresh:
         return {"drafted": 0, "skipped": 0, "action_ids": [], "reason": f"data is stale (as of {as_of}) — refresh before drafting"}
+
+    # reorder_proposal drafts ONE create_po per vendor (not per item), so admins approve a whole PO.
+    if name == "reorder_proposal":
+        return _draft_create_po(result, as_of, requested_by)
+
+    if name not in _DRAFTERS:
+        return {"drafted": 0, "skipped": 0, "action_ids": [], "reason": f"{name} does not draft actions"}
 
     if result is None:
         result = run_agent(name, triggered_by="user")
     action_type, list_key, item_field, build = _DRAFTERS[name]
     rows = result.get(list_key) or []
     existing = _pending_items(action_type)
-    ids, skipped = [], 0
+    ids, skipped, blocked = [], 0, 0
     for row in rows[:MAX_DRAFTS]:
         item = str(row.get(item_field, "")).strip()
         if not item or item in existing:
             skipped += 1
             continue
         payload = {**build(row), "item": item, "source": f"agent:{name}", "data_as_of": as_of}
+        ok, why = policy_check(action_type, payload)
+        if not ok:
+            _alert(f"blocked {action_type} draft for {item}: {why}")
+            blocked += 1
+            continue
         try:
             a = submit_action(action_type, payload, requested_by=requested_by)
             ids.append(a.get("id"))
@@ -93,7 +162,46 @@ def draft_for_agent(name: str, result: dict | None = None, requested_by: str = A
         except Exception as e:  # noqa: BLE001
             log.warning("draft action failed for %s/%s: %s", name, item, e)
             skipped += 1
-    return {"drafted": len(ids), "skipped": skipped, "action_ids": ids, "action_type": action_type, "data_as_of": as_of}
+    return {"drafted": len(ids), "skipped": skipped, "blocked": blocked,
+            "action_ids": ids, "action_type": action_type, "data_as_of": as_of}
+
+
+def _draft_create_po(result: dict | None, as_of: str, requested_by: str) -> dict:
+    """One create_po pending action per vendor group from reorder_proposal (human approves a PO)."""
+    if result is None:
+        result = run_agent("reorder_proposal", triggered_by="user")
+    vendors = result.get("by_vendor") or []
+    existing = _pending_items("create_po")   # dedupe key = vendor
+    ids, skipped, blocked = [], 0, 0
+    for g in vendors[:MAX_DRAFTS]:
+        vendor = str(g.get("vendor") or "").strip()
+        if not vendor or vendor.startswith("(vendor") or vendor in existing:
+            skipped += 1
+            continue
+        est = float(g.get("est_total_bhd") or 0)
+        payload = {
+            "item": vendor, "vendor": vendor, "est_value_bhd": est,
+            "line_count": g.get("lines"),
+            "lines": [{"item_name": i.get("item_name"), "qty": i.get("suggested_qty"),
+                       "cost_bhd": i.get("cost_bhd"), "est_cost_bhd": i.get("est_cost_bhd")}
+                      for i in (g.get("items") or [])],
+            "draft_message": g.get("draft_message"),
+            "source": "agent:reorder_proposal", "data_as_of": as_of,
+        }
+        ok, why = policy_check("create_po", payload)
+        if not ok:
+            _alert(f"blocked create_po for {vendor}: {why}")
+            blocked += 1
+            continue
+        try:
+            a = submit_action("create_po", payload, requested_by=requested_by)
+            ids.append(a.get("id"))
+            existing.add(vendor)
+        except Exception as e:  # noqa: BLE001
+            log.warning("draft create_po failed for %s: %s", vendor, e)
+            skipped += 1
+    return {"drafted": len(ids), "skipped": skipped, "blocked": blocked,
+            "action_ids": ids, "action_type": "create_po", "data_as_of": as_of}
 
 
 def draft_reminders(result: dict | None = None) -> dict:

@@ -8,7 +8,10 @@ Validates LLM-generated SQL before execution. Rules:
 """
 from __future__ import annotations
 
+import logging
 import re
+
+log = logging.getLogger(__name__)
 
 # LLM may only query these views — never raw tables.
 VIEW_ALLOWLIST: frozenset[str] = frozenset({
@@ -46,6 +49,10 @@ VIEW_ALLOWLIST: frozenset[str] = frozenset({
     "v_supplier_price_history",
     "supplier_prices",
     "shipments",
+    # Phase C additions
+    "v_returns",
+    "v_return_rates",
+    "v_customer_ltv",
 })
 
 # Which feature page gates each PO view (procurement → Inventory).
@@ -66,6 +73,8 @@ VIEW_FEATURE: dict[str, str] = {
     "v_product_margin": "Margins", "v_product_economics": "Margins", "v_margin_leakage": "Margins",
     "v_landed_margin": "Margins",
     "v_supplier_price_history": "Inventory", "supplier_prices": "Inventory",
+    "v_returns": "Inventory", "v_return_rates": "Inventory",
+    "v_customer_ltv": "Sales",
     "v_receivables": "Receivables",
 }
 
@@ -113,10 +122,9 @@ def validate(sql: str, allowed_features: set[str] | None = None) -> str:
     refs = {m.group(1) or m.group(2) for m in _TABLE_REF.finditer(sql)}
     bad = {r for r in refs if r and r.lower() not in VIEW_ALLOWLIST}
     if bad:
-        raise SQLValidationError(
-            f"Query references tables outside the allowed views: {', '.join(sorted(bad))}. "
-            f"Allowed: {', '.join(sorted(VIEW_ALLOWLIST))}."
-        )
+        # Log the specifics server-side; never echo the allowlist to the caller.
+        log.info("SQL rejected — non-allowlisted refs: %s", ", ".join(sorted(bad)))
+        raise SQLValidationError("Query references data outside the allowed views.")
 
     if allowed_features is not None:
         denied = sorted({VIEW_FEATURE[r.lower()] for r in refs

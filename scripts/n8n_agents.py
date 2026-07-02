@@ -96,6 +96,7 @@ ESCALATION: list[tuple[str, str, dict]] = [
     ("Morning Brief", "/escalation/brief", {"every": "day", "hour": 8}),
     ("Hourly Alerts", "/escalation/check", {"every": "hour"}),
     ("Run Due Agents", "/scheduler/run-due", {"every": "hour"}),  # per-agent schedules (08:00 Bahrain)
+    ("Dispatch Events", "/events/dispatch", {"every": "hour"}),   # Phase B event backbone fan-out
 ]
 
 

@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PriceSimulator } from '@/components/PriceSimulator'
 
 interface Row {
   item_name: string
@@ -44,6 +45,7 @@ export default function Margins() {
   return (
     <div>
       <PageHeader title="Profitability" subtitle="Gross margin by product (Focus COGS basis)" />
+      <PriceSimulator />
       {isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (

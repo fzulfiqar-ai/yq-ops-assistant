@@ -12,9 +12,10 @@ reviews the flags and approves. Reuses the same RMB->BHD + freight basis as reor
 from __future__ import annotations
 
 import io
+import json
 import re
 
-from app.ai import exec_sql
+from app.db_read import exec_sql_params
 
 RMB_BHD = 0.0525   # RMB -> BHD (matches the VFAN cost sheet exchange)
 FREIGHT = 1.15     # ~15% freight loading when no actual landed cost is known yet
@@ -30,9 +31,9 @@ def _num(x: object) -> float | None:
         return None
 
 
-def _q(sql: str) -> list:
+def _q(sql: str, params: list) -> list:
     try:
-        return exec_sql(sql) or []
+        return exec_sql_params(sql, params) or []
     except Exception:  # noqa: BLE001
         return []
 
@@ -81,18 +82,19 @@ def verify_order(data: bytes, filename: str) -> dict:
                 "summary": "Couldn't read an order table — need a Model / QTY / Unit Price layout."}
 
     codes = sorted({r["model"] for r in rows})
-    names = ",".join("'" + c.replace("'", "''") + "'" for c in codes)
+    names = json.dumps(codes)
+    _in = "(SELECT jsonb_array_elements_text($1::jsonb))"
     vfan = {x["model"]: x for x in _q(
         "SELECT model, latest_rmb, latest_list_rmb, change_pct FROM v_supplier_price_history "
-        f"WHERE model IN ({names})")}
+        f"WHERE model IN {_in}", [names])}
     sell = {x["code"]: float(x["s"]) for x in _q(
         "SELECT sku_code AS code, MAX(rate_bhd) AS s FROM selling_prices "
         "WHERE price_book='MA_base' AND warehouse_name IS NULL AND rate_bhd > 0 "
-        f"AND sku_code IN ({names}) GROUP BY sku_code")}
+        f"AND sku_code IN {_in} GROUP BY sku_code", [names])}
     health = {x["code"]: x for x in _q(
         "SELECT SPLIT_PART(item_name,' ',1) AS code, MAX(current_stock) AS current_stock, "
         "MAX(avg_daily) AS avg_daily FROM v_stock_health "
-        f"WHERE SPLIT_PART(item_name,' ',1) IN ({names}) GROUP BY 1")}
+        f"WHERE SPLIT_PART(item_name,' ',1) IN {_in} GROUP BY 1", [names])}
 
     out_lines: list[dict] = []
     total_flags = 0

@@ -25,3 +25,5 @@ dist-ssr
 
 # local env (set these in Vercel for prod)
 .env
+
+.vercel

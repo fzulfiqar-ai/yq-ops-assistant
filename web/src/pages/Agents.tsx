@@ -26,7 +26,7 @@ const ICONS: Record<string, LucideIcon> = {
   deadstock_liquidation: Tags, winback: Undo2, credit_exposure: CreditCard,
   pricing_optimization: Tag, working_capital: Banknote, reorder_proposal: ClipboardCheck,
   procurement_status: Workflow, cross_sell: Combine, vendor_scorecard: Star, trend_radar: Radar,
-  lead_gen: Target, research_scout: Search,
+  lead_gen: Target, research_scout: Search, price_drift: Gauge, returns_investigator: Undo2,
 }
 
 // CEO → departments → agents. Order + role label per department for the org map.

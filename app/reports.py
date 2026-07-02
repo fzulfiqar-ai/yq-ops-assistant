@@ -13,31 +13,37 @@ from app.database import get_client
 from app.digest import all_alerts, daily_summary
 
 
-def search(q: str) -> list[dict]:
+def search(q: str, features: set[str] | None = None) -> list[dict]:
     """Global search across customers, items and salesmen for the ⌘K palette.
-    Uses the parameterized client (.ilike) — never string-interpolated SQL."""
+    Uses the parameterized client (.ilike) — never string-interpolated SQL.
+    `features` scopes result groups to the caller's pages (None = unrestricted)."""
     q = (q or "").strip()
     if len(q) < 2:
         return []
     c = get_client()
     pat = f"%{q}%"
     out: list[dict] = []
+    sales_ok = features is None or "Sales" in features
+    inv_ok = features is None or "Inventory" in features
     try:
-        for r in (c.table("v_top_customers").select("customer_name,gross_bhd")
-                  .ilike("customer_name", pat).limit(6).execute().data or []):
-            name = r.get("customer_name") or ""
-            if name.lower().startswith("cash customer"):
-                continue
-            out.append({"type": "customer", "label": name,
-                        "sub": f"BHD {float(r.get('gross_bhd') or 0):,.0f} revenue"})
-        for r in (c.table("v_stock_health").select("item_name,current_stock,status")
-                  .ilike("item_name", pat).limit(6).execute().data or []):
-            out.append({"type": "item", "label": r.get("item_name") or "",
-                        "sub": f"{int(float(r.get('current_stock') or 0))} on hand · {str(r.get('status') or '').replace('_', ' ')}"})
-        for r in (c.table("v_sales_by_salesman").select("salesman,revenue_bhd")
-                  .ilike("salesman", pat).limit(4).execute().data or []):
-            out.append({"type": "salesman", "label": r.get("salesman") or "",
-                        "sub": f"BHD {float(r.get('revenue_bhd') or 0):,.0f} gross"})
+        if sales_ok:
+            for r in (c.table("v_top_customers").select("customer_name,gross_bhd")
+                      .ilike("customer_name", pat).limit(6).execute().data or []):
+                name = r.get("customer_name") or ""
+                if name.lower().startswith("cash customer"):
+                    continue
+                out.append({"type": "customer", "label": name,
+                            "sub": f"BHD {float(r.get('gross_bhd') or 0):,.0f} revenue"})
+        if inv_ok:
+            for r in (c.table("v_stock_health").select("item_name,current_stock,status")
+                      .ilike("item_name", pat).limit(6).execute().data or []):
+                out.append({"type": "item", "label": r.get("item_name") or "",
+                            "sub": f"{int(float(r.get('current_stock') or 0))} on hand · {str(r.get('status') or '').replace('_', ' ')}"})
+        if sales_ok:
+            for r in (c.table("v_sales_by_salesman").select("salesman,revenue_bhd")
+                      .ilike("salesman", pat).limit(4).execute().data or []):
+                out.append({"type": "salesman", "label": r.get("salesman") or "",
+                            "sub": f"BHD {float(r.get('revenue_bhd') or 0):,.0f} gross"})
     except Exception:
         pass
     return out[:16]
@@ -163,13 +169,20 @@ def stock_by_warehouse() -> list[dict]:
 
 
 def agents_status() -> list[dict]:
-    """Latest run per agent for the Agent Performance panel (from audit_log)."""
-    return exec_sql(
-        "SELECT DISTINCT ON (detail->>'agent') detail->>'agent' AS agent, ts AS last_run, "
-        "detail->>'summary' AS summary FROM audit_log "
-        "WHERE event='agent' AND detail->>'agent' IS NOT NULL "
-        "ORDER BY detail->>'agent', ts DESC"
-    )
+    """Latest run per agent for the Agent Performance panel (from agent_runs — the
+    per-run memory table; audit_log is deliberately NOT readable via the SQL RPC)."""
+    try:
+        rows = (get_client().table("agent_runs")
+                .select("agent,ran_at,summary")
+                .order("ran_at", desc=True).limit(300).execute().data or [])
+    except Exception:  # noqa: BLE001
+        return []
+    latest: dict[str, dict] = {}
+    for r in rows:
+        a = r.get("agent")
+        if a and a not in latest:
+            latest[a] = {"agent": a, "last_run": r.get("ran_at"), "summary": r.get("summary")}
+    return sorted(latest.values(), key=lambda x: x["agent"])
 
 
 def business_health() -> dict:

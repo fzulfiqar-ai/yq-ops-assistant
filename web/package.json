@@ -17,6 +17,7 @@
     "@tsparticles/slim": "^4.2.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.11",
     "lucide-react": "^1.21.0",
     "motion": "^12.40.0",
     "react": "^19.2.6",

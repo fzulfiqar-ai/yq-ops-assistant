@@ -23,7 +23,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.audit import log_event
-from app.auth import CurrentUser, get_caller, get_current_user, require_admin
+from app.auth import CurrentUser, get_caller, get_current_user, require_admin, require_feature
 from app.config import settings
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit])
@@ -117,7 +117,9 @@ async def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
     """Agentic entry point — routes to specialist agents, synthesizes one briefing."""
     from app.orchestrator import orchestrate
     result = orchestrate(body.question, user, history=body.history, model_name=body.model)
-    log_event(user.email, "orchestrate", detail={"mode": result.get("mode"), "agents": result.get("agents_used")})
+    # capture the question text so ops_sentinel (Phase F) can cluster knowledge gaps
+    log_event(user.email, "orchestrate", question=body.question[:500],
+              detail={"mode": result.get("mode"), "agents": result.get("agents_used")})
     return result
 
 
@@ -128,7 +130,7 @@ async def orchestrate_stream_endpoint(request: Request, body: OrchestrateRequest
     """Streaming agentic briefing: routing preamble → per-agent headlines → synthesis."""
     from fastapi.responses import StreamingResponse
     from app.orchestrator import orchestrate_stream
-    log_event(user.email, "orchestrate_stream", detail={})
+    log_event(user.email, "orchestrate_stream", question=body.question[:500], detail={})
 
     def gen():
         try:
@@ -141,10 +143,11 @@ async def orchestrate_stream_endpoint(request: Request, body: OrchestrateRequest
 
 
 @app.get("/search")
-async def global_search(q: str = "", _user: CurrentUser = Depends(get_current_user)) -> list:
-    """Global ⌘K search across customers, items and salesmen."""
+async def global_search(q: str = "", user: CurrentUser = Depends(get_current_user)) -> list:
+    """Global ⌘K search across customers, items and salesmen (scoped to the caller's pages)."""
+    from app.auth import feature_set
     from app.reports import search
-    return search(q)
+    return search(q, features=feature_set(user))
 
 
 @app.post("/agents/{name}/draft-actions")
@@ -227,6 +230,24 @@ def schedule_set(name: str, body: ScheduleRequest, admin: CurrentUser = Depends(
     return r
 
 
+@app.get("/events/dispatch")
+def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(get_caller)) -> dict:
+    """Called hourly by n8n: fan out unprocessed agent_events to subscribed agents
+    (rules-only). Reactions draft into pending_actions / notify; nothing auto-executes."""
+    from app.events import dispatch
+    return dispatch(limit=limit)
+
+
+@app.get("/feed")
+def events_feed(limit: int = 50, type: str | None = None, severity: str | None = None,
+                _user: CurrentUser = Depends(get_current_user)) -> dict:
+    """The ops activity feed: recent events + reactions, plus latest agent runs (Phase E)."""
+    from app.events import feed
+    from app.reports import agents_status
+    return {"events": feed(limit=limit, event_type=type, severity=severity),
+            "runs": agents_status()}
+
+
 @app.get("/scheduler/run-due")
 def scheduler_run_due(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
     """Called hourly by n8n: runs + emails the agents due now (08:00 Bahrain, idempotent per day)."""
@@ -241,7 +262,7 @@ class FieldNoteRequest(BaseModel):
 
 
 @app.post("/field-notes")
-def field_note_add(body: FieldNoteRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+def field_note_add(body: FieldNoteRequest, user: CurrentUser = Depends(require_feature("AI Assistant"))) -> dict:
     """Capture a rep's field observation (+ optional photo); stored + embedded into RAG for recall."""
     from app.field_notes import add_note
     r = add_note(body.note, body.category, by=user.email, image_path=body.image_path)
@@ -251,7 +272,8 @@ def field_note_add(body: FieldNoteRequest, user: CurrentUser = Depends(get_curre
 
 
 @app.post("/field-notes/photo")
-async def field_note_photo(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)) -> dict:
+async def field_note_photo(file: UploadFile = File(...),
+                           user: CurrentUser = Depends(require_feature("AI Assistant"))) -> dict:
     """Upload a field-note photo (reps snap a competitor tag / empty shelf on their phone).
     Validated + stored in a PRIVATE bucket; returns the object path to attach to the note."""
     from app.uploads import MAX_PHOTO_BYTES, PHOTO_TYPES, UploadTooLarge, content_matches, photo_ext, read_capped
@@ -273,7 +295,7 @@ async def field_note_photo(file: UploadFile = File(...), user: CurrentUser = Dep
 
 
 @app.get("/field-notes")
-def field_notes_list(_user: CurrentUser = Depends(get_current_user)) -> list:
+def field_notes_list(_user: CurrentUser = Depends(require_feature("AI Assistant"))) -> list:
     from app.field_notes import list_notes
     return list_notes()
 
@@ -489,7 +511,7 @@ async def invoice_upload(file: UploadFile = File(...), admin: CurrentUser = Depe
 
 
 @app.get("/supplier-prices")
-def supplier_prices(_user: CurrentUser = Depends(get_current_user)) -> dict:
+def supplier_prices(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
     """Supplier RMB price history per model — latest vs previous invoice, with the change %."""
     from app.ai import exec_sql
     rows = exec_sql("SELECT model, latest_invoice, latest_date, latest_rmb, latest_list_rmb, "
@@ -514,7 +536,7 @@ class OrderExportRequest(BaseModel):
 
 @app.post("/orders/proposal/export")
 def order_proposal_export(body: OrderExportRequest,
-                          _user: CurrentUser = Depends(get_current_user)) -> Response:
+                          _user: CurrentUser = Depends(require_feature("Inventory"))) -> Response:
     """Generate the reviewed proposal as a VFAN-format order .xlsx for the owner to send to the vendor."""
     from datetime import date as _date
 
@@ -573,7 +595,8 @@ def order_delete(po_no: str, admin: CurrentUser = Depends(require_admin)) -> dic
         c.table("mrn_lines").delete().eq("doc_no", po_no).execute()
         c.table("purchase_orders").delete().eq("po_no", po_no).execute()
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)[:140]}
+        log_event(admin.email, "order_delete_failed", detail={"po_no": po_no, "error": str(e)[:200]})
+        return {"error": "Could not delete the order — see the server log."}
     log_event(admin.email, "order_delete", detail={"po_no": po_no})
     return {"ok": True}
 
@@ -593,13 +616,14 @@ def order_file_delete(file_id: int, admin: CurrentUser = Depends(require_admin))
                 pass
         c.table("order_files").delete().eq("id", file_id).execute()
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)[:140]}
+        log_event(admin.email, "order_file_delete_failed", detail={"file_id": file_id, "error": str(e)[:200]})
+        return {"error": "Could not delete the file — see the server log."}
     log_event(admin.email, "order_file_delete", detail={"file_id": file_id})
     return {"ok": True}
 
 
 @app.get("/purchase-orders")
-def po_list(_user: CurrentUser = Depends(get_current_user)) -> dict:
+def po_list(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
     """Orders page data: recent orders, per-item cost change across orders, and what's on order."""
     from app.ai import exec_sql
 
@@ -631,7 +655,7 @@ def po_list(_user: CurrentUser = Depends(get_current_user)) -> dict:
 
 
 @app.get("/orders/{po_no}")
-def order_detail(po_no: str, _user: CurrentUser = Depends(get_current_user)) -> dict:
+def order_detail(po_no: str, _user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
     """One order's full record (PO=MRN number): ordered vs received, real landed cost, margin-on-
     arrival, reconciliation flags, and the linked 8-stage pipeline timeline."""
     from app.orders import detail
@@ -656,14 +680,14 @@ class ProcAdvanceRequest(BaseModel):
 
 
 @app.get("/procurement/board")
-def procurement_board(_user: CurrentUser = Depends(get_current_user)) -> dict:
+def procurement_board(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
     """The procurement pipeline: open orders by stage, days-in-stage, and stuck flags."""
     from app.procurement import board
     return board()
 
 
 @app.get("/procurement/orders/{order_id}")
-def procurement_get(order_id: int, _user: CurrentUser = Depends(get_current_user)) -> dict:
+def procurement_get(order_id: int, _user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
     """One order + its full stage-transition timeline."""
     from app.procurement import get_order
     return get_order(order_id)
@@ -700,7 +724,7 @@ class LeadStatusRequest(BaseModel):
 
 
 @app.get("/leads")
-def leads_list(status: str | None = None, _user: CurrentUser = Depends(get_current_user)) -> dict:
+def leads_list(status: str | None = None, _user: CurrentUser = Depends(require_feature("Sales"))) -> dict:
     """The leads pipeline + the prioritised list (highest-fit first)."""
     from app.leadgen import ATTRIBUTION, list_leads, pipeline
     return {"pipeline": pipeline(), "leads": list_leads(status=status, limit=200), "attribution": ATTRIBUTION}
@@ -717,7 +741,7 @@ def leads_discover(admin: CurrentUser = Depends(require_admin)) -> dict:
 
 @app.post("/leads/{lead_id}/status")
 def leads_set_status(lead_id: int, body: LeadStatusRequest,
-                     user: CurrentUser = Depends(get_current_user)) -> dict:
+                     user: CurrentUser = Depends(require_feature("Sales"))) -> dict:
     """Advance a lead through the pipeline (new→contacted→visited→quoted→ordered/rejected)."""
     from app.leadgen import set_status
     ok = set_status(int(lead_id), body.status, by=user.email)
@@ -729,15 +753,24 @@ def leads_set_status(lead_id: int, body: LeadStatusRequest,
 
 # ── Coaching Brain (Tier 3): per-account pre-visit brief for reps ──────────────
 
+@app.get("/bi/price-simulator")
+def bi_price_simulator(item: str, new_price: float,
+                       _user: CurrentUser = Depends(require_feature("Margins"))) -> dict:
+    """What-if price simulator: projected qty / revenue / margin from real price history.
+    Deterministic (no LLM); refuses when there isn't enough price history to be honest."""
+    from app.bi_simulator import simulate
+    return simulate(item, new_price)
+
+
 @app.get("/coaching/accounts")
-def coaching_accounts(_user: CurrentUser = Depends(get_current_user)) -> list:
+def coaching_accounts(_user: CurrentUser = Depends(require_feature("Sales"))) -> list:
     """Named accounts (by revenue) for the rep to pick before a call/visit."""
     from app.coaching import accounts
     return accounts()
 
 
 @app.get("/coaching/brief")
-def coaching_brief(account: str, _user: CurrentUser = Depends(get_current_user)) -> dict:
+def coaching_brief(account: str, _user: CurrentUser = Depends(require_feature("Sales"))) -> dict:
     """The pre-visit brief: what they buy, owe, what to cross-sell + talking points."""
     from app.coaching import brief
     return brief(account)
@@ -930,7 +963,8 @@ def ingest_purge(body: PurgeRequest, admin: CurrentUser = Depends(require_admin)
     try:
         n = purge_by_date(body.report, body.date_from, body.date_to, body.blanks)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)[:160]}
+        log_event(admin.email, "ingest_purge_failed", detail={"report": body.report, "error": str(e)[:200]})
+        return {"error": "Purge failed — see the server log."}
     try:
         from app.ai import flush_cache
         flush_cache()

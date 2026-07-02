@@ -7,6 +7,7 @@ summaries when the LLM is unavailable.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -191,6 +192,53 @@ def _key_figures(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_CARD_META = {"agent", "description", "generated_at", "summary", "email", "changes",
+              "data_partial", "_event_chain_depth"}
+
+
+def _build_cards(results: list[dict]) -> list[dict]:
+    """Deterministic context cards from agent results — the visual 'context card' the chat shows
+    above the prose. Numbers come straight from the agent (no LLM), so they can't be hallucinated."""
+    cards = []
+    for r in results:
+        agent = str(r.get("agent", ""))
+        metrics = {k: v for k, v in r.items()
+                   if isinstance(v, (int, float)) and not isinstance(v, bool) and k not in _CARD_META}
+        rows = []
+        for k, v in r.items():
+            if k in _CARD_META:
+                continue
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                for row in v[:3]:
+                    rows.append({kk: row[kk] for kk in list(row.keys())[:4]})
+                break
+        delta = None
+        ch = r.get("changes") or {}
+        if not ch.get("first_run"):
+            md = ch.get("metric_deltas") or {}
+            if md:
+                key = max(md, key=lambda k: abs(md[k]))
+                delta = {"metric": key, "value": md[key]}
+        kind = "kpi" if metrics and not rows else ("table" if rows else "entity")
+        cards.append({
+            "kind": kind, "agent": agent,
+            "title": agent.replace("_", " ").title(),
+            "summary": r.get("summary", ""),
+            "metrics": dict(list(metrics.items())[:4]),
+            "rows": rows, "delta": delta,
+        })
+    return cards
+
+
+def _card_marker(results: list[dict]) -> str:
+    """One base64 marker carrying all cards (base64 avoids ⟧ delimiter collisions in JSON)."""
+    try:
+        payload = json.dumps(_build_cards(results), default=str)
+        return "⟦card:" + base64.b64encode(payload.encode("utf-8")).decode("ascii") + "⟧"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _generalize_names(text: str, results: list[dict]) -> str:
     """Replace customer/account names (extracted from the result rows, plus anything in the
     question) with a generic placeholder so STORED memory carries the insight, not PII.
@@ -277,14 +325,16 @@ def _synth_prompt(question: str, results: list[dict], redactor: Redactor) -> lis
         if ch and not ch.get("first_run"):
             block += "\nchanges_since_last_run: " + json.dumps(ch, default=str)
         compact.append(block)
-    text = redactor.redact("\n\n".join(compact), _entity_names(_all_rows(results)))
+    from app.prompt_guard import FENCE_RULE, fence
+    text = fence(redactor.redact("\n\n".join(compact), _entity_names(_all_rows(results))), "agent_data")
     # semantic memory: weave in relevant past context (glossary, prior briefings, decisions),
-    # redacted with the same map before it reaches the LLM
+    # redacted with the same map + fenced before it reaches the LLM (kb_chunks hold
+    # free text written by any member — treat as data, never instructions)
     try:
         from app.knowledge import recall_text
         mem = recall_text(question, k=3)
         if mem:
-            mem = redactor.redact(mem, _entity_names(_all_rows(results)))
+            mem = fence(redactor.redact(mem, _entity_names(_all_rows(results))), "memory")
             text = "Relevant context from memory:\n" + mem + "\n\n---\n\n" + text
     except Exception:  # noqa: BLE001
         pass
@@ -293,7 +343,7 @@ def _synth_prompt(question: str, results: list[dict], redactor: Redactor) -> lis
         "from specialist agents. Write ONE concise, executive combined briefing that directly answers "
         "the user's question, weaving the findings together. Bold key numbers; use short bullets. "
         "If 'changes_since_last_run' are present, call out the notable ones. NEVER invent numbers — "
-        "use only what's provided. No filler."
+        "use only what's provided. No filler. " + FENCE_RULE
     )
     return [{"role": "system", "content": sys}, {"role": "user", "content": f"Question: {question}\n\n{text}"}]
 
@@ -398,6 +448,12 @@ def orchestrate_stream(question: str, user, history: list[dict] | None = None, m
                 results.append(r)
                 yield f"✓ **{futs[fut].replace('_', ' ').title()}** — {r.get('summary', '')}\n"
     yield "\n"
+
+    # structured context cards (KPI/table/entity) the chat renders above the answer; stripped
+    # from the prose by the client. Deterministic from the results — numbers can't be invented.
+    card_marker = _card_marker(results)
+    if card_marker:
+        yield card_marker
 
     redactor = Redactor()
     try:

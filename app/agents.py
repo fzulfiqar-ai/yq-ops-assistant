@@ -657,21 +657,21 @@ def deadstock_liquidation() -> dict:
 # ── Customer win-back (lapsed accounts) ────────────────────────────────────────
 
 def winback() -> dict:
-    """Named accounts that USED to buy but have gone quiet (60–365 days), ranked by lifetime value —
-    a warm list to re-engage. Excludes the walk-in 'Cash Customer' bucket."""
+    """Warm win-back list from the RFM/LTV model: customers scored 'lapsed' or
+    'at_risk_high_value' (recently quiet but valuable), ranked by lifetime spend. Reads
+    v_customer_ltv (Phase C) so the segmentation is consistent across the platform."""
     rows = _q(
-        "SELECT customer_name, MAX(sale_date) AS last_order, ROUND(SUM(revenue_bhd)::numeric,0) AS lifetime_bhd, "
-        "((SELECT MAX(sale_date) FROM v_sales) - MAX(sale_date)) AS days_since "
-        "FROM v_sales WHERE customer_name IS NOT NULL AND NOT is_cash_customer "
-        "GROUP BY customer_name "
-        "HAVING ((SELECT MAX(sale_date) FROM v_sales) - MAX(sale_date)) BETWEEN 60 AND 365 "
-        "AND SUM(revenue_bhd) > 100 ORDER BY SUM(revenue_bhd) DESC LIMIT 30"
+        "SELECT customer_name, segment, monetary_bhd AS lifetime_bhd, recency_days AS days_since, "
+        "last_order, rfm_total FROM v_customer_ltv "
+        "WHERE segment IN ('at_risk_high_value','lapsed') "
+        "ORDER BY (segment='at_risk_high_value') DESC, monetary_bhd DESC LIMIT 30"
     )
     at_risk = sum(_f(r, "lifetime_bhd") for r in rows)
+    high = [r for r in rows if r.get("segment") == "at_risk_high_value"]
     return {
-        "count": len(rows), "lifetime_value_bhd": at_risk,
-        "summary": (f"{len(rows)} previously-active customers have gone quiet (60–365 days) — "
-                    f"BHD {at_risk:,.0f} of past business to win back."),
+        "count": len(rows), "lifetime_value_bhd": at_risk, "high_value_count": len(high),
+        "summary": (f"{len(rows)} customers to win back ({len(high)} high-value at-risk) — "
+                    f"BHD {at_risk:,.0f} of lifetime spend to protect. Reach the high-value ones first."),
         "lapsed_customers": rows,
     }
 
@@ -1023,12 +1023,19 @@ def cross_sell() -> dict:
         "suggestion": f"Bundle '{p.get('item_a')}' with '{p.get('item_b')}' — bought together "
                       f"{int(_f(p, 'together'))} times.",
     } for p in pairs]
+    # Bundle-offer targets: the champion/loyal accounts worth proactively pitching these bundles to
+    # (highest-value, still-active), from the RFM model (Phase C).
+    targets = _q(
+        "SELECT customer_name, segment, monetary_bhd FROM v_customer_ltv "
+        "WHERE segment IN ('champion','loyal') ORDER BY monetary_bhd DESC LIMIT 10"
+    )
     return {
         "count": len(items),
-        "summary": (f"{len(items)} strong cross-sell pairs found — offer these bundles to lift basket "
-                    f"size on orders you already win." if items
+        "summary": (f"{len(items)} strong cross-sell pairs found — pitch these bundles to your "
+                    f"{len(targets)} top active accounts to lift basket size." if items
                     else "Not enough repeat baskets yet to find reliable cross-sell pairs."),
         "pairs": items,
+        "bundle_targets": targets,
     }
 
 
@@ -1174,6 +1181,78 @@ def research_scout() -> dict:
     }
 
 
+def ops_sentinel_agent() -> dict:
+    """Phase F — platform self-monitoring (thin wrapper so it registers like any agent)."""
+    from app.ops_sentinel import ops_sentinel
+    return ops_sentinel()
+
+
+def price_drift() -> dict:
+    """Price Sentry — SKUs whose LANDED COST has crept up (>=5%) but whose SELLING PRICE hasn't
+    followed, so margin is silently eroding. The real-data equivalent of 'competitor price watch':
+    we can't see competitors, but we CAN catch our own cost/price drift before it eats profit.
+    Cross-refs v_cost_change (cost up) against v_price_change (did price move?) by leading code."""
+    DRIFT_PCT = 5.0
+    cost_up = _q(
+        "SELECT item_name, vendor, current_cost_bhd, prev_cost_bhd, cost_change_pct, last_bought_on "
+        f"FROM v_cost_change WHERE cost_change_pct >= {DRIFT_PCT} ORDER BY cost_change_pct DESC LIMIT 60")
+    # codes whose selling price DID move up recently (so they're not drifting)
+    priced_up = {r["code"] for r in _q(
+        "SELECT SPLIT_PART(item_name,' ',1) AS code FROM v_price_change WHERE price_change_pct > 0") if r.get("code")}
+    drifting = []
+    for r in cost_up:
+        code = str(r.get("item_name") or "").split(" ")[0]
+        if code in priced_up:
+            continue  # price already responded to the cost rise
+        drifting.append({
+            "item_name": r.get("item_name"), "code": code, "vendor": r.get("vendor"),
+            "current_cost_bhd": _f(r, "current_cost_bhd"), "prev_cost_bhd": _f(r, "prev_cost_bhd"),
+            "cost_change_pct": _f(r, "cost_change_pct"), "last_bought_on": r.get("last_bought_on"),
+        })
+    top = drifting[:25]
+    return {
+        "count": len(drifting), "cost_change_count": len(cost_up),
+        "summary": (f"{len(drifting)} SKU(s) had landed cost rise ≥{DRIFT_PCT:.0f}% with NO matching "
+                    f"price increase — margin is eroding. Review and reprice." if drifting
+                    else "No silent cost/price drift — selling prices have kept pace with landed costs."),
+        "drifting": top,
+    }
+
+
+def returns_investigator() -> dict:
+    """Returns-Investigator — ranks SKUs by return rate (a quality-failure signal), aggregates the
+    blame by vendor, and cross-checks per-salesman leakage. A batch of one product coming back at a
+    high rate is a QUALITY problem to flag before more of it ships. Reads v_return_rates (Phase C)."""
+    HIGH_RATE = 10.0
+    rows = _q(
+        "SELECT item_name, code, vendor, ret_qty, sold_qty, return_rate_pct "
+        "FROM v_return_rates WHERE ret_qty > 0 ORDER BY return_rate_pct DESC LIMIT 40")
+    high = [r for r in rows if _f(r, "return_rate_pct") >= HIGH_RATE]
+    # vendor roll-up: which supplier's goods come back most
+    by_vendor: dict[str, dict] = {}
+    for r in rows:
+        v = r.get("vendor") or "unknown"
+        agg = by_vendor.setdefault(v, {"vendor": v, "ret_qty": 0.0, "sold_qty": 0.0, "skus": 0})
+        agg["ret_qty"] += _f(r, "ret_qty"); agg["sold_qty"] += _f(r, "sold_qty"); agg["skus"] += 1
+    vendors = sorted(
+        ({**a, "return_rate_pct": round(100.0 * a["ret_qty"] / a["sold_qty"], 2) if a["sold_qty"] else 0.0}
+         for a in by_vendor.values()), key=lambda x: x["return_rate_pct"], reverse=True)
+    # per-salesman leakage (shortage/unexplained) — ties into the van-stock recon
+    leakage = _q(
+        "SELECT salesman, shortage_qty, shortage_value_bhd, unexplained_qty FROM v_salesman_stock_recon "
+        "WHERE shortage_qty > 0 ORDER BY shortage_value_bhd DESC NULLS LAST LIMIT 10")
+    return {
+        "count": len(high), "flagged_skus": len(high),
+        "high_return_items": high,
+        "by_vendor": vendors[:10],
+        "salesman_leakage": leakage,
+        "summary": (f"{len(high)} SKU(s) returning at ≥{HIGH_RATE:.0f}% — likely quality issues. "
+                    f"Worst: {high[0]['code']} at {high[0]['return_rate_pct']}%. Flag the batch/vendor "
+                    f"before reordering." if high
+                    else "No SKU is returning at a worrying rate."),
+    }
+
+
 # Retired agent name → its successor. run_agent() resolves these so existing schedules,
 # n8n flows, tool calls and audit history keep working after consolidation.
 AGENT_ALIASES: dict[str, str] = {
@@ -1213,6 +1292,9 @@ AGENTS: dict[str, AgentSpec] = {
     "trend_radar": AgentSpec("trend_radar", "What's heating up: accelerating SKUs cross-referenced with stock → restock rising items before they run out (+ optional web signals)", trend_radar, category="growth"),
     "lead_gen": AgentSpec("lead_gen", "Free B2B lead-gen: prioritised call/visit list of new retailers (from OpenStreetMap) with openers — find new buyers", lead_gen, category="growth"),
     "research_scout": AgentSpec("research_scout", "Web scout (advise-only): new product ideas, competitor moves & trends drafted for review — needs a free Tavily key", research_scout, category="growth", in_brief=False),
+    "price_drift": AgentSpec("price_drift", "Price Sentry: landed cost rose but selling price didn't — silent margin erosion to reprice", price_drift),
+    "returns_investigator": AgentSpec("returns_investigator", "Returns-Investigator: SKUs returning at high rates (quality signal) + vendor & salesman roll-up", returns_investigator),
+    "ops_sentinel": AgentSpec("ops_sentinel", "Platform self-monitor: ingest/agent/event health + drafts KB articles for repeated unanswered questions", ops_sentinel_agent, in_brief=False),
 }
 
 # Org-map grouping (CEO → departments → agents). Used by the Agents page; default = Operations.
@@ -1228,7 +1310,8 @@ _DEPARTMENTS: dict[str, str] = {
     "winback": "Sales & Growth", "vendor_sourcing": "Sales & Growth", "pricing_optimization": "Sales & Growth",
     "cross_sell": "Sales & Growth", "vendor_scorecard": "Supply", "trend_radar": "Sales & Growth",
     "lead_gen": "Sales & Growth", "research_scout": "Sales & Growth",
-    "risk_watch": "Risk", "salesman_stock_recon": "Risk",
+    "risk_watch": "Risk", "salesman_stock_recon": "Risk", "returns_investigator": "Risk",
+    "price_drift": "Finance", "ops_sentinel": "Operations",
 }
 for _n, _spec in AGENTS.items():
     _spec.department = _DEPARTMENTS.get(_n, "Operations")
@@ -1239,10 +1322,12 @@ def list_agents() -> list[dict]:
              "department": s.department} for s in AGENTS.values()]
 
 
-def run_agent(name: str, triggered_by: str = "user") -> dict:
+def run_agent(name: str, triggered_by: str = "user", _event_chain_depth: int = 0) -> dict:
     """Run one agent and wrap with metadata. Raises KeyError for unknown agents.
 
-    `triggered_by` ('user'|'schedule'|'escalation') is recorded by the memory layer (Phase B)."""
+    `triggered_by` ('user'|'schedule'|'escalation'|'event') is recorded by the memory layer.
+    `_event_chain_depth` is set when this run is a reaction to an event (Phase B), so any
+    events it emits carry depth+1 and the dispatcher can stop cascades."""
     name = AGENT_ALIASES.get(name, name)  # retired names resolve to their successor
     if name not in AGENTS:
         raise KeyError(name)
@@ -1270,4 +1355,14 @@ def run_agent(name: str, triggered_by: str = "user") -> dict:
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).warning("memory hook failed for %s: %s", name, e)
+    # Event backbone: emit a typed event from this run's diff (best-effort — never break run).
+    try:
+        from app import events
+        wrapped["_event_chain_depth"] = _event_chain_depth
+        events.emit_from_run(name, wrapped)
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("event hook failed for %s: %s", name, e)
+    finally:
+        wrapped.pop("_event_chain_depth", None)
     return wrapped
