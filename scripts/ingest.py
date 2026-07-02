@@ -52,7 +52,9 @@ def norm_date(v) -> str | None:
     if isinstance(v, (datetime, date)):
         return v.date().isoformat() if isinstance(v, datetime) else v.isoformat()
     s = str(v).strip()
-    for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%m/%d/%y"):
+    # Focus (Bahrain) writes dates DD/MM/YYYY — try day-first BEFORE month-first, or an
+    # ambiguous date like 02/07/2026 (2 July) is misread as Feb 7 and mis-dates the whole report.
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d/%m/%y"):
         try:
             return datetime.strptime(s, fmt).date().isoformat()
         except ValueError:
