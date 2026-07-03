@@ -536,7 +536,7 @@ async def invoice_upload(file: UploadFile = File(...), admin: CurrentUser = Depe
 
 
 @app.get("/supplier-prices")
-def supplier_prices(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
+def supplier_prices(_user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Supplier RMB price history per model — latest vs previous invoice, with the change %."""
     from app.ai import exec_sql
     rows = exec_sql("SELECT model, latest_invoice, latest_date, latest_rmb, latest_list_rmb, "
@@ -561,7 +561,7 @@ class OrderExportRequest(BaseModel):
 
 @app.post("/orders/proposal/export")
 def order_proposal_export(body: OrderExportRequest,
-                          _user: CurrentUser = Depends(require_feature("Inventory"))) -> Response:
+                          _user: CurrentUser = Depends(require_feature("Orders"))) -> Response:
     """Generate the reviewed proposal as a VFAN-format order .xlsx for the owner to send to the vendor."""
     from datetime import date as _date
 
@@ -648,7 +648,7 @@ def order_file_delete(file_id: int, admin: CurrentUser = Depends(require_admin))
 
 
 @app.get("/purchase-orders")
-def po_list(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
+def po_list(_user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Orders page data: recent orders, per-item cost change across orders, and what's on order."""
     from app.ai import exec_sql
 
@@ -680,7 +680,7 @@ def po_list(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
 
 
 @app.get("/orders/{po_no}")
-def order_detail(po_no: str, _user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
+def order_detail(po_no: str, _user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """One order's full record (PO=MRN number): ordered vs received, real landed cost, margin-on-
     arrival, reconciliation flags, and the linked 8-stage pipeline timeline."""
     from app.orders import detail
@@ -705,14 +705,14 @@ class ProcAdvanceRequest(BaseModel):
 
 
 @app.get("/procurement/board")
-def procurement_board(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
+def procurement_board(_user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """The procurement pipeline: open orders by stage, days-in-stage, and stuck flags."""
     from app.procurement import board
     return board()
 
 
 @app.get("/procurement/orders/{order_id}")
-def procurement_get(order_id: int, _user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
+def procurement_get(order_id: int, _user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """One order + its full stage-transition timeline."""
     from app.procurement import get_order
     return get_order(order_id)
@@ -749,7 +749,7 @@ class LeadStatusRequest(BaseModel):
 
 
 @app.get("/leads")
-def leads_list(status: str | None = None, _user: CurrentUser = Depends(require_feature("Sales"))) -> dict:
+def leads_list(status: str | None = None, _user: CurrentUser = Depends(require_feature("Leads"))) -> dict:
     """The leads pipeline + the prioritised list (highest-fit first)."""
     from app.leadgen import ATTRIBUTION, list_leads, pipeline
     return {"pipeline": pipeline(), "leads": list_leads(status=status, limit=200), "attribution": ATTRIBUTION}
@@ -766,7 +766,7 @@ def leads_discover(admin: CurrentUser = Depends(require_admin)) -> dict:
 
 @app.post("/leads/{lead_id}/status")
 def leads_set_status(lead_id: int, body: LeadStatusRequest,
-                     user: CurrentUser = Depends(require_feature("Sales"))) -> dict:
+                     user: CurrentUser = Depends(require_feature("Leads"))) -> dict:
     """Advance a lead through the pipeline (new→contacted→visited→quoted→ordered/rejected)."""
     from app.leadgen import set_status
     ok = set_status(int(lead_id), body.status, by=user.email)
@@ -785,6 +785,133 @@ def bi_price_simulator(item: str, new_price: float,
     Deterministic (no LLM); refuses when there isn't enough price history to be honest."""
     from app.bi_simulator import simulate
     return simulate(item, new_price)
+
+
+# ── Stock movement (warehouse → van transfers + per-salesman reconciliation) ──
+
+@app.get("/stock/transfers")
+def stock_transfers(days: int = 30, warehouse: str | None = None,
+                    _user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
+    """Stock Issue Voucher transfers (central warehouse → salesman vans), newest first."""
+    from app.db_read import exec_sql_params
+    where = "WHERE transfer_date >= (SELECT MAX(transfer_date) FROM v_stock_transfers) - $1::int"
+    params: list = [max(1, min(days, 365))]
+    if warehouse:
+        where += " AND (to_warehouse ILIKE '%' || $2 || '%' OR from_warehouse ILIKE '%' || $2 || '%')"
+        params.append(warehouse)
+    rows = exec_sql_params(
+        f"SELECT transfer_date, voucher, item_name, from_warehouse, to_warehouse, qty, value_bhd "
+        f"FROM v_stock_transfers {where} ORDER BY transfer_date DESC, voucher LIMIT 500", params) or []
+    return {"transfers": rows, "count": len(rows)}
+
+
+@app.get("/stock/recon")
+def stock_recon(_user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
+    """Per-van reconciliation: transferred in vs sold vs on-hand, with shortage flags."""
+    from app.db_read import exec_sql
+    rows = exec_sql(
+        "SELECT * FROM v_salesman_stock_recon "
+        "ORDER BY is_van DESC, shortage_value_bhd DESC NULLS LAST, salesman") or []
+    return {"vans": rows, "count": len(rows)}
+
+
+# ── Catalog / Item Master ─────────────────────────────────────────────────────
+
+class CatalogItemRequest(BaseModel):
+    item_code: str
+    display_name: str | None = None
+    spec: str | None = None
+    category: str | None = None
+    brand: str | None = None
+    division: str | None = None
+    dealer_price: float | None = None
+    roadshow_price: float | None = None
+    rrp: float | None = None
+    sort_order: int | None = None
+    is_active: bool | None = None
+
+
+@app.get("/catalog")
+def catalog_list(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
+    """Full catalog with all price tiers (internal — salesmen included, like today's Excel)."""
+    from app.catalog import list_catalog
+    return list_catalog(include_inactive=(user.role == "admin"))
+
+
+@app.post("/catalog/item")
+def catalog_upsert(body: CatalogItemRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.catalog import upsert_item
+    r = upsert_item(body.model_dump(exclude_none=True), by=admin.email)
+    log_event(admin.email, "catalog.upsert", detail=r)
+    return r
+
+
+@app.delete("/catalog/item/{code}")
+def catalog_remove(code: str, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.catalog import delete_item
+    r = delete_item(code)
+    log_event(admin.email, "catalog.delete", detail={"item_code": code})
+    return r
+
+
+@app.post("/catalog/{code}/image")
+async def catalog_image(code: str, kind: str = "product", file: UploadFile = File(...),
+                        admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Upload/replace an item's product or package photo (admin, in-platform)."""
+    from fastapi import HTTPException
+    from app.catalog import upload_image
+    from app.uploads import UploadTooLarge, read_capped
+    try:
+        data = await read_capped(file, max_bytes=8 * 1024 * 1024)
+    except UploadTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Please upload an image file.")
+    url = upload_image(code, kind, data, file.content_type or "image/jpeg", by=admin.email)
+    log_event(admin.email, "catalog.image", detail={"item_code": code, "kind": kind})
+    return {"ok": True, "url": url}
+
+
+@app.post("/catalog/export")
+def catalog_export(_user: CurrentUser = Depends(require_feature("Catalog"))) -> Response:
+    """Branded .xlsx with embedded photos — same shape as the sheet shared today."""
+    from app.catalog import export_xlsx
+    return Response(
+        content=export_xlsx(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="YQ-VFAN-Catalog.xlsx"'})
+
+
+@app.get("/catalog/share-link")
+def catalog_share_link(_user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
+    """Public customer link (RRP only) a salesman can WhatsApp to a customer."""
+    import os
+    from app.catalog import share_token
+    tok = share_token()
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    return {"token": tok, "url": f"{base}/c/{tok}" if base else f"/c/{tok}"}
+
+
+@app.post("/catalog/share-link/rotate")
+def catalog_share_rotate(admin: CurrentUser = Depends(require_admin)) -> dict:
+    import os
+    from app.catalog import rotate_share_token
+    tok = rotate_share_token()
+    log_event(admin.email, "catalog.share_rotate", detail={})
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    return {"token": tok, "url": f"{base}/c/{tok}" if base else f"/c/{tok}"}
+
+
+@app.get("/public/catalog/{token}")
+@limiter.limit("30/minute")
+def catalog_public(request: Request, token: str) -> dict:
+    """No-auth customer catalog: item + photos + RRP only. Token-gated, rate-limited."""
+    from fastapi import HTTPException
+    from app.catalog import public_catalog
+    r = public_catalog(token)
+    if r is None:
+        raise HTTPException(status_code=404, detail="Invalid catalog link.")
+    return r
 
 
 @app.get("/coaching/accounts")
@@ -820,6 +947,14 @@ def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get
         result["email"] = send_agent(result)
     log_event(caller.email, "agent", detail={"agent": name, "summary": result.get("summary")})
     return result
+
+
+@app.get("/auth/features")
+def auth_features(_user: CurrentUser = Depends(get_current_user)) -> dict:
+    """The grantable feature pages + roles — single source (app/features.py) so the
+    Team page chips can never drift from what the API actually enforces."""
+    from app.features import FEATURES, ROLE_DEFAULT_FEATURES, ROLES
+    return {"features": FEATURES, "roles": ROLES, "role_defaults": ROLE_DEFAULT_FEATURES}
 
 
 @app.get("/me")
@@ -869,7 +1004,8 @@ def team_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
 @app.post("/team/invite")
 def team_invite(body: InviteRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
     from app.user_auth import FEATURES, create_email_invite, create_member, generate_temp_password
-    grant = body.features if body.role == "member" else list(FEATURES)
+    # Admins implicitly get everything; members AND salesmen get exactly what was picked.
+    grant = list(FEATURES) if body.role == "admin" else body.features
     if body.method == "email":
         res = create_email_invite(body.email, body.full_name, body.role, grant, invited_by=admin.email)
         log_event(admin.email, "team.invite", detail={"email": body.email, "mode": "email"})

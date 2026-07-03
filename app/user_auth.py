@@ -28,13 +28,8 @@ from app.database import get_client
 
 log = logging.getLogger(__name__)
 
-# Grantable features — each maps to a portal nav page. "Team" is admin-only and is
-# added implicitly for admins; it is never granted to members.
-FEATURES: list[str] = [
-    "Dashboard", "AI Agents", "AI Assistant",
-    "Inventory", "Sales", "Margins", "Receivables",
-]
-ROLES: list[str] = ["admin", "member"]
+# Single source of truth lives in app.features (backend + SPA via GET /auth/features).
+from app.features import FEATURES, ROLES  # noqa: F401  (re-exported for existing imports)
 
 
 # ── clients / helpers ────────────────────────────────────────────────────────

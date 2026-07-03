@@ -130,7 +130,8 @@ def has_feature(user: CurrentUser, feature: str) -> bool:
 # Data pages the machine (X-Agent-Key) caller may touch — explicitly NOT unrestricted:
 # scheduled agents legitimately compute over business data, but the key must never
 # unlock governance surfaces (Team, Data ingest, action approval) if it leaks.
-AGENT_FEATURES: frozenset[str] = frozenset({"Sales", "Inventory", "Margins", "Receivables"})
+AGENT_FEATURES: frozenset[str] = frozenset(
+    {"Sales", "Inventory", "Margins", "Receivables", "Orders", "Stock Movement", "Catalog"})
 
 
 def feature_set(user) -> set[str] | None:

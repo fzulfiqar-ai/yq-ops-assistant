@@ -10,16 +10,24 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 
-const FEATURES = ['Dashboard', 'AI Agents', 'AI Assistant', 'Inventory', 'Sales', 'Margins', 'Receivables']
+// Fallback only — the live list is served by GET /auth/features (single source of
+// truth in app/features.py) so new pages appear here without touching this file.
+const FEATURES_FALLBACK = ['Dashboard', 'AI Agents', 'AI Assistant', 'Inventory', 'Sales', 'Margins', 'Receivables']
 
 interface Member { email: string; role: string; features: string[]; status: string; full_name?: string }
 interface Invite { email: string; role: string; full_name?: string; expires_at?: string }
 interface TeamData { users: Member[]; invites: Invite[] }
+interface FeatureMeta { features: string[]; roles: string[]; role_defaults: Record<string, string[]> }
 
-function FeatureChips({ selected, onToggle }: { selected: string[]; onToggle: (f: string) => void }) {
+function useFeatureMeta(): FeatureMeta {
+  const { data } = useQuery({ queryKey: ['auth-features'], queryFn: () => apiGet<FeatureMeta>('/auth/features'), staleTime: 10 * 60_000 })
+  return data ?? { features: FEATURES_FALLBACK, roles: ['admin', 'member'], role_defaults: { member: ['Dashboard'] } }
+}
+
+function FeatureChips({ all, selected, onToggle }: { all: string[]; selected: string[]; onToggle: (f: string) => void }) {
   return (
     <div className="flex flex-wrap gap-2">
-      {FEATURES.map((f) => {
+      {all.map((f) => {
         const on = selected.includes(f)
         return (
           <button
@@ -42,6 +50,7 @@ function FeatureChips({ selected, onToggle }: { selected: string[]; onToggle: (f
 export default function Team() {
   const { me } = useAuth()
   const qc = useQueryClient()
+  const meta = useFeatureMeta()
   const { data, isLoading, error } = useQuery({
     queryKey: ['team'],
     queryFn: () => apiGet<TeamData>('/team'),
@@ -51,7 +60,7 @@ export default function Team() {
   // invite form state
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
-  const [role, setRole] = useState<'member' | 'admin'>('member')
+  const [role, setRole] = useState<string>('member')
   const [features, setFeatures] = useState<string[]>(['Dashboard'])
   const [method, setMethod] = useState<'temp' | 'email'>('temp')
   const [busy, setBusy] = useState(false)
@@ -64,7 +73,7 @@ export default function Team() {
       setResult({ kind: 'err', msg: 'Enter a valid email.' })
       return
     }
-    if (role === 'member' && features.length === 0) {
+    if (role !== 'admin' && features.length === 0) {
       setResult({ kind: 'err', msg: 'Grant at least one feature, or make them an admin.' })
       return
     }
@@ -129,20 +138,23 @@ export default function Team() {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-sm text-muted-foreground">Role:</span>
-          {(['member', 'admin'] as const).map((r) => (
+          {meta.roles.map((r) => (
             <button
               key={r}
-              onClick={() => setRole(r)}
+              onClick={() => { setRole(r); if (r !== 'admin') setFeatures(meta.role_defaults[r] ?? ['Dashboard']) }}
               className={cn('rounded-lg border px-3 py-1.5 text-[13px] font-medium capitalize transition', role === r ? 'border-primary bg-accent' : 'border-border')}
             >
               {r}
             </button>
           ))}
+          {role === 'salesman' && (
+            <span className="text-xs text-muted-foreground">— sees only the pages you grant (default: Catalog)</span>
+          )}
         </div>
-        {role === 'member' && (
+        {role !== 'admin' && (
           <div className="mt-3">
             <div className="mb-2 text-sm text-muted-foreground">Feature access</div>
-            <FeatureChips selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
+            <FeatureChips all={meta.features} selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
           </div>
         )}
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -209,6 +221,7 @@ export default function Team() {
 }
 
 function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: boolean; onChanged: () => void }) {
+  const meta = useFeatureMeta()
   const [open, setOpen] = useState(false)
   const [role, setRole] = useState(member.role)
   const [features, setFeatures] = useState<string[]>(member.features || [])
@@ -218,7 +231,7 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
   async function save() {
     setBusy(true)
     try {
-      await apiPatch(`/team/${encodeURIComponent(member.email)}`, { role, features: role === 'admin' ? FEATURES : features, status })
+      await apiPatch(`/team/${encodeURIComponent(member.email)}`, { role, features: role === 'admin' ? meta.features : features, status })
       setOpen(false)
       onChanged()
     } finally {
@@ -258,7 +271,7 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
         <div className="space-y-3 border-t bg-secondary/30 px-4 py-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm text-muted-foreground">Role:</span>
-            {(['member', 'admin'] as const).map((r) => (
+            {meta.roles.map((r) => (
               <button key={r} onClick={() => setRole(r)} disabled={isSelf} className={cn('rounded-lg border px-3 py-1 text-[13px] capitalize', role === r ? 'border-primary bg-accent' : 'border-border', isSelf && 'opacity-50')}>{r}</button>
             ))}
             <span className="ml-3 text-sm text-muted-foreground">Status:</span>
@@ -266,8 +279,8 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
               <button key={s} onClick={() => setStatus(s)} disabled={isSelf} className={cn('rounded-lg border px-3 py-1 text-[13px] capitalize', status === s ? 'border-primary bg-accent' : 'border-border', isSelf && 'opacity-50')}>{s}</button>
             ))}
           </div>
-          {role === 'member' && (
-            <FeatureChips selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
+          {role !== 'admin' && (
+            <FeatureChips all={meta.features} selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
           )}
           <div className="flex items-center gap-2">
             <Button size="sm" onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />} Save</Button>
