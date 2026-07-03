@@ -132,6 +132,54 @@ def discover_overpass(shop_types: tuple[str, ...] = SHOP_TYPES) -> list[dict]:
     return out
 
 
+def discover_apify(search_terms: tuple[str, ...] = ("mobile accessories shop", "mobile phone shop"),
+                   max_per_search: int = 40) -> list[dict]:
+    """OPTIONAL Google-Maps discovery via Apify (compass/crawler-google-places actor) —
+    unlike OSM it returns phone/website/ADDRESS for most places. Needs APIFY_TOKEN;
+    [] when unset or on failure. Synchronous actor run (keep max_per_search modest)."""
+    import os
+    token = os.getenv("APIFY_TOKEN") or os.getenv("APIFY_API_TOKEN") or ""
+    if not token:
+        return []
+    url = ("https://api.apify.com/v2/acts/compass~crawler-google-places/"
+           f"run-sync-get-dataset-items?token={token}")
+    payload = {
+        "searchStringsArray": list(search_terms),
+        "locationQuery": "Bahrain",
+        "maxCrawledPlacesPerSearch": max(1, min(max_per_search, 60)),
+        "language": "en",
+        "skipClosedPlaces": True,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=290)
+        r.raise_for_status()
+        places = r.json()
+    except Exception as e:  # noqa: BLE001
+        log.warning("apify discovery failed: %s", str(e)[:160])
+        return []
+    out: list[dict] = []
+    for p in places if isinstance(places, list) else []:
+        name = (p.get("title") or "").strip()
+        if not name:
+            continue
+        seg, brand = classify({}, name)
+        out.append({
+            "name": name,
+            "category": (p.get("categoryName") or "shop").lower(),
+            "segment": seg,
+            "brand": brand,
+            "area": p.get("neighborhood") or p.get("city"),
+            "phone": p.get("phone") or p.get("phoneUnformatted"),
+            "website": p.get("website"),
+            "address": p.get("address"),
+            "lat": (p.get("location") or {}).get("lat"),
+            "lon": (p.get("location") or {}).get("lng"),
+            "source": "apify_gmaps",
+            "source_ref": p.get("placeId") or name,
+        })
+    return out
+
+
 def _existing_customer_names() -> set[str]:
     try:
         rows = get_client().table("v_top_customers").select("customer_name").limit(3000).execute().data or []
@@ -169,6 +217,9 @@ def discover_and_import(shop_types: tuple[str, ...] = SHOP_TYPES) -> dict:
     columns aren't sent), so the pipeline survives a re-discovery. Returns new vs refreshed counts.
     """
     found = discover_overpass(shop_types)
+    # Apify Google-Maps source (optional, needs APIFY_TOKEN) — richer contact fields.
+    # Overpass rows win on ref collisions; both go through the same customer dedupe.
+    found += discover_apify()
     customers = _existing_customer_names()
     c = get_client()
     try:
@@ -225,3 +276,69 @@ def set_status(lead_id: int, status: str, by: str = "user") -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("set_status failed: %s", e)
         return False
+
+
+# Fields the portal may edit inline (leads v2 — contactability + follow-up).
+EDITABLE = ("phone", "website", "email", "address", "contact_name",
+            "last_contacted", "next_action", "notes", "assigned_to")
+
+
+def update_lead(lead_id: int, changes: dict, by: str = "user") -> bool:
+    payload = {k: (v or None) for k, v in changes.items() if k in EDITABLE}
+    if not payload:
+        return False
+    payload["updated_at"] = _now()
+    try:
+        get_client().table("leads").update(payload).eq("id", lead_id).execute()
+        _log_event(lead_id, "edited", {"fields": sorted(payload)}, by)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("update_lead failed: %s", e)
+        return False
+
+
+def enrich_lead(lead_id: int, by: str = "user") -> dict:
+    """OPTIONAL Tavily enrichment: search the business's public web presence for a
+    website/email/address. Only fills blanks — never overwrites hand-entered data.
+    PDPL-conscious: public business listings only."""
+    import os
+    key = os.getenv("TAVILY_API_KEY", "")
+    if not key:
+        return {"ok": False, "reason": "TAVILY_API_KEY not configured"}
+    row = (get_client().table("leads").select("*").eq("id", lead_id).limit(1).execute().data or [None])[0]
+    if not row:
+        return {"ok": False, "reason": "lead not found"}
+    import re
+
+    import requests
+    q = f"{row.get('name')} {row.get('area') or ''} Bahrain contact"
+    try:
+        r = requests.post("https://api.tavily.com/search",
+                          json={"api_key": key, "query": q, "max_results": 5,
+                                "include_answer": False}, timeout=20)
+        r.raise_for_status()
+        results = r.json().get("results") or []
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"search failed: {str(e)[:80]}"}
+    blob = " ".join(f"{x.get('title', '')} {x.get('content', '')} {x.get('url', '')}" for x in results)
+    found: dict = {}
+    if not row.get("email"):
+        m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", blob)
+        if m:
+            found["email"] = m.group(0)
+    if not row.get("website"):
+        for x in results:
+            url = x.get("url") or ""
+            if url and not any(s in url for s in ("facebook.", "instagram.", "tavily.")):
+                found["website"] = url.split("?")[0]
+                break
+    if not row.get("phone"):
+        m = re.search(r"(?:\+?973[\s-]?)?(?:3\d{3}|17\d{2}|77\d{2})[\s-]?\d{4}", blob)
+        if m:
+            found["phone"] = m.group(0).strip()
+    if found:
+        found["enriched_at"] = _now()
+        get_client().table("leads").update(found).eq("id", lead_id).execute()
+        _log_event(lead_id, "enriched", {"fields": sorted(k for k in found if k != "enriched_at")}, by)
+    return {"ok": True, "found": {k: v for k, v in found.items() if k != "enriched_at"},
+            "checked": len(results)}

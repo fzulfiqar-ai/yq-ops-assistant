@@ -174,12 +174,15 @@ def sales_insights() -> dict:
 # ── Sales Push agent ─────────────────────────────────────────────────────────
 
 def sales_push() -> dict:
-    """Where to push sales: best sellers, fast movers we've run OUT of (restock = recover
-    lost sales), and dead/overstock to clear. Windows anchor to the data's latest date."""
+    """Sales-push targeting: for every slow/dead SKU, WHO should sell it and TO WHOM.
+    Matches each push item to customers who already buy that category (last 180d),
+    grouped per salesman route, with a clearance price and the capital it frees —
+    a rep-ready push list, not just a slow-mover report. Giveaway lines excluded."""
     top = _q(
         "SELECT item_name, category_name, SUM(quantity) AS qty_sold, "
         "SUM(revenue_bhd) AS revenue_bhd FROM v_sales "
         "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND item_name IS NOT NULL "
+        "AND NOT is_giveaway "
         "GROUP BY item_name, category_name ORDER BY qty_sold DESC NULLS LAST LIMIT 15"
     )
     restock = _q(
@@ -187,17 +190,229 @@ def sales_push() -> dict:
         "WHERE status='urgent_out_of_stock' ORDER BY sold_90d DESC LIMIT 20"
     )
     clear = _q(
-        "SELECT item_name, current_stock, stock_value, sold_90d FROM v_stock_health "
-        "WHERE status IN ('dead_stock','overstock') ORDER BY stock_value DESC LIMIT 20"
+        "SELECT h.item_name, h.current_stock, h.stock_value, h.sold_90d, a.days_since_sale "
+        "FROM v_stock_health h LEFT JOIN v_inventory_aging a ON a.item_name = h.item_name "
+        "WHERE h.status IN ('dead_stock','overstock') ORDER BY h.stock_value DESC LIMIT 12"
     )
+    # One query: for each push item, the 4 best-matched customers (bought its category
+    # recently), tagged with their salesman — so each rep gets a concrete call list.
+    targets = _q(
+        "WITH push AS ("
+        "  SELECT item_name FROM v_stock_health WHERE status IN ('dead_stock','overstock') "
+        "  ORDER BY stock_value DESC LIMIT 12), "
+        "cat AS ("
+        "  SELECT DISTINCT ON (s.item_name) s.item_name, s.category_name "
+        "  FROM v_sales s JOIN push p ON p.item_name = s.item_name "
+        "  WHERE s.category_name IS NOT NULL), "
+        "buyers AS ("
+        "  SELECT c.item_name, s.salesman_resolved AS salesman, s.customer_name, "
+        "         SUM(s.revenue_bhd) AS spent_bhd, MAX(s.sale_date) AS last_buy "
+        "  FROM v_sales s JOIN cat c ON c.category_name = s.category_name "
+        "  WHERE s.customer_name NOT ILIKE 'cash customer%' AND NOT s.is_giveaway "
+        "    AND s.sale_date > (SELECT MAX(sale_date) FROM v_sales) - 180 "
+        "  GROUP BY 1, 2, 3) "
+        "SELECT item_name, salesman, customer_name, spent_bhd, last_buy FROM ("
+        "  SELECT b.*, ROW_NUMBER() OVER (PARTITION BY b.item_name ORDER BY b.spent_bhd DESC) AS rn "
+        "  FROM buyers b) x WHERE rn <= 4"
+    )
+    by_item: dict[str, list] = {}
+    for t in targets:
+        by_item.setdefault(t.get("item_name") or "", []).append(
+            {"customer": t.get("customer_name"), "salesman": t.get("salesman"),
+             "spent_bhd": _f(t, "spent_bhd"), "last_buy": t.get("last_buy")})
+    items, trapped, freed = [], 0.0, 0.0
+    for r in clear:
+        val = _f(r, "stock_value")
+        d = r.get("days_since_sale")
+        md = 0.40 if d is None else (0.50 if _f(r, "days_since_sale") > 180 else 0.30)
+        trapped += val
+        freed += val * (1 - md)
+        items.append({
+            "item_name": r.get("item_name"), "current_stock": _f(r, "current_stock"),
+            "stock_value_bhd": val, "sold_90d": _f(r, "sold_90d"),
+            "suggested_markdown_pct": int(md * 100),
+            "est_recovery_bhd": round(val * (1 - md), 1),
+            "target_customers": by_item.get(r.get("item_name") or "", []),
+        })
+    # per-salesman rollup: their personal push list
+    per_rep: dict[str, list] = {}
+    for it in items:
+        for t in it["target_customers"]:
+            rep = t.get("salesman") or "(unassigned)"
+            per_rep.setdefault(rep, []).append(
+                {"item_name": it["item_name"], "customer": t["customer"],
+                 "markdown_pct": it["suggested_markdown_pct"]})
+    matched = sum(1 for i in items if i["target_customers"])
     return {
         "summary": (
-            f"{len(top)} top sellers · {len(restock)} fast movers OUT of stock (restock to "
-            f"recover sales) · {len(clear)} slow/overstock lines to clear."
+            f"{len(items)} slow lines tying up BHD {trapped:,.0f} — {matched} matched to named "
+            f"buyers across {len(per_rep)} salesmen; a targeted push at the suggested markdowns "
+            f"recovers ~BHD {freed:,.0f}. Plus {len(restock)} fast movers OUT of stock to reorder."
         ),
+        "count": len(items),
+        "trapped_value_bhd": round(trapped, 1),
+        "est_recovery_bhd": round(freed, 1),
+        "push_list": items,
+        "per_salesman": [{"salesman": k, "targets": v} for k, v in
+                         sorted(per_rep.items(), key=lambda kv: -len(kv[1]))],
         "top_sellers": top,
         "restock_opportunities": restock,
-        "clear_slow_overstock": clear,
+    }
+
+
+def _catalog_link() -> str:
+    """Public RRP-only catalog URL for outreach messages ('' if unavailable)."""
+    try:
+        import os
+        from app.catalog import share_token
+        tok = share_token()
+        base = os.getenv("APP_BASE_URL", "").rstrip("/")
+        return f"{base}/c/{tok}" if (tok and base) else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def sales_outreach() -> dict:
+    """AI sales agent (drafts only — a human sends): customers who are DUE to reorder
+    (past 1.5× their usual buying cycle), what they usually buy, and a ready EN/AR
+    WhatsApp message with the public catalog link. Ranked by lifetime value."""
+    due = _q(
+        "WITH mx AS (SELECT MAX(sale_date) AS d FROM v_sales), "
+        "cust AS ("
+        "  SELECT customer_name, COUNT(DISTINCT sale_date) AS visit_days, "
+        "         MIN(sale_date) AS first_order, MAX(sale_date) AS last_order, "
+        "         SUM(revenue_bhd) AS lifetime_bhd "
+        "  FROM v_sales WHERE customer_name IS NOT NULL "
+        "    AND customer_name NOT ILIKE 'cash customer%' AND NOT is_giveaway "
+        "  GROUP BY 1 HAVING COUNT(DISTINCT sale_date) >= 3) "
+        "SELECT c.customer_name, c.lifetime_bhd, c.last_order, "
+        "       ((SELECT d FROM mx) - c.last_order) AS days_since, "
+        "       ROUND(((c.last_order - c.first_order)::numeric / NULLIF(c.visit_days - 1, 0)), 1) "
+        "         AS cycle_days "
+        "FROM cust c "
+        "WHERE (c.last_order - c.first_order) > 0 "
+        "  AND ((SELECT d FROM mx) - c.last_order) > "
+        "      1.5 * ((c.last_order - c.first_order)::numeric / NULLIF(c.visit_days - 1, 0)) "
+        "ORDER BY c.lifetime_bhd DESC LIMIT 12"
+    )
+    usuals = _q(
+        "WITH mx AS (SELECT MAX(sale_date) AS d FROM v_sales), "
+        "cust AS ("
+        "  SELECT customer_name, COUNT(DISTINCT sale_date) AS visit_days, "
+        "         MIN(sale_date) AS first_order, MAX(sale_date) AS last_order "
+        "  FROM v_sales WHERE customer_name IS NOT NULL "
+        "    AND customer_name NOT ILIKE 'cash customer%' AND NOT is_giveaway "
+        "  GROUP BY 1 HAVING COUNT(DISTINCT sale_date) >= 3), "
+        "due AS ("
+        "  SELECT customer_name FROM cust "
+        "  WHERE (last_order - first_order) > 0 "
+        "    AND ((SELECT d FROM mx) - last_order) > "
+        "        1.5 * ((last_order - first_order)::numeric / NULLIF(visit_days - 1, 0)) "
+        "  ORDER BY 1 LIMIT 40) "
+        "SELECT customer_name, item_name, qty FROM ("
+        "  SELECT s.customer_name, s.item_name, SUM(s.quantity) AS qty, "
+        "         ROW_NUMBER() OVER (PARTITION BY s.customer_name "
+        "                            ORDER BY SUM(s.quantity) DESC) AS rn "
+        "  FROM v_sales s JOIN due d ON d.customer_name = s.customer_name "
+        "  WHERE s.item_name IS NOT NULL AND NOT s.is_giveaway "
+        "  GROUP BY s.customer_name, s.item_name) x WHERE rn <= 3"
+    )
+    top_items: dict[str, list[str]] = {}
+    for u in usuals:
+        top_items.setdefault(u.get("customer_name") or "", []).append(str(u.get("item_name") or ""))
+    link = _catalog_link()
+    link_line_en = f"\nOur latest catalog with prices: {link}" if link else ""
+    link_line_ar = f"\nأحدث كتالوج بالأسعار: {link}" if link else ""
+    drafts = []
+    for r in due:
+        name = str(r.get("customer_name") or "").strip()
+        items = [i.split(" (")[0] for i in top_items.get(name, [])][:3]
+        usual = ", ".join(items) if items else "your usual items"
+        days = int(_f(r, "days_since"))
+        drafts.append({
+            "customer": name,
+            "lifetime_bhd": _f(r, "lifetime_bhd"),
+            "days_since_order": days,
+            "usual_cycle_days": _f(r, "cycle_days"),
+            "usual_items": items,
+            "message_en": (
+                f"Hello {name}, it's YQ Bahrain. It's been {days} days since your last order — "
+                f"we have fresh stock of {usual} and new VFAN arrivals. "
+                f"Shall we prepare your usual order?{link_line_en}"
+            ),
+            "message_ar": (
+                f"مرحباً {name}، معكم YQ البحرين. مضى {days} يوماً على آخر طلبية — "
+                f"لدينا مخزون جديد من {usual} ووصلات VFAN جديدة. "
+                f"هل نجهز طلبيتكم المعتادة؟{link_line_ar}"
+            ),
+        })
+    value = sum(d["lifetime_bhd"] for d in drafts)
+    return {
+        "count": len(drafts),
+        "summary": (f"{len(drafts)} customers are past their usual reorder cycle "
+                    f"(BHD {value:,.0f} lifetime value) — WhatsApp drafts ready to send."
+                    if drafts else
+                    "No customers are overdue for a reorder — the active book is buying on cycle."),
+        "drafts": drafts,
+        "catalog_link": link,
+    }
+
+
+def growth_plan() -> dict:
+    """The weekly growth plan: ONE ranked list of this week's money moves, assembled
+    from the specialist agents (collections, clearance push, win-back, repricing,
+    restock) with the BHD at stake and where to act. Answers 'what do I do this week?'"""
+    plan: list[dict] = []
+
+    c = collections()
+    if c.get("count"):
+        plan.append({
+            "move": f"Chase BHD {c['total_overdue_bhd']:,.0f} overdue across {c['count']} accounts "
+                    f"(drafted reminders ready)",
+            "impact_bhd": round(_f(c, "total_overdue_bhd"), 0), "owner": "Finance", "link": "/receivables"})
+
+    sp = sales_push()
+    if sp.get("count"):
+        plan.append({
+            "move": f"Run the targeted clearance push — {sp['count']} slow lines matched to named "
+                    f"buyers per salesman (frees ~BHD {sp['est_recovery_bhd']:,.0f})",
+            "impact_bhd": round(_f(sp, "est_recovery_bhd"), 0), "owner": "Sales", "link": "/agents"})
+    if sp.get("restock_opportunities"):
+        n = len(sp["restock_opportunities"])
+        plan.append({
+            "move": f"Reorder {n} fast movers that are OUT of stock — every day out is lost sales",
+            "impact_bhd": 0, "owner": "Supply", "link": "/orders"})
+
+    so = sales_outreach()
+    if so.get("count"):
+        v = sum(d["lifetime_bhd"] for d in so["drafts"])
+        plan.append({
+            "move": f"Send the {so['count']} reorder nudges — customers past their buying cycle "
+                    f"(BHD {v:,.0f} lifetime value)",
+            "impact_bhd": round(v * 0.05, 0), "owner": "Sales", "link": "/agents"})
+
+    wb = winback()
+    if wb.get("count"):
+        plan.append({
+            "move": f"Win back {wb['count']} lapsed/at-risk accounts "
+                    f"(BHD {_f(wb, 'lifetime_value_bhd'):,.0f} lifetime value to protect)",
+            "impact_bhd": 0, "owner": "Sales", "link": "/sales"})
+
+    pd = price_drift()
+    if pd.get("count"):
+        plan.append({
+            "move": f"Reprice {pd['count']} SKUs whose landed cost rose with no price response "
+                    f"— silent margin erosion",
+            "impact_bhd": 0, "owner": "Finance", "link": "/margins"})
+
+    plan.sort(key=lambda p: -p["impact_bhd"])
+    at_stake = sum(p["impact_bhd"] for p in plan)
+    return {
+        "count": len(plan),
+        "summary": (f"This week's plan: {len(plan)} moves with ~BHD {at_stake:,.0f} directly at stake. "
+                    f"Top: {plan[0]['move']}" if plan else
+                    "Nothing urgent this week — book is collected, stock is moving, prices hold."),
+        "plan": plan,
     }
 
 
@@ -1277,7 +1492,9 @@ AGENTS: dict[str, AgentSpec] = {
     "inventory": AgentSpec("inventory", "Velocity-aware reorder (urgent out-of-stock first)", inventory_reorder),
     "margin": AgentSpec("margin", "Negative & thin-margin products", margin_guardian),
     "sales_insights": AgentSpec("sales_insights", "Monthly sales trend (MoM) + top customers", sales_insights),
-    "sales_push": AgentSpec("sales_push", "Best sellers, fast movers out of stock, slow/overstock to clear", sales_push),
+    "sales_push": AgentSpec("sales_push", "Targeted push lists: slow stock matched to the customers who buy that category, per salesman, with clearance pricing", sales_push),
+    "sales_outreach": AgentSpec("sales_outreach", "AI sales agent (drafts): customers due to reorder + EN/AR WhatsApp messages with the catalog link", sales_outreach, category="growth"),
+    "growth_plan": AgentSpec("growth_plan", "The weekly growth plan: one ranked list of this week's money moves with BHD at stake", growth_plan, category="growth", in_brief=False),
     "customer_health": AgentSpec("customer_health", "Named customers with declining spend (churn risk)", customer_health),
     "cashflow": AgentSpec("cashflow", "Receivables aging buckets + debtor concentration", cashflow_forecast),
     "risk_watch": AgentSpec("risk_watch", "Risk & integrity: below-cost, negative & dead stock, discount/price-spread leakage", risk_watch),
@@ -1317,6 +1534,7 @@ _DEPARTMENTS: dict[str, str] = {
     "abc_xyz": "Supply", "reorder_proposal": "Supply",
     "procurement_status": "Supply",
     "sales_insights": "Sales & Growth", "sales_push": "Sales & Growth", "customer_health": "Sales & Growth",
+    "sales_outreach": "Sales & Growth", "growth_plan": "Sales & Growth",
     "salesman_performance": "Sales & Growth", "trend": "Sales & Growth", "marketing": "Sales & Growth",
     "winback": "Sales & Growth", "vendor_sourcing": "Sales & Growth", "pricing_optimization": "Sales & Growth",
     "cross_sell": "Sales & Growth", "vendor_scorecard": "Supply", "trend_radar": "Sales & Growth",

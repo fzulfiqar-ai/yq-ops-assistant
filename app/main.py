@@ -776,6 +776,42 @@ def leads_set_status(lead_id: int, body: LeadStatusRequest,
     return {"ok": True, "status": body.status}
 
 
+class LeadEditRequest(BaseModel):
+    phone: str | None = None
+    website: str | None = None
+    email: str | None = None
+    address: str | None = None
+    contact_name: str | None = None
+    last_contacted: str | None = None
+    next_action: str | None = None
+    notes: str | None = None
+    assigned_to: str | None = None
+
+
+@app.patch("/leads/{lead_id}")
+def leads_edit(lead_id: int, body: LeadEditRequest,
+               user: CurrentUser = Depends(require_feature("Leads"))) -> dict:
+    """Inline edit of a lead's contact + follow-up fields."""
+    from app.leadgen import update_lead
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    ok = update_lead(int(lead_id), changes, by=user.email)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Nothing to update.")
+    log_event(user.email, "lead.edit", detail={"lead_id": lead_id, "fields": sorted(changes)})
+    return {"ok": True}
+
+
+@app.post("/leads/{lead_id}/enrich")
+def leads_enrich(lead_id: int, user: CurrentUser = Depends(require_feature("Leads"))) -> dict:
+    """Fill missing website/email/phone from PUBLIC business listings (needs Tavily key).
+    Only fills blanks — never overwrites what a human typed."""
+    from app.leadgen import enrich_lead
+    r = enrich_lead(int(lead_id), by=user.email)
+    log_event(user.email, "lead.enrich", detail={"lead_id": lead_id, "found": r.get("found")})
+    return r
+
+
 # ── Coaching Brain (Tier 3): per-account pre-visit brief for reps ──────────────
 
 @app.get("/bi/price-simulator")

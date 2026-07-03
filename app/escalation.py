@@ -179,6 +179,18 @@ def daily_brief(send: bool = True) -> dict:
     if send:
         res = _send_brief(results, actions, fresh)
         emailed = bool((res or {}).get("emailed"))
+    # Post the brief headline to the Live Feed too (it used to be email/Telegram-only,
+    # which made "Run morning briefing" look like it did nothing in the portal).
+    try:
+        from app import events
+        top = "; ".join(a.get("action", "") for a in actions[:3])
+        events.emit("brief", "brief.sent", severity="info",
+                    payload={"summary": f"Morning brief: {len(results)} agents ran. Top actions: {top}"
+                             if top else f"Morning brief: {len(results)} agents ran — nothing urgent.",
+                             "actions": actions[:5]},
+                    dedupe=False)
+    except Exception:  # noqa: BLE001
+        pass
     return {"agents": len(results), "actions": actions, "recommendations": recs,
             "data": fresh, "emailed": emailed}
 
