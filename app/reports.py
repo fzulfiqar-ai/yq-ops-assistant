@@ -238,6 +238,60 @@ def movers(k: int = 5) -> dict:
     return {"rising": rising, "falling": falling}
 
 
+def daily_sales_mtd() -> list[dict]:
+    """One row per day of the current month (anchored to the data's latest date) —
+    the owner's 'daily current-month sales' dashboard chart."""
+    return exec_sql(
+        "WITH d AS (SELECT MAX(sale_date) AS mx FROM v_sales) "
+        "SELECT sale_date::text AS day, ROUND(SUM(revenue_bhd)::numeric, 2) AS gross_bhd, "
+        "ROUND(SUM(net_bhd)::numeric, 2) AS net_bhd, COUNT(DISTINCT invoice_no) AS orders "
+        "FROM v_sales, d WHERE sale_date >= date_trunc('month', d.mx)::date "
+        "GROUP BY sale_date ORDER BY sale_date"
+    ) or []
+
+
+def sales_split_mtd() -> dict:
+    """MTD cash/credit + division split (giveaways counted apart so free Batelco
+    stock can't distort the revenue story)."""
+    win = ("FROM v_sales, (SELECT MAX(sale_date) AS mx FROM v_sales) d "
+           "WHERE sale_date >= date_trunc('month', d.mx)::date")
+    pay = exec_sql(
+        f"SELECT sale_type, COUNT(DISTINCT invoice_no) AS orders, "
+        f"ROUND(SUM(revenue_bhd)::numeric, 2) AS revenue_bhd {win} GROUP BY sale_type") or []
+    div = exec_sql(
+        f"SELECT division, COUNT(DISTINCT invoice_no) AS orders, "
+        f"ROUND(SUM(revenue_bhd)::numeric, 2) AS revenue_bhd, "
+        f"SUM(CASE WHEN is_giveaway THEN quantity ELSE 0 END) AS giveaway_qty "
+        f"{win} GROUP BY division ORDER BY revenue_bhd DESC") or []
+    return {"by_payment": pay, "by_division": div}
+
+
+def _pace(kpis: dict, data_date: str | None) -> dict:
+    """MTD pace vs target and vs last month — 'on track for BHD X'."""
+    import calendar
+    from datetime import date
+    try:
+        from app.settings import setting
+        target = float(setting("monthly_sales_target_bhd") or 0)
+    except Exception:  # noqa: BLE001
+        target = 0.0
+    mtd = float(kpis.get("rev_mtd") or 0)
+    prev = float(kpis.get("rev_prev_month") or 0)
+    out = {"target_bhd": target, "mtd_bhd": mtd, "prev_month_bhd": prev,
+           "projected_bhd": None, "target_pct": None, "on_track": None}
+    try:
+        d = date.fromisoformat(str(data_date)[:10])
+        days_in_month = calendar.monthrange(d.year, d.month)[1]
+        projected = mtd / d.day * days_in_month if d.day else mtd
+        out["projected_bhd"] = round(projected, 0)
+        if target > 0:
+            out["target_pct"] = round(mtd / target * 100, 1)
+            out["on_track"] = projected >= target
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 # The dashboard payload is ~20 view queries; each is a PostgREST round-trip. Build the
 # independent sections concurrently and serve warm hits from an in-process cache (zero
 # round-trips). flush on ingest via invalidate_dashboard_cache() (ai.flush_cache calls it).
@@ -263,6 +317,8 @@ def dashboard(force: bool = False) -> dict:
             "salesman": ex.submit(sales_by_salesman),
             "agents": ex.submit(agents_status),
             "fresh": ex.submit(data_freshness),
+            "daily_mtd": ex.submit(daily_sales_mtd),
+            "split": ex.submit(sales_split_mtd),
         }
         r = {k: f.result() for k, f in futs.items()}
     out = _assemble_dashboard(r)
@@ -300,6 +356,10 @@ def _assemble_dashboard(r: dict) -> dict:
         "by_salesman": r["salesman"][:8],
         "agents": r["agents"],
         "alerts": a,
+        "daily_mtd": r["daily_mtd"],
+        "by_payment": r["split"]["by_payment"],
+        "by_division": r["split"]["by_division"],
+        "pace": _pace(kpis, s.get("data_date")),
     }
 
 

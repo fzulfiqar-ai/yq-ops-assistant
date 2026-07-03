@@ -34,6 +34,13 @@ interface Health {
   margin_basis?: string; cost_coverage_pct?: number; below_cost_count?: number
 }
 interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
+interface DailyRow { day: string; gross_bhd: number; net_bhd: number; orders: number }
+interface PaymentRow { sale_type: string; orders: number; revenue_bhd: number }
+interface DivisionRow { division: string; orders: number; revenue_bhd: number; giveaway_qty: number }
+interface Pace {
+  target_bhd: number; mtd_bhd: number; prev_month_bhd: number
+  projected_bhd: number | null; target_pct: number | null; on_track: boolean | null
+}
 interface DashboardData {
   data_as_of?: string | null
   data_stale?: boolean
@@ -48,6 +55,10 @@ interface DashboardData {
   by_salesman: SalesmanRow[]
   agents: AgentRow[]
   alerts: { negative_margin_count: number }
+  daily_mtd?: DailyRow[]
+  by_payment?: PaymentRow[]
+  by_division?: DivisionRow[]
+  pace?: Pace
 }
 
 const container = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } }
@@ -227,6 +238,69 @@ export default function Dashboard() {
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
         </motion.div>
+      )}
+
+      {/* This month, day by day — daily sales + pace vs target + cash/credit/division split */}
+      {data?.daily_mtd && data.daily_mtd.length > 0 && (
+        <Card className="mt-4 p-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <div className="font-display text-base font-semibold">This month, day by day</div>
+              <div className="text-xs text-muted-foreground">Gross sales per day (VAT-incl) · {monthLabel(data.data_as_of || '')}</div>
+            </div>
+            {data.pace && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                <span className="text-muted-foreground">MTD <b className="text-foreground tabular-nums">{bhd(data.pace.mtd_bhd, 0)}</b></span>
+                {data.pace.projected_bhd != null && (
+                  <span className="text-muted-foreground">Projected <b className="text-foreground tabular-nums">{bhd(data.pace.projected_bhd, 0)}</b></span>
+                )}
+                {data.pace.target_bhd > 0 ? (
+                  <span className={cn('rounded-full px-2.5 py-0.5 text-[12px] font-semibold',
+                    data.pace.on_track ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                      : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300')}>
+                    {data.pace.target_pct}% of {bhd(data.pace.target_bhd, 0)} target
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Set a monthly target in Settings →</span>
+                )}
+              </div>
+            )}
+          </div>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={data.daily_mtd} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
+              <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
+                tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
+                width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+              <Tooltip
+                formatter={(v, name) => (name === 'gross_bhd' ? [bhd(Number(v)), 'Gross'] : [String(v), String(name)])}
+                labelFormatter={(d) => fmtDate(String(d))}
+                contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+              <Bar dataKey="gross_bhd" fill="#7c3aed" radius={[4, 4, 0, 0]} maxBarSize={26} />
+            </BarChart>
+          </ResponsiveContainer>
+          {(data.by_payment?.length || data.by_division?.length) && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3 text-[13px]">
+              {(data.by_payment || []).map((p) => (
+                <span key={p.sale_type} className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
+                  <span className={cn('h-2 w-2 rounded-full', p.sale_type === 'cash' ? 'bg-emerald-500' : 'bg-blue-500')} />
+                  <span className="capitalize">{p.sale_type}</span>
+                  <b className="tabular-nums">{bhd(p.revenue_bhd, 0)}</b>
+                </span>
+              ))}
+              <span className="mx-1 hidden h-4 w-px bg-border sm:block" />
+              {(data.by_division || []).map((d) => (
+                <span key={d.division} className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
+                  <span className="text-muted-foreground">{d.division}</span>
+                  <b className="tabular-nums">{bhd(d.revenue_bhd, 0)}</b>
+                  {Number(d.giveaway_qty) > 0 && (
+                    <span className="text-[11px] text-amber-600">+{num(d.giveaway_qty)} free</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+        </Card>
       )}
 
       {/* Business health — the CEO truth the totals hide: margin, cash speed, frozen capital */}
