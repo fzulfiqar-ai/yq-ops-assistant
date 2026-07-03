@@ -45,14 +45,53 @@ def _safe_code(code: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", (code or "").strip()) or "item"
 
 
+def make_thumb(data: bytes, size: int = 256) -> bytes | None:
+    """256px JPEG thumbnail (white matte) — exports embed these instead of the full
+    photos, which is what turned a 10-minute Excel build into seconds."""
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        if im.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            im = im.convert("RGBA")
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        else:
+            im = im.convert("RGB")
+        im.thumbnail((size, size))
+        out = io.BytesIO()
+        im.save(out, "JPEG", quality=82)
+        return out.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("thumbnail failed: %s", e)
+        return None
+
+
+def thumb_path(code: str, kind: str) -> str:
+    return f"thumbs/{_safe_code(code)}-{kind}.jpg"
+
+
+def upload_thumb(code: str, kind: str, full_image: bytes) -> None:
+    """Best-effort thumbnail upload (fixed path per code+kind, overwritten on re-upload)."""
+    tb = make_thumb(full_image)
+    if not tb:
+        return
+    try:
+        get_client().storage.from_(_BUCKET).upload(
+            thumb_path(code, kind), tb, {"content-type": "image/jpeg", "upsert": "true"})
+    except Exception as e:  # noqa: BLE001
+        log.warning("thumb upload failed for %s-%s: %s", code, kind, e)
+
+
 def upload_image(code: str, kind: str, data: bytes, content_type: str, by: str = "") -> str:
-    """Store a product/package photo and point the item at it. Returns the public URL."""
+    """Store a product/package photo (+ its export thumbnail) and point the item at it."""
     ensure_bucket()
     kind = "package" if kind == "package" else "product"
     ext = {"image/png": ".png", "image/webp": ".webp"}.get(content_type, ".jpg")
     path = f"items/{_safe_code(code)}-{kind}-{int(time.time())}{ext}"
     get_client().storage.from_(_BUCKET).upload(
         path, data, {"content-type": content_type, "upsert": "false"})
+    upload_thumb(code, kind, data)
     url = public_url(path)
     col = f"{kind}_image_url"
     get_client().table("catalog_items").update(
@@ -61,15 +100,22 @@ def upload_image(code: str, kind: str, data: bytes, content_type: str, by: str =
     return url
 
 
-def list_catalog(include_inactive: bool = False) -> dict:
-    """Full catalog grouped for the portal page (all price tiers — internal users)."""
+def list_catalog(include_inactive: bool = False, role: str = "admin") -> dict:
+    """Catalog grouped for the portal page. Admin/member see all price tiers;
+    the SALESMAN role gets ONLY the B2B price (standard_rate from the price book) —
+    dealer/roadshow/RRP never leave the server for those accounts."""
     where = "" if include_inactive else "WHERE is_active"
     rows = exec_sql(
         "SELECT item_code, display_name, spec, category, brand, division, dealer_price, "
         "roadshow_price, rrp, standard_rate, product_image_url, package_image_url, "
-        f"sort_order, is_active, updated_at FROM v_catalog {where} "
+        f"sort_order, is_active, created_at, updated_at FROM v_catalog {where} "
         "ORDER BY category, sort_order NULLS LAST, item_code"
     ) or []
+    if role == "salesman":
+        for r in rows:
+            r.pop("dealer_price", None)
+            r.pop("roadshow_price", None)
+            r.pop("rrp", None)
     cats = sorted({r.get("category") or "OTHER" for r in rows},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
     return {"items": rows, "categories": cats, "count": len(rows)}
@@ -140,47 +186,75 @@ def public_catalog(token: str) -> dict | None:
     return {"items": rows, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain"}
 
 
-# ── branded .xlsx export (same shape as the sheet the owner shares today) ─────
+# ── branded exports (.xlsx + .pdf) — thumbnails make these fast ────────────────
 
-_xlsx_cache: dict = {"sig": None, "bytes": None}
+_export_cache: dict[str, tuple[str, bytes]] = {}   # key f"{fmt}:{version}" -> (sig, bytes)
 
 
-def export_xlsx() -> bytes:
-    """Workbook with one sheet per category, embedded photos, all price tiers.
-    Cached until any catalog row changes (images are re-downloaded on rebuild only)."""
-    sig_row = (exec_sql("SELECT COUNT(*) AS n, MAX(updated_at) AS u FROM catalog_items") or [{}])[0]
-    sig = f"{sig_row.get('n')}|{sig_row.get('u')}"
-    if _xlsx_cache["sig"] == sig and _xlsx_cache["bytes"]:
-        return _xlsx_cache["bytes"]
+def _catalog_sig() -> str:
+    r = (exec_sql("SELECT COUNT(*) AS n, MAX(updated_at) AS u FROM catalog_items") or [{}])[0]
+    return f"{r.get('n')}|{r.get('u')}"
+
+
+def _fetch_images(items: list[dict], kinds: tuple[str, ...] = ("product", "package")) -> dict:
+    """{(code, kind): jpeg_bytes} — 256px thumbnails (full photo fallback), fetched in
+    PARALLEL. Thumbs (~10KB vs ~200KB) + 8 workers turned the 10-minute export into
+    seconds; results are then cached until the catalog changes."""
+    from concurrent.futures import ThreadPoolExecutor
 
     import requests
+    sess = requests.Session()
+
+    def fetch(job: tuple[str, str, str | None]):
+        code, kind, full = job
+        for url in (public_url(thumb_path(code, kind)), full):
+            if not url:
+                continue
+            try:
+                r = sess.get(url, timeout=8)
+                if r.ok and r.content:
+                    return (code, kind), r.content
+            except Exception:  # noqa: BLE001
+                continue
+        return (code, kind), None
+
+    jobs = [(it.get("item_code") or "", kind, it.get(f"{kind}_image_url"))
+            for it in items for kind in kinds if it.get(f"{kind}_image_url")]
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="cat-img") as ex:
+        for key, data in ex.map(fetch, jobs):
+            if data:
+                out[key] = data
+    return out
+
+
+def export_xlsx(version: str = "full") -> bytes:
+    """Workbook with one sheet per category + embedded photos. version='full' = all
+    price tiers (owner/members); 'b2b' = ONLY the price-book rate (salesman copy)."""
+    version = "b2b" if version == "b2b" else "full"
+    sig = _catalog_sig()
+    cached = _export_cache.get(f"xlsx:{version}")
+    if cached and cached[0] == sig:
+        return cached[1]
+
     from openpyxl import Workbook
     from openpyxl.drawing.image import Image as XLImage
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
     data = list_catalog()
+    imgs = _fetch_images(data["items"])
     wb = Workbook()
     wb.remove(wb.active)
     head_fill = PatternFill("solid", fgColor="6D28D9")
     head_font = Font(color="FFFFFF", bold=True)
-    headers = ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC",
-               "Dealer Cost", "CauseWay & Road Show", "RRP", "Standard Rate (BHD)"]
-    widths = [5, 18, 18, 12, 46, 12, 18, 10, 16]
-    sess = requests.Session()
-
-    def _img(url: str | None) -> XLImage | None:
-        if not url:
-            return None
-        try:
-            r = sess.get(url, timeout=10)
-            r.raise_for_status()
-            im = XLImage(io.BytesIO(r.content))
-            scale = 100 / max(im.height, 1)
-            im.height, im.width = int(im.height * scale), int(im.width * scale)
-            return im
-        except Exception:  # noqa: BLE001
-            return None
+    if version == "b2b":
+        headers = ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC", "Price (BD)"]
+        widths = [5, 18, 18, 12, 52, 12]
+    else:
+        headers = ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC",
+                   "Dealer Cost", "CauseWay & Road Show", "RRP", "Book Rate (BD)"]
+        widths = [5, 18, 18, 12, 46, 12, 18, 10, 14]
 
     for cat in data["categories"]:
         ws = wb.create_sheet(title=(cat or "OTHER")[:31])
@@ -193,23 +267,123 @@ def export_xlsx() -> bytes:
         r = 2
         for i, it in enumerate([x for x in data["items"] if (x.get("category") or "OTHER") == cat], 1):
             ws.row_dimensions[r].height = 80
-            vals = [i, None, None, it.get("item_code"), it.get("spec") or it.get("display_name"),
-                    it.get("dealer_price"), it.get("roadshow_price"), it.get("rrp"),
-                    it.get("standard_rate")]
+            base = [i, None, None, it.get("item_code"), it.get("spec") or it.get("display_name")]
+            vals = base + ([it.get("standard_rate")] if version == "b2b" else
+                           [it.get("dealer_price"), it.get("roadshow_price"), it.get("rrp"),
+                            it.get("standard_rate")])
             for j, v in enumerate(vals, start=1):
                 cell = ws.cell(row=r, column=j, value=v)
                 cell.alignment = Alignment(vertical="center", wrap_text=(j == 5),
                                            horizontal="center" if j != 5 else "left")
-            for col, key in ((2, "product_image_url"), (3, "package_image_url")):
-                im = _img(it.get(key))
-                if im:
+            for col, kind in ((2, "product"), (3, "package")):
+                raw = imgs.get((it.get("item_code") or "", kind))
+                if raw:
+                    im = XLImage(io.BytesIO(raw))
+                    scale = 100 / max(im.height, 1)
+                    im.height, im.width = int(im.height * scale), int(im.width * scale)
                     ws.add_image(im, f"{get_column_letter(col)}{r}")
             r += 1
 
     buf = io.BytesIO()
     wb.save(buf)
     out = buf.getvalue()
-    _xlsx_cache.update(sig=sig, bytes=out)
+    _export_cache[f"xlsx:{version}"] = (sig, out)
+    return out
+
+
+def _latin(s: object) -> str:
+    """fpdf core fonts are latin-1 — replace anything else so a spec char can't crash the PDF."""
+    return str(s or "").encode("latin-1", "replace").decode("latin-1")
+
+
+def export_pdf(version: str = "full") -> bytes:
+    """Branded catalog PDF (A4, grid of photo cards per category) — what salesmen
+    forward on WhatsApp. version='b2b' shows ONLY the price-book rate."""
+    version = "b2b" if version == "b2b" else "full"
+    sig = _catalog_sig()
+    cached = _export_cache.get(f"pdf:{version}")
+    if cached and cached[0] == sig:
+        return cached[1]
+
+    from fpdf import FPDF
+
+    data = list_catalog()
+    imgs = _fetch_images(data["items"], kinds=("product",))
+    PURPLE = (109, 40, 217)
+    pdf = FPDF("P", "mm", "A4")
+    pdf.set_auto_page_break(False)
+    pdf.set_title("YQ Bahrain - VFAN Catalog")
+
+    COLS, GUT, M = 3, 6, 12
+    card_w = (210 - 2 * M - (COLS - 1) * GUT) / COLS   # ≈ 58mm
+    card_h = 88
+    img_h = 44
+
+    def header(cat: str) -> None:
+        pdf.add_page()
+        pdf.set_fill_color(*PURPLE)
+        pdf.rect(0, 0, 210, 22, "F")
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("helvetica", "B", 15)
+        pdf.set_xy(M, 5)
+        pdf.cell(0, 7, "YQ Bahrain - VFAN Catalog")
+        pdf.set_font("helvetica", "", 9)
+        pdf.set_xy(M, 12)
+        label = "B2B trade prices" if version == "b2b" else "Full price tiers (internal)"
+        pdf.cell(0, 5, _latin(f"{cat.title()}  ·  {label}  ·  {datetime.now():%d %b %Y}"))
+        pdf.set_text_color(30, 20, 48)
+
+    for cat in data["categories"]:
+        items = [x for x in data["items"] if (x.get("category") or "OTHER") == cat]
+        if not items:
+            continue
+        header(cat)
+        x0, y = M, 28
+        col = 0
+        for it in items:
+            if y + card_h > 287:
+                header(cat)
+                x0, y, col = M, 28, 0
+            x = x0 + col * (card_w + GUT)
+            pdf.set_draw_color(225, 222, 235)
+            pdf.rect(x, y, card_w, card_h)
+            raw = imgs.get((it.get("item_code") or "", "product"))
+            if raw:
+                try:
+                    pdf.image(io.BytesIO(raw), x=x + 6, y=y + 3, h=img_h - 6,
+                              keep_aspect_ratio=True, w=card_w - 12)
+                except Exception:  # noqa: BLE001
+                    pass
+            pdf.set_xy(x + 3, y + img_h)
+            pdf.set_font("helvetica", "B", 11)
+            pdf.cell(card_w - 6, 5, _latin(it.get("item_code")))
+            pdf.set_xy(x + 3, y + img_h + 5.5)
+            pdf.set_font("helvetica", "", 7)
+            pdf.set_text_color(110, 105, 130)
+            spec = _latin((it.get("spec") or it.get("display_name") or "").replace("\n", "  "))
+            pdf.multi_cell(card_w - 6, 3.2, spec[:170], max_line_height=3.2)
+            pdf.set_text_color(30, 20, 48)
+            pdf.set_font("helvetica", "B", 10)
+            pdf.set_xy(x + 3, y + card_h - 7)
+            if version == "b2b":
+                v = it.get("standard_rate")
+                pdf.set_text_color(*PURPLE)
+                pdf.cell(card_w - 6, 5, _latin(f"BD {v:.3f}" if v is not None else "-"), align="R")
+                pdf.set_text_color(30, 20, 48)
+            else:
+                parts = [f"D {it['dealer_price']:.2f}" if it.get("dealer_price") is not None else None,
+                         f"R {it['roadshow_price']:.2f}" if it.get("roadshow_price") is not None else None,
+                         f"RRP {it['rrp']:.2f}" if it.get("rrp") is not None else None,
+                         f"Bk {it['standard_rate']:.2f}" if it.get("standard_rate") is not None else None]
+                pdf.set_font("helvetica", "B", 7.5)
+                pdf.cell(card_w - 6, 5, _latin("  ".join(p for p in parts if p)), align="R")
+            col += 1
+            if col >= COLS:
+                col = 0
+                y += card_h + GUT
+        # footer page numbers
+    out = bytes(pdf.output())
+    _export_cache[f"pdf:{version}"] = (sig, out)
     return out
 
 

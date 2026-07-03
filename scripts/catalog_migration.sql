@@ -47,7 +47,8 @@ select
   ci.package_image_url,
   ci.sort_order,
   ci.is_active,
-  ci.updated_at
+  ci.updated_at,
+  ci.created_at
 from catalog_items ci
 left join lateral (
   select max(rate_bhd) as rate_bhd

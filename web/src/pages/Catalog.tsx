@@ -9,7 +9,6 @@ import { apiGet, apiPost, apiUpload, apiDownload, apiSend } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
-import { bhd } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -31,45 +30,52 @@ export interface CatalogItem {
   package_image_url?: string | null
   sort_order?: number | null
   is_active?: boolean
+  created_at?: string | null
 }
+
+const isNewItem = (i: CatalogItem) =>
+  !!i.created_at && Date.now() - new Date(i.created_at).getTime() < 14 * 864e5
 interface CatalogData { items: CatalogItem[]; categories: string[]; count: number }
 interface ShareLink { token: string; url: string }
 
-const price = (v?: number | null) => (v == null ? '—' : bhd(Number(v)))
+// Plain compact numbers in tiers — "BHD" on every value made the row unreadable on cards.
+const n3 = (v?: number | null) =>
+  v == null ? null : Number(v).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')
 
-function Tier({ label, value, strong }: { label: string; value?: number | null; strong?: boolean }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className={cn('truncate text-[13px] tabular-nums', strong ? 'font-bold text-primary' : 'font-medium')}>{price(value)}</div>
-    </div>
-  )
-}
-
-function ItemCard({ it, isAdmin, onEdit }: { it: CatalogItem; isAdmin: boolean; onEdit: (i: CatalogItem) => void }) {
+function ItemCard({ it, isAdmin, isSalesman, onEdit, onView }: {
+  it: CatalogItem; isAdmin: boolean; isSalesman: boolean
+  onEdit: (i: CatalogItem) => void; onView: (i: CatalogItem) => void
+}) {
   const [side, setSide] = useState<'product' | 'package'>('product')
   const img = side === 'product' ? it.product_image_url : it.package_image_url
+  const hero = isSalesman ? it.standard_rate : it.rrp
+  const tiers = isSalesman ? [] : ([
+    ['Dealer', it.dealer_price], ['Road', it.roadshow_price], ['Book', it.standard_rate],
+  ] as const).filter(([, v]) => v != null)
   return (
     <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
       className={cn('group overflow-hidden rounded-2xl border bg-card shadow-soft transition-shadow hover:shadow-lift', it.is_active === false && 'opacity-60')}>
-      <div className="relative aspect-square bg-white">
+      <div className="relative aspect-square cursor-pointer bg-white" onClick={() => onView(it)}>
         {img ? (
           <img src={img} alt={it.item_code} loading="lazy" className="h-full w-full object-contain p-3" />
         ) : (
           <div className="grid h-full w-full place-items-center text-muted-foreground"><Package size={40} strokeWidth={1} /></div>
         )}
         {it.package_image_url && (
-          <button onClick={() => setSide((s) => (s === 'product' ? 'package' : 'product'))}
+          <button onClick={(e) => { e.stopPropagation(); setSide((s) => (s === 'product' ? 'package' : 'product')) }}
             className="absolute bottom-2 right-2 rounded-full border bg-background/90 px-2.5 py-1 text-[11px] font-medium shadow-sm backdrop-blur transition hover:border-primary/50"
             title="Flip product / package photo">
             {side === 'product' ? 'Box' : 'Item'}
           </button>
         )}
+        {isNewItem(it) && (
+          <span className="absolute left-2 top-2 rounded-full bg-primary px-2 py-0.5 text-[10px] font-bold uppercase text-primary-foreground shadow-sm">New</span>
+        )}
         {it.is_active === false && (
-          <span className="absolute left-2 top-2 rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground">hidden</span>
+          <span className="absolute left-2 top-8 rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground">hidden</span>
         )}
         {isAdmin && (
-          <button onClick={() => onEdit(it)}
+          <button onClick={(e) => { e.stopPropagation(); onEdit(it) }}
             className="absolute right-2 top-2 rounded-full border bg-background/90 p-1.5 opacity-0 shadow-sm backdrop-blur transition group-hover:opacity-100"
             title="Edit item">
             <Pencil size={13} />
@@ -81,15 +87,73 @@ function ItemCard({ it, isAdmin, onEdit }: { it: CatalogItem; isAdmin: boolean; 
           <span className="font-display text-sm font-bold">{it.item_code}</span>
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{it.brand || 'VFAN'}</span>
         </div>
-        {it.spec && <div className="mt-0.5 line-clamp-2 whitespace-pre-line text-[12px] leading-snug text-muted-foreground">{it.spec}</div>}
-        <div className="mt-2 grid grid-cols-4 gap-2 border-t pt-2">
-          <Tier label="Dealer" value={it.dealer_price} />
-          <Tier label="Roadshow" value={it.roadshow_price} />
-          <Tier label="RRP" value={it.rrp} strong />
-          <Tier label="Book" value={it.standard_rate} />
+        {it.spec && (
+          <button onClick={() => onView(it)}
+            className="mt-0.5 line-clamp-2 whitespace-pre-line text-left text-[12px] leading-snug text-muted-foreground hover:text-foreground"
+            title="View full details">
+            {it.spec}
+          </button>
+        )}
+        <div className="mt-2 flex items-end justify-between gap-2 border-t pt-2">
+          <div className="flex min-w-0 flex-wrap gap-x-2.5 gap-y-0.5 text-[11.5px] text-muted-foreground">
+            {tiers.map(([label, v]) => (
+              <span key={label} className="whitespace-nowrap">
+                {label} <b className="text-foreground/80 tabular-nums">{n3(v)}</b>
+              </span>
+            ))}
+          </div>
+          <div className="shrink-0 text-right">
+            <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {isSalesman ? 'Price' : 'RRP'}
+            </div>
+            <div className="font-display text-base font-extrabold leading-tight text-primary tabular-nums">
+              {hero != null ? `BD ${n3(hero)}` : '—'}
+            </div>
+          </div>
         </div>
       </div>
     </motion.div>
+  )
+}
+
+function DetailDialog({ item, isSalesman, onClose }: { item: CatalogItem; isSalesman: boolean; onClose: () => void }) {
+  const [side, setSide] = useState<'product' | 'package'>('product')
+  const img = side === 'product' ? item.product_image_url : item.package_image_url
+  const rows = isSalesman
+    ? [['Price (B2B)', item.standard_rate]]
+    : ([['Dealer', item.dealer_price], ['Causeway & Roadshow', item.roadshow_price],
+       ['RRP', item.rrp], ['Book rate', item.standard_rate]] as const)
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
+      <Card className="max-h-[90vh] w-full max-w-md overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <div className="font-display text-lg font-bold">{item.item_code}</div>
+            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.brand || 'VFAN'} · {(item.category || '').toLowerCase()}</div>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
+        </div>
+        <div className="relative rounded-xl border bg-white">
+          {img ? <img src={img} alt={item.item_code} className="mx-auto max-h-72 object-contain p-4" />
+            : <div className="grid h-48 w-full place-items-center text-muted-foreground"><Package size={44} strokeWidth={1} /></div>}
+          {item.package_image_url && (
+            <button onClick={() => setSide((s) => (s === 'product' ? 'package' : 'product'))}
+              className="absolute bottom-2 right-2 rounded-full border bg-background/90 px-2.5 py-1 text-[11px] font-medium shadow-sm">
+              {side === 'product' ? 'Show box' : 'Show item'}
+            </button>
+          )}
+        </div>
+        {item.spec && <p className="mt-3 whitespace-pre-line text-[13px] leading-relaxed text-muted-foreground">{item.spec}</p>}
+        <div className="mt-3 space-y-1.5 border-t pt-3">
+          {rows.map(([label, v]) => v != null && (
+            <div key={String(label)} className="flex items-baseline justify-between text-sm">
+              <span className="text-muted-foreground">{label}</span>
+              <b className="tabular-nums">BD {n3(v as number)}</b>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
   )
 }
 
@@ -241,6 +305,8 @@ export default function Catalog() {
   const qc = useQueryClient()
   const toast = useToast()
   const isAdmin = me?.role === 'admin'
+  const isSalesman = me?.role === 'salesman'
+  const [view, setView] = useState<CatalogItem | null>(null)
   const { data, isLoading } = useQuery({ queryKey: ['catalog'], queryFn: () => apiGet<CatalogData>('/catalog') })
   const [cat, setCat] = useState<string>('All')
   const [q, setQ] = useState('')
@@ -261,10 +327,17 @@ export default function Catalog() {
     return r
   }, [data, cat, q, needsPhoto])
 
-  async function exportXlsx() {
+  const [dlOpen, setDlOpen] = useState(false)
+  const [dlVersion, setDlVersion] = useState<'full' | 'b2b'>(isSalesman ? 'b2b' : 'full')
+
+  async function download(format: 'pdf' | 'xlsx') {
+    setDlOpen(false)
     setExporting(true)
+    toast('Preparing your catalog — first build takes a few seconds…', 'info')
     try {
-      await apiDownload('/catalog/export', {}, 'YQ-VFAN-Catalog.xlsx')
+      await apiDownload(`/catalog/export?format=${format}&version=${dlVersion}`, {},
+        `YQ-VFAN-Catalog${dlVersion === 'b2b' ? '-B2B' : ''}.${format}`)
+      toast('Catalog downloaded.', 'success')
     } catch {
       toast('Export failed — try again.', 'error')
     } finally {
@@ -287,9 +360,35 @@ export default function Catalog() {
           {isAdmin && (
             <Button variant="outline" size="sm" onClick={() => setEdit({})}><Plus size={15} /> Add item</Button>
           )}
-          <Button variant="outline" size="sm" onClick={exportXlsx} disabled={exporting}>
-            {exporting ? <Loader2 className="animate-spin" size={15} /> : <Download size={15} />} Excel
-          </Button>
+          <div className="relative">
+            <Button variant="outline" size="sm" onClick={() => setDlOpen((o) => !o)} disabled={exporting}>
+              {exporting ? <Loader2 className="animate-spin" size={15} /> : <Download size={15} />} Download
+            </Button>
+            {dlOpen && (
+              <div className="absolute right-0 z-20 mt-1 w-56 rounded-xl border bg-card p-2 shadow-lift"
+                onMouseLeave={() => setDlOpen(false)}>
+                {!isSalesman && (
+                  <div className="mb-2 flex gap-1 rounded-lg bg-secondary/50 p-1">
+                    {(['full', 'b2b'] as const).map((v) => (
+                      <button key={v} onClick={() => setDlVersion(v)}
+                        className={cn('flex-1 rounded-md px-2 py-1 text-[12px] font-medium transition',
+                          dlVersion === v ? 'bg-card shadow-sm' : 'text-muted-foreground')}>
+                        {v === 'full' ? 'All tiers' : 'B2B price only'}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button onClick={() => download('pdf')}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent">
+                  📄 PDF <span className="ml-auto text-[11px] text-muted-foreground">for WhatsApp</span>
+                </button>
+                <button onClick={() => download('xlsx')}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent">
+                  📊 Excel <span className="ml-auto text-[11px] text-muted-foreground">with photos</span>
+                </button>
+              </div>
+            )}
+          </div>
           <Button size="sm" onClick={() => setShare(true)}><Share2 size={15} /> Share</Button>
         </div>
       </div>
@@ -320,7 +419,8 @@ export default function Catalog() {
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           {items.map((it) => (
-            <ItemCard key={it.item_code} it={it} isAdmin={!!isAdmin} onEdit={setEdit} />
+            <ItemCard key={it.item_code} it={it} isAdmin={!!isAdmin} isSalesman={!!isSalesman}
+              onEdit={setEdit} onView={setView} />
           ))}
         </div>
       )}
@@ -330,6 +430,7 @@ export default function Catalog() {
           onSaved={() => { setEdit(null); qc.invalidateQueries({ queryKey: ['catalog'] }) }} />
       )}
       {share && <ShareDialog onClose={() => setShare(false)} />}
+      {view && <DetailDialog item={view} isSalesman={!!isSalesman} onClose={() => setView(null)} />}
     </div>
   )
 }

@@ -1,13 +1,31 @@
 import { Suspense, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search, Menu } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { apiGet } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { navFor, NAV } from '@/lib/nav'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
+
+/** Pre-warm the most-clicked pages a moment after login — by the time the owner
+ *  clicks Sales/Inventory/Catalog, the data is already in memory (0ms click). */
+function usePrefetchPages(enabled: boolean) {
+  const qc = useQueryClient()
+  useEffect(() => {
+    if (!enabled) return
+    const t = setTimeout(() => {
+      for (const key of ['sales', 'inventory', 'margins', 'receivables']) {
+        qc.prefetchQuery({ queryKey: ['report', key], queryFn: () => apiGet(`/report/${key}`) })
+      }
+      qc.prefetchQuery({ queryKey: ['catalog'], queryFn: () => apiGet('/catalog') })
+    }, 2500)
+    return () => clearTimeout(t)
+  }, [enabled, qc])
+}
 
 const HEADER_QUOTES = [
   'Decisions made one day faster compound into a year of advantage.',
@@ -57,6 +75,7 @@ export function AppShell() {
   const { theme, toggle } = useTheme()
   const loc = useLocation()
   const outlet = useOutlet()
+  usePrefetchPages(!!me && me.role !== 'salesman')
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem('yq-collapsed') === '1',
   )

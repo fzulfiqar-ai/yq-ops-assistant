@@ -87,28 +87,34 @@ function relTime(iso?: string) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-function KpiCard({ accent, icon: Icon, label, value, foot, hero }: {
+function KpiCard({ accent, icon: Icon, label, value, foot, hero, to }: {
   accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode
-  foot?: React.ReactNode; hero?: boolean
+  foot?: React.ReactNode; hero?: boolean; to?: string
 }) {
-  return (
-    <motion.div variants={item}>
-      <Card className="group relative flex h-full flex-col overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
-        {/* top accent rail */}
-        <div className="absolute inset-x-0 top-0 h-[3px]" style={{ background: accent }} />
-        {/* soft accent glow that intensifies on hover */}
-        <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-500 group-hover:opacity-70"
-          style={{ background: accent }} />
-        <div className="relative grid h-9 w-9 place-items-center rounded-xl bg-accent/60 text-accent-foreground ring-1 ring-inset ring-white/40">
+  const card = (
+    <Card className="group relative flex h-full flex-col overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
+      {/* top accent rail */}
+      <div className="absolute inset-x-0 top-0 h-[3px]" style={{ background: accent }} />
+      {/* soft accent glow that intensifies on hover */}
+      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-500 group-hover:opacity-70"
+        style={{ background: accent }} />
+      <div className="relative flex items-start justify-between">
+        <div className="grid h-9 w-9 place-items-center rounded-xl bg-accent/60 text-accent-foreground ring-1 ring-inset ring-white/40">
           <Icon size={18} />
         </div>
-        <div className={cn(
-          'relative mt-3 font-display font-extrabold leading-none tracking-tight tabular-nums',
-          hero ? 'text-gradient text-[1.85rem]' : 'text-[1.6rem]',
-        )}>{value}</div>
-        <div className="relative mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-        {foot && <div className="relative mt-1.5 text-[12.5px]">{foot}</div>}
-      </Card>
+        {to && <ArrowUpRight size={15} className="text-muted-foreground/50 transition group-hover:text-primary" />}
+      </div>
+      <div className={cn(
+        'relative mt-3 font-display font-extrabold leading-none tracking-tight tabular-nums',
+        hero ? 'text-gradient text-[1.85rem]' : 'text-[1.6rem]',
+      )}>{value}</div>
+      <div className="relative mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      {foot && <div className="relative mt-1.5 text-[12.5px]">{foot}</div>}
+    </Card>
+  )
+  return (
+    <motion.div variants={item}>
+      {to ? <Link to={to} className="block h-full">{card}</Link> : card}
     </motion.div>
   )
 }
@@ -229,23 +235,23 @@ export default function Dashboard() {
       ) : (
         <motion.div variants={container} initial="hidden" animate="show"
           className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)" hero
+          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)" hero to="/sales"
             value={<CountUp value={k.rev_mtd} format={(n) => bhd(n, 0)} />}
             foot={<span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
               {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
               {up ? '+' : ''}{deltaPct.toFixed(1)}% MoM · ex-VAT {bhd(k.net_mtd, 0)}</span>} />
-          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label="Latest day"
+          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label="Latest day" to="/sales"
             value={<CountUp value={k.rev_today} format={(n) => bhd(n, 0)} />}
             foot={<span className="text-muted-foreground">Yesterday {bhd(k.rev_yesterday, 0)} · {k.orders_today} orders</span>} />
-          <KpiCard accent={ACCENTS.slate} icon={FileText} label="Orders this month"
+          <KpiCard accent={ACCENTS.slate} icon={FileText} label="Orders this month" to="/sales"
             value={<CountUp value={k.orders_mtd} />}
             foot={<span className="text-muted-foreground">Invoices processed</span>} />
-          <KpiCard accent={ACCENTS.green} icon={Landmark} label="Receivables (total)"
+          <KpiCard accent={ACCENTS.green} icon={Landmark} label="Receivables (total)" to="/receivables"
             value={<CountUp value={k.total_receivables} format={(n) => bhd(n, 0)} />}
             foot={<span className="text-muted-foreground">
               <span className="font-semibold text-rose-600">{bhd(k.overdue_total_bhd, 0)} overdue &gt;30d</span>
               {' '}· {bhd(k.current_receivables_bhd ?? Math.max(k.total_receivables - k.overdue_total_bhd, 0), 0)} current · {k.overdue_count} accts</span>} />
-          <KpiCard accent={ACCENTS.amber} icon={Boxes} label="Low-stock items"
+          <KpiCard accent={ACCENTS.amber} icon={Boxes} label="Low-stock items" to="/inventory"
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
         </motion.div>

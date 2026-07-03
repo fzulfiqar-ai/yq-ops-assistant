@@ -13,6 +13,8 @@ pandas
 openpyxl
 xlrd
 pdfplumber
+pillow
+fpdf2
 python-docx
 pyyaml
 plotly

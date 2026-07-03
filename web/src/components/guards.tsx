@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Navigate } from 'react-router-dom'
-import { Lock, Loader2 } from 'lucide-react'
+import { Lock, Loader2, CloudOff, RefreshCw } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { Logo } from './Logo'
 import { Button } from './ui/button'
@@ -17,6 +17,7 @@ function Splash() {
   )
 }
 
+/** Server said 401/403 — a REAL permissions problem. */
 function NoAccess() {
   const { signOut } = useAuth()
   return (
@@ -37,11 +38,43 @@ function NoAccess() {
   )
 }
 
+/** Couldn't REACH the API (cold start / network) — keep retrying, never say "no access". */
+function ServerWaking() {
+  const { refreshMe } = useAuth()
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    const t = setInterval(() => { refreshMe() }, 20000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  return (
+    <div className="grid h-screen place-items-center bg-background px-4">
+      <div className="max-w-sm text-center">
+        <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-accent text-accent-foreground">
+          <CloudOff size={22} />
+        </div>
+        <h1 className="font-display text-xl font-bold">Waking the server…</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          The API is starting up (this can take ~30 seconds after a quiet period).
+          It will connect automatically — or tap retry.
+        </p>
+        <Button variant="outline" className="mt-5" disabled={busy}
+          onClick={async () => { setBusy(true); await refreshMe(); setBusy(false) }}>
+          {busy ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />} Retry now
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 export function ProtectedRoute() {
-  const { session, me, loading } = useAuth()
+  const { session, me, meState, loading } = useAuth()
   if (loading) return <Splash />
   if (!session) return <Navigate to="/login" replace />
-  if (!me) return <NoAccess />
+  if (!me) {
+    if (meState === 'denied') return <NoAccess />
+    return <ServerWaking />
+  }
   return <AppShell />
 }
 

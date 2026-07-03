@@ -50,6 +50,26 @@ function relTime(iso?: string) {
 const META = new Set(['agent', 'description', 'generated_at', 'summary', 'count', 'email'])
 const DRAFTS = new Set(['inventory', 'margin', 'anomaly', 'collections'])
 
+interface RepTargets { salesman: string; targets: { item_name: string; customer: string; markdown_pct: number }[] }
+interface PlanMove { move: string; impact_bhd: number; owner: string; link?: string }
+
+function formatRepList(rep: RepTargets): string {
+  const lines = [`*YQ push list — ${rep.salesman}* (${new Date().toLocaleDateString('en-GB')})`]
+  for (const t of rep.targets) {
+    lines.push(`• ${String(t.item_name).split(' (')[0]} → ${t.customer}${t.markdown_pct ? ` (offer up to -${t.markdown_pct}%)` : ''}`)
+  }
+  lines.push('', 'Check stock with the warehouse before promising. 💪')
+  return lines.join('\n')
+}
+
+function formatPlan(plan: PlanMove[]): string {
+  const lines = [`*YQ growth plan — week of ${new Date().toLocaleDateString('en-GB')}*`]
+  plan.forEach((p, i) => {
+    lines.push(`${i + 1}. [${p.owner}] ${p.move}${p.impact_bhd ? ` — ~BHD ${Number(p.impact_bhd).toLocaleString()}` : ''}`)
+  })
+  return lines.join('\n')
+}
+
 const prettyTitle = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 function fmtVal(k: string, v: unknown) {
   if (v == null) return '—'
@@ -81,6 +101,15 @@ export default function Agents() {
     setSchedLocal((s) => ({ ...s, [name]: cadence }))
     try { await apiPost(`/schedules/${name}`, { cadence }); toast(`${prettyTitle(name)} — ${cadence === 'off' ? 'schedule off' : `auto-runs ${cadence}`}.`, 'success') }
     catch { toast('Could not update the schedule.', 'error') }
+  }
+
+  async function copyRepList(rep: RepTargets) {
+    try { await navigator.clipboard.writeText(formatRepList(rep)); toast(`${rep.salesman}'s push list copied — paste into WhatsApp.`, 'success') }
+    catch { toast('Could not copy.', 'error') }
+  }
+  async function copyPlan(plan: PlanMove[]) {
+    try { await navigator.clipboard.writeText(formatPlan(plan)); toast("This week's plan copied — paste into WhatsApp.", 'success') }
+    catch { toast('Could not copy.', 'error') }
   }
 
   async function run(name: string) {
@@ -173,6 +202,29 @@ export default function Agents() {
                   return <div className="mt-1 text-[11px] font-medium text-primary">vs last run: {parts.length ? parts.join(' · ') : 'no change'}</div>
                 })()}
               </div>
+              {/* Weekly sales-team share: copy each rep's push list / the full growth plan
+                  as WhatsApp-ready text — run it Monday, paste into each rep's chat. */}
+              {a.name === 'sales_push' && Array.isArray(st.data.per_salesman) && (st.data.per_salesman as RepTargets[]).length > 0 && (
+                <div className="border-t px-5 py-2.5">
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Send to your reps — tap to copy a WhatsApp-ready list</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(st.data.per_salesman as RepTargets[]).map((rep) => (
+                      <button key={rep.salesman} onClick={() => copyRepList(rep)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12.5px] font-medium transition hover:border-primary/50 hover:bg-accent">
+                        <ClipboardList size={13} /> {rep.salesman} <span className="text-muted-foreground">({rep.targets.length})</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {a.name === 'growth_plan' && Array.isArray(st.data.plan) && (
+                <div className="border-t px-5 py-2.5">
+                  <button onClick={() => copyPlan(st.data!.plan as PlanMove[])}
+                    className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12.5px] font-medium transition hover:border-primary/50 hover:bg-accent">
+                    <ClipboardList size={13} /> Copy the week's plan (WhatsApp-ready)
+                  </button>
+                </div>
+              )}
               {list && (
                 <div className="px-5 py-3">
                   <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{prettyTitle(list.key)}</div>

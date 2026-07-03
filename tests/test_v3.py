@@ -133,6 +133,39 @@ def _():
     assert int(r["n"]) >= 150 and int(r["prev"]) >= 100 and int(r["m"]) >= 30, str(r)
 
 
+@test("catalog: salesman payload strips dealer/roadshow/rrp (B2B price only)")
+def _():
+    from app.catalog import list_catalog
+    rows = list_catalog(role="salesman")["items"]
+    assert rows, "empty catalog"
+    for r in rows[:20]:
+        assert "dealer_price" not in r and "roadshow_price" not in r and "rrp" not in r
+        assert "standard_rate" in r
+
+
+@test("exports: PDF magic + non-trivial size; xlsx b2b builds")
+def _():
+    from app.catalog import export_pdf, export_xlsx
+    p = export_pdf("b2b")
+    assert p[:5] == b"%PDF-" and len(p) > 50_000, f"pdf {len(p)} bytes"
+    x = export_xlsx("b2b")
+    assert x[:2] == b"PK" and len(x) > 50_000, f"xlsx {len(x)} bytes"
+
+
+@test("tracker v2: purchase-cost coverage >= 80 SKUs with source labels")
+def _():
+    from app.db_read import exec_sql
+    r = exec_sql("SELECT COUNT(cost_now) AS c, COUNT(cost_source) AS s FROM v_price_tracker")[0]
+    assert int(r["c"]) >= 80 and int(r["s"]) >= 80, str(r)
+
+
+@test("chat: photo fast-path returns a card marker for a real item")
+def _():
+    from app.chat_extras import photo_answer
+    ans = photo_answer("show me the picture of T02")
+    assert ans and "⟦card:" in ans, str(ans)[:80]
+
+
 # ── agents ────────────────────────────────────────────────────────────────────
 
 @test("agents: 35 registered; growth trio runs with real output")

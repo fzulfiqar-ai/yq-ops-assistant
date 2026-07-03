@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import DOMPurify from 'dompurify'
 import { AnimatePresence, motion } from 'motion/react'
-import { Send, Plus, Mic, MicOff, Trash2, MessageSquare, User, Database } from 'lucide-react'
-import { apiGet, apiStream } from '@/lib/api'
+import { Send, Plus, Mic, MicOff, Trash2, MessageSquare, User, Database, Paperclip, X, Loader2 } from 'lucide-react'
+import { apiGet, apiStream, apiUpload } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
 import { ContextCards, parseCards, type ContextCardData } from '@/components/ContextCard'
@@ -75,6 +75,23 @@ export default function Assistant() {
   const [busy, setBusy] = useState(false)
   const [listening, setListening] = useState(false)
   const [lang, setLang] = useState<'en-US' | 'ar-SA'>('en-US')
+  const [doc, setDoc] = useState<{ id: string; name: string } | null>(null)
+  const [uploading, setUploading] = useState(false)
+
+  async function uploadDoc(file: File | null) {
+    if (!file) return
+    setUploading(true)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const r = await apiUpload<{ doc_id: string; filename: string }>('/assistant/upload', form)
+      setDoc({ id: r.doc_id, name: r.filename })
+    } catch {
+      setDoc(null)
+    } finally {
+      setUploading(false)
+    }
+  }
   const { data: agents } = useQuery({ queryKey: ['agents'], queryFn: () => apiGet<{ name: string }[]>('/agents') })
   const scrollRef = useRef<HTMLDivElement>(null)
   const recogRef = useRef<any>(null)
@@ -123,7 +140,7 @@ export default function Assistant() {
     scrollDown()
     try {
       // stream the agentic briefing (routing → specialists → synthesis); append each chunk live
-      await apiStream('/orchestrate/stream', { question: q, model, history }, (chunk) => {
+      await apiStream('/orchestrate/stream', { question: q, model, history, doc_id: doc?.id ?? null }, (chunk) => {
         setChats((prev) => prev.map((c) => {
           if (c.id !== convId) return c
           const msgs = [...c.messages]
@@ -320,7 +337,23 @@ export default function Assistant() {
 
         {/* Input */}
         <div className="mt-3">
+          {doc && (
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/5 px-3 py-1.5 text-[12.5px]">
+              <Paperclip size={13} className="text-primary" />
+              <span className="max-w-[240px] truncate font-medium">{doc.name}</span>
+              <span className="text-muted-foreground">— questions will use this document</span>
+              <button onClick={() => setDoc(null)} className="rounded-full p-0.5 hover:bg-accent" title="Detach document">
+                <X size={13} />
+              </button>
+            </div>
+          )}
           <div className="flex items-end gap-2 rounded-2xl border bg-card px-3 py-2 shadow-soft transition focus-within:border-primary/40 focus-within:ring-4 focus-within:ring-primary/10">
+            <label className="grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-xl text-muted-foreground transition hover:bg-accent hover:text-foreground"
+              title="Attach a PDF / Excel / CSV for the AI to read">
+              {uploading ? <Loader2 className="animate-spin" size={17} /> : <Paperclip size={17} />}
+              <input type="file" accept=".pdf,.xlsx,.xls,.csv,.txt" className="hidden"
+                onChange={(e) => { uploadDoc(e.target.files?.[0] ?? null); e.target.value = '' }} />
+            </label>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}

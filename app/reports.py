@@ -301,6 +301,7 @@ _dash_cache: dict = {"at": 0.0, "payload": None}
 
 def invalidate_dashboard_cache() -> None:
     _dash_cache.update(at=0.0, payload=None)
+    _report_cache.clear()
 
 
 def dashboard(force: bool = False) -> dict:
@@ -459,6 +460,21 @@ REPORTS = {
     "margins": margins,
     "receivables": receivables,
 }
+
+# Every page payload is served from this in-process cache between uploads — the data
+# only changes on ingest (which calls invalidate_dashboard_cache), so repeat clicks
+# cost ZERO DB round-trips. TTL is a safety net, not the real invalidation.
+_REPORT_TTL_S = 300
+_report_cache: dict[str, tuple[float, object]] = {}
+
+
+def cached_report(key: str):
+    hit = _report_cache.get(key)
+    if hit and time.time() - hit[0] < _REPORT_TTL_S:
+        return hit[1]
+    out = REPORTS[key]()
+    _report_cache[key] = (time.time(), out)
+    return out
 
 # report key -> the feature a member must have to read it
 REPORT_FEATURE = {

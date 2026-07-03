@@ -2,13 +2,15 @@ import { ArrowUpRight, ArrowDownRight, Table2, Gauge } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export interface ContextCardData {
-  kind: 'kpi' | 'table' | 'entity'
+  kind: 'kpi' | 'table' | 'entity' | 'item'
   agent: string
   title: string
   summary?: string
   metrics?: Record<string, number>
   rows?: Record<string, unknown>[]
   delta?: { metric: string; value: number } | null
+  image_url?: string | null
+  package_image_url?: string | null
 }
 
 /** Decode the base64-JSON ⟦card:…⟧ marker into card data (never throws). */
@@ -51,6 +53,17 @@ function OneCard({ card }: { card: ContextCardData }) {
         <span className="text-xs font-semibold">{card.title}</span>
         {card.delta && <span className="ml-auto"><DeltaBadge {...card.delta} /></span>}
       </div>
+
+      {card.kind === 'item' && card.image_url && (
+        <a href={card.image_url} target="_blank" rel="noreferrer"
+          className="mb-2 block rounded-md bg-white p-2">
+          <img src={card.image_url} alt={card.title} loading="lazy"
+            className="mx-auto max-h-44 object-contain" />
+        </a>
+      )}
+      {card.kind === 'item' && card.summary && (
+        <p className="mb-2 text-[12px] leading-snug text-muted-foreground">{card.summary}</p>
+      )}
 
       {metrics.length > 0 && (
         <div className="mb-2 grid grid-cols-2 gap-2">

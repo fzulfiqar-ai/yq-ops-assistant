@@ -11,9 +11,12 @@ import { DataTable, type Column } from '@/components/DataTable'
 interface Row {
   sku_code: string; item_name: string; brand: string; division: string; category: string
   sell_now: number | null; sell_prev: number | null; sell_changed_on: string | null; sell_change_pct: number | null
-  cost_now: number | null; cost_prev: number | null; cost_changed_on: string | null; cost_change_pct: number | null
+  cost_now: number | null; cost_prev: number | null; last_bought_on: string | null; cost_change_pct: number | null
+  cost_source?: 'po' | 'mrn' | 'supplier_est' | null
   margin_now_pct: number | null; margin_before_pct: number | null
 }
+
+const SOURCE_LABEL: Record<string, string> = { po: 'PO', mrn: 'received', supplier_est: 'est.' }
 interface TrackerData { rows: Row[]; count: number; divisions: string[]; brands: string[]; categories: string[] }
 
 function Delta({ pct }: { pct: number | null }) {
@@ -44,7 +47,15 @@ const COLS: Column<Row>[] = [
   { key: 'sell_now', label: 'Selling now', align: 'right', render: (v) => <b className="tabular-nums">{money(v)}</b> },
   { key: 'sell_change_pct', label: 'Sell Δ', align: 'right', render: (v) => <SellDelta pct={v as number | null} /> },
   { key: 'cost_prev', label: 'Cost (before)', align: 'right', render: money },
-  { key: 'cost_now', label: 'Cost now', align: 'right', render: money },
+  {
+    key: 'cost_now', label: 'Cost now', align: 'right',
+    render: (v, r) => v == null ? <span className="text-muted-foreground">—</span> : (
+      <span className="tabular-nums">
+        {money(v)}
+        {r.cost_source && <span className="ml-1 rounded bg-secondary px-1 text-[9px] uppercase text-muted-foreground">{SOURCE_LABEL[r.cost_source] || r.cost_source}</span>}
+      </span>
+    ),
+  },
   { key: 'cost_change_pct', label: 'Cost Δ', align: 'right', render: (v) => <Delta pct={v as number | null} /> },
   {
     key: 'margin_now_pct', label: 'Margin now', align: 'right',

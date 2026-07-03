@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -47,6 +48,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Big JSON payloads (inventory/sales lists ~100s of KB) shrink ~10× — every click
+# transfers less, which matters most on the owner's phone.
+app.add_middleware(GZipMiddleware, minimum_size=1500)
 
 
 @app.on_event("startup")
@@ -108,6 +112,7 @@ class OrchestrateRequest(BaseModel):
     question: str
     model: str | None = None
     history: list[dict] | None = None
+    doc_id: str | None = None   # uploaded document to answer over (see /assistant/upload)
 
 
 @app.post("/orchestrate")
@@ -127,19 +132,58 @@ def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
 @limiter.limit(settings.rate_limit)
 async def orchestrate_stream_endpoint(request: Request, body: OrchestrateRequest,
                                       user: CurrentUser = Depends(get_current_user)):
-    """Streaming agentic briefing: routing preamble → per-agent headlines → synthesis."""
+    """Streaming agentic briefing: routing preamble → per-agent headlines → synthesis.
+    Two fast-paths first: uploaded-document Q&A, and deterministic product-photo cards."""
     from fastapi.responses import StreamingResponse
     from app.orchestrator import orchestrate_stream
-    log_event(user.email, "orchestrate_stream", question=body.question[:500], detail={})
+    log_event(user.email, "orchestrate_stream", question=body.question[:500],
+              detail={"doc": bool(body.doc_id)})
 
     def gen():
         try:
+            if body.doc_id:
+                from app.chat_extras import answer_doc_stream, fetch_doc
+                doc = fetch_doc(body.doc_id, user.email)
+                if doc is None:
+                    yield "That document has expired — please upload it again."
+                    return
+                yield from answer_doc_stream(body.question, doc, history=body.history,
+                                             model_name=body.model)
+                return
+            from app.chat_extras import photo_answer
+            photo = photo_answer(body.question)
+            if photo:
+                yield photo
+                return
             yield from orchestrate_stream(body.question, user, history=body.history, model_name=body.model)
         except Exception:  # noqa: BLE001
             yield "\nSomething went wrong. Please try again."
 
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/assistant/upload")
+async def assistant_upload(file: UploadFile = File(...),
+                           user: CurrentUser = Depends(require_feature("AI Assistant"))) -> dict:
+    """Upload a PDF/Excel/CSV for the chat to read (kept 24h, visible only to you)."""
+    from fastapi import HTTPException
+    from app.chat_extras import extract_text, store_doc
+    from app.uploads import UploadTooLarge, read_capped
+    try:
+        data = await read_capped(file, max_bytes=8 * 1024 * 1024)
+    except UploadTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    name = file.filename or "document"
+    text = extract_text(data, name)
+    if not text.strip():
+        raise HTTPException(status_code=400,
+                            detail="Couldn't read any text from that file (PDF, Excel, CSV or TXT).")
+    doc_id = store_doc(user.email, name, text)
+    if not doc_id:
+        raise HTTPException(status_code=500, detail="Could not store the document — try again.")
+    log_event(user.email, "assistant.upload", detail={"filename": name, "chars": len(text)})
+    return {"doc_id": doc_id, "filename": name, "chars": len(text)}
 
 
 @app.get("/search")
@@ -169,12 +213,12 @@ def report(key: str, user: CurrentUser = Depends(get_current_user)):
     """Read-only data for a portal page, gated by the matching feature."""
     from fastapi import HTTPException
     from app.auth import has_feature
-    from app.reports import REPORTS, REPORT_FEATURE
+    from app.reports import REPORTS, REPORT_FEATURE, cached_report
     if key not in REPORTS:
         raise HTTPException(status_code=404, detail=f"Unknown report '{key}'.")
     if not has_feature(user, REPORT_FEATURE[key]):
         raise HTTPException(status_code=403, detail=f"Requires access to '{REPORT_FEATURE[key]}'.")
-    return REPORTS[key]()
+    return cached_report(key)
 
 
 @app.get("/llm/health")
@@ -896,9 +940,9 @@ class CatalogItemRequest(BaseModel):
 
 @app.get("/catalog")
 def catalog_list(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
-    """Full catalog with all price tiers (internal — salesmen included, like today's Excel)."""
+    """Catalog for the portal — salesman accounts receive ONLY the B2B (book) price."""
     from app.catalog import list_catalog
-    return list_catalog(include_inactive=(user.role == "admin"))
+    return list_catalog(include_inactive=(user.role == "admin"), role=user.role)
 
 
 @app.post("/catalog/item")
@@ -936,13 +980,23 @@ async def catalog_image(code: str, kind: str = "product", file: UploadFile = Fil
 
 
 @app.post("/catalog/export")
-def catalog_export(_user: CurrentUser = Depends(require_feature("Catalog"))) -> Response:
-    """Branded .xlsx with embedded photos — same shape as the sheet shared today."""
-    from app.catalog import export_xlsx
+def catalog_export(format: str = "xlsx", version: str = "full",
+                   user: CurrentUser = Depends(require_feature("Catalog"))) -> Response:
+    """Branded catalog download. format=xlsx|pdf; version=full (all tiers) | b2b
+    (price-book rate only). Salesman accounts are FORCED to b2b server-side."""
+    from app.catalog import export_pdf, export_xlsx
+    if user.role == "salesman":
+        version = "b2b"
+    tag = "-B2B" if version == "b2b" else ""
+    if format == "pdf":
+        return Response(
+            content=export_pdf(version),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="YQ-VFAN-Catalog{tag}.pdf"'})
     return Response(
-        content=export_xlsx(),
+        content=export_xlsx(version),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="YQ-VFAN-Catalog.xlsx"'})
+        headers={"Content-Disposition": f'attachment; filename="YQ-VFAN-Catalog{tag}.xlsx"'})
 
 
 @app.get("/catalog/share-link")
