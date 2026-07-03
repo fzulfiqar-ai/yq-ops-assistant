@@ -213,6 +213,54 @@ def export_xlsx() -> bytes:
     return out
 
 
+def sync_from_price_book() -> int:
+    """Auto-grow the catalog after every ingest: any active MA_base price-book SKU not
+    yet in catalog_items is added with its name/category — so a new item in the price
+    list appears in the catalog automatically and the owner's ONLY manual step is the
+    photo. Never touches existing rows (owner edits are preserved)."""
+    candidates = exec_sql(
+        "SELECT DISTINCT ON (sp.sku_code) sp.sku_code AS code, "
+        "COALESCE(NULLIF(TRIM(sp.item_name), ''), sp.sku_code) AS name, "
+        "COALESCE(p.item_name, sp.item_name) AS spec, "
+        "UPPER(COALESCE(c.name, 'OTHER')) AS category "
+        "FROM selling_prices sp "
+        "LEFT JOIN products p ON p.sku_code = sp.sku_code "
+        "LEFT JOIN categories c ON c.id = p.category_id "
+        "WHERE sp.price_book = 'MA_base' AND COALESCE(sp.rate_bhd, 0) > 0 "
+        "AND sp.sku_code IS NOT NULL AND TRIM(sp.sku_code) <> '' "
+        "ORDER BY sp.sku_code, sp.imported_at DESC"
+    ) or []
+    # existing codes via the service client (RLS-proof) — only INSERT true newcomers
+    existing: set[str] = set()
+    off = 0
+    while True:
+        b = (get_client().table("catalog_items").select("item_code")
+             .range(off, off + 999).order("item_code").execute().data or [])
+        existing |= {r["item_code"] for r in b}
+        if len(b) < 1000:
+            break
+        off += 1000
+    items = []
+    for r in candidates:
+        code = str(r.get("code") or "").strip()
+        if not code or code in existing:
+            continue
+        blob = f"{r.get('spec') or ''} {r.get('name') or ''}".lower()
+        items.append({
+            "item_code": code,
+            "display_name": str(r.get("name") or code)[:120],
+            "spec": r.get("spec"),
+            "category": r.get("category"),
+            "brand": "VFAN" if "vfan" in blob else None,
+            "is_active": True,
+            "updated_by": "price-book auto-sync",
+        })
+    n = bulk_upsert(items)
+    if n:
+        log.info("catalog auto-sync: %d new item(s) from the price book", n)
+    return n
+
+
 # Referenced by scripts/catalog_import.py so parsing lives in one place at import time too.
 def bulk_upsert(items: list[dict]) -> int:
     if not items:

@@ -21,6 +21,7 @@ const Inventory = lazy(() => import('@/pages/Inventory'))
 const StockMovement = lazy(() => import('@/pages/StockMovement'))
 const Sales = lazy(() => import('@/pages/Sales'))
 const Margins = lazy(() => import('@/pages/Margins'))
+const PriceTracker = lazy(() => import('@/pages/PriceTracker'))
 const Receivables = lazy(() => import('@/pages/Receivables'))
 const DataPage = lazy(() => import('@/pages/DataPage'))
 const Team = lazy(() => import('@/pages/Team'))
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="coaching" element={<Gate feature="Sales"><Coaching /></Gate>} />
           <Route path="sales" element={<Gate feature="Sales"><Sales /></Gate>} />
           <Route path="margins" element={<Gate feature="Margins"><Margins /></Gate>} />
+          <Route path="prices" element={<Gate feature="Margins"><PriceTracker /></Gate>} />
           <Route path="receivables" element={<Gate feature="Receivables"><Receivables /></Gate>} />
           <Route path="data" element={<Gate><DataPage /></Gate>} />
           <Route path="team" element={<Gate><Team /></Gate>} />

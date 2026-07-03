@@ -15,6 +15,7 @@ import {
   MessageSquareQuote,
   BookImage,
   ArrowLeftRight,
+  LineChart,
   type LucideIcon,
 } from 'lucide-react'
 import type { Me } from './auth'
@@ -42,6 +43,7 @@ export const NAV: NavItem[] = [
   { section: 'Supply', label: 'Stock Moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },
   { section: 'Supply', label: 'Orders', to: '/orders', icon: ShoppingCart, feature: 'Orders' },
   { section: 'Money', label: 'Profitability', to: '/margins', icon: Percent, feature: 'Margins' },
+  { section: 'Money', label: 'Price Tracker', to: '/prices', icon: LineChart, feature: 'Margins' },
   { section: 'Money', label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
   { section: 'Admin', label: 'Data', to: '/data', icon: Database }, // admin-only
   { section: 'Admin', label: 'Team', to: '/team', icon: Users }, // admin-only

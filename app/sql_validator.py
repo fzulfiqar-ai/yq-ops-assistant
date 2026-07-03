@@ -58,6 +58,7 @@ VIEW_ALLOWLIST: frozenset[str] = frozenset({
     "v_sales_by_division",
     "v_catalog",
     "leads",
+    "v_price_tracker",
 })
 
 # Which feature page gates each PO view (procurement → Inventory).
@@ -82,7 +83,7 @@ VIEW_FEATURE: dict[str, str] = {
     "v_customer_ltv": "Sales",
     "v_receivables": "Receivables",
     "v_sales_by_payment": "Sales", "v_sales_by_division": "Sales",
-    "v_catalog": "Catalog", "leads": "Leads",
+    "v_catalog": "Catalog", "leads": "Leads", "v_price_tracker": "Margins",
 }
 
 MAX_ROWS = 200

@@ -244,19 +244,22 @@ export default function Catalog() {
   const { data, isLoading } = useQuery({ queryKey: ['catalog'], queryFn: () => apiGet<CatalogData>('/catalog') })
   const [cat, setCat] = useState<string>('All')
   const [q, setQ] = useState('')
+  const [needsPhoto, setNeedsPhoto] = useState(false)
   const [edit, setEdit] = useState<Partial<CatalogItem> | null>(null)
   const [share, setShare] = useState(false)
   const [exporting, setExporting] = useState(false)
 
+  const noPhotoCount = useMemo(() => (data?.items || []).filter((i) => !i.product_image_url).length, [data])
   const items = useMemo(() => {
     let r = data?.items || []
     if (cat !== 'All') r = r.filter((i) => (i.category || 'OTHER') === cat)
+    if (needsPhoto) r = r.filter((i) => !i.product_image_url)
     if (q.trim()) {
       const s = q.toLowerCase()
       r = r.filter((i) => i.item_code.toLowerCase().includes(s) || (i.spec || '').toLowerCase().includes(s))
     }
     return r
-  }, [data, cat, q])
+  }, [data, cat, q, needsPhoto])
 
   async function exportXlsx() {
     setExporting(true)
@@ -299,6 +302,13 @@ export default function Catalog() {
             {c.toLowerCase()}
           </button>
         ))}
+        {isAdmin && noPhotoCount > 0 && (
+          <button onClick={() => setNeedsPhoto((v) => !v)}
+            className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition',
+              needsPhoto ? 'border-amber-500 bg-amber-500 text-white' : 'border-amber-300 bg-amber-50 text-amber-700 hover:border-amber-400 dark:bg-amber-500/10 dark:text-amber-300')}>
+            📷 needs photo · {noPhotoCount}
+          </button>
+        )}
       </div>
 
       {isLoading ? (

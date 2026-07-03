@@ -701,28 +701,108 @@ def trend_scan() -> dict:
 # ── Marketing agent (growth) ──────────────────────────────────────────────────
 
 def marketing() -> dict:
-    """Promo & push ideas: high-margin SKUs worth pushing, slow/overstock to clear with an
-    offer, and the best sellers to bundle around. Deterministic inputs; phrasing is yours."""
-    high_margin = _q(
-        "SELECT sku_code, item_name, price_bhd, margin_pct FROM v_product_economics "
-        "WHERE margin_pct IS NOT NULL AND margin_pct >= 30 ORDER BY margin_pct DESC LIMIT 12"
-    )
+    """Marketing campaign kit — ready-to-RUN, not just ideas. Three campaigns with
+    copy-paste EN/AR WhatsApp broadcasts (with the public catalog link), a channel
+    recommendation, and the BHD at stake, so a promo can go out the same day:
+      1. Clearance — slow/overstock at a markdown (frees trapped capital)
+      2. Bundles   — pairs customers already buy together (basket affinity)
+      3. Hero push — high-margin FAST movers to promote at full price"""
+    link = _catalog_link()
+    tail_en = f"\nCatalog & prices: {link}" if link else ""
+    tail_ar = f"\nالكتالوج والأسعار: {link}" if link else ""
+
+    # 1 — clearance: slow lines, priced with the deadstock markdown ladder
     clear = _q(
-        "SELECT item_name, current_stock, stock_value FROM v_stock_health "
-        "WHERE status IN ('dead_stock','overstock') ORDER BY stock_value DESC LIMIT 12"
+        "SELECT h.item_name, h.current_stock, h.stock_value, a.days_since_sale, e.price_bhd "
+        "FROM v_stock_health h "
+        "LEFT JOIN v_inventory_aging a ON a.item_name = h.item_name "
+        "LEFT JOIN v_product_economics e ON e.item_name = h.item_name "
+        "WHERE h.status IN ('dead_stock','overstock') ORDER BY h.stock_value DESC LIMIT 8"
     )
-    bestsellers = _q(
-        "SELECT item_name, SUM(quantity) AS qty FROM v_sales "
-        "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales)-90 AND item_name IS NOT NULL "
-        "GROUP BY item_name ORDER BY qty DESC NULLS LAST LIMIT 8"
+    clear_items, clear_val, clear_recover = [], 0.0, 0.0
+    for r in clear:
+        val = _f(r, "stock_value")
+        d = r.get("days_since_sale")
+        md = 0.40 if d is None else (0.50 if _f(r, "days_since_sale") > 180 else 0.30)
+        price = _f(r, "price_bhd")
+        promo = round(price * (1 - md), 3) if price else None
+        clear_val += val
+        clear_recover += val * (1 - md)
+        clear_items.append({"item_name": r.get("item_name"), "current_stock": _f(r, "current_stock"),
+                            "stock_value_bhd": val, "normal_price_bhd": price or None,
+                            "promo_price_bhd": promo, "discount_pct": int(md * 100)})
+    top_clear = ", ".join(str(i["item_name"]).split(" (")[0] for i in clear_items[:3])
+
+    # 2 — bundles: what already sells together (Phase C basket affinity)
+    pairs = _q(
+        "SELECT item_a, item_b, bought_together FROM v_basket_affinity "
+        "ORDER BY bought_together DESC LIMIT 3"
     )
-    clear_val = sum(_f(r, "stock_value") for r in clear)
+    bundles = []
+    for p in pairs:
+        a, b = str(p.get("item_a") or ""), str(p.get("item_b") or "")
+        prices = {x.get("item_name"): _f(x, "price_bhd") for x in _q(
+            "SELECT item_name, price_bhd FROM v_product_economics "
+            f"WHERE item_name IN ('{a.replace(chr(39), chr(39) * 2)}', '{b.replace(chr(39), chr(39) * 2)}')")}
+        total = (prices.get(a) or 0) + (prices.get(b) or 0)
+        bundles.append({"item_a": a, "item_b": b, "bought_together": p.get("bought_together"),
+                        "separate_bhd": round(total, 3) if total else None,
+                        "bundle_bhd": round(total * 0.9, 3) if total else None})
+
+    # 3 — hero push: fat margin AND actually selling (promote at full price)
+    heroes = _q(
+        "SELECT e.sku_code, e.item_name, e.price_bhd, e.margin_pct, h.sold_90d "
+        "FROM v_product_economics e JOIN v_stock_health h ON h.item_name = e.item_name "
+        "WHERE e.margin_pct >= 35 AND h.sold_90d > 0 AND h.current_stock > 0 "
+        "ORDER BY e.margin_pct * h.sold_90d DESC LIMIT 8"
+    )
+
+    # channel mix → where each campaign lands hardest
+    mix = {r.get("channel"): _f(r, "revenue_bhd") for r in
+           _q("SELECT channel, revenue_bhd FROM v_sales_by_channel")}
+    b2c_share = mix.get("B2C", 0) / (sum(mix.values()) or 1)
+
+    campaigns = [
+        {
+            "campaign": "Clearance sale",
+            "impact_bhd": round(clear_recover, 0),
+            "channel": "B2C (Causeway / Roadshow) at RRP markdown" if b2c_share > 0.3
+                       else "B2B trade offer at dealer price",
+            "items": clear_items,
+            "message_en": (f"🔥 YQ Bahrain CLEARANCE — up to 50% off {top_clear} and more. "
+                           f"Limited stock, first come first served!{tail_en}"),
+            "message_ar": (f"🔥 تخفيضات YQ البحرين — خصم يصل إلى ٥٠٪ على {top_clear} والمزيد. "
+                           f"الكمية محدودة!{tail_ar}"),
+        },
+        {
+            "campaign": "Bundle offers",
+            "impact_bhd": 0,
+            "channel": "Both — bundle at checkout (B2C) / carton deal (B2B)",
+            "items": bundles,
+            "message_en": ("💡 Deal of the week from YQ Bahrain: buy them together and save 10% — "
+                           + "; ".join(f"{b['item_a'].split(' (')[0]} + {b['item_b'].split(' (')[0]}"
+                                       for b in bundles if b.get("item_a")) + f".{tail_en}"),
+            "message_ar": ("💡 عرض الأسبوع من YQ البحرين: اشترِ القطعتين معاً ووفّر ١٠٪."
+                           + tail_ar),
+        },
+        {
+            "campaign": "Hero product push",
+            "impact_bhd": round(sum(_f(h, "price_bhd") * min(_f(h, "sold_90d") / 90 * 30, 999)
+                                    for h in heroes), 0),
+            "channel": "B2B reps push on route visits (full price — best margin)",
+            "items": heroes,
+            "message_en": (f"⭐ New month, top VFAN picks in stock now — fast movers your customers "
+                           f"ask for. Ask your YQ rep or browse:{tail_en or ' our catalog.'}"),
+            "message_ar": f"⭐ أفضل منتجات VFAN متوفرة الآن — اسأل مندوب YQ.{tail_ar}",
+        },
+    ]
     return {
-        "summary": (f"{len(high_margin)} high-margin SKUs to push · {len(clear)} slow lines to "
-                    f"clear (BHD {clear_val:,.0f}) · {len(bestsellers)} best sellers to bundle."),
-        "push_high_margin": high_margin,
-        "clear_with_offer": clear,
-        "bundle_around": bestsellers,
+        "count": len(campaigns),
+        "summary": (f"3 ready-to-send campaigns: clearance frees ~BHD {clear_recover:,.0f} of "
+                    f"BHD {clear_val:,.0f} trapped, {len(bundles)} data-backed bundles, "
+                    f"{len(heroes)} hero SKUs for the reps. WhatsApp drafts included — send today."),
+        "campaigns": campaigns,
+        "catalog_link": link,
     }
 
 

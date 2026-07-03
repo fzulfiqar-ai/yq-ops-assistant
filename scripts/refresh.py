@@ -126,6 +126,14 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
+    # 3c - auto-grow the catalog from the freshly loaded price book (new SKUs appear in
+    #      the Catalog automatically; the owner's only manual step is the photo)
+    try:
+        from app.catalog import sync_from_price_book
+        sync_from_price_book()
+    except Exception:  # noqa: BLE001
+        pass
+
     # 4 - verify (post-load validation vs the source reports)
     verify: dict | None = None
     try:

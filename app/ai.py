@@ -130,6 +130,13 @@ v_purchase_lifecycle  PO ordered -> received lifecycle (each PO line matched to 
   for "what's on order / not yet received", "did order X arrive". po_no, po_date, code, qty_ordered,
   rate_bhd, received_on, status('received'|'on_order')
 
+v_price_tracker       Price MOVEMENT per SKU — selling price AND purchase cost, before vs now,
+  with margins then/now + brand/division tags. USE THIS for "what changed in pricing",
+  "price before and after", "did cost go up on X", "margin now vs before", "VFAN price changes".
+  sku_code, item_name, brand('VFAN'|'Other'), division, category, sell_now, sell_prev,
+  sell_changed_on, sell_change_pct, cost_now, cost_prev, cost_change_pct,
+  margin_now_pct, margin_before_pct
+
 v_catalog             The CUSTOMER-FACING CATALOG / item master (with photos, shared with
   salesmen). Use for "is X in the catalog", "catalog price tiers", "items without a
   photo", "dealer/roadshow/RRP price of X". standard_rate = the live price-book rate.

@@ -823,6 +823,33 @@ def bi_price_simulator(item: str, new_price: float,
     return simulate(item, new_price)
 
 
+# ── Price Tracker (selling price + purchase cost, before vs now, per SKU) ─────
+
+@app.get("/prices/tracker")
+def prices_tracker(division: str | None = None, brand: str | None = None,
+                   category: str | None = None, only_changed: bool = False,
+                   _user: CurrentUser = Depends(require_feature("Margins"))) -> dict:
+    """Every SKU's selling price + purchase cost, before vs current, with margins —
+    filterable by division/brand/category. Updates itself on every report upload."""
+    from app.db_read import exec_sql, exec_sql_params
+    where, params = [], []
+    for col, val in (("division", division), ("brand", brand), ("category", category)):
+        if val:
+            params.append(val)
+            where.append(f"{col} = ${len(params)}")
+    if only_changed:
+        where.append("(COALESCE(sell_change_pct,0) <> 0 OR COALESCE(cost_change_pct,0) <> 0)")
+    sql = ("SELECT * FROM v_price_tracker"
+           + (" WHERE " + " AND ".join(where) if where else "")
+           + " ORDER BY ABS(COALESCE(sell_change_pct,0)) + ABS(COALESCE(cost_change_pct,0)) DESC, sku_code LIMIT 500")
+    rows = (exec_sql_params(sql, params) if params else exec_sql(sql)) or []
+    filt = exec_sql("SELECT DISTINCT division, brand, category FROM v_price_tracker") or []
+    return {"rows": rows, "count": len(rows),
+            "divisions": sorted({f.get("division") for f in filt if f.get("division")}),
+            "brands": sorted({f.get("brand") for f in filt if f.get("brand")}),
+            "categories": sorted({f.get("category") for f in filt if f.get("category")})}
+
+
 # ── Stock movement (warehouse → van transfers + per-salesman reconciliation) ──
 
 @app.get("/stock/transfers")
