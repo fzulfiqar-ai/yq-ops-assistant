@@ -40,10 +40,13 @@ AGENT_FEATURE: dict[str, str] = {
     "procurement_status": "Inventory",
     "cross_sell": "Sales", "vendor_scorecard": "Inventory", "trend_radar": "Sales",
     "lead_gen": "Sales", "research_scout": "Sales",
+    "sales_outreach": "Sales", "growth_plan": "Sales",
 }
 
 # Deterministic keyword router (fallback when the LLM JSON is unusable).
 _KEYWORDS: list[tuple[str, str]] = [
+    (r"\bgrowth plan|weekly plan|(what|which).{0,20}(do|focus|priorit).{0,20}(week|today)|game ?plan|action plan|money moves", "growth_plan"),
+    (r"\boutreach|due to (re)?order|reorder (nudge|remind)|follow.?up (message|customer)|whatsapp (draft|message)|win.{0,6}reorder", "sales_outreach"),
     (r"\bowe|owed|overdue|debtor|receivab|collect|outstand", "collections"),
     (r"\bcash ?flow|ag(e)?ing|90 ?day|concentrat", "cashflow"),
     (r"\bstock|inventory|reorder|out of stock|low stock|replenish", "inventory"),
@@ -124,6 +127,13 @@ def route(question: str, allowed: list[str], history: list[dict] | None = None) 
     # refinements/comparisons/lookups → data mode (re-query with context), not a canned briefing
     if _REFINE.search(question):
         return "data", [], "refinement"
+    # Deterministic fast-path: a short, broad question with a clear keyword hit routes
+    # instantly (zero LLM latency) — 'who owes us money', 'growth plan', 'stock shortages'.
+    # Specific/numeric questions still go to the LLM router so they land in data mode.
+    if len(question) <= 60 and not re.search(r"\d", question) and not _is_multistep(question):
+        kw_fast = _keyword_route(question, allowed)
+        if kw_fast:
+            return "agents", kw_fast, "keyword-fast-path"
     catalog = _catalog(allowed)
     hist = ""
     if history:

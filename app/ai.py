@@ -25,7 +25,17 @@ DATABASE VIEWS — query ONLY these, never raw tables:
 v_sales               Sales lines (one row per invoice line)
   sale_date(date), customer_name, salesman_resolved, channel('B2C'|'B2B'),
   is_cash_customer(bool), item_name, sku_code, category_name, quantity,
-  revenue_bhd[GROSS, VAT-incl — USE THIS FOR REVENUE], net_bhd[ex-VAT], gross_bhd
+  revenue_bhd[GROSS, VAT-incl — USE THIS FOR REVENUE], net_bhd[ex-VAT], gross_bhd,
+  division('Accessories'|'SIM'|'Giveaway'|'Devices'), sale_type('cash'|'credit'),
+  is_giveaway(bool — free/zero-priced lines; exclude from revenue quality analyses)
+
+v_sales_by_payment    CASH vs CREDIT sales split (all-time). For "this month cash vs credit"
+  aggregate v_sales by sale_type with the month anchor instead.
+  sale_type('cash'|'credit'), orders, qty, revenue_bhd[gross], net_bhd
+
+v_sales_by_division   Business-division split: Accessories (VFAN) / SIM (Batelco) / Giveaway /
+  Devices. USE THIS for "sim sales", "batelco", "accessories vs sim", "giveaways".
+  division, orders, qty, revenue_bhd[gross], net_bhd, giveaway_qty
 
 v_sales_by_period     Monthly totals (period_month = 1st of month)
   period_month, order_count, total_qty, gross_bhd[revenue], net_revenue_bhd[ex-VAT]
@@ -120,6 +130,18 @@ v_purchase_lifecycle  PO ordered -> received lifecycle (each PO line matched to 
   for "what's on order / not yet received", "did order X arrive". po_no, po_date, code, qty_ordered,
   rate_bhd, received_on, status('received'|'on_order')
 
+v_catalog             The CUSTOMER-FACING CATALOG / item master (with photos, shared with
+  salesmen). Use for "is X in the catalog", "catalog price tiers", "items without a
+  photo", "dealer/roadshow/RRP price of X". standard_rate = the live price-book rate.
+  item_code, display_name, spec, category, brand, division, dealer_price,
+  roadshow_price, rrp, standard_rate, product_image_url, package_image_url, is_active
+
+leads                 B2B prospect pipeline (new retailers to win, NOT existing customers).
+  Use for "leads", "prospects", "new shops to visit", "pipeline".
+  name, category, segment, area, address, phone, email, website, contact_name,
+  fit_score[0-100], status('new'|'contacted'|'visited'|'quoted'|'ordered'|'rejected'),
+  next_action, assigned_to
+
 RULES:
 - Return ONLY the SQL SELECT — no markdown, no explanation, no code blocks.
 - Use ILIKE '%value%' for text searches (case-insensitive).
@@ -129,6 +151,10 @@ RULES:
   use (SELECT MAX(sale_date) FROM v_sales), NOT CURRENT_DATE.
   This month = sale_date >= DATE_TRUNC('month',(SELECT MAX(sale_date) FROM v_sales)).
 - For "customers" exclude the walk-in bucket: customer_name NOT ILIKE 'cash customer%'.
+- v_sales_by_payment / v_sales_by_division are ALL-TIME rollups. For ANY time-bounded
+  split ("this month cash vs credit", "SIM sales in June") aggregate v_sales with the
+  month anchor and GROUP BY sale_type / division instead.
+- Exclude free stock from revenue-quality analyses: AND NOT is_giveaway (v_sales).
 - Below cost = v_product_margin WHERE gp_margin_pct < 0. Low stock = v_stock_health
   WHERE status IN ('urgent_out_of_stock','low_stock').
 TERMINOLOGY:
