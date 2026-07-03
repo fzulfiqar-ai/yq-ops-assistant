@@ -109,32 +109,34 @@ export function AppShell() {
           )}
         </Link>
 
-        {!collapsed && (
-          <div className="px-5 pb-2 pt-4 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40">
-            Portal
-          </div>
-        )}
-
-        <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 [scrollbar-color:rgba(255,255,255,.2)_transparent] [scrollbar-width:thin]">
-          {items.map((n) => {
+        <nav className="mt-2 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 [scrollbar-color:rgba(255,255,255,.2)_transparent] [scrollbar-width:thin]">
+          {items.map((n, i) => {
             const Icon = n.icon
+            const newSection = i === 0 || items[i - 1].section !== n.section
             return (
-              <NavLink
-                key={n.to}
-                to={n.to}
-                end={n.to === '/'}
-                className={({ isActive }) =>
-                  cn(
-                    'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/70 transition-all hover:bg-white/10 hover:text-white',
-                    isActive && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
-                    collapsed && 'justify-center px-0',
-                  )
-                }
-                title={collapsed ? n.label : undefined}
-              >
-                <Icon size={19} className="shrink-0" />
-                {!collapsed && <span>{n.label}</span>}
-              </NavLink>
+              <div key={n.to}>
+                {newSection && !collapsed && (
+                  <div className={cn('px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40', i > 0 && 'pt-3')}>
+                    {n.section}
+                  </div>
+                )}
+                {newSection && collapsed && i > 0 && <div className="mx-2 my-2 border-t border-white/10" />}
+                <NavLink
+                  to={n.to}
+                  end={n.to === '/'}
+                  className={({ isActive }) =>
+                    cn(
+                      'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/70 transition-all hover:bg-white/10 hover:text-white',
+                      isActive && 'bg-white/15 text-white shadow-[0_6px_18px_rgba(124,58,237,.35)]',
+                      collapsed && 'justify-center px-0',
+                    )
+                  }
+                  title={collapsed ? n.label : undefined}
+                >
+                  <Icon size={19} className="shrink-0" />
+                  {!collapsed && <span>{n.label}</span>}
+                </NavLink>
+              </div>
             )
           })}
         </nav>

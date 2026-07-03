@@ -27,6 +27,7 @@ const ICONS: Record<string, LucideIcon> = {
   pricing_optimization: Tag, working_capital: Banknote, reorder_proposal: ClipboardCheck,
   procurement_status: Workflow, cross_sell: Combine, vendor_scorecard: Star, trend_radar: Radar,
   lead_gen: Target, research_scout: Search, price_drift: Gauge, returns_investigator: Undo2,
+  sales_outreach: Send, growth_plan: ClipboardList,
 }
 
 // CEO → departments → agents. Order + role label per department for the org map.
@@ -125,27 +126,29 @@ export default function Agents() {
     const attention = !!st.data?.summary && /\b([1-9]\d*)\b/.test(String(st.data.summary)) && !/^no\b|cleanly|0 /i.test(String(st.data.summary))
     return (
       <Card key={a.name} className="overflow-hidden">
-        <div className="flex items-start gap-3.5 p-5">
+        <div className="flex flex-wrap items-start gap-3.5 p-5">
           <div className="relative grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground">
             <Icon size={20} />
             <span className={cn('absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-card',
               st.loading ? 'animate-pulse bg-amber-400' : st.data ? (attention ? 'bg-amber-500' : 'bg-emerald-500') : 'bg-border')} />
           </div>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-[55%] flex-1">
             <div className="font-display text-[15px] font-semibold">{prettyTitle(a.name)}</div>
             <div className="mt-0.5 text-[13px] text-muted-foreground">{a.description}</div>
           </div>
-          <select value={sched[a.name] || 'off'} onChange={(e) => setSchedule(a.name, e.target.value)}
-            title="Auto-run on a schedule and email you (08:00 Bahrain)"
-            className="shrink-0 rounded-lg border bg-background px-2 py-1.5 text-[12px] text-muted-foreground outline-none transition hover:text-foreground">
-            <option value="off">⏱ Off</option>
-            <option value="daily">Daily 8AM</option>
-            <option value="weekly">Weekly Mon</option>
-          </select>
-          <button onClick={() => run(a.name)} disabled={st.loading}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground shadow-soft transition hover:shadow-lift disabled:opacity-50">
-            {st.loading ? <Loader2 className="animate-spin" size={14} /> : <Play size={14} />} Run
-          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <select value={sched[a.name] || 'off'} onChange={(e) => setSchedule(a.name, e.target.value)}
+              title="Auto-run on a schedule and email you (08:00 Bahrain)"
+              className="rounded-lg border bg-background px-2 py-1.5 text-[12px] text-muted-foreground outline-none transition hover:text-foreground">
+              <option value="off">⏱ Off</option>
+              <option value="daily">Daily 8AM</option>
+              <option value="weekly">Weekly Mon</option>
+            </select>
+            <button onClick={() => run(a.name)} disabled={st.loading}
+              className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-semibold text-primary-foreground shadow-soft transition hover:shadow-lift disabled:opacity-50">
+              {st.loading ? <Loader2 className="animate-spin" size={14} /> : <Play size={14} />} Run
+            </button>
+          </div>
         </div>
 
         <AnimatePresence>

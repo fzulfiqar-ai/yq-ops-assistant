@@ -247,12 +247,12 @@ export default function Orders() {
           <div className="space-y-3">
             {proposal.by_vendor.map((g) => (
               <Card key={g.vendor} className="overflow-hidden">
-                <div className="flex items-center justify-between gap-3 border-b bg-accent/30 px-4 py-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-accent/30 px-4 py-2.5">
                   <div className="min-w-0">
                     <div className="truncate font-display text-sm font-semibold">{g.vendor}</div>
                     <div className="text-[11px] text-muted-foreground">{g.lines} item{g.lines > 1 ? 's' : ''} · est. {bhd(g.est_total_bhd)}</div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button onClick={() => copyDraft(g.draft_message)}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition hover:border-primary/50 hover:bg-accent">
                       <ClipboardCopy size={13} /> Copy

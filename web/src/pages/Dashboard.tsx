@@ -8,6 +8,7 @@ import {
   Flame, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
 import { apiGet } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
 import { CountUp } from '@/components/CountUp'
@@ -163,6 +164,7 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
 }
 
 export default function Dashboard() {
+  const { me } = useAuth()
   const { data, isLoading } = useQuery({
     queryKey: ['report', 'dashboard'],
     queryFn: () => apiGet<DashboardData>('/report/dashboard'),
@@ -176,9 +178,18 @@ export default function Dashboard() {
   const channelTotal = channels.reduce((s, c) => s + Number(c.revenue_bhd || 0), 0) || 1
   const salesmen = (data?.by_salesman || []).map((s) => ({ ...s, name: s.salesman, rev: Number(s.revenue_bhd || 0) }))
 
+  const hour = new Date().getHours()
+  const daypart = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
+  const firstName = (me?.full_name || me?.email || '').split(/[@ ]/)[0]
+  const nActions = data?.actions?.length ?? 0
+  const greeting = firstName ? `${daypart}, ${firstName.charAt(0).toUpperCase()}${firstName.slice(1)}` : daypart
+  const focus = nActions > 0
+    ? `${nActions} thing${nActions === 1 ? '' : 's'} need${nActions === 1 ? 's' : ''} your attention today`
+    : 'All clear — nothing needs your attention right now'
+
   return (
     <div>
-      <PageHeader title="AI Operations Center" subtitle="Mobile Accessories Intelligence" />
+      <PageHeader title={greeting} subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus} />
       <DataBanner date={data?.data_as_of} />
 
       {/* Stale-data guard */}
