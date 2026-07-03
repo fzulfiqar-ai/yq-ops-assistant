@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { motion } from 'motion/react'
-import GlowHorizon from '@/components/ui/glow-horizon'
 import { Button } from '@/components/ui/button'
+
+const GlowHorizon = lazy(() => import('@/components/ui/glow-horizon'))
 import { Input } from '@/components/ui/input'
 import { Logo } from '@/components/Logo'
 import { apiGet, apiPost } from '@/lib/api'
@@ -49,7 +50,7 @@ export default function AcceptInvite() {
 
   return (
     <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-[#140f24] px-4">
-      <div className="absolute inset-0"><GlowHorizon variant="top" /></div>
+      <div className="absolute inset-0"><Suspense fallback={null}><GlowHorizon variant="top" /></Suspense></div>
       <motion.div
         initial={{ opacity: 0, y: 18, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}

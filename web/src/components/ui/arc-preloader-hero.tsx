@@ -65,7 +65,7 @@ export function ArcRevealHero({
     }
     if (storageKey && typeof window !== 'undefined') {
       try {
-        if (window.sessionStorage.getItem(storageKey) === 'done') setPhase('done')
+        if (window.localStorage.getItem(storageKey) === 'done') setPhase('done')
       } catch {
         /* private mode */
       }
@@ -91,7 +91,7 @@ export function ArcRevealHero({
       onComplete: () => {
         if (storageKey && typeof window !== 'undefined') {
           try {
-            window.sessionStorage.setItem(storageKey, 'done')
+            window.localStorage.setItem(storageKey, 'done')
           } catch {
             /* ignore */
           }

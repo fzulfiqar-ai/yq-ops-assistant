@@ -1357,6 +1357,11 @@ def run_agent(name: str, triggered_by: str = "user", _event_chain_depth: int = 0
         "generated_at": datetime.now(timezone.utc).isoformat(),
         **result,
     }
+    # Interactive runs (portal button / assistant chat) skip the memory + event round-trips:
+    # they exist to track change over time, and scheduled/escalation runs already do that.
+    # This halves the DB trips on the latency-sensitive paths.
+    if triggered_by == "user":
+        return wrapped
     # Memory: diff vs the last baseline + record this run (best-effort — never break the run).
     try:
         from app import memory

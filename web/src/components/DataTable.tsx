@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from 'react'
 import { Search, ArrowUp, ArrowDown, ChevronsUpDown, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { bhd } from '@/lib/format'
+
+// Render rows incrementally: mount a page, grow as the user nears the bottom. Keeps
+// natural table layout (no fixed row heights) while avoiding thousand-row DOM mounts.
+const PAGE = 150
 
 export interface Column<T> {
   key: keyof T & string
@@ -38,7 +42,17 @@ export function DataTable<T extends object>({
 }) {
   const [query, setQuery] = useState(initialQuery || '')
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null)
+  const [limit, setLimit] = useState(PAGE)
+  const scrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => { if (initialQuery !== undefined) setQuery(initialQuery) }, [initialQuery])
+  useEffect(() => { setLimit(PAGE); scrollRef.current?.scrollTo({ top: 0 }) }, [query, sort, rows])
+
+  function onScroll(e: UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget
+    if (el.scrollTop + el.clientHeight > el.scrollHeight - 600) {
+      setLimit((l) => l + PAGE)
+    }
+  }
 
   const view = useMemo(() => {
     let r = rows
@@ -114,47 +128,88 @@ export function DataTable<T extends object>({
           {rows.length ? `No rows match “${query}”.` : empty}
         </div>
       ) : (
-        <div className="overflow-auto rounded-xl border" style={{ maxHeight }}>
-          <table className="w-full border-collapse text-sm">
-            <thead className="sticky top-0 z-10 bg-secondary/90 backdrop-blur">
-              <tr>
-                {cols.map((c) => {
-                  const sorted = sort?.key === c.key
-                  return (
-                    <th
-                      key={c.key}
-                      onClick={() => toggleSort(c.key)}
-                      className={cn(
-                        'cursor-pointer select-none whitespace-nowrap px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
-                        c.align === 'right' ? 'text-right' : 'text-left',
-                      )}
-                    >
-                      <span className={cn('inline-flex items-center gap-1', c.align === 'right' && 'flex-row-reverse')}>
-                        {c.label}
-                        {sorted ? (sort!.dir === 'asc' ? <ArrowUp size={12} className="text-primary" /> : <ArrowDown size={12} className="text-primary" />)
-                          : <ChevronsUpDown size={12} className="opacity-30" />}
-                      </span>
-                    </th>
-                  )
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {view.map((row, i) => (
-                <tr key={i} className={cn('border-t transition-colors hover:bg-accent/40', rowClass?.(row))}>
+        <>
+          {/* Phones: stacked cards (no sideways scrolling) */}
+          <div className="space-y-2 md:hidden">
+            {view.slice(0, Math.min(limit, 60)).map((row, i) => {
+              const [first, ...rest] = cols
+              const fv = (row as Record<string, unknown>)[first.key]
+              return (
+                <div key={i} className={cn('rounded-xl border bg-card p-3 shadow-soft', rowClass?.(row))}>
+                  <div className="mb-1.5 text-sm font-semibold">
+                    {first.render ? first.render(fv, row) : fv == null ? '—' : String(fv)}
+                  </div>
+                  <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
+                    {rest.map((c) => {
+                      const v = (row as Record<string, unknown>)[c.key]
+                      return (
+                        <div key={c.key} className="flex items-baseline justify-between gap-2">
+                          <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">{c.label}</dt>
+                          <dd className="text-[13px] font-medium tabular-nums">
+                            {c.render ? c.render(v, row) : c.money ? bhd(Number(v ?? 0)) : v == null ? '—' : String(v)}
+                          </dd>
+                        </div>
+                      )
+                    })}
+                  </dl>
+                </div>
+              )
+            })}
+            {view.length > 60 && (
+              <div className="py-2 text-center text-xs text-muted-foreground">
+                Showing 60 of {view.length} — search to narrow, or use a bigger screen for the full table.
+              </div>
+            )}
+          </div>
+
+          {/* Tablets & up: the real table, incrementally rendered */}
+          <div ref={scrollRef} onScroll={onScroll} className="hidden overflow-auto rounded-xl border md:block" style={{ maxHeight }}>
+            <table className="w-full border-collapse text-sm">
+              <thead className="sticky top-0 z-10 bg-secondary/90 backdrop-blur">
+                <tr>
                   {cols.map((c) => {
-                    const v = (row as Record<string, unknown>)[c.key]
+                    const sorted = sort?.key === c.key
                     return (
-                      <td key={c.key} className={cn('whitespace-nowrap px-4 py-2.5', c.align === 'right' ? 'text-right tabular-nums' : 'text-left')}>
-                        {c.render ? c.render(v, row) : c.money ? bhd(Number(v ?? 0)) : v == null ? '—' : String(v)}
-                      </td>
+                      <th
+                        key={c.key}
+                        onClick={() => toggleSort(c.key)}
+                        className={cn(
+                          'cursor-pointer select-none whitespace-nowrap px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
+                          c.align === 'right' ? 'text-right' : 'text-left',
+                        )}
+                      >
+                        <span className={cn('inline-flex items-center gap-1', c.align === 'right' && 'flex-row-reverse')}>
+                          {c.label}
+                          {sorted ? (sort!.dir === 'asc' ? <ArrowUp size={12} className="text-primary" /> : <ArrowDown size={12} className="text-primary" />)
+                            : <ChevronsUpDown size={12} className="opacity-30" />}
+                        </span>
+                      </th>
                     )
                   })}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {view.slice(0, limit).map((row, i) => (
+                  <tr key={i} className={cn('border-t transition-colors hover:bg-accent/40', rowClass?.(row))}>
+                    {cols.map((c) => {
+                      const v = (row as Record<string, unknown>)[c.key]
+                      return (
+                        <td key={c.key} className={cn('whitespace-nowrap px-4 py-2.5', c.align === 'right' ? 'text-right tabular-nums' : 'text-left')}>
+                          {c.render ? c.render(v, row) : c.money ? bhd(Number(v ?? 0)) : v == null ? '—' : String(v)}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {limit < view.length && (
+              <div className="border-t py-2 text-center text-xs text-muted-foreground">
+                Showing {limit} of {view.length} — keep scrolling to load more
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   )

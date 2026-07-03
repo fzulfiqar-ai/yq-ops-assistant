@@ -77,7 +77,7 @@ class AskRequest(BaseModel):
 
 @app.post("/ask")
 @limiter.limit(settings.rate_limit)
-async def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.ai import ask as ai_ask
     from app.auth import feature_set
     return ai_ask(body.question, user_email=user.email, model_name=body.model,
@@ -112,7 +112,7 @@ class OrchestrateRequest(BaseModel):
 
 @app.post("/orchestrate")
 @limiter.limit(settings.rate_limit)
-async def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
+def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
                                user: CurrentUser = Depends(get_current_user)) -> dict:
     """Agentic entry point — routes to specialist agents, synthesizes one briefing."""
     from app.orchestrator import orchestrate
@@ -143,7 +143,7 @@ async def orchestrate_stream_endpoint(request: Request, body: OrchestrateRequest
 
 
 @app.get("/search")
-async def global_search(q: str = "", user: CurrentUser = Depends(get_current_user)) -> list:
+def global_search(q: str = "", user: CurrentUser = Depends(get_current_user)) -> list:
     """Global ⌘K search across customers, items and salesmen (scoped to the caller's pages)."""
     from app.auth import feature_set
     from app.reports import search
@@ -151,7 +151,7 @@ async def global_search(q: str = "", user: CurrentUser = Depends(get_current_use
 
 
 @app.post("/agents/{name}/draft-actions")
-async def draft_agent_actions(name: str, admin: CurrentUser = Depends(require_admin)) -> dict:
+def draft_agent_actions(name: str, admin: CurrentUser = Depends(require_admin)) -> dict:
     """Draft pending actions (or bilingual reminders) from an agent — admin only, human-approved.
     Drafted actions land in the existing pending-actions queue (approve/reject/export)."""
     from app.agent_actions import draft_for_agent, draft_reminders
@@ -165,7 +165,7 @@ async def draft_agent_actions(name: str, admin: CurrentUser = Depends(require_ad
 
 
 @app.get("/report/{key}")
-async def report(key: str, user: CurrentUser = Depends(get_current_user)):
+def report(key: str, user: CurrentUser = Depends(get_current_user)):
     """Read-only data for a portal page, gated by the matching feature."""
     from fastapi import HTTPException
     from app.auth import has_feature
@@ -178,19 +178,19 @@ async def report(key: str, user: CurrentUser = Depends(get_current_user)):
 
 
 @app.get("/llm/health")
-async def llm_health(_user: CurrentUser = Depends(get_current_user)) -> dict:
+def llm_health(_user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.llm_router import health
     return {"providers": health()}
 
 
 @app.get("/digest/daily")
-async def digest_daily(_caller: CurrentUser = Depends(get_caller)) -> dict:
+def digest_daily(_caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.digest import daily_summary
     return daily_summary()
 
 
 @app.get("/digest/alerts")
-async def digest_alerts(_caller: CurrentUser = Depends(get_caller)) -> dict:
+def digest_alerts(_caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.digest import all_alerts
     return all_alerts()
 
@@ -802,13 +802,13 @@ def coaching_brief(account: str, _user: CurrentUser = Depends(require_feature("S
 
 
 @app.get("/agents")
-async def agents_list(_caller: CurrentUser = Depends(get_caller)) -> list:
+def agents_list(_caller: CurrentUser = Depends(get_caller)) -> list:
     from app.agents import list_agents
     return list_agents()
 
 
 @app.get("/agents/{name}")
-async def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get_caller)) -> dict:
+def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get_caller)) -> dict:
     from app.agents import run_agent
     try:
         result = run_agent(name)
@@ -823,7 +823,7 @@ async def agents_run(name: str, email: bool = False, caller: CurrentUser = Depen
 
 
 @app.get("/me")
-async def me(user: CurrentUser = Depends(get_current_user)) -> dict:
+def me(user: CurrentUser = Depends(get_current_user)) -> dict:
     """Identity + access for the SPA: role + granted feature pages."""
     role, features, full_name = user.role, [], ""
     try:
@@ -861,13 +861,13 @@ class AcceptRequest(BaseModel):
 
 
 @app.get("/team")
-async def team_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
+def team_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
     from app.user_auth import list_members
     return list_members()
 
 
 @app.post("/team/invite")
-async def team_invite(body: InviteRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+def team_invite(body: InviteRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
     from app.user_auth import FEATURES, create_email_invite, create_member, generate_temp_password
     grant = body.features if body.role == "member" else list(FEATURES)
     if body.method == "email":
@@ -881,7 +881,7 @@ async def team_invite(body: InviteRequest, admin: CurrentUser = Depends(require_
 
 
 @app.patch("/team/{email}")
-async def team_update(email: str, body: UpdateAccessRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+def team_update(email: str, body: UpdateAccessRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
     from app.user_auth import update_access
     update_access(email, role=body.role, features=body.features, status=body.status)
     log_event(admin.email, "team.update", detail={"email": email})
@@ -889,7 +889,7 @@ async def team_update(email: str, body: UpdateAccessRequest, admin: CurrentUser 
 
 
 @app.delete("/team/{email}")
-async def team_remove(email: str, admin: CurrentUser = Depends(require_admin)) -> dict:
+def team_remove(email: str, admin: CurrentUser = Depends(require_admin)) -> dict:
     from fastapi import HTTPException
     from app.user_auth import remove_user
     if email.strip().lower() == admin.email:
@@ -900,7 +900,7 @@ async def team_remove(email: str, admin: CurrentUser = Depends(require_admin)) -
 
 
 @app.get("/team/invite/{token}")
-async def team_invite_info(token: str) -> dict:
+def team_invite_info(token: str) -> dict:
     from fastapi import HTTPException
     from app.user_auth import get_invite
     inv = get_invite(token)
@@ -910,7 +910,7 @@ async def team_invite_info(token: str) -> dict:
 
 
 @app.post("/team/accept")
-async def team_accept(body: AcceptRequest) -> dict:
+def team_accept(body: AcceptRequest) -> dict:
     from fastapi import HTTPException
     from app.user_auth import accept_invite
     res = accept_invite(body.token, body.password, body.full_name)
@@ -926,7 +926,7 @@ class ActionRequest(BaseModel):
 
 
 @app.post("/action")
-async def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
     from app.actions import submit_action as _submit
     result = _submit(body.action_type, {**body.payload, "notes": body.notes}, requested_by=user.email)
     log_event(user.email, "action.submit", detail={"action_type": body.action_type})
@@ -934,13 +934,13 @@ async def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_cur
 
 
 @app.get("/actions")
-async def list_actions(status: str | None = None, _user: CurrentUser = Depends(get_current_user)) -> list:
+def list_actions(status: str | None = None, _user: CurrentUser = Depends(get_current_user)) -> list:
     from app.actions import list_actions as _list
     return _list(status=status)
 
 
 @app.patch("/actions/{action_id}/approve")
-async def approve_action(action_id: int, user: CurrentUser = Depends(require_admin)) -> dict:
+def approve_action(action_id: int, user: CurrentUser = Depends(require_admin)) -> dict:
     from app.actions import approve_action as _approve
     result = _approve(action_id, approved_by=user.email)
     log_event(user.email, "action.approve", detail={"action_id": action_id})
@@ -948,7 +948,7 @@ async def approve_action(action_id: int, user: CurrentUser = Depends(require_adm
 
 
 @app.patch("/actions/{action_id}/reject")
-async def reject_action(action_id: int, reason: str = "", user: CurrentUser = Depends(require_admin)) -> dict:
+def reject_action(action_id: int, reason: str = "", user: CurrentUser = Depends(require_admin)) -> dict:
     from app.actions import reject_action as _reject
     result = _reject(action_id, approved_by=user.email, reason=reason)
     log_event(user.email, "action.reject", detail={"action_id": action_id, "reason": reason})
@@ -956,7 +956,7 @@ async def reject_action(action_id: int, reason: str = "", user: CurrentUser = De
 
 
 @app.get("/actions/export")
-async def export_actions(_user: CurrentUser = Depends(require_admin)) -> Response:
+def export_actions(_user: CurrentUser = Depends(require_admin)) -> Response:
     from app.actions import export_approved_csv
     return Response(content=export_approved_csv(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=approved_actions.csv"})

@@ -191,6 +191,12 @@ def _store_cache(client, key: str, question: str, reply: str, sql: str, rows: li
 def flush_cache() -> int:
     """Clear the text-to-SQL answer cache. MUST be called after any data refresh / view
     change, or stale answers persist (the cache key is just the question text)."""
+    try:  # also drop the in-process dashboard payload cache so fresh data shows at once
+        from app.reports import invalidate_dashboard_cache
+        invalidate_dashboard_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    _data_date_cache.update(d="", at=0.0)
     try:
         get_client().table("query_cache").delete().neq("query_hash", "").execute()
         return 1

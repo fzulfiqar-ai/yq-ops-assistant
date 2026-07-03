@@ -6,11 +6,16 @@ with ex-VAT alongside; all windows anchor to the data's latest date.
 """
 from __future__ import annotations
 
+import logging
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 from app.ai import exec_sql
 from app.database import get_client
 from app.digest import all_alerts, daily_summary
+
+log = logging.getLogger(__name__)
 
 
 def search(q: str, features: set[str] | None = None) -> list[dict]:
@@ -233,9 +238,40 @@ def movers(k: int = 5) -> dict:
     return {"rising": rising, "falling": falling}
 
 
-def dashboard() -> dict:
-    s = daily_summary()
-    a = all_alerts()
+# The dashboard payload is ~20 view queries; each is a PostgREST round-trip. Build the
+# independent sections concurrently and serve warm hits from an in-process cache (zero
+# round-trips). flush on ingest via invalidate_dashboard_cache() (ai.flush_cache calls it).
+_DASH_TTL_S = 300
+_dash_cache: dict = {"at": 0.0, "payload": None}
+
+
+def invalidate_dashboard_cache() -> None:
+    _dash_cache.update(at=0.0, payload=None)
+
+
+def dashboard(force: bool = False) -> dict:
+    if not force and _dash_cache["payload"] is not None and time.time() - _dash_cache["at"] < _DASH_TTL_S:
+        return _dash_cache["payload"]
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="dash") as ex:
+        futs = {
+            "s": ex.submit(daily_summary),
+            "a": ex.submit(all_alerts),
+            "health": ex.submit(business_health),
+            "movers": ex.submit(movers, 5),
+            "trend": ex.submit(revenue_trend, 12),
+            "channel": ex.submit(sales_by_channel),
+            "salesman": ex.submit(sales_by_salesman),
+            "agents": ex.submit(agents_status),
+            "fresh": ex.submit(data_freshness),
+        }
+        r = {k: f.result() for k, f in futs.items()}
+    out = _assemble_dashboard(r)
+    _dash_cache.update(at=time.time(), payload=out)
+    return out
+
+
+def _assemble_dashboard(r: dict) -> dict:
+    s, a = r["s"], r["a"]
     kpis = {
         "rev_today": s["rev_today"], "net_today": s["net_today"], "orders_today": s["orders_today"],
         "rev_yesterday": s["rev_yesterday"], "orders_yesterday": s["orders_yesterday"],
@@ -249,20 +285,20 @@ def dashboard() -> dict:
         "overdue_total_bhd": s["overdue_receivables_bhd"],
         "current_receivables_bhd": s["current_receivables_bhd"],
     }
-    fresh = data_freshness()
+    fresh = r["fresh"]
     return {
         "data_as_of": s.get("data_date"),
         "data_stale": fresh["stale"],
         "data_days_behind": fresh["days_behind"],
         "actions": dashboard_actions(a, kpis),
         "kpis": kpis,
-        "health": business_health(),
-        "movers": movers(5),
+        "health": r["health"],
+        "movers": r["movers"],
         "top_customers": s["top_customers"],
-        "revenue_trend": revenue_trend(12),
-        "by_channel": sales_by_channel(),
-        "by_salesman": sales_by_salesman()[:8],
-        "agents": agents_status(),
+        "revenue_trend": r["trend"],
+        "by_channel": r["channel"],
+        "by_salesman": r["salesman"][:8],
+        "agents": r["agents"],
         "alerts": a,
     }
 

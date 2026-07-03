@@ -1,13 +1,16 @@
-import { useState, type FormEvent } from 'react'
+import { lazy, Suspense, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { Eye, EyeOff } from 'lucide-react'
-import GlowHorizon from '@/components/ui/glow-horizon'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Logo } from '@/components/Logo'
 import { Quote } from '@/components/Quote'
 import { useAuth } from '@/lib/auth'
+
+// tsParticles is the heaviest chunk in the app and only decorates this page —
+// load it after first paint so sign-in is interactive immediately.
+const GlowHorizon = lazy(() => import('@/components/ui/glow-horizon'))
 
 export default function Login() {
   const { signIn } = useAuth()
@@ -34,9 +37,11 @@ export default function Login() {
 
   return (
     <div className="relative flex min-h-screen w-full flex-col overflow-hidden bg-[#140f24]">
-      {/* Animated purple glow backdrop */}
+      {/* Animated purple glow backdrop (lazy — sign-in never waits for it) */}
       <div className="absolute inset-0">
-        <GlowHorizon variant="top" />
+        <Suspense fallback={null}>
+          <GlowHorizon variant="top" />
+        </Suspense>
       </div>
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_80%_at_50%_-10%,transparent,rgba(12,7,32,.65))]" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[5] h-64 bg-gradient-to-t from-[#0c0720] via-[#0c0720]/85 to-transparent" />
