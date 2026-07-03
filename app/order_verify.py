@@ -16,10 +16,11 @@ import json
 import re
 
 from app.db_read import exec_sql_params
+from app.settings import all_settings, rmb_to_bhd
 
-RMB_BHD = 0.0525   # RMB -> BHD (matches the VFAN cost sheet exchange)
-FREIGHT = 1.15     # ~15% freight loading when no actual landed cost is known yet
-DISCOUNT = 0.18    # standard VFAN trade discount
+# Costing constants now live in app_settings (owner-editable) — see app/settings.py.
+# The owner's chain: net RMB → ÷fx_rmb_usd ×fx_usd_bhd = base BHD (what Focus books)
+# → ×(1+landing_vat_pct) = landed → ×(1+target_markup) = suggested sell.
 _CODE = re.compile(r"^[A-Za-z]{1,3}\d")   # F15, X05, UK10 …
 
 
@@ -81,6 +82,12 @@ def verify_order(data: bytes, filename: str) -> dict:
         return {"ok": False, "verdict": "unreadable", "flags": 0, "lines": [],
                 "summary": "Couldn't read an order table — need a Model / QTY / Unit Price layout."}
 
+    cfg = all_settings()
+    discount = cfg["dealer_discount"]
+    rmb_bhd = rmb_to_bhd()
+    landing = 1 + cfg["landing_vat_pct"]
+    markup = 1 + cfg["target_markup"]
+
     codes = sorted({r["model"] for r in rows})
     names = json.dumps(codes)
     _in = "(SELECT jsonb_array_elements_text($1::jsonb))"
@@ -127,14 +134,18 @@ def verify_order(data: bytes, filename: str) -> dict:
             else:
                 checks.append(("math", "fail", f"amount RMB {amt:,.0f} != qty x net RMB {exp_amt:,.0f}"))
         if unit and net:
-            exp_net = round(unit * (1 - DISCOUNT), 2)
+            # Owner's sheet computes net as list ÷ (1+discount), i.e. 9.5/1.18 = 8.05.
+            exp_net = round(unit / (1 + discount), 2)
             if abs(exp_net - net) > max(0.5, unit * 0.02):
                 checks.append(("discount", "warn",
-                               f"net RMB {net:g} != 18% off list RMB {unit:g} (= RMB {exp_net:g})"))
+                               f"net RMB {net:g} != {discount:.0%} dealer discount off "
+                               f"list RMB {unit:g} (= RMB {exp_net:g})"))
 
-        # 3 — margin at the MA selling price
-        cost_rmb = net if net else (round(unit * (1 - DISCOUNT), 2) if unit else None)
-        cost_bhd = round(cost_rmb * RMB_BHD * FREIGHT, 4) if cost_rmb else None
+        # 3 — margin at the MA selling price, on the owner's full costing chain
+        cost_rmb = net if net else (round(unit / (1 + discount), 2) if unit else None)
+        base_bhd = round(cost_rmb * rmb_bhd, 4) if cost_rmb else None        # Focus PO cost
+        cost_bhd = round(base_bhd * landing, 4) if base_bhd else None        # landed (+VAT)
+        suggested_sell = round(cost_bhd * markup, 3) if cost_bhd else None   # before rounding
         s = sell.get(m)
         margin = None
         if s and cost_bhd:
@@ -176,7 +187,9 @@ def verify_order(data: bytes, filename: str) -> dict:
         out_lines.append({
             "model": m, "spec": r.get("spec"), "qty": qty,
             "unit_price_rmb": unit, "net_price_rmb": net, "amount_rmb": amt,
-            "cost_bhd": cost_bhd, "sell_bhd": s, "margin_pct": margin,
+            "base_cost_bhd": base_bhd, "cost_bhd": cost_bhd,
+            "suggested_sell_bhd": suggested_sell,
+            "sell_bhd": s, "margin_pct": margin,
             "cover_days": cover, "status": worst,
             "checks": [{"name": n, "status": st, "note": nt} for n, st, nt in checks],
         })

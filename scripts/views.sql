@@ -96,6 +96,10 @@ LEFT JOIN LATERAL (
 ) sp ON true;
 
 -- v_receivables: latest outstanding balance per account ---
+-- SUPERSEDED at runtime: the canonical, bucket-based definition lives in
+-- receivables_consolidation_migration.sql (sourced from ar_ageing, adds
+-- current_bhd/overdue_bhd/over_90_bhd). This ledger-based version exists only so a
+-- fresh DB bootstraps before migrations run — apply the migration right after.
 CREATE OR REPLACE VIEW v_receivables AS
 WITH latest AS (
     SELECT DISTINCT ON (account)

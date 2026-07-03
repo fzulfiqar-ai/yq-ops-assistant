@@ -26,7 +26,8 @@ def daily_summary() -> dict:
     data_date = _data_date()
     if not data_date:
         return {"data_date": None, "rev_today": 0, "orders_today": 0, "rev_mtd": 0,
-                "orders_mtd": 0, "rev_prev_month": 0, "top_customers": [], "total_receivables": 0}
+                "orders_mtd": 0, "rev_prev_month": 0, "top_customers": [], "total_receivables": 0,
+                "overdue_receivables_bhd": 0, "current_receivables_bhd": 0, "overdue_accounts": 0}
     d = datetime.date.fromisoformat(str(data_date)[:10])
     yday = (d - datetime.timedelta(days=1)).isoformat()
     month_start = d.replace(day=1).isoformat()
@@ -56,7 +57,14 @@ def daily_summary() -> dict:
         f"WHERE last_order_date >= DATE '{month_start}' AND customer_name NOT ILIKE 'cash customer%' "
         "ORDER BY gross_bhd DESC NULLS LAST LIMIT 5"
     )
-    recv = exec_sql("SELECT COALESCE(SUM(outstanding_bhd),0) AS total FROM v_receivables LIMIT 1")
+    # Total book + past-due split on the SAME bucket basis as the collections agent,
+    # so the dashboard tile and the agent can never disagree again.
+    recv = exec_sql(
+        "SELECT COALESCE(SUM(outstanding_bhd),0) AS total, "
+        "COALESCE(SUM(overdue_bhd),0) AS overdue, "
+        "COUNT(*) FILTER (WHERE overdue_bhd > 0) AS overdue_accounts "
+        "FROM v_receivables LIMIT 1"
+    )
 
     g = lambda rs, k, default=0: (rs or [{}])[0].get(k, default)  # noqa: E731
     return {
@@ -72,6 +80,9 @@ def daily_summary() -> dict:
         "rev_prev_month": float(g(prev, "rev")),
         "top_customers": top or [],
         "total_receivables": float(g(recv, "total")),
+        "overdue_receivables_bhd": float(g(recv, "overdue")),
+        "current_receivables_bhd": float(g(recv, "total")) - float(g(recv, "overdue")),
+        "overdue_accounts": int(g(recv, "overdue_accounts")),
     }
 
 

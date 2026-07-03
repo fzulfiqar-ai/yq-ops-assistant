@@ -1,14 +1,71 @@
 import { useState, type FormEvent } from 'react'
-import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2 } from 'lucide-react'
+import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { useToast } from '@/components/Toast'
 import { supabase } from '@/lib/supabase'
+import { apiGet, apiSend } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+
+type Costing = Record<string, number>
+
+const COSTING_FIELDS: { key: string; label: string; hint: string }[] = [
+  { key: 'fx_rmb_usd', label: 'RMB per USD', hint: 'Order costing exchange leg' },
+  { key: 'fx_usd_bhd', label: 'BHD per USD', hint: 'Order costing exchange leg' },
+  { key: 'dealer_discount', label: 'Dealer discount', hint: '0.18 = net price is list ÷ 1.18' },
+  { key: 'landing_vat_pct', label: 'Landing + VAT uplift', hint: '0.30 = 20% landing + 10% VAT' },
+  { key: 'target_markup', label: 'Target markup', hint: '0.70 = sell at landed × 1.70' },
+  { key: 'monthly_sales_target_bhd', label: 'Monthly sales target (BHD)', hint: '0 = no target set' },
+]
+
+function CostingCard() {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const { data } = useQuery({ queryKey: ['costing'], queryFn: () => apiGet<Costing>('/settings/costing') })
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const save = useMutation({
+    mutationFn: () => {
+      const changes: Costing = {}
+      for (const [k, v] of Object.entries(draft)) {
+        const n = parseFloat(v)
+        if (!Number.isNaN(n) && n !== data?.[k]) changes[k] = n
+      }
+      return apiSend<Costing>('PUT', '/settings/costing', changes)
+    },
+    onSuccess: () => { setDraft({}); qc.invalidateQueries({ queryKey: ['costing'] }); toast('Business settings saved.', 'success') },
+    onError: (e: Error) => toast(e.message, 'error'),
+  })
+  if (!data) return null
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+        <Calculator size={18} className="text-primary" /> Business settings
+      </div>
+      <p className="mb-4 text-sm text-muted-foreground">
+        The costing chain used across order verification, reorder proposals and pricing:
+        RMB ÷ (1 + discount) ÷ RMB/USD × BHD/USD → base cost · × (1 + landing) → landed · × (1 + markup) → sell.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {COSTING_FIELDS.map((f) => (
+          <label key={f.key} className="block">
+            <span className="mb-1 block text-xs font-semibold text-muted-foreground">{f.label}</span>
+            <Input inputMode="decimal" value={draft[f.key] ?? String(data[f.key] ?? '')}
+              onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))} />
+            <span className="mt-0.5 block text-[11px] text-muted-foreground">{f.hint}</span>
+          </label>
+        ))}
+      </div>
+      <Button className="mt-4" onClick={() => save.mutate()} disabled={save.isPending || Object.keys(draft).length === 0}>
+        {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save settings
+      </Button>
+    </Card>
+  )
+}
 
 export default function Settings() {
   const { me } = useAuth()
@@ -58,6 +115,8 @@ export default function Settings() {
           </div>
         )}
       </Card>
+
+      {me?.role === 'admin' && <CostingCard />}
 
       <Card className="mb-4 p-6">
         <div className="mb-4 font-display text-base font-semibold">Appearance</div>

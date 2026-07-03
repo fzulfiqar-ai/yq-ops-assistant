@@ -230,6 +230,31 @@ def schedule_set(name: str, body: ScheduleRequest, admin: CurrentUser = Depends(
     return r
 
 
+class CostingSettings(BaseModel):
+    fx_rmb_usd: float | None = None
+    fx_usd_bhd: float | None = None
+    dealer_discount: float | None = None
+    landing_vat_pct: float | None = None
+    target_markup: float | None = None
+    monthly_sales_target_bhd: float | None = None
+
+
+@app.get("/settings/costing")
+def costing_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Owner-editable costing chain + targets (drives order verify, reorder cost basis, pace)."""
+    from app.settings import all_settings
+    return all_settings(force=True)
+
+
+@app.put("/settings/costing")
+def costing_put(body: CostingSettings, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.settings import update_settings
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    out = update_settings(changes, by=admin.email)
+    log_event(admin.email, "settings.costing", detail=changes)
+    return out
+
+
 @app.get("/events/dispatch")
 def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(get_caller)) -> dict:
     """Called hourly by n8n: fan out unprocessed agent_events to subscribed agents

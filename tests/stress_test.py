@@ -204,12 +204,13 @@ def _():
         assert float(r.get("outstanding_bhd", 0)) > 0, f"Non-positive outstanding: {r}"
 
 
-@test("view: v_low_stock balance <= 10")
+@test("view: v_low_stock is velocity-based (urgent/low only)")
 def _():
     from app.ai import exec_sql
-    rows = exec_sql("SELECT item_name, balance_qty FROM v_low_stock LIMIT 5")
+    rows = exec_sql("SELECT item_name, balance_qty, status FROM v_low_stock LIMIT 5")
     for r in rows:
-        assert float(r.get("balance_qty", 0)) <= 10, f"balance_qty > 10 in v_low_stock: {r}"
+        assert r.get("status") in ("urgent_out_of_stock", "low_stock"), \
+            f"unexpected status in v_low_stock: {r}"
 
 
 # ── AI engine ─────────────────────────────────────────────────────────────────

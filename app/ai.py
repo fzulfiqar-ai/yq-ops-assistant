@@ -204,6 +204,27 @@ def flush_cache() -> int:
 from app.db_read import exec_sql, exec_sql_params  # noqa: E402,F401
 
 
+# Latest loaded sale date for user-facing copy — cached 5 min so greetings/fallbacks
+# don't cost a query, and never goes stale across uploads (unlike a hardcoded date).
+_data_date_cache: dict[str, Any] = {"d": "", "at": 0.0}
+
+
+def _data_date_str() -> str:
+    now = time.time()
+    if _data_date_cache["d"] and now - _data_date_cache["at"] < 300:
+        return _data_date_cache["d"]
+    label = "the latest upload"
+    try:
+        rows = exec_sql("SELECT MAX(sale_date) AS d FROM v_sales LIMIT 1")
+        raw = (rows or [{}])[0].get("d")
+        if raw:
+            label = datetime.fromisoformat(str(raw)[:10]).strftime("%d %b %Y")
+    except Exception:  # noqa: BLE001
+        pass
+    _data_date_cache.update(d=label, at=now)
+    return label
+
+
 # Shared with prompt_guard (single implementation); kept under the old name because
 # orchestrator/mcp_server import `_entity_names` from here.
 from app.prompt_guard import FENCE_RULE, entity_names as _entity_names, fence  # noqa: E402
@@ -276,8 +297,8 @@ def _llm_answer(question: str, rows: list[dict], redactor: Redactor,
     if not rows:
         return (
             "I checked the records but didn't find anything matching that. The data runs "
-            "to **22 Jun 2026** — try rephrasing, or ask about sales, a salesman, stock "
-            "health, margins, or who owes us money."
+            f"to **{_data_date_str()}** — try rephrasing, or ask about sales, a salesman, "
+            "stock health, margins, or who owes us money."
         )
     row_text = json.dumps(rows[:50], indent=2, default=str)
     redacted_rows = redactor.redact(row_text, _entity_names(rows))
@@ -352,7 +373,7 @@ def _smalltalk(question: str) -> str | None:
     if len(q) <= 60 and _GREETING.search(q) and not re.search(r"\d|sale|stock|revenue|customer|margin|owe|debtor", q, re.I):
         return (
             "Hello — I'm your YQ Bahrain operations analyst. I have your live "
-            "Mobile Accessories data (as of **22 Jun 2026**): sales, salesmen, stock, "
+            f"Mobile Accessories data (as of **{_data_date_str()}**): sales, salesmen, stock, "
             "margins and receivables.\n\n"
             "Try asking me:\n"
             "- **Who's our top salesman this month?**\n"

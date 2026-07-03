@@ -243,8 +243,11 @@ def dashboard() -> dict:
         "rev_prev_month": s["rev_prev_month"],
         "total_receivables": s["total_receivables"],
         "low_stock_count": a["low_stock_count"],
-        "overdue_count": a["overdue_count"],
-        "overdue_total_bhd": a["overdue_total_bhd"],
+        # Whole-book SQL sums (daily_summary), NOT the capped alert list — keeps the
+        # tile on the exact same basis as the collections agent.
+        "overdue_count": s["overdue_accounts"],
+        "overdue_total_bhd": s["overdue_receivables_bhd"],
+        "current_receivables_bhd": s["current_receivables_bhd"],
     }
     fresh = data_freshness()
     return {

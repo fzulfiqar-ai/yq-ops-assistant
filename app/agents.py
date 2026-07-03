@@ -58,6 +58,12 @@ def collections() -> dict:
         "FROM v_receivables WHERE overdue_bhd > 0 "
         "ORDER BY overdue_bhd DESC LIMIT 40"
     )
+    # Whole-book totals in SQL — the list above is capped at 40, so summing it would
+    # under-report and disagree with the dashboard whenever more accounts are overdue.
+    tot = _q(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(overdue_bhd),0) AS overdue, "
+        "COALESCE(SUM(outstanding_bhd),0) AS book FROM v_receivables WHERE overdue_bhd > 0"
+    )
     items = []
     for r in rows:
         acct = str(r.get("account", "")).strip()
@@ -76,11 +82,15 @@ def collections() -> dict:
                 f"Thank you — YQ Bahrain."
             ),
         })
-    total = sum(i["overdue_bhd"] for i in items)
+    n = int(_f(tot[0], "n")) if tot else len(items)
+    total = _f(tot[0], "overdue") if tot else sum(i["overdue_bhd"] for i in items)
+    book = _f(tot[0], "book") if tot else sum(i["outstanding_bhd"] for i in items)
     return {
-        "count": len(items),
+        "count": n,
         "total_overdue_bhd": total,
-        "summary": f"{len(items)} accounts with overdue balances — BHD {total:,.2f} past due.",
+        "overdue_book_bhd": book,
+        "summary": (f"{n} accounts with overdue balances — BHD {total:,.2f} past due (>30d)"
+                    + (f"; showing top {len(items)}." if n > len(items) else ".")),
         "items": items,
     }
 
@@ -803,8 +813,9 @@ def reorder_proposal(target_days_cover: int = 45, lead_time_days: int = 21) -> d
         "  ORDER BY po.po_date DESC NULLS LAST LIMIT 1) lp ON TRUE"
     )
     # ── Money lookups (keyed by leading product code) so each line carries the full picture ──
-    RMB_BHD = 0.0525            # ¥→BHD (matches the VFAN cost sheet exchange)
-    FREIGHT = 1.15             # ~15% freight loading when no actual landed cost is known yet
+    from app.settings import all_settings, rmb_to_bhd
+    RMB_BHD = rmb_to_bhd()                              # ¥→BHD via the USD leg (owner's sheet)
+    FREIGHT = 1 + all_settings()["landing_vat_pct"]     # landing + VAT uplift on base cost
     vfan = {x["model"]: x for x in (_q(
         "SELECT model, latest_rmb, change_pct FROM v_supplier_price_history") or [])}
     landed = {x["code"]: x["c"] for x in (_q(

@@ -22,6 +22,7 @@ interface Kpis {
   rev_mtd: number; net_mtd: number; orders_mtd: number; rev_prev_month: number
   total_receivables: number; low_stock_count: number
   overdue_count: number; overdue_total_bhd: number
+  current_receivables_bhd?: number
 }
 interface ChannelRow { channel: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
 interface SalesmanRow { salesman: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
@@ -217,9 +218,11 @@ export default function Dashboard() {
           <KpiCard accent={ACCENTS.slate} icon={FileText} label="Orders this month"
             value={<CountUp value={k.orders_mtd} />}
             foot={<span className="text-muted-foreground">Invoices processed</span>} />
-          <KpiCard accent={ACCENTS.green} icon={Landmark} label="Receivables"
+          <KpiCard accent={ACCENTS.green} icon={Landmark} label="Receivables (total)"
             value={<CountUp value={k.total_receivables} format={(n) => bhd(n, 0)} />}
-            foot={<span className="text-muted-foreground">{k.overdue_count} accounts overdue</span>} />
+            foot={<span className="text-muted-foreground">
+              <span className="font-semibold text-rose-600">{bhd(k.overdue_total_bhd, 0)} overdue &gt;30d</span>
+              {' '}· {bhd(k.current_receivables_bhd ?? Math.max(k.total_receivables - k.overdue_total_bhd, 0), 0)} current · {k.overdue_count} accts</span>} />
           <KpiCard accent={ACCENTS.amber} icon={Boxes} label="Low-stock items"
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />

@@ -163,11 +163,13 @@ def detail(po_no: str, with_files: bool = True) -> dict:
     # when an order has no MRN landed cost yet, so margin still calculates from the invoice you uploaded.
     vfan_by: dict[str, float] = {}
     if codes:
+        from app.settings import all_settings, rmb_to_bhd
+        landed_factor = rmb_to_bhd() * (1 + all_settings()["landing_vat_pct"])  # ¥→BHD landed
         for r in (exec_sql_params(
                 "SELECT model, latest_rmb FROM v_supplier_price_history "
                 "WHERE model IN (SELECT jsonb_array_elements_text($1::jsonb)) AND latest_rmb > 0",
                 [json.dumps(codes)]) or []):
-            vfan_by[r["model"]] = round(float(r["latest_rmb"]) * 0.0525 * 1.15, 4)  # ¥→BHD × ~15% freight
+            vfan_by[r["model"]] = round(float(r["latest_rmb"]) * landed_factor, 4)
 
     any_recv = bool(received)
     ordered_codes = {o["code"] for o in ordered}

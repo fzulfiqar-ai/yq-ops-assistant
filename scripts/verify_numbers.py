@@ -45,32 +45,51 @@ def _find(key: str, src_dir: Path) -> str | None:
     return None
 
 
-def _db_sum(view: str, col: str) -> float:
+def _sql_sum(sql: str, params: list | None = None) -> float | None:
+    """Single-query SUM via the read-only RPC — deterministic. The old approach paged
+    PostgREST with .range() and NO ORDER BY; Postgres gives no stable order without one,
+    so pages could overlap/skip and the same sum came back different between runs
+    (observed: v_sales 53,446 vs 52,909 seconds apart → spurious verify FAILs)."""
+    try:
+        from app.db_read import exec_sql, exec_sql_params
+        rows = exec_sql_params(sql, params) if params else exec_sql(sql)
+        return _nn((rows or [{}])[0].get("s"))
+    except Exception:  # noqa: BLE001 — RPC missing/ungranted → ordered REST fallback
+        return None
+
+
+def _rest_sum(view: str, col: str, order_col: str, filters=None) -> float:
+    """Paginated REST fallback with an explicit ORDER BY so pages are stable."""
     c = get_client()
     rows, off = [], 0
     while True:
-        b = c.table(view).select(col).range(off, off + 999).execute().data or []
+        q = c.table(view).select(col).order(order_col)
+        for f in (filters or []):
+            q = f(q)
+        b = q.range(off, off + 999).execute().data or []
         rows += b
         if len(b) < 1000:
             break
         off += 1000
     return sum(_nn(r.get(col)) for r in rows)
+
+
+def _db_sum(view: str, col: str) -> float:
+    s = _sql_sum(f"SELECT COALESCE(SUM({col}),0) AS s FROM {view}")
+    return s if s is not None else _rest_sum(view, col, col)
 
 
 def _db_sum_between(view: str, col: str, datecol: str, dmin: str, dmax: str) -> float:
     """Sum `col` over rows whose `datecol` is in [dmin, dmax]. Scopes the check to the uploaded
     file's own date range, so an incremental (partial) day-book validates against the same span
     instead of the whole cumulative DB (which made a small top-up look like a huge 'drift')."""
-    c = get_client()
-    rows, off = [], 0
-    while True:
-        b = (c.table(view).select(col).gte(datecol, dmin).lte(datecol, dmax)
-             .range(off, off + 999).execute().data or [])
-        rows += b
-        if len(b) < 1000:
-            break
-        off += 1000
-    return sum(_nn(r.get(col)) for r in rows)
+    s = _sql_sum(
+        f"SELECT COALESCE(SUM({col}),0) AS s FROM {view} "
+        f"WHERE {datecol} >= $1::date AND {datecol} <= $2::date", [dmin, dmax])
+    if s is not None:
+        return s
+    return _rest_sum(view, col, datecol,
+                     filters=[lambda q: q.gte(datecol, dmin), lambda q: q.lte(datecol, dmax)])
 
 
 def _latest_as_of(table: str) -> str | None:
@@ -82,16 +101,10 @@ def _latest_as_of(table: str) -> str | None:
 def _db_sum_eq(table: str, col: str, eqcol: str, eqval) -> float:
     """Sum `col` over rows where `eqcol` = `eqval`. Scopes a snapshot table (stock_balance) to its
     latest as_of_date so retained earlier snapshots aren't double-counted on the next upload."""
-    c = get_client()
-    rows, off = [], 0
-    while True:
-        b = (c.table(table).select(col).eq(eqcol, eqval)
-             .range(off, off + 999).execute().data or [])
-        rows += b
-        if len(b) < 1000:
-            break
-        off += 1000
-    return sum(_nn(r.get(col)) for r in rows)
+    s = _sql_sum(f"SELECT COALESCE(SUM({col}),0) AS s FROM {table} WHERE {eqcol} = $1", [str(eqval)])
+    if s is not None:
+        return s
+    return _rest_sum(table, col, "id", filters=[lambda q: q.eq(eqcol, eqval)])
 
 
 def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
@@ -141,7 +154,11 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
 
 
 def main() -> int:
-    ok, rows = run_checks()
+    # Optional folder argument, same as scripts.refresh:  python -m scripts.verify_numbers "Planning 030726"
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+    if src is not None and not src.is_absolute():
+        src = ROOT / src
+    ok, rows = run_checks(src)
     print("=" * 64)
     print(f"{'METRIC':24} {'REPORT':>14} {'DB':>14}  RESULT")
     print("-" * 64)
