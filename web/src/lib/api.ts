@@ -1,4 +1,4 @@
-import { supabase } from './supabase'
+import { getSessionSafe } from './supabase'
 
 const BASE = (import.meta.env.VITE_API_URL as string) || ''
 
@@ -13,8 +13,10 @@ export class ApiError extends Error {
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
-  const { data } = await supabase.auth.getSession()
-  const token = data.session?.access_token
+  // getSessionSafe() can't deadlock on the supabase cross-tab lock (which used to
+  // hang EVERY request behind it and freeze the app on its loading splash).
+  const session = await getSessionSafe()
+  const token = session?.access_token
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
@@ -24,8 +26,19 @@ async function handle<T>(res: Response): Promise<T> {
   return (ct.includes('application/json') ? res.json() : res.text()) as Promise<T>
 }
 
+/** Fetch with a hard timeout so one stalled request can never hang the caller. */
+async function fetchTimeout(input: string, init: RequestInit = {}, ms = 20000): Promise<Response> {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), ms)
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(t)
+  }
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: { ...(await authHeaders()) } })
+  const res = await fetchTimeout(`${BASE}${path}`, { headers: { ...(await authHeaders()) } })
   return handle<T>(res)
 }
 

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
-import { supabase } from './supabase'
+import { supabase, getSessionSafe } from './supabase'
 import { apiGet, ApiError } from './api'
 
 export type Role = 'admin' | 'member' | 'salesman'
@@ -62,12 +62,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true
-    supabase.auth.getSession().then(async ({ data }) => {
+    // Hard safety net: never let the boot splash hang forever. If getSession or the
+    // first /me stalls past 12s, stop the splash — the router then shows Login or the
+    // "Waking the server…" screen (both recover on their own), never a frozen logo.
+    const bootTimer = setTimeout(() => { if (active) setLoading(false) }, 12000)
+    ;(async () => {
+      const s = await getSessionSafe()   // cannot hang (races the supabase lock)
       if (!active) return
-      setSession(data.session)
-      if (data.session) await loadMe()
-      setLoading(false)
-    })
+      setSession(s)
+      if (s) await loadMe()
+      if (active) { setLoading(false); clearTimeout(bootTimer) }
+    })()
     const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
       setSession(s)
       if (s) await loadMe()
@@ -75,6 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     return () => {
       active = false
+      clearTimeout(bootTimer)
       sub.subscription.unsubscribe()
     }
   }, [])
