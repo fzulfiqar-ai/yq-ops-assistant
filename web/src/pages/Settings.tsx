@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator } from 'lucide-react'
+import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator, Target } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
@@ -67,6 +67,76 @@ function CostingCard() {
   )
 }
 
+interface TargetRow { salesman: string; target_bhd: number; rev_90d: number }
+interface TargetsData { company_target_bhd: number; targets: TargetRow[] }
+
+function TargetsCard() {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const { data } = useQuery({ queryKey: ['targets'], queryFn: () => apiGet<TargetsData>('/settings/targets') })
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [company, setCompany] = useState<string | null>(null)
+  const save = useMutation({
+    mutationFn: () => {
+      const targets = Object.entries(draft)
+        .map(([salesman, v]) => ({ salesman, target_bhd: parseFloat(v) }))
+        .filter((t) => !Number.isNaN(t.target_bhd))
+      const c = company != null ? parseFloat(company) : NaN
+      return apiSend('PUT', '/settings/targets', {
+        company_target_bhd: Number.isNaN(c) ? undefined : c,
+        targets: targets.length ? targets : undefined,
+      })
+    },
+    onSuccess: () => {
+      setDraft({}); setCompany(null)
+      qc.invalidateQueries({ queryKey: ['targets'] })
+      qc.invalidateQueries({ queryKey: ['report', 'dashboard'] })
+      qc.invalidateQueries({ queryKey: ['costing'] })
+      toast('Targets saved — dashboard pace updates now.', 'success')
+    },
+    onError: (e: Error) => toast(e.message, 'error'),
+  })
+  if (!data) return null
+  const sum = data.targets.reduce((s, t) => s + Number(draft[t.salesman] ?? t.target_bhd), 0)
+  const dirty = Object.keys(draft).length > 0 || company != null
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+        <Target size={18} className="text-primary" /> Sales targets (monthly)
+      </div>
+      <p className="mb-4 text-sm text-muted-foreground">
+        Set the company target and each salesman's share — the dashboard pace bar and the
+        leaderboard track these automatically every day.
+      </p>
+      <label className="mb-4 block max-w-xs">
+        <span className="mb-1 block text-xs font-semibold text-muted-foreground">Company target (BHD)</span>
+        <Input inputMode="numeric" value={company ?? String(data.company_target_bhd ?? '')}
+          onChange={(e) => setCompany(e.target.value)} />
+      </label>
+      <div className="space-y-1.5">
+        {data.targets.map((t) => (
+          <div key={t.salesman} className="flex items-center gap-3">
+            <span className="w-44 truncate text-sm font-medium">{t.salesman}</span>
+            <Input className="w-28" inputMode="numeric"
+              value={draft[t.salesman] ?? String(t.target_bhd)}
+              onChange={(e) => setDraft((d) => ({ ...d, [t.salesman]: e.target.value }))} />
+            <span className="text-[11px] text-muted-foreground">sold BHD {Number(t.rev_90d).toLocaleString('en-US', { maximumFractionDigits: 0 })} in 90d</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex items-center gap-3 border-t pt-3">
+        <span className="text-sm text-muted-foreground">
+          Salesmen total: <b className={sum > Number(company ?? data.company_target_bhd) ? 'text-amber-600' : 'text-foreground'}>BHD {sum.toLocaleString('en-US', { maximumFractionDigits: 0 })}</b>
+          {' '}of {Number(company ?? data.company_target_bhd).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+        </span>
+        <Button className="ml-auto" onClick={() => save.mutate()} disabled={save.isPending || !dirty}>
+          {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save targets
+        </Button>
+      </div>
+    </Card>
+  )
+}
+
 export default function Settings() {
   const { me } = useAuth()
   const { theme, toggle } = useTheme()
@@ -117,6 +187,7 @@ export default function Settings() {
       </Card>
 
       {me?.role === 'admin' && <CostingCard />}
+      {me?.role === 'admin' && <TargetsCard />}
 
       <Card className="mb-4 p-6">
         <div className="mb-4 font-display text-base font-semibold">Appearance</div>

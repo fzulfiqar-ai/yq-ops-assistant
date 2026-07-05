@@ -60,6 +60,7 @@ interface DashboardData {
   by_payment?: PaymentRow[]
   by_division?: DivisionRow[]
   pace?: Pace
+  attainment?: { salesman: string; target_bhd: number; rev_mtd: number; attainment_pct: number | null }[]
 }
 
 const container = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } }
@@ -419,6 +420,32 @@ export default function Dashboard() {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+          )}
+          {(data?.attainment?.length ?? 0) > 0 && (
+            <div className="mt-4 border-t pt-3">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                This month vs target <Link to="/settings" className="normal-case text-primary hover:underline">(edit targets)</Link>
+              </div>
+              <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
+                {data!.attainment!.slice(0, 10).map((a) => {
+                  const pct = Math.min(Number(a.attainment_pct ?? 0), 100)
+                  const hot = Number(a.attainment_pct ?? 0) >= 100
+                  return (
+                    <div key={a.salesman} className="flex items-center gap-2 text-[12.5px]">
+                      <span className="w-32 truncate font-medium">{a.salesman}</span>
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">
+                        <div className={cn('h-full rounded-full', hot ? 'bg-emerald-500' : 'bg-primary')}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className={cn('w-20 shrink-0 text-right tabular-nums',
+                        hot ? 'font-semibold text-emerald-600' : 'text-muted-foreground')}>
+                        {bhd(a.rev_mtd, 0)}<span className="text-muted-foreground">/{Number(a.target_bhd) >= 1000 ? `${(Number(a.target_bhd) / 1000).toFixed(1)}k` : Number(a.target_bhd)}</span>
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
           )}
         </Card>
 

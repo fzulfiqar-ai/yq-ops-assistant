@@ -323,23 +323,44 @@ def sales_outreach() -> dict:
     link = _catalog_link()
     link_line_en = f"\nOur latest catalog with prices: {link}" if link else ""
     link_line_ar = f"\nأحدث كتالوج بالأسعار: {link}" if link else ""
+
+    # Smart contacts: find business phones/emails for the due customers (public
+    # listings, capped per run) so each draft carries a one-tap wa.me link.
+    names = [str(r.get("customer_name") or "").strip() for r in due]
+    contacts: dict[str, dict] = {}
+    enriched = 0
+    try:
+        from app.customer_contacts import enrich_missing, get_contacts, wa_digits
+        enriched = enrich_missing(names, limit=8)
+        contacts = get_contacts(names)
+    except Exception:  # noqa: BLE001
+        def wa_digits(_p):  # type: ignore[misc]
+            return None
+
+    from urllib.parse import quote
     drafts = []
     for r in due:
         name = str(r.get("customer_name") or "").strip()
         items = [i.split(" (")[0] for i in top_items.get(name, [])][:3]
         usual = ", ".join(items) if items else "your usual items"
         days = int(_f(r, "days_since"))
+        msg_en = (
+            f"Hello {name}, it's YQ Bahrain. It's been {days} days since your last order — "
+            f"we have fresh stock of {usual} and new VFAN arrivals. "
+            f"Shall we prepare your usual order?{link_line_en}"
+        )
+        c = contacts.get(name) or {}
+        digits = wa_digits(c.get("phone"))
         drafts.append({
             "customer": name,
             "lifetime_bhd": _f(r, "lifetime_bhd"),
             "days_since_order": days,
             "usual_cycle_days": _f(r, "cycle_days"),
             "usual_items": items,
-            "message_en": (
-                f"Hello {name}, it's YQ Bahrain. It's been {days} days since your last order — "
-                f"we have fresh stock of {usual} and new VFAN arrivals. "
-                f"Shall we prepare your usual order?{link_line_en}"
-            ),
+            "phone": c.get("phone"),
+            "email": c.get("email"),
+            "wa_link": f"https://wa.me/{digits}?text={quote(msg_en)}" if digits else None,
+            "message_en": msg_en,
             "message_ar": (
                 f"مرحباً {name}، معكم YQ البحرين. مضى {days} يوماً على آخر طلبية — "
                 f"لدينا مخزون جديد من {usual} ووصلات VFAN جديدة. "
@@ -347,10 +368,13 @@ def sales_outreach() -> dict:
             ),
         })
     value = sum(d["lifetime_bhd"] for d in drafts)
+    with_contact = sum(1 for d in drafts if d.get("phone") or d.get("email"))
     return {
         "count": len(drafts),
         "summary": (f"{len(drafts)} customers are past their usual reorder cycle "
-                    f"(BHD {value:,.0f} lifetime value) — WhatsApp drafts ready to send."
+                    f"(BHD {value:,.0f} lifetime value) — WhatsApp drafts ready; "
+                    f"{with_contact} with a phone/email on file"
+                    + (f", {enriched} newly found" if enriched else "") + "."
                     if drafts else
                     "No customers are overdue for a reorder — the active book is buying on cycle."),
         "drafts": drafts,

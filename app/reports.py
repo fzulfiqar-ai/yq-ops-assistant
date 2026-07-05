@@ -238,6 +238,21 @@ def movers(k: int = 5) -> dict:
     return {"rising": rising, "falling": falling}
 
 
+def salesman_attainment() -> list[dict]:
+    """Per-salesman MTD gross vs their monthly target (salesman_targets) — the
+    leaderboard the owner sets from Settings → Sales targets."""
+    return exec_sql(
+        "WITH mx AS (SELECT MAX(sale_date) AS d FROM v_sales), "
+        "mtd AS (SELECT salesman_resolved AS salesman, SUM(revenue_bhd) AS rev_mtd "
+        "        FROM v_sales, mx WHERE sale_date >= date_trunc('month', mx.d)::date "
+        "        AND NOT is_giveaway GROUP BY 1) "
+        "SELECT t.salesman, t.target_bhd, COALESCE(m.rev_mtd, 0) AS rev_mtd, "
+        "CASE WHEN t.target_bhd > 0 THEN ROUND(COALESCE(m.rev_mtd, 0) / t.target_bhd * 100, 1) END AS attainment_pct "
+        "FROM salesman_targets t LEFT JOIN mtd m ON m.salesman = t.salesman "
+        "WHERE t.target_bhd > 0 ORDER BY attainment_pct DESC NULLS LAST"
+    ) or []
+
+
 def daily_sales_mtd() -> list[dict]:
     """One row per day of the current month (anchored to the data's latest date) —
     the owner's 'daily current-month sales' dashboard chart."""
@@ -320,6 +335,7 @@ def dashboard(force: bool = False) -> dict:
             "fresh": ex.submit(data_freshness),
             "daily_mtd": ex.submit(daily_sales_mtd),
             "split": ex.submit(sales_split_mtd),
+            "attainment": ex.submit(salesman_attainment),
         }
         r = {k: f.result() for k, f in futs.items()}
     out = _assemble_dashboard(r)
@@ -361,6 +377,7 @@ def _assemble_dashboard(r: dict) -> dict:
         "by_payment": r["split"]["by_payment"],
         "by_division": r["split"]["by_division"],
         "pace": _pace(kpis, s.get("data_date")),
+        "attainment": r["attainment"],
     }
 
 

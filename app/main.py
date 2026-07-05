@@ -299,6 +299,53 @@ def costing_put(body: CostingSettings, admin: CurrentUser = Depends(require_admi
     return out
 
 
+class SalesmanTarget(BaseModel):
+    salesman: str
+    target_bhd: float
+
+
+class TargetsRequest(BaseModel):
+    company_target_bhd: float | None = None
+    targets: list[SalesmanTarget] | None = None
+
+
+@app.get("/settings/targets")
+def targets_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Company monthly target + per-salesman targets with trailing-90d revenue for context."""
+    from app.db_read import exec_sql
+    from app.settings import setting
+    rows = exec_sql(
+        "SELECT r.salesman, COALESCE(t.target_bhd, 0) AS target_bhd, "
+        "COALESCE(SUM(s.revenue_bhd), 0) AS rev_90d "
+        "FROM v_salesman_stock_recon r "
+        "LEFT JOIN salesman_targets t ON t.salesman = r.salesman "
+        "LEFT JOIN v_sales s ON s.salesman_resolved = r.salesman "
+        "  AND s.sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND NOT s.is_giveaway "
+        "WHERE r.is_van GROUP BY r.salesman, t.target_bhd ORDER BY rev_90d DESC") or []
+    return {"company_target_bhd": setting("monthly_sales_target_bhd"), "targets": rows}
+
+
+@app.put("/settings/targets")
+def targets_put(body: TargetsRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Edit targets from the platform — company total and/or individual salesmen."""
+    from datetime import datetime, timezone
+    from app.database import get_client
+    from app.settings import update_settings
+    if body.company_target_bhd is not None:
+        update_settings({"monthly_sales_target_bhd": body.company_target_bhd}, by=admin.email)
+    if body.targets:
+        now = datetime.now(timezone.utc).isoformat()
+        get_client().table("salesman_targets").upsert(
+            [{"salesman": t.salesman, "target_bhd": t.target_bhd,
+              "updated_by": admin.email, "updated_at": now} for t in body.targets],
+            on_conflict="salesman").execute()
+    from app.reports import invalidate_dashboard_cache
+    invalidate_dashboard_cache()
+    log_event(admin.email, "settings.targets",
+              detail={"company": body.company_target_bhd, "n": len(body.targets or [])})
+    return {"ok": True}
+
+
 @app.get("/events/dispatch")
 def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(get_caller)) -> dict:
     """Called hourly by n8n: fan out unprocessed agent_events to subscribed agents
