@@ -16,7 +16,8 @@ Everything is **free / open-source**, and **a human approves every outbound mess
 | Piece | File | What it does |
 |---|---|---|
 | Outreach core | `app/outreach.py` | Send queue, contact enrichment, opt-out, attribution, scorecard |
-| Content engine | `app/video_gen.py` | Renders picture ads + 9:16 videos from catalog photos (Pillow + FFmpeg + edge-tts) |
+| Content engine | `app/video_gen.py` | Picture ads (Pillow) + AI videos from catalog photos |
+| Agnes AI client | `app/agnes.py` | Free OpenAI-compatible AI image/video backend (image-to-video) |
 | WhatsApp Cloud API | `app/whatsapp.py` | Phase 2 concierge bot (config-gated; inert until keys set) |
 | Social publishing | `app/social_publish.py` | IG/FB via Graph API, TikTok via Telegram hand-off, inbound webhook |
 | API endpoints | `app/main.py` | `/outreach/*`, `/contacts/*`, `/social/*`, `/wa/*`, `/public/*` webhooks |
@@ -34,7 +35,8 @@ Everything is **free / open-source**, and **a human approves every outbound mess
 | `outreach_builder` | Sun 07:00 | Build the week's send queue from `sales_outreach` / `winback` / `sales_push` / `lead_gen` |
 | `outreach_digest` | daily 08:30 | Telegram digest of messages waiting for a one-tap send |
 | `growth_scorecard` | Fri 17:00 | Month pace vs 10,000 target + outreach funnel + contact coverage |
-| `content_engine` | Tue + Thu 10:00 | Render picture ads + a video → `social_posts` drafts for approval |
+| `content_engine` | Tue + Thu 10:00 | Render picture ads + kick off an AI video → `social_posts` drafts for approval |
+| `content_poll` | hourly | Finish Agnes AI videos still rendering (async ~90s) and make them approvable |
 
 ---
 
@@ -119,9 +121,13 @@ Telegram with a drafted reply for one-tap posting, and interested users become `
 - **Email:** Resend (100/day, 3k/mo) or Brevo (300/day). Outreach caps at 25 emails/day —
   well under the free limit.
 - **LLM:** the existing free-provider rotation (`app/llm_router.py`). No Anthropic/paid.
-- **Video:** FFmpeg + Pillow render on the Railway container (ffmpeg added to the Docker
-  image); edge-tts uses free Microsoft neural voices. If ffmpeg is unavailable the engine
-  still produces picture ads and reports it.
+- **Video:** Agnes AI (free, OpenAI-compatible) generates a real image-to-video reel from
+  the clean product photo (~90s, async — kicked off by `content_engine`, finished by
+  `content_poll`). The finished MP4 is copied into our own `marketing` Supabase bucket
+  (stable URL + CSP-friendly). If `AGNES_API_KEY` is absent, the engine falls back to the
+  local FFmpeg ken-burns renderer; picture ads (Pillow) are always produced regardless.
+  Note: Agnes animates the *raw* product photo (the text-heavy branded card trips its
+  content moderation) — the caption carries the price/branding.
 - **Contact discovery:** Tavily free tier + OpenStreetMap/Overpass (already wired).
 
 ## Verify locally

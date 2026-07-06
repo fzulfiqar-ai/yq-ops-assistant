@@ -309,38 +309,107 @@ def content_engine(items_per_run: int = 4) -> dict:
             "caption_en": cap_en, "caption_ar": cap_ar, "media_url": url,
             "platforms": ["instagram", "facebook"], "meta": {"price_bhd": prices.get(code)},
         }).execute()
-        made.append({"item_code": code, "template": template, "kind": "image", "url": url})
+        made.append({"item_code": code, "template": template, "kind": "image", "url": url,
+                     "photo_url": it.get("product_image_url")})
         cards_for_video.append(png)
 
-    video_made = None
-    if len(cards_for_video) >= 2 and ffmpeg_available():
-        names = ", ".join(m["item_code"] for m in made[:3])
-        script = (f"New at YQ Bahrain: {names} — genuine VFAN accessories at trade prices. "
-                  f"Message us on WhatsApp to order today.")
-        mp4 = make_video(cards_for_video[:3], script)
-        if mp4:
-            vurl = _upload(mp4, f"videos/{ts}-reel.mp4", "video/mp4")
-            if vurl:
+    # ── Video: Agnes AI (premium image-to-video) → FFmpeg ken-burns fallback ──
+    from app import agnes
+    video_made, video_note = None, ""
+    if made:
+        hero = made[0]
+        vcap_en = (f"This week at YQ Bahrain 📱 {hero['item_code']} and more — genuine VFAN "
+                   f"accessories at trade prices.\n" + (f"Catalog: {link}\n" if link else "")
+                   + _hashtags())
+        vcap_ar = f"جديد هذا الأسبوع لدى YQ البحرين — إكسسوارات VFAN بأسعار الجملة."
+        if agnes.enabled():
+            vprompt = ("Cinematic slow push-in on the product, premium advertisement, clean "
+                       "studio lighting, smooth camera motion, high quality")
+            # Animate the CLEAN product photo (image-to-video). The text-heavy branded card
+            # trips Agnes' content moderation and warps overlaid text — the caption carries
+            # the price/branding instead.
+            vsrc = hero.get("photo_url") or hero["url"]
+            vid = agnes.start_video(vprompt, image_url=vsrc, seconds=5, portrait=True)
+            if vid:
                 get_client().table("social_posts").insert({
-                    "campaign": "hero", "item_code": made[0]["item_code"], "kind": "video",
-                    "template": "reel", "caption_en":
-                        f"This week at YQ Bahrain 📱 {_hashtags()}\n" + (f"Catalog: {link}" if link else ""),
-                    "caption_ar": "جديد هذا الأسبوع لدى YQ البحرين",
-                    "media_url": vurl, "platforms": ["instagram", "facebook", "tiktok"],
+                    "campaign": "hero", "item_code": hero["item_code"], "kind": "video",
+                    "template": "reel", "caption_en": vcap_en, "caption_ar": vcap_ar,
+                    "media_url": "", "status": "rendering",
+                    "platforms": ["instagram", "facebook", "tiktok"],
+                    "meta": {"agnes_video_id": vid, "source_url": hero["url"]},
                 }).execute()
-                video_made = vurl
+                video_note = " + 1 AI video rendering (Agnes, ~2 min)"
+        elif len(cards_for_video) >= 2 and ffmpeg_available():
+            names = ", ".join(m["item_code"] for m in made[:3])
+            mp4 = make_video(cards_for_video[:3],
+                             f"New at YQ Bahrain: {names} — genuine VFAN accessories at trade "
+                             f"prices. Message us on WhatsApp to order today.")
+            if mp4:
+                vurl = _upload(mp4, f"videos/{ts}-reel.mp4", "video/mp4")
+                if vurl:
+                    get_client().table("social_posts").insert({
+                        "campaign": "hero", "item_code": hero["item_code"], "kind": "video",
+                        "template": "reel", "caption_en": vcap_en, "caption_ar": vcap_ar,
+                        "media_url": vurl, "platforms": ["instagram", "facebook", "tiktok"],
+                    }).execute()
+                    video_made, video_note = vurl, " + 1 video reel"
 
     total_active = (get_client().table("catalog_items").select("item_code", count="exact")
                     .eq("is_active", True).execute().count or 0)
     missing = max(0, total_active - len(items))
+    engine = ("Agnes AI" if agnes.enabled() else
+              ("FFmpeg" if ffmpeg_available() else "no video engine"))
     return {
-        "count": len(made) + (1 if video_made else 0),
-        "summary": (f"Rendered {len(made)} picture ads" +
-                    (" + 1 video reel" if video_made else
-                     ("" if ffmpeg_available() else " (video skipped — ffmpeg not installed)")) +
-                    f" → drafts in Marketing Studio for approval. "
-                    f"{missing} active items still have no photo." ),
+        "count": len(made) + (1 if (video_made or "rendering" in video_note) else 0),
+        "summary": (f"Rendered {len(made)} picture ads{video_note} → drafts in Marketing Studio "
+                    f"for approval (video engine: {engine}). "
+                    f"{missing} active items still have no photo."),
         "ads": made,
         "video_url": video_made,
         "items_missing_photos": missing,
     }
+
+
+def resolve_pending_videos(limit: int = 10) -> dict:
+    """Agent content_poll — poll Agnes for any 'rendering' videos; when complete, copy the
+    MP4 into our public bucket (stable URL + CSP-friendly) and flip the draft to 'draft'."""
+    from app import agnes
+    if not agnes.enabled():
+        return {"count": 0, "summary": "Agnes not configured — no async videos to resolve."}
+    rows = (get_client().table("social_posts").select("*")
+            .eq("status", "rendering").limit(limit).execute().data or [])
+    done, still, failed = 0, 0, 0
+    for row in rows:
+        vid = (row.get("meta") or {}).get("agnes_video_id")
+        if not vid:
+            continue
+        st = agnes.poll_video(vid)
+        if st["status"] == "completed" and st.get("url"):
+            final_url = st["url"]
+            try:
+                import re
+                import requests
+                data = requests.get(st["url"], timeout=120).content
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(row.get("item_code") or "item"))
+                up = _upload(data, f"videos/agnes-{safe}-{stamp}.mp4", "video/mp4")
+                if up:
+                    final_url = up
+            except Exception as e:  # noqa: BLE001
+                log.warning("agnes mp4 copy failed: %s", str(e)[:120])
+            get_client().table("social_posts").update(
+                {"media_url": final_url, "status": "draft",
+                 "meta": {**(row.get("meta") or {}), "agnes_status": "completed"}}
+            ).eq("id", row["id"]).execute()
+            done += 1
+        elif st["status"] in ("failed", "error"):
+            get_client().table("social_posts").update(
+                {"status": "failed",
+                 "meta": {**(row.get("meta") or {}), "agnes_error": str(st.get("error"))[:200]}}
+            ).eq("id", row["id"]).execute()
+            failed += 1
+        else:
+            still += 1
+    return {"count": done, "resolved": done, "pending": still, "failed": failed,
+            "summary": (f"Agnes renders: {done} completed and ready to approve, "
+                        f"{still} still rendering, {failed} failed.")}

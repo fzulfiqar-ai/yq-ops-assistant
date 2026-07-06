@@ -42,6 +42,7 @@ AGENTS: dict[str, tuple[str, dict]] = {
     "outreach_digest":  ("Outreach Digest",      {"field": "hours", "hour": 8, "minute": 30}),
     "growth_scorecard": ("Growth Scorecard",     {"field": "weeks", "hour": 17, "day": 5}),
     "content_engine":   ("Content Engine",       {"field": "weeks", "hour": 10, "days": [2, 4]}),
+    "content_poll":     ("Content Poll",          {"field": "hours", "hour": 11}),  # finish Agnes renders
 }
 
 

@@ -65,6 +65,9 @@ class Settings:
         self.fb_page_id: str = os.getenv("FB_PAGE_ID", "")
         self.fb_page_token: str = os.getenv("FB_PAGE_TOKEN", "")
         self.ig_business_id: str = os.getenv("IG_BUSINESS_ID", "")
+        # Agnes AI (agnes-ai.com) — free OpenAI-compatible AI image/video backend for the
+        # content engine. Absent key → falls back to the local FFmpeg renderer.
+        self.agnes_api_key: str = os.getenv("AGNES_API_KEY", "")
 
         # App
         self.allowed_origins: list[str] = _split_csv(os.getenv("ALLOWED_ORIGINS")) or [

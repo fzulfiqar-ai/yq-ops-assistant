@@ -1627,6 +1627,12 @@ def content_engine() -> dict:
     return _run()
 
 
+def content_poll() -> dict:
+    """Finish any Agnes AI videos that were still rendering; make them approvable."""
+    from app.video_gen import resolve_pending_videos
+    return resolve_pending_videos()
+
+
 # Retired agent name → its successor. run_agent() resolves these so existing schedules,
 # n8n flows, tool calls and audit history keep working after consolidation.
 AGENT_ALIASES: dict[str, str] = {
@@ -1675,7 +1681,8 @@ AGENTS: dict[str, AgentSpec] = {
     "contact_enrich": AgentSpec("contact_enrich", "Nightly contact finder: business phones/emails for the highest-value customers still missing one (public listings)", contact_enrich, category="growth", in_brief=False),
     "outreach_digest": AgentSpec("outreach_digest", "Morning Telegram digest: outreach messages waiting for a one-tap send", outreach_digest, category="growth", in_brief=False),
     "growth_scorecard": AgentSpec("growth_scorecard", "Weekly scorecard: month pace vs BHD 10,000 target + outreach funnel + contact coverage", growth_scorecard, category="growth"),
-    "content_engine": AgentSpec("content_engine", "Renders picture ads + a 9:16 video from catalog photos (free: Pillow/FFmpeg) → drafts for approval", content_engine, category="growth", in_brief=False),
+    "content_engine": AgentSpec("content_engine", "Renders picture ads + a 9:16 video from catalog photos (Agnes AI, else Pillow/FFmpeg) → drafts for approval", content_engine, category="growth", in_brief=False),
+    "content_poll": AgentSpec("content_poll", "Finishes Agnes AI videos still rendering and makes them approvable", content_poll, category="growth", in_brief=False),
 }
 
 # Org-map grouping (CEO → departments → agents). Used by the Agents page; default = Operations.
@@ -1696,7 +1703,7 @@ _DEPARTMENTS: dict[str, str] = {
     "price_drift": "Finance", "ops_sentinel": "Operations",
     "outreach_builder": "Sales & Growth", "contact_enrich": "Sales & Growth",
     "outreach_digest": "Sales & Growth", "growth_scorecard": "Sales & Growth",
-    "content_engine": "Sales & Growth",
+    "content_engine": "Sales & Growth", "content_poll": "Sales & Growth",
 }
 for _n, _spec in AGENTS.items():
     _spec.department = _DEPARTMENTS.get(_n, "Operations")

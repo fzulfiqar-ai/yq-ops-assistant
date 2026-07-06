@@ -1714,6 +1714,13 @@ def social_generate(user: CurrentUser = Depends(require_feature("Marketing"))) -
     return res
 
 
+@app.post("/social/poll")
+def social_poll(_user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    """Resolve any Agnes AI videos still rendering (portal 'Check renders' + hourly n8n)."""
+    from app.video_gen import resolve_pending_videos
+    return resolve_pending_videos()
+
+
 @app.patch("/social/posts/{post_id}/status")
 def social_post_status(post_id: int, body: OutreachStatusRequest,
                        user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:

@@ -277,9 +277,15 @@ function Content() {
   const qc = useQueryClient()
   const toast = useToast()
   const [generating, setGenerating] = useState(false)
+  const [polling, setPolling] = useState(false)
   const [publishing, setPublishing] = useState<number | null>(null)
-  const { data: posts } = useQuery({ queryKey: ['social-posts'], queryFn: () => apiGet<SocialPost[]>('/social/posts') })
+  const { data: posts } = useQuery({
+    queryKey: ['social-posts'], queryFn: () => apiGet<SocialPost[]>('/social/posts'),
+    // auto-refresh while Agnes videos are still rendering
+    refetchInterval: (q) => ((q.state.data || []).some((p) => p.status === 'rendering') ? 15000 : false),
+  })
   const { data: conf } = useQuery({ queryKey: ['social-config'], queryFn: () => apiGet<{ platforms: Record<string, boolean> }>('/social/config') })
+  const rendering = (posts || []).filter((p) => p.status === 'rendering').length
 
   async function generate() {
     setGenerating(true)
@@ -289,6 +295,16 @@ function Content() {
       qc.invalidateQueries({ queryKey: ['social-posts'] })
     } catch { toast('Generation failed.', 'error') }
     finally { setGenerating(false) }
+  }
+
+  async function poll() {
+    setPolling(true)
+    try {
+      const r = await apiPost<{ summary: string }>('/social/poll')
+      toast(r.summary || 'Checked.', 'success')
+      qc.invalidateQueries({ queryKey: ['social-posts'] })
+    } catch { toast('Check failed.', 'error') }
+    finally { setPolling(false) }
   }
   async function publish(p: SocialPost) {
     setPublishing(p.id)
@@ -306,9 +322,14 @@ function Content() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-[12px] text-muted-foreground">
-          Picture ads + 9:16 videos rendered from your catalog photos — free, on your own server.
+          Picture ads + AI videos generated from your catalog photos.
           {!igReady && !fbReady && ' Connect Meta keys to auto-post; until then use TikTok-style hand-off.'}
         </p>
+        {rendering > 0 && (
+          <Button size="sm" variant="outline" onClick={poll} disabled={polling}>
+            {polling ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Check renders ({rendering})
+          </Button>
+        )}
         <Button size="sm" className="ml-auto" onClick={generate} disabled={generating}>
           {generating ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} Generate this week's content
         </Button>
@@ -322,10 +343,15 @@ function Content() {
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           {(posts || []).map((p) => (
             <Card key={p.id} className="overflow-hidden">
-              <div className="aspect-[4/5] bg-muted">
-                {p.kind === 'video'
-                  ? <video src={p.media_url} controls muted className="h-full w-full object-cover" />
-                  : <img src={p.media_url} alt={p.item_code} loading="lazy" className="h-full w-full object-cover" />}
+              <div className="grid aspect-[4/5] place-items-center bg-muted">
+                {p.status === 'rendering'
+                  ? <div className="text-center text-muted-foreground">
+                      <Loader2 size={26} className="mx-auto animate-spin text-[#6d28d9]" />
+                      <div className="mt-2 text-[10px] font-medium">AI video rendering…</div>
+                    </div>
+                  : p.kind === 'video'
+                    ? <video src={p.media_url} controls muted playsInline className="h-full w-full object-cover" />
+                    : <img src={p.media_url} alt={p.item_code} loading="lazy" className="h-full w-full object-cover" />}
               </div>
               <div className="p-2.5">
                 <div className="flex items-center gap-1.5">
@@ -333,12 +359,14 @@ function Content() {
                   <span className="truncate font-display text-[12px] font-bold">{p.item_code}</span>
                   <span className={cn('ml-auto rounded-full px-2 py-0.5 text-[9px] font-semibold',
                     p.status === 'posted' ? 'bg-emerald-100 text-emerald-700'
-                      : p.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-violet-100 text-violet-700')}>
+                      : p.status === 'failed' ? 'bg-red-100 text-red-700'
+                        : p.status === 'rendering' ? 'bg-amber-100 text-amber-700'
+                          : 'bg-violet-100 text-violet-700')}>
                     {p.status}
                   </span>
                 </div>
                 <div className="mt-0.5 text-[10px] text-muted-foreground">{p.platforms.join(' · ')}</div>
-                {p.status !== 'posted' && (
+                {p.status !== 'posted' && p.status !== 'rendering' && (
                   <div className="mt-2 flex gap-1.5">
                     <Button size="sm" className="h-7 flex-1 text-[11px]" disabled={publishing === p.id} onClick={() => publish(p)}>
                       {publishing === p.id ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />} Publish
