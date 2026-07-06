@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
-import { Search, Package } from 'lucide-react'
+import { useParams, useSearchParams } from 'react-router-dom'
+import { Search, Package, MessageCircle } from 'lucide-react'
 import { API_BASE } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
@@ -16,10 +16,11 @@ interface PubItem {
   category?: string
   brand?: string
   price_bhd?: number | null
+  b2c_bhd?: number | null
   product_image_url?: string | null
   package_image_url?: string | null
 }
-interface PubData { items: PubItem[]; categories: string[]; company: string; prices_updated?: string | null }
+interface PubData { items: PubItem[]; categories: string[]; company: string; prices_updated?: string | null; whatsapp?: string }
 
 function fmtUpdated(d?: string | null) {
   if (!d) return null
@@ -30,6 +31,7 @@ function fmtUpdated(d?: string | null) {
 
 export default function PublicCatalog() {
   const { token } = useParams()
+  const [params] = useSearchParams()
   const [data, setData] = useState<PubData | null>(null)
   const [err, setErr] = useState(false)
   const [cat, setCat] = useState('All')
@@ -41,7 +43,15 @@ export default function PublicCatalog() {
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then(setData)
       .catch(() => setErr(true))
+    // attribution ping (fire-and-forget) — ?src=outreach-{id} ties this visit to a touch
+    const src = params.get('src') || 'direct'
+    fetch(`${API_BASE}/public/catalog/${encodeURIComponent(token)}/visit?src=${encodeURIComponent(src)}`,
+      { method: 'POST' }).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
+
+  const wa = data?.whatsapp
+  const waHref = (text: string) => `https://wa.me/${wa}?text=${encodeURIComponent(text)}`
 
   const items = useMemo(() => {
     let r = data?.items || []
@@ -126,20 +136,44 @@ export default function PublicCatalog() {
                     <span className="text-[10px] uppercase text-[#6b6480]">{it.brand || 'VFAN'}</span>
                   </div>
                   {it.spec && <div className="mt-0.5 line-clamp-2 whitespace-pre-line text-[12px] text-[#6b6480]">{it.spec}</div>}
-                  {it.price_bhd != null && (
-                    <div className="mt-2 border-t pt-2 text-right font-display text-base font-extrabold text-[#6d28d9]">
-                      BHD {Number(it.price_bhd).toFixed(3)}
+                  {(it.price_bhd != null || it.b2c_bhd != null) && (
+                    <div className="mt-2 flex items-end justify-between gap-2 border-t pt-2">
+                      <div className="text-[11.5px] text-[#6b6480]">
+                        {it.b2c_bhd != null && <>B2C <b className="tabular-nums text-[#1a1430]">{Number(it.b2c_bhd).toFixed(3)}</b></>}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[9px] font-semibold uppercase tracking-wide text-[#6b6480]">B2B</div>
+                        <div className="font-display text-base font-extrabold leading-tight text-[#6d28d9]">
+                          {it.price_bhd != null ? `BHD ${Number(it.price_bhd).toFixed(3)}` : '—'}
+                        </div>
+                      </div>
                     </div>
+                  )}
+                  {wa && (
+                    <a href={waHref(`Hello YQ Bahrain! I'd like to order ${it.item_code}${it.spec ? ` (${it.spec.split('\n')[0]})` : ''}.`)}
+                      target="_blank" rel="noreferrer"
+                      className="mt-2 flex items-center justify-center gap-1.5 rounded-lg bg-[#25D366]/10 py-1.5 text-[11.5px] font-semibold text-[#128C7E] transition hover:bg-[#25D366]/20">
+                      <MessageCircle size={13} /> Order this item
+                    </a>
                   )}
                 </div>
               </div>
             ))}
           </div>
         )}
-        <footer className="py-8 text-center text-[11px] text-[#6b6480]">
+        <footer className="py-8 pb-24 text-center text-[11px] text-[#6b6480]">
           YQ Bahrain W.L.L · Trade prices — may change without notice.
         </footer>
       </main>
+
+      {/* Sticky WhatsApp CTA — the catalog's job is to start a conversation */}
+      {wa && (
+        <a href={waHref('Hello YQ Bahrain! I was browsing your catalog and would like to place an order.')}
+          target="_blank" rel="noreferrer"
+          className="fixed bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-full bg-[#25D366] px-5 py-3 font-display text-sm font-bold text-white shadow-lg shadow-[#25D366]/30 transition hover:scale-[1.02]">
+          <MessageCircle size={18} /> Order on WhatsApp
+        </a>
+      )}
     </div>
   )
 }

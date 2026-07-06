@@ -53,6 +53,19 @@ class Settings:
         # YouTube Data API v3 — trend_radar video signals (accessory unboxing/review volume).
         self.youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")          # console.cloud.google.com
 
+        # Marketing & outreach (Phase: 10k/month) — all optional/config-gated.
+        self.wa_human_number: str = os.getenv("WA_HUMAN_NUMBER", "")      # owner's WhatsApp digits (catalog CTA, assist mode)
+        self.optout_secret: str = os.getenv("OPTOUT_SECRET", "")          # falls back to SUPABASE_JWT_SECRET
+        # WhatsApp Cloud API (Phase 2 — a SECOND SIM, never the daily number)
+        self.wa_phone_number_id: str = os.getenv("WA_PHONE_NUMBER_ID", "")
+        self.wa_access_token: str = os.getenv("WA_ACCESS_TOKEN", "")      # permanent System User token
+        self.wa_verify_token: str = os.getenv("WA_VERIFY_TOKEN", "")      # webhook handshake
+        self.meta_app_secret: str = os.getenv("META_APP_SECRET", "")      # X-Hub-Signature-256 HMAC
+        # Social publishing (Meta app in dev mode posts to OWN Page/IG — no review needed)
+        self.fb_page_id: str = os.getenv("FB_PAGE_ID", "")
+        self.fb_page_token: str = os.getenv("FB_PAGE_TOKEN", "")
+        self.ig_business_id: str = os.getenv("IG_BUSINESS_ID", "")
+
         # App
         self.allowed_origins: list[str] = _split_csv(os.getenv("ALLOWED_ORIGINS")) or [
             "http://localhost:8501"

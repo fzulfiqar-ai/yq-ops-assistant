@@ -27,7 +27,7 @@ CATEGORY_ORDER = ["CABLE", "CHARGER", "EARPHONE", "BLUETOOTH HEADSET", "FOR CAR"
                   "POWER BANK", "BLUETOOTH SPEAKER"]
 
 PUBLIC_FIELDS = ("item_code", "display_name", "spec", "category", "brand", "price_bhd",
-                 "product_image_url", "package_image_url")
+                 "b2c_bhd", "product_image_url", "package_image_url")
 
 
 def ensure_bucket() -> None:
@@ -108,7 +108,7 @@ def list_catalog(include_inactive: bool = False, role: str = "admin") -> dict:
     where = "" if include_inactive else "WHERE is_active"
     rows = exec_sql(
         "SELECT item_code, display_name, spec, category, brand, division, dealer_price, "
-        "roadshow_price, rrp, standard_rate, product_image_url, package_image_url, "
+        "roadshow_price, rrp, standard_rate, b2c_rate, product_image_url, package_image_url, "
         f"sort_order, is_active, created_at, updated_at FROM v_catalog {where} "
         "ORDER BY category, sort_order NULLS LAST, item_code"
     ) or []
@@ -180,7 +180,7 @@ def public_catalog(token: str) -> dict | None:
         return None
     rows = exec_sql(
         "SELECT item_code, display_name, spec, category, brand, "
-        "standard_rate AS price_bhd, "
+        "standard_rate AS price_bhd, b2c_rate AS b2c_bhd, "
         "product_image_url, package_image_url FROM v_catalog "
         "WHERE is_active "
         "ORDER BY category, sort_order NULLS LAST, item_code"
@@ -261,8 +261,8 @@ def export_xlsx(version: str = "full") -> bytes:
         widths = [5, 18, 18, 12, 52, 12]
     else:
         headers = ["NO.", "PRODUCT PICTURE", "PACKAGE PICTURE", "CODE", "SPEC",
-                   "Dealer Cost", "CauseWay & Road Show", "RRP", "Book Rate (BD)"]
-        widths = [5, 18, 18, 12, 46, 12, 18, 10, 14]
+                   "B2B (BD)", "B2C · CauseWay & RoadShow (BD)"]
+        widths = [5, 18, 18, 12, 50, 12, 24]
 
     for cat in data["categories"]:
         ws = wb.create_sheet(title=(cat or "OTHER")[:31])
@@ -277,8 +277,7 @@ def export_xlsx(version: str = "full") -> bytes:
             ws.row_dimensions[r].height = 80
             base = [i, None, None, it.get("item_code"), it.get("spec") or it.get("display_name")]
             vals = base + ([it.get("standard_rate")] if version == "b2b" else
-                           [it.get("dealer_price"), it.get("roadshow_price"), it.get("rrp"),
-                            it.get("standard_rate")])
+                           [it.get("standard_rate"), it.get("b2c_rate")])
             for j, v in enumerate(vals, start=1):
                 cell = ws.cell(row=r, column=j, value=v)
                 cell.alignment = Alignment(vertical="center", wrap_text=(j == 5),
@@ -379,10 +378,8 @@ def export_pdf(version: str = "full") -> bytes:
                 pdf.cell(card_w - 6, 5, _latin(f"BD {v:.3f}" if v is not None else "-"), align="R")
                 pdf.set_text_color(30, 20, 48)
             else:
-                parts = [f"D {it['dealer_price']:.2f}" if it.get("dealer_price") is not None else None,
-                         f"R {it['roadshow_price']:.2f}" if it.get("roadshow_price") is not None else None,
-                         f"RRP {it['rrp']:.2f}" if it.get("rrp") is not None else None,
-                         f"Bk {it['standard_rate']:.2f}" if it.get("standard_rate") is not None else None]
+                parts = [f"B2B {it['standard_rate']:.3f}" if it.get("standard_rate") is not None else None,
+                         f"B2C {it['b2c_rate']:.3f}" if it.get("b2c_rate") is not None else None]
                 pdf.set_font("helvetica", "B", 7.5)
                 pdf.cell(card_w - 6, 5, _latin("  ".join(p for p in parts if p)), align="R")
             col += 1
@@ -396,10 +393,14 @@ def export_pdf(version: str = "full") -> bytes:
 
 
 def sync_from_price_book() -> int:
-    """Auto-grow the catalog after every ingest: any active MA_base price-book SKU not
-    yet in catalog_items is added with its name/category — so a new item in the price
-    list appears in the catalog automatically and the owner's ONLY manual step is the
-    photo. Never touches existing rows (owner edits are preserved)."""
+    """Keep the catalog a MIRROR of the current price book after every ingest:
+      - any current MA_base SKU not yet in catalog_items is ADDED (name/category from
+        the book; owner's only manual step is the photo);
+      - items that are ACTIVE but no longer in the current book are DEACTIVATED (they
+        vanish from the portal + shared link — owner rule: 'show whatever is active
+        in the pricing I upload');
+      - previously deactivated items that reappear in the book are REACTIVATED.
+    Photos/specs/owner edits on existing rows are never touched."""
     candidates = exec_sql(
         "SELECT DISTINCT ON (sp.sku_code) sp.sku_code AS code, "
         "COALESCE(NULLIF(TRIM(sp.item_name), ''), sp.sku_code) AS name, "
@@ -412,13 +413,16 @@ def sync_from_price_book() -> int:
         "AND sp.sku_code IS NOT NULL AND TRIM(sp.sku_code) <> '' "
         "ORDER BY sp.sku_code, sp.imported_at DESC"
     ) or []
-    # existing codes via the service client (RLS-proof) — only INSERT true newcomers
-    existing: set[str] = set()
+    # the CURRENT book (dated, authorized) decides who is active
+    book = {str(r["sku_code"]).strip() for r in exec_sql(
+        "SELECT sku_code FROM v_price_list_by_book WHERE price_book = 'MA_base'") or []}
+    # existing codes + active flags via the service client (RLS-proof)
+    existing: dict[str, bool] = {}
     off = 0
     while True:
-        b = (get_client().table("catalog_items").select("item_code")
+        b = (get_client().table("catalog_items").select("item_code,is_active")
              .range(off, off + 999).order("item_code").execute().data or [])
-        existing |= {r["item_code"] for r in b}
+        existing.update({r["item_code"]: bool(r.get("is_active")) for r in b})
         if len(b) < 1000:
             break
         off += 1000
@@ -434,12 +438,28 @@ def sync_from_price_book() -> int:
             "spec": r.get("spec"),
             "category": r.get("category"),
             "brand": "VFAN" if "vfan" in blob else None,
-            "is_active": True,
+            "is_active": code in book,
             "updated_by": "price-book auto-sync",
         })
     n = bulk_upsert(items)
-    if n:
-        log.info("catalog auto-sync: %d new item(s) from the price book", n)
+    # mirror is_active with the current book
+    now = datetime.now(timezone.utc).isoformat()
+    to_off = [c for c, active in existing.items() if active and book and c not in book]
+    to_on = [c for c, active in existing.items() if not active and c in book]
+    for codes, flag in ((to_off, False), (to_on, True)):
+        for i in range(0, len(codes), 200):
+            try:
+                (get_client().table("catalog_items")
+                 .update({"is_active": flag, "updated_by": "price-book auto-sync",
+                          "updated_at": now})
+                 .in_("item_code", codes[i:i + 200]).execute())
+            except Exception as e:  # noqa: BLE001
+                log.warning("catalog mirror update failed: %s", e)
+    if n or to_off or to_on:
+        log.info("catalog auto-sync: +%d new, %d deactivated (left the book), %d reactivated",
+                 n, len(to_off), len(to_on))
+        if to_off:
+            log.info("catalog deactivated: %s", ", ".join(sorted(to_off))[:400])
     return n
 
 

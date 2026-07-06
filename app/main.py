@@ -346,6 +346,43 @@ def targets_put(body: TargetsRequest, admin: CurrentUser = Depends(require_admin
     return {"ok": True}
 
 
+class AgentScopeRequest(BaseModel):
+    exclude_sim: bool
+
+
+@app.get("/settings/agents")
+def agent_scope_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Agent data scope — whether the AI agents ignore the SIM/starter-pack division."""
+    from app.database import get_client
+    try:
+        r = (get_client().table("app_settings").select("value")
+             .eq("key", "agent_exclude_sim").limit(1).execute().data or [])
+        val = (r[0]["value"] if r else "1")
+    except Exception:  # noqa: BLE001
+        val = "1"
+    return {"exclude_sim": val == "1"}
+
+
+@app.put("/settings/agents")
+def agent_scope_put(body: AgentScopeRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Flip whether agents read SIM/starter packs. Views check the flag live — no restart."""
+    from datetime import datetime, timezone
+    from app.database import get_client
+    get_client().table("app_settings").upsert(
+        {"key": "agent_exclude_sim", "value": "1" if body.exclude_sim else "0",
+         "description": "When 1, AI agents ignore the SIM/starter-pack division.",
+         "updated_by": admin.email,
+         "updated_at": datetime.now(timezone.utc).isoformat()},
+        on_conflict="key").execute()
+    try:
+        from app.ai import flush_cache
+        flush_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    log_event(admin.email, "settings.agent_scope", detail={"exclude_sim": body.exclude_sim})
+    return {"ok": True, "exclude_sim": body.exclude_sim}
+
+
 @app.get("/events/dispatch")
 def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(get_caller)) -> dict:
     """Called hourly by n8n: fan out unprocessed agent_events to subscribed agents
@@ -1103,6 +1140,43 @@ def stock_daily(month: str | None = None, warehouse: str | None = None,
             "gap_days": gap_days, "last_data_day": last_data, "snapshot_deltas": deltas}
 
 
+@app.get("/stock/flow")
+def stock_flow(warehouse: str = "Accessories Warehouse", direction: str = "out",
+               days: int = 30,
+               _user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
+    """Issue → Receive tracking for one warehouse (owner's flow: storekeeper punches a
+    Stock Issue Voucher, the destination converts it to a Stock Receive Voucher — the
+    two legs share the voucher number). direction=out: what left this warehouse and
+    whether it was received; direction=in: what others issued TO this warehouse."""
+    from app.db_read import exec_sql_params
+    days = max(1, min(days, 365))
+    side = ("i.from_warehouse ILIKE '%' || $1 || '%'" if direction != "in"
+            else "(i.to_warehouse ILIKE '%' || $1 || '%' OR i.received_by ILIKE '%' || $1 || '%')")
+    rows = exec_sql_params(
+        "WITH i AS (SELECT * FROM v_transfer_flow), "
+        "mx AS (SELECT MAX(issued_on) AS d FROM v_transfer_flow) "
+        f"SELECT i.issued_on::text AS issued_on, i.voucher_no, i.item_name, "
+        "i.from_warehouse, i.to_warehouse, i.issued_qty, i.issued_value_bhd, "
+        "COALESCE(i.received_qty, 0) AS received_qty, i.received_by, "
+        "i.received_on::text AS received_on, i.status "
+        f"FROM i, mx WHERE {side} AND i.issued_on >= mx.d - $2::int "
+        "ORDER BY i.issued_on DESC, i.voucher_no, i.item_name LIMIT 800",
+        [warehouse, days]) or []
+    summary: dict[str, dict] = {}
+    for r in rows:
+        s = summary.setdefault(r["status"], {"legs": 0, "qty": 0.0})
+        s["legs"] += 1
+        s["qty"] += float(r.get("issued_qty") or 0)
+    partners: dict[str, float] = {}
+    for r in rows:
+        key = (r.get("to_warehouse") if direction != "in" else r.get("from_warehouse")) or "—"
+        partners[key] = partners.get(key, 0.0) + float(r.get("issued_qty") or 0)
+    top_partners = sorted(partners.items(), key=lambda kv: -kv[1])[:8]
+    return {"warehouse": warehouse, "direction": "in" if direction == "in" else "out",
+            "days": days, "rows": rows, "count": len(rows), "summary": summary,
+            "partners": [{"name": k, "qty": round(v, 1)} for k, v in top_partners]}
+
+
 # ── Catalog / Item Master ─────────────────────────────────────────────────────
 
 class CatalogItemRequest(BaseModel):
@@ -1209,6 +1283,12 @@ def catalog_public(request: Request, token: str) -> dict:
     r = public_catalog(token)
     if r is None:
         raise HTTPException(status_code=404, detail="Invalid catalog link.")
+    # "Order on WhatsApp" CTA — the owner's number (assist mode), digits for wa.me
+    try:
+        from app.customer_contacts import wa_digits
+        r["whatsapp"] = wa_digits(settings.wa_human_number) or ""
+    except Exception:  # noqa: BLE001
+        r["whatsapp"] = ""
     return r
 
 
@@ -1534,3 +1614,254 @@ def data_coverage(user: CurrentUser = Depends(require_admin)) -> list[dict]:
     """Per-report data freshness for the Data-page upload panel (Zoho-style)."""
     from app.reports import coverage
     return coverage()
+
+
+# ── Marketing & outreach engine (the BHD 10k/month build) ────────────────────
+# Queue/send/attribution: app/outreach.py · content: app/video_gen.py ·
+# publishing: app/social_publish.py · WhatsApp Cloud API: app/whatsapp.py.
+# Public webhooks follow the /public/catalog pattern: rate-limited + verified
+# (share-token compare / Meta X-Hub-Signature-256 HMAC).
+
+
+class ContactsImportRequest(BaseModel):
+    rows: list[dict]
+    commit: bool = False
+
+
+class OutreachStatusRequest(BaseModel):
+    status: str
+
+
+class WaReplyRequest(BaseModel):
+    body: str
+
+
+@app.get("/outreach/queue")
+def outreach_queue_list(status: str = "draft",
+                        _user: CurrentUser = Depends(require_feature("Marketing"))) -> list:
+    from app.outreach import list_queue
+    return list_queue(None if status == "all" else status)
+
+
+@app.post("/outreach/build")
+def outreach_build(user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.agents import run_agent
+    res = run_agent("outreach_builder")
+    log_event(user.email, "outreach.build", detail={"summary": res.get("summary")})
+    return res
+
+
+@app.patch("/outreach/{row_id}/status")
+def outreach_set_status(row_id: int, body: OutreachStatusRequest,
+                        user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from fastapi import HTTPException
+    from app.outreach import set_status
+    if body.status not in ("approved", "dismissed", "replied", "converted"):
+        raise HTTPException(status_code=400, detail="Bad status.")
+    return set_status(row_id, body.status, by=user.email)
+
+
+@app.post("/outreach/{row_id}/send")
+def outreach_send(row_id: int,
+                  user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    """email → server-side send; whatsapp → caller opened the wa.me link, we log the touch."""
+    from app.outreach import send_row
+    res = send_row(row_id, by=user.email)
+    log_event(user.email, "outreach.send", detail={"row": row_id, **res})
+    return res
+
+
+@app.get("/outreach/kpis")
+def outreach_kpis(_user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.outreach import scorecard
+    return scorecard()
+
+
+@app.get("/contacts/coverage")
+def contacts_coverage(_user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.outreach import coverage
+    return coverage()
+
+
+@app.post("/contacts/import")
+def contacts_import(body: ContactsImportRequest,
+                    admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Bulk paste/CSV: fuzzy-match against the customer book; preview then commit."""
+    from app.outreach import import_contacts
+    res = import_contacts(body.rows, commit=body.commit, by=admin.email)
+    if body.commit:
+        log_event(admin.email, "contacts.import", detail={"committed": res.get("committed")})
+    return res
+
+
+# ── Content engine + social publishing ────────────────────────────────────────
+
+@app.get("/social/posts")
+def social_posts_list(status: str = "all",
+                      _user: CurrentUser = Depends(require_feature("Marketing"))) -> list:
+    from app.database import get_client
+    q = get_client().table("social_posts").select("*").order("created_at", desc=True).limit(60)
+    if status != "all":
+        q = q.eq("status", status)
+    return q.execute().data or []
+
+
+@app.post("/social/generate")
+def social_generate(user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.agents import run_agent
+    res = run_agent("content_engine")
+    log_event(user.email, "social.generate", detail={"summary": res.get("summary")})
+    return res
+
+
+@app.patch("/social/posts/{post_id}/status")
+def social_post_status(post_id: int, body: OutreachStatusRequest,
+                       user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from fastapi import HTTPException
+    from app.database import get_client
+    if body.status not in ("approved", "dismissed"):
+        raise HTTPException(status_code=400, detail="Bad status.")
+    rows = (get_client().table("social_posts").update({"status": body.status})
+            .eq("id", post_id).execute().data or [])
+    return rows[0] if rows else {}
+
+
+@app.post("/social/posts/{post_id}/publish")
+def social_post_publish(post_id: int,
+                        user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.social_publish import publish
+    res = publish(post_id, by=user.email)
+    log_event(user.email, "social.publish", detail={"post": post_id, "ok": res.get("ok")})
+    return res
+
+
+@app.get("/social/config")
+def social_config(_user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.social_publish import configured as social_conf
+    from app.video_gen import ffmpeg_available
+    from app.whatsapp import configured as wa_conf
+    return {"platforms": social_conf(), "whatsapp_api": wa_conf(),
+            "ffmpeg": ffmpeg_available(),
+            "wa_human_number": settings.wa_human_number}
+
+
+# ── WhatsApp inbox (Cloud API, Phase 2) ───────────────────────────────────────
+
+@app.get("/wa/threads")
+def wa_threads(_user: CurrentUser = Depends(require_feature("Marketing"))) -> list:
+    from app.whatsapp import threads
+    return threads()
+
+
+@app.get("/wa/threads/{wa_id}")
+def wa_thread(wa_id: str, _user: CurrentUser = Depends(require_feature("Marketing"))) -> list:
+    from app.whatsapp import thread_messages
+    return thread_messages(wa_id)
+
+
+@app.post("/wa/threads/{wa_id}/reply")
+def wa_reply(wa_id: str, body: WaReplyRequest,
+             user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    from app.whatsapp import send_text
+    res = send_text(wa_id, body.body)
+    log_event(user.email, "wa.reply", detail={"wa_id": wa_id, "ok": res.get("ok")})
+    return res
+
+
+# ── Public: opt-out, catalog visit log, Meta webhooks ─────────────────────────
+
+@app.get("/public/optout/{token}")
+@limiter.limit("10/minute")
+def public_optout(request: Request, token: str) -> dict:
+    """PDPL opt-out landing (linked from every outreach email). HMAC-signed token."""
+    from fastapi import HTTPException
+    from app.outreach import record_optout, verify_optout_token
+    name = verify_optout_token(token)
+    if not name:
+        raise HTTPException(status_code=404, detail="Invalid link.")
+    record_optout(name, channel="all", reason="email_link")
+    return {"ok": True, "name": name}
+
+
+@app.post("/public/catalog/{token}/visit")
+@limiter.limit("60/minute")
+def public_catalog_visit(request: Request, token: str, src: str = "direct") -> dict:
+    """Fire-and-forget visit ping from the public catalog page (attribution)."""
+    import secrets as _secrets
+    from app.catalog import share_token
+    good = share_token(create=False)
+    if not good or not _secrets.compare_digest(token, good):
+        return {"ok": False}
+    try:
+        from app.database import get_client
+        get_client().table("catalog_visits").insert(
+            {"src": src[:80], "ua": (request.headers.get("user-agent") or "")[:200]}).execute()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True}
+
+
+def _verify_meta_sig(raw: bytes, header: str) -> bool:
+    """X-Hub-Signature-256 check against META_APP_SECRET (constant-time)."""
+    import hashlib
+    import hmac as _hmac
+    secret = settings.meta_app_secret
+    if not secret:
+        return False
+    want = "sha256=" + _hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(want, header or "")
+
+
+@app.get("/public/wa/webhook")
+@limiter.limit("30/minute")
+def wa_webhook_verify(request: Request) -> Response:
+    """Meta webhook handshake: echo hub.challenge when the verify token matches."""
+    qp = request.query_params
+    if (qp.get("hub.mode") == "subscribe"
+            and settings.wa_verify_token
+            and qp.get("hub.verify_token") == settings.wa_verify_token):
+        return Response(content=qp.get("hub.challenge", ""), media_type="text/plain")
+    return Response(status_code=403)
+
+
+@app.post("/public/wa/webhook")
+@limiter.limit("120/minute")
+async def wa_webhook(request: Request) -> dict:
+    """Incoming WhatsApp messages. Always 200 (Meta retries otherwise); HMAC-verified."""
+    raw = await request.body()
+    if not _verify_meta_sig(raw, request.headers.get("X-Hub-Signature-256", "")):
+        return {"ok": False}
+    import json as _json
+    try:
+        payload = _json.loads(raw.decode() or "{}")
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+    from app.whatsapp import handle_inbound
+    return {"ok": True, **handle_inbound(payload)}
+
+
+@app.get("/public/meta/webhook")
+@limiter.limit("30/minute")
+def meta_webhook_verify(request: Request) -> Response:
+    qp = request.query_params
+    if (qp.get("hub.mode") == "subscribe"
+            and settings.wa_verify_token
+            and qp.get("hub.verify_token") == settings.wa_verify_token):
+        return Response(content=qp.get("hub.challenge", ""), media_type="text/plain")
+    return Response(status_code=403)
+
+
+@app.post("/public/meta/webhook")
+@limiter.limit("120/minute")
+async def meta_webhook(request: Request) -> dict:
+    """Page/IG comments & DMs → lead log + Telegram reply draft (Phase 4 stage 1)."""
+    raw = await request.body()
+    if not _verify_meta_sig(raw, request.headers.get("X-Hub-Signature-256", "")):
+        return {"ok": False}
+    import json as _json
+    try:
+        payload = _json.loads(raw.decode() or "{}")
+    except Exception:  # noqa: BLE001
+        return {"ok": False}
+    from app.social_publish import handle_meta_webhook
+    return {"ok": True, **handle_meta_webhook(payload)}

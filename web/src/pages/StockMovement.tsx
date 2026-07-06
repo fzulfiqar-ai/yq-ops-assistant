@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'motion/react'
-import { ArrowRight, Truck, AlertTriangle, BarChart3, ChevronLeft, ChevronRight, PackageCheck, Warehouse } from 'lucide-react'
-import { Bar, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { ArrowRight, ArrowLeftRight, Truck, AlertTriangle, BarChart3, ChevronLeft, ChevronRight, PackageCheck, Warehouse } from 'lucide-react'
+import { Bar, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, fmtDate } from '@/lib/format'
@@ -60,13 +60,21 @@ function DailyMovement() {
       `/stock/daily?month=${encodeURIComponent(month)}&warehouse=${encodeURIComponent(wh)}`),
   })
 
-  const days = useMemo(() => {
-    const deltas = new Map((data?.snapshot_deltas || []).map((d) => [d.day, Number(d.delta_qty)]))
-    return (data?.days || []).map((d) => ({ ...d, snapshot_delta: deltas.get(d.day) ?? null }))
-  }, [data])
+  // Company view ("All warehouses"): internal transfers appear on BOTH sides (issue
+  // leg + receive leg), so we chart external in (supplier receipts + returns), sold,
+  // and internal transfers as separate series — the totals then reconcile with the
+  // transfers table and van recon below. A single warehouse keeps its own in/out.
+  const allWh = wh === ''
+  const days = useMemo(() => (data?.days || []).map((d) => ({
+    ...d,
+    external_in: Number(d.receipts_qty) + Number(d.returns_qty),
+  })), [data])
   const totals = useMemo(() => ({
     in_qty: days.reduce((s, d) => s + Number(d.in_qty), 0),
     out_qty: days.reduce((s, d) => s + Number(d.out_qty), 0),
+    external_in: days.reduce((s, d) => s + d.external_in, 0),
+    sold: days.reduce((s, d) => s + Number(d.sales_qty), 0),
+    transferred: days.reduce((s, d) => s + Number(d.transfer_out_qty), 0),
     busiest: days.reduce<DailyDay | null>((best, d) =>
       (Number(d.in_qty) + Number(d.out_qty)) > (best ? Number(best.in_qty) + Number(best.out_qty) : 0) ? d : best, null),
   }), [days])
@@ -122,30 +130,57 @@ function DailyMovement() {
                 labelFormatter={(d) => fmtDate(String(d))}
                 formatter={(v, name) => {
                   const labels: Record<string, string> = {
-                    in_qty: 'In (received)', out_qty: 'Out (issued/sold)', snapshot_delta: 'Snapshot Δ (check)',
+                    external_in: 'Received (supplier + returns)', sales_qty: 'Sold',
+                    transfer_out_qty: 'Transferred (internal)', in_qty: 'In', out_qty: 'Out',
                   }
                   return [num(Number(v)), labels[String(name)] || String(name)]
                 }}
                 contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-              <Bar dataKey="in_qty" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={14} />
-              <Bar dataKey="out_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={14} />
-              {days.some((d) => d.snapshot_delta != null) && (
-                <Line type="monotone" dataKey="snapshot_delta" stroke="#d97706" strokeWidth={1.5}
-                  strokeDasharray="5 4" dot={{ r: 2 }} connectNulls />
+              {allWh ? (
+                <>
+                  <Bar dataKey="external_in" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={12} />
+                  <Bar dataKey="sales_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={12} />
+                  <Bar dataKey="transfer_out_qty" fill="#3b82f6" radius={[3, 3, 0, 0]} maxBarSize={12} />
+                </>
+              ) : (
+                <>
+                  <Bar dataKey="in_qty" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                  <Bar dataKey="out_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                </>
               )}
             </ComposedChart>
           </ResponsiveContainer>
           <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-3 text-sm">
-            <span className="flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-sm bg-emerald-600" />
-              In <b className="tabular-nums">{num(totals.in_qty)}</b>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-sm bg-violet-600" />
-              Out <b className="tabular-nums">{num(totals.out_qty)}</b>
-            </span>
-            <span className="text-muted-foreground">Net <b className={cn('tabular-nums', totals.in_qty - totals.out_qty >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
-              {num(totals.in_qty - totals.out_qty)}</b></span>
+            {allWh ? (
+              <>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-emerald-600" />
+                  Received <b className="tabular-nums">{num(totals.external_in)}</b>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-violet-600" />
+                  Sold <b className="tabular-nums">{num(totals.sold)}</b>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />
+                  Transferred <b className="tabular-nums">{num(totals.transferred)}</b>
+                  <span className="text-[11px] text-muted-foreground">(internal, warehouse → van)</span>
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-emerald-600" />
+                  In <b className="tabular-nums">{num(totals.in_qty)}</b>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm bg-violet-600" />
+                  Out <b className="tabular-nums">{num(totals.out_qty)}</b>
+                </span>
+                <span className="text-muted-foreground">Net <b className={cn('tabular-nums', totals.in_qty - totals.out_qty >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                  {num(totals.in_qty - totals.out_qty)}</b></span>
+              </>
+            )}
             {totals.busiest && (
               <span className="text-muted-foreground">Busiest day <b className="text-foreground">{fmtDate(totals.busiest.day)}</b> ({num(Number(totals.busiest.in_qty) + Number(totals.busiest.out_qty))} units)</span>
             )}
@@ -158,6 +193,106 @@ function DailyMovement() {
         </>
       )}
     </Card>
+  )
+}
+
+interface FlowRow {
+  issued_on: string; voucher_no: string; item_name: string
+  from_warehouse: string; to_warehouse: string | null
+  issued_qty: number; issued_value_bhd: number
+  received_qty: number; received_by: string | null; received_on: string | null
+  status: 'received' | 'partial' | 'pending'
+}
+interface FlowData {
+  warehouse: string; direction: 'out' | 'in'; days: number
+  rows: FlowRow[]; count: number
+  summary: Record<string, { legs: number; qty: number }>
+  partners: { name: string; qty: number }[]
+}
+
+const FLOW_STATUS: Record<FlowRow['status'], string> = {
+  received: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+  partial: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+  pending: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+}
+
+const FLOW_COLS: Column<FlowRow>[] = [
+  { key: 'issued_on', label: 'Issued' },
+  { key: 'voucher_no', label: 'Voucher' },
+  { key: 'item_name', label: 'Item' },
+  { key: 'from_warehouse', label: 'From' },
+  { key: 'to_warehouse', label: 'To', render: (v, r) => String(r.received_by || v || '—') },
+  { key: 'issued_qty', label: 'Issued', align: 'right', render: (v) => num(Number(v)) },
+  { key: 'received_qty', label: 'Received', align: 'right', render: (v) => num(Number(v)) },
+  {
+    key: 'status', label: 'Status',
+    render: (v) => (
+      <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', FLOW_STATUS[v as FlowRow['status']])}>
+        {String(v)}
+      </span>
+    ),
+  },
+]
+
+/** Issue → Receive tracking for the main warehouse (the storekeeper's paper trail):
+ *  every Stock Issue Voucher and whether the destination punched its Stock Receive. */
+function WarehouseFlow() {
+  const [direction, setDirection] = useState<'out' | 'in'>('out')
+  const [days, setDays] = useState(30)
+  const { data, isLoading } = useQuery({
+    queryKey: ['stock-flow', direction, days],
+    queryFn: () => apiGet<FlowData>(`/stock/flow?direction=${direction}&days=${days}`),
+  })
+  const s = data?.summary || {}
+  return (
+    <div className="mt-8">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <ArrowLeftRight size={16} className="text-primary" />
+        <h2 className="font-display text-base font-semibold">Issue → Receive tracking</h2>
+        <span className="text-xs text-muted-foreground">Accessories Warehouse</span>
+        <div className="ml-auto flex flex-wrap gap-1.5">
+          <div className="flex overflow-hidden rounded-lg border text-[12.5px] font-semibold">
+            {([['out', 'From main →'], ['in', '→ Into main']] as const).map(([d, label]) => (
+              <button key={d} onClick={() => setDirection(d)}
+                className={cn('px-3 py-1 transition',
+                  direction === d ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-accent/50')}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {[7, 30, 90].map((d) => (
+            <button key={d} onClick={() => setDays(d)}
+              className={cn('rounded-lg border px-3 py-1 text-[13px] font-medium transition',
+                days === d ? 'border-primary bg-accent' : 'border-border')}>
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[12.5px]">
+        {(['received', 'partial', 'pending'] as const).map((st) => s[st] && (
+          <span key={st} className={cn('rounded-full px-2.5 py-1 font-medium', FLOW_STATUS[st])}>
+            {st} · {num(s[st].qty)} units ({s[st].legs} lines)
+          </span>
+        ))}
+        {(data?.partners || []).slice(0, 6).map((p) => (
+          <span key={p.name} className="rounded-full border bg-secondary/40 px-2.5 py-1 text-muted-foreground">
+            {direction === 'out' ? '→' : '←'} {p.name} <b className="text-foreground tabular-nums">{num(p.qty)}</b>
+          </span>
+        ))}
+      </div>
+      {isLoading ? (
+        <Skeleton className="h-64" />
+      ) : (
+        <DataTable rows={data?.rows || []} cols={FLOW_COLS} exportName="stock-flow"
+          empty="No issue vouchers in this window." />
+      )}
+      <p className="mt-2 text-xs text-muted-foreground">
+        Flow: storekeeper punches a <b>Stock Issue Voucher</b> → the destination converts it to a{' '}
+        <b>Stock Receive Voucher</b> (same voucher number). <b>Pending</b> = issued but no receive
+        punched yet — chase the receiver.
+      </p>
+    </div>
   )
 }
 
@@ -231,6 +366,9 @@ export default function StockMovement() {
 
       {/* Daily movement dashboard (storekeeper performance, month by month) */}
       <DailyMovement />
+
+      {/* Issue → Receive paper trail for the main warehouse */}
+      <WarehouseFlow />
 
       {/* Van reconciliation */}
       <div className="mb-2 flex items-center gap-2">

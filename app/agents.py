@@ -14,6 +14,7 @@ humans (or a future approval step) act.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,13 @@ from app.agent_base import AgentSpec
 from app.ai import exec_sql
 
 log = logging.getLogger(__name__)
+
+# Agents read the *_agent views (owner rule: agents work on mobile accessories only —
+# SIM/starter packs excluded while app_settings.agent_exclude_sim='1'; the views
+# check the toggle themselves, so flipping it in Settings applies instantly).
+_AGENT_VIEW_SWAP = re.compile(
+    r"\b(v_sales_by_salesman|v_sales_by_channel|v_sales_by_period"
+    r"|v_stock_health|v_current_stock|v_sales)\b")
 
 # Per-run query-failure counter. thread-local so it stays isolated when the orchestrator runs
 # several agents concurrently (ThreadPoolExecutor). run_agent() resets it before each run and
@@ -32,7 +40,9 @@ _run_state = threading.local()
 
 def _q(sql: str) -> list[dict[str, Any]]:
     """Run a read-only query; return [] on error AND record the failure (see _run_state) so the
-    agent's summary can flag partial data instead of silently reporting zero."""
+    agent's summary can flag partial data instead of silently reporting zero.
+    Sales/stock views are swapped to their *_agent variants (division scoping)."""
+    sql = _AGENT_VIEW_SWAP.sub(lambda m: m.group(1) + "_agent", sql)
     try:
         return exec_sql(sql) or []
     except Exception as exc:  # noqa: BLE001
@@ -1583,6 +1593,40 @@ def returns_investigator() -> dict:
     }
 
 
+# ── Marketing & outreach engine (Phase: 10k/month) ───────────────────────────
+# Thin wrappers — the logic lives in app/outreach.py and app/video_gen.py; lazy imports
+# keep module load light and avoid circular imports (outreach calls agents above).
+
+def outreach_builder() -> dict:
+    """Build the approved-send queue from sales_outreach/winback/sales_push/lead_gen."""
+    from app.outreach import build_queue
+    return build_queue()
+
+
+def contact_enrich() -> dict:
+    """Nightly: find business phones/emails for the highest-value uncontacted customers."""
+    from app.outreach import contact_enrich_run
+    return contact_enrich_run()
+
+
+def outreach_digest() -> dict:
+    """Morning Telegram digest of messages waiting for a one-tap approve/send."""
+    from app.outreach import digest
+    return digest()
+
+
+def growth_scorecard() -> dict:
+    """Weekly numbers loop: month pace vs BHD 10,000 + outreach funnel + coverage."""
+    from app.outreach import scorecard
+    return scorecard()
+
+
+def content_engine() -> dict:
+    """Render picture ads + a 9:16 video from catalog photos → social_posts drafts."""
+    from app.video_gen import content_engine as _run
+    return _run()
+
+
 # Retired agent name → its successor. run_agent() resolves these so existing schedules,
 # n8n flows, tool calls and audit history keep working after consolidation.
 AGENT_ALIASES: dict[str, str] = {
@@ -1627,6 +1671,11 @@ AGENTS: dict[str, AgentSpec] = {
     "price_drift": AgentSpec("price_drift", "Price Sentry: landed cost rose but selling price didn't — silent margin erosion to reprice", price_drift),
     "returns_investigator": AgentSpec("returns_investigator", "Returns-Investigator: SKUs returning at high rates (quality signal) + vendor & salesman roll-up", returns_investigator),
     "ops_sentinel": AgentSpec("ops_sentinel", "Platform self-monitor: ingest/agent/event health + drafts KB articles for repeated unanswered questions", ops_sentinel_agent, in_brief=False),
+    "outreach_builder": AgentSpec("outreach_builder", "Builds the outreach send queue: reorder nudges, win-backs, clearance offers & lead openers — every message waits for human approval", outreach_builder, category="growth"),
+    "contact_enrich": AgentSpec("contact_enrich", "Nightly contact finder: business phones/emails for the highest-value customers still missing one (public listings)", contact_enrich, category="growth", in_brief=False),
+    "outreach_digest": AgentSpec("outreach_digest", "Morning Telegram digest: outreach messages waiting for a one-tap send", outreach_digest, category="growth", in_brief=False),
+    "growth_scorecard": AgentSpec("growth_scorecard", "Weekly scorecard: month pace vs BHD 10,000 target + outreach funnel + contact coverage", growth_scorecard, category="growth"),
+    "content_engine": AgentSpec("content_engine", "Renders picture ads + a 9:16 video from catalog photos (free: Pillow/FFmpeg) → drafts for approval", content_engine, category="growth", in_brief=False),
 }
 
 # Org-map grouping (CEO → departments → agents). Used by the Agents page; default = Operations.
@@ -1645,6 +1694,9 @@ _DEPARTMENTS: dict[str, str] = {
     "lead_gen": "Sales & Growth", "research_scout": "Sales & Growth",
     "risk_watch": "Risk", "salesman_stock_recon": "Risk", "returns_investigator": "Risk",
     "price_drift": "Finance", "ops_sentinel": "Operations",
+    "outreach_builder": "Sales & Growth", "contact_enrich": "Sales & Growth",
+    "outreach_digest": "Sales & Growth", "growth_scorecard": "Sales & Growth",
+    "content_engine": "Sales & Growth",
 }
 for _n, _spec in AGENTS.items():
     _spec.department = _DEPARTMENTS.get(_n, "Operations")

@@ -8,9 +8,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# System deps for pdfplumber (pdfminer) — kept minimal.
+# System deps: pdfplumber (pdfminer) + the content engine (ffmpeg renders the
+# 9:16 marketing videos; DejaVu fonts for the Pillow ad cards).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        ffmpeg \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

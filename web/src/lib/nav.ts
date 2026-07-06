@@ -16,6 +16,7 @@ import {
   BookImage,
   ArrowLeftRight,
   LineChart,
+  Megaphone,
   type LucideIcon,
 } from 'lucide-react'
 import type { Me } from './auth'
@@ -38,6 +39,7 @@ export const NAV: NavItem[] = [
   { section: 'Sell', label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
   { section: 'Sell', label: 'Catalog', to: '/catalog', icon: BookImage, feature: 'Catalog' },
   { section: 'Sell', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads' },
+  { section: 'Sell', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing' },
   { section: 'Sell', label: 'Coach', to: '/coaching', icon: MessageSquareQuote, feature: 'Sales' },
   { section: 'Supply', label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
   { section: 'Supply', label: 'Stock Moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },

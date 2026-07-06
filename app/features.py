@@ -22,6 +22,7 @@ FEATURES: list[str] = [
     "Margins",
     "Receivables",
     "Catalog",
+    "Marketing",
 ]
 
 ROLES: list[str] = ["admin", "member", "salesman"]

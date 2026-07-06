@@ -26,6 +26,7 @@ export interface CatalogItem {
   roadshow_price?: number | null
   rrp?: number | null
   standard_rate?: number | null
+  b2c_rate?: number | null
   product_image_url?: string | null
   package_image_url?: string | null
   sort_order?: number | null
@@ -42,16 +43,15 @@ interface ShareLink { token: string; url: string }
 const n3 = (v?: number | null) =>
   v == null ? null : Number(v).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')
 
-function ItemCard({ it, isAdmin, isSalesman, onEdit, onView }: {
-  it: CatalogItem; isAdmin: boolean; isSalesman: boolean
+function ItemCard({ it, isAdmin, onEdit, onView }: {
+  it: CatalogItem; isAdmin: boolean
   onEdit: (i: CatalogItem) => void; onView: (i: CatalogItem) => void
 }) {
   const [side, setSide] = useState<'product' | 'package'>('product')
   const img = side === 'product' ? it.product_image_url : it.package_image_url
-  const hero = isSalesman ? it.standard_rate : it.rrp
-  const tiers = isSalesman ? [] : ([
-    ['Dealer', it.dealer_price], ['Road', it.roadshow_price], ['Book', it.standard_rate],
-  ] as const).filter(([, v]) => v != null)
+  // 2 prices only (owner rule): B2B = MA price book (hero), B2C = Causeway/Roadshow book
+  const hero = it.standard_rate
+  const tiers = ([['B2C', it.b2c_rate]] as const).filter(([, v]) => v != null)
   return (
     <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
       className={cn('group overflow-hidden rounded-2xl border bg-card shadow-soft transition-shadow hover:shadow-lift', it.is_active === false && 'opacity-60')}>
@@ -103,9 +103,7 @@ function ItemCard({ it, isAdmin, isSalesman, onEdit, onView }: {
             ))}
           </div>
           <div className="shrink-0 text-right">
-            <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
-              {isSalesman ? 'Price' : 'RRP'}
-            </div>
+            <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">B2B</div>
             <div className="font-display text-base font-extrabold leading-tight text-primary tabular-nums">
               {hero != null ? `BD ${n3(hero)}` : '—'}
             </div>
@@ -116,13 +114,13 @@ function ItemCard({ it, isAdmin, isSalesman, onEdit, onView }: {
   )
 }
 
-function DetailDialog({ item, isSalesman, onClose }: { item: CatalogItem; isSalesman: boolean; onClose: () => void }) {
+function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => void }) {
   const [side, setSide] = useState<'product' | 'package'>('product')
   const img = side === 'product' ? item.product_image_url : item.package_image_url
-  const rows = isSalesman
-    ? [['Price (B2B)', item.standard_rate]]
-    : ([['Dealer', item.dealer_price], ['Causeway & Roadshow', item.roadshow_price],
-       ['RRP', item.rrp], ['Book rate', item.standard_rate]] as const)
+  const rows = [
+    ['B2B · trade price', item.standard_rate],
+    ['B2C · Causeway & Roadshow', item.b2c_rate],
+  ] as const
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="max-h-[90vh] w-full max-w-md overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
@@ -215,14 +213,10 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
           <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Spec / description</span>
             <textarea value={f.spec || ''} onChange={(e) => set('spec', e.target.value)} rows={3}
               className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary/50" /></label>
-          <div className="grid grid-cols-3 gap-3">
-            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Dealer</span>
-              <Input inputMode="decimal" value={f.dealer_price ?? ''} onChange={(e) => set('dealer_price', e.target.value)} /></label>
-            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Roadshow</span>
-              <Input inputMode="decimal" value={f.roadshow_price ?? ''} onChange={(e) => set('roadshow_price', e.target.value)} /></label>
-            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">RRP</span>
-              <Input inputMode="decimal" value={f.rrp ?? ''} onChange={(e) => set('rrp', e.target.value)} /></label>
-          </div>
+          <p className="rounded-lg bg-secondary/50 px-3 py-2 text-[12px] text-muted-foreground">
+            Prices are not edited here — B2B comes from the <b>MA price book</b> and B2C from the{' '}
+            <b>Causeway &amp; Roadshow book</b> in your weekly pricing upload, automatically.
+          </p>
           {!isNew && (
             <div className="grid grid-cols-2 gap-3">
               {(['product', 'package'] as const).map((kind) => (
@@ -267,7 +261,8 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
         </div>
         <p className="mb-4 text-sm text-muted-foreground">
-          Customers see items, photos and <b>RRP only</b> — never your dealer or roadshow pricing.
+          Customers see items, photos, the <b>B2B trade price</b> and the <b>B2C price</b> — always
+          current, straight from your latest price-book upload.
         </p>
         {url ? (
           <>
@@ -419,7 +414,7 @@ export default function Catalog() {
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           {items.map((it) => (
-            <ItemCard key={it.item_code} it={it} isAdmin={!!isAdmin} isSalesman={!!isSalesman}
+            <ItemCard key={it.item_code} it={it} isAdmin={!!isAdmin}
               onEdit={setEdit} onView={setView} />
           ))}
         </div>
@@ -430,7 +425,7 @@ export default function Catalog() {
           onSaved={() => { setEdit(null); qc.invalidateQueries({ queryKey: ['catalog'] }) }} />
       )}
       {share && <ShareDialog onClose={() => setShare(false)} />}
-      {view && <DetailDialog item={view} isSalesman={!!isSalesman} onClose={() => setView(null)} />}
+      {view && <DetailDialog item={view} onClose={() => setView(null)} />}
     </div>
   )
 }

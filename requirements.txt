@@ -19,3 +19,4 @@ python-docx
 pyyaml
 plotly
 watchdog
+edge-tts

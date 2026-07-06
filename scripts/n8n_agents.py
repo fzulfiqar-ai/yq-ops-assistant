@@ -25,7 +25,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "n8n_workflows" / "agents"
 
-# name -> (Title, schedule). schedule: {"field": "hours"|"weeks", "hour": H, "day": 1..7 (Mon=1, weekly only)}
+# name -> (Title, schedule). schedule: {"field": "hours"|"weeks", "hour": H,
+#   "day": 1..7 (Mon=1) | "days": [..] (weekly only), "minute": M (default 0)}
 AGENTS: dict[str, tuple[str, dict]] = {
     "collections":     ("Collections",          {"field": "hours", "hour": 9}),
     "inventory":       ("Inventory & Reorder",   {"field": "hours", "hour": 8}),
@@ -35,6 +36,12 @@ AGENTS: dict[str, tuple[str, dict]] = {
     "sales_insights":  ("Sales Insights",        {"field": "weeks", "hour": 8, "day": 1}),
     "customer_health": ("Customer Health",       {"field": "weeks", "hour": 9, "day": 1}),
     "sales_push":      ("Sales Push",            {"field": "weeks", "hour": 18, "day": 7}),
+    # Marketing & outreach engine (10k/month) — see app/outreach.py + app/video_gen.py
+    "contact_enrich":   ("Contact Enrich",       {"field": "hours", "hour": 2}),
+    "outreach_builder": ("Outreach Builder",     {"field": "weeks", "hour": 7, "day": 7}),
+    "outreach_digest":  ("Outreach Digest",      {"field": "hours", "hour": 8, "minute": 30}),
+    "growth_scorecard": ("Growth Scorecard",     {"field": "weeks", "hour": 17, "day": 5}),
+    "content_engine":   ("Content Engine",       {"field": "weeks", "hour": 10, "days": [2, 4]}),
 }
 
 
@@ -44,14 +51,15 @@ def _schedule_node(sched: dict) -> dict:
         interval["hoursInterval"] = 24
     else:
         interval["weeksInterval"] = 1
-        interval["triggerAtDay"] = [sched["day"]]
+        interval["triggerAtDay"] = sched.get("days") or [sched["day"]]
     return {
         "id": "trigger",
         "name": "Schedule",
         "type": "n8n-nodes-base.scheduleTrigger",
         "typeVersion": 1.2,
         "position": [260, 300],
-        "parameters": {"rule": {"interval": [interval]}, "triggerAtHour": sched["hour"], "triggerAtMinute": 0},
+        "parameters": {"rule": {"interval": [interval]}, "triggerAtHour": sched["hour"],
+                       "triggerAtMinute": sched.get("minute", 0)},
     }
 
 

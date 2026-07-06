@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator, Target } from 'lucide-react'
+import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator, Target, Bot } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
@@ -63,6 +63,48 @@ function CostingCard() {
       <Button className="mt-4" onClick={() => save.mutate()} disabled={save.isPending || Object.keys(draft).length === 0}>
         {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save settings
       </Button>
+    </Card>
+  )
+}
+
+/** AI-agent data scope — owner rule: agents focus on mobile accessories; SIM /
+ *  starter packs stay out of their analysis until this is switched back on. */
+function AgentScopeCard() {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['agent-scope'],
+    queryFn: () => apiGet<{ exclude_sim: boolean }>('/settings/agents'),
+  })
+  const save = useMutation({
+    mutationFn: (exclude_sim: boolean) => apiSend('PUT', '/settings/agents', { exclude_sim }),
+    onSuccess: (_r, exclude_sim) => {
+      qc.invalidateQueries({ queryKey: ['agent-scope'] })
+      toast(exclude_sim
+        ? 'AI agents now ignore SIM / starter packs.'
+        : 'AI agents now include SIM / starter packs.', 'success')
+    },
+    onError: (e: Error) => toast(e.message, 'error'),
+  })
+  if (!data) return null
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+        <Bot size={18} className="text-primary" /> AI agent scope
+      </div>
+      <p className="mb-3 text-sm text-muted-foreground">
+        What data the AI agents (reorders, trends, outreach, forecasts…) analyse.
+        Dashboards always show everything — this only scopes the agents.
+      </p>
+      <label className="flex cursor-pointer items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm font-medium transition hover:border-primary/40">
+        <input type="checkbox" checked={data.exclude_sim}
+          disabled={save.isPending}
+          onChange={(e) => save.mutate(e.target.checked)} />
+        Mobile accessories only — agents ignore the SIM / starter-pack division
+        <span className="ml-auto text-xs text-muted-foreground">
+          {data.exclude_sim ? 'SIM excluded' : 'SIM included'}
+        </span>
+      </label>
     </Card>
   )
 }
@@ -188,6 +230,7 @@ export default function Settings() {
 
       {me?.role === 'admin' && <CostingCard />}
       {me?.role === 'admin' && <TargetsCard />}
+      {me?.role === 'admin' && <AgentScopeCard />}
 
       <Card className="mb-4 p-6">
         <div className="mb-4 font-display text-base font-semibold">Appearance</div>

@@ -27,6 +27,8 @@ const DataPage = lazy(() => import('@/pages/DataPage'))
 const Team = lazy(() => import('@/pages/Team'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const PublicCatalog = lazy(() => import('@/pages/PublicCatalog'))
+const Marketing = lazy(() => import('@/pages/Marketing'))
+const OptOut = lazy(() => import('@/pages/OptOut'))
 
 /** Land on the first page this user can see (a salesman goes straight to Catalog). */
 function Home() {
@@ -44,6 +46,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/invite" element={<AcceptInvite />} />
         <Route path="/c/:token" element={<PublicCatalog />} />
+        <Route path="/optout/:token" element={<OptOut />} />
 
         <Route element={<ProtectedRoute />}>
           <Route index element={<Home />} />
@@ -57,6 +60,7 @@ export default function App() {
           <Route path="orders" element={<Gate feature="Orders"><Orders /></Gate>} />
           <Route path="orders/:poNo" element={<Gate feature="Orders"><OrderDetail /></Gate>} />
           <Route path="leads" element={<Gate feature="Leads"><Leads /></Gate>} />
+          <Route path="marketing" element={<Gate feature="Marketing"><Marketing /></Gate>} />
           <Route path="coaching" element={<Gate feature="Sales"><Coaching /></Gate>} />
           <Route path="sales" element={<Gate feature="Sales"><Sales /></Gate>} />
           <Route path="margins" element={<Gate feature="Margins"><Margins /></Gate>} />

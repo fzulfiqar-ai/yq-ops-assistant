@@ -30,10 +30,10 @@ _CODE_TOKEN = re.compile(r"\b[A-Za-z]{1,3}-?[A-Za-z]?\d+[A-Za-z0-9-]*\b")  # X01
 
 def _item_card(it: dict) -> dict:
     metrics: dict = {}
-    if it.get("rrp") is not None:
-        metrics["rrp_bhd"] = float(it["rrp"])
     if it.get("standard_rate") is not None:
-        metrics["book_bhd"] = float(it["standard_rate"])
+        metrics["b2b_bhd"] = float(it["standard_rate"])
+    if it.get("b2c_rate") is not None:
+        metrics["b2c_bhd"] = float(it["b2c_rate"])
     return {
         "kind": "item", "agent": "catalog",
         "title": it.get("item_code") or "",
@@ -59,7 +59,7 @@ def photo_answer(question: str) -> str | None:
     rows: list[dict] = []
     if tokens:
         rows = exec_sql_params(
-            "SELECT item_code, display_name, spec, rrp, standard_rate, "
+            "SELECT item_code, display_name, spec, standard_rate, b2c_rate, "
             "product_image_url, package_image_url FROM v_catalog "
             "WHERE is_active AND ("
             "  item_code = ANY(SELECT jsonb_array_elements_text($1::jsonb))"
@@ -74,7 +74,7 @@ def photo_answer(question: str) -> str | None:
         needle = " ".join(words.split())[:40].strip()
         if len(needle) >= 3:
             rows = exec_sql_params(
-                "SELECT item_code, display_name, spec, rrp, standard_rate, "
+                "SELECT item_code, display_name, spec, standard_rate, b2c_rate, "
                 "product_image_url, package_image_url FROM v_catalog "
                 "WHERE is_active AND product_image_url IS NOT NULL "
                 "AND (display_name ILIKE '%' || $1 || '%' OR spec ILIKE '%' || $1 || '%') "
