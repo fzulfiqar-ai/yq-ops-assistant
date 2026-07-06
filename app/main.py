@@ -1742,6 +1742,26 @@ def social_post_publish(post_id: int,
     return res
 
 
+@app.delete("/social/posts/{post_id}")
+def social_post_delete(post_id: int,
+                       user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
+    """Delete a generated ad/video draft + its media file from storage."""
+    from app.database import get_client
+    cli = get_client()
+    rows = cli.table("social_posts").select("media_url").eq("id", post_id).execute().data or []
+    # best-effort remove the file from our public 'marketing' bucket
+    if rows and rows[0].get("media_url"):
+        try:
+            path = rows[0]["media_url"].split("/object/public/marketing/", 1)
+            if len(path) == 2:
+                cli.storage.from_("marketing").remove([path[1]])
+        except Exception:  # noqa: BLE001
+            pass
+    cli.table("social_posts").delete().eq("id", post_id).execute()
+    log_event(user.email, "social.delete", detail={"post": post_id})
+    return {"ok": True}
+
+
 @app.get("/social/config")
 def social_config(_user: CurrentUser = Depends(require_feature("Marketing"))) -> dict:
     from app.social_publish import configured as social_conf

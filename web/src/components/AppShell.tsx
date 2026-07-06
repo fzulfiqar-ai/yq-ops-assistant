@@ -278,7 +278,7 @@ export function AppShell() {
         </header>
 
         {/* Page content with cross-fade */}
-        <main className="relative z-10 flex-1 overflow-y-auto">
+        <main className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden">
           <AnimatePresence mode="wait">
             <motion.div
               key={loc.pathname}
@@ -286,7 +286,7 @@ export function AppShell() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-              className="w-full px-5 py-6 md:px-7 lg:px-8"
+              className="w-full min-w-0 max-w-full overflow-x-hidden px-4 py-6 sm:px-5 md:px-7 lg:px-8"
             >
               <Suspense
                 fallback={

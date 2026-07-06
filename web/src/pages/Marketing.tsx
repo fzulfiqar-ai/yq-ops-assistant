@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Send, Mail, MessageCircle, Loader2, Check, X, Sparkles, Users, Megaphone,
-  Clapperboard, BarChart3, ClipboardCopy, RefreshCw, Play, Search,
+  Clapperboard, BarChart3, ClipboardCopy, RefreshCw, Play, Search, Trash2,
 } from 'lucide-react'
 import { apiGet, apiPost, apiSend } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -297,14 +297,35 @@ function Content() {
     finally { setGenerating(false) }
   }
 
-  async function poll() {
+  async function poll(silent = false) {
     setPolling(true)
     try {
       const r = await apiPost<{ summary: string }>('/social/poll')
-      toast(r.summary || 'Checked.', 'success')
+      if (!silent) toast(r.summary || 'Checked.', 'success')
       qc.invalidateQueries({ queryKey: ['social-posts'] })
-    } catch { toast('Check failed.', 'error') }
+    } catch { if (!silent) toast('Check failed.', 'error') }
     finally { setPolling(false) }
+  }
+
+  // Auto-finalise Agnes videos while any are still rendering (poll every 25s).
+  const pollingRef = useRef(false)
+  useEffect(() => {
+    if (rendering === 0) return
+    const id = setInterval(() => {
+      if (pollingRef.current) return
+      pollingRef.current = true
+      poll(true).finally(() => { pollingRef.current = false })
+    }, 25000)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rendering])
+
+  async function del(id: number) {
+    try {
+      await apiSend('DELETE', `/social/posts/${id}`)
+      toast('Deleted.', 'success')
+      qc.invalidateQueries({ queryKey: ['social-posts'] })
+    } catch { toast('Could not delete.', 'error') }
   }
   async function publish(p: SocialPost) {
     setPublishing(p.id)
@@ -326,7 +347,7 @@ function Content() {
           {!igReady && !fbReady && ' Connect Meta keys to auto-post; until then use TikTok-style hand-off.'}
         </p>
         {rendering > 0 && (
-          <Button size="sm" variant="outline" onClick={poll} disabled={polling}>
+          <Button size="sm" variant="outline" onClick={() => poll()} disabled={polling}>
             {polling ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Check renders ({rendering})
           </Button>
         )}
@@ -366,17 +387,24 @@ function Content() {
                   </span>
                 </div>
                 <div className="mt-0.5 text-[10px] text-muted-foreground">{p.platforms.join(' · ')}</div>
-                {p.status !== 'posted' && p.status !== 'rendering' && (
-                  <div className="mt-2 flex gap-1.5">
-                    <Button size="sm" className="h-7 flex-1 text-[11px]" disabled={publishing === p.id} onClick={() => publish(p)}>
-                      {publishing === p.id ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />} Publish
-                    </Button>
-                    <Button size="sm" variant="outline" className="h-7 text-[11px]"
-                      onClick={() => navigator.clipboard.writeText(p.caption_en).then(() => toast('Caption copied.', 'success'))}>
-                      <ClipboardCopy size={12} />
-                    </Button>
-                  </div>
-                )}
+                <div className="mt-2 flex gap-1.5">
+                  {p.status !== 'posted' && p.status !== 'rendering' && (
+                    <>
+                      <Button size="sm" className="h-7 flex-1 text-[11px]" disabled={publishing === p.id} onClick={() => publish(p)}>
+                        {publishing === p.id ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />} Publish
+                      </Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[11px]"
+                        onClick={() => navigator.clipboard.writeText(p.caption_en).then(() => toast('Caption copied.', 'success'))}>
+                        <ClipboardCopy size={12} />
+                      </Button>
+                    </>
+                  )}
+                  <Button size="sm" variant="outline"
+                    className="h-7 text-[11px] text-red-600 hover:bg-red-50 ml-auto"
+                    onClick={() => del(p.id)} title="Delete">
+                    <Trash2 size={12} />
+                  </Button>
+                </div>
               </div>
             </Card>
           ))}

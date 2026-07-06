@@ -56,19 +56,26 @@ def generate_image(prompt: str, model: str = IMAGE_MODEL) -> str | None:
         return None
 
 
-def start_video(prompt: str, image_url: str | None = None, *, seconds: float = 5.0,
-                fps: int = 16, portrait: bool = True) -> str | None:
+# A negative prompt keeps the ad clean and commercial (no cartoon look, no garbled text).
+NEG_PROMPT = ("low quality, blurry, distorted, warped product, deformed, extra objects, "
+              "text artifacts, watermark, logo, cartoon, anime, oversaturated, jittery motion, "
+              "flickering, duplicated product, melting, morphing shape")
+
+
+def start_video(prompt: str, image_url: str | None = None, *, seconds: float = 6.0,
+                fps: int = 24, portrait: bool = True, steps: int = 30) -> str | None:
     """Kick off (image-to-)video generation. Returns the video_id to poll, or None.
 
+    Higher `steps` (inference steps) + 24fps + 1080p give a smoother, more realistic ad.
     num_frames must satisfy the 8n+1 rule (Agnes constraint); duration = frames / fps."""
     if not enabled():
         return None
     frames = int(round(seconds * fps))
     frames = max(9, min(441, ((frames - 1) // 8) * 8 + 1))  # snap to 8n+1, cap 441
     body: dict = {
-        "model": VIDEO_MODEL, "prompt": prompt[:1200],
-        "height": 1152 if portrait else 768, "width": 768 if portrait else 1152,
-        "num_frames": frames, "frame_rate": fps,
+        "model": VIDEO_MODEL, "prompt": prompt[:1200], "negative_prompt": NEG_PROMPT,
+        "height": 1920 if portrait else 1080, "width": 1080 if portrait else 1920,
+        "num_frames": frames, "frame_rate": fps, "num_inference_steps": steps,
     }
     if image_url:
         body["image"] = image_url

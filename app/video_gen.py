@@ -92,65 +92,131 @@ def _badge(draw, xy: tuple[int, int], text: str, fill=PURPLE, size: int = 44) ->
     draw.text(xy, text, font=f, fill=(255, 255, 255))
 
 
+def _knockout_bg(photo):
+    """Make a studio-white product photo's background transparent so it floats on the
+    gradient (the 'million-dollar' look). Flood-fills from the corners, so interior
+    white parts of the product (e.g. a white cable) are preserved. No-op if the photo
+    isn't on a near-white background (already transparent PNG / dark bg)."""
+    try:
+        import numpy as np
+        from PIL import Image, ImageDraw
+        im = photo.convert("RGB")
+        corners = [im.getpixel(p) for p in
+                   [(0, 0), (im.width - 1, 0), (0, im.height - 1), (im.width - 1, im.height - 1)]]
+        if not all(min(c) > 232 for c in corners):
+            return photo  # not a white-studio shot → leave untouched
+        seed = (255, 0, 255)
+        work = im.copy()
+        for pt in [(1, 1), (im.width - 2, 1), (1, im.height - 2), (im.width - 2, im.height - 2)]:
+            ImageDraw.floodfill(work, pt, seed, thresh=36)
+        arr, orig = np.array(work), np.array(im)
+        bg = np.all(arr == seed, axis=-1)
+        alpha = np.where(bg, 0, 255).astype("uint8")
+        return Image.fromarray(np.dstack([orig, alpha]), "RGBA")
+    except Exception:  # noqa: BLE001
+        return photo
+
+
+def _v_gradient(size: tuple[int, int], top: tuple, bottom: tuple):
+    """Vertical linear gradient background (premium studio feel)."""
+    from PIL import Image
+    W, H = size
+    grad = Image.new("RGB", (1, H))
+    for y in range(H):
+        t = y / max(H - 1, 1)
+        grad.putpixel((0, y), tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
+    return grad.resize((W, H)).convert("RGBA")
+
+
+def _wrap(draw, text: str, font, max_w: int, max_lines: int = 2) -> list[str]:
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if draw.textlength(trial, font=font) <= max_w:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+            if len(lines) == max_lines:
+                break
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+    if lines and draw.textlength(lines[-1], font=font) > max_w:
+        while lines[-1] and draw.textlength(lines[-1] + "…", font=font) > max_w:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] += "…"
+    return lines
+
+
 def make_ad_card(item: dict, template: str = "hero_card",
                  size: tuple[int, int] = AD_SIZE) -> bytes | None:
-    """One branded ad card (PNG). Templates: hero_card | price_drop | new_arrival.
-    `item` needs: item_code, spec/display_name, price_bhd, product_image_url,
-    optional promo_price_bhd + discount_pct for price_drop."""
-    from PIL import Image, ImageDraw
+    """One premium ad card (PNG): studio gradient, soft product glow + grounded shadow,
+    refined type and a gradient price chip. Templates: hero_card | price_drop | new_arrival."""
+    from PIL import Image, ImageDraw, ImageFilter
     photo = _fetch_photo(item.get("product_image_url") or "")
     if photo is None:
         return None
+    photo = _knockout_bg(photo)   # float the product on the gradient (no white box)
     W, H = size
-    canvas = Image.new("RGBA", size, PAPER + (255,))
+    canvas = _v_gradient(size, (255, 255, 255), (238, 231, 250))
     d = ImageDraw.Draw(canvas)
 
-    # header band — brand
-    d.rectangle((0, 0, W, 8), fill=PURPLE)
-    d.text((60, 48), "YQ BAHRAIN", font=_font(56), fill=INK)
-    d.text((60, 120), "VFAN mobile accessories · wholesale", font=_font(34, bold=False),
-           fill=(107, 100, 128))
-    if template == "new_arrival":
-        _badge(d, (W - 320, 60), "NEW IN", size=48)
-    elif template == "price_drop":
-        pct = int(item.get("discount_pct") or 30)
-        _badge(d, (W - 340, 60), f"-{pct}% OFF", fill=(220, 38, 38), size=48)
-    elif template == "hero_card":
-        _badge(d, (W - 360, 60), "TOP PICK", size=48)
+    # top accent hairline
+    d.rectangle((0, 0, W, 10), fill=PURPLE)
 
-    # product photo — the star, ~55% of the canvas on a white card
-    card = (60, 200, W - 60, int(H * 0.68))
-    d.rounded_rectangle(card, radius=36, fill=(255, 255, 255),
-                        outline=(232, 228, 240), width=2)
-    _paste_center(canvas, photo, (card[0] + 30, card[1] + 30, card[2] - 30, card[3] - 30))
+    # brand lockup
+    d.text((60, 54), "YQ BAHRAIN", font=_font(58), fill=INK)
+    d.text((62, 128), "PREMIUM VFAN ACCESSORIES", font=_font(30, bold=False), fill=PURPLE)
+    badge = {"new_arrival": ("NEW IN", PURPLE), "price_drop": (
+        f"-{int(item.get('discount_pct') or 30)}% OFF", (220, 38, 38))}.get(
+        template, ("TOP PICK", (17, 24, 39)))
+    _badge(d, (W - 60 - int(len(badge[0]) * 26), 66), badge[0], fill=badge[1], size=46)
 
-    # name + spec
-    y = int(H * 0.70)
+    # product stage — soft radial glow + grounded elliptical shadow behind the hero shot
+    cx, cy = W // 2, int(H * 0.37)
+    glow = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse((cx - 420, cy - 420, cx + 420, cy + 420), fill=(124, 58, 237, 40))
+    canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(95)))
+    shadow = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).ellipse((cx - 280, int(H * 0.585), cx + 280, int(H * 0.63)),
+                                   fill=(60, 40, 100, 75))
+    canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(28)))
+    _paste_center(canvas, photo, (120, 200, W - 120, int(H * 0.60)))
+
+    # info zone
     code = str(item.get("item_code") or "")
-    spec = str(item.get("display_name") or item.get("spec") or "").replace("\n", " ")[:80]
-    d.text((60, y), code, font=_font(64), fill=INK)
-    d.text((60, y + 84), spec, font=_font(38, bold=False), fill=(107, 100, 128))
+    spec = str(item.get("display_name") or item.get("spec") or "").replace("\n", " ")
+    y = int(H * 0.645)
+    d.text((60, y), code, font=_font(66), fill=INK)
+    for i, line in enumerate(_wrap(d, spec, _font(34, bold=False), W - 120, 2)):
+        d.text((62, y + 90 + i * 44), line, font=_font(34, bold=False), fill=(107, 100, 128))
 
-    # price block
-    price = item.get("price_bhd")
-    promo = item.get("promo_price_bhd")
-    py = y + 160
-    if template == "price_drop" and promo and price:
-        d.text((60, py + 26), f"BHD {float(price):.3f}", font=_font(44, bold=False),
-               fill=(150, 145, 165))
-        w = d.textlength(f"BHD {float(price):.3f}", font=_font(44, bold=False))
-        d.line((60, py + 52, 60 + w, py + 52), fill=(220, 38, 38), width=4)
-        d.text((60 + w + 40, py), f"BHD {float(promo):.3f}", font=_font(84), fill=PURPLE)
-    elif price is not None:
-        d.text((60, py), f"BHD {float(price):.3f}", font=_font(84), fill=PURPLE)
+    # premium price chip (gradient pill) — sits above the CTA bar with a clear gap
+    price, promo = item.get("price_bhd"), item.get("promo_price_bhd")
+    py = int(H * 0.775)
+    if price is not None:
+        show = promo if (template == "price_drop" and promo) else price
+        label = f"BHD {float(show):.3f}"
+        ch = 104
+        cw = int(d.textlength(label, font=_font(68)) + 80)
+        chip = _v_gradient((cw, ch), (124, 58, 237), (76, 29, 149))
+        mask = Image.new("L", (cw, ch), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, cw - 1, ch - 1), radius=ch // 2, fill=255)
+        canvas.paste(chip, (60, py), mask)
+        d.text((60 + 40, py + 18), label, font=_font(68), fill=(255, 255, 255))
+        if template == "price_drop" and promo and price:
+            ox = 60 + cw + 28
+            old = f"BHD {float(price):.3f}"
+            d.text((ox, py + 32), old, font=_font(40, bold=False), fill=(150, 145, 165))
+            ow = d.textlength(old, font=_font(40, bold=False))
+            d.line((ox, py + 56, ox + ow, py + 56), fill=(220, 38, 38), width=5)
 
-    # CTA footer
+    # CTA bar
     wa = os.getenv("WA_HUMAN_NUMBER", "")
-    cta = f"Order on WhatsApp {('+' + wa) if wa else ''} · Trade prices".strip()
-    d.rounded_rectangle((60, H - 130, W - 60, H - 50), radius=20, fill=INK)
+    cta = f"Order on WhatsApp{(' +' + wa) if wa else ''}  ·  Trade prices"
+    d.rounded_rectangle((60, H - 120, W - 60, H - 42), radius=22, fill=INK)
     f = _font(38)
-    tw = d.textlength(cta, font=f)
-    d.text(((W - tw) / 2, H - 118), cta, font=f, fill=(255, 255, 255))
+    d.text(((W - d.textlength(cta, font=f)) / 2, H - 108), cta, font=f, fill=(255, 255, 255))
 
     out = io.BytesIO()
     canvas.convert("RGB").save(out, "PNG", optimize=True)
@@ -323,13 +389,17 @@ def content_engine(items_per_run: int = 4) -> dict:
                    + _hashtags())
         vcap_ar = f"جديد هذا الأسبوع لدى YQ البحرين — إكسسوارات VFAN بأسعار الجملة."
         if agnes.enabled():
-            vprompt = ("Cinematic slow push-in on the product, premium advertisement, clean "
-                       "studio lighting, smooth camera motion, high quality")
+            vprompt = (
+                "High-end commercial product advertisement for a premium mobile accessory. "
+                "Slow cinematic dolly and gentle orbit around the product, elegant studio "
+                "lighting with soft reflections and shallow depth of field, glossy reflective "
+                "surface, subtle floating motion, luxury tech aesthetic, photorealistic, "
+                "ultra sharp, 4k, smooth 24fps motion, professional colour grade")
             # Animate the CLEAN product photo (image-to-video). The text-heavy branded card
             # trips Agnes' content moderation and warps overlaid text — the caption carries
             # the price/branding instead.
             vsrc = hero.get("photo_url") or hero["url"]
-            vid = agnes.start_video(vprompt, image_url=vsrc, seconds=5, portrait=True)
+            vid = agnes.start_video(vprompt, image_url=vsrc, seconds=6, fps=24, portrait=True)
             if vid:
                 get_client().table("social_posts").insert({
                     "campaign": "hero", "item_code": hero["item_code"], "kind": "video",
@@ -370,46 +440,72 @@ def content_engine(items_per_run: int = 4) -> dict:
     }
 
 
-def resolve_pending_videos(limit: int = 10) -> dict:
-    """Agent content_poll — poll Agnes for any 'rendering' videos; when complete, copy the
-    MP4 into our public bucket (stable URL + CSP-friendly) and flip the draft to 'draft'."""
+MAX_POLL_ATTEMPTS = 40  # ~40 hourly/tab polls before we give up (Agnes usually done in ~90s)
+
+
+def _finalize_video(row: dict, url: str) -> None:
+    """Copy a completed Agnes MP4 into our public bucket and flip the row to a draft."""
+    final_url = url
+    try:
+        import re
+        import requests
+        data = requests.get(url, timeout=120).content
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(row.get("item_code") or "item"))
+        up = _upload(data, f"videos/agnes-{safe}-{stamp}.mp4", "video/mp4")
+        if up:
+            final_url = up
+    except Exception as e:  # noqa: BLE001
+        log.warning("agnes mp4 copy failed: %s", str(e)[:120])
+    get_client().table("social_posts").update(
+        {"media_url": final_url, "status": "draft",
+         "meta": {**(row.get("meta") or {}), "agnes_status": "completed"}}
+    ).eq("id", row["id"]).execute()
+
+
+def resolve_pending_videos(limit: int = 20) -> dict:
+    """Agent content_poll — poll Agnes for videos still rendering; when complete, copy the
+    MP4 into our public bucket (stable URL + CSP-friendly) and flip the draft to 'draft'.
+
+    Also RECOVERS videos previously marked 'failed' that Agnes actually finished — a
+    transient poll blip should never lose a good render. Only gives up after
+    MAX_POLL_ATTEMPTS or an explicit Agnes rejection (content policy)."""
     from app import agnes
     if not agnes.enabled():
         return {"count": 0, "summary": "Agnes not configured — no async videos to resolve."}
     rows = (get_client().table("social_posts").select("*")
-            .eq("status", "rendering").limit(limit).execute().data or [])
+            .in_("status", ["rendering", "failed"]).eq("kind", "video")
+            .limit(limit).execute().data or [])
     done, still, failed = 0, 0, 0
     for row in rows:
-        vid = (row.get("meta") or {}).get("agnes_video_id")
+        meta = row.get("meta") or {}
+        vid = meta.get("agnes_video_id")
         if not vid:
+            if row["status"] == "failed":
+                continue  # nothing to recover (e.g. old ffmpeg failure)
             continue
         st = agnes.poll_video(vid)
         if st["status"] == "completed" and st.get("url"):
-            final_url = st["url"]
-            try:
-                import re
-                import requests
-                data = requests.get(st["url"], timeout=120).content
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(row.get("item_code") or "item"))
-                up = _upload(data, f"videos/agnes-{safe}-{stamp}.mp4", "video/mp4")
-                if up:
-                    final_url = up
-            except Exception as e:  # noqa: BLE001
-                log.warning("agnes mp4 copy failed: %s", str(e)[:120])
-            get_client().table("social_posts").update(
-                {"media_url": final_url, "status": "draft",
-                 "meta": {**(row.get("meta") or {}), "agnes_status": "completed"}}
-            ).eq("id", row["id"]).execute()
+            _finalize_video(row, st["url"])          # recovers 'failed' rows too
             done += 1
-        elif st["status"] in ("failed", "error"):
+        elif st["status"] == "failed":               # explicit rejection (content policy)
             get_client().table("social_posts").update(
                 {"status": "failed",
-                 "meta": {**(row.get("meta") or {}), "agnes_error": str(st.get("error"))[:200]}}
+                 "meta": {**meta, "agnes_error": str(st.get("error"))[:200]}}
             ).eq("id", row["id"]).execute()
             failed += 1
-        else:
-            still += 1
+        else:                                        # queued / in_progress / transient
+            attempts = int(meta.get("poll_attempts") or 0) + 1
+            patch = {"meta": {**meta, "poll_attempts": attempts}}
+            if row["status"] == "failed":
+                patch["status"] = "rendering"        # un-fail: give it back to the poller
+            if attempts >= MAX_POLL_ATTEMPTS:
+                patch["status"] = "failed"
+                patch["meta"] = {**patch["meta"], "agnes_error": "timed out"}
+                failed += 1
+            else:
+                still += 1
+            get_client().table("social_posts").update(patch).eq("id", row["id"]).execute()
     return {"count": done, "resolved": done, "pending": still, "failed": failed,
             "summary": (f"Agnes renders: {done} completed and ready to approve, "
                         f"{still} still rendering, {failed} failed.")}

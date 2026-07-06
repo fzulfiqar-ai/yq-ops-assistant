@@ -159,7 +159,7 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
           const pct = Math.round((Number(r.momentum) - 1) * 100)
           return (
             <li key={i} className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-accent/40">
-              <span className="truncate font-medium">{r.item_name}</span>
+              <span className="min-w-0 truncate font-medium" title={r.item_name}>{r.item_name}</span>
               <span className={cn('shrink-0 font-semibold tabular-nums', up ? 'text-emerald-600' : 'text-rose-600')}>
                 {pct > 0 ? '+' : ''}{pct}%
               </span>
@@ -235,7 +235,7 @@ export default function Dashboard() {
                 className="group flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-accent/50">
                 <span className={cn('h-2 w-2 shrink-0 rounded-full',
                   a.urgency >= 3 ? 'bg-rose-500' : a.urgency === 2 ? 'bg-amber-500' : 'bg-slate-400')} />
-                <span className="flex-1 font-medium">{a.action}</span>
+                <span className="min-w-0 flex-1 truncate font-medium" title={a.action}>{a.action}</span>
                 {a.bhd > 0 && <span className="shrink-0 tabular-nums text-muted-foreground">{bhd(a.bhd, 0)}</span>}
                 <ArrowRight size={15} className="shrink-0 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
               </Link>
