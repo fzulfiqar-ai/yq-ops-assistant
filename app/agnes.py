@@ -30,6 +30,13 @@ VIDEO_MODEL = "agnes-video-v2.0"
 
 
 def _key() -> str:
+    # via settings so .env is guaranteed loaded regardless of import order
+    try:
+        from app.config import settings
+        if settings.agnes_api_key:
+            return settings.agnes_api_key
+    except Exception:  # noqa: BLE001
+        pass
     return os.getenv("AGNES_API_KEY", "")
 
 

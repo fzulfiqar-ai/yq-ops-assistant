@@ -41,6 +41,18 @@ _FONT_FILES = ["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf", "NotoSans-B
 _FONT_FILES_REG = ["segoeui.ttf", "arial.ttf", "DejaVuSans.ttf", "NotoSans-Regular.ttf"]
 
 
+import re as _re
+_EMOJI = _re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "←-⇿⬀-⯿ -⁯️⃣]+")
+
+
+def _no_emoji(s: str) -> str:
+    """Strip emoji/symbols that the DejaVu/Noto fonts render as tofu boxes when BURNED into
+    an image. Emojis stay in the post captions (rendered natively by Instagram/TikTok)."""
+    return _EMOJI.sub("", s or "").replace("  ", " ").strip()
+
+
 def _font(size: int, bold: bool = True):
     from PIL import ImageFont
     for d in _FONT_DIRS:
@@ -320,16 +332,56 @@ def _upload(data: bytes, name: str, content_type: str) -> str | None:
 
 
 def _hashtags() -> str:
-    return "#Bahrain #MobileAccessories #VFAN #YQBahrain #WholesaleBahrain #TradePrice"
+    # broad + local + niche tags for discovery / follower growth
+    return ("#Bahrain #البحرين #Manama #MobileAccessories #اكسسوارات_موبايل #VFAN #YQBahrain "
+            "#tech #gadgets #typec #fastcharging #WholesaleBahrain #بحرين #عروض #TradePrice")
+
+
+def _catalog_link() -> str:
+    try:
+        from app.agents import _catalog_link as _cl
+        return _cl()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _engaging_caption(item: dict, kind: str = "image") -> tuple[str, str]:
+    """A scroll-stopping, follower-growing caption (hook + follow CTA + order CTA + tags),
+    EN + AR. LLM-written with a safe template fallback."""
+    name = str(item.get("display_name") or item.get("spec") or item.get("item_code") or "").split(" (")[0]
+    price = item.get("price_bhd")
+    link = _catalog_link()
+    hook = ""
+    try:
+        from app.llm_router import chat
+        hook = (chat([
+            {"role": "system", "content":
+                "You are a witty social-media manager for YQ Bahrain, a VFAN mobile-accessories "
+                "brand in Bahrain. Write ONE short scroll-stopping Instagram/TikTok caption "
+                "(max 2 lines) with a strong hook and 1-2 emojis. Make people want to FOLLOW and "
+                "order. Do NOT include hashtags or a price. Reply with the caption text only."},
+            {"role": "user", "content": f"Product: {name}. Highlight the benefit, be punchy."},
+        ], tier=1, task="write", max_tokens=90) or "").strip().strip('"')
+    except Exception:  # noqa: BLE001
+        hook = ""
+    if not (10 < len(hook) < 260):
+        hook = f"Upgrade your everyday carry with the {name} ⚡"
+    price_line = f"💥 Trade price BHD {float(price):.3f}\n" if price is not None else ""
+    en = (f"{hook}\n{price_line}📲 Follow @yqbahrain for daily deals · DM/WhatsApp to order"
+          + (f"\n🛒 {link}" if link else "") + f"\n\n{_hashtags()}")
+    ar = (f"{name} — الأفضل من YQ البحرين ⚡\n"
+          + (f"💥 سعر الجملة {float(price):.3f} د.ب\n" if price is not None else "")
+          + "📲 تابعونا لأحدث العروض · راسلونا واتساب للطلب"
+          + (f"\n🛒 {link}" if link else ""))
+    return en, ar
 
 
 def content_engine(items_per_run: int = 4) -> dict:
-    """Agent content_engine — render fresh picture ads + one video from catalog photos,
-    caption them with the marketing agent's campaign copy, queue as social_posts drafts."""
-    from app.agents import marketing
+    """Agent content_engine — premium SCENE ads (real product composited into an AI studio
+    scene) + engaging captions + a cinematic Agnes video, queued as social_posts drafts."""
     from app.db_read import exec_sql
+    from app import agnes, scene
 
-    # items WITH photos, newest first, rotating past what was already rendered
     items = (get_client().table("catalog_items")
              .select("item_code,display_name,spec,category,product_image_url,updated_at")
              .eq("is_active", True).neq("product_image_url", "")
@@ -341,13 +393,9 @@ def content_engine(items_per_run: int = 4) -> dict:
              .execute().data or [])}
     prices = {r["item_code"]: r.get("standard_rate") for r in
               (exec_sql("SELECT item_code, standard_rate FROM v_catalog WHERE is_active") or [])}
+    link = _catalog_link()
 
-    camp = marketing()
-    campaigns = {c.get("campaign"): c for c in camp.get("campaigns", [])}
-    hero_cap = campaigns.get("Hero product push", {})
-    link = camp.get("catalog_link") or ""
-
-    made, skipped, cards_for_video = [], 0, []
+    made, skipped, scenes_made = [], 0, 0
     ts = datetime.now(timezone.utc).strftime("%Y%m%d")
     for it in items:
         if len(made) >= items_per_run:
@@ -358,101 +406,251 @@ def content_engine(items_per_run: int = 4) -> dict:
             skipped += 1
             continue
         item = {**it, "price_bhd": prices.get(code)}
-        png = make_ad_card(item, template)
-        if png is None:
+        # premium AI-scene ad; fall back to the studio gradient card if no clean cut-out
+        still, clean = scene.build_scene_ad(item, template, (1080, 1350))
+        used_scene = still is not None
+        if still is None:
+            still = make_ad_card(item, template)
+        if still is None:
             skipped += 1
             continue
-        url = _upload(png, f"ads/{ts}-{code}-{template}.png", "image/png")
+        url = _upload(still, f"ads/{ts}-{code}-{template}.png", "image/png")
         if not url:
             continue
-        cap_en = (f"{code} — {str(it.get('display_name') or it.get('spec') or '').strip()}. "
-                  f"{hero_cap.get('message_en') or 'In stock now at YQ Bahrain.'}\n"
-                  f"{('Catalog: ' + link) if link else ''}\n{_hashtags()}")
-        cap_ar = (f"{code} — {hero_cap.get('message_ar') or 'متوفر الآن لدى YQ البحرين.'}\n"
-                  f"{('الكتالوج: ' + link) if link else ''}")
+        clean_url = _upload(clean, f"scenes/{ts}-{code}.png", "image/png") if clean else None
+        if used_scene:
+            scenes_made += 1
+        cap_en, cap_ar = _engaging_caption(item)
         get_client().table("social_posts").insert({
             "campaign": "hero", "item_code": code, "kind": "image", "template": template,
-            "caption_en": cap_en, "caption_ar": cap_ar, "media_url": url,
-            "platforms": ["instagram", "facebook"], "meta": {"price_bhd": prices.get(code)},
+            "format": "feed", "lang": "en", "caption_en": cap_en, "caption_ar": cap_ar,
+            "media_url": url, "platforms": ["instagram", "facebook"],
+            "meta": {"price_bhd": prices.get(code), "scene": used_scene, "scene_url": clean_url},
         }).execute()
-        made.append({"item_code": code, "template": template, "kind": "image", "url": url,
-                     "photo_url": it.get("product_image_url")})
-        cards_for_video.append(png)
+        made.append({"item_code": code, "template": template, "url": url, "item": item,
+                     "photo_url": it.get("product_image_url"), "scene_url": clean_url})
 
-    # ── Video: Agnes AI (premium image-to-video) → FFmpeg ken-burns fallback ──
+    # ── Cinematic video: animate the in-scene composite (premium) via Agnes ──
     from app import agnes
-    video_made, video_note = None, ""
-    if made:
+    video_note = ""
+    if made and agnes.enabled():
         hero = made[0]
-        vcap_en = (f"This week at YQ Bahrain 📱 {hero['item_code']} and more — genuine VFAN "
-                   f"accessories at trade prices.\n" + (f"Catalog: {link}\n" if link else "")
-                   + _hashtags())
-        vcap_ar = f"جديد هذا الأسبوع لدى YQ البحرين — إكسسوارات VFAN بأسعار الجملة."
-        if agnes.enabled():
-            vprompt = (
-                "High-end commercial product advertisement for a premium mobile accessory. "
-                "Slow cinematic dolly and gentle orbit around the product, elegant studio "
-                "lighting with soft reflections and shallow depth of field, glossy reflective "
-                "surface, subtle floating motion, luxury tech aesthetic, photorealistic, "
-                "ultra sharp, 4k, smooth 24fps motion, professional colour grade")
-            # Animate the CLEAN product photo (image-to-video). The text-heavy branded card
-            # trips Agnes' content moderation and warps overlaid text — the caption carries
-            # the price/branding instead.
-            vsrc = hero.get("photo_url") or hero["url"]
-            vid = agnes.start_video(vprompt, image_url=vsrc, seconds=6, fps=24, portrait=True)
-            if vid:
-                get_client().table("social_posts").insert({
-                    "campaign": "hero", "item_code": hero["item_code"], "kind": "video",
-                    "template": "reel", "caption_en": vcap_en, "caption_ar": vcap_ar,
-                    "media_url": "", "status": "rendering",
-                    "platforms": ["instagram", "facebook", "tiktok"],
-                    "meta": {"agnes_video_id": vid, "source_url": hero["url"]},
-                }).execute()
-                video_note = " + 1 AI video rendering (Agnes, ~2 min)"
-        elif len(cards_for_video) >= 2 and ffmpeg_available():
-            names = ", ".join(m["item_code"] for m in made[:3])
-            mp4 = make_video(cards_for_video[:3],
-                             f"New at YQ Bahrain: {names} — genuine VFAN accessories at trade "
-                             f"prices. Message us on WhatsApp to order today.")
-            if mp4:
-                vurl = _upload(mp4, f"videos/{ts}-reel.mp4", "video/mp4")
-                if vurl:
-                    get_client().table("social_posts").insert({
-                        "campaign": "hero", "item_code": hero["item_code"], "kind": "video",
-                        "template": "reel", "caption_en": vcap_en, "caption_ar": vcap_ar,
-                        "media_url": vurl, "platforms": ["instagram", "facebook", "tiktok"],
-                    }).execute()
-                    video_made, video_note = vurl, " + 1 video reel"
+        vcap_en, vcap_ar = _engaging_caption(hero["item"], kind="video")
+        vprompt = (
+            "High-end commercial product advertisement, cinematic slow dolly and gentle orbit "
+            "around the product on its surface, elegant studio lighting, soft reflections, "
+            "shallow depth of field, luxury tech aesthetic, photorealistic, ultra sharp, smooth "
+            "24fps camera motion, professional colour grade")
+        vsrc = hero.get("scene_url") or hero.get("photo_url") or hero["url"]
+        vid = agnes.start_video(vprompt, image_url=vsrc, seconds=6, fps=24, portrait=True)
+        if vid:
+            price = hero["item"].get("price_bhd")
+            script = (f"Meet the {str(hero['item'].get('display_name') or hero['item_code']).split(' (')[0]} "
+                      f"from YQ Bahrain. Premium VFAN quality" +
+                      (f", trade price {price:.3f} dinars" if price else "") +
+                      ". Message us on WhatsApp to order today.")
+            get_client().table("social_posts").insert({
+                "campaign": "hero", "item_code": hero["item_code"], "kind": "video",
+                "template": "reel", "format": "reel", "lang": "en",
+                "caption_en": vcap_en, "caption_ar": vcap_ar, "media_url": "", "status": "rendering",
+                "platforms": ["instagram", "facebook", "tiktok"],
+                "meta": {"agnes_video_id": vid, "source_url": hero["url"],
+                         "reel_item": {"item_code": hero["item_code"],
+                                       "name": str(hero["item"].get("display_name") or hero["item_code"]),
+                                       "price_bhd": price, "catalog_link": link},
+                         "script_en": script},
+            }).execute()
+            video_note = " + 1 cinematic AI video rendering (~2 min)"
 
     total_active = (get_client().table("catalog_items").select("item_code", count="exact")
                     .eq("is_active", True).execute().count or 0)
     missing = max(0, total_active - len(items))
-    engine = ("Agnes AI" if agnes.enabled() else
-              ("FFmpeg" if ffmpeg_available() else "no video engine"))
     return {
-        "count": len(made) + (1 if (video_made or "rendering" in video_note) else 0),
-        "summary": (f"Rendered {len(made)} picture ads{video_note} → drafts in Marketing Studio "
-                    f"for approval (video engine: {engine}). "
+        "count": len(made) + (1 if video_note else 0),
+        "summary": (f"Rendered {len(made)} premium ads ({scenes_made} in AI studio scenes)"
+                    f"{video_note} → drafts in Marketing Studio for approval. "
                     f"{missing} active items still have no photo."),
-        "ads": made,
-        "video_url": video_made,
+        "ads": [{"item_code": m["item_code"], "url": m["url"]} for m in made],
         "items_missing_photos": missing,
     }
 
 
 MAX_POLL_ATTEMPTS = 40  # ~40 hourly/tab polls before we give up (Agnes usually done in ~90s)
+REEL = (1080, 1920)     # 9:16 (assembly runs async in content_poll, not a blocking request)
+
+
+def _reel_card(reel: dict, kind: str):
+    """Full-frame branded intro/outro card (PIL) for the reel."""
+    from PIL import Image, ImageDraw
+    W, H = REEL
+    canvas = _v_gradient(REEL, (26, 20, 48), (12, 8, 26))
+    d = ImageDraw.Draw(canvas)
+    ImageDraw.Draw(canvas).ellipse((W // 2 - 380, H // 2 - 500, W // 2 + 380, H // 2 - 60),
+                                   fill=(124, 58, 237, 30))
+    from PIL import ImageFilter
+    canvas = canvas.filter(ImageFilter.GaussianBlur(0))
+    d = ImageDraw.Draw(canvas)
+    if kind == "intro":
+        big = _font(120)
+        d.text(((W - d.textlength("YQ BAHRAIN", font=big)) / 2, H * 0.40), "YQ BAHRAIN",
+               font=big, fill=(255, 255, 255))
+        sub = "PREMIUM VFAN ACCESSORIES"
+        d.text(((W - d.textlength(sub, font=_font(46, bold=False))) / 2, H * 0.40 + 150), sub,
+               font=_font(46, bold=False), fill=(200, 190, 235))
+    else:  # outro
+        t1 = "Order on WhatsApp"
+        d.text(((W - d.textlength(t1, font=_font(84))) / 2, H * 0.36), t1, font=_font(84),
+               fill=(255, 255, 255))
+        wa = os.getenv("WA_HUMAN_NUMBER", "")
+        if wa:
+            t2 = f"+{wa}"
+            d.text(((W - d.textlength(t2, font=_font(72))) / 2, H * 0.36 + 120), t2,
+                   font=_font(72), fill=(37, 211, 102))
+        link = (reel or {}).get("catalog_link") or ""
+        if link:
+            d.text(((W - d.textlength(link, font=_font(38, bold=False))) / 2, H * 0.36 + 240),
+                   link, font=_font(38, bold=False), fill=(200, 190, 235))
+    b = io.BytesIO()
+    canvas.convert("RGB").save(b, "PNG")
+    return b.getvalue()
+
+
+def _reel_overlay(reel: dict, caption: str):
+    """Transparent WxH overlay: top caption band + bottom lower-third (item + price + CTA)."""
+    from PIL import Image, ImageDraw
+    W, H = REEL
+    ov = Image.new("RGBA", REEL, (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    # top scrim (brand legibility on light frames) + bottom scrim
+    tscrim = Image.new("RGBA", (W, 220), (0, 0, 0, 0))
+    for yy in range(220):
+        ImageDraw.Draw(tscrim).line((0, yy, W, yy), fill=(8, 5, 20, int(150 * (1 - yy / 220))))
+    ov.alpha_composite(tscrim, (0, 0))
+    scrim = Image.new("RGBA", (W, 560), (0, 0, 0, 0))
+    for yy in range(560):
+        ImageDraw.Draw(scrim).line((0, yy, W, yy), fill=(8, 5, 20, int(205 * (yy / 560))))
+    ov.alpha_composite(scrim, (0, H - 560))
+    d = ImageDraw.Draw(ov)
+    # brand chip top-left
+    d.text((54, 60), "YQ BAHRAIN", font=_font(52), fill=(255, 255, 255))
+    # caption (hook) near the bottom, wrapped (emojis stripped — they'd render as boxes)
+    cap_font = _font(52)
+    lines = _wrap(d, _no_emoji(caption), cap_font, W - 108, 2)
+    cy = H - 470
+    for ln in lines:
+        d.text((54, cy), ln, font=cap_font, fill=(255, 255, 255))
+        cy += 66
+    # item + price + CTA
+    name = _no_emoji(str(reel.get("name") or reel.get("item_code") or "").split(" (")[0])
+    d.text((54, H - 300), name, font=_font(48), fill=(230, 224, 245))
+    price = reel.get("price_bhd")
+    if price is not None:
+        label = f"BHD {float(price):.3f}"
+        ch = 96
+        cw = int(d.textlength(label, font=_font(60)) + 72)
+        chip = _v_gradient((cw, ch), (124, 58, 237), (76, 29, 149))
+        mask = Image.new("L", (cw, ch), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, cw - 1, ch - 1), radius=ch // 2, fill=255)
+        ov.paste(chip, (54, H - 220), mask)
+        ImageDraw.Draw(ov).text((54 + 36, H - 220 + 16), label, font=_font(60),
+                                fill=(255, 255, 255))
+    wa = os.getenv("WA_HUMAN_NUMBER", "")
+    cta = f"Order on WhatsApp{(' +' + wa) if wa else ''}"
+    d2 = ImageDraw.Draw(ov)
+    d2.text((54, H - 108), cta, font=_font(40), fill=(255, 255, 255))
+    b = io.BytesIO()
+    ov.save(b, "PNG")
+    return b.getvalue()
+
+
+def _music_track() -> str | None:
+    """First bundled CC0 track under assets/music/, if any (owner-droppable)."""
+    import glob
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "music")
+    tracks = sorted(glob.glob(os.path.join(root, "*.mp3")))
+    return tracks[0] if tracks else None
+
+
+def assemble_reel(motion_mp4: bytes, reel: dict, script: str) -> bytes | None:
+    """Finish the Agnes motion clip into a branded ad: intro card → motion (with lower-third +
+    caption overlay) → outro card, EN voiceover ducked over optional music. Best-effort: any
+    failure returns None so the caller keeps the plain motion clip."""
+    if not ffmpeg_available() or not motion_mp4:
+        return None
+    W, H = REEL
+    P = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "24", "-preset", "veryfast", "-crf", "23"]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            def w(name, data):
+                p = os.path.join(td, name); open(p, "wb").write(data); return p
+            main = w("main.mp4", motion_mp4)
+            intro = w("intro.png", _reel_card(reel, "intro"))
+            outro = w("outro.png", _reel_card(reel, "outro"))
+            overlay = w("ov.png", _reel_overlay(reel, (reel.get("caption") or "").strip()))
+            introv, outrov, main2, full = (os.path.join(td, n) for n in
+                                           ("intro.mp4", "outro.mp4", "main2.mp4", "full.mp4"))
+
+            def run(cmd):
+                r = subprocess.run(cmd, capture_output=True, timeout=240)
+                if r.returncode != 0:
+                    raise RuntimeError(r.stderr.decode(errors="ignore")[-300:])
+
+            run(["ffmpeg", "-y", "-loop", "1", "-t", "0.7", "-i", intro,
+                 "-vf", f"scale={W}:{H}", *P, "-an", introv])
+            run(["ffmpeg", "-y", "-loop", "1", "-t", "1.6", "-i", outro,
+                 "-vf", f"scale={W}:{H}", *P, "-an", outrov])
+            run(["ffmpeg", "-y", "-i", main, "-i", overlay, "-filter_complex",
+                 f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[bg];"
+                 f"[bg][1:v]overlay=0:0[v]", "-map", "[v]", *P, "-an", main2])
+            # concat (same params → concat demuxer works)
+            lst = w("list.txt", ("file '%s'\nfile '%s'\nfile '%s'\n" % (introv, main2, outrov)).encode())
+            run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", full])
+
+            # audio: EN voiceover (delayed past the intro) + optional ducked music
+            vo = os.path.join(td, "vo.mp3")
+            has_vo = bool(script) and _tts(script, vo)
+            music = _music_track()
+            out = os.path.join(td, "final.mp4")
+            if has_vo or music:
+                cmd = ["ffmpeg", "-y", "-i", full]
+                fc, amaps, idx = [], [], 1
+                if has_vo:
+                    cmd += ["-i", vo]
+                    fc.append(f"[{idx}:a]adelay=700|700,volume=1.6[vo]"); amaps.append("[vo]"); idx += 1
+                if music:
+                    cmd += ["-stream_loop", "-1", "-i", music]
+                    fc.append(f"[{idx}:a]volume=0.10[mus]"); amaps.append("[mus]"); idx += 1
+                fc.append(f"{''.join(amaps)}amix=inputs={len(amaps)}:duration=first:dropout_transition=0[a]")
+                cmd += ["-filter_complex", ";".join(fc), "-map", "0:v", "-map", "[a]",
+                        "-c:v", "copy", "-c:a", "aac", "-shortest", "-movflags", "+faststart", out]
+                run(cmd)
+            else:
+                run(["ffmpeg", "-y", "-i", full, "-c", "copy", "-movflags", "+faststart", out])
+            with open(out, "rb") as f:
+                return f.read()
+    except Exception as e:  # noqa: BLE001
+        log.warning("assemble_reel failed (keeping plain clip): %s", str(e)[:220])
+        return None
 
 
 def _finalize_video(row: dict, url: str) -> None:
-    """Copy a completed Agnes MP4 into our public bucket and flip the row to a draft."""
+    """Copy the completed Agnes MP4 into our bucket, ASSEMBLE the branded reel (intro/overlay/
+    outro/voiceover/music) if possible, and flip the row to a draft."""
     final_url = url
     try:
         import re
         import requests
         data = requests.get(url, timeout=120).content
+        meta = row.get("meta") or {}
+        reel = dict(meta.get("reel_item") or {})
+        reel["caption"] = (row.get("caption_en") or "").split("\n")[0]
+        assembled = assemble_reel(data, reel, meta.get("script_en") or "")
+        if assembled:
+            data = assembled
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(row.get("item_code") or "item"))
-        up = _upload(data, f"videos/agnes-{safe}-{stamp}.mp4", "video/mp4")
+        tag = "reel" if assembled else "agnes"
+        up = _upload(data, f"videos/{tag}-{safe}-{stamp}.mp4", "video/mp4")
         if up:
             final_url = up
     except Exception as e:  # noqa: BLE001

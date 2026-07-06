@@ -9,11 +9,12 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # System deps: pdfplumber (pdfminer) + the content engine (ffmpeg renders the
-# 9:16 marketing videos; DejaVu fonts for the Pillow ad cards).
+# marketing reels; DejaVu + Noto (incl. Arabic) fonts for the Pillow ad cards/captions).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ffmpeg \
         fonts-dejavu-core \
+        fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
