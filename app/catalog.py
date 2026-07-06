@@ -4,7 +4,8 @@ Items live in catalog_items (photos in the PUBLIC 'catalog' storage bucket, pric
 per the owner's sheet: Dealer / Causeway&RoadShow / RRP). The standard selling rate is
 read live from the price book via v_catalog, so price-book uploads update the catalog
 without any sync job. Salesmen get the Catalog feature only; customers get a tokenized
-public link that exposes ONLY item + photo + RRP (never dealer pricing).
+public link that shows item + photo + the trade (B2B book) price — owner's decision:
+whoever holds the link is a trade customer (never dealer/roadshow tiers).
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ _BUCKET = "catalog"
 CATEGORY_ORDER = ["CABLE", "CHARGER", "EARPHONE", "BLUETOOTH HEADSET", "FOR CAR",
                   "POWER BANK", "BLUETOOTH SPEAKER"]
 
-PUBLIC_FIELDS = ("item_code", "display_name", "spec", "category", "brand", "rrp",
+PUBLIC_FIELDS = ("item_code", "display_name", "spec", "category", "brand", "price_bhd",
                  "product_image_url", "package_image_url")
 
 
@@ -139,7 +140,7 @@ def delete_item(code: str) -> dict:
     return {"ok": True}
 
 
-# ── public share link (customers see item + photo + RRP only) ─────────────────
+# ── public share link (customers see item + photo + trade/B2B price) ──────────
 
 def share_token(create: bool = True) -> str | None:
     """Stable random token in app_settings; the public catalog URL embeds it."""
@@ -171,19 +172,26 @@ def rotate_share_token() -> str:
 
 
 def public_catalog(token: str) -> dict | None:
-    """RRP-only view for customers. None = bad token."""
+    """Trade (B2B book-rate) view for customers with the share link — every active item,
+    priced from the live MA_base price book, so a price-book upload updates every shared
+    link instantly. None = bad token."""
     good = share_token(create=False)
     if not good or not secrets.compare_digest(token, good):
         return None
     rows = exec_sql(
-        "SELECT item_code, display_name, spec, category, brand, rrp, "
+        "SELECT item_code, display_name, spec, category, brand, "
+        "standard_rate AS price_bhd, "
         "product_image_url, package_image_url FROM v_catalog "
-        "WHERE is_active AND rrp IS NOT NULL "
+        "WHERE is_active "
         "ORDER BY category, sort_order NULLS LAST, item_code"
     ) or []
     cats = sorted({r.get("category") or "OTHER" for r in rows},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
-    return {"items": rows, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain"}
+    upd = (exec_sql(
+        "SELECT MAX(start_date)::text AS d FROM selling_prices "
+        "WHERE price_book = 'MA_base' AND start_date <= CURRENT_DATE") or [{}])[0].get("d")
+    return {"items": rows, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain",
+            "prices_updated": upd}
 
 
 # ── branded exports (.xlsx + .pdf) — thumbnails make these fast ────────────────

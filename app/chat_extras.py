@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # ── product photo cards ────────────────────────────────────────────────────────
 
 _PHOTO_INTENT = re.compile(r"\b(photo|picture|image|pic|pics|show (me )?(the )?)\b|صور[ةه]?", re.I)
-_CODE_TOKEN = re.compile(r"\b[A-Za-z]{1,3}-?\d+[A-Za-z0-9-]*\b")
+_CODE_TOKEN = re.compile(r"\b[A-Za-z]{1,3}-?[A-Za-z]?\d+[A-Za-z0-9-]*\b")  # X01, K105, TB-D3, GN-08C
 
 
 def _item_card(it: dict) -> dict:
@@ -50,7 +50,9 @@ def _marker(cards: list[dict]) -> str:
 
 
 def photo_answer(question: str) -> str | None:
-    """Deterministic 'send me the picture of X' reply (text + photo card), or None."""
+    """Deterministic 'send me the picture of X' reply (text + photo card), or None.
+    Items that exist but have no photo yet get a card + 'photo coming soon' note
+    (instead of silence) so the owner knows to upload one."""
     if not _PHOTO_INTENT.search(question):
         return None
     tokens = [t.upper() for t in _CODE_TOKEN.findall(question)][:4]
@@ -59,10 +61,10 @@ def photo_answer(question: str) -> str | None:
         rows = exec_sql_params(
             "SELECT item_code, display_name, spec, rrp, standard_rate, "
             "product_image_url, package_image_url FROM v_catalog "
-            "WHERE is_active AND product_image_url IS NOT NULL AND ("
+            "WHERE is_active AND ("
             "  item_code = ANY(SELECT jsonb_array_elements_text($1::jsonb))"
             "  OR item_code ILIKE (SELECT jsonb_array_elements_text($1::jsonb) LIMIT 1) || ' %'"
-            ") LIMIT 3", [json.dumps(tokens)]) or []
+            ") ORDER BY (product_image_url IS NULL), item_code LIMIT 3", [json.dumps(tokens)]) or []
     if not rows:
         # fall back to a name search over the remaining words ("power bank", "airpord")
         words = re.sub(r"[^a-z0-9 ]", " ", question.lower())
@@ -80,9 +82,20 @@ def photo_answer(question: str) -> str | None:
     if not rows:
         return None
     cards = [_item_card(r) for r in rows]
-    names = ", ".join(f"**{r['item_code']}**" for r in rows)
-    text = (f"Here {'it is' if len(rows) == 1 else 'they are'} — {names}. "
-            "Tap the card to view; use Catalog → Share to send it to a customer with prices.")
+    with_photo = [r for r in rows if r.get("product_image_url")]
+    missing = [r for r in rows if not r.get("product_image_url")]
+    if with_photo:
+        names = ", ".join(f"**{r['item_code']}**" for r in with_photo)
+        text = (f"Here {'it is' if len(with_photo) == 1 else 'they are'} — {names}. "
+                "Tap the card to view; use Catalog → Share to send it to a customer with prices.")
+        if missing:
+            text += " (" + ", ".join(f"**{r['item_code']}**" for r in missing) + \
+                    " has no photo yet — add one in Catalog → Edit.)"
+    else:
+        names = ", ".join(f"**{r['item_code']}**" for r in missing)
+        text = (f"{names} {'is' if len(missing) == 1 else 'are'} in the catalog but "
+                "no photo has been uploaded yet — add one in Catalog → Edit item → Product photo, "
+                "and it will show here, on the shared link, and in exports.")
     return _marker(cards) + "\n" + text
 
 

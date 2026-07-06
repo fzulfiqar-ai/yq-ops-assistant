@@ -5,7 +5,8 @@ import { API_BASE } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Logo } from '@/components/Logo'
 
-/** Customer-facing catalog (no login): items, photos and RRP only.
+/** Customer-facing catalog (no login): every active item, photos and the trade
+ *  (B2B book) price — always current, because the backend reads the live price book.
  *  Reached via the tokenized share link salesmen send on WhatsApp. */
 
 interface PubItem {
@@ -14,11 +15,18 @@ interface PubItem {
   spec?: string
   category?: string
   brand?: string
-  rrp?: number | null
+  price_bhd?: number | null
   product_image_url?: string | null
   package_image_url?: string | null
 }
-interface PubData { items: PubItem[]; categories: string[]; company: string }
+interface PubData { items: PubItem[]; categories: string[]; company: string; prices_updated?: string | null }
+
+function fmtUpdated(d?: string | null) {
+  if (!d) return null
+  try {
+    return new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  } catch { return null }
+}
 
 export default function PublicCatalog() {
   const { token } = useParams()
@@ -62,8 +70,15 @@ export default function PublicCatalog() {
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
           <Logo className="h-10 w-10 rounded-xl" />
           <div>
-            <div className="font-display text-base font-bold leading-tight text-[#1a1430]">YQ Bahrain — VFAN Catalog</div>
-            <div className="text-[11px] text-[#6b6480]">Mobile accessories · recommended retail prices</div>
+            <div className="font-display text-base font-bold leading-tight text-[#1a1430]">YQ Bahrain — Catalog</div>
+            <div className="text-[11px] text-[#6b6480]">
+              Mobile accessories · trade price list
+              {fmtUpdated(data?.prices_updated) && (
+                <span className="ml-1.5 rounded-full bg-[#f1ecfb] px-2 py-0.5 font-medium text-[#6d28d9]">
+                  Prices updated {fmtUpdated(data?.prices_updated)}
+                </span>
+              )}
+            </div>
           </div>
           <div className="ml-auto hidden items-center gap-2 rounded-lg border bg-white px-3 sm:flex">
             <Search size={14} className="text-[#6b6480]" />
@@ -97,7 +112,12 @@ export default function PublicCatalog() {
                   {it.product_image_url ? (
                     <img src={it.product_image_url} alt={it.item_code} loading="lazy" className="h-full w-full object-contain p-3" />
                   ) : (
-                    <div className="grid h-full w-full place-items-center text-gray-300"><Package size={40} strokeWidth={1} /></div>
+                    <div className="grid h-full w-full place-items-center text-gray-300">
+                      <div className="text-center">
+                        <Package size={40} strokeWidth={1} className="mx-auto" />
+                        <div className="mt-1.5 text-[10px] font-medium uppercase tracking-wide text-gray-400">Photo coming soon</div>
+                      </div>
+                    </div>
                   )}
                 </div>
                 <div className="border-t p-3">
@@ -106,9 +126,9 @@ export default function PublicCatalog() {
                     <span className="text-[10px] uppercase text-[#6b6480]">{it.brand || 'VFAN'}</span>
                   </div>
                   {it.spec && <div className="mt-0.5 line-clamp-2 whitespace-pre-line text-[12px] text-[#6b6480]">{it.spec}</div>}
-                  {it.rrp != null && (
+                  {it.price_bhd != null && (
                     <div className="mt-2 border-t pt-2 text-right font-display text-base font-extrabold text-[#6d28d9]">
-                      BHD {Number(it.rrp).toFixed(2)}
+                      BHD {Number(it.price_bhd).toFixed(3)}
                     </div>
                   )}
                 </div>
@@ -117,7 +137,7 @@ export default function PublicCatalog() {
           </div>
         )}
         <footer className="py-8 text-center text-[11px] text-[#6b6480]">
-          YQ Bahrain W.L.L · Prices are recommended retail and may change without notice.
+          YQ Bahrain W.L.L · Trade prices — may change without notice.
         </footer>
       </main>
     </div>

@@ -1,6 +1,7 @@
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Area, AreaChart, Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, AreaChart, Bar, BarChart, Cell, ComposedChart, Line, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { motion } from 'motion/react'
 import {
   DollarSign, FileText, Boxes, Landmark, TrendingUp, TrendingDown, Crown, TriangleAlert,
@@ -172,10 +173,25 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
 
 export default function Dashboard() {
   const { me } = useAuth()
+  const [dailyMode, setDailyMode] = useState<'daily' | 'cumulative'>('daily')
   const { data, isLoading } = useQuery({
     queryKey: ['report', 'dashboard'],
     queryFn: () => apiGet<DashboardData>('/report/dashboard'),
   })
+
+  // daily target = monthly target ÷ all days in the month (owner's rule)
+  const daysInMonth = useMemo(() => {
+    const d = data?.data_as_of ? new Date(data.data_as_of) : new Date()
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+  }, [data?.data_as_of])
+  const dailyTarget = (data?.pace?.target_bhd ?? 0) > 0 ? data!.pace!.target_bhd / daysInMonth : null
+  const cumSeries = useMemo(() => {
+    let run = 0
+    return (data?.daily_mtd || []).map((r, i) => {
+      run += Number(r.gross_bhd || 0)
+      return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * (i + 1)) : null }
+    })
+  }, [data?.daily_mtd, dailyTarget])
 
   const k = data?.kpis
   const deltaPct = k && k.rev_prev_month > 0 ? ((k.rev_mtd - k.rev_prev_month) / k.rev_prev_month) * 100 : 0
@@ -266,8 +282,8 @@ export default function Dashboard() {
               <div className="font-display text-base font-semibold">This month, day by day</div>
               <div className="text-xs text-muted-foreground">Gross sales per day (VAT-incl) · {monthLabel(data.data_as_of || '')}</div>
             </div>
-            {data.pace && (
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              {data.pace && (<>
                 <span className="text-muted-foreground">MTD <b className="text-foreground tabular-nums">{bhd(data.pace.mtd_bhd, 0)}</b></span>
                 {data.pace.projected_bhd != null && (
                   <span className="text-muted-foreground">Projected <b className="text-foreground tabular-nums">{bhd(data.pace.projected_bhd, 0)}</b></span>
@@ -281,22 +297,65 @@ export default function Dashboard() {
                 ) : (
                   <span className="text-xs text-muted-foreground">Set a monthly target in Settings →</span>
                 )}
+              </>)}
+              <div className="flex overflow-hidden rounded-lg border text-[12px] font-semibold">
+                {(['daily', 'cumulative'] as const).map((m) => (
+                  <button key={m} onClick={() => setDailyMode(m)}
+                    className={cn('px-2.5 py-1 capitalize transition',
+                      dailyMode === m ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-accent/50')}>
+                    {m}
+                  </button>
+                ))}
               </div>
-            )}
+            </div>
           </div>
-          <ResponsiveContainer width="100%" height={190}>
-            <BarChart data={data.daily_mtd} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
-              <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
-                tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
-                width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
-              <Tooltip
-                formatter={(v, name) => (name === 'gross_bhd' ? [bhd(Number(v)), 'Gross'] : [String(v), String(name)])}
-                labelFormatter={(d) => fmtDate(String(d))}
-                contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-              <Bar dataKey="gross_bhd" fill="#7c3aed" radius={[4, 4, 0, 0]} maxBarSize={26} />
-            </BarChart>
-          </ResponsiveContainer>
+          {dailyMode === 'daily' ? (
+            <ResponsiveContainer width="100%" height={190}>
+              <BarChart data={data.daily_mtd} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
+                <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
+                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
+                  width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+                <Tooltip
+                  formatter={(v, name) => (name === 'gross_bhd' ? [bhd(Number(v)), 'Gross'] : [String(v), String(name)])}
+                  labelFormatter={(d) => fmtDate(String(d))}
+                  contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+                {dailyTarget && (
+                  <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4"
+                    label={{ value: `daily target ${bhd(dailyTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+                )}
+                <Bar dataKey="gross_bhd" radius={[4, 4, 0, 0]} maxBarSize={26}>
+                  {data.daily_mtd.map((r, i) => (
+                    <Cell key={i} fill={dailyTarget && Number(r.gross_bhd) >= dailyTarget ? '#059669' : '#7c3aed'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <ResponsiveContainer width="100%" height={190}>
+              <ComposedChart data={cumSeries} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="cumFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#7c3aed" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="#7c3aed" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
+                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
+                  width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+                <Tooltip
+                  formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? 'MTD actual' : 'Target to date']}
+                  labelFormatter={(d) => fmtDate(String(d))}
+                  contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+                <Area type="monotone" dataKey="cum_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#cumFill)" />
+                {dailyTarget && (
+                  <Line type="monotone" dataKey="cum_target" stroke="#d97706" strokeWidth={2}
+                    strokeDasharray="6 4" dot={false} />
+                )}
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
           {(data.by_payment?.length || data.by_division?.length) && (
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3 text-[13px]">
               {(data.by_payment || []).map((p) => (

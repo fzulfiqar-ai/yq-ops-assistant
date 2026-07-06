@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'motion/react'
-import { ArrowRight, Truck, AlertTriangle, PackageCheck, Warehouse } from 'lucide-react'
+import { ArrowRight, Truck, AlertTriangle, BarChart3, ChevronLeft, ChevronRight, PackageCheck, Warehouse } from 'lucide-react'
+import { Bar, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { bhd, num } from '@/lib/format'
+import { bhd, num, fmtDate } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -30,6 +31,134 @@ interface Van {
   shortage_qty: number
   shortage_value_bhd: number
   unexplained_qty: number
+}
+
+interface DailyDay {
+  day: string; in_qty: number; out_qty: number; net_qty: number
+  receipts_qty: number; transfer_out_qty: number; transfer_in_qty: number
+  sales_qty: number; returns_qty: number; adjustment_qty: number
+  vouchers: number; item_lines: number; has_data: boolean
+}
+interface DailyData {
+  month: string | null; months: string[]; warehouses: string[]
+  days: DailyDay[]; gap_days: number; last_data_day: string | null
+  snapshot_deltas: { day: string; delta_qty: number }[]
+}
+
+function monthTitle(m: string) {
+  const [y, mm] = m.split('-')
+  return new Date(Number(y), Number(mm) - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })
+}
+
+/** Daily movement dashboard — the storekeeper's month at a glance. */
+function DailyMovement() {
+  const [month, setMonth] = useState<string>('')     // '' = latest data month (backend default)
+  const [wh, setWh] = useState<string>('')
+  const { data, isLoading } = useQuery({
+    queryKey: ['stock-daily', month, wh],
+    queryFn: () => apiGet<DailyData>(
+      `/stock/daily?month=${encodeURIComponent(month)}&warehouse=${encodeURIComponent(wh)}`),
+  })
+
+  const days = useMemo(() => {
+    const deltas = new Map((data?.snapshot_deltas || []).map((d) => [d.day, Number(d.delta_qty)]))
+    return (data?.days || []).map((d) => ({ ...d, snapshot_delta: deltas.get(d.day) ?? null }))
+  }, [data])
+  const totals = useMemo(() => ({
+    in_qty: days.reduce((s, d) => s + Number(d.in_qty), 0),
+    out_qty: days.reduce((s, d) => s + Number(d.out_qty), 0),
+    busiest: days.reduce<DailyDay | null>((best, d) =>
+      (Number(d.in_qty) + Number(d.out_qty)) > (best ? Number(best.in_qty) + Number(best.out_qty) : 0) ? d : best, null),
+  }), [days])
+
+  if (!isLoading && (!data?.months?.length)) return null
+  const cur = data?.month || ''
+  const idx = data ? data.months.indexOf(cur) : -1
+  const prevM = idx >= 0 && idx < (data?.months.length ?? 0) - 1 ? data!.months[idx + 1] : null
+  const nextM = idx > 0 ? data!.months[idx - 1] : null
+  const whs = data?.warehouses || []
+
+  return (
+    <Card className="mb-6 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-display text-base font-semibold">
+          <BarChart3 size={17} className="text-primary" /> Daily movement
+          <span className="text-[12px] font-normal text-muted-foreground">· units in / out per day{wh ? ` · ${wh}` : ''}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => prevM && setMonth(prevM)} disabled={!prevM}
+            className="grid h-7 w-7 place-items-center rounded-lg border transition enabled:hover:bg-accent/50 disabled:opacity-30">
+            <ChevronLeft size={15} />
+          </button>
+          <span className="min-w-[120px] text-center text-sm font-semibold">{cur ? monthTitle(cur) : '—'}</span>
+          <button onClick={() => nextM && setMonth(nextM)} disabled={!nextM}
+            className="grid h-7 w-7 place-items-center rounded-lg border transition enabled:hover:bg-accent/50 disabled:opacity-30">
+            <ChevronRight size={15} />
+          </button>
+        </div>
+      </div>
+      {whs.length > 1 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {['', ...whs.slice(0, 8)].map((w) => (
+            <button key={w || 'all'} onClick={() => setWh(w)}
+              className={cn('rounded-full border px-3 py-1 text-[12px] font-medium transition',
+                wh === w ? 'border-primary bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-accent/50')}>
+              {w || 'All warehouses'}
+            </button>
+          ))}
+        </div>
+      )}
+      {isLoading ? (
+        <Skeleton className="mt-4 h-[220px]" />
+      ) : (
+        <>
+          <ResponsiveContainer width="100%" height={210}>
+            <ComposedChart data={days} margin={{ top: 12, right: 8, left: 8, bottom: 0 }}>
+              <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
+                tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
+                width={44} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+              <Tooltip
+                labelFormatter={(d) => fmtDate(String(d))}
+                formatter={(v, name) => {
+                  const labels: Record<string, string> = {
+                    in_qty: 'In (received)', out_qty: 'Out (issued/sold)', snapshot_delta: 'Snapshot Δ (check)',
+                  }
+                  return [num(Number(v)), labels[String(name)] || String(name)]
+                }}
+                contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+              <Bar dataKey="in_qty" fill="#059669" radius={[3, 3, 0, 0]} maxBarSize={14} />
+              <Bar dataKey="out_qty" fill="#7c3aed" radius={[3, 3, 0, 0]} maxBarSize={14} />
+              {days.some((d) => d.snapshot_delta != null) && (
+                <Line type="monotone" dataKey="snapshot_delta" stroke="#d97706" strokeWidth={1.5}
+                  strokeDasharray="5 4" dot={{ r: 2 }} connectNulls />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+          <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-3 text-sm">
+            <span className="flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-sm bg-emerald-600" />
+              In <b className="tabular-nums">{num(totals.in_qty)}</b>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-sm bg-violet-600" />
+              Out <b className="tabular-nums">{num(totals.out_qty)}</b>
+            </span>
+            <span className="text-muted-foreground">Net <b className={cn('tabular-nums', totals.in_qty - totals.out_qty >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+              {num(totals.in_qty - totals.out_qty)}</b></span>
+            {totals.busiest && (
+              <span className="text-muted-foreground">Busiest day <b className="text-foreground">{fmtDate(totals.busiest.day)}</b> ({num(Number(totals.busiest.in_qty) + Number(totals.busiest.out_qty))} units)</span>
+            )}
+            {(data?.gap_days ?? 0) > 0 && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-0.5 text-[12px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+                <AlertTriangle size={12} /> {data!.gap_days} day(s) with no ledger rows — likely a missing Stock_ledger upload, not zero movement
+              </span>
+            )}
+          </div>
+        </>
+      )}
+    </Card>
+  )
 }
 
 const COLS: Column<Transfer>[] = [
@@ -98,7 +227,10 @@ export default function StockMovement() {
 
   return (
     <div>
-      <PageHeader title="Stock Movement" subtitle="Warehouse → van transfers, and whether each route's stock adds up" />
+      <PageHeader title="Stock Movement" subtitle="Daily movement, warehouse → van transfers, and whether each route's stock adds up" />
+
+      {/* Daily movement dashboard (storekeeper performance, month by month) */}
+      <DailyMovement />
 
       {/* Van reconciliation */}
       <div className="mb-2 flex items-center gap-2">

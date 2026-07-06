@@ -211,6 +211,11 @@ SUBSCRIPTIONS: dict[str, list] = {
     "procurement.stage": [], # feed-only (procurement_status owns SLA nudges)
     "action.decided": [_react_notify_warn],
     "platform.alert": [_react_notify_warn],
+    # portal uploads (Orders page) — every upload lands in the feed; MRN costs
+    # additionally re-check margins so a cost jump drafts actions immediately
+    "po.uploaded": [],       # feed-only
+    "invoice.uploaded": [],  # feed-only
+    "mrn.uploaded": [_react_margin_negative],
 }
 
 

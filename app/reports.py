@@ -430,6 +430,19 @@ def sales() -> dict:
             "FROM v_top_customers WHERE customer_name NOT ILIKE 'cash customer%' "
             "ORDER BY gross_bhd DESC NULLS LAST LIMIT 50"
         ),
+        # per-day per-salesman gross this month + monthly targets — the Sales page
+        # derives each salesman's daily target as target_bhd / days-in-month
+        "daily_by_salesman": exec_sql(
+            "WITH d AS (SELECT MAX(sale_date) AS mx FROM v_sales) "
+            "SELECT sale_date::text AS day, salesman_resolved AS salesman, "
+            "ROUND(SUM(revenue_bhd)::numeric, 2) AS gross_bhd "
+            "FROM v_sales, d WHERE sale_date >= date_trunc('month', d.mx)::date "
+            "AND NOT is_giveaway GROUP BY 1, 2 ORDER BY 1"
+        ) or [],
+        "targets": exec_sql(
+            "SELECT salesman, target_bhd FROM salesman_targets WHERE target_bhd > 0 "
+            "ORDER BY target_bhd DESC"
+        ) or [],
     }
 
 

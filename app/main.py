@@ -442,9 +442,20 @@ async def po_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(r
         store_order_file(rows[0]["po_no"], "po", data, ".pdf", "application/pdf", admin.email)
     except Exception:  # noqa: BLE001
         pass
+    value_bhd = round(sum((r.get("gross_bhd") or 0) for r in rows), 3)
+    try:  # PO rates feed v_price_tracker / v_purchase_price_events → flush cached answers
+        from app.ai import flush_cache
+        flush_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    from app import events
+    events.emit("upload", "po.uploaded", entity_type="po", entity_key=rows[0]["po_no"],
+                payload={"vendor": rows[0]["vendor"], "lines": len(rows), "value_bhd": value_bhd,
+                         "summary": f"PO {rows[0]['po_no']} uploaded ({len(rows)} lines, BHD {value_bhd})"},
+                dedupe=False)
     log_event(admin.email, "po_upload", detail={"po_no": rows[0]["po_no"], "lines": len(rows)})
     return {"po_no": rows[0]["po_no"], "po_date": rows[0]["po_date"], "vendor": rows[0]["vendor"],
-            "lines": len(rows), "value_bhd": round(sum((r.get("gross_bhd") or 0) for r in rows), 3)}
+            "lines": len(rows), "value_bhd": value_bhd}
 
 
 @app.post("/material-receipts/upload")
@@ -479,6 +490,13 @@ async def mrn_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(
         flush_cache()
     except Exception:  # noqa: BLE001
         pass
+    from app import events
+    docs = summary.get("docs") or []
+    events.emit("upload", "mrn.uploaded", entity_type="mrn",
+                entity_key=str(docs[0]) if docs else None,
+                payload={"docs": docs, "skus": summary.get("skus"),
+                         "summary": f"MRN {', '.join(map(str, docs))} received — landed costs updated"},
+                dedupe=False)
     log_event(admin.email, "mrn_upload", detail={"docs": summary["docs"], "skus": summary["skus"]})
     return summary
 
@@ -550,6 +568,10 @@ async def order_file(po_no: str, file: UploadFile = File(...),
                 processed = "landed cost loaded"
                 from app.ai import flush_cache
                 flush_cache()
+                from app import events
+                events.emit("upload", "mrn.uploaded", entity_type="po", entity_key=po_no,
+                            payload={"summary": f"MRN attached to {po_no} — landed costs updated"},
+                            dedupe=False)
         except Exception:  # noqa: BLE001
             pass
     elif kind == "invoice":
@@ -559,6 +581,12 @@ async def order_file(po_no: str, file: UploadFile = File(...),
             if rows:
                 load_supplier_prices(rows)
                 processed = "supplier prices loaded"
+                from app.ai import flush_cache
+                flush_cache()
+                from app import events
+                events.emit("upload", "invoice.uploaded", entity_type="po", entity_key=po_no,
+                            payload={"summary": f"Supplier invoice attached to {po_no} — RMB prices updated"},
+                            dedupe=False)
         except Exception:  # noqa: BLE001
             pass
 
@@ -622,6 +650,16 @@ async def invoice_upload(file: UploadFile = File(...), admin: CurrentUser = Depe
     if not rows:
         return {"error": "No price lines found — is this a VFAN proforma invoice?"}
     r = load_supplier_prices(rows)
+    try:  # supplier RMB estimates feed v_price_tracker → flush cached answers
+        from app.ai import flush_cache
+        flush_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    from app import events
+    events.emit("upload", "invoice.uploaded", entity_type="invoice", entity_key=str(r.get("invoice") or ""),
+                payload={"invoice": r.get("invoice"), "models": r.get("models"),
+                         "summary": f"Supplier invoice {r.get('invoice')} loaded ({r.get('models')} models)"},
+                dedupe=False)
     log_event(admin.email, "invoice_upload", detail={"invoice": r.get("invoice"), "models": r.get("models")})
     return r
 
@@ -941,6 +979,35 @@ def prices_tracker(division: str | None = None, brand: str | None = None,
             "categories": sorted({f.get("category") for f in filt if f.get("category")})}
 
 
+@app.get("/prices/history")
+def prices_history(sku: str,
+                   _user: CurrentUser = Depends(require_feature("Margins"))) -> dict:
+    """Full purchase-price timeline for one SKU — every PO, goods receipt, and supplier
+    proforma price, newest first (v_purchase_price_events), plus the dated selling-price
+    history. RMB supplier prices carry a BHD estimate via the Settings costing chain."""
+    from app.db_read import exec_sql_params
+    from app.settings import setting
+    events = exec_sql_params(
+        "SELECT sku_code, source, event_date::text AS event_date, vendor, ref_no, qty, "
+        "unit_cost_bhd, unit_price_rmb, detail FROM v_purchase_price_events "
+        "WHERE sku_code = $1 OR sku_code = split_part($1, ' ', 1) "
+        "ORDER BY event_date DESC NULLS LAST, source LIMIT 200", [sku]) or []
+    try:
+        factor = (float(setting("fx_usd_bhd") or 0.37744) / float(setting("fx_rmb_usd") or 6.8)
+                  * (1 + float(setting("landing_vat_pct") or 0.30)))
+    except Exception:  # noqa: BLE001
+        factor = 0.37744 / 6.8 * 1.30
+    for e in events:
+        rmb = e.get("unit_price_rmb")
+        e["est_bhd"] = round(float(rmb) * factor, 4) if rmb else None
+    selling = exec_sql_params(
+        "SELECT price_bhd, effective_from::text AS effective_from, effective_to::text AS effective_to "
+        "FROM v_price_history WHERE price_book = 'MA_base' AND sku_code = $1 "
+        "ORDER BY effective_from DESC LIMIT 50", [sku]) or []
+    return {"sku_code": sku, "events": events, "count": len(events), "selling": selling,
+            "fx_note": "supplier ¥ → BHD estimate uses Settings: (fx_usd_bhd ÷ fx_rmb_usd) × (1 + landing %)"}
+
+
 # ── Stock movement (warehouse → van transfers + per-salesman reconciliation) ──
 
 @app.get("/stock/transfers")
@@ -967,6 +1034,73 @@ def stock_recon(_user: CurrentUser = Depends(require_feature("Stock Movement")))
         "SELECT * FROM v_salesman_stock_recon "
         "ORDER BY is_van DESC, shortage_value_bhd DESC NULLS LAST, salesman") or []
     return {"vans": rows, "count": len(rows)}
+
+
+@app.get("/stock/daily")
+def stock_daily(month: str | None = None, warehouse: str | None = None,
+                _user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
+    """Daily stock movement for one month (storekeeper performance): per-day in/out qty
+    split by voucher type, calendar zero-filled, with upload-gap detection and the
+    stock-balance snapshot deltas as a validation series. Month defaults to the latest
+    month that has ledger data; every new month starts a fresh chart."""
+    import re as _re
+    from app.db_read import exec_sql, exec_sql_params
+    months = [r["m"] for r in exec_sql(
+        "SELECT DISTINCT to_char(move_date, 'YYYY-MM') AS m "
+        "FROM v_stock_daily_movement ORDER BY 1 DESC LIMIT 24") or []]
+    if not months:
+        return {"month": None, "months": [], "warehouses": [], "days": [],
+                "gap_days": 0, "last_data_day": None, "snapshot_deltas": []}
+    if not (month and _re.fullmatch(r"\d{4}-\d{2}", month)):
+        month = months[0]
+    wh = (warehouse or "").strip()
+    days = exec_sql_params(
+        "WITH m0 AS (SELECT to_date($1 || '-01', 'YYYY-MM-DD') AS d0), "
+        "cal AS (SELECT generate_series((SELECT d0 FROM m0), "
+        "  LEAST(((SELECT d0 FROM m0) + interval '1 month' - interval '1 day')::date, CURRENT_DATE), "
+        "  '1 day')::date AS day), "
+        "agg AS (SELECT move_date, "
+        "  ROUND(SUM(in_qty)::numeric, 1)  AS in_qty, "
+        "  ROUND(SUM(out_qty)::numeric, 1) AS out_qty, "
+        "  ROUND(COALESCE(SUM(in_qty)  FILTER (WHERE voucher_type = 'Material Receipt Note'), 0)::numeric, 1) AS receipts_qty, "
+        "  ROUND(COALESCE(SUM(out_qty) FILTER (WHERE voucher_type = 'Stock Issue Voucher'), 0)::numeric, 1)   AS transfer_out_qty, "
+        "  ROUND(COALESCE(SUM(in_qty)  FILTER (WHERE voucher_type = 'Stock Receive Voucher'), 0)::numeric, 1) AS transfer_in_qty, "
+        "  ROUND(COALESCE(SUM(out_qty) FILTER (WHERE voucher_type = 'Sales Invoice'), 0)::numeric, 1)         AS sales_qty, "
+        "  ROUND(COALESCE(SUM(in_qty)  FILTER (WHERE voucher_type = 'Sales Return'), 0)::numeric, 1)          AS returns_qty, "
+        "  ROUND((COALESCE(SUM(in_qty)  FILTER (WHERE voucher_type = 'Excesses in Stocks'), 0) "
+        "       - COALESCE(SUM(out_qty) FILTER (WHERE voucher_type = 'Shortages in Stock'), 0))::numeric, 1)  AS adjustment_qty, "
+        "  SUM(vouchers) AS vouchers, SUM(items) AS item_lines "
+        "  FROM v_stock_daily_movement "
+        "  WHERE to_char(move_date, 'YYYY-MM') = $1 "
+        "    AND ($2 = '' OR warehouse_name ILIKE '%' || $2 || '%') "
+        "  GROUP BY move_date) "
+        "SELECT cal.day::text AS day, "
+        "  COALESCE(a.in_qty, 0) AS in_qty, COALESCE(a.out_qty, 0) AS out_qty, "
+        "  COALESCE(a.in_qty, 0) - COALESCE(a.out_qty, 0) AS net_qty, "
+        "  COALESCE(a.receipts_qty, 0) AS receipts_qty, "
+        "  COALESCE(a.transfer_out_qty, 0) AS transfer_out_qty, "
+        "  COALESCE(a.transfer_in_qty, 0) AS transfer_in_qty, "
+        "  COALESCE(a.sales_qty, 0) AS sales_qty, COALESCE(a.returns_qty, 0) AS returns_qty, "
+        "  COALESCE(a.adjustment_qty, 0) AS adjustment_qty, "
+        "  COALESCE(a.vouchers, 0) AS vouchers, COALESCE(a.item_lines, 0) AS item_lines, "
+        "  (a.move_date IS NOT NULL) AS has_data "
+        "FROM cal LEFT JOIN agg a ON a.move_date = cal.day ORDER BY cal.day",
+        [month, wh]) or []
+    last_data = ((exec_sql("SELECT MAX(move_date)::text AS d FROM v_stock_daily_movement") or [{}])[0].get("d"))
+    gap_days = sum(1 for d in days if not d.get("has_data") and last_data and d["day"] <= last_data)
+    warehouses = [r["w"] for r in exec_sql(
+        "SELECT warehouse_name AS w FROM v_stock_daily_movement "
+        "GROUP BY 1 ORDER BY SUM(lines) DESC LIMIT 20") or [] if r.get("w")]
+    deltas = exec_sql_params(
+        "WITH s AS (SELECT as_of_date, SUM(net_qty) AS qty FROM stock_balance "
+        "  WHERE ($2 = '' OR warehouse_name ILIKE '%' || $2 || '%') GROUP BY 1) "
+        "SELECT as_of_date::text AS day, "
+        "  ROUND((qty - LAG(qty) OVER (ORDER BY as_of_date))::numeric, 1) AS delta_qty "
+        "FROM s ORDER BY as_of_date",
+        [month, wh]) or []
+    deltas = [d for d in deltas if d["day"].startswith(month) and d.get("delta_qty") is not None]
+    return {"month": month, "months": months, "warehouses": warehouses, "days": days,
+            "gap_days": gap_days, "last_data_day": last_data, "snapshot_deltas": deltas}
 
 
 # ── Catalog / Item Master ─────────────────────────────────────────────────────
@@ -1048,7 +1182,7 @@ def catalog_export(format: str = "xlsx", version: str = "full",
 
 @app.get("/catalog/share-link")
 def catalog_share_link(_user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
-    """Public customer link (RRP only) a salesman can WhatsApp to a customer."""
+    """Public customer link (trade/B2B price) a salesman can WhatsApp to a customer."""
     import os
     from app.catalog import share_token
     tok = share_token()
@@ -1069,7 +1203,7 @@ def catalog_share_rotate(admin: CurrentUser = Depends(require_admin)) -> dict:
 @app.get("/public/catalog/{token}")
 @limiter.limit("30/minute")
 def catalog_public(request: Request, token: str) -> dict:
-    """No-auth customer catalog: item + photos + RRP only. Token-gated, rate-limited."""
+    """No-auth customer catalog: item + photos + trade (B2B) price. Token-gated, rate-limited."""
     from fastapi import HTTPException
     from app.catalog import public_catalog
     r = public_catalog(token)
