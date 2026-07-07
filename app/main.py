@@ -377,6 +377,8 @@ def agent_scope_put(body: AgentScopeRequest, admin: CurrentUser = Depends(requir
     try:
         from app.ai import flush_cache
         flush_cache()
+        import app.agents as _agents  # bust the 30s toggle cache so the change is instant
+        _agents._sim_toggle["at"] = 0.0
     except Exception:  # noqa: BLE001
         pass
     log_event(admin.email, "settings.agent_scope", detail={"exclude_sim": body.exclude_sim})
@@ -1106,6 +1108,13 @@ def stock_daily(month: str | None = None, warehouse: str | None = None,
         "  ROUND(COALESCE(SUM(in_qty)  FILTER (WHERE voucher_type = 'Sales Return'), 0)::numeric, 1)          AS returns_qty, "
         "  ROUND((COALESCE(SUM(in_qty)  FILTER (WHERE voucher_type = 'Excesses in Stocks'), 0) "
         "       - COALESCE(SUM(out_qty) FILTER (WHERE voucher_type = 'Shortages in Stock'), 0))::numeric, 1)  AS adjustment_qty, "
+        # BHD value (issued/received rate × qty from the ledger) — the owner asked to see value, not just units
+        "  ROUND(COALESCE(SUM(out_value_bhd) FILTER (WHERE voucher_type = 'Sales Invoice'), 0)::numeric, 2)          AS sales_value_bhd, "
+        "  ROUND(COALESCE(SUM(out_value_bhd) FILTER (WHERE voucher_type = 'Stock Issue Voucher'), 0)::numeric, 2)    AS transfer_out_value_bhd, "
+        "  ROUND((COALESCE(SUM(in_value_bhd) FILTER (WHERE voucher_type = 'Material Receipt Note'), 0) "
+        "       + COALESCE(SUM(in_value_bhd) FILTER (WHERE voucher_type = 'Sales Return'), 0))::numeric, 2)         AS received_value_bhd, "
+        "  ROUND(COALESCE(SUM(out_value_bhd), 0)::numeric, 2) AS out_value_bhd, "
+        "  ROUND(COALESCE(SUM(in_value_bhd), 0)::numeric, 2)  AS in_value_bhd, "
         "  SUM(vouchers) AS vouchers, SUM(items) AS item_lines "
         "  FROM v_stock_daily_movement "
         "  WHERE to_char(move_date, 'YYYY-MM') = $1 "
@@ -1119,6 +1128,10 @@ def stock_daily(month: str | None = None, warehouse: str | None = None,
         "  COALESCE(a.transfer_in_qty, 0) AS transfer_in_qty, "
         "  COALESCE(a.sales_qty, 0) AS sales_qty, COALESCE(a.returns_qty, 0) AS returns_qty, "
         "  COALESCE(a.adjustment_qty, 0) AS adjustment_qty, "
+        "  COALESCE(a.sales_value_bhd, 0) AS sales_value_bhd, "
+        "  COALESCE(a.transfer_out_value_bhd, 0) AS transfer_out_value_bhd, "
+        "  COALESCE(a.received_value_bhd, 0) AS received_value_bhd, "
+        "  COALESCE(a.in_value_bhd, 0) AS in_value_bhd, COALESCE(a.out_value_bhd, 0) AS out_value_bhd, "
         "  COALESCE(a.vouchers, 0) AS vouchers, COALESCE(a.item_lines, 0) AS item_lines, "
         "  (a.move_date IS NOT NULL) AS has_data "
         "FROM cal LEFT JOIN agg a ON a.move_date = cal.day ORDER BY cal.day",

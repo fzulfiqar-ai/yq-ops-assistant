@@ -37,6 +37,8 @@ interface DailyDay {
   day: string; in_qty: number; out_qty: number; net_qty: number
   receipts_qty: number; transfer_out_qty: number; transfer_in_qty: number
   sales_qty: number; returns_qty: number; adjustment_qty: number
+  sales_value_bhd: number; transfer_out_value_bhd: number; received_value_bhd: number
+  in_value_bhd: number; out_value_bhd: number
   vouchers: number; item_lines: number; has_data: boolean
 }
 interface DailyData {
@@ -75,6 +77,12 @@ function DailyMovement() {
     external_in: days.reduce((s, d) => s + d.external_in, 0),
     sold: days.reduce((s, d) => s + Number(d.sales_qty), 0),
     transferred: days.reduce((s, d) => s + Number(d.transfer_out_qty), 0),
+    // BHD value alongside units (owner asked to see value in movement)
+    received_val: days.reduce((s, d) => s + Number(d.received_value_bhd), 0),
+    sold_val: days.reduce((s, d) => s + Number(d.sales_value_bhd), 0),
+    transferred_val: days.reduce((s, d) => s + Number(d.transfer_out_value_bhd), 0),
+    in_val: days.reduce((s, d) => s + Number(d.in_value_bhd), 0),
+    out_val: days.reduce((s, d) => s + Number(d.out_value_bhd), 0),
     busiest: days.reduce<DailyDay | null>((best, d) =>
       (Number(d.in_qty) + Number(d.out_qty)) > (best ? Number(best.in_qty) + Number(best.out_qty) : 0) ? d : best, null),
   }), [days])
@@ -128,12 +136,18 @@ function DailyMovement() {
                 width={44} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
               <Tooltip
                 labelFormatter={(d) => fmtDate(String(d))}
-                formatter={(v, name) => {
+                formatter={(v, name, entry) => {
                   const labels: Record<string, string> = {
                     external_in: 'Received (supplier + returns)', sales_qty: 'Sold',
                     transfer_out_qty: 'Transferred (internal)', in_qty: 'In', out_qty: 'Out',
                   }
-                  return [num(Number(v)), labels[String(name)] || String(name)]
+                  const valKey: Record<string, string> = {
+                    external_in: 'received_value_bhd', sales_qty: 'sales_value_bhd',
+                    transfer_out_qty: 'transfer_out_value_bhd', in_qty: 'in_value_bhd', out_qty: 'out_value_bhd',
+                  }
+                  const p = entry?.payload as DailyDay | undefined
+                  const val = p ? Number(p[valKey[String(name)] as keyof DailyDay] || 0) : 0
+                  return [`${num(Number(v))} units · ${bhd(val, 3)}`, labels[String(name)] || String(name)]
                 }}
                 contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
               {allWh ? (
@@ -156,15 +170,17 @@ function DailyMovement() {
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm bg-emerald-600" />
                   Received <b className="tabular-nums">{num(totals.external_in)}</b>
+                  <span className="text-muted-foreground">· {bhd(totals.received_val, 0)}</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm bg-violet-600" />
                   Sold <b className="tabular-nums">{num(totals.sold)}</b>
+                  <span className="text-muted-foreground">· {bhd(totals.sold_val, 0)}</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm bg-blue-500" />
                   Transferred <b className="tabular-nums">{num(totals.transferred)}</b>
-                  <span className="text-[11px] text-muted-foreground">(internal, warehouse → van)</span>
+                  <span className="text-muted-foreground">· {bhd(totals.transferred_val, 0)} <span className="text-[11px]">(internal, warehouse → van)</span></span>
                 </span>
               </>
             ) : (
@@ -172,10 +188,12 @@ function DailyMovement() {
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm bg-emerald-600" />
                   In <b className="tabular-nums">{num(totals.in_qty)}</b>
+                  <span className="text-muted-foreground">· {bhd(totals.in_val, 0)}</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm bg-violet-600" />
                   Out <b className="tabular-nums">{num(totals.out_qty)}</b>
+                  <span className="text-muted-foreground">· {bhd(totals.out_val, 0)}</span>
                 </span>
                 <span className="text-muted-foreground">Net <b className={cn('tabular-nums', totals.in_qty - totals.out_qty >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
                   {num(totals.in_qty - totals.out_qty)}</b></span>

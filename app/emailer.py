@@ -29,6 +29,59 @@ PURPLE_DARK = "#4c1d95"
 # result keys that are metadata, not displayable data tables
 _META_KEYS = {"agent", "description", "generated_at", "summary", "email", "count"}
 
+# Professional, business-report headings per agent — used for BOTH the email subject
+# and the in-email H1, so every briefing reads like a report, not a feature blurb.
+# (The verbose AgentSpec.description stays as the explanatory text on the Agents page.)
+AGENT_EMAIL_TITLES: dict[str, str] = {
+    "collections": "Overdue Receivables & Collection Actions",
+    "inventory": "Reorder Priorities — Low Stock",
+    "margin": "Margin Alert — Products Below or Near Cost",
+    "sales_insights": "Sales Performance Review",
+    "sales_push": "Targeted Sell-Through Opportunities",
+    "sales_outreach": "Customer Reorder Outreach",
+    "growth_plan": "Weekly Growth Plan",
+    "customer_health": "Customer Retention Watch",
+    "cashflow": "Cashflow & Receivables Forecast",
+    "risk_watch": "Risk & Integrity Review",
+    "inventory_aging": "Ageing Inventory Report",
+    "salesman_performance": "Salesman Performance Report",
+    "purchase_insights": "Purchasing & Cost Review",
+    "salesman_stock_recon": "Van Stock Reconciliation",
+    "trend": "Product Momentum Report",
+    "marketing": "Marketing & Promotion Plan",
+    "catalog_watch": "Catalog & Price Changes",
+    "vendor_sourcing": "New Supplier Scouting",
+    "demand_forecast": "Demand Forecast & Stock-Out Risk",
+    "abc_xyz": "Inventory ABC / XYZ Classification",
+    "deadstock_liquidation": "Dead-Stock Clearance Plan",
+    "winback": "Lapsed-Customer Win-Back List",
+    "credit_exposure": "Credit Exposure Review",
+    "working_capital": "Working-Capital Release Opportunities",
+    "pricing_optimization": "Pricing Optimization Review",
+    "reorder_proposal": "Draft Purchase Order for Review",
+    "procurement_status": "Procurement Pipeline Status",
+    "cross_sell": "Cross-Sell & Bundle Opportunities",
+    "vendor_scorecard": "Vendor Performance Scorecard",
+    "trend_radar": "Trend Radar — Restock Rising Items",
+    "lead_gen": "New Retailer Lead List",
+    "research_scout": "Market Research Briefing",
+    "price_drift": "Margin Erosion Alert",
+    "returns_investigator": "Product Returns Investigation",
+    "ops_sentinel": "Platform Health Report",
+    "outreach_builder": "Outreach Queue — Ready to Send",
+    "contact_enrich": "Customer Contact Enrichment",
+    "outreach_digest": "Outreach Digest — Awaiting Approval",
+    "growth_scorecard": "Weekly Growth Scorecard",
+    "content_engine": "Marketing Content Drafts",
+    "content_poll": "Video Render Status",
+}
+
+
+def email_title(result: dict) -> str:
+    """A professional heading for this agent's email (curated map → agent name → 'Agent')."""
+    name = str(result.get("agent", "") or "")
+    return AGENT_EMAIL_TITLES.get(name) or name.replace("_", " ").title() or "Operations Briefing"
+
 
 def smtp_configured() -> bool:
     return bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and os.getenv("ALERT_EMAIL_TO"))
@@ -183,7 +236,7 @@ def _table(title: str, rows: list[dict]) -> str:
 
 
 def _agent_html(result: dict) -> str:
-    title = result.get("description") or str(result.get("agent", "Agent")).replace("_", " ").title()
+    title = email_title(result)
     summary = result.get("summary", "")
     generated_raw = result.get("generated_at", "")
     try:
@@ -261,9 +314,7 @@ def _agent_html(result: dict) -> str:
 
 def send_agent(result: dict) -> dict:
     """Render + email an agent result. Returns a status dict (never raises)."""
-    name = str(result.get("agent", "agent"))
-    title = result.get("description") or name.replace("_", " ").title()
-    subject = f"[YQ Mobile Accessories] {title} — {datetime.now().strftime('%d %b %Y')}"
+    subject = f"YQ Bahrain · {email_title(result)} — {datetime.now().strftime('%d %b %Y')}"
     try:
         return send_html(subject, _agent_html(result))
     except Exception as e:  # defensive: emailing must never break the agent run

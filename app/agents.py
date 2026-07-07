@@ -24,12 +24,45 @@ from app.ai import exec_sql
 
 log = logging.getLogger(__name__)
 
-# Agents read the *_agent views (owner rule: agents work on mobile accessories only —
-# SIM/starter packs excluded while app_settings.agent_exclude_sim='1'; the views
-# check the toggle themselves, so flipping it in Settings applies instantly).
+# Agents work on mobile accessories only (owner rule) while app_settings.agent_exclude_sim='1'.
+# TWO layers, because agents hit dozens of views:
+#   1. aggregate views (sales totals) are swapped to their SIM-free *_agent twins so SIM
+#      revenue is removed BEFORE the SUM;
+#   2. every other (item-level) query is post-filtered by name/division — the robust
+#      catch-all that also covers views without a twin (v_inventory_aging, etc.).
 _AGENT_VIEW_SWAP = re.compile(
     r"\b(v_sales_by_salesman|v_sales_by_channel|v_sales_by_period"
     r"|v_stock_health|v_current_stock|v_sales)\b")
+
+# A row is SIM/starter-pack if its division is SIM or any name-like field names it.
+_SIM_RE = re.compile(r"batelco|starter\s*pack|\bsim\b", re.I)
+_SIM_NAME_FIELDS = ("item_name", "product_name", "display_name", "raw_item_name",
+                    "name", "category_name", "category", "description")
+_sim_toggle = {"at": 0.0, "on": True}
+
+
+def _sim_excluded() -> bool:
+    """Whether agents should drop SIM/starter-pack rows (app_settings.agent_exclude_sim,
+    cached 30s so the 70+ per-run _q() calls don't each hit the DB)."""
+    import time
+    if time.time() - _sim_toggle["at"] < 30:
+        return _sim_toggle["on"]
+    on = True
+    try:
+        from app.database import get_client
+        r = (get_client().table("app_settings").select("value")
+             .eq("key", "agent_exclude_sim").limit(1).execute().data or [])
+        on = (r[0]["value"] if r else "1") == "1"
+    except Exception:  # noqa: BLE001 — default to excluding on any read failure
+        on = True
+    _sim_toggle.update(at=time.time(), on=on)
+    return on
+
+
+def _is_sim_row(r: dict) -> bool:
+    if str(r.get("division") or "").upper() == "SIM":
+        return True
+    return any(r.get(k) and _SIM_RE.search(str(r.get(k))) for k in _SIM_NAME_FIELDS)
 
 # Per-run query-failure counter. thread-local so it stays isolated when the orchestrator runs
 # several agents concurrently (ThreadPoolExecutor). run_agent() resets it before each run and
@@ -41,14 +74,20 @@ _run_state = threading.local()
 def _q(sql: str) -> list[dict[str, Any]]:
     """Run a read-only query; return [] on error AND record the failure (see _run_state) so the
     agent's summary can flag partial data instead of silently reporting zero.
-    Sales/stock views are swapped to their *_agent variants (division scoping)."""
-    sql = _AGENT_VIEW_SWAP.sub(lambda m: m.group(1) + "_agent", sql)
+    When SIM is excluded: aggregate views are swapped to their *_agent twins, and every
+    returned item-level row naming a SIM/starter-pack product is dropped (catch-all)."""
+    exclude_sim = _sim_excluded()
+    if exclude_sim:
+        sql = _AGENT_VIEW_SWAP.sub(lambda m: m.group(1) + "_agent", sql)
     try:
-        return exec_sql(sql) or []
+        rows = exec_sql(sql) or []
     except Exception as exc:  # noqa: BLE001
         log.warning("agent query failed (%s): %s", type(exc).__name__, str(exc)[:200])
         _run_state.errors = getattr(_run_state, "errors", 0) + 1
         return []
+    if exclude_sim and rows:
+        rows = [r for r in rows if not _is_sim_row(r)]
+    return rows
 
 
 def _f(row: dict, key: str, default: float = 0.0) -> float:
