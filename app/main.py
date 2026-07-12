@@ -1305,6 +1305,132 @@ def catalog_public(request: Request, token: str) -> dict:
     return r
 
 
+# ── Product Finds (new/unique products the sales team spots in the field) ─────
+
+class FindItem(BaseModel):
+    image_path: str
+    name: str | None = None
+    price_bhd: float | None = None
+    currency: str | None = "BHD"
+    note: str | None = None
+    category: str | None = None
+    source: str | None = None
+
+
+class FindsBulkRequest(BaseModel):
+    items: list[FindItem]
+
+
+class FindUpdateRequest(BaseModel):
+    status: str | None = None
+    name: str | None = None
+    price_bhd: float | None = None
+    note: str | None = None
+    category: str | None = None
+    source: str | None = None
+
+
+class FindPromoteRequest(BaseModel):
+    item_code: str
+
+
+@app.post("/finds/photo")
+async def finds_photo(file: UploadFile = File(...),
+                      _user: CurrentUser = Depends(require_feature("Product Finds"))) -> dict:
+    """Upload one product-find photo (a rep snaps it on their phone). Validated + stored in a
+    PRIVATE bucket; returns the object path to attach with POST /finds/bulk."""
+    from app.uploads import MAX_PHOTO_BYTES, PHOTO_TYPES, UploadTooLarge, content_matches, photo_ext, read_capped
+    ext = photo_ext(file.filename or "")
+    if not ext:
+        return {"error": "Please upload a photo (JPG, PNG, WEBP or HEIC)."}
+    try:
+        data = await read_capped(file, MAX_PHOTO_BYTES)
+    except UploadTooLarge as e:
+        return {"error": f"Photo too large ({e})."}
+    if not content_matches(file.filename or "", data):
+        return {"error": "That file isn't a valid image."}
+    from app.product_finds import upload_photo
+    path = upload_photo(data, ext, PHOTO_TYPES[ext])
+    if not path:
+        return {"error": "Could not save the photo — try again."}
+    return {"image_path": path}
+
+
+@app.post("/finds/bulk")
+def finds_bulk(body: FindsBulkRequest, user: CurrentUser = Depends(require_feature("Product Finds"))) -> dict:
+    """Add one or many finds (each = photo + optional name/price/note)."""
+    from app.product_finds import bulk_add
+    r = bulk_add([it.model_dump() for it in body.items], by=user.email)
+    log_event(user.email, "finds.bulk", detail={"count": r.get("count"), "ok": r.get("ok")})
+    return r
+
+
+@app.get("/finds")
+def finds_list(status: str | None = None,
+               _user: CurrentUser = Depends(require_feature("Product Finds"))) -> list:
+    from app.product_finds import list_finds
+    return list_finds(status)
+
+
+@app.get("/finds/share-link")
+def finds_share_link(_user: CurrentUser = Depends(require_feature("Product Finds"))) -> dict:
+    """No-login link management can open on any device to browse the finds board."""
+    import os
+    from app.product_finds import share_token
+    tok = share_token()
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    return {"token": tok, "url": f"{base}/f/{tok}" if base else f"/f/{tok}"}
+
+
+@app.post("/finds/share-link/rotate")
+def finds_share_rotate(admin: CurrentUser = Depends(require_admin)) -> dict:
+    import os
+    from app.product_finds import rotate_share_token
+    tok = rotate_share_token()
+    log_event(admin.email, "finds.share_rotate", detail={})
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    return {"token": tok, "url": f"{base}/f/{tok}" if base else f"/f/{tok}"}
+
+
+@app.patch("/finds/{find_id}")
+def finds_update(find_id: int, body: FindUpdateRequest,
+                 user: CurrentUser = Depends(require_feature("Product Finds"))) -> dict:
+    from app.product_finds import update_find
+    r = update_find(find_id, body.model_dump(exclude_none=True), by=user.email)
+    log_event(user.email, "finds.update", detail={"id": find_id, "ok": r.get("ok")})
+    return r
+
+
+@app.delete("/finds/{find_id}")
+def finds_delete(find_id: int, admin: CurrentUser = Depends(require_admin)) -> dict:
+    from app.product_finds import delete_find
+    r = delete_find(find_id)
+    log_event(admin.email, "finds.delete", detail={"id": find_id})
+    return r
+
+
+@app.post("/finds/{find_id}/promote")
+def finds_promote(find_id: int, body: FindPromoteRequest,
+                  admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Seed a hidden catalog item (carrying the find's photo) — goes live once its SKU is in the price book."""
+    from app.product_finds import promote
+    r = promote(find_id, body.item_code, by=admin.email)
+    log_event(admin.email, "finds.promote", detail=r)
+    return r
+
+
+@app.get("/public/finds/{token}")
+@limiter.limit("30/minute")
+def finds_public(request: Request, token: str) -> dict:
+    """No-auth product-finds gallery. Token-gated, rate-limited; internal fields stripped."""
+    from fastapi import HTTPException
+    from app.product_finds import public_finds
+    r = public_finds(token)
+    if r is None:
+        raise HTTPException(status_code=404, detail="Invalid link.")
+    return r
+
+
 @app.get("/coaching/accounts")
 def coaching_accounts(_user: CurrentUser = Depends(require_feature("Sales"))) -> list:
     """Named accounts (by revenue) for the rep to pick before a call/visit."""

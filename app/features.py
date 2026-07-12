@@ -22,6 +22,7 @@ FEATURES: list[str] = [
     "Margins",
     "Receivables",
     "Catalog",
+    "Product Finds",
     "Marketing",
 ]
 
@@ -30,5 +31,5 @@ ROLES: list[str] = ["admin", "member", "salesman"]
 # Default grants offered at invite time (admin implicitly has everything).
 ROLE_DEFAULT_FEATURES: dict[str, list[str]] = {
     "member": ["Dashboard", "Sales", "Inventory", "Receivables"],
-    "salesman": ["Catalog"],
+    "salesman": ["Catalog", "Product Finds"],
 }

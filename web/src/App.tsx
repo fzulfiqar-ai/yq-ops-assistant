@@ -17,6 +17,7 @@ const Leads = lazy(() => import('@/pages/Leads'))
 const Coaching = lazy(() => import('@/pages/Coaching'))
 const Agents = lazy(() => import('@/pages/Agents'))
 const Catalog = lazy(() => import('@/pages/Catalog'))
+const Finds = lazy(() => import('@/pages/Finds'))
 const Inventory = lazy(() => import('@/pages/Inventory'))
 const StockMovement = lazy(() => import('@/pages/StockMovement'))
 const Sales = lazy(() => import('@/pages/Sales'))
@@ -27,6 +28,7 @@ const DataPage = lazy(() => import('@/pages/DataPage'))
 const Team = lazy(() => import('@/pages/Team'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const PublicCatalog = lazy(() => import('@/pages/PublicCatalog'))
+const PublicFinds = lazy(() => import('@/pages/PublicFinds'))
 const Marketing = lazy(() => import('@/pages/Marketing'))
 const OptOut = lazy(() => import('@/pages/OptOut'))
 
@@ -46,6 +48,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/invite" element={<AcceptInvite />} />
         <Route path="/c/:token" element={<PublicCatalog />} />
+        <Route path="/f/:token" element={<PublicFinds />} />
         <Route path="/optout/:token" element={<OptOut />} />
 
         <Route element={<ProtectedRoute />}>
@@ -55,6 +58,7 @@ export default function App() {
           <Route path="assistant" element={<Gate feature="AI Assistant"><Assistant /></Gate>} />
           <Route path="field-notes" element={<Gate feature="AI Assistant"><FieldNotes /></Gate>} />
           <Route path="catalog" element={<Gate feature="Catalog"><Catalog /></Gate>} />
+          <Route path="finds" element={<Gate feature="Product Finds"><Finds /></Gate>} />
           <Route path="inventory" element={<Gate feature="Inventory"><Inventory /></Gate>} />
           <Route path="stock" element={<Gate feature="Stock Movement"><StockMovement /></Gate>} />
           <Route path="orders" element={<Gate feature="Orders"><Orders /></Gate>} />
