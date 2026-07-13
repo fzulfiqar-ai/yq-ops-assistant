@@ -124,10 +124,13 @@ def update_find(find_id: int, fields: dict, by: str = "") -> dict:
     if fields.get("status") in STATUSES:
         upd["status"] = fields["status"]
         upd["reviewed_by"] = by
-    for k in ("name", "note", "category", "source"):
+    for k in ("name", "note", "source"):
         if k in fields:
             v = fields[k]
             upd[k] = (str(v).strip() or None) if v is not None else None
+    if "category" in fields:                       # normalise like bulk_add (_clean_item)
+        v = fields["category"]
+        upd["category"] = (str(v).strip().upper() or None) if v is not None else None
     if "price_bhd" in fields:
         v = fields["price_bhd"]
         try:

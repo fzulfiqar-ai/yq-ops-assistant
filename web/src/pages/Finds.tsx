@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'motion/react'
 import {
   Search, Camera, Loader2, Plus, X, Share2, Copy, RefreshCw, Check,
-  Trash2, ArrowUpRight, Send, ImageOff,
+  Trash2, ArrowUpRight, Send, ImageOff, Pencil,
 } from 'lucide-react'
 import { apiGet, apiPost, apiPatch, apiDelete, apiUpload, apiSend } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
@@ -134,7 +134,7 @@ function AddFinds({ onDone }: { onDone: () => void }) {
                     <Input value={d.price} onChange={(e) => update(i, { price: e.target.value })} placeholder="Price BD" inputMode="decimal" className="h-8 w-24 text-[13px]" />
                   </div>
                   <Input value={d.category} onChange={(e) => update(i, { category: e.target.value })} placeholder="Category (optional)" className="h-8 text-[13px]" />
-                  <Input value={d.note} onChange={(e) => update(i, { note: e.target.value })} placeholder="Note — where seen, MOQ, competitor…" className="h-8 text-[13px]" />
+                  <Input value={d.note} onChange={(e) => update(i, { note: e.target.value })} placeholder="Comment — price details, where seen, MOQ…" className="h-8 text-[13px]" />
                 </div>
               </div>
             ))}
@@ -186,9 +186,62 @@ function PromoteDialog({ f, onClose, onDone }: { f: Find; onClose: () => void; o
   )
 }
 
+/** Edit a find after the fact — add/change the price, comment, name or category. Available to
+ *  anyone with the feature (reps annotate the seeded photos), backed by PATCH /finds/{id}. */
+function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast()
+  const [name, setName] = useState(f.name || '')
+  const [price, setPrice] = useState(f.price_bhd != null ? String(f.price_bhd) : '')
+  const [category, setCategory] = useState(f.category || '')
+  const [note, setNote] = useState(f.note || '')
+  const [busy, setBusy] = useState(false)
+
+  async function save() {
+    setBusy(true)
+    try {
+      const payload: Record<string, unknown> = { name: name.trim(), category: category.trim(), note: note.trim() }
+      if (price.trim()) payload.price_bhd = Number(price)   // empty leaves the price unchanged
+      await apiPatch(`/finds/${f.id}`, payload)
+      toast('Find updated.', 'success')
+      onSaved()
+    } catch { toast('Update failed.', 'error') } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
+      <Card className="max-h-[90vh] w-full max-w-md overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
+          <div className="font-display text-base font-semibold">Edit find</div>
+          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
+        </div>
+        {f.image_url && <img src={f.image_url} alt="" className="mx-auto mb-3 max-h-40 rounded-xl border object-contain p-2" />}
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Name</span>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Product name" /></label>
+            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Price (BD)</span>
+              <Input value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" placeholder="e.g. 1.250" /></label>
+          </div>
+          <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Category</span>
+            <Input value={category} onChange={(e) => setCategory(e.target.value.toUpperCase())} placeholder="e.g. CABLE" /></label>
+          <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Comment</span>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3}
+              placeholder="Price details, where it was seen, MOQ, competitor…"
+              className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm outline-none transition focus:border-primary/50" /></label>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
 function FindCard({ f, isAdmin, onChange }: { f: Find; isAdmin: boolean; onChange: () => void }) {
   const toast = useToast()
   const [promoteOpen, setPromoteOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
   const price = bd(f.price_bhd)
 
   async function setStatus(status: string) {
@@ -219,22 +272,29 @@ function FindCard({ f, isAdmin, onChange }: { f: Find; isAdmin: boolean; onChang
           <span className="ml-auto truncate">{f.posted_by ? `${f.posted_by.split('@')[0]} · ` : ''}{relTime(f.posted_at)}</span>
         </div>
         {f.promoted_item_code && <div className="mt-1 text-[11px] font-medium text-emerald-600">In catalog as {f.promoted_item_code}</div>}
-        {isAdmin && (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2">
-            {f.status !== 'promoted' && (
-              <button onClick={() => setPromoteOpen(true)}
-                className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition hover:border-primary/50">
-                <ArrowUpRight size={12} /> Promote
-              </button>
-            )}
-            {f.status === 'new' && <button onClick={() => setStatus('reviewing')} className="rounded-lg border px-2 py-1 text-[11px] transition hover:border-primary/50">Reviewing</button>}
-            {f.status !== 'archived'
-              ? <button onClick={() => setStatus('archived')} className="rounded-lg border px-2 py-1 text-[11px] transition hover:border-primary/50">Archive</button>
-              : <button onClick={() => setStatus('new')} className="rounded-lg border px-2 py-1 text-[11px] transition hover:border-primary/50">Restore</button>}
-            <button onClick={del} title="Delete" className="ml-auto rounded-lg border px-2 py-1 text-[11px] text-rose-600 transition hover:border-rose-400"><Trash2 size={12} /></button>
-          </div>
-        )}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2">
+          <button onClick={() => setEditOpen(true)}
+            className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition hover:border-primary/50">
+            <Pencil size={12} /> Edit
+          </button>
+          {isAdmin && (
+            <>
+              {f.status !== 'promoted' && (
+                <button onClick={() => setPromoteOpen(true)}
+                  className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition hover:border-primary/50">
+                  <ArrowUpRight size={12} /> Promote
+                </button>
+              )}
+              {f.status === 'new' && <button onClick={() => setStatus('reviewing')} className="rounded-lg border px-2 py-1 text-[11px] transition hover:border-primary/50">Reviewing</button>}
+              {f.status !== 'archived'
+                ? <button onClick={() => setStatus('archived')} className="rounded-lg border px-2 py-1 text-[11px] transition hover:border-primary/50">Archive</button>
+                : <button onClick={() => setStatus('new')} className="rounded-lg border px-2 py-1 text-[11px] transition hover:border-primary/50">Restore</button>}
+              <button onClick={del} title="Delete" className="ml-auto rounded-lg border px-2 py-1 text-[11px] text-rose-600 transition hover:border-rose-400"><Trash2 size={12} /></button>
+            </>
+          )}
+        </div>
       </div>
+      {editOpen && <EditFindDialog f={f} onClose={() => setEditOpen(false)} onSaved={() => { setEditOpen(false); onChange() }} />}
       {promoteOpen && <PromoteDialog f={f} onClose={() => setPromoteOpen(false)} onDone={() => { setPromoteOpen(false); onChange() }} />}
     </motion.div>
   )
