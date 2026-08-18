@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useState, type FormEvent, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { Eye, EyeOff } from 'lucide-react'
@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Logo } from '@/components/Logo'
 import { Quote } from '@/components/Quote'
 import { useAuth } from '@/lib/auth'
+import { warmApi } from '@/lib/api'
 
 // tsParticles is the heaviest chunk in the app and only decorates this page —
 // load it after first paint so sign-in is interactive immediately.
@@ -19,6 +20,11 @@ export default function Login() {
   const [pw, setPw] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // Wake the API while the user is still typing. The free-tier container sleeps
+  // after 15 min idle and takes ~50s to boot, so starting it now usually means it
+  // is ready by the time they hit Sign In.
+  useEffect(() => { warmApi() }, [])
   const [showPw, setShowPw] = useState(false)
 
   async function submit(e: FormEvent) {

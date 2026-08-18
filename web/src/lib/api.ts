@@ -26,8 +26,14 @@ async function handle<T>(res: Response): Promise<T> {
   return (ct.includes('application/json') ? res.json() : res.text()) as Promise<T>
 }
 
-/** Fetch with a hard timeout so one stalled request can never hang the caller. */
-async function fetchTimeout(input: string, init: RequestInit = {}, ms = 20000): Promise<Response> {
+/**
+ * Fetch with a hard timeout so one stalled request can never hang the caller.
+ *
+ * 60s, NOT 20s: the API sleeps after 15 min idle on the free tier and takes ~50s
+ * to wake. A 20s cap aborted every attempt mid-boot, so the app could never ride
+ * out a cold start — it just retried into the same wall until it gave up.
+ */
+async function fetchTimeout(input: string, init: RequestInit = {}, ms = 60000): Promise<Response> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), ms)
   try {
@@ -109,3 +115,17 @@ export async function apiStream(
 }
 
 export { BASE as API_BASE }
+
+
+/**
+ * Fire-and-forget ping to wake a sleeping API. Called when the login page mounts,
+ * so the container is already booting while the user types their password —
+ * turning a ~50s stall into an invisible one. Never throws; never awaited.
+ */
+export function warmApi(): void {
+  try {
+    void fetch(`${BASE}/health`, { method: 'GET', cache: 'no-store' }).catch(() => {})
+  } catch {
+    /* nothing to do — this is best-effort only */
+  }
+}

@@ -100,12 +100,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await supabase.auth.signInWithPassword({
       email: email.trim().toLowerCase(),
       password,
     })
     if (error) return { ok: false, error: error.message }
-    await loadMe()
+    // Adopt the session immediately so the router doesn't bounce back to /login.
+    if (data.session) setSession(data.session)
+    // Deliberately NOT awaited. The API sleeps on the free tier and can take ~50s
+    // to wake; awaiting loadMe() here froze the "Signing in…" button for minutes.
+    // onAuthStateChange also kicks off loadMe(), and ProtectedRoute renders the
+    // self-recovering "Waking the server…" screen until /me answers.
     return { ok: true }
   }
 
