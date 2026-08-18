@@ -58,6 +58,31 @@ def _sign(path: str | None) -> str | None:
         return None
 
 
+def _sign_many(paths: list[str | None]) -> dict[str, str]:
+    """Batch-sign many object paths in one Supabase request per 100 — far faster than signing
+    260 URLs one at a time on every board load (that was the slow-to-load-pictures cause)."""
+    out: dict[str, str] = {}
+    uniq = [p for p in dict.fromkeys(paths) if p]
+    if not uniq:
+        return out
+    bucket = get_client().storage.from_(_BUCKET)
+    for i in range(0, len(uniq), 100):
+        chunk = uniq[i:i + 100]
+        try:
+            for item in (bucket.create_signed_urls(chunk, _SIGNED_TTL) or []):
+                p = item.get("path")
+                url = item.get("signedURL") or item.get("signedUrl")
+                if p and url and not item.get("error"):
+                    out[p] = url
+        except Exception as e:  # noqa: BLE001 — fall back to per-path signing for this chunk
+            log.warning("batch sign failed (%d paths): %s", len(chunk), e)
+            for p in chunk:
+                s = _sign(p)
+                if s:
+                    out[p] = s
+    return out
+
+
 def _clean_item(it: dict) -> dict | None:
     """Normalise one incoming find; require an image_path (the photo is the point)."""
     path = (it.get("image_path") or "").strip()
@@ -113,9 +138,10 @@ def list_finds(status: str | None = None, limit: int = 500) -> list[dict]:
     except Exception as e:  # noqa: BLE001
         log.warning("list product finds failed: %s", e)
         return []
-    # swap the private path for a short-lived signed URL the browser can render
+    # swap the private path for a short-lived signed URL the browser can render (batch-signed)
+    signed = _sign_many([r.get("image_path") for r in rows])
     for r in rows:
-        r["image_url"] = _sign(r.pop("image_path", None))
+        r["image_url"] = signed.get(r.pop("image_path", None))
     return rows
 
 

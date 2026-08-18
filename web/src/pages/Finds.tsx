@@ -208,13 +208,14 @@ function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void;
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="max-h-[90vh] w-full max-w-md overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div className="flex min-h-full items-center justify-center">
+        <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
           <div className="font-display text-base font-semibold">Edit find</div>
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
         </div>
-        {f.image_url && <img src={f.image_url} alt="" className="mx-auto mb-3 max-h-40 rounded-xl border object-contain p-2" />}
+        {f.image_url && <img src={f.image_url} alt="" className="mx-auto mb-3 max-h-32 rounded-xl border object-contain p-2" />}
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Name</span>
@@ -233,7 +234,8 @@ function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void;
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Save</Button>
         </div>
-      </Card>
+        </Card>
+      </div>
     </div>
   )
 }
