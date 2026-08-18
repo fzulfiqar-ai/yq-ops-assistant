@@ -1,0 +1,40 @@
+# Keep the build context small and the image free of dev-only weight.
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.venv
+venv
+.env
+.env.*
+!.env.example
+
+# The React frontend is built and hosted separately (Vercel).
+web/
+
+# Streamlit dashboard is local-only and must not pull streamlit into the image.
+dashboard/
+
+# Local data, exports and scratch artefacts.
+data/
+exports/
+out/
+tmp/
+*.xlsx
+*.xls
+*.csv
+*.db
+*.sqlite3
+
+# Docs and notes.
+*.md
+!README.md
+docs/
+
+# Editor / OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/

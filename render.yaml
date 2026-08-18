@@ -1,0 +1,84 @@
+# Render blueprint — free-tier host for the YQ Bahrain ops API.
+#
+# Replaces Railway, whose trial lapsed and whose deployments were REMOVED.
+# Free tier reality check:
+#   * 512 MB RAM / 0.1 CPU  -> requirements.txt is kept lean for this
+#   * sleeps after 15 min idle, ~50 s cold start -> the portal's "Waking the
+#     server..." screen is designed for exactly this
+#   * no credit card required
+#
+# Deploy:  Render Dashboard -> New -> Blueprint -> pick this repo.
+# Secrets are marked `sync: false`, so Render never reads them from git; set
+# them in the dashboard (bulk-paste .env.render via "Add from .env").
+services:
+  - type: web
+    name: yq-ops-assistant
+    runtime: docker
+    plan: free
+    # Frankfurt is the closest free region to Bahrain (~4,600 km vs ~6,400 km
+    # to Singapore), so it wins on latency for the Manama team.
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- Supabase ---
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+
+      # --- portal wiring (public URLs, but kept out of git for consistency) ---
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+
+      # --- internal auth ---
+      - key: AGENT_API_KEY
+        sync: false
+      - key: AGNES_API_KEY
+        sync: false
+      - key: DASHBOARD_SECRET
+        sync: false
+
+      # --- LLM providers ---
+      - key: GROQ_API_KEY
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
+      - key: SCALEWAY_API_KEY
+        sync: false
+
+      # --- email ---
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+
+      # --- outreach / research tooling ---
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: WA_HUMAN_NUMBER
+        sync: false

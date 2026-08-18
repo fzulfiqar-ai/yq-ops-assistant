@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Navigate } from 'react-router-dom'
-import { Lock, Loader2, CloudOff, RefreshCw } from 'lucide-react'
+import { Lock, Loader2, CloudOff, RefreshCw, ServerCrash } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { Logo } from './Logo'
 import { Button } from './ui/button'
@@ -38,28 +38,70 @@ function NoAccess() {
   )
 }
 
-/** Couldn't REACH the API (cold start / network) — keep retrying, never say "no access". */
+/** The API is DELETED / not deployed (edge returned 404). Retrying cannot fix this. */
+function ApiOffline() {
+  const { refreshMe, signOut } = useAuth()
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="grid h-screen place-items-center bg-background px-4">
+      <div className="max-w-sm text-center">
+        <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-destructive/10 text-destructive">
+          <ServerCrash size={22} />
+        </div>
+        <h1 className="font-display text-xl font-bold">Backend is offline</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          The portal loaded, but its API server isn't running — so there's nothing to sign
+          you in to. This is a hosting problem, not a problem with your account, and it
+          needs an admin to bring the server back up.
+        </p>
+        <p className="mt-3 text-xs text-muted-foreground/80">
+          Your data is safe. Nothing has been lost.
+        </p>
+        <div className="mt-5 flex items-center justify-center gap-2">
+          <Button variant="outline" disabled={busy}
+            onClick={async () => { setBusy(true); await refreshMe(); setBusy(false) }}>
+            {busy ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />} Try again
+          </Button>
+          <Button variant="ghost" onClick={signOut}>Sign out</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Couldn't REACH the API (cold start / network). Free-tier hosts sleep after idle, so a
+ * slow first load is normal — but we stop claiming "starting up" forever. After ~2 minutes
+ * of failed polls the copy escalates to "probably down", so nobody stares at a spinner
+ * believing it's about to recover.
+ */
 function ServerWaking() {
   const { refreshMe } = useAuth()
   const [busy, setBusy] = useState(false)
+  const [attempts, setAttempts] = useState(0)
+  const stalled = attempts >= 6   // 6 × 20s ≈ 2 min
   useEffect(() => {
-    const t = setInterval(() => { refreshMe() }, 20000)
+    if (stalled) return           // stop hammering a server that clearly isn't coming back
+    const t = setInterval(() => { setAttempts((n) => n + 1); refreshMe() }, 20000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [stalled])
   return (
     <div className="grid h-screen place-items-center bg-background px-4">
       <div className="max-w-sm text-center">
         <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-accent text-accent-foreground">
           <CloudOff size={22} />
         </div>
-        <h1 className="font-display text-xl font-bold">Waking the server…</h1>
+        <h1 className="font-display text-xl font-bold">
+          {stalled ? "Can't reach the server" : 'Waking the server…'}
+        </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          The API is starting up (this can take ~30 seconds after a quiet period).
-          It will connect automatically — or tap retry.
+          {stalled
+            ? "The API hasn't responded for a couple of minutes, so it's likely down rather than just starting up. Your data is safe — please tell an admin."
+            : 'The API is starting up (this can take ~30 seconds after a quiet period). It will connect automatically — or tap retry.'}
         </p>
         <Button variant="outline" className="mt-5" disabled={busy}
-          onClick={async () => { setBusy(true); await refreshMe(); setBusy(false) }}>
+          onClick={async () => { setBusy(true); setAttempts(0); await refreshMe(); setBusy(false) }}>
           {busy ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />} Retry now
         </Button>
       </div>
@@ -73,6 +115,7 @@ export function ProtectedRoute() {
   if (!session) return <Navigate to="/login" replace />
   if (!me) {
     if (meState === 'denied') return <NoAccess />
+    if (meState === 'offline') return <ApiOffline />
     return <ServerWaking />
   }
   return <AppShell />

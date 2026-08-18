@@ -1,0 +1,6 @@
+# Local development only — NEVER installed into the production image.
+-r requirements.txt
+
+streamlit         # dashboard/ui.py
+plotly            # dashboard/ui.py charts
+watchdog          # scripts/watch_ingest.py file watcher

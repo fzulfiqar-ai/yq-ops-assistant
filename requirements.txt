@@ -1,22 +1,38 @@
+# Production API image ONLY. Keep this lean — the free-tier host caps the
+# container at 512 MB RAM, and every unused wheel eats into that headroom.
+#
+# The local Streamlit dashboard (dashboard/ui.py) and the dev-only file watcher
+# live in requirements-dev.txt. They are NOT copied into the Docker image, so
+# shipping streamlit/plotly here cost ~250 MB of image and RAM for nothing.
+
+# --- web framework ---
 fastapi
 uvicorn[standard]
-supabase
-python-dotenv
-openai
-tenacity
-requests
+slowapi
+
+# --- auth / crypto ---
 PyJWT
 cryptography
-slowapi
-streamlit
+
+# --- data layer ---
+supabase
+python-dotenv
+requests
+tenacity
+
+# --- LLM ---
+openai
+
+# --- spreadsheets & documents ---
 pandas
-openpyxl
-xlrd
-pdfplumber
-pillow
-fpdf2
-python-docx
+openpyxl          # .xlsx  (app/catalog.py, app/order_sheet.py)
+xlrd              # .xls   (legacy Focus ERP daily reports, via pandas.read_excel)
+pdfplumber        # PO / invoice parsing
+fpdf2             # app/catalog.py PDF export
 pyyaml
-plotly
-watchdog
-edge-tts
+
+# --- marketing content engine ---
+pillow            # ad cards
+numpy             # app/video_gen.py alpha-matting (also a pandas dep, pinned here
+                  # because video_gen imports it directly)
+edge-tts          # reel voiceover (ffmpeg does the video muxing)

@@ -12,8 +12,14 @@ export interface Me {
   full_name?: string
 }
 
-/** ok = provisioned · denied = server SAID 401/403 · unreachable = network/5xx/cold start */
-export type MeState = 'ok' | 'denied' | 'unreachable' | 'unknown'
+/**
+ * ok         = provisioned
+ * denied     = server SAID 401/403 (a real permissions problem)
+ * offline    = the API isn't deployed at all — the host edge answered 404
+ *              ("Application not found"). Retrying can NEVER fix this.
+ * unreachable = network error / 5xx / timeout — a genuine cold start, worth retrying
+ */
+export type MeState = 'ok' | 'denied' | 'offline' | 'unreachable' | 'unknown'
 
 interface AuthState {
   session: Session | null
@@ -51,6 +57,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
           setMe(null)
           setMeState('denied')
+          return
+        }
+        // 404 = the platform edge has no app behind this URL (service deleted, suspended,
+        // or VITE_API_URL points nowhere). A cold start NEVER returns 404, so bail out
+        // immediately instead of spinning on "Waking the server…" forever.
+        if (e instanceof ApiError && e.status === 404) {
+          setMe(null)
+          setMeState('offline')
           return
         }
         // network error / 5xx / timeout → keep retrying (cold start)
