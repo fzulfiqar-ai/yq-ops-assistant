@@ -8,6 +8,17 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // SELF-DESTRUCT. The API host changed (Railway -> Render) and the API URL is
+      // baked into the bundle at build time, so every client still holding a cached
+      // pre-migration bundle keeps calling the dead Railway host and hangs forever on
+      // "Waking the server...". Render's logs confirmed those browsers never reached
+      // the new API at all. A hard refresh does NOT reliably evict a controlling
+      // service worker, so this ships a SW that unregisters itself and drops its
+      // caches — every stale client self-heals on next load, no user action needed.
+      //
+      // This trades offline/PWA caching for correctness, which is the right call for
+      // an online-only ops portal. Re-enable only once every client is known good.
+      selfDestroying: true,
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'yq-icon-32.png'],
       manifest: {
