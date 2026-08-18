@@ -1,0 +1,443 @@
+<title>Focus ERP Data Scope</title>
+<style>
+  /* ---- tokens: light is the base, both dark states redefine only these ---- */
+  :root {
+    --paper:      #f6f7f6;
+    --card:       #ffffff;
+    --ink:        #16232b;
+    --ink-soft:   #4a5a61;
+    --muted:      #6b7a80;
+    --rule:       #d6dedb;
+    --rule-soft:  #e7ecea;
+    --accent:     #0f6466;
+    --accent-ink: #0b4a4c;
+    --accent-wash:#e4efee;
+    --flag:       #9d4420;
+    --flag-wash:  #f6e9e2;
+    --good:       #2f6b45;
+    --shadow:     0 1px 2px rgba(22,35,43,.06), 0 8px 24px -16px rgba(22,35,43,.25);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #10171a;
+      --card:       #161f23;
+      --ink:        #e6edeb;
+      --ink-soft:   #b3c2c3;
+      --muted:      #8a9a9c;
+      --rule:       #2a373c;
+      --rule-soft:  #202b30;
+      --accent:     #5fbfb6;
+      --accent-ink: #8fd8cf;
+      --accent-wash:#17302f;
+      --flag:       #e0916a;
+      --flag-wash:  #2e211a;
+      --good:       #79c294;
+      --shadow:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:      #10171a;
+    --card:       #161f23;
+    --ink:        #e6edeb;
+    --ink-soft:   #b3c2c3;
+    --muted:      #8a9a9c;
+    --rule:       #2a373c;
+    --rule-soft:  #202b30;
+    --accent:     #5fbfb6;
+    --accent-ink: #8fd8cf;
+    --accent-wash:#17302f;
+    --flag:       #e0916a;
+    --flag-wash:  #2e211a;
+    --good:       #79c294;
+    --shadow:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .sans { font-family: ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif; }
+  code, .mono {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+    font-size: .86em;
+  }
+
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem 6rem; }
+  .prose { max-width: 40rem; }
+
+  /* ---- masthead ---- */
+  header.mast {
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 2.5rem;
+    padding: 3.5rem 0 1.25rem;
+  }
+  .eyebrow {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: .7rem; font-weight: 700;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 .9rem;
+  }
+  h1 {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: clamp(2rem, 5vw, 3rem);
+    line-height: 1.05; letter-spacing: -.025em; font-weight: 700;
+    margin: 0 0 .75rem; text-wrap: balance;
+  }
+  .standfirst { font-size: 1.15rem; color: var(--ink-soft); margin: 0; max-width: 38rem; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: .5rem 2rem;
+    margin-top: 1.75rem; padding-top: 1.25rem;
+    border-top: 1px solid var(--rule-soft);
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: .8rem; color: var(--muted);
+  }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  /* ---- sections ---- */
+  section { margin-top: 3.5rem; }
+  h2 {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: 1.5rem; font-weight: 700; letter-spacing: -.015em;
+    margin: 0 0 .5rem; text-wrap: balance;
+  }
+  h3 {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: 1.02rem; font-weight: 700; letter-spacing: -.005em;
+    margin: 2rem 0 .4rem;
+  }
+  .lede { color: var(--ink-soft); margin: 0 0 1.5rem; max-width: 40rem; }
+  p { margin: 0 0 1rem; }
+  strong { font-weight: 700; }
+
+  /* ---- the ranked options ---- */
+  .opts { display: grid; gap: 1rem; margin-top: 1.5rem; }
+  .opt {
+    background: var(--card); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 1.5rem 1.5rem 1.35rem;
+    box-shadow: var(--shadow); position: relative;
+  }
+  .opt.pick { border-color: var(--accent); border-left-width: 4px; }
+  .opt-head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; margin-bottom: .6rem; }
+  .rank {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    font-size: .78rem; font-weight: 700; letter-spacing: .1em;
+    color: var(--accent);
+  }
+  .opt h3 { margin: 0; font-size: 1.15rem; }
+  .tag {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: .68rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    padding: .2rem .5rem; border-radius: 2px;
+    background: var(--accent-wash); color: var(--accent-ink);
+  }
+  .opt p { font-size: .97rem; margin-bottom: .8rem; }
+  .opt p:last-child { margin-bottom: 0; }
+  .facts {
+    display: flex; flex-wrap: wrap; gap: .4rem 1.75rem;
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: .8rem; color: var(--muted);
+    border-top: 1px solid var(--rule-soft); padding-top: .8rem; margin-top: .9rem;
+  }
+  .facts b { color: var(--ink); font-weight: 600; }
+
+  /* ---- tables ---- */
+  .scroll { overflow-x: auto; margin: 1.25rem 0; border: 1px solid var(--rule); border-radius: 3px; background: var(--card); }
+  table { border-collapse: collapse; width: 100%; font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif; font-size: .86rem; }
+  th, td { text-align: left; padding: .7rem .9rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  thead th {
+    font-size: .68rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); background: var(--paper); border-bottom: 1px solid var(--rule); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num, th.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .freq {
+    font-size: .7rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--accent-wash);
+    padding: .15rem .45rem; border-radius: 2px; white-space: nowrap;
+  }
+
+  /* ---- checklist ---- */
+  ol.qs, ul.plain { padding-left: 0; list-style: none; margin: 1.25rem 0 0; display: grid; gap: .1rem; }
+  ol.qs { counter-reset: q; }
+  ol.qs li {
+    counter-increment: q; position: relative;
+    padding: .7rem 0 .7rem 2.6rem; border-bottom: 1px solid var(--rule-soft);
+    font-size: .97rem;
+  }
+  ol.qs li::before {
+    content: counter(q, decimal-leading-zero);
+    position: absolute; left: 0; top: .78rem;
+    font-family: ui-monospace, Consolas, monospace; font-size: .78rem;
+    color: var(--accent); font-weight: 700;
+  }
+  ol.qs li b { display: block; font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif; font-size: .92rem; }
+  ol.qs li span { color: var(--ink-soft); font-size: .92rem; }
+
+  /* ---- warning callouts ---- */
+  .flag {
+    background: var(--flag-wash); border-left: 3px solid var(--flag);
+    padding: 1.1rem 1.25rem; border-radius: 0 3px 3px 0; margin: 1.25rem 0;
+  }
+  .flag .label {
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size: .68rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--flag); display: block; margin-bottom: .35rem;
+  }
+  .flag p { font-size: .95rem; margin: 0; }
+  .flag p + p { margin-top: .6rem; }
+
+  code {
+    background: var(--rule-soft); padding: .1em .35em;
+    border-radius: 2px; color: var(--accent-ink);
+  }
+  :root[data-theme="dark"] code, :root:not([data-theme="light"]) code { color: var(--accent-ink); }
+
+  hr.rule { border: none; border-top: 1px solid var(--rule); margin: 3.5rem 0 0; }
+  footer { margin-top: 2rem; font-family: ui-sans-serif, system-ui, sans-serif; font-size: .82rem; color: var(--muted); }
+  a { color: var(--accent-ink); }
+  a:focus-visible, li:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">Data access request &middot; YQ Bahrain Mobile Accessories W.L.L</p>
+    <h1>Focus ERP data scope</h1>
+    <p class="standfirst">What we need out of Focus, in what shape, and how often &mdash; so the right access can be quoted without guesswork.</p>
+    <div class="meta">
+      <span><b>To</b> Focus Softnet &mdash; account &amp; technical team</span>
+      <span><b>From</b> YQ Bahrain &middot; Furqan Ahmed</span>
+      <span><b>Datasets</b> 10</span>
+      <span><b>Direction</b> Read-only</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>What we are asking for</h2>
+    <div class="prose">
+      <p>We run an internal reporting portal on top of Focus data. Today a staff member logs into Focus every morning, runs eight reports by hand, downloads them, and uploads the files to our system. We want that to happen automatically.</p>
+      <p><strong>We are not asking to write anything back into Focus.</strong> Every dataset below is read-only. No document is created, edited, posted or cancelled by us &mdash; Focus stays the system of record and the only place transactions are entered.</p>
+      <p>The important thing to understand before quoting: our system already reads these exact reports and their exact columns. Whatever route we choose only has to deliver the same fields. It does not need to be clever.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Three routes, in the order we would prefer them</h2>
+    <p class="lede">These are ranked by how quickly they deliver value against how much they cost to build. We are open to any of them &mdash; please quote whichever you can actually support.</p>
+
+    <div class="opts">
+
+      <article class="opt pick">
+        <div class="opt-head">
+          <span class="rank">ROUTE 1</span>
+          <h3>Scheduled report delivery</h3>
+          <span class="tag">Preferred first step</span>
+        </div>
+        <p>Focus runs the same eight reports on a schedule and drops the files somewhere we can collect them &mdash; SFTP, a watched folder, or an email inbox. Nothing about the report definitions changes.</p>
+        <p>We prefer this first because it needs no integration work on our side at all: our system already parses these files. If Focus can schedule and deliver them, we are done. It is also the easiest for your team to support, because nothing new is exposed.</p>
+        <div class="facts">
+          <span><b>Format</b> XLS/XLSX or CSV, unchanged</span>
+          <span><b>Delivery</b> SFTP, folder, or email</span>
+          <span><b>Our effort</b> None</span>
+        </div>
+      </article>
+
+      <article class="opt">
+        <div class="opt-head">
+          <span class="rank">ROUTE 2</span>
+          <h3>Read-only database access</h3>
+        </div>
+        <p>A read-only login against the Focus database, limited to the sales, stock, receivables and pricing tables behind these reports. We would pull directly and never write.</p>
+        <p>This is the best long-term option for reporting: full history, no dependency on report layouts staying identical, and we can add a new metric without asking you for a new export. Please tell us if this conflicts with your support terms &mdash; if granting it voids support, say so and we will drop this route.</p>
+        <div class="facts">
+          <span><b>Permission</b> <code>SELECT</code> only</span>
+          <span><b>Scope</b> Sales, stock, AR, pricing</span>
+          <span><b>Access</b> VPN or IP allowlist, fine</span>
+        </div>
+      </article>
+
+      <article class="opt">
+        <div class="opt-head">
+          <span class="rank">ROUTE 3</span>
+          <h3>REST API</h3>
+        </div>
+        <p>The Focus REST API, scoped to the entities listed below. This is the most future-proof option and the one we would choose if it covers the fields in the next section and supports fetching only what changed.</p>
+        <p>Our concern is coverage rather than capability: these are reporting figures &mdash; ageing buckets, profitability, price books &mdash; not plain transaction records. Please confirm the API returns these as computed values, or tell us which ones it cannot, before we commit.</p>
+        <div class="facts">
+          <span><b>Methods</b> <code>GET</code> only</span>
+          <span><b>Must support</b> Filter by changed-since</span>
+          <span><b>Needs</b> Sandbox to test against</span>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>The data we need</h2>
+    <p class="lede">Ten datasets. The first eight are the reports we currently export by hand; the last two are documents we key in manually today. The &ldquo;matched on&rdquo; column is how we identify a record we already hold, so re-sending the same rows is harmless.</p>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Dataset &mdash; as named in Focus</th>
+            <th>What we use it for</th>
+            <th>Fields required</th>
+            <th class="num">Frequency</th>
+            <th>Matched on</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>Sales Day Book</b></td>
+            <td>Revenue, per-item sales, daily sales chart</td>
+            <td class="mono">invoice_no, line_no, date, customer_account, item_name, quantity, rate, gross, discount, taxable, vat_amount, total_amount, warehouse_name, narration</td>
+            <td><span class="freq">Daily</span></td>
+            <td class="mono">invoice_no + line_no</td>
+          </tr>
+          <tr>
+            <td><b>Summary Sales Register</b></td>
+            <td>Salesman performance, payment mode, order counts</td>
+            <td class="mono">invoice_no, order_date, customer_name, gross, salesman, payment_mode, sales_account_name</td>
+            <td><span class="freq">Daily</span></td>
+            <td class="mono">invoice_no</td>
+          </tr>
+          <tr>
+            <td><b>Stock Balance by Warehouse</b></td>
+            <td>Stock on hand, stock value, low-stock alerts</td>
+            <td class="mono">item_name, warehouse_name, net_qty, selling_rate, total_value, as_of_date</td>
+            <td><span class="freq">Daily</span></td>
+            <td class="mono">item + warehouse + date</td>
+          </tr>
+          <tr>
+            <td><b>Stock Ledger</b></td>
+            <td>Movements, branch transfers, reconciliation</td>
+            <td class="mono">item_name, move_date, voucher, voucher_type, received_qty, received_rate, issued_qty, issued_rate, balance_qty, received_value, issued_value, balance_value, avg_rate, warehouse_name, to_warehouse_name, narration</td>
+            <td><span class="freq">Daily</span></td>
+            <td class="mono">voucher + item</td>
+          </tr>
+          <tr>
+            <td><b>Customer Summary Ageing by Due Date</b></td>
+            <td>Receivables, overdue chasing</td>
+            <td class="mono">account, account_code, group_name, balance, and each ageing bucket: 0&ndash;30, 31&ndash;60, 61&ndash;90, 91&ndash;120, 121&ndash;150, 151&ndash;180, 181&ndash;210, over 210, total, last_receipt_date, as_of_date</td>
+            <td><span class="freq">Daily</span></td>
+            <td class="mono">account + as_of_date</td>
+          </tr>
+          <tr>
+            <td><b>Product Profitability Report</b></td>
+            <td>Margins, below-cost detection</td>
+            <td class="mono">item_name, report_date, gross, discount_pct, net_amount, cogs, gross_profit, gp_margin_pct, misc_charges, net_profit, np_margin_pct</td>
+            <td><span class="freq">Daily</span></td>
+            <td class="mono">item + report_date</td>
+          </tr>
+          <tr>
+            <td><b>MA Selling Price Book</b></td>
+            <td>Standard (B2B) selling price</td>
+            <td class="mono">item_name, sku_code, customer, warehouse, currency, start_date, end_date, min_qty, max_qty, price</td>
+            <td><span class="freq">Weekly</span></td>
+            <td class="mono">item + price book</td>
+          </tr>
+          <tr>
+            <td><b>Modern Trade Seller Book</b></td>
+            <td>Retail (B2C) selling price</td>
+            <td class="mono">same fields as above</td>
+            <td><span class="freq">Weekly</span></td>
+            <td class="mono">item + price book</td>
+          </tr>
+          <tr>
+            <td><b>Purchase Orders</b></td>
+            <td>Order tracking, cost vs last order</td>
+            <td class="mono">po_no, po_date, vendor, warehouse, line_no, item_code, description, qty, rate, gross</td>
+            <td><span class="freq">On change</span></td>
+            <td class="mono">po_no + line_no</td>
+          </tr>
+          <tr>
+            <td><b>Goods Receipt / MRN</b></td>
+            <td>Landed cost, receiving against PO</td>
+            <td class="mono">mrn_no, mrn_date, po_no, vendor, item_code, description, qty, landed rate/cost</td>
+            <td><span class="freq">On change</span></td>
+            <td class="mono">mrn_no + line</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="prose">All amounts in <strong>BHD</strong>. Dates in any unambiguous format, ideally <code>YYYY-MM-DD</code>. If a field above does not exist in Focus under that name, tell us the equivalent rather than omitting it &mdash; every one of these is in use today.</p>
+  </section>
+
+  <section>
+    <h2>Three things that will bite us if unaddressed</h2>
+    <p class="lede">These come from working with the current exports. Please confirm how each behaves in whichever route you quote.</p>
+
+    <div class="flag">
+      <span class="label">1 &middot; Salesman is arriving in the wrong field</span>
+      <p>In the Sales Day Book as currently configured, the salesman name comes through in the <code>Warehouse Name</code> column, not a salesman field. We have worked around it, but if the API or database exposes a proper salesman field, we would rather use that. Please confirm which field genuinely holds the salesman.</p>
+    </div>
+
+    <div class="flag">
+      <span class="label">2 &middot; Line totals are frequently empty</span>
+      <p><code>total_amount</code> on sales lines is often blank, so revenue has to be reconstructed from the other columns. Please confirm whether the API or database returns a reliably populated line total, and state clearly whether each amount is <strong>VAT-inclusive or VAT-exclusive</strong>. Getting this wrong misstates revenue.</p>
+    </div>
+
+    <div class="flag">
+      <span class="label">3 &middot; We need to fetch only what changed</span>
+      <p>Pulling full history every day is wasteful and slow. For Route 2 or 3 we need to request records by date range or a <em>modified-since</em> timestamp. If the API can only return everything, say so up front &mdash; it changes which route makes sense.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Questions we need answered to decide</h2>
+    <p class="lede">Please answer against whichever route you recommend. Commercial answers matter as much as technical ones.</p>
+
+    <ol class="qs">
+      <li><b>Which routes can you actually support?</b><span>Of the three above, which are available on our licence and version &mdash; and which do you recommend?</span></li>
+      <li><b>What is the cost, and what shape is it?</b><span>One-time setup, annual licence, per-module, or per-call. Include anything that changes at renewal.</span></li>
+      <li><b>Is it read-only, and can you guarantee that?</b><span>We want write access explicitly excluded, not merely unused.</span></li>
+      <li><b>How do we authenticate?</b><span>API key, OAuth, or database credentials &mdash; and how are they rotated if compromised?</span></li>
+      <li><b>Can we filter by date or changed-since?</b><span>See point 3 above. This is close to a deal-breaker for the API route.</span></li>
+      <li><b>Are there rate limits or page sizes?</b><span>And what happens when we hit them.</span></li>
+      <li><b>How far back can we pull?</b><span>We want a one-time backfill of history, not just from go-live.</span></li>
+      <li><b>Is there a test environment?</b><span>We will not test integrations against live accounting data.</span></li>
+      <li><b>Does the API return computed reporting figures?</b><span>Specifically ageing buckets, profitability and price books &mdash; or only raw transactions we would have to recompute?</span></li>
+      <li><b>What happens on a Focus upgrade?</b><span>Who is responsible if a version change breaks the integration, and what notice do we get?</span></li>
+      <li><b>How long to deliver?</b><span>From order to working access, per route.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>What done looks like</h2>
+    <div class="prose">
+      <p>We consider this delivered when, for a full week and without anyone logging into Focus to run a report by hand:</p>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Check</th><th>Acceptance</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>All ten datasets arrive</td><td>On their stated frequency, unattended</td></tr>
+          <tr><td>Figures reconcile</td><td>Revenue, stock value and receivables match the same reports run manually in Focus, to the fillis</td></tr>
+          <tr><td>Re-sends are safe</td><td>Delivering the same rows twice does not duplicate or double-count</td></tr>
+          <tr><td>Failures are visible</td><td>A missed or failed delivery is detectable, not silent</td></tr>
+          <tr><td>History is loaded</td><td>Backfill completed to the agreed start date</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="rule" />
+  <footer>
+    <p>Prepared by YQ Bahrain Mobile Accessories W.L.L for discussion with Focus Softnet. Read-only access only &mdash; no write-back to Focus is requested or required.</p>
+  </footer>
+
+</div>
