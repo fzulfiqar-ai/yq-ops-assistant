@@ -50,7 +50,10 @@ app.add_middleware(
 )
 # Big JSON payloads (inventory/sales lists ~100s of KB) shrink ~10× — every click
 # transfers less, which matters most on the owner's phone.
-app.add_middleware(GZipMiddleware, minimum_size=1500)
+# compresslevel=4, not Starlette's default 9: on a 0.1-CPU container the top levels burn
+# noticeably more CPU for a couple of percent more compression, and CPU is the scarce
+# resource here, not bandwidth. The CDN re-compresses to brotli at the edge anyway.
+app.add_middleware(GZipMiddleware, minimum_size=1500, compresslevel=4)
 
 
 @app.on_event("startup")
@@ -706,7 +709,7 @@ async def invoice_upload(file: UploadFile = File(...), admin: CurrentUser = Depe
 @app.get("/supplier-prices")
 def supplier_prices(_user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Supplier RMB price history per model — latest vs previous invoice, with the change %."""
-    from app.ai import exec_sql
+    from app.db_read import exec_sql
     rows = exec_sql("SELECT model, latest_invoice, latest_date, latest_rmb, latest_list_rmb, "
                     "prev_rmb, prev_date, change_pct, invoice_count FROM v_supplier_price_history "
                     "ORDER BY ABS(COALESCE(change_pct,0)) DESC, model LIMIT 300") or []
@@ -818,7 +821,7 @@ def order_file_delete(file_id: int, admin: CurrentUser = Depends(require_admin))
 @app.get("/purchase-orders")
 def po_list(_user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Orders page data: recent orders, per-item cost change across orders, and what's on order."""
-    from app.ai import exec_sql
+    from app.db_read import exec_sql
 
     def q(sql: str) -> list:
         try:

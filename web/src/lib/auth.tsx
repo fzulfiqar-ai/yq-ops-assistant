@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@supabase/supabase-js'
 import { supabase, getSessionSafe } from './supabase'
 import { apiGet, ApiError, API_BASE } from './api'
@@ -42,6 +43,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null)
   const [meState, setMeState] = useState<MeState>('unknown')
   const [meError, setMeError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+
+  /**
+   * Boot used to be four serialized round trips:
+   *   getSessionSafe -> GET /me -> [Dashboard chunk downloads] -> GET /report/dashboard
+   * ProtectedRoute gates the tree on `me`, so neither the chunk nor its data could start
+   * until /me came back. The token exists as soon as we have a session, so both can run
+   * DURING /me instead of after it. Fire-and-forget: failures are retried by the real
+   * useQuery, and a wasted prefetch costs nothing the user waits on.
+   */
+  function warmDashboard() {
+    void import('@/pages/Dashboard')
+    void queryClient.prefetchQuery({
+      queryKey: ['report', 'dashboard'],
+      queryFn: () => apiGet<unknown>('/report/dashboard'),
+    })
+  }
   const [loading, setLoading] = useState(true)
 
   // A failed /me is USUALLY the API waking from a Railway cold start — NOT a permissions
@@ -95,7 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const s = await getSessionSafe()   // cannot hang (races the supabase lock)
       if (!active) return
       setSession(s)
-      if (s) await loadMe()
+      if (s) { warmDashboard(); await loadMe() }
       if (active) { setLoading(false); clearTimeout(bootTimer) }
     })()
     const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
@@ -117,7 +135,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     if (error) return { ok: false, error: error.message }
     // Adopt the session immediately so the router doesn't bounce back to /login.
-    if (data.session) setSession(data.session)
+    if (data.session) { setSession(data.session); warmDashboard() }
     // Deliberately NOT awaited. The API sleeps on the free tier and can take ~50s
     // to wake; awaiting loadMe() here froze the "Signing in…" button for minutes.
     // onAuthStateChange also kicks off loadMe(), and ProtectedRoute renders the

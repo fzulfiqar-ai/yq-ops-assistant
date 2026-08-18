@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.agent_base import AgentSpec
-from app.ai import exec_sql
+from app.db_read import exec_sql
 
 log = logging.getLogger(__name__)
 

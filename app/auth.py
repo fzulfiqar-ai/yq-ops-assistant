@@ -29,8 +29,16 @@ log = logging.getLogger(__name__)
 
 @lru_cache
 def _jwks_client() -> PyJWKClient:
-    """Cached JWKS client for the project's asymmetric (ES256/RS256) signing keys."""
-    return PyJWKClient(f"{settings.supabase_url}/auth/v1/.well-known/jwks.json")
+    """Cached JWKS client for the project's asymmetric (ES256/RS256) signing keys.
+
+    cache_keys=True matters a lot on a 0.1-CPU container: without it PyJWT rebuilds the
+    signing key through `cryptography` on EVERY request (an asymmetric key parse per API
+    call). With it, the parsed key object is reused and only the JWK *set* refreshes.
+    """
+    return PyJWKClient(
+        f"{settings.supabase_url}/auth/v1/.well-known/jwks.json",
+        cache_keys=True,
+    )
 
 
 def _decode_token(token: str) -> dict:

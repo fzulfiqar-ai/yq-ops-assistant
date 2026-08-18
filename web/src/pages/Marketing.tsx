@@ -156,7 +156,7 @@ function Contacts() {
   const [paste, setPaste] = useState('')
   const [preview, setPreview] = useState<{ input: string; matched: string | null; phone: string; email: string; status: string }[] | null>(null)
   const [busy, setBusy] = useState(false)
-  const { data: cov } = useQuery({ queryKey: ['coverage'], queryFn: () => apiGet<Kpis['coverage']>('/contacts/coverage') })
+  const { data: cov } = useQuery({ queryKey: ['contacts', 'coverage'], queryFn: () => apiGet<Kpis['coverage']>('/contacts/coverage') })
 
   const parsed = useMemo(() => paste.split('\n').map((l) => {
     const [name = '', phone = '', email = ''] = l.split(/[,\t;]/).map((s) => s.trim())
@@ -172,7 +172,7 @@ function Contacts() {
       if (commit) {
         toast(`Saved ${r.committed} contacts ✓`, 'success')
         setPaste(''); setPreview(null)
-        qc.invalidateQueries({ queryKey: ['coverage'] })
+        qc.invalidateQueries({ queryKey: ['contacts', 'coverage'] })
       }
     } catch { toast('Import failed (admin only).', 'error') }
     finally { setBusy(false) }

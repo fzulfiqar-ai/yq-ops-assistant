@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime
 
-from app.ai import exec_sql
+from app.db_read import exec_sql
 
 
 def _data_date() -> str | None:

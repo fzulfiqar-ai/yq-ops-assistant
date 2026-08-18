@@ -30,7 +30,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
       <ThemeProvider>
-        <ArcRevealHero storageKey="yq-intro-v2" greetings={INTRO} greetingHold={900} revealDuration={1900} className="!min-h-0">
+        <ArcRevealHero storageKey="yq-intro-v2" greetings={INTRO} greetingHold={300} revealDuration={600} className="!min-h-0">
           <QueryClientProvider client={queryClient}>
             <ToastProvider>
               <AuthProvider>

@@ -11,7 +11,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-from app.ai import exec_sql
+from app.db_read import exec_sql
 from app.database import get_client
 from app.digest import all_alerts, daily_summary
 

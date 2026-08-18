@@ -33,6 +33,9 @@ async function handle<T>(res: Response): Promise<T> {
  * to wake. A 20s cap aborted every attempt mid-boot, so the app could never ride
  * out a cold start — it just retried into the same wall until it gave up.
  */
+/** Uploads and server-side renders are legitimately slow on 0.1 CPU — don't cut them at 60s. */
+const UPLOAD_TIMEOUT_MS = 300000
+
 async function fetchTimeout(input: string, init: RequestInit = {}, ms = 60000): Promise<Response> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), ms)
@@ -49,7 +52,9 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 export async function apiSend<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  // Bounded like apiGet: an unbounded mutation is exactly the "it's stuck forever" bug
+  // the GET timeout was added to prevent.
+  const res = await fetchTimeout(`${BASE}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -63,17 +68,21 @@ export const apiDelete = <T,>(path: string) => apiSend<T>('DELETE', path)
 
 export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
   // Do NOT set Content-Type — the browser adds the multipart boundary.
-  const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { ...(await authHeaders()) }, body: form })
+  const res = await fetchTimeout(
+    `${BASE}${path}`,
+    { method: 'POST', headers: { ...(await authHeaders()) }, body: form },
+    UPLOAD_TIMEOUT_MS,
+  )
   return handle<T>(res)
 }
 
 /** POST JSON and download the binary response as a file (used to export the order .xlsx). */
 export async function apiDownload(path: string, body?: unknown, fallbackName = 'download'): Promise<void> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchTimeout(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  }, UPLOAD_TIMEOUT_MS)
   if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ''))
   const blob = await res.blob()
   const cd = res.headers.get('content-disposition') || ''

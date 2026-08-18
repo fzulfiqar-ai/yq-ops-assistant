@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from app.ai import exec_sql
+from app.db_read import exec_sql
 from app.database import get_client
 
 # Ordered lifecycle (simplified to 100% payment). Each stage: label + the SLA (days) after which an

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from supabase import create_client
 
 from app.config import settings
-from app.database import get_client
+from app.database import cached_user_row, get_client, invalidate_user_cache
 
 log = logging.getLogger(__name__)
 
@@ -40,11 +40,9 @@ def _fresh_client():
 
 
 def _user_row(email: str) -> dict | None:
-    email = (email or "").strip().lower()
-    r = get_client().table("user_roles").select(
-        "email,role,features,status,full_name"
-    ).eq("email", email).limit(1).execute()
-    return (r.data or [None])[0]
+    """Cached in app.database so this and get_current_user's fetch_role share ONE query
+    per request instead of two. Writes below flush it, so access changes apply at once."""
+    return cached_user_row((email or "").strip().lower())
 
 
 def _find_auth_user(email: str):
@@ -117,6 +115,7 @@ def _upsert_role(email: str, role: str, features: list[str],
         client.table("user_roles").update(row).eq("email", email).execute()
     else:
         client.table("user_roles").insert(row).execute()
+    invalidate_user_cache(email)
 
 
 def create_member(email: str, full_name: str, role: str, features: list[str],
@@ -160,6 +159,7 @@ def update_access(email: str, role: str | None = None,
         upd["status"] = status
     if upd:
         get_client().table("user_roles").update(upd).eq("email", email.strip().lower()).execute()
+        invalidate_user_cache(email)
 
 
 def remove_user(email: str) -> None:
@@ -172,6 +172,7 @@ def remove_user(email: str) -> None:
         except Exception as e:
             log.warning("delete_user failed for %s: %s", email, e)
     get_client().table("user_roles").delete().eq("email", email).execute()
+    invalidate_user_cache(email)
 
 
 def list_members() -> dict:

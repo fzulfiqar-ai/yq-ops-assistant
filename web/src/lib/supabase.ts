@@ -39,12 +39,18 @@ function storedSession(): Session | null {
  * short timer and fall back to the persisted session from localStorage.
  */
 export async function getSessionSafe(timeoutMs = 3000): Promise<Session | null> {
+  // Every API call goes through here, so the loser of the race must be cleaned up —
+  // otherwise each request leaves a live 3s timer + closure behind.
+  let timer: ReturnType<typeof setTimeout> | undefined
   const viaSdk = supabase.auth.getSession().then(({ data }) => data.session)
-  const viaTimeout = new Promise<Session | null>((resolve) =>
-    setTimeout(() => resolve(storedSession()), timeoutMs))
+  const viaTimeout = new Promise<Session | null>((resolve) => {
+    timer = setTimeout(() => resolve(storedSession()), timeoutMs)
+  })
   try {
     return await Promise.race([viaSdk, viaTimeout])
   } catch {
     return storedSession()
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }

@@ -1,0 +1,39 @@
+# Keep the free-tier API awake.
+#
+# Render's free plan spins a service down after 15 minutes without inbound traffic, and
+# waking it costs ~50s. Worse, the dashboard cache (app/reports.py) is IN-PROCESS, so a
+# spin-down also throws away the cached payload — the first visitor afterwards pays the
+# container wake AND a ~26-query rebuild. A cheap ping every 10 minutes avoids both.
+#
+# BUDGET: Render free allows 750 instance-hours/month per workspace. Staying awake all
+# month is ~730h, which fits — but ONLY while yq-ops-assistant is the sole running free
+# service. If n8n (or anything else) is ever restored on Render free, this WILL exceed the
+# allowance and the service gets suspended. Drop to business hours if that happens.
+name: keepalive
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's scheduler drifts by several minutes under load, so this
+    # spacing still lands comfortably inside the 15-minute idle window.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health
+        run: |
+          # --max-time 90 tolerates a genuine cold start rather than failing the run.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 \
+            https://yq-ops-assistant.onrender.com/health || echo 000)
+          echo "health -> HTTP $code"
+          [ "$code" = "200" ] || { echo "::warning::API did not return 200 (got $code)"; exit 1; }

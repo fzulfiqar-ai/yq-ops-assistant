@@ -61,7 +61,7 @@ export default function DataPage() {
   const [result, setResult] = useState<IngestResult | null>(null)
   const [error, setError] = useState('')
 
-  const { data: cov } = useQuery({ queryKey: ['coverage'], queryFn: () => apiGet<Coverage[]>('/data/coverage') })
+  const { data: cov } = useQuery({ queryKey: ['data', 'coverage'], queryFn: () => apiGet<Coverage[]>('/data/coverage') })
   const { data: purgeTargets } = useQuery({ queryKey: ['purge-targets'], queryFn: () => apiGet<{ targets: PurgeTarget[] }>('/ingest/purge-targets') })
 
   // ── Fix a bad upload: remove a report's rows for a date (or its null-date junk) ──
@@ -84,7 +84,7 @@ export default function DataPage() {
         report: pReport, date_from: pBlanks ? null : pFrom, date_to: pBlanks ? null : (pTo || null), blanks: pBlanks,
       })
       if (r.error) setPMsg(r.error)
-      else { setPMsg(`Removed ${r.deleted} row(s). Now re-upload the correct ${tgt.label} export above.`); qc.invalidateQueries({ queryKey: ['coverage'] }) }
+      else { setPMsg(`Removed ${r.deleted} row(s). Now re-upload the correct ${tgt.label} export above.`); qc.invalidateQueries({ queryKey: ['data', 'coverage'] }) }
     } catch (e) {
       setPMsg(e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 120)}` : 'Remove failed.')
     } finally { setPBusy(false) }
@@ -107,7 +107,7 @@ export default function DataPage() {
       files.forEach((f) => form.append('files', f))
       setResult(await apiUpload<IngestResult>('/ingest', form))
       setFiles([])
-      qc.invalidateQueries({ queryKey: ['coverage'] })
+      qc.invalidateQueries({ queryKey: ['data', 'coverage'] })
     } catch (e) {
       setError(e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 200)}` : 'Upload failed.')
     } finally {
