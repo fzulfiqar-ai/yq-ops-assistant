@@ -9,6 +9,10 @@
 fastapi
 uvicorn[standard]
 slowapi
+python-multipart  # REQUIRED: FastAPI raises at import time on any File()/UploadFile
+                  # route ("Form data requires python-multipart"). Nothing imports it
+                  # by name, so a static import scan will NOT flag it. It used to
+                  # arrive transitively via streamlit; do not remove it again.
 
 # --- auth / crypto ---
 PyJWT
