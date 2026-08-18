@@ -76,7 +76,7 @@ function ApiOffline() {
  * believing it's about to recover.
  */
 function ServerWaking() {
-  const { refreshMe } = useAuth()
+  const { refreshMe, meError } = useAuth()
   const [busy, setBusy] = useState(false)
   const [attempts, setAttempts] = useState(0)
   const stalled = attempts >= 6   // 6 × 20s ≈ 2 min
@@ -104,6 +104,11 @@ function ServerWaking() {
           onClick={async () => { setBusy(true); setAttempts(0); await refreshMe(); setBusy(false) }}>
           {busy ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />} Retry now
         </Button>
+        {meError && (
+          <p className="mx-auto mt-5 max-w-md break-words rounded-lg bg-muted px-3 py-2 text-left font-mono text-[11px] leading-relaxed text-muted-foreground">
+            {meError}
+          </p>
+        )}
       </div>
     </div>
   )

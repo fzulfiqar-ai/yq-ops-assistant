@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase, getSessionSafe } from './supabase'
-import { apiGet, ApiError } from './api'
+import { apiGet, ApiError, API_BASE } from './api'
 
 export type Role = 'admin' | 'member' | 'salesman'
 
@@ -25,6 +25,8 @@ interface AuthState {
   session: Session | null
   me: Me | null
   meState: MeState
+  /** Why the last /me attempt failed — surfaced in the UI so field issues are diagnosable. */
+  meError: string | null
   loading: boolean
   signIn: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
   signOut: () => Promise<void>
@@ -39,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [me, setMe] = useState<Me | null>(null)
   const [meState, setMeState] = useState<MeState>('unknown')
+  const [meError, setMeError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   // A failed /me is USUALLY the API waking from a Railway cold start — NOT a permissions
@@ -52,8 +55,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const m = await apiGet<Me>('/me')
         setMe(m)
         setMeState('ok')
+        setMeError(null)
         return
       } catch (e) {
+        // Record WHY, verbatim. A TypeError here means the browser refused to send the
+        // request at all (CORS/blocked/DNS) — which looks identical to a cold start
+        // from the user's side, and is invisible in server logs.
+        const why = e instanceof ApiError
+          ? `HTTP ${e.status}${e.body ? ` — ${e.body.slice(0, 120)}` : ''}`
+          : `${(e as Error)?.name || 'Error'}: ${(e as Error)?.message || String(e)}`
+        setMeError(`${why}  ·  attempt ${i + 1}/${delays.length}  ·  ${API_BASE || '(no API base)'}/me`)
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
           setMe(null)
           setMeState('denied')
@@ -121,7 +132,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ session, me, meState, loading, signIn, signOut, refreshMe: loadMe }}>
+    <Ctx.Provider value={{ session, me, meState, meError, loading, signIn, signOut, refreshMe: loadMe }}>
       {children}
     </Ctx.Provider>
   )
