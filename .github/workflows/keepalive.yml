@@ -40,6 +40,11 @@ on:
     # often than Supabase needs, which is fine — the DB ping is a single indexed row read.
     - cron: '*/10 * * * *'
   workflow_dispatch:
+  # Self-verify: a change to this file runs it straight away rather than waiting for the
+  # schedule, which GitHub throttles to roughly every 2 hours on free public repos.
+  push:
+    paths:
+      - '.github/workflows/keepalive.yml'
 
 permissions:
   contents: read
