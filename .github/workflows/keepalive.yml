@@ -1,20 +1,43 @@
-# Keep the free-tier API awake.
+# Keep the free-tier stack alive. TWO independent things sleep, for different reasons:
 #
-# Render's free plan spins a service down after 15 minutes without inbound traffic, and
-# waking it costs ~50s. Worse, the dashboard cache (app/reports.py) is IN-PROCESS, so a
-# spin-down also throws away the cached payload — the first visitor afterwards pays the
-# container wake AND a ~26-query rebuild. A cheap ping every 10 minutes avoids both.
+#   1. SUPABASE pauses a Free-plan project after ~7 days with no API requests, database
+#      queries or Edge Function calls — and it WITHDRAWS THE PROJECT'S DNS RECORD when it
+#      does, so the host stops resolving and the browser reports a bare "Failed to fetch".
+#      This is what took the portal down on 14-Sep-2026: the job below used to ping only
+#      the API's /health, which app/main.py returns as a static dict with no DB call, so
+#      Supabase saw zero activity for a month while Render looked perfectly healthy.
+#      Recovering costs a manual "Resume project" in the dashboard — hence step 1.
+#
+#   2. RENDER spins a free service down after 15 minutes without inbound traffic, and waking
+#      it costs ~50s. Worse, the dashboard cache (app/reports.py) is IN-PROCESS, so a
+#      spin-down also throws away the cached payload — the first visitor afterwards pays the
+#      container wake AND a ~26-query rebuild.
+#
+# The Supabase ping runs FIRST and the Render ping runs with `if: always()`, so an API
+# outage can never stop the database from being kept alive. A final gate fails the run if
+# either leg failed, so GitHub's failure email reaches you inside the 7-day window.
 #
 # BUDGET: Render free allows 750 instance-hours/month per workspace. Staying awake all
 # month is ~730h, which fits — but ONLY while yq-ops-assistant is the sole running free
 # service. If n8n (or anything else) is ever restored on Render free, this WILL exceed the
 # allowance and the service gets suspended. Drop to business hours if that happens.
+# GitHub Actions minutes are unlimited on public repos, so the cadence itself is free.
+#
+# CAVEAT: GitHub disables scheduled workflows after 60 days of REPO INACTIVITY. If this
+# repo goes quiet for two months, this file stops running and Supabase pauses again. Push
+# something, or check the Actions tab, before that clock runs out.
+#
+# SETUP: needs two repository secrets — Settings -> Secrets and variables -> Actions:
+#   SUPABASE_URL       https://<ref>.supabase.co
+#   SUPABASE_ANON_KEY  the publishable/anon key (the one already shipped in the web bundle;
+#                      NEVER the sb_secret service-role key — this repo is public)
 name: keepalive
 
 on:
   schedule:
     # Every 10 minutes. GitHub's scheduler drifts by several minutes under load, so this
-    # spacing still lands comfortably inside the 15-minute idle window.
+    # spacing still lands comfortably inside Render's 15-minute idle window. It is far more
+    # often than Supabase needs, which is fine — the DB ping is a single indexed row read.
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
@@ -30,10 +53,73 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Ping /health
+      # Runs first and is allowed to fail without skipping the Render ping below, because
+      # a paused database is the slow, catastrophic failure — a cold API is merely slow.
+      - name: Query Supabase (prevents the 7-day pause)
+        id: supabase
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
+          set -uo pipefail
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_ANON_KEY}" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repository secrets are not set."
+            echo "::error::Supabase is NOT being kept alive and will pause after ~7 idle days."
+            exit 1
+          fi
+          # A real PostgREST read: this reaches Postgres and runs a query under the `anon`
+          # role, which is what Supabase counts as activity. An RLS policy that denies anon
+          # still returns HTTP 200 with an empty array — the query ran, which is the point.
+          # Response body is discarded rather than logged; it can contain real user rows.
+          # curl -w already PRINTS 000 itself on a connection failure, so `|| echo 000`
+          # on top of it concatenates to "000000", which silently falls through to the
+          # generic branch and loses the paused-project message — the one that says what
+          # to actually do. Let curl's own 000 stand; default only if it printed nothing.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            "${SUPABASE_URL}/rest/v1/user_roles?select=email&limit=1")
+          code=${code:-000}
+          echo "supabase rest -> HTTP $code"
+          case "$code" in
+            200|206) echo "Supabase answered a live query — project is awake." ;;
+            000)     echo "::error::Could not reach ${SUPABASE_URL} at all (DNS or network)."
+                     echo "::error::A withdrawn DNS record is exactly how a PAUSED project looks."
+                     echo "::error::Check https://supabase.com/dashboard and click Resume project."
+                     exit 1 ;;
+            401|403) echo "::error::Supabase rejected the anon key (HTTP $code) — rotate the SUPABASE_ANON_KEY secret."
+                     exit 1 ;;
+            404)     echo "::error::Table not found (HTTP 404) — the keepalive query needs a table that exists."
+                     exit 1 ;;
+            *)       echo "::error::Unexpected response from Supabase (HTTP $code)."
+                     exit 1 ;;
+          esac
+
+      # `always()` is load-bearing: without it, a failing Supabase step would skip this one
+      # and the API would be left to sleep on top of an already-broken database.
+      - name: Ping the API /health (keeps the Render container warm)
+        id: render
+        if: always()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
           # --max-time 90 tolerates a genuine cold start rather than failing the run.
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 \
-            https://yq-ops-assistant.onrender.com/health || echo 000)
+            https://yq-ops-assistant.onrender.com/health)
+          code=${code:-000}
           echo "health -> HTTP $code"
-          [ "$code" = "200" ] || { echo "::warning::API did not return 200 (got $code)"; exit 1; }
+          [ "$code" = "200" ] || { echo "::error::API did not return 200 (got $code)"; exit 1; }
+
+      # Both legs report here so a single failing leg still surfaces as a failed run, and
+      # the log says which one broke without having to expand the step.
+      - name: Report
+        if: always()
+        run: |
+          echo "supabase: ${{ steps.supabase.outcome }}"
+          echo "render:   ${{ steps.render.outcome }}"
+          if [ "${{ steps.supabase.outcome }}" != "success" ] || [ "${{ steps.render.outcome }}" != "success" ]; then
+            echo "::error::keepalive failed — see the step outcomes above."
+            exit 1
+          fi
+          echo "Both Supabase and the API are alive."
