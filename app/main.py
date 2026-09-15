@@ -1724,9 +1724,19 @@ async def ingest_file(
                 "error": "No recognised Focus reports in the upload — nothing was loaded."}
 
     # Verified refresh engine: ingest (de-dup by type) -> load -> flush cache -> verify ->
-    # what-changed -> briefing -> ingest_runs. (Synchronous; admin-only, infrequent.)
+    # what-changed -> briefing -> ingest_runs.
+    #
+    # refresh() is SYNCHRONOUS and takes minutes (parse every workbook -> reload Supabase ->
+    # verify -> brief). Calling it directly from this async handler blocked the one event loop
+    # we have (Dockerfile runs --workers 1), so /health stopped answering; Render's health
+    # check gives up after 5 SECONDS and KILLS the instance. The upload then died with the
+    # container and the browser saw a dropped connection, which the UI reports as the useless
+    # "Upload failed." -- observed 14-Sep-2026, Render event: "HTTP health check failed
+    # (timed out after 5 seconds)". Run it off the loop so health checks keep being served.
+    from starlette.concurrency import run_in_threadpool
+
     from scripts.refresh import refresh
-    res = refresh(folder=str(staging), send=True)
+    res = await run_in_threadpool(refresh, folder=str(staging), send=True)
     log_event(user.email, "ingest", detail={
         "recognised": [r["report"] for r in recognised],
         "ignored": [i["file"] for i in ignored], "ok": res.get("ok"),
