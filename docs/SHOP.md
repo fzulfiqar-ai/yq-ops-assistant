@@ -243,8 +243,11 @@ starting only at 3.35 s, and the API answering in ~1.4 s even when awake. What c
   and `GET /public/catalog/{token}` returns those bytes with `Cache-Control: public, max-age=60,
   stale-while-revalidate=600`. Warm request locally: ~400 ms → ~15 ms. `rotate_share_token()` invalidates the
   shop context so a revoked link dies at once.
-- **First request.** An inline script in `web/index.html` starts the catalog fetch for `/c/{token}` before the app
-  has downloaded; `getCatalog()` picks up that promise (`window.__yqCatalog`).
+- **First request.** `web/public/catalog-prefetch.js` (loaded from `web/index.html` with the API base in `data-api`)
+  starts the catalog fetch for `/c/{token}` before the app has downloaded; `getCatalog()` picks up that promise
+  (`window.__yqCatalog`). It must stay a same-origin file: the CSP in `web/vercel.json` is `script-src 'self'`, which
+  blocks inline scripts and inline event handlers. The first attempt used both (an inline script and a fonts
+  `onload` swap), and in production that silently disabled the prefetch and stopped the brand fonts from loading.
 - **Two front doors.** `web/src/main.tsx` sends `/c/` and `/o/` to `PublicApp` (shop + order status only: no
   supabase session client, no intro animation, no query cache) and everything else to `PortalRoot`. Entry bundle
   567 KB → 194 KB. `lib/shopApi.ts` loads `lib/api` lazily, only for the salesman calls.
