@@ -230,6 +230,11 @@ def flush_cache() -> int:
     except Exception:  # noqa: BLE001
         pass
     _data_date_cache.update(d="", at=0.0)
+    try:  # the shop payload derives from the same data
+        from app.shop import invalidate as _shop_invalidate
+        _shop_invalidate()
+    except Exception:  # noqa: BLE001
+        pass
     try:
         get_client().table("query_cache").delete().neq("query_hash", "").execute()
         return 1

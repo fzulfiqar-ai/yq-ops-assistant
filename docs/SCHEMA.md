@@ -231,7 +231,33 @@ A view keeps one source of truth and stays correct on every re-import.
 | status | text | Status |
 | narration | text | Narration |
 
-**Natural key:** `(sku_code, price_book, customer_code, start_date)`.
+**Natural key:** `(sku_code, price_book, customer_code, warehouse_name, start_date)` —
+repaired 06-Sep-2026 by `scripts/pricebook_key_migration.sql`. The original key omitted
+`warehouse_name` and relied on `customer_code`, which is **NULL on 100% of rows in both books**;
+under Postgres' default `NULLS DISTINCT` that index never matched, so `ON CONFLICT` never fired
+and every re-ingest appended a duplicate copy. The new index is `NULLS NOT DISTINCT`.
+
+> **THREE PRICE LAYERS LIVE IN THE MA_base BOOK — do not treat it as one price per SKU:**
+> | `warehouse_name` | meaning | rows |
+> |---|---|---:|
+> | `NULL` (blank) | **dealer / list price — this is the B2B price** | 293 |
+> | `Causeway` | outlet retail price | 181 |
+> | `YQ Roadshow` | outlet retail price | 180 |
+>
+> All three share a `start_date`, so any "latest price" query that tie-breaks on `rate_bhd`
+> picks the **retail** price. That defect showed retail as the B2B price on 89 of 170 SKUs
+> (median +77%, max +233%) and fabricated 71 phantom price changes. Ground truth: Focus's own
+> Stock-balance **"Selling Rate"** matches the blank-warehouse row on 69/69 SKUs and an outlet
+> row on 0. Order by `(warehouse_name IS NULL) DESC, start_date DESC, id DESC`.
+> `modern_trade` has `warehouse_name` set on all 167 rows, so it falls through to latest-dated.
+
+> **⚠️ PRICE-BOOK DATES ARE `M/D/YYYY`, NOT `D/M/YYYY`.** The two PriceBook files are the only
+> Focus exports that emit dates as **text**; every other report emits real Excel datetimes.
+> Measured: 494 of 655 MA_base start dates and 167 of 167 modern_trade start dates are
+> *unambiguously* month-first; **zero** are day-first. Parsing them day-first (as
+> `norm_date` does, correctly, for the transaction reports) mis-dated **533 values** and pushed
+> **13 start dates into the future**, silently excluding those prices from "current". Use
+> `norm_date_us()` in `scripts/ingest.py` for price books only.
 
 ### purchase_costs  *(created now, EMPTY in v1; filled in Phase 4 from vendor/pricing sheets)*
 The **cost source of truth** (Rules 1 & 2). NOT populated by any of the 8 Focus files — vendor
@@ -294,5 +320,28 @@ and **never truncates**.
 ## Ingestion normalization (all files)
 Skip rows 1–5 (price books: header row 1); header = row 6; forward-fill grouped section
 headers; keep real detail rows only; drop `Sub Total` / `Grand Total`; parse mixed date
-formats (datetime + `m/d/Y` + DD/MM/YYYY); strip thousands separators; trim whitespace; drop
+formats (datetime + `m/d/Y` + DD/MM/YYYY) — **but price books are month-first, see above**; strip thousands separators; trim whitespace; drop
 empty rows. **If columns don't match this file, stop and ask.**
+
+## YQ Shop (15-Sep-2026, `scripts/shop_migration.sql`, contract in `docs/SHOP.md`)
+Service-role-only tables (RLS enabled, no anon/authenticated policy):
+- `salesmen` — id, name UNIQUE, phone, email, whatsapp, user_email (→ user_roles.email), focus_name, referral_code UNIQUE,
+  is_active, sort_order, notify_email, notify_whatsapp. Contact details are never seeded from the repo.
+- `shop_orders` — order_no UNIQUE (PREFIX-YYMM-NNNN via `shop_next_order_no()` + `shop_counters`), token UNIQUE (status
+  page), status new|confirmed|packed|delivered|cancelled, customer_* (name, phone, shop, area, email), note, salesman_id FK,
+  salesman_name, source referral|dropdown|default, referral_code, src, coupon_code, subtotal/discount/delivery/total_bhd,
+  items_count, units_count, has_backorder, ip_hash, ua, notify_result jsonb, notified_at.
+- `shop_order_lines` — order_id FK (cascade), item_code, display_name, spec, image_url, qty, list_price_bhd,
+  unit_price_bhd, discount_bhd, line_total_bhd, stock_status, backorder, rule_ids jsonb.
+- `shop_order_events` — order_id FK, ts, actor, event (`created`, `status:<s>`), detail jsonb.
+- `discount_rules` — kind qty_tier|cart_value|coupon|bundle_price|salesman_offer, scope jsonb
+  {item_codes[], categories[], referral_codes[]}, min_qty, min_value_bhd, exactly one of pct_off / amount_off_bhd /
+  fixed_price_bhd, coupon_code UNIQUE, stackable, starts_at, ends_at, max_uses, uses, priority, is_active.
+- `shop_events` — funnel pings (view|item|add|checkout|order) with session_id, item_code, referral_code, src, hashed IP.
+- `catalog_stock_map` — manual `item_code → stock_item_name` override for the stock matcher.
+- `catalog_items` gained `moq` (default 1) and `pack_size`.
+Views: `v_catalog_stock_rows` (each latest-snapshot stock row → catalog code: manual map → product_aliases → longest
+normalised-prefix match), `v_catalog_stock` (qty per code — never exposed publicly), `v_shop_unpriced_stock`,
+`v_catalog_velocity` (30/90-day units, customers, from `v_sales.sku_code`), `v_catalog_pairs` (co-purchases, 180 d),
+`v_catalog_cost` (latest `mrn_landed_costs` per code; service role only), `v_shop_orders_agent` /
+`v_shop_order_lines_agent` (PII-free, granted to `yq_readonly`). Settings live in `app_settings` as `shop_*` keys.

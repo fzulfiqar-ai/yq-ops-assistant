@@ -57,8 +57,17 @@ VIEW_ALLOWLIST: frozenset[str] = frozenset({
     "v_sales_by_payment",
     "v_sales_by_division",
     "v_catalog",
+    "v_catalog_stock",
+    "v_catalog_velocity",
+    "v_catalog_pairs",
+    "v_shop_unpriced_stock",
+    "v_shop_orders_agent",
+    "v_shop_order_lines_agent",
     "leads",
     "v_price_tracker",
+    # Division split (Accessories vs SIM) — see scripts/division_split_migration.sql
+    "v_division_summary",
+    "v_item_division",
 })
 
 # Which feature page gates each PO view (procurement → Inventory).
@@ -83,7 +92,10 @@ VIEW_FEATURE: dict[str, str] = {
     "v_customer_ltv": "Sales",
     "v_receivables": "Receivables",
     "v_sales_by_payment": "Sales", "v_sales_by_division": "Sales",
-    "v_catalog": "Catalog", "leads": "Leads", "v_price_tracker": "Margins",
+    "v_catalog": "Catalog", "v_catalog_stock": "Catalog", "v_catalog_velocity": "Catalog",
+    "v_catalog_pairs": "Catalog", "v_shop_unpriced_stock": "Shop Admin",
+    "v_shop_orders_agent": "Shop Orders", "v_shop_order_lines_agent": "Shop Orders", "leads": "Leads", "v_price_tracker": "Margins",
+    "v_division_summary": "Inventory", "v_item_division": "Inventory",
 }
 
 MAX_ROWS = 200

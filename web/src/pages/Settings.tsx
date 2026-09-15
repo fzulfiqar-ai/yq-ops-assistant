@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator, Target, Bot } from 'lucide-react'
+import { Moon, Sun, ShieldCheck, User as UserIcon, KeyRound, Check, Loader2, Calculator, Target, Bot, Store } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
@@ -179,6 +179,114 @@ function TargetsCard() {
   )
 }
 
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button type="button" onClick={() => onChange(!checked)} className="flex items-center gap-2 text-sm font-medium">
+      <span className={cn('relative h-5 w-9 shrink-0 rounded-full transition-colors', checked ? 'bg-primary' : 'bg-muted')}>
+        <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4' : 'translate-x-0.5')} />
+      </span>
+      {label}
+    </button>
+  )
+}
+
+type ShopSettings = Record<string, string>
+type ShopFieldType = 'number' | 'text' | 'toggle' | 'select' | 'percent'
+interface ShopField { key: string; label: string; hint: string; type: ShopFieldType }
+
+const SHOP_FIELDS: ShopField[] = [
+  { key: 'shop_min_order_bhd', label: 'Minimum order (BHD)', hint: 'Smallest order value a customer can submit.', type: 'number' },
+  { key: 'shop_free_delivery_threshold_bhd', label: 'Free delivery threshold (BHD)', hint: 'Order value at which delivery becomes free.', type: 'number' },
+  { key: 'shop_low_stock_units', label: 'Low-stock units', hint: 'Units remaining at/below which an item shows "Only a few left."', type: 'number' },
+  { key: 'shop_low_stock_days_cover', label: 'Low-stock days cover', hint: 'Days of stock cover at/below which an item is flagged low stock.', type: 'number' },
+  { key: 'shop_min_margin_pct', label: 'Minimum margin', hint: 'Margin floor over landed cost — no rule or coupon can price below this.', type: 'percent' },
+  { key: 'shop_allow_backorder', label: 'Allow backorder', hint: 'Let customers order out-of-stock items; a salesman confirms the ETA.', type: 'toggle' },
+  { key: 'shop_show_retail_compare', label: 'Show retail compare-at price', hint: 'Show the retail price and savings badge next to the trade price.', type: 'toggle' },
+  { key: 'shop_social_proof_min_customers', label: 'Social proof minimum', hint: 'Minimum shops ordering an item this month before showing social proof.', type: 'number' },
+  { key: 'shop_default_salesman', label: 'Default salesman', hint: 'Credited for orders placed with no referral link.', type: 'select' },
+  { key: 'shop_order_prefix', label: 'Order number prefix', hint: 'e.g. YQ → order numbers look like YQ-2609-0001.', type: 'text' },
+  { key: 'shop_best_seller_top_n', label: 'Best-seller count', hint: 'How many top sellers get the "Best seller" badge.', type: 'number' },
+  { key: 'shop_trending_growth_pct', label: 'Trending growth %', hint: 'Sales growth that qualifies an item as "Trending."', type: 'number' },
+  { key: 'shop_new_days', label: 'New item window (days)', hint: 'Days since first sale that an item is tagged "New."', type: 'number' },
+]
+
+function ShopSettingsCard() {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const { data } = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const { data: salesmenData } = useQuery({
+    queryKey: ['shop-salesmen-names'],
+    queryFn: () => apiGet<{ salesmen: { name: string }[] }>('/shop/salesmen'),
+    staleTime: 5 * 60_000,
+  })
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const settings = data?.settings
+  const salesmenNames = (salesmenData?.salesmen || []).map((s) => s.name)
+
+  const save = useMutation({
+    mutationFn: () => apiSend<{ settings: ShopSettings }>('PUT', '/settings/shop', { settings: draft }),
+    onSuccess: () => { setDraft({}); qc.invalidateQueries({ queryKey: ['settings-shop'] }); toast('Shop settings saved.', 'success') },
+    onError: (e: Error) => toast(e.message, 'error'),
+  })
+
+  if (!settings) return null
+  const val = (k: string) => draft[k] ?? settings[k] ?? ''
+  const setVal = (k: string, v: string) => setDraft((d) => ({ ...d, [k]: v }))
+  const dirty = Object.keys(draft).length > 0
+
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+        <Store size={18} className="text-primary" /> Shop settings
+      </div>
+      <p className="mb-4 text-sm text-muted-foreground">
+        Rules the customer-facing catalog and ordering flow follow — minimum order, delivery, stock
+        thresholds and badge rules.
+      </p>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {SHOP_FIELDS.map((f) => (
+          <label key={f.key} className="block">
+            <span className="mb-1 block text-xs font-semibold text-muted-foreground">{f.label}</span>
+            {f.type === 'toggle' ? (
+              <div className="flex h-11 items-center">
+                <Toggle checked={val(f.key) === '1'} onChange={(v) => setVal(f.key, v ? '1' : '0')} label={val(f.key) === '1' ? 'On' : 'Off'} />
+              </div>
+            ) : f.type === 'select' ? (
+              <select
+                value={val(f.key)}
+                onChange={(e) => setVal(f.key, e.target.value)}
+                className="flex h-11 w-full rounded-lg border border-input bg-card px-3.5 text-sm text-foreground shadow-sm outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">— none —</option>
+                {salesmenNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            ) : f.type === 'percent' ? (
+              <div className="relative">
+                <Input
+                  inputMode="decimal"
+                  value={val(f.key) === '' ? '' : String(Number(val(f.key)) * 100)}
+                  onChange={(e) => {
+                    const n = parseFloat(e.target.value)
+                    setVal(f.key, Number.isNaN(n) ? '' : String(n / 100))
+                  }}
+                  className="pr-8"
+                />
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">%</span>
+              </div>
+            ) : (
+              <Input inputMode={f.type === 'number' ? 'decimal' : 'text'} value={val(f.key)} onChange={(e) => setVal(f.key, e.target.value)} />
+            )}
+            <span className="mt-0.5 block text-[11px] text-muted-foreground">{f.hint}</span>
+          </label>
+        ))}
+      </div>
+      <Button className="mt-4" onClick={() => save.mutate()} disabled={save.isPending || !dirty}>
+        {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save shop settings
+      </Button>
+    </Card>
+  )
+}
+
 export default function Settings() {
   const { me } = useAuth()
   const { theme, toggle } = useTheme()
@@ -230,6 +338,7 @@ export default function Settings() {
 
       {me?.role === 'admin' && <CostingCard />}
       {me?.role === 'admin' && <TargetsCard />}
+      {me?.role === 'admin' && <ShopSettingsCard />}
       {me?.role === 'admin' && <AgentScopeCard />}
 
       <Card className="mb-4 p-6">

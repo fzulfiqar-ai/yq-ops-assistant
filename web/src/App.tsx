@@ -31,6 +31,11 @@ const PublicCatalog = lazy(() => import('@/pages/PublicCatalog'))
 const PublicFinds = lazy(() => import('@/pages/PublicFinds'))
 const Marketing = lazy(() => import('@/pages/Marketing'))
 const OptOut = lazy(() => import('@/pages/OptOut'))
+const OrderStatus = lazy(() => import('@/pages/OrderStatus'))
+const ShopOrders = lazy(() => import('@/pages/ShopOrders'))
+const Salesmen = lazy(() => import('@/pages/Salesmen'))
+const ShopRules = lazy(() => import('@/pages/ShopRules'))
+const ShopAnalytics = lazy(() => import('@/pages/ShopAnalytics'))
 
 /** Land on the first page this user can see (a salesman goes straight to Catalog). */
 function Home() {
@@ -50,6 +55,7 @@ export default function App() {
         <Route path="/c/:token" element={<PublicCatalog />} />
         <Route path="/f/:token" element={<PublicFinds />} />
         <Route path="/optout/:token" element={<OptOut />} />
+        <Route path="/o/:orderToken" element={<OrderStatus />} />
 
         <Route element={<ProtectedRoute />}>
           <Route index element={<Home />} />
@@ -65,6 +71,10 @@ export default function App() {
           <Route path="orders/:poNo" element={<Gate feature="Orders"><OrderDetail /></Gate>} />
           <Route path="leads" element={<Gate feature="Leads"><Leads /></Gate>} />
           <Route path="marketing" element={<Gate feature="Marketing"><Marketing /></Gate>} />
+          <Route path="shop-orders" element={<Gate feature="Shop Orders"><ShopOrders /></Gate>} />
+          <Route path="salesmen" element={<Gate feature="Shop Admin"><Salesmen /></Gate>} />
+          <Route path="shop-rules" element={<Gate feature="Shop Admin"><ShopRules /></Gate>} />
+          <Route path="shop-analytics" element={<Gate feature="Shop Admin"><ShopAnalytics /></Gate>} />
           <Route path="coaching" element={<Gate feature="Sales"><Coaching /></Gate>} />
           <Route path="sales" element={<Gate feature="Sales"><Sales /></Gate>} />
           <Route path="margins" element={<Gate feature="Margins"><Margins /></Gate>} />

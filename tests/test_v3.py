@@ -109,7 +109,9 @@ def _():
     for f in ("Live Feed", "Orders", "Stock Movement", "Leads", "Catalog"):
         assert f in FEATURES, f"missing feature {f}"
     assert "salesman" in ROLES
-    assert ROLE_DEFAULT_FEATURES["salesman"] == ["Catalog"]
+    assert "Catalog" in ROLE_DEFAULT_FEATURES["salesman"] and "Shop Orders" in ROLE_DEFAULT_FEATURES["salesman"]
+    for f in ("Shop Orders", "Shop Admin"):
+        assert f in FEATURES, f"missing feature {f}"
     from app.user_auth import FEATURES as REEXP
     assert REEXP is FEATURES, "user_auth must re-export app.features.FEATURES"
 

@@ -32,6 +32,23 @@ export interface CatalogItem {
   sort_order?: number | null
   is_active?: boolean
   created_at?: string | null
+  stock_status?: 'in_stock' | 'low_stock' | 'out_of_stock' | null
+  moq?: number | null
+  pack_size?: number | null
+}
+
+const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Out of stock' }
+const STOCK_STYLE: Record<string, string> = {
+  in_stock: 'bg-emerald-100 text-emerald-700',
+  low_stock: 'bg-amber-100 text-amber-700',
+  out_of_stock: 'bg-rose-100 text-rose-700',
+}
+function StockPill({ status }: { status: string }) {
+  return (
+    <span className={cn('inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase', STOCK_STYLE[status] || 'bg-secondary text-muted-foreground')}>
+      {STOCK_LABEL[status] || status}
+    </span>
+  )
 }
 
 const isNewItem = (i: CatalogItem) =>
@@ -87,6 +104,7 @@ function ItemCard({ it, isAdmin, onEdit, onView }: {
           <span className="font-display text-sm font-bold">{it.item_code}</span>
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{it.brand || 'VFAN'}</span>
         </div>
+        {it.stock_status && <div className="mt-1"><StockPill status={it.stock_status} /></div>}
         {it.spec && (
           <button onClick={() => onView(it)}
             className="mt-0.5 line-clamp-2 whitespace-pre-line text-left text-[12px] leading-snug text-muted-foreground hover:text-foreground"
@@ -128,6 +146,7 @@ function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => voi
           <div>
             <div className="font-display text-lg font-bold">{item.item_code}</div>
             <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.brand || 'VFAN'} · {(item.category || '').toLowerCase()}</div>
+            {item.stock_status && <div className="mt-1"><StockPill status={item.stock_status} /></div>}
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
         </div>
@@ -173,6 +192,8 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
         dealer_price: f.dealer_price === undefined || f.dealer_price === null ? undefined : Number(f.dealer_price),
         roadshow_price: f.roadshow_price == null ? undefined : Number(f.roadshow_price),
         rrp: f.rrp == null ? undefined : Number(f.rrp),
+        moq: f.moq === undefined || f.moq === null ? undefined : Number(f.moq),
+        pack_size: f.pack_size === undefined || f.pack_size === null ? undefined : Number(f.pack_size),
       })
       toast(isNew ? 'Item added to the catalog.' : 'Item updated.', 'success')
       onSaved()
@@ -217,6 +238,12 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
             Prices are not edited here — B2B comes from the <b>MA price book</b> and B2C from the{' '}
             <b>Causeway &amp; Roadshow book</b> in your weekly pricing upload, automatically.
           </p>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">MOQ</span>
+              <Input inputMode="numeric" value={f.moq ?? ''} onChange={(e) => set('moq', e.target.value === '' ? null : Number(e.target.value))} placeholder="1" /></label>
+            <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Pack size</span>
+              <Input inputMode="numeric" value={f.pack_size ?? ''} onChange={(e) => set('pack_size', e.target.value === '' ? null : Number(e.target.value))} placeholder="e.g. 12" /></label>
+          </div>
           {!isNew && (
             <div className="grid grid-cols-2 gap-3">
               {(['product', 'package'] as const).map((kind) => (

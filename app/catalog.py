@@ -98,20 +98,39 @@ def upload_image(code: str, kind: str, data: bytes, content_type: str, by: str =
     get_client().table("catalog_items").update(
         {col: url, "updated_by": by, "updated_at": datetime.now(timezone.utc).isoformat()}
     ).eq("item_code", code).execute()
+    _shop_invalidate()
     return url
+
+
+def _shop_invalidate() -> None:
+    try:
+        from app.shop import invalidate
+        invalidate()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def list_catalog(include_inactive: bool = False, role: str = "admin") -> dict:
     """Catalog grouped for the portal page. Admin/member see all price tiers;
     the SALESMAN role gets ONLY the B2B price (standard_rate from the price book) —
     dealer/roadshow/RRP never leave the server for those accounts."""
-    where = "" if include_inactive else "WHERE is_active"
-    rows = exec_sql(
-        "SELECT item_code, display_name, spec, category, brand, division, dealer_price, "
-        "roadshow_price, rrp, standard_rate, b2c_rate, product_image_url, package_image_url, "
-        f"sort_order, is_active, created_at, updated_at FROM v_catalog {where} "
-        "ORDER BY category, sort_order NULLS LAST, item_code"
-    ) or []
+    where = "" if include_inactive else "WHERE v.is_active"
+    base = ("SELECT v.item_code, v.display_name, v.spec, v.category, v.brand, v.division, v.dealer_price, "
+            "v.roadshow_price, v.rrp, v.standard_rate, v.b2c_rate, v.product_image_url, v.package_image_url, "
+            "v.sort_order, v.is_active, v.created_at, v.updated_at")
+    order = f"{where} ORDER BY v.category, v.sort_order NULLS LAST, v.item_code"
+    try:
+        rows = exec_sql(base + ", ci.moq, ci.pack_size, s.stock_qty FROM v_catalog v "
+                        "JOIN catalog_items ci ON ci.item_code = v.item_code "
+                        "LEFT JOIN v_catalog_stock s ON s.item_code = v.item_code " + order) or []
+        from app.shop import shop_settings, stock_status_for
+        low = int(float(shop_settings().get("shop_low_stock_units", 10)))
+        for r in rows:
+            r["stock_status"] = stock_status_for(r.pop("stock_qty", None), low)
+            r["moq"] = int(r.get("moq") or 1)
+    except Exception as e:  # noqa: BLE001 — shop migration not applied yet → legacy columns only
+        log.warning("catalog stock join unavailable (%s) — legacy query", e)
+        rows = exec_sql(base + " FROM v_catalog v " + order) or []
     if role == "salesman":
         for r in rows:
             r.pop("dealer_price", None)
@@ -128,10 +147,15 @@ def upsert_item(payload: dict, by: str = "") -> dict:
         raise ValueError("item_code is required")
     fields = {k: payload.get(k) for k in (
         "display_name", "spec", "category", "brand", "division", "dealer_price",
-        "roadshow_price", "rrp", "sort_order", "is_active") if k in payload}
+        "roadshow_price", "rrp", "sort_order", "is_active", "moq", "pack_size") if k in payload}
+    if "moq" in fields:
+        fields["moq"] = max(int(fields.get("moq") or 1), 1)
+    if "pack_size" in fields:
+        fields["pack_size"] = int(fields["pack_size"]) if fields.get("pack_size") else None
     fields.update(item_code=code, updated_by=by,
                   updated_at=datetime.now(timezone.utc).isoformat())
     get_client().table("catalog_items").upsert(fields, on_conflict="item_code").execute()
+    _shop_invalidate()
     return {"ok": True, "item_code": code}
 
 

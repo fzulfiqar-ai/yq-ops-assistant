@@ -60,7 +60,27 @@ Build in **phases**. Do one phase, then **STOP** and tell the user exactly how t
 7. Reorganize by **copy**, never move. Originals are deleted by the user after verifying a
    clean import.
 
+## Database migrations — read docs/MIGRATIONS.md before touching any view
+`scripts/views.sql` is a GENERATED, bootstrap-only baseline for an empty database. Never apply it
+to the live DB — five of its views are superseded by `scripts/*_migration.sql`. Three
+(`v_sales`, `v_receivables`, `v_low_stock`) fail loudly if re-applied; **`v_current_stock` and
+`v_product_margin` regress SILENTLY** (identical columns, different source/filter — the old stock
+basis was ~8.6× overstated). It carries a guard that refuses to run against a migrated DB, but
+the guard cannot protect a copy-pasted fragment. To change a view, edit its canonical migration file
+(see the ownership table in `docs/MIGRATIONS.md`). Never add `CASCADE` to a `DROP VIEW` to clear
+a dependency error — that deletes the enriched views. Edit `VIEWS_SQL` in
+`scripts/migrate_views.py`, never `scripts/views.sql` directly.
+
 ## Data freshness (no Focus API)
 Focus ERP (FocusX) has no API. Data comes from Excel exports dropped into `Focus ERP Data/`.
 v1 = manual export + `scripts/ingest.py`. Phase 3 = n8n email-to-ingest or watched-folder.
 True real-time would need a read-only SQL link to the Focus DB (needs IT) — roadmap only.
+
+## YQ Shop (15-Sep-2026)
+The public catalog link `/c/{token}` is an ordering system: `app/shop.py` (payload, ONE pricing engine for quote+order,
+orders, salesmen, discount rules, margins, analytics), `app/shop_notify.py`, `app/shop_api.py` (routes registered from
+main.py), `scripts/shop_migration.sql`, `tests/test_shop.py`, `web/src/pages/shop/*`. Contract + setup: `docs/SHOP.md`.
+Rules: never expose stock quantities or costs (status only); no business numbers in code (`app_settings` `shop_*` keys);
+the shop never mutates stock (Focus is the system of record); salesman contact details are never committed (public repo).
+Owner prices come from the price book only — to load the owner's workbook prices use `scripts/import_workbook_prices.py`
+(adds dated dealer rows; never overwrites).

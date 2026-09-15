@@ -40,3 +40,4 @@ pillow            # ad cards
 numpy             # app/video_gen.py alpha-matting (also a pandas dep, pinned here
                   # because video_gen imports it directly)
 edge-tts          # reel voiceover (ffmpeg does the video muxing)
+segno             # QR codes for salesman referral links (app/shop.py)

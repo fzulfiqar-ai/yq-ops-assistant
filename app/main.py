@@ -15,6 +15,8 @@ Endpoints:
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -1068,6 +1070,27 @@ def stock_transfers(days: int = 30, warehouse: str | None = None,
     return {"transfers": rows, "count": len(rows)}
 
 
+@app.get("/divisions")
+def divisions(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dict:
+    """Accessories vs SIM, side by side: stock value, revenue, and months of cover.
+
+    The SIM/Batelco starter-pack stock is OWNED, not consignment, and it is the majority of
+    the stock book against a very small share of revenue. Agents drop it when
+    app_settings.agent_exclude_sim is on (the default) while the Dashboard counts it, so this
+    endpoint exists to make the gap explicit instead of leaving two screens disagreeing.
+    All figures come from v_division_summary; none is hardcoded.
+    """
+    from app.reports import division_summary
+    rows = division_summary() or []
+    return {
+        "divisions": rows,
+        "count": len(rows),
+        "basis": "Stock at Focus selling rate (stock_balance.total_value_bhd); "
+                 "revenue is gross, VAT-inclusive. months_of_cover = this division's stock "
+                 "value / its own average monthly revenue over the loaded data span.",
+    }
+
+
 @app.get("/stock/recon")
 def stock_recon(_user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
     """Per-van reconciliation: transferred in vs sold vs on-hand, with shortage flags."""
@@ -1296,7 +1319,12 @@ def catalog_public(request: Request, token: str) -> dict:
     """No-auth customer catalog: item + photos + trade (B2B) price. Token-gated, rate-limited."""
     from fastapi import HTTPException
     from app.catalog import public_catalog
-    r = public_catalog(token)
+    try:
+        from app.shop import catalog_payload
+        r = catalog_payload(token, referral_code=request.query_params.get("ref"))
+    except Exception as e:  # noqa: BLE001 — shop views not migrated yet → legacy payload
+        logging.getLogger(__name__).warning("shop payload failed, serving legacy catalog: %s", e)
+        r = public_catalog(token)
     if r is None:
         raise HTTPException(status_code=404, detail="Invalid catalog link.")
     # "Order on WhatsApp" CTA — the owner's number (assist mode), digits for wa.me
@@ -2044,3 +2072,9 @@ async def meta_webhook(request: Request) -> dict:
         return {"ok": False}
     from app.social_publish import handle_meta_webhook
     return {"ok": True, **handle_meta_webhook(payload)}
+
+
+# ── Shop (shareable ordering catalog) — routes live in app/shop_api.py ─────────
+from app.shop_api import register as _register_shop  # noqa: E402
+
+_register_shop(app, limiter)

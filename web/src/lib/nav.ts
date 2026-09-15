@@ -18,6 +18,10 @@ import {
   ArrowLeftRight,
   LineChart,
   Megaphone,
+  ClipboardList,
+  UserRoundCheck,
+  BadgePercent,
+  BarChart3,
   type LucideIcon,
 } from 'lucide-react'
 import type { Me } from './auth'
@@ -42,6 +46,7 @@ export const NAV: NavItem[] = [
   { section: 'Sell', label: 'Product Finds', to: '/finds', icon: Sparkles, feature: 'Product Finds' },
   { section: 'Sell', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads' },
   { section: 'Sell', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing' },
+  { section: 'Sell', label: 'Shop Orders', to: '/shop-orders', icon: ClipboardList, feature: 'Shop Orders' },
   { section: 'Sell', label: 'Coach', to: '/coaching', icon: MessageSquareQuote, feature: 'Sales' },
   { section: 'Supply', label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
   { section: 'Supply', label: 'Stock Moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },
@@ -49,6 +54,9 @@ export const NAV: NavItem[] = [
   { section: 'Money', label: 'Profitability', to: '/margins', icon: Percent, feature: 'Margins' },
   { section: 'Money', label: 'Price Tracker', to: '/prices', icon: LineChart, feature: 'Margins' },
   { section: 'Money', label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
+  { section: 'Admin', label: 'Salesmen', to: '/salesmen', icon: UserRoundCheck, feature: 'Shop Admin' },
+  { section: 'Admin', label: 'Offers & Rules', to: '/shop-rules', icon: BadgePercent, feature: 'Shop Admin' },
+  { section: 'Admin', label: 'Shop Analytics', to: '/shop-analytics', icon: BarChart3, feature: 'Shop Admin' },
   { section: 'Admin', label: 'Data', to: '/data', icon: Database }, // admin-only
   { section: 'Admin', label: 'Team', to: '/team', icon: Users }, // admin-only
 ]
