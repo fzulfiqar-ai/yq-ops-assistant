@@ -915,13 +915,15 @@ def _salesman_by_id(sid) -> dict | None:
 
 def public_order_view(o: dict) -> dict:
     """What the customer's status page may see (no phone/email/ip of anyone)."""
-    from app.shop_notify import customer_to_salesman_wa_url
+    from app.shop_notify import customer_to_salesman_email_url, customer_to_salesman_wa_url
     sm = o.get("salesman") or {}
     wa = customer_to_salesman_wa_url(o)   # falls back to the owner number when no salesman is set
+    mail = customer_to_salesman_email_url(o)
     return {
         "order_no": o["order_no"], "status": o["status"],
         "created_at": o.get("created_at"), "updated_at": o.get("updated_at"),
-        "salesman": ({"name": sm.get("name") or "YQ Bahrain", "whatsapp_url": wa} if (sm or wa) else None),
+        "salesman": ({"name": sm.get("name") or "YQ Bahrain", "whatsapp_url": wa, "email_url": mail}
+                     if (sm or wa) else None),
         "customer": {"name": o.get("customer_name"), "shop": o.get("customer_shop"), "area": o.get("customer_area")},
         "lines": [{"item_code": ln["item_code"], "display_name": ln.get("display_name"), "qty": ln["qty"],
                    "unit_price_bhd": money(ln["unit_price_bhd"]), "line_total_bhd": money(ln["line_total_bhd"]),

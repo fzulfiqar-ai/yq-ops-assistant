@@ -198,6 +198,8 @@ export interface OrderResponse {
   status_url?: string | null
   salesman?: { name?: string | null; phone?: string | null } | null
   whatsapp_url?: string | null
+  /** mailto: link, pre-filled with the salesman's address and the whole order (no provider needed) */
+  email_url?: string | null
   totals?: Quote | null
   has_backorder?: boolean | null
 }
@@ -227,7 +229,7 @@ export interface OrderStatusPayload {
   status?: OrderState | string | null
   created_at?: string | null
   updated_at?: string | null
-  salesman?: { name?: string | null; whatsapp_url?: string | null } | null
+  salesman?: { name?: string | null; whatsapp_url?: string | null; email_url?: string | null } | null
   customer?: { name?: string | null; shop?: string | null; area?: string | null } | null
   lines?: OrderStatusLine[] | null
   subtotal_bhd?: number | null

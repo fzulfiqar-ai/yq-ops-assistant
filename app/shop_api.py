@@ -150,6 +150,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return {
             "ok": True, "order_no": o["order_no"], "token": o["token"], "status_url": o["status_url"],
             "salesman": contact, "whatsapp_url": shop_notify.customer_to_salesman_wa_url(o),
+            "email_url": shop_notify.customer_to_salesman_email_url(o),
             "totals": o["totals"], "has_backorder": bool(o.get("has_backorder")),
         }
 

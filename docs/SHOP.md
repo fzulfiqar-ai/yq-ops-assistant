@@ -100,6 +100,7 @@ Response:
 { "ok": true, "order_no": "YQ-2609-0001", "token": "…", "status_url": "https://…/o/{token}",
   "salesman": { "name": "Furqan Ahmed", "phone": "97337158552" },   // owner contact when no salesman resolved
   "whatsapp_url": "https://wa.me/97337158552?text=…",   // customer taps to send the order summary to the salesman
+  "email_url": "mailto:rep@pie-int.com?subject=…&body=…",  // same, by email; null when the salesman has no email on file
   "totals": { …quote shape… }, "has_backorder": false }
 ```
 Rate limit 5/min per IP. Server re-prices and re-checks stock; the client's totals are never used.
@@ -109,7 +110,8 @@ Salesman routing: `?ref=` link → dropdown `salesman_id` → `shop_default_sale
 ```jsonc
 { "order_no": "YQ-2609-0001", "status": "new|confirmed|packed|delivered|cancelled",
   "created_at": "…", "updated_at": "…",
-  "salesman": { "name": "Furqan Ahmed", "whatsapp_url": "https://wa.me/…?text=…" } | null,
+  "salesman": { "name": "Furqan Ahmed", "whatsapp_url": "https://wa.me/…?text=…",
+                "email_url": "mailto:…?subject=…&body=…" | null } | null,
   "customer": { "name": "Ali", "shop": "Ali Mobiles", "area": "Manama" },
   "lines": [{ "item_code": "T02", "display_name": "T02", "qty": 12, "unit_price_bhd": 2.7, "line_total_bhd": 32.4,
               "stock_status": "in_stock", "backorder": false, "image_url": "…" }],
@@ -164,6 +166,16 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
   shop_trending_growth_pct, shop_trending_min_units, shop_new_days } }` (all strings; booleans are "1"/"0");
   `PUT /settings/shop` body `{ "settings": {…partial} }` (admin).
 - `GET /catalog` items now also carry `stock_status`, `moq`, `pack_size`; `POST /catalog/item` accepts `moq`, `pack_size`.
+
+## How a salesman hears about an order (three independent paths)
+1. **The Shop Orders page** — the order is written to the database the moment it is submitted, so it is
+   visible in the portal even if every message below fails. Nothing depends on a notification.
+2. **The customer's own tap** — the success screen and the status page offer a WhatsApp link and a
+   `mailto:` link, both pre-filled with the salesman's address/number and the whole order. These need no
+   keys and work today; the send comes from the customer's own device, so the salesman can reply directly.
+3. **Automatic server email/Telegram** (`app/shop_notify.py`) — fires by itself, with no customer action,
+   as soon as an email provider (`RESEND_API_KEY` or SMTP) or `TELEGRAM_BOT_TOKEN` is set on the host. This
+   is the only path that still reaches the salesman when the customer closes the tab without tapping anything.
 
 ## Setup
 1. Apply `scripts/shop_migration.sql` (`python -m scripts.apply_sql scripts/shop_migration.sql`, needs `DATABASE_URL`

@@ -86,6 +86,23 @@ def customer_to_salesman_wa_url(o: dict) -> str | None:
     return wa_url(number, order_text(o, audience="customer"))
 
 
+def customer_to_salesman_email_url(o: dict) -> str | None:
+    """A mailto: link the CUSTOMER taps — opens their own mail app with the salesman's
+    address, subject and the full order already filled in. Costs nothing and needs no
+    provider key (the same 'the human's tap IS the send' rule as the wa.me link).
+    None when the salesman has no email on file — we never expose any other address here."""
+    sm = o.get("salesman") or {}
+    to = (sm.get("email") or "").strip()
+    if not to or "@" not in to:
+        return None
+    shop = o.get("customer_shop") or o.get("customer_name") or ""
+    subject = f"Order {o.get('order_no')}" + (f" - {shop}" if shop else "")
+    body = (order_text(o, audience="customer")
+            .replace("•", "-").replace("×", "x").replace("→", "->"))
+    q = urllib.parse.quote
+    return f"mailto:{q(to, safe='@')}?subject={q(subject)}&body={q(body)}"
+
+
 def salesman_to_customer_wa_url(o: dict, status: str | None = None) -> str | None:
     """Prefilled message the salesman taps to update the customer."""
     name = (o.get("customer_name") or "").split(" ")[0] or "there"

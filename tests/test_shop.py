@@ -249,6 +249,27 @@ def _():
     assert url is None or url.startswith("https://wa.me/")
 
 
+@test("notify: pre-filled mailto to the salesman (no provider key needed)")
+def _():
+    import urllib.parse as u
+    from app.shop_notify import customer_to_salesman_email_url
+    o = {"order_no": "YQ-2609-0009", "token": "tok", "customer_name": "Ali Hassan", "customer_shop": "Ali Mobiles",
+         "customer_phone": "97333001122", "total_bhd": 29.1, "units_count": 18, "discount_bhd": 0, "delivery_bhd": 0,
+         "lines": [{"item_code": "T02", "qty": 6, "unit_price_bhd": 2.95, "line_total_bhd": 17.7}],
+         "salesman": {"name": "Furqan Ahmed", "email": "rep@example.com"}}
+    url = customer_to_salesman_email_url(o)
+    assert url.startswith("mailto:rep@example.com?"), url
+    q = u.parse_qs(u.urlparse(url).query)
+    assert q["subject"][0] == "Order YQ-2609-0009 - Ali Mobiles", q["subject"]
+    body = q["body"][0]
+    assert "T02" in body and "BHD 29.100" in body and body.isascii(), body
+    # never invent a recipient: no salesman email -> no link at all
+    o["salesman"] = {"name": "No Email Rep"}
+    assert customer_to_salesman_email_url(o) is None
+    o["salesman"] = None
+    assert customer_to_salesman_email_url(o) is None
+
+
 @test("payload: no quantity or cost ever leaves via the public item shape")
 def _():
     from app.shop import catalog_payload  # noqa: F401  (import only — live shape checked below)

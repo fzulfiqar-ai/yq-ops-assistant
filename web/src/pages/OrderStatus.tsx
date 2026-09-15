@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Check, CircleSlash, MessageCircle } from 'lucide-react'
+import { Check, CircleSlash, Mail, MessageCircle } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
@@ -165,7 +165,15 @@ export default function OrderStatus() {
                   <MessageCircle size={17} aria-hidden="true" /> Message {data.salesman.name || 'your salesman'} on WhatsApp
                 </a>
               )}
-              {data.salesman?.name && !data.salesman.whatsapp_url && (
+              {data.salesman?.email_url && (
+                <a
+                  href={data.salesman.email_url}
+                  className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#d9d2ee] bg-white text-[13px] font-semibold text-[#1a1430] transition hover:bg-[#f7f5fb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9]"
+                >
+                  <Mail size={16} aria-hidden="true" /> Email {data.salesman.name || 'your salesman'}
+                </a>
+              )}
+              {data.salesman?.name && !data.salesman.whatsapp_url && !data.salesman.email_url && (
                 <p className="mt-4 text-[12px] text-[#6b6480]">
                   Your salesman: <b className="font-semibold text-[#1a1430]">{data.salesman.name}</b>
                 </p>

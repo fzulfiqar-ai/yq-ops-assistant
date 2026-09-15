@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCircle2, Copy, MessageCircle, Receipt } from 'lucide-react'
+import { ArrowRight, CheckCircle2, Copy, Mail, MessageCircle, Receipt } from 'lucide-react'
 import { useToast } from '@/components/Toast'
 import { Logo } from '@/components/Logo'
 import type { OrderResponse } from '@/lib/shopApi'
@@ -72,6 +72,15 @@ export function OrderSuccess({ order, onContinue }: OrderSuccessProps) {
             >
               <MessageCircle size={17} aria-hidden="true" /> Send order to {order.salesman?.name || 'your salesman'} on
               WhatsApp
+            </a>
+          )}
+
+          {order.email_url && (
+            <a
+              href={order.email_url}
+              className="mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-[#d9d2ee] bg-white text-[13.5px] font-semibold text-[#1a1430] transition hover:bg-[#f7f5fb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9] focus-visible:ring-offset-2"
+            >
+              <Mail size={16} aria-hidden="true" /> Email the order to {order.salesman?.name || 'your salesman'}
             </a>
           )}
 
