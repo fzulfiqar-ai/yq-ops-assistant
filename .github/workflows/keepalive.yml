@@ -27,10 +27,13 @@
 # repo goes quiet for two months, this file stops running and Supabase pauses again. Push
 # something, or check the Actions tab, before that clock runs out.
 #
-# SETUP: needs two repository secrets — Settings -> Secrets and variables -> Actions:
+# SETUP: needs two repository secrets — Settings -> Secrets and variables -> Actions.
+# Both were added 15-Sep-2026; names are case-sensitive and must match exactly:
 #   SUPABASE_URL       https://<ref>.supabase.co
 #   SUPABASE_ANON_KEY  the publishable/anon key (the one already shipped in the web bundle;
 #                      NEVER the sb_secret service-role key — this repo is public)
+# If either is missing or misspelled the Supabase step fails loudly rather than silently
+# letting the project drift toward its 7-day pause — that silence was the original bug.
 name: keepalive
 
 on:
