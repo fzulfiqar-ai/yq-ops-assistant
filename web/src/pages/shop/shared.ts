@@ -68,7 +68,7 @@ export function badgeMeta(kind: string) {
 export const STOCK_META: Record<StockStatus, { label: string; tone: BadgeTone }> = {
   in_stock: { label: 'In stock', tone: 'green' },
   low_stock: { label: 'Only a few left', tone: 'amber' },
-  out_of_stock: { label: 'Out of stock', tone: 'grey' },
+  out_of_stock: { label: 'Sold out', tone: 'grey' },
 }
 
 export function stockMeta(status?: StockStatus | null) {
@@ -87,7 +87,7 @@ export function stockPill(item?: ShopItem | null): { label: string; tone: BadgeT
   const qty = item?.stock_qty
   const status = item?.stock_status
   if (typeof qty !== 'number' || !Number.isFinite(qty)) return stockMeta(status)
-  if (qty <= 0 || status === 'out_of_stock') return { label: 'Out of stock', tone: 'grey' }
+  if (qty <= 0 || status === 'out_of_stock') return { label: 'Sold out', tone: 'grey' }
   if (status === 'low_stock') return { label: `Only ${qty} left`, tone: 'amber' }
   return { label: `${qty} in stock`, tone: 'green' }
 }

@@ -105,7 +105,7 @@ function StatusPill({ status }: { status: string }) {
   return <Badge tone={STATUS_TONE[status] || 'grey'} className="uppercase tracking-wide">{status}</Badge>
 }
 
-const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Out of stock' }
+const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Sold out' }
 const STOCK_TONE: Record<string, BadgeTone> = { in_stock: 'green', low_stock: 'amber', out_of_stock: 'rose' }
 function StockPill({ status }: { status: string }) {
   return <Badge tone={STOCK_TONE[status] || 'grey'}>{STOCK_LABEL[status] || status}</Badge>

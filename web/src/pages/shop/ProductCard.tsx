@@ -173,7 +173,7 @@ export function ProductCard({
                     <Plus size={15} aria-hidden="true" /> {out ? 'Backorder' : 'Add'}
                   </>
                 ) : (
-                  'Out of stock'
+                  'Sold out'
                 )}
               </button>
             )}

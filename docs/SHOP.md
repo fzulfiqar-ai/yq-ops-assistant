@@ -39,7 +39,6 @@ Backward compatible with the old payload (all old keys kept). New keys:
 {
   "company": "YQ Bahrain", "brand": "VFAN",
   "prices_updated": "2026-09-06", "stock_as_of": "2026-09-14",
-  "whatsapp": "97337497693",                       // owner number — fallback CTA
   "categories": ["CABLE", "CHARGER", ...],
   "items": [{
     "item_code": "T02", "display_name": "T02", "spec": "T02 Aipord ...", "category": "BLUETOOTH HEADSET", "brand": "VFAN",
@@ -85,7 +84,9 @@ Returns the priced cart (the same shape is embedded in the order response as `to
   "block_reason": null                                  // human-readable reason when can_submit is false
 }
 ```
-Errors: `400 {"detail": "..."}` (unknown item, qty below MOQ, out of stock when backorder is off, …).
+Errors: `400 {"detail": "..."}` for a malformed or empty cart only. A line that cannot be ordered (unknown item,
+qty below MOQ, out of stock with backorder off, no price) comes back in `lines[]` with `unavailable: true` and a
+`blocked_reason`, priced at zero and left out of the totals — see "Catalog hygiene and dead cart lines" below.
 
 ### `POST /public/shop/{token}/order`
 Body:
@@ -208,3 +209,23 @@ Salesman default features are `Catalog` + `Shop Orders`; logins are created from
 4. Render env: an email provider (`RESEND_API_KEY` or SMTP), `ALERT_EMAIL_TO` (owner copy), optional Telegram, `APP_BASE_URL`.
 5. Grant salesmen the **Shop Orders** feature (Team page) and link their login on the Salesmen page (`user_email`).
 6. `python -m tests.test_shop` — pricing engine + live checks.
+
+## Catalog hygiene and dead cart lines (15-Sep-2026)
+
+- **Hidden SKUs.** `catalog_items.hidden = true` keeps a SKU in the item master and the price-book mirror but out of
+  both catalogs (public link and salesman app). Used for the three display stands. Do not use `is_active` for this:
+  the auto-sync mirrors `is_active` from the price book and would switch it back on at the next upload.
+- **Categories.** One vocabulary, in shelf order: `app.catalog.CATEGORY_ORDER` (CABLE, CHARGER, CAR CHARGER,
+  POWER BANK, EARPHONE, BLUETOOTH HEADSET, BLUETOOTH SPEAKER, CAR ACCESSORIES). New SKUs from the price book are
+  filed by `app.catalog.classify_category(code, name, spec)`; the book's own category column is only the fallback.
+  The shop payload lists items in this order.
+- **No company phone number** in either catalog payload (the `whatsapp` key is gone). The merchant reaches his
+  own salesman from the order confirmation.
+- **Item codes are case-insensitive on input.** The catalog stores the book's spelling (`X05 UL-1Mtr`); quote,
+  order and share lookups go through `shop.resolve_code()`. Before this, 23 mixed-case SKUs could not be ordered.
+- **A line that cannot be ordered no longer fails the whole quote.** `POST …/quote` returns it in `lines[]` with
+  `unavailable: true`, `blocked_reason` (`No longer in the catalog.`, `Price on request — ask your salesman.`,
+  `Sold out.` when backorders are off, `Minimum order is N.`) and zero prices. Totals, `items` and `units`
+  cover the orderable lines only. `can_submit` is false and `block_reason` says what to do next, in this order:
+  remove the dead line(s), then reach the minimum order. `POST …/order` refuses with that same `block_reason`.
+  An empty cart is still a 400.

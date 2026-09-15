@@ -150,30 +150,72 @@ def _():
     assert q["discount_bhd"] == 3.2 and q["total_bhd"] == 16.8, q
 
 
-@test("pricing: backorder flag with allow_backorder, rejection without")
+@test("pricing: backorder flag with allow_backorder, blocked line without")
 def _():
-    from app.shop import ShopError, price_cart
+    from app.shop import price_cart
     q = price_cart([{"item_code": "T02", "qty": 1}], ctx=_ctx([_item("T02", 2.95, stock=0)]))
     assert q["lines"][0]["backorder"] and q["has_backorder"] and q["warnings"]
-    try:
-        price_cart([{"item_code": "T02", "qty": 1}], ctx=_ctx([_item("T02", 2.95, stock=0)], shop_allow_backorder="0"))
-        raise AssertionError("expected ShopError")
-    except ShopError as e:
-        assert "out of stock" in str(e)
+    ctx = _ctx([_item("T02", 2.95, stock=0), _item("X01", 1.0)], shop_allow_backorder="0")
+    q = price_cart([{"item_code": "T02", "qty": 1}, {"item_code": "X01", "qty": 2}], ctx=ctx)
+    t02 = next(ln for ln in q["lines"] if ln["item_code"] == "T02")
+    assert t02["unavailable"] and "sold out" in t02["blocked_reason"].lower(), t02
+    assert q["total_bhd"] == 2.0 and q["items"] == 1 and not q["can_submit"], q
+    assert "T02" in q["block_reason"], q["block_reason"]
 
 
-@test("pricing: MOQ, unknown item, empty cart, merged duplicate lines")
+@test("pricing: MOQ and unknown items block their own line, empty cart raises, duplicates merge")
 def _():
     from app.shop import ShopError, price_cart
-    ctx = _ctx([_item("T02", 2.95, moq=6)])
-    for bad in ([{"item_code": "T02", "qty": 4}], [{"item_code": "ZZ", "qty": 1}], []):
-        try:
-            price_cart(bad, ctx=ctx)
-            raise AssertionError(f"expected ShopError for {bad}")
-        except ShopError:
-            pass
+    ctx = _ctx([_item("T02", 2.95, moq=6), _item("X01", 1.0)])
+    q = price_cart([{"item_code": "T02", "qty": 4}, {"item_code": "X01", "qty": 1}], ctx=ctx)
+    assert q["lines"][0]["unavailable"] and "6" in q["lines"][0]["blocked_reason"], q["lines"][0]
+    assert q["total_bhd"] == 1.0 and not q["can_submit"], q
+    q = price_cart([{"item_code": "ZZ", "qty": 1}, {"item_code": "X01", "qty": 3}], ctx=ctx)
+    assert q["lines"][0]["unavailable"] and q["lines"][0]["item_code"] == "ZZ", q["lines"][0]
+    assert q["subtotal_bhd"] == 3.0 and q["total_bhd"] == 3.0 and q["units"] == 3 and not q["can_submit"], q
+    try:
+        price_cart([], ctx=ctx)
+        raise AssertionError("expected ShopError for an empty cart")
+    except ShopError:
+        pass
     q = price_cart([{"item_code": "t02", "qty": 3}, {"item_code": "T02", "qty": 3}], ctx=ctx)
-    assert q["lines"][0]["qty"] == 6 and q["items"] == 1 and q["units"] == 6
+    assert q["lines"][0]["qty"] == 6 and q["items"] == 1 and q["units"] == 6 and q["can_submit"]
+
+
+@test("pricing: mixed-case catalog codes price whatever case the cart sends")
+def _():
+    from app.shop import price_cart
+    ctx = _ctx([_item("X05 UL-1Mtr", 0.4), _item("P04 2mtr", 1.2)])
+    q = price_cart([{"item_code": "X05 UL-1Mtr", "qty": 2}, {"item_code": "p04 2MTR", "qty": 1}], ctx=ctx)
+    assert q["can_submit"] and q["total_bhd"] == 2.0, q
+    assert [ln["item_code"] for ln in q["lines"]] == ["X05 UL-1Mtr", "P04 2mtr"], q["lines"]
+    assert not any(ln["unavailable"] for ln in q["lines"])
+
+
+@test("catalog: classifier files every live SKU shape into the fixed vocabulary")
+def _():
+    from app.catalog import CATEGORY_ORDER, classify_category
+    cases = {
+        ("BS06", "BS06 BT Speaker Wireless Distance 10mtr + Battery 1200mah"): "BLUETOOTH SPEAKER",
+        ("K105", "K105 PB 10000mah Slim Power Bank"): "POWER BANK",
+        ("C12", "C12 Kirsitre Car Charger (USB 22.5W + Type-C 20W Port)"): "CAR CHARGER",
+        ("H09", "H09 AC Vent Mobile Phone Holder (VFAN)"): "CAR ACCESSORIES",
+        ("T16", "T16 Round the Ear Ring design Aipords (VFAN)"): "BLUETOOTH HEADSET",
+        ("T11", "T11 In-Ear MINI Airpord Type-C Port"): "BLUETOOTH HEADSET",
+        ("T17", "BT version:  V6.0 Transmission range: 10m"): "BLUETOOTH HEADSET",
+        ("M20", "M20 Type-C Jack Flat In-Ear Phones (VFAN)"): "EARPHONE",
+        ("UK10 C", "UK10 C 20W Charger + Type-C Cable (USB + Type-C Port)"): "CHARGER",
+        ("W01", "W01 15W 1Mtr Aluminium Alloy+PVC Wireless Charger"): "CHARGER",
+        ("TB-D9", "TB-D9 1mtr Mix Cables + HFs + AUX (VFAN)"): "CABLE",
+        ("X26-C", "X26-C C to C (100W)"): "CABLE",
+        ("X27-C", "X27-C C to C (100W) (LED Display)"): "CABLE",
+        ("X18", "X18 Multi Converter Cale (VFAN)"): "CABLE",
+        ("Big Product Display", "Big Product Display 1095*417*250MM"): "MISCELLANEOUS",
+    }
+    for parts, want in cases.items():
+        got = classify_category(*parts)
+        assert got == want, (parts, got, want)
+        assert got in CATEGORY_ORDER or got == "MISCELLANEOUS"
 
 
 @test("pricing: free-delivery threshold, delivery fee, minimum order")
@@ -314,8 +356,12 @@ def _():
     r = TestClient(m.app).get(f"/public/catalog/{tok}")
     assert r.status_code == 200, r.text[:200]
     d = r.json()
-    for k in ("items", "categories", "company", "prices_updated", "whatsapp", "salesmen", "offers", "settings"):
+    for k in ("items", "categories", "company", "prices_updated", "salesmen", "offers", "settings"):
         assert k in d, k
+    # owner, 15-Sep-2026: no company phone number on the public catalog
+    assert "whatsapp" not in d, "the public catalog must not publish a WhatsApp number"
+    assert "OTHER" not in (d.get("categories") or []), d.get("categories")
+    assert not any("display" in str(i["item_code"]).lower() for i in d["items"]), "display stands are hidden"
     it = d["items"][0]
     for k in ("item_code", "price_bhd", "b2c_bhd", "product_image_url", "stock_status", "moq", "tiers", "badges"):
         assert k in it, k

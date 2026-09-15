@@ -183,7 +183,13 @@ def invalidate() -> None:
 
 
 def _load_items() -> list[dict]:
-    return exec_sql(
+    """Every sellable SKU, in the order a customer browses them.
+
+    `ci.hidden` is the owner's "not a product" switch (display stands, samples):
+    the row stays in the item master and in the price-book mirror, it just never
+    reaches a catalog. The shelf order is CATEGORY_ORDER, not the alphabet — the
+    volume lines lead, accessories trail."""
+    rows = exec_sql(
         "SELECT c.item_code, c.display_name, c.spec, c.category, c.brand, c.standard_rate, c.b2c_rate, "
         "c.product_image_url, c.package_image_url, c.sort_order, c.created_at::text AS created_at, "
         "ci.moq, ci.pack_size, s.stock_qty, s.as_of_date::text AS stock_as_of, "
@@ -192,9 +198,13 @@ def _load_items() -> list[dict]:
         "JOIN catalog_items ci ON ci.item_code = c.item_code "
         "LEFT JOIN v_catalog_stock s ON s.item_code = c.item_code "
         "LEFT JOIN v_catalog_velocity v ON v.item_code = c.item_code "
-        "WHERE c.is_active "
+        "WHERE c.is_active AND NOT COALESCE(ci.hidden, false) "
         "ORDER BY c.category, c.sort_order NULLS LAST, c.item_code"
     ) or []
+    rows.sort(key=lambda r: (CATEGORY_ORDER.index(r["category"]) if r.get("category") in CATEGORY_ORDER else 99,
+                             str(r.get("category") or ""),
+                             _i(r.get("sort_order"), 10 ** 6), str(r["item_code"])))
+    return rows
 
 
 def _load_costs() -> dict[str, float]:
@@ -289,9 +299,20 @@ def context(force: bool = False) -> dict:
         "salesmen": _load_salesmen(),
         "loaded_at": _iso(),
     }
+    # Item codes are stored exactly as the price book spells them ("X05 UL-1Mtr"),
+    # so every lookup that starts from user input goes through this index.
+    ctx["by_upper"] = {code.upper(): code for code in ctx["order"]}
     ctx["pairs"] = _load_pairs(set(ctx["order"]))
     _ctx_cache.update(at=now, ctx=ctx)
     return ctx
+
+
+def resolve_code(ctx: dict, raw) -> str | None:
+    """The catalog's own spelling of an item code, whatever case it arrives in."""
+    idx = ctx.get("by_upper")
+    if idx is None:     # a hand-built context (tests, scripts) — index it once
+        idx = ctx["by_upper"] = {str(code).upper(): code for code in ctx["items"]}
+    return idx.get(str(raw or "").strip().upper())
 
 
 # ── rule matching ─────────────────────────────────────────────────────────────
@@ -514,22 +535,26 @@ def _floor_for(ctx: dict, code: str) -> float | None:
 
 
 def normalize_lines(raw_lines) -> list[tuple[str, int]]:
+    """(item_code, qty) pairs, deduplicated. The code keeps the spelling it arrived
+    with — the catalog's own casing is restored later by resolve_code(), so a cart
+    holding "X05 UL-1Mtr" prices exactly like one holding "x05 ul-1mtr"."""
     if not isinstance(raw_lines, list) or not raw_lines:
         raise ShopError("Your cart is empty.")
     if len(raw_lines) > MAX_LINES:
         raise ShopError(f"Too many lines (max {MAX_LINES}).")
-    merged: dict[str, int] = {}
+    merged: dict[str, tuple[str, int]] = {}
     for ln in raw_lines:
         if not isinstance(ln, dict):
             raise ShopError("Bad line.")
-        code = str(ln.get("item_code") or "").strip().upper()[:64]
+        code = str(ln.get("item_code") or "").strip()[:64]
         qty = _i(ln.get("qty"))
         if not code:
             raise ShopError("Bad line: missing item code.")
         if qty <= 0 or qty > MAX_QTY:
             raise ShopError(f"Bad quantity for {code}.")
-        merged[code] = merged.get(code, 0) + qty
-    return list(merged.items())
+        seen, total = merged.get(code.upper(), (code, 0))
+        merged[code.upper()] = (seen, total + qty)
+    return list(merged.values())
 
 
 def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | None = None,
@@ -542,27 +567,50 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     ref = (referral_code or "").strip().lower() or None
     lines_in = normalize_lines(raw_lines)
 
-    lines: list[dict] = []
+    lines: list[dict] = []      # every line the customer can see, in cart order
+    good: list[dict] = []       # the priced ones — all the arithmetic below uses these
     warnings: list[str] = []
     clamped: list[str] = []
     subtotal = 0.0
-    for code, qty in lines_in:
-        it = ctx["items"].get(code)
+
+    def _blocked(code: str, qty: int, reason: str, **extra) -> dict:
+        """A line that cannot be ordered as it stands. It stays visible with its
+        reason and a price of zero — one dead line must never zero the whole cart,
+        which is what a customer reads as 'the site is broken'."""
+        ln = {"item_code": code, "display_name": code, "spec": None, "image_url": None,
+              "qty": qty, "moq": 1, "list_price_bhd": 0.0, "unit_price_bhd": 0.0,
+              "discount_bhd": 0.0, "line_total_bhd": 0.0, "stock_status": STOCK_OUT,
+              "backorder": False, "applied": [], "warning": None,
+              "unavailable": True, "blocked_reason": reason, "_floor": None}
+        ln.update(extra)
+        return ln
+
+    for raw_code, qty in lines_in:
+        code = resolve_code(ctx, raw_code)
+        it = ctx["items"].get(code) if code else None
         if not it:
-            raise ShopError(f"{code} is no longer available.")
+            lines.append(_blocked(raw_code, qty, "No longer in the catalog."))
+            continue
         lp = it.get("standard_rate")
         if lp is None or _f(lp) <= 0:
-            raise ShopError(f"{code} has no current price — ask your salesman.")
+            lines.append(_blocked(code, qty, "Price on request — ask your salesman.",
+                                  display_name=it.get("display_name") or code, spec=it.get("spec"),
+                                  image_url=it.get("product_image_url")))
+            continue
         lp = money(lp)
         moq = max(_i(it.get("moq"), 1), 1)
-        if qty < moq:
-            raise ShopError(f"Minimum order for {code} is {moq}.")
         status = stock_status_for(it.get("stock_qty"), low_units)
         backorder = status == STOCK_OUT
-        if backorder and not allow_bo:
-            raise ShopError(f"{code} is out of stock.")
+        if qty < moq or (backorder and not allow_bo):
+            # owner, 15-Sep: customers read "Sold out" (true, and it says the line sells)
+            reason = (f"Minimum order is {moq}." if qty < moq else "Sold out.")
+            lines.append(_blocked(code, qty, reason,
+                                  display_name=it.get("display_name") or code, spec=it.get("spec"),
+                                  image_url=it.get("product_image_url"), moq=moq,
+                                  list_price_bhd=lp, stock_status=status))
+            continue
         if backorder:
-            warnings.append(f"{code} is out of stock — it will be backordered and confirmed by your salesman.")
+            warnings.append(f"{code} is sold out — it will be backordered and confirmed by your salesman.")
         # item-level rules: best non-stackable, then stackables on top
         cands = [r for r in ctx["rules"] if r["kind"] in ("qty_tier", "salesman_offer", "bundle_price")
                  and _rule_matches_item(r, it) and _rule_matches_ref(r, ref)
@@ -592,24 +640,27 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
             clamped.append(code)
         line_total = money(unit * qty)
         subtotal += money(lp * qty)
-        lines.append({
+        line = {
             "item_code": code, "display_name": it.get("display_name") or code, "spec": it.get("spec"),
             "image_url": it.get("product_image_url"), "qty": qty, "moq": moq,
             "list_price_bhd": lp, "unit_price_bhd": unit, "discount_bhd": money((lp - unit) * qty),
             "line_total_bhd": line_total, "stock_status": status, "backorder": backorder,
-            "applied": applied, "warning": None, "_floor": floor,
-        })
+            "applied": applied, "warning": None, "unavailable": False, "blocked_reason": None,
+            "_floor": floor,
+        }
+        lines.append(line)
+        good.append(line)
     subtotal = money(subtotal)
-    item_discount = money(sum(ln["discount_bhd"] for ln in lines))
+    item_discount = money(sum(ln["discount_bhd"] for ln in good))
     net = money(subtotal - item_discount)
 
     # cart-level: automatic cart_value rules vs coupon — customer gets the better unless stackable
     discounts = [{"rule_id": a["rule_id"], "name": a["name"], "kind": a["kind"],
                   "amount_bhd": ln["discount_bhd"]}
-                 for ln in lines for a in ln["applied"]]
+                 for ln in good for a in ln["applied"]]
     headroom = 0.0
     unlimited = False
-    for ln in lines:
+    for ln in good:
         if ln["_floor"] is None:
             unlimited = True
         else:
@@ -617,7 +668,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     cap = float("inf") if unlimited else headroom
 
     def _cart_amount(rule: dict) -> float:
-        eligible = sum(ln["line_total_bhd"] for ln in lines if _rule_matches_item(rule, ctx["items"][ln["item_code"]]))
+        eligible = sum(ln["line_total_bhd"] for ln in good if _rule_matches_item(rule, ctx["items"][ln["item_code"]]))
         if rule.get("min_value_bhd") is not None and net < _f(rule["min_value_bhd"]):
             return 0.0
         if rule.get("pct_off") is not None:
@@ -691,7 +742,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     net_after = money(subtotal - discount_total)
     threshold = money(vals.get("shop_free_delivery_threshold_bhd"))
     fee = money(vals.get("shop_delivery_fee_bhd"))
-    delivery = fee if (threshold > 0 and fee > 0 and net_after < threshold) else 0.0
+    delivery = fee if (good and threshold > 0 and fee > 0 and net_after < threshold) else 0.0
     total = money(net_after + delivery)
 
     progress = None
@@ -715,11 +766,23 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                         "remaining_bhd": 0.0, "unlocked": True, "label": f"{best_auto['name']} applied"}
 
     min_order = money(vals.get("shop_min_order_bhd"))
-    can_submit = net_after >= min_order
+    # One thing at a time, in the order the customer can act on it: clear the dead
+    # line first, then top up to the minimum. Totals above are already the price of
+    # what IS orderable, so the number on the button stays true either way.
+    blocked = [ln for ln in lines if ln.get("unavailable")]
     block_reason = None
-    if not can_submit:
+    if blocked:
+        names = ", ".join(ln["item_code"] for ln in blocked[:3])
+        more = f" and {len(blocked) - 3} more" if len(blocked) > 3 else ""
+        block_reason = (f"Remove {names}{more} to send this order — "
+                        f"{blocked[0]['blocked_reason'].rstrip('.').lower()}."
+                        if len(blocked) == 1 else
+                        f"Remove {names}{more} to send this order.")
+    elif not good:
+        block_reason = "Your order is empty."
+    elif net_after < min_order:
         block_reason = f"Minimum order is BHD {min_order:.3f} — add BHD {money(min_order - net_after):.3f} more."
-        warnings.append(block_reason)
+    can_submit = block_reason is None
     if clamped:
         log.info("shop margin floor clamped: %s", ", ".join(clamped))
     for ln in lines:
@@ -727,11 +790,11 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     return {
         "ok": True, "lines": lines,
         "subtotal_bhd": subtotal, "discount_bhd": discount_total, "delivery_bhd": delivery,
-        "total_bhd": total, "units": sum(ln["qty"] for ln in lines), "items": len(lines),
+        "total_bhd": total, "units": sum(ln["qty"] for ln in good), "items": len(good),
         "discounts": discounts, "coupon": coupon_out, "progress": progress,
         "warnings": warnings, "can_submit": can_submit, "min_order_bhd": min_order,
         "block_reason": block_reason,
-        "has_backorder": any(ln["backorder"] for ln in lines),
+        "has_backorder": any(ln["backorder"] for ln in good),
         "_coupon_rule_id": coupon_rule["id"] if coupon_rule else None,
         "_clamped": clamped,
     }
@@ -822,7 +885,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         referral_code = body.get("referral_code")
     quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx)
     if not quote["can_submit"]:
-        raise ShopError(" ".join(quote["warnings"]) or "Order cannot be submitted.")
+        raise ShopError(quote["block_reason"] or " ".join(quote["warnings"]) or "Order cannot be submitted.")
     if not staff:
         sm, source = salesman_for(ctx, referral_code, _i(body.get("salesman_id")) or None)
     prefix = str(ctx["settings"].get("shop_order_prefix") or "YQ")
@@ -1353,7 +1416,7 @@ def delete_rule(rule_id: int) -> None:
 
 def share_item(item_code: str) -> dict | None:
     ctx = context()
-    it = ctx["items"].get(str(item_code or "").strip().upper())
+    it = ctx["items"].get(resolve_code(ctx, item_code) or "")
     if not it:
         return None
     low_units = _i(ctx["settings"].get("shop_low_stock_units"), 10)

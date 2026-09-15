@@ -106,7 +106,7 @@ const RULE_STATUS_STYLE: Record<string, string> = {
   inactive: 'bg-muted text-muted-foreground/70',
 }
 
-const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Out of stock' }
+const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Sold out' }
 const STOCK_STYLE: Record<string, string> = {
   in_stock: 'bg-emerald-100 text-emerald-700',
   low_stock: 'bg-amber-100 text-amber-700',

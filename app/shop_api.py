@@ -185,7 +185,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if ref:
             target += f"&ref={_html.escape(ref[:32])}"
         price = f"BHD {it['price_bhd']:.3f}" if it.get("price_bhd") is not None else "Ask for price"
-        labels = {"in_stock": "In stock", "low_stock": "Only a few left", "out_of_stock": "Out of stock"}
+        labels = {"in_stock": "In stock", "low_stock": "Only a few left", "out_of_stock": "Sold out"}
         schema_avail = {"in_stock": "https://schema.org/InStock", "low_stock": "https://schema.org/LimitedAvailability",
                         "out_of_stock": "https://schema.org/OutOfStock"}
         title = f"{it['item_code']} · {price} · {labels[it['stock_status']]} — YQ Bahrain trade catalog"
@@ -268,7 +268,6 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         """Same payload as the public catalog + exact stock units + who I am (never public)."""
         r = shop.catalog_payload(None, staff_email=user.email)
         r["me"]["is_admin"] = user.role == "admin"
-        r["whatsapp"] = ""
         return r
 
     @app.post("/shop/quote")

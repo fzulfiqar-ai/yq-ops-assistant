@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { AlertTriangle, Loader2, ShieldCheck, Tag, UserRound } from 'lucide-react'
+import { AlertTriangle, Loader2, ShieldCheck, Tag, Trash2, UserRound } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { Stepper } from '@/components/ui/stepper'
@@ -250,12 +250,10 @@ export function CartDrawer({
 
   const couponMsg = quote?.coupon?.message || ''
   const couponBad = Boolean(quote?.coupon && quote.coupon.valid === false)
+  // The server says exactly what is in the way ("Remove X05 UL-1Mtr…", "Minimum
+  // order is…"); the fallback only covers an older API that did not.
   const blockedReason =
-    quote?.can_submit === false
-      ? quote.min_order_bhd
-        ? `Minimum order is ${bhd(quote.min_order_bhd)} — add a little more to send this order.`
-        : 'This order cannot be submitted yet.'
-      : ''
+    quote?.can_submit === false ? quote.block_reason || 'This order cannot be submitted yet.' : ''
 
   return (
     <Sheet
@@ -332,8 +330,13 @@ export function CartDrawer({
                 const q = quoteLines.get(line.item_code)
                 const step = stepOf(item)
                 const min = minQtyOf(item)
+                // A dead line: say why, price it at nothing, and make removing it
+                // one tap. Only a below-minimum line keeps its stepper — raising the
+                // quantity is the fix there, not deleting the product.
+                const blocked = Boolean(q?.unavailable)
+                const fixableByQty = blocked && Boolean(item) && Number(q?.moq || 1) > line.qty
                 return (
-                  <li key={line.item_code} className="flex gap-3 py-3.5">
+                  <li key={line.item_code} className={cn('flex gap-3 py-3.5', blocked && 'opacity-95')}>
                     <div className="h-16 w-16 shrink-0 overflow-hidden rounded-[14px] border border-[#ece9f3]">
                       <ProductImage
                         srcs={[item?.thumb_url, item?.product_image_url]}
@@ -357,24 +360,49 @@ export function CartDrawer({
                           )}
                         </div>
                         <div className="shrink-0 text-right">
-                          <div className="font-display text-[13px] font-bold tabular-nums text-[#1a1430]">
-                            {bhd(q?.line_total_bhd ?? (item?.price_bhd || 0) * line.qty)}
-                          </div>
-                          <div className="text-[10.5px] tabular-nums text-[#6b6480]">
-                            {money(q?.unit_price_bhd ?? item?.price_bhd)} each
-                          </div>
+                          {blocked ? (
+                            <div className="font-display text-[13px] font-bold text-[#a8a2bb]">—</div>
+                          ) : (
+                            <>
+                              <div className="font-display text-[13px] font-bold tabular-nums text-[#1a1430]">
+                                {bhd(q?.line_total_bhd ?? (item?.price_bhd || 0) * line.qty)}
+                              </div>
+                              <div className="text-[10.5px] tabular-nums text-[#6b6480]">
+                                {money(q?.unit_price_bhd ?? item?.price_bhd)} each
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
+                      {blocked && q?.blocked_reason && (
+                        <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-[#9f1239]">
+                          <AlertTriangle size={12} className="shrink-0" aria-hidden="true" />
+                          {q.blocked_reason}
+                        </p>
+                      )}
                       <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <Stepper
-                          value={line.qty}
-                          step={step}
-                          min={min}
-                          size="sm"
-                          label={line.item_code}
-                          onChange={(n) => cart.set(line.item_code, n)}
-                          onRemove={() => cart.remove(line.item_code)}
-                        />
+                        {blocked && !fixableByQty ? (
+                          <button
+                            type="button"
+                            onClick={() => cart.remove(line.item_code)}
+                            className={cn(
+                              'inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#f3c9d2] bg-[#fdecef] px-3.5 text-[12px] font-semibold text-[#9f1239] transition duration-150 ease-out hover:bg-[#fbdde3]',
+                              RING,
+                            )}
+                          >
+                            <Trash2 size={13} aria-hidden="true" /> Remove
+                          </button>
+                        ) : (
+                          <Stepper
+                            value={line.qty}
+                            step={step}
+                            min={min}
+                            size="sm"
+                            label={line.item_code}
+                            onChange={(n) => cart.set(line.item_code, n)}
+                            onRemove={() => cart.remove(line.item_code)}
+                          />
+                        )}
                         {q?.backorder && <Badge tone="amber">Backorder</Badge>}
                         {q?.applied?.length ? <Badge tone="green">{q.applied[0]?.name || 'Discount'}</Badge> : null}
                       </div>

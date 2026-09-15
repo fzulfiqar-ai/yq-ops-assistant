@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
-import { Clock, MessageCircle, Search, ShoppingBag, X } from 'lucide-react'
+import { Clock, Search, ShoppingBag, X } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
@@ -134,6 +134,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
   const [sort, setSort] = useState<SortKey>('featured')
   const [inStockOnly, setInStockOnly] = useState(false)
   const [offersOnly, setOffersOnly] = useState(false)
+  const [bestOnly, setBestOnly] = useState(false)
   const [paging, setPaging] = useState({ key: '', n: CHUNK })
   const [sheetCode, setSheetCode] = useState<string | null>(null)
   const [cartOpen, setCartOpen] = useState(false)
@@ -202,7 +203,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
   }, [items])
 
   /* ── filter + sort ──────────────────────────────────────── */
-  const filterKey = `${cat}|${q.trim().toLowerCase()}|${inStockOnly}|${offersOnly}|${sort}`
+  const filterKey = `${cat}|${q.trim().toLowerCase()}|${inStockOnly}|${offersOnly}|${bestOnly}|${sort}`
 
   const filtered = useMemo(() => {
     let r = items
@@ -218,6 +219,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
     }
     if (inStockOnly) r = r.filter((i) => i.stock_status !== 'out_of_stock')
     if (offersOnly) r = r.filter((i) => hasBadge(i, 'on_offer') || i.compare_at_bhd != null || hasBadge(i, 'price_drop'))
+    if (bestOnly) r = r.filter((i) => hasBadge(i, 'best_seller'))
 
     if (sort === 'featured') return r
     const idx = new Map(items.map((i, n) => [i.item_code, n]))
@@ -241,16 +243,18 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
     else if (sort === 'newest')
       copy.sort((a, b) => Number(hasBadge(b, 'new')) - Number(hasBadge(a, 'new')) || order0(a) - order0(b))
     return copy
-  }, [items, cat, q, inStockOnly, offersOnly, sort])
+  }, [items, cat, q, inStockOnly, offersOnly, bestOnly, sort])
 
   // Paging is keyed to the filter: changing a filter shows the first chunk again
   // without an effect that would render the long list twice.
   const visible = paging.key === filterKey ? paging.n : CHUNK
   const showMore = () => setPaging({ key: filterKey, n: visible + CHUNK })
 
-  const bestSellers = useMemo(() => items.filter((i) => hasBadge(i, 'best_seller')).slice(0, 12), [items])
+  // No product rail above the grid: every product appears exactly once on this
+  // page (owner, 15-Sep — a "Best sellers" row repeating the grid below read as
+  // the page glitching). Best sellers are a filter instead, and a badge on the card.
   const offers = data?.offers || []
-  const railsVisible = !q.trim() && cat === 'All' && !inStockOnly && !offersOnly
+  const railsVisible = !q.trim() && cat === 'All' && !inStockOnly && !offersOnly && !bestOnly
 
   const settings = data?.settings || {}
   const allowBackorder = settings.allow_backorder !== false
@@ -381,7 +385,6 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
   const updated = fmtDate(data?.prices_updated)
   const stockAsOf = fmtDate(data?.stock_as_of)
   const shown = filtered.slice(0, visible)
-  const whatsapp = staff ? '' : data?.whatsapp
 
   const hasCart = cart.lines.length > 0
   // Reserve room for whatever is pinned to the bottom of the viewport. In the
@@ -507,6 +510,9 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
             <Toggle on={inStockOnly} onClick={() => setInStockOnly((v) => !v)}>
               In stock
             </Toggle>
+            <Toggle on={bestOnly} onClick={() => setBestOnly((v) => !v)}>
+              Best sellers
+            </Toggle>
             <Toggle on={offersOnly} onClick={() => setOffersOnly((v) => !v)}>
               On offer
             </Toggle>
@@ -537,30 +543,6 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
           </section>
         )}
 
-        {railsVisible && bestSellers.length > 0 && (
-          <section className="mt-6" aria-labelledby="yq-best">
-            <h2 id="yq-best" className="font-display text-[14px] font-bold tracking-[-0.01em] text-[#1a1430]">
-              Best sellers
-            </h2>
-            <div className="-mx-4 mt-3 flex gap-3 overflow-x-auto px-4 pb-2 sm:mx-0 sm:px-0">
-              {bestSellers.map((it) => (
-                <ProductCard
-                  key={it.item_code}
-                  item={it}
-                  qty={cart.qtyOf(it.item_code)}
-                  allowBackorder={allowBackorder}
-                  showCompare={showCompare}
-                  onOpen={() => openSheet(it.item_code)}
-                  onAdd={() => addToCart(it)}
-                  onSetQty={(n) => cart.set(it.item_code, n)}
-                  onRemove={() => cart.remove(it.item_code)}
-                  className="w-[10.5rem] shrink-0 sm:w-[12rem]"
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
         {/* ── grid ── */}
         <section className="mt-6" aria-label="Products">
           {!data ? (
@@ -580,6 +562,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
                   setCat('All')
                   setInStockOnly(false)
                   setOffersOnly(false)
+                  setBestOnly(false)
                 }}
                 className={cn(
                   'mt-5 inline-flex h-11 items-center rounded-xl border border-[#e4e0ee] bg-white px-5 text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
@@ -626,19 +609,6 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
         </section>
 
         <footer className="py-10 text-center text-[11px] leading-relaxed text-[#6b6480]">
-          {!hasCart && whatsapp && (
-            <a
-              href={`https://wa.me/${whatsapp}?text=${encodeURIComponent('Hello YQ Bahrain! I have a question about your catalog.')}`}
-              target="_blank"
-              rel="noreferrer"
-              className={cn(
-                'mb-5 inline-flex h-11 items-center gap-2 rounded-xl border border-[#25D366]/30 bg-[#25D366]/[.08] px-4 text-[12.5px] font-semibold text-[#128C7E] transition duration-150 ease-out hover:bg-[#25D366]/15',
-                RING,
-              )}
-            >
-              <MessageCircle size={15} aria-hidden="true" /> Chat on WhatsApp
-            </a>
-          )}
           <div>YQ Bahrain W.L.L · Trade prices — may change without notice.</div>
           {stockAsOf && <div className="mt-0.5">Stock as of {stockAsOf}</div>}
         </footer>

@@ -23,8 +23,43 @@ from app.db_read import exec_sql, exec_sql_params
 log = logging.getLogger(__name__)
 
 _BUCKET = "catalog"
-CATEGORY_ORDER = ["CABLE", "CHARGER", "EARPHONE", "BLUETOOTH HEADSET", "FOR CAR",
-                  "POWER BANK", "BLUETOOTH SPEAKER"]
+# The shelf order a customer browses in — volume lines first, accessories last.
+# Anything not listed sorts to the end alphabetically. Keep in step with
+# classify_category(): between them they are the only category vocabulary.
+CATEGORY_ORDER = ["CABLE", "CHARGER", "CAR CHARGER", "POWER BANK", "EARPHONE",
+                  "BLUETOOTH HEADSET", "BLUETOOTH SPEAKER", "CAR ACCESSORIES"]
+
+# What a SKU is, read off its own name and spec. The price book's own category
+# column is unreliable (it had cables filed under CAR CHARGER and airpods too),
+# so this decides the category for every new SKU the book introduces — otherwise
+# they pile up in "OTHER" and the customer's category chips stop meaning anything.
+# Order matters: the first rule that matches wins.
+_CLASSIFY_RULES: list[tuple[str, str]] = [
+    ("MISCELLANEOUS",     r"product display|display stand|cardboard"),
+    # before POWER BANK: a BT speaker quotes its battery in mAh too
+    ("BLUETOOTH SPEAKER", r"speaker"),
+    ("POWER BANK",        r"\bpb\b|power\s*bank|\d{3,}\s*mah"),
+    ("CAR CHARGER",       r"car\s*charger"),
+    ("CAR ACCESSORIES",   r"\bholder\b|phone\s*stand|air\s*vent|dashboard"),
+    # any cordless ear-worn thing: airpods (the book spells it "Aipord",
+    # "Airpord" and "Airpod"), TWS buds, neckbands, BT headphones
+    ("BLUETOOTH HEADSET", r"ai[rp]{0,2}por?ds?|\btws\b|neck\s*band|headphone|head\s*set|"
+                          r"bluetooth|\bbt\s*(version|v?\d)|open\s*ear"),
+    ("EARPHONE",          r"in[- ]?ear|ear\s*phone|\bjack\b"),
+    ("CHARGER",           r"charger|\bpd\b.*port|adapter"),
+    ("CABLE",             r"cable|cale|converter|\bmtr\b|\busb\b|\baux\b|"
+                          r"\bc\s*to\s*[cl]\b|to\s*type-?c|to\s*lightning|to\s*micro"),
+]
+_CLASSIFY = [(cat, re.compile(pat, re.I)) for cat, pat in _CLASSIFY_RULES]
+
+
+def classify_category(*parts) -> str | None:
+    """Best-guess category from a SKU's code / name / spec, or None when nothing fits."""
+    blob = " ".join(str(p or "") for p in parts)
+    for cat, rx in _CLASSIFY:
+        if rx.search(blob):
+            return cat
+    return None
 
 PUBLIC_FIELDS = ("item_code", "display_name", "spec", "category", "brand", "price_bhd",
                  "b2c_bhd", "product_image_url", "package_image_url")
@@ -460,7 +495,9 @@ def sync_from_price_book() -> int:
             "item_code": code,
             "display_name": str(r.get("name") or code)[:120],
             "spec": r.get("spec"),
-            "category": r.get("category"),
+            # what the SKU says it is beats the book's category column, which files
+            # cables under CAR CHARGER; the column is only the fallback
+            "category": classify_category(code, r.get("name"), r.get("spec")) or r.get("category"),
             "brand": "VFAN" if "vfan" in blob else None,
             "is_active": code in book,
             "updated_by": "price-book auto-sync",

@@ -136,7 +136,7 @@ export function ProductSheet({
                   <Plus size={16} aria-hidden="true" /> {out ? 'Backorder' : 'Add to order'}
                 </>
               ) : (
-                'Out of stock'
+                'Sold out'
               )}
             </button>
           )}
@@ -202,7 +202,7 @@ export function ProductSheet({
             </div>
             {out && allowBackorder && (
               <p className="mt-2.5 rounded-xl bg-[#f7f6fa] px-3 py-2 text-[11.5px] leading-snug text-[#6b6480]">
-                Out of stock — order now and your salesman will confirm the ETA.
+                Sold out — order now and your salesman will confirm the ETA.
               </p>
             )}
 

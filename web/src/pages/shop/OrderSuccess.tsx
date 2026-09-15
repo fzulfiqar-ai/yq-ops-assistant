@@ -83,8 +83,8 @@ export function OrderSuccess({ order, mode = 'public', customer, onContinue }: O
           {order.has_backorder && (
             <p className="mt-3 rounded-xl bg-[#fdf3e3] px-3 py-2 text-left text-[11.5px] leading-snug text-[#96600d]">
               {staff
-                ? 'Some lines are out of stock right now and are marked as backorder — confirm the ETA before you promise a delivery day.'
-                : `Some lines are out of stock right now and are marked as backorder — ${salesman} will confirm the ETA before anything is shipped.`}
+                ? 'Some lines are sold out right now and are marked as backorder — confirm the ETA before you promise a delivery day.'
+                : `Some lines are sold out right now and are marked as backorder — ${salesman} will confirm the ETA before anything is shipped.`}
             </p>
           )}
 

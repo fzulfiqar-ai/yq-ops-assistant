@@ -1327,12 +1327,9 @@ def catalog_public(request: Request, token: str) -> dict:
         r = public_catalog(token)
     if r is None:
         raise HTTPException(status_code=404, detail="Invalid catalog link.")
-    # "Order on WhatsApp" CTA — the owner's number (assist mode), digits for wa.me
-    try:
-        from app.customer_contacts import wa_digits
-        r["whatsapp"] = wa_digits(settings.wa_human_number) or ""
-    except Exception:  # noqa: BLE001
-        r["whatsapp"] = ""
+    # No company WhatsApp number in the payload (owner, 15-Sep-2026): a merchant's
+    # order belongs to his own salesman, and the catalog is public — publishing a
+    # number on it invites everything except orders.
     return r
 
 

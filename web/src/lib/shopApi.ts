@@ -106,7 +106,6 @@ export interface CatalogPayload {
   brand?: string | null
   prices_updated?: string | null
   stock_as_of?: string | null
-  whatsapp?: string | null
   categories?: string[] | null
   items?: ShopItem[] | null
   salesmen?: Salesman[] | null
@@ -145,6 +144,10 @@ export interface QuoteLine {
   backorder?: boolean | null
   applied?: AppliedRule[] | null
   warning?: string | null
+  /** The line cannot be ordered as it stands; it is priced at zero and left out of every total. */
+  unavailable?: boolean | null
+  /** Why — "No longer in the catalog.", "Sold out.", "Minimum order is 6." */
+  blocked_reason?: string | null
 }
 
 export interface QuoteDiscount {
@@ -183,6 +186,8 @@ export interface Quote {
   warnings?: string[] | null
   can_submit?: boolean | null
   min_order_bhd?: number | null
+  /** When can_submit is false: the one thing the customer has to do next, in plain words. */
+  block_reason?: string | null
 }
 
 export interface QuoteRequest {
