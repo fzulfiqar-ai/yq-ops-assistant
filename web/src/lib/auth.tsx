@@ -54,6 +54,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * useQuery, and a wasted prefetch costs nothing the user waits on.
    */
   function warmDashboard() {
+    // A salesman never sees the Dashboard: skip the chunk + the 403 (role remembered from the last /me).
+    try {
+      if (localStorage.getItem('yq-role') === 'salesman') return
+    } catch {
+      /* storage unavailable */
+    }
     void import('@/pages/Dashboard')
     void queryClient.prefetchQuery({
       queryKey: ['report', 'dashboard'],
@@ -72,6 +78,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const m = await apiGet<Me>('/me')
         setMe(m)
+        try {
+          localStorage.setItem('yq-role', m.role)
+        } catch {
+          /* storage unavailable */
+        }
         setMeState('ok')
         setMeError(null)
         return

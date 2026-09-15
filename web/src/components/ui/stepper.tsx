@@ -5,6 +5,10 @@ import { cn } from '@/lib/utils'
  * Quantity control. Steps by `step` (a pack size, usually), never goes below
  * `min` (the MOQ) — stepping below it calls `onRemove` instead, because "one less
  * than the minimum" means "take it out", not "an invalid order".
+ *
+ * Sizes are the shop's three tap targets: 40 (dense rows), 44 (cards — it takes
+ * the place of the Add button, so it must be exactly as tall), 48 (the primary
+ * action in a sheet footer).
  */
 
 export interface StepperProps {
@@ -16,8 +20,25 @@ export interface StepperProps {
   max?: number
   /** what the group is counting, e.g. the item code — used for screen readers */
   label?: string
-  size?: 'md' | 'sm'
+  size?: 'sm' | 'md' | 'lg'
   className?: string
+}
+
+const SHELL: Record<'sm' | 'md' | 'lg', string> = {
+  sm: 'h-10 rounded-xl',
+  md: 'h-11 rounded-xl',
+  lg: 'h-12 rounded-xl',
+}
+const BTN: Record<'sm' | 'md' | 'lg', string> = {
+  sm: 'h-9 w-9 rounded-lg',
+  md: 'h-10 w-10 rounded-[10px]',
+  lg: 'h-11 w-11 rounded-xl',
+}
+const ICON: Record<'sm' | 'md' | 'lg', number> = { sm: 15, md: 16, lg: 17 }
+const VALUE: Record<'sm' | 'md' | 'lg', string> = {
+  sm: 'text-[13px]',
+  md: 'text-[14px]',
+  lg: 'text-[15px]',
 }
 
 export function Stepper({
@@ -47,18 +68,15 @@ export function Stepper({
 
   const atMax = max != null && value >= max
   const willRemove = value - step < min
-  const btn =
-    size === 'sm'
-      ? 'h-9 w-9 rounded-lg'
-      : 'h-11 w-11 rounded-xl'
+  const icon = ICON[size]
 
   return (
     <div
       role="group"
       aria-label={`Quantity for ${label}`}
       className={cn(
-        'inline-flex items-center justify-between gap-1 rounded-xl border border-[#e4e0ee] bg-white p-0.5',
-        size === 'md' ? 'h-12' : 'h-10',
+        'inline-flex select-none items-center justify-between gap-1 border border-[#e4e0ee] bg-white p-0.5 transition duration-150 ease-out focus-within:border-[#6d28d9]',
+        SHELL[size],
         className,
       )}
     >
@@ -67,18 +85,18 @@ export function Stepper({
         onClick={dec}
         aria-label={willRemove ? `Remove ${label}` : `Decrease ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-[#6b6480] transition hover:bg-[#f4f2f9] hover:text-[#1a1430] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9]',
+          'grid shrink-0 place-items-center text-[#6b6480] transition duration-150 ease-out hover:bg-[#f4f2f9] hover:text-[#1a1430] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70 active:scale-95',
           willRemove && 'hover:bg-[#fdecef] hover:text-[#9f1239]',
-          btn,
+          BTN[size],
         )}
       >
-        {willRemove ? <Trash2 size={size === 'sm' ? 14 : 16} /> : <Minus size={size === 'sm' ? 15 : 17} />}
+        {willRemove ? <Trash2 size={icon - 2} /> : <Minus size={icon} />}
       </button>
       <span
         aria-live="polite"
         className={cn(
-          'min-w-[2.25rem] select-none text-center font-display font-bold tabular-nums text-[#1a1430]',
-          size === 'sm' ? 'text-[13px]' : 'text-[15px]',
+          'min-w-[2.25rem] flex-1 text-center font-display font-bold tabular-nums text-[#1a1430]',
+          VALUE[size],
         )}
       >
         {value}
@@ -89,11 +107,11 @@ export function Stepper({
         disabled={atMax}
         aria-label={`Increase ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-[#6d28d9] transition hover:bg-[#f1ecfb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9] disabled:cursor-not-allowed disabled:opacity-40',
-          btn,
+          'grid shrink-0 place-items-center text-[#6d28d9] transition duration-150 ease-out hover:bg-[#f3eefc] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40',
+          BTN[size],
         )}
       >
-        <Plus size={size === 'sm' ? 15 : 17} />
+        <Plus size={icon} />
       </button>
     </div>
   )

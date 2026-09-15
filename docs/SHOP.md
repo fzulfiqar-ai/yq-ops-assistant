@@ -167,6 +167,29 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
   `PUT /settings/shop` body `{ "settings": {…partial} }` (admin).
 - `GET /catalog` items now also carry `stock_status`, `moq`, `pack_size`; `POST /catalog/item` accepts `moq`, `pack_size`.
 
+## Salesman mode — the second link (15-Sep-2026)
+Two links, one app. The **catalog link** (`/c/{token}`) is for merchants and anyone else. The **portal login**
+(`yq-bahrain-ops.vercel.app`, email + password) shows a `salesman`-role user exactly two tabs, phone-first:
+**Catalog** (`/shop`) and **Orders** (`/shop-orders`). Admins keep the full sidebar and can also open `/shop`.
+
+The salesman catalog is the merchant shop screen in *salesman mode*: same grid/cart, plus exact stock units,
+the salesman pre-attached, and a checkout that places an order **for a shop** (customer details, quick-pick of
+recent customers). Salesman-placed orders have `source = "salesman"` and `placed_by = <login email>`; the salesman
+is not alerted about his own order (owner copy + customer confirmation still go out), and the success screen gives
+him a one-tap WhatsApp confirmation to the shop instead.
+
+Endpoints (bearer token, feature-gated):
+- `GET /shop/catalog` (Catalog) → the public payload shape + per item `stock_qty` (exact units) + `mode: "salesman"`,
+  `me: {salesman_id, salesman_name, is_admin}`, `ref` = the caller's own salesman row.
+- `POST /shop/quote` (Catalog) body `{lines, coupon_code?}` → Quote.
+- `POST /shop/order` (Catalog) body `{lines, coupon_code?, salesman_id? (admin only), customer:{name, phone, shop?, area?, email?}, note?}`
+  → `{ok, order_id, order_no, token, status_url, salesman, whatsapp_url (TO the customer), email_url: null, totals, has_backorder, source: "salesman"}`.
+- `GET /shop/customers` (Shop Orders) → `{customers: [{name, phone, shop, area, email, orders, last_order_at}]}`.
+- `GET /shop/orders?status=confirmed,packed` — `status` accepts a comma list; the response now also carries
+  `counts: {new, confirmed, packed, delivered, cancelled}` (scoped) and rows carry `placed_by`.
+Buckets in the salesman UI: New = `new`; In progress = `confirmed,packed`; Done = `delivered,cancelled`.
+Salesman default features are `Catalog` + `Shop Orders`; logins are created from the Team page (or in bulk by the owner).
+
 ## How a salesman hears about an order (three independent paths)
 1. **The Shop Orders page** — the order is written to the database the moment it is submitted, so it is
    visible in the portal even if every message below fails. Nothing depends on a notification.

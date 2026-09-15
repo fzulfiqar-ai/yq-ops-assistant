@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { postQuote, ShopApiError, type CartLine, type Quote } from '@/lib/shopApi'
+import { ShopApiError, type CartLine, type Quote, type QuoteRequest } from '@/lib/shopApi'
 
 /**
  * Live server price for the current cart.
@@ -12,7 +12,14 @@ import { postQuote, ShopApiError, type CartLine, type Quote } from '@/lib/shopAp
  *
  * `quoting` is derived (the answer on screen is for an older cart), so the hook
  * never has to set state synchronously inside its effect.
+ *
+ * The transport is injected: the public catalog quotes through the token endpoint,
+ * a logged-in salesman through the bearer one. Either way an answer whose
+ * controller was already aborted is dropped, so the "newest wins" rule holds even
+ * when the underlying call cannot itself be cancelled.
  */
+
+export type QuoteFetcher = (body: QuoteRequest, signal?: AbortSignal) => Promise<Quote>
 
 export interface QuoteState {
   quote: Quote | null
@@ -28,14 +35,20 @@ interface Answer {
 
 const NETWORK_ERROR = 'Could not reach the price server. Your cart is safe — please try again.'
 
-export function useQuote(token: string | undefined, lines: CartLine[], couponCode: string, referralCode: string): QuoteState {
+export function useQuote(
+  enabled: boolean,
+  lines: CartLine[],
+  couponCode: string,
+  referralCode: string,
+  fetchQuote: QuoteFetcher,
+): QuoteState {
   const [answer, setAnswer] = useState<Answer>({ sig: '', quote: null, error: '' })
   const abortRef = useRef<AbortController | null>(null)
 
   // Serialise the inputs so the effect only re-runs on a real change, not on
   // every render that happened to rebuild the same array.
   const signature = JSON.stringify({ lines, couponCode, referralCode })
-  const idle = !token || lines.length === 0
+  const idle = !enabled || lines.length === 0
 
   useEffect(() => {
     if (idle) {
@@ -51,7 +64,7 @@ export function useQuote(token: string | undefined, lines: CartLine[], couponCod
       abortRef.current?.abort()
       const ctrl = new AbortController()
       abortRef.current = ctrl
-      postQuote(token as string, { lines: l, coupon_code: c || '', referral_code: r || '' }, ctrl.signal)
+      fetchQuote({ lines: l, coupon_code: c || '', referral_code: r || '' }, ctrl.signal)
         .then((q) => {
           if (!ctrl.signal.aborted) setAnswer({ sig: signature, quote: q, error: '' })
         })
@@ -63,7 +76,7 @@ export function useQuote(token: string | undefined, lines: CartLine[], couponCod
         })
     }, 400)
     return () => clearTimeout(timer)
-  }, [token, signature, idle])
+  }, [signature, idle, fetchQuote])
 
   useEffect(() => () => abortRef.current?.abort(), [])
 

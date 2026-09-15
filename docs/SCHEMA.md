@@ -329,7 +329,7 @@ Service-role-only tables (RLS enabled, no anon/authenticated policy):
   is_active, sort_order, notify_email, notify_whatsapp. Contact details are never seeded from the repo.
 - `shop_orders` — order_no UNIQUE (PREFIX-YYMM-NNNN via `shop_next_order_no()` + `shop_counters`), token UNIQUE (status
   page), status new|confirmed|packed|delivered|cancelled, customer_* (name, phone, shop, area, email), note, salesman_id FK,
-  salesman_name, source referral|dropdown|default, referral_code, src, coupon_code, subtotal/discount/delivery/total_bhd,
+  salesman_name, source referral|dropdown|default|salesman, placed_by (staff login when source=salesman), referral_code, src, coupon_code, subtotal/discount/delivery/total_bhd,
   items_count, units_count, has_backorder, ip_hash, ua, notify_result jsonb, notified_at.
 - `shop_order_lines` — order_id FK (cascade), item_code, display_name, spec, image_url, qty, list_price_bhd,
   unit_price_bhd, discount_bhd, line_total_bhd, stock_status, backorder, rule_ids jsonb.
@@ -340,6 +340,7 @@ Service-role-only tables (RLS enabled, no anon/authenticated policy):
 - `shop_events` — funnel pings (view|item|add|checkout|order) with session_id, item_code, referral_code, src, hashed IP.
 - `catalog_stock_map` — manual `item_code → stock_item_name` override for the stock matcher.
 - `catalog_items` gained `moq` (default 1) and `pack_size`.
+`user_roles.role` check now includes `salesman`.
 Views: `v_catalog_stock_rows` (each latest-snapshot stock row → catalog code: manual map → product_aliases → longest
 normalised-prefix match), `v_catalog_stock` (qty per code — never exposed publicly), `v_shop_unpriced_stock`,
 `v_catalog_velocity` (30/90-day units, customers, from `v_sales.sku_code`), `v_catalog_pairs` (co-purchases, 180 d),

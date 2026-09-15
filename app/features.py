@@ -33,5 +33,5 @@ ROLES: list[str] = ["admin", "member", "salesman"]
 # Default grants offered at invite time (admin implicitly has everything).
 ROLE_DEFAULT_FEATURES: dict[str, list[str]] = {
     "member": ["Dashboard", "Sales", "Inventory", "Receivables"],
-    "salesman": ["Catalog", "Product Finds", "Shop Orders"],
+    "salesman": ["Catalog", "Shop Orders"],   # the two-tab salesman app; Product Finds stays grantable
 }

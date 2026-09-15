@@ -301,7 +301,7 @@ export default function Settings() {
     if (p1.length < 8) return setMsg({ ok: false, text: 'Password must be at least 8 characters.' })
     if (p1 !== p2) return setMsg({ ok: false, text: 'Passwords do not match.' })
     setBusy(true); setMsg(null)
-    const { error } = await supabase.auth.updateUser({ password: p1 })
+    const { error } = await supabase.auth.updateUser({ password: p1, data: { must_reset: false } })
     setBusy(false)
     if (error) { setMsg({ ok: false, text: error.message }); toast(error.message, 'error') }
     else { setP1(''); setP2(''); setMsg(null); toast('Password updated successfully.', 'success') }

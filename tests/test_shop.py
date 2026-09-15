@@ -323,6 +323,62 @@ def _():
     assert not any(k in it for k in ("stock_qty", "landed_cost_bhd", "sold_90d"))
 
 
+@test("staff: list_orders accepts a comma status list and returns counts")
+def _():
+    from app.shop import list_orders, status_counts
+    r = list_orders(status="confirmed,packed", limit=5)
+    assert "counts" in r and set(r["counts"]) == {"new", "confirmed", "packed", "delivered", "cancelled"}, r.get("counts")
+    assert all(o["status"] in ("confirmed", "packed") for o in r["orders"])
+    assert set(status_counts()) == set(r["counts"])
+
+
+@test("live: staff catalog carries units + me, the public one never does")
+def _():
+    from app.catalog import share_token
+    from app.shop import catalog_payload
+    if not _migrated():
+        print("   SKIP — scripts/shop_migration.sql not applied")
+        return
+    staff = catalog_payload(None, staff_email="fzulfiqar@pie-int.com")
+    assert staff["mode"] == "salesman" and staff["me"]["salesman_name"] == "Furqan Ahmed", staff.get("me")
+    assert all("stock_qty" in i and isinstance(i["stock_qty"], int) for i in staff["items"])
+    assert staff["ref"]["referral_code"] == "furqan"
+    pub = catalog_payload(share_token(create=False))
+    assert "mode" not in pub and "me" not in pub and not any("stock_qty" in i for i in pub["items"])
+    assert catalog_payload("wrong-token") is None
+
+
+@test("live: a salesman-placed order is source=salesman, records placed_by, and does not alert himself")
+def _():
+    import re
+    from app.database import get_client
+    from app.shop import create_order, recent_customers
+    from app.shop_notify import notify_new_order
+    if not _migrated():
+        print("   SKIP — scripts/shop_migration.sql not applied")
+        return
+    from app.shop import context
+    code = next(c for c in context()["order"] if context()["items"][c].get("standard_rate"))
+    o = create_order({"lines": [{"item_code": code, "qty": 1}],
+                      "customer": {"name": "Staff Test Shop", "phone": "33001122", "shop": "Test Shop", "area": "Manama"},
+                      "note": "automated test — delete me"}, staff_email="fzulfiqar@pie-int.com")
+    c = get_client()
+    try:
+        assert o["source"] == "salesman" and o["placed_by"] == "fzulfiqar@pie-int.com", (o["source"], o.get("placed_by"))
+        assert o["salesman"]["name"] == "Furqan Ahmed" and o["src"] == "salesman"
+        res = notify_new_order(o["id"])
+        assert "fzulfiqar@pie-int.com" not in [r.lower() for r in res.get("recipients", [])] or                res.get("recipients") == ["fzulfiqar@pie-int.com"] and "ALERT_EMAIL_TO" in __import__("os").environ, res
+        assert "whatsapp" not in res, "salesman must not be WhatsApp-alerted about his own order"
+        recent = recent_customers(o["salesman_id"])
+        assert any(r["phone"] == "97333001122" for r in recent), recent[:2]
+    finally:
+        c.table("shop_orders").delete().eq("id", o["id"]).execute()
+        c.table("shop_events").delete().eq("src", "salesman").eq("event", "order").execute()
+        period = re.search(r"-(\d{4})-", o["order_no"]).group(1)
+        n = c.table("shop_counters").select("n").eq("period", period).execute().data[0]["n"]
+        c.table("shop_counters").update({"n": max(n - 1, 0)}).eq("period", period).execute()
+
+
 def main() -> int:
     failed = 0
     for name, fn in TESTS:

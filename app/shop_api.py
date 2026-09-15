@@ -253,6 +253,61 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"rule": row, "summary": shop.rule_summary(row), "impact": shop.rule_impact(row)}
 
+    # ── portal: salesman mode — the logged-in catalog + ordering for a shop (feature Catalog) ──
+    class StaffQuoteRequest(BaseModel):
+        lines: list[QuoteLine] = Field(max_length=shop.MAX_LINES)
+        coupon_code: str | None = Field(default=None, max_length=40)
+
+    class StaffOrderRequest(StaffQuoteRequest):
+        salesman_id: int | None = None          # admins without a linked salesman row choose one
+        customer: Customer
+        note: str | None = Field(default=None, max_length=1000)
+
+    @app.get("/shop/catalog")
+    def shop_staff_catalog(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
+        """Same payload as the public catalog + exact stock units + who I am (never public)."""
+        r = shop.catalog_payload(None, staff_email=user.email)
+        r["me"]["is_admin"] = user.role == "admin"
+        r["whatsapp"] = ""
+        return r
+
+    @app.post("/shop/quote")
+    def shop_staff_quote(body: StaffQuoteRequest, user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
+        sm = shop.salesman_for_user(user.email)
+        try:
+            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, (sm or {}).get("referral_code"))
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {k: v for k, v in q.items() if not k.startswith("_")}
+
+    @app.post("/shop/order")
+    def shop_staff_order(request: Request, body: StaffOrderRequest, background: BackgroundTasks,
+                         user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
+        """A salesman (or admin) places an order FOR a shop — source 'salesman', placed_by = login."""
+        try:
+            o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), staff_email=user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        background.add_task(shop_notify.notify_new_order, o["id"])
+        log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"]})
+        sm = o.get("salesman") or {}
+        return {
+            "ok": True, "order_id": o["id"], "order_no": o["order_no"], "token": o["token"],
+            "status_url": o["status_url"],
+            "salesman": ({"name": sm.get("name"), "phone": sm.get("whatsapp") or sm.get("phone")} if sm else None),
+            "whatsapp_url": shop_notify.salesman_to_customer_wa_url(o, "new"),   # the salesman's tap TO the shop
+            "email_url": None,
+            "totals": o["totals"], "has_backorder": bool(o.get("has_backorder")), "source": "salesman",
+        }
+
+    @app.get("/shop/customers")
+    def shop_staff_customers(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """Recent shops for the checkout quick-pick (a salesman sees his own; admins see all)."""
+        sid, _admin = _scope(user)
+        if sid == -1:
+            return {"customers": []}
+        return {"customers": shop.recent_customers(sid)}
+
     # ── portal: orders ────────────────────────────────────────────────────────
     @app.get("/shop/orders")
     def shop_orders_list(status: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0,

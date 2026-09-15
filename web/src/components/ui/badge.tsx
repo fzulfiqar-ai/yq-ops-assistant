@@ -3,29 +3,48 @@ import { cn } from '@/lib/utils'
 
 export type BadgeTone = 'accent' | 'green' | 'amber' | 'grey' | 'rose' | 'ink'
 
+/**
+ * Tints are deliberately pale — a badge is a footnote, not a headline. The ring
+ * is a hairline at 10% so chips still read as separate objects on a white card
+ * without drawing a hard border around every one of them.
+ */
 const TONE: Record<BadgeTone, string> = {
-  accent: 'bg-[#f1ecfb] text-[#6d28d9] ring-[#6d28d9]/12',
-  green: 'bg-[#e8f7ee] text-[#137a48] ring-[#137a48]/12',
-  amber: 'bg-[#fdf3e3] text-[#96600d] ring-[#96600d]/12',
-  grey: 'bg-[#f2f1f6] text-[#6b6480] ring-[#6b6480]/12',
-  rose: 'bg-[#fdecef] text-[#9f1239] ring-[#9f1239]/12',
+  accent: 'bg-[#f3eefc] text-[#6d28d9] ring-[#6d28d9]/10',
+  green: 'bg-[#e8f7ee] text-[#137a48] ring-[#137a48]/10',
+  amber: 'bg-[#fdf3e3] text-[#96600d] ring-[#96600d]/10',
+  grey: 'bg-[#f4f3f8] text-[#6b6480] ring-[#6b6480]/10',
+  rose: 'bg-[#fdecef] text-[#9f1239] ring-[#9f1239]/10',
   ink: 'bg-[#1a1430] text-white ring-[#1a1430]/20',
 }
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   tone?: BadgeTone
+  /** Small filled circle before the label — used for live stock. */
+  dot?: boolean
+}
+
+const DOT: Record<BadgeTone, string> = {
+  accent: 'bg-[#6d28d9]',
+  green: 'bg-[#137a48]',
+  amber: 'bg-[#b8790f]',
+  grey: 'bg-[#a8a2bb]',
+  rose: 'bg-[#9f1239]',
+  ink: 'bg-white',
 }
 
 /** Small, quiet status chip. No gradients, no emoji — a tint and a hairline ring. */
-export function Badge({ tone = 'accent', className, ...props }: BadgeProps) {
+export function Badge({ tone = 'accent', dot = false, className, children, ...props }: BadgeProps) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold leading-4 ring-1 ring-inset',
+        'inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded-full px-2 py-[3px] text-[10.5px] font-semibold leading-[14px] tracking-[0.005em] ring-1 ring-inset',
         TONE[tone],
         className,
       )}
       {...props}
-    />
+    >
+      {dot && <span aria-hidden="true" className={cn('h-[5px] w-[5px] shrink-0 rounded-full', DOT[tone])} />}
+      <span className="min-w-0 truncate">{children}</span>
+    </span>
   )
 }

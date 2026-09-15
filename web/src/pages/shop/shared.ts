@@ -64,7 +64,7 @@ export function badgeMeta(kind: string) {
   return BADGE_META[kind as BadgeKind] || { label: String(kind).replace(/_/g, ' '), tone: 'grey' as BadgeTone }
 }
 
-/** Status only — the shop never reveals a stock number (docs/SHOP.md). */
+/** Status only — the PUBLIC shop never reveals a stock number (docs/SHOP.md). */
 export const STOCK_META: Record<StockStatus, { label: string; tone: BadgeTone }> = {
   in_stock: { label: 'In stock', tone: 'green' },
   low_stock: { label: 'Only a few left', tone: 'amber' },
@@ -73,6 +73,30 @@ export const STOCK_META: Record<StockStatus, { label: string; tone: BadgeTone }>
 
 export function stockMeta(status?: StockStatus | null) {
   return STOCK_META[(status || 'in_stock') as StockStatus] || STOCK_META.in_stock
+}
+
+/**
+ * The one stock chip a card or sheet shows.
+ *
+ * A salesman standing in a shop needs the number — "42 in stock" ends the
+ * argument. A customer only ever sees the wording, because `stock_qty` is
+ * absent from the public payload by design. One helper, so the two modes can
+ * never drift apart.
+ */
+export function stockPill(item?: ShopItem | null): { label: string; tone: BadgeTone } {
+  const qty = item?.stock_qty
+  const status = item?.stock_status
+  if (typeof qty !== 'number' || !Number.isFinite(qty)) return stockMeta(status)
+  if (qty <= 0 || status === 'out_of_stock') return { label: 'Out of stock', tone: 'grey' }
+  if (status === 'low_stock') return { label: `Only ${qty} left`, tone: 'amber' }
+  return { label: `${qty} in stock`, tone: 'green' }
+}
+
+/* ───────────────────────── names ───────────────────────── */
+
+/** "Ali Hassan" → "Ali". Used for the one-tap "Send confirmation to Ali" button. */
+export function firstName(full?: string | null): string {
+  return String(full || '').trim().split(/\s+/)[0] || ''
 }
 
 export function hasBadge(item: ShopItem, kind: BadgeKind): boolean {
@@ -154,3 +178,33 @@ export function isEmail(raw: string): boolean {
   const v = (raw || '').trim()
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v)
 }
+
+/* ───────────────────────── design system ─────────────────────────
+   One place for the class strings that repeat across the shop, so a control
+   can't quietly drift into a different height, radius or focus ring. Canvas
+   #faf9fc · card white · ink #1a1430 · muted #6b6480 · hairline #ece9f3 ·
+   ONE accent #6d28d9 (price, primary action, selection). */
+
+/** Visible focus ring — every interactive element in the shop wears this. */
+export const RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9]/70 focus-visible:ring-offset-2 focus-visible:ring-offset-white'
+
+/** Same ring, drawn inside the element (for full-bleed buttons and photos). */
+export const RING_INSET = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70'
+
+/** Text input / textarea / select. 44px, hairline, accent focus. */
+export const FIELD =
+  'h-11 w-full rounded-xl border border-[#e4e0ee] bg-white px-3 text-[14px] leading-none text-[#1a1430] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#d9d2ee] focus:border-[#6d28d9] focus:ring-2 focus:ring-[#6d28d9]/15'
+
+export const LABEL = 'mb-1.5 block text-[11.5px] font-semibold tracking-[0.01em] text-[#1a1430]'
+
+/** Quiet secondary button — white, hairline, ink text. */
+export const BTN_GHOST =
+  'inline-flex items-center justify-center gap-1.5 rounded-xl border border-[#e4e0ee] bg-white font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb] active:scale-[.99]'
+
+/** The one accent button. Nothing else on the page may be this colour. */
+export const BTN_PRIMARY =
+  'inline-flex items-center justify-center gap-2 rounded-xl bg-[#6d28d9] font-semibold text-white transition duration-150 ease-out hover:bg-[#5b21b6] active:scale-[.99] disabled:pointer-events-none'
+
+/** Card surface: 20px radius, hairline, a shadow you feel rather than see. */
+export const CARD =
+  'rounded-[20px] border border-[#ece9f3] bg-white shadow-[0_1px_2px_rgba(24,16,48,.04)]'

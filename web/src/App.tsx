@@ -36,12 +36,16 @@ const ShopOrders = lazy(() => import('@/pages/ShopOrders'))
 const Salesmen = lazy(() => import('@/pages/Salesmen'))
 const ShopRules = lazy(() => import('@/pages/ShopRules'))
 const ShopAnalytics = lazy(() => import('@/pages/ShopAnalytics'))
+// The customer-facing shop, reused inside the portal so a salesman can order for a shop.
+const ShopPage = lazy(() => import('@/pages/shop/ShopPage'))
 
 /** Land on the first page this user can see (a salesman goes straight to Catalog). */
 function Home() {
   const { me } = useAuth()
   const isAdmin = me?.role === 'admin'
   const canDashboard = isAdmin || (me?.features || []).includes('Dashboard')
+  // A salesman never wants the office dashboard — send them to the catalog they sell from.
+  if (me?.role === 'salesman') return <Navigate to={homeFor(me)} replace />
   if (!canDashboard) return <Navigate to={homeFor(me)} replace />
   return <Gate feature="Dashboard"><Dashboard /></Gate>
 }
@@ -71,6 +75,7 @@ export default function App() {
           <Route path="orders/:poNo" element={<Gate feature="Orders"><OrderDetail /></Gate>} />
           <Route path="leads" element={<Gate feature="Leads"><Leads /></Gate>} />
           <Route path="marketing" element={<Gate feature="Marketing"><Marketing /></Gate>} />
+          <Route path="shop" element={<Gate feature="Catalog"><ShopPage mode="salesman" /></Gate>} />
           <Route path="shop-orders" element={<Gate feature="Shop Orders"><ShopOrders /></Gate>} />
           <Route path="salesmen" element={<Gate feature="Shop Admin"><Salesmen /></Gate>} />
           <Route path="shop-rules" element={<Gate feature="Shop Admin"><ShopRules /></Gate>} />

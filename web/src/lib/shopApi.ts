@@ -1,12 +1,18 @@
-import { API_BASE } from '@/lib/api'
+import { API_BASE, ApiError, apiGet, apiPost } from '@/lib/api'
 
 /**
- * Typed client for the PUBLIC shop endpoints (docs/SHOP.md).
+ * Typed client for the shop endpoints (docs/SHOP.md).
  *
- * No auth header, no supabase session — these links are opened by customers who
- * have never logged in. Every field is optional on read: the API is documented as
- * backward compatible, so an older deployment can answer with the old catalog
- * payload and this UI must still render.
+ * Two audiences, one payload shape:
+ *
+ *  • PUBLIC  — `/public/…`, no auth header, no supabase session. These links are
+ *    opened by customers who have never logged in.
+ *  • SALESMAN — `/shop/…`, bearer token via lib/api. Same catalog, plus exact
+ *    stock numbers, who the logged-in salesman is, and his recent customers.
+ *
+ * Every field is optional on read: the API is documented as backward compatible,
+ * so an older deployment can answer with the old catalog payload and this UI
+ * must still render.
  */
 
 /* ───────────────────────── catalog payload ───────────────────────── */
@@ -37,6 +43,11 @@ export interface ShopItem {
   package_image_url?: string | null
   thumb_url?: string | null
   stock_status?: StockStatus | null
+  /**
+   * Exact units on hand. Salesman mode only — the public payload never carries a
+   * number (docs/SHOP.md), so `undefined`/`null` means "show the status wording".
+   */
+  stock_qty?: number | null
   moq?: number | null
   pack_size?: number | null
   tiers?: Tier[] | null
@@ -83,6 +94,13 @@ export interface ItemPair {
   with: string[]
 }
 
+/** Who is placing the order, in salesman mode. Absent on the public payload. */
+export interface StaffMe {
+  salesman_id?: number | null
+  salesman_name?: string | null
+  is_admin?: boolean | null
+}
+
 export interface CatalogPayload {
   company?: string | null
   brand?: string | null
@@ -96,6 +114,9 @@ export interface CatalogPayload {
   settings?: ShopSettings | null
   ref?: ShopRef | null
   pairs?: ItemPair[] | null
+  /** "salesman" on GET /shop/catalog; absent (or "public") on a share link. */
+  mode?: 'public' | 'salesman' | null
+  me?: StaffMe | null
 }
 
 /* ───────────────────────── quote / order ───────────────────────── */
@@ -194,14 +215,22 @@ export interface OrderRequest {
 export interface OrderResponse {
   ok?: boolean
   order_no: string
+  /** portal row id — salesman mode only */
+  order_id?: number | null
   token?: string | null
   status_url?: string | null
   salesman?: { name?: string | null; phone?: string | null } | null
+  /**
+   * Public mode: the CUSTOMER taps this to send the order to his salesman.
+   * Salesman mode: the SALESMAN taps it to send a confirmation to the customer.
+   */
   whatsapp_url?: string | null
   /** mailto: link, pre-filled with the salesman's address and the whole order (no provider needed) */
   email_url?: string | null
   totals?: Quote | null
   has_backorder?: boolean | null
+  /** "salesman" when the order was placed from inside the portal */
+  source?: string | null
 }
 
 /* ───────────────────────── order status ───────────────────────── */
@@ -354,4 +383,62 @@ export function pingEvent(token: string, body: EventPing): void {
   } catch {
     /* best effort only */
   }
+}
+
+/* ───────────────────── salesman mode (bearer via lib/api) ─────────────────────
+   Same catalog, same quote shape — but the caller is a logged-in salesman, so the
+   payload carries exact stock numbers, who he is, and the customers he has served.
+   lib/api throws ApiError with the raw body; re-shape it to ShopApiError so every
+   form in this folder keeps showing the server's own `detail` line. */
+
+/** A shop the salesman has already sold to — the quick-pick above the form. */
+export interface StaffCustomer {
+  name: string
+  phone?: string | null
+  shop?: string | null
+  area?: string | null
+  email?: string | null
+  orders?: number | null
+  last_order_at?: string | null
+}
+
+export interface StaffOrderRequest {
+  lines: CartLine[]
+  coupon_code?: string
+  /** admin only, and only when `me.salesman_id` is null */
+  salesman_id?: number | null
+  customer: OrderCustomer
+  note?: string
+}
+
+async function staff<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (e: unknown) {
+    if (e instanceof ApiError) throw new ShopApiError(e.status, readDetail(e.body))
+    throw e
+  }
+}
+
+export function getStaffCatalog(): Promise<CatalogPayload> {
+  return staff(() => apiGet<CatalogPayload>('/shop/catalog'))
+}
+
+/**
+ * `signal` is accepted for symmetry with postQuote and deliberately ignored: the
+ * bearer helper has its own timeout, and useQuote already drops any answer that
+ * lands after its controller was aborted, so a stale reply can never overwrite a
+ * newer one.
+ */
+export function postStaffQuote(body: QuoteRequest, _signal?: AbortSignal): Promise<Quote> {
+  void _signal
+  return staff(() => apiPost<Quote>('/shop/quote', { lines: body.lines, coupon_code: body.coupon_code || '' }))
+}
+
+export function postStaffOrder(body: StaffOrderRequest): Promise<OrderResponse> {
+  return staff(() => apiPost<OrderResponse>('/shop/order', body))
+}
+
+export function getMyCustomers(): Promise<StaffCustomer[]> {
+  return staff(async () => (await apiGet<{ customers?: StaffCustomer[] | null }>('/shop/customers')).customers || [])
 }

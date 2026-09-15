@@ -397,11 +397,17 @@ def resolve_ref(ctx: dict, referral_code: str | None) -> dict | None:
     return None
 
 
-def catalog_payload(token: str, referral_code: str | None = None) -> dict | None:
-    """The public catalog. Backward compatible with the pre-shop payload. None = bad token."""
-    good = share_token(create=False)
-    if not good or not secrets.compare_digest(token, good):
-        return None
+def catalog_payload(token: str | None, referral_code: str | None = None, *,
+                    staff_email: str | None = None) -> dict | None:
+    """The catalog payload. Public: token-gated, backward compatible with the pre-shop payload,
+    NEVER carries quantities. Staff (`staff_email` = a logged-in user): no token, the user's own
+    salesman row becomes `ref`, and every item carries `stock_qty` (exact units) — they sell against it.
+    None = bad token."""
+    staff = bool(staff_email)
+    if not staff:
+        good = share_token(create=False)
+        if not good or not token or not secrets.compare_digest(token, good):
+            return None
     ctx = context()
     vals = ctx["settings"]
     low_units = _i(vals.get("shop_low_stock_units"), 10)
@@ -439,6 +445,8 @@ def catalog_payload(token: str, referral_code: str | None = None) -> dict | None
             "badges": badges.get(code, []),
             "social_proof": f"Ordered by {cust} shops this month" if cust >= proof_min else None,
         })
+        if staff:   # added outside the public literal on purpose — the public block must never carry it
+            items[-1]["stock_qty"] = max(_i(it.get("stock_qty")), 0)
     cats = sorted({i.get("category") or "OTHER" for i in items},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
     upd = (exec_sql("SELECT MAX(start_date)::text AS d FROM selling_prices "
@@ -454,7 +462,7 @@ def catalog_payload(token: str, referral_code: str | None = None) -> dict | None
             "amount_off_bhd": r.get("amount_off_bhd"), "coupon_code": None,
             "scope_codes": r["scope"]["item_codes"], "scope_categories": r["scope"]["categories"],
         })
-    return {
+    out = {
         "items": items, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain",
         "prices_updated": upd, "stock_as_of": stock_as_of,
         "salesmen": [{"id": s["id"], "name": s["name"], "referral_code": s.get("referral_code")}
@@ -471,6 +479,14 @@ def catalog_payload(token: str, referral_code: str | None = None) -> dict | None
         },
         "ref": resolve_ref(ctx, referral_code),
     }
+    if staff:
+        sm = salesman_for_user(staff_email)
+        out["mode"] = "salesman"
+        out["me"] = {"salesman_id": sm["id"] if sm else None, "salesman_name": sm["name"] if sm else None,
+                     "is_admin": False}   # the route overwrites is_admin from the auth role
+        out["ref"] = ({"referral_code": sm.get("referral_code"), "salesman_id": sm["id"],
+                       "salesman_name": sm["name"]} if sm else None)
+    return out
 
 
 def rule_summary(r: dict) -> str:
@@ -778,9 +794,12 @@ def _base_url() -> str:
 
 # ── order creation ────────────────────────────────────────────────────────────
 
-def create_order(body: dict, ip: str | None = None, ua: str | None = None) -> dict:
-    """Validate → re-price → persist. Returns the stored order (+lines) and the priced totals."""
-    if clean(body.get("website"), 10):
+def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
+                 staff_email: str | None = None) -> dict:
+    """Validate → re-price → persist. Returns the stored order (+lines) and the priced totals.
+    `staff_email` = a logged-in salesman/admin placing the order FOR a shop (source 'salesman')."""
+    staff = bool(staff_email)
+    if not staff and clean(body.get("website"), 10):
         raise ShopError("Invalid submission.")
     cust = body.get("customer") or {}
     name = clean(cust.get("name"), 120)
@@ -793,10 +812,19 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None) -> di
     if email and not _EMAIL.match(email):
         raise ShopError("Please enter a valid email or leave it blank.")
     ctx = context()
-    quote = price_cart(body.get("lines"), body.get("coupon_code"), body.get("referral_code"), ctx=ctx)
+    if staff:
+        sm = salesman_for_user(staff_email)
+        if not sm and body.get("salesman_id"):     # an admin with no linked salesman row picks one
+            sm = next((s for s in ctx["salesmen"] if int(s["id"]) == _i(body.get("salesman_id"))), None)
+        source = "salesman"
+        referral_code = (sm or {}).get("referral_code")   # so salesman-scoped offers still apply
+    else:
+        referral_code = body.get("referral_code")
+    quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx)
     if not quote["can_submit"]:
         raise ShopError(" ".join(quote["warnings"]) or "Order cannot be submitted.")
-    sm, source = salesman_for(ctx, body.get("referral_code"), _i(body.get("salesman_id")) or None)
+    if not staff:
+        sm, source = salesman_for(ctx, referral_code, _i(body.get("salesman_id")) or None)
     prefix = str(ctx["settings"].get("shop_order_prefix") or "YQ")
     client = get_client()
     try:
@@ -814,8 +842,9 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None) -> di
         "customer_area": clean(cust.get("area"), 120) or None,
         "customer_email": email, "note": clean(body.get("note"), 1000) or None,
         "salesman_id": sm["id"] if sm else None, "salesman_name": sm["name"] if sm else None,
-        "source": source, "referral_code": clean(body.get("referral_code"), 32).lower() or None,
-        "src": clean(body.get("src"), 80) or None,
+        "source": source, "referral_code": clean(referral_code, 32).lower() or None,
+        "src": "salesman" if staff else (clean(body.get("src"), 80) or None),
+        "placed_by": staff_email if staff else None,
         "coupon_code": (quote["coupon"] or {}).get("code") if (quote["coupon"] or {}).get("valid") else None,
         "subtotal_bhd": quote["subtotal_bhd"], "discount_bhd": quote["discount_bhd"],
         "delivery_bhd": quote["delivery_bhd"], "total_bhd": quote["total_bhd"],
@@ -834,7 +863,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None) -> di
     } for ln in quote["lines"]]
     client.table("shop_order_lines").insert(lines).execute()
     client.table("shop_order_events").insert({
-        "order_id": order["id"], "actor": "customer", "event": "created",
+        "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
         "detail": {"source": source, "clamped": quote.get("_clamped") or []}}).execute()
     if quote.get("_coupon_rule_id"):
         try:
@@ -944,8 +973,11 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         "id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
         "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
         "referral_code,coupon_code", count="exact")
-    if status and status in STATUSES:
-        qry = qry.eq("status", status)
+    wanted = [s.strip().lower() for s in str(status or "").split(",") if s.strip().lower() in STATUSES]
+    if len(wanted) == 1:
+        qry = qry.eq("status", wanted[0])
+    elif wanted:
+        qry = qry.in_("status", wanted)
     if salesman_id is not None:
         qry = qry.eq("salesman_id", salesman_id)
     if q:
@@ -954,7 +986,44 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
             qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%,"
                           f"customer_phone.ilike.%{s}%")
     res = qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
-    return {"orders": res.data or [], "count": res.count if res.count is not None else len(res.data or [])}
+    return {"orders": res.data or [], "count": res.count if res.count is not None else len(res.data or []),
+            "counts": status_counts(salesman_id)}
+
+
+def status_counts(salesman_id: int | None = None) -> dict[str, int]:
+    """Orders per status for the scope — feeds the New / In progress / Done buckets and the tab badge."""
+    counts = {s: 0 for s in STATUSES}
+    try:
+        qry = get_client().table("shop_orders").select("status")
+        if salesman_id is not None:
+            qry = qry.eq("salesman_id", salesman_id)
+        for r in qry.limit(10000).execute().data or []:
+            if r.get("status") in counts:
+                counts[r["status"]] += 1
+    except Exception as e:  # noqa: BLE001
+        log.debug("status counts failed: %s", e)
+    return counts
+
+
+def recent_customers(salesman_id: int | None = None, limit: int = 20) -> list[dict]:
+    """A salesman's recent shops (one row per phone, latest first) for the checkout quick-pick."""
+    qry = get_client().table("shop_orders").select(
+        "customer_name,customer_phone,customer_shop,customer_area,customer_email,created_at")
+    if salesman_id is not None:
+        qry = qry.eq("salesman_id", salesman_id)
+    rows = qry.order("created_at", desc=True).limit(500).execute().data or []
+    seen: dict[str, dict] = {}
+    for r in rows:
+        key = r.get("customer_phone") or r.get("customer_name")
+        if not key:
+            continue
+        if key in seen:
+            seen[key]["orders"] += 1
+            continue
+        seen[key] = {"name": r.get("customer_name"), "phone": r.get("customer_phone"),
+                     "shop": r.get("customer_shop"), "area": r.get("customer_area"),
+                     "email": r.get("customer_email"), "orders": 1, "last_order_at": r.get("created_at")}
+    return list(seen.values())[:max(1, min(limit, 100))]
 
 
 def set_status(order_id: int, status: str, note: str | None, actor: str) -> dict:
@@ -1385,7 +1454,8 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
                           for r in reps.values()), key=lambda r: -r["value_bhd"])
     by_ref: dict[str, dict] = {}
     for o in live:
-        key = o.get("referral_code") or ("dropdown" if o.get("source") == "dropdown" else "direct")
+        key = (f"salesman:{o.get('salesman_name') or 'staff'}" if o.get("source") == "salesman"
+               else o.get("referral_code") or ("dropdown" if o.get("source") == "dropdown" else "direct"))
         a = by_ref.setdefault(key, {"key": key, "orders": 0, "value_bhd": 0.0})
         a["orders"] += 1
         a["value_bhd"] = money(a["value_bhd"] + _f(o.get("total_bhd")))

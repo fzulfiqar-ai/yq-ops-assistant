@@ -5,6 +5,7 @@ import { useAuth } from '@/lib/auth'
 import { Logo } from './Logo'
 import { Button } from './ui/button'
 import { AppShell } from './AppShell'
+import { SalesmanShell } from './SalesmanShell'
 
 function Splash() {
   return (
@@ -123,6 +124,8 @@ export function ProtectedRoute() {
     if (meState === 'offline') return <ApiOffline />
     return <ServerWaking />
   }
+  // A salesman works from a phone in a shop — two tabs, no office sidebar.
+  if (me.role === 'salesman') return <SalesmanShell />
   return <AppShell />
 }
 

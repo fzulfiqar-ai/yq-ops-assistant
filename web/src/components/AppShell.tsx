@@ -80,7 +80,11 @@ export function AppShell() {
     () => localStorage.getItem('yq-collapsed') === '1',
   )
   const items = navFor(me)
-  const active = NAV.find((n) => (n.to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(n.to)))
+  // Longest match wins, on segment boundaries only — otherwise /shop-orders would be
+  // labelled "Catalog" just because it starts with /shop.
+  const active = NAV
+    .filter((n) => (n.to === '/' ? loc.pathname === '/' : loc.pathname === n.to || loc.pathname.startsWith(`${n.to}/`)))
+    .sort((a, b) => b.to.length - a.to.length)[0]
   const initials = (me?.email?.[0] || 'U').toUpperCase()
   const [menuOpen, setMenuOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)

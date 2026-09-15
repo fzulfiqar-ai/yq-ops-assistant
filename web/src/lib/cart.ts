@@ -8,6 +8,11 @@ import type { CartLine } from '@/lib/shopApi'
  * WhatsApp mid-browse comes back to the same cart — and two different salesmen's
  * links never bleed into each other. Only {item_code, qty} is stored: prices and
  * totals are the server's job (docs/SHOP.md — client totals are ignored).
+ *
+ * The logged-in salesman shop passes the reserved key `staff`. That keeps the
+ * order he is building for a shop separate from whatever a customer's share link
+ * left behind in the same browser — the two must never merge, because one of them
+ * would be billed to the wrong person.
  */
 
 const PREFIX = 'yq-shop-cart:'

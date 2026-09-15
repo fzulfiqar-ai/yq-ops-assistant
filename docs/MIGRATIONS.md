@@ -38,7 +38,8 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_low_stock` | `lowstock_unification_migration.sql` | **STALE, diverges both ways** — lacks `sold_90d`, `days_cover`, `suggested_reorder_qty`, `status`; carries `product_name`, `sku_code`, `category_name`, `warehouse_name`, `balance_value_bhd`, `as_of_date` which the canonical drops |
 | `v_sales_by_payment`, `v_sales_by_division` | `division_payment_migration.sql` | not present in the baseline at all |
 | `v_top_customers`, `v_sales_by_period` | `scripts/views.sql` | baseline **is** canonical — never redefined |
-| `v_catalog_stock_rows`, `v_catalog_stock`, `v_shop_unpriced_stock`, `v_catalog_velocity`, `v_catalog_pairs`, `v_catalog_cost`, `v_shop_orders_agent`, `v_shop_order_lines_agent` | `shop_migration.sql` (15-Sep-2026) | not in the baseline — YQ Shop views (stock status per catalog code, velocity, co-purchases, landed cost, PII-free order views) |
+| `v_shop_orders_agent` | `shop_salesman_mode_migration.sql` (15-Sep-2026, appends `placed_by`) | not in the baseline |
+| `v_catalog_stock_rows`, `v_catalog_stock`, `v_shop_unpriced_stock`, `v_catalog_velocity`, `v_catalog_pairs`, `v_catalog_cost`, `v_shop_order_lines_agent` | `shop_migration.sql` (15-Sep-2026) | not in the baseline — YQ Shop views (stock status per catalog code, velocity, co-purchases, landed cost, PII-free order views) |
 
 ### The guard protects the file, not the statements
 
@@ -117,3 +118,5 @@ Two quirks worth knowing:
 
 ## Applied 15-Sep-2026 (live Supabase, via `python -m scripts.apply_sql`)
 `price_list_migration.sql` → `pricebook_key_migration.sql` → `rls_lockdown_migration.sql` → `division_split_migration.sql` → `shop_migration.sql`, in that order. Verified afterwards: `v_price_list_by_book` orders `warehouse_name IS NULL` first (98/182 trade prices corrected on the live link), `selling_prices` deduplicated (1,219 rows = 1,219 natural keys), `division_rules` present, `v_catalog_stock` maps 122/122 stock rows. `DATABASE_URL` lives in `.env` (never commit it).
+
+Also applied 15-Sep-2026: `shop_salesman_mode_migration.sql` — `shop_orders.source` gains `salesman`, `shop_orders.placed_by`, `v_shop_orders_agent.placed_by` (appended last: CREATE OR REPLACE VIEW cannot reorder columns — the first attempt failed on exactly that), and `user_roles_role_check` widened to include `salesman` (the portal offered the role since July but the DB rejected it — no salesman login had ever been created).

@@ -210,11 +210,12 @@ def notify_new_order(order_id: int) -> dict:
         if not o:
             return {"error": "order not found"}
         sm = o.get("salesman") or {}
+        placed_by_staff = o.get("source") == "salesman"   # the salesman placed it himself — do not alert him
         subject = f"YQ Shop · New order {o['order_no']} — {o.get('customer_name')} · {_money(o.get('total_bhd'))}"
         text = order_text(o, audience="salesman")
         # salesman + owner copy (one send; both see the same order)
         recipients = []
-        if sm.get("email") and sm.get("notify_email", True):
+        if sm.get("email") and sm.get("notify_email", True) and not placed_by_staff:
             recipients.append(sm["email"])
         owner = os.getenv("ALERT_EMAIL_TO", "")
         for a in owner.split(","):
@@ -222,7 +223,9 @@ def notify_new_order(order_id: int) -> dict:
             if a and a.lower() not in [r.lower() for r in recipients]:
                 recipients.append(a)
         body = order_html(o, f"New order {o['order_no']}",
-                          f"A customer ordered from the shared catalog. {'Assigned to ' + sm['name'] + '.' if sm else 'No salesman assigned — please pick it up.'}")
+                          (f"Placed by {sm.get('name') or o.get('placed_by')} for the shop." if placed_by_staff else
+                           f"A customer ordered from the shared catalog. {'Assigned to ' + sm['name'] + '.' if sm else 'No salesman assigned — please pick it up.'}"))
+        result["recipients"] = recipients
         result["email"] = _email(subject, body, ",".join(recipients))
         # customer confirmation
         if o.get("customer_email"):
@@ -231,7 +234,7 @@ def notify_new_order(order_id: int) -> dict:
                                show_contact=False)
             result["customer_email"] = _email(f"YQ Bahrain · Order {o['order_no']} received", cbody, o["customer_email"])
         result["telegram"] = _telegram(text)
-        if sm and sm.get("notify_whatsapp", True):
+        if sm and sm.get("notify_whatsapp", True) and not placed_by_staff:
             result["whatsapp"] = _whatsapp_cloud(sm.get("whatsapp") or sm.get("phone"), text)
         get_client().table("shop_orders").update({
             "notify_result": result, "notified_at": datetime.now(timezone.utc).isoformat()}).eq("id", order_id).execute()
