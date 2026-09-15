@@ -11,13 +11,34 @@
     <meta property="og:title" content="YQ Bahrain · AI Portal" />
     <meta property="og:description" content="A full team of AI agents working for you." />
     <meta property="og:type" content="website" />
+    <link rel="preconnect" href="%VITE_API_URL%" crossorigin />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Fonts never block the first paint: text shows in the system font and swaps in. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
     <title>YQ Bahrain · AI Portal</title>
+    <script>
+      // A catalog link (/c/{token}) asks the API for the products NOW, in parallel with
+      // downloading the app, instead of after the app has loaded and mounted — seconds
+      // later on a phone. lib/shopApi.ts getCatalog() picks this promise up.
+      ;(function () {
+        var m = location.pathname.match(/^\/c\/([^/]+)\/?$/)
+        var api = '%VITE_API_URL%'
+        if (!m || !window.fetch || api.charAt(0) === '%') return
+        var ref = new URLSearchParams(location.search).get('ref')
+        var url = api + '/public/catalog/' + m[1] + (ref ? '?ref=' + encodeURIComponent(ref) : '')
+        var res = fetch(url).then(function (r) {
+          return r.ok ? r.text() : Promise.reject(r.status)
+        })
+        res.catch(function () {})
+        window.__yqCatalog = { url: url, res: res }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

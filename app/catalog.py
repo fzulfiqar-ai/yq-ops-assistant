@@ -227,6 +227,11 @@ def rotate_share_token() -> str:
         {"key": "catalog_share_token", "value": tok,
          "description": "Public catalog share-link token (rotate to revoke old links)"},
         on_conflict="key").execute()
+    try:    # the shop keeps the token in its cached context — revoked links must die now, not at the next refresh
+        from app import shop
+        shop.invalidate()
+    except Exception:  # noqa: BLE001
+        pass
     return tok
 
 

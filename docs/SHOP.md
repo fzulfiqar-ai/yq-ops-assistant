@@ -229,3 +229,30 @@ Salesman default features are `Catalog` + `Shop Orders`; logins are created from
   cover the orderable lines only. `can_submit` is false and `block_reason` says what to do next, in this order:
   remove the dead line(s), then reach the minimum order. `POST …/order` refuses with that same `block_reason`.
   An empty cart is still a 400.
+
+## Speed (15-Sep-2026)
+
+Measured on production before the change (4G phone profile): first product at ~6.5 s, the catalog request
+starting only at 3.35 s, and the API answering in ~1.4 s even when awake. What changed:
+
+- **API.** `shop.context()` is stale-while-revalidate: past its 60 s TTL the current copy is served at once and
+  one background thread rebuilds it; only a cold process or `invalidate()` builds synchronously, so an owner's
+  upload is still visible on the next request (a generation counter stops an in-flight refresh from overwriting a
+  newer invalidation). The share token and the price date live in the context (they were two database calls on
+  every request). `shop.public_catalog_json()` serializes the public payload once per refresh per salesman link,
+  and `GET /public/catalog/{token}` returns those bytes with `Cache-Control: public, max-age=60,
+  stale-while-revalidate=600`. Warm request locally: ~400 ms → ~15 ms. `rotate_share_token()` invalidates the
+  shop context so a revoked link dies at once.
+- **First request.** An inline script in `web/index.html` starts the catalog fetch for `/c/{token}` before the app
+  has downloaded; `getCatalog()` picks up that promise (`window.__yqCatalog`).
+- **Two front doors.** `web/src/main.tsx` sends `/c/` and `/o/` to `PublicApp` (shop + order status only: no
+  supabase session client, no intro animation, no query cache) and everything else to `PortalRoot`. Entry bundle
+  567 KB → 194 KB. `lib/shopApi.ts` loads `lib/api` lazily, only for the salesman calls.
+- **Page.** A returning merchant's first paint is the copy saved on the phone (`yq-shop-catalog:{token}:{ref}`;
+  the public payload has no quantities or costs), replaced by the live one when it lands; a 404 clears it. The
+  visit/view pings fire after the catalog answers. The first commit draws 12 cards, the rest a frame later. Fonts
+  load without blocking paint. Logo 82 KB PNG → 4 KB WebP.
+- **Sold out last.** `_load_items` sorts sold-out SKUs after every in-stock one; the page keeps sold out last under
+  every sort. The Sold out pill is red.
+- **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` pings
+  every 10 minutes, but GitHub's scheduler can drift; only a paid instance removes cold starts entirely.

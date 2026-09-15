@@ -1315,22 +1315,30 @@ def catalog_share_rotate(admin: CurrentUser = Depends(require_admin)) -> dict:
 
 @app.get("/public/catalog/{token}")
 @limiter.limit("30/minute")
-def catalog_public(request: Request, token: str) -> dict:
-    """No-auth customer catalog: item + photos + trade (B2B) price. Token-gated, rate-limited."""
+def catalog_public(request: Request, token: str):
+    """No-auth customer catalog: item + photos + trade (B2B) price. Token-gated, rate-limited.
+
+    Served as bytes serialized once per catalog refresh (app.shop.public_catalog_json): on
+    Render's 0.1 CPU, rebuilding and encoding the same 180 items for every visitor was most
+    of the ~1.4 s this endpoint used to take. No company WhatsApp number in the payload
+    (owner, 15-Sep-2026) — a merchant's order belongs to his own salesman."""
     from fastapi import HTTPException
     from app.catalog import public_catalog
     try:
-        from app.shop import catalog_payload
-        r = catalog_payload(token, referral_code=request.query_params.get("ref"))
+        from app.shop import public_catalog_json
+        raw = public_catalog_json(token, request.query_params.get("ref"))
     except Exception as e:  # noqa: BLE001 — shop views not migrated yet → legacy payload
         logging.getLogger(__name__).warning("shop payload failed, serving legacy catalog: %s", e)
         r = public_catalog(token)
-    if r is None:
+        if r is None:
+            raise HTTPException(status_code=404, detail="Invalid catalog link.") from e
+        return r
+    if raw is None:
         raise HTTPException(status_code=404, detail="Invalid catalog link.")
-    # No company WhatsApp number in the payload (owner, 15-Sep-2026): a merchant's
-    # order belongs to his own salesman, and the catalog is public — publishing a
-    # number on it invites everything except orders.
-    return r
+    # A minute of browser cache, then a background revalidate: a merchant reopening the
+    # link sees it instantly. Safe for prices — quote and order re-price on the server.
+    return Response(content=raw, media_type="application/json",
+                    headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=600"})
 
 
 # ── Product Finds (new/unique products the sales team spots in the field) ─────

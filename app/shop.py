@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -173,12 +174,14 @@ def selling_fast(qty, sold_90d, low_days: int) -> bool:
 
 # ── context: items, rules, salesmen (one cached load feeds payload + pricing) ──
 
-_ctx_cache: dict = {"at": 0.0, "ctx": None}
+# gen counts invalidations, so a background refresh that started before one never
+# overwrites the fresh copy with data it read before the change.
+_ctx_cache: dict = {"at": 0.0, "ctx": None, "gen": 0}
 
 
 def invalidate() -> None:
     """Forget the cached catalog context (called after refresh, photo upload, rule/salesman edits)."""
-    _ctx_cache.update(at=0.0, ctx=None)
+    _ctx_cache.update(at=0.0, ctx=None, gen=_ctx_cache["gen"] + 1)
     _settings_cache.update(at=0.0, vals=None)
 
 
@@ -201,7 +204,11 @@ def _load_items() -> list[dict]:
         "WHERE c.is_active AND NOT COALESCE(ci.hidden, false) "
         "ORDER BY c.category, c.sort_order NULLS LAST, c.item_code"
     ) or []
-    rows.sort(key=lambda r: (CATEGORY_ORDER.index(r["category"]) if r.get("category") in CATEGORY_ORDER else 99,
+    # Sold-out SKUs go to the very end of the catalog (owner, 15-Sep): every screen a
+    # merchant scrolls should open on something he can have today. Within each half
+    # the shelf order holds.
+    rows.sort(key=lambda r: (_f(r.get("stock_qty"), 0.0) <= 0,
+                             CATEGORY_ORDER.index(r["category"]) if r.get("category") in CATEGORY_ORDER else 99,
                              str(r.get("category") or ""),
                              _i(r.get("sort_order"), 10 ** 6), str(r["item_code"])))
     return rows
@@ -284,11 +291,13 @@ def _load_salesmen(active_only: bool = True) -> list[dict]:
         return []
 
 
-def context(force: bool = False) -> dict:
-    now = time.time()
-    if not force and _ctx_cache["ctx"] is not None and now - _ctx_cache["at"] < _TTL:
-        return _ctx_cache["ctx"]
-    vals = shop_settings(force=force)
+_ctx_lock = threading.Lock()
+
+
+def _build_context() -> dict:
+    """One full load: ~7 round trips to Supabase (~1.5 s from Render). Everything a
+    public request needs is in here, so a warm request touches the database zero times."""
+    vals = shop_settings(force=True)
     items = _load_items()
     ctx = {
         "settings": vals,
@@ -303,8 +312,71 @@ def context(force: bool = False) -> dict:
     # so every lookup that starts from user input goes through this index.
     ctx["by_upper"] = {code.upper(): code for code in ctx["order"]}
     ctx["pairs"] = _load_pairs(set(ctx["order"]))
-    _ctx_cache.update(at=now, ctx=ctx)
+    # Both used to be a database call on EVERY catalog request (~350 ms together).
+    ctx["share_token"] = share_token(create=False)
+    ctx["prices_updated"] = (exec_sql("SELECT MAX(start_date)::text AS d FROM selling_prices "
+                                      "WHERE price_book = 'MA_base' AND start_date <= CURRENT_DATE")
+                             or [{}])[0].get("d")
+    ctx["public_json"] = {}     # serialized public payloads, per referral code — see public_catalog_json
     return ctx
+
+
+def _refresh_in_background(gen: int) -> None:
+    if not _ctx_lock.acquire(blocking=False):
+        return                  # a refresh is already running
+    def run() -> None:
+        try:
+            ctx = _build_context()
+            if _ctx_cache["gen"] == gen:     # an invalidate() meanwhile means this copy is already stale
+                _ctx_cache.update(at=time.time(), ctx=ctx)
+        except Exception as e:  # noqa: BLE001 — keep serving the previous copy
+            log.warning("background catalog refresh failed, serving the previous copy: %s", e)
+        finally:
+            _ctx_lock.release()
+    threading.Thread(target=run, name="shop-context-refresh", daemon=True).start()
+
+
+def context(force: bool = False) -> dict:
+    """The cached catalog context, stale-while-revalidate.
+
+    Past its 60 s TTL the current copy is still returned at once while ONE background
+    thread rebuilds it — no visitor ever waits for the rebuild. Only a cold process or an
+    explicit invalidate() (price/stock upload, photo, rule or salesman edit) builds
+    synchronously, so an owner's change is still visible on the very next request."""
+    cached = _ctx_cache["ctx"]
+    if not force and cached is not None:
+        if time.time() - _ctx_cache["at"] >= _TTL:
+            _refresh_in_background(_ctx_cache["gen"])
+        return cached
+    with _ctx_lock:             # one cold build at a time; everyone queued behind it reuses it
+        if not force and _ctx_cache["ctx"] is not None:
+            return _ctx_cache["ctx"]
+        gen = _ctx_cache["gen"]
+        ctx = _build_context()
+        if _ctx_cache["gen"] == gen:
+            _ctx_cache.update(at=time.time(), ctx=ctx)
+        return ctx
+
+
+def public_catalog_json(token: str | None, referral_code: str | None = None) -> bytes | None:
+    """The public catalog as ready-to-send JSON bytes, built once per context refresh and
+    per salesman link. Every visitor between two refreshes gets the same answer, so none of
+    them should pay for building and serializing 180 items. None = bad token."""
+    ctx = context()
+    good = ctx.get("share_token")
+    if not (token and good and secrets.compare_digest(token, good)):
+        return None if catalog_payload(token, referral_code) is None else _serialize(token, referral_code)
+    # unknown ?ref= values all share the no-ref copy, so junk links cannot grow the cache
+    key = (resolve_ref(ctx, referral_code) or {}).get("referral_code") or ""
+    cached = ctx["public_json"].get(key)
+    if cached is None:
+        cached = ctx["public_json"][key] = _serialize(token, key or None)
+    return cached
+
+
+def _serialize(token: str | None, referral_code: str | None) -> bytes | None:
+    payload = catalog_payload(token, referral_code)
+    return None if payload is None else json.dumps(payload, separators=(",", ":"), default=str).encode()
 
 
 def resolve_code(ctx: dict, raw) -> str | None:
@@ -425,11 +497,14 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
     salesman row becomes `ref`, and every item carries `stock_qty` (exact units) — they sell against it.
     None = bad token."""
     staff = bool(staff_email)
-    if not staff:
-        good = share_token(create=False)
-        if not good or not token or not secrets.compare_digest(token, good):
-            return None
     ctx = context()
+    if not staff:
+        good = ctx.get("share_token")
+        if not (good and token and secrets.compare_digest(token, good)):
+            # the cached token can trail a rotation made by another process: ask the table before refusing
+            good = share_token(create=False)
+            if not good or not token or not secrets.compare_digest(token, good):
+                return None
     vals = ctx["settings"]
     low_units = _i(vals.get("shop_low_stock_units"), 10)
     proof_min = _i(vals.get("shop_social_proof_min_customers"), 5)
@@ -470,8 +545,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             items[-1]["stock_qty"] = max(_i(it.get("stock_qty")), 0)
     cats = sorted({i.get("category") or "OTHER" for i in items},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
-    upd = (exec_sql("SELECT MAX(start_date)::text AS d FROM selling_prices "
-                    "WHERE price_book = 'MA_base' AND start_date <= CURRENT_DATE") or [{}])[0].get("d")
+    upd = ctx.get("prices_updated")      # read once per context refresh, not once per visitor
     offers = []
     for r in ctx["rules"]:
         if r["kind"] not in ("cart_value", "qty_tier") or r["scope"]["referral_codes"]:

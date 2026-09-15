@@ -13,6 +13,7 @@ import {
   pingVisit,
   postQuote,
   postStaffQuote,
+  ShopApiError,
   type CatalogPayload,
   type Offer,
   type OrderResponse,
@@ -114,6 +115,31 @@ function CardSkeleton() {
   )
 }
 
+/* A returning merchant's catalog, kept on his phone between visits. The public payload
+   carries no quantities and no costs, so nothing sensitive is stored, and the copy is
+   only a first paint: the live payload replaces it as soon as it lands. */
+const catalogCacheKey = (token: string, ref: string) => `yq-shop-catalog:${token}:${ref.toLowerCase()}`
+
+function readCachedCatalog(token: string, ref: string): CatalogPayload | null {
+  if (!token) return null
+  try {
+    const raw = localStorage.getItem(catalogCacheKey(token, ref))
+    const d = raw ? (JSON.parse(raw) as CatalogPayload) : null
+    return d?.items?.length ? d : null
+  } catch {
+    return null
+  }
+}
+
+function writeCachedCatalog(token: string, ref: string, d: CatalogPayload | null) {
+  try {
+    if (d) localStorage.setItem(catalogCacheKey(token, ref), JSON.stringify(d))
+    else localStorage.removeItem(catalogCacheKey(token, ref))
+  } catch {
+    /* storage full or private mode — the next visit simply waits for the network */
+  }
+}
+
 export interface ShopPageProps {
   /** "salesman" renders inside the logged-in shell against the bearer endpoints. */
   mode?: 'public' | 'salesman'
@@ -127,7 +153,9 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
   const srcParam = params.get('src') || 'direct'
   const itemParam = params.get('item') || ''
 
-  const [data, setData] = useState<CatalogPayload | null>(null)
+  // A public link's first render uses the copy this phone saved on its last visit, so a
+  // returning merchant sees products at once — even while a sleeping API wakes up.
+  const [data, setData] = useState<CatalogPayload | null>(() => (staff ? null : readCachedCatalog(token, refParam)))
   const [err, setErr] = useState(false)
   const [cat, setCat] = useState('All')
   const [q, setQ] = useState('')
@@ -153,10 +181,13 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
   useEffect(() => {
     if (!staff && !token) return
     let alive = true
+    // true when the first render already painted this phone's saved copy (see useState above)
+    const painted = data !== null
     ;(staff ? getStaffCatalog() : getCatalog(token, refParam))
       .then((d) => {
         if (!alive) return
         setData(d)
+        if (!staff) writeCachedCatalog(token, refParam, d)
         // ?item=CODE deep link (a shared product): open its sheet as soon as the
         // payload lands, so a WhatsApp link lands the customer on the product.
         if (!deepLinked.current && itemParam) {
@@ -176,15 +207,25 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
           }
         }
       })
-      .catch(() => {
-        if (alive) setErr(true)
+      .catch((e: unknown) => {
+        if (!alive) return
+        // A revoked link must stop working, even on a phone holding a copy of it.
+        // Any other failure (a sleeping API, no signal) keeps the saved copy up.
+        if (e instanceof ShopApiError && e.status === 404) {
+          writeCachedCatalog(token, refParam, null)
+          setErr(true)
+        } else if (!painted) {
+          setErr(true)
+        }
       })
-    // Funnel pings belong to the public link only — a salesman browsing his own
-    // price list is not a marketing session.
-    if (!staff) {
-      pingVisit(token, srcParam)
-      pingEvent(token, { event: 'view', referral_code: refParam, src: srcParam, session_id: sid })
-    }
+      .finally(() => {
+        // Funnel pings belong to the public link only — a salesman browsing his own
+        // price list is not a marketing session. They wait for the catalog: on a
+        // 0.1-CPU server they would otherwise queue in front of it.
+        if (staff || !alive) return
+        pingVisit(token, srcParam)
+        pingEvent(token, { event: 'view', referral_code: refParam, src: srcParam, session_id: sid })
+      })
     return () => {
       alive = false
     }
@@ -221,7 +262,12 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
     if (offersOnly) r = r.filter((i) => hasBadge(i, 'on_offer') || i.compare_at_bhd != null || hasBadge(i, 'price_drop'))
     if (bestOnly) r = r.filter((i) => hasBadge(i, 'best_seller'))
 
-    if (sort === 'featured') return r
+    // Sold out always goes last, whatever the sort (owner, 15-Sep): the server already
+    // orders the catalog that way, and this keeps it true for every other sort — and
+    // for a copy saved on the phone before that server change. Array sort is stable,
+    // so each half keeps the order the chosen sort gave it.
+    const soldOut = (i: ShopItem) => (i.stock_status === 'out_of_stock' ? 1 : 0)
+    if (sort === 'featured') return r.slice().sort((a, b) => soldOut(a) - soldOut(b))
     const idx = new Map(items.map((i, n) => [i.item_code, n]))
     // Featured order is the tie-break for every other sort, so equal items never
     // shuffle between renders.
@@ -242,12 +288,21 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
       )
     else if (sort === 'newest')
       copy.sort((a, b) => Number(hasBadge(b, 'new')) - Number(hasBadge(a, 'new')) || order0(a) - order0(b))
-    return copy
+    return copy.sort((a, b) => soldOut(a) - soldOut(b))
   }, [items, cat, q, inStockOnly, offersOnly, bestOnly, sort])
 
   // Paging is keyed to the filter: changing a filter shows the first chunk again
   // without an effect that would render the long list twice.
-  const visible = paging.key === filterKey ? paging.n : CHUNK
+  // The first paint draws one phone-screen of cards and the rest follow a frame later:
+  // on a phone's CPU, 48 cards in a single commit held the first product back ~2 s.
+  const [firstPaint, setFirstPaint] = useState(true)
+  useEffect(() => {
+    if (!data || !firstPaint) return
+    const id = window.setTimeout(() => setFirstPaint(false), 60)
+    return () => window.clearTimeout(id)
+  }, [data, firstPaint])
+  const pageSize = paging.key === filterKey ? paging.n : CHUNK
+  const visible = firstPaint ? Math.min(pageSize, 12) : pageSize
   const showMore = () => setPaging({ key: filterKey, n: visible + CHUNK })
 
   // No product rail above the grid: every product appears exactly once on this

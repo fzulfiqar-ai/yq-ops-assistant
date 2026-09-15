@@ -128,7 +128,7 @@ export function ProductSheet({
                   ? out
                     ? 'border border-[#e4e0ee] bg-white text-[#1a1430] hover:border-[#d9d2ee] hover:bg-[#f7f5fb]'
                     : 'bg-[#6d28d9] text-white hover:bg-[#5b21b6]'
-                  : 'cursor-not-allowed border border-[#f0eef6] bg-[#f9f8fc] text-[#a8a2bb]',
+                  : 'cursor-not-allowed border border-[#f3c9d2] bg-[#fdecef] text-[#9f1239]',
               )}
             >
               {canOrder ? (
@@ -201,7 +201,7 @@ export function ProductSheet({
               })}
             </div>
             {out && allowBackorder && (
-              <p className="mt-2.5 rounded-xl bg-[#f7f6fa] px-3 py-2 text-[11.5px] leading-snug text-[#6b6480]">
+              <p className="mt-2.5 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] leading-snug text-[#9f1239]">
                 Sold out — order now and your salesman will confirm the ETA.
               </p>
             )}

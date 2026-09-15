@@ -1,45 +1,22 @@
-import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import './index.css'
-import App from './App.tsx'
-import { ThemeProvider } from '@/lib/theme'
-import { AuthProvider } from '@/lib/auth'
-import { ArcRevealHero } from '@/components/ui/arc-preloader-hero'
-import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { ToastProvider } from '@/components/Toast'
 
-// Business data changes ONLY when reports are uploaded, so pages can cache hard:
-// revisiting a page within 5 min renders instantly from memory (no spinner, no fetch),
-// and cached pages survive navigation for 30 min.
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { staleTime: 5 * 60_000, gcTime: 30 * 60_000, refetchOnWindowFocus: false, retry: 1 },
-  },
-})
+/**
+ * Two front doors.
+ *
+ *  • /c/{token} and /o/{token} — a merchant tapping a WhatsApp link: logged out, on a
+ *    phone, often on 4G. PublicApp gives them the shop and the order-status page and
+ *    nothing else — no session client, no intro animation, no query cache, no charts.
+ *  • everything else — the portal (PortalRoot), exactly as before.
+ *
+ * Both are dynamic imports, so neither door downloads the other's code. Before this
+ * split a catalog link parsed the whole ~570 KB portal bundle and sat through the
+ * "Intelligence" intro before it ever asked the API for a product.
+ */
+const root = createRoot(document.getElementById('root')!)
 
-// Warm the API the moment the tab opens — by the time the user has typed their
-// password, a cold Railway instance is already up (fire-and-forget, errors ignored).
-import('./lib/api').then(({ API_BASE }) => {
-  if (API_BASE) fetch(`${API_BASE}/health`).catch(() => {})
-})
-
-const INTRO = [{ text: 'YQ Bahrain' }, { text: 'Mobile Accessories' }, { text: 'Intelligence' }]
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary>
-      <ThemeProvider>
-        <ArcRevealHero storageKey="yq-intro-v2" greetings={INTRO} greetingHold={300} revealDuration={600} className="!min-h-0">
-          <QueryClientProvider client={queryClient}>
-            <ToastProvider>
-              <AuthProvider>
-                <App />
-              </AuthProvider>
-            </ToastProvider>
-          </QueryClientProvider>
-        </ArcRevealHero>
-      </ThemeProvider>
-    </ErrorBoundary>
-  </StrictMode>,
-)
+if (/^\/(c|o)\/[^/]+/.test(window.location.pathname)) {
+  void import('./PublicApp').then(({ default: PublicApp }) => root.render(<PublicApp />))
+} else {
+  void import('./PortalRoot').then(({ default: PortalRoot }) => root.render(<PortalRoot />))
+}

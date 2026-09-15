@@ -1,4 +1,6 @@
-import { API_BASE, ApiError, apiGet, apiPost } from '@/lib/api'
+/** Same base as lib/api, read here directly: the public shop must never import lib/api (it
+ *  brings the supabase session client along). The salesman calls load it lazily below. */
+const API_BASE = (import.meta.env.VITE_API_URL as string) || ''
 
 /**
  * Typed client for the shop endpoints (docs/SHOP.md).
@@ -339,9 +341,26 @@ async function request<T>(path: string, init?: RequestInit, signal?: AbortSignal
 
 const seg = (s: string) => encodeURIComponent(s)
 
+declare global {
+  interface Window {
+    /** The catalog request index.html starts before the app has even downloaded. */
+    __yqCatalog?: { url: string; res: Promise<string> }
+  }
+}
+
 export function getCatalog(token: string, ref?: string | null): Promise<CatalogPayload> {
   const qs = ref ? `?ref=${encodeURIComponent(ref)}` : ''
-  return request<CatalogPayload>(`/public/catalog/${seg(token)}${qs}`)
+  const path = `/public/catalog/${seg(token)}${qs}`
+  const early = typeof window !== 'undefined' ? window.__yqCatalog : undefined
+  if (early && early.url === `${API_BASE}${path}`) {
+    // Shared while in flight, forgotten once settled: a later refetch must reach the network.
+    early.res.finally(() => {
+      if (window.__yqCatalog === early) window.__yqCatalog = undefined
+    }).catch(() => {})
+    // If the early request failed, ask again the normal way so the error carries its detail.
+    return early.res.then((text) => JSON.parse(text) as CatalogPayload, () => request<CatalogPayload>(path))
+  }
+  return request<CatalogPayload>(path)
 }
 
 export function postQuote(token: string, body: QuoteRequest, signal?: AbortSignal): Promise<Quote> {
@@ -416,17 +435,22 @@ export interface StaffOrderRequest {
   note?: string
 }
 
-async function staff<T>(run: () => Promise<T>): Promise<T> {
+type BearerApi = typeof import('@/lib/api')
+
+/* lib/api is imported lazily, on the first salesman call: it pulls in the supabase
+   session client, and a merchant on a public link must never download that. */
+async function staff<T>(run: (api: BearerApi) => Promise<T>): Promise<T> {
+  const api = await import('@/lib/api')
   try {
-    return await run()
+    return await run(api)
   } catch (e: unknown) {
-    if (e instanceof ApiError) throw new ShopApiError(e.status, readDetail(e.body))
+    if (e instanceof api.ApiError) throw new ShopApiError(e.status, readDetail(e.body))
     throw e
   }
 }
 
 export function getStaffCatalog(): Promise<CatalogPayload> {
-  return staff(() => apiGet<CatalogPayload>('/shop/catalog'))
+  return staff((api) => api.apiGet<CatalogPayload>('/shop/catalog'))
 }
 
 /**
@@ -437,13 +461,15 @@ export function getStaffCatalog(): Promise<CatalogPayload> {
  */
 export function postStaffQuote(body: QuoteRequest, _signal?: AbortSignal): Promise<Quote> {
   void _signal
-  return staff(() => apiPost<Quote>('/shop/quote', { lines: body.lines, coupon_code: body.coupon_code || '' }))
+  return staff((api) => api.apiPost<Quote>('/shop/quote', { lines: body.lines, coupon_code: body.coupon_code || '' }))
 }
 
 export function postStaffOrder(body: StaffOrderRequest): Promise<OrderResponse> {
-  return staff(() => apiPost<OrderResponse>('/shop/order', body))
+  return staff((api) => api.apiPost<OrderResponse>('/shop/order', body))
 }
 
 export function getMyCustomers(): Promise<StaffCustomer[]> {
-  return staff(async () => (await apiGet<{ customers?: StaffCustomer[] | null }>('/shop/customers')).customers || [])
+  return staff(
+    async (api) => (await api.apiGet<{ customers?: StaffCustomer[] | null }>('/shop/customers')).customers || [],
+  )
 }
