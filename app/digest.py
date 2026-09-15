@@ -26,13 +26,19 @@ def daily_summary() -> dict:
     data_date = _data_date()
     if not data_date:
         return {"data_date": None, "rev_today": 0, "orders_today": 0, "rev_mtd": 0,
-                "orders_mtd": 0, "rev_prev_month": 0, "top_customers": [], "total_receivables": 0,
+                "orders_mtd": 0, "rev_prev_month": 0, "rev_prev_month_mtd": 0,
+                "prev_month_through": None, "top_customers": [], "total_receivables": 0,
                 "overdue_receivables_bhd": 0, "current_receivables_bhd": 0, "overdue_accounts": 0}
     d = datetime.date.fromisoformat(str(data_date)[:10])
     yday = (d - datetime.timedelta(days=1)).isoformat()
     month_start = d.replace(day=1).isoformat()
     prev_end = d.replace(day=1) - datetime.timedelta(days=1)
     prev_start = prev_end.replace(day=1).isoformat()
+    # Same slice of the PREVIOUS month, for an honest like-for-like comparison: MTD covers only
+    # d.day days, so comparing it against the whole previous month always reads as a collapse
+    # early in the month and "recovers" by the 30th purely as an artefact. Clamp to prev_end so
+    # 31-Mar vs a 28-day February does not overshoot.
+    prev_same_day = min(prev_end.replace(day=1) + datetime.timedelta(days=d.day - 1), prev_end)
 
     mtd = exec_sql(
         "SELECT COALESCE(SUM(revenue_bhd),0) AS rev, COALESCE(SUM(net_bhd),0) AS net, "
@@ -50,12 +56,25 @@ def daily_summary() -> dict:
         "SELECT COALESCE(SUM(revenue_bhd),0) AS rev FROM v_sales "
         f"WHERE sale_date >= DATE '{prev_start}' AND sale_date <= DATE '{prev_end.isoformat()}' LIMIT 1"
     )
+    # Previous month truncated to the same day-of-month as the current data date.
+    prev_mtd = exec_sql(
+        "SELECT COALESCE(SUM(revenue_bhd),0) AS rev FROM v_sales "
+        f"WHERE sale_date >= DATE '{prev_start}' AND sale_date <= DATE '{prev_same_day.isoformat()}' LIMIT 1"
+    )
     # Top customers this month — exclude the walk-in "Cash Customer" bucket (it's a
     # channel, not an account, and would otherwise dominate every list).
+    # v_top_customers aggregates over ALL loaded history with no date filter, so the old
+    # query here (WHERE last_order_date >= month_start) only chose WHICH customers appear —
+    # every BHD figure and the ranking itself stayed lifetime. A customer buying 1,000/month
+    # for a year showed as ~12,000 under a card whose empty state says "this month".
+    # Aggregate the window itself instead.
     top = exec_sql(
-        "SELECT customer_name, gross_bhd AS total_revenue_bhd, order_count FROM v_top_customers "
-        f"WHERE last_order_date >= DATE '{month_start}' AND customer_name NOT ILIKE 'cash customer%' "
-        "ORDER BY gross_bhd DESC NULLS LAST LIMIT 5"
+        "SELECT COALESCE(customer_name, customer_account) AS customer_name, "
+        "COALESCE(SUM(revenue_bhd),0) AS total_revenue_bhd, "
+        "COUNT(DISTINCT invoice_no) AS order_count FROM v_sales "
+        f"WHERE sale_date >= DATE '{month_start}' AND NOT is_cash_customer "
+        "GROUP BY 1 HAVING COALESCE(SUM(revenue_bhd),0) > 0 "
+        "ORDER BY 2 DESC NULLS LAST LIMIT 5"
     )
     # Total book + past-due split on the SAME bucket basis as the collections agent,
     # so the dashboard tile and the agent can never disagree again.
@@ -78,6 +97,8 @@ def daily_summary() -> dict:
         "net_mtd": float(g(mtd, "net")),
         "orders_mtd": int(g(mtd, "orders")),
         "rev_prev_month": float(g(prev, "rev")),
+        "rev_prev_month_mtd": float(g(prev_mtd, "rev")),
+        "prev_month_through": prev_same_day.isoformat(),
         "top_customers": top or [],
         "total_receivables": float(g(recv, "total")),
         "overdue_receivables_bhd": float(g(recv, "overdue")),
@@ -94,6 +115,21 @@ def low_stock_items() -> list[dict]:
         "FROM v_stock_health WHERE status IN ('urgent_out_of_stock','low_stock') "
         "ORDER BY days_cover ASC NULLS FIRST LIMIT 60"
     )
+
+
+def low_stock_total() -> int:
+    """UNCAPPED count of low/out-of-stock items.
+
+    low_stock_items() is display-capped at 60, and taking len() of it pinned the dashboard
+    KPI, the footer strip and the "Reorder N items" action at exactly 60 once the real count
+    crossed it — a silent ceiling on the number that triggers reordering. overdue_count was
+    already fixed this way (see the note in app/reports.py); this closes the same hole here.
+    """
+    r = exec_sql(
+        "SELECT COUNT(*) AS n FROM v_stock_health "
+        "WHERE status IN ('urgent_out_of_stock','low_stock') LIMIT 1"
+    )
+    return int((r or [{}])[0].get("n") or 0)
 
 
 def overdue_receivables() -> list[dict]:
@@ -119,7 +155,8 @@ def all_alerts() -> dict:
     neg = negative_margins()
     return {
         "low_stock": low,
-        "low_stock_count": len(low),
+        # Uncapped SQL count, NOT len(low) — the list above stops at 60.
+        "low_stock_count": low_stock_total(),
         "overdue_receivables": overdue,
         "overdue_count": len(overdue),
         "overdue_total_bhd": sum(float(r.get("overdue_bhd") or 0) for r in overdue),

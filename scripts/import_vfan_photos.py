@@ -32,7 +32,7 @@ warnings.filterwarnings("ignore")
 
 # a model code has letters then digits (X01, TB-D1, K105, V02, M04DC, P04 CL);
 # variant labels (MICRO, LIGHTNING, TYPE-C, C-C, 3 in 1) don't.
-MODEL_RE = re.compile(r"^[A-Z]{1,3}-?\d+")
+MODEL_RE = re.compile(r"^[A-Z]{1,3}-?[A-Z]?\d+")   # X01, K105, P04 CL, and TB-D1 (letter after the dash)
 
 
 def _txt(v) -> str:
@@ -242,7 +242,7 @@ def run(xlsx: Path, dry: bool = False) -> int:
 def main() -> int:
     args = [a for a in sys.argv[1:] if a != "--dry-run"]
     dry = "--dry-run" in sys.argv
-    src = Path(args[0]) if args else ROOT / "VFAN Quotation-2026-7.xlsx"
+    src = Path(args[0]) if args else ROOT / "business_data" / "VFAN Quotation-2026-7.xlsx"
     if not src.is_absolute():
         src = ROOT / src
     if not src.exists():

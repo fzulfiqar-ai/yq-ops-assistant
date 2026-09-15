@@ -90,7 +90,7 @@ def run(src_dir: Path) -> int:
 
 
 def main() -> int:
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "Planning 030726"
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "business_data" / "Planning 030726"
     if not src.is_absolute():
         src = ROOT / src
     if not src.exists():

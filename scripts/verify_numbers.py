@@ -27,7 +27,27 @@ from scripts.ingest import (  # noqa: E402
     parse_order_lines, parse_receivables, parse_stock_balance, read_grid,
 )
 
-NEW = ROOT / "Focus ERP Updated Reports"
+DATA_DIR = ROOT / "business_data"
+
+
+def _latest_source_dir() -> Path:
+    """The most recent dated Focus drop, e.g. business_data/Focus ERP 2026-09-14.
+
+    The default used to be hard-pinned to "Focus ERP Updated Reports" (a June export). Running
+    this with no argument therefore crosschecked TODAY's database against MONTHS-old reports and
+    reported FAIL on receivables and stock -- a scary red result caused purely by a stale default.
+    Prefer the newest 'Focus ERP <date>' folder, which is what an upload actually loaded.
+    """
+    dated = sorted(
+        (p for p in DATA_DIR.glob("Focus ERP 20*") if p.is_dir()),
+        key=lambda p: p.name,
+    )
+    if dated:
+        return dated[-1]
+    return DATA_DIR / "Focus ERP Updated Reports"
+
+
+NEW = _latest_source_dir()
 
 
 def _nn(v) -> float:
@@ -138,10 +158,20 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
               if aod else _db_sum("stock_balance", "total_value_bhd"))
         checks.append(("Stock value BHD", report, db, 0.5))
 
-    # Channel split should reconcile to total sales gross (DB-only — always run)
+    # How many checks above are backed by an actual source FILE. Everything after this point
+    # is DB-vs-DB and cannot detect a bad load, so this is the number that decides whether the
+    # run proved anything at all.
+    source_backed = len(checks)
+
+    # Channel split vs total sales gross. NOTE: this is DB-vs-DB and very nearly a tautology —
+    # v_sales_by_channel is `select channel, sum(revenue_bhd) from v_sales group by channel`
+    # with no WHERE and no NULL branch in the channel CASE, so summing its groups is the same
+    # number by construction. It is kept only as a guard against the view being redefined with
+    # a filter or a channel that can go NULL. It must never be counted as evidence of a good
+    # load, which is why it is added AFTER source_backed is taken.
     c = get_client()
     ch = c.table("v_sales_by_channel").select("revenue_bhd").execute().data or []
-    checks.append(("Channel = sales gross", _db_sum("v_sales", "revenue_bhd"),
+    checks.append(("Channel = sales gross (DB-only)", _db_sum("v_sales", "revenue_bhd"),
                    sum(_nn(r["revenue_bhd"]) for r in ch), 0.5))
 
     rows, ok = [], True
@@ -150,6 +180,13 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
         passed = diff_pct <= tol
         ok = ok and passed
         rows.append({"metric": name, "report": report, "db": db, "diff_pct": diff_pct, "passed": passed})
+
+    # No source file matched => nothing was actually cross-checked. Reporting PASS here would be
+    # the worst possible outcome: a green light that means "I found no reports to compare against".
+    if source_backed == 0:
+        ok = False
+        rows.append({"metric": "NO SOURCE REPORTS FOUND", "report": 0.0, "db": 0.0,
+                     "diff_pct": 100.0, "passed": False})
     return ok, rows
 
 

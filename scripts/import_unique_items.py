@@ -78,7 +78,7 @@ def run(folder: Path, dry: bool = False) -> int:
 def main() -> int:
     args = [a for a in sys.argv[1:] if a != "--dry-run"]
     dry = "--dry-run" in sys.argv
-    folder = Path(args[0]) if args else ROOT / "Unique Items" / "Unique Items"
+    folder = Path(args[0]) if args else ROOT / "business_data" / "Unique Items" / "Unique Items"
     if not folder.is_absolute():
         folder = ROOT / folder
     if not folder.exists():

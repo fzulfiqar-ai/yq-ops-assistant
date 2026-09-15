@@ -137,7 +137,7 @@ def parse_and_upload(xlsx: Path, dry: bool = False) -> dict:
 def main() -> int:
     args = [a for a in sys.argv[1:] if a != "--dry-run"]
     dry = "--dry-run" in sys.argv
-    src = Path(args[0]) if args else ROOT / "Planning 030726" / "Catelog.xlsx"
+    src = Path(args[0]) if args else ROOT / "business_data" / "Planning 030726" / "Catelog.xlsx"
     if not src.is_absolute():
         src = ROOT / src
     if not src.exists():

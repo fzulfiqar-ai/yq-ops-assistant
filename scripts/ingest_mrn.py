@@ -16,7 +16,7 @@ import os
 import re
 from xml.etree import ElementTree as ET
 
-MRN_GLOB = "Order received/*/Transactions_*.xml"
+MRN_GLOB = "business_data/Order received/*/Transactions_*.xml"
 
 
 def _doc_month(doc_no: str | None) -> str | None:

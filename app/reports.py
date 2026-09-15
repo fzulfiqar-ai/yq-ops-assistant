@@ -350,6 +350,9 @@ def _assemble_dashboard(r: dict) -> dict:
         "rev_yesterday": s["rev_yesterday"], "orders_yesterday": s["orders_yesterday"],
         "rev_mtd": s["rev_mtd"], "net_mtd": s["net_mtd"], "orders_mtd": s["orders_mtd"],
         "rev_prev_month": s["rev_prev_month"],
+        # Same slice of last month as MTD covers — the only like-for-like MoM basis.
+        "rev_prev_month_mtd": s.get("rev_prev_month_mtd", 0),
+        "prev_month_through": s.get("prev_month_through"),
         "total_receivables": s["total_receivables"],
         "low_stock_count": a["low_stock_count"],
         # Whole-book SQL sums (daily_summary), NOT the capped alert list — keeps the

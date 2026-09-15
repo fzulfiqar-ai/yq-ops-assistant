@@ -74,7 +74,7 @@ def main() -> int:
     from app.database import get_client
     from app.db_read import exec_sql
 
-    q_specs = quotation_specs(ROOT / "VFAN Quotation-2026-7.xlsx")
+    q_specs = quotation_specs(ROOT / "business_data" / "VFAN Quotation-2026-7.xlsx")
     print(f"quotation specs for {len(q_specs)} models")
     book_names = {r["sku_code"]: (r.get("item_name") or "").strip()
                   for r in exec_sql("SELECT sku_code, item_name FROM v_price_list") or []}

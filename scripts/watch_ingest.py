@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 
-WATCH_DIR = Path(os.getenv("WATCH_DIR") or (ROOT / "Focus ERP Updated Reports"))
+WATCH_DIR = Path(os.getenv("WATCH_DIR") or (ROOT / "business_data" / "Focus ERP Updated Reports"))
 DEBOUNCE_S = float(os.getenv("WATCH_DEBOUNCE_S", "10"))  # batch a burst of drops into ONE refresh
 
 try:

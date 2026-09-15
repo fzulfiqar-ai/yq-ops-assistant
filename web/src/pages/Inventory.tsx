@@ -49,7 +49,10 @@ const cols: Column<Row>[] = [
   {
     key: 'days_cover', label: 'Days cover', align: 'right',
     render: (v) => {
-      if (v === null || v === undefined) return <span className="text-rose-600 font-semibold">0</span>
+      // days_cover is NULL exactly when sold_90d = 0 (stock_migration.sql), i.e. no demand at
+      // all -- effectively INFINITE cover. Printing a bold red "0" made dead stock look like the
+      // most urgent reorder on the page, the precise opposite of the truth.
+      if (v === null || v === undefined) return <span className="text-muted-foreground" title="No sales in 90 days — no cover figure">—</span>
       const n = Number(v)
       return <span className={cn('font-semibold', n < 30 ? 'text-amber-600' : n > 120 ? 'text-blue-600' : '')}>{n.toFixed(0)}</span>
     },

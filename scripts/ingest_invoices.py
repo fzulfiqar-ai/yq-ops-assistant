@@ -21,11 +21,11 @@ from app.invoices import load_supplier_prices, parse_invoice  # noqa: E402
 
 def _candidate_files() -> list[str]:
     pats = [
-        "Order received/*/*Invoice*.pdf",
-        "Order received/*/*Power Bank*.pdf",
-        "Order received/*/*Accessories*.pdf",
-        "Shipments/**/*PI*.xls",
-        "Shipments/**/*PI*.xlsx",
+        "business_data/Order received/*/*Invoice*.pdf",
+        "business_data/Order received/*/*Power Bank*.pdf",
+        "business_data/Order received/*/*Accessories*.pdf",
+        "business_data/Shipments/**/*PI*.xls",
+        "business_data/Shipments/**/*PI*.xlsx",
     ]
     out: set[str] = set()
     for p in pats:

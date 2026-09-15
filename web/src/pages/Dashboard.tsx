@@ -22,6 +22,7 @@ interface Kpis {
   rev_today: number; net_today: number; orders_today: number
   rev_yesterday: number; orders_yesterday: number
   rev_mtd: number; net_mtd: number; orders_mtd: number; rev_prev_month: number
+  rev_prev_month_mtd?: number; prev_month_through?: string | null
   total_receivables: number; low_stock_count: number
   overdue_count: number; overdue_total_bhd: number
   current_receivables_bhd?: number
@@ -194,8 +195,17 @@ export default function Dashboard() {
   }, [data?.daily_mtd, dailyTarget])
 
   const k = data?.kpis
-  const deltaPct = k && k.rev_prev_month > 0 ? ((k.rev_mtd - k.rev_prev_month) / k.rev_prev_month) * 100 : 0
-  const up = deltaPct >= 0
+  // Compare MTD against the SAME slice of last month, not the whole of it. MTD only covers
+  // the days elapsed so far, so measuring it against a complete prior month reports a
+  // collapse on the 1st that quietly 'recovers' by the 30th -- an artefact of the window,
+  // not the business. On 14-Sep the old basis said -65.4%; like-for-like it is -34.0%.
+  // Fall back to the old field only if the API predates rev_prev_month_mtd.
+  const prevBase = k?.rev_prev_month_mtd ?? k?.rev_prev_month ?? 0
+  const likeForLike = k?.rev_prev_month_mtd != null
+  // null (not 0) when there is no baseline at all -- a first trading month or a freshly
+  // reloaded DB. Zero would render as a confident green "+0.0%" next to an up-arrow.
+  const deltaPct = prevBase > 0 ? ((k!.rev_mtd - prevBase) / prevBase) * 100 : null
+  const up = (deltaPct ?? 0) >= 0
   const trend = (data?.revenue_trend || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
   const channels = data?.by_channel || []
   const channelTotal = channels.reduce((s, c) => s + Number(c.revenue_bhd || 0), 0) || 1
@@ -254,9 +264,11 @@ export default function Dashboard() {
           className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)" hero to="/sales"
             value={<CountUp value={k.rev_mtd} format={(n) => bhd(n, 0)} />}
-            foot={<span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
-              {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
-              {up ? '+' : ''}{deltaPct.toFixed(1)}% MoM · ex-VAT {bhd(k.net_mtd, 0)}</span>} />
+            foot={deltaPct === null
+              ? <span className="font-semibold text-muted-foreground">No prior-month baseline · ex-VAT {bhd(k.net_mtd, 0)}</span>
+              : <span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
+                  {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
+                  {up ? '+' : ''}{deltaPct.toFixed(1)}% {likeForLike ? 'vs same days last month' : 'MoM'} · ex-VAT {bhd(k.net_mtd, 0)}</span>} />
           <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label="Latest day" to="/sales"
             value={<CountUp value={k.rev_today} format={(n) => bhd(n, 0)} />}
             foot={<span className="text-muted-foreground">Yesterday {bhd(k.rev_yesterday, 0)} · {k.orders_today} orders</span>} />

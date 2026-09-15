@@ -1,7 +1,7 @@
 """Verified refresh engine — turns a folder of fresh Focus exports into a verified, fresh
 Supabase + a "what changed" briefing. The hands-off heart of data freshness (roadmap N0).
 
-  python -m scripts.refresh ["Focus ERP Updated Reports"]
+  python -m scripts.refresh ["business_data/Focus ERP Updated Reports"]
 
 Pipeline (abort early on a bad gate — never load drifted data silently):
   1. ingest(folder)      -> parse reports to data/clean CSVs. Honours ingest's >=80% voucher<->
@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 
-DEFAULT_FOLDER = "Focus ERP Updated Reports"
+DEFAULT_FOLDER = "business_data/Focus ERP Updated Reports"
 
 
 def _run(mod: str, *args: str) -> subprocess.CompletedProcess:

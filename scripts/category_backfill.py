@@ -10,7 +10,7 @@ That report is the authoritative category source — no guessing, and categories
 Categories change rarely → run occasionally, or it runs automatically during a refresh whenever a
 Multi_level_stock_movement file is present in the upload.
 
-  python -m scripts.category_backfill ["Focus ERP Updated Reports"]
+  python -m scripts.category_backfill ["business_data/Focus ERP Updated Reports"]
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ load_dotenv()
 from app.database import get_client  # noqa: E402
 from scripts.ingest import read_grid  # noqa: E402
 
-DEFAULT_FOLDER = "Focus ERP Updated Reports"
+DEFAULT_FOLDER = "business_data/Focus ERP Updated Reports"
 # Coarse division — reviewable seed (the granular categories are Focus's own item-groups).
 TELECOM = {"Sim", "Postpaid Giveaway", "Batelco TRA Devices"}
 

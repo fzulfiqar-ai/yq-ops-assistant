@@ -23,7 +23,7 @@ import pandas as pd
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT / "Focus ERP Data"
+SRC_DIR = ROOT / "business_data" / "Focus ERP Data"
 OUT_DIR = ROOT / "data" / "clean"
 
 JOIN_MIN = 0.80
@@ -475,7 +475,7 @@ def sniff_focus(path: Path) -> bool:
 
 
 def main() -> int:
-    # Optional source folder: `python scripts/ingest.py "Focus ERP Updated Reports"`.
+    # Optional source folder: `python scripts/ingest.py "business_data/Focus ERP Updated Reports"`.
     # Defaults to "Focus ERP Data". Reused by the email-to-ingest automation.
     src = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else SRC_DIR
     if not src.is_absolute():
