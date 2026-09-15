@@ -43,3 +43,31 @@ desktop.ini
 
 # n8n exports may contain credentials — only sanitized workflow JSON is committed
 n8n_workflows/*.local.json
+
+# Brand-film / marketing media — large binaries, untracked and previously UNIGNORED,
+# so `git add .` would have committed ~66 MB of media and personal photos (06-Sep-2026).
+film/
+footage/
+assets/
+exports/
+generations.csv
+/Furqan*.png
+/Furqan*.jpeg
+/Furqan*.jpg
+# Business-data tree (originals stay on disk; never in git)
+business_data/
+
+# --- commercial source data must NEVER be committed (repo is PUBLIC) ---
+# 12 Focus exports were tracked from before these rules existed and were publicly
+# downloadable from raw.githubusercontent.com until 15-Sep-2026. gitignore does not
+# untrack anything already in the index -- that needed `git rm --cached`.
+Focus ERP*/
+costs/
+business_data/
+*.xlsm
+*.zip
+# Dead Railway config, deleted in e947e3f but still present on disk.
+/railway.toml
+# OneDrive conflict copies land right beside the file they duplicate.
+*-Conflict.*
+*_conflict*
