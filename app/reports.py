@@ -173,6 +173,26 @@ def stock_by_warehouse() -> list[dict]:
     )
 
 
+def division_summary() -> list[dict]:
+    """Accessories vs SIM, side by side — stock AND sales, on one screen.
+
+    This exists because the SIM/Batelco starter-pack stock is OWNED (owner-confirmed
+    06-Sep-2026), not consignment, and it is the majority of the stock book against a tiny
+    share of revenue. The platform used to either hide it (agents drop it when
+    app_settings.agent_exclude_sim is on, which is the default) or silently blend it into
+    the Dashboard total — so the two surfaces disagreed with no explanation on screen.
+
+    Every figure is computed by v_division_summary from the loaded data. Nothing here is a
+    hardcoded constant: months_of_cover divides each division's stock value by its OWN
+    average monthly revenue over the actual span of the sales data.
+    """
+    return exec_sql(
+        "SELECT division, stock_value_bhd, stock_units, stock_skus, revenue_bhd, "
+        "net_ex_vat_bhd, invoices, stock_share_pct, revenue_share_pct, months_of_cover "
+        "FROM v_division_summary ORDER BY stock_value_bhd DESC NULLS LAST"
+    )
+
+
 def agents_status() -> list[dict]:
     """Latest run per agent for the Agent Performance panel (from agent_runs — the
     per-run memory table; audit_log is deliberately NOT readable via the SQL RPC)."""

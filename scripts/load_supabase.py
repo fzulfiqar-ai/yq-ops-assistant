@@ -123,8 +123,12 @@ def main() -> int:
         _upsert(client, "product_profitability", _records(pp),
                 on_conflict="item_name,report_date")
     if sp is not None:
+        # warehouse_name is part of the key: the MA_base book holds three layers per SKU
+        # (blank = dealer/list, 'Causeway'/'YQ Roadshow' = outlet retail). Without it they
+        # collide. Requires scripts/pricebook_key_migration.sql (NULLS NOT DISTINCT) — without
+        # that index this ON CONFLICT silently degrades to an INSERT and duplicates every row.
         _upsert(client, "selling_prices", _records(sp),
-                on_conflict="sku_code,price_book,customer_code,start_date")
+                on_conflict="sku_code,price_book,customer_code,warehouse_name,start_date")
     ar = _read("receivables")
     if ar is not None:
         ar = ar.dropna(subset=["account"])

@@ -1,11 +1,57 @@
 
 -- ============================================================
--- YQ Bahrain ops assistant — Phase 0.5 semantic views (idempotent)
+-- YQ Bahrain ops assistant — Phase 0.5 semantic views
+--
+-- GENERATED FILE — do not hand-edit scripts/views.sql. Edit VIEWS_SQL in
+-- scripts/migrate_views.py, then re-run `python -m scripts.migrate_views`.
+--
+-- BOOTSTRAP BASELINE ONLY — this file builds the views on an EMPTY database.
+-- FIVE of its views are SUPERSEDED at runtime by scripts/*_migration.sql:
+--   v_sales, v_receivables, v_low_stock  — regress LOUDLY (column lists differ, so a
+--       CREATE OR REPLACE errors out); and
+--   v_current_stock, v_product_margin    — regress SILENTLY (identical columns, only the
+--       source/filter differs, so a re-run SUCCEEDS and quietly corrupts the numbers).
+-- Applying this file to the LIVE database would regress all five. The guard below aborts
+-- the whole file, but it CANNOT protect you if you copy a single view's block out of it.
+-- Apply order and view ownership: docs/MIGRATIONS.md.
+--
 -- LLM queries ONLY these views — never raw tables.
 -- ============================================================
 
+-- ── Safety guard: refuse to run against an already-migrated database ──────────
+-- No-op on a fresh DB (v_sales does not exist yet, so the column test is false).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'v_sales'
+          AND column_name  = 'revenue_bhd'
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'REFUSING TO RUN: this database already has the enriched v_sales.',
+            DETAIL  = 'scripts/views.sql is the Phase-0.5 bootstrap baseline for an EMPTY '
+                      'database. Re-applying it here would strip revenue_bhd, net_bhd, '
+                      'channel, division, sale_type and is_giveaway from v_sales and break '
+                      'app/templates.py, app/ai.py and every rollup view that reads them.',
+            HINT    = 'To rebuild views on an existing database, re-apply the migrations in '
+                      'the order given in docs/MIGRATIONS.md — not this file. Do NOT work '
+                      'around this by adding CASCADE to the DROP VIEW below: that deletes '
+                      'the enriched views outright.';
+    END IF;
+END $$;
+
 -- v_sales: enriched sales lines ---------------------------
--- DROP first so column renames (warehouse_name -> salesman_resolved) apply cleanly.
+-- SUPERSEDED at runtime: the canonical definition lives in
+-- scripts/division_payment_migration.sql, which appends revenue_bhd, net_bhd, channel,
+-- is_cash_customer, division, sale_type and is_giveaway. This simpler version exists only
+-- so a fresh DB bootstraps before migrations run — apply the migrations right after.
+-- Note the revenue basis differs deliberately: the canonical view uses
+-- COALESCE(total_amount, gross) — gross, VAT-inclusive, the basis that reconciles against
+-- the Focus reports — not the 3-way fallback below, which understates revenue whenever
+-- taxable_bhd is present. Do not "reconcile" the two; fix the canonical file if it is wrong.
+-- DROP first so the historic column rename (warehouse_name -> salesman_resolved) applies
+-- cleanly on a part-built DB. Never add CASCADE here — see the guard above.
 DROP VIEW IF EXISTS v_sales;
 CREATE VIEW v_sales AS
 SELECT
@@ -45,6 +91,12 @@ LEFT JOIN products        p   ON p.id          = pa.product_id
 LEFT JOIN categories      cat ON cat.id        = p.category_id;
 
 -- v_current_stock: latest balance per item+warehouse ------
+-- ⚠️ SUPERSEDED at runtime by scripts/stock_migration.sql — AND THIS ONE REGRESSES
+-- SILENTLY. The column list is identical to the canonical view, so CREATE OR REPLACE
+-- SUCCEEDS with no error; only the SOURCE differs. This version reads the
+-- stock_movements ledger; the canonical version reads the stock_balance snapshot at
+-- MAX(as_of_date). The ledger basis was measured ~8.6x OVERSTATED (see the header of
+-- stock_migration.sql). Never run this block against a live DB to "refresh" the view.
 -- DISTINCT ON implements MAX(id) per group (data rule 6).
 CREATE OR REPLACE VIEW v_current_stock AS
 SELECT DISTINCT ON (sm.item_name, sm.warehouse_name)
@@ -65,6 +117,12 @@ LEFT JOIN categories      cat ON cat.id        = p.category_id
 ORDER BY sm.item_name, sm.warehouse_name, sm.id DESC;
 
 -- v_product_margin: Focus COGS basis (data rule 1) --------
+-- ⚠️ SUPERSEDED at runtime by scripts/stock_migration.sql — AND THIS ONE REGRESSES
+-- SILENTLY. Identical column list, so CREATE OR REPLACE SUCCEEDS with no error. The
+-- canonical version restricts to the newest report only:
+--     where pp.report_date = (select max(report_date) from product_profitability)
+-- Without that filter this view sums EVERY loaded period, double-counting margin and
+-- breaking the verified "below-cost items" figure. Never run this block on a live DB.
 CREATE OR REPLACE VIEW v_product_margin AS
 SELECT
     pp.item_name,
@@ -158,6 +216,10 @@ GROUP BY DATE_TRUNC('month', COALESCE(ol.line_date, o.order_date))
 ORDER BY period_month;
 
 -- v_low_stock: items at or below 10 units ----------------
+-- SUPERSEDED at runtime: the canonical definition lives in
+-- lowstock_unification_migration.sql, which adds sold_90d, days_cover,
+-- suggested_reorder_qty and status (the flat <=10 rule below is only a bootstrap
+-- placeholder). Exists so a fresh DB bootstraps before migrations run.
 CREATE OR REPLACE VIEW v_low_stock AS
 SELECT
     item_name,

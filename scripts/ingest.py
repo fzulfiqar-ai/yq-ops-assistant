@@ -62,6 +62,38 @@ def norm_date(v) -> str | None:
     return None
 
 
+def norm_date_us(v) -> str | None:
+    """Month-first (M/D/YYYY) date parser — for the PRICE BOOK exports only.
+
+    The two PriceBook files are the ONLY Focus exports that emit dates as TEXT; every other
+    report emits real Excel datetimes (which norm_date returns via its isinstance branch, so
+    the day-first fallback never fires for them). Measured on the 23-Jun-2026 exports:
+
+        MASellingPriceBook   Start date: 494 rows unambiguously MONTH-first, 0 day-first
+        ModernTradeSellerBook Start date: 167 of 167 unambiguously MONTH-first
+
+    Parsing those day-first silently mis-dates the ~25% of start dates and ~55% of end dates
+    where both parts are <= 12 — e.g. '1/11/2026' (1 Nov, future) became 11 Jan (past), so a
+    not-yet-effective price went live; '5/10/2026' (10 May, past) became 5 Oct (future), so a
+    live price was excluded by `start_date <= CURRENT_DATE`. That decides which price the
+    catalog and the assistant call "current". Verified against Focus's own Stock-balance
+    "Selling Rate": month-first + base-row selection reproduces it on 69/69 SKUs.
+
+    Do NOT use this for the transaction reports — those really are day-first (see norm_date).
+    """
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    if isinstance(v, (datetime, date)):
+        return v.date().isoformat() if isinstance(v, datetime) else v.isoformat()
+    s = str(v).strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d-%b-%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def txt(v) -> str | None:
     if v is None:
         return None
@@ -294,8 +326,9 @@ def parse_pricebook(grid: pd.DataFrame, src: str, price_book: str) -> list[dict]
             "warehouse_code": txt(r[5]),
             "price_book": price_book,
             "currency": txt(r[6]),
-            "start_date": norm_date(r[7]),
-            "end_date": norm_date(r[8]),
+            # PriceBook dates are TEXT in M/D/YYYY — see norm_date_us().
+            "start_date": norm_date_us(r[7]),
+            "end_date": norm_date_us(r[8]),
             "min_qty": norm_num(r[9]),
             "max_qty": norm_num(r[10]),
             "unit_name": txt(r[11]),

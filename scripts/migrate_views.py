@@ -1,6 +1,14 @@
 """Phase 0.5: semantic views + read-only role in Supabase/Postgres.
 
-Writes scripts/views.sql (idempotent CREATE OR REPLACE VIEW).
+BOOTSTRAP ONLY. This builds the baseline views on an EMPTY database. Five of them are
+superseded at runtime by scripts/*_migration.sql: v_sales, v_receivables and v_low_stock
+regress loudly (differing column lists), while v_current_stock and v_product_margin regress
+SILENTLY (identical columns, different source/filter). Applying this to the live database
+would regress all five. The SQL carries a guard that aborts if the target DB is already
+migrated — but it cannot protect a copy-pasted fragment. Apply order: docs/MIGRATIONS.md.
+
+VIEWS_SQL below is the source of truth; scripts/views.sql is generated from it and must not
+be hand-edited (write_sql() overwrites it on every run and warns if it had diverged).
 Apply in Supabase SQL editor, or via --apply if DATABASE_URL is set.
 
 Views (LLM queries ONLY these -- never raw tables):
@@ -25,12 +33,58 @@ SQL_OUT = ROOT / "scripts" / "views.sql"
 
 VIEWS_SQL = r"""
 -- ============================================================
--- YQ Bahrain ops assistant — Phase 0.5 semantic views (idempotent)
+-- YQ Bahrain ops assistant — Phase 0.5 semantic views
+--
+-- GENERATED FILE — do not hand-edit scripts/views.sql. Edit VIEWS_SQL in
+-- scripts/migrate_views.py, then re-run `python -m scripts.migrate_views`.
+--
+-- BOOTSTRAP BASELINE ONLY — this file builds the views on an EMPTY database.
+-- FIVE of its views are SUPERSEDED at runtime by scripts/*_migration.sql:
+--   v_sales, v_receivables, v_low_stock  — regress LOUDLY (column lists differ, so a
+--       CREATE OR REPLACE errors out); and
+--   v_current_stock, v_product_margin    — regress SILENTLY (identical columns, only the
+--       source/filter differs, so a re-run SUCCEEDS and quietly corrupts the numbers).
+-- Applying this file to the LIVE database would regress all five. The guard below aborts
+-- the whole file, but it CANNOT protect you if you copy a single view's block out of it.
+-- Apply order and view ownership: docs/MIGRATIONS.md.
+--
 -- LLM queries ONLY these views — never raw tables.
 -- ============================================================
 
+-- ── Safety guard: refuse to run against an already-migrated database ──────────
+-- No-op on a fresh DB (v_sales does not exist yet, so the column test is false).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'v_sales'
+          AND column_name  = 'revenue_bhd'
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'REFUSING TO RUN: this database already has the enriched v_sales.',
+            DETAIL  = 'scripts/views.sql is the Phase-0.5 bootstrap baseline for an EMPTY '
+                      'database. Re-applying it here would strip revenue_bhd, net_bhd, '
+                      'channel, division, sale_type and is_giveaway from v_sales and break '
+                      'app/templates.py, app/ai.py and every rollup view that reads them.',
+            HINT    = 'To rebuild views on an existing database, re-apply the migrations in '
+                      'the order given in docs/MIGRATIONS.md — not this file. Do NOT work '
+                      'around this by adding CASCADE to the DROP VIEW below: that deletes '
+                      'the enriched views outright.';
+    END IF;
+END $$;
+
 -- v_sales: enriched sales lines ---------------------------
--- DROP first so column renames (warehouse_name -> salesman_resolved) apply cleanly.
+-- SUPERSEDED at runtime: the canonical definition lives in
+-- scripts/division_payment_migration.sql, which appends revenue_bhd, net_bhd, channel,
+-- is_cash_customer, division, sale_type and is_giveaway. This simpler version exists only
+-- so a fresh DB bootstraps before migrations run — apply the migrations right after.
+-- Note the revenue basis differs deliberately: the canonical view uses
+-- COALESCE(total_amount, gross) — gross, VAT-inclusive, the basis that reconciles against
+-- the Focus reports — not the 3-way fallback below, which understates revenue whenever
+-- taxable_bhd is present. Do not "reconcile" the two; fix the canonical file if it is wrong.
+-- DROP first so the historic column rename (warehouse_name -> salesman_resolved) applies
+-- cleanly on a part-built DB. Never add CASCADE here — see the guard above.
 DROP VIEW IF EXISTS v_sales;
 CREATE VIEW v_sales AS
 SELECT
@@ -70,6 +124,12 @@ LEFT JOIN products        p   ON p.id          = pa.product_id
 LEFT JOIN categories      cat ON cat.id        = p.category_id;
 
 -- v_current_stock: latest balance per item+warehouse ------
+-- ⚠️ SUPERSEDED at runtime by scripts/stock_migration.sql — AND THIS ONE REGRESSES
+-- SILENTLY. The column list is identical to the canonical view, so CREATE OR REPLACE
+-- SUCCEEDS with no error; only the SOURCE differs. This version reads the
+-- stock_movements ledger; the canonical version reads the stock_balance snapshot at
+-- MAX(as_of_date). The ledger basis was measured ~8.6x OVERSTATED (see the header of
+-- stock_migration.sql). Never run this block against a live DB to "refresh" the view.
 -- DISTINCT ON implements MAX(id) per group (data rule 6).
 CREATE OR REPLACE VIEW v_current_stock AS
 SELECT DISTINCT ON (sm.item_name, sm.warehouse_name)
@@ -90,6 +150,12 @@ LEFT JOIN categories      cat ON cat.id        = p.category_id
 ORDER BY sm.item_name, sm.warehouse_name, sm.id DESC;
 
 -- v_product_margin: Focus COGS basis (data rule 1) --------
+-- ⚠️ SUPERSEDED at runtime by scripts/stock_migration.sql — AND THIS ONE REGRESSES
+-- SILENTLY. Identical column list, so CREATE OR REPLACE SUCCEEDS with no error. The
+-- canonical version restricts to the newest report only:
+--     where pp.report_date = (select max(report_date) from product_profitability)
+-- Without that filter this view sums EVERY loaded period, double-counting margin and
+-- breaking the verified "below-cost items" figure. Never run this block on a live DB.
 CREATE OR REPLACE VIEW v_product_margin AS
 SELECT
     pp.item_name,
@@ -121,6 +187,10 @@ LEFT JOIN LATERAL (
 ) sp ON true;
 
 -- v_receivables: latest outstanding balance per account ---
+-- SUPERSEDED at runtime: the canonical, bucket-based definition lives in
+-- receivables_consolidation_migration.sql (sourced from ar_ageing, adds
+-- current_bhd/overdue_bhd/over_90_bhd). This ledger-based version exists only so a
+-- fresh DB bootstraps before migrations run — apply the migration right after.
 CREATE OR REPLACE VIEW v_receivables AS
 WITH latest AS (
     SELECT DISTINCT ON (account)
@@ -179,6 +249,10 @@ GROUP BY DATE_TRUNC('month', COALESCE(ol.line_date, o.order_date))
 ORDER BY period_month;
 
 -- v_low_stock: items at or below 10 units ----------------
+-- SUPERSEDED at runtime: the canonical definition lives in
+-- lowstock_unification_migration.sql, which adds sold_90d, days_cover,
+-- suggested_reorder_qty and status (the flat <=10 rule below is only a bootstrap
+-- placeholder). Exists so a fresh DB bootstraps before migrations run.
 CREATE OR REPLACE VIEW v_low_stock AS
 SELECT
     item_name,
@@ -236,24 +310,61 @@ GRANT  EXECUTE ON FUNCTION run_readonly_query(text) TO service_role;
 
 
 def write_sql() -> None:
+    # Warn before clobbering: views.sql is generated, but it has been hand-edited before
+    # (a SUPERSEDED warning was added there and would have been silently lost here).
+    if SQL_OUT.exists():
+        existing = SQL_OUT.read_text(encoding="utf-8")
+        if existing != VIEWS_SQL:
+            print(
+                f"NOTE: {SQL_OUT.name} differed from VIEWS_SQL and has been regenerated. "
+                "If you hand-edited it, move that change into VIEWS_SQL in this file."
+            )
     SQL_OUT.write_text(VIEWS_SQL, encoding="utf-8")
     print(f"Wrote {SQL_OUT.relative_to(ROOT)}")
-    print("Apply in Supabase: SQL editor -> paste -> Run. (Idempotent; safe to re-run.)")
+    print(
+        "BOOTSTRAP ONLY — apply to an EMPTY database, then run the migrations in the order "
+        "listed in docs/MIGRATIONS.md. Against an already-migrated DB the SQL guard will "
+        "refuse to run."
+    )
 
 
 def apply_sql() -> int:
+    # Deliberately NO load_dotenv() here, unlike apply_sql.py / apply_migration.py. This
+    # file is the empty-DB bootstrap, so --apply must not silently pick up the live
+    # DATABASE_URL from .env. Setting it has to be a conscious act.
     url = os.getenv("DATABASE_URL")
     if not url:
-        print("ERROR: --apply needs DATABASE_URL (Supabase Postgres connection string).")
+        print(
+            "ERROR: --apply needs DATABASE_URL, and this script does NOT read .env on purpose.\n"
+            "       scripts/views.sql is the empty-database bootstrap baseline. To change a view\n"
+            "       on the live database, edit its canonical *_migration.sql instead and run only\n"
+            "       that file — see docs/MIGRATIONS.md. Set DATABASE_URL here only for a fresh or\n"
+            "       scratch database."
+        )
         return 1
     try:
         import psycopg  # type: ignore
     except ImportError:
         print("ERROR: pip install 'psycopg[binary]' first.")
         return 1
-    with psycopg.connect(url) as conn, conn.cursor() as cur:
-        cur.execute(VIEWS_SQL)
-        conn.commit()
+    try:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(VIEWS_SQL)
+            conn.commit()
+    except Exception as exc:
+        # The SQL carries a guard that RAISEs on an already-migrated DB. Print its
+        # message/detail/hint rather than dumping a psycopg traceback.
+        diag = getattr(exc, "diag", None)
+        print("ERROR: views.sql was NOT applied — the transaction rolled back.")
+        shown = False
+        for field in ("message_primary", "message_detail", "message_hint"):
+            text = getattr(diag, field, None) if diag is not None else None
+            if text:
+                print(f"  {text}")
+                shown = True
+        if not shown:
+            print(f"  {exc}")
+        return 1
     print("Views applied to database.")
     return 0
 

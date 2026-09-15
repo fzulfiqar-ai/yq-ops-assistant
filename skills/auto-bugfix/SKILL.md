@@ -33,12 +33,19 @@ Use this skill when:
 **Fix:** Add `df = df.drop_duplicates(subset=["key_col1", "key_col2"])` before upsert
 
 ### `ERROR: cannot change name of view column`
-**Cause:** `CREATE OR REPLACE VIEW` cannot rename columns  
-**Fix:** Add `DROP VIEW IF EXISTS view_name;` before the `CREATE VIEW` in `scripts/views.sql`
+**Cause:** `CREATE OR REPLACE VIEW` can only append columns — it cannot rename, reorder or drop them  
+**Fix:** Edit the view's **canonical** definition, which for most views is a `scripts/*_migration.sql`
+file, **not** `scripts/views.sql`. Look up the owning file in `docs/MIGRATIONS.md` first.
+If a column genuinely must be renamed or removed, write a **new** migration that drops the view
+*and re-creates every dependent view*, in order. Do not add `CASCADE` to an existing `DROP VIEW`
+to make an error go away — that silently deletes the dependent views (see `docs/MIGRATIONS.md`).
 
 ### `total_amount_bhd` is null for all rows
 **Cause:** Focus leaves this blank for zero-VAT transactions  
-**Fix:** Use `COALESCE(ol.total_amount_bhd, ol.taxable_bhd, ol.gross_bhd)` in the view
+**Fix:** Revenue is `COALESCE(ol.total_amount_bhd, ol.gross_bhd) AS revenue_bhd` — the gross,
+VAT-inclusive basis that reconciles to the verified total. Set in
+`scripts/revenue_channel_migration.sql`, carried by `scripts/division_payment_migration.sql`.
+Do **not** insert `taxable_bhd` into that fallback chain; it silently understates revenue.
 
 ### Login: `Invalid credentials or access not granted`
 **Cause 1:** Email not in `user_roles` table  
@@ -51,8 +58,13 @@ Use this skill when:
 **Fix:** Ensure `[data-testid="stSidebarCollapseButton"] { display: none; }` and sidebar has `min-width` set
 
 ### `run_readonly_query` RPC missing
-**Cause:** `scripts/views.sql` not applied to Supabase  
-**Fix:** Copy `scripts/views.sql` → Supabase SQL Editor → Run
+**Cause:** the RPC (defined at the bottom of `scripts/views.sql`) was never applied  
+**Fix:** Copy **only** the final `-- Safe SQL executor …` section of `scripts/views.sql` — the
+`CREATE OR REPLACE FUNCTION run_readonly_query` block plus its `REVOKE`/`GRANT` lines — into the
+Supabase SQL Editor and run that.
+**Do NOT paste the whole file** on an existing database: it is the empty-DB bootstrap baseline and
+would regress `v_sales`, `v_receivables` and `v_low_stock` to their pre-migration definitions.
+The file carries a guard that aborts if you try, so a whole-file paste will simply error out.
 
 ### LLM returns SQL with raw table names
 **Cause:** LLM ignored the view-only instruction  
@@ -94,6 +106,6 @@ Never use `--no-verify`. Never amend pushed commits.
 | `app/templates.py` | Regex too greedy or too strict; ordering matters |
 | `app/ai.py` | LLM prompt drift; cache not expiring; Redactor restore fails |
 | `scripts/load_supabase.py` | Null constraint, duplicate key, column mismatch |
-| `scripts/views.sql` | Column rename without DROP first; COALESCE missing |
+| `scripts/views.sql` | GENERATED + bootstrap-only — edit `VIEWS_SQL` in `scripts/migrate_views.py`. For live-DB view fixes edit the canonical `*_migration.sql` instead (`docs/MIGRATIONS.md`) |
 | `dashboard/ui.py` | CSS hiding Streamlit elements; session state race |
 | `app/digest.py` | Division by zero in delta calc; None from empty query |

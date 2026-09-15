@@ -2,6 +2,22 @@
 -- selling_prices has price HISTORY (many dated rows per SKU) across two price books
 -- (MA_base = standard, modern_trade = retail/MT). We surface ONE current price per SKU:
 -- the latest-dated, still-valid row, preferring the MA_base (standard) book.
+--
+-- ⚠️ WAREHOUSE LAYERS (fixed 06-Sep-2026 — this was wrong and it was visible to customers).
+-- The MA_base book is NOT one price per SKU. It holds THREE layers in one book:
+--     warehouse_name IS NULL  -> the DEALER / list price   (the B2B price)   293 rows
+--     warehouse_name='Causeway'    -> outlet RETAIL price                    181 rows
+--     warehouse_name='YQ Roadshow' -> outlet RETAIL price                    180 rows
+-- These share a start_date, so the old tie-break `rate_bhd DESC` deterministically picked
+-- the RETAIL price as the B2B price on 89 of 170 SKUs — median +77%, max +233%
+-- (BE01 dealer 3.10 shown as 5.50; L11 0.30 shown as 1.00). Causeway is 4.6% of revenue,
+-- so 95% of the business was being priced off the 5% channel's list.
+-- Ground truth: Focus's own Stock-balance "Selling Rate" matches the blank-warehouse base
+-- row on 69/69 SKUs and an outlet row on 0. NEVER tie-break a price by rate — order by
+-- (warehouse_name IS NULL) first, then start_date, then id. modern_trade has warehouse_name
+-- set on ALL 167 rows, so the predicate is uniformly false there and it falls through
+-- correctly to latest-dated.
+-- See also norm_date_us() in scripts/ingest.py — PriceBook dates are M/D/YYYY, not D/M/YYYY.
 
 CREATE OR REPLACE VIEW v_price_list AS
 WITH cur AS (
@@ -15,7 +31,8 @@ WITH cur AS (
     end_date,
     ROW_NUMBER() OVER (
       PARTITION BY sku_code
-      ORDER BY (price_book = 'MA_base') DESC, start_date DESC, rate_bhd DESC
+      ORDER BY (price_book = 'MA_base') DESC, (warehouse_name IS NULL) DESC,
+               start_date DESC, id DESC
     ) AS rn
   FROM selling_prices
   WHERE status = 'Authorized'
@@ -40,7 +57,7 @@ WITH cur AS (
     sku_code, item_name, price_book, rate_bhd, unit_name,
     ROW_NUMBER() OVER (
       PARTITION BY sku_code, price_book
-      ORDER BY start_date DESC, rate_bhd DESC
+      ORDER BY (warehouse_name IS NULL) DESC, start_date DESC, id DESC
     ) AS rn
   FROM selling_prices
   WHERE status = 'Authorized'
@@ -91,12 +108,19 @@ WHERE status = 'Authorized'
   AND rate_bhd IS NOT NULL
   AND rate_bhd > 0;
 
--- Latest vs previous SELLING price per SKU (MA_base book) = price change signal.
+-- Latest vs previous DEALER selling price per SKU (MA_base, base/list rows) = price change signal.
+-- `warehouse_name IS NULL` is load-bearing: without it the DISTINCT keeps the Causeway and
+-- YQ Roadshow retail rows, which share a start_date with the dealer row, so rn=1 was the retail
+-- price and rn=2 the dealer price for the SAME day — reporting a price RISE that never happened.
+-- Measured on the 23-Jun-2026 book: 166 SKUs flagged as "changed", 71 of them phantom
+-- (BE01 3.10->5.50 +77%, BS07 6.90->12.00 +74%). Filtered: 95 real changes, 0 same-day artifacts.
+-- This view feeds the Price Tracker page, catalog_watch and price_drift — all were wrong.
 CREATE OR REPLACE VIEW v_price_change AS
 WITH distinct_prices AS (
   SELECT DISTINCT sku_code, item_name, start_date, rate_bhd
   FROM selling_prices
   WHERE status='Authorized' AND price_book='MA_base'
+    AND warehouse_name IS NULL
     AND rate_bhd IS NOT NULL AND rate_bhd > 0
     AND start_date <= CURRENT_DATE
 ),

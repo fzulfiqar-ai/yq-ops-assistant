@@ -35,7 +35,15 @@ def configured() -> bool:
 
 
 def autoreply_enabled() -> bool:
-    return os.getenv("WA_AUTOREPLY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+    """Default OFF. Opt in explicitly with WA_AUTOREPLY_ENABLED=1.
+
+    This used to default ON, so setting WA_ACCESS_TOKEN alone would have started auto-sending
+    LLM-written replies containing BHD prices to customers with no human in the loop — and the
+    catalog prices those replies quote were wrong on 52% of SKUs until 06-Sep-2026. Every other
+    outbound path in this codebase (app/outreach.py) is draft-then-human-approve; this one was
+    the exception. A model must never emit a number that becomes a commercial commitment.
+    """
+    return os.getenv("WA_AUTOREPLY_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 
 
 def _now() -> datetime:

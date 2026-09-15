@@ -1,4 +1,9 @@
 {
-  "_comment": "SECURITY BOUNDARY. This file declares the ONLY MCP servers this project may use. It is intentionally empty in v1. Servers are added deliberately, one at a time, with review. The n8n MCP server is added in Phase 3 (not before). Do not add a server here without an explicit request.",
-  "mcpServers": {}
+  "_comment": "SECURITY BOUNDARY. This file declares the ONLY MCP servers this project may use. Servers are added deliberately, one at a time, with review. Higgsfield added 23-Aug-2026 on explicit owner request as an OWNER-SIDE production tool for the brand film (never embedded in prod, per docs/CLAUDE.md). Auth: OAuth via the owner's Higgsfield account on first use.",
+  "mcpServers": {
+    "higgsfield": {
+      "type": "http",
+      "url": "https://mcp.higgsfield.ai/mcp"
+    }
+  }
 }
