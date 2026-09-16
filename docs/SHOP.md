@@ -154,7 +154,13 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
 - `GET /shop/analytics?days=30` (feature Shop Orders; salesmen get their own slice) → `{ days, since, funnel: { sessions,
   item_views, adds, checkouts, orders, conversion_pct }, orders, cancelled, value_bhd, aov_bhd, units, customers,
   backorder_rate_pct, top_products[], leaderboard[] (per salesman: orders, value_bhd, customers, aov_bhd),
-  attribution: { by_referral[], by_src[], by_coupon[] }, daily[] }`.
+  attribution: { by_referral[], by_src[], by_coupon[] }, daily[],
+  search: { searches, zero_results, zero_rate_pct, terms[{term, searches, zero}], zero_terms[] },
+  rails[{rail, clicks, sessions}], engagement: { search, share, install, reorder, cancel, checkout_start, devices },
+  ops: { by_attribution[], unassigned_now, conflicts, sla_min, sla_breaches, median_time_to_confirm_min,
+  cancelled_by_customer, cancelled_by_staff }, identity: { customers, repeat_customers, repeat_rate_pct,
+  market_orders, staff_orders, legacy_orders }, vitals: { samples, lcp_ms_p75, inp_ms_p75, cls_p75 } }`
+  (the marketplace learning loop, 16-Sep-2026; the market build posts one `vitals` event per visit).
 - `GET /shop/margins` (Shop Admin) → `{ "rows": [{ item_code, spec, category, price_incl_vat_bhd, price_ex_vat_bhd,
   landed_cost_bhd, profit_bhd, margin_pct, markup_pct, floor_bhd, stock_status, sold_90d,
   status: ok|below_floor|no_cost|no_price }], "summary": { items, with_cost, below_floor, vat_rate, min_margin_pct } }`

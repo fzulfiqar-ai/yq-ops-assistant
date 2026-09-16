@@ -224,7 +224,8 @@ TEMPLATES: list[dict] = [
         "pattern": _p(
             r"(recent )?shipments?", r"goods? receiv(ed)?",
             r"(stock |goods? )?receiv(ed)? from", r"(recent )?mrn",
-            r"material receipt",
+            r"material receipt", r"stock (did|have|has) we receiv(e|ed)?",
+            r"receiv(ed)? stock",
         ),
         "label": "Recent shipments",
         "sql": (

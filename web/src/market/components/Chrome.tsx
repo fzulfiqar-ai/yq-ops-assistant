@@ -46,7 +46,7 @@ export function TopBar({ back, title, right }: { back?: boolean; title?: ReactNo
             <div className="font-display text-[18px] font-bold leading-tight tracking-[-0.02em] text-[#1a1430]">
               {S.brand}
             </div>
-            <div className="text-[11.5px] leading-snug text-[#6b6480]">{S.tagline}</div>
+            <div className="text-[12px] leading-snug text-[#6b6480]">{S.tagline}</div>
           </>
         )}
       </div>
@@ -82,7 +82,7 @@ export function TopBar({ back, title, right }: { back?: boolean; title?: ReactNo
         >
           <ShoppingBag size={16} aria-hidden="true" /> {S.nav.cart}
           {cart.items > 0 && (
-            <span className="rounded-full bg-white/20 px-1.5 text-[11px] tabular-nums">{cart.items}</span>
+            <span className="rounded-full bg-white/20 px-1.5 text-[12px] tabular-nums">{cart.items}</span>
           )}
         </Link>
       </nav>
@@ -112,7 +112,7 @@ export function BottomNav() {
               end={end}
               className={({ isActive }) =>
                 cn(
-                  'relative flex h-[4.25rem] flex-col items-center justify-center gap-0.5 text-[11px] font-semibold transition',
+                  'relative flex h-[4.25rem] flex-col items-center justify-center gap-0.5 text-[12px] font-semibold transition',
                   isActive ? 'text-[#6d28d9]' : 'text-[#6b6480]',
                   'focus-visible:outline-none focus-visible:bg-[#f4f2f9]',
                 )
@@ -123,7 +123,7 @@ export function BottomNav() {
                 {badge ? (
                   <span
                     aria-label={`${badge} in cart`}
-                    className="absolute -right-2.5 -top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-[#6d28d9] px-1 text-[10px] font-bold tabular-nums text-white"
+                    className="absolute -right-2.5 -top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-[#6d28d9] px-1 text-[11px] font-bold tabular-nums text-white"
                   >
                     {badge > 99 ? '99+' : badge}
                   </span>
@@ -152,7 +152,7 @@ export function CartBar() {
     >
       <div className="mx-auto flex max-w-6xl items-center gap-3">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[11.5px] text-[#6b6480]">
+          <div className="truncate text-[12px] text-[#6b6480]">
             <span className="tabular-nums">{cart.items}</span> {cart.items === 1 ? 'product' : 'products'} ·{' '}
             <span className="tabular-nums">{cart.units}</span> pcs
           </div>

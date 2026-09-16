@@ -42,4 +42,26 @@
   })
   res.catch(function () {})
   window.__yqCatalog = { url: url, res: res }
+  if (app === 'market') {
+    // The photos the first screen shows (the Best sellers rail, else the first grid cards) are the
+    // largest paint on the page. Announce them as soon as the catalog arrives — before the app has
+    // even downloaded — so the browser fetches them first instead of last.
+    res.then(function (text) {
+      try {
+        var items = (JSON.parse(text).items || [])
+        var lead = items.filter(function (i) {
+          return i.thumb_url && (i.badges || []).indexOf('best_seller') >= 0 && i.stock_status !== 'out_of_stock'
+        }).slice(0, 3)
+        if (lead.length < 2) lead = items.filter(function (i) { return i.thumb_url }).slice(0, 4)
+        lead.forEach(function (i, n) {
+          var l = document.createElement('link')
+          l.rel = 'preload'
+          l.as = 'image'
+          l.href = i.thumb_url
+          if (n === 0) l.setAttribute('fetchpriority', 'high')
+          document.head.appendChild(l)
+        })
+      } catch (e) { /* ignore */ }
+    }).catch(function () {})
+  }
 })()

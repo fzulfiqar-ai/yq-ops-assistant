@@ -100,7 +100,7 @@ export default function CheckoutPage() {
           <div>
             <label htmlFor="yq-phone" className={LABEL}>{S.checkout.phone} <span className="text-[#9f1239]">*</span></label>
             <input id="yq-phone" type="tel" inputMode="tel" autoComplete="tel" value={customer.phone} onChange={(e) => set('phone', e.target.value)} onBlur={() => blur('phone')} placeholder="33001122" required aria-invalid={touched.phone && !phoneOk} aria-describedby="yq-phone-hint" className={cn(FIELD, 'h-12 text-[16px]')} />
-            <p id="yq-phone-hint" className={cn('mt-1 text-[11px]', touched.phone && !phoneOk ? 'font-medium text-[#9f1239]' : 'text-[#6b6480]')}>{touched.phone && !phoneOk ? S.checkout.phoneBad : S.checkout.phoneHint}</p>
+            <p id="yq-phone-hint" className={cn('mt-1 text-[12px]', touched.phone && !phoneOk ? 'font-medium text-[#9f1239]' : 'text-[#6b6480]')}>{touched.phone && !phoneOk ? S.checkout.phoneBad : S.checkout.phoneHint}</p>
           </div>
           <div>
             <label htmlFor="yq-shop" className={LABEL}>{S.checkout.shop}</label>
@@ -109,7 +109,7 @@ export default function CheckoutPage() {
           <div>
             <label htmlFor="yq-name" className={LABEL}>{S.checkout.name} <span className="text-[#9f1239]">*</span></label>
             <input id="yq-name" autoComplete="name" value={customer.name} onChange={(e) => set('name', e.target.value)} onBlur={() => blur('name')} required aria-invalid={touched.name && !nameOk} className={cn(FIELD, 'h-12 text-[16px]')} />
-            {touched.name && !nameOk && <p className="mt-1 text-[11px] font-medium text-[#9f1239]">{S.checkout.nameBad}</p>}
+            {touched.name && !nameOk && <p className="mt-1 text-[12px] font-medium text-[#9f1239]">{S.checkout.nameBad}</p>}
           </div>
           <div>
             <label htmlFor="yq-area" className={LABEL}>{S.checkout.area}</label>
@@ -119,7 +119,7 @@ export default function CheckoutPage() {
           <div>
             <label htmlFor="yq-email" className={LABEL}>{S.checkout.email}</label>
             <input id="yq-email" type="email" autoComplete="email" value={customer.email} onChange={(e) => set('email', e.target.value)} onBlur={() => blur('email')} aria-invalid={touched.email && !emailOk} className={cn(FIELD, 'h-12 text-[16px]')} />
-            {touched.email && !emailOk && <p className="mt-1 text-[11px] font-medium text-[#9f1239]">{S.checkout.emailBad}</p>}
+            {touched.email && !emailOk && <p className="mt-1 text-[12px] font-medium text-[#9f1239]">{S.checkout.emailBad}</p>}
           </div>
 
           <label className="flex items-center gap-2.5 text-[13px] text-[#1a1430]">
@@ -152,17 +152,17 @@ export default function CheckoutPage() {
 
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#ece9f3] bg-white/95 px-4 pt-3 backdrop-blur-md" style={{ paddingBottom: 'max(0.875rem, env(safe-area-inset-bottom))' }}>
         <div className="mx-auto max-w-xl">
-          {error && <p role="alert" className="mb-2 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] font-medium text-[#9f1239]">{error}</p>}
+          {error && <p role="alert" className="mb-2 rounded-xl bg-[#fdecef] px-3 py-2 text-[12px] font-medium text-[#9f1239]">{error}</p>}
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
-              <div className="text-[11.5px] text-[#6b6480]">{cart.items} {cart.items === 1 ? 'product' : 'products'} · {cart.units} pcs</div>
+              <div className="text-[12px] text-[#6b6480]">{cart.items} {cart.items === 1 ? 'product' : 'products'} · {cart.units} pcs</div>
               <div className="font-display text-[19px] font-extrabold leading-tight tabular-nums text-[#1a1430]">{bhd(quote?.total_bhd)}</div>
             </div>
             <button type="submit" form={FORM_ID} disabled={!canSubmit} className={cn(BTN_PRIMARY, 'shrink-0 px-6')}>
               {submitting ? (<><Loader2 size={16} className="animate-spin" aria-hidden="true" /> {slow ? S.checkout.connecting : S.checkout.sending}</>) : S.checkout.place}
             </button>
           </div>
-          <p className="mt-2 flex items-center gap-1.5 text-[10.5px] text-[#6b6480]"><ShieldCheck size={12} aria-hidden="true" /> {first ? S.cart.placeHint(first) : S.checkout.noPayment}</p>
+          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-[#6b6480]"><ShieldCheck size={12} aria-hidden="true" /> {first ? S.cart.placeHint(first) : S.checkout.noPayment}</p>
         </div>
       </div>
     </Page>

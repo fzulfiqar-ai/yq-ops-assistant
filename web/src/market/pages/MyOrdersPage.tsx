@@ -32,7 +32,7 @@ export default function MyOrdersPage() {
           <EmptyState title={S.orders.empty} hint={S.orders.emptyHint} action={<button type="button" onClick={() => navigate('/')} className={BTN_SECONDARY}>{S.cart.browse}</button>} />
         ) : (
           <>
-            <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.orders.thisPhone}</h2>
+            <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.orders.thisPhone}</h2>
             <ul className="mt-2 overflow-hidden rounded-[20px] border border-[#ece9f3] bg-white">
               {rows.map((o) => {
                 const tone = o.status === 'cancelled' ? 'rose' : o.status === 'delivered' ? 'green' : 'accent'
@@ -44,7 +44,7 @@ export default function MyOrdersPage() {
                           <span className="font-display text-[14px] font-bold tabular-nums text-[#1a1430]">{o.order_no}</span>
                           <Badge tone={tone}>{o.status_label || o.status}</Badge>
                         </div>
-                        <div className="mt-0.5 text-[11.5px] text-[#6b6480]">
+                        <div className="mt-0.5 text-[12px] text-[#6b6480]">
                           {fmtDate(o.created_at)}{o.total_bhd != null ? ` · ${bhd(o.total_bhd)}` : ''}{'salesman' in o && o.salesman ? ` · ${o.salesman}` : ''}{'expected_delivery' in o && o.expected_delivery ? ` · ${o.expected_delivery}` : ''}
                         </div>
                       </div>
@@ -54,7 +54,7 @@ export default function MyOrdersPage() {
                 )
               })}
             </ul>
-            <p className="mt-4 text-[11.5px] leading-snug text-[#6b6480]">{S.orders.otherPhone}</p>
+            <p className="mt-4 text-[12px] leading-snug text-[#6b6480]">{S.orders.otherPhone}</p>
           </>
         )}
       </main>

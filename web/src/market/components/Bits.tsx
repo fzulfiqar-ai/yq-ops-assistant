@@ -110,7 +110,7 @@ export function OfferHero({ offer, onCta }: { offer: Offer; onCta: () => void })
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-white/60">{S.hero.label}</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-white/60">{S.hero.label}</div>
           <h2 className="mt-1 font-display text-[20px] font-bold leading-tight tracking-[-0.02em]">{offer.name}</h2>
           {offer.summary && <p className="mt-1 text-[13px] leading-snug text-white/75">{offer.summary}</p>}
         </div>
@@ -155,9 +155,9 @@ export function RepBanner({ rep, compact }: { rep: RepCard; compact?: boolean })
         </span>
       )}
       <div className="min-w-0 flex-1">
-        <div className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-[#6d28d9]">{S.rep.yours}</div>
+        <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6d28d9]">{S.rep.yours}</div>
         <div className="truncate font-display text-[14px] font-bold leading-tight text-[#1a1430]">{rep.name}</div>
-        {!compact && rep.title && <div className="truncate text-[11px] text-[#6b6480]">{rep.title}</div>}
+        {!compact && rep.title && <div className="truncate text-[12px] text-[#6b6480]">{rep.title}</div>}
       </div>
       {rep.whatsapp_url && (
         <a
@@ -236,8 +236,8 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
           aria-label={S.qty.title}
           className="h-16 w-full rounded-2xl border border-[#e4e0ee] bg-white text-center font-display text-[32px] font-extrabold tabular-nums text-[#1a1430] outline-none focus:border-[#6d28d9] focus:ring-2 focus:ring-[#6d28d9]/15"
         />
-        {!valid && draft !== '' && <p className="mt-1.5 text-center text-[11.5px] font-medium text-[#9f1239]">{n < min ? S.card.min(min) : 'Too many — please ask your representative.'}</p>}
-        <div className="mt-4 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.qty.presets}</div>
+        {!valid && draft !== '' && <p className="mt-1.5 text-center text-[12px] font-medium text-[#9f1239]">{n < min ? S.card.min(min) : 'Too many — please ask your representative.'}</p>}
+        <div className="mt-4 text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.qty.presets}</div>
         <div className="mt-2 grid grid-cols-5 gap-2">
           {presets.map((p) => (
             <button key={p} type="button" onClick={() => setDraft(String(p))} aria-pressed={n === p} className={cn('h-11 rounded-xl border text-[14px] font-semibold tabular-nums transition', RING, n === p ? 'border-[#6d28d9] bg-[#f3eefc] text-[#6d28d9]' : 'border-[#e4e0ee] bg-white text-[#1a1430] hover:bg-[#f7f5fb]')}>
@@ -289,7 +289,7 @@ export function EmptyState({ title, hint, action }: { title: string; hint?: stri
 
 export function OfflineBanner({ kind, onRetry }: { kind: 'offline' | 'loading-slow'; onRetry?: () => void }) {
   return (
-    <div className="mt-3 flex items-center gap-2 rounded-xl bg-[#fdf3e3] px-3 py-2 text-[11.5px] leading-snug text-[#96600d]">
+    <div className="mt-3 flex items-center gap-2 rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12px] leading-snug text-[#96600d]">
       <WifiOff size={14} className="shrink-0" aria-hidden="true" />
       <span className="flex-1">{kind === 'offline' ? S.states.offline : S.states.connectingHint}</span>
       {onRetry && (

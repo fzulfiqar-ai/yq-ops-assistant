@@ -48,7 +48,7 @@ export function ProductImage({
         <div className="px-2 text-center">
           <Package size={iconSize} strokeWidth={1} className="mx-auto" aria-hidden="true" />
           {showCaption && (
-            <div className="mt-1.5 text-[10px] font-medium uppercase tracking-wide text-[#a8a2bb]">Photo coming soon</div>
+            <div className="mt-1.5 text-[11px] font-medium uppercase tracking-wide text-[#6b6480]">Photo coming soon</div>
           )}
         </div>
       </div>
@@ -64,6 +64,8 @@ export function ProductImage({
         height={height}
         loading={eager ? 'eager' : 'lazy'}
         decoding="async"
+        // the above-the-fold photos are the largest paint: ask the browser for them first
+        fetchPriority={eager ? 'high' : undefined}
         draggable={false}
         onError={() => setFailed({ key, idx: idx + 1 })}
         className={cn('h-full w-full object-contain', imgClassName)}

@@ -80,11 +80,11 @@ export default function CartPage() {
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="line-clamp-2 font-display text-[13px] font-bold leading-tight text-[#1a1430]">{item?.display_name || line.item_code}</div>
-                          <div className="mt-0.5 text-[11px] text-[#6b6480]">{line.item_code}{q && !dead ? ` · ${money(q.unit_price_bhd)} ${S.cart.each}` : ''}</div>
+                          <div className="mt-0.5 text-[12px] text-[#6b6480]">{line.item_code}{q && !dead ? ` · ${money(q.unit_price_bhd)} ${S.cart.each}` : ''}</div>
                         </div>
                         <div className="shrink-0 text-right font-display text-[13.5px] font-bold tabular-nums text-[#1a1430]">{dead ? '—' : bhd(q?.line_total_bhd ?? (Number(item?.price_bhd) || 0) * line.qty)}</div>
                       </div>
-                      {dead && q?.blocked_reason && <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-[#9f1239]"><AlertTriangle size={12} aria-hidden="true" /> {q.blocked_reason}</p>}
+                      {dead && q?.blocked_reason && <p className="mt-1.5 flex items-center gap-1.5 text-[12px] font-medium text-[#9f1239]"><AlertTriangle size={12} aria-hidden="true" /> {q.blocked_reason}</p>}
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         {dead && !fixable ? (
                           <button type="button" onClick={() => m.remove(line.item_code)} className={cn('inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#f3c9d2] bg-[#fdecef] px-3.5 text-[12px] font-semibold text-[#9f1239]', RING)}><Trash2 size={13} aria-hidden="true" /> {S.cart.remove}</button>
@@ -94,8 +94,8 @@ export default function CartPage() {
                         {q?.backorder && <Badge tone="amber">{S.card.backorder}</Badge>}
                         {q?.applied?.length ? <Badge tone="green">{q.applied[0]?.name || 'Discount'}</Badge> : null}
                       </div>
-                      {nudge && !dead && <p className="mt-1.5 text-[11px] font-medium text-[#6d28d9]">{nudge}</p>}
-                      {q?.warning && <p className="mt-1.5 text-[11px] text-[#96600d]">{q.warning}</p>}
+                      {nudge && !dead && <p className="mt-1.5 text-[12px] font-medium text-[#6d28d9]">{nudge}</p>}
+                      {q?.warning && <p className="mt-1.5 text-[12px] text-[#96600d]">{q.warning}</p>}
                     </div>
                   </li>
                 )
@@ -113,7 +113,7 @@ export default function CartPage() {
             )}
 
             <div className="mt-5">
-              <label htmlFor="yq-note" className="mb-1.5 block text-[11.5px] font-semibold text-[#1a1430]">{first ? `Note for ${first}` : S.cart.note}</label>
+              <label htmlFor="yq-note" className="mb-1.5 block text-[12px] font-semibold text-[#1a1430]">{first ? `Note for ${first}` : S.cart.note}</label>
               <textarea id="yq-note" value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder={S.cart.notePlaceholder} className={cn(FIELD, 'h-auto resize-none py-2.5 text-[16px] leading-snug')} />
             </div>
 
@@ -126,20 +126,20 @@ export default function CartPage() {
                   <button type="button" onClick={() => setCoupon(couponDraft.trim())} className={BTN_SECONDARY}>{S.cart.apply}</button>
                 </div>
               )}
-              {quote?.coupon?.message && <p className={cn('mt-1.5 text-[11.5px] font-medium', quote.coupon.valid === false ? 'text-[#9f1239]' : 'text-[#137a48]')}>{quote.coupon.message}</p>}
+              {quote?.coupon?.message && <p className={cn('mt-1.5 text-[12px] font-medium', quote.coupon.valid === false ? 'text-[#9f1239]' : 'text-[#137a48]')}>{quote.coupon.message}</p>}
             </div>
 
             {(quote?.warnings || []).length > 0 && (
-              <ul className="mt-4 space-y-1.5">{(quote?.warnings || []).map((w, i) => <li key={i} className="flex gap-2 rounded-xl bg-[#fdf3e3] px-3 py-2 text-[11.5px] leading-snug text-[#96600d]"><AlertTriangle size={13} className="mt-0.5 shrink-0" aria-hidden="true" /><span>{w}</span></li>)}</ul>
+              <ul className="mt-4 space-y-1.5">{(quote?.warnings || []).map((w, i) => <li key={i} className="flex gap-2 rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12px] leading-snug text-[#96600d]"><AlertTriangle size={13} className="mt-0.5 shrink-0" aria-hidden="true" /><span>{w}</span></li>)}</ul>
             )}
-            {quoteError && <p className="mt-4 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] text-[#9f1239]">{quoteError}</p>}
+            {quoteError && <p className="mt-4 rounded-xl bg-[#fdecef] px-3 py-2 text-[12px] text-[#9f1239]">{quoteError}</p>}
 
             <dl className="mt-4 space-y-2 rounded-[16px] border border-[#ece9f3] bg-white p-4 text-[12.5px]">
               <div className="flex justify-between"><dt className="text-[#6b6480]">{S.cart.subtotal}</dt><dd className="tabular-nums">{bhd(quote?.subtotal_bhd)}</dd></div>
               {(quote?.discounts || []).map((d, i) => <div key={d.rule_id ?? i} className="flex justify-between"><dt className="truncate pr-2 text-[#137a48]">{d.name || 'Discount'}</dt><dd className="shrink-0 tabular-nums text-[#137a48]">−{bhd(d.amount_bhd)}</dd></div>)}
               <div className="flex justify-between"><dt className="text-[#6b6480]">{S.cart.delivery}</dt><dd className="tabular-nums">{Number(quote?.delivery_bhd) > 0 ? bhd(quote?.delivery_bhd) : S.cart.free}</dd></div>
               <div className="flex justify-between border-t border-[#f4f2f9] pt-2.5"><dt className="font-semibold">{S.cart.total}</dt><dd className="font-display text-[15px] font-extrabold tabular-nums">{bhd(quote?.total_bhd)}</dd></div>
-              {quoting && <div className="flex items-center gap-1.5 pt-0.5 text-[10.5px] text-[#6b6480]"><Loader2 size={11} className="animate-spin" aria-hidden="true" /> {S.cart.updating}</div>}
+              {quoting && <div className="flex items-center gap-1.5 pt-0.5 text-[11px] text-[#6b6480]"><Loader2 size={11} className="animate-spin" aria-hidden="true" /> {S.cart.updating}</div>}
             </dl>
 
             {askUrl && (
@@ -154,15 +154,15 @@ export default function CartPage() {
       {cart.lines.length > 0 && (
         <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#ece9f3] bg-white/95 px-4 pt-3 backdrop-blur-md md:bottom-0" style={{ paddingBottom: `calc(4.25rem + ${SAFE} + 0.75rem)` }}>
           <div className="mx-auto max-w-3xl">
-            {blocked && <p className="mb-2 text-[11.5px] font-medium text-[#9f1239]">{blocked}</p>}
+            {blocked && <p className="mb-2 text-[12px] font-medium text-[#9f1239]">{blocked}</p>}
             <div className="flex items-center gap-3">
               <div className="min-w-0 flex-1">
-                <div className="text-[11.5px] text-[#6b6480]">{S.cart.total}</div>
+                <div className="text-[12px] text-[#6b6480]">{S.cart.total}</div>
                 <div className="font-display text-[19px] font-extrabold leading-tight tabular-nums text-[#1a1430]">{bhd(quote?.total_bhd)}</div>
               </div>
               <button type="button" disabled={!canCheckout} onClick={() => navigate('/checkout')} className={cn(BTN_PRIMARY, 'shrink-0 px-7')}>{S.cart.place}</button>
             </div>
-            <p className="mt-1.5 text-[10.5px] text-[#6b6480]">{first ? S.cart.placeHint(first) : S.cart.placeHintGeneric}</p>
+            <p className="mt-1.5 text-[11px] text-[#6b6480]">{first ? S.cart.placeHint(first) : S.cart.placeHintGeneric}</p>
           </div>
         </div>
       )}

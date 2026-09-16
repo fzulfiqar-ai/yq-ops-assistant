@@ -117,7 +117,11 @@ async function check(): Promise<void> {
 export function startSw(): void {
   if (started || typeof window === 'undefined' || !('serviceWorker' in navigator)) return
   started = true
-  void check()
+  // Register only after the page has loaded and settled: precaching 30 files while the catalog
+  // and the first product photos are still downloading costs seconds on a slow connection.
+  const kick = () => window.setTimeout(() => void check(), 2500)
+  if (document.readyState === 'complete') kick()
+  else window.addEventListener('load', kick, { once: true })
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') void check()
   })

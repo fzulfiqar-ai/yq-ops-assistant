@@ -8,6 +8,9 @@ Jobs:
     to the owner channel (Telegram + owner email) at most every two hours until someone assigns
     it. GitHub cron drifts by minutes, so this is an internal nudge, never a merchant-facing promise.
   * cleanup — expired or revoked merchant sessions and stale access links are removed.
+  * stale_data_alert — when the stock snapshot merchants see is older than shop_stale_days, the
+    owner channel gets one Telegram a day asking for the Focus report (stale availability costs
+    trust and confirmations).
 """
 from __future__ import annotations
 
@@ -109,9 +112,54 @@ def cleanup() -> dict:
     return out
 
 
+STALE_RENOTIFY_HOURS = 24
+
+
+def stale_data_alert() -> dict:
+    """One Telegram a day while the stock snapshot on the marketplace is older than shop_stale_days."""
+    from app import shop
+    days = shop._i(shop.shop_settings().get("shop_stale_days"), 3)
+    if days <= 0:
+        return {"skipped": "shop_stale_days is 0"}
+    rows = shop.exec_sql("SELECT max(as_of_date)::text AS as_of FROM v_catalog_stock") or []
+    as_of = _parse((rows[0] or {}).get("as_of")) if rows else None
+    now = _now()
+    age = (now - as_of).days if as_of else None
+    out: dict = {"as_of": as_of.date().isoformat() if as_of else None, "age_days": age, "alerted": False}
+    if age is None or age < days:
+        return out
+    client = get_client()
+    last = None
+    try:
+        row = client.table("app_settings").select("value").eq("key", "shop_stale_alerted_at").limit(1).execute().data or []
+        last = _parse(row[0].get("value")) if row else None
+    except Exception:  # noqa: BLE001 — a missing marker just means "never alerted"
+        last = None
+    if last and last > now - timedelta(hours=STALE_RENOTIFY_HOURS):
+        out["skipped"] = "alerted in the last 24 h"
+        return out
+    text = (f"Stock data on the marketplace is {age} days old (as of {as_of:%d %b}). "
+            f"Merchants see stale availability.\nUpload the Focus Stock Balance report"
+            + (f": {_base()}/data" if _base() else "."))
+    try:
+        from app.notify import send_telegram
+        out["telegram"] = bool(send_telegram(text))
+    except Exception as e:  # noqa: BLE001
+        out["telegram"] = f"{type(e).__name__}: {e}"[:120]
+    try:
+        client.table("app_settings").upsert({"key": "shop_stale_alerted_at", "value": now.isoformat(),
+                                             "updated_by": "shop_jobs", "updated_at": now.isoformat()},
+                                            on_conflict="key").execute()
+        out["alerted"] = True
+    except Exception as e:  # noqa: BLE001
+        out["marker"] = f"{type(e).__name__}: {e}"[:120]
+    return out
+
+
 def run_shop_jobs() -> dict:
     out: dict = {"at": _now().isoformat()}
-    for name, fn in (("unassigned_reminder", unassigned_reminder), ("cleanup", cleanup)):
+    for name, fn in (("unassigned_reminder", unassigned_reminder), ("cleanup", cleanup),
+                     ("stale_data_alert", stale_data_alert)):
         try:
             out[name] = fn()
         except Exception as e:  # noqa: BLE001 — one job failing must not stop the others

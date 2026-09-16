@@ -66,12 +66,12 @@ questions:
 
   - id: 12
     question: "Which products have low stock?"
-    expected_template: "Low-stock items"
+    expected_template: "Low stock & out-of-stock (velocity-aware)"
     expected_columns: [item_name, balance_qty, warehouse_name]
 
   - id: 13
     question: "Show items running low"
-    expected_template: "Low-stock items"
+    expected_template: "Low stock & out-of-stock (velocity-aware)"
     expected_columns: [item_name, balance_qty]
 
   - id: 14

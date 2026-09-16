@@ -72,7 +72,7 @@ export default function SearchPage() {
           <>
             {recent.length > 0 && (
               <section aria-label={S.states.recent}>
-                <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.states.recent}</h2>
+                <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.states.recent}</h2>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {recent.map((r) => (
                     <button key={r} type="button" onClick={() => setQ(r)} className={cn('inline-flex h-9 items-center gap-1.5 rounded-full border border-[#e4e0ee] bg-white px-3.5 text-[12.5px] text-[#1a1430] hover:bg-[#f7f5fb]', RING)}>
@@ -83,12 +83,12 @@ export default function SearchPage() {
               </section>
             )}
             <section className="mt-6" aria-label="Browse by category">
-              <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">Categories</h2>
+              <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">Categories</h2>
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {categories.map((c) => (
                   <button key={c} type="button" onClick={() => navigate(`/t/${encodeURIComponent(c.toLowerCase())}`)} className={cn('h-14 rounded-[16px] border border-[#ece9f3] bg-white px-3 text-left font-display text-[13.5px] font-bold capitalize text-[#1a1430] hover:border-[#e2ddef] hover:shadow-[0_10px_24px_-16px_rgba(24,16,48,.32)]', RING)}>
                     {c.toLowerCase()}
-                    <span className="mt-0.5 block text-[11px] font-normal text-[#6b6480]">{items.filter((i) => (i.category || 'OTHER') === c).length} products</span>
+                    <span className="mt-0.5 block text-[12px] font-normal text-[#6b6480]">{items.filter((i) => (i.category || 'OTHER') === c).length} products</span>
                   </button>
                 ))}
               </div>

@@ -115,11 +115,11 @@ export default function TrackingPage() {
             <h1 className="mt-4 font-display text-[22px] font-bold tracking-[-0.02em] text-[#1a1430]">{S.placed.title}</h1>
             <p className="mt-1 text-[12.5px] leading-snug text-[#6b6480]">{placed.duplicate ? S.placed.duplicate : placed.assigned && first ? S.placed.sentTo(first) : S.placed.unassigned}</p>
             <div className="mt-5 rounded-[16px] bg-[#f3eefc] px-4 py-3">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#6d28d9]">{S.placed.number}</div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[#6d28d9]">{S.placed.number}</div>
               <div className="mt-0.5 font-display text-[26px] font-extrabold tracking-[-0.02em] tabular-nums text-[#1a1430]">{placed.order_no}</div>
             </div>
             <ol className="mt-4 space-y-1 text-left text-[12px] text-[#4a4360]">
-              {S.placed.next.map((t, i) => <li key={t} className="flex gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#f3eefc] text-[10.5px] font-bold text-[#6d28d9]">{i + 1}</span>{t}</li>)}
+              {S.placed.next.map((t, i) => <li key={t} className="flex gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#f3eefc] text-[11px] font-bold text-[#6d28d9]">{i + 1}</span>{t}</li>)}
             </ol>
             {placed.whatsapp_url && (
               <a href={placed.whatsapp_url} target="_blank" rel="noreferrer" className={cn('mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#25D366] text-[14px] font-semibold text-white hover:bg-[#1eb356]', RING)}>
@@ -146,9 +146,9 @@ export default function TrackingPage() {
             <section className={cn('rounded-[20px] border border-[#ece9f3] bg-white p-5', placed && 'mt-4')}>
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
-                  <div className="text-[10.5px] font-semibold uppercase tracking-wide text-[#6b6480]">{S.placed.number}</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6b6480]">{S.placed.number}</div>
                   <h2 className="font-display text-[22px] font-extrabold tabular-nums tracking-tight text-[#1a1430]">{data.order_no}</h2>
-                  {data.created_at && <div className="mt-0.5 text-[11.5px] text-[#6b6480]">{S.track.placed} {fmtDateTime(data.created_at)}</div>}
+                  {data.created_at && <div className="mt-0.5 text-[12px] text-[#6b6480]">{S.track.placed} {fmtDateTime(data.created_at)}</div>}
                 </div>
                 <Badge tone={data.cancelled ? 'rose' : data.status === 'delivered' ? 'green' : 'accent'}>{data.status_label || data.status}</Badge>
               </div>
@@ -160,15 +160,15 @@ export default function TrackingPage() {
                   {(data.steps || []).map((s, i, arr) => (
                     <li key={s.status} className="flex gap-3">
                       <div className="flex flex-col items-center">
-                        <span aria-current={s.current ? 'step' : undefined} className={cn('grid h-7 w-7 shrink-0 place-items-center rounded-full border-2 text-[11px] font-bold', s.done ? 'border-[#6d28d9] bg-[#6d28d9] text-white' : s.current ? 'border-[#6d28d9] bg-white text-[#6d28d9]' : 'border-[#e9e5f3] bg-white text-[#a8a2bb]')}>
+                        <span aria-current={s.current ? 'step' : undefined} className={cn('grid h-7 w-7 shrink-0 place-items-center rounded-full border-2 text-[12px] font-bold', s.done ? 'border-[#6d28d9] bg-[#6d28d9] text-white' : s.current ? 'border-[#6d28d9] bg-white text-[#6d28d9]' : 'border-[#e9e5f3] bg-white text-[#a8a2bb]')}>
                           {s.done ? <Check size={14} aria-hidden="true" /> : i + 1}
                         </span>
                         {i < arr.length - 1 && <span className={cn('my-1 h-6 w-0.5', s.done ? 'bg-[#6d28d9]' : 'bg-[#e9e5f3]')} />}
                       </div>
                       <div className="min-w-0 pb-2">
                         <div className={cn('text-[13px] font-semibold', s.done || s.current ? 'text-[#1a1430]' : 'text-[#a8a2bb]')}>{s.label}</div>
-                        {s.at && <div className="text-[11px] text-[#6b6480]">{fmtDateTime(s.at)}</div>}
-                        {s.status === 'confirmed' && data.expected_delivery && (s.done || s.current) && <div className="text-[11.5px] text-[#6d28d9]">{S.track.expected}: {data.expected_delivery}</div>}
+                        {s.at && <div className="text-[12px] text-[#6b6480]">{fmtDateTime(s.at)}</div>}
+                        {s.status === 'confirmed' && data.expected_delivery && (s.done || s.current) && <div className="text-[12px] text-[#6d28d9]">{S.track.expected}: {data.expected_delivery}</div>}
                       </div>
                     </li>
                   ))}
@@ -219,7 +219,7 @@ export default function TrackingPage() {
                     const qty = l.qty_confirmed ?? l.qty
                     return (
                       <li key={l.item_code} className={cn('flex items-baseline justify-between gap-3 px-4 py-2.5 text-[12.5px]', removed && 'opacity-50 line-through')}>
-                        <span className="min-w-0"><b className="font-display font-bold">{l.display_name || l.item_code}</b><span className="ml-1.5 tabular-nums text-[#6b6480]">{qty} × {money(l.unit_price_bhd)}</span>{l.backorder && !removed && <span className="ml-1.5 text-[11px] text-[#96600d]">backorder</span>}</span>
+                        <span className="min-w-0"><b className="font-display font-bold">{l.display_name || l.item_code}</b><span className="ml-1.5 tabular-nums text-[#6b6480]">{qty} × {money(l.unit_price_bhd)}</span>{l.backorder && !removed && <span className="ml-1.5 text-[12px] text-[#96600d]">backorder</span>}</span>
                         <span className="shrink-0 font-semibold tabular-nums">{bhd(Number(l.unit_price_bhd || 0) * Number(qty || 0))}</span>
                       </li>
                     )

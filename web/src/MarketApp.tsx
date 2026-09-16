@@ -7,6 +7,7 @@ import { UpdateToast } from '@/market/components/UpdateToast'
 import { isSlugShaped, rememberRef } from '@/market/lib/device'
 import { setSource } from '@/market/lib/events'
 import { watchInstallPrompt } from '@/market/lib/install'
+import { startVitals } from '@/market/lib/vitals'
 import Home from '@/market/pages/Home'
 
 const SearchPage = lazy(() => import('@/market/pages/SearchPage'))
@@ -50,7 +51,10 @@ function firstPathSlug(): string | null {
 }
 
 export default function MarketApp() {
-  useEffect(() => watchInstallPrompt(), [])
+  useEffect(() => {
+    startVitals()
+    return watchInstallPrompt()
+  }, [])
   return (
     <StrictMode>
       <ErrorBoundary>

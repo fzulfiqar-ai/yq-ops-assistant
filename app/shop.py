@@ -67,6 +67,7 @@ MAX_QTY = 9999
 
 # Mirrors the seeds in scripts/shop_migration.sql — defaults only; the DB value wins.
 SETTING_DEFAULTS: dict[str, str] = {
+    "shop_stale_days": "3",          # Telegram the owner when the stock snapshot is older than this
     "shop_min_margin_pct": "0.20",
     "shop_vat_rate": "0.10",
     "shop_low_stock_units": "10",
@@ -2122,11 +2123,12 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
     days = max(1, min(_i(days, 30), 365))
     since = (_now() - timedelta(days=days)).isoformat()
     client = get_client()
-    ev = (client.table("shop_events").select("ts,event,session_id,item_code,referral_code,salesman_id,src")
+    ev = (client.table("shop_events").select("ts,event,session_id,item_code,referral_code,salesman_id,src,device_id,meta")
           .gte("ts", since).limit(20000).execute().data or [])
     orders = (client.table("shop_orders")
               .select("id,status,total_bhd,units_count,salesman_id,salesman_name,referral_code,src,coupon_code,"
-                      "customer_phone,created_at,has_backorder,source")
+                      "customer_phone,created_at,has_backorder,source,attribution_source,attribution_conflict,"
+                      "assigned_at,confirmed_at,cancelled_by,customer_id,device_id")
               .gte("created_at", since).limit(5000).execute().data or [])
     if salesman:
         code = str(salesman.get("referral_code") or "").lower()
@@ -2193,7 +2195,96 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
         x = daily.setdefault(d, {"date": d, "orders": 0, "value_bhd": 0.0})
         x["orders"] += 1
         x["value_bhd"] = money(x["value_bhd"] + _f(o.get("total_bhd")))
+
+    # ── the marketplace learning loop (plan §R): what merchants search for, which rails they use,
+    # where orders are attributed, how fast they are taken, who comes back, how the site performs.
+    def _meta(e: dict) -> dict:
+        m = e.get("meta")
+        return m if isinstance(m, dict) else {}
+
+    def _ts(v) -> datetime | None:
+        if not v:
+            return None
+        try:
+            d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    terms: dict[str, dict] = {}
+    for e in ev:
+        if e.get("event") in ("search", "search_zero"):
+            q = str(_meta(e).get("q") or "").strip().lower()[:60]
+            if q:
+                t = terms.setdefault(q, {"term": q, "searches": 0, "zero": 0})
+                t["searches"] += 1
+                t["zero"] += 1 if e.get("event") == "search_zero" else 0
+    n_search = sum(t["searches"] for t in terms.values())
+    n_zero = sum(t["zero"] for t in terms.values())
+    search = {"searches": n_search, "zero_results": n_zero,
+              "zero_rate_pct": round(n_zero / n_search * 100, 1) if n_search else None,
+              "terms": sorted(terms.values(), key=lambda t: (-t["searches"], -t["zero"]))[:20],
+              "zero_terms": sorted((t for t in terms.values() if t["zero"]), key=lambda t: -t["zero"])[:10]}
+
+    rails: dict[str, dict] = {}
+    for e in ev:
+        if e.get("event") in ("rail_click", "reco_click", "reorder"):
+            rail = str(_meta(e).get("rail") or ("reorder" if e.get("event") == "reorder" else "unknown"))[:40]
+            r = rails.setdefault(rail, {"rail": rail, "clicks": 0, "sessions": set()})
+            r["clicks"] += 1
+            r["sessions"].add(e.get("session_id"))
+    rail_perf = sorted(({**r, "sessions": len(r["sessions"])} for r in rails.values()), key=lambda r: -r["clicks"])
+    engagement = {k: _sessions(k) for k in ("search", "share", "install", "reorder", "cancel", "checkout_start")}
+    engagement["devices"] = len({e.get("device_id") for e in ev if e.get("device_id")})
+
+    by_attr: dict[str, dict] = {}
+    for o in live:
+        key = o.get("attribution_source") or ("staff" if o.get("source") == "salesman" else "legacy")
+        a = by_attr.setdefault(key, {"key": key, "orders": 0, "value_bhd": 0.0})
+        a["orders"] += 1
+        a["value_bhd"] = money(a["value_bhd"] + _f(o.get("total_bhd")))
+    sla_min = _i(shop_settings().get("shop_assign_sla_min"), 30)
+    now = _now()
+    breaches = 0
+    for o in live:
+        created = _ts(o.get("created_at"))
+        if not created:
+            continue
+        assigned = _ts(o.get("assigned_at"))
+        if o.get("salesman_id") and not assigned:
+            continue  # attributed at creation: nobody waited
+        waited_min = ((assigned or now) - created).total_seconds() / 60
+        if waited_min > sla_min:
+            breaches += 1
+    confirm_mins = sorted((_ts(o["confirmed_at"]) - _ts(o["created_at"])).total_seconds() / 60
+                          for o in live if _ts(o.get("confirmed_at")) and _ts(o.get("created_at")))
+    cancelled = [o for o in orders if o.get("status") == "cancelled"]
+    ops = {"by_attribution": sorted(by_attr.values(), key=lambda a: -a["value_bhd"]),
+           "unassigned_now": sum(1 for o in live if not o.get("salesman_id") and o.get("status") in ("new", "confirmed")),
+           "conflicts": sum(1 for o in live if o.get("attribution_conflict")),
+           "sla_min": sla_min, "sla_breaches": breaches,
+           "median_time_to_confirm_min": round(confirm_mins[len(confirm_mins) // 2], 1) if confirm_mins else None,
+           "cancelled_by_customer": sum(1 for o in cancelled if o.get("cancelled_by") == "customer"),
+           "cancelled_by_staff": sum(1 for o in cancelled if o.get("cancelled_by") != "customer")}
+
+    per_customer: dict = {}
+    for o in live:
+        k = o.get("customer_id") or o.get("customer_phone")
+        per_customer[k] = per_customer.get(k, 0) + 1
+    repeat = sum(1 for c in per_customer.values() if c >= 2)
+    identity = {"customers": len(per_customer), "repeat_customers": repeat,
+                "repeat_rate_pct": round(repeat / len(per_customer) * 100, 1) if per_customer else None,
+                "market_orders": sum(1 for o in live if o.get("source") in ("market", "slug")),
+                "staff_orders": sum(1 for o in live if o.get("source") == "salesman"),
+                "legacy_orders": sum(1 for o in live if o.get("source") not in ("market", "slug", "salesman"))}
+
+    def _p75(key: str):
+        vals = sorted(_f(_meta(e).get(key)) for e in ev if e.get("event") == "vitals" and _meta(e).get(key) is not None)
+        return round(vals[min(len(vals) - 1, int(len(vals) * 0.75))], 3) if vals else None
+    vitals = {"samples": sum(1 for e in ev if e.get("event") == "vitals"),
+              "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls")}
     return {
+        "search": search, "rails": rail_perf, "engagement": engagement, "ops": ops, "identity": identity, "vitals": vitals,
         "days": days, "since": since[:10],
         "funnel": funnel,
         "orders": n, "cancelled": len(orders) - n, "value_bhd": value,

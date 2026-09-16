@@ -93,6 +93,12 @@ function marketPwa(apiUrl: string) {
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env }
+  // The marketplace Vercel project always builds the market entry, even for a preview branch whose
+  // environment has no VITE_APP (Vercel exposes the project's production hostname at build time).
+  if (!env.VITE_APP && /^yq-marketplace[.-]/.test(env.VERCEL_PROJECT_PRODUCTION_URL || '')) {
+    env.VITE_APP = 'market'
+    process.env.VITE_APP = 'market'
+  }
   const isMarket = env.VITE_APP === 'market'
   // commit sha when Vercel/GitHub know it; a CLI deploy without Git integration still gets a unique id per deployment
   const buildId =

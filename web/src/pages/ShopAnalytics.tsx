@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { AlertTriangle, Link2, Loader2, RefreshCw, Share2, Ticket, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, LayoutList, Link2, Loader2, RefreshCw, Search, Share2, Ticket, UserRoundCheck, type LucideIcon } from 'lucide-react'
 import { apiGet, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, pct, fmtDate } from '@/lib/format'
@@ -47,7 +47,64 @@ interface DailyRow {
   orders?: number | null
   value_bhd?: number | null
 }
+// marketplace learning loop (16-Sep-2026): search terms, rails, attribution sources, SLA, identity, vitals
+interface SearchTermRow {
+  term: string
+  searches?: number | null
+  zero?: number | null
+}
+interface SearchData {
+  searches?: number | null
+  zero_results?: number | null
+  zero_rate_pct?: number | null
+  terms?: SearchTermRow[] | null
+  zero_terms?: SearchTermRow[] | null
+}
+interface RailRow {
+  rail: string
+  clicks?: number | null
+  sessions?: number | null
+}
+interface EngagementData {
+  search?: number | null
+  share?: number | null
+  install?: number | null
+  reorder?: number | null
+  cancel?: number | null
+  checkout_start?: number | null
+  devices?: number | null
+}
+interface OpsData {
+  by_attribution?: AttributionRow[] | null
+  unassigned_now?: number | null
+  conflicts?: number | null
+  sla_min?: number | null
+  sla_breaches?: number | null
+  median_time_to_confirm_min?: number | null
+  cancelled_by_customer?: number | null
+  cancelled_by_staff?: number | null
+}
+interface IdentityData {
+  customers?: number | null
+  repeat_customers?: number | null
+  repeat_rate_pct?: number | null
+  market_orders?: number | null
+  staff_orders?: number | null
+  legacy_orders?: number | null
+}
+interface VitalsData {
+  samples?: number | null
+  lcp_ms_p75?: number | null
+  inp_ms_p75?: number | null
+  cls_p75?: number | null
+}
 interface ShopAnalyticsResp {
+  search?: SearchData | null
+  rails?: RailRow[] | null
+  engagement?: EngagementData | null
+  ops?: OpsData | null
+  identity?: IdentityData | null
+  vitals?: VitalsData | null
   days: number
   since?: string | null
   funnel?: FunnelData | null
@@ -118,6 +175,32 @@ function labelForReferral(key?: string | null): string {
 function labelForSrc(key?: string | null): string {
   if (!key || key === 'direct') return 'Direct'
   return key
+}
+const ATTRIBUTION_LABEL: Record<string, string> = {
+  customer_admin: 'Assigned to the merchant',
+  focus_map: 'Focus mapping',
+  sticky: 'Remembered rep',
+  session_ref: 'Storefront link / QR',
+  checkout_pick: 'Chosen at checkout',
+  staff: 'Placed by staff',
+  default: 'Default rep',
+  unassigned: 'Unassigned (queue)',
+  legacy: 'Legacy catalog link',
+}
+function labelForAttribution(key?: string | null): string {
+  return (key && ATTRIBUTION_LABEL[key]) || key || '—'
+}
+const RAIL_LABEL: Record<string, string> = {
+  best: 'Best sellers',
+  arrived: 'Just arrived',
+  offers: 'On offer',
+  regulars: 'Order again',
+  together: 'Bought together',
+  complete: 'Complete your order',
+  reorder: 'Reorder button',
+}
+function labelForRail(key?: string | null): string {
+  return (key && RAIL_LABEL[key]) || key || '—'
 }
 
 // ── small local atoms ───────────────────────────────────────────────────────
@@ -242,6 +325,46 @@ function AttributionTable({
   )
 }
 
+function MiniTable<T>({
+  title, icon: Icon, rows, cols, empty, foot,
+}: {
+  title: string
+  icon: LucideIcon
+  rows: T[]
+  cols: { label: string; align?: 'right'; render: (r: T) => React.ReactNode }[]
+  empty: string
+  foot?: React.ReactNode
+}) {
+  return (
+    <Card className="p-5">
+      <div className="mb-3 flex items-center gap-2 font-display text-base font-semibold">
+        <Icon size={16} className="text-primary" /> {title}
+      </div>
+      {!rows.length ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">{empty}</p>
+      ) : (
+        <div className="overflow-hidden rounded-xl border">
+          <table className="w-full text-[13px]">
+            <thead className="bg-secondary/50 text-[11px] uppercase text-muted-foreground">
+              <tr>
+                {cols.map((c) => <th key={c.label} className={cn('px-2.5 py-1.5', c.align === 'right' ? 'text-right' : 'text-left')}>{c.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 10).map((r, i) => (
+                <tr key={i} className="border-t">
+                  {cols.map((c) => <td key={c.label} className={cn('max-w-[160px] truncate px-2.5 py-1.5 tabular-nums', c.align === 'right' ? 'text-right' : 'font-medium')}>{c.render(r)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {foot && <div className="mt-2 text-[12px] text-muted-foreground">{foot}</div>}
+    </Card>
+  )
+}
+
 // ── page ─────────────────────────────────────────────────────────────────────
 
 export default function ShopAnalytics() {
@@ -259,6 +382,13 @@ export default function ShopAnalytics() {
   const byReferral = data?.attribution?.by_referral || []
   const bySrc = data?.attribution?.by_src || []
   const byCoupon = data?.attribution?.by_coupon || []
+  const search = data?.search || {}
+  const rails = data?.rails || []
+  const engagement = data?.engagement || {}
+  const ops = data?.ops || {}
+  const identity = data?.identity || {}
+  const vitals = data?.vitals || {}
+  const cancelledTotal = (ops.cancelled_by_customer ?? 0) + (ops.cancelled_by_staff ?? 0)
 
   // react-query keeps a stable array reference across renders when the underlying
   // data hasn't changed, so depending on `data?.leaderboard` directly (rather than
@@ -328,7 +458,7 @@ export default function ShopAnalytics() {
     <div>
       <PageHeader
         title="Shop Analytics"
-        subtitle="Orders, funnel and attribution from your shared catalog link"
+        subtitle="Orders, funnel, attribution and the marketplace learning loop"
         actions={
           <div className="flex gap-1.5">
             {PERIODS.map((d) => (
@@ -442,6 +572,51 @@ export default function ShopAnalytics() {
               keyHeader="Source" empty="No orders yet." />
             <AttributionTable title="By coupon" icon={Ticket} rows={byCoupon} labelFor={(k) => k || '—'}
               keyHeader="Coupon" empty="No coupons used yet." />
+          </div>
+
+          {/* Marketplace learning loop */}
+          <div className="mb-3 mt-6">
+            <div className="font-display text-base font-semibold">Marketplace</div>
+            <div className="text-xs text-muted-foreground">How fast orders are taken, what merchants search for, which rails they use · last {days} days</div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <Stat label="Unassigned now" value={num(ops.unassigned_now ?? 0)} tone={ops.unassigned_now ? 'amber' : undefined} />
+            <Stat label={`Waited past ${num(ops.sla_min ?? 30)} min`} value={num(ops.sla_breaches ?? 0)} tone={ops.sla_breaches ? 'amber' : undefined} />
+            <Stat label="Attribution conflicts" value={num(ops.conflicts ?? 0)} tone={ops.conflicts ? 'amber' : undefined} />
+            <Stat label="Median time to confirm" value={ops.median_time_to_confirm_min == null ? '—' : `${num(ops.median_time_to_confirm_min)} min`} />
+            <Stat label="Repeat customers" value={pctOrDash(identity.repeat_rate_pct)} foot={`${num(identity.repeat_customers ?? 0)} of ${num(identity.customers ?? 0)}`} />
+            <Stat label="Cancelled" value={num(cancelledTotal)} foot={cancelledTotal ? `${num(ops.cancelled_by_customer ?? 0)} by merchants` : undefined} />
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+            <MiniTable<SearchTermRow> title="Search terms" icon={Search} rows={search.terms || []}
+              cols={[
+                { label: 'Term', render: (r) => r.term },
+                { label: 'Searches', align: 'right', render: (r) => num(r.searches ?? 0) },
+                { label: 'No result', align: 'right', render: (r) => (r.zero ? <span className="font-semibold text-amber-600">{num(r.zero)}</span> : '—') },
+              ]}
+              empty="No searches yet."
+              foot={search.searches ? <>{num(search.searches)} searches · {pctOrDash(search.zero_rate_pct)} found nothing — add synonyms or products for those terms</> : undefined} />
+            <MiniTable<RailRow> title="Rails & recommendations" icon={LayoutList} rows={rails}
+              cols={[
+                { label: 'Rail', render: (r) => labelForRail(r.rail) },
+                { label: 'Taps', align: 'right', render: (r) => num(r.clicks ?? 0) },
+                { label: 'Sessions', align: 'right', render: (r) => num(r.sessions ?? 0) },
+              ]}
+              empty="No rail taps yet." foot="A rail nobody taps after four weeks comes off the home page." />
+            <AttributionTable title="By attribution" icon={UserRoundCheck} rows={ops.by_attribution || []} labelFor={labelForAttribution}
+              keyHeader="How the rep was chosen" empty="No orders yet." />
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+            <Stat label="Devices" value={num(engagement.devices ?? 0)} />
+            <Stat label="Searched" value={num(engagement.search ?? 0)} foot="sessions" />
+            <Stat label="Checkout started" value={num(engagement.checkout_start ?? 0)} foot="sessions" />
+            <Stat label="Reorders" value={num(engagement.reorder ?? 0)} />
+            <Stat label="Shares" value={num(engagement.share ?? 0)} />
+            <Stat label="Installs" value={num(engagement.install ?? 0)} />
+            <Stat label="Marketplace orders" value={num(identity.market_orders ?? 0)} foot={`${num(identity.staff_orders ?? 0)} by staff · ${num(identity.legacy_orders ?? 0)} legacy link`} />
+            <Stat label="Speed (LCP p75)" value={vitals.lcp_ms_p75 == null ? '—' : `${(vitals.lcp_ms_p75 / 1000).toFixed(1)} s`}
+              tone={vitals.lcp_ms_p75 != null && vitals.lcp_ms_p75 > 2500 ? 'amber' : undefined}
+              foot={vitals.samples ? `INP ${num(vitals.inp_ms_p75 ?? 0)} ms · CLS ${vitals.cls_p75 ?? '—'} · ${num(vitals.samples)} visits` : 'No field data yet'} />
           </div>
         </div>
       )}

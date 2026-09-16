@@ -166,7 +166,14 @@ export default function Home() {
 
   useEffect(() => {
     if (!data) return
-    const id = window.setTimeout(() => setVisible((v) => (v < CHUNK ? CHUNK : v)), 80)
+    // The first 12 cards paint with the data; the rest of the page follows once the main thread is
+    // idle, so the largest photo and the first tap are never queued behind forty more cards.
+    const grow = () => setVisible((v) => (v < CHUNK ? CHUNK : v))
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(grow, { timeout: 1500 })
+      return () => window.cancelIdleCallback(id)
+    }
+    const id = window.setTimeout(grow, 400) // Safari has no requestIdleCallback
     return () => window.clearTimeout(id)
   }, [data])
   useEffect(() => setVisible(12), [cat, offersOnly, inStockOnly, q])
@@ -228,7 +235,7 @@ export default function Home() {
 
   return (
     <Page withCartBar>
-      <TopBar right={updated ? <span className="hidden shrink-0 rounded-full bg-[#f3eefc] px-2.5 py-1 text-[10.5px] font-semibold text-[#6d28d9] sm:inline">{S.states.pricesAsOf(updated)}</span> : undefined} />
+      <TopBar right={updated ? <span className="hidden shrink-0 rounded-full bg-[#f3eefc] px-2.5 py-1 text-[11px] font-semibold text-[#6d28d9] sm:inline">{S.states.pricesAsOf(updated)}</span> : undefined} />
 
       {/* search + chips, pinned */}
       <div className="sticky top-0 z-20 border-b border-[#ece9f3] bg-[#faf9fc]/92 backdrop-blur-md">
@@ -248,7 +255,7 @@ export default function Home() {
         {showRails && recognized && openOrder && (
           <Link to={`/o/${openOrder.token}`} className={cn('mt-3 flex items-center gap-3 rounded-[18px] border border-[#ece9f3] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(24,16,48,.04)] hover:border-[#e2ddef]', RING)}>
             <div className="min-w-0 flex-1">
-              <div className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{openOrder.order_no}</div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{openOrder.order_no}</div>
               <div className="font-display text-[14px] font-bold text-[#1a1430]">{openOrder.status_label || openOrder.status}{openOrder.expected_delivery ? ` · ${openOrder.expected_delivery}` : ''}</div>
             </div>
             <span className="inline-flex items-center gap-1 text-[12.5px] font-semibold text-[#6d28d9]">{S.placed.track} <ChevronRight size={15} /></span>
@@ -312,7 +319,7 @@ export default function Home() {
           )}
         </section>
 
-        <footer className="py-10 text-center text-[11px] leading-relaxed text-[#6b6480]">
+        <footer className="py-10 text-center text-[12px] leading-relaxed text-[#6b6480]">
           <div>{S.states.footer}</div>
           {fmtDate(data.stock_as_of) && <div className="mt-0.5">{S.states.stockAsOf(fmtDate(data.stock_as_of)!)}</div>}
         </footer>

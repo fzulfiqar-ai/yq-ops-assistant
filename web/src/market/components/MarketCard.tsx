@@ -90,7 +90,7 @@ export function MarketCard({
           : 'border-[#ece9f3] shadow-[0_1px_2px_rgba(24,16,48,.04)] hover:border-[#e2ddef] hover:shadow-[0_12px_28px_-18px_rgba(24,16,48,.32)]',
       )}
     >
-      <button type="button" onClick={onOpen} aria-label={`View ${name}`} className={cn('relative block w-full', RING_INSET)}>
+      <button type="button" onClick={onOpen} className={cn('relative block w-full', RING_INSET)}>
         <ProductImage
           srcs={[item.thumb_url, item.product_image_url, item.package_image_url]}
           alt={name}
@@ -108,7 +108,7 @@ export function MarketCard({
           </span>
         )}
         {savePct != null && savePct > 0 && (
-          <span className="absolute right-2.5 top-2.5 rounded-full bg-[#1a1430] px-2 py-[3px] text-[10.5px] font-semibold leading-[14px] text-white">
+          <span className="absolute right-2.5 top-2.5 rounded-full bg-[#1a1430] px-2 py-[3px] text-[11px] font-semibold leading-[14px] text-white">
             Save {savePct}%
           </span>
         )}
@@ -120,7 +120,7 @@ export function MarketCard({
             {name}
           </h3>
           {!compact && (
-            <p className="mt-1 line-clamp-1 text-[11px] leading-[1.35] text-[#6b6480]">
+            <p className="mt-1 line-clamp-1 text-[12px] leading-[1.35] text-[#6b6480]">
               {[showCode ? item.item_code : null, (item.spec || '').split('\n')[0]].filter(Boolean).join(' · ')}
             </p>
           )}
@@ -138,9 +138,9 @@ export function MarketCard({
             <span className={cn('font-display font-extrabold leading-none tracking-[-0.01em] tabular-nums text-[#6d28d9]', compact ? 'text-[14px]' : 'text-[15px]')}>
               {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
             </span>
-            {item.price_bhd != null && !compact && <span className="text-[10.5px] text-[#6b6480]">{S.card.perPiece}</span>}
+            {item.price_bhd != null && !compact && <span className="text-[11px] text-[#6b6480]">{S.card.perPiece}</span>}
           </div>
-          <div className="mt-1 min-h-[1rem] text-[10.5px] leading-[1.35] text-[#6b6480]">
+          <div className="mt-1 min-h-[1rem] text-[11px] leading-[1.35] text-[#6b6480]">
             {compare != null && !compact && <span className="tabular-nums line-through">Retail BHD {money(compare)}</span>}
             {tier && (
               <div className="tabular-nums">
@@ -165,7 +165,7 @@ export function MarketCard({
                   onValueClick={onKeypad}
                   className="w-full"
                 />
-                {nudge && !compact && <p className="mt-1 text-[10.5px] font-medium text-[#6d28d9]">{nudge}</p>}
+                {nudge && !compact && <p className="mt-1 text-[11px] font-medium text-[#6d28d9]">{nudge}</p>}
               </div>
             ) : tellUrl ? (
               <a

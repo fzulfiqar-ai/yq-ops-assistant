@@ -172,7 +172,28 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
   }, [items])
   const categories = useMemo(() => data?.categories || [], [data])
   const settings = useMemo<ShopSettings>(() => data?.settings || {}, [data])
-  const index = useMemo(() => (items.length ? buildIndex(items) : null), [items])
+  // The search index is built off the critical path: Home never needs it, and the Search tab is at
+  // most a few milliseconds behind. Building it inside the first render cost main-thread time
+  // exactly when the largest photo and the first tap were waiting.
+  const [index, setIndex] = useState<SearchIndex | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const build = () => {
+      if (!cancelled) setIndex(items.length ? buildIndex(items) : null)
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(build, { timeout: 2000 })
+      return () => {
+        cancelled = true
+        window.cancelIdleCallback(id)
+      }
+    }
+    const id = window.setTimeout(build, 300) // Safari has no requestIdleCallback
+    return () => {
+      cancelled = true
+      window.clearTimeout(id)
+    }
+  }, [items])
   const pairsMap = useMemo(() => {
     const m = new Map<string, string[]>()
     for (const p of data?.pairs || []) m.set(p.item_code, p.with || [])
