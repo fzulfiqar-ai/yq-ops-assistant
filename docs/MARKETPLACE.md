@@ -104,6 +104,22 @@ plug on a bad worker: redeploy with `VITE_SW_KILL=1`, wait for clients to reload
 without it. Verified headless: offline renders the cached catalog; kill leaves 0 registrations and
 0 caches with no reload loop (`scratchpad/sw_smoke.py` on 16-Sep-2026).
 
+## Performance baseline (Lighthouse mobile, simulated slow 4G, 16-Sep-2026)
+
+| | first deploy | after the speed pass |
+|---|---|---|
+| Performance / Accessibility / Best practices | 39 / 96 / 96 | 64 / 100 / 100 |
+| LCP · FCP · TBT · Speed Index | 4.5 s · 3.3 s · 2.7 s · 14.1 s | 4.2 s · 2.5 s · 0.5 s · 6.5 s |
+| Legible text (≥ 12px) | 51% | 95% |
+
+What moved it: the prefetch script preloads the first product photos (`fetchpriority=high`), the
+search index and the rest of the first page render only when the main thread is idle, and the
+service worker registers after `load`. LCP is still above the 2.5 s budget under simulated
+throttling because the largest photo can only be requested after the catalog JSON arrives and it is
+served from Supabase storage; the next lever is smaller first-screen thumbnails (≈160 px WebP) or an
+image CDN in front of the bucket (Cloudflare, Track B). `.github/workflows/lighthouse.yml` re-measures
+weekly and on demand; field values (p75) appear in Shop Analytics once merchants visit.
+
 ## Not yet built (in order)
 
 Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
