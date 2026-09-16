@@ -16,9 +16,9 @@ Plan and decisions: `~/.claude/plans` (A–Z) — the API contract is in `docs/S
 `web/vite.config.ts` reads `VITE_APP`: the market build gets its own title/description/Open Graph,
 `<meta name="robots" content="noindex">`, `<link rel="manifest" href="/market.webmanifest">`,
 and `data-app="market"` on the prefetch script so `public/catalog-prefetch.js` fetches
-`/public/market[?ref=]` before the JavaScript downloads. The portal build keeps its self-destroying
-service worker; the market build has no service worker yet (the Workbox worker with a version
-kill-switch is the PWA step).
+`/public/market[?ref=]` before the JavaScript downloads and preloads the first product photos. The
+portal build keeps its self-destroying service worker; the market build ships the Workbox worker
+with the version kill-switch described below.
 
 ## Code map (`web/src/market/`)
 
