@@ -80,8 +80,21 @@ with zero console errors; first load ≈ 127 KB gzipped (budget 180).
   `{market}/{slug}` (what the QR encodes) and every tracking URL in emails/WhatsApp points at the
   marketplace's `/o/{token}`. Empty = the legacy token link on the portal host.
 
+## Service worker (market build only)
+
+`vite.config.ts → marketPwa()` generates `sw.js` (Workbox): precached shell; the catalog
+(`/public/market`) NetworkFirst with a 4 s timeout and a 1-day cached fallback, so a sleeping API
+still shows products; product photos CacheFirst (300 entries, 30 days); fonts stale-while-revalidate;
+quote/order/event and `/version.json` never cached. `market/lib/sw.ts` reads `/version.json`
+(`{build, kill}`, emitted at build with the commit sha, served `no-store` per `vercel.json`) **before**
+registering: a different `build` → worker update + the "New version ready · Refresh" toast;
+`kill: true` → unregister everything, drop every cache, reload once, register nothing. To pull the
+plug on a bad worker: redeploy with `VITE_SW_KILL=1`, wait for clients to reload, then redeploy
+without it. Verified headless: offline renders the cached catalog; kill leaves 0 registrations and
+0 caches with no reload loop (`scratchpad/sw_smoke.py` on 16-Sep-2026).
+
 ## Not yet built (in order)
 
-Service worker + version kill-switch for the market build · verified identity via salesman-issued
-access links (`/join/{token}`, Phase 2) · regular-stock rail from Focus history (needs
-`focus_customer_id` links) · web push · Quick Order mode · Arabic.
+Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
+from Focus history (needs `focus_customer_id` links) · web push · Quick Order mode · desktop
+persistent mini-cart · Arabic.

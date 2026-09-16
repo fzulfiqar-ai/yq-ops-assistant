@@ -90,3 +90,11 @@ Rules: never expose stock quantities or costs (status only); no business numbers
 the shop never mutates stock (Focus is the system of record); salesman contact details are never committed (public repo).
 Owner prices come from the price book only — to load the owner's workbook prices use `scripts/import_workbook_prices.py`
 (adds dated dealer rows; never overwrites).
+
+## YQ Marketplace (16-Sep-2026)
+The shop, enhanced, as the merchant front door: `web/src/MarketApp.tsx` + `web/src/market/**` built with
+`VITE_APP=market` for a second Vercel project; token-less API `/public/market*`, `/public/rep/{slug}`;
+merchant identity (`shop_customers`), attribution (`shop.resolve_salesman`), lifecycle
+Received→Confirmed→Preparing→On the way→Delivered, assignment queue, storekeeper pick list. Read
+`docs/MARKETPLACE.md` and `docs/SHOP.md § Marketplace` before touching any of it. After every migration
+run `python -m scripts.audit_grants` (the public schema must stay closed to the anon key).
