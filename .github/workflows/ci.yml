@@ -1,0 +1,72 @@
+# Continuous integration (16-Sep-2026). Runs on every push to main and every pull request.
+#
+# Two jobs, both free on GitHub Actions:
+#   api  — installs requirements.txt on the same Python the Dockerfile uses (3.11) and runs the
+#          shop suite. The pricing engine, validation, routing, notification text and rate-limit
+#          tests need no database; the live read-only checks print SKIP when no Supabase
+#          credentials are present, so this job needs NO repository secrets.
+#   web  — npm ci, eslint and the production Vite build of web/, so a type error or a broken
+#          import can never reach Vercel. VITE_* values are placeholders: the build only needs
+#          them to exist, the real ones are set per Vercel project.
+#
+# This does not deploy. Render auto-deploys main on its own; the marketplace and portal are
+# built by Vercel. A red run here is the signal not to ship.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Shop suite (pricing, routing, rate limits; live checks SKIP without secrets)
+        run: python -m tests.test_shop
+      - name: Template eval (deterministic answers, no DB)
+        run: python tests/run_eval.py
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      # Advisory until the design-system pass clears the 18 pre-existing portal findings
+      # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
+      # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: npm run lint
+      - name: Build
+        env:
+          VITE_API_URL: https://api.invalid
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder
+        run: npm run build

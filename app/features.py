@@ -26,12 +26,14 @@ FEATURES: list[str] = [
     "Marketing",
     "Shop Orders",
     "Shop Admin",
+    "Storekeeper",     # the warehouse pick list: confirmed marketplace orders grouped by salesman
 ]
 
-ROLES: list[str] = ["admin", "member", "salesman"]
+ROLES: list[str] = ["admin", "member", "salesman", "storekeeper"]
 
 # Default grants offered at invite time (admin implicitly has everything).
 ROLE_DEFAULT_FEATURES: dict[str, list[str]] = {
     "member": ["Dashboard", "Sales", "Inventory", "Receivables"],
     "salesman": ["Catalog", "Shop Orders"],   # the two-tab salesman app; Product Finds stays grantable
+    "storekeeper": ["Storekeeper"],           # marks orders Preparing / On the way, nothing else
 }

@@ -60,6 +60,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _public_noindex(request: Request, call_next):
+    """Trade prices are public (owner, 16-Sep-2026) but never promoted: every /public/* answer
+    tells crawlers to stay away, whichever hostname fronts the API."""
+    response = await call_next(request)
+    if request.url.path.startswith("/public/"):
+        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+    return response
+
+
 # Big JSON payloads (inventory/sales lists ~100s of KB) shrink ~10× — every click
 # transfers less, which matters most on the owner's phone.
 # compresslevel=4, not Starlette's default 9: on a 0.1-CPU container the top levels burn
@@ -423,6 +435,14 @@ def scheduler_run_due(send: bool = True, _caller: CurrentUser = Depends(get_call
     """Called hourly by n8n: runs + emails the agents due now (08:00 Bahrain, idempotent per day)."""
     from app.schedules import run_due
     return run_due(send=send)
+
+
+@app.get("/scheduler/shop-jobs")
+def scheduler_shop_jobs(_caller: CurrentUser = Depends(get_caller)) -> dict:
+    """Marketplace housekeeping (unassigned-order reminders, session cleanup). Called every
+    15 minutes by .github/workflows/shop-cron.yml with the machine key; idempotent."""
+    from app.shop_jobs import run_shop_jobs
+    return run_shop_jobs()
 
 
 class FieldNoteRequest(BaseModel):

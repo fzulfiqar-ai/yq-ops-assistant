@@ -103,16 +103,37 @@ def customer_to_salesman_email_url(o: dict) -> str | None:
     return f"mailto:{q(to, safe='@')}?subject={q(subject)}&body={q(body)}"
 
 
+def _changes_text(o: dict) -> str:
+    """One line per changed or removed line after confirm-with-changes; empty when none."""
+    out = []
+    for ln in _lines(o):
+        st = ln.get("line_status") or "ok"
+        if st == "removed":
+            out.append(f"- {ln.get('item_code')}: not available this time")
+        elif st in ("changed", "backorder") and ln.get("qty_confirmed") is not None \
+                and int(ln.get("qty_confirmed") or 0) != int(ln.get("qty") or 0):
+            out.append(f"- {ln.get('item_code')}: {ln.get('qty')} -> {ln.get('qty_confirmed')}")
+    return "\n".join(out)
+
+
 def salesman_to_customer_wa_url(o: dict, status: str | None = None) -> str | None:
-    """Prefilled message the salesman taps to update the customer."""
+    """Prefilled message the salesman taps to update the customer at each stage. The merchant's
+    tracking page uses the same words (Received / Confirmed / Preparing / On the way / Delivered)."""
     name = (o.get("customer_name") or "").split(" ")[0] or "there"
-    st = status or o.get("status") or "received"
+    st = status or o.get("status") or "new"
+    no = o.get("order_no")
+    total = o.get("total_confirmed_bhd") if o.get("total_confirmed_bhd") is not None else o.get("total_bhd")
+    eta = f" Expected delivery: {o['expected_delivery']}." if o.get("expected_delivery") else ""
+    changes = _changes_text(o)
+    confirmed = (f"Hello {name}, your order {no} is confirmed. Total {_money(total)}.{eta}"
+                 + (f"\nChanges to your order:\n{changes}" if changes else ""))
     msgs = {
-        "new": f"Hello {name}, thank you for your order {o.get('order_no')} with YQ Bahrain. I'm checking availability and will confirm shortly.",
-        "confirmed": f"Hello {name}, your order {o.get('order_no')} is confirmed. Total {_money(o.get('total_bhd'))}. I'll let you know when it's packed.",
-        "packed": f"Hello {name}, your order {o.get('order_no')} is packed and on its way.",
-        "delivered": f"Hello {name}, your order {o.get('order_no')} has been delivered. Thank you for choosing YQ Bahrain!",
-        "cancelled": f"Hello {name}, your order {o.get('order_no')} has been cancelled. Please message me if this is unexpected.",
+        "new": f"Hello {name}, thank you for your order {no} with YQ Bahrain. I'm checking availability and will confirm shortly.",
+        "confirmed": confirmed,
+        "packed": f"Hello {name}, your order {no} is being prepared at our warehouse.{eta}",
+        "out_for_delivery": f"Hello {name}, your order {no} is on its way to you.",
+        "delivered": f"Hello {name}, your order {no} has been delivered. Thank you for choosing YQ Bahrain!",
+        "cancelled": f"Hello {name}, your order {no} has been cancelled. Please message me if this is unexpected.",
     }
     return wa_url(o.get("customer_phone"), msgs.get(st, msgs["new"]) + f"\n{_status_url(o)}")
 
@@ -233,6 +254,11 @@ def notify_new_order(order_id: int) -> dict:
                                "We have your order. Your salesman will confirm availability and delivery shortly.",
                                show_contact=False)
             result["customer_email"] = _email(f"YQ Bahrain · Order {o['order_no']} received", cbody, o["customer_email"])
+        if not sm:
+            # Nobody owns this order yet: the admins must assign it (portal → Shop Orders → queue).
+            text = "UNASSIGNED marketplace order — assign it in the portal.\n" + text
+            if _base():
+                text += f"\nQueue: {_base()}/shop-orders?queue=1"
         result["telegram"] = _telegram(text)
         if sm and sm.get("notify_whatsapp", True) and not placed_by_staff:
             result["whatsapp"] = _whatsapp_cloud(sm.get("whatsapp") or sm.get("phone"), text)
@@ -240,6 +266,46 @@ def notify_new_order(order_id: int) -> dict:
             "notify_result": result, "notified_at": datetime.now(timezone.utc).isoformat()}).eq("id", order_id).execute()
     except Exception as e:  # noqa: BLE001
         log.warning("notify_new_order(%s) failed: %s", order_id, e)
+        result["error"] = f"{type(e).__name__}: {e}"[:200]
+    return result
+
+
+def notify_assigned(order_id: int) -> dict:
+    """Tell the newly assigned salesman (email if on file) and the owner channel. Never raises."""
+    from app.shop import get_order
+    result: dict = {}
+    try:
+        o = get_order(order_id)
+        if not o:
+            return {"error": "order not found"}
+        sm = o.get("salesman") or {}
+        text = f"Order {o['order_no']} assigned to {sm.get('name') or o.get('salesman_name')}.\n" + order_text(o, audience="salesman")
+        if sm.get("email") and sm.get("notify_email", True):
+            body = order_html(o, f"Order {o['order_no']} is yours",
+                              "This marketplace order has been assigned to you. Please confirm availability and delivery.")
+            result["email"] = _email(f"YQ Shop · Order {o['order_no']} assigned to you — {_money(o.get('total_bhd'))}", body, sm["email"])
+        result["telegram"] = _telegram(text)
+    except Exception as e:  # noqa: BLE001
+        result["error"] = f"{type(e).__name__}: {e}"[:200]
+    return result
+
+
+def notify_customer_cancel(order_id: int) -> dict:
+    """The merchant cancelled from the status page: tell the salesman and the owner. Never raises."""
+    from app.shop import get_order
+    result: dict = {}
+    try:
+        o = get_order(order_id)
+        if not o:
+            return {"error": "order not found"}
+        sm = o.get("salesman") or {}
+        reason = o.get("cancel_reason") or "no reason given"
+        text = f"Order {o['order_no']} was CANCELLED by the customer ({reason}).\n" + order_text(o, audience="salesman")
+        if sm.get("email") and sm.get("notify_email", True):
+            body = order_html(o, f"Order {o['order_no']} cancelled by the customer", f"Reason: {reason}")
+            result["email"] = _email(f"YQ Shop · Order {o['order_no']} cancelled by the customer", body, sm["email"])
+        result["telegram"] = _telegram(text)
+    except Exception as e:  # noqa: BLE001
         result["error"] = f"{type(e).__name__}: {e}"[:200]
     return result
 
@@ -252,7 +318,8 @@ def notify_status(order_id: int, status: str, note: str | None = None) -> dict:
         o = get_order(order_id)
         if not o or not o.get("customer_email"):
             return {"customer_email": {"emailed": False, "reason": "no_customer_email"}}
-        titles = {"confirmed": "Your order is confirmed", "packed": "Your order is packed",
+        titles = {"confirmed": "Your order is confirmed", "packed": "Your order is being prepared",
+                  "out_for_delivery": "Your order is on its way",
                   "delivered": "Your order has been delivered", "cancelled": "Your order was cancelled"}
         intro = titles.get(status, f"Order status: {status}") + (f" — {note}" if note else "")
         body = order_html(o, f"{titles.get(status, status.title())} · {o['order_no']}", intro, show_contact=False)

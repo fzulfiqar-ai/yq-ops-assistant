@@ -259,3 +259,77 @@ starting only at 3.35 s, and the API answering in ~1.4 s even when awake. What c
   every sort. The Sold out pill is red.
 - **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` pings
   every 10 minutes, but GitHub's scheduler can drift; only a paid instance removes cold starts entirely.
+
+## Marketplace (16-Sep-2026) — the token-less front door, attribution, lifecycle
+
+The catalog IS the marketplace: same payload, same pricing engine, same tables. What changed
+(`scripts/marketplace_migration.sql`, applied 16-Sep-2026; plan in `~/.claude/plans`):
+
+**Statuses** (DB value → what the merchant reads): `new` Received → `confirmed` Confirmed → `packed` Preparing
+(the storekeeper issued the goods to the salesman; `issued_to_salesman_id`/`issued_at` are stamped) →
+`out_for_delivery` On the way → `delivered` Delivered; `cancelled`. `packed` is optional (confirmed →
+out_for_delivery is allowed). Each stage has its own timestamp column. `shop.NEXT_STATUS` is the transition
+table; `shop.ROLE_STATUSES` limits the `storekeeper` role (new role + feature **Storekeeper**) to
+`packed` / `out_for_delivery`; salesmen act on their own orders, admins on all.
+
+**Who owns an order** (`shop.resolve_salesman`, stored in `shop_orders.attribution_source`): the merchant's admin
+assignment (`shop_customers.salesman_id`) → a Focus mapping placeholder (`focus_salesman_name`) → the sticky
+first-touch rep (`sticky_salesman_id`) while the last order is within `shop_sticky_days` (setting, 90) → the
+`/{slug}` or `?ref=` this device arrived with (`session_ref`) → an explicit pick at checkout → the
+`shop_default_salesman` setting → **unassigned** (queue). When the session's rep differs from the recorded
+one the order is flagged `attribution_conflict` instead of switching silently; past the sticky window the live
+link wins, still flagged. Every merchant-placed order upserts `shop_customers` by normalised phone
+(write-if-blank profile, sticky rep written once, `device_ids`, counts); `shop_customer_phones` holds extra
+numbers for one shop.
+
+**Idempotency + abuse caps**: `POST /public/market/order` with `device_id` + `client_order_id` returns the same
+order (`duplicate: true`) on a retry; `shop_phone_daily_cap` (10) and `shop_device_daily_cap` (20) refuse more
+orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/ratelimit.py`).
+
+### Public marketplace API (no token in the URL; the share token is resolved server-side)
+- `GET /public/market?ref={slug}` → the catalog payload (+ `rep` storefront card when the slug resolves, `has_tiers`
+  per item, `settings.public_tiers`, `settings.areas`). `Cache-Control: public, max-age=60,
+  stale-while-revalidate=600, stale-if-error=86400`; every `/public/*` answer carries `X-Robots-Tag: noindex`.
+  404 when `shop_market_enabled` is 0. 60/min.
+- `GET /public/rep/{slug}` → `{slug, salesman_id, name, first_name, title, photo_url, whatsapp_url|null}`;
+  reserved words (`shop_reserved_slugs`) and unknown slugs are 404. WhatsApp only when the rep set `public_whatsapp`.
+- `POST /public/market/quote` — same body/answer as the token quote.
+- `POST /public/market/order` — `OrderRequest` + `device_id`, `client_order_id`, `session_ref` →
+  `{ok, duplicate, order_no, token, status_url, status, status_label, assigned, attribution, salesman{name,first_name}|null,
+  whatsapp_url, email_url, totals, has_backorder}`. 10/min per IP.
+- `POST /public/market/event` — events v2: `event` in view|item|add|checkout|order|search|search_zero|remove|qty|cart|
+  checkout_start|rail_click|reco_click|share|install|reorder|cancel|vitals|push_subscribe, plus `device_id`,
+  `customer_id`, `meta` (kept keys: q, rail, pos, results, count, value, lcp, inp, cls, reason, from, to, code). 240/min.
+- `GET /public/shop/order/{token}` now also returns `status_label`, `steps[]` (five stages with done/current/at),
+  `can_cancel`, `expected_delivery`, `total_confirmed_bhd`, `has_changes`, per line `qty_confirmed` + `line_status`.
+- `POST /public/shop/order/{token}/cancel` `{reason?}` — while `new` only; 3/hour.
+- `POST /public/shop/my-orders` `{tokens: [≤20]}` → summaries for the tokens a device holds ("My orders" without an account).
+
+### Portal additions (bearer + feature)
+- `POST /shop/orders/{id}/confirm` `{lines:[{line_id, qty_confirmed?, line_status?: 'removed', note?}], expected_delivery?, note?}`
+  → confirms with changes, re-prices at the confirmed quantities (`subtotal/total_confirmed_bhd`), returns
+  `changed[]`, `removed[]`, `totals`, a prefilled WhatsApp to the merchant, `next_statuses`.
+- `POST /shop/orders/{id}/assign` `{salesman_id, reason?}` — admins reassign any open order; a salesman may only take an
+  unassigned one for himself. First assignment sets the merchant's sticky rep when none is recorded. Notifies the rep.
+- `GET /shop/assignment-queue` → unassigned open orders with `age_min` and a suggestion (rep who served the phone
+  before, else most orders in the area in 90 days).
+- `GET /shop/picklist?salesman_id=` (Storekeeper or Shop Orders) → confirmed/preparing orders grouped by salesman with
+  CONFIRMED quantities + `totals_by_item`.
+- `GET/POST /shop/orders/{id}[/status]` accept the storekeeper (all orders, limited statuses) and return `steps`,
+  `status_label`, role-filtered `next_statuses`.
+- `salesmen` gains `title`, `photo_url`, `public_profile`, `public_whatsapp`; a `referral_code` that is a reserved
+  marketplace address is refused.
+- `GET /scheduler/shop-jobs` (X-Agent-Key) — unassigned reminders after `shop_assign_sla_min` (re-alert every 2 h)
+  + session cleanup; called every 15 min by `.github/workflows/shop-cron.yml`.
+
+### Views for the learning loop
+`v_customer_regulars` (Focus cadence per merchant × SKU: times bought, median qty, cadence days, due flag — service
+role only, carries customer names), `v_shop_assignment_queue`, `v_shop_search_terms`, `v_shop_rail_perf`
+(PII-free, granted to `yq_readonly`). `v_shop_orders_agent` gained appended columns.
+
+### Verify
+`python -m tests.test_shop` (attribution matrix, lifecycle, storefront card, tiers switch, limiter) and
+`python -m scripts.audit_grants` (exit 0). The in-process smoke on 16-Sep-2026 walked: market → rep card →
+idempotent order → my-orders → confirm 2→1 (1.500→0.750) → storekeeper refused `delivered`, allowed `packed`
+(goods issued to the rep) → on the way → delivered → customer cancel refused; second order cancelled by the
+customer; third order unassigned → queue → admin assign → merchant's sticky rep set.

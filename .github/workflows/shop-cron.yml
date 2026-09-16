@@ -1,0 +1,57 @@
+# The shop's scheduler (16-Sep-2026). n8n is down and nothing else runs the API's scheduled
+# endpoints, so GitHub's free cron does it:
+#
+#   /scheduler/shop-jobs  — marketplace housekeeping: re-alert admins about orders nobody has
+#                           taken after shop_assign_sla_min minutes; clean up expired sessions.
+#   /scheduler/run-due    — the per-agent schedules (acts only in the 08:00 Bahrain hour, idempotent).
+#   /events/dispatch      — agent-to-agent reactions (stock.low -> draft PO, etc.), budgeted.
+#
+# GitHub's scheduler drifts by several minutes under load, so a "30-minute" reminder lands at
+# 30-45 minutes. That is fine for an internal nudge; never promise it to a merchant.
+#
+# SETUP: one repository secret — Settings -> Secrets and variables -> Actions:
+#   AGENT_API_KEY   the same value as the API's AGENT_API_KEY on Render (X-Agent-Key header).
+# The job fails loudly when the secret is missing rather than silently doing nothing.
+name: shop-cron
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shop-cron
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Call the scheduled endpoints
+        env:
+          AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+          API_URL: https://yq-ops-assistant.onrender.com
+        run: |
+          set -uo pipefail
+          if [ -z "${AGENT_API_KEY}" ]; then
+            echo "::error::AGENT_API_KEY repository secret is not set — copy it from the Render service env vars."
+            exit 1
+          fi
+          failed=0
+          for path in /scheduler/shop-jobs /scheduler/run-due /events/dispatch; do
+            # --max-time 120 tolerates a cold start of the free-tier container.
+            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' --max-time 120 \
+              -H "X-Agent-Key: ${AGENT_API_KEY}" "${API_URL}${path}")
+            code=${code:-000}
+            echo "${path} -> HTTP ${code}"
+            head -c 400 /tmp/out.json; echo
+            if [ "$code" != "200" ]; then
+              echo "::warning::${path} returned HTTP ${code}"
+              failed=1
+            fi
+          done
+          exit $failed

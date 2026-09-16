@@ -321,6 +321,113 @@ def _():
     assert not any(f'"{k}":' in block for k in forbidden), "public item block leaks a private field"
 
 
+# ── marketplace: attribution, lifecycle, storefront card (pure) ───────────────
+
+def _cust(**kw):
+    base = {"id": 7, "phone": "97333001122", "salesman_id": None, "focus_salesman_name": None,
+            "sticky_salesman_id": None, "last_order_at": None, "orders_count": 1}
+    base.update(kw)
+    return base
+
+
+@test("attribution: admin assignment > focus map > sticky (inside window) > link > pick > default > unassigned")
+def _():
+    from datetime import datetime, timedelta, timezone
+    from app.shop import resolve_salesman
+    ctx = _ctx([_item("T02", 2.95)], shop_default_salesman="")
+    ctx["salesmen"][0]["focus_name"] = "Furqan"
+    recent = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    # no customer, no link, no pick → unassigned (queue)
+    sm, how, conflict = resolve_salesman(ctx, phone="97333001122", session_ref=None, customer=_cust())
+    assert sm is None and how == "unassigned" and not conflict
+    # link wins for an unknown merchant
+    sm, how, conflict = resolve_salesman(ctx, phone=None, session_ref="harsh", customer=_cust())
+    assert sm["name"] == "Harsh Bhatia" and how == "session_ref" and not conflict
+    # checkout pick and the default setting
+    sm, how, _c = resolve_salesman(ctx, phone=None, session_ref=None, pick_id=2, customer=_cust())
+    assert sm["id"] == 2 and how == "checkout_pick"
+    ctx2 = _ctx([_item("T02", 2.95)], shop_default_salesman="Furqan Ahmed")
+    sm, how, _c = resolve_salesman(ctx2, phone=None, session_ref=None, customer=_cust())
+    assert sm["id"] == 1 and how == "default"
+    # sticky inside the window beats a different rep's link, flagged as a conflict
+    sm, how, conflict = resolve_salesman(ctx, phone=None, session_ref="harsh",
+                                         customer=_cust(sticky_salesman_id=1, last_order_at=recent))
+    assert sm["id"] == 1 and how == "sticky" and conflict
+    # sticky past the window loses to the live link, still flagged
+    sm, how, conflict = resolve_salesman(ctx, phone=None, session_ref="harsh",
+                                         customer=_cust(sticky_salesman_id=1, last_order_at=old))
+    assert sm["id"] == 2 and how == "session_ref" and conflict
+    # sticky past the window with no link still routes to the sticky rep
+    sm, how, conflict = resolve_salesman(ctx, phone=None, session_ref=None,
+                                         customer=_cust(sticky_salesman_id=1, last_order_at=old))
+    assert sm["id"] == 1 and how == "sticky" and not conflict
+    # admin assignment beats everything, conflict flagged when the link disagrees
+    sm, how, conflict = resolve_salesman(ctx, phone=None, session_ref="harsh",
+                                         customer=_cust(salesman_id=1, sticky_salesman_id=2, last_order_at=recent))
+    assert sm["id"] == 1 and how == "customer_admin" and conflict
+    # focus map placeholder resolves by focus_name / name
+    sm, how, _c = resolve_salesman(ctx, phone=None, session_ref=None, customer=_cust(focus_salesman_name="furqan"))
+    assert sm["id"] == 1 and how == "focus_map"
+
+
+@test("lifecycle: five merchant stages, storekeeper limited, every transition table entry is a real status")
+def _():
+    from app.shop import NEXT_STATUS, ROLE_STATUSES, STATUSES, STATUS_LABELS, TRACK_STEPS, order_steps
+    assert set(STATUS_LABELS) == set(STATUSES)
+    assert all(t in STATUSES for nxt in NEXT_STATUS.values() for t in nxt)
+    assert "out_for_delivery" in NEXT_STATUS["confirmed"] and "out_for_delivery" in NEXT_STATUS["packed"]
+    assert NEXT_STATUS["out_for_delivery"] == ("delivered", "cancelled")
+    assert NEXT_STATUS["delivered"] == () and NEXT_STATUS["cancelled"] == ()
+    assert ROLE_STATUSES["storekeeper"] == ("packed", "out_for_delivery")
+    assert TRACK_STEPS == ("new", "confirmed", "packed", "out_for_delivery", "delivered")
+    steps = order_steps({"status": "packed", "created_at": "a", "confirmed_at": "b", "packed_at": "c"})
+    assert [s["done"] for s in steps] == [True, True, False, False, False]
+    assert [s["current"] for s in steps] == [False, False, True, False, False]
+    assert steps[2]["at"] == "c" and steps[3]["at"] is None
+    delivered = order_steps({"status": "delivered", "created_at": "a", "delivered_at": "z"})
+    assert all(s["done"] for s in delivered) and delivered[-1]["current"] and delivered[-1]["at"] == "z"
+    cancelled = order_steps({"status": "cancelled", "created_at": "a"})
+    assert not any(s["current"] for s in cancelled) and not any(s["done"] for s in cancelled)
+
+
+@test("storefront: reserved slugs are refused, the rep card hides WhatsApp until the rep opts in")
+def _():
+    from app.shop import is_reserved_slug, rep_card
+    ctx = _ctx([_item("T02", 2.95)])
+    assert is_reserved_slug("cart", ctx) and is_reserved_slug("Search", ctx) and is_reserved_slug("", ctx)
+    assert not is_reserved_slug("furqan", ctx)
+    ctx["salesmen"][0].update({"phone": "97337158552", "public_whatsapp": False, "title": None})
+    card = rep_card(ctx, "furqan")
+    assert card["name"] == "Furqan Ahmed" and card["first_name"] == "Furqan" and card["whatsapp_url"] is None
+    assert card["title"] == "YQ sales representative" and card["slug"] == "furqan"
+    ctx["salesmen"][0]["public_whatsapp"] = True
+    assert rep_card(ctx, "FURQAN")["whatsapp_url"].startswith("https://wa.me/97337158552?text=")
+    ctx["salesmen"][0]["public_profile"] = False
+    assert rep_card(ctx, "furqan") is None
+    assert rep_card(ctx, "nobody") is None
+
+
+@test("payload: volume tiers follow the shop_public_tiers switch; has_tiers stays")
+def _():
+    from app.shop import catalog_payload
+    import app.shop as s
+    ctx = _ctx([_item("T02", 2.95)], [_rule(5, "qty_tier", min_qty=12, pct_off=10)], shop_public_tiers="0")
+    ctx["share_token"] = "tok-test-token-value"
+    old = s._ctx_cache["ctx"]
+    s._ctx_cache["ctx"], s._ctx_cache["at"] = ctx, s.time.time() + 10 ** 6
+    try:
+        p = catalog_payload("tok-test-token-value")
+        it = p["items"][0]
+        assert it["tiers"] == [] and it["has_tiers"] is True and p["settings"]["public_tiers"] is False
+        assert p["rep"] is None and "areas" in p["settings"]
+        ctx["settings"]["shop_public_tiers"] = "1"
+        p = catalog_payload("tok-test-token-value")
+        assert p["items"][0]["tiers"][0]["min_qty"] == 12 and p["settings"]["public_tiers"] is True
+    finally:
+        s._ctx_cache["ctx"], s._ctx_cache["at"] = old, 0.0
+
+
 # ── rate limiting (pure) ──────────────────────────────────────────────────────
 
 def _req(headers: dict, host: str = "10.0.0.9", path: str = "/x", method: str = "GET"):
@@ -459,8 +566,12 @@ def _():
 @test("staff: list_orders accepts a comma status list and returns counts")
 def _():
     from app.shop import list_orders, status_counts
+    if not _migrated():
+        print("   SKIP — no database (CI without secrets) or scripts/shop_migration.sql not applied")
+        return
+    from app.shop import STATUSES
     r = list_orders(status="confirmed,packed", limit=5)
-    assert "counts" in r and set(r["counts"]) == {"new", "confirmed", "packed", "delivered", "cancelled"}, r.get("counts")
+    assert "counts" in r and set(r["counts"]) == set(STATUSES), r.get("counts")
     assert all(o["status"] in ("confirmed", "packed") for o in r["orders"])
     assert set(status_counts()) == set(r["counts"])
 
@@ -510,6 +621,10 @@ def _():
         period = re.search(r"-(\d{4})-", o["order_no"]).group(1)
         n = c.table("shop_counters").select("n").eq("period", period).execute().data[0]["n"]
         c.table("shop_counters").update({"n": max(n - 1, 0)}).eq("period", period).execute()
+        try:   # the merchant record the order created (marketplace_migration.sql)
+            c.table("shop_customers").delete().eq("phone", "97333001122").execute()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main() -> int:

@@ -21,10 +21,22 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     from app import shop, shop_notify
     from app.audit import log_event
-    from app.auth import CurrentUser, require_admin, require_feature
+    from app.auth import CurrentUser, get_current_user, has_feature, require_admin, require_feature
     from app.catalog import share_token
     from app.config import settings as cfg
     from app.shop import ShopError
+
+    def require_any_feature(*features: str):
+        """Gate behind ANY of the given feature pages (the storekeeper has only 'Storekeeper')."""
+        def _dep(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+            if any(has_feature(user, f) for f in features):
+                return user
+            raise HTTPException(status_code=403, detail=f"Requires access to one of {features}.")
+        return _dep
+
+    # Cacheable by any CDN in front of the API; stale-if-error keeps the last catalog on screen
+    # while the free-tier container wakes up. Never indexed: trade prices are public, not promoted.
+    MARKET_CACHE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=86400"
 
     # ── models ────────────────────────────────────────────────────────────────
     class QuoteLine(BaseModel):
@@ -57,6 +69,36 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         referral_code: str | None = Field(default=None, max_length=32)
         src: str | None = Field(default=None, max_length=80)
         session_id: str | None = Field(default=None, max_length=64)
+        # marketplace (events v2): the device, the merchant when known, and a small PII-free meta bag
+        device_id: str | None = Field(default=None, max_length=64)
+        customer_id: int | None = None
+        meta: dict | None = None
+
+    class MarketOrderRequest(OrderRequest):
+        device_id: str | None = Field(default=None, max_length=64)
+        client_order_id: str | None = Field(default=None, max_length=64)   # idempotency key per device
+        session_ref: str | None = Field(default=None, max_length=32)       # the /{slug} or ?ref this device remembers
+
+    class CancelRequest(BaseModel):
+        reason: str | None = Field(default=None, max_length=300)
+
+    class MyOrdersRequest(BaseModel):
+        tokens: list[str] = Field(max_length=20)
+
+    class AssignRequest(BaseModel):
+        salesman_id: int
+        reason: str | None = Field(default=None, max_length=300)
+
+    class ConfirmLine(BaseModel):
+        line_id: int
+        qty_confirmed: int | None = Field(default=None, ge=0, le=shop.MAX_QTY)
+        line_status: str | None = Field(default=None, max_length=16)   # 'removed' drops the line
+        note: str | None = Field(default=None, max_length=200)
+
+    class ConfirmRequest(BaseModel):
+        lines: list[ConfirmLine] = Field(default_factory=list, max_length=shop.MAX_LINES)
+        expected_delivery: str | None = Field(default=None, max_length=120)
+        note: str | None = Field(default=None, max_length=500)
 
     class StatusRequest(BaseModel):
         status: str = Field(max_length=16)
@@ -169,6 +211,97 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if not good or not _secrets.compare_digest(token, good):
             return {"ok": False}
         return {"ok": shop.record_event(body.model_dump(), ip=_ip(request), ua=_ua(request))}
+
+    # ── public: the marketplace (token-less; the share token is resolved server-side) ──
+    @app.get("/public/market")
+    @limiter.limit("60/minute")
+    def market_catalog(request: Request, ref: str | None = None):
+        """The marketplace catalog for the root URL and every /{slug} storefront. Same payload as
+        /public/catalog/{token} plus `rep` (the storefront card) — no token in the URL, so a
+        rotation never breaks the storefront or the pre-JS prefetch."""
+        data = shop.market_json(ref)
+        if data is None:
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        return Response(content=data, media_type="application/json",
+                        headers={"Cache-Control": MARKET_CACHE, "X-Robots-Tag": "noindex, nofollow"})
+
+    @app.get("/public/rep/{slug}")
+    @limiter.limit("60/minute")
+    def market_rep(request: Request, slug: str) -> dict:
+        """The salesman storefront card: name, title, photo, opt-in WhatsApp. Reserved words and
+        unknown slugs are 404 so the front end falls back to the plain home page."""
+        ctx = shop.context()
+        if shop.is_reserved_slug(slug, ctx):
+            raise HTTPException(status_code=404, detail="Not found.")
+        card = shop.rep_card(ctx, slug)
+        if not card:
+            raise HTTPException(status_code=404, detail="Not found.")
+        return card
+
+    @app.post("/public/market/quote")
+    @limiter.limit("60/minute")
+    def market_quote(request: Request, body: QuoteRequest) -> dict:
+        if not shop.market_enabled():
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        try:
+            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {k: v for k, v in q.items() if not k.startswith("_")}
+
+    @app.post("/public/market/order")
+    @limiter.limit("10/minute")
+    def market_order(request: Request, body: MarketOrderRequest, background: BackgroundTasks) -> dict:
+        """Place a marketplace order: attribution via resolve_salesman, idempotent per
+        (device_id, client_order_id), per-phone/per-device daily caps, merchant record upserted."""
+        if not shop.market_enabled():
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        try:
+            o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), market=True)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if not o.get("duplicate"):
+            background.add_task(shop_notify.notify_new_order, o["id"])
+        sm = o.get("salesman") or {}
+        name = str(sm.get("name") or "")
+        return {
+            "ok": True, "duplicate": bool(o.get("duplicate")),
+            "order_no": o["order_no"], "token": o["token"], "status_url": o["status_url"],
+            "status": o.get("status", "new"), "status_label": shop.STATUS_LABELS.get(o.get("status", "new"), "Received"),
+            "assigned": bool(sm), "attribution": o.get("attribution_source"),
+            "salesman": ({"name": name, "first_name": name.split(" ")[0] if name else ""} if sm else None),
+            "whatsapp_url": shop_notify.customer_to_salesman_wa_url(o),
+            "email_url": shop_notify.customer_to_salesman_email_url(o),
+            "totals": o["totals"], "has_backorder": bool(o.get("has_backorder")),
+        }
+
+    @app.post("/public/market/event")
+    @limiter.limit("240/minute")
+    def market_event(request: Request, body: EventRequest) -> dict:
+        if not shop.market_enabled():
+            return {"ok": False}
+        return {"ok": shop.record_event(body.model_dump(), ip=_ip(request), ua=_ua(request))}
+
+    @app.post("/public/shop/order/{order_token}/cancel")
+    @limiter.limit("3/hour")
+    def shop_order_cancel(request: Request, order_token: str, background: BackgroundTasks,
+                          body: CancelRequest | None = None) -> dict:
+        """The merchant cancels while the order is still Received (token-gated, like the status page)."""
+        try:
+            o = shop.cancel_by_customer(order_token, body.reason if body else None)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        background.add_task(shop_notify.notify_customer_cancel, o["id"])
+        shop.record_event({"event": "cancel", "salesman_id": o.get("salesman_id"), "device_id": o.get("device_id"),
+                           "customer_id": o.get("customer_id"), "meta": {"reason": (body.reason if body else None) or ""}},
+                          ip=_ip(request), ua=_ua(request))
+        return {"ok": True, "status": o["status"], "order": shop.public_order_view(o)}
+
+    @app.post("/public/shop/my-orders")
+    @limiter.limit("30/minute")
+    def shop_my_orders(request: Request, body: MyOrdersRequest) -> dict:
+        """Summaries for the order tokens this device holds (its own orders only, by construction)."""
+        return {"orders": shop.orders_by_tokens(body.tokens)}
 
     @app.get("/public/share/{token}/{item_code}")
     @limiter.limit("60/minute")
@@ -317,35 +450,108 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                     "hint": "Your login is not linked to a salesman yet — an admin can link it on the Salesmen page."}
         return shop.list_orders(status, q, limit, offset, salesman_id=sid)
 
+    def _visible(user: CurrentUser, o: dict | None) -> bool:
+        """May this staff user see/act on this order? Admins and the storekeeper: every order;
+        a salesman: his own."""
+        if not o:
+            return False
+        if user.role in ("admin", "storekeeper"):
+            return True
+        sid, _admin = _scope(user)
+        return o.get("salesman_id") == sid
+
     @app.get("/shop/orders/{order_id}")
-    def shop_order_detail(order_id: int, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        sid, is_admin = _scope(user)
+    def shop_order_detail(order_id: int,
+                          user: CurrentUser = Depends(require_any_feature("Shop Orders", "Storekeeper"))) -> dict:
         o = shop.get_order(order_id)
-        if not o or (not is_admin and o.get("salesman_id") != sid):
+        if not _visible(user, o):
             raise HTTPException(status_code=404, detail="Order not found.")
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o)
         o["status_url"] = f"{shop._base_url()}/o/{o.get('token')}" if shop._base_url() else f"/o/{o.get('token')}"
-        o["next_statuses"] = list(shop.NEXT_STATUS.get(o["status"], ()))
+        allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
+        nxt = list(shop.NEXT_STATUS.get(o["status"], ()))
+        o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
+        o["steps"] = shop.order_steps(o)
+        o["status_label"] = shop.STATUS_LABELS.get(o["status"], o["status"])
         o.pop("ip_hash", None)
         return o
 
     @app.post("/shop/orders/{order_id}/status")
     def shop_order_set_status(order_id: int, body: StatusRequest, background: BackgroundTasks,
-                              user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        sid, is_admin = _scope(user)
+                              user: CurrentUser = Depends(require_any_feature("Shop Orders", "Storekeeper"))) -> dict:
         cur = shop.get_order(order_id)
-        if not cur or (not is_admin and cur.get("salesman_id") != sid):
+        if not _visible(user, cur):
             raise HTTPException(status_code=404, detail="Order not found.")
+        allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
         try:
-            o = shop.set_status(order_id, body.status, body.note, actor=user.email)
+            o = shop.set_status(order_id, body.status, body.note, actor=user.email, allowed=allowed)
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         background.add_task(shop_notify.notify_status, order_id, body.status, body.note)
         log_event(user.email, "shop.order_status", detail={"order_id": order_id, "status": body.status})
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, body.status)
+        nxt = list(shop.NEXT_STATUS.get(o["status"], ()))
+        o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
+        o["steps"] = shop.order_steps(o)
+        o.pop("ip_hash", None)
+        return {"ok": True, "order": o}
+
+    @app.post("/shop/orders/{order_id}/confirm")
+    def shop_order_confirm(order_id: int, body: ConfirmRequest, background: BackgroundTasks,
+                           user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """Confirm with changes: confirmed quantities / removed lines, expected delivery, re-price."""
+        cur = shop.get_order(order_id)
+        if not _visible(user, cur):
+            raise HTTPException(status_code=404, detail="Order not found.")
+        try:
+            o = shop.confirm_order(order_id, [ln.model_dump() for ln in body.lines], body.expected_delivery,
+                                   body.note, actor=user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        background.add_task(shop_notify.notify_status, order_id, "confirmed", body.note)
+        log_event(user.email, "shop.order_confirm",
+                  detail={"order_id": order_id, "changed": o.get("changed"), "removed": o.get("removed")})
+        totals = o.pop("totals", None)
+        o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, "confirmed")
+        o["next_statuses"] = list(shop.NEXT_STATUS.get(o["status"], ()))
+        o["steps"] = shop.order_steps(o)
+        o.pop("ip_hash", None)
+        return {"ok": True, "order": o, "totals": totals, "changed": o.get("changed"), "removed": o.get("removed"),
+                "whatsapp_url": o["whatsapp_url"], "next_statuses": o["next_statuses"]}
+
+    @app.post("/shop/orders/{order_id}/assign")
+    def shop_order_assign(order_id: int, body: AssignRequest, background: BackgroundTasks,
+                          user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """Admins assign or reassign; a salesman may only take an unassigned order for himself."""
+        sid, is_admin = _scope(user)
+        try:
+            o = shop.assign_order(order_id, body.salesman_id, actor=user.email, reason=body.reason,
+                                  is_admin=is_admin, actor_salesman_id=(sid if sid and sid > 0 else None))
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        background.add_task(shop_notify.notify_assigned, order_id)
+        log_event(user.email, "shop.order_assign",
+                  detail={"order_id": order_id, "salesman_id": body.salesman_id, "reason": body.reason})
+        o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, o.get("status"))
         o["next_statuses"] = list(shop.NEXT_STATUS.get(o["status"], ()))
         o.pop("ip_hash", None)
         return {"ok": True, "order": o}
+
+    @app.get("/shop/assignment-queue")
+    def shop_assignment_queue(_user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """Unassigned open orders with a suggested rep (history, not AI)."""
+        return shop.assignment_queue()
+
+    @app.get("/shop/picklist")
+    def shop_picklist(salesman_id: int | None = None,
+                      user: CurrentUser = Depends(require_any_feature("Storekeeper", "Shop Orders"))) -> dict:
+        """The storekeeper's pick list: confirmed / preparing orders grouped by salesman + totals per item.
+        A salesman only ever sees his own."""
+        if user.role == "salesman":
+            salesman_id = _scope(user)[0]
+            if salesman_id == -1:
+                return {"groups": [], "totals_by_item": [], "count": 0}
+        return shop.picklist(salesman_id)
 
     @app.get("/shop/analytics")
     def shop_analytics(days: int = 30, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
