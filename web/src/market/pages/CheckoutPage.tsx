@@ -7,13 +7,14 @@ import { RepCard } from '../components/RepCard'
 import { useMarket, useOrder } from '../MarketContext'
 import { clientOrderId, deviceId, EMPTY_CUSTOMER, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, cleanPhone, isEmail, isPhone } from '../lib/format'
-import { postMarketOrder } from '../lib/marketApi'
+import { bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/format'
+import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { cartStore, useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Hint, Input, Label, Select } from '../ui/Field'
+import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 
 const FORM_ID = 'yq-market-checkout'
 
@@ -27,7 +28,7 @@ export default function CheckoutPage() {
   const navigate = useNavigate()
   const m = useMarket()
   const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders } = useOrder()
-  const { rep, data } = m
+  const { rep, data, itemsByCode, recognized } = m
   const { viewport } = useShell()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
@@ -67,6 +68,22 @@ export default function CheckoutPage() {
   const desktop = viewport === 'desktop' || viewport === 'wide'
   const areaIsOther = customer.area.trim() !== '' && !areas.includes(customer.area.trim())
   const [otherArea, setOtherArea] = useState(areaIsOther)
+  const [deliveryPref, setDeliveryPref] = useState<string | null>(null)
+  const [known, setKnown] = useState<{ shop?: string | null; area?: string | null; first_name?: string | null } | null>(null)
+  const [askedPhone, setAskedPhone] = useState('')
+  const small = Boolean(quote?.minimum && !quote.minimum.met && quote.minimum.mode !== 'block')
+  // a complete number we have not asked about yet → one recognise call; prefill only what is empty
+  const digits = cleanPhone(customer.phone)
+  if (digits.length >= 8 && digits !== askedPhone && !recognized) {
+    setAskedPhone(digits)
+    recognizePhone(digits, deviceId())
+      .then((r) => {
+        if (!r.known) return
+        setKnown(r.known)
+        setCustomer((c) => ({ ...c, shop: c.shop || r.known?.shop || '', area: c.area || r.known?.area || '', name: c.name || r.known?.first_name || '' }))
+      })
+      .catch(() => undefined)
+  }
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -82,7 +99,7 @@ export default function CheckoutPage() {
         session_ref: rep?.slug || m.ref || undefined,
         salesman_id: !rep && pick !== '' ? Number(pick) : null,
         customer: { name: customer.name.trim(), phone: cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() },
-        note: note.trim(),
+        note: [deliveryPref ? `${S.checkout.deliveryLabel}: ${deliveryPref}` : null, note.trim()].filter(Boolean).join(' · '),
         website,
         device_id: deviceId(),
         client_order_id: clientOrderId(),
@@ -107,13 +124,13 @@ export default function CheckoutPage() {
 
   const submitBtn = (
     <Button type="submit" form={FORM_ID} size="lg" className={cn('shrink-0', desktop ? 'w-full' : 'px-6')} disabled={!canSubmit} loading={submitting} icon={<Lock size={15} aria-hidden="true" />}>
-      {submitting ? (slow ? S.checkout.connecting : S.checkout.sending) : S.checkout.place}
+      {submitting ? (slow ? S.checkout.connecting : S.checkout.sending) : small ? S.minimum.requestCta : S.checkout.place}
     </Button>
   )
 
   return (
     <div className="px-gutter lg:px-0">
-      <div className="mx-auto max-w-xl lg:mx-0 lg:grid lg:max-w-none lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start lg:gap-6">
+      <div className="mx-auto max-w-xl lg:mx-auto lg:grid lg:max-w-6xl lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start lg:gap-8">
         <div>
           <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{S.checkout.title}</h1>
           {/* the order, folded */}
@@ -122,9 +139,14 @@ export default function CheckoutPage() {
             <span className="font-display font-bold tnum text-ink">{bhd(quote?.total_bhd)}</span>
             <span className="font-semibold text-plum">{S.cart.edit}</span>
           </Link>
-          {rep && <RepCard rep={rep} compact className="mt-3" />}
+          {known?.shop && (
+            <p className="mt-3 rounded-md bg-plum-wash px-3.5 py-2.5 text-sm text-plum-ink">
+              <b className="font-semibold">{S.checkout.welcomeBack(known.shop)}</b> · {S.checkout.welcomeBackHint}
+            </p>
+          )}
+          {rep && <RepCard rep={rep} compact className="mt-3 lg:hidden" />}
 
-          <form id={FORM_ID} onSubmit={submit} noValidate className="mt-4 grid gap-4">
+          <form id={FORM_ID} onSubmit={submit} noValidate className="mt-4 grid gap-4 lg:grid-cols-2 lg:gap-x-5">
             <div>
               <Label htmlFor="yq-phone">
                 {S.checkout.phone} <span className="text-bad">*</span>
@@ -145,7 +167,7 @@ export default function CheckoutPage() {
               <Input id="yq-name" autoComplete="name" value={customer.name} onChange={(e) => set('name', e.target.value)} onBlur={() => blur('name')} required aria-invalid={touched.name && !nameOk} />
               {touched.name && !nameOk && <Hint error>{S.checkout.nameBad}</Hint>}
             </div>
-            <div>
+            <div className="lg:col-span-2">
               <Label htmlFor="yq-area">{S.checkout.area}</Label>
               {areas.length > 0 ? (
                 <>
@@ -186,17 +208,32 @@ export default function CheckoutPage() {
               )}
             </div>
 
-            <label className="flex items-center gap-2.5 text-sm text-ink">
+            <div className="lg:col-span-2">
+              <Label>{S.checkout.deliveryLabel}</Label>
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label={S.checkout.deliveryLabel}>
+                {S.checkout.deliveryOptions.map((o) => {
+                  const on = deliveryPref === o
+                  return (
+                    <button key={o} type="button" aria-pressed={on} onClick={() => setDeliveryPref(on ? null : o)} className={cn('h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}>
+                      {o}
+                    </button>
+                  )
+                })}
+              </div>
+              <Hint>{S.checkout.deliveryHint}</Hint>
+            </div>
+
+            <label className="flex items-center gap-2.5 text-sm text-ink lg:col-span-2">
               <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} className="h-5 w-5 rounded border-line accent-[#6D4091]" />
               {S.checkout.save}
             </label>
 
             {!more ? (
-              <button type="button" onClick={() => setMore(true)} className="inline-flex items-center gap-1 self-start text-sm font-semibold text-plum hover:underline">
+              <button type="button" onClick={() => setMore(true)} className="inline-flex items-center gap-1 self-start text-sm font-semibold text-plum hover:underline lg:col-span-2">
                 {S.checkout.more} <ChevronDown size={14} aria-hidden="true" />
               </button>
             ) : (
-              <div>
+              <div className="lg:col-span-2">
                 <Label htmlFor="yq-email">{S.checkout.email}</Label>
                 <Input id="yq-email" type="email" autoComplete="email" value={customer.email} onChange={(e) => set('email', e.target.value)} onBlur={() => blur('email')} aria-invalid={touched.email && !emailOk} />
                 {touched.email && !emailOk && <Hint error>{S.checkout.emailBad}</Hint>}
@@ -204,7 +241,7 @@ export default function CheckoutPage() {
             )}
 
             {!rep && salesmen.length > 0 && (
-              <div>
+              <div className="lg:col-span-2">
                 {!pickOpen ? (
                   <button type="button" onClick={() => setPickOpen(true)} className="text-sm font-semibold text-plum hover:underline">
                     {S.checkout.haveRep} {S.checkout.chooseRep}
@@ -244,8 +281,57 @@ export default function CheckoutPage() {
               </p>
             )}
             <div className="mt-4">{submitBtn}</div>
-            <p className="mt-2 text-xs text-ink-2">{first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
+            <p className="mt-2 text-xs text-ink-2">{small ? S.minimum.requested : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
           </div>
+
+          {/* the lines, so the merchant sees what they are confirming */}
+          <div className="mt-4 rounded-lg border border-line bg-surface">
+            <div className="flex items-center justify-between px-4 pt-3">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.cart.title}</h2>
+              <Link to="/cart" className="text-xs font-semibold text-plum hover:underline">
+                {S.cart.edit}
+              </Link>
+            </div>
+            <ul className="divide-y divide-line-2 px-4">
+              {lines.slice(0, 5).map((l) => {
+                const it = itemsByCode.get(l.item_code)
+                const q = quote?.lines?.find((x) => x.item_code === l.item_code)
+                return (
+                  <li key={l.item_code} className="flex items-center gap-3 py-2.5">
+                    <span className="h-10 w-10 shrink-0 overflow-hidden rounded-sm border border-line-2 bg-white">
+                      <ProductImage item={it} alt="" sizes={SIZES_THUMB} size={40} imgClassName="p-0.5" iconSize={14} showCaption={false} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold text-ink">{it ? productName(it) : l.item_code}</span>
+                      <span className="block text-xs tnum text-ink-2">
+                        {l.qty} × {money(q?.unit_price_bhd ?? it?.price_bhd)}
+                      </span>
+                    </span>
+                    <span className="text-sm font-semibold tnum text-ink">{bhd(q?.line_total_bhd ?? (Number(it?.price_bhd) || 0) * l.qty)}</span>
+                  </li>
+                )
+              })}
+            </ul>
+            {lines.length > 5 && (
+              <Link to="/cart" className="block border-t border-line-2 px-4 py-2.5 text-center text-xs font-semibold text-plum hover:underline">
+                {S.checkout.moreLines(lines.length - 5)}
+              </Link>
+            )}
+          </div>
+
+          {/* how it works */}
+          <div className="mt-4 rounded-lg border border-line bg-surface p-4">
+            <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.checkout.how}</h2>
+            <ol className="mt-2 space-y-2">
+              {S.placed.next.map((step, i) => (
+                <li key={step} className="flex items-start gap-2.5 text-sm text-ink-2">
+                  <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-plum-wash text-2xs font-bold text-plum">{i + 1}</span>
+                  {step}
+                </li>
+              ))}
+            </ol>
+          </div>
+          {rep && <RepCard rep={rep} compact className="mt-4" />}
         </div>
       </div>
 
@@ -263,7 +349,7 @@ export default function CheckoutPage() {
             </div>
             {submitBtn}
           </div>
-          <p className="mt-1.5 text-2xs text-ink-2">{first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
+          <p className="mt-1.5 text-2xs text-ink-2">{small ? S.minimum.requested : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
         </PageBar>
       )}
     </div>

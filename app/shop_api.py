@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def register(app, limiter) -> None:  # noqa: C901 — one registration function, many small routes
-    from fastapi import BackgroundTasks, Depends, HTTPException, Request, Response
+    from fastapi import BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
     from pydantic import BaseModel, Field
 
     from app import shop, shop_notify
@@ -136,6 +136,39 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         max_uses: int | None = None
         priority: int | None = None
         is_active: bool | None = None
+
+    class CampaignIn(BaseModel):
+        title: str | None = Field(default=None, max_length=80)
+        title_ar: str | None = Field(default=None, max_length=160)
+        line: str | None = Field(default=None, max_length=160)
+        line_ar: str | None = Field(default=None, max_length=160)
+        image_url: str | None = Field(default=None, max_length=400)
+        cta_label: str | None = Field(default=None, max_length=40)
+        cta_label_ar: str | None = Field(default=None, max_length=40)
+        cta_to: str | None = Field(default=None, max_length=300)
+        placement: list[str] | None = None
+        category: str | None = Field(default=None, max_length=40)
+        audience: str | None = Field(default=None, max_length=12)
+        rule_id: int | None = None
+        sponsored: bool | None = None
+        sponsor_name: str | None = Field(default=None, max_length=60)
+        starts_at: str | None = Field(default=None, max_length=40)
+        ends_at: str | None = Field(default=None, max_length=40)
+        is_active: bool | None = None
+        sort_order: int | None = None
+
+    class RestockRequest(BaseModel):
+        item_code: str = Field(max_length=64)
+        phone: str | None = Field(default=None, max_length=32)
+        device_id: str | None = Field(default=None, max_length=64)
+        referral_code: str | None = Field(default=None, max_length=32)
+
+    class RecognizeRequest(BaseModel):
+        phone: str = Field(max_length=32)
+        device_id: str | None = Field(default=None, max_length=64)
+
+    class RestockResolve(BaseModel):
+        ids: list[int] = Field(max_length=200)
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _check_token(token: str) -> None:
@@ -347,6 +380,83 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             f"<p>Opening <a href=\"{e(target)}\">{e(it['item_code'])} in the YQ Bahrain catalog</a>…</p></body></html>"
         )
         return Response(content=page, media_type="text/html", headers={"Cache-Control": "public, max-age=300"})
+
+    # ── public: a returning merchant, recognised by phone ───────────────────
+    @app.post("/public/market/recognize")
+    @limiter.limit("10/minute")
+    def market_recognize(request: Request, body: RecognizeRequest) -> dict:
+        known = shop.recognize_phone(body.phone, body.device_id)
+        return {"known": known}
+
+    # ── public: "tell me when back" ─────────────────────────────────────────
+    @app.post("/public/market/restock")
+    @limiter.limit("20/minute")
+    def market_restock(request: Request, body: RestockRequest) -> dict:
+        ok = shop.add_restock(body.item_code, body.phone, body.device_id, body.referral_code)
+        return {"ok": ok}
+
+    # ── portal: campaigns (Shop Admin) + restock list (Shop Orders) ──────────
+    @app.get("/shop/campaigns")
+    def shop_campaigns_list(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        return {"campaigns": shop.list_campaigns()}
+
+    @app.post("/shop/campaigns")
+    def shop_campaigns_create(body: CampaignIn, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        try:
+            row = shop.upsert_campaign(body.model_dump(exclude_unset=True), by=user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.campaign_create", detail={"id": row.get("id")})
+        return row
+
+    @app.patch("/shop/campaigns/{campaign_id}")
+    def shop_campaigns_update(campaign_id: int, body: CampaignIn, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        try:
+            row = shop.upsert_campaign(body.model_dump(exclude_unset=True), by=user.email, campaign_id=campaign_id)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.campaign_update", detail={"id": campaign_id})
+        return row
+
+    @app.delete("/shop/campaigns/{campaign_id}")
+    def shop_campaigns_delete(campaign_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        shop.delete_campaign(campaign_id)
+        log_event(user.email, "shop.campaign_delete", detail={"id": campaign_id})
+        return {"ok": True}
+
+    @app.post("/shop/campaigns/image")
+    async def shop_campaigns_image(file: UploadFile = File(...), user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        from app.uploads import MAX_PHOTO_BYTES, UploadTooLarge, content_matches, photo_ext, read_capped
+        ext = photo_ext(file.filename or "")
+        if not ext:
+            raise HTTPException(status_code=400, detail="Please upload a JPG, PNG or WEBP image.")
+        try:
+            data = await read_capped(file, MAX_PHOTO_BYTES)
+        except UploadTooLarge as e:
+            raise HTTPException(status_code=400, detail=f"Image too large ({e}).") from e
+        if not content_matches(file.filename or "", data):
+            raise HTTPException(status_code=400, detail="That file is not a valid image.")
+        from app.catalog import upload_campaign_image
+        urls = upload_campaign_image(data)
+        if not urls:
+            raise HTTPException(status_code=500, detail="Could not store the image.")
+        log_event(user.email, "shop.campaign_image", detail={"bytes": len(data)})
+        return urls
+
+    @app.get("/shop/restock")
+    def shop_restock_list(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        sid, admin = _scope(user)
+        ref = None
+        if not admin:
+            sm = shop.salesman_for_user(user.email)
+            ref = (sm or {}).get("referral_code") or "-"
+        return {"requests": shop.list_restock(ref)}
+
+    @app.post("/shop/restock/resolve")
+    def shop_restock_resolve(body: RestockResolve, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        n = shop.resolve_restock(body.ids)
+        log_event(user.email, "shop.restock_resolve", detail={"n": n})
+        return {"ok": True, "n": n}
 
     # ── portal: rules (Shop Admin) ────────────────────────────────────────────
     @app.get("/shop/rules")

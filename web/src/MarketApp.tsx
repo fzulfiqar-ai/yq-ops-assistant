@@ -1,13 +1,15 @@
 import { lazy, StrictMode, Suspense, useEffect } from 'react'
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams, useNavigate } from 'react-router-dom'
 import { UpdateToast } from '@/market/components/UpdateToast'
 import { isSlugShaped, rememberRef } from '@/market/lib/device'
 import { setSource } from '@/market/lib/events'
 import { watchInstallPrompt } from '@/market/lib/install'
+import { startErrorReporting } from '@/market/lib/errors'
 import { startVitals } from '@/market/lib/vitals'
 import { MarketProvider } from '@/market/MarketContext'
 import Home from '@/market/pages/Home'
 import { Shell } from '@/market/shell/Shell'
+import { cartStore } from '@/market/store/cart'
 import { locale } from '@/market/strings'
 import { ErrorBoundary } from '@/market/ui/ErrorBoundary'
 import { ToastProvider } from '@/market/ui/Toast'
@@ -22,6 +24,7 @@ const MyOrdersPage = lazy(() => import('@/market/pages/MyOrdersPage'))
 const MyYQPage = lazy(() => import('@/market/pages/MyYQPage'))
 const QuickOrderPage = lazy(() => import('@/market/pages/QuickOrderPage'))
 const LegacyRedirect = lazy(() => import('@/market/pages/LegacyRedirect'))
+const AboutPage = lazy(() => import('@/market/pages/AboutPage'))
 
 /**
  * YQ Marketplace — the merchant front door (built with VITE_APP=market, its own hostname, its own
@@ -37,17 +40,33 @@ const LegacyRedirect = lazy(() => import('@/market/pages/LegacyRedirect'))
  * app/shop.py (_RESERVED_FALLBACK) and the shop_reserved_slugs table. Keep them equal.
  */
 // eslint-disable-next-line react-refresh/only-export-components
-export const RESERVED = new Set(['search', 'cart', 'checkout', 'orders', 'p', 't', 'o', 'c', 'join', 'shop', 'me', 'quick'])
+export const RESERVED = new Set(['search', 'cart', 'checkout', 'orders', 'p', 't', 'o', 'c', 'join', 'shop', 'me', 'quick', 'about', 'help', 'ask', 'saved'])
 
 /** Reads ?ref / ?src on any entry URL (shared product links carry them); scrolls to top on page changes (not overlays). */
 function EntryParams() {
   const [params] = useSearchParams()
   const location = useLocation()
+  const navigate = useNavigate()
   useEffect(() => {
     const ref = (params.get('ref') || '').toLowerCase()
     if (ref && isSlugShaped(ref)) rememberRef(ref)
     setSource(params.get('src'))
-  }, [params, location.pathname])
+    // a representative's ready order: ?order=X01:12,UK04:6 → the cart, then the cart page
+    const order = params.get('order')
+    if (order) {
+      const entries = order
+        .split(',')
+        .map((part) => {
+          const [code, qty] = part.split(':')
+          return { item_code: decodeURIComponent((code || '').trim()), qty: Math.max(1, Math.floor(Number(qty) || 1)) }
+        })
+        .filter((e) => e.item_code)
+      if (entries.length) {
+        cartStore.setMany(entries)
+        navigate('/cart', { replace: true })
+      }
+    }
+  }, [params, location.pathname, navigate])
   useEffect(() => {
     const st = location.state as { panel?: string } | null
     if (st?.panel) return // product panel over the same page: keep the scroll position
@@ -68,7 +87,9 @@ export default function MarketApp() {
     document.documentElement.lang = locale.lang
     document.documentElement.dir = locale.dir
     startVitals()
-    return watchInstallPrompt()
+    const stopErrors = startErrorReporting()
+    watchInstallPrompt()
+    return stopErrors
   }, [])
   return (
     <StrictMode>
@@ -87,6 +108,7 @@ export default function MarketApp() {
                     <Route path="/shop" element={<ShopPage />} />
                     <Route path="/search" element={<SearchPage />} />
                     <Route path="/quick" element={<QuickOrderPage />} />
+                    <Route path="/about" element={<AboutPage />} />
                     <Route path="/cart" element={<CartPage />} />
                     <Route path="/checkout" element={<CheckoutPage />} />
                     <Route path="/orders" element={<MyOrdersPage />} />

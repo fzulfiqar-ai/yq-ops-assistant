@@ -1,20 +1,31 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, BookImage, ChevronRight, ClipboardList, Copy, ExternalLink, Loader2, MessageCircle, QrCode, Share2, Users } from 'lucide-react'
-import { apiGet } from '@/lib/api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowRight, BookImage, Check, ChevronRight, ClipboardList, Copy, ExternalLink, Loader2, MessageCircle, PackageSearch, QrCode, Share2, Users } from 'lucide-react'
+import { apiGet, apiPost } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
 import { STATUS_LABEL, STATUS_TONE } from '@/pages/shop-ops/OrderActions'
 import { Badge } from '@/components/ui/badge'
-import { bhd3, firstName, greeting, relTime, useAuthedBlob, useShopMe } from './lib'
+import { bhd3, firstName, greeting, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
 
 /**
  * /today — the salesman's home. What needs him now (orders waiting to be confirmed), how his
  * month is going (KPIs and the target bar), his link and QR one tap away, and the three things he
  * does all day: order for a shop, open his customers, open his orders.
  */
+
+interface RestockRow {
+  item_code: string
+  display_name: string
+  count: number
+  phones: string[]
+  first_at: string
+  ids: number[]
+  stock_qty?: number | null
+  back_in_stock: boolean
+}
 
 interface OrderRow {
   id: number
@@ -37,6 +48,17 @@ export default function Today() {
   const newQ = useQuery({ queryKey: ['shop-orders', 'new', ''], queryFn: () => apiGet<{ orders: OrderRow[]; count: number }>('/shop/orders?status=new&limit=5'), refetchInterval: 60_000 })
   const progressQ = useQuery({ queryKey: ['shop-orders', 'confirmed,packed', ''], queryFn: () => apiGet<{ orders: OrderRow[]; count: number }>('/shop/orders?status=confirmed,packed&limit=3') })
   const [qrOpen, setQrOpen] = useState(false)
+  const qc = useQueryClient()
+  const restockQ = useQuery({ queryKey: ['shop-restock'], queryFn: () => apiGet<{ requests: RestockRow[] }>('/shop/restock'), staleTime: 60_000 })
+  const resolveRestock = async (r: RestockRow) => {
+    try {
+      await apiPost('/shop/restock/resolve', { ids: r.ids })
+      qc.invalidateQueries({ queryKey: ['shop-restock'] })
+      toast('Marked as told', 'success')
+    } catch {
+      toast('Could not update', 'error')
+    }
+  }
   const { blobUrl: qr, loading: qrLoading } = useAuthedBlob(qrOpen ? meQ.data?.qr_url : null)
 
   const name = me?.full_name || meQ.data?.salesman?.name || ''
@@ -144,6 +166,43 @@ export default function Today() {
               </Link>
             )}
           </section>
+
+          {/* waiting for stock */}
+          {(restockQ.data?.requests?.length || 0) > 0 && (
+            <section className="overflow-hidden rounded-2xl border border-border bg-card">
+              <div className="flex items-center gap-2 px-4 py-3">
+                <PackageSearch size={16} className="text-primary" aria-hidden="true" />
+                <h2 className="font-display text-[15px] font-bold">Waiting for stock</h2>
+                <span className="text-[12px] text-muted-foreground">shops asked to be told</span>
+              </div>
+              <ul className="divide-y divide-border border-t border-border">
+                {restockQ.data!.requests.slice(0, 8).map((r) => {
+                  const wa = waLink(r.phones[0], `Hello, ${r.display_name} (${r.item_code}) is back in stock at YQ. Shall I add it to your next order?`)
+                  return (
+                    <li key={r.item_code} className="flex items-center gap-3 px-4 py-2.5">
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2">
+                          <span className="truncate text-[13.5px] font-semibold">{r.display_name}</span>
+                          {r.back_in_stock ? <Badge tone="green">Back in stock</Badge> : <Badge tone="grey">Still out</Badge>}
+                        </span>
+                        <span className="block text-[11.5px] text-muted-foreground">
+                          {r.item_code} · {r.count} {r.count === 1 ? 'shop' : 'shops'} · since {relTime(r.first_at)}
+                        </span>
+                      </span>
+                      {wa && r.back_in_stock && (
+                        <a href={wa} target="_blank" rel="noreferrer" aria-label="WhatsApp the shop" className="grid h-10 w-10 place-items-center rounded-xl border border-border text-[#1d9e50] hover:bg-muted">
+                          <MessageCircle size={16} aria-hidden="true" />
+                        </a>
+                      )}
+                      <button type="button" onClick={() => resolveRestock(r)} aria-label="Mark as told" title="Mark as told" className="grid h-10 w-10 place-items-center rounded-xl border border-border text-muted-foreground hover:bg-muted hover:text-foreground">
+                        <Check size={16} aria-hidden="true" />
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          )}
         </div>
 
         <div className="space-y-4">

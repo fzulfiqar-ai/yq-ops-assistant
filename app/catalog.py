@@ -144,6 +144,43 @@ def upload_thumb(code: str, kind: str, full_image: bytes, *, sizes: tuple[int, .
     return done
 
 
+def make_banner(data: bytes, width: int = 1200) -> bytes | None:
+    """A campaign image: width-limited WebP that keeps its aspect (banners are not square)."""
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        if im.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            im = im.convert("RGBA")
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        else:
+            im = im.convert("RGB")
+        im.thumbnail((width, width * 2), Image.LANCZOS)
+        out = io.BytesIO()
+        im.save(out, "WEBP", quality=82, method=6)
+        return out.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("banner failed: %s", e)
+        return None
+
+
+def upload_campaign_image(data: bytes) -> dict | None:
+    """Store a campaign image as 1200w + 600w WebP under campaigns/. Returns {url, url_600}."""
+    ensure_bucket()
+    stamp = int(time.time())
+    bucket = get_client().storage.from_(_BUCKET)
+    urls: dict[str, str] = {}
+    for w, key in ((1200, "url"), (600, "url_600")):
+        blob = make_banner(data, w)
+        if not blob:
+            return None
+        path = f"campaigns/{stamp}-{w}.webp"
+        bucket.upload(path, blob, {"content-type": "image/webp", "upsert": "true", "cache-control": THUMB_CACHE})
+        urls[key] = public_url(path)
+    return urls
+
+
 def upload_image(code: str, kind: str, data: bytes, content_type: str, by: str = "") -> str:
     """Store a product/package photo (+ its export thumbnail) and point the item at it."""
     ensure_bucket()

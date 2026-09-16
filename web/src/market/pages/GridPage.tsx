@@ -3,7 +3,9 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { LayoutGrid, List, SlidersHorizontal, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
+import { CategoryBanner } from '../components/CampaignStrip'
 import { MarketCard } from '../components/MarketCard'
+import { useMarket } from '../MarketContext'
 import { EmptyState } from '../components/States'
 import { track } from '../lib/events'
 import { applyQuickFilters, facetsFor, matchesFacets, parseFilters, readFacets, sortItems, type QuickFilter, type SortMode } from '../lib/facets'
@@ -77,8 +79,10 @@ export function GridPage({ title, items, category, breadcrumb }: { title: string
   const chip = (on: boolean) =>
     cn('inline-flex h-10 shrink-0 items-center gap-1 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash hover:text-ink')
 
+  const { campaigns } = useMarket()
   return (
     <div className="px-gutter lg:px-0">
+      {category && <CategoryBanner campaigns={campaigns} category={category} />}
       <div className="sticky top-0 z-header -mx-gutter bg-canvas/95 px-gutter pb-2 pt-1 backdrop-blur lg:static lg:mx-0 lg:bg-transparent lg:px-0 lg:backdrop-blur-none">
         <div className="flex items-center gap-2">
           {/* the phone header already shows the title; from lg the page carries it */}

@@ -1,4 +1,5 @@
 import type { ShopItem } from '@/lib/shopApi'
+import { savedStore } from '../store/saved'
 
 /**
  * Sub-facets inferred from the product text — no attribute model in the backend, and the
@@ -190,7 +191,7 @@ export function readFacets(params: URLSearchParams, groups: FacetGroup[]): Facet
 /* ───────────────────────── sort & filter ───────────────────────── */
 
 export type SortMode = 'shelf' | 'popular' | 'price_asc' | 'price_desc'
-export type QuickFilter = 'instock' | 'offers' | 'new' | 'clearance' | 'drops'
+export type QuickFilter = 'instock' | 'offers' | 'new' | 'clearance' | 'drops' | 'saved'
 
 function popularity(it: ShopItem): number {
   let s = 0
@@ -223,11 +224,15 @@ export function applyQuickFilters(items: ShopItem[], filters: Set<QuickFilter>):
   if (filters.has('new')) r = r.filter((i) => (i.badges || []).includes('new'))
   if (filters.has('clearance')) r = r.filter((i) => (i.badges || []).includes('clearance'))
   if (filters.has('drops')) r = r.filter((i) => (i.badges || []).includes('price_drop') || i.was_bhd != null)
+  if (filters.has('saved')) {
+    const saved = new Set(savedStore.get())
+    r = r.filter((i) => saved.has(i.item_code))
+  }
   return r
 }
 
 export function parseFilters(s: string | null): Set<QuickFilter> {
   const set = new Set<QuickFilter>()
-  for (const p of (s || '').split(',')) if (p === 'instock' || p === 'offers' || p === 'new' || p === 'clearance' || p === 'drops') set.add(p)
+  for (const p of (s || '').split(',')) if (p === 'instock' || p === 'offers' || p === 'new' || p === 'clearance' || p === 'drops' || p === 'saved') set.add(p)
   return set
 }

@@ -231,3 +231,14 @@ company WhatsApp for "Ask YQ" · a decision on a real clearance markdown.
 Verified identity via salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail
 from Focus history (needs `focus_customer_id` links) · web push · Arabic strings (the `locale` flag
 and logical CSS are in place) · a real `shop_clearance_pct` markdown applied by the pricing engine.
+
+## v2.1 (16-Sep-2026) — desktop density, campaigns, wholesale engine
+
+- **Desktop aside**: `shell/MiniCart` (+ `PopularRows` when empty) and `components/Spotlight` (real signals + campaign slides). Also on `/orders` and `/search`.
+- **Campaigns** (the honest "ads" layer): table `shop_campaigns`, admin tab *Offers & Rules → Campaigns* (`pages/shop-ops/CampaignsSection.tsx`), endpoints `GET/POST/PATCH/DELETE /shop/campaigns`, image upload `POST /shop/campaigns/image`. Payload `campaigns[]` (window applied server-side, `rule_id` inherits the rule's real end). Renderings in `components/CampaignStrip.tsx` (strip / hero for anonymous visitors / category banner) and Spotlight.
+- **Promise bar**: `settings.promises` from `shop_market_promises` (JSON, admin-editable). `components/PromiseBar.tsx` (desktop utility bar, phone strip).
+- **Wholesale order engine**: settings `shop_min_order_bhd`, `shop_small_order_mode` (request|allow|block), `shop_small_order_fee_bhd`, `shop_gap_suggestions`. Quote adds `minimum` + `gap_suggestions` (`gap_fillers()` in `app/shop.py`); `components/MinimumBar.tsx`; orders under the minimum carry `order_kind='small'` + `minimum_gap_bhd` (migration `scripts/marketplace_wholesale_migration.sql`).
+- **Returning merchants**: `POST /public/market/recognize {phone, device_id}` → `{shop, area, first_name}` for a known phone; checkout prefills and greets.
+- **Restock requests**: `POST /public/market/restock`; salesman Today shows *Waiting for stock*; `GET /shop/restock`, `POST /shop/restock/resolve`.
+- **Ready order links**: `/{slug}?order=CODE:QTY,CODE:QTY` fills the cart (`EntryParams`); the staff cart drawer offers "Send as a ready order on WhatsApp".
+- Also: saved items (`store/saved.ts`, `/shop?f=saved`), `components/Lightbox.tsx`, `/about` (reserved slugs `about, help, ask, saved` in MarketApp, catalog-prefetch, `_RESERVED_FALLBACK`, `shop_reserved_slugs`), `lib/errors.ts` (event kind `error`), `components/Splash.tsx` (first open), tagline `S.tagline` = "Restock faster. Sell more.".

@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { LayoutGrid, List } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CampaignHero, CampaignStrip } from '../components/CampaignStrip'
 import { HomeBlocks } from '../components/HomeBlocksIndex'
+import { PromiseStrip } from '../components/PromiseBar'
 import { MarketCard } from '../components/MarketCard'
 import { Rail } from '../components/Rail'
 import { RepCard } from '../components/RepCard'
@@ -35,7 +37,8 @@ export default function Home() {
   const m = useMarket()
   const { myOrders, quote } = useOrder()
   const { viewport } = useShell()
-  const { data, status, items, itemsByCode, categories, rep, recognized } = m
+  const { data, status, items, itemsByCode, categories, rep, recognized, campaigns } = m
+  const heroCampaign = !recognized ? campaigns.find((c) => c.placement.includes('hero')) || null : null
   const lines = useCartLines()
   usePageTitle(null, false, rep ? `${rep.first_name || rep.name} · ${S.brand}` : `${S.brand} · ${S.company}`)
 
@@ -168,16 +171,20 @@ export default function Home() {
       {phone && (
         <div className="pt-1">
           <SearchField value={q} onChange={setQ} onFocus={() => navigate('/search')} onSubmit={(v) => navigate(v.trim() ? `/search?q=${encodeURIComponent(v.trim())}` : '/search')} readOnlyTap />
+          <PromiseStrip className="mt-2" />
         </div>
       )}
       <HomeBlocks.MissionStrip lastCount={showOrderAgain ? lastLines.length : 0} newCount={arrived.length} offerCount={offers.length} clearanceCount={aging.length} dropCount={drops.length} />
       {lines.length > 0 && <HomeBlocks.ResumeOrderCard lines={lines} itemsByCode={itemsByCode} total={cartTotal} />}
       <HomeBlocks.CategoryTiles tiles={tiles} />
+      <CampaignStrip campaigns={campaigns} phone={phone} />
       {offer && <HomeBlocks.OfferStrip offer={offer} />}
       {recognized && openOrder && <HomeBlocks.TrackCard order={openOrder} />}
 
       {showOrderAgain ? (
         <HomeBlocks.OrderAgainHero lines={lastLines} placedAt={latest?.created_at} more={Math.max(0, lastLines.length - 4)} />
+      ) : heroCampaign ? (
+        <CampaignHero c={heroCampaign} />
       ) : hero ? (
         <HomeBlocks.HeroProduct item={hero.item} rank={hero.rank} category={hero.category} also={best.filter((b) => b.item_code !== hero.item.item_code)} />
       ) : null}

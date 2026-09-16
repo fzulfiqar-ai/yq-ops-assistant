@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowRight, Loader2, MessageCircle, ShieldCheck, Tag, Tr
 import { cn } from '@/lib/utils'
 import type { Quote, ShopItem } from '@/lib/shopApi'
 import { MarketCard } from '../components/MarketCard'
+import { MinimumBar } from '../components/MinimumBar'
 import { ProgressBar } from '../components/ProgressBar'
 import { QtySheet } from '../components/QtySheet'
 import { Rail } from '../components/Rail'
@@ -11,7 +12,7 @@ import { EmptyState } from '../components/States'
 import { useMarket, useOrder } from '../MarketContext'
 import { track } from '../lib/events'
 import { bhd, minQtyOf, money, nextTier, stepOf, productName } from '../lib/format'
-import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
+import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
 import { AnchorButton, Button } from '../ui/Button'
@@ -42,6 +43,7 @@ export default function CartPage() {
   const [couponOpen, setCouponOpen] = useState(Boolean(coupon))
   const [keypad, setKeypad] = useState<ShopItem | null>(null)
   usePageTitle(items ? `${S.cart.title} · ${items}` : S.cart.title, true, `${S.cart.title} · ${S.brand}`)
+  useHideNav(true)
 
   useEffect(() => {
     track('cart', { meta: { count: lines.length } })
@@ -58,6 +60,7 @@ export default function CartPage() {
 
   const blocked = quote?.can_submit === false ? quote.block_reason || 'This order cannot be sent yet.' : ''
   const canCheckout = lines.length > 0 && !quoting && quote?.can_submit !== false
+  const small = Boolean(quote?.minimum && !quote.minimum.met && quote.minimum.mode !== 'block')
   const first = rep?.first_name || ''
   const askUrl = useMemo(() => {
     if (!rep?.whatsapp_url) return null
@@ -115,11 +118,16 @@ export default function CartPage() {
           </div>
         )}
       </dl>
+      {quote?.minimum && (
+        <div className="mt-3 border-t border-line-2 pt-3">
+          <MinimumBar minimum={quote.minimum} suggestions={quote.gap_suggestions || []} />
+        </div>
+      )}
       {desktop && (
         <>
           {blocked && <p className="mt-3 text-xs font-medium text-bad">{blocked}</p>}
           <Button size="lg" full className="mt-4" disabled={!canCheckout} onClick={() => navigate('/checkout')} icon={<ArrowRight size={16} aria-hidden="true" />}>
-            {S.cart.place}
+            {small ? S.minimum.requestCta : S.cart.place}
           </Button>
           <p className="mt-2 flex items-center gap-1.5 text-xs text-ink-2">
             <ShieldCheck size={13} aria-hidden="true" /> {first ? S.cart.placeHint(first) : S.cart.placeHintGeneric}
@@ -249,6 +257,9 @@ export default function CartPage() {
       {!desktop && (
         <PageBar>
           {blocked && <p className="mb-1.5 text-xs font-medium text-bad">{blocked}</p>}
+          {quote?.minimum && !quote.minimum.met && !blocked && (
+            <p className="mb-1.5 text-xs font-semibold text-plum">{S.minimum.more(bhd(quote.minimum.remaining_bhd))}</p>
+          )}
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="text-xs text-ink-2">{S.cart.summary(items, units)}</div>
@@ -257,7 +268,7 @@ export default function CartPage() {
               </div>
             </div>
             <Button size="lg" className="shrink-0 px-6" disabled={!canCheckout} onClick={() => navigate('/checkout')} icon={<ArrowRight size={16} aria-hidden="true" />}>
-              {S.cart.place}
+              {small ? S.minimum.requestCta : S.cart.place}
             </Button>
           </div>
           <p className="mt-1 text-2xs text-ink-2">{first ? S.cart.placeHint(first) : S.cart.placeHintGeneric}</p>

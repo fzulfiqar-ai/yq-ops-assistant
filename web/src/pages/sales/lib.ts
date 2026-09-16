@@ -22,8 +22,8 @@ export interface ShopMe {
   hint?: string | null
 }
 
-export function useShopMe() {
-  return useQuery({ queryKey: ['shop-me'], queryFn: () => apiGet<ShopMe>('/shop/me'), staleTime: 60_000 })
+export function useShopMe(enabled = true) {
+  return useQuery({ queryKey: ['shop-me'], queryFn: () => apiGet<ShopMe>('/shop/me'), staleTime: 60_000, enabled })
 }
 
 export function useCustomers(enabled = true) {

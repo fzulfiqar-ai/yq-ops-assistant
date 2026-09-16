@@ -11,6 +11,7 @@ import { isPhoneLike } from './useViewport'
 
 const DesktopShell = lazy(() => import('./DesktopShell'))
 const ProductPanel = lazy(() => import('../components/ProductPanel'))
+const Splash = lazy(() => import('../components/Splash').then((mod) => ({ default: mod.Splash })))
 const SearchPalette = lazy(() => import('../components/SearchPalette'))
 
 /**
@@ -64,6 +65,7 @@ function ShellBody() {
       <Suspense fallback={null}>
         {panelCode && <ProductPanel code={panelCode} />}
         {paletteOpen && <SearchPalette />}
+        <Splash />
       </Suspense>
     </>
   )

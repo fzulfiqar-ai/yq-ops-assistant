@@ -20,7 +20,7 @@ export default function ShopPage() {
   const [params] = useSearchParams()
   const filtered = params.has('f') || params.has('sort')
   const f = params.get('f') || ''
-  const title = f.includes('clearance') ? S.rails.clearance : f.includes('drops') ? S.rails.drops : f.includes('new') ? S.rails.arrived : f.includes('offers') ? S.rails.offers : params.get('sort') === 'popular' ? S.rails.best : S.home.all
+  const title = f.includes('saved') ? S.me.saved : f.includes('clearance') ? S.rails.clearance : f.includes('drops') ? S.rails.drops : f.includes('new') ? S.rails.arrived : f.includes('offers') ? S.rails.offers : params.get('sort') === 'popular' ? S.rails.best : S.home.all
   usePageTitle(filtered ? title : S.shop.title, filtered, `${S.shop.title} · ${S.brand}`)
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
   const newCount = items.filter((i) => hasBadge(i, 'new')).length

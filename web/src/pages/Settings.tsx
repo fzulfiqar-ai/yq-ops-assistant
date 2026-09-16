@@ -197,6 +197,9 @@ interface ShopField { key: string; label: string; hint: string; type: ShopFieldT
 const SHOP_FIELDS: ShopField[] = [
   { key: 'shop_min_order_bhd', label: 'Minimum order (BHD)', hint: 'Smallest order value a customer can submit.', type: 'number' },
   { key: 'shop_free_delivery_threshold_bhd', label: 'Free delivery threshold (BHD)', hint: 'Order value at which delivery becomes free.', type: 'number' },
+  { key: 'shop_small_order_mode', label: 'Under the minimum', hint: 'request = accept and flag it for the rep · allow = accept silently · block = refuse. The cart shows "Only BHD X more" and suggests add-ons either way.', type: 'text' },
+  { key: 'shop_small_order_fee_bhd', label: 'Small-order handling fee (BHD)', hint: 'Shown to merchants under the minimum in request mode; the rep applies it when confirming. 0 = none.', type: 'number' },
+  { key: 'shop_gap_suggestions', label: 'Gap suggestions', hint: 'How many add-ons the cart suggests to reach the minimum.', type: 'number' },
   { key: 'shop_low_stock_units', label: 'Low-stock units', hint: 'Units remaining at/below which an item shows "Only a few left."', type: 'number' },
   { key: 'shop_low_stock_days_cover', label: 'Low-stock days cover', hint: 'Days of stock cover at/below which an item is flagged low stock.', type: 'number' },
   { key: 'shop_min_margin_pct', label: 'Minimum margin', hint: 'Margin floor over landed cost — no rule or coupon can price below this.', type: 'percent' },

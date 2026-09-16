@@ -1,5 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
+import { PromiseBar } from '../components/PromiseBar'
+import { Spotlight } from '../components/Spotlight'
 import { MiniCart } from './MiniCart'
 import { StickyHeader } from './StickyHeader'
 import { useShell } from './ShellContext'
@@ -16,7 +18,7 @@ export default function DesktopShell() {
   const { viewport, cartOpen, closeCart } = useShell()
   const { pathname } = useLocation()
   const wide = viewport === 'wide'
-  const browsing = !/^\/(cart|checkout|o\/|orders|me|quick)/.test(pathname)
+  const browsing = !/^\/(cart|checkout|o\/|me|quick)/.test(pathname)
   const showAside = wide && browsing
   const stackRef = useRef<HTMLDivElement>(null)
   const { setBarHost } = useShell()
@@ -36,14 +38,16 @@ export default function DesktopShell() {
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
+      <PromiseBar />
       <StickyHeader />
       <div className="container-m flex items-start gap-6 2xl:gap-8">
         <main id="main" className="min-w-0 flex-1 pb-[calc(var(--m-bottom-stack)+40px)]">
           <Outlet />
         </main>
         {showAside && (
-          <aside className="sticky top-[calc(var(--m-header-h)+16px)] hidden w-[320px] shrink-0 2xl:w-[360px] xl:block" aria-label={S.cart.mini}>
+          <aside className="sticky top-[calc(var(--m-header-h)+16px)] hidden max-h-[calc(100dvh-var(--m-header-h)-32px)] w-[320px] shrink-0 flex-col gap-4 overflow-y-auto overscroll-contain pb-2 2xl:w-[360px] xl:flex" aria-label={S.cart.mini}>
             <MiniCart />
+            <Spotlight />
           </aside>
         )}
       </div>

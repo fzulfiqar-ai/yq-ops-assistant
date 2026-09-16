@@ -124,7 +124,7 @@ export function StickyHeader() {
               </NavLink>
             )}
             {hasOffers && (
-              <NavLink to="/shop?f=offers" className={linkCls}>
+              <NavLink to="/shop?f=offers" className={(a) => cn(linkCls(a), 'hidden 2xl:inline-flex')}>
                 <Tag size={15} aria-hidden="true" /> {S.nav.offers}
               </NavLink>
             )}

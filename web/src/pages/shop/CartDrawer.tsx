@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { AlertTriangle, Loader2, ShieldCheck, Tag, Trash2, UserRound } from 'lucide-react'
+import { AlertTriangle, Loader2, MessageCircle, ShieldCheck, Tag, Trash2, UserRound } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { Stepper } from '@/components/ui/stepper'
@@ -16,7 +16,7 @@ import {
   type ShopItem,
   type StaffCustomer,
 } from '@/lib/shopApi'
-import { getSelectedCustomer, setSelectedCustomer, useSelectedCustomer } from '@/pages/sales/lib'
+import { getSelectedCustomer, setSelectedCustomer, useSelectedCustomer, useShopMe } from '@/pages/sales/lib'
 import { ProductImage } from './ProductImage'
 import { Select } from './Select'
 import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, stepOf } from './shared'
@@ -118,6 +118,16 @@ export function CartDrawer({
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [recent, setRecent] = useState<StaffCustomer[]>([])
+  // Salesman: the storefront link, so a built cart can be sent to the shop as a ready order.
+  const meQ = useShopMe(staff)
+  const readyLink = staff && meQ.data?.link && cart.lines.length ? `${meQ.data.link}${meQ.data.link.includes('?') ? '&' : '?'}order=${cart.lines.map((l) => `${encodeURIComponent(l.item_code)}:${l.qty}`).join(',')}` : null
+  const sendReady = () => {
+    if (!readyLink) return
+    const who = customer.name.trim() ? `Hello ${customer.name.trim()}, ` : 'Hello, '
+    const text = `${who}here is the order we discussed — open it, check the quantities and press Place order:\n${readyLink}`
+    const digits = cleanPhone(customer.phone)
+    window.open(`https://wa.me/${digits ? (digits.length === 8 ? `973${digits}` : digits) : ''}?text=${encodeURIComponent(text)}`, '_blank', 'noreferrer')
+  }
   // Salesman: follow the shop picked in the CustomerBar (render-phase derived state, no effect).
   const selected = useSelectedCustomer()
   const selKey = staff ? selectedKey(selected) : ''
@@ -290,6 +300,11 @@ export function CartDrawer({
             <p role="alert" className="mb-2 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] font-medium text-[#9f1239]">
               {submitError}
             </p>
+          )}
+          {readyLink && (
+            <button type="button" onClick={sendReady} className="mb-2.5 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#E2DCEA] bg-white text-[13px] font-semibold text-[#1A1428] hover:bg-[#F9F7F3]">
+              <MessageCircle size={15} className="text-[#1d9e50]" aria-hidden="true" /> Send as a ready order on WhatsApp
+            </button>
           )}
           <div className="mb-2.5 flex items-baseline justify-between">
             <span className="text-[12px] font-medium text-[#6b6480]">Total</span>

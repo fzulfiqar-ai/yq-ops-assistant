@@ -58,10 +58,10 @@ ATTRIBUTION = ("customer_admin", "focus_map", "sticky", "session_ref", "checkout
 LINE_STATUSES = ("ok", "changed", "removed", "backorder")
 EVENTS = ("view", "item", "add", "checkout", "order", "search", "search_zero", "remove", "qty", "cart",
           "checkout_start", "rail_click", "reco_click", "share", "install", "reorder", "cancel", "vitals",
-          "push_subscribe")
+          "push_subscribe", "error")
 # event meta keys we keep (short strings / numbers only — never free text that could carry PII)
 _META_KEYS = frozenset({"q", "rail", "pos", "results", "count", "value", "lcp", "inp", "cls", "reason",
-                        "from", "to", "code", "attribution"})
+                        "from", "to", "code", "attribution", "where"})
 MAX_LINES = 60
 MAX_QTY = 9999
 
@@ -101,6 +101,18 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_market_url": "",
     "shop_areas": ("Manama,Muharraq,Riffa,Isa Town,Hamad Town,Sitra,Budaiya,Saar,Hidd,Jidhafs,Sanabis,Aali,"
                    "Zallaq,Salmabad,Tubli,Seef,Juffair,Adliya,Gudaibiya,Hoora,Galali,Arad,Busaiteen,Askar"),
+    # marketplace v2.1 (16-Sep-2026): the promise bar — only claims the data can back. JSON list of
+    # {key, en, ar, icon, to}. The delivery line switches itself when a free-delivery threshold exists.
+    "shop_market_promises": json.dumps([
+        {"key": "delivery", "en": "Free delivery across Bahrain", "ar": "توصيل مجاني في كل البحرين", "icon": "truck", "to": "/about#delivery"},
+        {"key": "minimum", "en": "No minimum order", "ar": "بدون حد أدنى للطلب", "icon": "package", "to": "/quick"},
+        {"key": "stock", "en": "Live stock", "ar": "مخزون مباشر", "icon": "pulse", "to": "/shop?f=instock"},
+    ], ensure_ascii=False),
+    "shop_market_ai_enabled": "0",       # phase C: the concierge; off until the office switches it on
+    # wholesale order engine (16-Sep-2026): the minimum is a sales engine, not a wall
+    "shop_small_order_mode": "request",  # request = accept + flag for the rep · allow = accept silently · block = refuse
+    "shop_small_order_fee_bhd": "0",     # optional handling fee the rep may apply when confirming a small order
+    "shop_gap_suggestions": "6",         # how many add-ons the cart suggests to close the gap to the minimum
 }
 
 _TTL = 60.0
@@ -337,6 +349,74 @@ def _load_pairs(active_codes: set[str], top_n: int = 3) -> dict[str, list[str]]:
     return {c: [code for code, _n in sorted(v, key=lambda t: -t[1])[:top_n]] for c, v in partners.items()}
 
 
+CAMPAIGN_PLACEMENTS = ("hero", "strip", "aside", "category")
+CAMPAIGN_AUDIENCES = ("all", "recognized", "new")
+
+
+def _load_campaigns() -> list[dict]:
+    """Active campaign rows (the window is applied per request so a 60 s cache never shows a
+    campaign a minute late or early)."""
+    try:
+        return (get_client().table("shop_campaigns").select("*").eq("is_active", True)
+                .order("sort_order").order("id").execute().data or [])
+    except Exception as e:  # noqa: BLE001 — the market works without the table
+        log.warning("shop_campaigns unavailable: %s", e)
+        return []
+
+
+def campaigns_payload(ctx: dict, now: datetime | None = None) -> list[dict]:
+    """Campaigns live right now, in the shape the market renders. A campaign tied to a discount
+    rule inherits the rule's real end time, so a countdown is never invented."""
+    now = now or _now()
+    rules = {r.get("id"): r for r in ctx.get("rules", [])}
+    out = []
+    for c in ctx.get("campaigns", []) or []:
+        st, en = _parse_ts(c.get("starts_at")), _parse_ts(c.get("ends_at"))
+        if st and st > now:
+            continue
+        if en and en < now:
+            continue
+        rule = rules.get(c.get("rule_id")) if c.get("rule_id") else None
+        if c.get("rule_id") and rule is None:
+            continue    # the offer behind it ended or was switched off — the banner goes with it
+        ends = c.get("ends_at") or (rule.get("ends_at") if rule else None)
+        placement = [x for x in (c.get("placement") or []) if x in CAMPAIGN_PLACEMENTS] or ["strip"]
+        out.append({
+            "id": c["id"], "title": c.get("title") or "", "title_ar": c.get("title_ar") or None,
+            "line": c.get("line") or None, "line_ar": c.get("line_ar") or None,
+            "image_url": c.get("image_url") or None,
+            "cta_label": c.get("cta_label") or None, "cta_label_ar": c.get("cta_label_ar") or None,
+            "cta_to": c.get("cta_to") or "/shop",
+            "placement": placement, "category": c.get("category") or None,
+            "audience": c.get("audience") if c.get("audience") in CAMPAIGN_AUDIENCES else "all",
+            "rule_id": c.get("rule_id"), "sponsored": bool(c.get("sponsored")),
+            "sponsor_name": c.get("sponsor_name") if c.get("sponsored") else None,
+            "ends_at": ends,
+        })
+    return out
+
+
+def promises_payload(vals: dict) -> list[dict]:
+    """The promise bar. Only true claims: when a free-delivery threshold exists the delivery line
+    says so instead of promising free delivery on everything."""
+    try:
+        rows = json.loads(vals.get("shop_market_promises") or "[]")
+    except (TypeError, ValueError):
+        rows = []
+    thr = money(vals.get("shop_free_delivery_threshold_bhd"))
+    out = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("en"):
+            continue
+        r = dict(r)
+        if r.get("key") == "delivery" and thr > 0:
+            r["en"] = f"Free delivery over BHD {thr:.3f}"
+            r["ar"] = f"توصيل مجاني للطلبات فوق {thr:.3f} د.ب"
+        out.append({"key": r.get("key") or "", "en": r["en"], "ar": r.get("ar") or None,
+                    "icon": r.get("icon") or None, "to": r.get("to") or None})
+    return out[:4]
+
+
 def _load_salesmen(active_only: bool = True) -> list[dict]:
     try:
         q = get_client().table("salesmen").select("*")
@@ -354,7 +434,7 @@ _RESERVED_FALLBACK = frozenset({
     "c", "o", "p", "t", "s", "f", "search", "cart", "checkout", "orders", "order", "join", "api", "public",
     "shop", "admin", "assets", "static", "me", "health", "share", "optout", "login", "invite", "catalog",
     "market", "marketplace", "track", "app", "sw.js", "version.json", "manifest.webmanifest", "robots.txt",
-    "quick", "fonts",
+    "quick", "fonts", "about", "help", "ask", "saved",
 })
 
 
@@ -390,6 +470,7 @@ def _build_context() -> dict:
         "costs": _load_costs(),
         "rules": _load_rules(),
         "salesmen": _load_salesmen(),
+        "campaigns": _load_campaigns(),
         "loaded_at": _iso(),
     }
     # Item codes are stored exactly as the price book spells them ("X05 UL-1Mtr"),
@@ -721,9 +802,11 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
         "salesmen": [{"id": s["id"], "name": s["name"], "referral_code": s.get("referral_code")}
                      for s in ctx["salesmen"]],
         "offers": offers,
+        "campaigns": campaigns_payload(ctx),
         "pairs": [{"item_code": c, "with": w} for c, w in ctx.get("pairs", {}).items() if w],
         "settings": {
             "currency": "BHD",
+            "promises": promises_payload(vals),
             "min_order_bhd": money(vals.get("shop_min_order_bhd")),
             "free_delivery_threshold_bhd": money(vals.get("shop_free_delivery_threshold_bhd")),
             "delivery_fee_bhd": money(vals.get("shop_delivery_fee_bhd")),
@@ -790,6 +873,71 @@ def normalize_lines(raw_lines) -> list[tuple[str, int]]:
         seen, total = merged.get(code.upper(), (code, 0))
         merged[code.upper()] = (seen, total + qty)
     return list(merged.values())
+
+
+def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_code: str | None = None,
+                *, limit: int = 6) -> list[dict]:
+    """Products that would close the gap to the wholesale minimum, best first: pairs of what is
+    already in the cart, then best sellers from the same categories, then anything in stock —
+    each ranked by how close one default quantity lands on the gap without overshooting by more
+    than one pack. Never a cart line, never out of stock, never the same product twice."""
+    items = ctx.get("items") or {}
+    if remaining <= 0 or not items:
+        return []
+    in_cart = set(cart_codes)
+    pairs_map = ctx.get("pairs") or {}
+    badges = ctx.get("_badges_cache")
+    if not isinstance(badges, dict):
+        try:
+            badges = _badges(ctx)
+        except Exception:  # noqa: BLE001
+            badges = {}
+        ctx["_badges_cache"] = badges
+    cats = {str((items.get(c) or {}).get("category") or "") for c in cart_codes}
+    cands: dict[str, int] = {}     # code -> tier (0 pairs, 1 same-category best seller, 2 anything)
+    for c in cart_codes:
+        for w in pairs_map.get(c, []) or []:
+            cands.setdefault(w, 0)
+    for code, it in items.items():
+        if code in cands:
+            continue
+        if str(it.get("category") or "") in cats and "best_seller" in (badges.get(code) or []):
+            cands.setdefault(code, 1)
+    if len(cands) < limit * 2:
+        for code in items:
+            cands.setdefault(code, 2)
+    scored = []
+    for code, tier in cands.items():
+        if code in in_cart:
+            continue
+        it = items.get(code) or {}
+        price = _f(it.get("standard_rate"))
+        stock = _f(it.get("stock_qty"))
+        if price <= 0 or stock <= 0:
+            continue
+        pack = max(_i(it.get("pack_size"), 1), 1)
+        moq = max(_i(it.get("moq"), 1), 1)
+        # the smallest multiple of the pack, at least the MOQ, whose value reaches the gap; else all of one pack
+        qty = max(moq, pack)
+        while price * qty < remaining and qty < 999:
+            qty += pack
+        value = money(price * qty)
+        over = value - remaining
+        if over > price * pack + 1e-9 and value > remaining:      # more than one pack past the gap: try a smaller step
+            qty = max(moq, pack)
+            value = money(price * qty)
+            over = value - remaining
+        closes = value >= remaining
+        scored.append((tier, 0 if closes else 1, abs(over), code, qty, value))
+    scored.sort()
+    out = []
+    for tier, _c, _o, code, qty, value in scored[:max(limit, 0)]:
+        it = items[code]
+        out.append({"item_code": code, "display_name": it.get("display_name") or code, "qty": qty,
+                    "unit_price_bhd": money(it.get("standard_rate")), "value_bhd": value,
+                    "closes_gap": value >= remaining,
+                    "why": "pairs" if tier == 0 else "popular" if tier == 1 else "in_stock"})
+    return out
 
 
 def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | None = None,
@@ -1001,6 +1149,9 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                         "remaining_bhd": 0.0, "unlocked": True, "label": f"{best_auto['name']} applied"}
 
     min_order = money(vals.get("shop_min_order_bhd"))
+    small_mode = str(vals.get("shop_small_order_mode") or "request").strip().lower()
+    if small_mode not in ("request", "allow", "block"):
+        small_mode = "request"
     # One thing at a time, in the order the customer can act on it: clear the dead
     # line first, then top up to the minimum. Totals above are already the price of
     # what IS orderable, so the number on the button stays true either way.
@@ -1015,9 +1166,21 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                         f"Remove {names}{more} to send this order.")
     elif not good:
         block_reason = "Your order is empty."
-    elif net_after < min_order:
+    elif net_after < min_order and small_mode == "block":
         block_reason = f"Minimum order is BHD {min_order:.3f} — add BHD {money(min_order - net_after):.3f} more."
     can_submit = block_reason is None
+    # The wholesale minimum as a sales engine: how far to go, and what would close the gap.
+    minimum = None
+    gap_suggestions: list[dict] = []
+    if min_order > 0 and good:
+        remaining = money(max(0.0, min_order - net_after))
+        under = remaining > 0
+        minimum = {"value_bhd": min_order, "remaining_bhd": remaining, "met": not under,
+                   "mode": small_mode, "kind": ("small" if under and small_mode != "block" else "standard"),
+                   "fee_bhd": money(vals.get("shop_small_order_fee_bhd")) if under and small_mode == "request" else 0.0}
+        if under:
+            gap_suggestions = gap_fillers(ctx, [ln["item_code"] for ln in good], remaining, referral_code,
+                                          limit=_i(vals.get("shop_gap_suggestions"), 6))
     if clamped:
         log.info("shop margin floor clamped: %s", ", ".join(clamped))
     for ln in lines:
@@ -1028,7 +1191,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         "total_bhd": total, "units": sum(ln["qty"] for ln in good), "items": len(good),
         "discounts": discounts, "coupon": coupon_out, "progress": progress,
         "warnings": warnings, "can_submit": can_submit, "min_order_bhd": min_order,
-        "block_reason": block_reason,
+        "block_reason": block_reason, "minimum": minimum, "gap_suggestions": gap_suggestions,
         "has_backorder": any(ln["backorder"] for ln in good),
         "_coupon_rule_id": coupon_rule["id"] if coupon_rule else None,
         "_clamped": clamped,
@@ -1060,6 +1223,29 @@ def _salesman_by(ctx: dict, sid) -> dict | None:
     if not sid:
         return None
     return next((s for s in ctx["salesmen"] if int(s["id"]) == _i(sid)), None)
+
+
+def recognize_phone(raw_phone: str | None, device_id: str | None) -> dict | None:
+    """A returning merchant on a new phone: the shop name, area and first name for a number we
+    already know — nothing else (no email, no history). The device joins the merchant's list so
+    the next visit is recognised without typing. None for an unknown number."""
+    digits = re.sub(r"\D", "", str(raw_phone or ""))
+    phone = ("973" + digits) if len(digits) == 8 else digits
+    if len(phone) < 8:
+        return None
+    cust = _customer_by_phone(phone)
+    if not cust:
+        return None
+    if device_id:
+        try:
+            devs = [d for d in (cust.get("device_ids") or []) if isinstance(d, str) and d != device_id]
+            get_client().table("shop_customers").update({"device_ids": ([device_id] + devs)[:10], "updated_at": _iso()}) \
+                .eq("id", cust["id"]).execute()
+        except Exception as e:  # noqa: BLE001
+            log.debug("recognize device update failed: %s", e)
+    first = (str(cust.get("name") or "").strip().split(" ") or [""])[0]
+    return {"shop": cust.get("shop") or None, "area": cust.get("area") or None, "first_name": first or None,
+            "orders_count": int(cust.get("orders_count") or 0)}
 
 
 def _customer_by_phone(phone: str | None) -> dict | None:
@@ -1309,6 +1495,8 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx)
     if not quote["can_submit"]:
         raise ShopError(quote["block_reason"] or " ".join(quote["warnings"]) or "Order cannot be submitted.")
+    minimum = quote.get("minimum") or {}
+    order_kind = "small" if minimum and not minimum.get("met") else "standard"
     prefix = str(vals.get("shop_order_prefix") or "YQ")
     try:
         order_no = client.rpc("shop_next_order_no", {"p_prefix": prefix}).execute().data
@@ -1320,6 +1508,8 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     token = secrets.token_urlsafe(24)
     row = {
         "order_no": str(order_no), "token": token, "status": "new",
+        "order_kind": order_kind,
+        "minimum_gap_bhd": money(minimum.get("remaining_bhd")) if order_kind == "small" else None,
         "customer_name": name, "customer_phone": phone,
         "customer_shop": clean(cust.get("shop"), 120) or None,
         "customer_area": clean(cust.get("area"), 120) or None,
@@ -1493,6 +1683,7 @@ def public_order_view(o: dict) -> dict:
         "total_confirmed_bhd": money(confirmed_total) if confirmed_total is not None else None,
         "has_changes": any((ln.get("line_status") or "ok") in ("changed", "removed") for ln in o.get("lines", [])),
         "has_backorder": bool(o.get("has_backorder")), "note": o.get("note"),
+        "order_kind": o.get("order_kind") or "standard", "minimum_gap_bhd": o.get("minimum_gap_bhd"),
         "timeline": [{"ts": e.get("ts"), "event": e.get("event"),
                       "note": (e.get("detail") or {}).get("note") if isinstance(e.get("detail"), dict) else None}
                      for e in o.get("events", [])],
@@ -1527,7 +1718,7 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         "id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
         "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
         "referral_code,coupon_code,placed_by,customer_id,attribution_source,attribution_conflict,"
-        "expected_delivery,total_confirmed_bhd", count="exact")
+        "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd", count="exact")
     wanted = [s.strip().lower() for s in str(status or "").split(",") if s.strip().lower() in STATUSES]
     if len(wanted) == 1:
         qry = qry.eq("status", wanted[0])
@@ -2150,6 +2341,140 @@ def upsert_rule(payload: dict, by: str = "", rule_id: int | None = None) -> dict
     out["status"] = _rule_status(out)
     out["impact"] = rule_impact(out)
     return out
+
+
+# ── campaigns (admin) ─────────────────────────────────────────────────────────
+
+def list_campaigns() -> list[dict]:
+    rows = (get_client().table("shop_campaigns").select("*").order("sort_order").order("id")
+            .execute().data or [])
+    now = _now()
+    for r in rows:
+        st, en = _parse_ts(r.get("starts_at")), _parse_ts(r.get("ends_at"))
+        r["status"] = ("paused" if not r.get("is_active") else "scheduled" if st and st > now
+                       else "ended" if en and en < now else "live")
+    return rows
+
+
+_CAMPAIGN_NULLABLE = ("title_ar", "line", "line_ar", "image_url", "cta_label", "cta_label_ar", "category",
+                      "rule_id", "sponsor_name", "starts_at", "ends_at")
+
+
+def validate_campaign(payload: dict, existing: dict | None = None) -> dict:
+    cur = dict(existing or {})
+    cur.update({k: v for k, v in payload.items() if v is not None or k in _CAMPAIGN_NULLABLE})
+    title = str(cur.get("title") or "").strip()
+    if len(title) < 3:
+        raise ShopError("Give the campaign a title (3+ characters).")
+    to = str(cur.get("cta_to") or "/shop").strip()
+    if not (to.startswith("/") or to.startswith("https://")):
+        raise ShopError("The link must be a marketplace path (/shop?f=clearance) or an https URL.")
+    placement = [str(x) for x in (cur.get("placement") or ["strip"]) if str(x) in CAMPAIGN_PLACEMENTS]
+    if not placement:
+        raise ShopError("Pick at least one placement.")
+    audience = cur.get("audience") or "all"
+    if audience not in CAMPAIGN_AUDIENCES:
+        raise ShopError("Audience must be all, recognized or new.")
+    st, en = _parse_ts(cur.get("starts_at")), _parse_ts(cur.get("ends_at"))
+    if st and en and en <= st:
+        raise ShopError("The end must be after the start.")
+    if cur.get("sponsored") and not str(cur.get("sponsor_name") or "").strip():
+        raise ShopError("A sponsored campaign needs the sponsor's name — it is shown to merchants.")
+    if "category" in placement and not str(cur.get("category") or "").strip():
+        raise ShopError("A category placement needs the category.")
+    row = {
+        "title": title[:80], "title_ar": (cur.get("title_ar") or None),
+        "line": (cur.get("line") or None), "line_ar": (cur.get("line_ar") or None),
+        "image_url": (cur.get("image_url") or None),
+        "cta_label": (cur.get("cta_label") or None), "cta_label_ar": (cur.get("cta_label_ar") or None),
+        "cta_to": to[:300], "placement": placement,
+        "category": (str(cur.get("category") or "").strip().upper() or None),
+        "audience": audience, "rule_id": cur.get("rule_id") or None,
+        "sponsored": bool(cur.get("sponsored")), "sponsor_name": (str(cur.get("sponsor_name") or "").strip() or None),
+        "starts_at": st.isoformat() if st else None, "ends_at": en.isoformat() if en else None,
+        "is_active": bool(cur.get("is_active", True)), "sort_order": int(cur.get("sort_order") or 100),
+    }
+    for k in ("title_ar", "line", "line_ar", "cta_label", "cta_label_ar"):
+        if row[k]:
+            row[k] = str(row[k]).strip()[:160] or None
+    return row
+
+
+def upsert_campaign(payload: dict, by: str = "", campaign_id: int | None = None) -> dict:
+    client = get_client()
+    existing = None
+    if campaign_id is not None:
+        got = client.table("shop_campaigns").select("*").eq("id", campaign_id).limit(1).execute().data
+        if not got:
+            raise ShopError("Campaign not found.")
+        existing = got[0]
+    row = validate_campaign(payload, existing)
+    row["updated_at"] = _iso()
+    if campaign_id is None:
+        row["created_by"] = by
+        out = client.table("shop_campaigns").insert(row).execute().data[0]
+    else:
+        out = client.table("shop_campaigns").update(row).eq("id", campaign_id).execute().data[0]
+    invalidate()
+    return out
+
+
+def delete_campaign(campaign_id: int) -> None:
+    get_client().table("shop_campaigns").delete().eq("id", campaign_id).execute()
+    invalidate()
+
+
+# ── restock requests ("tell me when back") ────────────────────────────────────
+
+def add_restock(item_code: str, phone: str | None, device_id: str | None, referral_code: str | None) -> bool:
+    ctx = context()
+    code = resolve_code(ctx, item_code)
+    if not code:
+        return False
+    row = {"item_code": code, "phone": (phone or "").strip()[:32] or None,
+           "device_id": (device_id or "").strip()[:64] or None,
+           "referral_code": (referral_code or "").strip().lower()[:32] or None}
+    try:
+        get_client().table("shop_restock_requests").insert(row).execute()
+    except Exception as e:  # noqa: BLE001 — the unique index makes a repeat a no-op
+        if "duplicate" not in str(e).lower() and "unique" not in str(e).lower():
+            log.warning("restock insert failed: %s", e)
+            return False
+    return True
+
+
+def list_restock(referral_code: str | None = None) -> list[dict]:
+    """Open requests, one row per product, newest first — with the live stock so the rep sees
+    which ones came back. Scoped to a rep's referral code when given."""
+    q = get_client().table("shop_restock_requests").select("*").is_("notified_at", "null")
+    if referral_code:
+        q = q.eq("referral_code", referral_code.lower())
+    rows = q.order("created_at", desc=True).limit(500).execute().data or []
+    ctx = context()
+    by: dict[str, dict] = {}
+    for r in rows:
+        g = by.setdefault(r["item_code"], {"item_code": r["item_code"], "count": 0, "phones": [], "first_at": r["created_at"], "ids": []})
+        g["count"] += 1
+        g["ids"].append(r["id"])
+        if r.get("phone") and r["phone"] not in g["phones"]:
+            g["phones"].append(r["phone"])
+        g["first_at"] = min(g["first_at"], r["created_at"])
+    out = []
+    for code, g in by.items():
+        it = ctx["items"].get(code) or {}
+        g["display_name"] = it.get("display_name") or code
+        g["stock_qty"] = it.get("stock_qty")
+        g["back_in_stock"] = bool((it.get("stock_qty") or 0) > 0)
+        out.append(g)
+    out.sort(key=lambda g: (not g["back_in_stock"], g["first_at"]))
+    return out
+
+
+def resolve_restock(ids: list[int]) -> int:
+    if not ids:
+        return 0
+    get_client().table("shop_restock_requests").update({"notified_at": _iso()}).in_("id", ids[:200]).execute()
+    return len(ids[:200])
 
 
 def delete_rule(rule_id: int) -> None:

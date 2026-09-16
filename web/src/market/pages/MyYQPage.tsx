@@ -1,8 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronRight, Download, Globe, Info, MessageCircle, Package, Phone, RotateCcw, Trash2, UserRound, Zap } from 'lucide-react'
+import { ChevronRight, Download, Globe, Heart, Info, MessageCircle, Package, Phone, RotateCcw, Trash2, UserRound, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { MarketCard } from '../components/MarketCard'
+import { Rail } from '../components/Rail'
 import { RepCard } from '../components/RepCard'
+import { useRecentOrders } from '../hooks/useRecentOrders'
+import { bestSellers, regularStock } from '../lib/home'
+import { useSaved } from '../store/saved'
 import { useMarket, useOrder } from '../MarketContext'
 import { readCustomer, rememberedOrders, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
@@ -24,6 +29,12 @@ declare const __BUILD_ID__: string
 export default function MyYQPage() {
   const navigate = useNavigate()
   const { rep, data, recognized } = useMarket()
+  const mkt = useMarket()
+  const recentOrders = useRecentOrders(mkt.recognized, 3)
+  const regulars = useMemo(() => regularStock(recentOrders, mkt.itemsByCode, new Set()), [recentOrders, mkt.itemsByCode])
+  const best = useMemo(() => bestSellers(mkt.items), [mkt.items])
+  const savedCodes = useSaved()
+  const savedItems = useMemo(() => savedCodes.map((c) => mkt.itemsByCode.get(c)).filter((x): x is NonNullable<typeof x> => Boolean(x)), [savedCodes, mkt.itemsByCode])
   const { myOrders } = useOrder()
   const toast = useToast()
   const [customer, setCustomer] = useState<CustomerDraft>(() => readCustomer())
@@ -100,6 +111,36 @@ export default function MyYQPage() {
                   {a.label}
                 </Link>
               ))}
+          </section>
+
+          {/* saved items */}
+          <section className="mt-4 overflow-hidden rounded-lg border border-line bg-surface">
+            <div className="flex items-center justify-between px-4 py-3">
+              <h2 className="flex items-center gap-2 font-display text-base font-bold text-ink">
+                <Heart size={16} className="text-plum" aria-hidden="true" /> {S.me.saved}
+              </h2>
+              {savedItems.length > 0 && (
+                <div className="flex items-center gap-3">
+                  <Link to="/shop?f=saved" className="text-sm font-semibold text-plum hover:underline">
+                    {S.home.seeAll}
+                  </Link>
+                  <Button size="sm" onClick={() => mkt.addMany(savedItems.filter((it) => it.stock_status !== 'out_of_stock').map((it) => ({ item: it, qty: mkt.defaultQty(it) })), 'saved')}>
+                    {S.me.addAllSaved(savedItems.length)}
+                  </Button>
+                </div>
+              )}
+            </div>
+            {savedItems.length === 0 ? (
+              <p className="border-t border-line-2 px-4 py-4 text-sm text-ink-2">{S.me.savedEmpty}</p>
+            ) : (
+              <ul className="divide-y divide-line-2 border-t border-line-2">
+                {savedItems.slice(0, 6).map((it) => (
+                  <li key={it.item_code} className="px-4">
+                    <MarketCard item={it} variant="list" from="saved" />
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           {/* orders */}
@@ -217,14 +258,21 @@ export default function MyYQPage() {
                 </span>
               </span>
             </div>
-            <details className="border-t border-line-2">
-              <summary className={cn(row, 'cursor-pointer list-none')}>
-                <Info size={18} className="text-plum" aria-hidden="true" />
-                <span className="flex-1">{S.me.about}</span>
+            {rep?.whatsapp_url && (
+              <a href={rep.whatsapp_url} target="_blank" rel="noreferrer" className={cn(row, 'border-t border-line-2')}>
+                <MessageCircle size={18} className="text-plum" aria-hidden="true" />
+                <span className="flex-1">
+                  {S.me.ask}
+                  <span className="block text-xs font-normal text-ink-2">{S.me.askHint}</span>
+                </span>
                 <ChevronRight size={18} className="text-ink-3" aria-hidden="true" />
-              </summary>
-              <p className="px-4 pb-4 text-sm leading-relaxed text-ink-2">{S.me.aboutText}</p>
-            </details>
+              </a>
+            )}
+            <Link to="/about" className={cn(row, 'border-t border-line-2')}>
+              <Info size={18} className="text-plum" aria-hidden="true" />
+              <span className="flex-1">{S.nav.about}</span>
+              <ChevronRight size={18} className="text-ink-3" aria-hidden="true" />
+            </Link>
             <div className={cn(row, 'border-t border-line-2 cursor-default hover:bg-transparent')}>
               <Phone size={18} className="text-plum" aria-hidden="true" />
               <span className="flex-1">{S.me.contact}</span>
@@ -247,6 +295,21 @@ export default function MyYQPage() {
             </button>
           </div>
         </div>
+      </div>
+      <div className="mt-6">
+        {regulars.length >= 3 ? (
+          <Rail id="me-regular" title={S.home.regular} seeAllTo="/quick?load=regular">
+            {regulars.map((r) => (
+              <MarketCard key={r.item.item_code} item={r.item} variant="compact" from="me" presetQty={r.qty} />
+            ))}
+          </Rail>
+        ) : best.length > 0 ? (
+          <Rail id="me-best" title={S.rails.best} seeAllTo="/shop?sort=popular">
+            {best.map((it) => (
+              <MarketCard key={it.item_code} item={it} variant="compact" from="me" />
+            ))}
+          </Rail>
+        ) : null}
       </div>
     </div>
   )

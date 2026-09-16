@@ -3,6 +3,8 @@ import { Link, useNavigate } from 'react-router-dom'
 import { ArrowRight, RotateCcw, ShoppingBag, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ProgressBar } from '../components/ProgressBar'
+import { MinimumBar } from '../components/MinimumBar'
+import { PopularRows } from '../components/Spotlight'
 import { useMarket, useOrder } from '../MarketContext'
 import { rememberedOrders } from '../lib/device'
 import { bhd, minQtyOf, money, stepOf, productName } from '../lib/format'
@@ -35,7 +37,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
   }
 
   return (
-    <section className={cn('flex flex-col overflow-hidden bg-surface', inDrawer ? 'h-full' : 'max-h-[calc(100dvh-var(--m-header-h)-32px)] rounded-xl border border-line shadow-1')} aria-label={S.cart.mini}>
+    <section className={cn('flex flex-col overflow-hidden bg-surface', inDrawer ? 'h-full' : 'max-h-[60dvh] shrink-0 rounded-xl border border-line shadow-1')} aria-label={S.cart.mini}>
       <header className="flex items-center gap-2 border-b border-line-2 px-4 py-3">
         <ShoppingBag size={18} className="text-plum" aria-hidden="true" />
         <h2 className="font-display text-md font-bold text-ink">{S.cart.mini}</h2>
@@ -57,7 +59,9 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
             )}
           </div>
         </div>
-      ) : (
+      ) : null}
+      {lines.length === 0 && !inDrawer ? <PopularRows limit={3} /> : null}
+      {lines.length === 0 ? null : (
         <>
           <ul className="min-h-0 flex-1 divide-y divide-line-2 overflow-y-auto overscroll-contain px-4">
             {lines.map((line) => {
@@ -89,6 +93,11 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
             })}
           </ul>
           <footer className="border-t border-line-2 px-4 pb-4 pt-3">
+            {quote?.minimum && (
+              <div className="mb-3">
+                <MinimumBar minimum={quote.minimum} suggestions={quote.gap_suggestions || []} compact />
+              </div>
+            )}
             {quote?.progress?.label && (
               <div className="mb-3">
                 <ProgressBar progress={quote.progress} compact />
@@ -102,7 +111,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
             </div>
             {quoting && <div className="mt-0.5 text-2xs text-ink-3">{S.cart.updating}</div>}
             <Button size="lg" full className="mt-3" disabled={quote?.can_submit === false} onClick={() => go('/checkout')} icon={<ArrowRight size={16} aria-hidden="true" />}>
-              {S.cart.place}
+              {quote?.minimum && !quote.minimum.met && quote.minimum.mode !== 'block' ? S.minimum.requestCta : S.cart.place}
             </Button>
             <Link to="/cart" onClick={closeCart} className="mt-2 block text-center text-sm font-semibold text-plum hover:underline">
               {S.cart.full}

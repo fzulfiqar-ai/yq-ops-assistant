@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, X, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes } from 'lucide-react'
+import { Plus, Pencil, Trash2, X, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes, Megaphone } from 'lucide-react'
+import { CampaignsSection } from '@/pages/shop-ops/CampaignsSection'
 import { apiGet, apiPost, apiPatch, apiDelete, ApiError } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
@@ -807,6 +808,7 @@ function UnpricedSection() {
 
 const SECTIONS = [
   { key: 'rules', label: 'Rules & coupons', icon: Tag },
+  { key: 'campaigns', label: 'Campaigns', icon: Megaphone },
   { key: 'margins', label: 'Margin health', icon: Percent },
   { key: 'unpriced', label: 'Unpriced stock', icon: Boxes },
 ] as const
@@ -817,7 +819,7 @@ export default function ShopRules() {
 
   return (
     <div>
-      <PageHeader title="Offers & Rules" subtitle="Discount rules, coupons and the live health of every margin behind the shop" />
+      <PageHeader title="Offers & Rules" subtitle="Discount rules, coupons, marketplace campaigns and the live health of every margin behind the shop" />
 
       <div className="mb-5 flex gap-1.5 overflow-x-auto pb-1">
         {SECTIONS.map((s) => (
@@ -835,6 +837,7 @@ export default function ShopRules() {
       </div>
 
       {tab === 'rules' && <RulesSection />}
+      {tab === 'campaigns' && <CampaignsSection />}
       {tab === 'margins' && <MarginsSection />}
       {tab === 'unpriced' && <UnpricedSection />}
     </div>

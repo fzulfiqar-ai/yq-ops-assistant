@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, Zap } from 'lucide-react'
 import { RepCard } from '../components/RepCard'
 import { EmptyState } from '../components/States'
 import { useMarket, useOrder } from '../MarketContext'
@@ -27,10 +27,19 @@ export default function MyOrdersPage() {
   return (
     <div className="px-gutter lg:px-0">
       <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{S.orders.title}</h1>
-      <div className="mx-auto max-w-2xl lg:mx-0 lg:mt-4">
+      <div className="mx-auto max-w-2xl lg:mx-0 lg:mt-4 lg:max-w-3xl">
         {rep && <RepCard rep={rep} compact className="mb-4" />}
         {rows.length === 0 ? (
-          <EmptyState title={S.orders.empty} hint={S.orders.emptyHint} action={<Button variant="secondary" onClick={() => navigate('/')}>{S.cart.browse}</Button>} />
+          <EmptyState title={S.orders.empty} hint={S.orders.emptyHint} action={
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button onClick={() => navigate('/quick')} icon={<Zap size={15} aria-hidden="true" />}>
+                  {S.nav.quick}
+                </Button>
+                <Button variant="secondary" onClick={() => navigate('/')}>
+                  {S.cart.browse}
+                </Button>
+              </div>
+            } />
         ) : (
           <>
             <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.orders.thisPhone}</h2>

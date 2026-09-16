@@ -406,6 +406,9 @@
 .anim-tick-down {
   animation: m-tick-down var(--m-d-1) var(--m-ease);
 }
+.anim-pop {
+  animation: m-pop var(--m-d-3, 320ms) var(--m-ease-spring, cubic-bezier(.22,1.18,.36,1)) both;
+}
 .anim-fade-in {
   animation: m-fade-in var(--m-d-2) var(--m-ease) both;
 }

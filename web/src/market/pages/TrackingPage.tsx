@@ -176,6 +176,7 @@ export default function TrackingPage() {
                       {S.track.placed} {fmtDateTime(data.created_at)}
                     </div>
                   )}
+                  {data.order_kind === 'small' && data.status === 'new' && <div className="mt-1.5 max-w-prose text-xs leading-snug text-plum-ink">{S.minimum.requested}</div>}
                 </div>
                 <Chip tone={data.cancelled ? 'bad' : data.status === 'delivered' ? 'ok' : 'plum'} size="md">
                   {data.status_label || data.status}

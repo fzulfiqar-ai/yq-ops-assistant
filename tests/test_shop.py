@@ -221,7 +221,7 @@ def _():
 @test("pricing: free-delivery threshold, delivery fee, minimum order")
 def _():
     from app.shop import price_cart
-    ctx = _ctx([_item("T02", 10.0)], shop_free_delivery_threshold_bhd="50", shop_delivery_fee_bhd="2", shop_min_order_bhd="15")
+    ctx = _ctx([_item("T02", 10.0)], shop_free_delivery_threshold_bhd="50", shop_delivery_fee_bhd="2", shop_min_order_bhd="15", shop_small_order_mode="block")
     q = price_cart([{"item_code": "T02", "qty": 1}], ctx=ctx)
     assert q["delivery_bhd"] == 2.0 and q["total_bhd"] == 12.0 and not q["can_submit"], q
     assert q["progress"]["kind"] == "free_delivery" and q["progress"]["remaining_bhd"] == 40.0
@@ -716,6 +716,105 @@ def main() -> int:
     print(f"\n{len(TESTS) - failed}/{len(TESTS)} passed")
     return 0 if failed == 0 else 2
 
+
+
+# ── campaigns + promises (marketplace v2.1) ───────────────────────────────────
+
+@test("campaigns: live window shown, future/past hidden, rule-linked inherits the real end")
+def _():
+    from datetime import datetime, timedelta, timezone
+    from app.shop import campaigns_payload
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    rule = _rule(7, "cart_value", ends_at=(now + timedelta(days=3)).isoformat(), min_value_bhd=30, pct_off=5)
+    ctx = {"rules": [rule], "campaigns": [
+        {"id": 1, "title": "Clearance week", "placement": ["strip", "aside"], "audience": "all", "cta_to": "/shop?f=clearance"},
+        {"id": 2, "title": "Future", "starts_at": (now + timedelta(days=1)).isoformat(), "placement": ["strip"]},
+        {"id": 3, "title": "Past", "ends_at": (now - timedelta(days=1)).isoformat(), "placement": ["strip"]},
+        {"id": 4, "title": "With rule", "rule_id": 7, "placement": ["hero"], "sponsored": True, "sponsor_name": "VFAN"},
+        {"id": 5, "title": "Dead rule", "rule_id": 99, "placement": ["strip"]},
+        {"id": 6, "title": "Bad placement", "placement": ["banner"], "audience": "vip"},
+    ]}
+    out = campaigns_payload(ctx, now)
+    ids = [c["id"] for c in out]
+    assert ids == [1, 4, 6], ids
+    by = {c["id"]: c for c in out}
+    assert by[4]["ends_at"] == rule["ends_at"] and by[4]["sponsor_name"] == "VFAN"
+    assert by[6]["placement"] == ["strip"] and by[6]["audience"] == "all"
+    assert by[1]["sponsor_name"] is None
+
+
+@test("promises: defaults are the three proven claims; a threshold rewrites the delivery line")
+def _():
+    from app.shop import SETTING_DEFAULTS, promises_payload
+    vals = dict(SETTING_DEFAULTS)
+    p = promises_payload(vals)
+    assert [x["key"] for x in p] == ["delivery", "minimum", "stock"], p
+    assert p[0]["en"] == "Free delivery across Bahrain" and p[0]["ar"]
+    vals["shop_free_delivery_threshold_bhd"] = "25"
+    p2 = promises_payload(vals)
+    assert p2[0]["en"] == "Free delivery over BHD 25.000", p2[0]
+    vals["shop_market_promises"] = "not json"
+    assert promises_payload(vals) == []
+
+
+@test("campaigns: validation catches the mistakes an admin would make")
+def _():
+    from app.shop import ShopError, validate_campaign
+    def bad(payload, why):
+        try:
+            validate_campaign(payload)
+        except ShopError as e:
+            assert why in str(e).lower(), (why, str(e))
+        else:
+            raise AssertionError(f"expected error {why!r} for {payload}")
+    bad({"title": "ab"}, "title")
+    bad({"title": "Sale", "cta_to": "javascript:alert(1)"}, "link")
+    bad({"title": "Sale", "placement": ["banner"]}, "placement")
+    bad({"title": "Sale", "audience": "vip"}, "audience")
+    bad({"title": "Sale", "starts_at": "2026-09-20T00:00:00+00:00", "ends_at": "2026-09-10T00:00:00+00:00"}, "end")
+    bad({"title": "Sale", "sponsored": True}, "sponsor")
+    bad({"title": "Sale", "placement": ["category"]}, "category")
+    row = validate_campaign({"title": " Back to school ", "placement": ["strip", "hero"], "category": "cable", "cta_to": "/shop?f=new", "sponsored": False})
+    assert row["title"] == "Back to school" and row["category"] == "CABLE" and row["placement"] == ["strip", "hero"]
+    assert row["is_active"] is True and row["sort_order"] == 100
+
+
+# ── wholesale order engine ────────────────────────────────────────────────────
+
+@test("wholesale: under the minimum in request mode the quote is submittable, flagged small, with gap fillers")
+def _():
+    from app.shop import price_cart
+    items = [_item("A", 1.0, stock=50, cat="CABLE"), _item("B", 2.5, stock=50, cat="CABLE", sold_90d=500),
+             _item("C", 10.0, stock=0, cat="CHARGER"), _item("D", 4.0, stock=20, cat="CHARGER", sold_90d=900)]
+    ctx = _ctx(items, shop_min_order_bhd="20", shop_small_order_mode="request", shop_small_order_fee_bhd="1.5")
+    ctx["pairs"] = {"A": ["B"]}
+    q = price_cart([{"item_code": "A", "qty": 5}], ctx=ctx)
+    assert q["can_submit"] is True and q["block_reason"] is None, q["block_reason"]
+    m = q["minimum"]
+    assert m and m["met"] is False and abs(m["remaining_bhd"] - 15.0) < 1e-6 and m["kind"] == "small" and m["fee_bhd"] == 1.5
+    codes = [g["item_code"] for g in q["gap_suggestions"]]
+    assert codes and codes[0] == "B", codes                       # the pair comes first
+    assert "C" not in codes and "A" not in codes                   # never out of stock, never a cart line
+    for g in q["gap_suggestions"]:
+        assert g["value_bhd"] >= 0 and g["qty"] >= 1
+    assert q["gap_suggestions"][0]["closes_gap"] is True
+
+
+@test("wholesale: block mode keeps the refusal; allow mode is silent; met minimum is standard")
+def _():
+    from app.shop import price_cart
+    items = [_item("A", 1.0, stock=50)]
+    ctx = _ctx(items, shop_min_order_bhd="20", shop_small_order_mode="block")
+    q = price_cart([{"item_code": "A", "qty": 5}], ctx=ctx)
+    assert q["can_submit"] is False and "Minimum order" in q["block_reason"]
+    ctx = _ctx(items, shop_min_order_bhd="20", shop_small_order_mode="allow")
+    q = price_cart([{"item_code": "A", "qty": 5}], ctx=ctx)
+    assert q["can_submit"] is True and q["minimum"]["kind"] == "small" and q["minimum"]["fee_bhd"] == 0.0
+    q = price_cart([{"item_code": "A", "qty": 25}], ctx=ctx)
+    assert q["minimum"]["met"] is True and q["minimum"]["kind"] == "standard" and q["gap_suggestions"] == []
+    ctx = _ctx(items)   # no minimum configured → no engine
+    q = price_cart([{"item_code": "A", "qty": 1}], ctx=ctx)
+    assert q["minimum"] is None and q["gap_suggestions"] == []
 
 if __name__ == "__main__":
     sys.exit(main())

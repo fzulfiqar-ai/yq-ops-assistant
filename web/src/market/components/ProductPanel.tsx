@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, MessageCircle, Plus, Share2 } from 'lucide-react'
+import { Check, Heart, Maximize2, MessageCircle, Plus, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
-import { rememberViewed } from '../lib/device'
+import { deviceId, readCustomer, rememberViewed } from '../lib/device'
 import { track } from '../lib/events'
+import { postRestock } from '../lib/marketApi'
 import { badgeMeta, bhd, cardBadges, isOut, minQtyOf, money, niceCategory, stepOf, stockMeta, priceAnchor, productDetail, productName } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
+import { savedStore, useIsSaved } from '../store/saved'
+import { Lightbox } from './Lightbox'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
@@ -32,6 +35,9 @@ export default function ProductPanel({ code }: { code: string }) {
   const [view, setView] = useState<'product' | 'package'>('product')
   const [added, setAdded] = useState(false)
   const [keypad, setKeypad] = useState(false)
+  const [asked, setAsked] = useState(false)
+  const [zoom, setZoom] = useState(false)
+  const saved = useIsSaved(code)
   // a new product always opens on its product shot
   const [codeSeen, setCodeSeen] = useState(code)
   if (codeSeen !== code) {
@@ -107,10 +113,25 @@ export default function ProductPanel({ code }: { code: string }) {
         <Button variant="secondary" size="lg" onClick={() => window.open(tellUrl, '_blank', 'noreferrer')} icon={<MessageCircle size={16} aria-hidden="true" />}>
           {S.card.tellRep(m.rep?.first_name || 'us')}
         </Button>
+      ) : !canOrder ? (
+        <Button
+          size="lg"
+          variant="secondary"
+          className="min-w-[9rem]"
+          disabled={asked}
+          icon={asked ? <Check size={16} aria-hidden="true" /> : <MessageCircle size={16} aria-hidden="true" />}
+          onClick={() => {
+            setAsked(true)
+            toast(S.card.tellBackDone, 'success')
+            postRestock({ item_code: item.item_code, phone: readCustomer().phone || null, device_id: deviceId(), referral_code: m.ref || null }).catch(() => undefined)
+          }}
+        >
+          {asked ? S.card.tellBackDone : S.card.tellBack}
+        </Button>
       ) : (
-        <Button size="lg" variant={out ? 'secondary' : 'primary'} className="min-w-[9rem]" onClick={add} disabled={!canOrder} icon={<Plus size={17} aria-hidden="true" />}>
-          {canOrder ? (out ? S.card.backorder : S.card.add) : S.card.soldOut}
-          {canOrder && !out && m.defaultQty(item) > 1 && <span className="tnum opacity-80">· {m.defaultQty(item)}</span>}
+        <Button size="lg" variant={out ? 'secondary' : 'primary'} className="min-w-[9rem]" onClick={add} icon={<Plus size={17} aria-hidden="true" />}>
+          {out ? S.card.backorder : S.card.add}
+          {!out && m.defaultQty(item) > 1 && <span className="tnum opacity-80">· {m.defaultQty(item)}</span>}
         </Button>
       )}
     </div>
@@ -134,6 +155,20 @@ export default function ProductPanel({ code }: { code: string }) {
               iconSize={48}
               vtName={phone ? 'product-photo' : undefined}
             />
+            <button type="button" onClick={() => setZoom(true)} aria-label={S.card.zoom} className="absolute end-3 bottom-3 grid h-10 w-10 place-items-center rounded-full border border-line bg-surface/95 text-ink-2 shadow-1 hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+              <Maximize2 size={16} aria-hidden="true" />
+            </button>
+            {zoom && (
+              <Lightbox
+                alt={name}
+                start={view === 'package' ? 1 : 0}
+                onClose={() => setZoom(false)}
+                photos={[
+                  { src: item.product_image_url || item.thumb_urls?.['512'] || item.thumb_url || '', label: 'Product' },
+                  ...(item.package_image_url ? [{ src: item.package_image_url, label: 'Package' }] : []),
+                ].filter((x) => x.src)}
+              />
+            )}
             <div className="absolute start-3 top-3 flex flex-wrap gap-1.5">
               {cardBadges(item, 2).map((b) => (
                 <Chip key={b} tone={badgeMeta(b).tone}>
@@ -232,9 +267,14 @@ export default function ProductPanel({ code }: { code: string }) {
             </div>
           )}
 
-          <Button variant="secondary" className="mt-5" onClick={share} icon={<Share2 size={15} aria-hidden="true" />}>
-            Share this product
-          </Button>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => savedStore.toggle(item.item_code)} aria-pressed={saved} icon={<Heart size={15} aria-hidden="true" className={cn(saved && 'fill-current text-plum')} />}>
+              {saved ? S.card.savedItem : S.card.saveItem}
+            </Button>
+            <Button variant="secondary" onClick={share} icon={<Share2 size={15} aria-hidden="true" />}>
+              {S.card.shareProduct}
+            </Button>
+          </div>
 
           {pairs.length > 0 && (
             <section className="mt-6 border-t border-line-2 pt-5">

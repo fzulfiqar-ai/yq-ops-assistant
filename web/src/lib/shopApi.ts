@@ -22,6 +22,7 @@ export const API_BASE = (import.meta.env.VITE_API_URL as string) || ''
 export type StockStatus = 'in_stock' | 'low_stock' | 'out_of_stock'
 export type BadgeKind = 'best_seller' | 'trending' | 'new' | 'on_offer' | 'price_drop' | 'selling_fast' | 'clearance'
 export type ShopEventKind =
+  | 'error'
   | 'view'
   | 'item'
   | 'add'
@@ -112,8 +113,39 @@ export interface Offer {
   scope_codes?: string[] | null
 }
 
+/** Marketplace v2.1: a promotion the office scheduled (see app/shop.py campaigns_payload). */
+export interface Campaign {
+  id: number
+  title: string
+  title_ar?: string | null
+  line?: string | null
+  line_ar?: string | null
+  image_url?: string | null
+  cta_label?: string | null
+  cta_label_ar?: string | null
+  cta_to: string
+  placement: ('hero' | 'strip' | 'aside' | 'category')[]
+  category?: string | null
+  audience: 'all' | 'recognized' | 'new'
+  rule_id?: number | null
+  sponsored: boolean
+  sponsor_name?: string | null
+  ends_at?: string | null
+}
+
+/** Marketplace v2.1: one line of the promise bar (only claims the data can back). */
+export interface MarketPromise {
+  key: string
+  en: string
+  ar?: string | null
+  icon?: string | null
+  to?: string | null
+}
+
 export interface ShopSettings {
   currency?: string | null
+  /** Marketplace v2.1: the promise bar, edited by the office. */
+  promises?: MarketPromise[] | null
   min_order_bhd?: number | null
   free_delivery_threshold_bhd?: number | null
   allow_backorder?: boolean | null
@@ -152,6 +184,8 @@ export interface CatalogPayload {
   items?: ShopItem[] | null
   salesmen?: Salesman[] | null
   offers?: Offer[] | null
+  /** Marketplace v2.1: live campaigns (window already applied server-side). */
+  campaigns?: Campaign[] | null
   settings?: ShopSettings | null
   ref?: ShopRef | null
   pairs?: ItemPair[] | null
@@ -207,6 +241,25 @@ export interface QuoteCoupon {
   message?: string | null
 }
 
+/** Wholesale minimum (marketplace v2.1): how far to go and what the order is if sent now. */
+export interface QuoteMinimum {
+  value_bhd: number
+  remaining_bhd: number
+  met: boolean
+  mode: 'request' | 'allow' | 'block'
+  kind: 'standard' | 'small'
+  fee_bhd?: number | null
+}
+export interface GapSuggestion {
+  item_code: string
+  display_name?: string | null
+  qty: number
+  unit_price_bhd: number
+  value_bhd: number
+  closes_gap: boolean
+  why: 'pairs' | 'popular' | 'in_stock'
+}
+
 export interface QuoteProgress {
   kind?: string | null
   threshold_bhd?: number | null
@@ -227,6 +280,8 @@ export interface Quote {
   discounts?: QuoteDiscount[] | null
   coupon?: QuoteCoupon | null
   progress?: QuoteProgress | null
+  minimum?: QuoteMinimum | null
+  gap_suggestions?: GapSuggestion[] | null
   warnings?: string[] | null
   can_submit?: boolean | null
   min_order_bhd?: number | null
@@ -318,6 +373,8 @@ export interface OrderStep {
 }
 
 export interface OrderStatusPayload {
+  /** wholesale (v2.1): 'small' when the order was sent under the minimum for the rep to confirm */
+  order_kind?: 'standard' | 'small' | null
   order_no: string
   status?: OrderState | string | null
   status_label?: string | null

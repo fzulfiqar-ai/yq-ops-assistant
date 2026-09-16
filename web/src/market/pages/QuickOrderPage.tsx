@@ -11,6 +11,7 @@ import { bhd, fmtDateShort, minQtyOf, money, normalizeQty, stepOf, unitAt, produ
 import { orderLines, regularStock } from '../lib/home'
 import { parseList, resolveQuery } from '../lib/quickParse'
 import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
+import { Spotlight } from '../components/Spotlight'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Input, Label, Textarea } from '../ui/Field'
@@ -305,7 +306,10 @@ export default function QuickOrderPage() {
           </Button>
           <div className="mt-4 lg:hidden">{summary}</div>
         </div>
-        <div className="hidden lg:sticky lg:top-[calc(var(--m-header-h)+16px)] lg:block">{summary}</div>
+        <div className="hidden lg:sticky lg:top-[calc(var(--m-header-h)+16px)] lg:block">
+          {summary}
+          <Spotlight className="mt-4" />
+        </div>
       </div>
 
       {!desktop && resolved.length > 0 && (

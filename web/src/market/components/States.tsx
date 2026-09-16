@@ -85,10 +85,11 @@ export function Footer({ prices, stock }: { prices?: string | null; stock?: stri
       <div className="mt-0.5">
         {[prices ? S.states.pricesAsOf(prices) : null, stock ? S.states.stockAsOf(stock) : null].filter(Boolean).join(' · ')}
       </div>
-      <div className="mt-2">
-        <Link to="/me" className="font-semibold text-plum hover:underline">
-          {S.nav.me}
-        </Link>
+      <div className="mt-2 flex flex-wrap justify-center gap-x-4 gap-y-1">
+        <Link to="/about" className="font-semibold text-plum hover:underline">{S.nav.about}</Link>
+        <Link to="/about#delivery" className="font-semibold text-plum hover:underline">{S.about.delivery}</Link>
+        <Link to="/about#privacy" className="font-semibold text-plum hover:underline">{S.about.privacy}</Link>
+        <Link to="/me" className="font-semibold text-plum hover:underline">{S.nav.me}</Link>
       </div>
     </footer>
   )

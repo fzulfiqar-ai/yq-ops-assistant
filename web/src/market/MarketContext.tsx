@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ShopApiError, type CatalogPayload, type MyOrderSummary, type Quote, type RepCard, type ShopItem, type ShopSettings } from '@/lib/shopApi'
+import { ShopApiError, type Campaign, type CatalogPayload, type MyOrderSummary, type Quote, type RepCard, type ShopItem, type ShopSettings } from '@/lib/shopApi'
 import { useQuote, type QuoteFetcher } from '@/pages/shop/useQuote'
 import { currentRef, forgetRef, isRecognized, lastQty, readNote, rememberQty, rememberedOrders, writeNote } from './lib/device'
 import { track } from './lib/events'
@@ -31,6 +31,8 @@ export interface MarketValue {
   itemsByCode: Map<string, ShopItem>
   categories: string[]
   settings: ShopSettings
+  /** live campaigns for this visitor (audience filter applied) */
+  campaigns: Campaign[]
   allowBackorder: boolean
   showCompare: boolean
   publicTiers: boolean
@@ -253,6 +255,10 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
   }, [refreshMyOrders])
 
   const recognized = isRecognized()
+  const campaigns = useMemo<Campaign[]>(
+    () => (data?.campaigns || []).filter((c) => c.audience === 'all' || (c.audience === 'recognized') === recognized),
+    [data, recognized],
+  )
 
   const market = useMemo<MarketValue>(
     () => ({
@@ -262,6 +268,7 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       itemsByCode,
       categories,
       settings,
+      campaigns,
       allowBackorder: settings.allow_backorder !== false,
       showCompare: settings.show_retail_compare !== false,
       publicTiers: settings.public_tiers !== false,
@@ -279,7 +286,7 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       pairsFor,
       reload,
     }),
-    [data, status, items, itemsByCode, categories, settings, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
+    [data, status, items, itemsByCode, categories, settings, campaigns, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
   )
 
   const order = useMemo<OrderValue>(

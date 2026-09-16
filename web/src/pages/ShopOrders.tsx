@@ -39,6 +39,8 @@ interface ShopOrderRow {
   items_count?: number | null
   units_count?: number | null
   has_backorder?: boolean
+  order_kind?: 'standard' | 'small' | null
+  minimum_gap_bhd?: number | null
   created_at?: string | null
   source?: string | null
   referral_code?: string | null
@@ -590,7 +592,7 @@ function DeskOrders({
       ) },
     { key: 'items_count', label: 'Items / Units', align: 'right', render: (_, r) => `${num(r.items_count)} / ${num(r.units_count)}` },
     { key: 'total_bhd', label: 'Total', align: 'right', render: (_, r) => bhd(r.total_bhd, 3) },
-    { key: 'status', label: 'Status', render: (_, r) => <StatusPill status={r.status} /> },
+    { key: 'status', label: 'Status', render: (_, r) => <span className="inline-flex items-center gap-1.5"><StatusPill status={r.status} />{r.order_kind === 'small' && <Badge tone="accent">Small</Badge>}</span> },
     { key: 'has_backorder', label: 'Backorder', render: (_, r) => (
         r.has_backorder
           ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600"><PackageX size={12} /> Backorder</span>
@@ -681,6 +683,7 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
         <StatusPill status={row.status} />
         {row.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
         {row.has_backorder && <Badge tone="amber">Backorder</Badge>}
+        {row.order_kind === 'small' && <Badge tone="accent">Small order</Badge>}
         <span className={cn('ml-auto shrink-0 text-[11px]', MUTED)}>
           {row.order_no}{age ? ` · ${age}` : ''}
         </span>

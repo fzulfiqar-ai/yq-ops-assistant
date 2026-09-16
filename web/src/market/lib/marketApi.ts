@@ -91,3 +91,13 @@ export function pingMarketEvent(body: EventPing): void {
     /* best effort only */
   }
 }
+
+/** "Tell me when back": a sold-out product the merchant wants; the rep sees the list. */
+export function postRestock(body: { item_code: string; phone?: string | null; device_id?: string; referral_code?: string | null }): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>('/public/market/restock', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) })
+}
+
+/** A returning merchant on a new phone: shop, area and first name for a known number. */
+export function recognizePhone(phone: string, deviceId: string): Promise<{ known: { shop?: string | null; area?: string | null; first_name?: string | null; orders_count?: number } | null }> {
+  return request('/public/market/recognize', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ phone, device_id: deviceId }) })
+}

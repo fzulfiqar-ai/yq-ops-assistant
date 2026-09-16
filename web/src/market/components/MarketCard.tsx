@@ -1,12 +1,15 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { Check, Eye, MessageCircle, Plus } from 'lucide-react'
+import { Check, Eye, Heart, MessageCircle, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
+import { deviceId, readCustomer } from '../lib/device'
 import { track } from '../lib/events'
+import { postRestock } from '../lib/marketApi'
 import { badgeMeta, bhd, cardBadges, isOut, minQtyOf, money, nextTier, stepOf, stockMeta, unitAt, priceAnchor, productDetail, productName } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
+import { savedStore, useIsSaved } from '../store/saved'
 import { S } from '../strings'
 import { Chip } from '../ui/Chip'
 import { ProductImage, SIZES_GRID, SIZES_RAIL, SIZES_THUMB } from '../ui/ProductImage'
@@ -50,8 +53,10 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const { openProduct, viewport } = useShell()
   const toast = useToast()
   const qty = useCartQty(item.item_code)
+  const saved = useIsSaved(item.item_code)
   const [added, setAdded] = useState(false)
   const [keypad, setKeypad] = useState(false)
+  const [asked, setAsked] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   const imgWrap = useRef<HTMLDivElement>(null)
   useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -75,6 +80,11 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const tellRep = out && !m.allowBackorder && m.rep?.whatsapp_url
   const tellUrl = tellRep ? `${m.rep!.whatsapp_url!.split('?text=')[0]}?text=${encodeURIComponent(`Hello ${m.rep!.first_name || ''}, please tell me when ${item.item_code} (${name}) is back in stock.`)}` : null
   const spec = productDetail(item)
+  const askBack = () => {
+    setAsked(true)
+    toast(S.card.tellBackDone, 'success')
+    postRestock({ item_code: item.item_code, phone: readCustomer().phone || null, device_id: deviceId(), referral_code: m.ref || null }).catch(() => undefined)
+  }
 
   const open = useCallback(() => {
     if (from) track('rail_click', { item_code: item.item_code, meta: { rail: from } })
@@ -132,13 +142,13 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     return (
       <button
         type="button"
-        onClick={add}
-        disabled={!canOrder}
-        aria-label={canOrder ? `${out ? S.card.backorder : S.card.add}${!out && defaultQty > 1 ? ` · ${defaultQty}` : ''} — ${name}` : `${S.card.soldOut} — ${name}`}
+        onClick={canOrder ? add : askBack}
+        disabled={!canOrder && asked}
+        aria-label={canOrder ? `${out ? S.card.backorder : S.card.add}${!out && defaultQty > 1 ? ` · ${defaultQty}` : ''} — ${name}` : `${asked ? S.card.tellBackDone : S.card.tellBack} — ${name}`}
         className={cn(
           'flex w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
           size === 'sm' ? 'h-10' : 'h-11',
-          canOrder ? (out ? 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash' : 'bg-plum text-white shadow-1 hover:bg-plum-deep') : 'cursor-not-allowed border border-bad/20 bg-bad-soft text-bad',
+          canOrder ? (out ? 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash' : 'bg-plum text-white shadow-1 hover:bg-plum-deep') : asked ? 'cursor-default border border-ok/30 bg-ok-soft text-ok' : 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash',
         )}
       >
         {canOrder ? (
@@ -146,8 +156,14 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
             <Plus size={15} aria-hidden="true" /> {out ? S.card.backorder : S.card.add}
             {!out && defaultQty > 1 && <span className="tnum opacity-80">· {defaultQty}</span>}
           </>
+        ) : asked ? (
+          <>
+            <Check size={15} aria-hidden="true" /> {S.card.tellBackDone}
+          </>
         ) : (
-          S.card.soldOut
+          <>
+            <MessageCircle size={15} aria-hidden="true" /> {S.card.tellBack}
+          </>
         )}
       </button>
     )
@@ -196,6 +212,15 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
       )}
     >
       <div className="relative">
+      <button
+        type="button"
+        onClick={() => savedStore.toggle(item.item_code)}
+        aria-pressed={saved}
+        aria-label={`${saved ? S.card.savedItem : S.card.saveItem} — ${name}`}
+        className={cn('absolute end-2 top-2 z-[1] grid h-9 w-9 place-items-center rounded-full border bg-surface/95 shadow-1 transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', saved ? 'border-plum/40 text-plum' : 'border-line text-ink-3 hover:text-plum')}
+      >
+        <Heart size={compact ? 15 : 16} aria-hidden="true" className={cn(saved && 'fill-current')} />
+      </button>
       <button type="button" onClick={open} className="block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
         <div ref={imgWrap}>
           <ProductImage
