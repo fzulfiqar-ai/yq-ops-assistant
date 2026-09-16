@@ -40,6 +40,12 @@ requires the auth dependency (`app/auth.py`). Generated SQL is read-only, SELECT
 restricted to the curated view allowlist, with a forced `LIMIT`. Every ask / action / alert is
 recorded in `audit_log`.
 
+**The `public` schema is closed to the publishable key (16-Sep-2026).** `anon`/`authenticated`
+hold no grants on any table, view, sequence or function except SELECT on the empty
+`keepalive_ping`. Supabase auto-grants new objects to those roles by default and views bypass
+RLS, so after any migration run `python -m scripts.audit_grants` (exit 0 = clean). Never set
+`security_invoker` on views (it would break the `yq_readonly` RPC path). See docs/MIGRATIONS.md.
+
 ## How to build
 Build in **phases**. Do one phase, then **STOP** and tell the user exactly how to test it.
 - Phase 0: security spine + ingestion (this).  • Phase 0.5: semantic views + guardrails + eval.

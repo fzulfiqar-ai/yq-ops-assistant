@@ -76,10 +76,11 @@ jobs:
             echo "::error::Supabase is NOT being kept alive and will pause after ~7 idle days."
             exit 1
           fi
-          # A real PostgREST read: this reaches Postgres and runs a query under the `anon`
-          # role, which is what Supabase counts as activity. An RLS policy that denies anon
-          # still returns HTTP 200 with an empty array — the query ran, which is the point.
-          # Response body is discarded rather than logged; it can contain real user rows.
+          # A real PostgREST read: this reaches Postgres and runs a query under the anon
+          # role, which is what Supabase counts as activity. keepalive_ping is an empty table
+          # created by scripts/hotfix_view_grants_migration.sql: it is the ONLY object in the
+          # public schema the publishable key may read (RLS on, no policy -> HTTP 200 + []).
+          # Every other table and view was revoked from anon/authenticated on 16-Sep-2026.
           # curl -w already PRINTS 000 itself on a connection failure, so `|| echo 000`
           # on top of it concatenates to "000000", which silently falls through to the
           # generic branch and loses the paused-project message — the one that says what
@@ -87,7 +88,7 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
             -H "apikey: ${SUPABASE_ANON_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
-            "${SUPABASE_URL}/rest/v1/user_roles?select=email&limit=1")
+            "${SUPABASE_URL}/rest/v1/keepalive_ping?select=id&limit=1")
           code=${code:-000}
           echo "supabase rest -> HTTP $code"
           case "$code" in
@@ -98,7 +99,7 @@ jobs:
                      exit 1 ;;
             401|403) echo "::error::Supabase rejected the anon key (HTTP $code) — rotate the SUPABASE_ANON_KEY secret."
                      exit 1 ;;
-            404)     echo "::error::Table not found (HTTP 404) — the keepalive query needs a table that exists."
+            404)     echo "::error::Table not found (HTTP 404) — apply scripts/hotfix_view_grants_migration.sql (creates keepalive_ping)."
                      exit 1 ;;
             *)       echo "::error::Unexpected response from Supabase (HTTP $code)."
                      exit 1 ;;
