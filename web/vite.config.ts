@@ -36,15 +36,71 @@ function marketHtml(): Plugin {
   }
 }
 
+/** `/version.json` — what the running app compares itself against (market/lib/sw.ts). Emitted at
+ *  build time so it always names the deployment that is live; VITE_SW_KILL=1 makes every client
+ *  unregister its worker and clear its caches on the next check. */
+function versionJson(buildId: string, kill: boolean): Plugin {
+  return {
+    name: 'yq-version-json',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ build: buildId, kill, at: new Date().toISOString() }) })
+    },
+  }
+}
+
+function marketPwa(apiUrl: string) {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const api = esc((apiUrl || 'https://yq-ops-assistant.onrender.com').replace(/\/$/, ''))
+  return VitePWA({
+    // Registered by market/lib/sw.ts (prompt flow + kill-switch), not by an injected snippet.
+    injectRegister: false,
+    registerType: 'prompt',
+    filename: 'sw.js',
+    // public/market.webmanifest is linked by marketHtml(); the plugin must not add a second one.
+    manifest: false,
+    includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'yq-icon-32.png', 'yq-icon-512.png', 'market.webmanifest'],
+    workbox: {
+      globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,woff2}'],
+      // never let the worker answer the version file or any API path from cache
+      globIgnores: ['version.json'],
+      navigateFallback: '/index.html',
+      navigateFallbackDenylist: [/^\/public\//, /^\/api\//, /\/version\.json$/],
+      cleanupOutdatedCaches: true,
+      clientsClaim: false,
+      skipWaiting: false,
+      runtimeCaching: [
+        {
+          // the catalog only (not quote/order/event): serve stale for a day if the API is asleep
+          urlPattern: new RegExp(`^${api}/public/market(\\?.*)?$`),
+          handler: 'NetworkFirst',
+          options: { cacheName: 'yq-market-catalog', networkTimeoutSeconds: 4, expiration: { maxEntries: 8, maxAgeSeconds: 86400 } },
+        },
+        {
+          urlPattern: /^https:\/\/[a-z0-9]+\.supabase\.co\/storage\/v1\/object\/public\//,
+          handler: 'CacheFirst',
+          options: { cacheName: 'yq-market-images', expiration: { maxEntries: 300, maxAgeSeconds: 30 * 86400 } },
+        },
+        {
+          urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
+          handler: 'StaleWhileRevalidate',
+          options: { cacheName: 'yq-fonts', expiration: { maxEntries: 20, maxAgeSeconds: 365 * 86400 } },
+        },
+      ],
+    },
+  })
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env }
   const isMarket = env.VITE_APP === 'market'
+  const buildId = env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) || env.GITHUB_SHA?.slice(0, 12) || `local-${Date.now().toString(36)}`
   return {
+    define: { __BUILD_ID__: JSON.stringify(buildId) },
     plugins: [
       react(),
       ...(isMarket
-        ? [marketHtml()]
+        ? [marketHtml(), marketPwa(env.VITE_API_URL || ''), versionJson(buildId, env.VITE_SW_KILL === '1')]
         : [
             VitePWA({
               // SELF-DESTRUCT. The API host changed (Railway -> Render) and the API URL is

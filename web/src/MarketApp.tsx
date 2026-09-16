@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams } 
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ToastProvider } from '@/components/Toast'
 import { MarketProvider } from '@/market/MarketContext'
+import { UpdateToast } from '@/market/components/UpdateToast'
 import { isSlugShaped, rememberRef } from '@/market/lib/device'
 import { setSource } from '@/market/lib/events'
 import { watchInstallPrompt } from '@/market/lib/install'
@@ -57,6 +58,7 @@ export default function MarketApp() {
           <BrowserRouter>
             <MarketProvider initialRef={firstPathSlug()}>
               <EntryParams />
+              <UpdateToast />
               <Suspense fallback={null}>
                 <Routes>
                   <Route path="/" element={<Home />} />
