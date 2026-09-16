@@ -58,6 +58,7 @@ export const BADGE_META: Record<BadgeKind, { label: string; tone: BadgeTone }> =
   new: { label: 'New', tone: 'ink' },
   on_offer: { label: 'On offer', tone: 'green' },
   price_drop: { label: 'Price drop', tone: 'rose' },
+  selling_fast: { label: 'Selling fast', tone: 'amber' },
 }
 
 export function badgeMeta(kind: string) {

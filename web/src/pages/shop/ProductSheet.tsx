@@ -19,6 +19,10 @@ export interface ProductSheetProps {
   pairs: ShopItem[]
   /** Salesman mode has no public link to hand out — the sheet drops the share button. */
   canShare?: boolean
+  /** Marketplace: share this URL instead of the token link (e.g. https://…/p/CODE). */
+  shareUrl?: string
+  /** Marketplace: called after a successful share (analytics). */
+  onShared?: () => void
   onAdd: (item: ShopItem) => void
   onSetQty: (item: ShopItem, qty: number) => void
   onRemove: (item: ShopItem) => void
@@ -35,6 +39,8 @@ export function ProductSheet({
   qty,
   pairs,
   canShare = true,
+  shareUrl: shareUrlOverride,
+  onShared,
   onAdd,
   onSetQty,
   onRemove,
@@ -65,23 +71,27 @@ export function ProductSheet({
   const savePct =
     compare != null ? Number(item.save_pct) || Math.round(((compare - Number(item.price_bhd)) / compare) * 100) : null
 
-  const shareUrl = (() => {
-    const base = `${window.location.origin}/c/${encodeURIComponent(token)}`
-    const qs = new URLSearchParams()
-    if (referralCode) qs.set('ref', referralCode)
-    qs.set('item', item.item_code)
-    return `${base}?${qs.toString()}`
-  })()
+  const shareUrl =
+    shareUrlOverride ||
+    (() => {
+      const base = `${window.location.origin}/c/${encodeURIComponent(token)}`
+      const qs = new URLSearchParams()
+      if (referralCode) qs.set('ref', referralCode)
+      qs.set('item', item.item_code)
+      return `${base}?${qs.toString()}`
+    })()
 
   const share = async () => {
     const text = `${name}${item.price_bhd != null ? ` — ${bhd(item.price_bhd)}` : ''}`
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
         await navigator.share({ title: `YQ Bahrain — ${name}`, text, url: shareUrl })
+        onShared?.()
         return
       }
       await navigator.clipboard.writeText(shareUrl)
       toast('Link copied — paste it into WhatsApp', 'success')
+      onShared?.()
     } catch {
       /* the customer dismissed the share sheet, or the clipboard is blocked */
     }

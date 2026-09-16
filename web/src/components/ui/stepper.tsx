@@ -22,6 +22,8 @@ export interface StepperProps {
   label?: string
   size?: 'sm' | 'md' | 'lg'
   className?: string
+  /** Marketplace: tapping the number opens a keypad sheet to type a quantity. */
+  onValueClick?: () => void
 }
 
 const SHELL: Record<'sm' | 'md' | 'lg', string> = {
@@ -51,6 +53,7 @@ export function Stepper({
   label = 'quantity',
   size = 'md',
   className,
+  onValueClick,
 }: StepperProps) {
   const dec = () => {
     const next = value - step
@@ -92,15 +95,29 @@ export function Stepper({
       >
         {willRemove ? <Trash2 size={icon - 2} /> : <Minus size={icon} />}
       </button>
-      <span
-        aria-live="polite"
-        className={cn(
-          'min-w-[2.25rem] flex-1 text-center font-display font-bold tabular-nums text-[#1a1430]',
-          VALUE[size],
-        )}
-      >
-        {value}
-      </span>
+      {onValueClick ? (
+        <button
+          type="button"
+          onClick={onValueClick}
+          aria-label={`Type a quantity for ${label} (currently ${value})`}
+          className={cn(
+            'min-w-[2.25rem] flex-1 self-stretch rounded-lg text-center font-display font-bold tabular-nums text-[#1a1430] transition duration-150 ease-out hover:bg-[#f4f2f9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70',
+            VALUE[size],
+          )}
+        >
+          {value}
+        </button>
+      ) : (
+        <span
+          aria-live="polite"
+          className={cn(
+            'min-w-[2.25rem] flex-1 text-center font-display font-bold tabular-nums text-[#1a1430]',
+            VALUE[size],
+          )}
+        >
+          {value}
+        </span>
+      )}
       <button
         type="button"
         onClick={inc}

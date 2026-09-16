@@ -1,10 +1,16 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
-import { AnimatePresence, motion } from 'motion/react'
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
+/**
+ * Toasts on CSS keyframes, not an animation library. This provider is mounted by the
+ * public shop, the marketplace AND the portal; the previous version pulled the `motion`
+ * package (~200 KB uncompressed) into the merchant's first download for a 300 ms slide.
+ * `prefers-reduced-motion` collapses the durations globally (index.css).
+ */
+
 type ToastKind = 'success' | 'error' | 'info'
-interface ToastItem { id: number; kind: ToastKind; message: string }
+interface ToastItem { id: number; kind: ToastKind; message: string; leaving?: boolean }
 interface ToastCtxValue { toast: (message: string, kind?: ToastKind) => void }
 
 const ToastCtx = createContext<ToastCtxValue | null>(null)
@@ -15,37 +21,63 @@ const STYLE: Record<ToastKind, { ring: string; icon: ReactNode }> = {
   info: { ring: 'border-primary/30', icon: <Info size={18} className="text-primary" /> },
 }
 
+const MOTION = `
+@keyframes yq-toast-in { from { opacity: 0; transform: translate3d(0, 16px, 0) scale(.97) } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1) } }
+@keyframes yq-toast-out { from { opacity: 1; transform: translate3d(0, 0, 0) } to { opacity: 0; transform: translate3d(32px, 0, 0) } }
+.yq-toast { animation: yq-toast-in 260ms cubic-bezier(.16, 1, .3, 1) both }
+.yq-toast--leaving { animation: yq-toast-out 180ms ease-in both }
+`
+
+const SHOW_MS = 4200
+const LEAVE_MS = 180
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([])
-  const dismiss = (id: number) => setItems((t) => t.filter((x) => x.id !== id))
-  const toast = useCallback((message: string, kind: ToastKind = 'success') => {
-    const id = Date.now() + Math.random()
-    setItems((t) => [...t, { id, kind, message }])
-    setTimeout(() => dismiss(id), 4200)
+
+  const dismiss = useCallback((id: number) => {
+    setItems((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x)))
+    setTimeout(() => setItems((t) => t.filter((x) => x.id !== id)), LEAVE_MS)
   }, [])
+
+  const toast = useCallback(
+    (message: string, kind: ToastKind = 'success') => {
+      const id = Date.now() + Math.random()
+      setItems((t) => [...t, { id, kind, message }])
+      setTimeout(() => dismiss(id), SHOW_MS)
+    },
+    [dismiss],
+  )
 
   return (
     <ToastCtx.Provider value={{ toast }}>
       {children}
-      <div className="pointer-events-none fixed bottom-5 right-5 z-[100] flex w-full max-w-sm flex-col gap-2">
-        <AnimatePresence>
-          {items.map((t) => (
-            <motion.div
-              key={t.id}
-              initial={{ opacity: 0, y: 20, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, x: 40, transition: { duration: 0.2 } }}
-              transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-              className={cn('pointer-events-auto flex items-start gap-3 rounded-xl border bg-card p-3.5 shadow-lift', STYLE[t.kind].ring)}
+      <div
+        className="pointer-events-none fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom,0px)+5.25rem)] z-[100] flex flex-col items-end gap-2 sm:inset-x-auto sm:bottom-5 sm:right-5 sm:w-full sm:max-w-sm"
+        aria-live="polite"
+      >
+        <style>{MOTION}</style>
+        {items.map((t) => (
+          <div
+            key={t.id}
+            role="status"
+            className={cn(
+              'yq-toast pointer-events-auto flex w-full items-start gap-3 rounded-xl border bg-card p-3.5 shadow-lift',
+              t.leaving && 'yq-toast--leaving',
+              STYLE[t.kind].ring,
+            )}
+          >
+            {STYLE[t.kind].icon}
+            <p className="flex-1 text-sm font-medium leading-snug text-foreground">{t.message}</p>
+            <button
+              type="button"
+              onClick={() => dismiss(t.id)}
+              aria-label="Dismiss"
+              className="text-muted-foreground transition hover:text-foreground"
             >
-              {STYLE[t.kind].icon}
-              <p className="flex-1 text-sm font-medium leading-snug text-foreground">{t.message}</p>
-              <button onClick={() => dismiss(t.id)} className="text-muted-foreground transition hover:text-foreground">
-                <X size={15} />
-              </button>
-            </motion.div>
-          ))}
-        </AnimatePresence>
+              <X size={15} />
+            </button>
+          </div>
+        ))}
       </div>
     </ToastCtx.Provider>
   )

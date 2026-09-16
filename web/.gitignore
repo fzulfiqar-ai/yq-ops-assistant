@@ -27,3 +27,6 @@ dist-ssr
 .env
 
 .vercel
+
+# marketplace build output (VITE_APP=market)
+dist-market

@@ -1,6 +1,6 @@
 /** Same base as lib/api, read here directly: the public shop must never import lib/api (it
  *  brings the supabase session client along). The salesman calls load it lazily below. */
-const API_BASE = (import.meta.env.VITE_API_URL as string) || ''
+export const API_BASE = (import.meta.env.VITE_API_URL as string) || ''
 
 /**
  * Typed client for the shop endpoints (docs/SHOP.md).
@@ -20,8 +20,27 @@ const API_BASE = (import.meta.env.VITE_API_URL as string) || ''
 /* ───────────────────────── catalog payload ───────────────────────── */
 
 export type StockStatus = 'in_stock' | 'low_stock' | 'out_of_stock'
-export type BadgeKind = 'best_seller' | 'trending' | 'new' | 'on_offer' | 'price_drop'
-export type ShopEventKind = 'view' | 'item' | 'add' | 'checkout'
+export type BadgeKind = 'best_seller' | 'trending' | 'new' | 'on_offer' | 'price_drop' | 'selling_fast'
+export type ShopEventKind =
+  | 'view'
+  | 'item'
+  | 'add'
+  | 'checkout'
+  | 'order'
+  | 'search'
+  | 'search_zero'
+  | 'remove'
+  | 'qty'
+  | 'cart'
+  | 'checkout_start'
+  | 'rail_click'
+  | 'reco_click'
+  | 'share'
+  | 'install'
+  | 'reorder'
+  | 'cancel'
+  | 'vitals'
+  | 'push_subscribe'
 
 export interface Tier {
   min_qty: number
@@ -53,8 +72,21 @@ export interface ShopItem {
   moq?: number | null
   pack_size?: number | null
   tiers?: Tier[] | null
+  /** Marketplace: true when volume tiers exist even if `tiers` is hidden (shop_public_tiers off). */
+  has_tiers?: boolean | null
   badges?: BadgeKind[] | null
   social_proof?: string | null
+}
+
+/** The salesman storefront card behind /{slug} (marketplace). WhatsApp only when the rep opted in. */
+export interface RepCard {
+  slug: string
+  salesman_id: number
+  name: string
+  first_name?: string | null
+  title?: string | null
+  photo_url?: string | null
+  whatsapp_url?: string | null
 }
 
 export interface Salesman {
@@ -82,6 +114,10 @@ export interface ShopSettings {
   free_delivery_threshold_bhd?: number | null
   allow_backorder?: boolean | null
   show_retail_compare?: boolean | null
+  /** Marketplace: whether volume tiers are shown to anonymous visitors. */
+  public_tiers?: boolean | null
+  /** Marketplace: the area list offered at checkout (admin setting). */
+  areas?: string[] | null
 }
 
 export interface ShopRef {
@@ -118,6 +154,8 @@ export interface CatalogPayload {
   /** "salesman" on GET /shop/catalog; absent (or "public") on a share link. */
   mode?: 'public' | 'salesman' | null
   me?: StaffMe | null
+  /** Marketplace: the storefront card when the request carried a known ?ref / slug. */
+  rep?: RepCard | null
 }
 
 /* ───────────────────────── quote / order ───────────────────────── */
@@ -242,14 +280,20 @@ export interface OrderResponse {
 
 /* ───────────────────────── order status ───────────────────────── */
 
+export type LineStatus = 'ok' | 'changed' | 'removed' | 'backorder'
+
 export interface OrderStatusLine {
   item_code: string
   display_name?: string | null
   qty: number
+  /** Marketplace: what the salesman confirmed (null until confirmed). */
+  qty_confirmed?: number | null
+  line_status?: LineStatus | string | null
   unit_price_bhd?: number | null
   line_total_bhd?: number | null
   stock_status?: StockStatus | null
   backorder?: boolean | null
+  image_url?: string | null
 }
 
 export interface OrderTimelineEntry {
@@ -258,21 +302,43 @@ export interface OrderTimelineEntry {
   note?: string | null
 }
 
-export type OrderState = 'new' | 'confirmed' | 'packed' | 'delivered' | 'cancelled'
+export type OrderState = 'new' | 'confirmed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled'
+
+/** One of the five merchant-facing stages (Received → Confirmed → Preparing → On the way → Delivered). */
+export interface OrderStep {
+  status: OrderState | string
+  label: string
+  done: boolean
+  current: boolean
+  at?: string | null
+}
 
 export interface OrderStatusPayload {
   order_no: string
   status?: OrderState | string | null
+  status_label?: string | null
+  steps?: OrderStep[] | null
+  cancelled?: boolean | null
+  can_cancel?: boolean | null
+  expected_delivery?: string | null
   created_at?: string | null
   updated_at?: string | null
-  salesman?: { name?: string | null; whatsapp_url?: string | null; email_url?: string | null } | null
+  salesman?: {
+    name?: string | null
+    first_name?: string | null
+    whatsapp_url?: string | null
+    email_url?: string | null
+  } | null
   customer?: { name?: string | null; shop?: string | null; area?: string | null } | null
   lines?: OrderStatusLine[] | null
   subtotal_bhd?: number | null
   discount_bhd?: number | null
   delivery_bhd?: number | null
   total_bhd?: number | null
+  total_confirmed_bhd?: number | null
+  has_changes?: boolean | null
   has_backorder?: boolean | null
+  note?: string | null
   timeline?: OrderTimelineEntry[] | null
 }
 
@@ -282,6 +348,44 @@ export interface EventPing {
   referral_code?: string
   src?: string
   session_id?: string
+  /** Marketplace (events v2) */
+  device_id?: string
+  customer_id?: number
+  meta?: Record<string, string | number | boolean>
+}
+
+/* ───────────────────────── marketplace ───────────────────────── */
+
+export interface MarketOrderRequest extends OrderRequest {
+  device_id?: string
+  /** idempotency key per device — a retry after a timeout returns the same order */
+  client_order_id?: string
+  /** the /{slug} or ?ref this device remembers */
+  session_ref?: string
+}
+
+export interface MarketOrderResponse extends OrderResponse {
+  duplicate?: boolean | null
+  status?: string | null
+  status_label?: string | null
+  assigned?: boolean | null
+  attribution?: string | null
+  salesman?: { name?: string | null; first_name?: string | null; phone?: string | null } | null
+}
+
+export interface MyOrderSummary {
+  order_no: string
+  token: string
+  status: OrderState | string
+  status_label?: string | null
+  total_bhd?: number | null
+  items?: number | null
+  units?: number | null
+  created_at?: string | null
+  updated_at?: string | null
+  salesman?: string | null
+  expected_delivery?: string | null
+  can_cancel?: boolean | null
 }
 
 /* ───────────────────────── transport ───────────────────────── */
@@ -323,7 +427,7 @@ function readDetail(body: string): string {
 /** 60s, not 20s: the API sleeps on the free tier and takes ~50s to wake. */
 const TIMEOUT_MS = 60000
 
-async function request<T>(path: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
   const onAbort = () => ctrl.abort()

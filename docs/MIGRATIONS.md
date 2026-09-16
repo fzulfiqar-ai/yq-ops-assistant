@@ -149,3 +149,17 @@ ends with a `DO` block that raises if anything is still exposed.
 - Objects created by `supabase_admin` (extensions) still inherit its default ACL, so run
   `python -m scripts.audit_grants` after every migration; exit 0 means nothing is exposed.
 - Re-applying the file is safe (idempotent). Rollback would be re-granting; do not.
+
+## Applied 16-Sep-2026: `marketplace_migration.sql` — merchant identity, attribution, lifecycle depth
+
+Adds `shop_customers`, `shop_customer_phones`, `shop_customer_sessions`, `shop_access_links`,
+`shop_push_subscriptions`, `shop_reserved_slugs`; widens `shop_orders.status` (`out_for_delivery`),
+`shop_orders.source` (`market`), `shop_events.event` (v2 vocabulary) and `user_roles.role` (`storekeeper`);
+adds the lifecycle / attribution / payment-ready columns on `shop_orders`, `qty_confirmed` + `line_status` on
+`shop_order_lines`, `device_id` / `customer_id` / `meta` on `shop_events`, storefront fields on `salesmen`, seven
+`shop_*` settings, and the views `v_customer_regulars` (service role only — customer names),
+`v_shop_assignment_queue`, `v_shop_search_terms`, `v_shop_rail_perf`. `v_shop_orders_agent` gained APPENDED
+columns (`attribution_source … cancelled_at`). Ends with a `DO` block that raises if anything is missing or
+granted to `anon`/`authenticated`. Verified afterwards with `python -m scripts.audit_grants` (clean apart from the
+temporary `user_roles` keepalive grant) and `python -m tests.test_shop` (31/31). Contract: `docs/SHOP.md`
+§ Marketplace.
