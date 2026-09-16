@@ -1,5 +1,5 @@
 import type { EventPing, ShopEventKind } from '@/lib/shopApi'
-import { sessionId } from '@/pages/shop/shared'
+import { sessionId } from './format'
 import { pingMarketEvent } from './marketApi'
 import { currentRef, deviceId } from './device'
 

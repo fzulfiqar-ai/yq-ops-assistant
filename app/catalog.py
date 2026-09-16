@@ -81,9 +81,18 @@ def _safe_code(code: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", (code or "").strip()) or "item"
 
 
-def make_thumb(data: bytes, size: int = 256) -> bytes | None:
-    """256px JPEG thumbnail (white matte) — exports embed these instead of the full
-    photos, which is what turned a 10-minute Excel build into seconds."""
+# The marketplace's responsive photo set (srcset 160/320/512, WebP). The legacy 256px JPEG
+# stays for exports and older clients; `thumb_urls` in the public payload points at these.
+THUMB_SIZES = (160, 320, 512)
+# storage-level cache: the files are content-stable per code+kind+size (re-uploads overwrite), so
+# a long max-age is safe — the service worker and Cloudflare stop revalidating every photo.
+THUMB_CACHE = "31536000"
+
+
+def make_thumb(data: bytes, size: int = 256, fmt: str = "JPEG") -> bytes | None:
+    """Square-fit thumbnail on a white matte. JPEG q82 (exports) or WebP q80 (marketplace).
+    Exports embed these instead of the full photos, which is what turned a 10-minute Excel
+    build into seconds."""
     try:
         from PIL import Image
         im = Image.open(io.BytesIO(data))
@@ -94,29 +103,45 @@ def make_thumb(data: bytes, size: int = 256) -> bytes | None:
             im = bg
         else:
             im = im.convert("RGB")
-        im.thumbnail((size, size))
+        im.thumbnail((size, size), Image.LANCZOS)
         out = io.BytesIO()
-        im.save(out, "JPEG", quality=82)
+        if fmt.upper() == "WEBP":
+            im.save(out, "WEBP", quality=82 if size <= 160 else 80, method=6)
+        else:
+            im.save(out, "JPEG", quality=82)
         return out.getvalue()
     except Exception as e:  # noqa: BLE001
         log.warning("thumbnail failed: %s", e)
         return None
 
 
-def thumb_path(code: str, kind: str) -> str:
+def thumb_path(code: str, kind: str, size: int | None = None) -> str:
+    """`thumbs/{code}-{kind}.jpg` (legacy 256 JPEG) or `thumbs/{code}-{kind}-{size}.webp`."""
+    if size:
+        return f"thumbs/{_safe_code(code)}-{kind}-{int(size)}.webp"
     return f"thumbs/{_safe_code(code)}-{kind}.jpg"
 
 
-def upload_thumb(code: str, kind: str, full_image: bytes) -> None:
-    """Best-effort thumbnail upload (fixed path per code+kind, overwritten on re-upload)."""
-    tb = make_thumb(full_image)
-    if not tb:
-        return
-    try:
-        get_client().storage.from_(_BUCKET).upload(
-            thumb_path(code, kind), tb, {"content-type": "image/jpeg", "upsert": "true"})
-    except Exception as e:  # noqa: BLE001
-        log.warning("thumb upload failed for %s-%s: %s", code, kind, e)
+def upload_thumb(code: str, kind: str, full_image: bytes, *, sizes: tuple[int, ...] = THUMB_SIZES,
+                 legacy: bool = True) -> int:
+    """Best-effort thumbnail uploads (fixed paths per code+kind, overwritten on re-upload):
+    the legacy 256 JPEG plus one WebP per marketplace size. Returns how many were stored."""
+    bucket = get_client().storage.from_(_BUCKET)
+    done = 0
+    jobs: list[tuple[str, bytes | None, str]] = []
+    if legacy:
+        jobs.append((thumb_path(code, kind), make_thumb(full_image), "image/jpeg"))
+    for s in sizes:
+        jobs.append((thumb_path(code, kind, s), make_thumb(full_image, s, "WEBP"), "image/webp"))
+    for path, blob, ctype in jobs:
+        if not blob:
+            continue
+        try:
+            bucket.upload(path, blob, {"content-type": ctype, "upsert": "true", "cache-control": THUMB_CACHE})
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("thumb upload failed for %s: %s", path, e)
+    return done
 
 
 def upload_image(code: str, kind: str, data: bytes, content_type: str, by: str = "") -> str:

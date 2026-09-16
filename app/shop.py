@@ -26,7 +26,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.catalog import CATEGORY_ORDER, public_url, share_token, thumb_path
+from app.catalog import CATEGORY_ORDER, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
 from app.db_read import exec_sql, exec_sql_params
@@ -84,6 +84,12 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_trending_growth_pct": "30",
     "shop_trending_min_units": "10",
     "shop_new_days": "30",
+    # marketplace v2 (16-Sep-2026): honest merchandising signals
+    "shop_price_drop_days": "30",        # a real trade-price cut inside this window shows "Was → Now"
+    "shop_clearance_days_cover": "365",  # stock on hand covers this many days of sales → aging
+    "shop_clearance_min_units": "12",    # …and there are at least this many units to clear
+    "shop_clearance_max": "24",          # the worst N by cover wear the Clearance badge
+    "shop_clearance_show_retail": "1",   # clearance cards show the real retail price as the anchor even if compare is off
     # marketplace (16-Sep-2026)
     "shop_sticky_days": "90",
     "shop_public_tiers": "1",
@@ -293,6 +299,26 @@ def _load_rules() -> list[dict]:
     return out
 
 
+def _load_price_drops(days: int = 30) -> dict[str, dict]:
+    """Real trade-price cuts (MA_base) inside the window, keyed by upper-cased code:
+    {"was": prev, "now": current, "on": date}. The marketplace shows "Was → Now" only when
+    `now` still equals the live price, so a later change can never leave a stale anchor."""
+    try:
+        rows = exec_sql(
+            "SELECT sku_code, changed_on::text AS changed_on, current_price_bhd, prev_price_bhd FROM v_price_change "
+            f"WHERE current_price_bhd < prev_price_bhd AND changed_on >= CURRENT_DATE - INTERVAL '{int(days)} days'"
+        ) or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("price drops unavailable: %s", e)
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        code = str(r.get("sku_code") or "").strip().upper()
+        if code:
+            out[code] = {"was": _f(r.get("prev_price_bhd")), "now": _f(r.get("current_price_bhd")), "on": r.get("changed_on")}
+    return out
+
+
 def _load_pairs(active_codes: set[str], top_n: int = 3) -> dict[str, list[str]]:
     """Top co-purchase partners per code (both directions), active items only."""
     try:
@@ -327,6 +353,7 @@ _RESERVED_FALLBACK = frozenset({
     "c", "o", "p", "t", "s", "f", "search", "cart", "checkout", "orders", "order", "join", "api", "public",
     "shop", "admin", "assets", "static", "me", "health", "share", "optout", "login", "invite", "catalog",
     "market", "marketplace", "track", "app", "sw.js", "version.json", "manifest.webmanifest", "robots.txt",
+    "quick", "fonts",
 })
 
 
@@ -368,6 +395,7 @@ def _build_context() -> dict:
     # so every lookup that starts from user input goes through this index.
     ctx["by_upper"] = {code.upper(): code for code in ctx["order"]}
     ctx["pairs"] = _load_pairs(set(ctx["order"]))
+    ctx["drops"] = _load_price_drops(_i(vals.get("shop_price_drop_days"), 30))
     ctx["reserved_slugs"] = _load_reserved_slugs()
     # Both used to be a database call on EVERY catalog request (~350 ms together).
     ctx["share_token"] = share_token(create=False)
@@ -503,6 +531,10 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
     min_units = _f(vals.get("shop_trending_min_units"), 10.0)
     new_days = _i(vals.get("shop_new_days"), 30)
     low_days = _i(vals.get("shop_low_stock_days_cover"), 30)
+    drops = ctx.get("drops") or {}
+    cl_days = _i(vals.get("shop_clearance_days_cover"), 365)
+    cl_min = _i(vals.get("shop_clearance_min_units"), 12)
+    cl_max = _i(vals.get("shop_clearance_max"), 24)
     out: dict[str, list[str]] = {c: [] for c in ctx["order"]}
     by_cat: dict[str, list[dict]] = {}
     for code in ctx["order"]:
@@ -530,11 +562,49 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
             out[code].append("selling_fast")
         if code in offer_codes:
             out[code].append("on_offer")
+        drop = drops.get(code.upper())
+        if drop and drop["was"] > drop["now"] > 0:
+            out[code].append("price_drop")
+    # Clearance: real stock that the last 90 days of sales would take a year+ to move. The worst
+    # movers first, capped, and never something that is also a best seller / trending / new.
+    aging: list[tuple[float, str]] = []
+    for code in ctx["order"]:
+        if any(b in out[code] for b in ("best_seller", "trending", "new")):
+            continue
+        it = ctx["items"][code]
+        qty, s90 = _f(it.get("stock_qty")), _f(it.get("sold_90d"))
+        if qty < cl_min:
+            continue
+        cover = qty / (s90 / 90.0) if s90 > 0 else float("inf")
+        if cover >= cl_days:
+            aging.append((cover, code))
+    for _cover, code in sorted(aging, key=lambda t: (-t[0], t[1]))[:cl_max]:
+        out[code].append("clearance")
     return out
+
+
+def _was_bhd(ctx: dict, code: str, price) -> float | None:
+    """The previous trade price when a REAL cut happened inside the window and the live price is
+    still the cut price. Never a made-up anchor: this is the price-book history."""
+    drop = (ctx.get("drops") or {}).get(str(code).upper())
+    if not drop or price is None:
+        return None
+    if abs(_f(price) - drop["now"]) > 0.0005 or drop["was"] <= drop["now"]:
+        return None
+    return money(drop["was"])
 
 
 def _thumb(item: dict) -> str | None:
     return public_url(thumb_path(str(item["item_code"]), "product")) if item.get("product_image_url") else None
+
+
+def _thumb_urls(item: dict) -> dict[str, str] | None:
+    """The marketplace's WebP size set for srcset ({"160": url, "320": url, "512": url}).
+    URL construction only — the files are written by upload_thumb / scripts.make_market_thumbs."""
+    if not item.get("product_image_url"):
+        return None
+    code = str(item["item_code"])
+    return {str(s): public_url(thumb_path(code, "product", s)) for s in THUMB_SIZES}
 
 
 def resolve_ref(ctx: dict, referral_code: str | None) -> dict | None:
@@ -586,6 +656,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
     low_units = _i(vals.get("shop_low_stock_units"), 10)
     proof_min = _i(vals.get("shop_social_proof_min_customers"), 5)
     show_compare = _flag(vals, "shop_show_retail_compare")
+    clearance_retail = _flag(vals, "shop_clearance_show_retail")
     # owner decision 16-Sep-2026: trade prices are public; the volume ladders are a switch
     public_tiers = staff or _flag(vals, "shop_public_tiers")
     badges = _badges(ctx)
@@ -595,7 +666,10 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
         it = ctx["items"][code]
         lp = it.get("standard_rate")
         b2c = it.get("b2c_rate")
-        compare = money(b2c) if (show_compare and lp is not None and b2c is not None and _f(b2c) > _f(lp)) else None
+        # The struck-through anchor is always a REAL price: the price book's retail (B2C) rate.
+        # Shown everywhere when the compare setting is on; on Clearance items also when it is off.
+        anchor_ok = show_compare or (clearance_retail and "clearance" in badges.get(code, []))
+        compare = money(b2c) if (anchor_ok and lp is not None and b2c is not None and _f(b2c) > _f(lp)) else None
         save_pct = int(round((1 - _f(lp) / _f(b2c)) * 100)) if compare else None
         cust = _i(it.get("customers_30d"))
         stock_as_of = stock_as_of or it.get("stock_as_of")
@@ -611,9 +685,11 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "b2c_bhd": money(b2c) if (show_compare and b2c is not None) else None,
             "compare_at_bhd": compare,
             "save_pct": save_pct if save_pct and save_pct > 0 else None,
+            "was_bhd": _was_bhd(ctx, code, lp),
             "product_image_url": it.get("product_image_url"),
             "package_image_url": it.get("package_image_url"),
             "thumb_url": _thumb(it),
+            "thumb_urls": _thumb_urls(it),
             "stock_status": stock_status_for(it.get("stock_qty"), low_units),
             "moq": max(_i(it.get("moq"), 1), 1),
             "pack_size": _i(it.get("pack_size")) or None,

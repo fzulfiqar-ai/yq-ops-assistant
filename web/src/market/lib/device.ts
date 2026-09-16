@@ -29,22 +29,39 @@ const MAX_QTY_MEMORY = 250
 const MAX_SEARCHES = 8
 const MAX_VIEWED = 12
 
+// Parsed once per key, kept in memory: sixty product cards asking for their remembered
+// quantity must not JSON.parse the same blob sixty times on the first paint.
+const cache = new Map<string, unknown>()
+
 function read<T>(key: string, fallback: T): T {
+  if (cache.has(key)) return cache.get(key) as T
+  let v: T
   try {
     const raw = localStorage.getItem(key)
-    return raw ? (JSON.parse(raw) as T) : fallback
+    v = raw ? (JSON.parse(raw) as T) : fallback
   } catch {
-    return fallback
+    v = fallback
   }
+  cache.set(key, v)
+  return v
 }
 
 function write(key: string, value: unknown): void {
+  if (value === null || value === undefined) cache.delete(key)
+  else cache.set(key, value)
   try {
     if (value === null || value === undefined) localStorage.removeItem(key)
     else localStorage.setItem(key, JSON.stringify(value))
   } catch {
     /* storage unavailable — forget, never fail */
   }
+}
+
+if (typeof window !== 'undefined') {
+  // another tab wrote: drop the stale copy
+  window.addEventListener('storage', (e) => {
+    if (e.key) cache.delete(e.key)
+  })
 }
 
 function uuid(): string {
@@ -123,7 +140,7 @@ type QtyMemory = Record<string, { last: number; at: number }>
 
 export function rememberQty(code: string, qty: number): void {
   if (!code || !(qty > 0)) return
-  const m = read<QtyMemory>(KEYS.qty, {})
+  const m = { ...read<QtyMemory>(KEYS.qty, {}) }
   m[code] = { last: qty, at: Date.now() }
   const entries = Object.entries(m)
   if (entries.length > MAX_QTY_MEMORY) {

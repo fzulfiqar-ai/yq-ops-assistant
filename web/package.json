@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dev:market": "vite --mode market --port 5175",
+    "build:market": "tsc -b && vite build --mode market --outDir dist-market",
+    "preview:market": "vite preview --outDir dist-market --port 5174"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",
@@ -28,6 +31,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@fontsource-variable/sora": "^5.3.0",
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

@@ -19,4 +19,22 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    // The merchant build has its own primitives (src/market/ui) and stylesheet; portal components
+    // carry portal tokens that the market CSS does not define.
+    files: ['src/market/**/*.{ts,tsx}', 'src/MarketApp.tsx', 'src/main.market.tsx'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            { group: ['@/components/*', '@/components/ui/*'], message: 'Market code uses src/market/ui primitives, not portal components.' },
+            { group: ['@/pages/shop/ProductSheet', '@/pages/shop/ProductImage', '@/pages/shop/Select', '@/pages/shop/shared', '@/pages/shop/ProductCard', '@/pages/shop/CartDrawer'], message: 'Market code uses src/market equivalents.' },
+            { group: ['@/lib/api', '@/lib/supabase', '@/lib/auth', '@/lib/theme'], message: 'The merchant bundle must not carry the session client.' },
+            { group: ['motion', 'motion/*', 'recharts'], message: 'No animation/chart library in the merchant bundle (CSS/WAAPI only).' },
+          ],
+        },
+      ],
+    },
+  },
 ])

@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!web/.env.market
 
 # YQ Bahrain commercial data — never commit
 data/

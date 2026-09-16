@@ -1,50 +1,24 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react'
-import { useCart, type Cart } from '@/lib/cart'
-import {
-  ShopApiError,
-  type CatalogPayload,
-  type MyOrderSummary,
-  type Quote,
-  type RepCard,
-  type ShopItem,
-  type ShopSettings,
-} from '@/lib/shopApi'
-import { minQtyOf, stepOf } from '@/pages/shop/shared'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ShopApiError, type CatalogPayload, type MyOrderSummary, type Quote, type RepCard, type ShopItem, type ShopSettings } from '@/lib/shopApi'
 import { useQuote, type QuoteFetcher } from '@/pages/shop/useQuote'
-import {
-  currentRef,
-  forgetRef,
-  isRecognized,
-  lastQty,
-  readNote,
-  rememberQty,
-  rememberedOrders,
-  writeNote,
-} from './lib/device'
+import { currentRef, forgetRef, isRecognized, lastQty, readNote, rememberQty, rememberedOrders, writeNote } from './lib/device'
 import { track } from './lib/events'
+import { minQtyOf, normalizeQty } from './lib/format'
 import { getMarket, postMarketQuote, postMyOrders } from './lib/marketApi'
-import { buildIndex, type SearchIndex } from './lib/search'
+import type { SearchIndex } from './lib/search'
+import { cartStore, useCartLines } from './store/cart'
 
 /**
- * Everything a marketplace screen needs, loaded once per visit:
+ * Two contexts, one provider:
  *
- *  • the catalog — painted from the copy this phone saved last time, replaced by the live
- *    payload as soon as it lands (a sleeping API never leaves the merchant staring at nothing);
- *  • who the merchant is attributed to (the /{slug} or ?ref remembered on this device);
- *  • the cart (device-scoped), the last quantity ordered per SKU, the server-priced quote;
- *  • the orders this device placed (tokens → summaries) — "recognized" merchants get a
- *    different home page;
- *  • the search index.
+ *  • `useMarket()` — the catalog (painted from the copy this phone saved last time, replaced by
+ *    the live payload), who the merchant is attributed to, the search index (loaded lazily, off
+ *    the critical path), and the cart ACTIONS (add / setQty / remove with quantity memory and
+ *    analytics). This value changes rarely, so product cards stay cheap.
+ *  • `useOrder()` — the server-priced quote, coupon, note, and the orders this device placed.
+ *    Changes on every cart edit; only cart surfaces subscribe.
  *
+ * Cart LINES live in store/cart.ts; components read their own slice with useCartQty / useCartLines.
  * Nothing here is authoritative: the server prices the cart and owns attribution.
  */
 
@@ -63,7 +37,22 @@ export interface MarketValue {
   rep: RepCard | null
   ref: string | null
   setRef: (slug: string | null) => void
-  cart: Cart
+  recognized: boolean
+  index: SearchIndex | null
+  /** ask for the search index now (search intent) — resolves when built */
+  ensureIndex: () => Promise<SearchIndex | null>
+  /** remembered quantity for this SKU, rounded to its rules — what one tap of Add sets */
+  defaultQty: (item: ShopItem) => number
+  add: (item: ShopItem, qty?: number, from?: string) => number
+  setQty: (item: ShopItem, qty: number) => void
+  remove: (code: string) => void
+  /** put many lines in at once (Order again, Quick order) */
+  addMany: (entries: { item: ShopItem; qty: number }[], from: string) => number
+  pairsFor: (code: string) => ShopItem[]
+  reload: () => void
+}
+
+export interface OrderValue {
   quote: Quote | null
   quoting: boolean
   quoteError: string
@@ -71,19 +60,12 @@ export interface MarketValue {
   setCoupon: (c: string) => void
   note: string
   setNote: (n: string) => void
-  recognized: boolean
   myOrders: MyOrderSummary[]
   refreshMyOrders: () => void
-  index: SearchIndex | null
-  add: (item: ShopItem, qty?: number, from?: string) => void
-  setQty: (item: ShopItem, qty: number) => void
-  remove: (code: string) => void
-  defaultQty: (item: ShopItem) => number
-  pairsFor: (code: string) => ShopItem[]
-  reload: () => void
 }
 
-const Ctx = createContext<MarketValue | null>(null)
+const MarketCtx = createContext<MarketValue | null>(null)
+const OrderCtx = createContext<OrderValue | null>(null)
 
 const cacheKey = (ref: string | null) => `yq-market-catalog:${(ref || '').toLowerCase()}`
 
@@ -114,33 +96,31 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
   const [note, setNoteState] = useState(() => readNote())
   const [myOrders, setMyOrders] = useState<MyOrderSummary[]>([])
   const [reloadTick, setReloadTick] = useState(0)
-  const cart = useCart('market')
   const viewedRef = useRef(false)
 
   // State only: the Home page persists a slug AFTER the server confirms it resolves, so an
   // unknown /{slug} can never overwrite the rep this phone already remembers.
-  const setRef = useCallback((slug: string | null) => {
-    setRefState(slug ? slug.toLowerCase() : null)
-  }, [])
+  const setRef = useCallback((slug: string | null) => setRefState(slug ? slug.toLowerCase() : null), [])
 
   /* ── catalog ─────────────────────────────────────────────── */
+  // When the ref changes (a /{slug} entrance), paint that storefront's cached copy at once —
+  // derived during render, so the effect below only ever fetches.
+  const [refSeen, setRefSeen] = useState(ref)
+  if (refSeen !== ref) {
+    setRefSeen(ref)
+    const c = readCache(ref)
+    setData(c)
+    setStatus(c ? 'ready' : 'loading')
+  }
   useEffect(() => {
     let alive = true
     const cached = readCache(ref)
-    if (cached) {
-      setData(cached)
-      setStatus('ready')
-    } else {
-      setStatus((s) => (s === 'ready' ? 'loading' : s))
-    }
     getMarket(ref)
       .then((d) => {
         if (!alive) return
         setData(d)
         writeCache(ref, d)
         setStatus('ready')
-        // A remembered slug that no longer resolves (rep left, code changed) is forgotten, so the
-        // merchant is not attributed to a ghost. The URL slug case is handled by the Home page.
         if (ref && !d.ref && currentRef() === ref) forgetRef()
         if (!viewedRef.current) {
           viewedRef.current = true
@@ -172,106 +152,109 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
   }, [items])
   const categories = useMemo(() => data?.categories || [], [data])
   const settings = useMemo<ShopSettings>(() => data?.settings || {}, [data])
-  // The search index is built off the critical path: Home never needs it, and the Search tab is at
-  // most a few milliseconds behind. Building it inside the first render cost main-thread time
-  // exactly when the largest photo and the first tap were waiting.
+
+  /* ── search index: MiniSearch is its own chunk, loaded after the first paint or on intent ── */
   const [index, setIndex] = useState<SearchIndex | null>(null)
+  const buildRef = useRef<Promise<SearchIndex | null> | null>(null)
+  const itemsRef = useRef(items)
   useEffect(() => {
-    let cancelled = false
-    const build = () => {
-      if (!cancelled) setIndex(items.length ? buildIndex(items) : null)
-    }
-    if (typeof window.requestIdleCallback === 'function') {
-      const id = window.requestIdleCallback(build, { timeout: 2000 })
-      return () => {
-        cancelled = true
-        window.cancelIdleCallback(id)
-      }
-    }
-    const id = window.setTimeout(build, 300) // Safari has no requestIdleCallback
-    return () => {
-      cancelled = true
-      window.clearTimeout(id)
-    }
+    itemsRef.current = items
   }, [items])
+  const ensureIndex = useCallback(() => {
+    if (!buildRef.current) {
+      buildRef.current = import('./lib/search')
+        .then(({ buildIndex }) => (itemsRef.current.length ? buildIndex(itemsRef.current) : null))
+        .then((ix) => {
+          setIndex(ix)
+          return ix
+        })
+        .catch(() => null)
+    }
+    return buildRef.current
+  }, [])
+  useEffect(() => {
+    // items changed (live payload replaced the cache): rebuild lazily on next intent / idle
+    buildRef.current = null
+    if (!items.length) return
+    const go = () => void ensureIndex()
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(go, { timeout: 3000 })
+      return () => window.cancelIdleCallback(id)
+    }
+    const id = window.setTimeout(go, 1200)
+    return () => window.clearTimeout(id)
+  }, [items, ensureIndex])
+
   const pairsMap = useMemo(() => {
     const m = new Map<string, string[]>()
     for (const p of data?.pairs || []) m.set(p.item_code, p.with || [])
     return m
   }, [data])
-
   const pairsFor = useCallback(
-    (code: string) =>
-      (pairsMap.get(code) || []).map((c) => itemsByCode.get(c)).filter((x): x is ShopItem => Boolean(x)),
+    (code: string) => (pairsMap.get(code) || []).map((c) => itemsByCode.get(c)).filter((x): x is ShopItem => Boolean(x)),
     [pairsMap, itemsByCode],
   )
 
-  /* ── cart with quantity memory ─────────────────────────────── */
+  /* ── cart actions with quantity memory ─────────────────────── */
   const defaultQty = useCallback((item: ShopItem) => {
-    const min = minQtyOf(item)
-    const step = stepOf(item)
     const last = lastQty(item.item_code)
-    if (!last) return min
-    return Math.max(min, Math.ceil(last / step) * step)
+    return last ? normalizeQty(item, last) : minQtyOf(item)
   }, [])
 
   const add = useCallback(
     (item: ShopItem, qty?: number, from?: string) => {
-      const q = qty && qty > 0 ? qty : defaultQty(item)
-      cart.set(item.item_code, q)
+      const q = qty && qty > 0 ? normalizeQty(item, qty) : defaultQty(item)
+      cartStore.set(item.item_code, q)
       rememberQty(item.item_code, q)
-      track('add', { item_code: item.item_code, meta: from ? { rail: from, count: q } : { count: q } })
+      track('add', { item_code: item.item_code, meta: { count: q, ...(from ? { rail: from } : {}) } })
+      return q
     },
-    [cart, defaultQty],
+    [defaultQty],
   )
 
-  const setQty = useCallback(
-    (item: ShopItem, qty: number) => {
-      cart.set(item.item_code, qty)
-      if (qty > 0) rememberQty(item.item_code, qty)
-      track('qty', { item_code: item.item_code, meta: { count: qty } })
-    },
-    [cart],
-  )
+  const setQty = useCallback((item: ShopItem, qty: number) => {
+    cartStore.set(item.item_code, qty)
+    if (qty > 0) rememberQty(item.item_code, qty)
+    track('qty', { item_code: item.item_code, meta: { count: qty } })
+  }, [])
 
-  const remove = useCallback(
-    (code: string) => {
-      cart.remove(code)
-      track('remove', { item_code: code })
-    },
-    [cart],
-  )
+  const remove = useCallback((code: string) => {
+    cartStore.remove(code)
+    track('remove', { item_code: code })
+  }, [])
+
+  const addMany = useCallback((entries: { item: ShopItem; qty: number }[], from: string) => {
+    const rows = entries.filter((e) => e.qty > 0).map((e) => ({ item_code: e.item.item_code, qty: normalizeQty(e.item, e.qty) }))
+    cartStore.setMany(rows)
+    for (const r of rows) rememberQty(r.item_code, r.qty)
+    track('reorder', { meta: { count: rows.length, rail: from } })
+    return rows.length
+  }, [])
 
   const setNote = useCallback((n: string) => {
     setNoteState(n)
     writeNote(n)
   }, [])
 
-  /* ── quote ───────────────────────────────────────────────── */
+  /* ── quote (subscribes to the lines here, not in every card) ── */
+  const lines = useCartLines()
   const fetchQuote = useCallback<QuoteFetcher>((body, signal) => postMarketQuote(body, signal), [])
-  const { quote, quoting, error: quoteError } = useQuote(Boolean(data), cart.lines, coupon, ref || '', fetchQuote)
+  const { quote, quoting, error: quoteError } = useQuote(Boolean(data), lines, coupon, ref || '', fetchQuote)
 
   /* ── my orders (tokens this device holds) ──────────────────── */
   const refreshMyOrders = useCallback(() => {
     const tokens = rememberedOrders().map((o) => o.token)
-    if (!tokens.length) {
-      setMyOrders([])
-      return
-    }
-    postMyOrders(tokens)
+    ;(tokens.length ? postMyOrders(tokens) : Promise.resolve([] as MyOrderSummary[]))
       .then(setMyOrders)
-      .catch(() => {
-        /* keep whatever we had */
-      })
+      .catch(() => {})
   }, [])
-
   useEffect(() => {
     refreshMyOrders()
   }, [refreshMyOrders])
 
   const recognized = isRecognized()
 
-  const value = useMemo<MarketValue>(
+  const market = useMemo<MarketValue>(
     () => ({
       data,
       status,
@@ -285,38 +268,42 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       rep: data?.rep || null,
       ref,
       setRef,
-      cart,
-      quote,
-      quoting,
-      quoteError,
-      coupon,
-      setCoupon,
-      note,
-      setNote,
       recognized,
-      myOrders,
-      refreshMyOrders,
       index,
+      ensureIndex,
+      defaultQty,
       add,
       setQty,
       remove,
-      defaultQty,
+      addMany,
       pairsFor,
       reload,
     }),
-    [
-      data, status, items, itemsByCode, categories, settings, ref, setRef, cart, quote, quoting, quoteError,
-      coupon, note, setNote, recognized, myOrders, refreshMyOrders, index, add, setQty, remove, defaultQty,
-      pairsFor, reload,
-    ],
+    [data, status, items, itemsByCode, categories, settings, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
   )
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
+  const order = useMemo<OrderValue>(
+    () => ({ quote, quoting, quoteError, coupon, setCoupon, note, setNote, myOrders, refreshMyOrders }),
+    [quote, quoting, quoteError, coupon, note, setNote, myOrders, refreshMyOrders],
+  )
+
+  return (
+    <MarketCtx.Provider value={market}>
+      <OrderCtx.Provider value={order}>{children}</OrderCtx.Provider>
+    </MarketCtx.Provider>
+  )
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function useMarket(): MarketValue {
-  const v = useContext(Ctx)
+  const v = useContext(MarketCtx)
   if (!v) throw new Error('useMarket must be used inside MarketProvider')
+  return v
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function useOrder(): OrderValue {
+  const v = useContext(OrderCtx)
+  if (!v) throw new Error('useOrder must be used inside MarketProvider')
   return v
 }

@@ -1,215 +1,293 @@
-import { MessageCircle, Plus } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
-import { Stepper } from '@/components/ui/stepper'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { Check, Eye, MessageCircle, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { RepCard, ShopItem } from '@/lib/shopApi'
-import { ProductImage } from '@/pages/shop/ProductImage'
-import { badgeMeta, bhd, minQtyOf, money, RING, RING_INSET, stepOf, stockMeta } from '@/pages/shop/shared'
+import type { ShopItem } from '@/lib/shopApi'
+import { useMarket } from '../MarketContext'
+import { track } from '../lib/events'
+import { badgeMeta, bhd, cardBadges, isOut, minQtyOf, money, nextTier, stepOf, stockMeta, unitAt, priceAnchor, productDetail, productName } from '../lib/format'
+import { useShell } from '../shell/ShellContext'
+import { useCartQty } from '../store/cart'
 import { S } from '../strings'
+import { Chip } from '../ui/Chip'
+import { ProductImage, SIZES_GRID, SIZES_RAIL, SIZES_THUMB } from '../ui/ProductImage'
+import { Stepper } from '../ui/Stepper'
+import { useToast } from '../ui/Toast'
+import { QtySheet } from './QtySheet'
 
 /**
- * The marketplace product card (plan §H). Product NAME as the title, the code underneath,
- * one stock pill, up to two badges, the trade price, the first volume tier, and ONE action:
- * Add (which becomes a stepper preset to the merchant's remembered quantity) — or Backorder,
- * or "Tell Ahmed" when the item is sold out and the rep takes WhatsApp.
+ * The product card, three densities:
+ *   grid    — the shelf: photo tile, name, code · stock, price, quantity rules, first tier, Add
+ *   compact — rails and the mega-nav: photo, name, price, Add
+ *   list    — mission mode (Shop/Search density toggle, search rows): one line per SKU
+ *
+ * One action. `Add · 12` (the remembered quantity, rounded to the pack) → "✓ Added" for 600 ms →
+ * the stepper, with a plum border on the card. Tapping the number opens the keypad. Below the
+ * minimum the stepper removes the line — with an Undo toast. Every add also bumps the cart badge
+ * and rolls the cart total (those subscribe to the store themselves). No fly-to-cart.
+ *
+ * Memoised on the item: an add re-renders this card (its own qty subscription) and the cart
+ * surfaces, not the whole grid.
  */
 
-const BADGE_ORDER = ['on_offer', 'new', 'best_seller', 'trending', 'selling_fast', 'price_drop']
+export type CardVariant = 'grid' | 'compact' | 'list'
 
 export interface MarketCardProps {
   item: ShopItem
-  qty: number
-  defaultQty: number
-  allowBackorder: boolean
-  showCompare: boolean
-  publicTiers: boolean
-  rep?: RepCard | null
-  compact?: boolean
-  eagerImage?: boolean
-  onOpen: () => void
-  onAdd: () => void
-  onSetQty: (qty: number) => void
-  onRemove: () => void
-  onKeypad: () => void
+  variant?: CardVariant
+  /** analytics: which rail / surface the card sits in */
+  from?: string
+  /** first-screen photos: eager + high priority */
+  priority?: boolean
+  /** override the remembered quantity (Order again rows) */
+  presetQty?: number
+  className?: string
 }
 
-export function tierNudge(item: ShopItem, qty: number): string | null {
-  const next = (item.tiers || []).find((t) => t.min_qty > qty)
-  if (!next || qty <= 0) return null
-  return S.card.nudge(next.min_qty - qty, next.min_qty)
-}
+const ADDED_MS = 600
 
-export function MarketCard({
-  item,
-  qty,
-  defaultQty,
-  allowBackorder,
-  showCompare,
-  publicTiers,
-  rep,
-  compact,
-  eagerImage,
-  onOpen,
-  onAdd,
-  onSetQty,
-  onRemove,
-  onKeypad,
-}: MarketCardProps) {
-  const out = item.stock_status === 'out_of_stock'
+export const MarketCard = memo(function MarketCard({ item, variant = 'grid', from, priority, presetQty, className }: MarketCardProps) {
+  const m = useMarket()
+  const { openProduct, viewport } = useShell()
+  const toast = useToast()
+  const qty = useCartQty(item.item_code)
+  const [added, setAdded] = useState(false)
+  const [keypad, setKeypad] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  const imgWrap = useRef<HTMLDivElement>(null)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+
+  const out = isOut(item)
   const stock = stockMeta(item.stock_status)
   const step = stepOf(item)
   const min = minQtyOf(item)
-  const name = item.display_name || item.item_code
-  const showCode = Boolean(item.display_name && item.display_name !== item.item_code)
-  const compare =
-    showCompare && item.compare_at_bhd != null && item.price_bhd != null && item.compare_at_bhd > item.price_bhd
-      ? Number(item.compare_at_bhd)
-      : null
-  const savePct = compare != null ? Number(item.save_pct) || Math.round(((compare - Number(item.price_bhd)) / compare) * 100) : null
-  const badges = (item.badges || [])
-    .filter((b) => b !== 'selling_fast' || item.stock_status !== 'out_of_stock')
-    .slice()
-    .sort((a, b) => BADGE_ORDER.indexOf(a) - BADGE_ORDER.indexOf(b))
-    .slice(0, 2)
-  const tier = publicTiers ? (item.tiers || [])[0] : undefined
-  const canOrder = !out || allowBackorder
+  const name = productName(item)
+  const showCode = name.toUpperCase() !== item.item_code.toUpperCase()
+  const defaultQty = presetQty && presetQty > 0 ? presetQty : m.defaultQty(item)
+  const anchor = priceAnchor(item, m.showCompare)
+  const compare = anchor?.was ?? null
+  const savePct = anchor?.pct ?? null
+  const badges = cardBadges(item, variant === 'compact' ? 1 : 2)
+  const tiers = m.publicTiers ? item.tiers || [] : []
+  const firstTier = tiers[0]
+  const canOrder = !out || m.allowBackorder
   const selected = qty > 0
-  const nudge = selected ? tierNudge(item, qty) : null
-  const tellRep = out && !allowBackorder && rep?.whatsapp_url
-  const tellUrl = tellRep
-    ? `${rep!.whatsapp_url!.split('?text=')[0]}?text=${encodeURIComponent(`Hello ${rep!.first_name || ''}, please tell me when ${item.item_code} (${name}) is back in stock.`)}`
-    : null
+  const nudgeTier = selected ? nextTier(item, qty) : null
+  const tellRep = out && !m.allowBackorder && m.rep?.whatsapp_url
+  const tellUrl = tellRep ? `${m.rep!.whatsapp_url!.split('?text=')[0]}?text=${encodeURIComponent(`Hello ${m.rep!.first_name || ''}, please tell me when ${item.item_code} (${name}) is back in stock.`)}` : null
+  const spec = productDetail(item)
+
+  const open = useCallback(() => {
+    if (from) track('rail_click', { item_code: item.item_code, meta: { rail: from } })
+    const phone = viewport === 'phone'
+    const img = imgWrap.current?.querySelector('img')
+    const vt = phone && typeof document !== 'undefined' && 'startViewTransition' in document && Boolean(img)
+    if (vt && img) {
+      img.style.viewTransitionName = 'product-photo'
+      window.setTimeout(() => {
+        img.style.viewTransitionName = ''
+      }, 900)
+    }
+    openProduct(item.item_code, from, vt)
+  }, [from, item.item_code, openProduct, viewport])
+
+  const add = useCallback(() => {
+    m.add(item, defaultQty, from)
+    setAdded(true)
+    window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => setAdded(false), ADDED_MS)
+    try {
+      navigator.vibrate?.(8)
+    } catch {
+      /* not supported */
+    }
+  }, [m, item, defaultQty, from])
+
+  const removeWithUndo = useCallback(() => {
+    const last = qty
+    m.remove(item.item_code)
+    toast(S.card.removed(name), { kind: 'info', action: { label: S.card.undo, onClick: () => m.setQty(item, last) } })
+  }, [m, item, qty, name, toast])
+
+  const setQty = useCallback((n: number) => m.setQty(item, n), [m, item])
+
+  /* ── the one action ── */
+  const action = (size: 'sm' | 'md') => {
+    if (added) {
+      return (
+        <div aria-live="polite" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm bg-plum text-sm font-semibold text-white', size === 'sm' ? 'h-10' : 'h-11')}>
+          <Check size={16} aria-hidden="true" /> {S.card.added}
+        </div>
+      )
+    }
+    if (selected) {
+      return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad(true)} className="w-full" />
+    }
+    if (tellUrl) {
+      return (
+        <a href={tellUrl} target="_blank" rel="noreferrer" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm border border-line bg-surface text-sm font-semibold text-ink transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', size === 'sm' ? 'h-10' : 'h-11')}>
+          <MessageCircle size={15} aria-hidden="true" /> {S.card.tellRep(m.rep?.first_name || 'us')}
+        </a>
+      )
+    }
+    return (
+      <button
+        type="button"
+        onClick={add}
+        disabled={!canOrder}
+        aria-label={canOrder ? `${out ? S.card.backorder : S.card.add}${!out && defaultQty > 1 ? ` · ${defaultQty}` : ''} — ${name}` : `${S.card.soldOut} — ${name}`}
+        className={cn(
+          'flex w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
+          size === 'sm' ? 'h-10' : 'h-11',
+          canOrder ? (out ? 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash' : 'bg-plum text-white shadow-1 hover:bg-plum-deep') : 'cursor-not-allowed border border-bad/20 bg-bad-soft text-bad',
+        )}
+      >
+        {canOrder ? (
+          <>
+            <Plus size={15} aria-hidden="true" /> {out ? S.card.backorder : S.card.add}
+            {!out && defaultQty > 1 && <span className="tnum opacity-80">· {defaultQty}</span>}
+          </>
+        ) : (
+          S.card.soldOut
+        )}
+      </button>
+    )
+  }
+
+  const keypadEl = keypad && <QtySheet item={item} value={qty} onApply={setQty} onRemove={removeWithUndo} onClose={() => setKeypad(false)} />
+
+  /* ── list row ── */
+  if (variant === 'list') {
+    return (
+      <article className={cn('flex items-center gap-3 border-b border-line-2 py-2.5', selected && 'bg-plum-wash/60 -mx-2 px-2 rounded-sm', className)}>
+        <button type="button" onClick={open} className="h-14 w-14 shrink-0 overflow-hidden rounded-sm border border-line-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70" aria-label={name}>
+          <div ref={imgWrap}>
+            <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={56} imgClassName={cn('p-1', out && 'opacity-45 saturate-50')} iconSize={18} showCaption={false} />
+          </div>
+        </button>
+        <button type="button" onClick={open} className="min-w-0 flex-1 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 rounded-xs">
+          <div className="line-clamp-1 text-sm font-semibold text-ink">{name}</div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-ink-2">
+            {showCode && <span className="tnum">{item.item_code}</span>}
+            <span className={cn('inline-flex items-center gap-1', stock.tone === 'ok' ? 'text-ok' : stock.tone === 'warn' ? 'text-warn' : 'text-bad')}>
+              <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+              {stock.label}
+            </span>
+            {firstTier && <span className="tnum">{S.card.tier(firstTier.min_qty, money(firstTier.unit_price_bhd))}</span>}
+          </div>
+        </button>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <span className="font-display text-sm font-bold tnum text-ink">{item.price_bhd != null ? bhd(selected ? (unitAt(item, qty) ?? Number(item.price_bhd)) * qty : item.price_bhd) : S.card.priceOnRequest}</span>
+          <div className="w-[7.5rem]">{action('sm')}</div>
+        </div>
+        {keypadEl}
+      </article>
+    )
+  }
+
+  const compact = variant === 'compact'
 
   return (
     <article
       className={cn(
-        'group flex flex-col overflow-hidden rounded-[20px] border bg-white transition duration-200 ease-out',
-        compact && 'w-[10.5rem] shrink-0 sm:w-[12rem]',
-        selected
-          ? 'border-[#6d28d9]/40 shadow-[0_0_0_1px_rgba(109,40,217,.10),0_8px_24px_-16px_rgba(24,16,48,.30)]'
-          : 'border-[#ece9f3] shadow-[0_1px_2px_rgba(24,16,48,.04)] hover:border-[#e2ddef] hover:shadow-[0_12px_28px_-18px_rgba(24,16,48,.32)]',
+        'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition duration-2 ease-m',
+        compact ? 'cv-compact w-[clamp(9.5rem,44vw,12.5rem)] shrink-0 lg:w-auto' : priority ? '' : 'cv-card',
+        selected ? 'border-plum/50 shadow-[0_0_0_1px_hsl(var(--m-plum)/.18),var(--m-shadow-2)]' : 'border-line shadow-1 hover:-translate-y-0.5 hover:border-ink/15 hover:shadow-2',
+        className,
       )}
     >
-      <button type="button" onClick={onOpen} className={cn('relative block w-full', RING_INSET)}>
-        <ProductImage
-          srcs={[item.thumb_url, item.product_image_url, item.package_image_url]}
-          alt={name}
-          eager={eagerImage}
-          width={compact ? 192 : 320}
-          height={compact ? 192 : 320}
-          className="aspect-square w-full"
-          imgClassName={cn('p-3 transition-transform duration-500 ease-out group-hover:scale-[1.035]', out && 'opacity-45 saturate-50')}
-          iconSize={compact ? 28 : 40}
-          showCaption={!compact}
-        />
+      <div className="relative">
+      <button type="button" onClick={open} className="block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70" aria-label={`${S.card.quickView}: ${name}`}>
+        <div ref={imgWrap}>
+          <ProductImage
+            item={item}
+            alt={name}
+            sizes={compact ? SIZES_RAIL : SIZES_GRID}
+            size={compact ? 200 : 320}
+            priority={priority}
+            eager={priority}
+            className="w-full"
+            imgClassName={cn('p-3 transition-transform duration-3 ease-m group-hover:scale-[1.03]', out && 'opacity-45 saturate-50')}
+            iconSize={compact ? 28 : 40}
+            showCaption={!compact}
+          />
+        </div>
+      </button>
+      <div className="pointer-events-none absolute inset-0" aria-hidden="true">
         {badges[0] && (
-          <span className="absolute left-2.5 top-2.5">
-            <Badge tone={badgeMeta(badges[0]).tone}>{badgeMeta(badges[0]).label}</Badge>
+          <span className="absolute start-2.5 top-2.5">
+            <Chip tone={badgeMeta(badges[0]).tone}>{badgeMeta(badges[0]).label}</Chip>
           </span>
         )}
         {savePct != null && savePct > 0 && (
-          <span className="absolute right-2.5 top-2.5 rounded-full bg-[#1a1430] px-2 py-[3px] text-[11px] font-semibold leading-[14px] text-white">
-            Save {savePct}%
+          <span className="absolute end-2.5 top-2.5">
+            <Chip tone="ink">{S.card.save(savePct)}</Chip>
           </span>
         )}
-      </button>
+        {out && compact && (
+          <span className="absolute inset-x-2.5 bottom-2.5">
+            <Chip tone="bad" className="w-full justify-center">
+              {S.card.soldOut}
+            </Chip>
+          </span>
+        )}
+        {/* desktop hover reveal */}
+        <span className="pointer-events-none absolute inset-x-0 bottom-2.5 hidden justify-center opacity-0 transition duration-2 ease-m group-hover:opacity-100 lg:flex">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-ink/85 px-3 py-1.5 text-xs font-semibold text-white shadow-2 backdrop-blur">
+            <Eye size={13} aria-hidden="true" /> {S.card.quickView}
+          </span>
+        </span>
+      </div>
+      </div>
 
-      <div className={cn('flex flex-1 flex-col border-t border-[#f4f2f9]', compact ? 'p-2.5' : 'p-3')}>
-        <button type="button" onClick={onOpen} className={cn('rounded-lg text-left', RING)}>
-          <h3 className={cn('line-clamp-2 font-display font-bold leading-[1.15] tracking-[-0.01em] text-[#1a1430]', compact ? 'text-[12.5px]' : 'text-[13.5px]')}>
-            {name}
-          </h3>
-          {!compact && (
-            <p className="mt-1 line-clamp-1 text-[12px] leading-[1.35] text-[#6b6480]">
-              {[showCode ? item.item_code : null, (item.spec || '').split('\n')[0]].filter(Boolean).join(' · ')}
-            </p>
-          )}
+      <div className={cn('flex flex-1 flex-col border-t border-line-2', compact ? 'p-2.5' : 'p-3')}>
+        <button type="button" onClick={open} className="-my-1 min-h-[2.5rem] rounded-xs py-1 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+          <h3 className={cn('line-clamp-2 font-display font-bold leading-[1.2] text-ink', compact ? 'text-xs' : 'text-sm')}>{name}</h3>
         </button>
-
-        <div className="mt-2 flex flex-wrap items-center gap-1">
-          <Badge tone={stock.tone} dot>
-            {stock.label}
-          </Badge>
-          {!compact && badges[1] && <Badge tone={badgeMeta(badges[1]).tone}>{badgeMeta(badges[1]).label}</Badge>}
-        </div>
-
-        <div className="mt-auto pt-2.5">
-          <div className="flex items-baseline gap-1.5">
-            <span className={cn('font-display font-extrabold leading-none tracking-[-0.01em] tabular-nums text-[#6d28d9]', compact ? 'text-[14px]' : 'text-[15px]')}>
-              {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
+        {!compact && (
+          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-ink-2">
+            {showCode && <span className="tnum">{item.item_code}</span>}
+            {showCode && <span aria-hidden="true">·</span>}
+            <span className={cn('inline-flex items-center gap-1 font-medium', stock.tone === 'ok' ? 'text-ok' : stock.tone === 'warn' ? 'text-warn' : 'text-bad')}>
+              <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+              {stock.label}
             </span>
-            {item.price_bhd != null && !compact && <span className="text-[11px] text-[#6b6480]">{S.card.perPiece}</span>}
+            {badges[1] && <Chip tone={badgeMeta(badges[1]).tone}>{badgeMeta(badges[1]).label}</Chip>}
           </div>
-          <div className="mt-1 min-h-[1rem] text-[11px] leading-[1.35] text-[#6b6480]">
-            {compare != null && !compact && <span className="tabular-nums line-through">Retail BHD {money(compare)}</span>}
-            {tier && (
-              <div className="tabular-nums">
-                {tier.min_qty}+ pcs · <span className="font-semibold text-[#1a1430]">{bhd(tier.unit_price_bhd)}</span>
-              </div>
-            )}
-            {!tier && item.has_tiers && !publicTiers && <div>{S.card.volumePrices}</div>}
-            {min > 1 && !compact && <div className="tabular-nums">{S.card.min(min)}</div>}
-          </div>
+        )}
+        {!compact && spec && <p className="mt-0.5 line-clamp-1 text-xs text-ink-3">{spec}</p>}
 
-          <div className="mt-2.5">
-            {selected ? (
-              <div>
-                <Stepper
-                  value={qty}
-                  step={step}
-                  min={min}
-                  size={compact ? 'sm' : 'md'}
-                  label={name}
-                  onChange={onSetQty}
-                  onRemove={onRemove}
-                  onValueClick={onKeypad}
-                  className="w-full"
-                />
-                {nudge && !compact && <p className="mt-1 text-[11px] font-medium text-[#6d28d9]">{nudge}</p>}
-              </div>
-            ) : tellUrl ? (
-              <a
-                href={tellUrl}
-                target="_blank"
-                rel="noreferrer"
-                className={cn(
-                  'flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#e4e0ee] bg-white text-[13px] font-semibold text-[#1a1430] transition hover:bg-[#f7f5fb]',
-                  compact ? 'h-10' : 'h-11',
-                  RING,
-                )}
-              >
-                <MessageCircle size={15} aria-hidden="true" /> {S.card.tellRep(rep?.first_name || 'us')}
-              </a>
-            ) : (
-              <button
-                type="button"
-                onClick={onAdd}
-                disabled={!canOrder}
-                aria-label={canOrder ? `${out ? S.card.backorder : S.card.add} ${defaultQty} × ${name}` : `${name} is sold out`}
-                className={cn(
-                  'flex w-full items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition duration-150 ease-out active:scale-[.99]',
-                  compact ? 'h-10' : 'h-11',
-                  RING,
-                  canOrder
-                    ? out
-                      ? 'border border-[#e4e0ee] bg-white text-[#1a1430] hover:border-[#d9d2ee] hover:bg-[#f7f5fb]'
-                      : 'bg-[#6d28d9] text-white hover:bg-[#5b21b6]'
-                    : 'cursor-not-allowed border border-[#f3c9d2] bg-[#fdecef] text-[#9f1239]',
-                )}
-              >
-                {canOrder ? (
-                  <>
-                    <Plus size={15} aria-hidden="true" /> {out ? S.card.backorder : S.card.add}
-                    {!out && defaultQty > 1 && <span className="tabular-nums opacity-80">· {defaultQty}</span>}
-                  </>
-                ) : (
-                  S.card.soldOut
-                )}
-              </button>
-            )}
+        <div className={cn('mt-auto', compact ? 'pt-1.5' : 'pt-2.5')}>
+          <div className="flex items-baseline gap-1.5">
+            <span className={cn('font-display font-extrabold leading-none tnum text-plum-ink', compact ? 'text-sm' : 'text-md')}>{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</span>
+            {item.price_bhd != null && !compact && <span className="text-2xs text-ink-3">{S.card.perPiece}</span>}
           </div>
+          {!compact && (
+            <div className="mt-1 min-h-[1rem] text-xs leading-[1.35] text-ink-2">
+              {compare != null && (
+                <span className="tnum">
+                  {anchor?.kind === 'was' ? S.card.was : S.card.retail} <s>BHD {money(compare)}</s>
+                </span>
+              )}
+              {(min > 1 || step > 1) && <div className="tnum">{[min > 1 ? S.card.min(min) : null, step > 1 ? S.card.packs(step) : null].filter(Boolean).join(' · ')}</div>}
+              {firstTier ? (
+                <div className="tnum">
+                  {firstTier.min_qty}+ pcs → <span className="font-semibold text-ink">{bhd(firstTier.unit_price_bhd)}</span>
+                  {tiers.length > 1 && (
+                    <button type="button" onClick={open} className="ms-1.5 font-semibold text-plum hover:underline">
+                      {S.card.breaks(tiers.length)}
+                    </button>
+                  )}
+                </div>
+              ) : item.has_tiers && !m.publicTiers ? (
+                <div>{S.card.volumePrices}</div>
+              ) : null}
+            </div>
+          )}
+          <div className={cn(compact ? 'mt-2' : 'mt-2.5')}>{action(compact ? 'sm' : 'md')}</div>
+          {!compact && nudgeTier && <p className="mt-1.5 text-xs font-medium text-plum">{S.card.nudge(nudgeTier.min_qty - qty, money(nudgeTier.unit_price_bhd))}</p>}
         </div>
       </div>
+      {keypadEl}
     </article>
   )
-}
+})

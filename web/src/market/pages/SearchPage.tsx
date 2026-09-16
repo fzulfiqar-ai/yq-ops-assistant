@@ -1,155 +1,94 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Clock, MessageCircle } from 'lucide-react'
-import { cn } from '@/lib/utils'
-import type { ShopItem } from '@/lib/shopApi'
-import { RING } from '@/pages/shop/shared'
-import { useMarket } from '../MarketContext'
-import { BTN_SECONDARY, CategoryChips, EmptyState, QtySheet, SearchBox } from '../components/Bits'
-import { BottomNav, CartBar, Page, TopBar } from '../components/Chrome'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { MarketCard } from '../components/MarketCard'
-import { recentSearches, rememberSearch } from '../lib/device'
+import { Rail } from '../components/Rail'
+import { SearchField } from '../components/SearchField'
+import { SearchEmpty, SearchGroups, SearchPreparing } from '../components/SearchResults'
+import { groupResults } from '../lib/searchGroups'
+import { useMarket } from '../MarketContext'
+import { rememberSearch } from '../lib/device'
 import { track, trackSearch } from '../lib/events'
-import { searchItems, suggest } from '../lib/search'
+import { bestSellers } from '../lib/home'
+import { usePageTitle } from '../shell/ShellContext'
 import { S } from '../strings'
 
-/** Fuzzy, synonym-aware search over the whole catalog (plan §Q). */
+/**
+ * /search — instant, grouped, with inline Add. The query lives in the URL (survives refresh,
+ * shareable). Enter on an exact code adds it at the default quantity and keeps the field ready
+ * for the next code. Below zero results the page is never dead: Best sellers.
+ */
 export default function SearchPage() {
   const [params, setParams] = useSearchParams()
-  const navigate = useNavigate()
   const m = useMarket()
-  const { items, index, categories, cart, rep } = m
   const [q, setQ] = useState(params.get('q') || '')
-  const [cat, setCat] = useState<string>(S.categories.all)
-  const [keypad, setKeypad] = useState<ShopItem | null>(null)
-  const [recent, setRecent] = useState<string[]>(() => recentSearches())
+  const inputRef = useRef<HTMLInputElement>(null)
+  usePageTitle(S.nav.search, false, q.trim() ? `${q.trim()} · ${S.brand}` : `${S.nav.search} · ${S.brand}`)
 
   useEffect(() => {
-    document.title = q.trim() ? `${q.trim()} · ${S.brand}` : `${S.nav.search} · ${S.brand}`
-  }, [q])
-
-  // keep the URL in step so a search survives a refresh and can be shared
+    void m.ensureIndex()
+  }, [m])
   useEffect(() => {
     const cur = params.get('q') || ''
-    if (cur !== q) setParams(q.trim() ? { q: q.trim() } : {}, { replace: true })
+    if (cur !== q.trim()) setParams(q.trim() ? { q: q.trim() } : {}, { replace: true })
   }, [q, params, setParams])
 
-  const results = useMemo(() => {
-    if (!index || !q.trim()) return []
-    const r = searchItems(index, items, q)
-    return cat === S.categories.all ? r : r.filter((i) => (i.category || 'OTHER') === cat)
-  }, [index, items, q, cat])
-  const hints = useMemo(() => (index && q.trim() && !results.length ? suggest(index, q) : []), [index, q, results.length])
+  const [search, setSearch] = useState<null | { searchItems: typeof import('../lib/search').searchItems; suggest: typeof import('../lib/search').suggest }>(null)
+  useEffect(() => {
+    let alive = true
+    import('../lib/search').then((mod) => alive && setSearch({ searchItems: mod.searchItems, suggest: mod.suggest }))
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const grouped = useMemo(() => (search ? groupResults(q, m.items, m.index, search.searchItems) : { codes: [], products: [], categories: [], exact: null }), [q, m.items, m.index, search])
+  const flat = grouped.codes.length + grouped.products.length
+  const hints = useMemo(() => (search && m.index && q.trim() && !flat ? search.suggest(m.index, q) : []), [search, m.index, q, flat])
+  const best = useMemo(() => bestSellers(m.items), [m.items])
 
   useEffect(() => {
-    if (!q.trim() || !index) return
-    trackSearch(q, results.length)
-    const id = window.setTimeout(() => {
-      rememberSearch(q)
-      setRecent(recentSearches())
-    }, 1200)
+    if (!q.trim() || !m.index) return
+    trackSearch(q, flat)
+    const id = window.setTimeout(() => rememberSearch(q), 1200)
     return () => window.clearTimeout(id)
-  }, [q, results.length, index])
+  }, [q, flat, m.index])
 
-  const openItem = (code: string) => navigate(`/p/${encodeURIComponent(code)}`)
-  const askUrl = rep?.whatsapp_url && q.trim() ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(`Hello ${rep.first_name || ''}, do you have "${q.trim()}"?`)}` : null
+  const submit = (v: string) => {
+    const query = v.trim()
+    if (!query) return
+    rememberSearch(query)
+    if (grouped.exact && grouped.exact.stock_status !== 'out_of_stock') {
+      m.add(grouped.exact, undefined, 'search_enter')
+      track('search', { meta: { q: query.slice(0, 60), results: flat, code: grouped.exact.item_code } })
+      setQ('')
+      inputRef.current?.focus()
+    }
+  }
 
   return (
-    <Page withCartBar>
-      <TopBar title={S.nav.search} />
-      <div className="sticky top-0 z-20 border-b border-[#ece9f3] bg-[#faf9fc]/92 backdrop-blur-md">
-        <div className="mx-auto max-w-6xl px-4 pb-2 pt-2">
-          <SearchBox value={q} onChange={setQ} autoFocus />
-          {q.trim() && (
-            <div className="mt-2">
-              <CategoryChips categories={categories} active={cat} onPick={setCat} />
-            </div>
-          )}
-        </div>
+    <div className="px-gutter lg:px-0">
+      <div className="sticky top-0 z-header -mx-gutter bg-canvas/95 px-gutter pb-2 pt-1 backdrop-blur lg:static lg:mx-0 lg:bg-transparent lg:px-0">
+        <h1 className="hidden font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{S.nav.search}</h1>
+        <SearchField ref={inputRef} value={q} onChange={setQ} onSubmit={submit} autoFocus />
       </div>
-      <main className="mx-auto max-w-6xl px-4 pt-4">
+      <div className="pt-3">
         {!q.trim() ? (
-          <>
-            {recent.length > 0 && (
-              <section aria-label={S.states.recent}>
-                <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">{S.states.recent}</h2>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {recent.map((r) => (
-                    <button key={r} type="button" onClick={() => setQ(r)} className={cn('inline-flex h-9 items-center gap-1.5 rounded-full border border-[#e4e0ee] bg-white px-3.5 text-[12.5px] text-[#1a1430] hover:bg-[#f7f5fb]', RING)}>
-                      <Clock size={13} className="text-[#a8a2bb]" aria-hidden="true" /> {r}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-            <section className="mt-6" aria-label="Browse by category">
-              <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b6480]">Categories</h2>
-              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {categories.map((c) => (
-                  <button key={c} type="button" onClick={() => navigate(`/t/${encodeURIComponent(c.toLowerCase())}`)} className={cn('h-14 rounded-[16px] border border-[#ece9f3] bg-white px-3 text-left font-display text-[13.5px] font-bold capitalize text-[#1a1430] hover:border-[#e2ddef] hover:shadow-[0_10px_24px_-16px_rgba(24,16,48,.32)]', RING)}>
-                    {c.toLowerCase()}
-                    <span className="mt-0.5 block text-[12px] font-normal text-[#6b6480]">{items.filter((i) => (i.category || 'OTHER') === c).length} products</span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          </>
-        ) : results.length === 0 ? (
-          <EmptyState
-            title={S.states.noMatch(q.trim())}
-            hint={S.states.noMatchHint}
-            action={
-              <div className="flex flex-col items-center gap-3">
-                {hints.length > 0 && (
-                  <div className="flex flex-wrap justify-center gap-1.5">
-                    <span className="self-center text-[12px] text-[#6b6480]">{S.states.didYouMean}</span>
-                    {hints.map((h) => (
-                      <button key={h} type="button" onClick={() => setQ(h)} className={cn('h-9 rounded-full border border-[#e4e0ee] bg-white px-3.5 text-[12.5px] font-semibold text-[#6d28d9] hover:bg-[#f7f5fb]', RING)}>{h}</button>
-                    ))}
-                  </div>
-                )}
-                <div className="flex flex-wrap justify-center gap-1.5">
-                  {categories.map((c) => (
-                    <button key={c} type="button" onClick={() => navigate(`/t/${encodeURIComponent(c.toLowerCase())}`)} className={cn('h-9 rounded-full border border-[#e4e0ee] bg-white px-3.5 text-[12px] capitalize text-[#1a1430] hover:bg-[#f7f5fb]', RING)}>{c.toLowerCase()}</button>
-                  ))}
-                </div>
-                {askUrl && (
-                  <a href={askUrl} target="_blank" rel="noreferrer" className={cn(BTN_SECONDARY, 'text-[#137a48]')}>
-                    <MessageCircle size={15} aria-hidden="true" /> {S.cart.ask(rep!.first_name || 'us')}
-                  </a>
-                )}
-              </div>
-            }
-          />
+          <SearchEmpty onPick={setQ} />
+        ) : !m.index || !search ? (
+          <SearchPreparing />
         ) : (
           <>
-            <p aria-live="polite" className="text-[12px] text-[#6b6480]"><b className="font-semibold tabular-nums text-[#1a1430]">{results.length}</b> {results.length === 1 ? 'product' : 'products'}</p>
-            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 xl:grid-cols-5">
-              {results.map((it, i) => (
-                <MarketCard
-                  key={it.item_code}
-                  item={it}
-                  qty={cart.qtyOf(it.item_code)}
-                  defaultQty={m.defaultQty(it)}
-                  allowBackorder={m.allowBackorder}
-                  showCompare={m.showCompare}
-                  publicTiers={m.publicTiers}
-                  rep={rep}
-                  eagerImage={i < 4}
-                  onOpen={() => { track('item', { item_code: it.item_code, meta: { q: q.trim().slice(0, 60), pos: i } }); openItem(it.item_code) }}
-                  onAdd={() => m.add(it, undefined, 'search')}
-                  onSetQty={(n) => m.setQty(it, n)}
-                  onRemove={() => m.remove(it.item_code)}
-                  onKeypad={() => setKeypad(it)}
-                />
-              ))}
-            </div>
+            <SearchGroups q={q} grouped={grouped} hints={hints} onPick={setQ} />
+            {flat === 0 && best.length > 0 && (
+              <Rail id="best" title={S.rails.best} seeAllTo="/shop?sort=popular">
+                {best.map((it) => (
+                  <MarketCard key={it.item_code} item={it} variant="compact" from="search_zero" />
+                ))}
+              </Rail>
+            )}
           </>
         )}
-      </main>
-      <CartBar />
-      <BottomNav />
-      {keypad && <QtySheet item={keypad} value={cart.qtyOf(keypad.item_code)} onApply={(n) => m.setQty(keypad, n)} onRemove={() => m.remove(keypad.item_code)} onClose={() => setKeypad(null)} />}
-    </Page>
+      </div>
+    </div>
   )
 }

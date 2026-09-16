@@ -321,6 +321,66 @@ def _():
     assert not any(f'"{k}":' in block for k in forbidden), "public item block leaks a private field"
 
 
+@test("badges: a real price cut → price_drop + was_bhd; a stale anchor never shows")
+def _():
+    from app.shop import _badges, _was_bhd
+    ctx = _ctx([_item("UK15", 1.0, stock=50, sold_90d=30), _item("X01", 0.75, stock=50, sold_90d=30)])
+    ctx["drops"] = {"UK15": {"was": 1.2, "now": 1.0, "on": "2026-09-10"}, "X01": {"was": 0.9, "now": 0.7, "on": "2026-09-10"}}
+    b = _badges(ctx)
+    assert "price_drop" in b["UK15"] and "price_drop" in b["X01"]
+    assert _was_bhd(ctx, "UK15", 1.0) == 1.2                 # live price == cut price → honest anchor
+    assert _was_bhd(ctx, "X01", 0.75) is None                # price moved again since → no anchor
+    assert _was_bhd(ctx, "NOPE", 1.0) is None
+
+
+@test("badges: clearance = real stock with a year+ of cover, worst first, capped, never a best seller")
+def _():
+    from app.shop import _badges
+    items = [
+        _item("SLOW1", 1.0, stock=600, sold_90d=10),     # 5400 days of cover
+        _item("SLOW2", 1.0, stock=200, sold_90d=0),      # never sold → infinite cover
+        _item("SLOW3", 1.0, stock=100, sold_90d=20),     # 450 days
+        _item("FAST", 1.0, stock=100, sold_90d=900),     # 10 days → not aging
+        _item("TINY", 1.0, stock=5, sold_90d=0),         # below the unit floor
+        _item("BEST", 1.0, stock=500, sold_90d=1000),    # best seller in its category
+    ]
+    ctx = _ctx(items, shop_clearance_max=2, shop_best_seller_top_n=1)
+    b = _badges(ctx)
+    tagged = {c for c in ctx["order"] if "clearance" in b[c]}
+    assert tagged == {"SLOW2", "SLOW1"}, tagged             # the two worst covers, capped at 2
+    assert "clearance" not in b["FAST"] and "clearance" not in b["TINY"] and "clearance" not in b["BEST"]
+    b3 = _badges(_ctx(items, shop_clearance_max=5, shop_best_seller_top_n=1))
+    assert "clearance" in b3["SLOW3"]
+
+
+@test("payload: a clearance item shows the real retail anchor even with retail compare off")
+def _():
+    from app.shop import catalog_payload  # noqa: F401
+    src = (ROOT / "app" / "shop.py").read_text(encoding="utf-8")
+    assert 'anchor_ok = show_compare or (clearance_retail and "clearance" in badges.get(code, []))' in src
+    assert "shop_clearance_show_retail" in src
+
+
+@test("payload: thumb_urls carries the 160/320/512 WebP set only when a product photo exists")
+def _():
+    from app.catalog import THUMB_SIZES, thumb_path
+    from app.shop import _thumb_urls
+    assert THUMB_SIZES == (160, 320, 512)
+    assert _thumb_urls({"item_code": "X01", "product_image_url": None}) is None
+    urls = _thumb_urls({"item_code": "X01", "product_image_url": "https://x/items/X01-product-1.jpg"})
+    assert set(urls) == {"160", "320", "512"}, urls
+    assert all(u.endswith(f"/thumbs/X01-product-{s}.webp") for s, u in urls.items()), urls
+    assert thumb_path("X01", "product") == "thumbs/X01-product.jpg"      # legacy 256 JPEG path unchanged
+    assert thumb_path("UK 15/A", "package", 320) == "thumbs/UK_15_A-package-320.webp"
+
+
+@test("payload: the public item block carries thumb_urls next to thumb_url")
+def _():
+    src = (ROOT / "app" / "shop.py").read_text(encoding="utf-8")
+    block = src.split("items.append({", 1)[1].split("})", 1)[0]
+    assert '"thumb_urls": _thumb_urls(it)' in block
+
+
 # ── marketplace: attribution, lifecycle, storefront card (pure) ───────────────
 
 def _cust(**kw):

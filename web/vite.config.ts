@@ -2,6 +2,8 @@ import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
+import tailwindcss from 'tailwindcss'
+import autoprefixer from 'autoprefixer'
 
 /**
  * One codebase, two builds (16-Sep-2026):
@@ -17,21 +19,48 @@ const MARKET = {
   description: 'Order mobile accessories at trade prices from YQ Bahrain — cables, chargers, TWS and more, delivered by your YQ representative.',
   ogTitle: 'YQ Marketplace',
   manifest: '/market.webmanifest',
-  theme: '#6d28d9',
+  /** the logo plum (src/market/market.css --m-plum) */
+  theme: '#6D4091',
+  /** product photos live here; preconnect so the LCP image does not pay DNS+TLS after the catalog lands */
+  imageOrigin: 'https://vofwqcqmdwdidueqxtxy.supabase.co',
+  fonts: ['/fonts/instrument-sans-v1.woff2', '/fonts/sora-v1.woff2'],
 }
 
+/**
+ * The market build rewrites the shared index.html: its own entry (src/main.market.tsx — one
+ * network hop less than main.tsx → MarketApp), its own head (title, OG, manifest, plum theme,
+ * viewport-fit for the floating nav, self-hosted font preloads instead of the Google Fonts
+ * stylesheet, storage preconnect) and `data-app="market"` on <html> (token scope) and on the
+ * prefetch script. `order: 'pre'` so the entry swap happens before Vite resolves the module graph.
+ */
 function marketHtml(): Plugin {
   return {
     name: 'yq-market-html',
-    transformIndexHtml(html) {
-      return html
-        .replace(/<title>[^<]*<\/title>/, `<title>${MARKET.title}</title>`)
-        .replace(/<meta name="description" content="[^"]*" \/>/, `<meta name="description" content="${MARKET.description}" />`)
-        .replace(/<meta property="og:title" content="[^"]*" \/>/, `<meta property="og:title" content="${MARKET.ogTitle}" />`)
-        .replace(/<meta property="og:description" content="[^"]*" \/>/, `<meta property="og:description" content="${MARKET.description}" />`)
-        .replace('<meta name="theme-color" content="#6d28d9" />', `<meta name="theme-color" content="${MARKET.theme}" />\n    <meta name="robots" content="noindex, nofollow" />\n    <link rel="manifest" href="${MARKET.manifest}" />`)
-        // Vite has already substituted %VITE_API_URL% by the time this runs — match the shape, not the placeholder.
-        .replace(/(<script src="\/catalog-prefetch\.js" data-api="[^"]*")/, '$1 data-app="market"')
+    transformIndexHtml: {
+      order: 'pre',
+      handler(html) {
+        const fontLinks = MARKET.fonts
+          .map((f) => `<link rel="preload" as="font" type="font/woff2" crossorigin href="${f}" />`)
+          .join('\n    ')
+        return html
+          .replace('<html lang="en">', '<html lang="en" dir="ltr" data-app="market">')
+          .replace('src="/src/main.tsx"', 'src="/src/main.market.tsx"')
+          .replace(/<title>[^<]*<\/title>/, `<title>${MARKET.title}</title>`)
+          .replace(/<meta name="description" content="[^"]*" \/>/, `<meta name="description" content="${MARKET.description}" />`)
+          .replace(/<meta property="og:title" content="[^"]*" \/>/, `<meta property="og:title" content="${MARKET.ogTitle}" />`)
+          .replace(/<meta property="og:description" content="[^"]*" \/>/, `<meta property="og:description" content="${MARKET.description}" />`)
+          .replace('<meta name="viewport" content="width=device-width, initial-scale=1.0" />', '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />')
+          .replace(
+            '<meta name="theme-color" content="#6d28d9" />',
+            `<meta name="theme-color" content="${MARKET.theme}" />\n    <meta name="color-scheme" content="light" />\n    <meta name="mobile-web-app-capable" content="yes" />\n    <meta name="robots" content="noindex, nofollow" />\n    <link rel="manifest" href="${MARKET.manifest}" />`,
+          )
+          // the two Google Fonts preconnects + the blocking stylesheet → self-hosted, preloaded woff2
+          .replace(/\s*<link rel="preconnect" href="https:\/\/fonts\.googleapis\.com" \/>/, '')
+          .replace(/\s*<link rel="preconnect" href="https:\/\/fonts\.gstatic\.com" crossorigin \/>/, `\n    <link rel="preconnect" href="${MARKET.imageOrigin}" />`)
+          .replace(/\s*<!-- A plain stylesheet on purpose:[\s\S]*?<link\s+href="https:\/\/fonts\.googleapis\.com[^"]*"\s+rel="stylesheet"\s*\/>/, `\n    ${fontLinks}`)
+          // Vite has already substituted %VITE_API_URL% by the time this runs — match the shape, not the placeholder.
+          .replace(/(<script src="\/catalog-prefetch\.js" data-api="[^"]*")/, '$1 data-app="market"')
+      },
     },
   }
 }
@@ -58,9 +87,9 @@ function marketPwa(apiUrl: string) {
     filename: 'sw.js',
     // public/market.webmanifest is linked by marketHtml(); the plugin must not add a second one.
     manifest: false,
-    includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'yq-icon-32.png', 'yq-icon-512.png', 'market.webmanifest'],
+    includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'yq-icon-32.png', 'yq-icon-512.png', 'market.webmanifest', 'fonts/*.woff2'],
     workbox: {
-      globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,woff2}'],
+      globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,webmanifest,woff2}'],
       // never let the worker answer the version file or any API path from cache
       globIgnores: ['version.json'],
       navigateFallback: '/index.html',
@@ -76,14 +105,10 @@ function marketPwa(apiUrl: string) {
           options: { cacheName: 'yq-market-catalog', networkTimeoutSeconds: 4, expiration: { maxEntries: 8, maxAgeSeconds: 86400 } },
         },
         {
+          // three WebP sizes per photo now, so the cap is doubled
           urlPattern: /^https:\/\/[a-z0-9]+\.supabase\.co\/storage\/v1\/object\/public\//,
           handler: 'CacheFirst',
-          options: { cacheName: 'yq-market-images', expiration: { maxEntries: 300, maxAgeSeconds: 30 * 86400 } },
-        },
-        {
-          urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
-          handler: 'StaleWhileRevalidate',
-          options: { cacheName: 'yq-fonts', expiration: { maxEntries: 20, maxAgeSeconds: 365 * 86400 } },
+          options: { cacheName: 'yq-market-images', expiration: { maxEntries: 600, maxAgeSeconds: 30 * 86400 } },
         },
       ],
     },
@@ -108,6 +133,28 @@ export default defineConfig(({ mode }) => {
     `local-${Date.now().toString(36)}`
   return {
     define: { __BUILD_ID__: JSON.stringify(buildId) },
+    // Inline PostCSS so the market build gets its own Tailwind config (own tokens, market-only
+    // content glob); the portal keeps tailwind.config.js and its CSS output is unchanged.
+    css: {
+      postcss: {
+        plugins: [tailwindcss({ config: isMarket ? './tailwind.market.config.js' : './tailwind.config.js' }), autoprefixer()],
+      },
+    },
+    build: isMarket
+      ? {
+          rollupOptions: {
+            output: {
+              // stable, auditable chunk names for the budget check (no "Chrome-xxxx" grab-bag)
+              manualChunks(id: string) {
+                if (/node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'react'
+                if (/node_modules[\\/]react-router/.test(id)) return 'router'
+                if (/node_modules[\\/]minisearch[\\/]/.test(id)) return 'search'
+                return undefined
+              },
+            },
+          },
+        }
+      : undefined,
     plugins: [
       react(),
       ...(isMarket

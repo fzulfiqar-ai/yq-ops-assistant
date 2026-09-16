@@ -15,13 +15,9 @@ import './index.css'
  */
 const root = createRoot(document.getElementById('root')!)
 
-// A third door (16-Sep-2026): the marketplace build (VITE_APP=market, its own Vercel project and
-// hostname) owns the root URL and every /{slug} storefront. The portal build is untouched.
-const APP = (import.meta.env.VITE_APP as string | undefined) || 'portal'
-
-if (APP === 'market') {
-  void import('./MarketApp').then(({ default: MarketApp }) => root.render(<MarketApp />))
-} else if (/^\/(c|o)\/[^/]+/.test(window.location.pathname)) {
+// The third door — the marketplace build (VITE_APP=market, its own Vercel project and hostname) —
+// has its own entry, src/main.market.tsx, which vite.config.ts wires into index.html directly.
+if (/^\/(c|o)\/[^/]+/.test(window.location.pathname)) {
   void import('./PublicApp').then(({ default: PublicApp }) => root.render(<PublicApp />))
 } else {
   void import('./PortalRoot').then(({ default: PortalRoot }) => root.render(<PortalRoot />))

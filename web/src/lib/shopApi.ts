@@ -20,7 +20,7 @@ export const API_BASE = (import.meta.env.VITE_API_URL as string) || ''
 /* ───────────────────────── catalog payload ───────────────────────── */
 
 export type StockStatus = 'in_stock' | 'low_stock' | 'out_of_stock'
-export type BadgeKind = 'best_seller' | 'trending' | 'new' | 'on_offer' | 'price_drop' | 'selling_fast'
+export type BadgeKind = 'best_seller' | 'trending' | 'new' | 'on_offer' | 'price_drop' | 'selling_fast' | 'clearance'
 export type ShopEventKind =
   | 'view'
   | 'item'
@@ -60,9 +60,13 @@ export interface ShopItem {
   b2c_bhd?: number | null
   compare_at_bhd?: number | null
   save_pct?: number | null
+  /** Marketplace: the previous trade price when a REAL cut happened recently (price-book history). */
+  was_bhd?: number | null
   product_image_url?: string | null
   package_image_url?: string | null
   thumb_url?: string | null
+  /** Marketplace: WebP size set for srcset ({"160": url, "320": url, "512": url}); absent on older payloads. */
+  thumb_urls?: Record<string, string> | null
   stock_status?: StockStatus | null
   /**
    * Exact units on hand. Salesman mode only — the public payload never carries a
