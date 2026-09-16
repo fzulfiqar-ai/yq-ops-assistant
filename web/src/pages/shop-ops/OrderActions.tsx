@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Check, Loader2, MessageCircle, UserRoundCheck } from 'lucide-react'
 import { apiGet, apiPost, ApiError } from '@/lib/api'
@@ -6,6 +6,7 @@ import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd } from '@/lib/format'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
+import { Stepper } from '@/components/ui/stepper'
 
 /**
  * The three actions the marketplace added to an order, shared by the desk drawer, the field
@@ -61,6 +62,9 @@ export interface ConfirmResponse {
 
 interface SalesmanOpt { id: number; name: string; is_active?: boolean }
 
+/** What a salesman actually says in the shop — one tap instead of typing on the road. */
+const ETA_CHIPS = ['Today', 'Tomorrow', 'Day after tomorrow', 'With my next visit'] as const
+
 export function ConfirmEditor({
   orderId, lines, onDone, onCancel,
 }: {
@@ -114,34 +118,34 @@ export function ConfirmEditor({
   }
 
   return (
-    <div className="space-y-3 rounded-xl border border-[#e9e2f8] bg-[#f9f7fd] p-3.5">
-      <div className="text-[12px] font-semibold text-[#1a1430]">Confirm quantities</div>
-      <ul className="divide-y divide-[#ece9f3] overflow-hidden rounded-xl border border-[#ece9f3] bg-white">
+    <div className="space-y-3 rounded-xl border border-[#E3DAEC] bg-[#F6F3F8] p-3.5">
+      <div className="text-[12px] font-semibold text-[#1A1428]">Confirm quantities</div>
+      <ul className="divide-y divide-[#E9E4EF] overflow-hidden rounded-xl border border-[#E9E4EF] bg-white">
         {lines.map((l) => {
           const d = draft[l.id] || { qty: String(l.qty), removed: false }
           const n = Math.floor(Number(d.qty) || 0)
           return (
             <li key={l.id} className={cn('flex items-center gap-3 p-2.5', d.removed && 'opacity-60')}>
               <div className="min-w-0 flex-1">
-                <div className={cn('truncate text-[13px] font-semibold text-[#1a1430]', d.removed && 'line-through')}>{l.display_name || l.item_code}</div>
+                <div className={cn('truncate text-[13px] font-semibold text-[#1A1428]', d.removed && 'line-through')}>{l.display_name || l.item_code}</div>
                 <div className="text-[11px] tabular-nums text-[#6b6480]">{l.item_code} · ordered {l.qty}{l.backorder ? ' · backorder' : ''}</div>
               </div>
               {!d.removed && (
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
+                <Stepper
+                  size="sm"
+                  value={n}
+                  min={1}
                   max={9999}
-                  value={d.qty}
-                  onChange={(e) => setDraft((s) => ({ ...s, [l.id]: { ...d, qty: e.target.value.replace(/[^\d]/g, '') } }))}
-                  aria-label={`Confirmed quantity for ${l.item_code}`}
-                  className={cn('h-10 w-[4.5rem] rounded-lg border bg-white px-2 text-center text-[15px] font-semibold tabular-nums outline-none focus:border-[#6d28d9]', n !== l.qty ? 'border-[#6d28d9] text-[#6d28d9]' : 'border-[#e4e0ee] text-[#1a1430]')}
+                  label={l.item_code}
+                  onChange={(v) => setDraft((s) => ({ ...s, [l.id]: { ...d, qty: String(v) } }))}
+                  onRemove={() => setDraft((s) => ({ ...s, [l.id]: { ...d, removed: true } }))}
+                  className={cn(n !== l.qty && 'border-[#6D4091] [&_span]:text-[#6D4091]')}
                 />
               )}
               <button
                 type="button"
                 onClick={() => setDraft((s) => ({ ...s, [l.id]: { ...d, removed: !d.removed } }))}
-                className={cn('h-10 shrink-0 rounded-lg border px-2.5 text-[12px] font-semibold', d.removed ? 'border-[#6d28d9] bg-[#f3eefc] text-[#6d28d9]' : 'border-[#e4e0ee] bg-white text-[#9f1239]')}
+                className={cn('h-10 shrink-0 rounded-lg border px-2.5 text-[12px] font-semibold', d.removed ? 'border-[#6D4091] bg-[#EEE8F4] text-[#6D4091]' : 'border-[#E2DCEA] bg-white text-[#9f1239]')}
               >
                 {d.removed ? 'Keep' : 'Remove'}
               </button>
@@ -149,17 +153,27 @@ export function ConfirmEditor({
           )
         })}
       </ul>
+      <div>
+        <div className="mb-1.5 text-[11.5px] font-semibold text-[#6b6480]">When will it reach the shop?</div>
+        <div className="flex flex-wrap gap-1.5">
+          {ETA_CHIPS.map((c) => (
+            <button key={c} type="button" onClick={() => setEta(eta === c ? '' : c)} aria-pressed={eta === c} className={cn('h-9 rounded-full border px-3 text-[12.5px] font-semibold transition-colors duration-150', eta === c ? 'border-[#6D4091] bg-[#6D4091] text-white' : 'border-[#E2DCEA] bg-white text-[#1A1428] hover:border-[#6D4091]')}>
+              {c}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="grid gap-2 sm:grid-cols-2">
-        <input value={eta} onChange={(e) => setEta(e.target.value)} placeholder="Expected delivery (e.g. Tomorrow with my route)" className="h-10 rounded-lg border border-[#e4e0ee] bg-white px-3 text-[13px] outline-none focus:border-[#6d28d9]" />
-        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)" className="h-10 rounded-lg border border-[#e4e0ee] bg-white px-3 text-[13px] outline-none focus:border-[#6d28d9]" />
+        <input value={eta} onChange={(e) => setEta(e.target.value)} placeholder="Or type it (e.g. Thursday morning)" aria-label="Expected delivery" className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note for the shop (optional)" aria-label="Note" className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />
       </div>
       <div className="flex items-center justify-between gap-2 text-[12px] text-[#6b6480]">
         <span>{changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'}` : 'As ordered'} · est. {bhd(total, 3)}</span>
         {!live.length && <span className="inline-flex items-center gap-1 font-medium text-[#9f1239]"><AlertTriangle size={12} /> Remove every line? Cancel the order instead.</span>}
       </div>
       <div className="flex gap-2">
-        {onCancel && <button type="button" onClick={onCancel} className="h-11 flex-1 rounded-xl border border-[#e4e0ee] bg-white text-[13px] font-semibold text-[#1a1430]">Back</button>}
-        <button type="button" onClick={submit} disabled={busy || invalid || !live.length} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-[#6d28d9] text-[14px] font-semibold text-white disabled:opacity-50">
+        {onCancel && <button type="button" onClick={onCancel} className="h-11 flex-1 rounded-xl border border-[#E2DCEA] bg-white text-[13px] font-semibold text-[#1A1428]">Back</button>}
+        <button type="button" onClick={submit} disabled={busy || invalid || !live.length} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[14px] font-semibold text-white disabled:opacity-50">
           {busy ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} {changes.length ? 'Confirm with changes' : 'Confirm order'}
         </button>
       </div>
@@ -191,7 +205,13 @@ export function AssignBox({
   const [pick, setPick] = useState<number | ''>(suggestedId ?? currentSalesmanId ?? '')
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
-  useEffect(() => { if (pick === '' && (suggestedId || currentSalesmanId)) setPick(suggestedId ?? currentSalesmanId ?? '') }, [suggestedId, currentSalesmanId, pick])
+  // When the suggestion arrives after mount, adopt it once (render-phase derived state).
+  const proposed = suggestedId ?? currentSalesmanId ?? ''
+  const [proposedSeen, setProposedSeen] = useState(proposed)
+  if (proposed !== proposedSeen) {
+    setProposedSeen(proposed)
+    if (pick === '' && proposed !== '') setPick(proposed)
+  }
 
   async function assign() {
     if (pick === '') return
@@ -208,20 +228,20 @@ export function AssignBox({
   }
 
   return (
-    <div className={cn('rounded-xl border p-3', currentSalesmanId ? 'border-[#ece9f3] bg-white' : 'border-[#f3c9d2] bg-[#fdf3f5]')}>
+    <div className={cn('rounded-xl border p-3', currentSalesmanId ? 'border-[#E9E4EF] bg-white' : 'border-[#f3c9d2] bg-[#fdf3f5]')}>
       {!compact && (
-        <div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold text-[#1a1430]">
-          <UserRoundCheck size={14} className="text-[#6d28d9]" /> {currentSalesmanId ? 'Reassign' : 'Assign a salesman'}
+        <div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold text-[#1A1428]">
+          <UserRoundCheck size={14} className="text-[#6D4091]" /> {currentSalesmanId ? 'Reassign' : 'Assign a salesman'}
         </div>
       )}
       {suggestedReason && <p className="mb-2 text-[11.5px] text-[#6b6480]">Suggested: {suggestedReason}</p>}
       <div className="flex flex-wrap gap-2">
-        <select value={pick} onChange={(e) => setPick(e.target.value === '' ? '' : Number(e.target.value))} className="h-10 min-w-[10rem] flex-1 rounded-lg border border-[#e4e0ee] bg-white px-2.5 text-[13px] outline-none focus:border-[#6d28d9]" aria-label="Salesman">
+        <select value={pick} onChange={(e) => setPick(e.target.value === '' ? '' : Number(e.target.value))} className="h-10 min-w-[10rem] flex-1 rounded-lg border border-[#E2DCEA] bg-white px-2.5 text-[13px] outline-none focus:border-[#6D4091]" aria-label="Salesman">
           <option value="">Choose…</option>
           {(options || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
-        {!compact && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" className="h-10 flex-1 rounded-lg border border-[#e4e0ee] bg-white px-3 text-[13px] outline-none focus:border-[#6d28d9]" />}
-        <button type="button" onClick={assign} disabled={busy || pick === '' || pick === currentSalesmanId} className="flex h-10 items-center gap-1.5 rounded-lg bg-[#6d28d9] px-3.5 text-[13px] font-semibold text-white disabled:opacity-50">
+        {!compact && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" className="h-10 flex-1 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />}
+        <button type="button" onClick={assign} disabled={busy || pick === '' || pick === currentSalesmanId} className="flex h-10 items-center gap-1.5 rounded-lg bg-[#6D4091] px-3.5 text-[13px] font-semibold text-white disabled:opacity-50">
           {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} {currentSalesmanId ? 'Reassign' : 'Assign'}
         </button>
       </div>
@@ -259,7 +279,7 @@ export function AssignmentQueue({ onChanged, highlight }: { onChanged: () => voi
   return (
     <section className={cn('mb-5 rounded-[18px] border p-4', highlight ? 'border-[#9f1239] bg-[#fdf3f5]' : 'border-[#f3c9d2] bg-[#fff7f8]')} aria-labelledby="assign-queue">
       <div className="flex items-center justify-between gap-2">
-        <h2 id="assign-queue" className="flex items-center gap-2 font-display text-[15px] font-bold text-[#1a1430]">
+        <h2 id="assign-queue" className="flex items-center gap-2 font-display text-[15px] font-bold text-[#1A1428]">
           <AlertTriangle size={16} className="text-[#9f1239]" /> {rows.length} unassigned {rows.length === 1 ? 'order' : 'orders'}
         </h2>
         <span className="text-[11.5px] text-[#6b6480]">Reminder after {sla} min</span>
@@ -269,7 +289,7 @@ export function AssignmentQueue({ onChanged, highlight }: { onChanged: () => voi
           <li key={r.id} className="grid gap-2 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-display text-[14px] font-bold tabular-nums text-[#1a1430]">{r.order_no}</span>
+                <span className="font-display text-[14px] font-bold tabular-nums text-[#1A1428]">{r.order_no}</span>
                 <Badge tone={r.age_min != null && r.age_min > sla ? 'rose' : 'grey'}>{r.age_min != null ? `${r.age_min} min` : ''}</Badge>
                 {r.attribution_conflict && <Badge tone="amber">Referral conflict</Badge>}
                 {r.session_ref && <Badge tone="accent">via /{r.session_ref}</Badge>}

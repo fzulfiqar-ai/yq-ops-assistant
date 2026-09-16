@@ -78,7 +78,7 @@ export function Stepper({
       role="group"
       aria-label={`Quantity for ${label}`}
       className={cn(
-        'inline-flex select-none items-center justify-between gap-1 border border-[#e4e0ee] bg-white p-0.5 transition duration-150 ease-out focus-within:border-[#6d28d9]',
+        'inline-flex select-none items-center justify-between gap-1 border border-[#E2DCEA] bg-white p-0.5 transition duration-150 ease-out focus-within:border-[#6D4091]',
         SHELL[size],
         className,
       )}
@@ -88,7 +88,7 @@ export function Stepper({
         onClick={dec}
         aria-label={willRemove ? `Remove ${label}` : `Decrease ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-[#6b6480] transition duration-150 ease-out hover:bg-[#f4f2f9] hover:text-[#1a1430] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70 active:scale-95',
+          'grid shrink-0 place-items-center text-[#6b6480] transition duration-150 ease-out hover:bg-[#F3F0F6] hover:text-[#1A1428] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70 active:scale-95',
           willRemove && 'hover:bg-[#fdecef] hover:text-[#9f1239]',
           BTN[size],
         )}
@@ -101,7 +101,7 @@ export function Stepper({
           onClick={onValueClick}
           aria-label={`Type a quantity for ${label} (currently ${value})`}
           className={cn(
-            'min-w-[2.25rem] flex-1 self-stretch rounded-lg text-center font-display font-bold tabular-nums text-[#1a1430] transition duration-150 ease-out hover:bg-[#f4f2f9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70',
+            'min-w-[2.25rem] flex-1 self-stretch rounded-lg text-center font-display font-bold tabular-nums text-[#1A1428] transition duration-150 ease-out hover:bg-[#F3F0F6] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70',
             VALUE[size],
           )}
         >
@@ -111,7 +111,7 @@ export function Stepper({
         <span
           aria-live="polite"
           className={cn(
-            'min-w-[2.25rem] flex-1 text-center font-display font-bold tabular-nums text-[#1a1430]',
+            'min-w-[2.25rem] flex-1 text-center font-display font-bold tabular-nums text-[#1A1428]',
             VALUE[size],
           )}
         >
@@ -124,7 +124,7 @@ export function Stepper({
         disabled={atMax}
         aria-label={`Increase ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-[#6d28d9] transition duration-150 ease-out hover:bg-[#f3eefc] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40',
+          'grid shrink-0 place-items-center text-[#6D4091] transition duration-150 ease-out hover:bg-[#EEE8F4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40',
           BTN[size],
         )}
       >

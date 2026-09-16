@@ -219,6 +219,7 @@ def invalidate() -> None:
     """Forget the cached catalog context (called after refresh, photo upload, rule/salesman edits)."""
     _ctx_cache.update(at=0.0, ctx=None, gen=_ctx_cache["gen"] + 1)
     _settings_cache.update(at=0.0, vals=None)
+    _salesman_cache.clear()
 
 
 def _load_items() -> list[dict]:
@@ -1924,12 +1925,26 @@ def delete_salesman(salesman_id: int) -> None:
     invalidate()
 
 
+# Every salesman request resolves the login to its salesmen row (scope, KPIs, link). The Today
+# screen fires three of those at once, so remember the answer for a minute per login; every
+# salesman edit path calls invalidate(), which also clears this.
+_SALESMAN_TTL = 60.0
+_salesman_cache: dict[str, tuple[float, dict | None]] = {}
+
+
 def salesman_for_user(email: str | None) -> dict | None:
     if not email:
         return None
+    key = email.strip().lower()
+    hit = _salesman_cache.get(key)
+    now = time.monotonic()
+    if hit and hit[0] > now:
+        return hit[1]
     r = (get_client().table("salesmen").select("*").ilike("user_email", email.strip())
          .limit(1).execute().data or [])
-    return r[0] if r else None
+    row = r[0] if r else None
+    _salesman_cache[key] = (now + _SALESMAN_TTL, row)
+    return row
 
 
 def me_payload(email: str) -> dict:

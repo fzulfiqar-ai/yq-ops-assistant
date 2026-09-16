@@ -120,7 +120,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
         aria-label="Close"
         tabIndex={-1}
         onClick={close}
-        className="yq-veil absolute inset-0 h-full w-full cursor-default bg-[#1a1430]/45 backdrop-blur-[2px]"
+        className="yq-veil absolute inset-0 h-full w-full cursor-default bg-[#1A1428]/45 backdrop-blur-[2px]"
       />
       <div
         ref={panelRef}
@@ -138,12 +138,12 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
       >
         {/* Grab handle — the affordance that says "this slides". Phones only. */}
         <div aria-hidden="true" className="flex justify-center pt-2 sm:hidden">
-          <span className="h-1 w-9 rounded-full bg-[#e4e0ee]" />
+          <span className="h-1 w-9 rounded-full bg-[#E2DCEA]" />
         </div>
 
-        <div className="flex items-start gap-3 border-b border-[#ece9f3] px-4 pb-3.5 pt-3 sm:px-5 sm:pt-4">
+        <div className="flex items-start gap-3 border-b border-[#E9E4EF] px-4 pb-3.5 pt-3 sm:px-5 sm:pt-4">
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="font-display text-[17px] font-bold leading-tight tracking-[-0.01em] text-[#1a1430]">
+            <h2 id={titleId} className="font-display text-[17px] font-bold leading-tight tracking-[-0.01em] text-[#1A1428]">
               {title}
             </h2>
             {subtitle ? (
@@ -156,7 +156,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
             type="button"
             onClick={close}
             aria-label="Close"
-            className="-mr-1.5 -mt-0.5 grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[#6b6480] transition duration-150 ease-out hover:bg-[#f4f2f9] hover:text-[#1a1430] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70"
+            className="-mr-1.5 -mt-0.5 grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[#6b6480] transition duration-150 ease-out hover:bg-[#F3F0F6] hover:text-[#1A1428] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70"
           >
             <X size={18} />
           </button>
@@ -165,7 +165,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
 
         {footer ? (
-          <div className="border-t border-[#ece9f3] bg-white px-4 pb-[max(0.875rem,env(safe-area-inset-bottom))] pt-3 sm:px-5">
+          <div className="border-t border-[#E9E4EF] bg-white px-4 pb-[max(0.875rem,env(safe-area-inset-bottom))] pt-3 sm:px-5">
             {footer}
           </div>
         ) : null}

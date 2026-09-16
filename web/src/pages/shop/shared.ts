@@ -184,29 +184,29 @@ export function isEmail(raw: string): boolean {
 /* ───────────────────────── design system ─────────────────────────
    One place for the class strings that repeat across the shop, so a control
    can't quietly drift into a different height, radius or focus ring. Canvas
-   #faf9fc · card white · ink #1a1430 · muted #6b6480 · hairline #ece9f3 ·
-   ONE accent #6d28d9 (price, primary action, selection). */
+   #F9F7F3 · card white · ink #1A1428 · muted #6b6480 · hairline #E9E4EF ·
+   ONE accent #6D4091 (price, primary action, selection). */
 
 /** Visible focus ring — every interactive element in the shop wears this. */
-export const RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9]/70 focus-visible:ring-offset-2 focus-visible:ring-offset-white'
+export const RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/70 focus-visible:ring-offset-2 focus-visible:ring-offset-white'
 
 /** Same ring, drawn inside the element (for full-bleed buttons and photos). */
-export const RING_INSET = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6d28d9]/70'
+export const RING_INSET = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70'
 
 /** Text input / textarea / select. 44px, hairline, accent focus. */
 export const FIELD =
-  'h-11 w-full rounded-xl border border-[#e4e0ee] bg-white px-3 text-[14px] leading-none text-[#1a1430] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#d9d2ee] focus:border-[#6d28d9] focus:ring-2 focus:ring-[#6d28d9]/15'
+  'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[14px] leading-none text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15'
 
-export const LABEL = 'mb-1.5 block text-[11.5px] font-semibold tracking-[0.01em] text-[#1a1430]'
+export const LABEL = 'mb-1.5 block text-[11.5px] font-semibold tracking-[0.01em] text-[#1A1428]'
 
 /** Quiet secondary button — white, hairline, ink text. */
 export const BTN_GHOST =
-  'inline-flex items-center justify-center gap-1.5 rounded-xl border border-[#e4e0ee] bg-white font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb] active:scale-[.99]'
+  'inline-flex items-center justify-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white font-semibold text-[#1A1428] transition duration-150 ease-out hover:border-[#CFC3DE] hover:bg-[#f7f5fb] active:scale-[.99]'
 
 /** The one accent button. Nothing else on the page may be this colour. */
 export const BTN_PRIMARY =
-  'inline-flex items-center justify-center gap-2 rounded-xl bg-[#6d28d9] font-semibold text-white transition duration-150 ease-out hover:bg-[#5b21b6] active:scale-[.99] disabled:pointer-events-none'
+  'inline-flex items-center justify-center gap-2 rounded-xl bg-[#6D4091] font-semibold text-white transition duration-150 ease-out hover:bg-[#5A3478] active:scale-[.99] disabled:pointer-events-none'
 
 /** Card surface: 20px radius, hairline, a shadow you feel rather than see. */
 export const CARD =
-  'rounded-[20px] border border-[#ece9f3] bg-white shadow-[0_1px_2px_rgba(24,16,48,.04)]'
+  'rounded-[20px] border border-[#E9E4EF] bg-white shadow-[0_1px_2px_rgba(24,16,48,.04)]'

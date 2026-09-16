@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Copy, ExternalLink, Link2, MessageCircle, X, Check, Loader2,
-  Phone, Mail, PackageX, ChevronRight, ChevronDown,
+  Phone, Mail, PackageX, ChevronRight,
 } from 'lucide-react'
 import { apiGet, apiPost, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
@@ -178,7 +179,7 @@ function QtyCell({ l }: { l: OrderLine }) {
   const st = l.line_status || 'ok'
   if (st === 'removed') return <span className="text-[#9f1239] line-through">{l.qty}</span>
   if (l.qty_confirmed != null && l.qty_confirmed !== l.qty) {
-    return <span><span className="text-muted-foreground line-through">{l.qty}</span> <b className="text-[#6d28d9]">{l.qty_confirmed}</b></span>
+    return <span><span className="text-muted-foreground line-through">{l.qty}</span> <b className="text-[#6D4091]">{l.qty_confirmed}</b></span>
   }
   return <>{l.qty}</>
 }
@@ -646,120 +647,9 @@ function DeskOrders({
 // Field view (phone) — one thumb, a shop owner waiting, no table in sight.
 // ══════════════════════════════════════════════════════════════════════════════
 
-const INK = 'text-[#1a1430]'
+const INK = 'text-[#1A1428]'
 const MUTED = 'text-[#6b6480]'
-const HAIRLINE = 'border-[#ece9f3]'
-
-function FieldLinkCard({ me, open, onToggle }: { me?: ShopMe; open: boolean; onToggle: () => void }) {
-  const toast = useToast()
-  const salesman = me?.salesman ?? null
-  const link = me?.link || ''
-  // Only pay for the QR once the card is actually opened.
-  const { blobUrl: qrUrl } = useAuthedBlob(salesman && open ? me?.qr_url : null)
-  const kpis = me?.kpis
-  const focus = me?.focus
-  const pct = focus?.target_bhd ? Math.min(100, Math.round(((focus.revenue_90d_bhd || 0) / focus.target_bhd) * 100)) : null
-
-  if (!salesman) {
-    return (
-      <div className={cn('rounded-[20px] border bg-white p-4', HAIRLINE)}>
-        <div className={cn('font-display text-[14px] font-bold', INK)}>No personal link yet</div>
-        <p className={cn('mt-1 text-[12.5px] leading-snug', MUTED)}>
-          Ask an admin to link your login on the Salesmen page — your own catalog link and QR code then appear here.
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <div className={cn('overflow-hidden rounded-[20px] border bg-white', HAIRLINE)}>
-      <div className="flex items-center gap-1 pr-2">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
-        >
-          <Link2 size={17} className="shrink-0 text-[#6d28d9]" aria-hidden="true" />
-          <span className="min-w-0 flex-1">
-            <span className={cn('block font-display text-[14px] font-bold leading-tight', INK)}>My link</span>
-            <span className={cn('block truncate text-[11.5px]', MUTED)}>{link.replace(/^https?:\/\//, '')}</span>
-          </span>
-          <ChevronDown
-            size={18}
-            aria-hidden="true"
-            className={cn('shrink-0 transition-transform duration-200 motion-reduce:transition-none', MUTED, open && 'rotate-180')}
-          />
-        </button>
-        <button
-          type="button"
-          onClick={() => { if (link) { navigator.clipboard?.writeText(link); toast('Link copied.', 'success') } }}
-          className={cn('grid h-11 w-11 shrink-0 place-items-center rounded-xl transition-colors duration-150 hover:bg-[#f4f2f9] motion-reduce:transition-none', MUTED)}
-          aria-label="Copy my link"
-        >
-          <Copy size={17} />
-        </button>
-      </div>
-
-      {open && (
-        <div className={cn('border-t px-4 pb-4 pt-3.5', HAIRLINE)}>
-          <div className="flex items-start gap-3">
-            <div className="min-w-0 flex-1 space-y-2">
-              <a
-                href={link ? `https://wa.me/?text=${encodeURIComponent(link)}` : undefined}
-                target="_blank"
-                rel="noreferrer"
-                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#25d366] text-[13.5px] font-semibold text-[#08331b] transition-opacity duration-150 hover:opacity-90 motion-reduce:transition-none"
-              >
-                <MessageCircle size={16} aria-hidden="true" /> Share on WhatsApp
-              </a>
-              <a
-                href={link || undefined}
-                target="_blank"
-                rel="noreferrer"
-                className={cn('flex h-11 w-full items-center justify-center gap-2 rounded-xl border text-[13.5px] font-semibold transition-colors duration-150 hover:bg-[#faf9fc] motion-reduce:transition-none', HAIRLINE, INK)}
-              >
-                <ExternalLink size={16} aria-hidden="true" /> Open my catalog
-              </a>
-            </div>
-            {qrUrl && (
-              <img src={qrUrl} alt="My referral QR code" className={cn('h-[5.5rem] w-[5.5rem] shrink-0 rounded-xl border bg-white p-1.5', HAIRLINE)} />
-            )}
-          </div>
-
-          <dl className="mt-4 grid grid-cols-2 gap-2">
-            {[
-              { k: 'Orders · 7 days', v: num(kpis?.orders_7d) },
-              { k: 'Orders · 30 days', v: num(kpis?.orders_30d) },
-              { k: 'Value · 30 days', v: bhd(kpis?.value_30d_bhd, 3) },
-              { k: 'Customers · 30 days', v: num(kpis?.customers_30d) },
-            ].map((s) => (
-              <div key={s.k} className="rounded-xl bg-[#faf9fc] px-3 py-2.5">
-                <dt className={cn('text-[10.5px] font-semibold uppercase tracking-wide', MUTED)}>{s.k}</dt>
-                <dd className={cn('mt-0.5 font-display text-[15px] font-bold tabular-nums', INK)}>{s.v}</dd>
-              </div>
-            ))}
-          </dl>
-
-          {focus && (
-            <div className={cn('mt-3.5 border-t pt-3', HAIRLINE)}>
-              <div className={cn('mb-1.5 flex items-baseline justify-between gap-2 text-[11.5px]', MUTED)}>
-                <span>90-day revenue vs target</span>
-                <span className="tabular-nums">{pct != null ? `${pct}%` : '—'}</span>
-              </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-[#ece9f3]">
-                <div className="h-full rounded-full bg-[#6d28d9]" style={{ width: `${pct ?? 0}%` }} />
-              </div>
-              <div className={cn('mt-1.5 text-[11.5px] tabular-nums', MUTED)}>
-                {bhd(focus.revenue_90d_bhd, 3)} of {bhd(focus.target_bhd, 3)}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
+const HAIRLINE = 'border-[#E9E4EF]'
 
 function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
   const title = row.customer_shop || row.customer_name || 'Order'
@@ -771,7 +661,7 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
       onClick={onOpen}
       className={cn(
         'w-full rounded-[20px] border bg-white p-4 text-left transition-colors duration-150 hover:border-[#d9d3ea]',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9] motion-reduce:transition-none',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091] motion-reduce:transition-none',
         HAIRLINE,
       )}
     >
@@ -842,7 +732,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
         <button
           type="button"
           onClick={() => setConfirming(true)}
-          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6d28d9] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
         >
           <Check size={17} aria-hidden="true" /> Confirm order
         </button>
@@ -851,7 +741,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
           type="button"
           onClick={() => setStatus(forward)}
           disabled={busy !== null}
-          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6d28d9] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
         >
           {busy === forward ? <Loader2 className="animate-spin" size={17} /> : <Check size={17} aria-hidden="true" />}
           {actionLabel(forward)}
@@ -859,7 +749,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
       ) : null}
       {data.status === 'confirmed' && allowed.includes('packed') && (
         <button type="button" onClick={() => setStatus('packed')} disabled={busy !== null}
-          className={cn('h-11 w-full rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#faf9fc] motion-reduce:transition-none', HAIRLINE, INK)}>
+          className={cn('h-11 w-full rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}>
           {busy === 'packed' ? <Loader2 className="mx-auto animate-spin" size={15} /> : 'Mark preparing (goods with me)'}
         </button>
       )}
@@ -868,7 +758,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
           type="button"
           onClick={() => setConfirmCancel(true)}
           disabled={busy !== null}
-          className={cn('h-11 w-full rounded-xl text-[13px] font-semibold transition-colors duration-150 hover:bg-[#f4f2f9] motion-reduce:transition-none', MUTED)}
+          className={cn('h-11 w-full rounded-xl text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F3F0F6] motion-reduce:transition-none', MUTED)}
         >
           Cancel this order
         </button>
@@ -880,7 +770,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             <button
               type="button"
               onClick={() => setConfirmCancel(false)}
-              className={cn('h-11 flex-1 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#faf9fc] motion-reduce:transition-none', HAIRLINE, INK)}
+              className={cn('h-11 flex-1 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}
             >
               Keep it
             </button>
@@ -943,7 +833,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
               {data.customer_phone && (
                 <a
                   href={`tel:${data.customer_phone}`}
-                  className={cn('flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#faf9fc] motion-reduce:transition-none', HAIRLINE, INK)}
+                  className={cn('flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}
                 >
                   <Phone size={15} aria-hidden="true" /> Call
                 </a>
@@ -1019,7 +909,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
           {data.note && (
             <section>
               <h3 className={cn('mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide', MUTED)}>Note</h3>
-              <p className={cn('rounded-xl bg-[#faf9fc] p-3 text-[12.5px] leading-snug', INK)}>{data.note}</p>
+              <p className={cn('rounded-xl bg-[#F9F7F3] p-3 text-[12.5px] leading-snug', INK)}>{data.note}</p>
             </section>
           )}
 
@@ -1029,7 +919,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
               <ul className="space-y-2.5">
                 {data.events.map((e, i) => (
                   <li key={i} className="flex gap-2.5">
-                    <span className="mt-[0.4rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6d28d9]" aria-hidden="true" />
+                    <span className="mt-[0.4rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6D4091]" aria-hidden="true" />
                     <div className="min-w-0">
                       <div className={cn('text-[12.5px] font-semibold', INK)}>{eventLabel(e.event)}</div>
                       <div className={cn('text-[11.5px]', MUTED)}>{fmtDateTime(e.ts)}{e.note ? ` · ${e.note}` : ''}</div>
@@ -1046,9 +936,10 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
 }
 
 function FieldOrders({
-  meData, rows, isLoading, isError, counts, bucket, setBucket, qRaw, setQRaw, onRefresh,
+  meData, rows, isLoading, isError, counts, bucket, setBucket, qRaw, setQRaw, onRefresh, initialOpen,
 }: {
   meData?: ShopMe
+  initialOpen?: number | null
   rows: ShopOrderRow[]
   isLoading: boolean
   isError: boolean
@@ -1059,22 +950,21 @@ function FieldOrders({
   setQRaw: (v: string) => void
   onRefresh: () => void
 }) {
-  const [linkOpen, setLinkOpen] = useState(false)
-  const [openId, setOpenId] = useState<number | null>(null)
+  const navigate = useNavigate()
+  const [openId, setOpenId] = useState<number | null>(initialOpen ?? null)
   const name = meData?.salesman?.name
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4 px-4 py-4">
+    <div className="mx-auto max-w-2xl space-y-4 px-4 py-4 lg:max-w-5xl lg:px-8 lg:py-8">
       <header>
-        <h1 className={cn('font-display text-[22px] font-bold leading-tight tracking-tight', INK)}>Orders</h1>
+        <h1 className={cn('font-display text-[22px] font-bold leading-tight tracking-tight lg:text-[28px]', INK)}>Orders</h1>
         <p className={cn('mt-0.5 text-[12.5px]', MUTED)}>
-          {name ? `${name} · everything from your link` : 'Everything placed through your link'}
+          {name ? `${name} · from your link and placed by you` : 'From your link and placed by you'}
         </p>
       </header>
 
-      <FieldLinkCard me={meData} open={linkOpen} onToggle={() => setLinkOpen((o) => !o)} />
-
-      <div className={cn('flex h-12 items-center gap-2 rounded-2xl border bg-white px-3.5 focus-within:border-[#6d28d9]', HAIRLINE)}>
+      <div className="space-y-3 lg:flex lg:items-center lg:gap-3 lg:space-y-0">
+      <div className={cn('flex h-12 items-center gap-2 rounded-2xl border bg-white px-3.5 focus-within:border-[#6D4091] lg:flex-1', HAIRLINE)}>
         <Search size={16} className={MUTED} aria-hidden="true" />
         <input
           value={qRaw}
@@ -1090,7 +980,7 @@ function FieldOrders({
         )}
       </div>
 
-      <div role="tablist" aria-label="Order stage" className={cn('flex gap-1 rounded-2xl border bg-white p-1', HAIRLINE)}>
+      <div role="tablist" aria-label="Order stage" className={cn('flex gap-1 rounded-2xl border bg-white p-1 lg:w-[26rem]', HAIRLINE)}>
         {BUCKETS.map((b) => {
           const on = bucket === b.key
           const n = b.of(counts)
@@ -1103,7 +993,7 @@ function FieldOrders({
               onClick={() => setBucket(b.key)}
               className={cn(
                 'flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition-colors duration-150 motion-reduce:transition-none',
-                on ? 'bg-[#6d28d9] text-white' : cn(MUTED, 'hover:bg-[#faf9fc]'),
+                on ? 'bg-[#6D4091] text-white' : cn(MUTED, 'hover:bg-[#F9F7F3]'),
               )}
             >
               {b.label}
@@ -1111,6 +1001,7 @@ function FieldOrders({
             </button>
           )
         })}
+      </div>
       </div>
 
       {isLoading ? (
@@ -1122,7 +1013,7 @@ function FieldOrders({
           <button
             type="button"
             onClick={onRefresh}
-            className="mt-4 h-11 rounded-xl bg-[#6d28d9] px-5 text-[13.5px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
+            className="mt-4 h-11 rounded-xl bg-[#6D4091] px-5 text-[13.5px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
           >
             Try again
           </button>
@@ -1137,8 +1028,8 @@ function FieldOrders({
               </p>
               <button
                 type="button"
-                onClick={() => setLinkOpen(true)}
-                className="mt-4 h-11 rounded-xl bg-[#6d28d9] px-5 text-[13.5px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
+                onClick={() => navigate('/today')}
+                className="mt-4 h-11 rounded-xl bg-[#6D4091] px-5 text-[13.5px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
               >
                 Open my link
               </button>
@@ -1155,7 +1046,7 @@ function FieldOrders({
           )}
         </div>
       ) : (
-        <ul className="space-y-2.5">
+        <ul className="grid gap-2.5 lg:grid-cols-2">
           {rows.map((r) => (
             <li key={r.id}>
               <OrderCard row={r} onOpen={() => setOpenId(r.id)} />
@@ -1177,12 +1068,17 @@ export default function ShopOrders() {
   const { me } = useAuth()
   const qc = useQueryClient()
   const isAdmin = me?.role === 'admin'
-  // The Telegram "UNASSIGNED" alert links to /shop-orders?queue=1 — open on the queue.
-  const queueFocus = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('queue') === '1'
+  // Deep links: the Telegram "UNASSIGNED" alert opens the queue (?queue=1); Today and Customers
+  // open one order (?open=id), a stage (?bucket=progress) or a search (?q=phone).
+  const [sp] = useSearchParams()
+  const queueFocus = sp.get('queue') === '1'
+  const initialBucket = (BUCKETS.find((b) => b.key === sp.get('bucket'))?.key ?? 'new') as BucketKey
+  const initialQ = (sp.get('q') || '').trim()
+  const initialOpen = Number(sp.get('open')) || null
   const [status, setStatus] = useState<StatusFilter>('all')
-  const [bucket, setBucket] = useState<BucketKey>('new')
-  const [qRaw, setQRaw] = useState('')
-  const [q, setQ] = useState('')
+  const [bucket, setBucket] = useState<BucketKey>(initialBucket)
+  const [qRaw, setQRaw] = useState(initialQ)
+  const [q, setQ] = useState(initialQ)
 
   useEffect(() => {
     const t = setTimeout(() => setQ(qRaw.trim()), 300)
@@ -1251,6 +1147,7 @@ export default function ShopOrders() {
         qRaw={qRaw}
         setQRaw={setQRaw}
         onRefresh={refreshList}
+        initialOpen={initialOpen}
       />
     )
   }

@@ -87,10 +87,7 @@ export function navFor(me: Me | null): NavItem[] {
 /** Where to land after login — the first page this user can actually see. */
 export function homeFor(me: Me | null): string {
   const items = navFor(me)
-  // A salesman's home is always the catalog they sell from, whatever else they can see.
-  if (me?.role === 'salesman') {
-    const shop = items.find((n) => n.to === '/shop')
-    if (shop) return shop.to
-  }
+  // A salesman lands on Today (his orders, link and numbers), whatever else he can see.
+  if (me?.role === 'salesman') return '/today'
   return items.length ? items[0].to : '/settings'
 }

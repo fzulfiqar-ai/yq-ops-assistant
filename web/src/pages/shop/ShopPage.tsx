@@ -20,6 +20,7 @@ import {
   type ShopItem,
 } from '@/lib/shopApi'
 import { CartDrawer } from './CartDrawer'
+import { CustomerBar } from './CustomerBar'
 import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
 import { ProductSheet } from './ProductSheet'
@@ -64,9 +65,9 @@ const SORTS: { value: SortKey; label: string }[] = [
 function OfferCard({ offer }: { offer: Offer }) {
   const countdown = useCountdown(offer.ends_at)
   return (
-    <div className="w-[15.5rem] shrink-0 rounded-[18px] border border-[#ece9f3] bg-white p-4 shadow-[0_1px_2px_rgba(24,16,48,.04)] sm:w-auto">
+    <div className="w-[15.5rem] shrink-0 rounded-[18px] border border-[#E9E4EF] bg-white p-4 shadow-[0_1px_2px_rgba(24,16,48,.04)] sm:w-auto">
       <div className="flex items-start justify-between gap-2">
-        <h3 className="font-display text-[13px] font-bold leading-tight text-[#1a1430]">{offer.name}</h3>
+        <h3 className="font-display text-[13px] font-bold leading-tight text-[#1A1428]">{offer.name}</h3>
         {offer.coupon_code && <Badge tone="accent">{offer.coupon_code}</Badge>}
       </div>
       {offer.summary && <p className="mt-1 text-[11.5px] leading-snug text-[#6b6480]">{offer.summary}</p>}
@@ -89,8 +90,8 @@ function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; c
         'h-9 shrink-0 rounded-full border px-3.5 text-[12px] font-medium transition duration-150 ease-out',
         RING,
         on
-          ? 'border-[#6d28d9] bg-[#f3eefc] text-[#6d28d9]'
-          : 'border-[#e4e0ee] bg-white text-[#6b6480] hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+          ? 'border-[#6D4091] bg-[#EEE8F4] text-[#6D4091]'
+          : 'border-[#E2DCEA] bg-white text-[#6b6480] hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
       )}
     >
       {children}
@@ -101,15 +102,15 @@ function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; c
 /** A card-shaped placeholder, so the first paint has the same rhythm as the last. */
 function CardSkeleton() {
   return (
-    <div className="overflow-hidden rounded-[20px] border border-[#ece9f3] bg-white">
-      <div className="aspect-square w-full animate-pulse bg-[#f4f2f9]" />
-      <div className="space-y-2 border-t border-[#f4f2f9] p-3">
+    <div className="overflow-hidden rounded-[20px] border border-[#E9E4EF] bg-white">
+      <div className="aspect-square w-full animate-pulse bg-[#F3F0F6]" />
+      <div className="space-y-2 border-t border-[#F3F0F6] p-3">
         <div className="h-3 w-2/5 animate-pulse rounded bg-[#f0eef6]" />
-        <div className="h-2.5 w-full animate-pulse rounded bg-[#f4f2f9]" />
-        <div className="h-2.5 w-3/4 animate-pulse rounded bg-[#f4f2f9]" />
-        <div className="h-5 w-20 animate-pulse rounded-full bg-[#f4f2f9]" />
+        <div className="h-2.5 w-full animate-pulse rounded bg-[#F3F0F6]" />
+        <div className="h-2.5 w-3/4 animate-pulse rounded bg-[#F3F0F6]" />
+        <div className="h-5 w-20 animate-pulse rounded-full bg-[#F3F0F6]" />
         <div className="h-4 w-24 animate-pulse rounded bg-[#f0eef6]" />
-        <div className="h-11 w-full animate-pulse rounded-xl bg-[#f4f2f9]" />
+        <div className="h-11 w-full animate-pulse rounded-xl bg-[#F3F0F6]" />
       </div>
     </div>
   )
@@ -390,7 +391,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
     if (staff) {
       return (
         <div className="mx-auto max-w-md px-4 py-16 text-center">
-          <h1 className="font-display text-[18px] font-bold text-[#1a1430]">The catalog did not load</h1>
+          <h1 className="font-display text-[18px] font-bold text-[#1A1428]">The catalog did not load</h1>
           <p className="mt-1.5 text-[13px] leading-snug text-[#6b6480]">
             The price server did not answer. Check your connection and try again.
           </p>
@@ -398,7 +399,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
             type="button"
             onClick={() => window.location.reload()}
             className={cn(
-              'mt-5 inline-flex h-11 items-center rounded-xl bg-[#6d28d9] px-5 text-[13px] font-semibold text-white transition duration-150 ease-out hover:bg-[#5b21b6]',
+              'mt-5 inline-flex h-11 items-center rounded-xl bg-[#6D4091] px-5 text-[13px] font-semibold text-white transition duration-150 ease-out hover:bg-[#5A3478]',
               RING,
             )}
           >
@@ -408,7 +409,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
       )
     }
     return (
-      <div className="grid min-h-screen place-items-center bg-[#140f24] px-4 text-center text-white/80">
+      <div className="grid min-h-screen place-items-center bg-[#17111F] px-4 text-center text-white/80">
         <div>
           <Logo className="mx-auto h-14 w-14 rounded-2xl" />
           <p className="mt-4 text-sm">
@@ -423,7 +424,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
 
   if (order) {
     return (
-      <div className={cn(staff && 'bg-[#faf9fc]')}>
+      <div className={cn(staff && 'bg-[#F9F7F3]')}>
         <OrderSuccess
           order={order.res}
           mode={mode}
@@ -454,31 +455,34 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
       : undefined
 
   return (
-    <div className={cn('bg-[#faf9fc] text-[#1a1430]', !staff && 'min-h-screen')}>
+    <div className={cn('bg-[#F9F7F3] text-[#1A1428]', !staff && 'min-h-screen')}>
       {/* ── masthead ──
              Public: identity plus the two dates the trade actually asks about.
              Salesman: the shell already owns the page title and the user, so all
              that is left worth saying is which prices and which stock these are.
              Either way it scrolls away — only the tools below stay pinned. ── */}
       {staff ? (
-        <div className="mx-auto max-w-6xl px-4 pb-1 pt-3">
-          <p className="text-[12px] leading-snug text-[#6b6480]">
-            Trade prices · live stock
-            {stockAsOf && <span className="text-[#a8a2bb]"> · as of {stockAsOf}</span>}
-          </p>
-        </div>
+        <>
+          <CustomerBar />
+          <div className="mx-auto max-w-6xl px-4 pb-1">
+            <p className="text-[12px] leading-snug text-[#6b6480]">
+              Trade prices · live stock
+              {stockAsOf && <span className="text-[#a8a2bb]"> · as of {stockAsOf}</span>}
+            </p>
+          </div>
+        </>
       ) : (
         <div className="mx-auto max-w-6xl px-4 pb-3 pt-4 sm:pt-6">
           <div className="flex items-start gap-3">
             <Logo className="h-11 w-11 shrink-0 rounded-[14px]" />
             <div className="min-w-0 flex-1">
-              <h1 className="font-display text-[20px] font-bold leading-tight tracking-[-0.02em] text-[#1a1430] sm:text-[22px]">
+              <h1 className="font-display text-[20px] font-bold leading-tight tracking-[-0.02em] text-[#1A1428] sm:text-[22px]">
                 YQ Bahrain
               </h1>
               <p className="mt-0.5 text-[12px] leading-snug text-[#6b6480]">Mobile accessories · trade price list</p>
             </div>
             {updated && (
-              <span className="mt-0.5 shrink-0 rounded-full bg-[#f3eefc] px-2.5 py-1 text-[10.5px] font-semibold text-[#6d28d9]">
+              <span className="mt-0.5 shrink-0 rounded-full bg-[#EEE8F4] px-2.5 py-1 text-[10.5px] font-semibold text-[#6D4091]">
                 Prices {updated}
               </span>
             )}
@@ -490,7 +494,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
              In the shell this hangs under its 56px top bar and must stay below
              its z-30; standalone it owns the top of the window. ── */}
       <div
-        className="sticky z-20 border-b border-[#ece9f3] bg-[#faf9fc]/92 backdrop-blur-md"
+        className="sticky z-20 border-b border-[#E9E4EF] bg-[#F9F7F3]/92 backdrop-blur-md"
         style={{ top: staff ? TOPBAR : 0 }}
       >
         <div className="mx-auto max-w-6xl px-4 pb-2 pt-2.5">
@@ -507,7 +511,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
               aria-label="Search the catalog"
               type="search"
               className={cn(
-                'h-11 w-full rounded-xl border border-[#e4e0ee] bg-white pl-10 pr-11 text-[14px] text-[#1a1430] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#d9d2ee] focus:border-[#6d28d9] focus:ring-2 focus:ring-[#6d28d9]/15',
+                'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white pl-10 pr-11 text-[14px] text-[#1A1428] outline-none transition duration-150 ease-out placeholder:text-[#a8a2bb] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15',
                 '[&::-webkit-search-cancel-button]:hidden',
               )}
             />
@@ -517,7 +521,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
                 onClick={() => setQ('')}
                 aria-label="Clear search"
                 className={cn(
-                  'absolute right-1 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-lg text-[#6b6480] transition duration-150 ease-out hover:bg-[#f4f2f9] hover:text-[#1a1430]',
+                  'absolute right-1 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-lg text-[#6b6480] transition duration-150 ease-out hover:bg-[#F3F0F6] hover:text-[#1A1428]',
                   RING,
                 )}
               >
@@ -533,11 +537,11 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
                 onClick={() => setCat(c)}
                 aria-pressed={cat === c}
                 className={cn(
-                  'h-8 shrink-0 rounded-full border px-3.5 text-[12px] font-medium capitalize transition duration-150 ease-out',
+                  'h-9 shrink-0 rounded-full border px-3.5 text-[12px] font-medium capitalize transition duration-150 ease-out',
                   RING,
                   cat === c
-                    ? 'border-[#6d28d9] bg-[#6d28d9] text-white'
-                    : 'border-[#e4e0ee] bg-white text-[#6b6480] hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+                    ? 'border-[#6D4091] bg-[#6D4091] text-white'
+                    : 'border-[#E2DCEA] bg-white text-[#6b6480] hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                 )}
               >
                 {c.toLowerCase()}
@@ -553,7 +557,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
           <p aria-live="polite" className="text-[12px] text-[#6b6480]">
             {data ? (
               <>
-                <b className="font-semibold tabular-nums text-[#1a1430]">{filtered.length}</b>{' '}
+                <b className="font-semibold tabular-nums text-[#1A1428]">{filtered.length}</b>{' '}
                 {filtered.length === 1 ? 'product' : 'products'}
                 {filtered.length !== items.length ? ` of ${items.length}` : ''}
               </>
@@ -587,7 +591,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
         {/* ── rails ── */}
         {railsVisible && offers.length > 0 && (
           <section className="mt-6" aria-labelledby="yq-offers">
-            <h2 id="yq-offers" className="font-display text-[14px] font-bold tracking-[-0.01em] text-[#1a1430]">
+            <h2 id="yq-offers" className="font-display text-[14px] font-bold tracking-[-0.01em] text-[#1A1428]">
               Offers
             </h2>
             <div className="-mx-4 mt-3 flex gap-3 overflow-x-auto px-4 pb-1 sm:mx-0 sm:grid sm:grid-cols-2 sm:overflow-visible sm:px-0 lg:grid-cols-3">
@@ -607,8 +611,8 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
               ))}
             </div>
           ) : filtered.length === 0 ? (
-            <div className="rounded-[20px] border border-[#ece9f3] bg-white px-6 py-16 text-center">
-              <p className="font-display text-[15px] font-bold text-[#1a1430]">Nothing matches that</p>
+            <div className="rounded-[20px] border border-[#E9E4EF] bg-white px-6 py-16 text-center">
+              <p className="font-display text-[15px] font-bold text-[#1A1428]">Nothing matches that</p>
               <p className="mt-1 text-[12.5px] text-[#6b6480]">Try a different code, or clear the filters.</p>
               <button
                 type="button"
@@ -620,7 +624,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
                   setBestOnly(false)
                 }}
                 className={cn(
-                  'mt-5 inline-flex h-11 items-center rounded-xl border border-[#e4e0ee] bg-white px-5 text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+                  'mt-5 inline-flex h-11 items-center rounded-xl border border-[#E2DCEA] bg-white px-5 text-[13px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                   RING,
                 )}
               >
@@ -651,7 +655,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
                     type="button"
                     onClick={showMore}
                     className={cn(
-                      'h-11 rounded-xl border border-[#e4e0ee] bg-white px-6 text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+                      'h-11 rounded-xl border border-[#E2DCEA] bg-white px-6 text-[13px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                       RING,
                     )}
                   >
@@ -672,7 +676,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
       {/* ── sticky order bar, in the thumb zone ── */}
       {hasCart && (
         <div
-          className="fixed inset-x-0 z-30 border-t border-[#ece9f3] bg-white/95 px-4 pt-2.5 backdrop-blur-md"
+          className="fixed inset-x-0 z-30 border-t border-[#E9E4EF] bg-white/95 px-4 pt-2.5 backdrop-blur-md"
           style={
             staff
               ? { bottom: TABBAR, paddingBottom: '0.625rem' }
@@ -685,7 +689,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
                 <span className="tabular-nums">{cart.items}</span> {cart.items === 1 ? 'item' : 'items'} ·{' '}
                 <span className="tabular-nums">{cart.units}</span> units
               </div>
-              <div className="font-display text-[17px] font-extrabold leading-tight tracking-[-0.015em] tabular-nums text-[#1a1430]">
+              <div className="font-display text-[17px] font-extrabold leading-tight tracking-[-0.015em] tabular-nums text-[#1A1428]">
                 {bhd(barTotal)}
               </div>
             </div>
@@ -693,7 +697,7 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
               type="button"
               onClick={openCart}
               className={cn(
-                'flex h-12 shrink-0 items-center gap-2 rounded-xl bg-[#6d28d9] px-5 text-[14px] font-semibold text-white transition duration-150 ease-out hover:bg-[#5b21b6] active:scale-[.99]',
+                'flex h-12 shrink-0 items-center gap-2 rounded-xl bg-[#6D4091] px-5 text-[14px] font-semibold text-white transition duration-150 ease-out hover:bg-[#5A3478] active:scale-[.99]',
                 RING,
               )}
             >

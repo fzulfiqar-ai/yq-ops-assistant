@@ -16,6 +16,7 @@ import {
   type ShopItem,
   type StaffCustomer,
 } from '@/lib/shopApi'
+import { getSelectedCustomer, setSelectedCustomer, useSelectedCustomer } from '@/pages/sales/lib'
 import { ProductImage } from './ProductImage'
 import { Select } from './Select'
 import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, stepOf } from './shared'
@@ -34,6 +35,15 @@ interface CustomerDraft {
 }
 
 const EMPTY: CustomerDraft = { name: '', phone: '', shop: '', area: '', email: '' }
+
+/** The shop picked at the top of the salesman catalog (CustomerBar), as a checkout draft. */
+function fromSelected(c: StaffCustomer | null): CustomerDraft {
+  if (!c) return EMPTY
+  return { name: String(c.name || ''), phone: String(c.phone || ''), shop: String(c.shop || ''), area: String(c.area || ''), email: String(c.email || '') }
+}
+function selectedKey(c: StaffCustomer | null): string {
+  return c ? [c.phone, c.name, c.shop].map((v) => v || '').join('|') : ''
+}
 
 function readCustomer(): CustomerDraft {
   try {
@@ -98,7 +108,7 @@ export function CartDrawer({
   onSuccess,
 }: CartDrawerProps) {
   const staff = mode === 'salesman'
-  const [customer, setCustomer] = useState<CustomerDraft>(() => (staff ? EMPTY : readCustomer()))
+  const [customer, setCustomer] = useState<CustomerDraft>(() => (staff ? fromSelected(getSelectedCustomer()) : readCustomer()))
   const [note, setNote] = useState('')
   const [website, setWebsite] = useState('') // honeypot — a human never fills this
   const [couponDraft, setCouponDraft] = useState(coupon)
@@ -108,6 +118,15 @@ export function CartDrawer({
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [recent, setRecent] = useState<StaffCustomer[]>([])
+  // Salesman: follow the shop picked in the CustomerBar (render-phase derived state, no effect).
+  const selected = useSelectedCustomer()
+  const selKey = staff ? selectedKey(selected) : ''
+  const [selSeen, setSelSeen] = useState(selKey)
+  if (selKey !== selSeen) {
+    setSelSeen(selKey)
+    setCustomer(fromSelected(staff ? selected : null))
+    setTouched({})
+  }
 
   const salesmen = data.salesmen || []
   const resolvedRef = data.ref || null
@@ -174,6 +193,7 @@ export function CartDrawer({
   const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }))
 
   const pick = (c: StaffCustomer) => {
+    setSelectedCustomer(c)
     setCustomer({
       name: String(c.name || ''),
       phone: String(c.phone || ''),
@@ -222,6 +242,7 @@ export function CartDrawer({
       setNote('')
       setCouponDraft('')
       if (staff) {
+        setSelectedCustomer(null)
         setCustomer(EMPTY)
         setTouched({})
       }
@@ -272,7 +293,7 @@ export function CartDrawer({
           )}
           <div className="mb-2.5 flex items-baseline justify-between">
             <span className="text-[12px] font-medium text-[#6b6480]">Total</span>
-            <span className="font-display text-[20px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1a1430]">
+            <span className="font-display text-[20px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1A1428]">
               {bhd(quote?.total_bhd)}
             </span>
           </div>
@@ -284,7 +305,7 @@ export function CartDrawer({
               'flex h-12 w-full items-center justify-center gap-2 rounded-xl text-[14px] font-semibold transition duration-150 ease-out active:scale-[.995]',
               RING,
               canSubmit
-                ? 'bg-[#6d28d9] text-white hover:bg-[#5b21b6]'
+                ? 'bg-[#6D4091] text-white hover:bg-[#5A3478]'
                 : 'cursor-not-allowed bg-[#f0eef6] text-[#a8a2bb]',
             )}
           >
@@ -308,13 +329,13 @@ export function CartDrawer({
       <div className="px-4 py-4 sm:px-5">
         {cart.lines.length === 0 ? (
           <div className="py-14 text-center">
-            <p className="font-display text-[15px] font-bold text-[#1a1430]">Nothing in this order yet</p>
+            <p className="font-display text-[15px] font-bold text-[#1A1428]">Nothing in this order yet</p>
             <p className="mt-1 text-[12.5px] text-[#6b6480]">Add a product and it will show up here.</p>
             <button
               type="button"
               onClick={onClose}
               className={cn(
-                'mt-4 inline-flex h-11 items-center rounded-xl border border-[#e4e0ee] bg-white px-5 text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:bg-[#f7f5fb]',
+                'mt-4 inline-flex h-11 items-center rounded-xl border border-[#E2DCEA] bg-white px-5 text-[13px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:bg-[#f7f5fb]',
                 RING,
               )}
             >
@@ -324,7 +345,7 @@ export function CartDrawer({
         ) : (
           <>
             {/* ── lines ── */}
-            <ul className="divide-y divide-[#f4f2f9]">
+            <ul className="divide-y divide-[#F3F0F6]">
               {cart.lines.map((line) => {
                 const item = itemsByCode.get(line.item_code)
                 const q = quoteLines.get(line.item_code)
@@ -337,7 +358,7 @@ export function CartDrawer({
                 const fixableByQty = blocked && Boolean(item) && Number(q?.moq || 1) > line.qty
                 return (
                   <li key={line.item_code} className={cn('flex gap-3 py-3.5', blocked && 'opacity-95')}>
-                    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-[14px] border border-[#ece9f3]">
+                    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-[14px] border border-[#E9E4EF]">
                       <ProductImage
                         srcs={[item?.thumb_url, item?.product_image_url]}
                         alt={item?.display_name || line.item_code}
@@ -352,7 +373,7 @@ export function CartDrawer({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="font-display text-[13px] font-bold text-[#1a1430]">{line.item_code}</div>
+                          <div className="font-display text-[13px] font-bold text-[#1A1428]">{line.item_code}</div>
                           {item?.spec && (
                             <div className="mt-0.5 line-clamp-1 text-[11px] text-[#6b6480]">
                               {item.spec.split('\n')[0]}
@@ -364,7 +385,7 @@ export function CartDrawer({
                             <div className="font-display text-[13px] font-bold text-[#a8a2bb]">—</div>
                           ) : (
                             <>
-                              <div className="font-display text-[13px] font-bold tabular-nums text-[#1a1430]">
+                              <div className="font-display text-[13px] font-bold tabular-nums text-[#1A1428]">
                                 {bhd(q?.line_total_bhd ?? (item?.price_bhd || 0) * line.qty)}
                               </div>
                               <div className="text-[10.5px] tabular-nums text-[#6b6480]">
@@ -415,9 +436,9 @@ export function CartDrawer({
 
             {/* ── progress toward a threshold ── */}
             {progress?.label && (
-              <div className="mt-4 rounded-[16px] border border-[#ece9f3] bg-[#faf9fc] p-3.5">
+              <div className="mt-4 rounded-[16px] border border-[#E9E4EF] bg-[#F9F7F3] p-3.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11.5px] font-medium text-[#1a1430]">{progress.label}</span>
+                  <span className="text-[11.5px] font-medium text-[#1A1428]">{progress.label}</span>
                   {progress.unlocked && <Badge tone="green">Unlocked</Badge>}
                 </div>
                 <div
@@ -429,7 +450,7 @@ export function CartDrawer({
                   aria-label={progress.label}
                 >
                   <div
-                    className="h-full rounded-full bg-[#6d28d9] transition-[width] duration-500 ease-out"
+                    className="h-full rounded-full bg-[#6D4091] transition-[width] duration-500 ease-out"
                     style={{ width: `${progress.unlocked ? 100 : pct}%` }}
                   />
                 </div>
@@ -461,7 +482,7 @@ export function CartDrawer({
                   type="button"
                   onClick={() => onCouponChange(couponDraft.trim())}
                   className={cn(
-                    'h-11 shrink-0 rounded-xl border border-[#e4e0ee] bg-white px-4 text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+                    'h-11 shrink-0 rounded-xl border border-[#E2DCEA] bg-white px-4 text-[13px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                     RING,
                   )}
                 >
@@ -494,10 +515,10 @@ export function CartDrawer({
             )}
 
             {/* ── totals ── */}
-            <dl className="mt-4 space-y-2 rounded-[16px] border border-[#ece9f3] bg-white p-4 text-[12.5px]">
+            <dl className="mt-4 space-y-2 rounded-[16px] border border-[#E9E4EF] bg-white p-4 text-[12.5px]">
               <div className="flex justify-between">
                 <dt className="text-[#6b6480]">Subtotal</dt>
-                <dd className="tabular-nums text-[#1a1430]">{bhd(quote?.subtotal_bhd)}</dd>
+                <dd className="tabular-nums text-[#1A1428]">{bhd(quote?.subtotal_bhd)}</dd>
               </div>
               {(quote?.discounts || []).map((d, i) => (
                 <div key={d.rule_id ?? i} className="flex justify-between">
@@ -513,13 +534,13 @@ export function CartDrawer({
               )}
               <div className="flex justify-between">
                 <dt className="text-[#6b6480]">Delivery</dt>
-                <dd className="tabular-nums text-[#1a1430]">
+                <dd className="tabular-nums text-[#1A1428]">
                   {Number(quote?.delivery_bhd) > 0 ? bhd(quote?.delivery_bhd) : 'Free'}
                 </dd>
               </div>
-              <div className="flex justify-between border-t border-[#f4f2f9] pt-2.5">
-                <dt className="font-semibold text-[#1a1430]">Total</dt>
-                <dd className="font-display text-[15px] font-extrabold tabular-nums text-[#1a1430]">
+              <div className="flex justify-between border-t border-[#F3F0F6] pt-2.5">
+                <dt className="font-semibold text-[#1A1428]">Total</dt>
+                <dd className="font-display text-[15px] font-extrabold tabular-nums text-[#1A1428]">
                   {bhd(quote?.total_bhd)}
                 </dd>
               </div>
@@ -532,7 +553,7 @@ export function CartDrawer({
 
             {/* ── who is ordering ── */}
             <form id={FORM_ID} onSubmit={submit} className="mt-6" noValidate>
-              <h3 className="font-display text-[13px] font-bold tracking-[-0.005em] text-[#1a1430]">
+              <h3 className="font-display text-[13px] font-bold tracking-[-0.005em] text-[#1A1428]">
                 {staff ? 'Customer details' : 'Your details'}
               </h3>
 
@@ -540,7 +561,7 @@ export function CartDrawer({
               {staff && mySalesmanId != null && (
                 <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-[#6b6480]">
                   <UserRound size={13} aria-hidden="true" className="shrink-0" />
-                  Placing as <b className="font-semibold text-[#1a1430]">{me?.salesman_name || 'you'}</b>
+                  Placing as <b className="font-semibold text-[#1A1428]">{me?.salesman_name || 'you'}</b>
                 </p>
               )}
 
@@ -574,16 +595,16 @@ export function CartDrawer({
               {/* Public mode: the customer's salesman, resolved from the link or chosen. */}
               {!staff &&
                 (resolvedRef?.salesman_name && !changingSalesman ? (
-                  <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-[#f3eefc] px-3.5 py-2.5">
+                  <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-[#EEE8F4] px-3.5 py-2.5">
                     <span className="text-[12px] text-[#4a4360]">
-                      Your salesman: <b className="font-semibold text-[#1a1430]">{resolvedRef.salesman_name}</b>
+                      Your salesman: <b className="font-semibold text-[#1A1428]">{resolvedRef.salesman_name}</b>
                     </span>
                     {salesmen.length > 0 && (
                       <button
                         type="button"
                         onClick={() => setChangingSalesman(true)}
                         className={cn(
-                          'shrink-0 rounded text-[11.5px] font-semibold text-[#6d28d9] underline underline-offset-2',
+                          'shrink-0 rounded text-[11.5px] font-semibold text-[#6D4091] underline underline-offset-2',
                           RING,
                         )}
                       >
@@ -634,11 +655,11 @@ export function CartDrawer({
                             'w-[9.5rem] shrink-0 rounded-[14px] border px-3 py-2 text-left transition duration-150 ease-out',
                             RING,
                             on
-                              ? 'border-[#6d28d9] bg-[#f3eefc]'
-                              : 'border-[#e4e0ee] bg-white hover:border-[#d9d2ee] hover:bg-[#f9f8fc]',
+                              ? 'border-[#6D4091] bg-[#EEE8F4]'
+                              : 'border-[#E2DCEA] bg-white hover:border-[#CFC3DE] hover:bg-[#f9f8fc]',
                           )}
                         >
-                          <span className="block truncate text-[12.5px] font-semibold leading-tight text-[#1a1430]">
+                          <span className="block truncate text-[12.5px] font-semibold leading-tight text-[#1A1428]">
                             {c.shop || c.name}
                           </span>
                           <span className="mt-0.5 block truncate text-[11px] leading-tight text-[#6b6480]">

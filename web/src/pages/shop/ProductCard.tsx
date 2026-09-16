@@ -71,8 +71,8 @@ export function ProductCard({
       className={cn(
         'group flex flex-col overflow-hidden rounded-[20px] border bg-white transition duration-200 ease-out',
         selected
-          ? 'border-[#6d28d9]/40 shadow-[0_0_0_1px_rgba(109,40,217,.10),0_8px_24px_-16px_rgba(24,16,48,.30)]'
-          : 'border-[#ece9f3] shadow-[0_1px_2px_rgba(24,16,48,.04)] hover:border-[#e2ddef] hover:shadow-[0_12px_28px_-18px_rgba(24,16,48,.32)]',
+          ? 'border-[#6D4091]/40 shadow-[0_0_0_1px_rgba(109,40,217,.10),0_8px_24px_-16px_rgba(24,16,48,.30)]'
+          : 'border-[#E9E4EF] shadow-[0_1px_2px_rgba(24,16,48,.04)] hover:border-[#e2ddef] hover:shadow-[0_12px_28px_-18px_rgba(24,16,48,.32)]',
         className,
       )}
     >
@@ -93,15 +93,15 @@ export function ProductCard({
           )}
         />
         {savePct != null && savePct > 0 && (
-          <span className="absolute left-2.5 top-2.5 rounded-full bg-[#1a1430] px-2 py-[3px] text-[10.5px] font-semibold leading-[14px] text-white">
+          <span className="absolute left-2.5 top-2.5 rounded-full bg-[#1A1428] px-2 py-[3px] text-[10.5px] font-semibold leading-[14px] text-white">
             Save {savePct}%
           </span>
         )}
       </button>
 
-      <div className="flex flex-1 flex-col border-t border-[#f4f2f9] p-3">
+      <div className="flex flex-1 flex-col border-t border-[#F3F0F6] p-3">
         <button type="button" onClick={onOpen} className={cn('rounded-lg text-left', RING)}>
-          <h3 className="font-display text-[13.5px] font-bold leading-[1.15] tracking-[-0.01em] text-[#1a1430]">
+          <h3 className="font-display text-[13.5px] font-bold leading-[1.15] tracking-[-0.01em] text-[#1A1428]">
             {item.item_code}
           </h3>
           {item.spec ? (
@@ -126,14 +126,14 @@ export function ProductCard({
         </div>
 
         <div className="mt-auto pt-3">
-          <div className="font-display text-[15px] font-extrabold leading-none tracking-[-0.01em] tabular-nums text-[#6d28d9]">
+          <div className="font-display text-[15px] font-extrabold leading-none tracking-[-0.01em] tabular-nums text-[#6D4091]">
             {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
           </div>
           <div className="mt-1 space-y-0.5 text-[10.5px] leading-[1.35] text-[#6b6480]">
             {compare != null && <div className="tabular-nums line-through">Retail BHD {money(compare)}</div>}
             {tier && (
               <div className="tabular-nums">
-                {tier.min_qty}+ pcs · <span className="font-semibold text-[#1a1430]">{bhd(tier.unit_price_bhd)}</span>
+                {tier.min_qty}+ pcs · <span className="font-semibold text-[#1A1428]">{bhd(tier.unit_price_bhd)}</span>
               </div>
             )}
             {min > 1 && <div className="tabular-nums">Minimum {min} pcs</div>}
@@ -163,8 +163,8 @@ export function ProductCard({
                   RING,
                   canOrder
                     ? out
-                      ? 'border border-[#e4e0ee] bg-white text-[#1a1430] hover:border-[#d9d2ee] hover:bg-[#f7f5fb]'
-                      : 'bg-[#6d28d9] text-white hover:bg-[#5b21b6]'
+                      ? 'border border-[#E2DCEA] bg-white text-[#1A1428] hover:border-[#CFC3DE] hover:bg-[#f7f5fb]'
+                      : 'bg-[#6D4091] text-white hover:bg-[#5A3478]'
                     : 'cursor-not-allowed border border-[#f3c9d2] bg-[#fdecef] text-[#9f1239]',
                 )}
               >

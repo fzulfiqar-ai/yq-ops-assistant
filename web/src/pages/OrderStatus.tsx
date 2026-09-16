@@ -61,7 +61,7 @@ export default function OrderStatus() {
   // A missing token is the same dead end as a rejected one — no state needed.
   if (err || !orderToken) {
     return (
-      <div className="grid min-h-screen place-items-center bg-[#140f24] px-4 text-center text-white/80">
+      <div className="grid min-h-screen place-items-center bg-[#17111F] px-4 text-center text-white/80">
         <div>
           <Logo className="mx-auto h-14 w-14 rounded-2xl" />
           <p className="mt-4 text-sm">
@@ -81,8 +81,8 @@ export default function OrderStatus() {
   const timeline = data?.timeline || []
 
   return (
-    <div className="min-h-screen bg-[#faf9fc] text-[#1a1430]">
-      <header className="border-b border-[#ece9f3] bg-white">
+    <div className="min-h-screen bg-[#F9F7F3] text-[#1A1428]">
+      <header className="border-b border-[#E9E4EF] bg-white">
         <div className="mx-auto flex max-w-2xl items-center gap-3 px-4 py-3">
           <Logo className="h-10 w-10 rounded-xl" />
           <div>
@@ -100,7 +100,7 @@ export default function OrderStatus() {
           </div>
         ) : (
           <>
-            <section className="rounded-2xl border border-[#ece9f3] bg-white p-5 shadow-[0_1px_2px_rgba(24,16,48,.04)]">
+            <section className="rounded-2xl border border-[#E9E4EF] bg-white p-5 shadow-[0_1px_2px_rgba(24,16,48,.04)]">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <div className="text-[10.5px] font-semibold uppercase tracking-wide text-[#6b6480]">Order number</div>
@@ -129,12 +129,12 @@ export default function OrderStatus() {
                     return (
                       <li key={s.key} className="flex flex-1 flex-col items-center text-center">
                         <div className="flex w-full items-center">
-                          <span className={cn('h-0.5 flex-1', i === 0 ? 'bg-transparent' : done ? 'bg-[#6d28d9]' : 'bg-[#e9e5f3]')} />
+                          <span className={cn('h-0.5 flex-1', i === 0 ? 'bg-transparent' : done ? 'bg-[#6D4091]' : 'bg-[#e9e5f3]')} />
                           <span
                             aria-current={i === stepIndex ? 'step' : undefined}
                             className={cn(
                               'grid h-7 w-7 shrink-0 place-items-center rounded-full border-2 text-[11px] font-bold tabular-nums',
-                              done ? 'border-[#6d28d9] bg-[#6d28d9] text-white' : 'border-[#e9e5f3] bg-white text-[#a8a2bb]',
+                              done ? 'border-[#6D4091] bg-[#6D4091] text-white' : 'border-[#e9e5f3] bg-white text-[#a8a2bb]',
                             )}
                           >
                             {done ? <Check size={14} aria-hidden="true" /> : i + 1}
@@ -142,11 +142,11 @@ export default function OrderStatus() {
                           <span
                             className={cn(
                               'h-0.5 flex-1',
-                              i === STEPS.length - 1 ? 'bg-transparent' : i < stepIndex ? 'bg-[#6d28d9]' : 'bg-[#e9e5f3]',
+                              i === STEPS.length - 1 ? 'bg-transparent' : i < stepIndex ? 'bg-[#6D4091]' : 'bg-[#e9e5f3]',
                             )}
                           />
                         </div>
-                        <span className={cn('mt-1.5 text-[10.5px] font-medium', done ? 'text-[#1a1430]' : 'text-[#a8a2bb]')}>
+                        <span className={cn('mt-1.5 text-[10.5px] font-medium', done ? 'text-[#1A1428]' : 'text-[#a8a2bb]')}>
                           {s.label}
                         </span>
                       </li>
@@ -168,14 +168,14 @@ export default function OrderStatus() {
               {data.salesman?.email_url && (
                 <a
                   href={data.salesman.email_url}
-                  className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#d9d2ee] bg-white text-[13px] font-semibold text-[#1a1430] transition hover:bg-[#f7f5fb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d28d9]"
+                  className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#CFC3DE] bg-white text-[13px] font-semibold text-[#1A1428] transition hover:bg-[#f7f5fb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]"
                 >
                   <Mail size={16} aria-hidden="true" /> Email {data.salesman.name || 'your salesman'}
                 </a>
               )}
               {data.salesman?.name && !data.salesman.whatsapp_url && !data.salesman.email_url && (
                 <p className="mt-4 text-[12px] text-[#6b6480]">
-                  Your salesman: <b className="font-semibold text-[#1a1430]">{data.salesman.name}</b>
+                  Your salesman: <b className="font-semibold text-[#1A1428]">{data.salesman.name}</b>
                 </p>
               )}
             </section>
@@ -187,7 +187,7 @@ export default function OrderStatus() {
             )}
 
             {lines.length > 0 && (
-              <section className="mt-4 overflow-hidden rounded-2xl border border-[#ece9f3] bg-white">
+              <section className="mt-4 overflow-hidden rounded-2xl border border-[#E9E4EF] bg-white">
                 <h2 className="border-b border-[#f2f0f7] px-4 py-3 font-display text-[13px] font-bold">Items</h2>
                 <ul className="divide-y divide-[#f2f0f7]">
                   {lines.map((l) => (
@@ -230,7 +230,7 @@ export default function OrderStatus() {
             )}
 
             {(data.customer?.name || data.customer?.shop || data.customer?.area) && (
-              <section className="mt-4 rounded-2xl border border-[#ece9f3] bg-white p-4">
+              <section className="mt-4 rounded-2xl border border-[#E9E4EF] bg-white p-4">
                 <h2 className="font-display text-[13px] font-bold">Delivering to</h2>
                 <p className="mt-1 text-[12.5px] leading-relaxed text-[#4a4360]">
                   {[data.customer?.name, data.customer?.shop, data.customer?.area].filter(Boolean).join(' · ')}
@@ -239,12 +239,12 @@ export default function OrderStatus() {
             )}
 
             {timeline.length > 0 && (
-              <section className="mt-4 rounded-2xl border border-[#ece9f3] bg-white p-4">
+              <section className="mt-4 rounded-2xl border border-[#E9E4EF] bg-white p-4">
                 <h2 className="font-display text-[13px] font-bold">Timeline</h2>
                 <ol className="mt-3 space-y-3">
                   {timeline.map((t, i) => (
                     <li key={i} className="flex gap-3">
-                      <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#6d28d9]" aria-hidden="true" />
+                      <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#6D4091]" aria-hidden="true" />
                       <div className="min-w-0">
                         <div className="text-[12.5px] font-medium capitalize">{eventLabel(t.event)}</div>
                         <div className="text-[11px] text-[#6b6480]">{fmtDateTime(t.ts) || ''}</div>

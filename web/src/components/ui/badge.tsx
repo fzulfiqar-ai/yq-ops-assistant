@@ -9,12 +9,12 @@ export type BadgeTone = 'accent' | 'green' | 'amber' | 'grey' | 'rose' | 'ink'
  * without drawing a hard border around every one of them.
  */
 const TONE: Record<BadgeTone, string> = {
-  accent: 'bg-[#f3eefc] text-[#6d28d9] ring-[#6d28d9]/10',
+  accent: 'bg-[#EEE8F4] text-[#6D4091] ring-[#6D4091]/10',
   green: 'bg-[#e8f7ee] text-[#137a48] ring-[#137a48]/10',
   amber: 'bg-[#fdf3e3] text-[#96600d] ring-[#96600d]/10',
   grey: 'bg-[#f4f3f8] text-[#6b6480] ring-[#6b6480]/10',
   rose: 'bg-[#fdecef] text-[#9f1239] ring-[#9f1239]/10',
-  ink: 'bg-[#1a1430] text-white ring-[#1a1430]/20',
+  ink: 'bg-[#1A1428] text-white ring-[#1A1428]/20',
 }
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
@@ -24,7 +24,7 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
 }
 
 const DOT: Record<BadgeTone, string> = {
-  accent: 'bg-[#6d28d9]',
+  accent: 'bg-[#6D4091]',
   green: 'bg-[#137a48]',
   amber: 'bg-[#b8790f]',
   grey: 'bg-[#a8a2bb]',

@@ -1,0 +1,156 @@
+import { useState, type FormEvent } from 'react'
+import { Link } from 'react-router-dom'
+import { Check, ChevronRight, Copy, ExternalLink, KeyRound, Loader2, LogOut, MessageCircle, QrCode } from 'lucide-react'
+import { useAuth } from '@/lib/auth'
+import { navFor } from '@/lib/nav'
+import { supabase } from '@/lib/supabase'
+import { cn } from '@/lib/utils'
+import { useToast } from '@/components/Toast'
+import { bhd3, initials, useAuthedBlob, useShopMe } from './lib'
+
+/**
+ * /account — who I am, my storefront link and QR, my target, my password, everything else the
+ * office has switched on for me, and sign out. Deliberately short: a salesman opens this once.
+ */
+export default function Account() {
+  const { me, signOut } = useAuth()
+  const toast = useToast()
+  const meQ = useShopMe()
+  const [p1, setP1] = useState('')
+  const [p2, setP2] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
+  const [qrOpen, setQrOpen] = useState(false)
+  const { blobUrl: qr } = useAuthedBlob(qrOpen ? meQ.data?.qr_url : null)
+  const name = me?.full_name || meQ.data?.salesman?.name || me?.email?.split('@')[0] || ''
+  const link = meQ.data?.link || ''
+  const sm = meQ.data?.salesman
+  const focus = meQ.data?.focus
+  const CORE = new Set(['/today', '/shop', '/shop-orders', '/customers', '/account', '/settings', '/catalog', '/'])
+  const more = navFor(me).filter((n) => !CORE.has(n.to))
+
+  async function changePassword(e: FormEvent) {
+    e.preventDefault()
+    if (p1.length < 8) return toast('Password must be at least 8 characters.', 'error')
+    if (p1 !== p2) return toast('Passwords do not match.', 'error')
+    setBusy(true)
+    const { error } = await supabase.auth.updateUser({ password: p1, data: { must_reset: false } })
+    setBusy(false)
+    if (error) toast(error.message, 'error')
+    else {
+      setP1('')
+      setP2('')
+      toast('Password updated.', 'success')
+    }
+  }
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link)
+      toast('Link copied', 'success')
+    } catch {
+      toast('Could not copy', 'error')
+    }
+  }
+
+  const row = 'flex items-center gap-3 px-4 py-3.5 text-[14px] font-semibold hover:bg-muted'
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-4 lg:px-8 lg:py-8">
+      <h1 className="font-display text-[22px] font-bold leading-tight tracking-tight lg:text-[28px]">My account</h1>
+
+      <section className="mt-4 rounded-2xl border border-border bg-card p-4">
+        <div className="flex items-center gap-3">
+          {sm?.photo_url ? <img src={sm.photo_url} alt="" width={56} height={56} className="h-14 w-14 rounded-full object-cover" /> : <span className="grid h-14 w-14 place-items-center rounded-full bg-accent font-display text-[18px] font-bold text-accent-foreground">{initials(name)}</span>}
+          <div className="min-w-0">
+            <div className="truncate font-display text-[18px] font-bold leading-tight">{name}</div>
+            <div className="truncate text-[12.5px] text-muted-foreground">{me?.email}</div>
+            <div className="mt-1 text-[12px] text-muted-foreground">{sm?.title || 'YQ sales representative'}{sm?.referral_code ? ` · /${sm.referral_code}` : ''}</div>
+          </div>
+        </div>
+        {focus?.target_bhd ? (
+          <div className="mt-4 rounded-xl bg-muted px-3 py-2.5 text-[12.5px]">
+            <span className="text-muted-foreground">90-day revenue </span>
+            <b className="tabular-nums">{bhd3(focus.revenue_90d_bhd)}</b>
+            <span className="text-muted-foreground"> of </span>
+            <b className="tabular-nums">{bhd3(focus.target_bhd)}</b>
+            <span className="text-muted-foreground"> target</span>
+          </div>
+        ) : null}
+      </section>
+
+      {/* link */}
+      <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card">
+        <div className="px-4 pt-4">
+          <h2 className="font-display text-[15px] font-bold">My storefront link</h2>
+          <p className="mt-0.5 truncate text-[12.5px] text-muted-foreground">{link.replace(/^https?:\/\//, '') || (meQ.data?.hint ?? '…')}</p>
+        </div>
+        <div className="mt-3 grid grid-cols-3 divide-x divide-border border-t border-border">
+          <button type="button" onClick={copy} className="inline-flex h-12 items-center justify-center gap-2 text-[13px] font-semibold hover:bg-muted">
+            <Copy size={15} aria-hidden="true" /> Copy
+          </button>
+          <button type="button" onClick={() => setQrOpen((v) => !v)} className="inline-flex h-12 items-center justify-center gap-2 text-[13px] font-semibold hover:bg-muted">
+            <QrCode size={15} aria-hidden="true" /> QR
+          </button>
+          <a href={link || '#'} target="_blank" rel="noreferrer" className="inline-flex h-12 items-center justify-center gap-2 text-[13px] font-semibold hover:bg-muted">
+            <ExternalLink size={15} aria-hidden="true" /> Open
+          </a>
+        </div>
+        {qrOpen && (
+          <div className="grid place-items-center border-t border-border bg-white p-4">
+            {qr ? <img src={qr} alt="QR code for my link" width={240} height={240} className="h-60 w-60" /> : <Loader2 size={18} className="my-24 animate-spin text-muted-foreground" />}
+          </div>
+        )}
+      </section>
+
+      {sm?.whatsapp || sm?.phone ? (
+        <p className="mt-2 px-1 text-[11.5px] text-muted-foreground">
+          <MessageCircle size={11} className="inline" aria-hidden="true" /> Merchants message you on {sm.whatsapp || sm.phone}. Ask the office to change it.
+        </p>
+      ) : null}
+
+      {/* more tools */}
+      {more.length > 0 && (
+        <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card">
+          <h2 className="px-4 pt-4 font-display text-[15px] font-bold">More tools</h2>
+          <ul className="mt-2 divide-y divide-border border-t border-border">
+            {more.map((n) => (
+              <li key={n.to}>
+                <Link to={n.to} className={row}>
+                  <n.icon size={18} className="text-primary" aria-hidden="true" />
+                  <span className="flex-1">{n.label}</span>
+                  <ChevronRight size={16} className="text-muted-foreground" aria-hidden="true" />
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {/* password */}
+      <section id="password" className="mt-4 rounded-2xl border border-border bg-card p-4">
+        <h2 className="flex items-center gap-2 font-display text-[15px] font-bold">
+          <KeyRound size={16} className="text-primary" aria-hidden="true" /> Change password
+        </h2>
+        <form onSubmit={changePassword} className="mt-3 grid gap-2 sm:max-w-sm">
+          <input type="password" autoComplete="new-password" value={p1} onChange={(e) => setP1(e.target.value)} placeholder="New password" className="h-12 rounded-xl border border-border bg-card px-3.5 text-[16px] outline-none focus:border-primary" />
+          <input type="password" autoComplete="new-password" value={p2} onChange={(e) => setP2(e.target.value)} placeholder="Confirm new password" className="h-12 rounded-xl border border-border bg-card px-3.5 text-[16px] outline-none focus:border-primary" />
+          <button type="submit" disabled={busy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground disabled:opacity-50">
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Update password
+          </button>
+        </form>
+      </section>
+
+      <button
+        type="button"
+        onClick={async () => {
+          setSigningOut(true)
+          await signOut()
+          setSigningOut(false)
+        }}
+        className={cn('mt-4 inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-border bg-card text-[14px] font-semibold text-destructive hover:bg-muted')}
+      >
+        {signingOut ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />} Sign out
+      </button>
+    </div>
+  )
+}

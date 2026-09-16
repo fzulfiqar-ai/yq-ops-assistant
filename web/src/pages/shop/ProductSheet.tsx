@@ -109,7 +109,7 @@ export function ProductSheet({
       footer={
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
-            <div className="font-display text-[19px] font-extrabold leading-none tracking-[-0.015em] tabular-nums text-[#6d28d9]">
+            <div className="font-display text-[19px] font-extrabold leading-none tracking-[-0.015em] tabular-nums text-[#6D4091]">
               {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
             </div>
             <div className="mt-1 text-[10.5px] text-[#6b6480]">
@@ -136,8 +136,8 @@ export function ProductSheet({
                 RING,
                 canOrder
                   ? out
-                    ? 'border border-[#e4e0ee] bg-white text-[#1a1430] hover:border-[#d9d2ee] hover:bg-[#f7f5fb]'
-                    : 'bg-[#6d28d9] text-white hover:bg-[#5b21b6]'
+                    ? 'border border-[#E2DCEA] bg-white text-[#1A1428] hover:border-[#CFC3DE] hover:bg-[#f7f5fb]'
+                    : 'bg-[#6D4091] text-white hover:bg-[#5A3478]'
                   : 'cursor-not-allowed border border-[#f3c9d2] bg-[#fdecef] text-[#9f1239]',
               )}
             >
@@ -156,7 +156,7 @@ export function ProductSheet({
       <div className="px-4 py-4 sm:px-5">
         <div className="sm:flex sm:gap-6">
           <div className="sm:w-[17rem] sm:shrink-0">
-            <div className="overflow-hidden rounded-[20px] border border-[#ece9f3] bg-white">
+            <div className="overflow-hidden rounded-[20px] border border-[#E9E4EF] bg-white">
               <ProductImage
                 key={view}
                 srcs={
@@ -185,8 +185,8 @@ export function ProductSheet({
                       'h-10 flex-1 rounded-xl border text-[12px] font-medium capitalize transition duration-150 ease-out',
                       RING,
                       view === v
-                        ? 'border-[#6d28d9] bg-[#f3eefc] text-[#6d28d9]'
-                        : 'border-[#e4e0ee] bg-white text-[#6b6480] hover:bg-[#f7f5fb]',
+                        ? 'border-[#6D4091] bg-[#EEE8F4] text-[#6D4091]'
+                        : 'border-[#E2DCEA] bg-white text-[#6b6480] hover:bg-[#f7f5fb]',
                     )}
                   >
                     {v}
@@ -217,7 +217,7 @@ export function ProductSheet({
             )}
 
             <div className="mt-4 flex flex-wrap items-end gap-x-3 gap-y-1">
-              <div className="font-display text-[28px] font-extrabold leading-[0.95] tracking-[-0.02em] tabular-nums text-[#6d28d9]">
+              <div className="font-display text-[28px] font-extrabold leading-[0.95] tracking-[-0.02em] tabular-nums text-[#6D4091]">
                 {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
               </div>
               {compare != null && (
@@ -236,11 +236,11 @@ export function ProductSheet({
             {item.social_proof && <p className="mt-1 text-[11.5px] text-[#6b6480]">{item.social_proof}</p>}
 
             {tiers.length > 0 && (
-              <div className="mt-4 overflow-hidden rounded-[14px] border border-[#ece9f3]">
+              <div className="mt-4 overflow-hidden rounded-[14px] border border-[#E9E4EF]">
                 <table className="w-full text-left text-[12px]">
                   <caption className="sr-only">Quantity price breaks</caption>
                   <thead>
-                    <tr className="bg-[#faf9fc] text-[10.5px] uppercase tracking-[0.06em] text-[#6b6480]">
+                    <tr className="bg-[#F9F7F3] text-[10.5px] uppercase tracking-[0.06em] text-[#6b6480]">
                       <th scope="col" className="px-3 py-2 font-semibold">
                         Quantity
                       </th>
@@ -251,11 +251,11 @@ export function ProductSheet({
                   </thead>
                   <tbody>
                     {tiers.map((t) => (
-                      <tr key={t.min_qty} className="border-t border-[#f4f2f9]">
-                        <th scope="row" className="px-3 py-2 font-medium text-[#1a1430]">
+                      <tr key={t.min_qty} className="border-t border-[#F3F0F6]">
+                        <th scope="row" className="px-3 py-2 font-medium text-[#1A1428]">
                           {t.min_qty}+ pcs
                         </th>
-                        <td className="px-3 py-2 text-right font-display font-bold tabular-nums text-[#6d28d9]">
+                        <td className="px-3 py-2 text-right font-display font-bold tabular-nums text-[#6D4091]">
                           {bhd(t.unit_price_bhd)}
                         </td>
                       </tr>
@@ -279,7 +279,7 @@ export function ProductSheet({
                 type="button"
                 onClick={share}
                 className={cn(
-                  'mt-5 inline-flex h-11 items-center gap-2 rounded-xl border border-[#e4e0ee] bg-white px-4 text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+                  'mt-5 inline-flex h-11 items-center gap-2 rounded-xl border border-[#E2DCEA] bg-white px-4 text-[13px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
                   RING,
                 )}
               >
@@ -290,8 +290,8 @@ export function ProductSheet({
         </div>
 
         {pairs.length > 0 && (
-          <section className="mt-6 border-t border-[#f4f2f9] pt-5">
-            <h3 className="font-display text-[13px] font-bold text-[#1a1430]">Frequently bought together</h3>
+          <section className="mt-6 border-t border-[#F3F0F6] pt-5">
+            <h3 className="font-display text-[13px] font-bold text-[#1A1428]">Frequently bought together</h3>
             <div className="-mx-4 mt-3 flex gap-3 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0">
               {pairs.map((p) => (
                 <button
@@ -299,7 +299,7 @@ export function ProductSheet({
                   type="button"
                   onClick={() => onOpenItem(p.item_code)}
                   className={cn(
-                    'w-[8.5rem] shrink-0 overflow-hidden rounded-[16px] border border-[#ece9f3] bg-white text-left transition duration-200 ease-out hover:border-[#e2ddef] hover:shadow-[0_10px_24px_-16px_rgba(24,16,48,.32)]',
+                    'w-[8.5rem] shrink-0 overflow-hidden rounded-[16px] border border-[#E9E4EF] bg-white text-left transition duration-200 ease-out hover:border-[#e2ddef] hover:shadow-[0_10px_24px_-16px_rgba(24,16,48,.32)]',
                     RING,
                   )}
                 >
@@ -313,9 +313,9 @@ export function ProductSheet({
                     iconSize={26}
                     showCaption={false}
                   />
-                  <div className="border-t border-[#f4f2f9] p-2.5">
-                    <div className="truncate font-display text-[12px] font-bold text-[#1a1430]">{p.item_code}</div>
-                    <div className="mt-0.5 font-display text-[12px] font-bold tabular-nums text-[#6d28d9]">
+                  <div className="border-t border-[#F3F0F6] p-2.5">
+                    <div className="truncate font-display text-[12px] font-bold text-[#1A1428]">{p.item_code}</div>
+                    <div className="mt-0.5 font-display text-[12px] font-bold tabular-nums text-[#6D4091]">
                       {p.price_bhd != null ? bhd(p.price_bhd) : '—'}
                     </div>
                   </div>

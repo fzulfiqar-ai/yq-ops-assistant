@@ -25,8 +25,8 @@ export function Select({ shape = 'field', className, wrapperClassName, ...props 
       <select
         {...props}
         className={cn(
-          'w-full appearance-none bg-white font-medium text-[#1a1430] outline-none transition duration-150 ease-out',
-          'border border-[#e4e0ee] hover:border-[#d9d2ee] focus:border-[#6d28d9] focus:ring-2 focus:ring-[#6d28d9]/15',
+          'w-full appearance-none bg-white font-medium text-[#1A1428] outline-none transition duration-150 ease-out',
+          'border border-[#E2DCEA] hover:border-[#CFC3DE] focus:border-[#6D4091] focus:ring-2 focus:ring-[#6D4091]/15',
           'focus-visible:outline-none',
           pill ? 'h-9 rounded-full pl-3.5 pr-8 text-[12px]' : 'h-11 rounded-xl pl-3 pr-9 text-[14px]',
           className,

@@ -56,26 +56,26 @@ export function OrderSuccess({ order, mode = 'public', customer, onContinue }: O
   }
 
   const secondary = cn(
-    'flex h-11 items-center justify-center gap-2 rounded-xl border border-[#e4e0ee] bg-white text-[13px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:border-[#d9d2ee] hover:bg-[#f7f5fb]',
+    'flex h-11 items-center justify-center gap-2 rounded-xl border border-[#E2DCEA] bg-white text-[13px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:border-[#CFC3DE] hover:bg-[#f7f5fb]',
     RING,
   )
 
   return (
-    <div className={cn(staff ? 'bg-transparent' : 'min-h-screen bg-[#faf9fc]')}>
+    <div className={cn(staff ? 'bg-transparent' : 'min-h-screen bg-[#F9F7F3]')}>
       <div className="mx-auto max-w-lg px-4 py-8 sm:py-10">
-        <div className="rounded-[20px] border border-[#ece9f3] bg-white p-6 text-center shadow-[0_12px_40px_-24px_rgba(24,16,48,.35)]">
+        <div className="rounded-[20px] border border-[#E9E4EF] bg-white p-6 text-center shadow-[0_12px_40px_-24px_rgba(24,16,48,.35)]">
           <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-[#e8f7ee]">
             <CheckCircle2 size={26} className="text-[#137a48]" aria-hidden="true" />
           </div>
-          <h1 className="mt-4 font-display text-[22px] font-bold tracking-[-0.02em] text-[#1a1430]">
+          <h1 className="mt-4 font-display text-[22px] font-bold tracking-[-0.02em] text-[#1A1428]">
             {staff ? 'Order placed' : 'Order received'}
           </h1>
           <p className="mt-1 text-[12.5px] leading-snug text-[#6b6480]">
             {staff ? who || 'Saved to Shop Orders.' : `${salesman} will confirm availability and delivery with you shortly.`}
           </p>
-          <div className="mt-5 rounded-[16px] bg-[#f3eefc] px-4 py-3">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#6d28d9]">Order number</div>
-            <div className="mt-0.5 font-display text-[26px] font-extrabold tracking-[-0.02em] tabular-nums text-[#1a1430]">
+          <div className="mt-5 rounded-[16px] bg-[#EEE8F4] px-4 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#6D4091]">Order number</div>
+            <div className="mt-0.5 font-display text-[26px] font-extrabold tracking-[-0.02em] tabular-nums text-[#1A1428]">
               {order.order_no}
             </div>
           </div>
@@ -107,7 +107,7 @@ export function OrderSuccess({ order, mode = 'public', customer, onContinue }: O
             <a
               href={order.email_url}
               className={cn(
-                'mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-[#d9d2ee] bg-white text-[13.5px] font-semibold text-[#1a1430] transition duration-150 ease-out hover:bg-[#f7f5fb]',
+                'mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-[#CFC3DE] bg-white text-[13.5px] font-semibold text-[#1A1428] transition duration-150 ease-out hover:bg-[#f7f5fb]',
                 RING,
               )}
             >
@@ -134,27 +134,27 @@ export function OrderSuccess({ order, mode = 'public', customer, onContinue }: O
         </div>
 
         {lines.length > 0 && (
-          <div className="mt-4 overflow-hidden rounded-[20px] border border-[#ece9f3] bg-white">
-            <h2 className="border-b border-[#f4f2f9] px-4 py-3 font-display text-[13px] font-bold text-[#1a1430]">
+          <div className="mt-4 overflow-hidden rounded-[20px] border border-[#E9E4EF] bg-white">
+            <h2 className="border-b border-[#F3F0F6] px-4 py-3 font-display text-[13px] font-bold text-[#1A1428]">
               {staff ? 'What they ordered' : 'What you ordered'}
             </h2>
-            <ul className="divide-y divide-[#f4f2f9]">
+            <ul className="divide-y divide-[#F3F0F6]">
               {lines.map((l) => (
                 <li key={l.item_code} className="flex items-baseline justify-between gap-3 px-4 py-2.5 text-[12.5px]">
                   <span className="min-w-0">
-                    <b className="font-display font-bold text-[#1a1430]">{l.item_code}</b>
+                    <b className="font-display font-bold text-[#1A1428]">{l.item_code}</b>
                     <span className="ml-1.5 tabular-nums text-[#6b6480]">
                       {l.qty} × {money(l.unit_price_bhd)}
                     </span>
                     {l.backorder && <span className="ml-1.5 text-[11px] text-[#96600d]">backorder</span>}
                   </span>
-                  <span className="shrink-0 font-semibold tabular-nums text-[#1a1430]">{bhd(l.line_total_bhd)}</span>
+                  <span className="shrink-0 font-semibold tabular-nums text-[#1A1428]">{bhd(l.line_total_bhd)}</span>
                 </li>
               ))}
             </ul>
-            <div className="flex items-baseline justify-between border-t border-[#f4f2f9] px-4 py-3">
-              <span className="text-[12.5px] font-semibold text-[#1a1430]">Total</span>
-              <span className="font-display text-[17px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1a1430]">
+            <div className="flex items-baseline justify-between border-t border-[#F3F0F6] px-4 py-3">
+              <span className="text-[12.5px] font-semibold text-[#1A1428]">Total</span>
+              <span className="font-display text-[17px] font-extrabold tracking-[-0.015em] tabular-nums text-[#1A1428]">
                 {bhd(totals?.total_bhd)}
               </span>
             </div>
@@ -165,7 +165,7 @@ export function OrderSuccess({ order, mode = 'public', customer, onContinue }: O
           type="button"
           onClick={onContinue}
           className={cn(
-            'mt-4 flex h-11 w-full items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold text-[#6d28d9] transition duration-150 ease-out hover:bg-[#f3eefc]',
+            'mt-4 flex h-11 w-full items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold text-[#6D4091] transition duration-150 ease-out hover:bg-[#EEE8F4]',
             RING,
           )}
         >

@@ -1,0 +1,224 @@
+import { useMemo, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { ArrowRight, BookImage, ChevronRight, ClipboardList, Copy, ExternalLink, Loader2, MessageCircle, QrCode, Share2, Users } from 'lucide-react'
+import { apiGet } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
+import { cn } from '@/lib/utils'
+import { useToast } from '@/components/Toast'
+import { STATUS_LABEL, STATUS_TONE } from '@/pages/shop-ops/OrderActions'
+import { Badge } from '@/components/ui/badge'
+import { bhd3, firstName, greeting, relTime, useAuthedBlob, useShopMe } from './lib'
+
+/**
+ * /today — the salesman's home. What needs him now (orders waiting to be confirmed), how his
+ * month is going (KPIs and the target bar), his link and QR one tap away, and the three things he
+ * does all day: order for a shop, open his customers, open his orders.
+ */
+
+interface OrderRow {
+  id: number
+  order_no: string
+  status: string
+  created_at?: string | null
+  customer_name?: string | null
+  customer_shop?: string | null
+  customer_area?: string | null
+  total_bhd?: number | null
+  items?: number | null
+  units?: number | null
+}
+
+export default function Today() {
+  const { me } = useAuth()
+  const navigate = useNavigate()
+  const toast = useToast()
+  const meQ = useShopMe()
+  const newQ = useQuery({ queryKey: ['shop-orders', 'new', ''], queryFn: () => apiGet<{ orders: OrderRow[]; count: number }>('/shop/orders?status=new&limit=5'), refetchInterval: 60_000 })
+  const progressQ = useQuery({ queryKey: ['shop-orders', 'confirmed,packed', ''], queryFn: () => apiGet<{ orders: OrderRow[]; count: number }>('/shop/orders?status=confirmed,packed&limit=3') })
+  const [qrOpen, setQrOpen] = useState(false)
+  const { blobUrl: qr, loading: qrLoading } = useAuthedBlob(qrOpen ? meQ.data?.qr_url : null)
+
+  const name = me?.full_name || meQ.data?.salesman?.name || ''
+  const link = meQ.data?.link || ''
+  const kpis = meQ.data?.kpis
+  const focus = meQ.data?.focus
+  const pct = focus?.target_bhd ? Math.min(100, Math.round(((focus.revenue_90d_bhd || 0) / Number(focus.target_bhd)) * 100)) : null
+  const today = useMemo(() => new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }), [])
+  const newOrders = newQ.data?.orders || []
+  const newCount = newQ.data?.count || 0
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link)
+      toast('Link copied', 'success')
+    } catch {
+      toast('Could not copy', 'error')
+    }
+  }
+  const share = async () => {
+    try {
+      if (navigator.share) await navigator.share({ title: 'YQ Marketplace', text: 'Order from YQ at trade prices:', url: link })
+      else window.open(`https://wa.me/?text=${encodeURIComponent(`Order from YQ at trade prices: ${link}`)}`, '_blank', 'noreferrer')
+    } catch {
+      /* dismissed */
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl px-4 py-4 lg:px-8 lg:py-8">
+      {/* greeting */}
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <p className="text-[12.5px] text-muted-foreground">{today}</p>
+          <h1 className="font-display text-[24px] font-bold leading-tight tracking-tight lg:text-[30px]">{greeting(firstName(name))}</h1>
+        </div>
+        {newCount > 0 && (
+          <Link to="/shop-orders" className="hidden h-11 items-center gap-2 rounded-xl bg-primary px-4 text-[13px] font-semibold text-primary-foreground md:inline-flex">
+            {newCount} to confirm <ArrowRight size={15} />
+          </Link>
+        )}
+      </div>
+
+      <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-6">
+        <div className="space-y-4">
+          {/* quick actions */}
+          <div className="grid grid-cols-3 gap-2 md:gap-3">
+            {[
+              { to: '/shop', label: 'New order', hint: 'Order for a shop', icon: BookImage, primary: true },
+              { to: '/customers', label: 'Customers', hint: 'Your book of shops', icon: Users },
+              { to: '/shop-orders', label: 'Orders', hint: newCount ? `${newCount} waiting` : 'All stages', icon: ClipboardList },
+            ].map((a) => (
+              <Link key={a.to} to={a.to} className={cn('group flex min-h-[5.5rem] flex-col justify-between rounded-2xl border p-3 transition-transform duration-150 hover:-translate-y-0.5 md:p-4', a.primary ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-foreground')}>
+                <a.icon size={20} aria-hidden="true" className={a.primary ? 'text-primary-foreground/90' : 'text-primary'} />
+                <span>
+                  <span className="block text-[13.5px] font-bold leading-tight md:text-[15px]">{a.label}</span>
+                  <span className={cn('block text-[11px] leading-tight md:text-[12px]', a.primary ? 'text-primary-foreground/75' : 'text-muted-foreground')}>{a.hint}</span>
+                </span>
+              </Link>
+            ))}
+          </div>
+
+          {/* needs you */}
+          <section className="overflow-hidden rounded-2xl border border-border bg-card">
+            <div className="flex items-center justify-between px-4 py-3">
+              <h2 className="font-display text-[15px] font-bold">Waiting for you</h2>
+              <Link to="/shop-orders" className="-mr-2 inline-flex h-10 items-center rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted">
+                All orders
+              </Link>
+            </div>
+            {newQ.isLoading ? (
+              <div className="grid h-24 place-items-center text-muted-foreground">
+                <Loader2 size={18} className="animate-spin" />
+              </div>
+            ) : newOrders.length === 0 ? (
+              <p className="border-t border-border px-4 py-5 text-[13px] text-muted-foreground">Nothing waiting. New orders from your link land here.</p>
+            ) : (
+              <ul className="divide-y divide-border border-t border-border">
+                {newOrders.map((o) => (
+                  <li key={o.id}>
+                    <button type="button" onClick={() => navigate(`/shop-orders?open=${o.id}`)} className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted">
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2">
+                          <span className="truncate text-[14px] font-semibold">{o.customer_shop || o.customer_name || o.order_no}</span>
+                          <Badge tone={STATUS_TONE[o.status] || 'grey'}>{STATUS_LABEL[o.status] || o.status}</Badge>
+                        </span>
+                        <span className="mt-0.5 block truncate text-[12px] text-muted-foreground">
+                          {[o.customer_area, o.items ? `${o.items} products` : null, o.units ? `${o.units} pcs` : null, relTime(o.created_at)].filter(Boolean).join(' · ')}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-right">
+                        <span className="block font-display text-[14px] font-bold tabular-nums">{bhd3(o.total_bhd)}</span>
+                        <span className="block text-[11.5px] font-semibold text-primary">Confirm</span>
+                      </span>
+                      <ChevronRight size={16} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(progressQ.data?.count || 0) > 0 && (
+              <Link to="/shop-orders?bucket=progress" className="flex items-center justify-between border-t border-border bg-muted/60 px-4 py-2.5 text-[12.5px] font-medium text-muted-foreground hover:text-foreground">
+                <span>{progressQ.data!.count} in progress (confirmed / preparing)</span>
+                <ChevronRight size={15} aria-hidden="true" />
+              </Link>
+            )}
+          </section>
+        </div>
+
+        <div className="space-y-4">
+          {/* month */}
+          <section className="rounded-2xl border border-border bg-card p-4">
+            <h2 className="font-display text-[15px] font-bold">Your month</h2>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {[
+                { k: 'Orders · 7 days', v: kpis?.orders_7d ?? 0 },
+                { k: 'Orders · 30 days', v: kpis?.orders_30d ?? 0 },
+                { k: 'Value · 30 days', v: bhd3(kpis?.value_30d_bhd) },
+                { k: 'Shops · 30 days', v: kpis?.customers_30d ?? 0 },
+              ].map((s) => (
+                <div key={s.k} className="rounded-xl bg-muted px-3 py-2.5">
+                  <div className="text-[11px] text-muted-foreground">{s.k}</div>
+                  <div className="mt-0.5 font-display text-[18px] font-bold tabular-nums leading-tight">{meQ.isLoading ? '—' : s.v}</div>
+                </div>
+              ))}
+            </div>
+            {focus?.target_bhd ? (
+              <div className="mt-3">
+                <div className="flex items-baseline justify-between text-[12px]">
+                  <span className="text-muted-foreground">90-day revenue vs target</span>
+                  <span className="font-semibold tabular-nums">{pct}%</span>
+                </div>
+                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={pct ?? 0} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${pct}%` }} />
+                </div>
+                <div className="mt-1 flex justify-between text-[11px] tabular-nums text-muted-foreground">
+                  <span>{bhd3(focus.revenue_90d_bhd)}</span>
+                  <span>{bhd3(focus.target_bhd)}</span>
+                </div>
+              </div>
+            ) : null}
+          </section>
+
+          {/* my link */}
+          <section className="rounded-2xl border border-border bg-card p-4">
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-[15px] font-bold">My link</h2>
+              {meQ.data?.salesman?.referral_code && <span className="rounded-full bg-accent px-2 py-0.5 text-[11px] font-semibold text-accent-foreground">/{meQ.data.salesman.referral_code}</span>}
+            </div>
+            {meQ.data && !meQ.data.salesman ? (
+              <p className="mt-2 text-[12.5px] text-muted-foreground">{meQ.data.hint || 'Your login is not linked to a salesman yet — ask the office.'}</p>
+            ) : (
+              <>
+                <p className="mt-1 truncate text-[12.5px] text-muted-foreground">{link.replace(/^https?:\/\//, '') || '…'}</p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button type="button" onClick={share} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#25D366] text-[13px] font-semibold text-white">
+                    <MessageCircle size={16} aria-hidden="true" /> Share
+                  </button>
+                  <button type="button" onClick={copy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border bg-card text-[13px] font-semibold">
+                    <Copy size={15} aria-hidden="true" /> Copy
+                  </button>
+                  <button type="button" onClick={() => setQrOpen((v) => !v)} aria-expanded={qrOpen} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border bg-card text-[13px] font-semibold">
+                    <QrCode size={15} aria-hidden="true" /> QR code
+                  </button>
+                  <a href={link || '#'} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-border bg-card text-[13px] font-semibold">
+                    <ExternalLink size={15} aria-hidden="true" /> Open
+                  </a>
+                </div>
+                {qrOpen && (
+                  <div className="mt-3 grid place-items-center rounded-xl border border-border bg-white p-3">
+                    {qr ? <img src={qr} alt="QR code for my link" width={220} height={220} className="h-[220px] w-[220px]" /> : qrLoading ? <Loader2 size={18} className="my-24 animate-spin text-muted-foreground" /> : <span className="my-24 text-[12px] text-muted-foreground">QR unavailable</span>}
+                    <p className="mt-2 text-center text-[11.5px] text-muted-foreground">Show this in the shop — they scan and order from your storefront.</p>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+          <p className="px-1 text-[11.5px] text-muted-foreground">
+            Share on WhatsApp opens your phone's share sheet; on a laptop it opens WhatsApp Web. <Share2 size={11} className="inline" aria-hidden="true" />
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
