@@ -321,6 +321,93 @@ def _():
     assert not any(f'"{k}":' in block for k in forbidden), "public item block leaks a private field"
 
 
+# ── rate limiting (pure) ──────────────────────────────────────────────────────
+
+def _req(headers: dict, host: str = "10.0.0.9", path: str = "/x", method: str = "GET"):
+    from starlette.requests import Request
+    scope = {"type": "http", "method": method, "path": path, "query_string": b"",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+             "client": (host, 1234), "server": ("testserver", 80), "scheme": "http"}
+    return Request(scope)
+
+
+@test("ratelimit: client ip is the N-th X-Forwarded-For entry from the right, never the left end")
+def _():
+    from app import ratelimit
+    from app.config import settings
+    old = settings.trusted_proxy_hops
+    try:
+        settings.trusted_proxy_hops = 1
+        assert ratelimit.client_ip(_req({"x-forwarded-for": "9.9.9.9, 1.2.3.4"})) == "1.2.3.4"   # spoofed left entry ignored
+        assert ratelimit.client_ip(_req({"x-forwarded-for": "1.2.3.4"})) == "1.2.3.4"
+        assert ratelimit.client_ip(_req({})) == "10.0.0.9"                                        # no header → socket peer
+        settings.trusted_proxy_hops = 0
+        assert ratelimit.client_ip(_req({"x-forwarded-for": "1.2.3.4"})) == "10.0.0.9"            # header not trusted locally
+        settings.trusted_proxy_hops = 2
+        assert ratelimit.client_ip(_req({"x-forwarded-for": "5.5.5.5, 1.2.3.4, 7.7.7.7"})) == "1.2.3.4"
+        assert ratelimit.client_ip(_req({"x-forwarded-for": "7.7.7.7"})) == "10.0.0.9"            # fewer entries than hops → peer
+    finally:
+        settings.trusted_proxy_hops = old
+
+
+@test("ratelimit: bearer calls are keyed per user, public calls per client ip")
+def _():
+    from app import ratelimit
+    from app.config import settings
+    old = settings.trusted_proxy_hops
+    try:
+        settings.trusted_proxy_hops = 1
+        k1 = ratelimit.rate_limit_key(_req({"authorization": "Bearer eyJhbGciOi.first-token.signature-1234567890"}))
+        k2 = ratelimit.rate_limit_key(_req({"authorization": "Bearer eyJhbGciOi.other-token.signature-1234567890"}))
+        k1b = ratelimit.rate_limit_key(_req({"authorization": "Bearer eyJhbGciOi.first-token.signature-1234567890",
+                                             "x-forwarded-for": "8.8.8.8"}))
+        assert k1.startswith("u:") and k1 != k2 and k1 == k1b, (k1, k2, k1b)          # same user, different ip → same bucket
+        assert ratelimit.rate_limit_key(_req({"x-forwarded-for": "1.2.3.4"})) == "1.2.3.4"
+        assert ratelimit.rate_limit_key(_req({"authorization": "Bearer x"})) == "10.0.0.9"    # junk header → ip
+    finally:
+        settings.trusted_proxy_hops = old
+
+
+@test("ratelimit: middleware limits undecorated routes per client and returns 429 with CORS")
+def _():
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.testclient import TestClient
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+    from app.config import settings
+    from app.ratelimit import rate_limit_key
+    import app.main as m
+    assert any(mw.cls is SlowAPIMiddleware for mw in m.app.user_middleware), "SlowAPIMiddleware not installed on the app"
+    assert m.limiter._default_limits, "no default limit configured"
+    old = settings.trusted_proxy_hops
+    try:
+        settings.trusted_proxy_hops = 1
+        lim = Limiter(key_func=rate_limit_key, default_limits=["2/minute"])
+        api = FastAPI()
+        api.state.limiter = lim
+        api.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        api.add_middleware(SlowAPIMiddleware)
+        api.add_middleware(CORSMiddleware, allow_origins=["https://shop.example"], allow_methods=["*"], allow_headers=["*"])
+
+        @api.get("/plain")
+        def plain():
+            return {"ok": True}
+
+        c = TestClient(api)
+        a = {"x-forwarded-for": "1.1.1.1", "origin": "https://shop.example"}
+        b = {"x-forwarded-for": "2.2.2.2", "origin": "https://shop.example"}
+        assert c.get("/plain", headers=a).status_code == 200
+        assert c.get("/plain", headers=a).status_code == 200
+        r = c.get("/plain", headers=a)
+        assert r.status_code == 429, r.status_code
+        assert r.headers.get("access-control-allow-origin") == "https://shop.example", "429 must keep CORS headers"
+        assert c.get("/plain", headers=b).status_code == 200, "a different client must have its own bucket"
+    finally:
+        settings.trusted_proxy_hops = old
+
+
 # ── live, read-only (SKIP until the migration is applied) ─────────────────────
 
 def _migrated() -> bool:

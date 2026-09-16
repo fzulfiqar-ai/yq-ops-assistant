@@ -74,6 +74,17 @@ class Settings:
             "http://localhost:8501"
         ]
         self.rate_limit: str = os.getenv("RATE_LIMIT", "30/minute")
+        # Blanket default applied by SlowAPIMiddleware to EVERY route (per user when a bearer
+        # token is present, per client IP otherwise). Generous on purpose: the portal fires
+        # dozens of calls per page; the strict limits live on the public routes' decorators.
+        self.rate_limit_default: str = os.getenv("RATE_LIMIT_DEFAULT", "300/minute")
+        # Trusted reverse-proxy hops in front of uvicorn (see app/ratelimit.py). Render puts
+        # exactly one and exports RENDER=true; anywhere else X-Forwarded-For is not trusted.
+        _hops_default = "1" if os.getenv("RENDER") else "0"
+        try:
+            self.trusted_proxy_hops: int = max(0, int(os.getenv("TRUSTED_PROXY_HOPS", _hops_default) or 0))
+        except ValueError:
+            self.trusted_proxy_hops = int(_hops_default)
         # Machine-to-machine key for schedulers / n8n agent flows (X-Agent-Key header).
         # Empty by default → agent-key auth is disabled until set in the environment.
         self.agent_api_key: str = os.getenv("AGENT_API_KEY", "")

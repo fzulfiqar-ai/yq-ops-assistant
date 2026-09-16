@@ -102,10 +102,10 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise HTTPException(status_code=404, detail="Invalid catalog link.")
 
     def _ip(request: Request) -> str | None:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()[:64]
-        return request.client.host if request.client else None
+        # Proxy-aware (trusted hops from the right), shared with the rate limiter. The old
+        # `split(",")[0]` took the client-controlled left end of X-Forwarded-For.
+        from app.ratelimit import client_ip
+        return client_ip(request)
 
     def _ua(request: Request) -> str:
         return (request.headers.get("user-agent") or "")[:200]

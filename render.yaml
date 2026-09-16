@@ -36,6 +36,11 @@ services:
         sync: false
       - key: APP_BASE_URL
         sync: false
+      # Render puts exactly one proxy in front of the container; the rate limiter and the
+      # hashed client IP on orders read the client from X-Forwarded-For with this hop count
+      # (app/ratelimit.py). Not a secret. Default is already 1 when RENDER=true is present.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
 
       # --- internal auth ---
       - key: AGENT_API_KEY

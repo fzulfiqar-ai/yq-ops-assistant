@@ -23,17 +23,27 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.audit import log_event
 from app.auth import CurrentUser, get_caller, get_current_user, require_admin, require_feature
 from app.config import settings
+from app.ratelimit import rate_limit_key
 
-limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit])
+# Two layers (16-Sep-2026). SlowAPIMiddleware applies `default_limits` to EVERY route — before
+# this it was never added, so only decorated routes were limited and the whole portal /shop/*
+# surface had no limit at all. The strict limits stay on the public decorators; the middleware
+# pass cannot see those, so a decorated route gets both its own limit and the generous default.
+# The key is per user for bearer calls and the proxy-aware client IP otherwise (app/ratelimit.py):
+# slowapi's stock key returned Render's proxy address for everyone, one global bucket.
+limiter = Limiter(key_func=rate_limit_key, default_limits=[settings.rate_limit_default])
 
 app = FastAPI(title="YQ Bahrain Ops Assistant", version="0.3.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Added before CORS so CORS stays outermost and a 429 still carries the allow-origin header;
+# otherwise the browser reports a CORS failure instead of the rate limit.
+app.add_middleware(SlowAPIMiddleware)
 
 # Local dev origins are always allowed; production origins come from ALLOWED_ORIGINS.
 # Include Vite's fallback ports (5174/5175) so a busy 5173 doesn't break CORS for /me.
