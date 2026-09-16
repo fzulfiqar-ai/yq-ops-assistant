@@ -319,6 +319,9 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   `status_label`, role-filtered `next_statuses`.
 - `salesmen` gains `title`, `photo_url`, `public_profile`, `public_whatsapp`; a `referral_code` that is a reserved
   marketplace address is refused.
+- Setting `shop_market_url` (the marketplace origin): when set, `shop.salesman_link()` returns `{market}/{slug}`
+  (the QR encodes it) and `shop.market_base()` drives every merchant-facing URL (`status_url`, tracking links in
+  emails and WhatsApp). Empty = legacy `/c/{token}?ref=` on `APP_BASE_URL`. Portal screens: `docs/MARKETPLACE.md`.
 - `GET /scheduler/shop-jobs` (X-Agent-Key) — unassigned reminders after `shop_assign_sla_min` (re-alert every 2 h)
   + session cleanup; called every 15 min by `.github/workflows/shop-cron.yml`.
 

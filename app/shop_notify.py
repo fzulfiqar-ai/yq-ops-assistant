@@ -38,7 +38,9 @@ def _money(x) -> str:
 
 
 def _status_url(o: dict) -> str:
-    return f"{_base()}/o/{o.get('token')}" if _base() else f"/o/{o.get('token')}"
+    from app.shop import market_base   # lazy: app.shop imports this module for the wa.me helpers
+    base = market_base() or _base()
+    return f"{base}/o/{o.get('token')}" if base else f"/o/{o.get('token')}"
 
 
 def _lines(o: dict) -> list[dict]:

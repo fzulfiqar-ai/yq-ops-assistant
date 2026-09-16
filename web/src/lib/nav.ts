@@ -23,6 +23,7 @@ import {
   UserRoundCheck,
   BadgePercent,
   BarChart3,
+  PackageCheck,
   type LucideIcon,
 } from 'lucide-react'
 import type { Me, Role } from './auth'
@@ -55,6 +56,8 @@ export const NAV: NavItem[] = [
   { section: 'Sell', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing' },
   { section: 'Sell', label: 'Shop Orders', to: '/shop-orders', icon: ClipboardList, feature: 'Shop Orders' },
   { section: 'Sell', label: 'Coach', to: '/coaching', icon: MessageSquareQuote, feature: 'Sales' },
+  // The storekeeper's one page: confirmed marketplace orders to pick, grouped by salesman.
+  { section: 'Supply', label: 'Pick list', to: '/picklist', icon: PackageCheck, feature: 'Storekeeper' },
   { section: 'Supply', label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
   { section: 'Supply', label: 'Stock Moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },
   { section: 'Supply', label: 'Orders', to: '/orders', icon: ShoppingCart, feature: 'Orders' },

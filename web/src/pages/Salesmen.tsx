@@ -28,6 +28,11 @@ interface Salesman {
   notify_whatsapp?: boolean
   link?: string | null
   orders_30d?: number | null
+  // marketplace storefront card (/{referral_code})
+  title?: string | null
+  photo_url?: string | null
+  public_profile?: boolean
+  public_whatsapp?: boolean
 }
 interface SalesmenResp { salesmen: Salesman[] }
 interface TeamUsersResp { users: { email: string }[] }
@@ -147,6 +152,10 @@ function SalesmanDialog({
         is_active: f.is_active !== false,
         notify_email: f.notify_email !== false,
         notify_whatsapp: f.notify_whatsapp !== false,
+        title: f.title?.trim() || undefined,
+        photo_url: f.photo_url?.trim() || undefined,
+        public_profile: f.public_profile !== false,
+        public_whatsapp: f.public_whatsapp === true,
       }
       if (isNew) await apiPost('/shop/salesmen', payload)
       else await apiPatch(`/shop/salesmen/${f.id}`, payload)
@@ -198,6 +207,19 @@ function SalesmanDialog({
                 placeholder="e.g. furqan" />
               <span className="mt-0.5 block text-[11px] text-muted-foreground">Used in the shared link — lowercase letters, numbers and dashes only.</span>
             </label>
+            <div className="rounded-xl border p-3">
+              <div className="mb-2 text-xs font-semibold text-muted-foreground">Marketplace storefront · /{f.referral_code || 'code'}</div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Title shown to merchants</span>
+                  <Input value={f.title || ''} onChange={(e) => set('title', e.target.value)} placeholder="YQ sales representative" /></label>
+                <label className="block"><span className="mb-1 block text-xs font-semibold text-muted-foreground">Photo URL (https)</span>
+                  <Input value={f.photo_url || ''} onChange={(e) => set('photo_url', e.target.value)} placeholder="https://…/ahmed.jpg" /></label>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-4">
+                <Toggle checked={f.public_profile !== false} onChange={(v) => set('public_profile', v)} label="Show my card on my storefront" />
+                <Toggle checked={f.public_whatsapp === true} onChange={(v) => set('public_whatsapp', v)} label="Show my WhatsApp button to merchants" />
+              </div>
+            </div>
             <div className="flex flex-wrap items-center gap-4 pt-1">
               <Toggle checked={f.is_active !== false} onChange={(v) => set('is_active', v)} label="Active" />
               <Toggle checked={f.notify_email !== false} onChange={(v) => set('notify_email', v)} label="Notify by email" />
@@ -287,9 +309,10 @@ export default function Salesmen() {
         actions={<Button size="sm" onClick={() => setEdit({})}><Plus size={15} /> Add salesman</Button>} />
 
       <p className="mb-4 text-sm text-muted-foreground">
-        Each salesman gets a personal catalog link and QR code — orders placed through it are credited
-        to them automatically, and they see their own orders under Shop Orders. Contact details are
-        stored in the database only.
+        Each salesman gets a personal storefront link and QR code — orders placed through it are credited
+        to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
+        Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
+        marketplace instead of the token link. Contact details are stored in the database only.
       </p>
 
       {isLoading ? (

@@ -467,7 +467,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if not _visible(user, o):
             raise HTTPException(status_code=404, detail="Order not found.")
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o)
-        o["status_url"] = f"{shop._base_url()}/o/{o.get('token')}" if shop._base_url() else f"/o/{o.get('token')}"
+        base = shop.market_base()
+        o["status_url"] = f"{base}/o/{o.get('token')}" if base else f"/o/{o.get('token')}"
         allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
         nxt = list(shop.NEXT_STATUS.get(o["status"], ()))
         o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]

@@ -428,6 +428,22 @@ def _():
         s._ctx_cache["ctx"], s._ctx_cache["at"] = old, 0.0
 
 
+@test("links: shop_market_url turns rep links into /{slug} storefronts and tracking URLs onto the marketplace")
+def _():
+    import app.shop as s
+    from app.shop_notify import _status_url
+    real = s.shop_settings
+    try:
+        s.shop_settings = lambda force=False: {**s.SETTING_DEFAULTS, "shop_market_url": "https://market.example/"}
+        assert s.market_base() == "https://market.example"
+        assert s.salesman_link({"referral_code": "furqan"}) == "https://market.example/furqan"
+        assert _status_url({"token": "abc123"}) == "https://market.example/o/abc123"
+        s.shop_settings = lambda force=False: dict(s.SETTING_DEFAULTS)
+        assert "/c/" in s.salesman_link({"referral_code": "furqan"}) or s.salesman_link({"referral_code": "furqan"}).endswith("?ref=furqan")
+    finally:
+        s.shop_settings = real
+
+
 # ── rate limiting (pure) ──────────────────────────────────────────────────────
 
 def _req(headers: dict, host: str = "10.0.0.9", path: str = "/x", method: str = "GET"):

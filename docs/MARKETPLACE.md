@@ -60,9 +60,28 @@ The headless smoke used on 16-Sep-2026 (Playwright, Chromium) walked home → st
 → search → add → product → cart → checkout → placed/tracking → my orders → recognized home → desktop,
 with zero console errors; first load ≈ 127 KB gzipped (budget 180).
 
+## Portal side (built 16-Sep-2026)
+
+- **Shop Orders (desk)**: an *Unassigned orders* panel at the top (from `GET /shop/assignment-queue`,
+  refreshed every minute) with a suggested rep and one-click Assign; `/shop-orders?queue=1` (the
+  Telegram alert link) highlights it. The order drawer shows the salesman with attribution source and
+  conflict flag, lets admins reassign, and offers **Confirm order (adjust quantities)** — the
+  `ConfirmEditor` (per-line confirmed qty / remove, expected delivery, note) posts to
+  `/shop/orders/{id}/confirm`. Statuses read Received / Confirmed / Preparing / On the way / Delivered.
+- **Shop Orders (field, salesman phone)**: "Confirm order" opens the same editor inside the sheet;
+  afterwards the forward button is *On the way* (Preparing is an optional side button), and every
+  stage has the prefilled WhatsApp to the merchant on top.
+- **Pick list** (`/picklist`, feature **Storekeeper**, role `storekeeper`): confirmed orders grouped by
+  salesman with confirmed quantities, *Preparing (issued to rep)* and *On the way* buttons, and a
+  total-to-pick panel. Storekeepers see only this page; admins can open it too.
+- **Salesmen**: storefront card fields (title, photo URL, show card, show WhatsApp button).
+- Shared pieces live in `web/src/pages/shop-ops/OrderActions.tsx`.
+- **`shop_market_url`** (Settings → Shop): once set to the marketplace origin, `salesman_link` becomes
+  `{market}/{slug}` (what the QR encodes) and every tracking URL in emails/WhatsApp points at the
+  marketplace's `/o/{token}`. Empty = the legacy token link on the portal host.
+
 ## Not yet built (in order)
 
-Portal screens for the new ops endpoints (assignment queue, confirm-with-changes, storekeeper pick
-list, salesman storefront fields) · service worker + version kill-switch · verified identity via
-salesman-issued access links (`/join/{token}`, Phase 2) · regular-stock rail from Focus history
-(needs `focus_customer_id` links) · web push · Quick Order mode · Arabic.
+Service worker + version kill-switch for the market build · verified identity via salesman-issued
+access links (`/join/{token}`, Phase 2) · regular-stock rail from Focus history (needs
+`focus_customer_id` links) · web push · Quick Order mode · Arabic.

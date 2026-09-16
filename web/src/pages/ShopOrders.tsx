@@ -18,6 +18,10 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
+import {
+  ACTION_LABEL, AssignBox, AssignmentQueue, ConfirmEditor, CustomerWhatsApp, STATUS_LABEL,
+  STATUS_TONE as MARKET_STATUS_TONE,
+} from '@/pages/shop-ops/OrderActions'
 
 // ── types (kept close to docs/SHOP.md — fields we're not certain about stay optional) ──
 
@@ -38,14 +42,23 @@ interface ShopOrderRow {
   source?: string | null
   referral_code?: string | null
   placed_by?: string | null
+  // marketplace (16-Sep-2026)
+  salesman_id?: number | null
+  attribution_source?: string | null
+  attribution_conflict?: boolean
+  expected_delivery?: string | null
+  total_confirmed_bhd?: number | null
 }
-type StatusCounts = Partial<Record<'new' | 'confirmed' | 'packed' | 'delivered' | 'cancelled', number>>
+type StatusCounts = Partial<Record<'new' | 'confirmed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled', number>>
 interface ShopOrdersResp { orders: ShopOrderRow[]; count: number; counts?: StatusCounts }
 
 interface OrderLine {
+  id: number
   item_code: string
   display_name?: string | null
   qty: number
+  qty_confirmed?: number | null
+  line_status?: string | null
   unit_price_bhd?: number | null
   line_total_bhd?: number | null
   stock_status?: 'in_stock' | 'low_stock' | 'out_of_stock' | null
@@ -65,6 +78,7 @@ interface OrderDetail extends ShopOrderRow {
   notify_result?: Record<string, unknown> | null
   whatsapp_url?: string | null
   next_statuses?: string[] | null
+  status_url?: string | null
 }
 
 interface ShopMeSalesman {
@@ -80,29 +94,27 @@ interface ShopMe {
   focus?: { revenue_90d_bhd?: number; target_bhd?: number } | null
 }
 
-const STATUSES = ['new', 'confirmed', 'packed', 'delivered', 'cancelled'] as const
-type StatusFilter = 'all' | (typeof STATUSES)[number]
+const STATUSES = ['new', 'confirmed', 'packed', 'out_for_delivery', 'delivered', 'cancelled'] as const
+type StatusFilter = 'all' | 'unassigned' | (typeof STATUSES)[number]
 
 /**
- * Three buckets, not five statuses. Standing in a shop the only questions are
+ * Three buckets, not six statuses. Standing in a shop the only questions are
  * "what is waiting for me", "what am I working on", "what is finished".
  */
 const BUCKETS = [
   { key: 'new', label: 'New', param: 'new', of: (c: StatusCounts) => c.new },
-  { key: 'progress', label: 'In progress', param: 'confirmed,packed', of: (c: StatusCounts) => (c.confirmed ?? 0) + (c.packed ?? 0) },
+  { key: 'progress', label: 'In progress', param: 'confirmed,packed,out_for_delivery', of: (c: StatusCounts) => (c.confirmed ?? 0) + (c.packed ?? 0) + (c.out_for_delivery ?? 0) },
   { key: 'done', label: 'Done', param: 'delivered,cancelled', of: (c: StatusCounts) => (c.delivered ?? 0) + (c.cancelled ?? 0) },
 ] as const
 type BucketKey = (typeof BUCKETS)[number]['key']
 
-const STATUS_TONE: Record<string, BadgeTone> = {
-  new: 'ink',
-  confirmed: 'amber',
-  packed: 'amber',
-  delivered: 'green',
-  cancelled: 'grey',
-}
+const STATUS_TONE: Record<string, BadgeTone> = MARKET_STATUS_TONE
+/** The merchant's words for each stage (Received / Confirmed / Preparing / On the way / Delivered). */
 function StatusPill({ status }: { status: string }) {
-  return <Badge tone={STATUS_TONE[status] || 'grey'} className="uppercase tracking-wide">{status}</Badge>
+  return <Badge tone={STATUS_TONE[status] || 'grey'}>{STATUS_LABEL[status] || status}</Badge>
+}
+function actionLabel(s: string): string {
+  return ACTION_LABEL[s] || `Mark ${STATUS_LABEL[s] || s}`
 }
 
 const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Sold out' }
@@ -146,17 +158,29 @@ function relTime(iso?: string | null): string {
 
 function eventLabel(event: string): string {
   if (event === 'created') return 'Order created'
-  if (event.startsWith('status:')) return `Marked ${event.slice(7)}`
+  if (event === 'assigned') return 'Assigned'
+  if (event.startsWith('status:')) return `Marked ${STATUS_LABEL[event.slice(7)] || event.slice(7)}`
   return event.replace(/[_:]/g, ' ')
 }
 
 function nextStatuses(status: string): string[] {
   switch (status) {
     case 'new': return ['confirmed', 'cancelled']
-    case 'confirmed': return ['packed', 'cancelled']
-    case 'packed': return ['delivered']
+    case 'confirmed': return ['packed', 'out_for_delivery', 'delivered', 'cancelled']
+    case 'packed': return ['out_for_delivery', 'delivered', 'cancelled']
+    case 'out_for_delivery': return ['delivered', 'cancelled']
     default: return []
   }
+}
+
+/** ordered → confirmed quantity, struck through when the salesman changed or removed it */
+function QtyCell({ l }: { l: OrderLine }) {
+  const st = l.line_status || 'ok'
+  if (st === 'removed') return <span className="text-[#9f1239] line-through">{l.qty}</span>
+  if (l.qty_confirmed != null && l.qty_confirmed !== l.qty) {
+    return <span><span className="text-muted-foreground line-through">{l.qty}</span> <b className="text-[#6d28d9]">{l.qty_confirmed}</b></span>
+  }
+  return <>{l.qty}</>
 }
 
 /** Fetch a protected binary endpoint (the QR PNG needs the bearer token) and hand back an
@@ -325,15 +349,22 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [reassigning, setReassigning] = useState(false)
+
+  const refetchOrder = () => {
+    qc.invalidateQueries({ queryKey: ['shop-order', id] })
+    qc.invalidateQueries({ queryKey: ['shop-assignment-queue'] })
+    onChanged()
+  }
 
   async function setStatus(next: string) {
     setBusy(next)
     try {
       await apiPost(`/shop/orders/${id}/status`, { status: next, note: note.trim() || undefined })
-      toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${next}.`, 'success')
+      toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
       setNote('')
-      qc.invalidateQueries({ queryKey: ['shop-order', id] })
-      onChanged()
+      refetchOrder()
     } catch (e) {
       toast(e instanceof ApiError ? e.body.slice(0, 160) : 'Could not update the order.', 'error')
     } finally {
@@ -343,6 +374,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
 
   const actions = data ? (data.next_statuses?.length ? data.next_statuses : nextStatuses(data.status)) : []
   const coupon = data?.coupon_code || data?.coupon?.code || null
+  const unassigned = Boolean(data && !data.salesman_id && !data.salesman_name)
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-sm" onClick={onClose}>
@@ -359,6 +391,25 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
           <div className="space-y-2 p-5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
         ) : (
           <div className="flex-1 space-y-5 p-5">
+            <section>
+              <div className="mb-1.5 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <span>Salesman</span>
+                {!unassigned && !reassigning && data.status !== 'delivered' && data.status !== 'cancelled' && (
+                  <button type="button" onClick={() => setReassigning(true)} className="text-[11px] font-semibold normal-case tracking-normal text-primary hover:underline">Reassign</button>
+                )}
+              </div>
+              {unassigned || reassigning ? (
+                <AssignBox orderId={id} currentSalesmanId={data.salesman_id ?? null} onDone={() => { setReassigning(false); refetchOrder() }} />
+              ) : (
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border p-3 text-sm">
+                  <span className="font-semibold">{data.salesman_name}</span>
+                  {data.attribution_source && <Badge tone="grey">{data.attribution_source.replace(/_/g, ' ')}</Badge>}
+                  {data.attribution_conflict && <Badge tone="amber">Referral conflict{data.referral_code ? ` · /${data.referral_code}` : ''}</Badge>}
+                  {data.expected_delivery && <span className="ml-auto text-[12px] text-muted-foreground">Expected: {data.expected_delivery}</span>}
+                </div>
+              )}
+            </section>
+
             <section>
               <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Customer</div>
               <div className="rounded-xl border p-3 text-sm">
@@ -413,7 +464,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
                             {l.backorder && <span className="text-[10px] font-semibold uppercase text-amber-600">Backorder</span>}
                           </div>
                         </td>
-                        <td className="px-2.5 py-1.5 text-right tabular-nums">{l.qty}</td>
+                        <td className="px-2.5 py-1.5 text-right tabular-nums"><QtyCell l={l} /></td>
                         <td className="px-2.5 py-1.5 text-right tabular-nums">{bhd(l.unit_price_bhd, 3)}</td>
                         <td className="px-2.5 py-1.5 text-right tabular-nums font-medium">{bhd(l.line_total_bhd, 3)}</td>
                       </tr>
@@ -429,9 +480,22 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
               <Row label="Delivery" value={bhd(data.delivery_bhd, 3)} />
               {coupon && <Row label="Coupon" value={coupon} />}
               <div className="mt-1 flex items-baseline justify-between border-t pt-1.5 text-base font-bold">
-                <span>Total</span><span className="tabular-nums text-primary">{bhd(data.total_bhd, 3)}</span>
+                <span>{data.total_confirmed_bhd != null && data.total_confirmed_bhd !== data.total_bhd ? 'Confirmed total' : 'Total'}</span>
+                <span className="tabular-nums text-primary">{bhd(data.total_confirmed_bhd ?? data.total_bhd, 3)}</span>
               </div>
+              {data.total_confirmed_bhd != null && data.total_confirmed_bhd !== data.total_bhd && (
+                <Row label="As ordered" value={bhd(data.total_bhd, 3)} />
+              )}
             </section>
+
+            {data.status === 'new' && !unassigned && (
+              confirming ? (
+                <ConfirmEditor orderId={id} lines={data.lines || []} onCancel={() => setConfirming(false)} onDone={() => { setConfirming(false); refetchOrder() }} />
+              ) : (
+                <Button type="button" onClick={() => setConfirming(true)} className="w-full"><Check size={14} /> Confirm order (adjust quantities)</Button>
+              )
+            )}
+            {data.whatsapp_url && data.status !== 'new' && <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />}
 
             {data.note && (
               <section>
@@ -466,18 +530,19 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
           </div>
         )}
 
-        {data && actions.length > 0 && (
+        {data && actions.length > 0 && !confirming && (
           <div className="sticky bottom-0 space-y-2 border-t bg-card p-4">
             <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional note…" />
             <div className="flex flex-wrap gap-2">
-              {actions.map((a) => (
+              {actions.filter((a) => a !== 'confirmed' || unassigned).map((a) => (
                 <Button key={a} size="sm" variant={a === 'cancelled' ? 'destructive' : 'default'}
-                  onClick={() => setStatus(a)} disabled={busy !== null}>
+                  onClick={() => setStatus(a)} disabled={busy !== null || (a === 'confirmed' && unassigned)}>
                   {busy === a ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
-                  {a === 'cancelled' ? 'Cancel order' : `Mark ${a}`}
+                  {actionLabel(a)}
                 </Button>
               ))}
             </div>
+            {unassigned && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
           </div>
         )}
       </div>
@@ -486,7 +551,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
 }
 
 function DeskOrders({
-  meData, rows, isLoading, companyKpis, needsCompanyKpi, status, setStatus, qRaw, setQRaw, onRefresh,
+  meData, rows, isLoading, companyKpis, needsCompanyKpi, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus,
 }: {
   meData?: ShopMe
   rows: ShopOrderRow[]
@@ -498,6 +563,7 @@ function DeskOrders({
   qRaw: string
   setQRaw: (v: string) => void
   onRefresh: () => void
+  queueFocus?: boolean
 }) {
   const [openId, setOpenId] = useState<number | null>(null)
   const openRow = (r: ShopOrderRow) => setOpenId(r.id)
@@ -516,7 +582,11 @@ function DeskOrders({
         </div>
       ) },
     { key: 'customer_area', label: 'Area', render: (_, r) => r.customer_area || '—' },
-    { key: 'salesman_name', label: 'Salesman', render: (_, r) => r.salesman_name || '—' },
+    { key: 'salesman_name', label: 'Salesman', render: (_, r) => (
+        r.salesman_name
+          ? <span className="inline-flex items-center gap-1.5">{r.salesman_name}{r.attribution_conflict && <Badge tone="amber">conflict</Badge>}</span>
+          : <Badge tone="rose">Unassigned</Badge>
+      ) },
     { key: 'items_count', label: 'Items / Units', align: 'right', render: (_, r) => `${num(r.items_count)} / ${num(r.units_count)}` },
     { key: 'total_bhd', label: 'Total', align: 'right', render: (_, r) => bhd(r.total_bhd, 3) },
     { key: 'status', label: 'Status', render: (_, r) => <StatusPill status={r.status} /> },
@@ -535,7 +605,9 @@ function DeskOrders({
 
   return (
     <div>
-      <PageHeader title="Shop Orders" subtitle="Orders placed from your shared catalog link" />
+      <PageHeader title="Shop Orders" subtitle="Orders from the marketplace, salesman links and the shared catalog" />
+
+      <AssignmentQueue onChanged={onRefresh} highlight={queueFocus} />
 
       <MyLinkCard me={meData} isAdmin companyKpis={needsCompanyKpi ? companyKpis : null} />
 
@@ -543,9 +615,9 @@ function DeskOrders({
         <div className="flex gap-1.5 overflow-x-auto pb-1">
           {(['all', ...STATUSES] as StatusFilter[]).map((s) => (
             <button key={s} onClick={() => setStatus(s)}
-              className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium capitalize transition duration-150 motion-reduce:transition-none',
+              className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition duration-150 motion-reduce:transition-none',
                 status === s ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
-              {s}
+              {s === 'all' ? 'All' : STATUS_LABEL[s] || s}
             </button>
           ))}
         </div>
@@ -750,13 +822,31 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
   }
 
   const allowed = data ? (data.next_statuses?.length ? data.next_statuses : nextStatuses(data.status)) : []
-  const forward = allowed.find((s) => s !== 'cancelled') || null
+  // The forward step. From Received it is "Confirm" (with the quantity editor); afterwards the
+  // next physical stage — Preparing is optional, so from Confirmed the button reads "On the way".
+  const forward = data?.status === 'new'
+    ? (allowed.includes('confirmed') ? 'confirmed' : null)
+    : data?.status === 'confirmed'
+      ? (allowed.includes('out_for_delivery') ? 'out_for_delivery' : allowed.find((s) => s !== 'cancelled') || null)
+      : allowed.find((s) => s !== 'cancelled') || null
   const canCancel = allowed.includes('cancelled')
   const coupon = data?.coupon_code || data?.coupon?.code || null
+  const [confirming, setConfirming] = useState(false)
 
-  const footer = !data ? null : (
+  const footer = !data || confirming ? null : (
     <div className="space-y-2">
-      {forward && (
+      {data.whatsapp_url && data.status !== 'new' && (
+        <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />
+      )}
+      {forward === 'confirmed' ? (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6d28d9] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
+        >
+          <Check size={17} aria-hidden="true" /> Confirm order
+        </button>
+      ) : forward ? (
         <button
           type="button"
           onClick={() => setStatus(forward)}
@@ -764,7 +854,13 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
           className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6d28d9] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
         >
           {busy === forward ? <Loader2 className="animate-spin" size={17} /> : <Check size={17} aria-hidden="true" />}
-          Mark {forward}
+          {actionLabel(forward)}
+        </button>
+      ) : null}
+      {data.status === 'confirmed' && allowed.includes('packed') && (
+        <button type="button" onClick={() => setStatus('packed')} disabled={busy !== null}
+          className={cn('h-11 w-full rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#faf9fc] motion-reduce:transition-none', HAIRLINE, INK)}>
+          {busy === 'packed' ? <Loader2 className="mx-auto animate-spin" size={15} /> : 'Mark preparing (goods with me)'}
         </button>
       )}
       {canCancel && !confirmCancel && (
@@ -821,8 +917,20 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
           <div className="flex flex-wrap items-center gap-1.5">
             <StatusPill status={data.status} />
             {data.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
+            {data.source === 'market' && <Badge tone="accent">Marketplace</Badge>}
+            {data.attribution_conflict && <Badge tone="amber">Referral conflict</Badge>}
             {data.has_backorder && <Badge tone="amber">Backorder</Badge>}
+            {data.expected_delivery && <span className={cn('text-[11.5px]', MUTED)}>Expected: {data.expected_delivery}</span>}
           </div>
+
+          {confirming && (
+            <ConfirmEditor
+              orderId={id}
+              lines={data.lines || []}
+              onCancel={() => setConfirming(false)}
+              onDone={() => { setConfirming(false); qc.invalidateQueries({ queryKey: ['shop-order', id] }); onChanged() }}
+            />
+          )}
 
           <section className={cn('rounded-xl border p-3.5', HAIRLINE)}>
             <div className={cn('font-display text-[14px] font-bold leading-tight', INK)}>
@@ -864,7 +972,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
                       <div className={cn('truncate text-[11.5px]', MUTED)}>{l.display_name}</div>
                     )}
                     <div className={cn('mt-0.5 text-[11.5px] tabular-nums', MUTED)}>
-                      {l.qty} × {bhd(l.unit_price_bhd, 3)}
+                      <QtyCell l={l} /> × {bhd(l.unit_price_bhd, 3)}
                     </div>
                     {(l.stock_status || l.backorder) && (
                       <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -1069,6 +1177,8 @@ export default function ShopOrders() {
   const { me } = useAuth()
   const qc = useQueryClient()
   const isAdmin = me?.role === 'admin'
+  // The Telegram "UNASSIGNED" alert links to /shop-orders?queue=1 — open on the queue.
+  const queueFocus = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('queue') === '1'
   const [status, setStatus] = useState<StatusFilter>('all')
   const [bucket, setBucket] = useState<BucketKey>('new')
   const [qRaw, setQRaw] = useState('')
@@ -1084,7 +1194,7 @@ export default function ShopOrders() {
   // The desk filters by one status, the field by a bucket of statuses (the API takes a
   // comma list) — both collapse to a single `status` query param.
   const statusParam = isAdmin
-    ? (status === 'all' ? '' : status)
+    ? (status === 'all' || status === 'unassigned' ? '' : status)
     : (BUCKETS.find((b) => b.key === bucket)?.param ?? 'new')
 
   const ordersQuery = useQuery({
@@ -1157,6 +1267,7 @@ export default function ShopOrders() {
       qRaw={qRaw}
       setQRaw={setQRaw}
       onRefresh={refreshList}
+      queueFocus={queueFocus}
     />
   )
 }

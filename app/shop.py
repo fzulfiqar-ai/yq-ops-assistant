@@ -90,6 +90,8 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_device_daily_cap": "20",
     "shop_assign_sla_min": "30",
     "shop_market_enabled": "1",
+    # the merchant-facing origin (the marketplace's hostname); empty = fall back to APP_BASE_URL
+    "shop_market_url": "",
     "shop_areas": ("Manama,Muharraq,Riffa,Isa Town,Hamad Town,Sitra,Budaiya,Saar,Hidd,Jidhafs,Sanabis,Aali,"
                    "Zallaq,Salmabad,Tubli,Seef,Juffair,Adliya,Gudaibiya,Hoora,Galali,Arad,Busaiteen,Askar"),
 }
@@ -1135,6 +1137,17 @@ def _base_url() -> str:
     return (os.getenv("APP_BASE_URL", "") or "").rstrip("/")
 
 
+def market_base() -> str:
+    """The origin merchants should see in links (storefronts, tracking pages): the marketplace
+    hostname from the `shop_market_url` setting when the owner has set it, else the portal's
+    APP_BASE_URL, which also serves /o/{token} and /c/{token}."""
+    try:
+        u = str(shop_settings().get("shop_market_url") or "").strip().rstrip("/")
+    except Exception:  # noqa: BLE001
+        u = ""
+    return u or _base_url()
+
+
 # ── order creation ────────────────────────────────────────────────────────────
 
 def _totals_from_order(o: dict) -> dict:
@@ -1276,7 +1289,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
                   "meta": {"attribution": attribution}}, ip=ip, ua=ua)
     order["lines"] = quote["lines"]
     order["salesman"] = sm
-    order["status_url"] = f"{_base_url()}/o/{token}" if _base_url() else f"/o/{token}"
+    order["status_url"] = f"{market_base()}/o/{token}" if market_base() else f"/o/{token}"
     order["totals"] = {k: v for k, v in quote.items() if not k.startswith("_")}
     return order
 
@@ -1747,6 +1760,11 @@ def slugify(name: str) -> str:
 
 
 def salesman_link(s: dict) -> str:
+    """The rep's personal link. With the marketplace live (`shop_market_url` set) it is the
+    storefront `/{slug}` — no token, safe to print on a QR card; otherwise the legacy token link."""
+    market = str(shop_settings().get("shop_market_url") or "").strip().rstrip("/")
+    if market and s.get("referral_code"):
+        return f"{market}/{s['referral_code']}"
     tok = share_token() or ""
     base = _base_url()
     path = f"/c/{tok}?ref={s.get('referral_code')}"

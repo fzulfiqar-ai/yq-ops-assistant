@@ -4,7 +4,7 @@ import type { Session } from '@supabase/supabase-js'
 import { supabase, getSessionSafe } from './supabase'
 import { apiGet, ApiError, API_BASE } from './api'
 
-export type Role = 'admin' | 'member' | 'salesman'
+export type Role = 'admin' | 'member' | 'salesman' | 'storekeeper'
 
 export interface Me {
   email: string

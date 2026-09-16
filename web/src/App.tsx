@@ -38,6 +38,7 @@ const ShopRules = lazy(() => import('@/pages/ShopRules'))
 const ShopAnalytics = lazy(() => import('@/pages/ShopAnalytics'))
 // The customer-facing shop, reused inside the portal so a salesman can order for a shop.
 const ShopPage = lazy(() => import('@/pages/shop/ShopPage'))
+const PickList = lazy(() => import('@/pages/PickList'))
 
 /** Land on the first page this user can see (a salesman goes straight to Catalog). */
 function Home() {
@@ -77,6 +78,7 @@ export default function App() {
           <Route path="marketing" element={<Gate feature="Marketing"><Marketing /></Gate>} />
           <Route path="shop" element={<Gate feature="Catalog"><ShopPage mode="salesman" /></Gate>} />
           <Route path="shop-orders" element={<Gate feature="Shop Orders"><ShopOrders /></Gate>} />
+          <Route path="picklist" element={<Gate feature="Storekeeper"><PickList /></Gate>} />
           <Route path="salesmen" element={<Gate feature="Shop Admin"><Salesmen /></Gate>} />
           <Route path="shop-rules" element={<Gate feature="Shop Admin"><ShopRules /></Gate>} />
           <Route path="shop-analytics" element={<Gate feature="Shop Admin"><ShopAnalytics /></Gate>} />
