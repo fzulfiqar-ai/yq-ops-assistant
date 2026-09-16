@@ -94,7 +94,12 @@ function marketPwa(apiUrl: string) {
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env }
   const isMarket = env.VITE_APP === 'market'
-  const buildId = env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) || env.GITHUB_SHA?.slice(0, 12) || `local-${Date.now().toString(36)}`
+  // commit sha when Vercel/GitHub know it; a CLI deploy without Git integration still gets a unique id per deployment
+  const buildId =
+    env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) ||
+    env.GITHUB_SHA?.slice(0, 12) ||
+    env.VERCEL_DEPLOYMENT_ID?.replace(/^dpl_/, '').slice(0, 12) ||
+    `local-${Date.now().toString(36)}`
   return {
     define: { __BUILD_ID__: JSON.stringify(buildId) },
     plugins: [

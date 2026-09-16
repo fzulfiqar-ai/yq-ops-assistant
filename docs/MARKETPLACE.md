@@ -42,17 +42,28 @@ Attribution on the device: `/{slug}` is remembered ONLY after the server confirm
 Checkout sends `session_ref`, `device_id` and a per-attempt `client_order_id` (a retry after a
 timeout returns the same order).
 
-## Deploying the marketplace (second Vercel project)
+## Deploying the marketplace (second Vercel project) — LIVE since 16-Sep-2026
 
-1. Vercel → Add New Project → import the same GitHub repo → **Root Directory `web`**, framework Vite,
-   build `npm run build`, output `dist`. Enable Git integration (previews per branch).
-2. Environment variables: `VITE_APP=market`, `VITE_API_URL=https://yq-ops-assistant.onrender.com`
-   (and the two `VITE_SUPABASE_*` values the portal uses — unused by the market build but harmless).
-3. On Render add the new hostname (and later the custom domain) to `ALLOWED_ORIGINS`, otherwise every
-   API call is refused by CORS. `web/vercel.json` already allows the API host in `connect-src`.
-4. Point the domain (when bought) at the market project; print QR codes only after that.
-5. Verify: open `/` and `/furqan` on a phone, add a product, place an order, open the tracking link;
-   `python -m scripts.audit_grants` still exits 0; Lighthouse on the preview.
+- **Production:** `https://yq-marketplace.vercel.app` — Vercel project `yq-marketplace` (team
+  `fzulfiqar-ai-s-projects`), environment `VITE_APP=market`,
+  `VITE_API_URL=https://yq-ops-assistant.onrender.com`. The market build imports no Supabase code, so
+  it needs no `VITE_SUPABASE_*` values.
+- **Deploy from the developer machine:** `python -m scripts.deploy_web market` (or `portal`). Both
+  projects are CLI-deployed from `web/`; the script swaps the CLI link, deploys, and restores it.
+  Vercel builds with the project's env, so a local `.env` never leaks into the bundle.
+- **Render:** `ALLOWED_ORIGINS` includes `https://yq-marketplace.vercel.app` (16-Sep-2026). Add the
+  custom domain there too when it exists, otherwise every API call is refused by CORS. Note: Render's
+  `autoDeploy` flag is on but pushes do not reach it (no GitHub-app webhook); deploys are triggered
+  through the Render API.
+- **Portal setting:** `shop_market_url = https://yq-marketplace.vercel.app` (Settings → Shop), so
+  salesman links/QR and tracking URLs point at the marketplace.
+- **Git integration (owner click, optional):** Vercel → project → *Connect Git Repository* → root
+  directory **`web`**. After that, CLI deploys must run from the repository root, and every push to
+  `main` deploys automatically with a preview URL per branch.
+- **Custom domain (later):** attach the root domain to `yq-marketplace` and `ops.` to
+  `yq-bahrain-ops`; add both to `ALLOWED_ORIGINS`; update `shop_market_url`; print QR codes only then.
+- **Verify after a deploy:** `/version.json` changes build id, `/sw.js` is `no-cache`, `/robots.txt`
+  disallows all, `/` and `/furqan` render on a phone, `python -m scripts.audit_grants` exits 0.
 
 Local: `cd web && VITE_API_URL=http://127.0.0.1:8000 VITE_APP=market npx vite build --outDir dist-market`
 then `npx vite preview --outDir dist-market --port 5174` against a local `uvicorn app.main:app`.
