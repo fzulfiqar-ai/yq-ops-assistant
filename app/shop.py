@@ -103,10 +103,13 @@ SETTING_DEFAULTS: dict[str, str] = {
                    "Zallaq,Salmabad,Tubli,Seef,Juffair,Adliya,Gudaibiya,Hoora,Galali,Arad,Busaiteen,Askar"),
     # marketplace v2.1 (16-Sep-2026): the promise bar — only claims the data can back. JSON list of
     # {key, en, ar, icon, to}. The delivery line switches itself when a free-delivery threshold exists.
+    # v3 (17-Sep-2026): wholesale-first — "No minimum order" gave way to trade prices and the rep's
+    # confirmation (the wholesale minimum is real now). Validated on save by validate_promises().
     "shop_market_promises": json.dumps([
         {"key": "delivery", "en": "Free delivery across Bahrain", "ar": "توصيل مجاني في كل البحرين", "icon": "truck", "to": "/about#delivery"},
-        {"key": "minimum", "en": "No minimum order", "ar": "بدون حد أدنى للطلب", "icon": "package", "to": "/quick"},
-        {"key": "stock", "en": "Live stock", "ar": "مخزون مباشر", "icon": "pulse", "to": "/shop?f=instock"},
+        {"key": "trade", "en": "Trade prices for shops", "ar": "أسعار الجملة للمحلات", "icon": "tag", "to": "/about#trade"},
+        {"key": "stock", "en": "Live warehouse stock", "ar": "مخزون المستودع مباشر", "icon": "pulse", "to": "/shop?f=instock"},
+        {"key": "rep", "en": "Every order confirmed by your rep", "ar": "كل طلب يؤكده مندوبك", "icon": "shield", "to": "/about#how"},
     ], ensure_ascii=False),
     "shop_market_ai_enabled": "0",       # phase C: the concierge; off until the office switches it on
     # wholesale order engine (16-Sep-2026): the minimum is a sales engine, not a wall
@@ -186,7 +189,67 @@ def shop_settings(force: bool = False) -> dict[str, str]:
     return vals
 
 
+PROMISES_MAX = 6          # stored; the bar itself shows the first 4 (promises_payload)
+_PROMISE_OPTIONAL = ("ar", "icon", "to")
+
+
+def validate_promises(raw) -> str:
+    """The promise bar as it may be stored: a JSON list (≤ PROMISES_MAX) of objects, each with a
+    non-empty text `key` and `en`, optional text `ar` / `icon` / `to`. Returns the normalised JSON
+    (trimmed, known fields only, Arabic kept as-is). Raises ShopError with a message the admin can
+    act on — the market used to blank the whole bar silently when the stored value was bad."""
+    rows = raw
+    if raw is None or isinstance(raw, (str, bytes)):
+        try:
+            rows = json.loads(raw or "")
+        except ValueError as e:
+            raise ShopError("Promises must be valid JSON: a list of {key, en, ar, icon, to} objects.") from e
+    if not isinstance(rows, list):
+        raise ShopError("Promises must be a JSON list of {key, en, ar, icon, to} objects.")
+    if len(rows) > PROMISES_MAX:
+        raise ShopError(f"At most {PROMISES_MAX} promises (the bar shows the first 4).")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for n, r in enumerate(rows, 1):
+        if not isinstance(r, dict):
+            raise ShopError(f"Promise {n} must be an object with a key and English text (en).")
+        key, en = r.get("key"), r.get("en")
+        if not isinstance(key, str) or not key.strip():
+            raise ShopError(f"Promise {n} needs a key (text, e.g. delivery).")
+        key = key.strip()
+        if not isinstance(en, str) or not en.strip():
+            raise ShopError(f"Promise {n} ({key}) needs English text (en).")
+        if key.lower() in seen:
+            raise ShopError(f"Promise keys must be unique — '{key}' appears twice.")
+        seen.add(key.lower())
+        row = {"key": key, "en": en.strip()}
+        for f in _PROMISE_OPTIONAL:
+            v = r.get(f)
+            if v is None:
+                continue
+            if not isinstance(v, str):
+                raise ShopError(f"Promise {n} ({key}): {f} must be text.")
+            if v.strip():
+                row[f] = v.strip()
+        to = row.get("to")
+        if to and not (to.startswith("/") or to.startswith("https://")):
+            raise ShopError(f"Promise {n} ({key}): the link must be a marketplace path (/about#delivery) or an https URL.")
+        out.append(row)
+    return json.dumps(out, ensure_ascii=False)
+
+
+def small_order_mode(vals: dict) -> str:
+    """shop_small_order_mode normalised: request (accept + flag for the rep) · allow · block."""
+    mode = str(vals.get("shop_small_order_mode") or "request").strip().lower()
+    return mode if mode in ("request", "allow", "block") else "request"
+
+
 def update_shop_settings(changes: dict[str, str], by: str = "") -> dict[str, str]:
+    """Upsert known shop_* keys (unknown keys are ignored). Everything is validated before the
+    first write, so a bad value never leaves the settings half-saved. Raises ShopError."""
+    changes = dict(changes or {})
+    if "shop_market_promises" in changes:
+        changes["shop_market_promises"] = validate_promises(changes["shop_market_promises"])
     client = get_client()
     for k, v in changes.items():
         if k not in SETTING_DEFAULTS:
@@ -351,6 +414,12 @@ def _load_pairs(active_codes: set[str], top_n: int = 3) -> dict[str, list[str]]:
 
 CAMPAIGN_PLACEMENTS = ("hero", "strip", "aside", "category")
 CAMPAIGN_AUDIENCES = ("all", "recognized", "new")
+# v3 creative (scripts/marketplace_campaign_creative_migration.sql): an uploaded photo is framed with
+# `image_fit` (never cropped unless the admin says cover); a composed creative lays up to
+# CAMPAIGN_MAX_PRODUCTS product photos on a `canvas`. The first value of each tuple is the DB default.
+CAMPAIGN_IMAGE_FITS = ("contain", "cover")
+CAMPAIGN_CANVASES = ("lilac", "apricot", "mint", "plum", "night")
+CAMPAIGN_MAX_PRODUCTS = 3
 
 
 def _load_campaigns() -> list[dict]:
@@ -362,6 +431,22 @@ def _load_campaigns() -> list[dict]:
     except Exception as e:  # noqa: BLE001 — the market works without the table
         log.warning("shop_campaigns unavailable: %s", e)
         return []
+
+
+def _campaign_live_codes(ctx: dict, codes) -> list[str] | None:
+    """A composed creative's products, in the catalog's own spelling, keeping only codes the public
+    catalog still carries (a hidden, deactivated or renamed SKU simply drops out). None when nothing
+    is left, so the market can test the field for truthiness."""
+    items = ctx.get("items") or {}
+    if not items or not isinstance(codes, (list, tuple)):
+        return None
+    idx = ctx.get("by_upper") or {str(k).upper(): k for k in items}
+    out: list[str] = []
+    for raw in codes:
+        code = idx.get(str(raw or "").strip().upper())
+        if code and code not in out:
+            out.append(code)
+    return out[:CAMPAIGN_MAX_PRODUCTS] or None
 
 
 def campaigns_payload(ctx: dict, now: datetime | None = None) -> list[dict]:
@@ -385,6 +470,10 @@ def campaigns_payload(ctx: dict, now: datetime | None = None) -> list[dict]:
             "id": c["id"], "title": c.get("title") or "", "title_ar": c.get("title_ar") or None,
             "line": c.get("line") or None, "line_ar": c.get("line_ar") or None,
             "image_url": c.get("image_url") or None,
+            "image_url_600": c.get("image_url_600") or None,
+            "image_fit": c.get("image_fit") if c.get("image_fit") in CAMPAIGN_IMAGE_FITS else CAMPAIGN_IMAGE_FITS[0],
+            "product_codes": _campaign_live_codes(ctx, c.get("product_codes")),
+            "canvas": c.get("canvas") if c.get("canvas") in CAMPAIGN_CANVASES else CAMPAIGN_CANVASES[0],
             "cta_label": c.get("cta_label") or None, "cta_label_ar": c.get("cta_label_ar") or None,
             "cta_to": c.get("cta_to") or "/shop",
             "placement": placement, "category": c.get("category") or None,
@@ -808,6 +897,8 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "currency": "BHD",
             "promises": promises_payload(vals),
             "min_order_bhd": money(vals.get("shop_min_order_bhd")),
+            # how an order under the minimum is treated, so the market can say "BHD x away" before a quote
+            "small_order_mode": small_order_mode(vals),
             "free_delivery_threshold_bhd": money(vals.get("shop_free_delivery_threshold_bhd")),
             "delivery_fee_bhd": money(vals.get("shop_delivery_fee_bhd")),
             "allow_backorder": _flag(vals, "shop_allow_backorder"),
@@ -880,7 +971,9 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
     """Products that would close the gap to the wholesale minimum, best first: pairs of what is
     already in the cart, then best sellers from the same categories, then anything in stock —
     each ranked by how close one default quantity lands on the gap without overshooting by more
-    than one pack. Never a cart line, never out of stock, never the same product twice."""
+    than one pack. Never a cart line, never out of stock, never the same product twice. On an
+    exact tie (same tier, same closes-the-gap flag, same overshoot) a clearing line ranks first —
+    the minimum doubles as the clearance engine, at the price-book price."""
     items = ctx.get("items") or {}
     if remaining <= 0 or not items:
         return []
@@ -928,10 +1021,11 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
             value = money(price * qty)
             over = value - remaining
         closes = value >= remaining
-        scored.append((tier, 0 if closes else 1, abs(over), code, qty, value))
+        clearing = "clearance" in (badges.get(code) or [])
+        scored.append((tier, 0 if closes else 1, abs(over), 0 if clearing else 1, code, qty, value))
     scored.sort()
     out = []
-    for tier, _c, _o, code, qty, value in scored[:max(limit, 0)]:
+    for tier, _c, _o, _cl, code, qty, value in scored[:max(limit, 0)]:
         it = items[code]
         out.append({"item_code": code, "display_name": it.get("display_name") or code, "qty": qty,
                     "unit_price_bhd": money(it.get("standard_rate")), "value_bhd": value,
@@ -1149,9 +1243,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                         "remaining_bhd": 0.0, "unlocked": True, "label": f"{best_auto['name']} applied"}
 
     min_order = money(vals.get("shop_min_order_bhd"))
-    small_mode = str(vals.get("shop_small_order_mode") or "request").strip().lower()
-    if small_mode not in ("request", "allow", "block"):
-        small_mode = "request"
+    small_mode = small_order_mode(vals)
     # One thing at a time, in the order the customer can act on it: clear the dead
     # line first, then top up to the minimum. Totals above are already the price of
     # what IS orderable, so the number on the button stays true either way.
@@ -1698,7 +1790,7 @@ def orders_by_tokens(tokens) -> list[dict]:
         return []
     rows = (get_client().table("shop_orders")
             .select("order_no,token,status,total_bhd,total_confirmed_bhd,items_count,units_count,created_at,"
-                    "updated_at,salesman_name,expected_delivery")
+                    "updated_at,salesman_name,expected_delivery,order_kind")
             .in_("token", toks).order("created_at", desc=True).execute().data or [])
     out = []
     for r in rows:
@@ -1708,7 +1800,8 @@ def orders_by_tokens(tokens) -> list[dict]:
                     "items": _i(r.get("items_count")), "units": _i(r.get("units_count")),
                     "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
                     "salesman": r.get("salesman_name"), "expected_delivery": r.get("expected_delivery"),
-                    "can_cancel": r["status"] == "new"})
+                    "can_cancel": r["status"] == "new",
+                    "order_kind": r.get("order_kind") or "standard"})
     return out
 
 
@@ -2357,7 +2450,29 @@ def list_campaigns() -> list[dict]:
 
 
 _CAMPAIGN_NULLABLE = ("title_ar", "line", "line_ar", "image_url", "cta_label", "cta_label_ar", "category",
-                      "rule_id", "sponsor_name", "starts_at", "ends_at")
+                      "rule_id", "sponsor_name", "starts_at", "ends_at", "image_url_600", "product_codes")
+
+
+def _campaign_codes(raw) -> list[str] | None:
+    """A composed creative's item codes as the admin typed them: trimmed at the ends only (codes such
+    as "P05 1Mtr" or "UK20 (New)" keep their case and inner spaces), blanks dropped, duplicates
+    dropped, at most CAMPAIGN_MAX_PRODUCTS. None = no composition (an uploaded photo or plain text)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise ShopError("Products must be a list of item codes.")
+    out: list[str] = []
+    for c in raw:
+        if not isinstance(c, str):
+            raise ShopError("Products must be a list of item codes.")
+        code = c.strip()
+        if len(code) > 64:
+            raise ShopError(f"'{code[:24]}…' is not an item code.")
+        if code and code.upper() not in {x.upper() for x in out}:
+            out.append(code)
+    if len(out) > CAMPAIGN_MAX_PRODUCTS:
+        raise ShopError(f"Pick at most {CAMPAIGN_MAX_PRODUCTS} products for a composed creative.")
+    return out or None
 
 
 def validate_campaign(payload: dict, existing: dict | None = None) -> dict:
@@ -2375,6 +2490,13 @@ def validate_campaign(payload: dict, existing: dict | None = None) -> dict:
     audience = cur.get("audience") or "all"
     if audience not in CAMPAIGN_AUDIENCES:
         raise ShopError("Audience must be all, recognized or new.")
+    image_fit = cur.get("image_fit") or CAMPAIGN_IMAGE_FITS[0]
+    if image_fit not in CAMPAIGN_IMAGE_FITS:
+        raise ShopError("Image fit must be contain or cover.")
+    canvas = cur.get("canvas") or CAMPAIGN_CANVASES[0]
+    if canvas not in CAMPAIGN_CANVASES:
+        raise ShopError("Canvas must be lilac, apricot, mint, plum or night.")
+    product_codes = _campaign_codes(cur.get("product_codes"))
     st, en = _parse_ts(cur.get("starts_at")), _parse_ts(cur.get("ends_at"))
     if st and en and en <= st:
         raise ShopError("The end must be after the start.")
@@ -2386,6 +2508,8 @@ def validate_campaign(payload: dict, existing: dict | None = None) -> dict:
         "title": title[:80], "title_ar": (cur.get("title_ar") or None),
         "line": (cur.get("line") or None), "line_ar": (cur.get("line_ar") or None),
         "image_url": (cur.get("image_url") or None),
+        "image_url_600": (str(cur.get("image_url_600") or "").strip() or None),
+        "image_fit": image_fit, "product_codes": product_codes, "canvas": canvas,
         "cta_label": (cur.get("cta_label") or None), "cta_label_ar": (cur.get("cta_label_ar") or None),
         "cta_to": to[:300], "placement": placement,
         "category": (str(cur.get("category") or "").strip().upper() or None),

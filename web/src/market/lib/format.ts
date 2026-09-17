@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { BadgeKind, ShopItem, StockStatus } from '@/lib/shopApi'
+import { S } from '../strings'
 import type { ChipTone } from '../ui/Chip'
 
 /**
@@ -81,13 +82,14 @@ export function unitAt(item: ShopItem, qty: number): number | null {
 export const BADGE_ORDER: BadgeKind[] = ['on_offer', 'price_drop', 'clearance', 'best_seller', 'selling_fast', 'new', 'trending']
 
 export const BADGE_META: Record<BadgeKind, { label: string; tone: ChipTone }> = {
-  on_offer: { label: 'Offer', tone: 'plum' },
+  // "Deal" is reserved for real offers; clearing lines read "Last chance" (plan D3).
+  on_offer: { label: S.deals.deal, tone: 'deal' },
   best_seller: { label: 'Best seller', tone: 'ink' },
   selling_fast: { label: 'Selling fast', tone: 'warn' },
-  new: { label: 'New', tone: 'ok' },
+  new: { label: 'New', tone: 'fresh' },
   trending: { label: 'Trending', tone: 'grey' },
   price_drop: { label: 'Price drop', tone: 'bad' },
-  clearance: { label: 'Clearance', tone: 'warn' },
+  clearance: { label: S.deals.badge, tone: 'deal' },
 }
 
 export function badgeMeta(kind: string): { label: string; tone: ChipTone } {
@@ -102,22 +104,33 @@ export function cardBadges(item: ShopItem, limit = 2): BadgeKind[] {
 }
 
 /**
- * The struck-through anchor next to a price — only ever a REAL number: the previous trade
- * price after a genuine cut (`was_bhd`), else the retail price when the owner enabled the
- * compare setting. Never an invented "was".
+ * The struck-through anchor next to a price — only ever the REAL previous trade price after a
+ * genuine cut in the price book (`was_bhd`). Retail is never struck through any more: it is
+ * shown as the merchant's margin by `marginOf()`. The signature (and the `'retail'` kind in the
+ * type) stays so existing consumers compile; `kind` is always `'was'` now.
  */
-export function priceAnchor(item: ShopItem, showCompare: boolean): { was: number; pct: number; kind: 'was' | 'retail' } | null {
+export function priceAnchor(item: ShopItem, _showCompare?: boolean): { was: number; pct: number; kind: 'was' | 'retail' } | null {
+  void _showCompare
   const price = item.price_bhd != null ? Number(item.price_bhd) : null
-  if (price == null) return null
-  if (item.was_bhd != null && Number(item.was_bhd) > price) {
-    const was = Number(item.was_bhd)
-    return { was, pct: Math.round(((was - price) / was) * 100), kind: 'was' }
-  }
-  if (showCompare && item.compare_at_bhd != null && Number(item.compare_at_bhd) > price) {
-    const was = Number(item.compare_at_bhd)
-    return { was, pct: Number(item.save_pct) || Math.round(((was - price) / was) * 100), kind: 'retail' }
-  }
-  return null
+  if (price == null || !Number.isFinite(price)) return null
+  const was = item.was_bhd != null ? Number(item.was_bhd) : null
+  if (was == null || !Number.isFinite(was) || was <= price) return null
+  return { was, pct: Math.round(((was - price) / was) * 100), kind: 'was' }
+}
+
+/**
+ * Merchant maths from real payload numbers only. Retail reaches the public payload as
+ * `compare_at_bhd` (backend `anchor_ok`), `b2c_bhd` where the payload carries it. Null unless
+ * retail > price > 0. `pct` is the margin as a share of the retail price (what the shop keeps).
+ */
+export function marginOf(item: ShopItem): { price: number; retail: number; margin: number; pct: number } | null {
+  const rawRetail = item.compare_at_bhd ?? item.b2c_bhd
+  if (item.price_bhd == null || rawRetail == null) return null
+  const price = Number(item.price_bhd)
+  const retail = Number(rawRetail)
+  if (!Number.isFinite(price) || !Number.isFinite(retail) || !(price > 0) || !(retail > price)) return null
+  const margin = Math.round((retail - price) * 1000) / 1000
+  return { price, retail, margin, pct: Math.round((margin / retail) * 100) }
 }
 
 export function hasBadge(item: ShopItem, kind: BadgeKind): boolean {
@@ -126,9 +139,9 @@ export function hasBadge(item: ShopItem, kind: BadgeKind): boolean {
 
 /** Status only — the public shop never reveals a stock number (docs/SHOP.md). */
 export const STOCK_META: Record<StockStatus, { label: string; tone: ChipTone }> = {
-  in_stock: { label: 'In stock', tone: 'ok' },
-  low_stock: { label: 'Only a few left', tone: 'warn' },
-  out_of_stock: { label: 'Sold out', tone: 'bad' },
+  in_stock: { label: S.card.stockIn, tone: 'ok' },
+  low_stock: { label: S.card.stockLow, tone: 'warn' },
+  out_of_stock: { label: S.card.stockOut, tone: 'bad' },
 }
 
 export function stockMeta(status?: StockStatus | null) {
@@ -145,20 +158,58 @@ export function isOut(item?: ShopItem | null): boolean {
    brand suffix "(VFAN)" is noise on a single-brand shelf. One helper, used everywhere, so a
    merchant always reads a product name, and the code sits underneath it. */
 
-const BRAND_SUFFIX = /\s*\((vfan|v-fan)\)\s*$/i
+/** "(VFAN)" anywhere in a line — the export often repeats the code after it. */
+const BRAND_TAG = /\s*\((?:vfan|v-fan)\)/gi
+/** Upper-case variant suffixes the export leaves at the front of a name ("P04 CL 1Mtr …"). */
+const VARIANT_LEAD = /^(?:CCC|CCL|CC|CL|UC|UL|UM|TC|LT|MK)\s+/
 
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * The code at the start of a line; spaces and hyphens in the code match either ("X05 UC-1Mtr" ~
+ * "X05 UC 1Mtr"). A length the code ends with stays in the name ("X24 CC 1Mtr Cable …" →
+ * "1Mtr Cable …"), so "P01-1Mtr" and "P01-2Mtr" do not both read "TPE (…)".
+ */
 function stripCode(text: string, code: string): string {
-  const esc = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return text.replace(new RegExp(`^\\s*${esc}\\s*[-–:·]?\\s*`, 'i'), '')
+  const parts = code.trim().split(/[\s-]+/).filter(Boolean)
+  if (parts.length > 1 && /^\d+(?:\.\d+)?\s*mtrs?$/i.test(parts[parts.length - 1])) parts.pop()
+  else if (parts.length > 2 && /^mtrs?$/i.test(parts[parts.length - 1]) && /^\d+(?:\.\d+)?$/.test(parts[parts.length - 2])) parts.splice(-2)
+  if (!parts.length) return text
+  return text.replace(new RegExp(`^\\s*${parts.map(escRe).join('[\\s-]*')}\\s*[-–:·]?\\s*`, 'i'), '')
+}
+
+/** The model token of a code: "X05 UC-1Mtr" → "X05". */
+function codeHead(code: string): string {
+  return code.trim().split(/[\s-]+/)[0] || ''
+}
+
+/**
+ * One name line without the brand tag, doubled spaces, or the code the export repeats at the end
+ * of a line that already starts with it ("P04 CL 1Mtr … (VFAN) P04 CL"). A line that only
+ * mentions the code ("Model: H08") keeps it.
+ */
+function cleanLine(text: string, code: string): string {
+  let t = text.replace(BRAND_TAG, '').replace(/\s{2,}/g, ' ').trim()
+  const head = codeHead(code)
+  if (head && t.toUpperCase().startsWith(head.toUpperCase())) {
+    t = t.replace(new RegExp(`\\s+${escRe(head)}(?:[\\s-]+[\\w().]+){0,3}\\s*$`, 'i'), '').trim()
+  }
+  return t
 }
 
 export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>): string {
   const code = item.item_code
   const dn = (item.display_name || '').trim()
   const firstSpec = (item.spec || '').split('\n')[0].trim()
-  let raw = dn && dn.toUpperCase() !== code.toUpperCase() ? dn : firstSpec
-  raw = raw.replace(BRAND_SUFFIX, '')
-  const noCode = stripCode(raw, code).trim()
+  const raw = cleanLine(dn && dn.toUpperCase() !== code.toUpperCase() ? dn : firstSpec, code)
+  let noCode = stripCode(raw, code).trim()
+  if (noCode === raw) {
+    // the line starts with the model only ("X24 2Mtr Cable …" for code "X24 CC")
+    const head = codeHead(code)
+    if (head) noCode = raw.replace(new RegExp(`^${escRe(head)}(?![\\w])\\s*[-–:·]?\\s*`, 'i'), '').trim()
+  }
+  const lead = noCode.replace(VARIANT_LEAD, '')
+  if (lead.length >= 3) noCode = lead
   const out = (noCode.length >= 3 ? noCode : raw).replace(/\s{2,}/g, ' ').trim()
   return out || code
 }
@@ -168,13 +219,210 @@ export function productDetail(item: Pick<ShopItem, 'item_code' | 'display_name' 
   const name = productName(item).toLowerCase()
   const lines = (item.spec || '')
     .split('\n')
-    .map((l) => l.replace(BRAND_SUFFIX, '').trim())
+    .map((l) => cleanLine(l, item.item_code))
     .filter(Boolean)
   const rest = lines.filter((l) => {
     const t = stripCode(l, item.item_code).trim().toLowerCase()
     return t && t !== name && !name.includes(t) && !t.includes(name)
   })
   return rest.join(' · ')
+}
+
+/* ───────────────────────── variant chips ─────────────────────────
+   Look-alike SKUs share a family name ("20W Charger + … Cable", "1.2Mtr … AUX Cable"); what tells
+   them apart is buried in the text. variantOf() lifts the distinguishing facts into ≤3 short chips
+   — connector, included cable, capacity, wattage, length, ports — read only from the item's own
+   name/spec, never guessed. Nothing matched → no chip. */
+
+type End = 'Type-C' | 'Lightning' | 'Micro' | 'USB' | 'AUX F' | 'AUX M' | 'AUX' | '3.5 mm'
+
+const END_SRC = String.raw`aux\s*female|aux\s*male|type[\s-]?c\b|usb[\s-]?c\b|usb(?:[\s-]?a\b)?|lightning|ligthning|lighting|micro|3\.5\s?mm|aux|\bc\b|\bl\b|\ba\b`
+const PAIR_RE = new RegExp(String.raw`(${END_SRC})\s+(?:to|→)\s+(${END_SRC})((?:\s*\+\s*(?:${END_SRC}))*)`, 'gi')
+
+function endOf(raw: string): End | null {
+  const t = raw.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (/^aux ?female$/.test(t)) return 'AUX F'
+  if (/^aux ?male$/.test(t)) return 'AUX M'
+  if (/^(type[ -]?c|usb[ -]?c|c)$/.test(t)) return 'Type-C'
+  if (/^(lightning|ligthning|lighting|l)$/.test(t)) return 'Lightning'
+  if (t === 'micro') return 'Micro'
+  if (/^(usb([ -]?a)?|a)$/.test(t)) return 'USB'
+  if (/^3\.5 ?mm$/.test(t)) return '3.5 mm'
+  if (t === 'aux') return 'AUX'
+  return null
+}
+
+/** Short form for tight labels: Type-C → "C". */
+const shortEnd = (e: End) => (e === 'Type-C' ? 'C' : e)
+const END_RANK: Record<End, number> = { 'AUX F': 0, 'AUX M': 0, AUX: 0, '3.5 mm': 0, USB: 1, 'Type-C': 2, Lightning: 3, Micro: 4 }
+
+interface Pair {
+  from: End
+  to: End[]
+}
+
+/** Every "X to Y (+ Z)" in the text, device end last ("Lightning to Type-C" reads Type-C → Lightning). */
+function pairsIn(text: string): Pair[] {
+  const out: Pair[] = []
+  const seen = new Set<string>()
+  for (const m of text.matchAll(PAIR_RE)) {
+    const first = endOf(m[1])
+    const to = [m[2], ...(m[3] || '').split('+')].map((s) => s.trim()).filter(Boolean).map(endOf)
+    if (!first || to.some((e) => !e)) continue
+    let from: End = first
+    let ends = to as End[]
+    if (ends.length === 1 && (from === 'Lightning' || from === 'Micro') && (ends[0] === 'Type-C' || ends[0] === 'USB')) {
+      const device = from
+      from = ends[0]
+      ends = [device]
+    }
+    if (ends.length > 1) ends = ends.slice().sort((a, b) => END_RANK[a] - END_RANK[b])
+    const key = `${from}>${ends.join('+')}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ from, to: ends })
+  }
+  return out
+}
+
+function pairLabel(p: Pair): string {
+  return p.to.length > 1 ? `${p.from} → ${p.to.map(shortEnd).join(' + ')}` : `${p.from} → ${p.to[0]}`
+}
+
+/** "2USB" / "PD +PD" / "USB 48W + Type-C 30W" / "1USB + 1C" → "2 USB" / "2 × PD" / "USB + Type-C". */
+function portList(list: string): string | null {
+  const kinds = new Map<string, number>()
+  for (const raw of list.split(/\s*[+&,/]\s*/)) {
+    const tok = raw.replace(/\d+(?:\.\d+)?\s?w\b/gi, '').trim()
+    if (!tok) continue
+    const m = tok.match(/^(\d)\s*(.*)$/)
+    const count = m ? Number(m[1]) : 1
+    const name = (m ? m[2] : tok).trim().toLowerCase()
+    let kind: string | null = null
+    if (/^(type[\s-]?c|usb[\s-]?c|c)$/.test(name)) kind = 'Type-C'
+    else if (name === 'pd') kind = 'PD'
+    else if (/^(usb([\s-]?a)?|a)$/.test(name)) kind = 'USB'
+    else if (/^qc/.test(name)) kind = 'QC'
+    else if (/^(lightning|ligthning)$/.test(name)) kind = 'Lightning'
+    else if (name === 'micro') kind = 'Micro'
+    if (!kind || count < 1) return null // an unknown token: say nothing rather than half the truth
+    kinds.set(kind, (kinds.get(kind) || 0) + count)
+  }
+  const parts = [...kinds]
+  if (!parts.length) return null
+  if (parts.length === 1) {
+    const [kind, n] = parts[0]
+    if (n === 1) return `${kind} port`
+    return kind === 'PD' ? `${n} × PD` : `${n} ${kind}`
+  }
+  return parts.map(([kind, n]) => (n > 1 ? `${n} ${kind}` : kind)).join(' + ')
+}
+
+function portsIn(text: string): string | null {
+  const grouped = text.match(/\b\d\s*ports?\s*\(([^()]+)\)/i) // "2 Port (USB + Type C)"
+  if (grouped) return portList(grouped[1])
+  const paren = text.match(/\(([^()]*?)\s*ports?\s*\)/i) // "(USB + Type-C Port)"
+  if (paren) return portList(paren[1])
+  const plus = text.match(/\+\s*((?:usb|type[\s-]?c|pd|\d)[\w\s&-]*?)\s+ports?\b/i) // "+ USB & Type C ports"
+  if (plus) return portList(plus[1])
+  const single = text.match(/\b(type[\s-]?c|usb[\s-]?c|lightning|ligthning|micro|usb)\s+ports?\b/i) // "Type-C Port"
+  if (single) return portList(single[1])
+  const charging = text.match(/charging\s+(?:port|interface)\s*:\s*(type[\s-]?c|lightning|micro)/i) // "Charging port: Lightning"
+  if (charging) return portList(charging[1])
+  return null
+}
+
+const fmtNum = (n: number) => String(Number(n.toFixed(2)))
+
+function maxWatt(text: string): string | null {
+  let best = 0
+  for (const m of text.matchAll(/(?<![\d.])(\d{1,3}(?:\.\d{1,2})?)\s?w(?![a-z0-9])/gi)) best = Math.max(best, Number(m[1]))
+  return best > 0 ? `${fmtNum(best)}W` : null
+}
+
+function lengthIn(text: string): string | null {
+  for (const m of text.matchAll(/(?<![\d.])(\d{1,2}(?:\.\d{1,2})?)\s?(?:mtrs?|meters?|metres?|m)(?![a-z])/gi)) {
+    const before = text.slice(Math.max(0, (m.index || 0) - 14), m.index || 0)
+    const n = Number(m[1])
+    if (/distance\W*$|range\W*$/i.test(before) || !(n > 0) || n > 5) continue // range of a speaker, not a cable
+    return `${fmtNum(n)} m`
+  }
+  return null
+}
+
+function capacityIn(text: string): string | null {
+  let best = 0
+  for (const m of text.matchAll(/(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d{3,6})\s?mah\b/gi)) best = Math.max(best, Number(m[1].replace(/,/g, '')))
+  return best >= 1000 ? `${best.toLocaleString('en-US')} mAh` : null
+}
+
+/** The chips one text yields, in priority order (uncapped). */
+function chipsFrom(text: string): string[] {
+  const out: string[] = []
+  const add = (c: string | null | undefined) => {
+    if (c && !out.includes(c)) out.push(c)
+  }
+  const assortment = /\bmix\b|\d+\s*pcs\b/i.test(text) // a box of mixed cables: no single connector
+  const powered = /charger|\bpb\b|power\s*bank/i.test(text) // the connector named is the cable in the box
+  const pairs = assortment ? [] : pairsIn(text)
+  const nIn1 = text.match(/\b(\d)\s*-?\s*in\s*-?\s*1\b/i)
+
+  // connector
+  if (!powered && !assortment) {
+    if (pairs.length === 1) add(pairLabel(pairs[0]))
+    else if (!pairs.length) {
+      const jack = text.match(/\b(3\.5\s?mm|type[\s-]?c|lightning|ligthning)\s+(?:l-shape\s+)?jack\b/i)
+      if (jack) add(`${endOf(jack[1])} jack`)
+      else if (!nIn1 && /cable/i.test(text)) {
+        const kinds = new Set<End>()
+        if (/type[\s-]?c\b|usb[\s-]?c\b/i.test(text)) kinds.add('Type-C')
+        if (/lightn|ligthn|lighting/i.test(text)) kinds.add('Lightning')
+        if (/micro/i.test(text)) kinds.add('Micro')
+        if (kinds.size === 1 && /\busb\b/i.test(text.replace(/usb[\s-]?c\b/gi, ''))) add(`USB → ${[...kinds][0]}`)
+      }
+    }
+    if (nIn1 && !(pairs.length === 1 && pairs[0].to.length > 1)) add(`${nIn1[1]}-in-1`)
+  }
+
+  // included cable (chargers, power banks)
+  if (powered) {
+    const attachedN = text.match(/\+\s*attached\s+(\d+)\s+cables?\b/i)
+    const nIn1Cable = text.match(/\+\s*(\d)\s*-?\s*in\s*-?\s*1\s+cables?\b/i)
+    const single = text.match(/\+\s*(type[\s-]?c|usb[\s-]?c|lightning|ligthning|micro)\s+cables?\b/i)
+    if (pairs.length === 1) add(`+ ${shortEnd(pairs[0].from)} → ${pairs[0].to.map(shortEnd).join(' + ')} cable`)
+    else if (attachedN) add(`${attachedN[1]} built-in cables`)
+    else if (/\+\s*attached\s+cables?\b/i.test(text)) add('Built-in cable')
+    else if (nIn1Cable) add(`+ ${nIn1Cable[1]}-in-1 cable`)
+    else if (single) add(`+ ${endOf(single[1])} cable`)
+    else if (/\+\s*cables?\b/i.test(text)) add('+ cable')
+    else if (nIn1) add(`${nIn1[1]}-in-1`)
+  }
+
+  add(capacityIn(text)) // a power bank is bought by capacity first
+  add(maxWatt(text))
+  add(lengthIn(text))
+  add(portsIn(text))
+  return out
+}
+
+/** ≤3 short, meaningful variant chips derived from name+spec, e.g. ['Type-C → Type-C', '60W', '1 m'] or ['+ Lightning cable', '20W', '2 USB']. */
+export function variantOf(item: ShopItem): string[] {
+  const code = item.item_code || ''
+  const dn = (item.display_name || '').trim()
+  const spec = item.spec || ''
+  const primary = dn && dn.toUpperCase() !== code.toUpperCase() ? dn : spec.split('\n')[0]
+  const text = primary.replace(BRAND_TAG, ' ')
+  let chips = chipsFrom(text)
+  // the name says nothing measurable ("Bluetooth 5.3"): read the whole spec sheet
+  if (!chips.length && spec.trim() && spec.trim() !== primary.trim()) chips = chipsFrom(`${dn}\n${spec}`.replace(BRAND_TAG, ' '))
+  if (!chips.length) {
+    if (/braided/i.test(text)) chips.push('Braided')
+    else if (/alumin(?:i)?um/i.test(text)) chips.push('Aluminium')
+  }
+  chips = chips.slice(0, 3)
+  // "UK20" vs "UK20 (New)": the code itself is the only difference
+  if (/\(new\)/i.test(code) || /\(new\)/i.test(primary)) chips = [...chips.slice(0, 2), 'New version']
+  return chips
 }
 
 /* ───────────────────────── names & words ───────────────────────── */

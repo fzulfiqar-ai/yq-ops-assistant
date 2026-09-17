@@ -191,7 +191,15 @@ export function readFacets(params: URLSearchParams, groups: FacetGroup[]): Facet
 /* ───────────────────────── sort & filter ───────────────────────── */
 
 export type SortMode = 'shelf' | 'popular' | 'price_asc' | 'price_desc'
-export type QuickFilter = 'instock' | 'offers' | 'new' | 'clearance' | 'drops' | 'saved'
+export type QuickFilter = 'instock' | 'offers' | 'new' | 'clearance' | 'drops' | 'saved' | 'deals'
+
+const QUICK_FILTERS: readonly QuickFilter[] = ['instock', 'offers', 'new', 'clearance', 'drops', 'saved', 'deals']
+
+/** Stock-Up Deals: a real price drop, a live offer, or a last-chance (clearing) line — never a markdown. */
+export function isDeal(it: ShopItem): boolean {
+  const b = it.badges || []
+  return b.includes('price_drop') || it.was_bhd != null || b.includes('clearance') || b.includes('on_offer')
+}
 
 function popularity(it: ShopItem): number {
   let s = 0
@@ -224,6 +232,7 @@ export function applyQuickFilters(items: ShopItem[], filters: Set<QuickFilter>):
   if (filters.has('new')) r = r.filter((i) => (i.badges || []).includes('new'))
   if (filters.has('clearance')) r = r.filter((i) => (i.badges || []).includes('clearance'))
   if (filters.has('drops')) r = r.filter((i) => (i.badges || []).includes('price_drop') || i.was_bhd != null)
+  if (filters.has('deals')) r = r.filter(isDeal)
   if (filters.has('saved')) {
     const saved = new Set(savedStore.get())
     r = r.filter((i) => saved.has(i.item_code))
@@ -233,6 +242,6 @@ export function applyQuickFilters(items: ShopItem[], filters: Set<QuickFilter>):
 
 export function parseFilters(s: string | null): Set<QuickFilter> {
   const set = new Set<QuickFilter>()
-  for (const p of (s || '').split(',')) if (p === 'instock' || p === 'offers' || p === 'new' || p === 'clearance' || p === 'drops' || p === 'saved') set.add(p)
+  for (const p of (s || '').split(',')) if ((QUICK_FILTERS as readonly string[]).includes(p)) set.add(p as QuickFilter)
   return set
 }

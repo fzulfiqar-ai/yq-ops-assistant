@@ -143,6 +143,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         line: str | None = Field(default=None, max_length=160)
         line_ar: str | None = Field(default=None, max_length=160)
         image_url: str | None = Field(default=None, max_length=400)
+        # v3 creative — all optional; defaults (contain / lilac) are applied by shop.validate_campaign
+        image_url_600: str | None = Field(default=None, max_length=400)
+        image_fit: str | None = Field(default=None, max_length=12)
+        product_codes: list[str] | None = Field(default=None, max_length=12)   # ≤3 enforced with a clear 400
+        canvas: str | None = Field(default=None, max_length=12)
         cta_label: str | None = Field(default=None, max_length=40)
         cta_label_ar: str | None = Field(default=None, max_length=40)
         cta_to: str | None = Field(default=None, max_length=300)
@@ -306,6 +311,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             "whatsapp_url": shop_notify.customer_to_salesman_wa_url(o),
             "email_url": shop_notify.customer_to_salesman_email_url(o),
             "totals": o["totals"], "has_backorder": bool(o.get("has_backorder")),
+            # 'small' = sent under the wholesale minimum as a request the rep confirms case by case
+            "order_kind": o.get("order_kind") or "standard",
         }
 
     @app.post("/public/market/event")
@@ -727,9 +734,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.put("/settings/shop")
     def shop_settings_put(body: ShopSettingsIn, admin: CurrentUser = Depends(require_admin)) -> dict:
-        vals = shop.update_shop_settings(body.settings, by=admin.email)
+        try:
+            vals = shop.update_shop_settings(body.settings, by=admin.email)
+        except ShopError as e:      # e.g. shop_market_promises is not a valid promise list — nothing was saved
+            raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(admin.email, "settings.shop", detail={"keys": sorted(body.settings.keys())})
-        return {"ok": True, "settings": vals}
+        ignored = sorted(k for k in body.settings if k not in shop.SETTING_DEFAULTS)
+        return {"ok": True, "settings": vals, "ignored": ignored}
 
     @app.get("/shop/margins")
     def shop_margins(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:

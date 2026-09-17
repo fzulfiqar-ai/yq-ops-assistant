@@ -113,6 +113,9 @@ export interface Offer {
   scope_codes?: string[] | null
 }
 
+/** Marketplace v3: the tinted backdrop a campaign creative sits on (tokens in market.css). */
+export type CampaignCanvas = 'lilac' | 'apricot' | 'mint' | 'plum' | 'night'
+
 /** Marketplace v2.1: a promotion the office scheduled (see app/shop.py campaigns_payload). */
 export interface Campaign {
   id: number
@@ -131,6 +134,14 @@ export interface Campaign {
   sponsored: boolean
   sponsor_name?: string | null
   ends_at?: string | null
+  /** Marketplace v3 creative: 600 w rendition of `image_url` for srcset. */
+  image_url_600?: string | null
+  /** Marketplace v3 creative: how an uploaded image fills its frame (server default 'contain'). */
+  image_fit?: 'contain' | 'cover' | null
+  /** Marketplace v3 creative: ≤3 item codes to compose the creative from (codes not in the catalog are dropped server-side). */
+  product_codes?: string[] | null
+  /** Marketplace v3 creative: backdrop tint (server default 'lilac'). */
+  canvas?: CampaignCanvas | null
 }
 
 /** Marketplace v2.1: one line of the promise bar (only claims the data can back). */
@@ -154,6 +165,8 @@ export interface ShopSettings {
   public_tiers?: boolean | null
   /** Marketplace: the area list offered at checkout (admin setting). */
   areas?: string[] | null
+  /** Marketplace v3: what happens under the minimum — request = send as a small order request, allow = accept, block = refuse. */
+  small_order_mode?: 'request' | 'allow' | 'block' | null
 }
 
 export interface ShopRef {
@@ -432,6 +445,8 @@ export interface MarketOrderResponse extends OrderResponse {
   assigned?: boolean | null
   attribution?: string | null
   salesman?: { name?: string | null; first_name?: string | null; phone?: string | null } | null
+  /** Marketplace v3: 'small' when the order was sent under the minimum as a small order request. */
+  order_kind?: 'standard' | 'small' | null
 }
 
 export interface MyOrderSummary {
@@ -447,6 +462,8 @@ export interface MyOrderSummary {
   salesman?: string | null
   expected_delivery?: string | null
   can_cancel?: boolean | null
+  /** Marketplace v3: 'small' when the order was sent under the minimum as a small order request. */
+  order_kind?: 'standard' | 'small' | null
 }
 
 /* ───────────────────────── transport ───────────────────────── */

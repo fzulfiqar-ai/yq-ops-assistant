@@ -743,13 +743,16 @@ def _():
     assert by[1]["sponsor_name"] is None
 
 
-@test("promises: defaults are the three proven claims; a threshold rewrites the delivery line")
+@test("promises: defaults are the four wholesale claims with Arabic; a threshold rewrites the delivery line")
 def _():
     from app.shop import SETTING_DEFAULTS, promises_payload
     vals = dict(SETTING_DEFAULTS)
     p = promises_payload(vals)
-    assert [x["key"] for x in p] == ["delivery", "minimum", "stock"], p
+    assert [x["key"] for x in p] == ["delivery", "trade", "stock", "rep"], p
     assert p[0]["en"] == "Free delivery across Bahrain" and p[0]["ar"]
+    assert all(x["en"] and x["ar"] and x["icon"] and x["to"] for x in p), p
+    assert [x["icon"] for x in p] == ["truck", "tag", "pulse", "shield"], p
+    assert not any("minimum" in x["en"].lower() for x in p), "the wholesale minimum is real — never promise 'no minimum'"
     vals["shop_free_delivery_threshold_bhd"] = "25"
     p2 = promises_payload(vals)
     assert p2[0]["en"] == "Free delivery over BHD 25.000", p2[0]
@@ -815,6 +818,301 @@ def _():
     ctx = _ctx(items)   # no minimum configured → no engine
     q = price_cart([{"item_code": "A", "qty": 1}], ctx=ctx)
     assert q["minimum"] is None and q["gap_suggestions"] == []
+
+
+# ── marketplace v3 (17-Sep-2026) ──────────────────────────────────────────────
+
+class _FakeDB:
+    """A stand-in for the Supabase client: every builder call is recorded and returns itself;
+    execute() hands back canned rows. Nothing here ever reaches the network."""
+
+    def __init__(self, rows=None):
+        self.rows = rows or []
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name):
+        def call(*a, **kw):
+            self.calls.append((name, a, kw))
+            return self
+        return call
+
+    def execute(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(data=self.rows, count=None)
+
+
+def _with_cached_ctx(ctx):
+    """Serve `ctx` as the cached catalog context; returns a restore function."""
+    import app.shop as s
+    old = s._ctx_cache["ctx"]
+    s._ctx_cache["ctx"], s._ctx_cache["at"] = ctx, s.time.time() + 10 ** 6
+
+    def restore():
+        s._ctx_cache["ctx"], s._ctx_cache["at"] = old, 0.0
+    return restore
+
+
+@test("promises: validation rejects what would blank the bar, accepts and normalises a good list")
+def _():
+    import json
+    from app.shop import SETTING_DEFAULTS, ShopError, validate_promises
+
+    def bad(raw, why):
+        try:
+            validate_promises(raw)
+        except ShopError as e:
+            assert why in str(e).lower(), (why, str(e))
+        else:
+            raise AssertionError(f"expected error {why!r} for {raw!r}")
+    bad("not json", "json")
+    bad("", "json")
+    bad(None, "json")
+    bad('{"key": "delivery", "en": "Free"}', "list")
+    bad("[1, 2]", "object")
+    bad('[{"en": "No key"}]', "key")
+    bad('[{"key": "  ", "en": "Blank key"}]', "key")
+    bad('[{"key": "delivery"}]', "english")
+    bad('[{"key": "delivery", "en": ""}]', "english")
+    bad('[{"key": "delivery", "en": "Free", "ar": 5}]', "text")
+    bad('[{"key": "a", "en": "A"}, {"key": "A", "en": "B"}]', "unique")
+    bad('[{"key": "x", "en": "X", "to": "javascript:alert(1)"}]', "link")
+    bad(json.dumps([{"key": f"k{i}", "en": "x"} for i in range(7)]), "at most 6")
+    # the shipped default passes and survives a round trip unchanged (Arabic kept, not \u-escaped)
+    default = SETTING_DEFAULTS["shop_market_promises"]
+    assert json.loads(validate_promises(default)) == json.loads(default)
+    assert "توصيل" in validate_promises(default)
+    good = validate_promises('[{"key": " trade ", "en": " Trade prices for shops ", "ar": "", "icon": null, "extra": 1}]')
+    assert json.loads(good) == [{"key": "trade", "en": "Trade prices for shops"}], good
+    assert validate_promises("[]") == "[]"                    # an empty bar is a deliberate choice, allowed
+    assert json.loads(validate_promises([{"key": "rep", "en": "Rep", "to": "/about#how"}]))[0]["to"] == "/about#how"
+
+
+@test("promises: update_shop_settings validates before the first write; the route answers 400")
+def _():
+    import json
+    from fastapi.testclient import TestClient
+    import app.database as db
+    import app.main as m
+    import app.shop as s
+    from app.auth import CurrentUser, require_admin
+    from app.shop import ShopError
+    real_client, real_settings, real_db_client = s.get_client, s.shop_settings, db.get_client
+    fake = _FakeDB()
+    # Both halves run against the fake — the shop's client AND app.database's (the audit log imports it
+    # at call time) — so even a regressed validator can never write to the live settings/audit tables.
+    s.get_client = db.get_client = lambda: fake
+    s.shop_settings = lambda force=False: dict(s.SETTING_DEFAULTS)
+    m.app.dependency_overrides[require_admin] = lambda: CurrentUser(user_id="test", email="test@example.com", role="admin")
+    try:
+        try:
+            s.update_shop_settings({"shop_min_order_bhd": "20", "shop_market_promises": "not json"}, by="test")
+            raise AssertionError("expected ShopError")
+        except ShopError:
+            pass
+        assert not any(c[0] == "upsert" for c in fake.calls), "a bad promise list must not half-save the settings"
+        s.update_shop_settings({"shop_market_promises": '[{"key": "trade", "en": " Trade prices "}]',
+                                "not_a_shop_key": "x"}, by="test")
+        ups = [c[1][0] for c in fake.calls if c[0] == "upsert"]
+        assert [u["key"] for u in ups] == ["shop_market_promises"], ups
+        assert json.loads(ups[0]["value"]) == [{"key": "trade", "en": "Trade prices"}], ups[0]
+        # the route: ShopError → HTTP 400 with the message, and nothing is written (checked on the fake)
+        fake.calls.clear()
+        r = TestClient(m.app).put("/settings/shop", json={"settings": {"shop_market_promises": "[{\"en\": \"no key\"}]"}})
+        assert not any(c[0] in ("upsert", "insert", "update") for c in fake.calls), \
+            ("an invalid promise list must not be written", fake.calls)
+        assert r.status_code == 400, (r.status_code, r.text[:200])
+        assert "key" in r.json()["detail"].lower(), r.json()
+    finally:
+        m.app.dependency_overrides.pop(require_admin, None)
+        s.get_client, s.shop_settings, db.get_client = real_client, real_settings, real_db_client
+
+
+@test("payload: catalog settings carry small_order_mode, normalised to request|allow|block")
+def _():
+    from app.shop import catalog_payload
+    ctx = _ctx([_item("T02", 2.95)], shop_small_order_mode=" ALLOW ")
+    ctx["share_token"] = "tok-test-token-value"
+    restore = _with_cached_ctx(ctx)
+    try:
+        p = catalog_payload("tok-test-token-value")
+        assert p["settings"]["small_order_mode"] == "allow", p["settings"]
+        ctx["settings"]["shop_small_order_mode"] = "block"
+        assert catalog_payload("tok-test-token-value")["settings"]["small_order_mode"] == "block"
+        ctx["settings"]["shop_small_order_mode"] = "nonsense"
+        assert catalog_payload("tok-test-token-value")["settings"]["small_order_mode"] == "request"
+        ctx["settings"]["shop_small_order_mode"] = ""
+        assert catalog_payload("tok-test-token-value")["settings"]["small_order_mode"] == "request"
+    finally:
+        restore()
+
+
+@test("wholesale: on an exact gap-filler tie a clearing line ranks first — and only on an exact tie")
+def _():
+    from app.shop import _badges, gap_fillers
+    items = [
+        _item("CART", 1.0, stock=5, cat="CHARGER"),            # the cart line
+        _item("AAA", 4.0, stock=5, cat="CABLE"),               # 16.000 → overshoot 1, not clearing (below the unit floor)
+        _item("NEAR", 3.0, stock=5, cat="CABLE"),              # 15.000 → closes exactly, not clearing
+        _item("ZZZ", 4.0, stock=500, cat="CABLE"),             # 16.000 → overshoot 1, CLEARING (never sold, 500 on hand)
+        _item("FAR", 9.0, stock=5, cat="CABLE"),               # 18.000 → overshoot 3
+    ]
+    ctx = _ctx(items)
+    b = _badges(ctx)
+    assert "clearance" in b["ZZZ"] and "clearance" not in b["AAA"] and "clearance" not in b["NEAR"], b
+    out = [g["item_code"] for g in gap_fillers(ctx, ["CART"], 15.0)]
+    # NEAR closes with no overshoot, so the clearing line never jumps it; ZZZ beats AAA on the exact tie
+    # (alphabetically AAA used to win); FAR overshoots more and stays behind both.
+    assert out == ["NEAR", "ZZZ", "AAA", "FAR"], out
+    # without the clearance badge the old alphabetical tie-break is unchanged
+    ctx2 = _ctx(items, shop_clearance_max=0)
+    assert [g["item_code"] for g in gap_fillers(ctx2, ["CART"], 15.0)] == ["NEAR", "AAA", "ZZZ", "FAR"]
+    # a tier beats clearance: a pair of the cart line ranks above a clearing line with the same numbers
+    ctx3 = _ctx(items)
+    ctx3["pairs"] = {"CART": ["AAA"]}
+    assert [g["item_code"] for g in gap_fillers(ctx3, ["CART"], 15.0)][0] == "AAA"
+
+
+@test("campaigns: creative fields are optional, enums and the 3-product cap are enforced")
+def _():
+    from app.shop import ShopError, validate_campaign
+
+    def bad(payload, why):
+        try:
+            validate_campaign(payload)
+        except ShopError as e:
+            assert why in str(e).lower(), (why, str(e))
+        else:
+            raise AssertionError(f"expected error {why!r} for {payload}")
+    bad({"title": "Sale", "image_fit": "stretch"}, "fit")
+    bad({"title": "Sale", "canvas": "neon"}, "canvas")
+    bad({"title": "Sale", "product_codes": ["A", "B", "C", "D"]}, "at most 3")
+    bad({"title": "Sale", "product_codes": "X01"}, "list")
+    bad({"title": "Sale", "product_codes": ["X01", 5]}, "list")
+    # nothing creative given → the DB defaults, no composition
+    row = validate_campaign({"title": "Plain"})
+    assert row["image_fit"] == "contain" and row["canvas"] == "lilac", row
+    assert row["product_codes"] is None and row["image_url_600"] is None
+    assert {"image_url_600", "image_fit", "product_codes", "canvas"} <= set(row)
+    # codes keep their case and inner spaces; blanks and duplicates drop before the cap is counted
+    row = validate_campaign({"title": "Compose", "product_codes": ["  P05 1Mtr ", "UK20 (New)", "", "p05 1mtr", "X13-C"],
+                             "canvas": "night", "image_fit": "cover", "image_url_600": " https://x/c-600.webp "})
+    assert row["product_codes"] == ["P05 1Mtr", "UK20 (New)", "X13-C"], row["product_codes"]
+    assert row["canvas"] == "night" and row["image_fit"] == "cover" and row["image_url_600"] == "https://x/c-600.webp"
+    # editing: an explicit null clears the composition and the 600 w image; an absent/null fit or canvas keeps the stored one
+    existing = dict(row, id=9, placement=["hero"], audience="all", cta_to="/shop")
+    upd = validate_campaign({"product_codes": None, "image_url_600": None, "canvas": None}, existing)
+    assert upd["product_codes"] is None and upd["image_url_600"] is None and upd["canvas"] == "night", upd
+    assert validate_campaign({"line": "New line"}, existing)["product_codes"] == ["P05 1Mtr", "UK20 (New)", "X13-C"]
+    assert validate_campaign({"product_codes": []}, existing)["product_codes"] is None
+
+
+@test("campaigns: payload carries the creative with defaults; codes the catalog no longer has drop out")
+def _():
+    from datetime import datetime, timezone
+    from app.shop import campaigns_payload
+    now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+    ctx = _ctx([_item("P05 1Mtr", 0.8), _item("UK04-C", 1.2), _item("X13-L", 0.5)])
+    ctx["campaigns"] = [
+        {"id": 1, "title": "Legacy row", "placement": ["strip"]},                              # pre-migration shape
+        {"id": 2, "title": "Composed", "placement": ["hero"], "canvas": "mint", "image_fit": "cover",
+         "product_codes": ["p05 1mtr", "GONE-1", "UK04-C", "UK04-C", "X13-L", "P05 1Mtr"],
+         "image_url": "https://x/c.webp", "image_url_600": "https://x/c-600.webp"},
+        {"id": 3, "title": "Bad values", "placement": ["strip"], "canvas": "neon", "image_fit": "fill",
+         "product_codes": ["GONE-1", "GONE-2"]},
+    ]
+    out = {c["id"]: c for c in campaigns_payload(ctx, now)}
+    for c in out.values():
+        assert {"image_url_600", "image_fit", "product_codes", "canvas"} <= set(c), c
+    assert out[1]["image_fit"] == "contain" and out[1]["canvas"] == "lilac"
+    assert out[1]["product_codes"] is None and out[1]["image_url_600"] is None
+    assert out[2]["product_codes"] == ["P05 1Mtr", "UK04-C", "X13-L"], out[2]["product_codes"]   # catalog spelling, deduped, ≤3
+    assert out[2]["canvas"] == "mint" and out[2]["image_fit"] == "cover" and out[2]["image_url_600"] == "https://x/c-600.webp"
+    assert out[3]["canvas"] == "lilac" and out[3]["image_fit"] == "contain" and out[3]["product_codes"] is None
+    # a hand-built context without items (like the window test above) still renders
+    assert campaigns_payload({"rules": [], "campaigns": [ctx["campaigns"][1]]}, now)[0]["product_codes"] is None
+
+
+@test("orders: orders_by_tokens selects order_kind and returns it (standard when unset)")
+def _():
+    import app.shop as s
+    rows = [{"order_no": "YQ-2609-0101", "token": "t" * 24, "status": "new", "total_bhd": 12.5,
+             "total_confirmed_bhd": None, "items_count": 2, "units_count": 7, "created_at": "2026-09-17T08:00:00+00:00",
+             "updated_at": None, "salesman_name": None, "expected_delivery": None, "order_kind": "small"},
+            {"order_no": "YQ-2609-0100", "token": "u" * 24, "status": "confirmed", "total_bhd": 40.0,
+             "total_confirmed_bhd": 38.0, "items_count": 5, "units_count": 30, "created_at": "2026-09-16T08:00:00+00:00",
+             "updated_at": None, "salesman_name": "Furqan Ahmed", "expected_delivery": None, "order_kind": None}]
+    fake = _FakeDB(rows)
+    real = s.get_client
+    try:
+        s.get_client = lambda: fake
+        out = s.orders_by_tokens(["t" * 24, "u" * 24, "short"])
+    finally:
+        s.get_client = real
+    select = next(c[1][0] for c in fake.calls if c[0] == "select")
+    assert "order_kind" in [x.strip() for x in select.split(",")], select
+    assert [o["order_kind"] for o in out] == ["small", "standard"], out
+    assert out[1]["total_bhd"] == 38.0 and out[0]["can_cancel"] is True
+
+
+@test("orders: the marketplace order response carries order_kind")
+def _():
+    from fastapi.testclient import TestClient
+    import app.main as m
+    import app.shop as s
+    import app.shop_notify as n
+    placed = {"id": 1, "order_no": "YQ-2609-0102", "token": "v" * 24, "status": "new", "status_url": "/o/" + "v" * 24,
+              "order_kind": "small", "attribution_source": "unassigned", "salesman": None, "has_backorder": False,
+              "totals": {"ok": True, "total_bhd": 12.5}}
+    real = (s.create_order, s.market_enabled, n.notify_new_order, n.customer_to_salesman_wa_url,
+            n.customer_to_salesman_email_url)
+    body = {"lines": [{"item_code": "T02", "qty": 1}], "customer": {"name": "Test Shop", "phone": "33001122"},
+            "device_id": "dev-test", "client_order_id": "coid-test"}
+    try:
+        s.create_order = lambda *a, **kw: dict(placed)
+        s.market_enabled = lambda: True
+        n.notify_new_order = lambda *a, **kw: {}
+        n.customer_to_salesman_wa_url = lambda o: None
+        n.customer_to_salesman_email_url = lambda o: None
+        c = TestClient(m.app)
+        r = c.post("/public/market/order", json=body)
+        assert r.status_code == 200, (r.status_code, r.text[:200])
+        assert r.json()["order_kind"] == "small", r.json()
+        s.create_order = lambda *a, **kw: {**placed, "order_kind": None, "duplicate": True}
+        r = c.post("/public/market/order", json=body)
+        assert r.status_code == 200 and r.json()["order_kind"] == "standard", r.text[:200]
+    finally:
+        (s.create_order, s.market_enabled, n.notify_new_order, n.customer_to_salesman_wa_url,
+         n.customer_to_salesman_email_url) = real
+
+
+@test("payload: a clearance item's price_bhd is the price-book trade rate — never a markdown")
+def _():
+    from app.shop import catalog_payload, money
+    items = [_item("CLR", 0.4, stock=600, b2c=1.5), _item("REG", 1.25, stock=20, sold_90d=300, b2c=2.0)]
+    ctx = _ctx(items, shop_show_retail_compare="0", shop_clearance_show_retail="1")
+    ctx["share_token"] = "tok-test-token-value"
+    restore = _with_cached_ctx(ctx)
+    try:
+        for compare in ("0", "1"):
+            ctx["settings"]["shop_show_retail_compare"] = compare
+            p = {i["item_code"]: i for i in catalog_payload("tok-test-token-value")["items"]}
+            assert "clearance" in p["CLR"]["badges"], p["CLR"]
+            assert p["CLR"]["price_bhd"] == money(items[0]["standard_rate"]) == 0.4, p["CLR"]
+            assert p["CLR"]["compare_at_bhd"] == 1.5 and p["CLR"]["was_bhd"] is None, p["CLR"]
+            assert p["REG"]["price_bhd"] == 1.25
+    finally:
+        restore()
+    if not _migrated():
+        print("   SKIP (live half) — no database or scripts/shop_migration.sql not applied")
+        return
+    from app.catalog import share_token
+    from app.shop import context
+    live = context()
+    pub = catalog_payload(share_token(create=False))
+    for it in pub["items"]:
+        if "clearance" in it["badges"]:
+            want = live["items"][it["item_code"]].get("standard_rate")
+            assert it["price_bhd"] == (money(want) if want is not None else None), (it["item_code"], it["price_bhd"], want)
 
 if __name__ == "__main__":
     sys.exit(main())

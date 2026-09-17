@@ -1,6 +1,6 @@
 import type { CatalogPayload, Offer, OrderStatusPayload, ShopItem } from '@/lib/shopApi'
 import { deviceId, recentlyViewed } from './device'
-import { hasBadge, hashStr } from './format'
+import { hasBadge, hashStr, marginOf } from './format'
 
 /**
  * The home page's merchandising, as pure functions over the payload and device memory, so the
@@ -31,6 +31,134 @@ export function clearance(items: ShopItem[]): ShopItem[] {
 
 export function priceDrops(items: ShopItem[]): ShopItem[] {
   return inStock(items).filter((i) => hasBadge(i, 'price_drop') || i.was_bhd != null).slice(0, RAIL_MAX)
+}
+
+/* ───────────────────────── v3: deals, exclusive rails, brands ───────────────────────── */
+
+/** Has a photo the slider / tiles can show (WebP set, legacy thumb or the full photo). */
+export function hasPhoto(i: ShopItem): boolean {
+  return Boolean(i.thumb_urls?.['320'] || i.thumb_url || i.product_image_url)
+}
+
+/**
+ * Last-Chance Stock: clearing lines still on the shelf (low stock included), the best real
+ * retail margin first (lines without a public retail price after), then shelf order. No cap.
+ */
+export function lastChance(items: ShopItem[]): ShopItem[] {
+  return inStock(items)
+    .filter((i) => hasBadge(i, 'clearance'))
+    .map((item, index) => ({ item, index, pct: marginOf(item)?.pct ?? null }))
+    .sort((a, b) => {
+      if (a.pct != null && b.pct != null && a.pct !== b.pct) return b.pct - a.pct
+      if ((a.pct == null) !== (b.pct == null)) return a.pct == null ? 1 : -1
+      return a.index - b.index
+    })
+    .map((x) => x.item)
+}
+
+export interface DealSets {
+  drops: ShopItem[]
+  lastChance: ShopItem[]
+  offers: ShopItem[]
+  bundles: ShopItem[]
+  all: ShopItem[]
+  hasRealDeals: boolean
+}
+
+function isLiveOffer(o: Offer): boolean {
+  if (!o.ends_at) return true
+  const end = new Date(o.ends_at).getTime()
+  return Number.isNaN(end) || end > Date.now()
+}
+
+/**
+ * The Stock-Up Deals section, from real data only: price-book drops, live offers, bundle rules,
+ * and last-chance lines. Every set is in stock. A code sits in one of drops/offers/bundles first
+ * (drops and offers may share a code), and last-chance never repeats one of them.
+ */
+export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
+  const live = inStock(items)
+  const bundleCodes = new Set<string>()
+  for (const o of offers || []) {
+    const kind = (o.kind || '').toLowerCase()
+    if (!isLiveOffer(o) || !(kind === 'bundle_price' || kind.includes('bundle'))) continue
+    for (const c of o.scope_codes || []) bundleCodes.add(c)
+  }
+  const drops = live.filter((i) => hasBadge(i, 'price_drop') || i.was_bhd != null)
+  const bundles = live.filter((i) => bundleCodes.has(i.item_code))
+  const offerItems = live.filter((i) => hasBadge(i, 'on_offer') && !bundleCodes.has(i.item_code))
+  const taken = new Set([...drops, ...offerItems, ...bundles].map((i) => i.item_code))
+  const last = lastChance(items).filter((i) => !taken.has(i.item_code))
+  const seen = new Set<string>()
+  const all: ShopItem[] = []
+  for (const i of [...drops, ...offerItems, ...bundles, ...last]) {
+    if (seen.has(i.item_code)) continue
+    seen.add(i.item_code)
+    all.push(i)
+  }
+  return { drops, lastChance: last, offers: offerItems, bundles, all, hasRealDeals: drops.length + offerItems.length + bundles.length > 0 }
+}
+
+export interface HomeRails {
+  deals: ShopItem[]
+  essentials: ShopItem[]
+  fresh: ShopItem[]
+  moving: ShopItem[]
+}
+
+/**
+ * The home rails, mutually exclusive: every product appears in at most one of them. Priority
+ * Deals (dealSets.all) → Restock essentials (best sellers) → New arrivals → Moving fast
+ * (trending / selling fast); in stock only; RAIL_MAX each; codes in `exclude` are skipped.
+ * Every deal code is reserved for Deals — also the ones past RAIL_MAX — because the deals section
+ * can show a whole set behind its chips, and a product must not show there and in a rail below.
+ */
+export function homeRails(items: ShopItem[], offers?: Offer[] | null, exclude?: ReadonlySet<string>): HomeRails {
+  const used = new Set<string>(exclude ? [...exclude] : [])
+  const live = inStock(items)
+  const take = (pool: ShopItem[], reserveAll = false): ShopItem[] => {
+    const out: ShopItem[] = []
+    for (const i of pool) {
+      if (used.has(i.item_code)) continue
+      if (out.length < RAIL_MAX) out.push(i)
+      else if (!reserveAll) break
+    }
+    for (const i of reserveAll ? pool : out) used.add(i.item_code)
+    return out
+  }
+  const deals = take(dealSets(items, offers).all, true)
+  const essentials = take(live.filter((i) => hasBadge(i, 'best_seller')))
+  const fresh = take(live.filter((i) => hasBadge(i, 'new')))
+  const moving = take(live.filter((i) => hasBadge(i, 'trending') || hasBadge(i, 'selling_fast')))
+  return { deals, essentials, fresh, moving }
+}
+
+export interface BrandTile {
+  brand: string
+  count: number
+  image: ShopItem | null
+}
+
+/** Shop by brand — only worth a section when ≥2 brands each carry ≥3 products; else []. */
+export function brandTiles(items: ShopItem[]): BrandTile[] {
+  const groups = new Map<string, { brand: string; list: ShopItem[] }>()
+  for (const i of items) {
+    const brand = (i.brand || '').trim()
+    if (!brand) continue
+    const key = brand.toUpperCase()
+    const g = groups.get(key)
+    if (g) g.list.push(i)
+    else groups.set(key, { brand, list: [i] })
+  }
+  const tiles = [...groups.values()]
+    .filter((g) => g.list.length >= 3)
+    .map((g) => ({
+      brand: g.brand,
+      count: g.list.length,
+      image: g.list.find((i) => hasPhoto(i) && i.stock_status !== 'out_of_stock' && hasBadge(i, 'best_seller')) || g.list.find((i) => hasPhoto(i) && i.stock_status !== 'out_of_stock') || g.list.find(hasPhoto) || null,
+    }))
+  if (tiles.length < 2) return []
+  return tiles.sort((a, b) => b.count - a.count || a.brand.localeCompare(b.brand))
 }
 
 export function pickedUpAgain(items: ShopItem[], inCart: Set<string>): ShopItem[] {

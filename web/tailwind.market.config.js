@@ -15,6 +15,21 @@ export default {
     './src/market/**/*.{ts,tsx}',
   ],
   future: { hoverOnlyWhenSupported: true },
+  // v3 component classes defined in @layer components (market.css) that consumers may build
+  // dynamically (`canvas-${slide.canvas}`) — keep them even when no source file spells them out.
+  safelist: [
+    'horizon',
+    'is-rising',
+    'is-small',
+    'band-sash',
+    'slider-track',
+    'canvas-lilac',
+    'canvas-apricot',
+    'canvas-mint',
+    'canvas-plum',
+    'canvas-night',
+    'sweep',
+  ],
   theme: {
     screens: { sm: '640px', md: '768px', lg: '1024px', xl: '1280px', '2xl': '1440px', '3xl': '1800px' },
     colors: {
@@ -32,6 +47,13 @@ export default {
       bad: { DEFAULT: c('--m-bad'), soft: c('--m-bad-soft') },
       wa: c('--m-wa'),
       focus: c('--m-focus'),
+      // v3 (wholesale redesign)
+      deal: { DEFAULT: c('--m-deal'), soft: c('--m-deal-soft'), ink: c('--m-deal-ink') },
+      fresh: { DEFAULT: c('--m-fresh'), soft: c('--m-fresh-soft'), ink: c('--m-fresh-ink') },
+      sash: c('--m-sash'),
+      tile: { lilac: c('--m-tile-lilac'), apricot: c('--m-tile-apricot'), mint: c('--m-tile-mint') },
+      night: { DEFAULT: c('--m-night'), 2: c('--m-night-2') },
+      arc: { 1: c('--m-arc-1'), 2: c('--m-arc-2'), 3: c('--m-arc-3') },
     },
     fontFamily: {
       sans: ['var(--m-font-sans)'],

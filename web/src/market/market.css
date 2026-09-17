@@ -77,6 +77,24 @@
     --m-wa: 142 70% 49%;          /* WhatsApp brand */
     --m-focus: 273 60% 55%;
 
+    /* v3 colour (wholesale redesign). Ratios are WCAG contrast, measured on these exact values. */
+    --m-deal: 39.1 87.4% 59.4%;   /* #F2B33D amber — Last chance / Deal fills; never small text on white */
+    --m-deal-soft: 42 92% 90%;    /* #FDEFCE amber wash — the deal chip */
+    --m-deal-ink: 29 90% 23%;     /* #6F3906 — 8.13:1 on deal-soft, 4.99:1 on deal, 9.28:1 on white */
+    --m-fresh: 152.7 54.9% 40%;   /* #2E9E6B mint — New fills and dots; text needs fresh-ink (3.38:1 on white) */
+    --m-fresh-soft: 151 52% 91%;  /* #DCF4E8 */
+    --m-fresh-ink: 155 64% 22%;   /* #145C3E — 6.90:1 on fresh-soft */
+    --m-sash: 273 37% 49%;        /* #824FAB lighter plum — the header diagonal; white text 5.74:1 */
+    --m-tile-lilac: 268 70% 92%;  /* #EADCF9 promo canvas — ink 13.71:1, ink-2 5.36:1, plum 5.77:1 */
+    --m-tile-apricot: 31 95% 88%; /* #FDE1C3 — ink 14.24:1, ink-2 5.57:1, plum 5.99:1 */
+    --m-tile-mint: 153 50% 86%;   /* #C9EDDD — ink 14.16:1, ink-2 5.53:1, plum 5.96:1 */
+    --m-night: 254.3 41.2% 10%;   /* #140F24 — the portal login night; white 18.69:1 */
+    --m-night-2: 260.3 66.4% 21%; /* #2A1259 */
+    --m-arc-1: 259.6 70.3% 14.5%; /* #1C0B3F horizon core */
+    --m-arc-2: 252 78.9% 51.6%;   /* #4922E5 horizon blue */
+    --m-arc-3: 268.3 95.3% 66.5%; /* #A558FB horizon violet */
+    --m-grad-night: linear-gradient(135deg, hsl(var(--m-night-2)), hsl(var(--m-night)));
+
     /* radius */
     --m-r-xs: 6px;
     --m-r-sm: 10px;
@@ -453,3 +471,267 @@
     display: none;
   }
 }
+
+/* ══════════════════════════════ v3 — wholesale redesign ══════════════════════════════
+ * One commented block per feature; each round-2 owner adds rules only inside its own block
+ * (between the "v3: name" and "end v3: name" comments). Classes that consumers may combine with Tailwind
+ * utilities live in @layer components, so a utility on the same element still wins (`sticky` on a
+ * .band-sash header, `fixed` on a .horizon). Those class names are safelisted in
+ * tailwind.market.config.js because some are built dynamically (`canvas-${slide.canvas}`).
+ * Everything that moves is gated on prefers-reduced-motion: no-preference or dies in the kill
+ * switch above; nothing here ever hides content under reduced motion.
+ */
+
+/* v3: reveal */
+/* Scroll reveal, driven by hooks/useReveal.ts. Double gate: content is hidden only when motion is
+ * allowed AND the hook has confirmed IntersectionObserver (it sets html[data-reveal]). Every .reveal
+ * must sit inside an element passed to useReveal. Put it on a section wrapper or a wrapper around a
+ * desktop grid card — never on compact rail cards, inside a .cv-* element, or on an element with its
+ * own transition (this shorthand would replace it). Stagger: style={{ ['--i' as string]: index }}. */
+@media (prefers-reduced-motion: no-preference) {
+  html[data-reveal] .reveal {
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity var(--m-d-3) var(--m-ease), transform var(--m-d-3) var(--m-ease);
+    transition-delay: calc(min(var(--i, 0), 6) * 45ms);
+  }
+  html[data-reveal] .reveal.is-in {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* end v3: reveal */
+
+/* v3: horizon */
+/* The portal's glow horizon (web/src/components/ui/glow-horizon.tsx) in CSS, mirrored so the arcs
+ * rise from the bottom edge. Markup: <div className="horizon is-rising" aria-hidden><i/><i/><i/><i/></div>
+ * The parent needs a size and a position; content goes in a later sibling with `relative` so it
+ * paints above. Without .is-rising the arcs rest where the original settles.
+ * Geometry is the original's: every <i> is a full-size ellipse scaled 132/120/124/120 % with its
+ * centre on the bottom edge (--horizon-y: 50%; larger sinks it). Paint order is the original DOM
+ * order: white rim (box-shadow 0 -4px 23px #ffffffb5), violet blur 31, blue blur 21, core blur 51.
+ * Entrance: the original's container move (+50%, scaleY 1.5, blur 15px, opacity 0) plus each arc's
+ * +40% offset, compressed from 2 s to 900 ms with the 0 / 0.6 / 1.2 s stagger scaled to
+ * 0 / 250 / 500 ms; later arcs run shorter so every arc settles together at 900 ms.
+ * .is-small halves the blur for canvases under ~400px tall (slide cards, CTA bands). */
+@layer components {
+  .horizon {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    isolation: isolate;
+    pointer-events: none;
+    background-color: hsl(var(--m-night));
+    background-image: var(--m-grad-night);
+  }
+  .horizon > i {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    transform: translate3d(0, var(--horizon-y, 50%), 0) scale(var(--arc-s));
+  }
+  .horizon > i:nth-child(1) {
+    --arc-s: 1.32;
+    --arc-s-y0: 1.98;
+    --arc-rise: 50%;
+    --arc-blur-0: 15px;
+    --arc-delay: 500ms;
+    --arc-dur: 400ms;
+    background-color: #fff;
+    box-shadow: 0 -4px 23px 0 #ffffffb5;
+  }
+  .horizon > i:nth-child(2) {
+    --arc-s: 1.2;
+    --arc-s-y0: 1.8;
+    --arc-rise: 90%;
+    --arc-blur: 31px;
+    --arc-blur-0: 46px;
+    --arc-delay: 250ms;
+    --arc-dur: 650ms;
+    background-color: hsl(var(--m-arc-3));
+    filter: blur(var(--arc-blur));
+  }
+  .horizon > i:nth-child(3) {
+    --arc-s: 1.24;
+    --arc-s-y0: 1.86;
+    --arc-rise: 90%;
+    --arc-blur: 21px;
+    --arc-blur-0: 36px;
+    --arc-delay: 0ms;
+    --arc-dur: 900ms;
+    background-color: hsl(var(--m-arc-2));
+    filter: blur(var(--arc-blur));
+  }
+  .horizon > i:nth-child(4) {
+    --arc-s: 1.2;
+    --arc-s-y0: 1.8;
+    --arc-rise: 90%;
+    --arc-blur: 51px;
+    --arc-blur-0: 66px;
+    --arc-delay: 0ms;
+    --arc-dur: 900ms;
+    background-color: hsl(var(--m-arc-1));
+    filter: blur(var(--arc-blur));
+  }
+  .horizon.is-small > i:nth-child(1) {
+    box-shadow: 0 -2px 12px 0 #ffffffb5;
+  }
+  .horizon.is-small > i:nth-child(2) {
+    --arc-blur: 16px;
+  }
+  .horizon.is-small > i:nth-child(3) {
+    --arc-blur: 11px;
+  }
+  .horizon.is-small > i:nth-child(4) {
+    --arc-blur: 26px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .horizon.is-rising > i {
+      animation: m-horizon-rise var(--arc-dur) cubic-bezier(0.16, 1, 0.3, 1) var(--arc-delay) both;
+      will-change: transform, opacity, filter;
+    }
+  }
+}
+/* `to` is implicit: each arc lands on its resting transform and blur declared above. */
+@keyframes m-horizon-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, calc(var(--horizon-y, 50%) + var(--arc-rise)), 0) scale(var(--arc-s), var(--arc-s-y0));
+    filter: blur(var(--arc-blur-0));
+  }
+}
+/* end v3: horizon */
+
+/* v3: sash */
+/* Keeta's header sash in YQ plum: a lighter-plum wedge whose diagonal runs from the left edge at
+ * --sash-left (58% of the band's height) up to the top edge at --sash-top (96% of its width), so the
+ * lower band (where the pinned search sits) is sash and the brand corner stays plum. Put it on the
+ * plum band (bg-plum); the ::before paints between the band's background and its content. */
+@layer components {
+  .band-sash {
+    position: relative;
+    isolation: isolate;
+  }
+  .band-sash::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-color: hsl(var(--m-sash));
+    clip-path: polygon(var(--sash-top, 96%) 0, 100% 0, 100% 100%, 0 100%, 0 var(--sash-left, 58%));
+  }
+  [dir='rtl'] .band-sash::before {
+    transform: scaleX(-1);
+  }
+}
+/* end v3: sash */
+
+/* v3: slider */
+/* Promo slider track (components/PromoSlider.tsx): one slide per flick, centred, no scrollbar.
+ * Spacing comes from a gap utility on the track. Canvases are the slide/tile backgrounds with their
+ * text colour: lilac/apricot/mint carry ink (AA for ink, ink-2 and plum), plum and night carry white. */
+@layer components {
+  .slider-track {
+    display: flex;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: var(--m-gutter);
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .slider-track::-webkit-scrollbar {
+    display: none;
+  }
+  .slider-track > * {
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+    flex: 0 0 auto;
+  }
+  .canvas-lilac {
+    background-color: hsl(var(--m-tile-lilac));
+    color: hsl(var(--m-ink));
+  }
+  .canvas-apricot {
+    background-color: hsl(var(--m-tile-apricot));
+    color: hsl(var(--m-ink));
+  }
+  .canvas-mint {
+    background-color: hsl(var(--m-tile-mint));
+    color: hsl(var(--m-ink));
+  }
+  .canvas-plum {
+    background-color: hsl(var(--m-plum));
+    color: #fff;
+  }
+  .canvas-night {
+    background-color: hsl(var(--m-night));
+    background-image: var(--m-grad-night);
+    color: #fff;
+  }
+}
+/* end v3: slider */
+
+/* v3: hints */
+/* Rotating search hints (components/SearchField.tsx): the outgoing hint lifts away, the next one
+ * rises in. The field turns rotation off under reduced motion; the kill switch covers the rest. */
+@keyframes m-hint-in {
+  from {
+    opacity: 0;
+    transform: translateY(60%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes m-hint-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-60%);
+  }
+}
+.anim-hint-in {
+  animation: m-hint-in 260ms var(--m-ease) both;
+}
+.anim-hint-out {
+  animation: m-hint-out 260ms var(--m-ease) both;
+}
+/* end v3: hints */
+
+/* v3: sweep */
+/* One diagonal light sweep across a tile (the splash logo). `.sweep` plays once when the element
+ * mounts, after --sweep-delay; the element clips it to its own radius. Reduced motion: no sweep. */
+@keyframes m-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@layer components {
+  .sweep {
+    position: relative;
+    overflow: hidden;
+  }
+  .sweep::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 32%, hsl(0 0% 100% / 0.55) 48%, hsl(0 0% 100% / 0.12) 56%, transparent 68%);
+    transform: translateX(-100%);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .sweep::after {
+      animation: m-sweep 900ms cubic-bezier(0.4, 0, 0.2, 1) var(--sweep-delay, 0ms) both;
+    }
+  }
+}
+/* end v3: sweep */
