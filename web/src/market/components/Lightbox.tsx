@@ -31,7 +31,7 @@ export function Lightbox({ photos, start = 0, alt, onClose }: { photos: { src: s
   return createPortal(
     <div className="fixed inset-0 z-[70] flex flex-col bg-ink/95 anim-fade-in" role="dialog" aria-modal="true" aria-label={alt} onClick={onClose}>
       <div className="flex items-center justify-between px-3 pt-3" style={{ paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))' }}>
-        <span className="rounded-pill bg-white/10 px-3 py-1 text-xs font-semibold text-white">{p.label}{n > 1 ? ` · ${(i % n) + 1}/${n}` : ''}</span>
+        <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold text-white">{p.label}{n > 1 ? ` · ${(i % n) + 1}/${n}` : ''}</span>
         <button type="button" onClick={onClose} aria-label={S.states.close} className="grid h-11 w-11 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
           <X size={20} aria-hidden="true" />
         </button>

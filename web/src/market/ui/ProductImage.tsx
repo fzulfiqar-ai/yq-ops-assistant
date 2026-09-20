@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from 'react'
 import { Package } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
+import { S } from '../strings'
 
 /**
  * A product photo on a white shelf tile.
@@ -33,7 +34,8 @@ export interface ProductImageProps {
 }
 
 export const SIZES_GRID = '(min-width: 1280px) 240px, (min-width: 768px) 30vw, 46vw'
-export const SIZES_RAIL = '(min-width: 768px) 200px, 44vw'
+/** compact card: clamp(10rem, 46vw, 13rem) on phones/tablets, a desktop rail cell (~200–240px) from lg */
+export const SIZES_RAIL = '(min-width: 1024px) 240px, (min-width: 768px) 208px, 46vw'
 export const SIZES_THUMB = '68px'
 export const SIZES_HERO = '(min-width: 1024px) 480px, 90vw'
 
@@ -53,7 +55,7 @@ export function ProductImage({ item, srcs, alt, sizes = SIZES_GRID, size = 320, 
       <div className={cn('grid place-items-center bg-surface text-line', className)} style={{ aspectRatio: '1 / 1', ...style }}>
         <div className="px-2 text-center">
           <Package size={iconSize} strokeWidth={1} className="mx-auto" aria-hidden="true" />
-          {showCaption && <div className="mt-1.5 text-2xs font-medium uppercase tracking-wide text-ink-3">Photo coming soon</div>}
+          {showCaption && <div className="mt-1.5 text-2xs font-medium uppercase tracking-wide text-ink-3">{S.card.photoSoon}</div>}
         </div>
       </div>
     )

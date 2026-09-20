@@ -31,7 +31,7 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
       onClose={onClose}
       variant="dialog"
       title={S.qty.title}
-      subtitle={`${productName(item)}${min > 1 ? ` · ${S.card.min(min)}` : ''}${step > 1 ? ` · ${S.card.packs(step)}` : ''}`}
+      subtitle={`${item.item_code} · ${productName(item)}${min > 1 ? ` · ${S.card.min(min)}` : ''}${step > 1 ? ` · ${S.card.packs(step)}` : ''}`}
       footer={
         <div className="flex gap-2">
           {value > 0 && (
@@ -86,7 +86,7 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
           <ul className="mt-4 space-y-1 text-xs text-ink-2">
             {(item.tiers || []).map((t) => (
               <li key={t.min_qty} className={cn('flex justify-between rounded-xs px-2 py-1 tnum', n >= t.min_qty && 'bg-plum-soft font-semibold text-plum-ink')}>
-                <span>{t.min_qty}+ pcs</span>
+                <span>{S.card.pcsPlus(t.min_qty)}</span>
                 <span>
                   {bhd(t.unit_price_bhd)} {S.cart.each}
                 </span>

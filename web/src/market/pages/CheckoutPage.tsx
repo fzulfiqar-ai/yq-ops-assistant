@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronDown, Lock } from 'lucide-react'
+import { ChevronDown, Lock, MessageCircle, ReceiptText, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ShopApiError } from '@/lib/shopApi'
 import { RepCard } from '../components/RepCard'
@@ -9,6 +9,7 @@ import { clientOrderId, deviceId, EMPTY_CUSTOMER, readCustomer, rememberOrder, r
 import { track } from '../lib/events'
 import { bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/format'
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
+import { clearSmallAck } from '../lib/smallOrder'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { cartStore, useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
@@ -42,7 +43,14 @@ export default function CheckoutPage() {
   const [submitting, setSubmitting] = useState(false)
   const [slow, setSlow] = useState(false)
   const [error, setError] = useState('')
-  usePageTitle(S.checkout.title, true, `${S.checkout.title} · ${S.brand}`)
+  // Only `request` mode turns this checkout into a small order request. In `allow` mode an order
+  // under the minimum goes through like any other — the portal and /about promise that — so it
+  // keeps the normal wholesale wording; `block` mode never reaches checkout (can_submit is false).
+  const minimum = quote?.minimum || null
+  const small = Boolean(minimum && !minimum.met && minimum.mode === 'request')
+  const smallFee = small ? Number(minimum?.fee_bhd) || 0 : 0
+  const pageTitle = small ? S.small.title : S.checkout.title
+  usePageTitle(pageTitle, true, `${pageTitle} · ${S.brand}`)
   useHideNav(true)
 
   useEffect(() => {
@@ -71,7 +79,6 @@ export default function CheckoutPage() {
   const [deliveryPref, setDeliveryPref] = useState<string | null>(null)
   const [known, setKnown] = useState<{ shop?: string | null; area?: string | null; first_name?: string | null } | null>(null)
   const [askedPhone, setAskedPhone] = useState('')
-  const small = Boolean(quote?.minimum && !quote.minimum.met && quote.minimum.mode !== 'block')
   // a complete number we have not asked about yet → one recognise call; prefill only what is empty
   const digits = cleanPhone(customer.phone)
   if (digits.length >= 8 && digits !== askedPhone && !recognized) {
@@ -107,6 +114,7 @@ export default function CheckoutPage() {
       if (res.token) rememberOrder({ token: res.token, order_no: res.order_no, ts: Date.now(), total: res.totals?.total_bhd ?? null })
       for (const l of lines) rememberQty(l.item_code, l.qty)
       resetClientOrderId()
+      clearSmallAck()
       cartStore.clear()
       setCoupon('')
       setNote('')
@@ -124,7 +132,7 @@ export default function CheckoutPage() {
 
   const submitBtn = (
     <Button type="submit" form={FORM_ID} size="lg" className={cn('shrink-0', desktop ? 'w-full' : 'px-6')} disabled={!canSubmit} loading={submitting} icon={<Lock size={15} aria-hidden="true" />}>
-      {submitting ? (slow ? S.checkout.connecting : S.checkout.sending) : small ? S.minimum.requestCta : S.checkout.place}
+      {submitting ? (slow ? S.checkout.connecting : S.checkout.sending) : small ? S.small.send : S.checkout.place}
     </Button>
   )
 
@@ -132,13 +140,38 @@ export default function CheckoutPage() {
     <div className="px-gutter lg:px-0">
       <div className="mx-auto max-w-xl lg:mx-auto lg:grid lg:max-w-6xl lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start lg:gap-8">
         <div>
-          <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{S.checkout.title}</h1>
+          <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{pageTitle}</h1>
           {/* the order, folded */}
           <Link to="/cart" className="mt-1 flex items-center justify-between gap-3 rounded-md border border-line bg-surface px-3.5 py-2.5 text-sm hover:bg-plum-wash lg:mt-4">
             <span className="text-ink-2">{S.cart.summary(items, units)}</span>
             <span className="font-display font-bold tnum text-ink">{bhd(quote?.total_bhd)}</span>
             <span className="font-semibold text-plum">{S.cart.edit}</span>
           </Link>
+          {small && minimum && (
+            <section aria-label={S.small.title} className="mt-3 rounded-lg border border-plum/15 bg-plum-wash p-4">
+              <div className="flex items-start gap-3">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-surface text-plum shadow-1 ring-1 ring-inset ring-plum/10" aria-hidden="true">
+                  <MessageCircle size={17} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold leading-snug text-plum-ink">{S.small.body(bhd(minimum.value_bhd))}</p>
+                  {smallFee > 0 && (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-snug text-ink-2">
+                      <ReceiptText size={13} className="mt-px shrink-0 text-deal-ink" aria-hidden="true" />
+                      {S.small.fee(bhd(smallFee))}
+                    </p>
+                  )}
+                  <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-snug text-ink-2">
+                    <ShieldCheck size={13} className="mt-px shrink-0 text-ok" aria-hidden="true" />
+                    {S.small.noPayment}
+                  </p>
+                  <Link to="/cart" className="-ms-1 mt-1.5 inline-flex h-10 items-center rounded-sm px-1 text-sm font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+                    {S.small.keep}
+                  </Link>
+                </div>
+              </div>
+            </section>
+          )}
           {known?.shop && (
             <p className="mt-3 rounded-md bg-plum-wash px-3.5 py-2.5 text-sm text-plum-ink">
               <b className="font-semibold">{S.checkout.welcomeBack(known.shop)}</b> · {S.checkout.welcomeBackHint}
@@ -281,7 +314,7 @@ export default function CheckoutPage() {
               </p>
             )}
             <div className="mt-4">{submitBtn}</div>
-            <p className="mt-2 text-xs text-ink-2">{small ? S.minimum.requested : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
+            <p className="mt-2 text-xs text-ink-2">{small ? S.small.sendHint : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
           </div>
 
           {/* the lines, so the merchant sees what they are confirming */}
@@ -349,7 +382,7 @@ export default function CheckoutPage() {
             </div>
             {submitBtn}
           </div>
-          <p className="mt-1.5 text-2xs text-ink-2">{small ? S.minimum.requested : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
+          <p className="mt-1.5 text-2xs text-ink-2">{small ? S.small.sendHint : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
         </PageBar>
       )}
     </div>

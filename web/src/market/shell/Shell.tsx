@@ -11,7 +11,15 @@ import { isPhoneLike } from './useViewport'
 
 const DesktopShell = lazy(() => import('./DesktopShell'))
 const ProductPanel = lazy(() => import('../components/ProductPanel'))
-const Splash = lazy(() => import('../components/Splash').then((mod) => ({ default: mod.Splash })))
+const loadSplash = () => import('../components/Splash')
+// A session's first load: start fetching the opening with the app itself (not at the shell's first
+// render), so the overlay lands as close to the first paint as a lazy chunk can. Same key as Splash.tsx.
+try {
+  if (!sessionStorage.getItem('yq-splash-session')) void loadSplash()
+} catch {
+  /* storage blocked: the opening stays out of the way anyway */
+}
+const Splash = lazy(() => loadSplash().then((mod) => ({ default: mod.Splash })))
 const SearchPalette = lazy(() => import('../components/SearchPalette'))
 
 /**

@@ -9,8 +9,8 @@ import { S } from '../strings'
 import { Sheet } from '../ui/Sheet'
 
 /**
- * Tablet + desktop chrome: a sticky glass header (logo · Shop mega-nav · search · New · Offers ·
- * Quick order · Orders · My YQ · Cart), the page in a fluid container, and from 1280px a
+ * Tablet + desktop chrome: the dark promise bar, a sticky glass header (logo + kicker · Browse
+ * mega-nav · search · Deals · Quick order · Orders · My YQ · Restock), the page in a fluid container, and from 1280px a
  * persistent mini-cart aside on the browsing pages. Below 1280 the header's Cart opens the same
  * mini-cart as a side drawer. Tablets keep a bottom stack for page bars + the cart dock.
  */

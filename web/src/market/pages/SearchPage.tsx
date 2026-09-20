@@ -13,16 +13,18 @@ import { usePageTitle } from '../shell/ShellContext'
 import { S } from '../strings'
 
 /**
- * /search — instant, grouped, with inline Add. The query lives in the URL (survives refresh,
- * shareable). Enter on an exact code adds it at the default quantity and keeps the field ready
- * for the next code. Below zero results the page is never dead: Best sellers.
+ * /search — reached from the pinned search band. Instant, grouped, with inline Add. The query lives
+ * in the URL (survives refresh, shareable). The bar stays pinned while results scroll; empty and
+ * unfocused it rotates example queries. Enter on an exact code adds it at the default quantity and
+ * keeps the field ready for the next code. Empty query: recent searches → Popular restocks (real
+ * best sellers in stock, one-tap Add) → categories. Zero results is never a dead end: essentials.
  */
 export default function SearchPage() {
   const [params, setParams] = useSearchParams()
   const m = useMarket()
   const [q, setQ] = useState(params.get('q') || '')
   const inputRef = useRef<HTMLInputElement>(null)
-  usePageTitle(S.nav.search, false, q.trim() ? `${q.trim()} · ${S.brand}` : `${S.nav.search} · ${S.brand}`)
+  usePageTitle(S.nav.search, true, q.trim() ? `${q.trim()} · ${S.brand}` : `${S.nav.search} · ${S.brand}`)
 
   useEffect(() => {
     void m.ensureIndex()
@@ -67,11 +69,11 @@ export default function SearchPage() {
 
   return (
     <div className="px-gutter lg:px-0">
-      <div className="sticky top-0 z-header -mx-gutter bg-canvas/95 px-gutter pb-2 pt-1 backdrop-blur lg:static lg:mx-0 lg:bg-transparent lg:px-0">
+      <div className="sticky top-0 z-header -mx-gutter border-b border-line-2 bg-canvas/95 px-gutter pb-3 pt-1 backdrop-blur lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:px-0 lg:pb-2 lg:pt-2 lg:backdrop-blur-none">
         <h1 className="hidden font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{S.nav.search}</h1>
-        <SearchField ref={inputRef} value={q} onChange={setQ} onSubmit={submit} autoFocus />
+        <SearchField ref={inputRef} value={q} onChange={setQ} onSubmit={submit} hints={S.search.hints} autoFocus />
       </div>
-      <div className="pt-3">
+      <div className="pt-4">
         {!q.trim() ? (
           <SearchEmpty onPick={setQ} />
         ) : !m.index || !search ? (
@@ -80,7 +82,7 @@ export default function SearchPage() {
           <>
             <SearchGroups q={q} grouped={grouped} hints={hints} onPick={setQ} />
             {flat === 0 && best.length > 0 && (
-              <Rail id="best" title={S.rails.best} seeAllTo="/shop?sort=popular">
+              <Rail id="best" title={S.rails.essentials} seeAllTo="/shop?f=best">
                 {best.map((it) => (
                   <MarketCard key={it.item_code} item={it} variant="compact" from="search_zero" />
                 ))}

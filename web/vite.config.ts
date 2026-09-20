@@ -16,7 +16,7 @@ import autoprefixer from 'autoprefixer'
 
 const MARKET = {
   title: 'YQ Marketplace · YQ Bahrain',
-  description: 'Order mobile accessories at trade prices from YQ Bahrain — cables, chargers, TWS and more, delivered by your YQ representative.',
+  description: 'Where Bahrain restocks. Mobile accessories wholesale from YQ Bahrain — trade prices, live warehouse stock, every order confirmed by your representative.',
   ogTitle: 'YQ Marketplace',
   manifest: '/market.webmanifest',
   /** the logo plum (src/market/market.css --m-plum) */

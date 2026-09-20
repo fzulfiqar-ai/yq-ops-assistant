@@ -7,6 +7,7 @@ import { useViewport, isPhoneLike, type Viewport } from './useViewport'
  * What pages tell the shell and what the shell offers pages.
  *
  *  • `usePageTitle(title, back)` — the phone header shows it (with a back arrow).
+ *  • `useSearchBand()` — the phone header becomes the plum band with the pinned search.
  *  • `<PageBar>` — a page's sticky bottom action (cart total + Place order, checkout submit).
  *    On phones/tablets it is portalled into the shell's bottom stack, ABOVE the nav, and the
  *    shell measures the stack into `--m-bottom-stack` so content never hides under it. On
@@ -42,6 +43,9 @@ interface ShellValue {
   /** kept alongside setHasPageBar so nav can hide on focused flows (checkout) */
   hideNav: boolean
   setHideNav: (v: boolean) => void
+  /** phone/tablet: the page asked for the plum band with the pinned search (useSearchBand) */
+  searchBand: boolean
+  setSearchBand: (v: boolean) => void
 }
 
 const Ctx = createContext<ShellValue | null>(null)
@@ -57,6 +61,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [paletteQuery, setPaletteQuery] = useState('')
   const [hideNav, setHideNav] = useState(false)
+  const [searchBand, setSearchBand] = useState(false)
 
   const state = location.state as { panel?: string } | null
   const routeCode = location.pathname.startsWith('/p/') ? decodeURIComponent(location.pathname.slice(3).split('/')[0] || '') : null
@@ -112,8 +117,10 @@ export function ShellProvider({ children }: { children: ReactNode }) {
       closeProduct,
       hideNav,
       setHideNav,
+      searchBand,
+      setSearchBand,
     }),
-    [viewport, title, barHost, hasPageBar, cartOpen, paletteOpen, paletteQuery, openProduct, panelCode, closeProduct, hideNav],
+    [viewport, title, barHost, hasPageBar, cartOpen, paletteOpen, paletteQuery, openProduct, panelCode, closeProduct, hideNav, searchBand],
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
@@ -146,6 +153,21 @@ export function useHideNav(on = true) {
     setHideNav(on)
     return () => setHideNav(false)
   }, [on, setHideNav])
+}
+
+/**
+ * Phone + tablet: show the plum header band with the search pinned under it (Home, Browse, a
+ * category shelf). The brand/title row scrolls away and the search stays — pure CSS sticky. While
+ * the band is up, the shell writes `--m-search-h` (px, the pinned part incl. the top safe area) on
+ * <html>, so a page can pin its own row under it: `top: var(--m-search-h, 0px)`. Desktop ignores it.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function useSearchBand(on = true) {
+  const { setSearchBand } = useShell()
+  useLayoutEffect(() => {
+    setSearchBand(on)
+    return () => setSearchBand(false)
+  }, [on, setSearchBand])
 }
 
 /** A page's sticky bottom action. See ShellContext. */

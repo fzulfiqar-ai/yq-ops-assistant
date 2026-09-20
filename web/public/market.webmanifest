@@ -2,7 +2,7 @@
   "id": "/",
   "name": "YQ Marketplace",
   "short_name": "YQ",
-  "description": "Order mobile accessories at trade prices from YQ Bahrain.",
+  "description": "Where Bahrain restocks. Restock faster. Sell more. Mobile accessories at trade prices for shops, from YQ Bahrain.",
   "start_url": "/?src=pwa",
   "scope": "/",
   "display": "standalone",
@@ -21,7 +21,7 @@
   ],
   "shortcuts": [
     { "name": "Search", "short_name": "Search", "url": "/search?src=shortcut", "icons": [{ "src": "/shortcut-search.png", "sizes": "96x96", "type": "image/png" }] },
-    { "name": "Your order", "short_name": "Cart", "url": "/cart?src=shortcut", "icons": [{ "src": "/shortcut-cart.png", "sizes": "96x96", "type": "image/png" }] },
+    { "name": "Your restock", "short_name": "Restock", "url": "/cart?src=shortcut", "icons": [{ "src": "/shortcut-cart.png", "sizes": "96x96", "type": "image/png" }] },
     { "name": "My orders", "short_name": "Orders", "url": "/orders?src=shortcut", "icons": [{ "src": "/shortcut-orders.png", "sizes": "96x96", "type": "image/png" }] }
   ]
 }

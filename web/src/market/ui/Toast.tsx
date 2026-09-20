@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react'
 import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { S } from '../strings'
 
 /**
  * Market toasts: CSS keyframes, market tokens, an optional action ("Undo", "View order").
@@ -88,7 +89,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={() => dismiss(t.id)}
-              aria-label="Dismiss"
+              aria-label={S.states.dismiss}
               className="-me-1 grid h-8 w-8 shrink-0 place-items-center rounded-xs text-white/70 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
             >
               <X size={15} aria-hidden="true" />

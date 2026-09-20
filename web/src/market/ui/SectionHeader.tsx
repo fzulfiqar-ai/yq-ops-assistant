@@ -21,17 +21,19 @@ export interface SectionHeaderProps {
 
 /**
  * The home/browse section header: Sora title, optional muted line, and "See all →" at the end,
- * sitting on the title's baseline (the rail header look, one step larger). The link keeps its
- * 36px visual box but its hit area reaches 44px, and it is described by the heading so screen
- * readers hear "See all, Restock essentials". No margins of its own: the section spaces it.
+ * sitting on the title's baseline. Sized for a dense marketplace, not an editorial page: 18px on
+ * phones (the Keeta/Talabat section weight — a section title, never louder than the cards), 22px
+ * from lg. The link keeps its 36px visual box but its hit area reaches 44px, and it is described
+ * by the heading so screen readers hear "See all, Restock essentials". No margins of its own: the
+ * section spaces it.
  */
 export function SectionHeader({ title, line, seeAllTo, seeAllLabel = S.home.seeAll, action, id, as: Heading = 'h2', className }: SectionHeaderProps) {
   return (
     <div className={cn('grid grid-cols-[minmax(0,1fr)_auto_auto] items-baseline', className)}>
-      <Heading id={id} className={cn('col-start-1 row-start-1 min-w-0 text-balance font-display text-xl font-bold text-ink lg:text-2xl', (action || seeAllTo) && 'pr-3')}>
+      <Heading id={id} className={cn('col-start-1 row-start-1 min-w-0 text-balance font-display text-lg font-bold text-ink lg:text-xl', (action || seeAllTo) && 'pe-3')}>
         {title}
       </Heading>
-      {action && <div className={cn('col-start-2 row-start-1 -my-2 flex items-center gap-1.5 self-center', seeAllTo && 'mr-1.5')}>{action}</div>}
+      {action && <div className={cn('col-start-2 row-start-1 -my-2 flex items-center gap-1.5 self-center', seeAllTo && 'me-1.5')}>{action}</div>}
       {seeAllTo && (
         <Link
           to={seeAllTo}

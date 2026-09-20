@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, Heart, Maximize2, MessageCircle, Plus, Share2 } from 'lucide-react'
+import { Check, Heart, Maximize2, MessageCircle, Plus, Share2, Store } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { deviceId, readCustomer, rememberViewed } from '../lib/device'
 import { track } from '../lib/events'
 import { postRestock } from '../lib/marketApi'
-import { badgeMeta, bhd, cardBadges, isOut, minQtyOf, money, niceCategory, stepOf, stockMeta, priceAnchor, productDetail, productName } from '../lib/format'
+import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, niceCategory, priceAnchor, productDetail, productName, stepOf, stockMeta } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
@@ -17,14 +17,17 @@ import { ProductImage, SIZES_HERO } from '../ui/ProductImage'
 import { Sheet } from '../ui/Sheet'
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
-import { MarketCard } from './MarketCard'
+import { HighMarginTag, MarketCard, VariantChips } from './MarketCard'
 import { QtySheet } from './QtySheet'
 
 /**
  * The product, over whichever page the merchant is on: a bottom sheet on phones, a dialog on
- * tablets, a right drawer on desktop. Photo (product/package), name and code, stock + badges,
- * price with compare-at, quantity rules, the tier ladder (current quantity highlighted), spec,
- * share, "Often ordered together", and a sticky footer with the one action.
+ * tablets, a right drawer on desktop. Photo (product/package, zoom), then the card's reading
+ * order at full size: category · brand · code, name, every variant chip, stock + "Ordered by N
+ * shops", the trade price (+ the real previous price when the price book cut it), the merchant's
+ * maths (retail and margin, from the price book — never struck through), quantity rules, the tier
+ * ladder (current quantity highlighted), details, save/share, "Often ordered together", and a
+ * sticky footer with the one action.
  */
 export default function ProductPanel({ code }: { code: string }) {
   const m = useMarket()
@@ -69,13 +72,15 @@ export default function ProductPanel({ code }: { code: string }) {
   const step = stepOf(item)
   const min = minQtyOf(item)
   const canOrder = !out || m.allowBackorder
-  const anchor = priceAnchor(item, m.showCompare)
-  const compare = anchor?.was ?? null
-  const savePct = anchor?.pct ?? null
+  const was = priceAnchor(item)?.was ?? null
+  const mg = marginOf(item)
   const tiers = m.publicTiers ? item.tiers || [] : []
-  const tellUrl = out && !m.allowBackorder && m.rep?.whatsapp_url ? `${m.rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(`Hello ${m.rep.first_name || ''}, please tell me when ${item.item_code} (${name}) is back in stock.`)}` : null
+  const tellUrl = out && !m.allowBackorder && m.rep?.whatsapp_url ? `${m.rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.card.tellBackText(m.rep.first_name || '', item.item_code, name))}` : null
   const shareUrl = `${window.location.origin}/p/${encodeURIComponent(item.item_code)}${m.rep ? `?ref=${encodeURIComponent(m.rep.slug)}` : ''}`
   const phone = viewport === 'phone'
+  const detail = productDetail(item)
+  const category = niceCategory(item.category)
+  const brand = (item.brand || '').trim().toUpperCase()
 
   const add = () => {
     m.add(item, undefined, 'panel')
@@ -89,7 +94,7 @@ export default function ProductPanel({ code }: { code: string }) {
         await navigator.share({ title: `${S.company} — ${name}`, text, url: shareUrl })
       } else {
         await navigator.clipboard.writeText(shareUrl)
-        toast('Link copied — paste it into WhatsApp', 'success')
+        toast(S.card.linkCopied, 'success')
       }
       track('share', { item_code: item.item_code })
     } catch {
@@ -100,8 +105,11 @@ export default function ProductPanel({ code }: { code: string }) {
   const footer = (
     <div className="flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="font-display text-xl font-extrabold leading-none tnum text-plum-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</div>
-        <div className="mt-1 text-2xs text-ink-2">{min > 1 ? `${S.card.min(min)} pcs` : S.card.perPiece}</div>
+        <div className="flex items-baseline gap-1">
+          <span className="font-display text-xl font-bold leading-none tnum text-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</span>
+          {item.price_bhd != null && <span className="text-2xs text-ink-3">{S.card.perPc}</span>}
+        </div>
+        <div className="mt-1 truncate text-2xs tnum text-ink-2">{min > 1 ? S.card.minPcs(min) : item.item_code}</div>
       </div>
       {added ? (
         <div className="flex h-12 min-w-[9rem] items-center justify-center gap-2 rounded-md bg-plum px-5 text-base font-semibold text-white">
@@ -146,12 +154,12 @@ export default function ProductPanel({ code }: { code: string }) {
               key={view}
               srcs={view === 'package' ? [item.package_image_url, item.product_image_url, item.thumb_url] : undefined}
               item={view === 'product' ? item : undefined}
-              alt={`${name} — ${view}`}
+              alt={`${name} — ${view === 'package' ? S.card.viewPackage : S.card.viewProduct}`}
               sizes={SIZES_HERO}
               size={512}
               eager
               className="mx-auto w-full max-w-[17rem] md:max-w-[26rem]"
-              imgClassName="p-4 md:p-6"
+              imgClassName={cn('p-4 md:p-6', out && 'opacity-70 saturate-[.25]')}
               iconSize={48}
               vtName={phone ? 'product-photo' : undefined}
             />
@@ -164,8 +172,8 @@ export default function ProductPanel({ code }: { code: string }) {
                 start={view === 'package' ? 1 : 0}
                 onClose={() => setZoom(false)}
                 photos={[
-                  { src: item.product_image_url || item.thumb_urls?.['512'] || item.thumb_url || '', label: 'Product' },
-                  ...(item.package_image_url ? [{ src: item.package_image_url, label: 'Package' }] : []),
+                  { src: item.product_image_url || item.thumb_urls?.['512'] || item.thumb_url || '', label: S.card.viewProduct },
+                  ...(item.package_image_url ? [{ src: item.package_image_url, label: S.card.viewPackage }] : []),
                 ].filter((x) => x.src)}
               />
             )}
@@ -175,20 +183,19 @@ export default function ProductPanel({ code }: { code: string }) {
                   {badgeMeta(b).label}
                 </Chip>
               ))}
-              {savePct != null && savePct > 0 && <Chip tone="ink">{S.card.save(savePct)}</Chip>}
             </div>
           </div>
           {item.package_image_url && (
-            <div className="mt-2 flex gap-1.5 px-4 md:px-0" role="group" aria-label="Photo">
+            <div className="mt-2 flex gap-1.5 px-4 md:px-0" role="group" aria-label={S.card.photo}>
               {(['product', 'package'] as const).map((v) => (
                 <button
                   key={v}
                   type="button"
                   onClick={() => setView(v)}
                   aria-pressed={view === v}
-                  className={cn('h-9 flex-1 rounded-sm border text-xs font-medium capitalize transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
+                  className={cn('h-9 flex-1 rounded-sm border text-xs font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
                 >
-                  {v}
+                  {v === 'package' ? S.card.viewPackage : S.card.viewProduct}
                 </button>
               ))}
             </div>
@@ -196,50 +203,74 @@ export default function ProductPanel({ code }: { code: string }) {
         </div>
 
         <div className="min-w-0 flex-1 px-4 pb-4 pt-4 md:px-0 md:pt-0 lg:pt-4">
-          <div className="text-xs text-ink-2">
-            {[niceCategory(item.category), item.brand].filter(Boolean).join(' · ')} · <span className="tnum">{item.item_code}</span>
-          </div>
+          {/* category · BRAND · CODE — the code is what tells look-alikes apart */}
+          <p className="flex flex-wrap items-baseline gap-x-1.5 text-xs text-ink-3">
+            {category && <span>{category}</span>}
+            {category && <span aria-hidden="true">·</span>}
+            {brand && <span className="font-semibold tracking-[0.06em]">{brand}</span>}
+            {brand && <span aria-hidden="true">·</span>}
+            <span className="font-semibold tnum text-ink">{item.item_code}</span>
+          </p>
           <h2 className="mt-1 font-display text-xl font-bold leading-tight text-ink">{name}</h2>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            <Chip tone={stock.tone} dot size="md">
+          <VariantChips item={item} layout="wrap" className="mt-2.5" />
+
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <Chip tone={stock.tone === 'warn' ? 'deal' : stock.tone} dot size="md">
               {stock.label}
             </Chip>
-            {item.social_proof && <span className="text-xs text-ink-2">{item.social_proof}</span>}
-          </div>
-          {out && m.allowBackorder && <p className="mt-2.5 rounded-sm bg-warn-soft px-3 py-2 text-xs leading-snug text-warn">Sold out — order now and your representative confirms the ETA.</p>}
-
-          <div className="mt-4 flex flex-wrap items-end gap-x-3 gap-y-1">
-            <div className="font-display text-2xl font-extrabold leading-none tnum text-plum-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</div>
-            {compare != null && (
-              <span className="pb-0.5 text-xs tnum text-ink-2">
-                {anchor?.kind === 'was' ? S.card.was : S.card.retail} <s>BHD {money(compare)}</s>
+            {item.social_proof && (
+              <span className="inline-flex items-center gap-1.5 text-xs text-ink-2">
+                <Store size={14} aria-hidden="true" className="shrink-0 text-ink-3" />
+                {item.social_proof}
               </span>
             )}
           </div>
-          <div className="mt-1 text-xs text-ink-2">
-            {S.card.perPiece}
-            {min > 1 ? ` · ${S.card.min(min)} pcs` : ''}
-            {step > 1 ? ` · ${S.card.packs(step)}` : ''}
+          {out && m.allowBackorder && <p className="mt-2.5 rounded-sm bg-warn-soft px-3 py-2 text-xs leading-snug text-warn">{S.card.backorderNote}</p>}
+
+          <div className="mt-4 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+            <span className="font-display text-2xl font-bold leading-none tnum text-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</span>
+            {item.price_bhd != null && <span className="text-xs text-ink-3">{S.card.perPc}</span>}
+            {was != null && (
+              <span className="ms-1.5 text-xs tnum text-ink-3">
+                {S.card.was} <s>{bhd(was)}</s>
+              </span>
+            )}
           </div>
+          {(min > 1 || step > 1) && (
+            <div className="mt-1.5 text-xs tnum text-ink-2">
+              {[min > 1 ? S.card.minPcs(min) : null, step > 1 ? S.card.packs(step) : null].filter(Boolean).join(' · ')}
+            </div>
+          )}
+
+          {/* the merchant's maths — real price-book numbers only (marginOf) */}
+          {mg && (
+            <div className="mt-3 flex items-start justify-between gap-3 rounded-md bg-deal-soft px-3 py-2.5 tnum text-deal-ink">
+              <div className="min-w-0 text-xs leading-[18px]">
+                <div>{S.deals.retail(bhd(mg.retail))}</div>
+                <div className="text-sm font-bold">{S.deals.margin(bhd(mg.margin), mg.pct)}</div>
+              </div>
+              {!out && <HighMarginTag item={item} className="mt-0.5 shrink-0" />}
+            </div>
+          )}
 
           {tiers.length > 0 && (
             <div className="mt-4 overflow-hidden rounded-md border border-line">
               <table className="w-full text-start text-sm">
-                <caption className="sr-only">Quantity price breaks</caption>
+                <caption className="sr-only">{S.card.breaksCaption}</caption>
                 <thead>
                   <tr className="bg-canvas text-2xs uppercase tracking-[0.06em] text-ink-2">
                     <th scope="col" className="px-3 py-2 text-start font-semibold">
-                      Quantity
+                      {S.card.colQty}
                     </th>
                     <th scope="col" className="px-3 py-2 text-end font-semibold">
-                      Price each
+                      {S.card.colEach}
                     </th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr className={cn('border-t border-line-2', qty > 0 && !tiers.some((t) => qty >= t.min_qty) && 'bg-plum-soft')}>
                     <th scope="row" className="px-3 py-2 text-start font-medium text-ink">
-                      1+ pcs
+                      {S.card.pcsPlus(1)}
                     </th>
                     <td className="px-3 py-2 text-end font-display font-bold tnum text-ink">{bhd(item.price_bhd)}</td>
                   </tr>
@@ -249,7 +280,7 @@ export default function ProductPanel({ code }: { code: string }) {
                     return (
                       <tr key={t.min_qty} className={cn('border-t border-line-2', active && 'bg-plum-soft')}>
                         <th scope="row" className="px-3 py-2 text-start font-medium text-ink">
-                          {t.min_qty}+ pcs
+                          {S.card.pcsPlus(t.min_qty)}
                         </th>
                         <td className="px-3 py-2 text-end font-display font-bold tnum text-plum-ink">{bhd(t.unit_price_bhd)}</td>
                       </tr>
@@ -260,10 +291,10 @@ export default function ProductPanel({ code }: { code: string }) {
             </div>
           )}
 
-          {productDetail(item) && (
+          {detail && (
             <div className="mt-5">
-              <h3 className="text-2xs font-bold uppercase tracking-[0.08em] text-ink-2">Details</h3>
-              <p className="mt-1.5 whitespace-pre-line text-sm leading-[1.6] text-ink-2">{productDetail(item)}</p>
+              <h3 className="text-2xs font-bold uppercase tracking-[0.08em] text-ink-2">{S.card.details}</h3>
+              <p className="mt-1.5 whitespace-pre-line text-sm leading-[1.6] text-ink-2">{detail}</p>
             </div>
           )}
 
@@ -281,7 +312,7 @@ export default function ProductPanel({ code }: { code: string }) {
               <h3 className="font-display text-base font-bold text-ink">{S.rails.together}</h3>
               <div className="rail -mx-4 mt-3 px-4 pb-1 md:mx-0 md:px-0">
                 {pairs.slice(0, 6).map((p) => (
-                  <MarketCard key={p.item_code} item={p} variant="compact" from="together" className="!w-[9.5rem]" />
+                  <MarketCard key={p.item_code} item={p} variant="compact" from="together" className="!w-[10rem]" />
                 ))}
               </div>
             </section>

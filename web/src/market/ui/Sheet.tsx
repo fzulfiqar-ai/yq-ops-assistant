@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type PointerEvent as R
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { S } from '../strings'
 
 /**
  * The market's one modal surface.
@@ -153,7 +154,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
     <div className="fixed inset-0 z-sheet flex" role="presentation">
       <button
         type="button"
-        aria-label="Close"
+        aria-label={S.states.close}
         tabIndex={-1}
         onClick={close}
         style={{ animation: closing ? 'm-fade-in 150ms ease-in reverse both' : 'm-fade-in 200ms ease-out both' }}
@@ -186,7 +187,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
             <h2 id={titleId} className="sr-only">
               {title}
             </h2>
-            <button type="button" onClick={close} aria-label="Close" className="absolute end-2 top-2 z-10 grid h-11 w-11 place-items-center rounded-sm bg-surface/80 text-ink-2 backdrop-blur hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+            <button type="button" onClick={close} aria-label={S.states.close} className="absolute end-2 top-2 z-10 grid h-11 w-11 place-items-center rounded-sm bg-surface/80 text-ink-2 backdrop-blur hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
               <X size={18} aria-hidden="true" />
             </button>
           </>
@@ -206,7 +207,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'sheet', size 
             <button
               type="button"
               onClick={close}
-              aria-label="Close"
+              aria-label={S.states.close}
               className="-me-1.5 -mt-0.5 grid h-11 w-11 shrink-0 place-items-center rounded-sm text-ink-2 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70"
             >
               <X size={18} aria-hidden="true" />

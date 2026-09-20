@@ -1,6 +1,5 @@
 import type { ShopItem } from '@/lib/shopApi'
-import { itemText } from './facets'
-import { codeKey, hasBadge } from './format'
+import { codeKey } from './format'
 import type { SearchIndex } from './search'
 
 /** Grouped search results: Codes (exact/prefix, ≤3) · Products (index hits, ≤20) · Categories (≤2). */
@@ -25,26 +24,4 @@ export function groupResults(q: string, items: ShopItem[], index: SearchIndex | 
   const ql = query.toLowerCase()
   const cats = Array.from(new Set(items.map((i) => i.category || 'OTHER'))).filter((c) => c.toLowerCase().includes(ql) || ql.split(/\s+/).some((w) => w.length > 2 && c.toLowerCase().includes(w)))
   return { codes, products, categories: cats.slice(0, 2), exact }
-}
-
-/** "Popular right now" — best sellers' names + the vocabulary merchants actually type. */
-export function popularTerms(items: ShopItem[]): string[] {
-  const best = items.filter((i) => hasBadge(i, 'best_seller') || hasBadge(i, 'trending'))
-  const text = best.map(itemText).join(' ').toLowerCase()
-  const vocab: [string, RegExp][] = [
-    ['Type-C cable', /type[\s-]?c|usb[\s-]?c/],
-    ['20W charger', /20\s?w/],
-    ['TWS', /tws|earbud/],
-    ['Car charger', /car charger/],
-    ['Power bank', /power ?bank|mah/],
-    ['Lightning', /lightning|iphone/],
-    ['100W', /100\s?w/],
-    ['Wireless', /wireless|magsafe/],
-  ]
-  const terms = vocab.filter(([, r]) => r.test(text)).map(([t]) => t)
-  const names = best
-    .slice(0, 4)
-    .map((i) => (i.display_name || i.item_code).split(/\s[(·]/)[0].trim())
-    .filter((n) => n.length <= 28)
-  return Array.from(new Set([...terms, ...names])).slice(0, 8)
 }

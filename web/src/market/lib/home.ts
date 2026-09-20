@@ -1,6 +1,8 @@
 import type { CatalogPayload, Offer, OrderStatusPayload, ShopItem } from '@/lib/shopApi'
-import { deviceId, recentlyViewed } from './device'
-import { hasBadge, hashStr, marginOf } from './format'
+import { recentlyViewed } from './device'
+import { hasBadge, marginOf, priceAnchor } from './format'
+import type { Slide } from './slides'
+import { S } from '../strings'
 
 /**
  * The home page's merchandising, as pure functions over the payload and device memory, so the
@@ -17,20 +19,13 @@ export function bestSellers(items: ShopItem[]): ShopItem[] {
   return inStock(items).filter((i) => hasBadge(i, 'best_seller')).slice(0, RAIL_MAX)
 }
 
-export function justArrived(items: ShopItem[]): ShopItem[] {
-  return inStock(items).filter((i) => hasBadge(i, 'new')).slice(0, RAIL_MAX)
-}
-
-export function onOffer(items: ShopItem[]): ShopItem[] {
-  return items.filter((i) => hasBadge(i, 'on_offer') || i.compare_at_bhd != null).slice(0, RAIL_MAX)
-}
-
-export function clearance(items: ShopItem[]): ShopItem[] {
-  return inStock(items).filter((i) => hasBadge(i, 'clearance')).slice(0, RAIL_MAX)
-}
-
-export function priceDrops(items: ShopItem[]): ShopItem[] {
-  return inStock(items).filter((i) => hasBadge(i, 'price_drop') || i.was_bhd != null).slice(0, RAIL_MAX)
+/**
+ * A price drop we can show: the price book really went down and the card prints the old trade
+ * price (`was_bhd` above today's price — exactly when `priceAnchor()` returns it). A `price_drop`
+ * badge alone is not enough: every "price drops" surface promises the old price on the card.
+ */
+export function hasRealDrop(i: ShopItem): boolean {
+  return priceAnchor(i) != null
 }
 
 /* ───────────────────────── v3: deals, exclusive rails, brands ───────────────────────── */
@@ -72,9 +67,10 @@ function isLiveOffer(o: Offer): boolean {
 }
 
 /**
- * The Stock-Up Deals section, from real data only: price-book drops, live offers, bundle rules,
- * and last-chance lines. Every set is in stock. A code sits in one of drops/offers/bundles first
- * (drops and offers may share a code), and last-chance never repeats one of them.
+ * The Stock-Up Deals section, from real data only: price-book drops that carry the old price
+ * (`hasRealDrop`), live offers, bundle rules, and last-chance lines. Every set is in stock. A code
+ * sits in one of drops/offers/bundles first (drops and offers may share a code), and last-chance
+ * never repeats one of them.
  */
 export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
   const live = inStock(items)
@@ -84,7 +80,7 @@ export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
     if (!isLiveOffer(o) || !(kind === 'bundle_price' || kind.includes('bundle'))) continue
     for (const c of o.scope_codes || []) bundleCodes.add(c)
   }
-  const drops = live.filter((i) => hasBadge(i, 'price_drop') || i.was_bhd != null)
+  const drops = live.filter(hasRealDrop)
   const bundles = live.filter((i) => bundleCodes.has(i.item_code))
   const offerItems = live.filter((i) => hasBadge(i, 'on_offer') && !bundleCodes.has(i.item_code))
   const taken = new Set([...drops, ...offerItems, ...bundles].map((i) => i.item_code))
@@ -97,6 +93,19 @@ export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
     all.push(i)
   }
   return { drops, lastChance: last, offers: offerItems, bundles, all, hasRealDeals: drops.length + offerItems.length + bundles.length > 0 }
+}
+
+/**
+ * The one line a Deals shelf may claim: it names only the kinds that are really in the set. The
+ * home Deals section and /shop?f=deals both read it, so they cannot drift apart — `hasRealDeals`
+ * is true for a bare offer or bundle too, and promising "price drops" with none in the price book
+ * would be a lie.
+ */
+export function dealsLine(sets: DealSets): string {
+  const last = sets.lastChance.length > 0
+  if (sets.drops.length) return last ? S.deals.dealsLine : S.deals.dealsLineDrops
+  if (sets.offers.length + sets.bundles.length) return last ? S.deals.dealsLineMixed : S.deals.dealsLineOffers
+  return S.deals.line
 }
 
 export interface HomeRails {
@@ -161,6 +170,31 @@ export function brandTiles(items: ShopItem[]): BrandTile[] {
   return tiles.sort((a, b) => b.count - a.count || a.brand.localeCompare(b.brand))
 }
 
+/**
+ * The desktop hero composition from ONE slide list: a slider stage (≤3 slides) and a row of pastel
+ * tiles (2–3) under it, FreshMart's three promo tiles. Tiles are data slides only, taken from the
+ * end of the list (the lowest priority), so campaigns and Order again stay on the stage; pastel
+ * canvases are preferred over the night one. With 5+ slides the row gets 3 tiles, with 3–4 it
+ * gets 2; fewer than 2 possible tiles → no row, the stage keeps up to 3. A slide shows at most
+ * once; the ones left out (a 4th campaign) stay unclaimed, so the aside Spotlight can carry them.
+ */
+export function heroSplit(slides: readonly Slide[]): { hero: Slide[]; tiles: Slide[] } {
+  const n = slides.length
+  const want = n >= 5 ? 3 : n >= 3 ? 2 : 0
+  const tileable = (s: Slide) => s.kind === 'data' && s.id !== 'd:again'
+  const picked = new Set<string>()
+  // pastel first, then the night slide, each walked from the end of the list; slide 1 (the LCP
+  // candidate catalog-prefetch.js preloads) always stays on the stage
+  for (const pass of [(s: Slide) => s.canvas !== 'night', () => true]) {
+    for (let i = n - 1; i >= 1 && picked.size < want; i--) {
+      const s = slides[i]
+      if (!picked.has(s.id) && tileable(s) && pass(s)) picked.add(s.id)
+    }
+  }
+  if (picked.size < 2) return { hero: slides.slice(0, 3), tiles: [] }
+  return { hero: slides.filter((s) => !picked.has(s.id)).slice(0, 3), tiles: slides.filter((s) => picked.has(s.id)) }
+}
+
 export function pickedUpAgain(items: ShopItem[], inCart: Set<string>): ShopItem[] {
   const byCode = new Map(items.map((i) => [i.item_code, i]))
   return recentlyViewed()
@@ -169,32 +203,11 @@ export function pickedUpAgain(items: ShopItem[], inCart: Set<string>): ShopItem[
     .slice(0, 8)
 }
 
-/**
- * The hero product: the first best seller in stock with a photo — deterministic, because the
- * prefetch script (public/catalog-prefetch.js) preloads exactly this photo as the LCP image.
- * The shelf order already leads with the biggest category.
- */
-export function heroProduct(items: ShopItem[], categories: string[]): { item: ShopItem; rank: number; category: string } | null {
-  const withPhoto = inStock(items).filter((i) => i.thumb_url || i.thumb_urls?.['320'] || i.product_image_url)
-  const best = withPhoto.filter((i) => hasBadge(i, 'best_seller'))
-  const pool = best.length ? best : withPhoto
-  if (!pool.length) return null
-  const catOrder = new Map(categories.map((c, i) => [c, i]))
-  const pick = pool.slice().sort((a, b) => (catOrder.get(a.category || '') ?? 99) - (catOrder.get(b.category || '') ?? 99))[0]
-  return { item: pick, rank: best.length ? 1 : 0, category: pick.category || '' }
-}
-
-/** A stable per-device seed for anything that should vary between merchants (not the hero). */
-export function deviceSeed(): number {
-  return hashStr(deviceId())
-}
-
 /** One tile image per category: its first best seller with a photo, else the first with a photo. */
 export function categoryTiles(items: ShopItem[], categories: string[]) {
   return categories.map((c) => {
     const inCat = items.filter((i) => (i.category || 'OTHER') === c)
-    const photo = (i: ShopItem) => Boolean(i.thumb_url || i.product_image_url)
-    const img = inCat.find((i) => hasBadge(i, 'best_seller') && photo(i) && i.stock_status !== 'out_of_stock') || inCat.find(photo) || null
+    const img = inCat.find((i) => hasBadge(i, 'best_seller') && hasPhoto(i) && i.stock_status !== 'out_of_stock') || inCat.find((i) => hasPhoto(i) && i.stock_status !== 'out_of_stock') || inCat.find(hasPhoto) || null
     return { category: c, count: inCat.length, newCount: inCat.filter((i) => hasBadge(i, 'new')).length, image: img }
   })
 }

@@ -255,21 +255,33 @@
     background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.6), transparent);
     animation: m-shimmer 1.4s linear infinite;
   }
-  /* cards below the fold skip layout/paint until they scroll near (React still renders them) */
+  /* cards below the fold skip layout/paint until they scroll near (React still renders them).
+   * Placeholder heights = card v3 (components/MarketCard.tsx) without the optional rows, measured
+   * from its classes: borders 2 + square photo (card width − 2) + body. `auto` keeps the real size
+   * once a card has rendered, so these only matter for cards never seen yet.
+   *   grid body    hairline 1 · p-3 24 · kicker 14 · name 2+36 · chips 8+20 · price 8+22 · action 12+44 = 191
+   *                → 2-col phone at 390px (card 176.5): 368 · md 3-col (card 229; name 38, price 24): 424
+   *   compact body hairline 1 · 8+10 · kicker 14 · name 2+34 · chips 6+20 · price 6+20 · action 10+40 = 171
+   *                → clamp(10rem,46vw,13rem) at 390px (179.4): 350 · lg rail cell (200–230): 371–402
+   * Optional rows add: margin strip +30 (short form, body < 12rem) or +50 (full form), low stock +22,
+   * social proof +22 (one line) / +36 (two), tiers +16 per line. */
   .cv-card {
     content-visibility: auto;
-    contain-intrinsic-size: auto 340px;
+    contain-intrinsic-size: auto 368px;
   }
   .cv-compact {
     content-visibility: auto;
-    contain-intrinsic-size: auto 250px;
+    contain-intrinsic-size: auto 350px;
   }
-  /* pointer tilt (hero only): the hook writes --rx/--ry */
-  .tilt {
-    transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
-    transition: transform var(--m-d-3) var(--m-ease);
-    transform-style: preserve-3d;
-    will-change: transform;
+  @media (min-width: 768px) {
+    .cv-card {
+      contain-intrinsic-size: auto 424px;
+    }
+  }
+  @media (min-width: 1024px) {
+    .cv-compact {
+      contain-intrinsic-size: auto 386px;
+    }
   }
 }
 
@@ -424,9 +436,6 @@
 .anim-tick-down {
   animation: m-tick-down var(--m-d-1) var(--m-ease);
 }
-.anim-pop {
-  animation: m-pop var(--m-d-3, 320ms) var(--m-ease-spring, cubic-bezier(.22,1.18,.36,1)) both;
-}
 .anim-fade-in {
   animation: m-fade-in var(--m-d-2) var(--m-ease) both;
 }
@@ -463,9 +472,6 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
-  }
-  .tilt {
-    transform: none !important;
   }
   .skeleton::after {
     display: none;
@@ -600,6 +606,28 @@
     filter: blur(var(--arc-blur-0));
   }
 }
+/* .is-opening (components/Splash.tsx, full-screen): the arcs' box is wider than the screen and sunk
+ * below it, so the rim reads as a low dawn curve rather than a dome. In both presets the white rim
+ * crests at ~66% of the height (portrait 65.6%, landscape 66.2%) and the core is dark again by ~76%;
+ * the splash lays its text above and below that line, so change the two together. */
+@layer components {
+  .horizon.is-opening > i {
+    inset: 35% -30% -25%;
+  }
+  @media (min-aspect-ratio: 1/1) {
+    .horizon.is-opening > i {
+      inset: 23% -20% -50%;
+    }
+  }
+}
+/* .is-offset (components/SlideCard.tsx, ComposedCreative.tsx): a promo card on the night canvas. The
+ * arcs' box moves under the art column and sinks, so the rim crests (~60% of the height, ~84% across)
+ * behind the product discs instead of behind the text; SlideCard adds a night scrim on the text side. */
+@layer components {
+  .horizon.is-offset > i {
+    inset: 30% -26% -18% 42%;
+  }
+}
 /* end v3: horizon */
 
 /* v3: sash */
@@ -623,6 +651,17 @@
   }
   [dir='rtl'] .band-sash::before {
     transform: scaleX(-1);
+  }
+  /* The phone band (shell/PhoneHeader.tsx) uses the corner cut: the wedge lives in the brand row's
+   * far corner (top edge at --sash-x, far edge down to --sash-y of the band), so once the brand row
+   * has scrolled away the pinned search strip is solid plum — one colour with the plum theme-color —
+   * with only the wedge's tip left in its corner. */
+  .band-sash.sash-corner::before {
+    clip-path: polygon(var(--sash-x, 50%) 0, 100% 0, 100% var(--sash-y, 76%));
+  }
+  /* keyboard focus and #anchors never land under the pinned band; 0 when no band is mounted */
+  html {
+    scroll-padding-top: var(--m-search-h, 0px);
   }
 }
 /* end v3: sash */
@@ -670,6 +709,256 @@
     background-image: var(--m-grad-night);
     color: #fff;
   }
+}
+/* SlideCard (components/SlideCard.tsx). The card is an inline-size container named `slide`, so its
+ * type scales with the card wherever it sits; [data-size] picks the scale. Outside @layer on purpose:
+ * these beat Tailwind's line-clamp on the same elements. Every cq size follows a px fallback line. */
+.slide-card {
+  container: slide / inline-size;
+}
+/* the YQ sash behind the art (the header's diagonal); the plum canvas uses the header's own tint */
+.slide-sash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-color: hsl(0 0% 100% / 0.4);
+  clip-path: polygon(60% 0, 100% 0, 100% 100%, 42% 100%);
+}
+.canvas-plum .slide-sash {
+  background-color: hsl(var(--m-sash));
+}
+.slide-card[data-size='aside'] .slide-sash {
+  clip-path: polygon(30% 0, 100% 0, 100% 64%);
+}
+/* legibility on a cover photo (canvas colour → clear) and over the night horizon */
+.slide-scrim {
+  --scrim: var(--m-tile-lilac);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, hsl(var(--scrim)) 0%, hsl(var(--scrim) / 0.92) 40%, hsl(var(--scrim) / 0) 72%);
+}
+.canvas-apricot .slide-scrim {
+  --scrim: var(--m-tile-apricot);
+}
+.canvas-mint .slide-scrim {
+  --scrim: var(--m-tile-mint);
+}
+.canvas-plum .slide-scrim {
+  --scrim: var(--m-plum);
+}
+.canvas-night .slide-scrim {
+  --scrim: var(--m-night);
+  background: linear-gradient(90deg, hsl(var(--scrim) / 0.85) 0%, hsl(var(--scrim) / 0.55) 38%, hsl(var(--scrim) / 0) 62%);
+}
+.slide-card[data-size='aside'] .slide-scrim {
+  background: linear-gradient(0deg, hsl(var(--scrim) / 0.94) 0%, hsl(var(--scrim) / 0.8) 40%, hsl(var(--scrim) / 0) 70%);
+}
+.slide-kicker {
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.slide-title {
+  font-size: 19px;
+  font-size: clamp(16px, 5.9cqi, 22px);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+.slide-card[data-size='hero'] .slide-kicker {
+  font-size: 12px;
+  line-height: 16px;
+}
+.slide-card[data-size='hero'] .slide-title {
+  font-size: 40px;
+  font-size: clamp(28px, 5.4cqi, 52px);
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+}
+.slide-card[data-size='hero'] .slide-line {
+  font-size: 15px;
+  font-size: clamp(14px, 1.8cqi, 18px);
+}
+.slide-card[data-size='tile'] .slide-title {
+  font-size: 20px;
+  font-size: clamp(17px, 7cqi, 26px);
+}
+.slide-card[data-size='aside'] .slide-title {
+  font-size: 20px;
+  font-size: clamp(18px, 6.6cqi, 24px);
+}
+.slide-card[data-size='tile'] .slide-line {
+  display: none;
+}
+.slide-card[data-size='aside'] .slide-line {
+  -webkit-line-clamp: 1;
+}
+/* 320–360 px phones: one line of copy, a tighter CTA, and no sticker over the centre photo */
+@container slide (max-width: 300px) {
+  .slide-line {
+    -webkit-line-clamp: 1;
+  }
+  .slide-card[data-size='phone'] .slide-cta {
+    padding-inline: 10px;
+    font-size: 11px;
+  }
+  .slide-card[data-size='phone'] .slide-sticker {
+    display: none;
+  }
+}
+@container slide (min-width: 440px) {
+  .slide-card[data-size='tile'] .slide-line {
+    display: -webkit-box;
+  }
+}
+/* a round word sticker, slapped on at −10° (Last chance · New · Price drops) */
+.slide-sticker {
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  width: clamp(54px, 17cqi, 92px);
+  aspect-ratio: 1;
+  padding: 0 6px;
+  border-radius: 9999px;
+  text-align: center;
+  font-family: var(--m-font-display);
+  font-size: 10px;
+  font-size: clamp(9.5px, 2.9cqi, 14px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  transform: rotate(-10deg);
+  box-shadow: 0 0 0 2px #fff, 0 10px 22px -10px hsl(268 30% 10% / 0.5);
+}
+.slide-photo {
+  filter: drop-shadow(0 14px 18px hsl(268 30% 10% / 0.2));
+}
+/* ComposedCreative: a size container that fills its parent; discs sized in container units (centre
+ * --dc, sides --ds, side offset --ox) so three photos fan inside the box at any aspect, never cut.
+ * Transform = centre + offset (--x/--y) + state lift (--lift) · fan (--r × --fan) · scale (--sc). */
+.creative {
+  --dc: min(64cqh, 50cqw);
+  --ds: min(50cqh, 39cqw);
+  --ox: min(calc(48cqw - var(--ds) / 2), calc(var(--dc) * 0.66));
+  position: relative;
+  width: 100%;
+  height: 100%;
+  container-type: size;
+}
+.creative-disc {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--d, var(--dc));
+  aspect-ratio: 1;
+  border-radius: 9999px;
+  background-color: #fff;
+  box-shadow: 0 1px 2px hsl(268 30% 10% / 0.06), 0 16px 32px -16px hsl(268 30% 10% / 0.45);
+  transform: translate3d(calc(-50% + var(--x, 0px)), calc(-50% + var(--y, 0px) + var(--lift, 0%)), 0) rotate(calc(var(--r, 0deg) * var(--fan, 1))) scale(var(--sc, 1));
+}
+.creative-disc[data-pos='c'] {
+  z-index: 3;
+}
+.creative-disc[data-pos='l'] {
+  --d: var(--ds);
+  --x: calc(var(--ox) * -1);
+  --y: 7cqh;
+  --r: -8deg;
+  z-index: 2;
+}
+.creative-disc[data-pos='r'] {
+  --d: var(--ds);
+  --x: var(--ox);
+  --y: 7cqh;
+  --r: 8deg;
+  z-index: 1;
+}
+.creative[data-count='2'] .creative-disc {
+  --d: min(58cqh, 45cqw);
+  --y: 3cqh;
+}
+.creative[data-count='2'] [data-pos='c'] {
+  --x: calc(var(--d) * -0.36);
+  --r: -6deg;
+}
+.creative[data-count='2'] [data-pos='l'] {
+  --x: calc(var(--d) * 0.36);
+  --y: 8cqh;
+  --r: 6deg;
+}
+.creative[data-count='1'] .creative-disc {
+  --d: min(76cqh, 62cqw);
+  --r: -4deg;
+}
+.creative[data-canvas='plum'] .creative-disc,
+.creative[data-canvas='night'] .creative-disc {
+  box-shadow: 0 0 0 1px hsl(0 0% 100% / 0.55), 0 20px 40px -16px hsl(260 60% 4% / 0.75);
+}
+@supports not (width: 1cqh) {
+  .creative-disc {
+    width: 44%;
+    transform: translate(-50%, -50%);
+  }
+  .creative-disc[data-pos='l'] {
+    transform: translate(-102%, -42%) rotate(-8deg);
+  }
+  .creative-disc[data-pos='r'] {
+    transform: translate(2%, -42%) rotate(8deg);
+  }
+}
+/* The dwell fill on the active dot (PromoSlider desktop, Spotlight): the element sets
+ * animation-duration and animation-play-state inline, in step with the slide timer. */
+@keyframes m-dwell {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.slide-dwell {
+  animation: m-dwell linear both;
+}
+.slide-dwell.is-static {
+  animation: none;
+}
+/* Slide states (PromoSlider / Spotlight mark each slide data-slide-state="active|idle"): an idle
+ * slide's discs rest lower and tighter and spring into the fan when it becomes active; on a stage
+ * the copy rises too. Hover spreads the fan. Nothing here runs under reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .creative-disc {
+    transition: transform 720ms var(--m-ease-spring);
+    transition-delay: calc(var(--k, 0) * 70ms);
+  }
+  [data-slide-state='idle'] .creative-disc {
+    --lift: 12%;
+    --fan: 0.3;
+    --sc: 0.92;
+    transition-delay: 0ms;
+  }
+  .slider-stage .slide-copy {
+    transition: transform 620ms var(--m-ease);
+  }
+  .slider-stage [data-slide-state='idle'] .slide-copy {
+    transform: translate3d(0, 10px, 0);
+  }
+  @media (hover: hover) {
+    .slide-card:hover .creative-disc {
+      --fan: 1.22;
+    }
+  }
+}
+/* RTL: SlideCard lays itself out with logical utilities (start/end), but a clip-path polygon and a
+ * gradient angle have no writing-mode form — so the sash and the copy-side scrim mirror instead.
+ * The aside scrim is a vertical (0deg) gradient, which scaleX leaves as it was. */
+[dir='rtl'] .slide-sash,
+[dir='rtl'] .slide-scrim {
+  transform: scaleX(-1);
 }
 /* end v3: slider */
 
@@ -731,6 +1020,23 @@
   @media (prefers-reduced-motion: no-preference) {
     .sweep::after {
       animation: m-sweep 900ms cubic-bezier(0.4, 0, 0.2, 1) var(--sweep-delay, 0ms) both;
+    }
+  }
+}
+/* The opening's entrance (components/Splash.tsx), on the base keyframes: .open-fade (overlay/halo),
+ * .open-pop (logo tile, spring), .open-rise (lines). Timing per element via --open-delay (and
+ * --open-dur for the fade). Motion-gated like everything here: under reduced motion none of them
+ * runs, so the splash is a complete static frame, never an invisible one. */
+@layer components {
+  @media (prefers-reduced-motion: no-preference) {
+    .open-fade {
+      animation: m-fade-in var(--open-dur, 520ms) var(--m-ease) var(--open-delay, 0ms) both;
+    }
+    .open-pop {
+      animation: m-scale-in 620ms var(--m-ease-spring) var(--open-delay, 0ms) both;
+    }
+    .open-rise {
+      animation: m-toast-in 680ms cubic-bezier(0.16, 1, 0.3, 1) var(--open-delay, 0ms) both;
     }
   }
 }

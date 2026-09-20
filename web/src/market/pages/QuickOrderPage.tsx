@@ -168,7 +168,7 @@ export default function QuickOrderPage() {
     writeLists(next)
     setSaveOpen(false)
     setListName('')
-    toast(`${S.quick.saveList}: ${name}`, 'success')
+    toast(S.quick.listSaved(name), 'success')
   }
   const loadList = (l: SavedList) => {
     const lines = l.lines.map((x) => ({ item: m.itemsByCode.get(x.item_code)!, qty: x.qty })).filter((x) => x.item)
@@ -187,7 +187,7 @@ export default function QuickOrderPage() {
         <span className="text-sm text-ink-2">{S.cart.summary(resolved.length, units)}</span>
         <span className="font-display text-xl font-extrabold tnum text-ink">≈ {bhd(total)}</span>
       </div>
-      {unresolved > 0 && <p className="mt-1 text-xs text-warn">{unresolved} × {S.quick.notFound}</p>}
+      {unresolved > 0 && <p className="mt-1 text-xs text-warn">{S.quick.unresolved(unresolved)}</p>}
       <Button size="lg" full className="mt-4" disabled={!resolved.length} onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" />}>
         {S.quick.addAll(resolved.length)}
       </Button>
@@ -201,19 +201,20 @@ export default function QuickOrderPage() {
     <div className="px-gutter lg:px-0">
       <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start lg:gap-6">
         <div>
-          <div className="hidden lg:block">
-            <h1 className="font-display text-2xl font-bold text-ink">{S.quick.title}</h1>
-            <p className="mt-1 text-sm text-ink-2">{S.quick.intro}</p>
+          <div>
+            {/* the phone header carries the title; the intro frames the page everywhere */}
+            <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{S.quick.title}</h1>
+            <p className="text-sm leading-snug text-ink-2 lg:mt-1">{S.quick.intro}</p>
           </div>
 
           {/* templates */}
-          <div className="mt-1 flex flex-wrap gap-2 lg:mt-4">
+          <div className="mt-3 flex flex-wrap gap-2 lg:mt-4">
             <Button variant="secondary" size="sm" onClick={() => setPasteOpen(true)} icon={<ClipboardPaste size={15} aria-hidden="true" />}>
               {S.quick.paste}
             </Button>
             {last && (
               <Button variant="secondary" size="sm" onClick={() => { loadedRef.current = null; setParams({ load: 'last' }) }} icon={<RotateCcw size={15} aria-hidden="true" />}>
-                {S.quick.lastOrder(fmtDateShort(new Date(last.ts).toISOString()) || '', 0).replace(' · 0 products', '')}
+                {S.quick.lastOrderShort(fmtDateShort(new Date(last.ts).toISOString()) || '')}
               </Button>
             )}
             {lists.map((l) => (
@@ -221,7 +222,7 @@ export default function QuickOrderPage() {
                 <button type="button" onClick={() => loadList(l)} className="h-10 px-3 text-sm font-semibold text-ink hover:bg-plum-wash">
                   {l.name} <span className="text-xs font-normal tnum text-ink-3">· {l.lines.length}</span>
                 </button>
-                <button type="button" onClick={() => deleteList(l.name)} aria-label={`Delete ${l.name}`} className="grid h-10 w-9 place-items-center border-s border-line text-ink-3 hover:bg-bad-soft hover:text-bad">
+                <button type="button" onClick={() => deleteList(l.name)} aria-label={S.quick.deleteList(l.name)} className="grid h-10 w-9 place-items-center border-s border-line text-ink-3 hover:bg-bad-soft hover:text-bad">
                   <X size={14} aria-hidden="true" />
                 </button>
               </span>
@@ -302,13 +303,14 @@ export default function QuickOrderPage() {
           </ol>
           {rows.length === 1 && !rows[0].query && !rows[0].item && <p className="mt-3 text-sm text-ink-2">{S.quick.empty}</p>}
           <Button variant="ghost" className="mt-3" onClick={() => setRows((rs) => [...rs, newRow()])} icon={<Plus size={15} aria-hidden="true" />}>
-            {S.card.add}
+            {S.quick.addLine}
           </Button>
           <div className="mt-4 lg:hidden">{summary}</div>
         </div>
         <div className="hidden lg:sticky lg:top-[calc(var(--m-header-h)+16px)] lg:block">
           {summary}
-          <Spotlight className="mt-4" />
+          {/* desktop only: on a phone this column is display:none, so a mounted carousel would only idle */}
+          {desktop && <Spotlight className="mt-4" />}
         </div>
       </div>
 
@@ -340,7 +342,7 @@ export default function QuickOrderPage() {
           }
         >
           <div className="px-4 py-4 md:px-5">
-            <Textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={7} autoFocus placeholder={'24 x C18\n12 UK15\ntws 6'} aria-label={S.quick.paste} />
+            <Textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={7} autoFocus placeholder={S.quick.pastePlaceholder} aria-label={S.quick.paste} />
           </div>
         </Sheet>
       )}
@@ -358,7 +360,7 @@ export default function QuickOrderPage() {
         >
           <div className="px-4 py-4 md:px-5">
             <Label htmlFor="yq-list-name">{S.quick.listName}</Label>
-            <Input id="yq-list-name" value={listName} onChange={(e) => setListName(e.target.value)} autoFocus placeholder="Weekly cables" onKeyDown={(e) => e.key === 'Enter' && saveList()} />
+            <Input id="yq-list-name" value={listName} onChange={(e) => setListName(e.target.value)} autoFocus placeholder={S.quick.listPlaceholder} onKeyDown={(e) => e.key === 'Enter' && saveList()} />
           </div>
         </Sheet>
       )}

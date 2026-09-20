@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronRight, Zap } from 'lucide-react'
+import { ChevronRight, Store, Zap } from 'lucide-react'
+import type { MyOrderSummary } from '@/lib/shopApi'
 import { RepCard } from '../components/RepCard'
 import { EmptyState } from '../components/States'
 import { useMarket, useOrder } from '../MarketContext'
@@ -22,7 +23,7 @@ export default function MyOrdersPage() {
     refreshMyOrders()
   }, [refreshMyOrders])
 
-  const rows = myOrders.length ? myOrders : known.map((k) => ({ order_no: k.order_no, token: k.token, status: 'new', status_label: undefined, total_bhd: k.total ?? null, created_at: new Date(k.ts).toISOString(), salesman: null, expected_delivery: null }))
+  const rows: MyOrderSummary[] = myOrders.length ? myOrders : known.map((k) => ({ order_no: k.order_no, token: k.token, status: 'new', status_label: undefined, total_bhd: k.total ?? null, created_at: new Date(k.ts).toISOString(), salesman: null, expected_delivery: null, order_kind: null }))
 
   return (
     <div className="px-gutter lg:px-0">
@@ -35,7 +36,7 @@ export default function MyOrdersPage() {
                 <Button onClick={() => navigate('/quick')} icon={<Zap size={15} aria-hidden="true" />}>
                   {S.nav.quick}
                 </Button>
-                <Button variant="secondary" onClick={() => navigate('/')}>
+                <Button variant="secondary" onClick={() => navigate('/shop')} icon={<Store size={15} aria-hidden="true" />}>
                   {S.cart.browse}
                 </Button>
               </div>
@@ -50,9 +51,10 @@ export default function MyOrdersPage() {
                   <li key={o.token} className="border-b border-line-2 last:border-b-0">
                     <Link to={`/o/${o.token}`} className="flex items-center gap-3 px-4 py-3.5 hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70">
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                           <span className="font-display text-sm font-bold tnum text-ink">{o.order_no}</span>
                           <Chip tone={tone}>{o.status_label || o.status}</Chip>
+                          {o.order_kind === 'small' && <Chip tone="grey">{S.small.badge}</Chip>}
                         </div>
                         <div className="mt-0.5 text-xs text-ink-2">
                           {[fmtDate(o.created_at), o.total_bhd != null ? bhd(o.total_bhd) : null, o.salesman || null, o.expected_delivery || null].filter(Boolean).join(' · ')}

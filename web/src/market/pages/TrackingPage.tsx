@@ -36,7 +36,7 @@ export default function TrackingPage() {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [installable, setInstallable] = useState(() => canPromptInstall())
-  usePageTitle(data?.order_no ? `Order ${data.order_no}` : S.track.title, true, data?.order_no ? `Order ${data.order_no} · ${S.brand}` : `${S.track.title} · ${S.brand}`)
+  usePageTitle(data?.order_no ? S.track.order(data.order_no) : S.track.title, true, data?.order_no ? `${S.track.order(data.order_no)} · ${S.brand}` : `${S.track.title} · ${S.brand}`)
 
   const load = useCallback(() => {
     if (!token) return
@@ -64,6 +64,8 @@ export default function TrackingPage() {
   useEffect(() => onInstallChange(() => setInstallable(canPromptInstall())), [])
 
   const first = data?.salesman?.first_name || placed?.salesman?.first_name || ''
+  // the placed screen speaks the order's kind: a small order request is confirmed case by case
+  const isSmall = (placed?.order_kind ?? data?.order_kind) === 'small'
   const lines = data?.lines || []
   const total = data?.total_confirmed_bhd ?? data?.total_bhd
 
@@ -75,7 +77,7 @@ export default function TrackingPage() {
       setCancelOpen(false)
       toast(S.track.cancelled, 'info')
     } catch {
-      toast('Could not cancel — please message your representative.', 'error')
+      toast(S.track.cancelFailed, 'error')
     } finally {
       setBusy(false)
     }
@@ -89,12 +91,12 @@ export default function TrackingPage() {
     navigate('/cart')
   }
   const copySummary = async () => {
-    const text = [`YQ order ${data?.order_no}`, ...lines.map((l) => `${l.qty_confirmed ?? l.qty} x ${l.item_code}`), `Total ${bhd(total)}`, window.location.href].join('\n')
+    const text = [`YQ ${S.track.order(data?.order_no || '')}`, ...lines.map((l) => `${l.qty_confirmed ?? l.qty} x ${l.item_code}`), `${S.cart.total} ${bhd(total)}`, window.location.href].join('\n')
     try {
       await navigator.clipboard.writeText(text)
       toast(S.placed.copied, 'success')
     } catch {
-      toast('Could not copy', 'error')
+      toast(S.track.copyFailed, 'error')
     }
   }
   const install = async () => {
@@ -120,8 +122,11 @@ export default function TrackingPage() {
               <div className="mx-auto w-14">
                 <CheckMark size={56} />
               </div>
-              <h1 className="mt-4 font-display text-xl font-bold text-ink">{S.placed.title}</h1>
-              <p className="mt-1 text-sm leading-snug text-ink-2">{placed.duplicate ? S.placed.duplicate : placed.assigned && first ? S.placed.sentTo(first) : S.placed.unassigned}</p>
+              <h1 className="mt-4 text-balance font-display text-xl font-bold text-ink">{isSmall ? S.small.received : S.placed.title}</h1>
+              <p className="mx-auto mt-1 max-w-sm text-balance text-sm leading-snug text-ink-2">
+                {placed.duplicate ? S.placed.duplicate : isSmall ? S.small.receivedHint : placed.assigned && first ? S.placed.sentTo(first) : S.placed.unassigned}
+              </p>
+              {isSmall && !placed.duplicate && placed.assigned && first && <p className="mt-1 text-xs font-medium text-plum-ink">{S.placed.sentTo(first)}</p>}
               <div className="mt-5 rounded-md bg-plum-soft px-4 py-3">
                 <div className="text-2xs font-semibold uppercase tracking-[0.1em] text-plum">{S.placed.number}</div>
                 <div className="mt-0.5 font-display text-2xl font-extrabold tnum text-ink">{placed.order_no}</div>
@@ -136,7 +141,7 @@ export default function TrackingPage() {
               </ol>
               {placed.whatsapp_url && (
                 <AnchorButton href={placed.whatsapp_url} target="_blank" rel="noreferrer" variant="wa" size="lg" full className="mt-5" icon={<MessageCircle size={17} aria-hidden="true" />}>
-                  {first ? S.placed.whatsapp(first) : 'Send on WhatsApp'}
+                  {first ? S.placed.whatsapp(first) : S.track.sendWhatsapp}
                 </AnchorButton>
               )}
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
@@ -157,6 +162,7 @@ export default function TrackingPage() {
               <Link to={m.rep ? `/${m.rep.slug}` : '/'} className="mt-3 inline-flex h-10 items-center text-sm font-semibold text-plum hover:underline">
                 {S.placed.continue}
               </Link>
+              <p className="mt-3 border-t border-line-2 pt-3 font-display text-xs font-semibold tracking-[-0.01em] text-ink-3">{S.tagline}</p>
             </section>
           )}
 
@@ -176,11 +182,18 @@ export default function TrackingPage() {
                       {S.track.placed} {fmtDateTime(data.created_at)}
                     </div>
                   )}
-                  {data.order_kind === 'small' && data.status === 'new' && <div className="mt-1.5 max-w-prose text-xs leading-snug text-plum-ink">{S.minimum.requested}</div>}
+                  {isSmall && data.status === 'new' && <div className="mt-1.5 max-w-prose text-xs leading-snug text-plum-ink">{S.minimum.requested}</div>}
                 </div>
-                <Chip tone={data.cancelled ? 'bad' : data.status === 'delivered' ? 'ok' : 'plum'} size="md">
-                  {data.status_label || data.status}
-                </Chip>
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {isSmall && (
+                    <Chip tone="grey" size="md">
+                      {S.small.badge}
+                    </Chip>
+                  )}
+                  <Chip tone={data.cancelled ? 'bad' : data.status === 'delivered' ? 'ok' : 'plum'} size="md">
+                    {data.status_label || data.status}
+                  </Chip>
+                </div>
               </div>
 
               {data.cancelled ? (
@@ -188,7 +201,7 @@ export default function TrackingPage() {
                   {S.track.cancelled} {S.track.cancelledHint}
                 </p>
               ) : (
-                <ol className="mt-5" aria-label="Order progress">
+                <ol className="mt-5" aria-label={S.track.progress}>
                   {(data.steps || []).map((s, i, arr) => (
                     <li key={s.status} className="flex gap-3">
                       <div className="flex flex-col items-center">
@@ -229,7 +242,7 @@ export default function TrackingPage() {
               {data.salesman && (data.salesman.whatsapp_url || data.salesman.email_url) && (
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
                   {data.salesman.whatsapp_url && (
-                    <AnchorButton href={`${data.salesman.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(`Hello ${data.salesman.first_name || ''}, about my order ${data.order_no}:`)}`} target="_blank" rel="noreferrer" variant="wa" icon={<MessageCircle size={16} aria-hidden="true" />}>
+                    <AnchorButton href={`${data.salesman.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.track.aboutOrder(data.salesman.first_name || '', data.order_no))}`} target="_blank" rel="noreferrer" variant="wa" icon={<MessageCircle size={16} aria-hidden="true" />}>
                       {S.track.message(data.salesman.first_name || data.salesman.name || 'YQ')}
                     </AnchorButton>
                   )}
@@ -247,7 +260,7 @@ export default function TrackingPage() {
                     {S.track.reorder}
                   </Button>
                 )}
-                <Button variant="secondary" onClick={() => navigator.share?.({ title: `Order ${data.order_no}`, url: window.location.href }).catch(() => {}) ?? copySummary()} icon={<Share2 size={15} aria-hidden="true" />}>
+                <Button variant="secondary" onClick={() => navigator.share?.({ title: S.track.order(data.order_no), url: window.location.href }).catch(() => {}) ?? copySummary()} icon={<Share2 size={15} aria-hidden="true" />}>
                   {S.placed.share}
                 </Button>
                 {data.can_cancel && !cancelOpen && (
@@ -299,7 +312,7 @@ export default function TrackingPage() {
               <dl className="space-y-1.5 border-t border-line-2 px-4 py-3 text-sm">
                 {Number(data.discount_bhd) > 0 && (
                   <div className="flex justify-between">
-                    <dt className="text-ok">Discount</dt>
+                    <dt className="text-ok">{S.cart.discount}</dt>
                     <dd className="tnum text-ok">−{bhd(data.discount_bhd)}</dd>
                   </div>
                 )}

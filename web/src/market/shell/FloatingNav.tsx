@@ -1,35 +1,50 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { CircleUserRound, House, LayoutGrid, Search, ShoppingBag } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { NAV_ICONS } from '../lib/icons'
 import { useCartAddTick, useCartCounts } from '../store/cart'
 import { S } from '../strings'
 
 /**
- * The phone's persistent navigation: a floating glass pill with five destinations. The active
- * cell carries a soft plum pill that slides between tabs; the Cart cell wears a live count that
- * bumps once per add. Safe-area aware. The shell hides the whole bottom stack on scroll-down.
+ * The phone's persistent navigation: a floating glass pill with the five wholesale destinations —
+ * Home · Browse · Restock · Orders · My YQ. The active cell carries a soft plum pill that slides
+ * between tabs; Restock wears a live line count that bumps once per add. Safe-area aware. The shell
+ * hides the whole bottom stack on scroll-down. Search lives in the header band, not here.
  */
 
 const TABS = [
-  { to: '/', label: S.nav.home, icon: House, end: true },
-  { to: '/shop', label: S.nav.shop, icon: LayoutGrid },
-  { to: '/search', label: S.nav.search, icon: Search },
-  { to: '/cart', label: S.nav.cart, icon: ShoppingBag, cart: true },
-  { to: '/me', label: S.nav.me, icon: CircleUserRound },
+  { to: '/', label: S.nav.home, icon: NAV_ICONS.home, end: true },
+  { to: '/shop', label: S.nav.browse, icon: NAV_ICONS.browse },
+  { to: '/cart', label: S.nav.restock, icon: NAV_ICONS.restock, cart: true },
+  { to: '/orders', label: S.nav.orders, icon: NAV_ICONS.orders },
+  { to: '/me', label: S.nav.me, icon: NAV_ICONS.me },
 ] as const
 
+/**
+ * Which tab a path belongs to, by its FIRST segment exactly — so a storefront slug that merely
+ * starts like a route ("/shopfront", "/mearaj") is a storefront (Home), never a false match.
+ * /, /p/{code} and /{slug} → Home.
+ */
 function activeIndex(pathname: string): number {
-  if (pathname === '/' || /^\/(p|t)\//.test(pathname) || pathname.split('/').filter(Boolean).length === 1 && !TABS.some((t) => t.to === pathname) && !['/orders', '/quick', '/checkout'].includes(pathname)) {
-    if (pathname.startsWith('/t/')) return 1
-    return 0
+  const first = pathname.split('/').filter(Boolean)[0] || ''
+  switch (first) {
+    case 'shop':
+    case 't':
+    case 'search':
+      return 1
+    case 'cart':
+    case 'checkout':
+    case 'quick':
+      return 2
+    case 'orders':
+    case 'o':
+      return 3
+    case 'me':
+    case 'about':
+      return 4
+    default:
+      return 0
   }
-  if (pathname.startsWith('/shop')) return 1
-  if (pathname.startsWith('/search')) return 2
-  if (pathname.startsWith('/cart') || pathname.startsWith('/checkout')) return 3
-  if (pathname.startsWith('/me') || pathname.startsWith('/orders') || pathname.startsWith('/o/')) return 4
-  if (pathname.startsWith('/quick')) return 2
-  return 0
 }
 
 export function FloatingNav() {
@@ -50,7 +65,7 @@ export function FloatingNav() {
   const active = activeIndex(pathname)
 
   return (
-    <nav aria-label="Main" className="mx-3 mb-3">
+    <nav aria-label={S.nav.main} className="mx-3 mb-3">
       <ul className="glass relative grid h-nav grid-cols-5 items-stretch rounded-xl shadow-nav" style={{ ['--i' as string]: active }}>
         {/* the sliding active pill */}
         <li
@@ -76,7 +91,7 @@ export function FloatingNav() {
                   <Icon size={22} strokeWidth={isActive ? 2.1 : 1.75} aria-hidden="true" />
                   {showBadge && (
                     <span
-                      aria-label={`${items} in cart`}
+                      aria-hidden="true"
                       className={cn('absolute -end-2.5 -top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-plum px-1 text-[10.5px] font-bold tnum text-white ring-2 ring-surface', bump && 'anim-bump')}
                     >
                       {items > 99 ? '99+' : items}
@@ -84,6 +99,7 @@ export function FloatingNav() {
                   )}
                 </span>
                 <span>{label}</span>
+                {showBadge && <span className="sr-only">{`, ${S.nav.inRestock(items)}`}</span>}
               </NavLink>
             </li>
           )

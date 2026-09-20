@@ -206,7 +206,8 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
   return (
     <button type="button" onClick={() => onChange(!checked)} className="flex items-center gap-2 text-[13px] font-medium">
       <span className={cn('relative h-5 w-9 shrink-0 rounded-full transition-colors', checked ? 'bg-primary' : 'bg-muted')}>
-        <span className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4' : 'translate-x-0.5')} />
+        {/* left-0: a <button> centres its text, which moved the knob's static position to the middle of the track */}
+        <span className={cn('absolute left-0 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4' : 'translate-x-0.5')} />
       </span>
       {label}
     </button>

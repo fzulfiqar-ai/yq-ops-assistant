@@ -1,5 +1,6 @@
 import type { ShopItem } from '@/lib/shopApi'
 import { savedStore } from '../store/saved'
+import { hasBadge, marginOf, priceAnchor } from './format'
 
 /**
  * Sub-facets inferred from the product text — no attribute model in the backend, and the
@@ -191,14 +192,42 @@ export function readFacets(params: URLSearchParams, groups: FacetGroup[]): Facet
 /* ───────────────────────── sort & filter ───────────────────────── */
 
 export type SortMode = 'shelf' | 'popular' | 'price_asc' | 'price_desc'
-export type QuickFilter = 'instock' | 'offers' | 'new' | 'clearance' | 'drops' | 'saved' | 'deals'
+/**
+ * The Browse quick filters (?f=a,b — AND across them). Destinations link straight to one:
+ *   deals     Stock-Up Deals: a real price-book drop, a live offer, or a last-chance line
+ *   drops     a real price-book drop — the card prints the old trade price (priceAnchor)
+ *   offers    a live offer (the `on_offer` badge) — never a retail anchor
+ *   clearance last-chance (clearing) lines
+ *   best      Restock essentials (best sellers) · moving: Moving fast (trending / selling fast)
+ *   new · saved · instock
+ */
+export type QuickFilter = 'instock' | 'offers' | 'new' | 'clearance' | 'drops' | 'saved' | 'deals' | 'best' | 'moving'
 
-const QUICK_FILTERS: readonly QuickFilter[] = ['instock', 'offers', 'new', 'clearance', 'drops', 'saved', 'deals']
+const QUICK_FILTERS: readonly QuickFilter[] = ['instock', 'offers', 'new', 'clearance', 'drops', 'saved', 'deals', 'best', 'moving']
+
+/** A real price drop: the price book went down and the card shows the old trade price. A badge alone is not enough. */
+export function isRealDrop(it: ShopItem): boolean {
+  return priceAnchor(it) != null
+}
+
+/** A live offer — the `on_offer` badge only. `compare_at_bhd` is the retail price (merchant margin), not an offer. */
+export function isOffer(it: ShopItem): boolean {
+  return hasBadge(it, 'on_offer')
+}
 
 /** Stock-Up Deals: a real price drop, a live offer, or a last-chance (clearing) line — never a markdown. */
 export function isDeal(it: ShopItem): boolean {
-  const b = it.badges || []
-  return b.includes('price_drop') || it.was_bhd != null || b.includes('clearance') || b.includes('on_offer')
+  return isRealDrop(it) || isOffer(it) || hasBadge(it, 'clearance')
+}
+
+/** Restock essentials: the best sellers. */
+export function isEssential(it: ShopItem): boolean {
+  return hasBadge(it, 'best_seller')
+}
+
+/** Moving fast in Bahrain: trending or selling fast. */
+export function isMoving(it: ShopItem): boolean {
+  return hasBadge(it, 'trending') || hasBadge(it, 'selling_fast')
 }
 
 function popularity(it: ShopItem): number {
@@ -225,14 +254,39 @@ export function sortItems(items: ShopItem[], mode: SortMode): ShopItem[] {
   }
 }
 
+/** Filters that make a shelf a destination (a slide, a "See all", the Deals link) rather than a tweak. */
+const DESTINATIONS: readonly QuickFilter[] = ['deals', 'clearance', 'drops', 'offers', 'best', 'moving', 'new']
+
+/**
+ * Shelf order on a destination shelf: lines in stock first ("while stock lasts"); on a deals or
+ * last-chance shelf the real price drops and offers lead, then clearing lines by the merchant's real
+ * margin (marginOf, highest first), then the shelf order. Anything else keeps the shelf order.
+ */
+export function shelfOrder(items: ShopItem[], filters: ReadonlySet<QuickFilter>): ShopItem[] {
+  if (!DESTINATIONS.some((f) => filters.has(f))) return items
+  const deals = filters.has('deals') || filters.has('clearance')
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      out: item.stock_status === 'out_of_stock' ? 1 : 0,
+      tier: deals && !(isRealDrop(item) || isOffer(item)) ? 1 : 0,
+      pct: deals ? (marginOf(item)?.pct ?? -1) : 0,
+    }))
+    .sort((a, b) => a.out - b.out || a.tier - b.tier || b.pct - a.pct || a.index - b.index)
+    .map((x) => x.item)
+}
+
 export function applyQuickFilters(items: ShopItem[], filters: Set<QuickFilter>): ShopItem[] {
   let r = items
   if (filters.has('instock')) r = r.filter((i) => i.stock_status !== 'out_of_stock')
-  if (filters.has('offers')) r = r.filter((i) => (i.badges || []).includes('on_offer') || i.compare_at_bhd != null)
-  if (filters.has('new')) r = r.filter((i) => (i.badges || []).includes('new'))
-  if (filters.has('clearance')) r = r.filter((i) => (i.badges || []).includes('clearance'))
-  if (filters.has('drops')) r = r.filter((i) => (i.badges || []).includes('price_drop') || i.was_bhd != null)
+  if (filters.has('offers')) r = r.filter(isOffer)
+  if (filters.has('new')) r = r.filter((i) => hasBadge(i, 'new'))
+  if (filters.has('clearance')) r = r.filter((i) => hasBadge(i, 'clearance'))
+  if (filters.has('drops')) r = r.filter(isRealDrop)
   if (filters.has('deals')) r = r.filter(isDeal)
+  if (filters.has('best')) r = r.filter(isEssential)
+  if (filters.has('moving')) r = r.filter(isMoving)
   if (filters.has('saved')) {
     const saved = new Set(savedStore.get())
     r = r.filter((i) => saved.has(i.item_code))

@@ -159,6 +159,8 @@ export interface ShopSettings {
   promises?: MarketPromise[] | null
   min_order_bhd?: number | null
   free_delivery_threshold_bhd?: number | null
+  /** flat delivery fee per order (0 = free); the backend already sends it */
+  delivery_fee_bhd?: number | null
   allow_backorder?: boolean | null
   show_retail_compare?: boolean | null
   /** Marketplace: whether volume tiers are shown to anonymous visitors. */

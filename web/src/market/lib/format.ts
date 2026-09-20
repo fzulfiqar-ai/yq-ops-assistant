@@ -84,11 +84,11 @@ export const BADGE_ORDER: BadgeKind[] = ['on_offer', 'price_drop', 'clearance', 
 export const BADGE_META: Record<BadgeKind, { label: string; tone: ChipTone }> = {
   // "Deal" is reserved for real offers; clearing lines read "Last chance" (plan D3).
   on_offer: { label: S.deals.deal, tone: 'deal' },
-  best_seller: { label: 'Best seller', tone: 'ink' },
-  selling_fast: { label: 'Selling fast', tone: 'warn' },
-  new: { label: 'New', tone: 'fresh' },
-  trending: { label: 'Trending', tone: 'grey' },
-  price_drop: { label: 'Price drop', tone: 'bad' },
+  best_seller: { label: S.badges.best, tone: 'ink' },
+  selling_fast: { label: S.badges.fast, tone: 'warn' },
+  new: { label: S.badges.fresh, tone: 'fresh' },
+  trending: { label: S.badges.trending, tone: 'grey' },
+  price_drop: { label: S.badges.drop, tone: 'bad' },
   clearance: { label: S.deals.badge, tone: 'deal' },
 }
 
@@ -527,11 +527,4 @@ export function codeKey(s: string): string {
   return String(s || '')
     .toUpperCase()
     .replace(/[\s\-_.]/g, '')
-}
-
-/** Cheap, stable hash for per-device rotation (hero pick). */
-export function hashStr(s: string): number {
-  let h = 2166136261
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619)
-  return h >>> 0
 }
