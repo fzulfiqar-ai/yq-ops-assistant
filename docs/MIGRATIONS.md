@@ -163,3 +163,19 @@ columns (`attribution_source … cancelled_at`). Ends with a `DO` block that rai
 granted to `anon`/`authenticated`. Verified afterwards with `python -m scripts.audit_grants` (clean apart from the
 temporary `user_roles` keepalive grant) and `python -m tests.test_shop` (31/31). Contract: `docs/SHOP.md`
 § Marketplace.
+
+## Applied 17-Sep-2026: `marketplace_campaign_creative_migration.sql` — campaign creatives that are never cropped
+
+Marketplace v3 (D4). Four **additive** columns on `shop_campaigns`, every one nullable or defaulted, so the
+code already in production kept working before and after the apply: `image_url_600` (the 600 w rendition the
+upload route already returns, for a 600/1200 srcset), `image_fit` (`contain` default | `cover` — how an
+uploaded photo is framed), `product_codes text[]` (a creative *composed* from up to 3 catalog codes; the ≤3
+limit is enforced by `app.shop.validate_campaign`, not by the DB), and `canvas` (`lilac` default | `apricot` |
+`mint` | `plum` | `night`). The two `check` constraints are dropped by name and re-added, so a re-run never
+stacks a second auto-named constraint — **the whole file is idempotent and re-run safe**. **No GRANT**:
+`shop_campaigns` is service-role only (RLS on, no policies — `scripts/marketplace_campaigns_migration.sql`).
+Applied with `python -m scripts.apply_sql scripts/marketplace_campaign_creative_migration.sql`. The file's own
+closing `DO` block raises if a column or a check is missing, or if anything is granted to
+`anon`/`authenticated`; `python -m scripts.audit_grants` afterwards was **clean (exit 0)**, and
+`python -m tests.test_shop` passed (51/51, the new cases cover the enums and the 3-code cap). Rendering and
+admin contract: `docs/MARKETPLACE.md` § Campaign creative.
