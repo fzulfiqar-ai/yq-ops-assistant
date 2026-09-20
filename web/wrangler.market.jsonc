@@ -4,7 +4,8 @@
 // HTTP 200 for any path that is not a file (the same behaviour as the old Vercel rewrite); response
 // headers come from public/_headers, copied into the build root by Vite.
 // Deploy: python -m scripts.deploy_cf market (builds first) or .github/workflows/cf-deploy.yml.
-// The custom domain (yqmarketplace.com) is attached as a `routes` entry once the zone exists.
+// `routes` with custom_domain attach the hostnames: wrangler creates the DNS records and the
+// certificate in the zone (same account) on deploy.
 {
   "name": "yq-marketplace",
   "compatibility_date": "2026-09-18",
@@ -12,6 +13,10 @@
     "directory": "./dist-market",
     "not_found_handling": "single-page-application"
   },
+  "routes": [
+    { "pattern": "yqmarketplace.com", "custom_domain": true },
+    { "pattern": "www.yqmarketplace.com", "custom_domain": true }
+  ],
   "workers_dev": true,
   "observability": { "enabled": false }
 }
