@@ -77,3 +77,6 @@ business_data/
 # the v3 redesign). Reference material, not source: it must not land in a PUBLIC repo, and a
 # `git add -A` during a redesign round would take the whole folder.
 /Design Example/
+
+# wrangler state written by scripts/deploy_cf.py / npx wrangler deploy
+web/.wrangler/

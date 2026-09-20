@@ -1,5 +1,25 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "has": [{ "type": "host", "value": "yq-marketplace.vercel.app" }],
+      "destination": "https://yqmarketplace.com/$1",
+      "permanent": true
+    },
+    {
+      "source": "/(.*)",
+      "has": [{ "type": "host", "value": "yq-bahrain-ops.vercel.app" }],
+      "destination": "https://ops.yqmarketplace.com/$1",
+      "permanent": true
+    },
+    {
+      "source": "/(.*)",
+      "has": [{ "type": "host", "value": "web-amber-kappa-73.vercel.app" }],
+      "destination": "https://ops.yqmarketplace.com/$1",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",

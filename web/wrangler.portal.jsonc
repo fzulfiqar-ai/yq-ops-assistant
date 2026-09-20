@@ -1,0 +1,14 @@
+// The ops portal (+ salesman app, /c/{token}, /o/{token}) on Cloudflare Workers static assets,
+// 20-Sep-2026 — see wrangler.market.jsonc for how this works. Serves web/dist (the default build).
+// Deploy: python -m scripts.deploy_cf portal (builds first) or .github/workflows/cf-deploy.yml.
+// The custom domain (ops.yqmarketplace.com) is attached as a `routes` entry once the zone exists.
+{
+  "name": "yq-bahrain-ops",
+  "compatibility_date": "2026-09-18",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "workers_dev": true,
+  "observability": { "enabled": false }
+}

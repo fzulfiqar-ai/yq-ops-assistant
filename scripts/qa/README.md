@@ -18,7 +18,7 @@ python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots --only cart_under,checkout_small
 
 # production
-python scripts/qa/market_qa.py --base https://yq-marketplace.vercel.app --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
+python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
 ```
 
 In Git Bash prefix with `MSYS_NO_PATHCONV=1` so the URLs survive. The exit code is **1** when a hard

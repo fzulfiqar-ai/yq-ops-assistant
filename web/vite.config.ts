@@ -12,7 +12,9 @@ import autoprefixer from 'autoprefixer'
  *   VITE_APP=market            the merchant marketplace — its own title, description, Open Graph
  *                              tags and manifest, and the catalog prefetch pointed at the
  *                              token-less /public/market endpoint (see public/catalog-prefetch.js).
- * Vercel sets VITE_APP per project; locally: `VITE_APP=market npm run build` (or .env.local).
+ * scripts/deploy_cf.py and .github/workflows/cf-deploy.yml set VITE_APP per build (Cloudflare Workers
+ * static assets host both since 20-Sep-2026; the Vercel projects only redirect there); locally:
+ * `VITE_APP=market npm run build` (or .env.local).
  */
 
 const MARKET = {
@@ -189,10 +191,13 @@ export default defineConfig(({ mode }) => {
     process.env.VITE_APP = 'market'
   }
   const isMarket = env.VITE_APP === 'market'
-  // commit sha when Vercel/GitHub know it; a CLI deploy without Git integration still gets a unique id per deployment
+  // commit sha when Vercel / GitHub know it, or the BUILD_ID scripts/deploy_cf.py
+  // passes; a CLI deploy without Git integration still gets a unique id per deployment
   const buildId =
     env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) ||
+    env.CF_PAGES_COMMIT_SHA?.slice(0, 12) ||
     env.GITHUB_SHA?.slice(0, 12) ||
+    env.BUILD_ID?.slice(0, 12) ||
     env.VERCEL_DEPLOYMENT_ID?.replace(/^dpl_/, '').slice(0, 12) ||
     `local-${Date.now().toString(36)}`
   return {

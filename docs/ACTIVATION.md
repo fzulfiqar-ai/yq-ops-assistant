@@ -25,8 +25,8 @@ python -m scripts.manage_users set furqanahmed223@gmail.com 'AnotherPassword' ad
 ## 3 · Deploy the backend (Railway)
 
 - **Add 1 env var** on the `yq-ops-assistant` service:
-  `APP_BASE_URL = https://<your-vercel-app>.vercel.app`  (set after step 4; used for invite links)
-- **Add the Vercel origin** to `ALLOWED_ORIGINS` (comma-append `https://<your-vercel-app>.vercel.app`)
+  `APP_BASE_URL = https://ops.yqmarketplace.com`  (set after step 4; used for invite links)
+- **Add the portal origin** to `ALLOWED_ORIGINS` (comma-append `https://ops.yqmarketplace.com`)
 - **Deploy:** `git push` (Railway auto-builds; `cryptography` installs from requirements for the new
   ES256 token validation). Already set earlier and still valid: `AGENT_API_KEY`, `RESEND_API_KEY`,
   `EMAIL_FROM`, `ALERT_EMAIL_TO`, `SUPABASE_*`.

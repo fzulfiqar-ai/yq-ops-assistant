@@ -1,12 +1,14 @@
-"""Deploy one of the two web builds to its Vercel project from the developer machine.
+"""Deploy web/vercel.json to the two Vercel projects - since 20-Sep-2026 that file only REDIRECTS.
 
-    python -m scripts.deploy_web market     # yq-marketplace  (VITE_APP=market is set on the project)
-    python -m scripts.deploy_web portal     # yq-bahrain-ops
+    python -m scripts.deploy_web market     # yq-marketplace  -> 308 to https://yqmarketplace.com
+    python -m scripts.deploy_web portal     # yq-bahrain-ops  -> 308 to https://ops.yqmarketplace.com
 
-Both projects build the same `web/` directory; only the project (and its environment variables)
-differs. The Vercel CLI links a directory to ONE project through web/.vercel/project.json, so this
-script points the link at the requested project, runs a production deploy, and always restores the
-previous link. Vercel builds the upload with the project's own env, so nothing local leaks in.
+Cloudflare hosts both apps now (scripts/deploy_cf.py): Vercel Hobby hit its 100 GB/month transfer
+cap and forbids commercial use, so the old *.vercel.app hostnames (in WhatsApp messages and printed
+QR codes) live on as redirects that cost a few hundred bytes each. Run this only when the redirect
+rules in web/vercel.json change. Both projects deploy the same `web/` directory; the Vercel CLI links
+a directory to ONE project through web/.vercel/project.json, so this script points the link at the
+requested project, runs a production deploy, and always restores the previous link.
 
 Needs: `npx vercel whoami` logged in (team fzulfiqar-ai-s-projects). Set VERCEL_SCOPE to override.
 """

@@ -1,0 +1,91 @@
+# Deploy the two web builds to Cloudflare (Workers static assets) on every push to main (20-Sep-2026).
+# Cloudflare replaced Vercel as the static host: Vercel Hobby caps Fast Data Transfer at 100 GB/month,
+# pauses every project in the team past it and forbids commercial use; static-asset requests on
+# Workers are free and unlimited. Vercel now only redirects the old hostnames (web/vercel.json).
+#
+# Mirrors scripts/deploy_cf.py (the manual path): each bundle is built here with its env baked in -
+# the market gets the API origin, the portal also the public Supabase URL + anon key (the same values
+# the keepalive workflow already holds as secrets) - then `wrangler deploy` uploads it with the app's
+# config (web/wrangler.market.jsonc / web/wrangler.portal.jsonc: assets only, SPA fallback,
+# public/_headers). BUILD_ID = the commit, stamped into /version.json and the service worker.
+#
+# SETUP: two repository secrets - Settings -> Secrets and variables -> Actions:
+#   CLOUDFLARE_API_TOKEN   an account token with Workers Scripts/Routes + DNS write
+#                          (the .env CLOUDFLARE_API_TOKEN_WRITE value)
+#   CLOUDFLARE_ACCOUNT_ID  the Cloudflare account id (the .env CLOUDFLARE_ACCOUNT_ID value)
+# Until both exist the job SKIPS with a notice - it never fails, so it can never become a source of
+# failure e-mails the way shop-cron was while its secret was missing.
+name: cf-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/cf-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      VITE_API_URL: https://yq-ops-assistant.onrender.com
+      BUILD_ID: ${{ github.sha }}
+      CI: "true"
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Check the Cloudflare secrets
+        id: gate
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID repository secrets are not set - skipping the Cloudflare deploy (deploy by hand: python -m scripts.deploy_cf market|portal)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.ready == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: npm ci
+
+      - name: Build the marketplace (VITE_APP=market -> web/dist-market)
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        env:
+          VITE_APP: market
+        run: npm run build:market
+      - name: Build the portal (-> web/dist)
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: npm run build
+
+      - name: Deploy the marketplace (Worker yq-marketplace)
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: npx --yes wrangler@4 deploy -c wrangler.market.jsonc
+      - name: Deploy the portal (Worker yq-bahrain-ops)
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: npx --yes wrangler@4 deploy -c wrangler.portal.jsonc

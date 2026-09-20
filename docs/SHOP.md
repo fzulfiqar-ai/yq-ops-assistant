@@ -176,7 +176,7 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
 
 ## Salesman mode — the second link (15-Sep-2026)
 Two links, one app. The **catalog link** (`/c/{token}`) is for merchants and anyone else. The **portal login**
-(`yq-bahrain-ops.vercel.app`, email + password) shows a `salesman`-role user exactly two tabs, phone-first:
+(`ops.yqmarketplace.com`, email + password) shows a `salesman`-role user exactly two tabs, phone-first:
 **Catalog** (`/shop`) and **Orders** (`/shop-orders`). Admins keep the full sidebar and can also open `/shop`.
 
 The salesman catalog is the merchant shop screen in *salesman mode*: same grid/cart, plus exact stock units,

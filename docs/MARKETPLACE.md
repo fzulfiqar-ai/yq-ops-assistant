@@ -55,8 +55,8 @@ stock. "Deal" is reserved for a real drop, offer or bundle; a clearing line read
 
 | Build | Entry | Stylesheet / Tailwind | Owns | Hosting |
 |---|---|---|---|---|
-| portal (default) | `web/src/main.tsx` → `PortalRoot` / `PublicApp` | `src/index.css` · `tailwind.config.js` | `yq-bahrain-ops.vercel.app`, `/c/{token}`, `/o/{token}` | Vercel `yq-bahrain-ops` |
-| **market** (`VITE_APP=market`) | **`web/src/main.market.tsx`** → `MarketApp` | **`src/market/market.css` · `tailwind.market.config.js`** | `/`, `/{slug}`, `/p/{code}`, `/t/{category}`, `/shop`, `/search`, `/quick`, `/cart`, `/checkout`, `/orders`, `/me`, `/about`, `/o/{token}`, `/c/{token}` (redirect) | Vercel `yq-marketplace` |
+| portal (default) | `web/src/main.tsx` → `PortalRoot` / `PublicApp` | `src/index.css` · `tailwind.config.js` | `ops.yqmarketplace.com`, `/c/{token}`, `/o/{token}` | Cloudflare Worker `yq-bahrain-ops` (Vercel redirects) |
+| **market** (`VITE_APP=market`) | **`web/src/main.market.tsx`** → `MarketApp` | **`src/market/market.css` · `tailwind.market.config.js`** | `/`, `/{slug}`, `/p/{code}`, `/t/{category}`, `/shop`, `/search`, `/quick`, `/cart`, `/checkout`, `/orders`, `/me`, `/about`, `/o/{token}`, `/c/{token}` (redirect) | Cloudflare Worker `yq-marketplace` (Vercel redirects) |
 
 `web/vite.config.ts → marketHtml()` rewrites the shared `index.html` for the market build: the entry
 (`main.market.tsx`, one network hop less), `<html lang dir data-app="market">`, `viewport-fit=cover`,
@@ -409,16 +409,25 @@ maskable + shortcuts) → `web/public/`.
 5. **Verify** — `/version.json` changes build id, `/sw.js` is `no-cache`, `/robots.txt` disallows all,
    `/` and `/{slug}` render on a phone, then rerun the QA harness against production.
 
-- **Production:** `https://yq-marketplace.vercel.app` — Vercel project `yq-marketplace` (team
-  `fzulfiqar-ai-s-projects`), environment `VITE_APP=market`,
-  `VITE_API_URL=https://yq-ops-assistant.onrender.com`. The market build imports no Supabase code, so
-  it needs no `VITE_SUPABASE_*` values.
-- **Render:** `ALLOWED_ORIGINS` includes `https://yq-marketplace.vercel.app`. Add the custom domain
+- **Production:** `https://yqmarketplace.com` — Cloudflare Worker `yq-marketplace` (static assets; "Pages" is now this product; default URL `yq-marketplace.yqbahrain.workers.dev` until the domain is attached)
+  (account id + Write token in the root `.env`), built locally with `VITE_APP=market`,
+  `VITE_API_URL=https://yq-ops-assistant.onrender.com` by `python -m scripts.deploy_cf market`,
+  and on every push to `main` by `.github/workflows/cf-deploy.yml` once the `CLOUDFLARE_*`
+  repository secrets exist. The market build imports no Supabase code, so it needs no
+  `VITE_SUPABASE_*` values. Cloudflare hosts both apps since 20-Sep-2026: Vercel Hobby capped transfer at
+  100 GB/month (hit) and forbids commercial use.
+- **Vercel:** `yq-marketplace.vercel.app` (project `yq-marketplace`, team `fzulfiqar-ai-s-projects`)
+  now only 308-redirects to Pages — `web/vercel.json` `redirects`, deployed with
+  `python -m scripts.deploy_web market`. Old WhatsApp links and QR codes keep working through it.
+- **Headers:** `web/public/_headers` (Cloudflare) mirrors `web/vercel.json` `headers` (Vercel): CSP,
+  `noindex`, immutable `/assets/*`, `no-cache` `sw.js`, `no-store` `version.json`. Change both together.
+- **Render:** `ALLOWED_ORIGINS` includes `https://yqmarketplace.com`. Add the custom domain
   there too when it exists, otherwise every API call is refused by CORS.
-- **Portal setting:** `shop_market_url = https://yq-marketplace.vercel.app` (Settings → Shop), so
+- **Portal setting:** `shop_market_url = https://yqmarketplace.com` (Settings → Shop), so
   salesman links/QR and tracking URLs point at the marketplace.
-- **Custom domain (later):** attach the root domain to `yq-marketplace` and `ops.` to
-  `yq-bahrain-ops`; add both to `ALLOWED_ORIGINS`; update `shop_market_url`; print QR codes only then.
+- **Custom domain (later):** attach the root domain to the `yq-marketplace` Worker and `ops.`
+  to `yq-bahrain-ops` (`routes` with `custom_domain: true` in the wrangler configs, free); add both to `ALLOWED_ORIGINS`; update
+  `shop_market_url`; print QR codes only then.
 
 Local: `cd web && npm run build:market && npm run preview:market` (port 5174) against a local
 `uvicorn app.main:app --port 8001` (`web/.env` points `VITE_API_URL` there).
@@ -431,7 +440,7 @@ Python Playwright (Chromium is cached on the dev machine). Full notes: `scripts/
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots --quick
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots --only cart_under,checkout_small
-python scripts/qa/market_qa.py --base https://yq-marketplace.vercel.app --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
+python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
 ```
 
 `--quick` keeps 390×844 and 1440×900 (also the "lead" viewports that carry the extras: full-page
