@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, Heart, Maximize2, MessageCircle, Plus, Share2, Store } from 'lucide-react'
+import { Check, Clock, Heart, Maximize2, MessageCircle, Plus, Share2, Store } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { deviceId, readCustomer, rememberViewed } from '../lib/device'
 import { track } from '../lib/events'
 import { postRestock } from '../lib/marketApi'
-import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, niceCategory, priceAnchor, productDetail, productName, stepOf, stockMeta } from '../lib/format'
+import { badgeMeta, bhd, cardBadges, isOut, minQtyOf, niceCategory, priceAnchor, productDetail, productName, stepOf, stockMeta } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
@@ -17,7 +17,7 @@ import { ProductImage, SIZES_HERO } from '../ui/ProductImage'
 import { Sheet } from '../ui/Sheet'
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
-import { HighMarginTag, MarketCard, VariantChips } from './MarketCard'
+import { MarginStrip, MarketCard, VariantChips, WasPill } from './MarketCard'
 import { QtySheet } from './QtySheet'
 
 /**
@@ -52,6 +52,20 @@ export default function ProductPanel({ code }: { code: string }) {
     rememberViewed(item.item_code)
     track('item', { item_code: item.item_code })
   }, [item])
+  /**
+   * The sticky bar repeats the price only once the real one has scrolled away — otherwise the
+   * same number is printed twice in one view, 180 px apart.
+   */
+  // a callback ref, not useRef: the price node only exists once the catalog has the item
+  const [priceEl, setPriceEl] = useState<HTMLDivElement | null>(null)
+  // no observer (very old browser) → the bar simply always carries the price, as it did before
+  const [priceGone, setPriceGone] = useState(() => typeof IntersectionObserver === 'undefined')
+  useEffect(() => {
+    if (!priceEl || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(([e]) => setPriceGone(!e.isIntersecting), { threshold: 0 })
+    io.observe(priceEl)
+    return () => io.disconnect()
+  }, [priceEl])
   const pairs = useMemo(() => (item ? m.pairsFor(item.item_code).filter((p) => !isOut(p)) : []), [m, item])
 
   if (!item) {
@@ -72,8 +86,7 @@ export default function ProductPanel({ code }: { code: string }) {
   const step = stepOf(item)
   const min = minQtyOf(item)
   const canOrder = !out || m.allowBackorder
-  const was = priceAnchor(item)?.was ?? null
-  const mg = marginOf(item)
+  const anchor = priceAnchor(item)
   const tiers = m.publicTiers ? item.tiers || [] : []
   const tellUrl = out && !m.allowBackorder && m.rep?.whatsapp_url ? `${m.rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.card.tellBackText(m.rep.first_name || '', item.item_code, name))}` : null
   const shareUrl = `${window.location.origin}/p/${encodeURIComponent(item.item_code)}${m.rep ? `?ref=${encodeURIComponent(m.rep.slug)}` : ''}`
@@ -104,7 +117,7 @@ export default function ProductPanel({ code }: { code: string }) {
 
   const footer = (
     <div className="flex items-center gap-3">
-      <div className="min-w-0 flex-1">
+      <div className={cn('min-w-0 flex-1 transition-opacity duration-2 ease-m', !priceGone && 'opacity-0')} aria-hidden={!priceGone}>
         <div className="flex items-baseline gap-1">
           <span className="font-display text-xl font-bold leading-none tnum text-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</span>
           {item.price_bhd != null && <span className="text-2xs text-ink-3">{S.card.perPc}</span>}
@@ -137,7 +150,9 @@ export default function ProductPanel({ code }: { code: string }) {
           {asked ? S.card.tellBackDone : S.card.tellBack}
         </Button>
       ) : (
-        <Button size="lg" variant={out ? 'secondary' : 'primary'} className="min-w-[9rem]" onClick={add} icon={<Plus size={17} aria-hidden="true" />}>
+        // a backorder is not an add: "we will order it in, date unconfirmed" must not wear the
+        // same + as the line that ships today
+        <Button size="lg" variant={out ? 'secondary' : 'primary'} className="min-w-[9rem]" onClick={add} icon={out ? <Clock size={17} aria-hidden="true" /> : <Plus size={17} aria-hidden="true" />}>
           {out ? S.card.backorder : S.card.add}
           {!out && m.defaultQty(item) > 1 && <span className="tnum opacity-80">· {m.defaultQty(item)}</span>}
         </Button>
@@ -227,14 +242,12 @@ export default function ProductPanel({ code }: { code: string }) {
           </div>
           {out && m.allowBackorder && <p className="mt-2.5 rounded-sm bg-warn-soft px-3 py-2 text-xs leading-snug text-warn">{S.card.backorderNote}</p>}
 
-          <div className="mt-4 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+          <div ref={setPriceEl} className="mt-4 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
             <span className="font-display text-2xl font-bold leading-none tnum text-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</span>
             {item.price_bhd != null && <span className="text-xs text-ink-3">{S.card.perPc}</span>}
-            {was != null && (
-              <span className="ms-1.5 text-xs tnum text-ink-3">
-                {S.card.was} <s>{bhd(was)}</s>
-              </span>
-            )}
+            {/* the same anchor block the card carries, in the same slot and at the same weight:
+                our own previous price-book figure, with the real cut spelled out */}
+            {anchor && <WasPill was={anchor.was} pct={anchor.pct} className="ms-1" />}
           </div>
           {(min > 1 || step > 1) && (
             <div className="mt-1.5 text-xs tnum text-ink-2">
@@ -242,16 +255,10 @@ export default function ProductPanel({ code }: { code: string }) {
             </div>
           )}
 
-          {/* the merchant's maths — real price-book numbers only (marginOf) */}
-          {mg && (
-            <div className="mt-3 flex items-start justify-between gap-3 rounded-md bg-deal-soft px-3 py-2.5 tnum text-deal-ink">
-              <div className="min-w-0 text-xs leading-[18px]">
-                <div>{S.deals.retail(bhd(mg.retail))}</div>
-                <div className="text-sm font-bold">{S.deals.margin(bhd(mg.margin), mg.pct)}</div>
-              </div>
-              {!out && <HighMarginTag item={item} className="mt-0.5 shrink-0" />}
-            </div>
-          )}
+          {/* the merchant's maths — real price-book numbers only (marginOf), and the very same
+              component the shelf card renders, so the panel and the grid can never drift apart on
+              the strongest number in the shop (this used to be a hand-copy of it) */}
+          <MarginStrip item={item} form="full" size="lg" tag={!out} className="mt-3" />
 
           {tiers.length > 0 && (
             <div className="mt-4 overflow-hidden rounded-md border border-line">

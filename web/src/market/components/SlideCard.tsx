@@ -41,16 +41,22 @@ const FRAME: Record<SlideSize, string> = {
  * START, so the whole slide mirrors in Arabic. The two painted shapes that cannot follow a writing
  * mode — the .slide-sash clip-path and the .slide-scrim gradient angle — are mirrored under
  * [dir='rtl'] in the "v3: slider" block of market.css. */
+/* The fan is a composed creative, so it is never cropped: the end padding keeps the outer disc (and
+ * its shadow) inside the card's radius instead of tangent to the edge, where it read as a slice. */
 const ART: Record<SlideSize, string> = {
-  phone: 'inset-y-0 end-0 w-[45%]',
+  phone: 'inset-y-0 end-0 w-[36%] pe-1.5',
   hero: 'inset-y-[7%] end-[3%] w-[42%]',
-  tile: 'inset-y-0 end-0 w-[42%]',
+  tile: 'inset-y-0 end-0 w-[42%] pe-3',
   aside: 'end-0 top-0 h-[46%] w-[70%]',
 }
+/* A copy column wide enough for the sentence — at 57% the price-drop line ("the old price is on
+ * every card" — an honesty claim) was ellipsed away on every phone — and narrow enough that the two
+ * columns never overlap: copy + art stay under 100% at every size, and the discs of a composed
+ * creative start ~2% inside the art box, so a full stop can no longer land under a white circle. */
 const COPY: Record<SlideSize, string> = {
-  phone: 'inset-y-0 start-0 w-[57%] justify-center py-3 ps-4 pe-1',
+  phone: 'inset-y-0 start-0 w-[60%] justify-center py-3 ps-4 pe-1',
   hero: 'inset-y-0 start-0 w-[56%] justify-center py-[5%] ps-[5.5%] pe-2',
-  tile: 'inset-y-0 start-0 w-[60%] justify-center py-3 ps-4 pe-1 lg:ps-5',
+  tile: 'inset-y-0 start-0 w-[58%] justify-center py-3 ps-4 pe-1 lg:ps-5',
   aside: 'inset-x-0 bottom-0 justify-end p-4',
 }
 /** the sticker's corner; a tile is too small to carry one */
@@ -73,8 +79,8 @@ const STICKER_TONE = {
   drop: 'bg-bad text-white',
 } as const
 const CTA: Record<SlideSize, string> = {
-  // the pill may run a little past the copy column, under the empty corner of the first disc
-  phone: 'mt-2.5 h-[30px] max-w-[calc(100%+1.75rem)] gap-1 px-3 text-[12px]',
+  // the pill stays inside the copy column: past it, it ran under the first disc of the fan
+  phone: 'mt-2.5 h-[30px] max-w-full gap-1 px-3 text-[12px]',
   hero: 'mt-6 h-11 gap-2 px-5 text-[15px]',
   tile: 'mt-2',
   aside: 'mt-3 h-9 gap-1.5 px-3.5 text-[13px]',
@@ -141,7 +147,7 @@ export function SlideCard({ slide, size, priority, className, where }: SlideCard
       {(cover || slide.canvas === 'night') && <span className="slide-scrim" aria-hidden="true" />}
 
       {!cover && (
-        <div className={cn('absolute', ART[size], size === 'hero' ? 'p-0' : size === 'phone' ? 'py-1' : 'py-0.5')} aria-hidden="true">
+        <div className={cn('slide-art absolute', ART[size], size === 'hero' ? 'p-0' : size === 'phone' ? 'py-1' : 'py-0.5')} aria-hidden="true">
           {imgTag ? (
             <div className={cn('h-full w-full', size === 'hero' ? 'p-2' : 'p-2.5')}>{imgTag}</div>
           ) : slide.products.length ? (

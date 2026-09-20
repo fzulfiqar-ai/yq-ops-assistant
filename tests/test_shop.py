@@ -753,6 +753,13 @@ def _():
     assert all(x["en"] and x["ar"] and x["icon"] and x["to"] for x in p), p
     assert [x["icon"] for x in p] == ["truck", "tag", "pulse", "shield"], p
     assert not any("minimum" in x["en"].lower() for x in p), "the wholesale minimum is real — never promise 'no minimum'"
+    # 20-Sep-2026: the catalog ships a DATED stock snapshot (`stock_as_of`, printed in the market
+    # footer), so no promise may claim the stock is live/real-time — the page would contradict itself.
+    import re
+    for x in p:
+        low = f"{x['en']} {x['ar'] or ''}".lower()          # \b so "delivery" is not read as "live"
+        for word in (r"\blive\b", r"\breal[- ]?time\b", "مباشر", "لحظي"):
+            assert not re.search(word, low), f"the stock snapshot is dated — a promise may not claim {word}: {x}"
     vals["shop_free_delivery_threshold_bhd"] = "25"
     p2 = promises_payload(vals)
     assert p2[0]["en"] == "Free delivery over BHD 25.000", p2[0]

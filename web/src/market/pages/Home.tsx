@@ -12,7 +12,7 @@ import { fetchOrderCached, useRecentOrders } from '../hooks/useRecentOrders'
 import { useMarket, useOrder } from '../MarketContext'
 import { currentRef, forgetRef, isSlugShaped, rememberedOrders, rememberRef } from '../lib/device'
 import { categoryTiles, heroSplit, liveOffer, orderLines } from '../lib/home'
-import { buildSlides, useClaimSlides } from '../lib/slides'
+import { buildSlides, heroDeck, SECTION_SLIDE_IDS, useClaimSlides } from '../lib/slides'
 import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
@@ -25,12 +25,20 @@ import { S } from '../strings'
  * Phone: the shell's plum band with the pinned search → the promise strip → the promo slider →
  * round category tiles → what to do next (continue the restock / order again, track, offer, the
  * wholesale actions) → [below the fold, pages/HomeBelow] Restock essentials → Stock-Up Deals → New
- * arrivals → brands → Moving fast → all products → "Ready to restock?" → footer.
- * Desktop: the hero composition (slider stage + pastel tiles from the same slide list) → one row of
- * category tiles → the same sections on a wider rhythm, each rising in as it scrolls into view.
+ * arrivals → brands → Moving fast → paste a list (first visits) → all products → "Ready to
+ * restock?" → footer.
+ * Desktop: the hero composition (slider stage beside one or two pastel tiles from the same slide
+ * list — never a tile that clones a heading further down) → one row of category tiles → the same
+ * sections on a wider rhythm, each rising in as it scrolls in.
+ *
+ * The paste offer is made twice, never more: on the phone the mid-page card and the closing band
+ * (so 'd:quick' is dropped from the deck and the wholesale actions no longer carry a paste row);
+ * on desktop the aside mini-cart's empty state and the band — 'd:quick' is dropped from the hero
+ * composition there too, and the card appears only when there is a restock or a last order to
+ * continue.
  *
  * The orders this phone remembers arrive after the first paint: while they do, the Order again
- * slot is held (skeleton) and the hero tile row is built without 'd:again', so a returning
+ * slot is held (skeleton) and the hero tiles are built without 'd:again', so a returning
  * merchant's top zone is laid out once instead of shifting when they land.
  *
  * A slide shows once (lib/slides, claimed so the aside Spotlight skips it). Two-phase render: the
@@ -128,15 +136,26 @@ export default function Home() {
   const offer = useMemo(() => liveOffer(data), [data])
   const lastOrderItems = useMemo(() => againLines.map((l) => l.item), [againLines])
   const slides = useMemo(() => buildSlides({ items, campaigns, recognized, lastOrder: lastOrderItems }), [items, campaigns, recognized, lastOrderItems])
+  // the phone carries the paste offer twice — the card under the tiles and the closing band — so
+  // the deck never opens with a third: 'd:quick' is out of it and the slider sells stock instead
+  const phoneSlides = useMemo(() => slides.filter((s) => s.id !== 'd:quick'), [slides])
   const stage = useMemo(() => {
-    if (!desktop) return { hero: slides, tiles: [] }
+    if (!desktop) return { hero: phoneSlides, tiles: [] }
+    // The desktop hero is a promotion, not a table of contents: the slides this page renders
+    // verbatim as a section of its own further down — "Restock essentials", "Moving fast in
+    // Bahrain", the paste band — are dropped from the composition exactly as the phone deck drops
+    // them, so no headline appears twice in one frame. It also spends the page's SECOND paste
+    // offer: the aside mini-cart and the closing band make it, the hero no longer does.
+    const deck = heroDeck(slides, 6)
     // 'd:again' appears only once the last order has loaded, and it is never tileable: keep it out
-    // of the split's arithmetic so the tile row under the stage does not change when it arrives
-    const split = heroSplit(slides.filter((s) => s.id !== 'd:again'))
+    // of the split's arithmetic so the tile column beside the stage does not change when it arrives
+    const split = heroSplit(deck.filter((s) => s.id !== 'd:again'))
     const picked = new Set(split.tiles.map((s) => s.id))
-    return { hero: slides.filter((s) => !picked.has(s.id)).slice(0, 3), tiles: split.tiles }
-  }, [desktop, slides])
-  const shownSlides = useMemo(() => [...stage.hero, ...stage.tiles].map((s) => s.id), [stage])
+    return { hero: deck.filter((s) => !picked.has(s.id)).slice(0, 3), tiles: split.tiles }
+  }, [desktop, slides, phoneSlides])
+  // What this page has spent: the composition itself, plus every id it states as a section of its
+  // own — the aside Spotlight must not bring "Restock essentials" back beside the essentials rail.
+  const shownSlides = useMemo(() => [...new Set([...[...stage.hero, ...stage.tiles].map((s) => s.id), ...SECTION_SLIDE_IDS])], [stage])
   useClaimSlides(shownSlides)
 
   useEffect(() => {
@@ -161,9 +180,11 @@ export default function Home() {
   // reorder: no second button above it
   const againCard = lines.length === 0 && recognized && (againLines.length > 0 || pendingOrders)
   const continueTop = lines.length > 0 || recognized
-  // …and the paste card, when that is what the top slot shows, already is the paste action
-  const pasteCardTop = continueTop && lines.length === 0 && !againCard
-  const continueCard = <ContinueRestock lastLines={againLines} placedAt={latest?.created_at} pending={pendingOrders} />
+  // With nothing to continue the card is the paste card, and it keeps its mid-page slot (HomeBelow)
+  // — the phone's one paste moment besides the closing band, which is why the phone deck drops
+  // 'd:quick'. Desktop already makes that offer twice (the hero/aside and the band), so there the
+  // card renders only when there IS something to continue.
+  const continueCard = <ContinueRestock lastLines={againLines} placedAt={latest?.created_at} pending={pendingOrders} paste={!desktop} />
 
   return (
     <div className="px-gutter lg:px-0 lg:pt-5">
@@ -175,13 +196,18 @@ export default function Home() {
       <div className={cn(STACK, 'mt-3 lg:mt-0')}>
         {desktop ? (
           stage.hero.length > 0 && (
-            <div>
-              <PromoSlider slides={stage.hero} layout="desktop" />
-              {stage.tiles.length >= 2 && (
-                <ul className={cn('mt-4 grid gap-4 2xl:gap-5', stage.tiles.length === 3 ? 'grid-cols-3' : 'grid-cols-2')}>
-                  {stage.tiles.map((s) => (
+            // D7's hero composition: the stage beside the stacked tiles, not a row of boxes under
+            // it. The tiles stretch to the stage's height (they drop their own 2:1 frame for it).
+            // With one tile the stage keeps a little less of the row, so the single tile lands
+            // landscape (~3:2) instead of a cramped square — the tile's own layout is copy beside
+            // art, and that needs width.
+            <div className={cn('grid gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-cols-[minmax(0,1.95fr)_minmax(0,1fr)]' : stage.tiles.length === 1 && 'grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]')}>
+              <PromoSlider slides={stage.hero} layout="desktop" className="min-w-0" />
+              {stage.tiles.length > 0 && (
+                <ul className={cn('grid min-w-0 gap-4 2xl:gap-5', stage.tiles.length >= 2 ? 'grid-rows-2' : 'grid-rows-1')}>
+                  {stage.tiles.slice(0, 2).map((s) => (
                     <li key={s.id} className="min-w-0">
-                      <SlideCard slide={s} size="tile" />
+                      <SlideCard slide={s} size="tile" className="aspect-auto h-full min-h-[7.5rem]" />
                     </li>
                   ))}
                 </ul>
@@ -189,7 +215,7 @@ export default function Home() {
             </div>
           )
         ) : (
-          <PromoSlider slides={slides} layout="phone" />
+          <PromoSlider slides={phoneSlides} layout="phone" />
         )}
 
         <HomeBlocks.CategoryTiles tiles={tiles} />
@@ -198,7 +224,7 @@ export default function Home() {
           {continueTop && continueCard}
           {recognized && openOrder && <HomeBlocks.TrackCard order={openOrder} />}
           {offer && <HomeBlocks.OfferStrip offer={offer} />}
-          <HomeBlocks.MissionStrip againCount={againCard ? 0 : againLines.length} rep={rep} paste={!pasteCardTop} className={cn(continueTop && 'mt-1')} />
+          <HomeBlocks.MissionStrip againCount={againCard ? 0 : againLines.length} rep={rep} className={cn(continueTop && 'mt-1')} />
           {/* a storefront rep without WhatsApp: who they are (the Ask-your-rep action covers the rest) */}
           {rep && !rep.whatsapp_url && <RepCard rep={rep} compact />}
         </div>

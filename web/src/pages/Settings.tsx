@@ -383,7 +383,7 @@ const PROMISES_SHOWN = 4
 const DEFAULT_PROMISES: Omit<PromiseRow, 'uid'>[] = [
   { key: 'delivery', en: 'Free delivery across Bahrain', ar: 'توصيل مجاني في كل البحرين', icon: 'truck', to: '/about#delivery' },
   { key: 'trade', en: 'Trade prices for shops', ar: 'أسعار الجملة للمحلات', icon: 'tag', to: '/about#trade' },
-  { key: 'stock', en: 'Live warehouse stock', ar: 'مخزون المستودع مباشر', icon: 'pulse', to: '/shop?f=instock' },
+  { key: 'stock', en: 'Real warehouse stock', ar: 'مخزون حقيقي من المستودع', icon: 'pulse', to: '/shop?f=instock' },
   { key: 'rep', en: 'Every order confirmed by your rep', ar: 'كل طلب يؤكده مندوبك', icon: 'shield', to: '/about#how' },
 ]
 

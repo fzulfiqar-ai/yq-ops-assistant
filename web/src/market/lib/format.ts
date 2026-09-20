@@ -96,10 +96,13 @@ export function badgeMeta(kind: string): { label: string; tone: ChipTone } {
   return BADGE_META[kind as BadgeKind] || { label: String(kind).replace(/_/g, ' '), tone: 'grey' }
 }
 
-/** The badges a card shows: priority order, max `limit`, "selling fast" dropped once sold out. */
+/** Badges that claim demand. A line nobody can order today does not advertise how well it sells. */
+const DEMAND_BADGES: BadgeKind[] = ['best_seller', 'selling_fast', 'trending']
+
+/** The badges a card shows: priority order, max `limit`, demand claims dropped once sold out. */
 export function cardBadges(item: ShopItem, limit = 2): BadgeKind[] {
   const have = new Set(item.badges || [])
-  if (item.stock_status === 'out_of_stock') have.delete('selling_fast')
+  if (item.stock_status === 'out_of_stock') for (const b of DEMAND_BADGES) have.delete(b)
   return BADGE_ORDER.filter((b) => have.has(b)).slice(0, limit)
 }
 
@@ -197,6 +200,22 @@ function cleanLine(text: string, code: string): string {
   return t
 }
 
+/**
+ * Acronyms the trade really does write in capitals. Everything else the ERP shouts
+ * ("NYLON BRAIDED LIGHTNING") is a word, not an initialism.
+ */
+const KEEP_CAPS = new Set(['USB', 'PVC', 'TPE', 'TPU', 'ABS', 'EVA', 'TWS', 'ANC', 'ENC', 'CVC', 'AUX', 'LED', 'OTG', 'HDMI', 'RGB', 'IPX', 'MAH', 'VFAN', 'PPS', 'GPS', 'NFC', 'LCD', 'SBC', 'AAC', 'LDAC', 'CCC', 'CCL', 'USA'])
+const SHOUT = /\b[A-Z]{3,}\b/g
+
+/**
+ * Calm the export's shouting: a run of three or more capitals that is not a known acronym becomes
+ * a word ("MICRO" → "Micro"). Runs glued to digits ("2USB") and two-letter marks ("PD", "QC") are
+ * left alone, so only the words change — never a code, a rating or a connector mark.
+ */
+function calmCaps(text: string): string {
+  return text.replace(SHOUT, (word) => (KEEP_CAPS.has(word) ? word : word[0] + word.slice(1).toLowerCase()))
+}
+
 export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 'spec'>): string {
   const code = item.item_code
   const dn = (item.display_name || '').trim()
@@ -210,7 +229,7 @@ export function productName(item: Pick<ShopItem, 'item_code' | 'display_name' | 
   }
   const lead = noCode.replace(VARIANT_LEAD, '')
   if (lead.length >= 3) noCode = lead
-  const out = (noCode.length >= 3 ? noCode : raw).replace(/\s{2,}/g, ' ').trim()
+  const out = calmCaps((noCode.length >= 3 ? noCode : raw).replace(/\s{2,}/g, ' ').trim())
   return out || code
 }
 

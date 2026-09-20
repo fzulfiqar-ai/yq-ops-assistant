@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronDown, Lock, MessageCircle, ReceiptText, ShieldCheck } from 'lucide-react'
+import { ChevronDown, Lock, MessageCircle, ReceiptText } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ShopApiError } from '@/lib/shopApi'
 import { RepCard } from '../components/RepCard'
@@ -11,6 +11,7 @@ import { bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/fo
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { clearSmallAck } from '../lib/smallOrder'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
+import { useReducedMotion } from '../shell/useViewport'
 import { cartStore, useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
@@ -31,6 +32,7 @@ export default function CheckoutPage() {
   const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders } = useOrder()
   const { rep, data, itemsByCode, recognized } = m
   const { viewport } = useShell()
+  const reduced = useReducedMotion()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
   const [customer, setCustomer] = useState<CustomerDraft>(() => (saveDetailsEnabled() ? readCustomer() : EMPTY_CUSTOMER))
@@ -40,6 +42,8 @@ export default function CheckoutPage() {
   const [pickOpen, setPickOpen] = useState(false)
   const [pick, setPick] = useState<number | ''>('')
   const [touched, setTouched] = useState<Record<string, boolean>>({})
+  /** set by the first send attempt — the one-line reason under the button appears only after it */
+  const [tried, setTried] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [slow, setSlow] = useState(false)
   const [error, setError] = useState('')
@@ -67,7 +71,13 @@ export default function CheckoutPage() {
   const nameOk = customer.name.trim().length > 1
   const phoneOk = isPhone(customer.phone)
   const emailOk = !customer.email.trim() || isEmail(customer.email)
-  const canSubmit = lines.length > 0 && nameOk && phoneOk && emailOk && !quoting && !submitting && quote?.can_submit !== false
+  const formOk = nameOk && phoneOk && emailOk
+  const canSubmit = lines.length > 0 && formOk && !quoting && !submitting && quote?.can_submit !== false
+  // Why the send did not go through, once it has been attempted. The button stays solid plum and
+  // takes the tap: a `disabled:opacity-50` plum slab is 2.5:1 against its own white label and reads
+  // as a broken control, and nothing on the screen says what is missing.
+  const invalid = tried && !formOk
+  const reason = invalid ? (!phoneOk && !nameOk ? S.checkout.missing : !phoneOk ? S.checkout.missingPhone : !nameOk ? S.checkout.missingName : S.checkout.emailBad) : tried && quoting ? S.cart.updating : ''
   const set = (k: keyof CustomerDraft, v: string) => setCustomer((c) => ({ ...c, [k]: v }))
   const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }))
   const areas = data?.settings?.areas || []
@@ -92,10 +102,26 @@ export default function CheckoutPage() {
       .catch(() => undefined)
   }
 
+  /** Take the merchant to the field that is holding the send up, instead of greying the button out. */
+  const focusMissing = () => {
+    const id = !phoneOk ? 'yq-phone' : !nameOk ? 'yq-name' : !emailOk ? 'yq-email' : ''
+    if (!id) return
+    if (id === 'yq-email') setMore(true)
+    window.requestAnimationFrame(() => {
+      const el = document.getElementById(id) as HTMLInputElement | null
+      el?.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
+      el?.focus({ preventScroll: true })
+    })
+  }
+
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setTouched({ name: true, phone: true, email: true })
-    if (!canSubmit) return
+    setTried(true)
+    if (!canSubmit) {
+      focusMissing()
+      return
+    }
     setSubmitting(true)
     setError('')
     const slowTimer = window.setTimeout(() => setSlow(true), 3000)
@@ -130,10 +156,26 @@ export default function CheckoutPage() {
     }
   }
 
+  // The send stays live until the shop itself is blocked (can_submit false, with the reason shown
+  // on the Restock page): an incomplete form is answered by moving to the field, not by a washed-out
+  // slab. Should it ever be disabled, it goes grey — never a 50 %-opacity plum with white on it.
   const submitBtn = (
-    <Button type="submit" form={FORM_ID} size="lg" className={cn('shrink-0', desktop ? 'w-full' : 'px-6')} disabled={!canSubmit} loading={submitting} icon={<Lock size={15} aria-hidden="true" />}>
+    <Button
+      type="submit"
+      form={FORM_ID}
+      size="lg"
+      full
+      className={cn('shrink-0', !submitting && 'disabled:bg-line-2 disabled:text-ink-3 disabled:opacity-100 disabled:shadow-none')}
+      disabled={quote?.can_submit === false || lines.length === 0}
+      loading={submitting}
+      icon={<Lock size={15} aria-hidden="true" />}
+    >
       {submitting ? (slow ? S.checkout.connecting : S.checkout.sending) : small ? S.small.send : S.checkout.place}
     </Button>
+  )
+  /** the line under the send: why it did not go (after a tap) or the standing reassurance */
+  const sendHint = (className: string) => (
+    <p className={cn(className, invalid ? 'font-medium text-bad' : 'text-ink-2')}>{reason || (small ? S.small.sendHint : first ? S.checkout.reassure(first) : S.checkout.noPayment)}</p>
   )
 
   return (
@@ -161,10 +203,6 @@ export default function CheckoutPage() {
                       {S.small.fee(bhd(smallFee))}
                     </p>
                   )}
-                  <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-snug text-ink-2">
-                    <ShieldCheck size={13} className="mt-px shrink-0 text-ok" aria-hidden="true" />
-                    {S.small.noPayment}
-                  </p>
                   <Link to="/cart" className="-ms-1 mt-1.5 inline-flex h-10 items-center rounded-sm px-1 text-sm font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
                     {S.small.keep}
                   </Link>
@@ -256,31 +294,35 @@ export default function CheckoutPage() {
               <Hint>{S.checkout.deliveryHint}</Hint>
             </div>
 
-            <label className="flex items-center gap-2.5 text-sm text-ink lg:col-span-2">
-              <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} className="h-5 w-5 rounded border-line accent-[#6D4091]" />
-              {S.checkout.save}
-            </label>
+            {/* the three small controls that close the form: one bordered block of 48 px rows, the
+                same card language as the rest of the page — loose 18 px links read as debug UI */}
+            <div className="divide-y divide-line-2 rounded-md border border-line bg-surface lg:col-span-2">
+              <label className="flex h-12 w-full cursor-pointer items-center gap-2.5 px-3.5 text-sm text-ink">
+                <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} className="h-5 w-5 shrink-0 rounded border-line accent-[#6D4091]" />
+                <span className="min-w-0 flex-1 truncate">{S.checkout.save}</span>
+              </label>
 
-            {!more ? (
-              <button type="button" onClick={() => setMore(true)} className="inline-flex items-center gap-1 self-start text-sm font-semibold text-plum hover:underline lg:col-span-2">
-                {S.checkout.more} <ChevronDown size={14} aria-hidden="true" />
-              </button>
-            ) : (
-              <div className="lg:col-span-2">
-                <Label htmlFor="yq-email">{S.checkout.email}</Label>
-                <Input id="yq-email" type="email" autoComplete="email" value={customer.email} onChange={(e) => set('email', e.target.value)} onBlur={() => blur('email')} aria-invalid={touched.email && !emailOk} />
-                {touched.email && !emailOk && <Hint error>{S.checkout.emailBad}</Hint>}
-              </div>
-            )}
+              {!more ? (
+                <button type="button" onClick={() => setMore(true)} aria-expanded={false} className="flex h-12 w-full items-center justify-between gap-3 px-3.5 text-sm font-semibold text-plum transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70">
+                  {S.checkout.more} <ChevronDown size={16} aria-hidden="true" />
+                </button>
+              ) : (
+                <div className="px-3.5 py-3">
+                  <Label htmlFor="yq-email">{S.checkout.email}</Label>
+                  <Input id="yq-email" type="email" autoComplete="email" value={customer.email} onChange={(e) => set('email', e.target.value)} onBlur={() => blur('email')} aria-invalid={touched.email && !emailOk} />
+                  {touched.email && !emailOk && <Hint error>{S.checkout.emailBad}</Hint>}
+                </div>
+              )}
 
-            {!rep && salesmen.length > 0 && (
-              <div className="lg:col-span-2">
-                {!pickOpen ? (
-                  <button type="button" onClick={() => setPickOpen(true)} className="text-sm font-semibold text-plum hover:underline">
-                    {S.checkout.haveRep} {S.checkout.chooseRep}
+              {!rep &&
+                salesmen.length > 0 &&
+                (!pickOpen ? (
+                  <button type="button" onClick={() => setPickOpen(true)} aria-expanded={false} className="flex h-12 w-full items-center justify-between gap-3 px-3.5 text-start text-sm transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70">
+                    <span className="min-w-0 truncate text-ink-2">{S.checkout.haveRep}</span>
+                    <span className="shrink-0 font-semibold text-plum">{S.checkout.chooseRep}</span>
                   </button>
                 ) : (
-                  <>
+                  <div className="px-3.5 py-3">
                     <Label htmlFor="yq-rep">{S.checkout.haveRep}</Label>
                     <Select id="yq-rep" value={pick} onChange={(e) => setPick(e.target.value === '' ? '' : Number(e.target.value))}>
                       <option value="">{S.checkout.noRep}</option>
@@ -290,10 +332,9 @@ export default function CheckoutPage() {
                         </option>
                       ))}
                     </Select>
-                  </>
-                )}
-              </div>
-            )}
+                  </div>
+                ))}
+            </div>
 
             <div aria-hidden="true" className="pointer-events-none absolute h-0 w-0 overflow-hidden opacity-0">
               <label htmlFor="yq-website">Website</label>
@@ -302,7 +343,9 @@ export default function CheckoutPage() {
           </form>
         </div>
 
-        <div className="hidden lg:sticky lg:top-[calc(var(--m-header-h)+16px)] lg:block">
+        {/* --m-sticky-h is the MEASURED sticky header (brand row + any category strip); the plain
+            header height is the fallback for a page the shell has not measured */}
+        <div className="hidden lg:sticky lg:top-[calc(var(--m-sticky-h,var(--m-header-h))+16px)] lg:block">
           <div className="rounded-lg border border-line bg-surface p-4">
             <div className="flex items-baseline justify-between">
               <span className="text-sm text-ink-2">{S.cart.summary(items, units)}</span>
@@ -314,7 +357,7 @@ export default function CheckoutPage() {
               </p>
             )}
             <div className="mt-4">{submitBtn}</div>
-            <p className="mt-2 text-xs text-ink-2">{small ? S.small.sendHint : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
+            {sendHint('mt-2 text-xs')}
           </div>
 
           {/* the lines, so the merchant sees what they are confirming */}
@@ -375,14 +418,14 @@ export default function CheckoutPage() {
               {error}
             </p>
           )}
-          <div className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="text-xs text-ink-2">{S.cart.summary(items, units)}</div>
-              <div className="font-display text-xl font-extrabold leading-tight tnum text-ink">{bhd(quote?.total_bhd)}</div>
-            </div>
-            {submitBtn}
+          {/* stacked, not squeezed: "Place wholesale order" + the lock take ~330 px of a 390 px bar,
+              and the money column was the one that gave way (BHD / 21.000 on two lines at 390) */}
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0 truncate text-xs text-ink-2">{S.cart.summary(items, units)}</span>
+            <span className="shrink-0 whitespace-nowrap font-display text-xl font-extrabold leading-tight tnum text-ink">{bhd(quote?.total_bhd)}</span>
           </div>
-          <p className="mt-1.5 text-2xs text-ink-2">{small ? S.small.sendHint : first ? S.checkout.reassure(first) : S.checkout.noPayment}</p>
+          <div className="mt-2">{submitBtn}</div>
+          {sendHint('mt-1.5 text-2xs')}
         </PageBar>
       )}
     </div>

@@ -14,11 +14,17 @@ const ProductPanel = lazy(() => import('../components/ProductPanel'))
 const loadSplash = () => import('../components/Splash')
 // A session's first load: start fetching the opening with the app itself (not at the shell's first
 // render), so the overlay lands as close to the first paint as a lazy chunk can. Same key as Splash.tsx.
-try {
-  if (!sessionStorage.getItem('yq-splash-session')) void loadSplash()
-} catch {
-  /* storage blocked: the opening stays out of the way anyway */
-}
+// NEEDS_SPLASH also colours the Suspense gap: without it the shell paints the finished header and the
+// home skeleton first and the night field drops on top a round trip later (seconds on a cold 4G
+// cache), which reads as a glitch — app, dark overlay, app — instead of an entrance.
+const NEEDS_SPLASH = (() => {
+  try {
+    return !sessionStorage.getItem('yq-splash-session')
+  } catch {
+    return false // storage blocked: the opening stays out of the way anyway
+  }
+})()
+if (NEEDS_SPLASH) void loadSplash()
 const Splash = lazy(() => loadSplash().then((mod) => ({ default: mod.Splash })))
 const SearchPalette = lazy(() => import('../components/SearchPalette'))
 
@@ -73,6 +79,11 @@ function ShellBody() {
       <Suspense fallback={null}>
         {panelCode && <ProductPanel code={panelCode} />}
         {paletteOpen && <SearchPalette />}
+      </Suspense>
+      {/* Its own boundary, and a night field for the gap: the first frame of a session's first load is
+       * the brand, with the horizon and the logo animating in on top of it. A product panel or the
+       * palette loading later must never paint it, hence the split. */}
+      <Suspense fallback={NEEDS_SPLASH ? <div className="canvas-night fixed inset-0 z-[90]" aria-hidden="true" /> : null}>
         <Splash />
       </Suspense>
     </>

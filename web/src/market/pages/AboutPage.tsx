@@ -1,7 +1,9 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { ClipboardList, LayoutGrid, ListChecks, MessageCircle, ShieldCheck, Tag, Truck, type LucideIcon } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { RepCard } from '../components/RepCard'
+import { useEdgeFade } from '../hooks/useEdgeFade'
 import { useMarket } from '../MarketContext'
 import { bhd } from '../lib/format'
 import { usePageTitle } from '../shell/ShellContext'
@@ -17,7 +19,10 @@ import { LinkButton } from '../ui/Button'
  * Nothing here promises more than the settings say: no "no minimum", free delivery only when it is.
  */
 
-const SCROLL_M = 'scroll-mt-4 lg:scroll-mt-[calc(var(--m-header-h)+1rem)]'
+// clears the pinned “On this page” row on a phone (h-10 + py-2) and, on desktop, the MEASURED
+// sticky header (--m-sticky-h, written by StickyHeader; the fixed row height is the fallback) PLUS
+// that same row, which now pins under it (1rem offset + 40px pills + py-2 both sides + 8px air)
+const SCROLL_M = 'scroll-mt-[68px] lg:scroll-mt-[calc(var(--m-sticky-h,var(--m-header-h))+5rem)]'
 
 function Section({ id, icon: Icon, title, children }: { id: string; icon: LucideIcon; title: string; children: ReactNode }) {
   return (
@@ -37,7 +42,24 @@ export default function AboutPage() {
   const { rep, data, settings } = useMarket()
   const { hash, key } = useLocation()
   const reduced = useReducedMotion()
+  const navRef = useRef<HTMLElement>(null)
+  const mask = useEdgeFade(navRef, true, [hash])
+  const current = decodeURIComponent(hash.slice(1))
   usePageTitle(S.about.title, true, `${S.about.title} · ${S.brand}`)
+
+  /* ── the pinned row must say it is pinned ──
+   * On a phone this row sits at the top of the viewport with the page's cards sliding under it, and
+   * with a flat cream background and no edge the card above looked amputated. It is stuck exactly
+   * when it can no longer sit fully inside a viewport shortened by 1px — no sentinel, no scroll
+   * handler. On desktop it pins under the measured header instead, where it keeps its hairline. */
+  const [stuck, setStuck] = useState(false)
+  useEffect(() => {
+    const el = navRef.current
+    if (!el || typeof IntersectionObserver !== 'function') return
+    const io = new IntersectionObserver(([entry]) => setStuck(!entry.isIntersecting && entry.boundingClientRect.top < 1), { threshold: [1], rootMargin: '-1px 0px 0px 0px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
   useEffect(() => {
     if (!hash) return
     const el = document.getElementById(decodeURIComponent(hash.slice(1)))
@@ -61,7 +83,8 @@ export default function AboutPage() {
 
   return (
     <div className="px-gutter lg:px-0">
-      <div className="mx-auto max-w-3xl space-y-4 lg:mx-0 lg:mt-4">
+      {/* trailing space so the last anchors (#delivery, #privacy, #contact) can reach the top */}
+      <div className="mx-auto max-w-3xl space-y-4 pb-[40vh] lg:mx-0 lg:mt-4">
         <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{S.about.title}</h1>
 
         {/* who we are — the one plum surface on the page */}
@@ -81,13 +104,23 @@ export default function AboutPage() {
           <p className="mt-3 text-xs leading-snug text-white/75">{S.about.company}</p>
         </section>
 
-        {/* on this page */}
-        <nav aria-label={S.about.onPage} className="no-scrollbar -mx-gutter flex gap-2 overflow-x-auto px-gutter py-1 lg:mx-0 lg:flex-wrap lg:overflow-visible lg:px-0">
+        {/* on this page — pinned everywhere, so there is a way back between sections all the way down */}
+        <nav
+          ref={navRef}
+          data-stuck={stuck ? '' : undefined}
+          aria-label={S.about.onPage}
+          style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+          className="no-scrollbar sticky top-0 z-[29] -mx-gutter flex gap-2 overflow-x-auto border-b border-transparent bg-canvas px-gutter py-2 transition-[border-color,box-shadow] duration-2 ease-m data-[stuck]:border-line data-[stuck]:shadow-[0_10px_18px_-16px_hsl(268_30%_10%/0.45)] lg:top-[calc(var(--m-sticky-h,var(--m-header-h))+1rem)] lg:mx-0 lg:flex-wrap lg:overflow-visible lg:border-line lg:px-0 lg:shadow-none"
+        >
           {sections.map((s) => (
             <Link
               key={s.id}
               to={{ hash: s.id }}
-              className="inline-flex h-10 shrink-0 items-center whitespace-nowrap rounded-full bg-surface px-3.5 text-sm font-semibold text-ink shadow-1 ring-1 ring-inset ring-line transition duration-1 ease-m hover:bg-plum-wash hover:ring-ink/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
+              aria-current={current === s.id ? 'location' : undefined}
+              className={cn(
+                'inline-flex h-10 shrink-0 items-center whitespace-nowrap rounded-full px-3.5 text-sm font-semibold shadow-1 transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
+                current === s.id ? 'bg-ink text-white' : 'bg-surface text-ink ring-1 ring-inset ring-line hover:bg-plum-wash hover:ring-ink/15',
+              )}
             >
               {s.label}
             </Link>

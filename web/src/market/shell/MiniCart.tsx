@@ -103,7 +103,11 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                       <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={44} imgClassName="p-1" iconSize={16} showCaption={false} />
                     </button>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-semibold text-ink">{name}</div>
+                      {/* two lines, not an ellipsis: in this catalog the part that tells two SKUs
+                          apart is at the END of the name — "(2USB Port)" vs "(USB + Type-C Port)",
+                          "1Mtr" vs "2Mtr" — and this is the panel where the merchant checks what
+                          they are about to order */}
+                      <div className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{name}</div>
                       <div className={cn('text-xs tnum', dead ? 'text-bad' : 'text-ink-2')}>{dead ? q?.blocked_reason || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : line.item_code}</div>
                     </div>
                     <div className="flex flex-col items-end gap-1">

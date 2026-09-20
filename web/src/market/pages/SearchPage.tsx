@@ -69,8 +69,10 @@ export default function SearchPage() {
 
   return (
     <div className="px-gutter lg:px-0">
-      <div className="sticky top-0 z-header -mx-gutter border-b border-line-2 bg-canvas/95 px-gutter pb-3 pt-1 backdrop-blur lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:px-0 lg:pb-2 lg:pt-2 lg:backdrop-blur-none">
-        <h1 className="hidden font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{S.nav.search}</h1>
+      <div className="sticky top-0 z-header -mx-gutter border-b border-line-2 bg-canvas/95 px-gutter pb-3 pt-1 backdrop-blur lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:px-0 lg:pb-2 lg:pt-4 lg:backdrop-blur-none">
+        {/* desktop: the heading says which query the results belong to — the header's rotating
+            search trigger is a palette opener, not this field, and the two read as two searches */}
+        <h1 className="hidden truncate font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{q.trim() && m.index && search ? S.shop.resultsFor(q.trim(), flat) : S.nav.search}</h1>
         <SearchField ref={inputRef} value={q} onChange={setQ} onSubmit={submit} hints={S.search.hints} autoFocus />
       </div>
       <div className="pt-4">

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { useReveal } from '../hooks/useReveal'
 import { useViewport, isPhoneLike, type Viewport } from './useViewport'
 
 /**
@@ -12,6 +13,8 @@ import { useViewport, isPhoneLike, type Viewport } from './useViewport'
  *    On phones/tablets it is portalled into the shell's bottom stack, ABOVE the nav, and the
  *    shell measures the stack into `--m-bottom-stack` so content never hides under it. On
  *    desktop it renders inline where the page put it.
+ *  • `<PageTail>` — a page's closing full-width tail (CTA band, footer). On desktop it is portalled
+ *    below the main column + aside row so it spans the container; elsewhere it renders in place.
  *  • `openProduct(code)` — opens the product panel over the current page (history push, so Back
  *    closes it) · `openCart()` — the cart drawer on desktop < 1280 / tablet · `openPalette()`.
  */
@@ -27,6 +30,8 @@ interface ShellValue {
   setTitle: (t: PageTitle | null) => void
   barHost: HTMLElement | null
   setBarHost: (el: HTMLElement | null) => void
+  tailHost: HTMLElement | null
+  setTailHost: (el: HTMLElement | null) => void
   hasPageBar: boolean
   setHasPageBar: (v: boolean) => void
   cartOpen: boolean
@@ -56,6 +61,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   const location = useLocation()
   const [title, setTitle] = useState<PageTitle | null>(null)
   const [barHost, setBarHost] = useState<HTMLElement | null>(null)
+  const [tailHost, setTailHost] = useState<HTMLElement | null>(null)
   const [hasPageBar, setHasPageBar] = useState(false)
   const [cartOpen, setCartOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -100,6 +106,8 @@ export function ShellProvider({ children }: { children: ReactNode }) {
       setTitle,
       barHost,
       setBarHost,
+      tailHost,
+      setTailHost,
       hasPageBar,
       setHasPageBar,
       cartOpen,
@@ -120,7 +128,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
       searchBand,
       setSearchBand,
     }),
-    [viewport, title, barHost, hasPageBar, cartOpen, paletteOpen, paletteQuery, openProduct, panelCode, closeProduct, hideNav, searchBand],
+    [viewport, title, barHost, tailHost, hasPageBar, cartOpen, paletteOpen, paletteQuery, openProduct, panelCode, closeProduct, hideNav, searchBand],
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
@@ -168,6 +176,24 @@ export function useSearchBand(on = true) {
     setSearchBand(on)
     return () => setSearchBand(false)
   }, [on, setSearchBand])
+}
+
+/**
+ * A page's closing tail — the CTA band and the footer. On desktop the page lives in the main
+ * column next to the sticky mini-cart aside; a closing statement squeezed into that column reads
+ * as an accident (and the aside would still be floating beside the copyright). So the shell hosts
+ * the tail after the column row, at full container width, and the page portals into it. Phone and
+ * tablet have no aside and no host: the children stay exactly where the page put them.
+ *
+ * The portal leaves the page's reveal root behind, so the tail scans itself — without this a
+ * `.reveal` section in here would never be marked `.is-in`, and would never become visible.
+ */
+export function PageTail({ children }: { children: ReactNode }) {
+  const { tailHost } = useShell()
+  const root = useMemo(() => ({ current: tailHost }), [tailHost])
+  useReveal(root, [tailHost])
+  if (!tailHost) return <>{children}</>
+  return createPortal(children, tailHost)
 }
 
 /** A page's sticky bottom action. See ShellContext. */

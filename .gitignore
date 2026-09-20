@@ -72,3 +72,8 @@ business_data/
 # OneDrive conflict copies land right beside the file they duplicate.
 *-Conflict.*
 *_conflict*
+
+# Design references the owner sent on WhatsApp (23 MB of screenshots + screen recordings used for
+# the v3 redesign). Reference material, not source: it must not land in a PUBLIC repo, and a
+# `git add -A` during a redesign round would take the whole folder.
+/Design Example/

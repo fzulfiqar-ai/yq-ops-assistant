@@ -20,7 +20,7 @@ export type SlideSize = 'hero' | 'phone' | 'tile' | 'aside'
 type Placement = 'hero' | 'strip' | 'aside'
 
 export interface Slide {
-  /** 'c:<campaign id>' | 'd:again' | 'd:last' | 'd:drops' | 'd:essentials' | 'd:fresh' | 'd:moving' | 'd:quick' */
+  /** 'c:<campaign id>' | 'd:again' | 'd:last' | 'd:drops' | 'd:essentials' | 'd:fresh' | 'd:moving' | 'd:brand' | 'd:quick' */
   id: string
   kind: SlideKind
   /** small line above the title, e.g. S.deals.title, or the sponsor label on a sponsored campaign */
@@ -70,7 +70,7 @@ const ART = 3
 /**
  * The slides, in order: campaigns (by placement priority, hero before strip) → data slides, each
  * only when the data backs it (last chance ≥3, price drops ≥2, restock essentials ≥3, new ≥3,
- * moving ≥3) → paste-a-list (always). Order again (a recognised merchant with a last order) goes
+ * moving ≥3) → the brand slide → paste-a-list (always). Order again (a recognised merchant) goes
  * SECOND, so slide 1 depends on the catalog payload alone — public/catalog-prefetch.js preloads its
  * image before the app has even downloaded (mirror any change to the slide-1 rules there).
  * `exclude` drops slide ids (e.g. the ones Home already shows), `kinds` keeps only those kinds,
@@ -156,6 +156,13 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
   if (moving.length >= MIN_DATA && wants('d:moving', 'data')) {
     push({ id: 'd:moving', kind: 'data', kicker: null, title: S.slides.moving, line: S.slides.movingLine, cta: S.slides.movingCta, to: '/shop?f=moving', canvas: 'apricot', products: art(moving) })
   }
+  /* The supplier itself, in the opening's night palette (plan D11). Every other slide is a shelf,
+   * so a deck built from a catalog that is all deals said "we are clearing stock" twice and never
+   * what YQ is. Always eligible, but LOW: with real promotions to show, this is the one that goes.
+   * Nothing here is a claim — the headline is the tagline and the count is the payload's own. */
+  if (live.length >= MIN_DATA && wants('d:brand', 'data')) {
+    push({ id: 'd:brand', kind: 'data', kicker: null, title: S.tagline, line: S.slides.brandLine(live.length), cta: S.slides.brandCta, to: '/about#how', canvas: 'night', products: art(best.length ? best : live) })
+  }
   if (wants('d:quick', 'data')) {
     push({ id: 'd:quick', kind: 'data', kicker: null, title: S.slides.quick, line: S.slides.quickLine, cta: S.slides.quickCta, to: '/quick', canvas: 'night', products: art(best.length ? best : live) })
   }
@@ -166,6 +173,56 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
     out.splice(Math.min(1, out.length), 0, slide)
   }
   return out
+}
+
+/**
+ * Slide ids the home page renders VERBATIM as a section of its own a flick further down
+ * (pages/HomeBelow: the "Restock essentials" rail, the "Moving fast in Bahrain" rail and the
+ * "Ready to restock?" paste band). They say nothing the merchant is not about to read anyway, so
+ * the phone hero — the most expensive card on the page — must not spend a slide on them.
+ */
+export const SECTION_SLIDE_IDS: readonly string[] = ['d:essentials', 'd:moving', 'd:quick']
+
+/**
+ * The two slides the Stock-Up Deals section states again in its own chips ("Last chance 24",
+ * "Price drops 4") a screen and a half below the hero. One of them is a promotion; both of them
+ * are the section's table of contents.
+ */
+const DEALS_SLIDE_IDS: readonly string[] = ['d:last', 'd:drops']
+
+/**
+ * The home deck: slide 1 exactly as buildSlides ordered it — public/catalog-prefetch.js preloads
+ * that slide's image before the app has loaded, so it may never change here — then only slides that
+ * carry something the page does not otherwise state (no rail headings, no second paste offer).
+ * Capped at `max` (a 5-slide hero is a table of contents; 2–3 is a promotion).
+ *
+ * `deals` caps how many of the deck's cards may come from the Stock-Up Deals section. A phone deck
+ * is a stack of equals, one after the other, so it passes 1: with this catalog both survivors were
+ * that section ("Last-Chance Stock · 24 lines" then "4 prices cut in our price book"), which made
+ * the app's first impression "we are clearing stock", said twice, and no positioning at all. The
+ * desktop composition reads as one frame — a stage beside two smaller tiles — where the second
+ * deals card is a tile, not a repeat, so it leaves the cap open.
+ *
+ * Never empty when `slides` is not.
+ */
+export function heroDeck(slides: Slide[], max = 3, deals = slides.length): Slide[] {
+  if (slides.length < 2) return slides
+  let spent = 0
+  const deck = slides.filter((s, i) => {
+    const isDeal = DEALS_SLIDE_IDS.includes(s.id)
+    // slide 1 stands whatever it is (the preload picked it)
+    if (i === 0) {
+      if (isDeal) spent++
+      return true
+    }
+    if (SECTION_SLIDE_IDS.includes(s.id)) return false
+    if (isDeal) {
+      if (spent >= deals) return false
+      spent++
+    }
+    return true
+  })
+  return deck.slice(0, Math.max(1, max))
 }
 
 /** One campaign as a slide (Arabic copy when the locale is Arabic; sponsor label always carried). */
@@ -195,9 +252,10 @@ function campaignSlide(c: Campaign, fallbackCanvas: SlideCanvas, byCode: Map<str
 /**
  * The header creative of one category's shelf (CampaignStrip.tsx CategoryBanner): the campaign an
  * admin placed on that category; else, when the shelf's `items` are given, a banner composed from
- * them — the category name, its in-stock line count, the one message its data backs (last-chance
- * lines → price drops → new arrivals; the CTA filters this shelf) and three of those photos. With
- * no such message the banner is not a link. Null when there is nothing to show.
+ * them — the one message its data backs as the headline (last-chance lines → price drops → new
+ * arrivals; the CTA filters this shelf), the shelf's stock as a kicker, and three of those photos.
+ * With no such message the banner is not a link and falls back to the category name.
+ * Null when there is nothing to show.
  */
 export function categorySlide(campaigns: Campaign[], category: string, items?: ShopItem[] | null): Slide | null {
   const key = category.toUpperCase()
@@ -210,16 +268,20 @@ export function categorySlide(campaigns: Campaign[], category: string, items?: S
   const fresh = live.filter((i) => hasBadge(i, 'new'))
   const best = live.filter((i) => hasBadge(i, 'best_seller'))
   const shelf = `/t/${categorySlug(category)}`
-  const base = { kind: 'data' as const, kicker: S.campaign.categoryStock(live.length), title: niceCategory(category) }
+  /* The headline is the shelf's message, not its name: the page h1 (and the active chip on desktop)
+   * already say "Cable" within 300 px of this card. The kicker counts the shelf against its own
+   * total, so it can never look like it contradicts the "78 products" under it. The line repeats
+   * neither, and only shows on a banner wide enough for it (market.css, tile size ≥ 440 px). */
+  const base = { kind: 'data' as const, kicker: S.campaign.categoryStock(live.length, pool.length) }
   let slide: Slide
   if (deals.lastChance.length) {
-    slide = { ...base, id: 'k:last', line: S.spot.clearance(deals.lastChance.length), cta: S.slides.lastCta, to: `${shelf}?f=clearance`, canvas: 'apricot', products: deals.lastChance, sticker: { label: S.deals.badge, tone: 'deal' } }
+    slide = { ...base, id: 'k:last', title: S.campaign.categoryLast(deals.lastChance.length), line: S.deals.line, cta: S.slides.lastCta, to: `${shelf}?f=clearance`, canvas: 'apricot', products: deals.lastChance, sticker: { label: S.deals.badge, tone: 'deal' } }
   } else if (deals.drops.length) {
-    slide = { ...base, id: 'k:drops', line: S.spot.drops(deals.drops.length), cta: S.slides.dropsCta, to: `${shelf}?f=drops`, canvas: 'lilac', products: deals.drops, sticker: { label: S.deals.drops, tone: 'drop' } }
+    slide = { ...base, id: 'k:drops', title: S.campaign.categoryDrops(deals.drops.length), line: S.slides.dropsLine, cta: S.slides.dropsCta, to: `${shelf}?f=drops`, canvas: 'lilac', products: deals.drops, sticker: { label: S.deals.drops, tone: 'drop' } }
   } else if (fresh.length) {
-    slide = { ...base, id: 'k:fresh', line: S.spot.arrived(fresh.length), cta: S.slides.freshCta, to: `${shelf}?f=new`, canvas: 'mint', products: fresh, sticker: { label: S.slides.stickerNew, tone: 'fresh' } }
+    slide = { ...base, id: 'k:fresh', title: S.campaign.categoryFresh(fresh.length), line: null, cta: S.slides.freshCta, to: `${shelf}?f=new`, canvas: 'mint', products: fresh, sticker: { label: S.slides.stickerNew, tone: 'fresh' } }
   } else {
-    slide = { ...base, id: 'k:shelf', line: null, cta: '', to: '', canvas: 'lilac', products: [...best, ...live.filter((i) => !best.includes(i))] }
+    slide = { ...base, id: 'k:shelf', title: niceCategory(category), line: null, cta: '', to: '', canvas: 'lilac', products: [...best, ...live.filter((i) => !best.includes(i))] }
   }
   slide.products = slide.products.filter(hasPhoto).slice(0, ART)
   return slide.products.length ? slide : null
@@ -233,25 +295,27 @@ export function categorySlide(campaigns: Campaign[], category: string, items?: S
  *   SLIDE_SIZES        the whole card: an uploaded image with fit 'cover' (600/1200 w)
  *   SLIDE_ART_SIZES    the art column: an uploaded image with fit 'contain' (600/1200 w)
  *   SLIDE_THUMB_SIZES  one disc of a composed creative (product thumbs 160/320/512 w)
- * Widths follow components/SlideCard.tsx: phone cards are 88% of the track (84vw of a 390 phone,
- * 56vw on a tablet); the desktop hero stage spans the main column (≈860–1000 px beside the 320/360
- * aside); tiles are the pastel cards under it (or a category banner); aside is the Spotlight card.
+ * Widths follow components/SlideCard.tsx and the `.slider-cell` rule in market.css: a phone card
+ * runs from the page gutter to 20 px short of the far edge (≈92vw; 56vw on a tablet) and its art
+ * column is 36% of that; the desktop hero stage spans the main column (≈860–1000 px beside the
+ * 320/360 aside); tiles are the pastel cards under it (or a category banner); aside is the
+ * Spotlight card.
  */
 export const SLIDE_SIZES: Record<SlideSize, string> = {
   hero: '(min-width: 1440px) 1000px, (min-width: 1024px) 900px, 92vw',
-  phone: '(min-width: 768px) 56vw, 84vw',
+  phone: '(min-width: 768px) 56vw, 92vw',
   tile: '(min-width: 1024px) 480px, 92vw',
   aside: '(min-width: 1440px) 336px, 296px',
 }
 export const SLIDE_ART_SIZES: Record<SlideSize, string> = {
   hero: '(min-width: 1440px) 420px, (min-width: 1024px) 380px, 40vw',
-  phone: '(min-width: 768px) 25vw, 38vw',
+  phone: '(min-width: 768px) 22vw, 34vw',
   tile: '(min-width: 1024px) 200px, 40vw',
   aside: '(min-width: 1440px) 220px, 196px',
 }
 export const SLIDE_THUMB_SIZES: Record<SlideSize, string> = {
   hero: '(min-width: 1440px) 208px, (min-width: 1024px) 184px, 20vw',
-  phone: '(min-width: 768px) 13vw, 19vw',
+  phone: '(min-width: 768px) 12vw, 17vw',
   tile: '(min-width: 1024px) 112px, 20vw',
   aside: '(min-width: 1440px) 104px, 96px',
 }

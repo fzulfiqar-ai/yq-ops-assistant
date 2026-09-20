@@ -60,6 +60,45 @@ export interface DealSets {
   hasRealDeals: boolean
 }
 
+/** The model a code belongs to: "UK10 C" / "UK10-L" / "P05 2Mtr" / "X01 UM" → UK10 · UK10 · P05 · X01. */
+function codeFamily(i: ShopItem): string {
+  return (i.item_code || '').trim().toUpperCase().split(/[\s\-_/]+/)[0] || ''
+}
+
+/** The photo two variants were shot on — in this catalog a whole family usually shares one file. */
+function photoKey(i: ShopItem): string {
+  return i.product_image_url || i.thumb_urls?.['320'] || i.thumb_url || ''
+}
+
+/** Two cards a merchant cannot tell apart at a glance: one photo, or one model with two connectors. */
+function sameFamily(a: ShopItem, b: ShopItem): boolean {
+  const pa = photoKey(a)
+  if (pa && pa === photoKey(b)) return true
+  const ca = codeFamily(a)
+  return Boolean(ca) && ca === codeFamily(b)
+}
+
+/**
+ * Keep look-alikes apart on a shelf. Two SKUs of one model (UK10 C / UK10 L: the same photo, the
+ * same price, one word of difference) side by side at the head of a rail read as a duplicate
+ * render — the owner's original v2 complaint — and they waste the first screenful of the section
+ * that has to prove the deals are worth scanning. Stable: an item only moves when the card before
+ * it is from its own family, and then only far enough to break the pair; if nothing else is left,
+ * shelf order wins over an empty slot.
+ */
+export function spreadFamilies(list: ShopItem[]): ShopItem[] {
+  if (list.length < 3) return list
+  const rest = list.slice()
+  const out: ShopItem[] = [rest.shift()!]
+  while (rest.length) {
+    const prev = out[out.length - 1]
+    let k = 0
+    while (k < rest.length && sameFamily(prev, rest[k])) k++
+    out.push(rest.splice(k === rest.length ? 0 : k, 1)[0])
+  }
+  return out
+}
+
 function isLiveOffer(o: Offer): boolean {
   if (!o.ends_at) return true
   const end = new Date(o.ends_at).getTime()
@@ -70,7 +109,8 @@ function isLiveOffer(o: Offer): boolean {
  * The Stock-Up Deals section, from real data only: price-book drops that carry the old price
  * (`hasRealDrop`), live offers, bundle rules, and last-chance lines. Every set is in stock. A code
  * sits in one of drops/offers/bundles first (drops and offers may share a code), and last-chance
- * never repeats one of them.
+ * never repeats one of them. Every set — and the combined All — is then de-clustered
+ * (`spreadFamilies`) so two variants of one model never land side by side.
  */
 export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
   const live = inStock(items)
@@ -80,11 +120,11 @@ export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
     if (!isLiveOffer(o) || !(kind === 'bundle_price' || kind.includes('bundle'))) continue
     for (const c of o.scope_codes || []) bundleCodes.add(c)
   }
-  const drops = live.filter(hasRealDrop)
-  const bundles = live.filter((i) => bundleCodes.has(i.item_code))
-  const offerItems = live.filter((i) => hasBadge(i, 'on_offer') && !bundleCodes.has(i.item_code))
+  const drops = spreadFamilies(live.filter(hasRealDrop))
+  const bundles = spreadFamilies(live.filter((i) => bundleCodes.has(i.item_code)))
+  const offerItems = spreadFamilies(live.filter((i) => hasBadge(i, 'on_offer') && !bundleCodes.has(i.item_code)))
   const taken = new Set([...drops, ...offerItems, ...bundles].map((i) => i.item_code))
-  const last = lastChance(items).filter((i) => !taken.has(i.item_code))
+  const last = spreadFamilies(lastChance(items).filter((i) => !taken.has(i.item_code)))
   const seen = new Set<string>()
   const all: ShopItem[] = []
   for (const i of [...drops, ...offerItems, ...bundles, ...last]) {
@@ -92,7 +132,7 @@ export function dealSets(items: ShopItem[], offers?: Offer[] | null): DealSets {
     seen.add(i.item_code)
     all.push(i)
   }
-  return { drops, lastChance: last, offers: offerItems, bundles, all, hasRealDeals: drops.length + offerItems.length + bundles.length > 0 }
+  return { drops, lastChance: last, offers: offerItems, bundles, all: spreadFamilies(all), hasRealDeals: drops.length + offerItems.length + bundles.length > 0 }
 }
 
 /**
@@ -171,27 +211,37 @@ export function brandTiles(items: ShopItem[]): BrandTile[] {
 }
 
 /**
- * The desktop hero composition from ONE slide list: a slider stage (≤3 slides) and a row of pastel
- * tiles (2–3) under it, FreshMart's three promo tiles. Tiles are data slides only, taken from the
- * end of the list (the lowest priority), so campaigns and Order again stay on the stage; pastel
- * canvases are preferred over the night one. With 5+ slides the row gets 3 tiles, with 3–4 it
- * gets 2; fewer than 2 possible tiles → no row, the stage keeps up to 3. A slide shows at most
- * once; the ones left out (a 4th campaign) stay unclaimed, so the aside Spotlight can carry them.
+ * The desktop hero composition from ONE slide list (D7): a slider stage beside up to TWO stacked
+ * pastel tiles. Tiles are data slides only, taken from the end of the list (the lowest priority),
+ * so campaigns and Order again stay on the stage; pastel canvases are preferred over the night
+ * one; slide 1 (the LCP candidate catalog-prefetch.js preloads) never leaves the stage.
+ *
+ * Never three — three equal boxes in a row read as a template — and never a filler tile either:
+ * a tile that repeats a heading the merchant reads 300 px further down ("Restock essentials",
+ * "Moving fast in Bahrain") turns the hero into a table of contents. The caller therefore passes
+ * a deck those ids are already out of (lib/slides `heroDeck`), and when only one tileable slide
+ * is left the composition drops to ONE tile beside a wider stage rather than filling the second
+ * slot with a rail clone. None at all → no tiles, the stage runs full width with up to 3 slides.
+ *
+ * The stage keeps two slides before a second tile is cut from it. A stage of one is a static
+ * board with no dots and no reason to look twice, and the deck is short on purpose — with this
+ * catalog it is three (Last-Chance Stock · price drops · the brand slide), so taking two tiles
+ * left the largest box on the page holding a single frame. Tiles are therefore rationed by what
+ * the deck can spare: 4+ slides → two tiles, 3 → one, fewer → none.
  */
 export function heroSplit(slides: readonly Slide[]): { hero: Slide[]; tiles: Slide[] } {
   const n = slides.length
-  const want = n >= 5 ? 3 : n >= 3 ? 2 : 0
+  const maxTiles = n >= 4 ? 2 : n >= 3 ? 1 : 0
   const tileable = (s: Slide) => s.kind === 'data' && s.id !== 'd:again'
   const picked = new Set<string>()
-  // pastel first, then the night slide, each walked from the end of the list; slide 1 (the LCP
-  // candidate catalog-prefetch.js preloads) always stays on the stage
+  // pastel first, then the night slide, each walked from the end of the list
   for (const pass of [(s: Slide) => s.canvas !== 'night', () => true]) {
-    for (let i = n - 1; i >= 1 && picked.size < want; i--) {
+    for (let i = n - 1; i >= 1 && picked.size < maxTiles; i--) {
       const s = slides[i]
       if (!picked.has(s.id) && tileable(s) && pass(s)) picked.add(s.id)
     }
   }
-  if (picked.size < 2) return { hero: slides.slice(0, 3), tiles: [] }
+  if (!picked.size) return { hero: slides.slice(0, 3), tiles: [] }
   return { hero: slides.filter((s) => !picked.has(s.id)).slice(0, 3), tiles: slides.filter((s) => picked.has(s.id)) }
 }
 

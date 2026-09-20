@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { SLIDE_DWELL, useCarousel, useClaimSlides, type Slide } from '../lib/slides'
+import { heroDeck, SLIDE_DWELL, useCarousel, useClaimSlides, type Slide } from '../lib/slides'
 import { useReducedMotion } from '../shell/useViewport'
 import { S } from '../strings'
 import { SlideCard } from './SlideCard'
@@ -9,15 +9,21 @@ import { SlideCard } from './SlideCard'
 /**
  * The promo slider (plan D7): campaigns + data slides from lib/slides.ts, one list, never a repeat.
  *
- * Phone — a scroll-snap track (`.slider-track`) that bleeds to the screen edges (put it in a
- * `px-gutter` parent): cards at 88% width peek the next one, 2:1, dots under it. Autoplay every
+ * Phone — the deck is `heroDeck()`: slide 1 as built (the preload in public/catalog-prefetch.js
+ * depends on it), then only slides that say something the page does not repeat 400 px lower — and
+ * one deals card at most, so the deck cannot be the Stock-Up Deals section twice — capped at 3.
+ * A hero that lists the sections under it sells nothing.
+ * A scroll-snap track (`.slider-track`) that bleeds to the screen edges (put it in a `px-gutter`
+ * parent): a `.slider-cell` card runs gutter-to-gutter and leaves a 12 px sliver of the next one
+ * — its corner, never its type — 2:1, dots under it. Autoplay every
  * 5.5 s by smooth-scrolling the track; the index follows the scroll position. Pauses while the
  * merchant touches or scrolls the track (and for 8 s after), while it has keyboard focus, when the
  * tab is hidden or the slider is off-screen; never plays under reduced motion. A 44 px pause/play
  * button sits at the end of the dots row — the only way to stop it for good (WCAG 2.2.2).
  *
- * Desktop — a 21:9 stage that crossfades (the incoming slide fades in over the outgoing one, which
- * stays opaque, so the canvas never dips), inactive slides inert + aria-hidden; under it a control
+ * Desktop — a 21:9 stage that dissolves: the stage takes the incoming slide's canvas, the outgoing
+ * slide fades into it (200 ms) and the incoming one fades up after it (180 ms delay), so the two
+ * are never both legible and the canvas never dips; inactive slides inert + aria-hidden; under it a control
  * row: dots that fill over the dwell time (the fill pauses with the timer), pause/play, prev/next.
  * Arrow keys move too, but only from that row — inside the stage they would turn the focused slide
  * inert under the merchant. Hover pauses.
@@ -32,9 +38,14 @@ export interface PromoSliderProps {
 }
 
 export function PromoSlider({ slides, layout, className }: PromoSliderProps) {
-  useClaimSlides(slides.map((s) => s.id))
-  if (!slides.length) return null
-  return layout === 'phone' ? <PhoneSlider slides={slides} className={className} /> : <DesktopSlider slides={slides} className={className} />
+  // The phone hero is the home's one promo surface, so it trims itself to the slides that are a
+  // promotion (heroDeck) — and to ONE deals card, because a deck is a stack of equals and the two
+  // cards a merchant flicks through must not say the same thing. The desktop stage is a
+  // composition: the page splits hero/tiles itself and passes in exactly what it wants shown.
+  const deck = useMemo(() => (layout === 'phone' ? heroDeck(slides, 3, 1) : slides), [layout, slides])
+  useClaimSlides(deck.map((s) => s.id))
+  if (!deck.length) return null
+  return layout === 'phone' ? <PhoneSlider slides={deck} className={className} /> : <DesktopSlider slides={deck} className={className} />
 }
 
 /* ───────────────────────── phone: snap track ───────────────────────── */
@@ -106,16 +117,35 @@ function PhoneSlider({ slides, className }: { slides: Slide[]; className?: strin
 
   return (
     <section ref={rootRef} aria-roledescription="carousel" aria-label={S.slides.label} className={cn('-mx-gutter', className)} {...c.bind} onTouchStart={hold}>
-      <div ref={trackRef} onScroll={onScroll} className="slider-track relative gap-2.5 px-gutter">
-        {slides.map((s, i) => (
-          <div key={s.id} role="group" aria-roledescription="slide" aria-label={S.slides.go(i + 1, n)} data-slide-state={i === c.index ? 'active' : 'idle'} className={cn(n > 1 ? 'w-[88%] md:w-[60%]' : 'w-full md:w-[60%]', 'max-w-[560px]')}>
-            <SlideCard slide={s} size="phone" priority={i === 0} where="slider" />
-          </div>
-        ))}
+      {/* The peek must promise a next card, not show 40 px of sliced headline: `.slider-cell` runs
+          the card from the page gutter to 20 px short of the far edge (8 px gap + a 12 px sliver
+          that is the next card's own padding, never its type) and `.slider-edge` veils that sliver
+          into the page. */}
+      <div className={cn(n > 1 && 'slider-edge')}>
+        <div ref={trackRef} onScroll={onScroll} className="slider-track relative gap-2 px-gutter">
+          {slides.map((s, i) => (
+            <div
+              key={s.id}
+              role="group"
+              aria-roledescription="slide"
+              aria-label={S.slides.go(i + 1, n)}
+              data-slide-state={i === c.index ? 'active' : 'idle'}
+              className={cn(
+                n > 1 ? 'slider-cell' : 'w-full md:w-[60%]',
+                'max-w-[560px]',
+                // the neighbour reads as depth; focus (or one flick) brings it back to full strength
+                n > 1 && 'transition-[opacity,filter] duration-3 ease-m focus-within:opacity-100 focus-within:saturate-100 motion-reduce:transition-none',
+                n > 1 && i !== c.index && 'opacity-70 saturate-[.85]',
+              )}
+            >
+              <SlideCard slide={s} size="phone" priority={i === 0} where="slider" />
+            </div>
+          ))}
+        </div>
       </div>
       {n > 1 && (
         <>
-          <div className={cn('relative flex items-center justify-center gap-1.5', c.autoplay ? 'mt-1 h-11' : 'mt-2.5 h-1.5')}>
+          <div className={cn('flex items-center justify-center', c.autoplay ? 'mt-1 h-11 gap-1.5' : 'mt-2.5 h-1.5')}>
             <span className="flex items-center gap-1.5" aria-hidden="true">
               {slides.map((s, i) => (
                 <span key={s.id} className={cn('h-1.5 rounded-full transition-[width,background-color] duration-3 ease-m', i === c.index ? 'w-[18px] bg-plum' : 'w-1.5 bg-ink/20')} />
@@ -123,13 +153,14 @@ function PhoneSlider({ slides, className }: { slides: Slide[]; className?: strin
             </span>
             {/* WCAG 2.2.2: touching the track only holds the slides for SLIDE_RESUME, so the merchant
                 (and anyone reading with a browse cursor, which never fires focus) needs a real stop.
-                Absolute, so it never pushes the dots off centre; gone when nothing moves on its own. */}
+                It sits in the row, right after the dots — floating alone at the far end of an empty
+                44 px band it read as a stray control. Gone when nothing moves on its own. */}
             {c.autoplay && (
               <button
                 type="button"
                 onClick={c.togglePause}
                 aria-label={c.userPaused ? S.slides.play : S.slides.pause}
-                className="absolute end-gutter top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-full text-ink-3 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
+                className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-ink-3 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
               >
                 {c.userPaused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}
               </button>
@@ -155,7 +186,8 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
   const c = useCarousel({ count: n, reduced, rootRef })
   const idx = c.index
 
-  // the slide that was showing: it stays opaque under the incoming one while that fades in
+  // the slide that was showing: it fades away FIRST, over the stage already wearing the incoming
+  // slide's canvas, and the incoming one only starts once it is gone
   const [shown, setShown] = useState({ cur: idx, prev: -1 })
   if (shown.cur !== idx) setShown({ cur: idx, prev: shown.cur })
   const prev = shown.cur === idx ? shown.prev : -1
@@ -178,7 +210,11 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
 
   return (
     <section ref={rootRef} aria-roledescription="carousel" aria-label={S.slides.label} className={className} {...c.bind} onKeyDown={onKeyDown}>
-      <div className="slider-stage relative aspect-[21/9] overflow-hidden rounded-xl bg-surface-2" aria-live={c.running ? 'off' : 'polite'}>
+      {/* The stage wears the CANVAS of the slide that is coming in, from the first frame of the
+          swap: the outgoing slide then dissolves into that colour instead of the two slides
+          overlapping at half opacity — which, between an apricot and a night slide, painted both
+          headlines, both lines and both CTAs on top of each other over mud. */}
+      <div className={cn('slider-stage relative aspect-[21/9] overflow-hidden rounded-xl', `canvas-${slides[idx]?.canvas || 'lilac'}`)} aria-live={c.running ? 'off' : 'polite'}>
         {slides.map((s, i) => {
           const active = i === idx
           return (
@@ -190,7 +226,9 @@ function DesktopSlider({ slides, className }: { slides: Slide[]; className?: str
               aria-hidden={active ? undefined : true}
               inert={!active}
               data-slide-state={active ? 'active' : 'idle'}
-              className={cn('absolute inset-0', active ? 'z-[2] opacity-100 transition-opacity duration-[560ms] ease-m' : i === prev ? 'z-[1] opacity-100' : 'z-0 opacity-0')}
+              /* Sequenced, never simultaneous: the outgoing slide is gone by 200 ms and the
+                 incoming one only starts at 180 ms, so no frame carries two headlines. */
+              className={cn('absolute inset-0 motion-reduce:transition-none', active ? 'z-[2] opacity-100 transition-opacity duration-[260ms] delay-[180ms] ease-m' : i === prev ? 'z-[1] opacity-0 transition-opacity duration-[200ms] ease-m' : 'z-0 opacity-0')}
             >
               <SlideCard slide={s} size="hero" priority={i === 0} where="slider" className="h-full w-full" />
             </div>

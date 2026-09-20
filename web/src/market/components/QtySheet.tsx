@@ -6,7 +6,12 @@ import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Sheet } from '../ui/Sheet'
 
-/** Type a quantity: a big numeric field, quick picks (pack multiples or 6/12/24/48/100), the tier ladder. */
+/**
+ * Type a quantity: a big numeric field, quick picks (pack multiples or 6/12/24/48/100), the tier
+ * ladder. It is also where a line STARTS when nothing is remembered for it — a wholesaler's first
+ * question is "how many", not "one?" — so the field opens focused and selected: the first digit
+ * typed replaces the minimum it was seeded with, and a quick pick is one tap.
+ */
 export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: ShopItem; value: number; onApply: (n: number) => void; onRemove: () => void; onClose: () => void }) {
   const step = stepOf(item)
   const min = minQtyOf(item)
@@ -58,6 +63,7 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
           value={draft}
           onChange={(e) => setDraft(e.target.value.replace(/\D/g, '').slice(0, 4))}
           onKeyDown={(e) => e.key === 'Enter' && apply()}
+          onFocus={(e) => e.currentTarget.select()}
           inputMode="numeric"
           pattern="[0-9]*"
           autoFocus

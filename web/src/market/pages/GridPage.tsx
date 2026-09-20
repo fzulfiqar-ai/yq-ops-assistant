@@ -7,6 +7,7 @@ import { CategoryBanner } from '../components/CampaignStrip'
 import { MarketCard } from '../components/MarketCard'
 import { useMarket } from '../MarketContext'
 import { ClosedState, ConnectingState, EmptyState } from '../components/States'
+import { revealActiveChip, useEdgeFade } from '../hooks/useEdgeFade'
 import { useReveal } from '../hooks/useReveal'
 import { track } from '../lib/events'
 import { applyQuickFilters, facetsFor, isDeal, isEssential, isMoving, isOffer, isRealDrop, matchesFacets, parseFilters, readFacets, shelfOrder, sortItems, type QuickFilter, type SortMode } from '../lib/facets'
@@ -15,7 +16,7 @@ import { useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useSaved } from '../store/saved'
 import { S } from '../strings'
-import { Button } from '../ui/Button'
+import { Button, LinkButton } from '../ui/Button'
 import { Select } from '../ui/Field'
 import { CardSkeleton } from '../ui/Skeleton'
 
@@ -25,7 +26,9 @@ import { CardSkeleton } from '../ui/Skeleton'
  * so a filtered shelf can be shared, refreshed and linked from rails and slides ("See all").
  *
  * Phones/tablets (under the plum search band, useSearchBand on the page): the chips row — Sort ·
- * In stock · Deals · Price drops · Last chance · Saved · facets — pins at `--m-search-h`, Keeta-style.
+ * In stock · Deals · Price drops · Last chance · Saved — pins at `--m-search-h`, Keeta-style, and a
+ * category's own facets ride a second row under it (they are a shelf's real navigation, not a
+ * postscript to the quick filters; on desktop both rows wrap statically in the toolbar).
  * It gains a hairline once it is stuck (a 1px sentinel sits exactly `--m-search-h` above the row,
  * so it leaves the viewport the moment the row sticks — no scroll handler), and fills the band's
  * rounded corners with the canvas. Changing a filter while stuck brings the results back to the top
@@ -195,6 +198,20 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
     }
   }, [desktop])
 
+  /* ── the chips row scrolls: the active chip must be on screen, and the row must look scrollable ──
+   * A filtered shelf that looks exactly like the whole shelf is the bug: on a phone "Essentials" or
+   * "Last chance" can sit 600px into the row. Bring the first pressed chip into view inside the
+   * scroller (never the page), and fade whichever edge has more chips behind it. */
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const facetsRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (desktop) return
+    revealActiveChip(scrollerRef.current)
+    revealActiveChip(facetsRef.current)
+  }, [paramsKey, desktop, items])
+  const mask = useEdgeFade(scrollerRef, !desktop, [paramsKey, items, groups])
+  const facetMask = useEdgeFade(facetsRef, !desktop && groups.length > 0, [paramsKey, items, groups])
+
   /* ── desktop reveal: stagger by column ── */
   const gridRef = useRef<HTMLDivElement>(null)
   const [cols, setCols] = useState(4)
@@ -276,7 +293,13 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
         className="sticky z-[29] -mx-gutter border-b border-transparent bg-canvas transition-[border-color,box-shadow] duration-2 ease-m before:pointer-events-none before:absolute before:inset-x-0 before:bottom-full before:hidden before:h-[22px] before:bg-canvas data-[stuck]:border-line data-[stuck]:shadow-[0_10px_18px_-16px_hsl(268_30%_10%/0.45)] data-[stuck]:before:block lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:shadow-none"
         style={{ top: 'var(--m-search-h, 0px)' }}
       >
-        <div role="group" aria-label={S.shop.filters} className="no-scrollbar flex items-center gap-2 overflow-x-auto px-gutter py-2 lg:flex-wrap lg:overflow-visible lg:px-0 lg:py-0">
+        <div
+          ref={scrollerRef}
+          role="group"
+          aria-label={S.shop.filters}
+          style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+          className="no-scrollbar flex items-center gap-2 overflow-x-auto px-gutter py-2 lg:flex-wrap lg:overflow-visible lg:px-0 lg:py-0"
+        >
           <label className={chipCls(sort !== 'shelf', 'cursor-pointer pe-2.5 focus-within:ring-2 focus-within:ring-focus/70 lg:hidden')}>
             <ArrowDownUp size={15} strokeWidth={2} aria-hidden="true" />
             <span aria-hidden="true">{SORT_LABEL[sort] || S.shop.sort}</span>
@@ -314,9 +337,31 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
               </button>
             )
           })}
-          {groups.map((g) => (
+          {active > 0 && (
+            <button type="button" onClick={clearAll} className="relative inline-flex h-10 shrink-0 items-center gap-1 rounded-full px-3 text-sm font-semibold text-plum transition duration-1 ease-m after:absolute after:inset-x-0 after:-inset-y-[3px] hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+              <X size={14} aria-hidden="true" /> {S.shop.clear}
+            </button>
+          )}
+          <span aria-hidden="true" className="w-px shrink-0 lg:hidden" />
+        </div>
+      </div>
+
+      {/* ── the facets get their own row ──
+       * On a 78-line cable shelf the inferred facets (Type-C 61 · Lightning 32 · 1 m 42 · 25–65W 18…)
+       * are how a merchant actually finds a line, and behind five quick filters they started 1.4
+       * screens to the right and ran 5.5 screens long. They scroll on their own row from the gutter,
+       * under the pinned quick filters rather than inside them, and wrap beside them on desktop. */}
+      {groups.length > 0 && (
+        <div
+          ref={facetsRef}
+          role="group"
+          aria-label={S.shop.refine}
+          style={facetMask ? { maskImage: facetMask, WebkitMaskImage: facetMask } : undefined}
+          className="no-scrollbar -mx-gutter flex items-center gap-2 overflow-x-auto px-gutter pb-2 pt-0.5 lg:mx-0 lg:mt-2 lg:flex-wrap lg:overflow-visible lg:px-0 lg:pb-0 lg:pt-0"
+        >
+          {groups.map((g, gi) => (
             <span key={g.key} role="group" aria-label={g.label} className="flex shrink-0 items-center gap-2 lg:flex-wrap">
-              <span aria-hidden="true" className="h-6 w-px shrink-0 bg-line" />
+              {gi > 0 && <span aria-hidden="true" className="h-6 w-px shrink-0 bg-line" />}
               {g.values.map((v) => {
                 const on = sel[g.key] === v.key
                 return (
@@ -327,14 +372,9 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
               })}
             </span>
           ))}
-          {active > 0 && (
-            <button type="button" onClick={clearAll} className="relative inline-flex h-10 shrink-0 items-center gap-1 rounded-full px-3 text-sm font-semibold text-plum transition duration-1 ease-m after:absolute after:inset-x-0 after:-inset-y-[3px] hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
-              <X size={14} aria-hidden="true" /> {S.shop.clear}
-            </button>
-          )}
           <span aria-hidden="true" className="w-px shrink-0 lg:hidden" />
         </div>
-      </div>
+      )}
 
       {/* phone meta row: live count · paste a list · density */}
       <div className="mt-2 flex items-center gap-1 lg:hidden">
@@ -353,19 +393,28 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
         ) : status === 'error' ? (
           <ConnectingState onRetry={reload} failed />
         ) : (
-          <div aria-busy="true" aria-label={S.states.loading} className="mt-2 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:mt-4 lg:grid-cols-4 2xl:grid-cols-5">
+          <div aria-busy="true" aria-label={S.states.loading} className="mt-2 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:mt-4 lg:grid-cols-4 3xl:grid-cols-5">
             {Array.from({ length: 8 }).map((_, i) => (
               <CardSkeleton key={i} />
             ))}
           </div>
         )
       ) : result.length === 0 ? (
-        <EmptyState
-          className="mt-4 lg:mt-5"
-          title={S.shop.none}
-          hint={filters.has('saved') && !savedCodes.length ? S.shop.savedNone : S.shop.noneHint}
-          action={active > 0 ? <Button variant="secondary" onClick={clearAll}>{S.shop.clear}</Button> : undefined}
-        />
+        // nothing saved is not a filter miss: the shelf is empty because the heart was never tapped
+        filters.has('saved') && !savedCodes.length ? (
+          <EmptyState
+            className="mt-4 lg:mt-5"
+            title={S.shop.savedNoneTitle}
+            hint={S.shop.savedNone}
+            action={
+              <LinkButton to="/shop" variant="secondary">
+                {S.restock.browse}
+              </LinkButton>
+            }
+          />
+        ) : (
+          <EmptyState className="mt-4 lg:mt-5" title={S.shop.none} hint={S.shop.noneHint} action={active > 0 ? <Button variant="secondary" onClick={clearAll}>{S.shop.clear}</Button> : undefined} />
+        )
       ) : view === 'list' ? (
         <div className="mt-1 lg:mt-3">
           {result.slice(0, shown).map((it) => (
@@ -373,7 +422,11 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
           ))}
         </div>
       ) : (
-        <div ref={gridRef} className="mt-2 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:mt-4 lg:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
+        // the one desktop shelf ladder (components/Rail.tsx, components/DealsSection.tsx): 4 up to
+        // 1800, 5 beyond it. A fifth column at 1440 left ~175px of card, too narrow for the price
+        // row to carry the old price beside today's — and a 5-up grid under a 4-up rail on the
+        // same page read as two pages stitched together.
+        <div ref={gridRef} className="mt-2 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:mt-4 lg:grid-cols-4 3xl:grid-cols-5">
           {result.slice(0, shown).map((it, i) =>
             desktop ? (
               // .reveal on a plain wrapper (the card keeps its hover transition and .cv-card); className never changes

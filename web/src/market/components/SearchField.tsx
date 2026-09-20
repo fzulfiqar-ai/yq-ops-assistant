@@ -9,8 +9,9 @@ const HINT_EVERY_MS = 2400
 /**
  * The rotating example query — "Search “20W charger”" — shown where a placeholder would be (the
  * phone band, the desktop search trigger, an empty unfocused SearchField). Purely visual: it is
- * aria-hidden and the control around it carries the accessible name. The outgoing hint lifts away
- * as the next rises in (`anim-hint-out` / `anim-hint-in`, market.css "v3: hints"). It holds still
+ * aria-hidden and the control around it carries the accessible name. The two hints share one
+ * clipped line box: the outgoing one lifts out of it and is gone before the next rises in
+ * (`anim-hint-out` / `anim-hint-in`, market.css "v3: hints"). It holds still
  * while `paused`, while the tab is hidden, and under reduced motion (first hint, static).
  */
 export function SearchHints({ hints, paused, className, leadClassName, hintClassName }: { hints: readonly string[]; paused?: boolean; className?: string; leadClassName?: string; hintClassName?: string }) {
@@ -34,15 +35,19 @@ export function SearchHints({ hints, paused, className, leadClassName, hintClass
   const now = reduced ? 0 : tick % n
   const before = run && moving && tick > 0 ? (tick - 1) % n : null
   return (
-    <span aria-hidden="true" className={cn('pointer-events-none flex min-w-0 items-baseline gap-[0.3em] overflow-hidden whitespace-nowrap', className)}>
+    <span aria-hidden="true" className={cn('pointer-events-none flex min-w-0 items-center gap-[0.3em] overflow-hidden whitespace-nowrap leading-[1.6]', className)}>
       <span className={cn('shrink-0', leadClassName)}>{S.search.hintLead}</span>
-      <span className="grid min-w-0 flex-1 overflow-hidden">
+      {/* one line box, exactly — and a FULL one: 1.6em (not 1.3em) so the descenders of "charger"
+          and "Type-C" sit inside it instead of being sliced flat by the clip. The outgoing hint is
+          transparent long before it is half out of the window (market.css "v3: hints"), so a
+          screenshot can never catch two cut lines in the pill. */}
+      <span className="relative block h-[1.6em] min-w-0 flex-1 overflow-hidden">
         {before !== null && (
-          <span key={`out-${tick}`} className={cn('anim-hint-out col-start-1 row-start-1 truncate', hintClassName)}>
+          <span key={`out-${tick}`} className={cn('anim-hint-out absolute inset-x-0 top-0 truncate', hintClassName)}>
             {S.search.hintQuoted(hints[before])}
           </span>
         )}
-        <span key={`in-${tick}`} className={cn('col-start-1 row-start-1 truncate', before !== null && 'anim-hint-in', hintClassName)}>
+        <span key={`in-${tick}`} className={cn('absolute inset-x-0 top-0 truncate', before !== null && 'anim-hint-in', hintClassName)}>
           {S.search.hintQuoted(hints[now])}
         </span>
       </span>

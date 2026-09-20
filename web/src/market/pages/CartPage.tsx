@@ -8,7 +8,7 @@ import { ProgressBar } from '../components/ProgressBar'
 import { QtySheet } from '../components/QtySheet'
 import { Rail } from '../components/Rail'
 import { SmallOrderSheet } from '../components/SmallOrderSheet'
-import { SmallRequestButton, WholesaleState } from '../components/WholesaleState'
+import { SmallRequestButton, WholesaleFillers, WholesaleState } from '../components/WholesaleState'
 import { useRecentOrders } from '../hooks/useRecentOrders'
 import { useMarket, useOrder } from '../MarketContext'
 import { rememberedOrders } from '../lib/device'
@@ -79,12 +79,15 @@ export default function CartPage() {
     const shown = new Set(showRegulars ? regulars.map((r) => r.item.item_code) : [])
     return savedCodes.map((c) => itemsByCode.get(c)).filter((i): i is ShopItem => Boolean(i) && !inCart.has(i!.item_code) && !shown.has(i!.item_code))
   }, [savedCodes, itemsByCode, inCart, regulars, showRegulars])
-  const essentials = useMemo(() => (lines.length ? [] : bestSellers(m.items)), [lines.length, m.items])
+  const essentials = useMemo(() => bestSellers(m.items).filter((it) => !inCart.has(it.item_code)), [m.items, inCart])
   const together = useMemo(() => {
     const out: ShopItem[] = []
     for (const l of lines) for (const p of m.pairsFor(l.item_code)) if (!inCart.has(p.item_code) && !out.includes(p) && p.stock_status !== 'out_of_stock') out.push(p)
     return out.slice(0, 8)
   }, [lines, m, inCart])
+  // "Often ordered together" must stay true, so it is never padded — with fewer than a row's worth
+  // of real pairs (one 170 px card alone in a 900 px column) the essentials rail takes the slot.
+  const pairsRail = together.length >= 3
 
   /* ── the order ── */
   const quoteLines = useMemo(() => new Map<string, QLine>((quote?.lines || []).map((l) => [l.item_code, l])), [quote])
@@ -233,8 +236,11 @@ export default function CartPage() {
         <div className="min-w-0">
           {!desktop && (
             <>
-              {/* the page bar carries the primary (Keep restocking / Place wholesale order); the card keeps the small-order request */}
-              <WholesaleState variant="page" actions="secondary" onRequestSmall={requestSmall ? openSmall : undefined} className="mt-3" />
+              {/* the page bar carries the primary (Keep restocking / Place wholesale order); the card
+                  keeps the small-order request. The gap fillers are NOT in it: with the list inside,
+                  the card ran past the fold and "In this restock" opened below three products the
+                  merchant had not chosen — they get their own block under the lines instead. */}
+              <WholesaleState variant="page" actions="secondary" fillers={false} onRequestSmall={requestSmall ? openSmall : undefined} className="mt-3" />
               {progress && <div className="mt-3">{progress}</div>}
             </>
           )}
@@ -315,13 +321,24 @@ export default function CartPage() {
             </ul>
           </section>
 
-          {together.length > 0 && (
+          {/* "Complete your restock with these" — the quote's gap fillers, under the merchant's own
+              lines on every width. In the state card they pushed the restock off the first phone
+              screen, and in the desktop column they pushed the CTA out of the sticky box. */}
+          <WholesaleFillers className="mt-4" />
+
+          {pairsRail ? (
             <Rail id="together" title={S.rails.together} max={4}>
               {together.map((it) => (
                 <MarketCard key={it.item_code} item={it} variant="compact" from="complete" />
               ))}
             </Rail>
-          )}
+          ) : essentials.length > 0 ? (
+            <Rail id="restock-essentials" title={S.restock.essentials} seeAllTo="/shop?f=best">
+              {essentials.map((it) => (
+                <MarketCard key={it.item_code} item={it} variant="compact" from="restock_essentials" />
+              ))}
+            </Rail>
+          ) : null}
 
           <div className="mt-6">
             <Label htmlFor="yq-note">{first ? S.cart.noteFor(first) : S.cart.note}</Label>
@@ -388,12 +405,17 @@ export default function CartPage() {
           </section>
         </div>
 
-        {/* ── desktop: the sticky decision column ── */}
+        {/* ── desktop: the sticky decision column. --m-sticky-h is the MEASURED sticky header
+            (brand row + any category strip); the plain header height is the fallback for a page
+            the shell has not measured. It carries the decision only — how far to the minimum, the
+            totals, the CTA — never the gap fillers, which used to make it 875 px in a 695 px box at
+            1280×800 and sliced "Keep restocking" off a sticky column the page could not scroll.
+            The totals card sticks to the bottom of the box, so the CTA survives a tall quote ── */}
         {desktop && (
-          <div className="sticky top-[calc(var(--m-header-h)+16px)] -m-1 max-h-[calc(100dvh-var(--m-header-h)-32px)] space-y-3 overflow-y-auto overscroll-contain p-1">
-            <WholesaleState variant="page" actions={false} />
+          <div className="sticky top-[calc(var(--m-sticky-h,var(--m-header-h))+16px)] -m-1 max-h-[calc(100dvh-var(--m-sticky-h,var(--m-header-h))-32px)] space-y-3 overflow-y-auto overscroll-contain p-1">
+            <WholesaleState variant="page" actions={false} fillers={false} />
             {progress}
-            <div className="rounded-xl border border-line bg-surface p-4 shadow-1">
+            <div className="sticky bottom-1 rounded-xl border border-line bg-surface p-4 shadow-1">
               {totals}
               {blocked && <p className="mt-3 text-xs font-medium text-bad">{blocked}</p>}
               {keepMode ? (

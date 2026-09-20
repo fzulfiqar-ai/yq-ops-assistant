@@ -57,9 +57,9 @@
   // lib/format.ts marginOf() / priceAnchor(); ui/ProductImage.tsx srcset;
   // MarketContext.tsx campaign audience filter + lib/device.ts isRecognized(). The desktop layout
   // (hero stage + tiles) starts at 1024px — shell/useViewport.ts isDesktopLike, as pages/Home.tsx uses.
-  var SLIDE_SIZES = { hero: '(min-width: 1440px) 1000px, (min-width: 1024px) 900px, 92vw', phone: '(min-width: 768px) 56vw, 84vw' }
-  var SLIDE_ART_SIZES = { hero: '(min-width: 1440px) 420px, (min-width: 1024px) 380px, 40vw', phone: '(min-width: 768px) 25vw, 38vw' }
-  var SLIDE_THUMB_SIZES = { hero: '(min-width: 1440px) 208px, (min-width: 1024px) 184px, 20vw', phone: '(min-width: 768px) 13vw, 19vw' }
+  var SLIDE_SIZES = { hero: '(min-width: 1440px) 1000px, (min-width: 1024px) 900px, 92vw', phone: '(min-width: 768px) 56vw, 92vw' }
+  var SLIDE_ART_SIZES = { hero: '(min-width: 1440px) 420px, (min-width: 1024px) 380px, 40vw', phone: '(min-width: 768px) 22vw, 34vw' }
+  var SLIDE_THUMB_SIZES = { hero: '(min-width: 1440px) 208px, (min-width: 1024px) 184px, 20vw', phone: '(min-width: 768px) 12vw, 17vw' }
 
   function has(i, badge) { return (i.badges || []).indexOf(badge) >= 0 }
   function live(i) { return i.stock_status !== 'out_of_stock' }

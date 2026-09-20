@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { ChevronRight, ClipboardList, Clock, MessageCircle, Package, RotateCcw, Tag, type LucideIcon } from 'lucide-react'
+import { ChevronRight, Clock, MessageCircle, Package, RotateCcw, Tag, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { MyOrderSummary, Offer, RepCard, ShopItem } from '@/lib/shopApi'
 import { track } from '../lib/events'
@@ -9,14 +9,14 @@ import { Chip } from '../ui/Chip'
 import { ProductImage } from '../ui/ProductImage'
 
 /* ───────────────────────── wholesale actions ─────────────────────────
-   The three things a shop owner comes to do besides browsing: paste the list they would have sent
-   on WhatsApp, reorder the last delivery, ask their representative. Order again only when this
-   phone has a last order; Ask your rep only when the rep shares a WhatsApp link; `paste={false}` when
-   the paste-your-list card already sits right above. Three actions on a phone are app-style keys
-   (icon over label); one or two are rows with a line of detail. */
+   What a shop owner comes to do besides browsing and pasting a list: reorder the last delivery and
+   ask their representative. Order again only when this phone has a last order; Ask your rep only
+   when the rep shares a WhatsApp link. Paste is NOT here: the continue card right above already is
+   the paste offer, and the closing band repeats it — the page makes that offer twice, never more.
+   Each action is a row with a line of detail. */
 
 interface Action {
-  key: 'paste' | 'again' | 'rep'
+  key: 'again' | 'rep'
   label: string
   sub: string
   icon: LucideIcon
@@ -32,46 +32,32 @@ const DISC: Record<Action['tone'], string> = {
   wa: 'bg-wa text-white',
 }
 
-export function MissionStrip({ againCount, rep, paste = true, className }: { againCount: number; rep: RepCard | null; paste?: boolean; className?: string }) {
+export function MissionStrip({ againCount, rep, className }: { againCount: number; rep: RepCard | null; className?: string }) {
   const actions: Action[] = []
-  if (paste) actions.push({ key: 'paste', label: S.band.paste, sub: S.home.pasteSub, icon: ClipboardList, to: '/quick', tone: 'plum' })
   if (againCount > 0) actions.push({ key: 'again', label: S.rails.again, sub: S.home.againSub(againCount), icon: RotateCcw, to: '/quick?load=last', tone: 'solid' })
   if (rep?.whatsapp_url) {
     const first = rep.first_name || firstName(rep.name) || rep.name
     actions.push({ key: 'rep', label: S.home.askRep, sub: S.home.askSub(first), icon: MessageCircle, href: rep.whatsapp_url, aria: S.cart.ask(first), tone: 'wa' })
   }
   if (!actions.length) return null
-  const keys = actions.length === 3
-  const single = actions.length === 1 && actions[0].key === 'paste'
 
   return (
     <nav aria-label={S.home.actions} className={className}>
-      <ul className={cn('grid gap-2 lg:gap-3', actions.length === 3 ? 'grid-cols-3' : actions.length === 2 ? 'grid-cols-2' : 'grid-cols-1')}>
+      <ul className={cn('grid gap-2 lg:gap-3', actions.length === 2 ? 'grid-cols-2' : 'grid-cols-1')}>
         {actions.map((a) => {
           const Icon = a.icon
-          const cls = cn(
-            'group flex rounded-lg bg-surface text-ink shadow-1 ring-1 ring-line transition duration-2 ease-m hover:-translate-y-0.5 hover:shadow-2 hover:ring-ink/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 active:scale-[.985]',
-            keys ? 'h-[4.75rem] flex-col items-center justify-center gap-1.5 px-1.5 text-center lg:h-16 lg:flex-row lg:justify-start lg:gap-3 lg:px-4 lg:text-start' : 'h-16 items-center gap-3 px-3.5 lg:px-4',
-          )
+          const cls =
+            'group flex h-16 items-center gap-3 rounded-lg bg-surface px-3.5 text-ink shadow-1 ring-1 ring-line transition duration-2 ease-m hover:-translate-y-0.5 hover:shadow-2 hover:ring-ink/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 active:scale-[.985] lg:px-4'
           const inner = (
             <>
-              <span className={cn('grid shrink-0 place-items-center rounded-full', keys ? 'h-8 w-8 lg:h-10 lg:w-10' : 'h-10 w-10', DISC[a.tone])} aria-hidden="true">
-                <Icon size={keys ? 16 : 18} strokeWidth={1.9} />
+              <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-full', DISC[a.tone])} aria-hidden="true">
+                <Icon size={18} strokeWidth={1.9} />
               </span>
-              <span className={cn('min-w-0 max-w-full', !keys && 'flex-1', keys && 'lg:flex-1')}>
-                <span className={cn('block truncate font-semibold', keys ? 'text-xs leading-4 lg:text-sm' : 'text-sm')}>{a.label}</span>
-                <span className={cn('truncate text-xs text-ink-2', keys ? 'hidden lg:block' : 'block')}>{a.sub}</span>
+              <span className="min-w-0 max-w-full flex-1">
+                <span className="block truncate text-sm font-semibold">{a.label}</span>
+                <span className="block truncate text-xs text-ink-2">{a.sub}</span>
               </span>
-              {single && (
-                <span className="hidden shrink-0 items-center gap-1.5 md:flex" aria-hidden="true">
-                  {S.home.pasteExample.map((line) => (
-                    <span key={line} className="rounded-full bg-surface-2 px-2.5 py-1 text-2xs font-medium tnum text-ink-2 ring-1 ring-inset ring-line-2">
-                      {line}
-                    </span>
-                  ))}
-                </span>
-              )}
-              {!keys && <ChevronRight size={16} className="shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100" aria-hidden="true" />}
+              <ChevronRight size={16} className="shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100" aria-hidden="true" />
             </>
           )
           const onClick = () => track('rail_click', { meta: { rail: 'mission', code: a.key } })
@@ -95,9 +81,22 @@ export function MissionStrip({ againCount, rep, paste = true, className }: { aga
 }
 
 /* ───────────────────────── category tiles ─────────────────────────
-   Round shelf tiles, the delivery-app way: a white disc holding the category's best photo
-   (never cropped — object-contain on a square-padded white thumb), the name under it and the
-   line count, muted. Four per row on a phone (two rows for eight categories), one row on desktop. */
+   Round shelf tiles, the delivery-app way: a pastel disc holding the category's best photo
+   (never cropped — object-contain), the name under it and the line count, muted. Four per row on
+   a phone (two rows for eight categories), one row on desktop.
+
+   Two things the photos force. (1) The art box is the square inscribed in the circle (70.7%), so
+   no product corner — the Power bank's eco badge, the Charger's plug — can be sliced by the ring.
+   (2) The disc carries its own ring's wash instead of white: half this catalog is a white cable or
+   a white earbud on a white background, and on a white disc they all but vanished. The white the
+   thumbs are padded with (167 of 172 files) is dropped by `mix-blend-multiply`, so the product
+   floats on the tint instead of printing a white rectangle inside the circle — which is why the
+   fill was white before. `isolate` keeps that blend inside the disc. */
+
+/** the pastel rings, cycled across the row — the tile canvases from D8 */
+const TILE_RING = ['ring-tile-lilac', 'ring-tile-apricot', 'ring-tile-mint']
+/** the same three washes as the disc ground, so a white-on-white product has something to sit on */
+const TILE_WASH = ['bg-tile-lilac/60', 'bg-tile-apricot/60', 'bg-tile-mint/60']
 
 export function CategoryTiles({ tiles, className }: { tiles: { category: string; count: number; newCount: number; image: ShopItem | null }[]; className?: string }) {
   if (!tiles.length) return null
@@ -111,10 +110,10 @@ export function CategoryTiles({ tiles, className }: { tiles: { category: string;
               onClick={() => track('rail_click', { meta: { rail: 'tile', pos: i } })}
               className="group flex flex-col items-center rounded-md px-0.5 pb-1 pt-1 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70"
             >
-              <span className="relative grid h-16 w-16 place-items-center rounded-full bg-surface shadow-[0_1px_2px_hsl(268_30%_10%/0.06),0_8px_18px_-10px_hsl(268_30%_10%/0.22)] ring-1 ring-line-2 transition duration-2 ease-m group-hover:-translate-y-0.5 group-hover:shadow-2 group-hover:ring-plum/25 group-active:scale-95 lg:h-[88px] lg:w-[88px]">
-                {/* the square inscribed in the disc (≈70%): the photo is never clipped by the circle */}
+              <span className={cn('relative isolate grid h-16 w-16 place-items-center rounded-full shadow-[0_1px_2px_hsl(268_30%_10%/0.06),0_8px_18px_-10px_hsl(268_30%_10%/0.22)] ring-2 transition duration-2 ease-m group-hover:-translate-y-0.5 group-hover:shadow-2 group-hover:ring-plum/25 group-active:scale-95 min-[360px]:h-[72px] min-[360px]:w-[72px] lg:h-[88px] lg:w-[88px]', TILE_WASH[i % TILE_WASH.length], TILE_RING[i % TILE_RING.length])}>
+                {/* the square inscribed in the disc (70.7%): no corner of the photo can fall outside the ring */}
                 <span className="block h-[70%] w-[70%]">
-                  <ProductImage item={t.image} alt="" sizes="(min-width: 1024px) 88px, 64px" size={88} className="h-full w-full bg-transparent" imgClassName="transition-transform duration-3 ease-m group-hover:scale-[1.07]" iconSize={20} showCaption={false} eager={i < 8} />
+                  <ProductImage item={t.image} alt="" sizes="(min-width: 1024px) 88px, 72px" size={88} className="h-full w-full bg-transparent" imgClassName="mix-blend-multiply transition-transform duration-3 ease-m group-hover:scale-[1.07]" iconSize={20} showCaption={false} eager={i < 8} />
                 </span>
                 {t.newCount > 0 && (
                   <span className="absolute -end-2 -top-1">
@@ -124,7 +123,10 @@ export function CategoryTiles({ tiles, className }: { tiles: { category: string;
               </span>
               {/* two label lines reserved, the label sitting on its count: counts line up across a row and a one-line name never floats away from its number */}
               <span className="mt-2 flex min-h-[30px] items-end justify-center lg:mt-2.5 lg:min-h-[36px]">
-                <span className="line-clamp-2 text-xs font-semibold leading-[15px] text-ink lg:text-sm lg:leading-[18px]">{niceCategory(t.category)}</span>
+                {/* one step down on a 320px phone: four columns leave ~69px, and "accessories" —
+                    the second line of the longest category — measures ~68px at 12px, i.e. clipped
+                    by the clamp's own overflow. At 11px it clears, and the 2-line reserve holds */}
+                <span className="line-clamp-2 text-[11px] font-semibold leading-[14px] text-ink min-[360px]:text-xs min-[360px]:leading-[15px] lg:text-sm lg:leading-[18px]">{niceCategory(t.category)}</span>
               </span>
               <span className="text-2xs tnum text-ink-3">{t.count}</span>
             </Link>

@@ -15,7 +15,7 @@ import { bhd, fmtDate, initials } from '../lib/format'
 import { canPromptInstall, isIos, isStandalone, onInstallChange, promptInstall } from '../lib/install'
 import { usePageTitle } from '../shell/ShellContext'
 import { S } from '../strings'
-import { Button } from '../ui/Button'
+import { Button, LinkButton } from '../ui/Button'
 import { Chip } from '../ui/Chip'
 import { Input, Label } from '../ui/Field'
 import { useToast } from '../ui/Toast'
@@ -88,7 +88,9 @@ export default function MyYQPage() {
   const row = 'flex items-center gap-3 px-4 py-3.5 text-sm font-semibold text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70'
 
   return (
-    <div className="px-gutter lg:px-0">
+    <div className="px-gutter lg:px-0 lg:pt-4">
+      {/* the phone header carries the title; desktop had no heading at all */}
+      <h1 className="hidden font-display text-2xl font-bold text-ink lg:mb-3 lg:block">{S.me.title}</h1>
       <div className="mx-auto max-w-2xl lg:mx-0 lg:grid lg:max-w-none lg:grid-cols-2 lg:gap-6">
         <div>
           {/* the hub: your shop and its wholesale actions */}
@@ -152,7 +154,13 @@ export default function MyYQPage() {
               )}
             </div>
             {savedItems.length === 0 ? (
-              <p className="border-t border-line-2 px-4 py-4 text-sm text-ink-2">{S.me.savedEmpty}</p>
+              // an empty card with no way out is a dead end: every one of them offers its next step
+              <div className="border-t border-line-2 px-4 py-4">
+                <p className="text-sm text-ink-2">{S.me.savedEmpty}</p>
+                <LinkButton to="/shop" variant="secondary" size="sm" className="mt-3">
+                  {S.restock.browse}
+                </LinkButton>
+              </div>
             ) : (
               <ul className="divide-y divide-line-2 border-t border-line-2">
                 {savedItems.slice(0, 6).map((it) => (
@@ -175,7 +183,12 @@ export default function MyYQPage() {
               )}
             </div>
             {myOrders.length === 0 ? (
-              <p className="border-t border-line-2 px-4 py-4 text-sm text-ink-2">{S.orders.empty}</p>
+              <div className="border-t border-line-2 px-4 py-4">
+                <p className="text-sm text-ink-2">{S.orders.empty}</p>
+                <LinkButton to="/orders" variant="secondary" size="sm" className="mt-3">
+                  {S.me.track}
+                </LinkButton>
+              </div>
             ) : (
               <ul className="divide-y divide-line-2 border-t border-line-2">
                 {myOrders.slice(0, 5).map((o) => (
@@ -243,7 +256,14 @@ export default function MyYQPage() {
                       <dd className="truncate font-medium text-ink">{v}</dd>
                     </div>
                   ))}
-                {!customer.phone && !customer.name && <dd className="col-span-2 text-sm text-ink-2">{S.me.noDetails}</dd>}
+                {!customer.phone && !customer.name && (
+                  <dd className="col-span-2">
+                    <span className="block text-sm text-ink-2">{S.me.noDetails}</span>
+                    <Button variant="secondary" size="sm" className="mt-3" onClick={() => setEditing(true)}>
+                      {S.me.addDetails}
+                    </Button>
+                  </dd>
+                )}
               </dl>
             )}
             {(customer.phone || customer.name) && !editing && (
@@ -308,13 +328,14 @@ export default function MyYQPage() {
                   </span>
                 </span>
               </div>
+              {/* the build id belongs with help, not as the merchant's closing line */}
+              <div className="flex items-center justify-end border-t border-line-2 px-4 py-2 text-2xs tnum text-ink-3">
+                {S.me.version} {typeof __BUILD_ID__ !== 'undefined' ? __BUILD_ID__ : 'dev'}
+              </div>
             </div>
           </section>
 
-          <div className="mt-6 flex flex-wrap items-center justify-between gap-2 text-2xs text-ink-3">
-            <span>
-              {S.me.version} {typeof __BUILD_ID__ !== 'undefined' ? __BUILD_ID__ : 'dev'}
-            </span>
+          <div className="mt-6 flex flex-wrap items-center justify-end gap-2 text-2xs text-ink-3">
             <button type="button" onClick={clearAll} className="inline-flex h-10 items-center rounded-sm px-2 font-semibold text-ink-2 hover:bg-plum-wash hover:text-ink">
               {S.me.clear}
             </button>

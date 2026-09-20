@@ -18,9 +18,9 @@ import { Skeleton } from '../ui/Skeleton'
  *  • lines in the restock list → how far the list is from a wholesale order (WholesaleState),
  *    the lines as thumbnails, Review restock;
  *  • a recognised merchant with a last order → Order again: the lines, one tap to add them all;
- *  • anyone else → paste the list you would have sent on WhatsApp.
- * Home places it right under the categories when the list is non-empty or the merchant is
- * recognised, and lower (before the full catalogue) for a first visit.
+ *  • anyone else → paste the list you would have sent on WhatsApp (`paste`, phone only: the
+ *    desktop home already makes that offer in the hero and the closing band).
+ * Home places it right under the categories, on every visit.
  */
 // The wholesale state is the Restock page's card; on Home it only appears once the restock has a
 // priced quote (network time anyway), so its code loads on demand instead of with the first screen
@@ -31,6 +31,7 @@ export function ContinueRestock({
   lastLines,
   placedAt,
   pending,
+  paste = true,
   className,
 }: {
   /** the lines of the last order that are on the shelf — what "Add all" can honestly add (Home filters) */
@@ -38,6 +39,8 @@ export function ContinueRestock({
   placedAt?: string | null
   /** this phone remembers an order and it is still loading: hold the slot instead of offering the paste card */
   pending?: boolean
+  /** false where the page already makes the paste offer twice (desktop): nothing to continue → nothing */
+  paste?: boolean
   className?: string
 }) {
   const { recognized } = useMarket()
@@ -45,7 +48,7 @@ export function ContinueRestock({
   if (lines.length) return <ResumeCard lines={lines} className={className} />
   if (recognized && lastLines.length) return <AgainCard lines={lastLines} placedAt={placedAt} className={className} />
   if (pending) return <AgainSkeleton className={className} />
-  return <PasteCard className={className} />
+  return paste ? <PasteCard className={className} /> : null
 }
 
 /** A square photo tile with the quantity on its corner. */
@@ -262,12 +265,15 @@ function PasteCard({ className }: { className?: string }) {
 /**
  * The list a shop owner would send on WhatsApp, as a sent message — decoration (aria-hidden) that
  * explains the paste flow at a glance. The lines are an example in the quick-order parser's format.
+ * `size="lg"` is the closing band's copy: it keeps growing past 1280 so the note holds its half of
+ * a 1500 px band instead of sitting in it as a stamp with a void beside it.
  */
-export function PasteBubble({ className }: { className?: string }) {
+export function PasteBubble({ className, size = 'sm' }: { className?: string; size?: 'sm' | 'lg' }) {
+  const big = size === 'lg'
   return (
-    <div aria-hidden="true" className={cn('w-[7.5rem] rotate-[4deg] rounded-[18px] rounded-se-[5px] bg-fresh-soft px-3 pb-1.5 pt-2.5 text-ink shadow-3 lg:w-48 lg:px-4 lg:pb-2 lg:pt-3.5', className)}>
+    <div aria-hidden="true" className={cn('w-[7.5rem] rotate-[4deg] rounded-[18px] rounded-se-[5px] bg-fresh-soft px-3 pb-1.5 pt-2.5 text-ink shadow-3 lg:w-48 lg:px-4 lg:pb-2 lg:pt-3.5', big && 'xl:w-56 2xl:w-64 2xl:px-5 2xl:pb-2.5 2xl:pt-4 3xl:w-72', className)}>
       {S.home.pasteExample.map((line) => (
-        <p key={line} className="whitespace-nowrap text-xs font-semibold leading-5 tnum lg:text-base lg:leading-7">
+        <p key={line} className={cn('whitespace-nowrap text-xs font-semibold leading-5 tnum lg:text-base lg:leading-7', big && '2xl:text-lg 2xl:leading-8')}>
           {line}
         </p>
       ))}

@@ -1,21 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ArrowRight, ClipboardPaste, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react'
+import { ArrowRight, ClipboardPaste, Plus, RotateCcw, Save, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { fetchOrderCached } from '../hooks/useRecentOrders'
 import { useMarket } from '../MarketContext'
 import { lastQty, rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, fmtDateShort, minQtyOf, money, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
-import { orderLines, regularStock } from '../lib/home'
+import { bhd, fmtDateShort, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
+import { bestSellers, orderLines, regularStock } from '../lib/home'
 import { parseList, resolveQuery } from '../lib/quickParse'
 import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
+import { MarketCard } from '../components/MarketCard'
 import { Spotlight } from '../components/Spotlight'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Input, Label, Textarea } from '../ui/Field'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
+import { SectionHeader } from '../ui/SectionHeader'
 import { Sheet } from '../ui/Sheet'
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
@@ -25,6 +27,10 @@ import { useToast } from '../ui/Toast'
  * WhatsApp list and it becomes rows; load the last order or a saved list; "Add all" puts every
  * resolved row in the cart at once and opens it for review. Device-saved lists (max 5) are
  * written so they can migrate to a customer object later.
+ *
+ * The total is shown once: the sticky bar carries it on a phone, the aside card on desktop. With
+ * nothing composed yet there is no summary card and no disabled CTA — the page shows the paste
+ * action, the merchant's own lists and Popular restocks instead of empty canvas.
  */
 
 interface Row {
@@ -83,7 +89,8 @@ export default function QuickOrderPage() {
   const setRow = useCallback((id: number, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r))), [])
   const lockRow = useCallback(
     (id: number, item: ShopItem, qty?: number) => {
-      const q = normalizeQty(item, qty && qty > 0 ? qty : lastQty(item.item_code) || minQtyOf(item))
+      // a row must never land at 0 — that is a line the merchant cannot order
+      const q = normalizeQty(item, qty && qty > 0 ? qty : lastQty(item.item_code) || minQtyOf(item) || 1)
       setRows((rs) => {
         const next = rs.map((r) => (r.id === id ? { ...r, item, query: productName(item), qty: q, candidates: [], suggestions: [] } : r))
         return next.some((r) => !r.item) ? next : [...next, newRow()]
@@ -120,7 +127,15 @@ export default function QuickOrderPage() {
     const exact = item && item.item_code.replace(/[\s-]/g, '').toLowerCase() === value.replace(/[\s-]/g, '').toLowerCase()
     const hits = m.index ? m.index.mini.search(value, { prefix: true, fuzzy: 0.2 }).slice(0, 6) : []
     const suggestions = hits.map((h) => m.itemsByCode.get(String(h.id))).filter((x): x is ShopItem => Boolean(x))
-    setRow(row.id, { query: value, item: exact ? item : null, suggestions: exact ? [] : suggestions.length ? suggestions : candidates, candidates })
+    // typing a code resolves the line: lock it the way picking it does — with a quantity and a
+    // fresh row underneath. Without this the row read "0" and the order could not be sent.
+    if (exact && item) {
+      lockRow(row.id, item, row.qty)
+      // the typed row's input unmounts with it: carry the caret to the fresh row so codes can run on
+      window.setTimeout(() => Array.from(inputs.current.values()).pop()?.focus(), 0)
+      return
+    }
+    setRow(row.id, { query: value, item: null, suggestions: suggestions.length ? suggestions : candidates, candidates })
   }
   const onKey = (row: Row, e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -141,7 +156,7 @@ export default function QuickOrderPage() {
   const applyPaste = () => {
     const parsed = parseList(pasteText, m.items, m.index)
     if (!parsed.length) return
-    const made = parsed.map((p) => ({ ...newRow(), query: p.item ? productName(p.item) : p.query, item: p.item, qty: p.item ? normalizeQty(p.item, p.qty || lastQty(p.item.item_code) || minQtyOf(p.item)) : 0, candidates: p.candidates, suggestions: p.item ? [] : p.candidates }))
+    const made = parsed.map((p) => ({ ...newRow(), query: p.item ? productName(p.item) : p.query, item: p.item, qty: p.item ? normalizeQty(p.item, p.qty || lastQty(p.item.item_code) || minQtyOf(p.item) || 1) : 0, candidates: p.candidates, suggestions: p.item ? [] : p.candidates }))
     setRows((rs) => [...rs.filter((r) => r.item || r.query.trim()), ...made, newRow()])
     track('search', { meta: { rail: 'quick_paste', results: made.filter((r) => r.item).length, count: made.length } })
     setPasteText('')
@@ -181,24 +196,33 @@ export default function QuickOrderPage() {
   }
   const desktop = viewport === 'desktop' || viewport === 'wide'
 
-  const summary = (
+  // the sticky bar owns the total on a phone, this card owns it on desktop — never both at once
+  const barShown = !desktop && resolved.length > 0
+  const summary = (compact: boolean) => (
     <div className="rounded-lg border border-line bg-surface p-4">
-      <div className="flex items-baseline justify-between">
-        <span className="text-sm text-ink-2">{S.cart.summary(resolved.length, units)}</span>
-        <span className="font-display text-xl font-extrabold tnum text-ink">≈ {bhd(total)}</span>
-      </div>
-      {unresolved > 0 && <p className="mt-1 text-xs text-warn">{S.quick.unresolved(unresolved)}</p>}
-      <Button size="lg" full className="mt-4" disabled={!resolved.length} onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" />}>
-        {S.quick.addAll(resolved.length)}
-      </Button>
-      <Button variant="ghost" full className="mt-2" disabled={!resolved.length} onClick={() => setSaveOpen(true)} icon={<Save size={15} aria-hidden="true" />}>
+      {!compact && (
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="min-w-0 truncate text-sm text-ink-2">{S.cart.summary(resolved.length, units)}</span>
+          <span className="shrink-0 whitespace-nowrap font-display text-xl font-extrabold tnum text-ink">≈ {bhd(total)}</span>
+        </div>
+      )}
+      {unresolved > 0 && <p className={cn('text-xs text-warn', !compact && 'mt-1')}>{S.quick.unresolved(unresolved)}</p>}
+      {!compact && (
+        <Button size="lg" full className="mt-4" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" />}>
+          {S.quick.addAll(resolved.length)}
+        </Button>
+      )}
+      <Button variant="ghost" full className={cn((!compact || unresolved > 0) && 'mt-2')} onClick={() => setSaveOpen(true)} icon={<Save size={15} aria-hidden="true" />}>
         {S.quick.saveList}
       </Button>
     </div>
   )
+  // nothing typed yet: the page fills with what a merchant can actually restock from
+  const composeEmpty = !resolved.length && !rows.some((r) => r.query.trim())
+  const popular = useMemo(() => (composeEmpty ? bestSellers(m.items).slice(0, 6) : []), [composeEmpty, m.items])
 
   return (
-    <div className="px-gutter lg:px-0">
+    <div className="px-gutter lg:px-0 lg:pt-4">
       <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start lg:gap-6">
         <div>
           <div>
@@ -208,8 +232,9 @@ export default function QuickOrderPage() {
           </div>
 
           {/* templates */}
-          <div className="mt-3 flex flex-wrap gap-2 lg:mt-4">
-            <Button variant="secondary" size="sm" onClick={() => setPasteOpen(true)} icon={<ClipboardPaste size={15} aria-hidden="true" />}>
+          <div className="mt-3 flex flex-wrap items-center gap-2 lg:mt-4">
+            {/* the page is paste-first: its strongest affordance must look like it */}
+            <Button variant="primary" size="lg" className="w-full sm:w-auto" onClick={() => setPasteOpen(true)} icon={<ClipboardPaste size={17} aria-hidden="true" />}>
               {S.quick.paste}
             </Button>
             {last && (
@@ -232,7 +257,7 @@ export default function QuickOrderPage() {
           {/* rows */}
           <ol className="mt-4 space-y-2">
             {rows.map((row) => (
-              <li key={row.id} className={cn('relative rounded-lg border bg-surface p-2.5', row.item ? 'border-plum/40' : 'border-line')}>
+              <li key={row.id} className={cn('relative rounded-lg', row.item && 'border border-plum/40 bg-surface p-2.5')}>
                 {row.item ? (
                   <div className="flex items-center gap-3">
                     <div className="h-12 w-12 shrink-0 overflow-hidden rounded-sm border border-line-2">
@@ -241,16 +266,15 @@ export default function QuickOrderPage() {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-semibold text-ink">{productName(row.item)}</div>
                       <div className="text-xs tnum text-ink-2">
-                        {row.item.item_code} · {money(unitAt(row.item, row.qty))} {S.cart.each}
+                        {row.item.item_code} · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
                         {stepOf(row.item) > 1 && row.qty % stepOf(row.item) === 0 ? ` · ${S.card.packs(stepOf(row.item))}` : ''}
                       </div>
                     </div>
+                    {/* one delete control per line: the stepper removes the row at its minimum, the
+                        way the restock rows do — a second trash beside it read as two ways to delete */}
                     <div className="flex items-center gap-2">
                       <span className="hidden text-sm font-semibold tnum text-ink sm:block">{bhd((unitAt(row.item, row.qty) ?? 0) * row.qty)}</span>
                       <Stepper value={row.qty} step={stepOf(row.item)} min={minQtyOf(row.item)} size="sm" label={productName(row.item)} onChange={(n) => setRow(row.id, { qty: n })} onRemove={() => remove(row.id)} />
-                      <button type="button" onClick={() => remove(row.id)} aria-label={S.quick.remove} className="grid h-9 w-9 place-items-center rounded-xs text-ink-3 hover:bg-bad-soft hover:text-bad">
-                        <Trash2 size={15} aria-hidden="true" />
-                      </button>
                     </div>
                   </div>
                 ) : (
@@ -288,7 +312,7 @@ export default function QuickOrderPage() {
                               </span>
                               <span className="min-w-0 flex-1 truncate font-medium text-ink">{productName(s)}</span>
                               <span className="text-xs tnum text-ink-2">{s.item_code}</span>
-                              <span className="text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? money(s.price_bhd) : ''}</span>
+                              <span className="whitespace-nowrap text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? bhd(s.price_bhd) : ''}</span>
                               <Plus size={14} className="text-plum" aria-hidden="true" />
                             </button>
                           </li>
@@ -301,14 +325,25 @@ export default function QuickOrderPage() {
               </li>
             ))}
           </ol>
-          {rows.length === 1 && !rows[0].query && !rows[0].item && <p className="mt-3 text-sm text-ink-2">{S.quick.empty}</p>}
-          <Button variant="ghost" className="mt-3" onClick={() => setRows((rs) => [...rs, newRow()])} icon={<Plus size={15} aria-hidden="true" />}>
+          <Button variant="ghost" className="mt-2" onClick={() => setRows((rs) => [...rs, newRow()])} icon={<Plus size={15} aria-hidden="true" />}>
             {S.quick.addLine}
           </Button>
-          <div className="mt-4 lg:hidden">{summary}</div>
+          {resolved.length > 0 && <div className="mt-4 lg:hidden">{summary(barShown)}</div>}
+
+          {/* an empty compose card used to leave half the screen bare: fill it with real stock */}
+          {composeEmpty && popular.length > 0 && (
+            <section aria-labelledby="quick-popular" className="mt-6">
+              <SectionHeader id="quick-popular" title={S.search.popularRestocks} seeAllTo="/shop?f=best" />
+              <div className="mt-2 rounded-lg bg-surface px-3 shadow-1 ring-1 ring-line [&>article:last-child]:border-b-0">
+                {popular.map((it) => (
+                  <MarketCard key={it.item_code} item={it} variant="list" from="quick_popular" />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
-        <div className="hidden lg:sticky lg:top-[calc(var(--m-header-h)+16px)] lg:block">
-          {summary}
+        <div className="hidden lg:sticky lg:top-[calc(var(--m-sticky-h,var(--m-header-h))+16px)] lg:block">
+          {resolved.length > 0 && summary(false)}
           {/* desktop only: on a phone this column is display:none, so a mounted carousel would only idle */}
           {desktop && <Spotlight className="mt-4" />}
         </div>
@@ -318,8 +353,9 @@ export default function QuickOrderPage() {
         <PageBar>
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
-              <div className="text-xs text-ink-2">{S.cart.summary(resolved.length, units)}</div>
-              <div className="font-display text-xl font-extrabold leading-tight tnum text-ink">≈ {bhd(total)}</div>
+              <div className="truncate text-xs text-ink-2">{S.cart.summary(resolved.length, units)}</div>
+              {/* the money never wraps: at 320–390px it steps down instead */}
+              <div className="whitespace-nowrap font-display text-lg font-extrabold leading-tight tnum text-ink min-[400px]:text-xl">≈ {bhd(total)}</div>
             </div>
             <Button size="lg" className="shrink-0 px-5" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" />}>
               {S.quick.addAll(resolved.length)}

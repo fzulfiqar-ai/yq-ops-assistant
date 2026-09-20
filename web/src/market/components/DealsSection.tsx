@@ -23,7 +23,8 @@ import { MarketCard } from './MarketCard'
 type SetKey = 'all' | 'drops' | 'offers' | 'bundles' | 'lastChance'
 
 const PHONE_MAX = 12
-const DESKTOP_MAX = 10 // 8 in four columns; the widest screens show a fifth column
+/** two full rows at every desktop width, never a part row: 8 in four columns, 10 in five (3xl) */
+const DESKTOP_MAX = 10
 
 export function DealsSection({ items, offers, layout }: { items: ShopItem[]; offers?: Offer[] | null; layout: 'phone' | 'desktop' }) {
   const sets = useMemo(() => dealSets(items, offers), [items, offers])
@@ -37,7 +38,9 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
     { key: 'bundles' as const, label: S.deals.bundles, n: sets.bundles.length },
     { key: 'lastChance' as const, label: S.deals.last, n: sets.lastChance.length },
   ].filter((t) => t.n > 0)
-  const chips = tabs.length >= 2 ? [{ key: 'all' as const, label: S.deals.all, n: sets.all.length }, ...tabs] : []
+  // the amber pill above already counts the whole shelf, so the All chip carries no number: "28
+  // LINES" and "All 28" said the same thing 200 px apart. Every other chip counts its own subset.
+  const chips = tabs.length >= 2 ? [{ key: 'all' as const, label: S.deals.all, n: null }, ...tabs] : []
   const active: SetKey = chips.some((c) => c.key === pick) ? pick : 'all'
   useReveal(gridRef, [active, desktop, sets])
 
@@ -78,7 +81,7 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
                 )}
               >
                 {c.label}
-                <span className={cn('text-xs font-medium tnum', on ? 'text-white/70' : 'text-ink-3')}>{c.n}</span>
+                {c.n != null && <span className={cn('text-xs font-medium tnum', on ? 'text-white/70' : 'text-ink-3')}>{c.n}</span>}
               </button>
             )
           })}
@@ -86,6 +89,10 @@ export function DealsSection({ items, offers, layout }: { items: ShopItem[]; off
       )}
 
       {desktop ? (
+        // Four columns until 1800. A deal card has to carry the struck old price beside today's
+        // price — the honesty this section is named for — and the fifth column at 1440 left ~175 px
+        // of content, which cut "2.000" to "2.0…", the sixth at 1920 to "2…". Columns stop where
+        // the card stops being able to say the thing the section promises.
         <div key={active} ref={gridRef} className="anim-fade-in mt-5 grid grid-cols-4 gap-3 xl:gap-4 3xl:grid-cols-5">
           {list.slice(0, DESKTOP_MAX).map((it, i) => (
             <div key={it.item_code} className={cn('reveal', i >= 8 && 'hidden 3xl:block')} style={{ ['--i' as string]: i }}>

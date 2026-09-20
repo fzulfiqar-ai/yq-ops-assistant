@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
 import tailwindcss from 'tailwindcss'
 import autoprefixer from 'autoprefixer'
 
@@ -16,7 +17,7 @@ import autoprefixer from 'autoprefixer'
 
 const MARKET = {
   title: 'YQ Marketplace · YQ Bahrain',
-  description: 'Where Bahrain restocks. Mobile accessories wholesale from YQ Bahrain — trade prices, live warehouse stock, every order confirmed by your representative.',
+  description: 'Where Bahrain restocks. Mobile accessories wholesale from YQ Bahrain — trade prices, real warehouse stock, every order confirmed by your representative.',
   ogTitle: 'YQ Marketplace',
   manifest: '/market.webmanifest',
   /** the logo plum (src/market/market.css --m-plum) */
@@ -25,6 +26,64 @@ const MARKET = {
   imageOrigin: 'https://vofwqcqmdwdidueqxtxy.supabase.co',
   fonts: ['/fonts/instrument-sans-v1.woff2', '/fonts/sora-v1.woff2'],
 }
+
+/**
+ * The first painted pixel. Until 20-Sep-2026 a session's first load showed a bare night gradient
+ * with no mark on it (Shell.tsx paints the opening chunk's Suspense fallback) — measured at ~250 ms
+ * on a warm load and seconds on a cold one, so the longest-lived frame of the sequence was the one
+ * that read as "still loading". This node ships the same night field and the same logo tile, at the
+ * place components/Splash.tsx composes them, in the served HTML: the first frame is the brand's own
+ * night field (see the measurement note on BOOT_LOGO for what the tile does and does not manage)
+ * and the opening then mounts on top of an identical picture. Splash removes this node in a layout
+ * effect as it mounts and, seeing it, does not replay the tile's spring.
+ *
+ * Kept deliberately small: market build only (the portal shares this index.html and is a light app),
+ * outside #root (React clears its own container on the first commit), z-index 89 — one below the
+ * opening's 90 — and no copy, because UI text lives in src/market/strings.ts. The tile geometry
+ * mirrors Splash.tsx: the box above the horizon (top → 60 % of the height), the tile bottom-aligned
+ * in it above the space the two lines take (91 / 97 / 112 px at the 3 type steps), 84 px (96 px from
+ * lg), radius 22 px, and hidden under 520 px of height exactly as the overlay hides it. The 8 s
+ * animation is only a safety net: if the opening chunk never arrives, the frame hides itself instead
+ * of sealing the app off (animation-delay survives the reduced-motion kill switch, the duration does
+ * not — reduced motion simply gets the same cut, not a fade).
+ */
+const BOOT_CSS = [
+  "#yq-boot{position:fixed;inset:0;z-index:89;background-color:#140F24;background-image:linear-gradient(135deg,#2A1259,#140F24);animation:yq-boot-out 320ms linear 8s both}",
+  "#yq-boot span{position:absolute;inset:0 0 40%;display:flex;align-items:flex-end;justify-content:center;padding-bottom:91px}",
+  "#yq-boot i{position:relative;display:block;overflow:hidden;width:84px;height:84px;border-radius:22px;box-shadow:0 0 0 1px rgba(255,255,255,.16),0 0 56px 12px rgba(165,88,251,.28),0 22px 48px -18px rgba(165,88,251,.85),0 8px 20px -8px rgba(8,4,20,.6)}",
+  "#yq-boot img{display:block;width:100%;height:100%}",
+  "@media(min-width:640px){#yq-boot span{padding-bottom:97px}}",
+  "@media(min-width:1024px){#yq-boot span{padding-bottom:112px}#yq-boot i{width:96px;height:96px}}",
+  "@media(max-height:520px){#yq-boot i{display:none}}",
+  "@keyframes yq-boot-out{to{opacity:0;visibility:hidden}}",
+].join('')
+/**
+ * The tile's mark travels IN the HTML, as a data: URI — one request fewer on the critical path, and
+ * the bytes are there the moment the node is parsed. ~5 KB of HTML, cheaper than the round trip.
+ * If the file is ever missing the URL is used, so a build never fails over the boot frame.
+ *
+ * MEASURED, 20-Sep-2026, so the next person does not chase it again: on a real load the night field
+ * paints immediately but this tile does NOT reach the screen before React mounts — the image raster
+ * is starved by the main thread parsing the app, and the node is removed before a frame carrying it
+ * is produced. (Block the app's JS and the same markup paints the tile in ~100 ms, which is how we
+ * know the geometry and the CSS are right.) Inlining and `decoding="sync"` both help the browser as
+ * much as it can be helped from here; a first frame that carries the mark on a cold phone needs the
+ * mark to be a CSS paint (an inline SVG or a drawn tile), not an image — we do not have the logo as
+ * a vector. What the node does deliver today: the first frame is the brand's night field instead of
+ * the cream shell, and the overlay mounts on top of an identical picture.
+ *
+ * The overlay that takes over (components/Splash.tsx) loads the same file by URL, so the head also
+ * preloads it as an image: the mark must not blink out in the frame where the node hands over.
+ */
+const BOOT_LOGO = (() => {
+  try {
+    const file = fileURLToPath(new URL('./public/yq-logo-160.webp', import.meta.url))
+    return `data:image/webp;base64,${readFileSync(file).toString('base64')}`
+  } catch {
+    return '/yq-logo-160.webp'
+  }
+})()
+const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><span><i><img src="${BOOT_LOGO}" alt="" width="96" height="96" decoding="sync" fetchpriority="high" /></i></span></div>`
 
 /**
  * The market build rewrites the shared index.html: its own entry (src/main.market.tsx — one
@@ -57,9 +116,14 @@ function marketHtml(): Plugin {
           // the two Google Fonts preconnects + the blocking stylesheet → self-hosted, preloaded woff2
           .replace(/\s*<link rel="preconnect" href="https:\/\/fonts\.googleapis\.com" \/>/, '')
           .replace(/\s*<link rel="preconnect" href="https:\/\/fonts\.gstatic\.com" crossorigin \/>/, `\n    <link rel="preconnect" href="${MARKET.imageOrigin}" />`)
-          .replace(/\s*<!-- A plain stylesheet on purpose:[\s\S]*?<link\s+href="https:\/\/fonts\.googleapis\.com[^"]*"\s+rel="stylesheet"\s*\/>/, `\n    ${fontLinks}`)
+          .replace(/\s*<!-- A plain stylesheet on purpose:[\s\S]*?<link\s+href="https:\/\/fonts\.googleapis\.com[^"]*"\s+rel="stylesheet"\s*\/>/, `\n    ${fontLinks}\n    <link rel="preload" as="image" type="image/webp" href="/yq-logo-160.webp" fetchpriority="high" />`)
           // Vite has already substituted %VITE_API_URL% by the time this runs — match the shape, not the placeholder.
           .replace(/(<script src="\/catalog-prefetch\.js" data-api="[^"]*")/, '$1 data-app="market"')
+          // the first painted frame (see BOOT_CSS): night field + logo tile before React exists
+          .replace('</head>', `<style>${BOOT_CSS}</style>
+  </head>`)
+          .replace('<div id="root"></div>', `${BOOT_HTML}
+    <div id="root"></div>`)
       },
     },
   }

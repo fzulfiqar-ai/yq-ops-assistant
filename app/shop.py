@@ -105,10 +105,16 @@ SETTING_DEFAULTS: dict[str, str] = {
     # {key, en, ar, icon, to}. The delivery line switches itself when a free-delivery threshold exists.
     # v3 (17-Sep-2026): wholesale-first — "No minimum order" gave way to trade prices and the rep's
     # confirmation (the wholesale minimum is real now). Validated on save by validate_promises().
+    # 20-Sep-2026: the stock line no longer says "Live warehouse stock". The catalog carries a DATED
+    # snapshot (`stock_as_of`, printed in the market footer — 14-Sep while today is 20-Sep), so "live"
+    # contradicted the same page. The claim we can back is that the counts are the warehouse's real ones.
+    # A cadence claim ("Stock updated daily") is NOT the fix: the snapshot is six days old, so it would
+    # contradict the same footer. Only promise freshness once the upload is provably daily. Mirrors:
+    # web/src/pages/Settings.tsx DEFAULT_PROMISES and S.about.intro in web/src/market/strings.ts.
     "shop_market_promises": json.dumps([
         {"key": "delivery", "en": "Free delivery across Bahrain", "ar": "توصيل مجاني في كل البحرين", "icon": "truck", "to": "/about#delivery"},
         {"key": "trade", "en": "Trade prices for shops", "ar": "أسعار الجملة للمحلات", "icon": "tag", "to": "/about#trade"},
-        {"key": "stock", "en": "Live warehouse stock", "ar": "مخزون المستودع مباشر", "icon": "pulse", "to": "/shop?f=instock"},
+        {"key": "stock", "en": "Real warehouse stock", "ar": "مخزون حقيقي من المستودع", "icon": "pulse", "to": "/shop?f=instock"},
         {"key": "rep", "en": "Every order confirmed by your rep", "ar": "كل طلب يؤكده مندوبك", "icon": "shield", "to": "/about#how"},
     ], ensure_ascii=False),
     "shop_market_ai_enabled": "0",       # phase C: the concierge; off until the office switches it on

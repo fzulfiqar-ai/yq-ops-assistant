@@ -96,10 +96,14 @@ export const S = {
   wholesale: {
     kicker: 'Wholesale order',
     away: (amount: string) => `${amount} away from your wholesale order`,
+    /** the last stretch (≥80% of the minimum) — the number is the quote's own remaining_bhd */
+    almost: (amount: string) => `Almost there — ${amount} to go`,
     progress: (have: string, need: string) => `${have} of ${need}`,
     ready: 'Wholesale order ready',
     readyHint: 'Your restock qualifies — check out when you’re ready.',
     fill: 'Complete your restock with these',
+    /** what reaching the minimum changes — the real small-order rule, shown in request mode only */
+    whyUnder: 'At the minimum your restock is placed as a standard wholesale order — under it, it goes to your representative to approve case by case.',
     closes: 'completes your order',
     keep: 'Keep restocking',
     checkout: 'Continue to checkout',
@@ -109,8 +113,8 @@ export const S = {
     inRestock: 'in your restock',
     minimumLabel: 'wholesale minimum',
     toGo: (amount: string) => `${amount} to go`,
-    /** a gap-filler row: "12 × BHD 0.400 · BHD 4.800" */
-    line: (qty: number, unit: string, value: string) => `${qty} × ${unit} · ${value}`,
+    /** the same row with the value in its own column, so a narrow phone can never truncate it */
+    qtyAt: (qty: number, unit: string) => `${qty} × ${unit}`,
     showMore: (n: number) => `Show ${n} more`,
   },
   small: {
@@ -131,40 +135,59 @@ export const S = {
     brand: 'Restock faster. Sell more.',
     welcome: (shop: string) => `Welcome back, ${shop}`,
     refill: 'Refill my shelf',
-    skip: 'Tap to continue',
-    skipClick: 'Click or press Esc to continue',
+    /* The opening dismisses itself; these name an escape hatch, they do not ask for a tap. */
+    skip: 'Skip',
+    skipClick: 'Skip · Esc',
     kicker: 'Where Bahrain restocks.',
   },
   campaign: {
     cta: 'See more',
     sponsored: (n: string) => (n ? `Sponsored · ${n}` : 'Sponsored'),
-    /** kicker of a category page's composed banner (in-stock lines of that category) */
-    categoryStock: (n: number) => `${plural(n, 'line', 'lines')} in stock`,
+    /** kicker of a category page's composed banner. Both numbers: the shelf header states the total
+     *  a few pixels below, and a bare "48 lines in stock" beside "78 products" reads as a mistake. */
+    categoryStock: (n: number, total: number) => `${n} of ${total} in stock`,
+    /* Headlines for that banner — the message, never the category name: the page h1 (and, on
+     * desktop, the active chip) already carry the name, so repeating it sells nothing.
+     * No hyphenated compound in the headline: at 320–390px "12 last-chance lines" broke at its own
+     * hyphen ("12 last-" / "chance lines"), so the biggest type on the shelf opened on what reads as
+     * a typesetting error. The same fact, in words that can only break between them. */
+    categoryLast: (n: number) => `Last chance on ${plural(n, 'line', 'lines')}`,
+    categoryDrops: (n: number) => plural(n, 'price drop', 'price drops'),
+    categoryFresh: (n: number) => plural(n, 'new line', 'new lines'),
   },
   slides: {
     label: 'Promotions',
     again: 'Order again',
-    againLine: (n: number) => `${plural(n, 'product', 'products')} from your last order — one tap to restock.`,
+    /* Every *Line below is ONE clause of at most 34 characters, so it survives two lines in the
+     * slide's copy column at 320 px — a subhead that ends in "…" reads as broken, not as a teaser,
+     * and the price-drop line carries an honesty claim that must never be the part that is cut.
+     * scripts/qa/market_qa.py fails the gate on a longer one. */
+    againLine: (n: number) => `${plural(n, 'product', 'products')} from your last order.`,
     againCta: 'Reorder',
     last: 'Last-Chance Stock',
-    lastLine: (n: number) => `${plural(n, 'line', 'lines')} we’re clearing — trade price while stock lasts.`,
+    lastLine: (n: number) => `${plural(n, 'line', 'lines')} clearing at trade price.`,
     lastCta: 'See last-chance stock',
     /* no time span: the drop window is the admin's shop_price_drop_days (30 by default), not a month */
     drops: (n: number) => `${plural(n, 'price', 'prices')} cut in our price book`,
-    dropsLine: 'Real cuts in our price book — the old price is on every card.',
+    dropsLine: 'The old price is on every card.',
     dropsCta: 'See price drops',
     essentials: 'Restock essentials',
-    essentialsLine: 'The lines Bahrain shops reorder most.',
+    essentialsLine: 'The lines shops reorder most.',
     essentialsCta: 'Restock now',
     fresh: 'New arrivals',
     freshLine: (n: number) => `${plural(n, 'new line', 'new lines')} on the shelf.`,
     freshCta: 'See what’s new',
     moving: 'Moving fast in Bahrain',
-    movingLine: 'What shops are restocking right now.',
+    movingLine: 'What shops are reordering now.',
     movingCta: 'See what’s moving',
     quick: 'Paste your WhatsApp list',
-    quickLine: 'We turn it into a wholesale order in seconds.',
+    quickLine: 'Codes and quantities, in seconds.',
     quickCta: 'Paste a list',
+    /* The one slide that sells the supplier, not a shelf: it runs beside the deals slide so the
+     * phone hero never says the same thing twice. The headline is the tagline (S.tagline) and the
+     * line is counted from the payload — the lines a shop can actually order — never a claim. */
+    brandLine: (n: number) => `${plural(n, 'line', 'lines')} in stock for shops.`,
+    brandCta: 'How ordering works',
     prev: 'Previous slide',
     next: 'Next slide',
     go: (i: number, n: number) => `Slide ${i} of ${n}`,
@@ -209,7 +232,10 @@ export const S = {
     list: 'List',
     undo: 'Undo',
     removed: (name: string) => `${name} removed`,
-    was: 'Was',
+    /** the one honest anchor — OUR previous price book figure — carried at the weight of the margin strip, never as 11px grey strike-through: "Was 2.000 · ↓5%" */
+    wasPill: (was: string, pct: number) => `Was ${was} · ↓${pct}%`,
+    /** a committed line: the extended total never travels without its multiplier — "5 × 1.000 · BHD 5.000" */
+    lineTotal: (qty: number, unit: string, total: string) => `${qty} × ${unit} · ${total}`,
     priceOnRequest: 'Price on request',
     perPc: '/pc',
     stockIn: 'In stock',
@@ -251,6 +277,8 @@ export const S = {
     drops: 'Price drops',
     clear: 'Clear',
     filters: 'Filters',
+    /** the second chips row on a category shelf: the facets inferred from the shelf itself */
+    refine: 'Refine',
     /** v3 browse: the chips row (sticky under the phone search band) */
     deals: 'Deals',
     essentials: 'Essentials',
@@ -263,6 +291,10 @@ export const S = {
     none: 'Nothing on this shelf matches',
     noneHint: 'Clear a filter, or try another category.',
     savedNone: 'Tap the heart on a product and it waits for you here.',
+    /** the Saved shelf with nothing saved: not a filter miss, so it gets its own title */
+    savedNoneTitle: 'No saved items yet',
+    /** the desktop search heading — says which query the shelf under it belongs to */
+    resultsFor: (q: string, n: number) => `Results for “${q}” · ${plural(n, 'product', 'products')}`,
     /** the "ask your rep" WhatsApp text when a search finds nothing */
     askHave: (first: string, q: string) => `Hello${first ? ` ${first}` : ''}, do you have “${q}” for my shop?`,
     notOnShelf: (q: string) => `“${q}” isn’t on our shelf`,
@@ -382,6 +414,11 @@ export const S = {
     place: 'Place wholesale order',
     connecting: 'Connecting to YQ…',
     sending: 'Sending…',
+    /* Under the send button after a tap with the form incomplete. The button itself stays solid —
+       a half-painted plum slab reads as broken, not as "disabled until you fill this in". */
+    missing: 'Add your phone and name to send',
+    missingPhone: 'Add your phone number to send',
+    missingName: 'Add your name to send',
     failed: 'We could not send your order. Please check your connection and try again.',
     noPayment: 'No payment now — everything is confirmed with you first.',
     deliveryLabel: 'Delivery',
@@ -452,6 +489,8 @@ export const S = {
     orders: 'Your orders',
     details: 'Your shop details',
     noDetails: 'Nothing saved yet — your shop details stay on this phone after your first wholesale order.',
+    /** the action on the empty details card */
+    addDetails: 'Add my details',
     edit: 'Edit',
     done: 'Done',
     forget: 'Forget on this phone',
@@ -495,7 +534,7 @@ export const S = {
     minimum: (min: string) => `Wholesale orders start at ${min}. Smaller orders can be sent as a request — your representative confirms them case by case.`,
     how: 'How ordering works',
     /** v3 about page */
-    intro: 'Mobile accessories wholesale for shops across Bahrain — trade prices, live warehouse stock, and a representative who knows your shop.',
+    intro: 'Mobile accessories wholesale for shops across Bahrain — trade prices, real warehouse stock, and a representative who knows your shop.',
     onPage: 'On this page',
     contact: 'Contact',
     tradeConfirm: 'Your representative confirms the price of every line before your order is delivered.',
@@ -524,6 +563,8 @@ export const S = {
     how: 'How ordering works',
     priceBook: 'Price book',
     noRep: 'Place your first order and your YQ representative shows up here.',
+    /** the footer column before a representative is known — real delivery terms, not a placeholder */
+    deliveryTitle: 'Delivery & ordering',
   },
   states: {
     loading: 'Loading the marketplace…',

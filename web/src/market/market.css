@@ -259,28 +259,34 @@
    * Placeholder heights = card v3 (components/MarketCard.tsx) without the optional rows, measured
    * from its classes: borders 2 + square photo (card width − 2) + body. `auto` keeps the real size
    * once a card has rendered, so these only matter for cards never seen yet.
-   *   grid body    hairline 1 · p-3 24 · kicker 14 · name 2+36 · chips 8+20 · price 8+22 · action 12+44 = 191
-   *                → 2-col phone at 390px (card 176.5): 368 · md 3-col (card 229; name 38, price 24): 424
-   *   compact body hairline 1 · 8+10 · kicker 14 · name 2+34 · chips 6+20 · price 6+20 · action 10+40 = 171
-   *                → clamp(10rem,46vw,13rem) at 390px (179.4): 350 · lg rail cell (200–230): 371–402
-   * Optional rows add: margin strip +30 (short form, body < 12rem) or +50 (full form), low stock +22,
-   * social proof +22 (one line) / +36 (two), tiers +16 per line. */
+   *   grid body    hairline 1 · p-3 24 · kicker 14 · name 2+36 · chips 8+20 · price 8+22 · facts 6+22
+   *                · action 12+44 = 219 → 2-col phone at 390px (card 176.5): 396 · md 3-col
+   *                (card 229; name 38, price 24): 452
+   *   compact body hairline 1 · 8+10 · kicker 14 · name 2+36 · chips 6+20 · price row 6+40 (the
+   *                round + rides IN the price row now, so an untouched rail card has no action row
+   *                at all) · facts 0 (collapsed: 165 of 179 SKUs carry no fact) = 143
+   *                → clamp(10rem,46vw,13rem) at 390px (179.4): 320 · lg rail cell (200–230): 341–371
+   * The facts row is RESERVED on the grid (the anchor pill, then ONE line: margin strip / low stock
+   * / shops / tiers) and COLLAPSES on compact, so on the shelf the only thing that still varies is
+   * the margin strip wrapping to two lines below ~390px (+14), and on a rail a deal card carrying
+   * an anchor or a margin runs ~28px taller than these placeholders. `auto` corrects both the
+   * moment the card has actually rendered. */
   .cv-card {
     content-visibility: auto;
-    contain-intrinsic-size: auto 368px;
+    contain-intrinsic-size: auto 396px;
   }
   .cv-compact {
     content-visibility: auto;
-    contain-intrinsic-size: auto 350px;
+    contain-intrinsic-size: auto 324px;
   }
   @media (min-width: 768px) {
     .cv-card {
-      contain-intrinsic-size: auto 424px;
+      contain-intrinsic-size: auto 452px;
     }
   }
   @media (min-width: 1024px) {
     .cv-compact {
-      contain-intrinsic-size: auto 386px;
+      contain-intrinsic-size: auto 356px;
     }
   }
 }
@@ -710,6 +716,48 @@
     color: #fff;
   }
 }
+/* One cell of the phone track (components/PromoSlider.tsx). The card starts at the page gutter —
+ * the same edge every section under it starts at — and stops 20 px short of the far edge: the
+ * track's 8 px gap plus a 12 px sliver of the next card. A slide's copy begins 16 px inside its own
+ * edge, so that sliver can only ever show canvas and a rounded corner, never a letter; the old 92%
+ * cell left 34–46 px on the first slide (where the track is scrolled to 0 and the card is NOT
+ * centred), enough to read "STO", "4", "ou" down the screen edge. Tablets keep the centred card. */
+.slider-cell {
+  width: calc(100% + var(--m-gutter) - 20px);
+}
+@media (min-width: 768px) {
+  .slider-cell {
+    width: 60%;
+  }
+}
+/* Both screen edges of a bleeding track (components/PromoSlider.tsx wraps the track in this): the
+ * sliver of the next card is a promise of more, so it fades into the page instead of being chopped
+ * mid-letter by the viewport. The veil is one gutter wide and solid across its first third — the
+ * whole sliver — and it stops exactly where the card can reach: a slide at either end of the track
+ * sits flush at the gutter, so a wider veil washed the active card's own edge in cream. Physical
+ * left/right on purpose — both edges cut in either writing direction. Outside @layer, like the
+ * rules below: a purged fade would be a silent regression. */
+.slider-edge {
+  position: relative;
+}
+.slider-edge::before,
+.slider-edge::after {
+  content: '';
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  width: var(--m-gutter);
+  pointer-events: none;
+}
+.slider-edge::before {
+  left: 0;
+  background: linear-gradient(to right, hsl(var(--m-canvas)) 0 33%, hsl(var(--m-canvas) / 0) 100%);
+}
+.slider-edge::after {
+  right: 0;
+  background: linear-gradient(to left, hsl(var(--m-canvas)) 0 33%, hsl(var(--m-canvas) / 0) 100%);
+}
 /* SlideCard (components/SlideCard.tsx). The card is an inline-size container named `slide`, so its
  * type scales with the card wherever it sits; [data-size] picks the scale. Outside @layer on purpose:
  * these beat Tailwind's line-clamp on the same elements. Every cq size follows a px fallback line. */
@@ -807,6 +855,20 @@
   }
   .slide-card[data-size='phone'] .slide-sticker {
     display: none;
+  }
+  /* One line of ~128 px holds about 19 characters: no honest sentence fits, so the phone card drops
+   * its line here rather than ending a promise — or an honesty claim — in an ellipsis. */
+  .slide-card[data-size='phone'] .slide-line {
+    display: none;
+  }
+  /* The narrowest card gives the copy the width the art can spare, so the two never overlap: at 320
+   * the headline ran behind the first disc and the CTA pill under the second. The fan keeps its
+   * geometry — the discs are sized in container units, so they simply come down with the column. */
+  .slide-card[data-size='phone'] .slide-copy {
+    width: 66%;
+  }
+  .slide-card[data-size='phone'] .slide-art {
+    width: 30%;
   }
 }
 @container slide (min-width: 440px) {
@@ -963,12 +1025,23 @@
 /* end v3: slider */
 
 /* v3: hints */
-/* Rotating search hints (components/SearchField.tsx): the outgoing hint lifts away, the next one
- * rises in. The field turns rotation off under reduced motion; the kill switch covers the rest. */
+/* Rotating search hints (components/SearchField.tsx): the outgoing hint lifts out of the one-line
+ * window and has faded before the next one rises in, so the pill never shows two sliced lines at
+ * once. The travel is a full line and then some (110% — the window clips it), and `both` holds the
+ * incoming hint at opacity 0 through its delay. The field turns rotation off under reduced motion;
+ * the kill switch covers the rest.
+ *
+ * Opacity leads the travel, deliberately: a hint is only ever OPAQUE while it is whole. The
+ * outgoing one is transparent by 40% of its run (still ~¾ of a line high in the window) and the
+ * incoming one stays invisible until 60% of its run, so no frame — and no screenshot — catches a
+ * half-cut line of text at reading contrast. */
 @keyframes m-hint-in {
   from {
     opacity: 0;
-    transform: translateY(60%);
+    transform: translateY(110%);
+  }
+  60% {
+    opacity: 0;
   }
   to {
     opacity: 1;
@@ -980,16 +1053,19 @@
     opacity: 1;
     transform: translateY(0);
   }
+  40% {
+    opacity: 0;
+  }
   to {
     opacity: 0;
-    transform: translateY(-60%);
+    transform: translateY(-110%);
   }
 }
 .anim-hint-in {
-  animation: m-hint-in 260ms var(--m-ease) both;
+  animation: m-hint-in 240ms var(--m-ease) 180ms both;
 }
 .anim-hint-out {
-  animation: m-hint-out 260ms var(--m-ease) both;
+  animation: m-hint-out 200ms var(--m-ease) both;
 }
 /* end v3: hints */
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ChevronDown, CircleUserRound, Search, Tag, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -18,6 +18,12 @@ import { useShell } from './ShellContext'
  * palette · Deals (only when real deals or last-chance lines are in stock) · Quick order · Orders ·
  * My YQ · Restock (line count, and a thin wholesale-progress line when a minimum is set; drawer
  * below 1280, page above). A category strip rides under it on Home and Browse.
+ *
+ * The strip makes the sticky block taller than the header row, so the header measures itself into
+ * `--m-sticky-h` (`--m-header-h` stays the fixed height of the row alone, which is what sets it).
+ * Anything that has to sit below the sticky block — the mini-cart aside, a page's own sticky
+ * column, scroll-margin for in-page anchors — pins to `var(--m-sticky-h, var(--m-header-h))`,
+ * never to a hard-coded 72px.
  */
 export function StickyHeader() {
   const { viewport, openPalette, openCart, paletteOpen } = useShell()
@@ -33,6 +39,7 @@ export function StickyHeader() {
   const [tickSeen, setTickSeen] = useState(tick)
   const [pathSeen, setPathSeen] = useState(pathname)
   const closeTimer = useRef<number | undefined>(undefined)
+  const headerRef = useRef<HTMLElement>(null)
   const desktop = viewport === 'desktop' || viewport === 'wide'
   const wide = viewport === 'wide'
 
@@ -57,6 +64,21 @@ export function StickyHeader() {
   const dealsActive = pathname === '/shop' && (new URLSearchParams(search).get('f') || '').split(',').includes('deals')
   const showStrip = pathname === '/' || pathname === '/shop' || pathname.startsWith('/t/') || (pathname.split('/').filter(Boolean).length === 1 && !['/search', '/cart', '/checkout', '/orders', '/me', '/quick', '/about'].includes(pathname))
 
+  // the real height of the whole sticky block (row + strip when it is up) → --m-sticky-h
+  useLayoutEffect(() => {
+    const el = headerRef.current
+    if (!el) return
+    const root = document.documentElement.style
+    const apply = () => root.setProperty('--m-sticky-h', `${el.offsetHeight}px`)
+    apply()
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(apply)
+    ro?.observe(el)
+    return () => {
+      ro?.disconnect()
+      root.removeProperty('--m-sticky-h')
+    }
+  }, [showStrip])
+
   // wholesale minimum from the priced quote: a 2px line under the Restock label
   const min = count > 0 && quote?.minimum && Number(quote.minimum.value_bhd) > 0 ? quote.minimum : null
   const remaining = min ? Math.max(0, Number(min.remaining_bhd) || 0) : 0
@@ -80,7 +102,7 @@ export function StickyHeader() {
   const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:bg-plum-wash hover:text-ink')
 
   return (
-    <header className="sticky top-0 z-header">
+    <header ref={headerRef} className="sticky top-0 z-header">
       <div className="glass border-b border-line">
         <div className="container-m flex h-header items-center gap-3 lg:gap-4">
           <Link to="/" aria-label={`${S.brand} · ${S.kicker}`} className="flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
@@ -123,27 +145,36 @@ export function StickyHeader() {
           >
             <Search size={18} strokeWidth={2} aria-hidden="true" className="shrink-0 text-plum" />
             <SearchHints hints={S.search.hints} paused={paletteOpen} className="min-w-0 flex-1" leadClassName="text-ink-3" hintClassName="text-ink-2" />
-            <kbd className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 lg:inline">{S.search.shortcut}</kbd>
+            <kbd className="hidden shrink-0 rounded-xs border border-line bg-canvas px-1.5 py-0.5 font-sans text-2xs text-ink-3 xl:inline">{S.search.shortcut}</kbd>
           </button>
 
+          {/* Four anonymous 15px glyphs — a tag, a lightning bolt, a receipt, a person — is what this
+              row used to be at 1024, and nobody reads a bolt as "Quick order". Budget at 1024
+              (958px of container): logo+kicker 175 · Browse 97 · gaps 60 · Restock 109 leaves 517 to
+              split between the shortcuts and the search trigger. Deals (84) and Quick order (115)
+              carry their word at every width they appear — they are the two wholesale entry points
+              and their glyphs are guesswork — which still leaves the trigger ~235px, enough for
+              "Search “20W charger”". Labelling all four would cost ~100px more and squeeze the
+              trigger under 140px, so Orders (receipt) and My YQ (person/rep photo) — conventional
+              icons — keep title + aria-label until 1280, where everything is labelled. */}
           <nav aria-label={S.nav.shortcuts} className="ms-auto hidden shrink-0 items-center gap-0.5 md:flex">
             {hasDeals && (
               <Link to="/shop?f=deals" aria-current={dealsActive ? 'page' : undefined} className={linkCls({ isActive: dealsActive })}>
                 <span aria-hidden="true" className="grid h-5 w-5 place-items-center rounded-full bg-deal-soft text-deal-ink">
                   <Tag size={12} strokeWidth={2.2} />
                 </span>
-                {S.nav.deals}
+                <span>{S.nav.deals}</span>
               </Link>
             )}
             {desktop && (
               <NavLink to="/quick" className={linkCls}>
-                <Zap size={15} aria-hidden="true" /> {S.nav.quick}
+                <Zap size={15} aria-hidden="true" /> <span>{S.nav.quick}</span>
               </NavLink>
             )}
-            <NavLink to="/orders" className={linkCls} aria-label={S.nav.orders}>
+            <NavLink to="/orders" className={linkCls} aria-label={S.nav.orders} title={S.nav.orders}>
               <NAV_ICONS.orders size={15} aria-hidden="true" /> <span className="hidden xl:inline">{S.nav.orders}</span>
             </NavLink>
-            <NavLink to="/me" className={linkCls} aria-label={S.nav.me}>
+            <NavLink to="/me" className={linkCls} aria-label={S.nav.me} title={S.nav.me}>
               {rep?.photo_url ? <img src={rep.photo_url} alt="" width={22} height={22} className="h-[22px] w-[22px] rounded-full object-cover" /> : <CircleUserRound size={17} aria-hidden="true" />}
               <span className="hidden xl:inline">{S.nav.me}</span>
             </NavLink>

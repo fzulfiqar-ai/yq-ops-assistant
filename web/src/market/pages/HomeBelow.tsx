@@ -13,6 +13,7 @@ import { useMarket } from '../MarketContext'
 import { applyQuickFilters, type QuickFilter } from '../lib/facets'
 import { fmtDate } from '../lib/format'
 import { dealSets, homeRails, pickedUpAgain, regularStock, type RegularLine } from '../lib/home'
+import { PageTail } from '../shell/ShellContext'
 import { useCartLines } from '../store/cart'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
@@ -24,14 +25,18 @@ import { Button } from '../ui/Button'
  * top zone painted, behind the same 60vh placeholder it always had.
  *
  * Order: regular stock (recognised) → Restock essentials → Stock-Up Deals → New arrivals → brands →
- * Moving fast → Picked up again → the continue card (first visits) → All products → "Ready to
- * restock?" → footer. Every product appears in at most one rail (lib/home homeRails; Picked up
- * again skips anything already shown) and rail products sink to the end of the grid, which grows
- * from 12 cards to 48 on idle.
+ * Moving fast (the one tinted block in the middle of the page) → Picked up again → the paste card
+ * (first visits, phone) → All products → "Ready to restock?" → footer. Every product appears in at
+ * most one rail (lib/home homeRails; Picked up again skips anything already shown) and rail
+ * products sink to the end of the grid, which grows from 12 cards to one page on idle.
+ *
+ * That page is a column multiple, so the grid never ends on a ragged half-row above "Show more":
+ * 24 on a phone (2 columns, and the home stays inside reach of the band and the footer — the
+ * catalogue is what Browse is for), 60 on desktop (both 4 and 5 columns divide it).
  */
 
 const FIRST = 12
-const CHUNK = 48
+const CHUNK = { phone: 24, desktop: 60 }
 const DEALS: Set<QuickFilter> = new Set<QuickFilter>(['deals'])
 /** section rhythm — the same as Home's top zone: 28px between phone sections, 56px on desktop */
 const STACK = 'flex flex-col gap-7 lg:gap-14 [&>*]:!mt-0'
@@ -45,7 +50,7 @@ function Sect({ reveal = false, children }: { reveal?: boolean; children: ReactN
   return <div className={cn('min-w-0 empty:hidden [&>*]:!mt-0', reveal && 'reveal')}>{children}</div>
 }
 
-export default function HomeBelow({ recent, lastLines, lastCodes, desktop, continueCard }: { recent: OrderStatusPayload[]; lastLines: RegularLine[]; lastCodes: Set<string>; desktop: boolean; /** the continue card when it is not already in the top zone */ continueCard: ReactNode }) {
+export default function HomeBelow({ recent, lastLines, lastCodes, desktop, continueCard }: { recent: OrderStatusPayload[]; lastLines: RegularLine[]; lastCodes: Set<string>; desktop: boolean; /** the continue card when it is not already in the top zone (a first visit: the paste card, phone only) */ continueCard: ReactNode }) {
   const { data, items, itemsByCode, recognized, rep } = useMarket()
   const lines = useCartLines()
   const rootRef = useRef<HTMLDivElement>(null)
@@ -102,17 +107,18 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
   }, [items, inStockOnly, dealsOnly, filtering, railCodes])
 
   // the first grid page is on screen; the rest of the first chunk arrives on idle
+  const chunk = desktop ? CHUNK.desktop : CHUNK.phone
   useEffect(() => {
     let idle = 0
     let t = 0
-    const grow = () => setVisible((v) => (v < CHUNK ? CHUNK : v))
+    const grow = () => setVisible((v) => (v < chunk ? chunk : v))
     if (typeof window.requestIdleCallback === 'function') idle = window.requestIdleCallback(grow, { timeout: 2500 })
     else t = window.setTimeout(grow, 1200)
     return () => {
       window.clearTimeout(t)
       if (idle) window.cancelIdleCallback(idle)
     }
-  }, [])
+  }, [chunk])
   const toggleFilter = (which: 'stock' | 'deals') => {
     if (which === 'stock') setInStockOnly((v) => !v)
     else setDealsOnly((v) => !v)
@@ -161,11 +167,15 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
       </Sect>
       <Sect>
         {rails.moving.length >= 3 && (
-          <Rail id="moving" title={S.rails.moving} seeAllTo="/shop?f=moving">
-            {rails.moving.map((it) => (
-              <MarketCard key={it.item_code} item={it} variant="compact" from="moving" />
-            ))}
-          </Rail>
+          // the one tinted block in the middle of the page: after the cream deals panel the home
+          // runs white-on-warm for thousands of pixels, and this is the section that earns a canvas
+          <div className="bleed bg-fresh-soft/60 pb-6 pt-5 [&>*]:!mt-0 lg:mx-0 lg:rounded-xl lg:px-7 lg:pb-7 lg:pt-6 2xl:px-8">
+            <Rail id="moving" title={S.rails.moving} seeAllTo="/shop?f=moving">
+              {rails.moving.map((it) => (
+                <MarketCard key={it.item_code} item={it} variant="compact" from="moving" />
+              ))}
+            </Rail>
+          </div>
         )}
       </Sect>
       <Sect>
@@ -182,14 +192,16 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
       {/* ── the grid ── */}
       <Sect reveal={desktop}>
         <section aria-labelledby="home-all">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
+          {/* phone: heading and count on one line, then the filters flush left with the view
+              toggle at the end — one row of pills instead of three styles fighting for the line */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2.5">
             <h2 id="home-all" className="font-display text-lg font-bold text-ink lg:text-xl">
               {S.home.all}
             </h2>
             <span aria-live="polite" className="text-sm tnum text-ink-2">
               {S.states.products(grid.length)}
             </span>
-            <div className="ms-auto flex items-center gap-1.5">
+            <div className="flex basis-full items-center gap-1.5 lg:ms-auto lg:basis-auto">
               {[
                 { on: inStockOnly, which: 'stock' as const, label: S.shop.inStock },
                 { on: dealsOnly, which: 'deals' as const, label: S.nav.deals, hide: !hasDeals },
@@ -201,7 +213,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
                     {t.label}
                   </button>
                 ))}
-              <div className="ms-1 inline-flex rounded-sm border border-line bg-surface p-0.5" role="group" aria-label={S.home.view}>
+              <div className="ms-auto inline-flex rounded-sm border border-line bg-surface p-0.5 lg:ms-1" role="group" aria-label={S.home.view}>
                 {(['grid', 'list'] as const).map((v) => (
                   // the hit area grows to 44 px tall (vertically only: the two sit edge to edge)
                   <button key={v} type="button" onClick={() => setViewMode(v)} aria-pressed={view === v} aria-label={v === 'grid' ? S.card.grid : S.card.list} className={cn('relative grid h-8 w-9 place-items-center rounded-xs transition duration-1 ease-m after:absolute after:-inset-y-1.5 after:inset-x-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'bg-ink text-white' : 'text-ink-2 hover:bg-plum-wash')}>
@@ -234,7 +246,10 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
               ))}
             </div>
           ) : (
-            <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
+            // The deals grid's ceiling, for the same reason: past four columns a wholesale name
+            // clipped to "20W Charger + Type-C Cable (US…" — and the end of the name is the half
+            // that tells two SKUs apart in this catalogue. The fifth column waits for 3xl.
+            <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:grid-cols-4 3xl:grid-cols-5">
               {grid.slice(0, shownCount).map((it) => (
                 <MarketCard key={it.item_code} item={it} />
               ))}
@@ -242,7 +257,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           )}
           {shownCount < grid.length && (
             <div className="mt-7 text-center">
-              <Button variant="secondary" size="lg" onClick={() => setVisible((v) => v + CHUNK)}>
+              <Button variant="secondary" size="lg" onClick={() => setVisible((v) => v + chunk)}>
                 {S.states.showMore(grid.length - shownCount)}
               </Button>
             </div>
@@ -250,10 +265,14 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
         </section>
       </Sect>
 
-      <Sect reveal={desktop}>
-        <CtaBand canReorder={lastLines.length > 0} />
-      </Sect>
-      <Footer prices={fmtDate(data?.prices_updated)} stock={fmtDate(data?.stock_as_of)} rep={rep} />
+      {/* the closing statement spans the container: on desktop the shell hosts it below the main
+          column + mini-cart row (PageTail), elsewhere it stays right here */}
+      <PageTail>
+        <Sect reveal={desktop}>
+          <CtaBand canReorder={lastLines.length > 0} />
+        </Sect>
+        <Footer prices={fmtDate(data?.prices_updated)} stock={fmtDate(data?.stock_as_of)} rep={rep} />
+      </PageTail>
     </div>
   )
 }

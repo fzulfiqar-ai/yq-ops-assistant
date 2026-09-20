@@ -7,6 +7,12 @@ import { S } from '../strings'
 /**
  * A product photo on a white shelf tile.
  *
+ * The tile stays pure white on purpose. Measured over the live catalog (17-Sep-2026): 163 of the
+ * 172 thumbs are NOT square, so the tile shows beside every photo, and 167 of 172 carry a pure
+ * white background of their own. Tinting the tile would therefore draw a white rectangle on
+ * ~163 cards to hide the 5 files that came in on another background (TB-D6…D9 orange, F20 grey).
+ * Those 5 are a source-image job — normalise the thumbs, do not tint the frame.
+ *
  * Uses the WebP size set (`thumb_urls` 160/320/512) as a srcset when the payload has it, else the
  * legacy 256 px JPEG thumb, then the full photo, then an honest "Photo coming soon" tile (7 SKUs
  * today). The box always reserves its aspect ratio, so the grid never jumps while loading.

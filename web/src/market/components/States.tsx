@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import { WifiOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { RepCard as Rep } from '@/lib/shopApi'
+import { useMarket } from '../MarketContext'
+import { bhd } from '../lib/format'
 import { S } from '../strings'
 import { Button, LinkButton } from '../ui/Button'
 import { CardSkeleton, Skeleton } from '../ui/Skeleton'
@@ -95,10 +97,16 @@ export function HomeSkeleton() {
 
 /**
  * The storefront footer (home). Desktop: four columns — the brand and what YQ is, help pages,
- * the merchant's representative (with WhatsApp when the rep shares it), and the price-book note
- * with the dates the prices and stock are from. Phone: the same, stacked and compact.
+ * the merchant's representative (with WhatsApp when the rep shares it) or, before one is known,
+ * the delivery terms this shop actually sets, and the price-book note with the dates the prices
+ * and stock are from. Phone: the same, stacked and compact.
  */
 export function Footer({ prices, stock, rep, className }: { prices?: string | null; stock?: string | null; rep?: Rep | null; className?: string }) {
+  const { settings } = useMarket()
+  // the same three cases the About page states, from the same two settings — never "free" unless it is
+  const threshold = Number(settings.free_delivery_threshold_bhd || 0)
+  const fee = Number(settings.delivery_fee_bhd || 0)
+  const delivery = threshold > 0 ? S.about.deliveryOver(threshold.toFixed(3)) : fee > 0 ? S.about.deliveryFee(bhd(fee)) : S.about.deliveryFree
   const help = [
     { to: '/about', label: S.footer.about },
     { to: '/about#how', label: S.footer.how },
@@ -136,9 +144,18 @@ export function Footer({ prices, stock, rep, className }: { prices?: string | nu
           </ul>
         </nav>
 
+        {/* before a representative is known this column would be one grey placeholder sentence, so
+            it carries the delivery terms instead — the real ones, from the shop's own settings */}
         <div className="min-w-0">
-          <h2 className={heading}>{S.footer.rep}</h2>
-          {rep ? <RepCard rep={rep} mini className="mt-3" /> : <p className="mt-3 max-w-xs text-sm">{S.footer.noRep}</p>}
+          <h2 className={heading}>{rep ? S.footer.rep : S.footer.deliveryTitle}</h2>
+          {rep ? (
+            <RepCard rep={rep} mini className="mt-3" />
+          ) : (
+            <>
+              <p className="mt-3 max-w-xs text-sm font-medium text-ink">{delivery}</p>
+              <p className="mt-1.5 max-w-xs text-sm leading-snug">{S.about.deliveryHow}</p>
+            </>
+          )}
         </div>
 
         <div className="min-w-0">
