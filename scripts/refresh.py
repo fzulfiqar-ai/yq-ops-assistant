@@ -17,6 +17,7 @@ Text is kept ASCII so it prints safely on the Windows console.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -33,6 +34,44 @@ DEFAULT_FOLDER = "business_data/Focus ERP Updated Reports"
 
 def _run(mod: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-m", mod, *args], cwd=ROOT, capture_output=True, text=True)
+
+
+# Table -> the Focus report name the team knows it by (for the "Loaded" chips on the Data page).
+_TABLE_LABEL = {
+    "order_lines": "Sales_day_book", "orders": "Summary_sales_register",
+    "stock_balance": "Stock_balance_by_warehouse", "stock_movements": "Stock_ledger",
+    "ar_ageing": "Customer_summary_ageing", "product_profitability": "Product_Profitability_Report",
+    "selling_prices": "Price book", "ledger_entries": "Ledger",
+    "products": "Item master", "customers": "Customer master",
+}
+
+
+def _loaded_counts(stdout: str) -> dict:
+    """Parse load_supabase's `upserted <table> <n>` lines into {report label: rows}."""
+    out: dict = {}
+    for m in re.finditer(r"upserted\s+(\w+)\s+(\d+)", stdout or ""):
+        out[_TABLE_LABEL.get(m.group(1), m.group(1))] = int(m.group(2))
+    return out
+
+
+def _friendly(stage: str, tail: str) -> str:
+    """Turn a subprocess failure into one sentence a non-engineer can act on. The raw tail is
+    still returned separately as `detail`; it is no longer the headline the Data page shows."""
+    t = tail or ""
+    if "cannot affect row a second time" in t or "'21000'" in t:
+        return ("One report lists the same product/price twice with an identical key, so the database "
+                "refused the batch. The loader now folds such rows automatically -- upload again; if it "
+                "repeats, send the file to the developer.")
+    if stage == "ingest" and ("join" in t.lower() or "HARD FAIL" in t):
+        return ("Sales_day_book and Summary_sales_register do not cover the same invoices (join below 80%). "
+                "Export both for the same date range and upload them together.")
+    if stage == "ingest":
+        return "A report could not be parsed. Check it is an unmodified Focus export with the default file name."
+    if "timed out" in t.lower() or "timeout" in t.lower():
+        return "The database did not answer in time. Wait a minute and upload again."
+    if "duplicate key" in t:
+        return "A row already exists with a different key than expected. Send the file to the developer."
+    return f"The {stage} step failed. See the technical detail below."
 
 
 def _briefing(ok: bool, data_date, changes: dict, verify: dict | None, error: str | None) -> tuple[str, str]:
@@ -56,7 +95,8 @@ def _briefing(ok: bool, data_date, changes: dict, verify: dict | None, error: st
 
 
 def _finish(ok: bool, src_path: str, error: str | None, changes: dict,
-            verify: dict | None, send: bool) -> dict:
+            verify: dict | None, send: bool, detail: str | None = None,
+            loaded: dict | None = None) -> dict:
     data_date = None
     try:
         from app.reports import data_as_of
@@ -71,7 +111,7 @@ def _finish(ok: bool, src_path: str, error: str | None, changes: dict,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "status": "ok" if ok else "error",
             "file": f"refresh {Path(src_path).name} (data as of {data_date})",
-            "errors": None if ok else (error or "")[:500],
+            "errors": None if ok else ((error or "") + (f" | {detail}" if detail else ""))[:500],
         }).execute()
     except Exception:  # noqa: BLE001
         pass
@@ -87,8 +127,8 @@ def _finish(ok: bool, src_path: str, error: str | None, changes: dict,
         print(out)
     except UnicodeEncodeError:  # Windows cp1252 console can't render some report chars
         print(out.encode("ascii", "replace").decode())
-    return {"ok": ok, "data_as_of": data_date, "error": error,
-            "changes": changes, "verify": verify, "notified": sent}
+    return {"ok": ok, "data_as_of": data_date, "error": error, "detail": detail,
+            "loaded": loaded or {}, "changes": changes, "verify": verify, "notified": sent}
 
 
 def refresh(folder: str | None = None, send: bool = True) -> dict:
@@ -101,15 +141,16 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     # 1 - ingest (honours the >=80% join hard-gate: non-zero exit => abort, do NOT load)
     r1 = _run("scripts.ingest", src)
     if r1.returncode != 0:
-        tail = (r1.stdout or r1.stderr or "")[-300:]
-        return _finish(False, src_path,
-                       f"ingest gate failed (join < 80% or parse error). {tail}", {}, None, send)
+        tail = (r1.stdout or r1.stderr or "")[-600:]
+        return _finish(False, src_path, _friendly("ingest", tail), {}, None, send, detail=tail)
 
     # 2 - load
     r2 = _run("scripts.load_supabase")
+    loaded = _loaded_counts(r2.stdout)
     if r2.returncode != 0:
-        tail = (r2.stderr or r2.stdout or "")[-300:]
-        return _finish(False, src_path, f"load_supabase failed. {tail}", {}, None, send)
+        tail = (r2.stderr or r2.stdout or "")[-600:]
+        return _finish(False, src_path, _friendly("load", tail), {}, None, send,
+                       detail=tail, loaded=loaded)
 
     # 3 - flush stale answer cache
     try:
@@ -180,8 +221,12 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    return _finish(ok, src_path, None if ok else "verify FAILED - DB totals drifted from the reports",
-                   changes, verify, send)
+    v_err = None
+    if not ok:
+        bad = [r["metric"] for r in (verify or {}).get("rows", []) if not r.get("passed")]
+        v_err = ("The data loaded, but these totals do not match the reports: " + "; ".join(bad)
+                 if bad else "Verification could not run: " + str((verify or {}).get("error") or "unknown"))
+    return _finish(ok, src_path, v_err, changes, verify, send, loaded=loaded)
 
 
 def main() -> int:

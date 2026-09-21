@@ -28,7 +28,7 @@ interface Coverage {
   status: 'current' | 'behind' | 'stale' | 'never'
 }
 interface PurgeTarget { key: string; table: string; date_col: string; label: string }
-interface VerifyRow { metric: string; diff_pct: number; passed: boolean }
+interface VerifyRow { metric: string; diff_pct: number; passed: boolean; note?: string }
 interface IngestResult {
   files: string[]
   recognised?: { file: string; report: string }[]
@@ -38,6 +38,10 @@ interface IngestResult {
   verify?: { ok: boolean; rows: VerifyRow[] }
   changes?: { catalog?: string; new_skus?: string[]; anomaly?: string }
   error?: string
+  /** raw subprocess tail for the developer — never the headline */
+  detail?: string
+  /** rows written per report, e.g. { Sales_day_book: 140 } */
+  loaded?: Record<string, number>
 }
 
 const DOT: Record<Coverage['status'], string> = {
@@ -204,9 +208,18 @@ export default function DataPage() {
               {result.ok ? 'Data refreshed' : 'Refresh needs attention'}
               {result.data_as_of && <span className="ml-auto text-xs font-normal text-muted-foreground">data as of {result.data_as_of}</span>}
             </div>
-            {result.error && <div className="text-xs text-amber-700">{result.error}</div>}
-            {result.recognised?.length ? (
-              <div className="text-[13px]"><span className="font-medium">Loaded:</span> {result.recognised.map((r) => r.file).join(', ')}</div>
+            {result.error && <div className="text-[13px] text-amber-800">{result.error}</div>}
+            {result.loaded && Object.keys(result.loaded).length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(result.loaded).map(([report, n]) => (
+                  <span key={report} className="rounded-md border bg-background px-2 py-0.5 text-xs">
+                    <span className="font-medium">{report}</span>
+                    <span className="text-muted-foreground"> · {n.toLocaleString()} rows</span>
+                  </span>
+                ))}
+              </div>
+            ) : result.recognised?.length ? (
+              <div className="text-[13px]"><span className="font-medium">Files:</span> {result.recognised.map((r) => r.file).join(', ')}</div>
             ) : null}
             {result.ignored?.length ? (
               <div className="text-[13px] text-amber-700">
@@ -220,14 +233,21 @@ export default function DataPage() {
                 </div>
                 <div className="grid gap-1 sm:grid-cols-2">
                   {result.verify.rows.map((r) => (
-                    <div key={r.metric} className="flex items-center gap-2 text-[13px]">
-                      {r.passed ? <CheckCircle2 size={13} className="text-emerald-600" /> : <XCircle size={13} className="text-rose-600" />}
-                      {r.metric} <span className="text-muted-foreground">({r.diff_pct.toFixed(2)}%)</span>
+                    <div key={r.metric} className="flex items-center gap-2 text-[13px]" title={r.note}>
+                      {r.passed ? <CheckCircle2 size={13} className="shrink-0 text-emerald-600" /> : <XCircle size={13} className="shrink-0 text-rose-600" />}
+                      <span className="truncate">{r.metric}</span>
+                      {r.note ? null : <span className="shrink-0 text-muted-foreground">({r.diff_pct.toFixed(2)}%)</span>}
                     </div>
                   ))}
                 </div>
               </div>
             ) : null}
+            {result.detail && (
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Technical detail</summary>
+                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-background p-2 font-mono text-[11px] text-muted-foreground">{result.detail}</pre>
+              </details>
+            )}
             {result.changes?.catalog && (
               <div className="text-[13px]"><span className="font-medium">Changes:</span> {result.changes.catalog}</div>
             )}

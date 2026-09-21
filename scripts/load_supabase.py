@@ -102,6 +102,27 @@ def main() -> int:
         dropped = before - len(sm)
         if dropped:
             print(f"  (dropped {dropped} stock_movements rows with null item_name)")
+        # Range replace, not append. The upsert key ends in row_hash, and the hash covers Focus's
+        # running balance / average-rate columns, which Focus RECALCULATES retroactively (a later
+        # receipt re-costs earlier rows). Every re-export of an overlapping window therefore
+        # produced new hashes and the same voucher lines landed again: on 21-Sep-2026 the table
+        # held 2.04x the units the ledger reported. Focus filters the export by date, so the file
+        # is the whole truth for its own date span -- clear that span first, then load, exactly
+        # like stock_balance / ar_ageing replace per as_of_date. Deleted month by month so a
+        # single PostgREST call never has to return tens of thousands of rows.
+        sm = sm.drop_duplicates(subset=["voucher", "item_name", "row_hash"])
+        dts = sorted(sm["move_date"].dropna().astype(str).unique())
+        if dts:
+            dmin, dmax = dts[0][:10], dts[-1][:10]
+            months = sorted({d[:7] for d in dts})
+            removed = 0
+            for ym in months:
+                lo = max(dmin, f"{ym}-01")
+                hi = min(dmax, f"{ym}-31")
+                r = (client.table("stock_movements").delete()
+                     .gte("move_date", lo).lte("move_date", hi).execute())
+                removed += len(r.data or [])
+            print(f"  (stock_movements: cleared {removed} rows in {dmin}..{dmax} before reload)")
         _upsert(client, "stock_movements", _records(sm),
                 on_conflict="voucher,item_name,row_hash")
     le = _read("ledger_entries")
@@ -127,8 +148,21 @@ def main() -> int:
         # (blank = dealer/list, 'Causeway'/'YQ Roadshow' = outlet retail). Without it they
         # collide. Requires scripts/pricebook_key_migration.sql (NULLS NOT DISTINCT) — without
         # that index this ON CONFLICT silently degrades to an INSERT and duplicates every row.
+        #
+        # The key deliberately excludes end_date, and Focus CAN export two rows that differ only
+        # there (21-Sep-2026: T02 at 3.55 ending 2027-11-10 AND 2.95 open-ended, both starting
+        # 2026-03-26). Two rows with one key inside a single upsert batch is exactly Postgres's
+        # "ON CONFLICT DO UPDATE command cannot affect row a second time", which aborted the whole
+        # daily load. Keep the LAST row per key -- Focus lists the newest entry last, and that is
+        # the row the DB already held -- and say how many were folded so the log explains itself.
+        key = ["sku_code", "price_book", "customer_code", "warehouse_name", "start_date"]
+        before = len(sp)
+        sp = sp.drop_duplicates(subset=key, keep="last")
+        if before - len(sp):
+            print(f"  (folded {before - len(sp)} selling_prices rows that repeat the same "
+                  f"SKU/book/customer/warehouse/start_date -- kept the last one)")
         _upsert(client, "selling_prices", _records(sp),
-                on_conflict="sku_code,price_book,customer_code,warehouse_name,start_date")
+                on_conflict=",".join(key))
     ar = _read("receivables")
     if ar is not None:
         ar = ar.dropna(subset=["account"])

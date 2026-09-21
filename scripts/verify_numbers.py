@@ -24,10 +24,19 @@ warnings.filterwarnings("ignore")
 
 from app.database import get_client  # noqa: E402
 from scripts.ingest import (  # noqa: E402
-    parse_order_lines, parse_receivables, parse_stock_balance, read_grid,
+    parse_order_lines, parse_orders, parse_receivables, parse_stock, parse_stock_balance, read_grid,
 )
 
 DATA_DIR = ROOT / "business_data"
+CLEAN_DIR = ROOT / "data" / "clean"
+
+# Report types that have NO cross-check rule here. They still load (data/clean/<table>.csv), so a
+# refresh made only of these must not be reported as a FAIL -- it is "loaded, nothing to compare".
+_UNCHECKED = {
+    "product_profitability": "Product_Profitability_Report",
+    "selling_prices": "price book",
+    "ledger_entries": "Ledger",
+}
 
 
 def _latest_source_dir() -> Path:
@@ -144,6 +153,27 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
         db = (_db_sum_between("v_sales", "revenue_bhd", "sale_date", dts[0], dts[-1])
               if dts else _db_sum("v_sales", "revenue_bhd"))
         checks.append(("Sales gross BHD", report, db, 0.5))
+    f = _find("summary_sales_register", src)
+    if f:  # Invoice headers -- gross per invoice, scoped to the file's own date range
+        od = parse_orders(read_grid(f), "x")
+        report = sum(_nn(r["gross_bhd"]) for r in od)
+        dts = sorted(str(r["order_date"])[:10] for r in od if r.get("order_date"))
+        db = (_db_sum_between("orders", "gross_bhd", "order_date", dts[0], dts[-1])
+              if dts else _db_sum("orders", "gross_bhd"))
+        checks.append(("Invoice headers gross BHD", report, db, 0.5))
+    f = _find("stock_ledger", src)
+    if f:  # Stock movements -- units received + issued inside the file's date range. This is the
+        # check that was missing on 21-Sep-2026: a Stock_ledger-only upload had nothing to compare
+        # against and was reported as "NO SOURCE REPORTS FOUND" even though it loaded cleanly.
+        sm = parse_stock(read_grid(f), "x")
+        report = sum(_nn(r["received_qty"]) + _nn(r["issued_qty"]) for r in sm)
+        dts = sorted(str(r["move_date"])[:10] for r in sm if r.get("move_date"))
+        if dts:
+            db = (_db_sum_between("stock_movements", "received_qty", "move_date", dts[0], dts[-1])
+                  + _db_sum_between("stock_movements", "issued_qty", "move_date", dts[0], dts[-1]))
+        else:
+            db = _db_sum("stock_movements", "received_qty") + _db_sum("stock_movements", "issued_qty")
+        checks.append(("Stock movements units", report, db, 0.5))
     f = _find("customer_summary_ageing_by_due_date", src)
     if f:  # Receivables total vs AR ageing report (v_receivables already = latest snapshot)
         ar = parse_receivables(read_grid(f), "x")
@@ -181,13 +211,36 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
         ok = ok and passed
         rows.append({"metric": name, "report": report, "db": db, "diff_pct": diff_pct, "passed": passed})
 
-    # No source file matched => nothing was actually cross-checked. Reporting PASS here would be
-    # the worst possible outcome: a green light that means "I found no reports to compare against".
+    # No source file matched a cross-check rule. Reporting a bare PASS here would be the worst
+    # outcome (a green light meaning "I found nothing to compare"), but a bare FAIL is wrong too
+    # when the upload was made only of report types that have no rule (price books, profitability):
+    # those loaded fine. So: PASS with an explicit "loaded, nothing to compare" line when the
+    # ingest step produced rows for such a report; FAIL only when nothing at all was loaded.
     if source_backed == 0:
-        ok = False
-        rows.append({"metric": "NO SOURCE REPORTS FOUND", "report": 0.0, "db": 0.0,
-                     "diff_pct": 100.0, "passed": False})
+        loaded = _unchecked_loaded()
+        if loaded:
+            rows.append({"metric": "Loaded, no totals to cross-check: " + ", ".join(loaded),
+                         "report": 0.0, "db": 0.0, "diff_pct": 0.0, "passed": True,
+                         "note": "These report types have no verification rule; row counts are shown above."})
+        else:
+            ok = False
+            rows.append({"metric": "NO SOURCE REPORTS FOUND", "report": 0.0, "db": 0.0,
+                         "diff_pct": 100.0, "passed": False,
+                         "note": "None of the uploaded files produced rows. Check the file names and contents."})
     return ok, rows
+
+
+def _unchecked_loaded() -> list[str]:
+    """Human labels of unchecked report types whose ingest CSV holds at least one row."""
+    out: list[str] = []
+    for table, label in _UNCHECKED.items():
+        p = CLEAN_DIR / f"{table}.csv"
+        try:
+            if p.exists() and sum(1 for _ in p.open(encoding="utf-8")) > 1:
+                out.append(label)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def main() -> int:
