@@ -13,12 +13,34 @@ import type { StaffCustomer } from '@/lib/shopApi'
 
 /* ───────────────────────── /shop/me ───────────────────────── */
 
+/** Tiered kickback standing for the month (app/shop.py tier_progress). */
+export interface TierProgress {
+  team: 'normal' | 'mobile_accessories' | string
+  month: string | null            // YYYY-MM
+  data_through: string | null     // last loaded sale date
+  days_left: number | null
+  mtd_bhd: number
+  tiers: { n: number; bhd: number; pct: number }[]
+  tier_reached: number            // 0 = below Tier 1
+  kickback_pct: number            // fraction
+  kickback_bhd: number
+  next_tier: { n: number; bhd: number; gap_bhd: number; pct: number } | null
+  progress_pct: number            // vs the top tier
+}
+
+/** "2026-09" -> "September" */
+export function monthName(ym?: string | null): string {
+  if (!ym) return ''
+  const [y, m] = ym.split('-').map(Number)
+  return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-GB', { month: 'long' })
+}
+
 export interface ShopMe {
   salesman: { id: number; name: string; referral_code?: string | null; phone?: string | null; whatsapp?: string | null; title?: string | null; photo_url?: string | null } | null
   link?: string | null
   qr_url?: string | null
   kpis?: { orders_7d?: number; orders_30d?: number; value_30d_bhd?: number; customers_30d?: number } | null
-  focus?: { revenue_90d_bhd?: number | null } | null
+  focus?: { revenue_90d_bhd?: number | null; target?: TierProgress | null } | null
   hint?: string | null
 }
 

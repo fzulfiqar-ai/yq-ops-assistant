@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
 import { STATUS_LABEL, STATUS_TONE } from '@/pages/shop-ops/OrderActions'
 import { Badge } from '@/components/ui/badge'
-import { bhd3, firstName, greeting, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
+import { bhd3, firstName, greeting, monthName, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
 
 /**
  * /today — the salesman's home. What needs him now (orders waiting to be confirmed), how his
@@ -64,6 +64,7 @@ export default function Today() {
   const name = me?.full_name || meQ.data?.salesman?.name || ''
   const link = meQ.data?.link || ''
   const kpis = meQ.data?.kpis
+  const tier = meQ.data?.focus?.target || null
   const today = useMemo(() => new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }), [])
   const newOrders = newQ.data?.orders || []
   const newCount = newQ.data?.count || 0
@@ -221,6 +222,48 @@ export default function Today() {
               ))}
             </div>
           </section>
+
+          {/* tiered kickback — this month's Focus sales vs the rep's tier thresholds */}
+          {tier ? (
+            <section className="rounded-2xl border border-border bg-card p-4" aria-label="Kickback this month">
+              <div className="flex items-baseline justify-between gap-2">
+                <h2 className="font-display text-[15px] font-bold">Kickback · {monthName(tier.month)}</h2>
+                <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                  tier.tier_reached > 0 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')}>
+                  {tier.tier_reached > 0 ? `Tier ${tier.tier_reached} · ${Math.round(tier.kickback_pct * 100)}%` : 'Below Tier 1'}
+                </span>
+              </div>
+              <div className="mt-2 flex items-baseline gap-1.5">
+                <span className="font-display text-[22px] font-bold tabular-nums leading-none">{bhd3(tier.mtd_bhd)}</span>
+                <span className="text-[12px] text-muted-foreground">sold this month</span>
+              </div>
+              <div className="relative mt-3 h-2 rounded-full bg-muted" role="progressbar" aria-valuenow={tier.progress_pct} aria-valuemin={0} aria-valuemax={100}>
+                <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${tier.progress_pct}%` }} />
+                {tier.tiers.map((t) => {
+                  const top = tier.tiers[tier.tiers.length - 1].bhd || 1
+                  return (
+                    <span key={t.n} className={cn('absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full', tier.mtd_bhd >= t.bhd ? 'bg-primary-foreground/80' : 'bg-foreground/30')}
+                      style={{ left: `calc(${(t.bhd / top) * 100}% - 1px)` }} title={`Tier ${t.n} · BHD ${t.bhd}`} />
+                  )
+                })}
+              </div>
+              <div className="mt-1.5 flex justify-between text-[10.5px] tabular-nums text-muted-foreground">
+                {tier.tiers.map((t) => <span key={t.n}>T{t.n} {t.bhd.toLocaleString('en-US')}</span>)}
+              </div>
+              <div className="mt-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[12.5px]">
+                <span>
+                  {tier.next_tier
+                    ? <><b className="tabular-nums">{bhd3(tier.next_tier.gap_bhd)}</b> more for Tier {tier.next_tier.n} ({Math.round(tier.next_tier.pct * 100)}%)</>
+                    : <b>Top tier reached</b>}
+                </span>
+                {tier.days_left != null && <span className="text-muted-foreground">{tier.days_left} day{tier.days_left === 1 ? '' : 's'} left</span>}
+              </div>
+              <div className="mt-1 text-[12px] text-muted-foreground">
+                Kickback so far <b className="tabular-nums text-foreground">{bhd3(tier.kickback_bhd)}</b>
+                {tier.data_through ? <> · sales to {tier.data_through}</> : null}
+              </div>
+            </section>
+          ) : null}
 
           {/* my link */}
           <section className="rounded-2xl border border-border bg-card p-4">

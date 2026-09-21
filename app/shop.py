@@ -23,7 +23,7 @@ import re
 import secrets
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.catalog import CATEGORY_ORDER, public_url, share_token, thumb_path, THUMB_SIZES
@@ -2237,6 +2237,51 @@ def salesman_for_user(email: str | None) -> dict | None:
     return row
 
 
+def tier_progress(target: dict | None, mtd: float, data_date: str | None) -> dict | None:
+    """Where a rep stands this month against the tiered kickback scheme (21-Sep-2026):
+    tiers = monthly sales thresholds (target_bhd = Tier 1, tier2_bhd, tier3_bhd), each paying
+    kickback_tN of the month's sales once reached. Pure: no I/O, unit-tested in tests/test_shop.py.
+
+    Returns None when the rep has no target row. `progress_pct` is against the TOP tier so the bar
+    never sits at 100% before the last tier; `next_tier` is None once the top tier is reached."""
+    if not target:
+        return None
+    tiers: list[dict] = []
+    for n, (tk, kk) in enumerate((("target_bhd", "kickback_t1"), ("tier2_bhd", "kickback_t2"),
+                                  ("tier3_bhd", "kickback_t3")), start=1):
+        thr = _f(target.get(tk))
+        if thr > 0:
+            tiers.append({"n": n, "bhd": money(thr), "pct": _f(target.get(kk))})
+    if not tiers:
+        return None
+    mtd = max(0.0, _f(mtd))
+    reached = [t for t in tiers if mtd >= t["bhd"]]
+    ahead = [t for t in tiers if mtd < t["bhd"]]
+    top = tiers[-1]["bhd"]
+    nxt = ahead[0] if ahead else None
+    days_left = None
+    month = None
+    if data_date:
+        try:
+            import calendar
+            d = date.fromisoformat(str(data_date)[:10])
+            month = d.strftime("%Y-%m")
+            days_left = calendar.monthrange(d.year, d.month)[1] - d.day
+        except Exception:  # noqa: BLE001
+            pass
+    rate = reached[-1]["pct"] if reached else 0.0
+    return {
+        "team": target.get("team") or "normal",
+        "month": month, "data_through": str(data_date)[:10] if data_date else None, "days_left": days_left,
+        "mtd_bhd": money(mtd), "tiers": tiers,
+        "tier_reached": reached[-1]["n"] if reached else 0,
+        "kickback_pct": rate, "kickback_bhd": money(mtd * rate),
+        "next_tier": ({"n": nxt["n"], "bhd": nxt["bhd"], "gap_bhd": money(nxt["bhd"] - mtd),
+                       "pct": nxt["pct"]} if nxt else None),
+        "progress_pct": round(min(100.0, mtd / top * 100), 1) if top else 0.0,
+    }
+
+
 def me_payload(email: str) -> dict:
     sm = salesman_for_user(email)
     client = get_client()
@@ -2260,8 +2305,23 @@ def me_payload(email: str) -> dict:
                 "SELECT COALESCE(SUM(revenue_bhd),0) AS rev FROM v_sales "
                 "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 "
                 "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
-            # target_bhd retired 21-Sep-2026 (seeded targets removed; real ones arrive as a file)
             focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev"))}
+            # Tiered kickback (21-Sep-2026): this month's sales (month of the latest loaded sale,
+            # giveaways excluded, same revenue basis as every other Focus figure) vs the rep's
+            # standing or month-specific target row.
+            mtd = exec_sql_params(
+                "SELECT COALESCE(SUM(revenue_bhd),0) AS rev, (SELECT MAX(sale_date) FROM v_sales)::text AS d "
+                "FROM v_sales WHERE sale_date >= date_trunc('month', (SELECT MAX(sale_date) FROM v_sales))::date "
+                "AND NOT is_giveaway "
+                "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
+            m0 = (mtd or [{}])[0]
+            data_date = m0.get("d")
+            tgt = exec_sql_params(
+                "SELECT salesman, period, team, target_bhd, tier2_bhd, tier3_bhd, "
+                "kickback_t1, kickback_t2, kickback_t3 FROM salesman_targets "
+                "WHERE salesman = $1 AND period IN ('', $2) ORDER BY period DESC LIMIT 1",
+                [sm["focus_name"], str(data_date or "")[:7]])
+            focus["target"] = tier_progress((tgt or [None])[0], _f(m0.get("rev")), data_date)
         except Exception as e:  # noqa: BLE001
             log.debug("focus kpis failed: %s", e)
     return {"salesman": sm, "link": salesman_link(sm) if sm else None,

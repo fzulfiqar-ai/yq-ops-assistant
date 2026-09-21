@@ -6,7 +6,7 @@ import { navFor } from '@/lib/nav'
 import { supabase } from '@/lib/supabase'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
-import { bhd3, initials, useAuthedBlob, useShopMe } from './lib'
+import { bhd3, initials, monthName, useAuthedBlob, useShopMe } from './lib'
 
 /**
  * /account — who I am, my storefront link and QR, my target, my password, everything else the
@@ -71,6 +71,20 @@ export default function Account() {
           <div className="mt-4 rounded-xl bg-muted px-3 py-2.5 text-[12.5px]">
             <span className="text-muted-foreground">90-day Focus revenue </span>
             <b className="tabular-nums">{bhd3(focus.revenue_90d_bhd)}</b>
+          </div>
+        ) : null}
+        {focus?.target ? (
+          <div className="mt-2 rounded-xl bg-muted px-3 py-2.5 text-[12.5px]">
+            <span className="text-muted-foreground">{monthName(focus.target.month)} kickback · </span>
+            <b className="tabular-nums">{bhd3(focus.target.mtd_bhd)}</b>
+            <span className="text-muted-foreground"> sold · </span>
+            <b>{focus.target.tier_reached > 0 ? `Tier ${focus.target.tier_reached} (${Math.round(focus.target.kickback_pct * 100)}%)` : 'below Tier 1'}</b>
+            {focus.target.next_tier ? (
+              <span className="text-muted-foreground"> · {bhd3(focus.target.next_tier.gap_bhd)} to Tier {focus.target.next_tier.n}</span>
+            ) : null}
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              Tiers {focus.target.tiers.map((t) => `BHD ${t.bhd.toLocaleString('en-US')} (${Math.round(t.pct * 100)}%)`).join(' · ')}
+            </div>
           </div>
         ) : null}
       </section>

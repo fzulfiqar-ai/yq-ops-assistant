@@ -381,6 +381,30 @@ def _():
     assert '"thumb_urls": _thumb_urls(it)' in block
 
 
+# ── tiered kickback (pure) ────────────────────────────────────────────────────
+
+@test("targets: tier_progress reports the tier reached, the gap to the next, the kickback and days left")
+def _tiers():
+    from app import shop
+    row = {"team": "mobile_accessories", "target_bhd": 500, "tier2_bhd": 1200, "tier3_bhd": 2000,
+           "kickback_t1": 0.05, "kickback_t2": 0.07, "kickback_t3": 0.08}
+    t = shop.tier_progress(row, 340.0, "2026-09-21")
+    assert t["tier_reached"] == 0 and t["kickback_bhd"] == 0 and t["next_tier"]["n"] == 1
+    assert t["next_tier"]["gap_bhd"] == 160 and t["days_left"] == 9 and t["month"] == "2026-09"
+    t = shop.tier_progress(row, 1250.0, "2026-09-21")
+    assert t["tier_reached"] == 2 and t["kickback_pct"] == 0.07 and t["kickback_bhd"] == 87.5
+    assert t["next_tier"] == {"n": 3, "bhd": 2000.0, "gap_bhd": 750.0, "pct": 0.08}
+    assert t["progress_pct"] == 62.5
+    top = shop.tier_progress(row, 2600.0, "2026-02-10")
+    assert top["tier_reached"] == 3 and top["next_tier"] is None and top["progress_pct"] == 100.0
+    assert top["days_left"] == 18 and top["kickback_bhd"] == 208.0
+    assert shop.tier_progress(None, 100.0, "2026-09-21") is None
+    assert shop.tier_progress({"target_bhd": 0}, 100.0, "2026-09-21") is None
+    # a normal-team row with only Tier 1 filled still works
+    one = shop.tier_progress({"target_bhd": 100, "kickback_t1": "5"}, 120.0, None)
+    assert one["tier_reached"] == 1 and one["next_tier"] is None and one["days_left"] is None
+
+
 # ── marketplace: attribution, lifecycle, storefront card (pure) ───────────────
 
 def _cust(**kw):
