@@ -114,11 +114,13 @@ def main() -> int:
         dts = sorted(sm["move_date"].dropna().astype(str).unique())
         if dts:
             dmin, dmax = dts[0][:10], dts[-1][:10]
+            import calendar
             months = sorted({d[:7] for d in dts})
             removed = 0
             for ym in months:
+                y, m = int(ym[:4]), int(ym[5:7])
                 lo = max(dmin, f"{ym}-01")
-                hi = min(dmax, f"{ym}-31")
+                hi = min(dmax, f"{ym}-{calendar.monthrange(y, m)[1]:02d}")   # real month end, not "-31"
                 r = (client.table("stock_movements").delete()
                      .gte("move_date", lo).lte("move_date", hi).execute())
                 removed += len(r.data or [])

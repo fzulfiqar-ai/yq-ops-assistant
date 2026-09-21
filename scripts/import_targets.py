@@ -31,8 +31,23 @@ load_dotenv(ROOT / ".env")
 import pandas as pd  # noqa: E402
 
 NAME_HINTS = ("salesman", "sales man", "rep", "name")
-TARGET_HINTS = ("target", "bhd", "amount")
+TARGET_HINTS = ("target", "tier 1", "tier1", "bhd", "amount")
 MONTH_HINTS = ("month", "period", "date")
+# Optional tier columns (21-Sep-2026 scheme): thresholds for tiers 2/3, kickback % per tier, team.
+OPTIONAL = {
+    "tier2_bhd": ("tier 2", "tier2"), "tier3_bhd": ("tier 3", "tier3"),
+    "kickback_t1": ("kickback 1", "kickback_t1", "kb1"), "kickback_t2": ("kickback 2", "kickback_t2", "kb2"),
+    "kickback_t3": ("kickback 3", "kickback_t3", "kb3"), "team": ("team",),
+}
+
+
+def _pct(v):
+    """'5%' / 5 / 0.05 -> 0.05"""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip().rstrip("%")
+    f = float(s)
+    return round(f / 100, 4) if f > 1 else f
 
 
 def _col(cols: list[str], hints: tuple[str, ...]) -> str | None:
@@ -72,7 +87,9 @@ def main(argv: list[str]) -> int:
     df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
     df.columns = [str(c).strip() for c in df.columns]
     ncol, tcol, mcol = _col(list(df.columns), NAME_HINTS), _col(list(df.columns), TARGET_HINTS), _col(list(df.columns), MONTH_HINTS)
-    print(f"file: {path.name}  columns: {list(df.columns)}\n  salesman={ncol!r} target={tcol!r} month={mcol!r}")
+    opt = {k: _col(list(df.columns), hints) for k, hints in OPTIONAL.items()}
+    opt = {k: c for k, c in opt.items() if c and c not in (ncol, tcol, mcol)}
+    print(f"file: {path.name}  columns: {list(df.columns)}\n  salesman={ncol!r} target={tcol!r} month={mcol!r} extra={opt}")
     if not ncol or not tcol:
         print("ERROR: could not find the Salesman and Target columns.")
         return 1
@@ -101,9 +118,16 @@ def main(argv: list[str]) -> int:
             bad.append(f"{name}: not in the salesmen roster (add them in Salesmen first)")
             continue
         period = _period(r[mcol]) if mcol else (a.period or "")
-        rows.append({"salesman": resolved, "period": period, "target_bhd": round(target, 3),
-                     "updated_by": f"import {path.name}", "updated_at": datetime.now(timezone.utc).isoformat()})
-        print(f"  {resolved:24} {period or '(standing)':10} BHD {target:,.0f}")
+        row = {"salesman": resolved, "period": period, "target_bhd": round(target, 3),
+               "updated_by": f"import {path.name}", "updated_at": datetime.now(timezone.utc).isoformat()}
+        for k, col in opt.items():
+            v = r[col]
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                continue
+            row[k] = str(v).strip().lower() if k == "team" else (_pct(v) if k.startswith("kickback") else float(v))
+        rows.append(row)
+        tiers = f"  tiers {row.get('tier2_bhd', '-')}/{row.get('tier3_bhd', '-')}" if opt else ""
+        print(f"  {resolved:24} {period or '(standing)':10} BHD {target:,.0f}{tiers}  {row.get('team', '')}")
 
     if bad:
         print("\nREFUSED -- fix these rows first:")
