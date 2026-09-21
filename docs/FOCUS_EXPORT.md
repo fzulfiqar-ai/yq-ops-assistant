@@ -57,6 +57,20 @@ re-upload — the loader is idempotent, so the same days never create duplicates
 **Re-uploading is always safe** — same invoice/line/snapshot = no duplicate. Upload the full daily set
 together for a complete refresh, or a single report to refresh just that one.
 
+### What the result means (21-Sep-2026)
+- **Loaded chips** — rows written per report (e.g. `Sales_day_book · 140 rows`). A report that is
+  missing from the chips was not in the upload or was ignored.
+- **Verify** — totals cross-checked against the files you uploaded: sales gross, invoice headers,
+  stock movement units, receivables, stock value. Price books and Product_Profitability have no
+  totals to compare, so an upload made only of those shows "Loaded, no totals to cross-check" and
+  still counts as a good refresh.
+- **Refresh needs attention** — the headline is plain English (what happened and what to do);
+  the developer's trace sits behind "Technical detail". Two cases the loader now handles itself:
+  a price book listing the same product twice (folded, last row wins) and a Stock_ledger that
+  overlaps an earlier export (the file's date span is replaced, so re-exports never double-count).
+- **Stock_ledger**: export the widest range you can. The loader replaces everything inside the
+  file's own first–last date, so a narrow export only refreshes those days.
+
 ## Phase 2 (later — after ~1 month of Phase 1)
 Automate the export so even the clicking is hands-off. Preferred: a **headless browser bot
 (Playwright)** that logs into FocusX in the background and downloads the reports on a schedule — it

@@ -138,7 +138,7 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
 - `POST /shop/orders/{id}/status` body `{ "status": "confirmed", "note": "" }` → `{ "ok": true, "order": {…} }`
   (allowed: new→confirmed|cancelled, confirmed→packed|delivered|cancelled, packed→delivered|cancelled)
 - `GET /shop/me` → `{ "salesman": {…}|null, "link": "https://…/c/{token}?ref=furqan", "qr_url": "/shop/salesmen/1/qr.png",
-  "kpis": { "orders_7d", "orders_30d", "value_30d_bhd", "customers_30d" }, "focus": { "revenue_90d_bhd", "target_bhd" } | null }`
+  "kpis": { "orders_7d", "orders_30d", "value_30d_bhd", "customers_30d" }, "focus": { "revenue_90d_bhd" } | null }`  (target_bhd retired 21-Sep-2026 -- targets return via `scripts/import_targets.py` into `salesman_targets(salesman, period)`)
 - `GET /shop/salesmen` (feature **Shop Admin**) → `{ "salesmen": [{ id, name, phone, email, whatsapp, user_email, focus_name,
   referral_code, is_active, sort_order, notify_email, notify_whatsapp, link, orders_30d }] }`;
   `POST /shop/salesmen` (same fields, `name` required; phone/whatsapp normalised to wa digits), `PATCH /shop/salesmen/{id}`,
