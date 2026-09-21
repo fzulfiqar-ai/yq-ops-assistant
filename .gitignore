@@ -80,3 +80,12 @@ business_data/
 
 # wrangler state written by scripts/deploy_cf.py / npx wrangler deploy
 web/.wrangler/
+
+# Owner drop folders (dated, e.g. 210926/ = 21-Sep-2026): supplier invoices, packing lists,
+# MRN XML, product photos. Only *.xlsx/*.zip were caught before -- the .pdf/.xml/.rar/.jpg
+# inside were one `git add -A` away from the PUBLIC repo (21-Sep-2026).
+/[0-9][0-9][0-9][0-9][0-9][0-9]/
+*.rar
+# DB backups written by scripts/db_backup.py live under business_data/ (already ignored) --
+# listed again so a moved backup folder can never be committed.
+backups/
