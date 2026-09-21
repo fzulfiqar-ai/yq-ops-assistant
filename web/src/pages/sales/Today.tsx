@@ -64,8 +64,6 @@ export default function Today() {
   const name = me?.full_name || meQ.data?.salesman?.name || ''
   const link = meQ.data?.link || ''
   const kpis = meQ.data?.kpis
-  const focus = meQ.data?.focus
-  const pct = focus?.target_bhd ? Math.min(100, Math.round(((focus.revenue_90d_bhd || 0) / Number(focus.target_bhd)) * 100)) : null
   const today = useMemo(() => new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }), [])
   const newOrders = newQ.data?.orders || []
   const newCount = newQ.data?.count || 0
@@ -222,21 +220,6 @@ export default function Today() {
                 </div>
               ))}
             </div>
-            {focus?.target_bhd ? (
-              <div className="mt-3">
-                <div className="flex items-baseline justify-between text-[12px]">
-                  <span className="text-muted-foreground">90-day revenue vs target</span>
-                  <span className="font-semibold tabular-nums">{pct}%</span>
-                </div>
-                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={pct ?? 0} aria-valuemin={0} aria-valuemax={100}>
-                  <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${pct}%` }} />
-                </div>
-                <div className="mt-1 flex justify-between text-[11px] tabular-nums text-muted-foreground">
-                  <span>{bhd3(focus.revenue_90d_bhd)}</span>
-                  <span>{bhd3(focus.target_bhd)}</span>
-                </div>
-              </div>
-            ) : null}
           </section>
 
           {/* my link */}

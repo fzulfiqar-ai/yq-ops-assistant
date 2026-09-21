@@ -18,7 +18,7 @@ export interface ShopMe {
   link?: string | null
   qr_url?: string | null
   kpis?: { orders_7d?: number; orders_30d?: number; value_30d_bhd?: number; customers_30d?: number } | null
-  focus?: { revenue_90d_bhd?: number | null; target_bhd?: number | null } | null
+  focus?: { revenue_90d_bhd?: number | null } | null
   hint?: string | null
 }
 

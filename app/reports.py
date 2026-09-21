@@ -259,18 +259,11 @@ def movers(k: int = 5) -> dict:
 
 
 def salesman_attainment() -> list[dict]:
-    """Per-salesman MTD gross vs their monthly target (salesman_targets) — the
-    leaderboard the owner sets from Settings → Sales targets."""
-    return exec_sql(
-        "WITH mx AS (SELECT MAX(sale_date) AS d FROM v_sales), "
-        "mtd AS (SELECT salesman_resolved AS salesman, SUM(revenue_bhd) AS rev_mtd "
-        "        FROM v_sales, mx WHERE sale_date >= date_trunc('month', mx.d)::date "
-        "        AND NOT is_giveaway GROUP BY 1) "
-        "SELECT t.salesman, t.target_bhd, COALESCE(m.rev_mtd, 0) AS rev_mtd, "
-        "CASE WHEN t.target_bhd > 0 THEN ROUND(COALESCE(m.rev_mtd, 0) / t.target_bhd * 100, 1) END AS attainment_pct "
-        "FROM salesman_targets t LEFT JOIN mtd m ON m.salesman = t.salesman "
-        "WHERE t.target_bhd > 0 ORDER BY attainment_pct DESC NULLS LAST"
-    ) or []
+    """Per-salesman MTD vs target leaderboard -- RETIRED 21-Sep-2026. The seeded targets were
+    removed before launch; real targets arrive later as a file (scripts/import_targets.py into
+    salesman_targets(salesman, period)). Kept as an empty list so the dashboard payload shape is
+    unchanged; re-implement against the period column when the owner's file exists."""
+    return []
 
 
 def daily_sales_mtd() -> list[dict]:
@@ -432,6 +425,16 @@ def inventory() -> dict:
         "  ORDER BY sb.ctid, LENGTH(c.nkey) DESC) "
         "SELECT COALESCE(SUM(net_qty * landed_cost_bhd),0) AS v FROM item_cost"
     )
+    # New arrivals: Material Receipt Notes posted in the last 14 days (one row per MRN voucher),
+    # so the team can see a shipment landed (LC1716_196 = MRN:YQ-26-09-2, 20-Sep-2026) without
+    # opening Stock Moves. Quantities come from the Focus ledger, never from the shop.
+    arrivals = exec_sql(
+        "SELECT voucher, MIN(move_date)::text AS received_on, COUNT(DISTINCT item_name) AS items, "
+        "COALESCE(SUM(received_qty),0) AS units, ROUND(COALESCE(SUM(received_value_bhd),0)::numeric, 2) AS value_bhd "
+        "FROM stock_movements WHERE voucher_type = 'Material Receipt Note' "
+        "AND move_date >= (SELECT MAX(move_date) FROM stock_movements) - 14 "
+        "GROUP BY voucher ORDER BY received_on DESC LIMIT 6"
+    ) or []
     return {
         "rows": rows,
         "by_status": dict(Counter(r["status"] for r in rows)),
@@ -439,6 +442,7 @@ def inventory() -> dict:
         "stock_value_cost": float((cv or [{}])[0].get("v", 0)),
         "stock_qty": float(t.get("q", 0)),
         "by_warehouse": stock_by_warehouse(),
+        "recent_receipts": arrivals,
     }
 
 
@@ -453,18 +457,14 @@ def sales() -> dict:
             "FROM v_top_customers WHERE customer_name NOT ILIKE 'cash customer%' "
             "ORDER BY gross_bhd DESC NULLS LAST LIMIT 50"
         ),
-        # per-day per-salesman gross this month + monthly targets — the Sales page
-        # derives each salesman's daily target as target_bhd / days-in-month
+        # per-day per-salesman gross this month (the Sales page's daily chart). Targets were
+        # retired 21-Sep-2026 pending the owner's target file -- see scripts/import_targets.py.
         "daily_by_salesman": exec_sql(
             "WITH d AS (SELECT MAX(sale_date) AS mx FROM v_sales) "
             "SELECT sale_date::text AS day, salesman_resolved AS salesman, "
             "ROUND(SUM(revenue_bhd)::numeric, 2) AS gross_bhd "
             "FROM v_sales, d WHERE sale_date >= date_trunc('month', d.mx)::date "
             "AND NOT is_giveaway GROUP BY 1, 2 ORDER BY 1"
-        ) or [],
-        "targets": exec_sql(
-            "SELECT salesman, target_bhd FROM salesman_targets WHERE target_bhd > 0 "
-            "ORDER BY target_bhd DESC"
         ) or [],
     }
 

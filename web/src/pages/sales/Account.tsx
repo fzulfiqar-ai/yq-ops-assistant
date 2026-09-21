@@ -67,13 +67,10 @@ export default function Account() {
             <div className="mt-1 text-[12px] text-muted-foreground">{sm?.title || 'YQ sales representative'}{sm?.referral_code ? ` · /${sm.referral_code}` : ''}</div>
           </div>
         </div>
-        {focus?.target_bhd ? (
+        {focus?.revenue_90d_bhd ? (
           <div className="mt-4 rounded-xl bg-muted px-3 py-2.5 text-[12.5px]">
-            <span className="text-muted-foreground">90-day revenue </span>
+            <span className="text-muted-foreground">90-day Focus revenue </span>
             <b className="tabular-nums">{bhd3(focus.revenue_90d_bhd)}</b>
-            <span className="text-muted-foreground"> of </span>
-            <b className="tabular-nums">{bhd3(focus.target_bhd)}</b>
-            <span className="text-muted-foreground"> target</span>
           </div>
         ) : null}
       </section>

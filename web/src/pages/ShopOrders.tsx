@@ -94,7 +94,7 @@ interface ShopMe {
   link?: string | null
   qr_url?: string | null
   kpis?: { orders_7d?: number; orders_30d?: number; value_30d_bhd?: number; customers_30d?: number } | null
-  focus?: { revenue_90d_bhd?: number; target_bhd?: number } | null
+  focus?: { revenue_90d_bhd?: number } | null
 }
 
 const STATUSES = ['new', 'confirmed', 'packed', 'out_for_delivery', 'delivered', 'cancelled'] as const
@@ -293,7 +293,6 @@ function MyLinkCard({
   const link = me?.link || ''
   const kpis = me?.kpis
   const focus = me?.focus
-  const pct = focus?.target_bhd ? Math.min(100, Math.round(((focus.revenue_90d_bhd || 0) / focus.target_bhd) * 100)) : null
 
   return (
     <Card className="mb-5 p-5">
@@ -329,19 +328,12 @@ function MyLinkCard({
         <Stat label="Value (30d)" value={bhd(kpis?.value_30d_bhd, 3)} tone="violet" />
         <Stat label="Customers (30d)" value={num(kpis?.customers_30d)} />
       </div>
-      {focus && (
-        <div className="mt-4 border-t pt-3">
-          <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 text-[12px] text-muted-foreground">
-            <span>90-day revenue vs target</span>
-            <span className="tabular-nums">
-              {bhd(focus.revenue_90d_bhd, 3)} of {bhd(focus.target_bhd, 3)}{pct != null ? ` · ${pct}%` : ''}
-            </span>
-          </div>
-          <div className="h-2 overflow-hidden rounded-full bg-secondary">
-            <div className="h-full rounded-full bg-primary" style={{ width: `${pct ?? 0}%` }} />
-          </div>
+      {focus?.revenue_90d_bhd ? (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-x-3 border-t pt-3 text-[12px] text-muted-foreground">
+          <span>90-day Focus revenue</span>
+          <span className="tabular-nums">{bhd(focus.revenue_90d_bhd, 3)}</span>
         </div>
-      )}
+      ) : null}
     </Card>
   )
 }

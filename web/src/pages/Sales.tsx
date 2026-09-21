@@ -1,8 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
-import { Area, AreaChart, Bar, BarChart, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { Store, Target, Truck } from 'lucide-react'
+import { Area, AreaChart, Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { CalendarDays, Store, Truck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
@@ -22,19 +21,13 @@ interface Data {
   top_sellers: Seller[]
   top_customers: Customer[]
   daily_by_salesman?: { day: string; salesman: string; gross_bhd: number }[]
-  targets?: { salesman: string; target_bhd: number }[]
 }
 
-/** Per-salesman daily sales vs their daily target (monthly target ÷ days in month). */
-function DailyVsTarget({ data }: { data: Data }) {
-  const daily = data.daily_by_salesman || []
-  const targets = data.targets || []
-  const names = useMemo(() => {
-    const sellers = [...new Set(daily.map((r) => r.salesman))]
-    const withTarget = new Set(targets.map((t) => t.salesman))
-    return sellers.sort((a, b) =>
-      Number(withTarget.has(b)) - Number(withTarget.has(a)) || a.localeCompare(b))
-  }, [daily, targets])
+/** Per-salesman daily gross this month. (Targets were retired 21-Sep-2026 until the owner's
+ *  target file is loaded -- see scripts/import_targets.py.) */
+function DailyBySalesman({ data }: { data: Data }) {
+  const daily = useMemo(() => data.daily_by_salesman || [], [data.daily_by_salesman])
+  const names = useMemo(() => [...new Set(daily.map((r) => r.salesman))].sort((a, b) => a.localeCompare(b)), [daily])
   const [sel, setSel] = useState<string | null>(null)
   const who = sel && names.includes(sel) ? sel : names[0]
   const days = useMemo(() => {
@@ -44,31 +37,17 @@ function DailyVsTarget({ data }: { data: Data }) {
   }, [daily, who])
 
   if (!daily.length) return null
-  const target = Number(targets.find((t) => t.salesman === who)?.target_bhd ?? 0)
-  const lastDay = days.length ? days[days.length - 1].day : ''
-  const daysInMonth = lastDay ? new Date(Number(lastDay.slice(0, 4)), Number(lastDay.slice(5, 7)), 0).getDate() : 30
-  const dayOfMonth = lastDay ? Number(lastDay.slice(8)) : 0
-  const dailyTarget = target > 0 ? target / daysInMonth : null
   const mtd = days.reduce((s, r) => s + r.gross_bhd, 0)
-  const targetToDate = dailyTarget ? dailyTarget * dayOfMonth : 0
-  const pct = targetToDate > 0 ? Math.round((mtd / targetToDate) * 100) : null
 
   return (
     <Card className="p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 font-display text-base font-semibold">
-          <Target size={17} className="text-primary" /> Daily sales vs target
-          <span className="text-[12px] font-normal text-muted-foreground">· target ÷ {daysInMonth} days</span>
+          <CalendarDays size={17} className="text-primary" /> Daily sales this month
         </div>
-        {pct != null ? (
-          <span className={cn('rounded-full px-2.5 py-0.5 text-[12px] font-semibold',
-            pct >= 100 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
-              : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300')}>
-            MTD {bhd(mtd, 0)} / {bhd(targetToDate, 0)} to date ({pct}%)
-          </span>
-        ) : (
-          <Link to="/settings" className="text-xs text-primary hover:underline">Set targets in Settings →</Link>
-        )}
+        <span className="rounded-full bg-secondary px-2.5 py-0.5 text-[12px] font-semibold tabular-nums">
+          MTD {bhd(mtd, 0)}
+        </span>
       </div>
       <div className="mb-3 flex flex-wrap gap-1.5">
         {names.map((n) => (
@@ -87,15 +66,7 @@ function DailyVsTarget({ data }: { data: Data }) {
             width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
           <Tooltip formatter={(v) => [bhd(Number(v)), 'Gross']} labelFormatter={(d) => fmtDate(String(d))}
             contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-          {dailyTarget && (
-            <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4"
-              label={{ value: `daily target ${bhd(dailyTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
-          )}
-          <Bar dataKey="gross_bhd" radius={[4, 4, 0, 0]} maxBarSize={24}>
-            {days.map((r, i) => (
-              <Cell key={i} fill={dailyTarget && r.gross_bhd >= dailyTarget ? '#059669' : '#7c3aed'} />
-            ))}
-          </Bar>
+          <Bar dataKey="gross_bhd" radius={[4, 4, 0, 0]} maxBarSize={24} fill="#7c3aed" />
         </BarChart>
       </ResponsiveContainer>
     </Card>
@@ -175,7 +146,7 @@ export default function Sales() {
             </Card>
           </div>
 
-          <DailyVsTarget data={data} />
+          <DailyBySalesman data={data} />
 
           <Card className="p-5">
             <div className="mb-4 font-display text-base font-semibold">Salesman performance (gross revenue)</div>

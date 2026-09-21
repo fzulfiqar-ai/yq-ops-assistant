@@ -2260,10 +2260,8 @@ def me_payload(email: str) -> dict:
                 "SELECT COALESCE(SUM(revenue_bhd),0) AS rev FROM v_sales "
                 "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 "
                 "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
-            tgt = exec_sql_params("SELECT target_bhd FROM salesman_targets WHERE salesman = $1 LIMIT 1",
-                                  [sm["focus_name"]])
-            focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev")),
-                     "target_bhd": money((tgt or [{}])[0].get("target_bhd")) if tgt else None}
+            # target_bhd retired 21-Sep-2026 (seeded targets removed; real ones arrive as a file)
+            focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev"))}
         except Exception as e:  # noqa: BLE001
             log.debug("focus kpis failed: %s", e)
     return {"salesman": sm, "link": salesman_link(sm) if sm else None,
