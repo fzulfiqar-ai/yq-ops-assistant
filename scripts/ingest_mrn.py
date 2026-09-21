@@ -16,7 +16,15 @@ import os
 import re
 from xml.etree import ElementTree as ET
 
-MRN_GLOB = "business_data/Order received/*/Transactions_*.xml"
+# Every place an MRN export has been dropped. Receipts YQ-26-06-1/-2 sat under Shipments/ and
+# New order*/ and were missed by the old single glob, so a re-run "forgot" them and let the
+# February receipts overwrite their newer landed costs (21-Sep-2026). Same DocNo in two folders
+# is loaded once.
+MRN_GLOBS = (
+    "business_data/Order received/*/Transactions_*.xml",
+    "business_data/Shipments/**/Transactions_*.xml",
+    "business_data/New order*/Transactions_*.xml",
+)
 
 
 def _doc_month(doc_no: str | None) -> str | None:
@@ -82,8 +90,24 @@ def load_mrn_costs(rows: list[dict]) -> dict:
     from app.database import get_client
     c = get_client()
 
-    # current cost = latest receipt per SKU
+    # current cost = latest receipt per SKU -- and never older than what the table already holds.
+    # The API path uploads ONE file at a time, and a bulk run may not see every folder: without
+    # this guard an older receipt silently replaced a newer landed cost for the same SKU.
     final = dedupe_latest(rows)
+    try:
+        have = {r["sku_code"].upper(): (r.get("effective_date") or "")
+                for r in (c.table("mrn_landed_costs").select("sku_code,effective_date").execute().data or [])}
+    except Exception:  # noqa: BLE001 -- table may not exist yet on a fresh DB
+        have = {}
+    kept, skipped = [], 0
+    for r in final:
+        if (r["eff"] or "") < have.get(r["code"].upper(), ""):
+            skipped += 1
+            continue
+        kept.append(r)
+    if skipped:
+        print(f"  (kept {skipped} newer landed costs already in mrn_landed_costs)")
+    final = kept
     cost_payload = [{
         "sku_code": r["code"], "landed_cost_bhd": round(r["landed"], 4),
         "product_cost_bhd": round(r["product"], 4), "last_qty": r["qty"],
@@ -111,8 +135,23 @@ def load_mrn_costs(rows: list[dict]) -> dict:
     if seen:
         c.table("mrn_lines").upsert(list(seen.values()), on_conflict="doc_no,sku_code").execute()
 
+    # Data rule 1+2: purchase_costs is the cost source of truth and is VERSIONED by
+    # effective_date ("latest cost" = MAX(id) per SKU). Mirror the newest receipt month into it
+    # as a dated snapshot -- only the newest month, because an older receipt inserted later would
+    # get a higher id and win the MAX(id) rule with a stale cost. ON CONFLICT DO NOTHING keeps
+    # history intact on re-runs (idempotent).
+    newest = max((r["eff"] or "") for r in final) if final else ""
+    cost_rows = [{
+        "sku_code": r["code"], "landed_cost_bhd": round(r["landed"], 4), "currency": "BHD",
+        "effective_date": newest, "source_file": f"MRN {r['doc_no']}",
+    } for r in final if r["eff"] == newest and newest]
+    if cost_rows:
+        c.table("purchase_costs").upsert(cost_rows, on_conflict="sku_code,effective_date",
+                                         ignore_duplicates=True).execute()
+
     docs = sorted({r["doc_no"] for r in final if r["doc_no"]})
-    return {"skus": len(final), "lines": len(rows), "docs": docs}
+    return {"skus": len(final), "lines": len(rows), "docs": docs,
+            "purchase_costs_month": newest, "purchase_costs_rows": len(cost_rows)}
 
 
 def main() -> None:
@@ -120,18 +159,26 @@ def main() -> None:
     from dotenv import load_dotenv
     load_dotenv()
 
-    files = sorted(glob.glob(MRN_GLOB))
+    files = sorted({f for g in MRN_GLOBS for f in glob.glob(g, recursive=True)})
     if not files:
-        print("No MRN XML files found under 'Order received/'.")
+        print("No MRN XML files found under business_data/ (Order received, Shipments, New order*).")
         return
     rows: list[dict] = []
+    seen_docs: dict[str, str] = {}
     for f in files:
         try:
             got = parse_mrn(f)
-            rows.extend(got)
-            print(f"  {os.path.basename(os.path.dirname(f))}: {len(got)} lines  ({os.path.basename(f)})")
         except Exception as e:  # noqa: BLE001
             print(f"  skip {f}: {type(e).__name__}: {e}")
+            continue
+        doc = got[0]["doc_no"] if got else None
+        if doc and doc in seen_docs:
+            print(f"  dup  {os.path.basename(os.path.dirname(f))}: {doc} already loaded from {seen_docs[doc]}")
+            continue
+        if doc:
+            seen_docs[doc] = os.path.basename(os.path.dirname(f))
+        rows.extend(got)
+        print(f"  {os.path.basename(os.path.dirname(f))}: {len(got)} lines  ({os.path.basename(f)}) {doc or ''}")
     # ensure both tables exist, then reuse the shared (Supabase) loader for the upserts
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         conn.execute(open("scripts/mrn_costs_migration.sql", encoding="utf-8").read())
