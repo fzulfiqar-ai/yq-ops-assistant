@@ -2301,18 +2301,19 @@ def me_payload(email: str) -> dict:
     focus = None
     if sm and sm.get("focus_name"):
         try:
+            # Rep figures are MOBILE ACCESSORIES only (owner, 21-Sep-2026): Batelco SIM sales
+            # never count towards a rep's revenue or target, so both queries filter the division.
             rev = exec_sql_params(
                 "SELECT COALESCE(SUM(revenue_bhd),0) AS rev FROM v_sales "
-                "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 "
+                "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND division = 'Accessories' "
                 "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
             focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev"))}
-            # Tiered kickback (21-Sep-2026): this month's sales (month of the latest loaded sale,
-            # giveaways excluded, same revenue basis as every other Focus figure) vs the rep's
-            # standing or month-specific target row.
+            # Tiered kickback (21-Sep-2026): this month's accessories sales (month of the latest
+            # loaded sale, giveaways excluded) vs the rep's standing or month-specific target row.
             mtd = exec_sql_params(
                 "SELECT COALESCE(SUM(revenue_bhd),0) AS rev, (SELECT MAX(sale_date) FROM v_sales)::text AS d "
                 "FROM v_sales WHERE sale_date >= date_trunc('month', (SELECT MAX(sale_date) FROM v_sales))::date "
-                "AND NOT is_giveaway "
+                "AND NOT is_giveaway AND division = 'Accessories' "
                 "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
             m0 = (mtd or [{}])[0]
             data_date = m0.get("d")

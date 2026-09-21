@@ -269,9 +269,13 @@ def salesman_attainment() -> list[dict]:
 def daily_sales_mtd() -> list[dict]:
     """One row per day of the current month (anchored to the data's latest date) —
     the owner's 'daily current-month sales' dashboard chart."""
+    # acc_bhd = Mobile Accessories only. Targets never include Batelco SIM sales (owner,
+    # 21-Sep-2026), so the dashboard's daily bars and pace read acc_bhd; gross_bhd stays the
+    # all-division total for the tooltip and the division chips.
     return exec_sql(
         "WITH d AS (SELECT MAX(sale_date) AS mx FROM v_sales) "
         "SELECT sale_date::text AS day, ROUND(SUM(revenue_bhd)::numeric, 2) AS gross_bhd, "
+        "ROUND(SUM(CASE WHEN division = 'Accessories' THEN revenue_bhd ELSE 0 END)::numeric, 2) AS acc_bhd, "
         "ROUND(SUM(net_bhd)::numeric, 2) AS net_bhd, COUNT(DISTINCT invoice_no) AS orders "
         "FROM v_sales, d WHERE sale_date >= date_trunc('month', d.mx)::date "
         "GROUP BY sale_date ORDER BY sale_date"
@@ -295,7 +299,9 @@ def sales_split_mtd() -> dict:
 
 
 def _pace(kpis: dict, data_date: str | None) -> dict:
-    """MTD pace vs target and vs last month — 'on track for BHD X'."""
+    """MTD pace vs target — 'on track for BHD X'. The target is a MOBILE ACCESSORIES target
+    (owner, 21-Sep-2026): Batelco SIM sales never count, so mtd_bhd here is the Accessories
+    division only (kpis['rev_mtd_acc']); the all-division figure stays on the revenue tile."""
     import calendar
     from datetime import date
     try:
@@ -303,9 +309,9 @@ def _pace(kpis: dict, data_date: str | None) -> dict:
         target = float(setting("monthly_sales_target_bhd") or 0)
     except Exception:  # noqa: BLE001
         target = 0.0
-    mtd = float(kpis.get("rev_mtd") or 0)
+    mtd = float(kpis.get("rev_mtd_acc") if kpis.get("rev_mtd_acc") is not None else kpis.get("rev_mtd") or 0)
     prev = float(kpis.get("rev_prev_month") or 0)
-    out = {"target_bhd": target, "mtd_bhd": mtd, "prev_month_bhd": prev,
+    out = {"target_bhd": target, "mtd_bhd": mtd, "prev_month_bhd": prev, "basis": "Accessories",
            "projected_bhd": None, "target_pct": None, "on_track": None}
     try:
         d = date.fromisoformat(str(data_date)[:10])
@@ -392,7 +398,9 @@ def _assemble_dashboard(r: dict) -> dict:
         "daily_mtd": r["daily_mtd"],
         "by_payment": r["split"]["by_payment"],
         "by_division": r["split"]["by_division"],
-        "pace": _pace(kpis, s.get("data_date")),
+        "pace": _pace({**kpis, "rev_mtd_acc": sum(
+            float(d.get("revenue_bhd") or 0) for d in (r["split"]["by_division"] or [])
+            if str(d.get("division") or "") == "Accessories")}, s.get("data_date")),
         "attainment": r["attainment"],
     }
 

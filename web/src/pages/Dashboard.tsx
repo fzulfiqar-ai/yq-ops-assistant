@@ -37,7 +37,8 @@ interface Health {
   margin_basis?: string; cost_coverage_pct?: number; below_cost_count?: number
 }
 interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
-interface DailyRow { day: string; gross_bhd: number; net_bhd: number; orders: number }
+/** acc_bhd = Mobile Accessories only — the basis for every target (SIM never counts) */
+interface DailyRow { day: string; gross_bhd: number; acc_bhd?: number; net_bhd: number; orders: number }
 interface PaymentRow { sale_type: string; orders: number; revenue_bhd: number }
 interface DivisionRow { division: string; orders: number; revenue_bhd: number; giveaway_qty: number }
 interface Pace {
@@ -188,7 +189,7 @@ export default function Dashboard() {
   const cumSeries = useMemo(() => {
     let run = 0
     return (data?.daily_mtd || []).map((r, i) => {
-      run += Number(r.gross_bhd || 0)
+      run += Number(r.acc_bhd ?? r.gross_bhd ?? 0)
       return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * (i + 1)) : null }
     })
   }, [data?.daily_mtd, dailyTarget])
@@ -291,11 +292,11 @@ export default function Dashboard() {
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <div>
               <div className="font-display text-base font-semibold">This month, day by day</div>
-              <div className="text-xs text-muted-foreground">Gross sales per day (VAT-incl) · {monthLabel(data.data_as_of || '')}</div>
+              <div className="text-xs text-muted-foreground">Mobile Accessories gross per day (VAT-incl, SIM excluded) · {monthLabel(data.data_as_of || '')}</div>
             </div>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
               {data.pace && (<>
-                <span className="text-muted-foreground">MTD <b className="text-foreground tabular-nums">{bhd(data.pace.mtd_bhd, 0)}</b></span>
+                <span className="text-muted-foreground">Accessories MTD <b className="text-foreground tabular-nums">{bhd(data.pace.mtd_bhd, 0)}</b></span>
                 {data.pace.projected_bhd != null && (
                   <span className="text-muted-foreground">Projected <b className="text-foreground tabular-nums">{bhd(data.pace.projected_bhd, 0)}</b></span>
                 )}
@@ -328,16 +329,16 @@ export default function Dashboard() {
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
                   width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
                 <Tooltip
-                  formatter={(v, name) => (name === 'gross_bhd' ? [bhd(Number(v)), 'Gross'] : [String(v), String(name)])}
+                  formatter={(v, name) => (name === 'acc_bhd' ? [bhd(Number(v)), 'Accessories'] : [String(v), String(name)])}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 {dailyTarget && (
                   <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4"
                     label={{ value: `daily target ${bhd(dailyTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
                 )}
-                <Bar dataKey="gross_bhd" radius={[4, 4, 0, 0]} maxBarSize={26}>
+                <Bar dataKey="acc_bhd" radius={[4, 4, 0, 0]} maxBarSize={26}>
                   {data.daily_mtd.map((r, i) => (
-                    <Cell key={i} fill={dailyTarget && Number(r.gross_bhd) >= dailyTarget ? '#059669' : '#7c3aed'} />
+                    <Cell key={i} fill={dailyTarget && Number(r.acc_bhd ?? r.gross_bhd) >= dailyTarget ? '#059669' : '#7c3aed'} />
                   ))}
                 </Bar>
               </BarChart>
@@ -356,7 +357,7 @@ export default function Dashboard() {
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
                   width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
                 <Tooltip
-                  formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? 'MTD actual' : 'Target to date']}
+                  formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? 'Accessories MTD' : 'Target to date']}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 <Area type="monotone" dataKey="cum_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#cumFill)" />

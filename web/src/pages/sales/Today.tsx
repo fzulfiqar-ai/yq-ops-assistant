@@ -235,7 +235,7 @@ export default function Today() {
               </div>
               <div className="mt-2 flex items-baseline gap-1.5">
                 <span className="font-display text-[22px] font-bold tabular-nums leading-none">{bhd3(tier.mtd_bhd)}</span>
-                <span className="text-[12px] text-muted-foreground">sold this month</span>
+                <span className="text-[12px] text-muted-foreground">accessories sold this month</span>
               </div>
               <div className="relative mt-3 h-2 rounded-full bg-muted" role="progressbar" aria-valuenow={tier.progress_pct} aria-valuemin={0} aria-valuemax={100}>
                 <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${tier.progress_pct}%` }} />

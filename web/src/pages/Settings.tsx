@@ -41,7 +41,7 @@ const COSTING_FIELDS: { key: string; label: string; hint: string }[] = [
   { key: 'dealer_discount', label: 'Dealer discount', hint: '0.18 = net price is list ÷ 1.18' },
   { key: 'landing_vat_pct', label: 'Landing + VAT uplift', hint: '0.30 = 20% landing + 10% VAT' },
   { key: 'target_markup', label: 'Target markup', hint: '0.70 = sell at landed × 1.70' },
-  { key: 'monthly_sales_target_bhd', label: 'Monthly sales target (BHD)', hint: '0 = no target set' },
+  { key: 'monthly_sales_target_bhd', label: 'Monthly accessories target (BHD)', hint: 'Mobile Accessories only — SIM sales never count · 0 = no target' },
 ]
 
 function CostingCard() {

@@ -330,7 +330,7 @@ function MyLinkCard({
       </div>
       {focus?.revenue_90d_bhd ? (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-x-3 border-t pt-3 text-[12px] text-muted-foreground">
-          <span>90-day Focus revenue</span>
+          <span>90-day accessories sales</span>
           <span className="tabular-nums">{bhd(focus.revenue_90d_bhd, 3)}</span>
         </div>
       ) : null}
