@@ -13,6 +13,8 @@
 #   CLOUDFLARE_API_TOKEN   an account token with Workers Scripts/Routes + DNS write
 #                          (the .env CLOUDFLARE_API_TOKEN_WRITE value)
 #   CLOUDFLARE_ACCOUNT_ID  the Cloudflare account id (the .env CLOUDFLARE_ACCOUNT_ID value)
+# Both were added on 21-Sep-2026; before that the job SKIPPED on every push (a "success" that deployed
+# nothing) and web deploys were manual via scripts/deploy_cf.py.
 # Until both exist the job SKIPS with a notice - it never fails, so it can never become a source of
 # failure e-mails the way shop-cron was while its secret was missing.
 name: cf-deploy
