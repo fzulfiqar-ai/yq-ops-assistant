@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
+import { PackageCheck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
-import { bhd, num } from '@/lib/format'
+import { bhd, fmtDate, num } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
@@ -18,6 +19,7 @@ interface Row {
   status: string
 }
 interface Warehouse { warehouse_name: string; value_bhd: number; qty: number; items: number }
+interface Receipt { voucher: string; received_on: string; items: number; units: number; value_bhd: number }
 interface Data {
   rows: Row[]
   by_status: Record<string, number>
@@ -25,6 +27,8 @@ interface Data {
   stock_value_cost: number
   stock_qty: number
   by_warehouse: Warehouse[]
+  /** Material Receipt Notes in the last 14 days — a shipment that just landed */
+  recent_receipts?: Receipt[]
 }
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -83,6 +87,30 @@ export default function Inventory() {
             <Stat label="Urgent out-of-stock" value={num(s.urgent_out_of_stock || 0)} tone="rose" />
             <Stat label="Dead stock" value={num(s.dead_stock || 0)} />
           </div>
+
+          {(data.recent_receipts?.length ?? 0) > 0 && (
+            <Card className="mb-4 p-5">
+              <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+                <PackageCheck size={18} className="text-primary" /> New arrivals
+                <span className="text-[12px] font-normal text-muted-foreground">· goods receipts in the last 14 days</span>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {data.recent_receipts!.map((r) => (
+                  <Link key={r.voucher} to={`/stock?q=${encodeURIComponent(r.voucher)}`}
+                    className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm transition hover:border-primary/50 hover:bg-accent/40">
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium">{r.voucher.replace(/^MRN:/, 'MRN ')}</span>
+                      <span className="block text-[11.5px] text-muted-foreground">{fmtDate(r.received_on)} · {num(Number(r.items))} items</span>
+                    </span>
+                    <span className="shrink-0 text-right">
+                      <span className="block font-semibold tabular-nums text-primary">{num(Number(r.units))} units</span>
+                      <span className="block text-[11.5px] tabular-nums text-muted-foreground">{bhd(r.value_bhd, 0)} at cost</span>
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </Card>
+          )}
 
           {data.by_warehouse?.length > 0 && (
             <Card className="mb-4 p-5">

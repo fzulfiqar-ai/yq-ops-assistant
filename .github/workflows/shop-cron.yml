@@ -47,8 +47,11 @@ jobs:
             code=$(curl -sS -o /tmp/out.json -w '%{http_code}' --max-time 120 \
               -H "X-Agent-Key: ${AGENT_API_KEY}" "${API_URL}${path}")
             code=${code:-000}
-            echo "${path} -> HTTP ${code}"
-            head -c 400 /tmp/out.json; echo
+            # This repository is PUBLIC, so these logs are public. Never echo the response body:
+            # it carries order numbers and merchant/shop names (21-Sep-2026). Log the status and
+            # the top-level keys only, which is enough to tell "ran" from "did nothing".
+            keys=$(jq -r 'if type=="object" then (keys|join(",")) else type end' /tmp/out.json 2>/dev/null || echo "(non-json)")
+            echo "${path} -> HTTP ${code} [${keys}]"
             if [ "$code" != "200" ]; then
               echo "::warning::${path} returned HTTP ${code}"
               failed=1
