@@ -18,6 +18,11 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+  # Self-verify, same as keepalive.yml: editing this file runs it at once instead of waiting for
+  # the schedule (which GitHub throttles to roughly every 2 hours on free public repos).
+  push:
+    paths:
+      - '.github/workflows/shop-cron.yml'
 
 permissions:
   contents: read
