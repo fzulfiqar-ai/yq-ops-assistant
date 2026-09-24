@@ -13,10 +13,15 @@ Expected columns (header names are matched loosely, any order, extra columns ign
 Rules: dry run by default and prints every row with its resolution; refuses to write if any
 salesman name is unknown (no silent typos); upsert on (salesman, period) so re-running the same
 file is a no-op; never touches other periods. Requires scripts/targets_v2_migration.sql.
+
+Audit (R3, M12): the rows are snapshotted BEFORE the upsert and the append-only shop_admin_audit
+rows are written only AFTER it succeeded, so the audit never records an import that did not
+happen. The actor names the operator (--actor, default the OS user) and the file.
 """
 from __future__ import annotations
 
 import argparse
+import getpass
 import re
 import sys
 from datetime import datetime, timezone
@@ -74,12 +79,21 @@ def _period(v) -> str:
         return s
 
 
+def _os_user() -> str:
+    try:
+        return getpass.getuser().strip() or "unknown"
+    except Exception:  # noqa: BLE001 — no login name in this environment
+        return "unknown"
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file")
     ap.add_argument("--period", default=None, help="YYYY-MM to use when the file has no Month column")
     ap.add_argument("--commit", action="store_true")
+    ap.add_argument("--actor", default=None, help="who is running the import (default: the OS user); goes on the audit rows")
     a = ap.parse_args(argv)
+    operator = (a.actor or "").strip() or _os_user()
 
     path = Path(a.file)
     if not path.is_absolute():
@@ -119,7 +133,7 @@ def main(argv: list[str]) -> int:
             continue
         period = _period(r[mcol]) if mcol else (a.period or "")
         row = {"salesman": resolved, "period": period, "target_bhd": round(target, 3),
-               "updated_by": f"import {path.name}", "updated_at": datetime.now(timezone.utc).isoformat()}
+               "updated_by": f"{operator} · import {path.name}", "updated_at": datetime.now(timezone.utc).isoformat()}
         for k, col in opt.items():
             v = r[col]
             if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -138,10 +152,17 @@ def main(argv: list[str]) -> int:
         print("nothing to load")
         return 1
     if not a.commit:
-        print(f"\nDry run: {len(rows)} rows would be upserted on (salesman, period). Add --commit to write.")
+        print(f"\nDry run: {len(rows)} rows would be upserted on (salesman, period) by {operator}. Add --commit to write.")
         return 0
+    # R3 admin audit (M12): the target row as it was and as it is now, one shop_admin_audit row
+    # per (salesman, period) — a rename or a re-scaled percentage is documented, never silent.
+    # Snapshot first, write, then audit: the audit is append-only, so it must never describe an
+    # upsert that failed.
+    from app.shop_audit import record_target_import, target_import_snapshots
+    befores = target_import_snapshots(c, rows)
     c.table("salesman_targets").upsert(rows, on_conflict="salesman,period").execute()
-    print(f"\nLoaded {len(rows)} targets.")
+    audited = record_target_import(c, rows, actor=f"{operator} · import {path.name}", befores=befores)
+    print(f"\nLoaded {len(rows)} targets ({audited} audit rows, actor {operator}).")
     return 0
 
 

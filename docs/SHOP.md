@@ -360,7 +360,8 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   → confirms with changes, re-prices at the confirmed quantities (`subtotal/total_confirmed_bhd`), returns
   `changed[]`, `removed[]`, `totals`, a prefilled WhatsApp to the merchant, `next_statuses`.
 - `POST /shop/orders/{id}/assign` `{salesman_id, reason?}` — admins reassign any open order; a salesman may only take an
-  unassigned one for himself. First assignment sets the merchant's sticky rep when none is recorded. Notifies the rep.
+  unassigned one for himself. Notifies the rep. (R3: assigning an order no longer touches the merchant record — the
+  sticky rep settles when the assigned rep confirms or delivers; `also_customer:true` binds the shop explicitly.)
 - `GET /shop/assignment-queue` → unassigned open orders with `age_min` and a suggestion (rep who served the phone
   before, else most orders in the area in 90 days).
 - `GET /shop/picklist?salesman_id=` (Storekeeper or Shop Orders) → confirmed/preparing orders grouped by salesman with
@@ -392,6 +393,63 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   **07:00–22:00 Bahrain**; `notify_retry` is the first alert and is not gated. A reminder or the stale marker is
   recorded only when a channel really delivered. The answer carries `ok:false` + `errors[]` when a job raised.
 
+### Release R3b — pipeline states, customer attribution, admin audit (24-Sep-2026)
+Migration `scripts/r3_pipeline_migration.sql` (reverse `r3_pipeline_reverse.sql`); the code answers before it runs.
+- **Cancel reasons.** `POST /shop/orders/{id}/status {status:'cancelled', reason_code, note?}` — a staff cancel needs
+  `reason_code` in `out_of_stock | customer_request | duplicate | test | price_issue | other` (`other` needs the note);
+  400 with the list otherwise. The code goes to `cancel_reason_code` (once the column exists), the text to
+  `cancel_reason`, and the code to the `status:cancelled` event always. The merchant's own cancel is `customer_request`.
+  **The note is internal**: the shop's cancel email carries the reason's public label only
+  (`shop_pipeline.customer_cancel_text` — `other`/`test` add nothing), never the free text; the picker in both order
+  views says so ("Internal note … stays in the office record"). Notes on every other move still go in the shop's
+  update email, and the drawer's input says that too.
+- **Payment** (admin): `POST /shop/orders/{id}/payment {status: unpaid|partial|paid, method?, amount_bhd?, note?}` →
+  `payment_status` + `payment_method` (+ `paid_at`), one `payment` event. A recorded fact, never a lifecycle state.
+  A request without `method` keeps the method on the row ("partial, cash" then "paid" stays cash); the drawer's box
+  starts on the recorded method. `unpaid` is also the column default, so pills read **"Payment not recorded"**
+  (shown only once Delivered) — never a claim that the shop owes; Focus holds the ledger until the office records one.
+- **Returns** (admin): `POST /shop/orders/{id}/return {lines:[{line_id, qty}], reason}` on a delivered order → a
+  `returned` EVENT with lines, quantities, reason and the Decimal value at the confirmed line price (an order-level
+  coupon is not apportioned). `qty` is capped at delivered **minus what earlier returns already took back**, across
+  calls and retries; `returned_bhd` (once the column exists) is set to Σ of the order's returned events read back after
+  the insert, never row-value-plus-this. The status is untouched. `audit_log 'shop.order_return'`.
+- **Focus invoice.** `status` accepts `focus_invoice_no` with Delivered; `POST /shop/orders/{id}/invoice` (admin)
+  records or corrects it later (`invoice` event). `GET /shop/focus-recon` (admin) reads `v_shop_focus_recon`
+  (service role only): delivered orders with `missing_invoice`, `invoice_not_found` (**not in the uploaded ledger** —
+  the answer carries `ledger_as_of`, the ledger's last sale date, and the UI says "sales up to …"; a recent invoice is
+  simply not uploaded yet), `salesman_mismatch` (Focus salesman vs the rep's `focus_name`), `amount_mismatch`
+  (> 0.005 BHD, VAT-inclusive both sides) or `invoice_reused` (one invoice number on more than one delivered order).
+  Shop Orders (desk) shows it as the "Focus check" section.
+- **Small-order gap.** Rep cards and the drawer print "BHD x short of the wholesale minimum when placed" from
+  `minimum_gap_bhd` **only while the order is Received**: the gap was stored against the minimum of that moment, so it
+  is never paired with today's `min_order_bhd` (still returned on the list, unused by the UI) and not shown once the
+  order is confirmed, delivered or cancelled.
+- **Attribution.** The public picker (`salesmen` in the catalog payload) lists only pickable reps — active, public
+  profile, linked login — as `{id, name}`; a pick of any other rep is ignored server-side. The sticky rep is no
+  longer written at request time: the proposed rep is kept as `first_ref` and `sticky_salesman_id` settles when the
+  assigned rep **confirms or delivers** (`app/attribution.settle_sticky`) as **one conditional UPDATE**
+  (`… where salesman_id is null and sticky_salesman_id is null`), so two reps confirming a new merchant's orders at
+  once cannot both win and an existing value is never overwritten; a test order (`is_test`) settles nothing. A staff
+  order for a shop whose recorded rep is someone else sets `attribution_conflict` + a `conflict` event, written in
+  the same insert as the `created` event (one request; an informational row can never discard a complete order).
+  `POST /shop/customers/{id}/assign {salesman_id, reason}` (admin, reason required) writes
+  `shop_customers.salesman_id/assigned_by/assigned_at`, `audit_log 'shop.customer_assign' {from,to,reason}` and a
+  `shop_admin_audit` row; `POST /shop/orders/{id}/assign` takes `also_customer:true` (admins) to do the same.
+  `GET /shop/orders/{id}` (admins) carries `customer` = the shop's recorded rep.
+- **Admin audit (M12).** `shop_admin_audit(id, at, actor, entity, entity_id, action, before, after)`, append-only:
+  a row trigger refuses UPDATE/DELETE and a statement trigger refuses TRUNCATE (the service role holds it on every
+  table). `app/shop_audit.py` is called from settings (`PUT /settings/shop`, `/settings/costing`, `/settings/agents`
+  → entity_id `shop` / `costing` / `agents`), discount rules, campaigns, salesmen, upcoming edits and
+  `scripts/import_targets.py` (snapshot → upsert → audit, so a failed upsert leaves no row; the actor is
+  `"<operator> · import <file>"`, operator from `--actor` or the OS user). `GET /shop/audit?entity=&limit=&offset=`
+  (admin) → rows with the derived `changes`; the Settings page shows it as the read-only "Audit" card.
+- **Reverse / rollback.** `r3_pipeline_reverse.sql` drops the view, the audit table (both triggers go with it, then
+  the function) and the three columns. A cached `has_column` hit outliving the drop costs one retry, not a page or a
+  write: reads go through `_select_optional`, and the `cancel_reason_code` / `paid_at` writes through
+  `_update_optional` (both forget the probe and run once more without the column). Rolling the API back before the
+  reverse script is still the cleaner order.
+- Tests: `python -m tests.test_r3_pipeline` (no database; the local replay SKIPs without the scratch cluster).
+
 ### Views for the learning loop
 `v_customer_regulars` (Focus cadence per merchant × SKU: times bought, median qty, cadence days, due flag — service
 role only, carries customer names), `v_shop_assignment_queue`, `v_shop_search_terms`, `v_shop_rail_perf`
@@ -402,4 +460,4 @@ role only, carries customer names), `v_shop_assignment_queue`, `v_shop_search_te
 `python -m scripts.audit_grants` (exit 0). The in-process smoke on 16-Sep-2026 walked: market → rep card →
 idempotent order → my-orders → confirm 2→1 (1.500→0.750) → storekeeper refused `delivered`, allowed `packed`
 (goods issued to the rep) → on the way → delivered → customer cancel refused; second order cancelled by the
-customer; third order unassigned → queue → admin assign → merchant's sticky rep set.
+customer; third order unassigned → queue → admin assign → (since R3) the merchant's sticky rep settles at confirm.

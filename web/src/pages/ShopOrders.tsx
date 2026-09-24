@@ -3,14 +3,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Copy, ExternalLink, Link2, MessageCircle, X, Check, Loader2,
-  Phone, Mail, PackageX, ChevronRight,
+  Phone, Mail, PackageX, ChevronRight, AlertTriangle, ChevronDown,
 } from 'lucide-react'
 import { apiGet, apiPost, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
-import { bhd, num } from '@/lib/format'
+import { bhd, fmtDate, num } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -22,7 +22,9 @@ import { DataTable, Stat, type Column } from '@/components/DataTable'
 import {
   ACTION_LABEL, AssignBox, AssignmentQueue, ConfirmEditor, CustomerWhatsApp, STATUS_LABEL,
   STATUS_TONE as MARKET_STATUS_TONE,
+  CancelReasonPicker, InvoiceBox, PaymentBox, PaymentPill, ReturnBox,
 } from '@/pages/shop-ops/OrderActions'
+import { apiDetail, cancelReady, cancelReasonLabel, minimumGapText, PAYMENT_LABEL } from '@/pages/shop-ops/pipeline'
 
 // ── types (kept close to docs/SHOP.md — fields we're not certain about stay optional) ──
 
@@ -47,6 +49,7 @@ interface ShopOrderRow {
   placed_by?: string | null
   // marketplace (16-Sep-2026)
   salesman_id?: number | null
+  customer_id?: number | null
   attribution_source?: string | null
   attribution_conflict?: boolean
   expected_delivery?: string | null
@@ -56,8 +59,15 @@ interface ShopOrderRow {
   notify_failed?: boolean
   notify_attempts?: number
   notify_result?: Record<string, unknown> | null
+  // R3 pipeline (24-Sep-2026): payment is a recorded fact, returns are events, cancels carry a reason
+  payment_status?: string | null
+  focus_invoice_no?: string | null
+  cancel_reason?: string | null
+  cancel_reason_code?: string | null
+  returned_bhd?: number | null
 }
 type StatusCounts = Partial<Record<'new' | 'confirmed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled', number>>
+// min_order_bhd also arrives on the list; it is not read here — a stored gap is never paired with today's minimum (pipeline.ts)
 interface ShopOrdersResp { orders: ShopOrderRow[]; count: number; counts?: StatusCounts }
 
 interface OrderLine {
@@ -68,11 +78,22 @@ interface OrderLine {
   qty_confirmed?: number | null
   line_status?: string | null
   unit_price_bhd?: number | null
+  unit_price_confirmed?: number | null
   line_total_bhd?: number | null
   stock_status?: 'in_stock' | 'low_stock' | 'out_of_stock' | null
   backorder?: boolean
 }
 interface OrderEvent { ts: string; event: string; note?: string | null; detail?: Record<string, unknown> | null }
+/** R3: the shop's recorded rep (admin assignment, else the settled first-touch rep) — admins only. */
+interface OrderCustomerRep {
+  id: number
+  shop?: string | null
+  salesman_id?: number | null
+  salesman_name?: string | null
+  sticky_salesman_id?: number | null
+  sticky_name?: string | null
+  first_ref?: string | null
+}
 interface OrderDetail extends ShopOrderRow {
   customer_email?: string | null
   note?: string | null
@@ -86,6 +107,9 @@ interface OrderDetail extends ShopOrderRow {
   whatsapp_url?: string | null
   next_statuses?: string[] | null
   status_url?: string | null
+  payment_label?: string | null
+  payment_method?: string | null
+  customer?: OrderCustomerRep | null
 }
 
 interface ShopMeSalesman {
@@ -172,8 +196,34 @@ function eventLabel(event: string, detail?: Record<string, unknown> | null): str
     if (detail?.rep) return 'Reminder sent to the rep'
     return 'Reminder attempted · rep not reached'
   }
+  // R3 pipeline events
+  if (event === 'payment') {
+    const to = String(detail?.to || '')
+    const amt = typeof detail?.amount_bhd === 'number' ? ` · ${bhd(detail.amount_bhd as number, 3)}` : ''
+    const how = detail?.method ? ` · ${String(detail.method).replace(/_/g, ' ')}` : ''
+    return `Payment: ${PAYMENT_LABEL[to] || to}${amt}${how}`
+  }
+  if (event === 'returned') {
+    const v = typeof detail?.value_bhd === 'number' ? ` · ${bhd(detail.value_bhd as number, 3)}` : ''
+    const u = typeof detail?.units === 'number' ? ` · ${detail.units} pcs` : ''
+    return `Returned${u}${v}${detail?.reason ? ` · ${String(detail.reason)}` : ''}`
+  }
+  if (event === 'invoice') return `Focus invoice ${detail?.to ? String(detail.to) : 'recorded'}`
+  if (event === 'conflict') return 'Placed for a shop whose rep is someone else'
+  if (event === 'status:cancelled') {
+    const code = detail?.reason_code ? cancelReasonLabel(String(detail.reason_code)) : ''
+    return code ? `Cancelled · ${code}` : 'Marked Cancelled'
+  }
   if (event.startsWith('status:')) return `Marked ${STATUS_LABEL[event.slice(7)] || event.slice(7)}`
   return event.replace(/[_:]/g, ' ')
+}
+
+/** "Cancelled · Out of stock · the note" for a cancelled row (the code, else the free text). */
+function cancelSummary(o: { cancel_reason?: string | null; cancel_reason_code?: string | null }): string | null {
+  const code = cancelReasonLabel(o.cancel_reason_code)
+  const text = (o.cancel_reason || '').trim()
+  if (!code && !text) return null
+  return code && text && text.toLowerCase() !== code.toLowerCase() ? `${code} · ${text}` : code || text
 }
 
 // ── notify_result (app/shop_notify.py) ────────────────────────────────────────
@@ -424,22 +474,34 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
   const [busy, setBusy] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [reassigning, setReassigning] = useState(false)
+  // R3: a staff cancel names its reason; Delivered may carry the Focus invoice; returns are recorded on delivered orders
+  const [cancelling, setCancelling] = useState(false)
+  const [cancel, setCancel] = useState({ reason_code: '', note: '' })
+  const [invoiceNo, setInvoiceNo] = useState('')
+  const [returning, setReturning] = useState(false)
 
   const refetchOrder = () => {
     qc.invalidateQueries({ queryKey: ['shop-order', id] })
     qc.invalidateQueries({ queryKey: ['shop-assignment-queue'] })
+    qc.invalidateQueries({ queryKey: ['shop-focus-recon'] })
     onChanged()
   }
 
   async function setStatus(next: string) {
     setBusy(next)
     try {
-      await apiPost(`/shop/orders/${id}/status`, { status: next, note: note.trim() || undefined })
+      const body: Record<string, unknown> = { status: next, note: note.trim() || undefined }
+      if (next === 'cancelled') {
+        body.reason_code = cancel.reason_code
+        body.note = cancel.note.trim() || undefined
+      }
+      if (next === 'delivered' && invoiceNo.trim()) body.focus_invoice_no = invoiceNo.trim()
+      await apiPost(`/shop/orders/${id}/status`, body)
       toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
-      setNote('')
+      setNote(''); setInvoiceNo(''); setCancelling(false); setCancel({ reason_code: '', note: '' })
       refetchOrder()
     } catch (e) {
-      toast(e instanceof ApiError ? e.body.slice(0, 160) : 'Could not update the order.', 'error')
+      toast(apiDetail(e, 'Could not update the order.'), 'error')
     } finally {
       setBusy(null)
     }
@@ -448,6 +510,10 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
   const actions = data ? (data.next_statuses?.length ? data.next_statuses : nextStatuses(data.status)) : []
   const coupon = data?.coupon_code || data?.coupon?.code || null
   const unassigned = Boolean(data && !data.salesman_id && !data.salesman_name)
+  const gap = data ? minimumGapText(data) : null
+  const cancelled = data ? cancelSummary(data) : null
+  const shopRep = data?.customer
+  const shopRepName = shopRep?.salesman_name || shopRep?.sticky_name || null
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-sm" onClick={onClose}>
@@ -455,7 +521,16 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
         <div className="flex items-center justify-between border-b px-5 py-4">
           <div>
             <div className="font-display text-base font-semibold">{data?.order_no || 'Order'}</div>
-            {data && <div className="mt-1 flex flex-wrap items-center gap-1.5"><StatusPill status={data.status} /><NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} /></div>}
+            {data && (
+              <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                <StatusPill status={data.status} />
+                <PaymentPill status={data.payment_status} orderStatus={data.status} />
+                {!!data.returned_bhd && <Badge tone="rose">Returned {bhd(data.returned_bhd, 3)}</Badge>}
+                <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
+              </div>
+            )}
+            {cancelled && data?.status === 'cancelled' && <div className="mt-1 text-[12px] text-muted-foreground">Cancelled · {cancelled}</div>}
+            {gap && <div className="mt-1 text-[12px] font-medium text-amber-700">{gap}</div>}
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={18} /></button>
         </div>
@@ -472,14 +547,23 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
                 )}
               </div>
               {unassigned || reassigning ? (
-                <AssignBox orderId={id} currentSalesmanId={data.salesman_id ?? null} onDone={() => { setReassigning(false); refetchOrder() }} />
+                <AssignBox orderId={id} currentSalesmanId={data.salesman_id ?? null} canBindShop={Boolean(data.customer_id)} shopName={data.customer_shop}
+                  onDone={() => { setReassigning(false); refetchOrder() }} />
               ) : (
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border p-3 text-sm">
                   <span className="font-semibold">{data.salesman_name}</span>
                   {data.attribution_source && <Badge tone="grey">{data.attribution_source.replace(/_/g, ' ')}</Badge>}
-                  {data.attribution_conflict && <Badge tone="amber">Referral conflict{data.referral_code ? ` · /${data.referral_code}` : ''}</Badge>}
+                  {data.attribution_conflict && <Badge tone="amber">{data.source === 'salesman' ? 'Another rep’s shop' : `Referral conflict${data.referral_code ? ` · /${data.referral_code}` : ''}`}</Badge>}
                   {data.expected_delivery && <span className="ml-auto text-[12px] text-muted-foreground">Expected: {data.expected_delivery}</span>}
                 </div>
+              )}
+              {shopRep && (
+                <p className="mt-1.5 text-[11.5px] text-muted-foreground">
+                  Shop’s rep: {shopRepName ? <b className="text-foreground">{shopRepName}</b> : 'not settled yet'}
+                  {shopRep.salesman_name ? ' (assigned by the office)' : shopRep.sticky_name ? ' (first rep to confirm)' : shopRep.first_ref ? ` · first link /${shopRep.first_ref}` : ''}
+                  {shopRepName && data.salesman_id && shopRep.salesman_id !== data.salesman_id && shopRep.sticky_salesman_id !== data.salesman_id && !shopRep.salesman_id
+                    ? ' — this order is with a different rep' : ''}
+                </p>
               )}
             </section>
 
@@ -570,6 +654,28 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
             )}
             {data.whatsapp_url && data.status !== 'new' && <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />}
 
+            {data.status === 'delivered' && (
+              <section className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">After delivery</div>
+                <div className="rounded-xl border p-3">
+                  <div className="mb-1.5 flex items-center justify-between text-[12px] font-semibold">
+                    <span>Focus invoice</span>
+                    {data.focus_invoice_no && <code className="rounded bg-secondary px-1.5 py-0.5 text-[12px]">{data.focus_invoice_no}</code>}
+                  </div>
+                  <InvoiceBox orderId={id} current={data.focus_invoice_no} onDone={refetchOrder} />
+                  {!data.focus_invoice_no && <p className="mt-1.5 text-[11px] text-muted-foreground">Without it this order sits in the Focus check as “no invoice”.</p>}
+                </div>
+                <PaymentBox orderId={id} status={data.payment_status} method={data.payment_method} total={data.total_confirmed_bhd ?? data.total_bhd} onDone={refetchOrder} />
+                {returning ? (
+                  <ReturnBox orderId={id} lines={data.lines || []} onCancel={() => setReturning(false)} onDone={() => { setReturning(false); refetchOrder() }} />
+                ) : (
+                  <button type="button" onClick={() => setReturning(true)} className="h-10 w-full rounded-xl border border-[#f3c9d2] text-[12.5px] font-semibold text-[#9f1239] hover:bg-[#fff7f8]">
+                    Record a return{data.returned_bhd ? ` (so far ${bhd(data.returned_bhd, 3)})` : ''}
+                  </button>
+                )}
+              </section>
+            )}
+
             {data.note && (
               <section>
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Note</div>
@@ -605,21 +711,132 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
 
         {data && actions.length > 0 && !confirming && (
           <div className="sticky bottom-0 space-y-2 border-t bg-card p-4">
-            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional note…" />
-            <div className="flex flex-wrap gap-2">
-              {actions.filter((a) => a !== 'confirmed' || unassigned).map((a) => (
-                <Button key={a} size="sm" variant={a === 'cancelled' ? 'destructive' : 'default'}
-                  onClick={() => setStatus(a)} disabled={busy !== null || (a === 'confirmed' && unassigned)}>
-                  {busy === a ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
-                  {actionLabel(a)}
-                </Button>
-              ))}
-            </div>
-            {unassigned && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
+            {cancelling ? (
+              <div className="space-y-2 rounded-xl border border-[#f3c9d2] bg-[#fff7f8] p-3">
+                <CancelReasonPicker value={cancel.reason_code} note={cancel.note} onChange={setCancel} />
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" variant="outline" onClick={() => { setCancelling(false); setCancel({ reason_code: '', note: '' }) }} disabled={busy !== null}>Keep it</Button>
+                  <Button type="button" size="sm" variant="destructive" onClick={() => setStatus('cancelled')} disabled={busy !== null || !cancelReady(cancel.reason_code, cancel.note)}>
+                    {busy === 'cancelled' ? <Loader2 className="animate-spin" size={14} /> : <X size={14} />} Yes, cancel {data.order_no}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note to the shop (optional) — goes in their update email" aria-label="Note to the shop" />
+                {actions.includes('delivered') && (
+                  <Input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} placeholder="Focus invoice no (optional, with Delivered)" maxLength={40} spellCheck={false} className="font-mono" />
+                )}
+                <div className="flex flex-wrap gap-2">
+                  {actions.filter((a) => a !== 'confirmed' || unassigned).map((a) => (
+                    <Button key={a} size="sm" variant={a === 'cancelled' ? 'destructive' : 'default'}
+                      onClick={() => (a === 'cancelled' ? setCancelling(true) : setStatus(a))} disabled={busy !== null || (a === 'confirmed' && unassigned)}>
+                      {busy === a ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+                      {actionLabel(a)}
+                    </Button>
+                  ))}
+                </div>
+                {unassigned && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
+              </>
+            )}
           </div>
         )}
       </div>
     </div>
+  )
+}
+
+// ── R3: the Focus check (delivered orders vs the Focus ledger, by invoice) ────
+
+interface ReconRow {
+  order_id: number
+  order_no: string
+  delivered_at?: string | null
+  customer_shop?: string | null
+  salesman_name?: string | null
+  salesman_focus_name?: string | null
+  order_total_bhd?: number | null
+  payment_status?: string | null
+  focus_invoice_no?: string | null
+  invoice_total_bhd?: number | null
+  invoice_date?: string | null
+  focus_salesman?: string | null
+  amount_diff_bhd?: number | null
+  flags: string[]
+  is_test?: boolean
+}
+interface ReconResp { rows: ReconRow[]; count: number; issues: number; hint?: string; ledger_as_of?: string | null }
+
+// "Not in the uploaded ledger", never "not in Focus": the check reads the ledger as uploaded up to
+// ledger_as_of, and a recent invoice is simply not uploaded yet.
+const RECON_FLAG_LABEL: Record<string, string> = {
+  missing_invoice: 'No invoice', invoice_not_found: 'Not in the uploaded ledger', salesman_mismatch: 'Salesman differs',
+  amount_mismatch: 'Amount differs', invoice_reused: 'Invoice on more than one order',
+}
+
+function FocusCheck({ onOpen, onChanged }: { onOpen: (id: number) => void; onChanged: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [showAll, setShowAll] = useState(false)
+  const { data, isLoading } = useQuery({ queryKey: ['shop-focus-recon'], queryFn: () => apiGet<ReconResp>('/shop/focus-recon'), staleTime: 60_000 })
+  const rows = (data?.rows || []).filter((r) => !r.is_test)
+  const issues = rows.filter((r) => r.flags.length)
+  const shown = showAll ? rows : issues
+  return (
+    <section className="mb-5 rounded-[18px] border p-4" aria-labelledby="focus-check">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="flex w-full items-center justify-between gap-2 text-left">
+        <h2 id="focus-check" className="flex items-center gap-2 font-display text-[15px] font-bold">
+          {issues.length ? <AlertTriangle size={16} className="text-amber-600" /> : <Check size={16} className="text-emerald-600" />}
+          Focus check
+          <span className="text-[12.5px] font-medium text-muted-foreground">
+            {isLoading ? 'checking…' : data?.hint ? 'not available yet' : issues.length ? `${issues.length} of ${rows.length} delivered orders need a look` : `${rows.length} delivered orders match`}
+          </span>
+        </h2>
+        <ChevronDown size={16} className={cn('shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="mt-3">
+          <p className="mb-2 text-[12px] text-muted-foreground">
+            Delivered marketplace orders against the uploaded Focus sales ledger
+            {data?.ledger_as_of ? <> (sales up to <b>{fmtDate(data.ledger_as_of)}</b>)</> : null}, by invoice number: an order with no invoice recorded,
+            an invoice the upload does not carry yet, a different salesman on the invoice, a total that differs by more than 0.005 BHD,
+            or one invoice number recorded on more than one order.
+          </p>
+          {data?.hint ? (
+            <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">{data.hint}</p>
+          ) : shown.length === 0 ? (
+            <p className="text-[13px] text-muted-foreground">{rows.length ? 'Every delivered order has a matching Focus invoice.' : 'No delivered orders yet.'}</p>
+          ) : (
+            <ul className="divide-y overflow-hidden rounded-xl border">
+              {shown.map((r) => (
+                <li key={r.order_id} className="grid gap-2 p-3 text-[12.5px] sm:grid-cols-[1fr_auto] sm:items-center">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button type="button" onClick={() => onOpen(r.order_id)} className="font-semibold text-foreground hover:text-primary hover:underline">{r.order_no}</button>
+                      {r.flags.map((f) => <Badge key={f} tone={f === 'missing_invoice' || f === 'invoice_not_found' ? 'amber' : 'rose'}>{RECON_FLAG_LABEL[f] || f}</Badge>)}
+                      {!r.flags.length && <Badge tone="green">Matches</Badge>}
+                      <PaymentPill status={r.payment_status} orderStatus="delivered" />
+                    </div>
+                    <div className="mt-0.5 text-muted-foreground">
+                      {[r.customer_shop, r.salesman_name, fmtDateTime(r.delivered_at)].filter(Boolean).join(' · ')} · order {bhd(r.order_total_bhd, 3)}
+                      {r.focus_invoice_no ? ` · invoice ${r.focus_invoice_no}${r.invoice_total_bhd != null ? ` = ${bhd(r.invoice_total_bhd, 3)}` : ''}${r.focus_salesman ? ` (${r.focus_salesman})` : ''}` : ''}
+                      {r.amount_diff_bhd ? ` · diff ${bhd(r.amount_diff_bhd, 3)}` : ''}
+                    </div>
+                  </div>
+                  {r.flags.includes('missing_invoice') && (
+                    <div className="sm:w-[19rem]"><InvoiceBox orderId={r.order_id} current={null} onDone={onChanged} /></div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {rows.length > issues.length && !data?.hint && (
+            <button type="button" onClick={() => setShowAll((v) => !v)} className="mt-2 text-[12px] font-semibold text-primary hover:underline">
+              {showAll ? 'Show only the ones that need a look' : `Show all ${rows.length} delivered orders`}
+            </button>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -638,8 +855,10 @@ function DeskOrders({
   onRefresh: () => void
   queueFocus?: boolean
 }) {
+  const qc = useQueryClient()
   const [openId, setOpenId] = useState<number | null>(null)
   const openRow = (r: ShopOrderRow) => setOpenId(r.id)
+  const refreshRecon = () => { qc.invalidateQueries({ queryKey: ['shop-focus-recon'] }); onRefresh() }
 
   const cols: Column<ShopOrderRow>[] = [
     { key: 'order_no', label: 'Order', render: (_, r) => (
@@ -662,7 +881,21 @@ function DeskOrders({
       ) },
     { key: 'items_count', label: 'Items / Units', align: 'right', render: (_, r) => `${num(r.items_count)} / ${num(r.units_count)}` },
     { key: 'total_bhd', label: 'Total', align: 'right', render: (_, r) => bhd(r.total_bhd, 3) },
-    { key: 'status', label: 'Status', render: (_, r) => <span className="inline-flex items-center gap-1.5"><StatusPill status={r.status} />{r.order_kind === 'small' && <Badge tone="accent">Small</Badge>}<NotNotifiedBadge status={r.status} failed={rowNotifyFailed(r)} attempts={r.notify_attempts} /></span> },
+    { key: 'status', label: 'Status', render: (_, r) => (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <StatusPill status={r.status} />
+          {r.order_kind === 'small' && <Badge tone="accent" title={minimumGapText(r) || undefined}>Small</Badge>}
+          <NotNotifiedBadge status={r.status} failed={rowNotifyFailed(r)} attempts={r.notify_attempts} />
+          {r.status === 'cancelled' && cancelSummary(r) && <span className="text-[11px] text-muted-foreground">{cancelSummary(r)}</span>}
+        </span>
+      ) },
+    { key: 'payment_status', label: 'Payment', render: (_, r) => (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <PaymentPill status={r.payment_status} orderStatus={r.status} />
+          {!!r.returned_bhd && <Badge tone="rose">Returned {bhd(r.returned_bhd, 3)}</Badge>}
+          {r.status === 'delivered' && !r.focus_invoice_no && <Badge tone="amber">No invoice</Badge>}
+        </span>
+      ) },
     { key: 'has_backorder', label: 'Backorder', render: (_, r) => (
         r.has_backorder
           ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600"><PackageX size={12} /> Backorder</span>
@@ -681,6 +914,8 @@ function DeskOrders({
       <PageHeader title="Shop Orders" subtitle="Orders from the marketplace, salesman links and the shared catalog" />
 
       <AssignmentQueue onChanged={onRefresh} highlight={queueFocus} />
+
+      <FocusCheck onOpen={(id) => setOpenId(id)} onChanged={refreshRecon} />
 
       <MyLinkCard me={meData} isAdmin companyKpis={needsCompanyKpi ? companyKpis : null} />
 
@@ -709,7 +944,7 @@ function DeskOrders({
       )}
 
       {openId != null && (
-        <OrderDrawer id={openId} onClose={() => setOpenId(null)} onChanged={onRefresh} />
+        <OrderDrawer id={openId} onClose={() => setOpenId(null)} onChanged={refreshRecon} />
       )}
     </div>
   )
@@ -727,6 +962,8 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
   const title = row.customer_shop || row.customer_name || 'Order'
   const sub = [row.customer_shop ? row.customer_name : null, row.customer_area].filter(Boolean).join(' · ')
   const age = relTime(row.created_at)
+  const gap = minimumGapText(row)
+  const cancelled = row.status === 'cancelled' ? cancelSummary(row) : null
   return (
     <button
       type="button"
@@ -751,14 +988,18 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <StatusPill status={row.status} />
+        <PaymentPill status={row.payment_status} orderStatus={row.status} />
         {row.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
         {row.has_backorder && <Badge tone="amber">Backorder</Badge>}
         {row.order_kind === 'small' && <Badge tone="accent">Small order</Badge>}
+        {!!row.returned_bhd && <Badge tone="rose">Returned</Badge>}
         <NotNotifiedBadge status={row.status} failed={rowNotifyFailed(row)} attempts={row.notify_attempts} />
         <span className={cn('ml-auto shrink-0 text-[11px]', MUTED)}>
           {row.order_no}{age ? ` · ${age}` : ''}
         </span>
       </div>
+      {gap && <div className="mt-1.5 text-[12px] font-medium text-[#96600d]">{gap}</div>}
+      {cancelled && <div className={cn('mt-1.5 text-[12px]', MUTED)}>Cancelled · {cancelled}</div>}
     </button>
   )
 }
@@ -769,17 +1010,28 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmCancel, setConfirmCancel] = useState(false)
+  // R3: the cancel names its reason (chips); Delivered may carry the Focus invoice number
+  const [cancel, setCancel] = useState({ reason_code: '', note: '' })
+  const [invoiceNo, setInvoiceNo] = useState('')
 
   async function setStatus(next: string) {
     setBusy(next)
     try {
-      await apiPost(`/shop/orders/${id}/status`, { status: next })
-      toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${next}.`, 'success')
+      const body: Record<string, unknown> = { status: next }
+      if (next === 'cancelled') {
+        body.reason_code = cancel.reason_code
+        body.note = cancel.note.trim() || undefined
+      }
+      if (next === 'delivered' && invoiceNo.trim()) body.focus_invoice_no = invoiceNo.trim()
+      await apiPost(`/shop/orders/${id}/status`, body)
+      toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
       setConfirmCancel(false)
+      setCancel({ reason_code: '', note: '' })
+      setInvoiceNo('')
       qc.invalidateQueries({ queryKey: ['shop-order', id] })
       onChanged()
     } catch (e) {
-      toast(e instanceof ApiError ? e.body.slice(0, 160) : 'Could not update the order.', 'error')
+      toast(e instanceof ApiError ? apiDetail(e, 'Could not update the order.') : 'Could not update the order.', 'error')
     } finally {
       setBusy(null)
     }
@@ -796,11 +1048,24 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
   const canCancel = allowed.includes('cancelled')
   const coupon = data?.coupon_code || data?.coupon?.code || null
   const [confirming, setConfirming] = useState(false)
+  const gap = data ? minimumGapText(data) : null
+  const cancelledWhy = data?.status === 'cancelled' ? cancelSummary(data) : null
 
   const footer = !data || confirming ? null : (
     <div className="space-y-2">
       {data.whatsapp_url && data.status !== 'new' && (
         <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />
+      )}
+      {forward === 'delivered' && (
+        <input
+          value={invoiceNo}
+          onChange={(e) => setInvoiceNo(e.target.value)}
+          placeholder="Focus invoice no (optional)"
+          aria-label="Focus invoice number"
+          maxLength={40}
+          spellCheck={false}
+          className={cn('h-11 w-full rounded-xl border bg-white px-3.5 font-mono text-[13px] outline-none focus:border-[#6D4091]', HAIRLINE, INK)}
+        />
       )}
       {forward === 'confirmed' ? (
         <button
@@ -839,11 +1104,14 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
       )}
       {canCancel && confirmCancel && (
         <div className={cn('rounded-xl border p-3', HAIRLINE)}>
-          <p className={cn('text-[12.5px] leading-snug', INK)}>Cancel {data.order_no}? The customer sees it as cancelled.</p>
+          <p className={cn('text-[12.5px] leading-snug', INK)}>Cancel {data.order_no}? The shop is told it is cancelled, and the reason you pick. Say why:</p>
+          <div className="mt-2.5">
+            <CancelReasonPicker value={cancel.reason_code} note={cancel.note} onChange={setCancel} compact />
+          </div>
           <div className="mt-2.5 flex gap-2">
             <button
               type="button"
-              onClick={() => setConfirmCancel(false)}
+              onClick={() => { setConfirmCancel(false); setCancel({ reason_code: '', note: '' }) }}
               className={cn('h-11 flex-1 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}
             >
               Keep it
@@ -851,7 +1119,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             <button
               type="button"
               onClick={() => setStatus('cancelled')}
-              disabled={busy !== null}
+              disabled={busy !== null || !cancelReady(cancel.reason_code, cancel.note)}
               className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#9f1239] text-[13px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
             >
               {busy === 'cancelled' ? <Loader2 className="animate-spin" size={15} /> : null}
@@ -880,13 +1148,24 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
         <div className="space-y-4 p-4">
           <div className="flex flex-wrap items-center gap-1.5">
             <StatusPill status={data.status} />
+            <PaymentPill status={data.payment_status} orderStatus={data.status} />
             {data.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
             {data.source === 'market' && <Badge tone="accent">Marketplace</Badge>}
-            {data.attribution_conflict && <Badge tone="amber">Referral conflict</Badge>}
+            {data.attribution_conflict && <Badge tone="amber">{data.source === 'salesman' ? 'Another rep’s shop' : 'Referral conflict'}</Badge>}
             {data.has_backorder && <Badge tone="amber">Backorder</Badge>}
+            {!!data.returned_bhd && <Badge tone="rose">Returned {bhd(data.returned_bhd, 3)}</Badge>}
             <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
             {data.expected_delivery && <span className={cn('text-[11.5px]', MUTED)}>Expected: {data.expected_delivery}</span>}
           </div>
+          {gap && (
+            <p className="rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12.5px] font-medium text-[#96600d]">
+              Small order · {gap}. Confirm it as it is, or add to it with the shop.
+            </p>
+          )}
+          {cancelledWhy && <p className={cn('text-[12.5px]', MUTED)}>Cancelled · {cancelledWhy}</p>}
+          {data.status === 'delivered' && data.focus_invoice_no && (
+            <p className={cn('text-[11.5px]', MUTED)}>Focus invoice <code className="rounded bg-[#F3F0F6] px-1">{data.focus_invoice_no}</code></p>
+          )}
 
           {confirming && (
             <ConfirmEditor

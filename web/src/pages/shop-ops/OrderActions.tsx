@@ -7,14 +7,258 @@ import { cn } from '@/lib/utils'
 import { bhd } from '@/lib/format'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Stepper } from '@/components/ui/stepper'
+import { apiDetail, CANCEL_REASONS, PAYMENT_LABEL, PAYMENT_METHODS, PAYMENT_PILL_LABEL, PAYMENT_TONE } from './pipeline'
 
 /**
- * The three actions the marketplace added to an order, shared by the desk drawer, the field
- * sheet and the assignment queue (docs/SHOP.md § Marketplace):
+ * The actions the marketplace added to an order, shared by the desk drawer, the field sheet and
+ * the assignment queue (docs/SHOP.md § Marketplace):
  *   • ConfirmEditor — confirm with changes (per-line confirmed qty / remove, expected delivery)
- *   • AssignBox     — assign or reassign (admins; a salesman only takes an unassigned order)
+ *   • AssignBox     — assign or reassign (admins; a salesman only takes an unassigned order);
+ *                     admins may also make the rep the SHOP's rep (R3, audited)
  *   • AssignmentQueue — unassigned open orders with a history-based suggestion
+ *   • R3 pipeline: CancelReasonPicker (a staff cancel names its reason), PaymentPill / PaymentBox
+ *     (paid | partly paid | unpaid as a recorded fact, admin), ReturnBox (a 'returned' event with
+ *     lines and a reason on a delivered order, admin), InvoiceBox (the Focus invoice number).
+ *     The constants and pure helpers live in ./pipeline.ts.
  */
+
+/* ───────────────────────── R3: cancel reasons ───────────────────────── */
+
+/** Reason chips (+ an INTERNAL note, required for "Other"). `onChange` gets what the status route
+ *  needs. The shop's cancel email carries the reason's label only (app/shop_pipeline.py
+ *  customer_cancel_text); the note goes to cancel_reason and the timeline and never leaves. */
+export function CancelReasonPicker({
+  value, note, onChange, compact,
+}: {
+  value: string
+  note: string
+  onChange: (next: { reason_code: string; note: string }) => void
+  compact?: boolean
+}) {
+  const needsNote = value === 'other'
+  return (
+    <div className="space-y-2">
+      <div className={cn('text-[11.5px] font-semibold text-[#6b6480]', compact && 'sr-only')}>Why is it cancelled?</div>
+      <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Cancel reason">
+        {CANCEL_REASONS.map((r) => (
+          <button
+            key={r.code}
+            type="button"
+            role="radio"
+            aria-checked={value === r.code}
+            onClick={() => onChange({ reason_code: value === r.code ? '' : r.code, note })}
+            className={cn('h-9 rounded-full border px-3 text-[12.5px] font-semibold transition-colors duration-150 motion-reduce:transition-none',
+              value === r.code ? 'border-[#9f1239] bg-[#9f1239] text-white' : 'border-[#E2DCEA] bg-white text-[#1A1428] hover:border-[#9f1239]')}
+          >
+            {r.label}
+          </button>
+        ))}
+      </div>
+      <input
+        value={note}
+        onChange={(e) => onChange({ reason_code: value, note: e.target.value })}
+        placeholder={needsNote ? 'Internal note — say why (required for Other)' : 'Internal note (optional)'}
+        aria-label="Internal cancel note"
+        aria-describedby="cancel-note-hint"
+        aria-required={needsNote}
+        maxLength={300}
+        className="h-10 w-full rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#9f1239]"
+      />
+      <p id="cancel-note-hint" className="text-[11px] leading-snug text-[#6b6480]">
+        The shop is told the reason only (for example “Out of stock”). This note stays in the office record.
+      </p>
+    </div>
+  )
+}
+
+/* ───────────────────────── R3: payment ───────────────────────── */
+
+/** Paid / Partly paid pill. The default state is shown only once the order is delivered (until
+ *  then nothing is due), and it says "Payment not recorded" rather than "Unpaid": 'unpaid' is
+ *  the column default, and a delivered order may well have been paid in Focus without anyone
+ *  recording it here. */
+export function PaymentPill({ status, orderStatus }: { status?: string | null; orderStatus: string }) {
+  const s = status || 'unpaid'
+  if (s === 'unpaid' && orderStatus !== 'delivered') return null
+  const title = s === 'unpaid' ? 'No payment has been recorded on this order here — the Focus ledger is the record until the office records one.' : undefined
+  return <Badge tone={PAYMENT_TONE[s] || 'grey'} title={title}>{PAYMENT_PILL_LABEL[s] || s}</Badge>
+}
+
+export function PaymentBox({
+  orderId, status, method, total, onDone,
+}: {
+  orderId: number
+  status?: string | null
+  method?: string | null
+  total?: number | null
+  onDone: () => void
+}) {
+  const toast = useToast()
+  const [next, setNext] = useState(status || 'unpaid')
+  const [how, setHow] = useState(method || '')
+  const [amount, setAmount] = useState('')
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const changed = next !== (status || 'unpaid') || how !== (method || '') || amount.trim() !== '' || note.trim() !== ''
+
+  async function save() {
+    setBusy(true)
+    try {
+      await apiPost(`/shop/orders/${orderId}/payment`, {
+        status: next, method: how || undefined,
+        amount_bhd: amount.trim() === '' ? undefined : Number(amount),
+        note: note.trim() || undefined,
+      })
+      toast(`Payment recorded: ${PAYMENT_LABEL[next] || next}.`, 'success')
+      setAmount(''); setNote('')
+      onDone()
+    } catch (e) {
+      toast(apiDetail(e, 'Could not record the payment.'), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-[#E9E4EF] bg-white p-3">
+      <div className="mb-2 flex items-center justify-between gap-2 text-[12px] font-semibold text-[#1A1428]">
+        <span>Payment{method ? <span className="ml-1.5 font-normal text-[#6b6480]">· {PAYMENT_METHODS.find((m) => m.value === method)?.label || method}</span> : null}</span>
+        <PaymentPill status={status} orderStatus="delivered" />
+      </div>
+      <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Payment status">
+        {(['unpaid', 'partial', 'paid'] as const).map((s) => (
+          <button key={s} type="button" role="radio" aria-checked={next === s} onClick={() => setNext(s)}
+            className={cn('h-9 rounded-full border px-3 text-[12.5px] font-semibold transition-colors duration-150',
+              next === s ? 'border-[#6D4091] bg-[#6D4091] text-white' : 'border-[#E2DCEA] bg-white text-[#1A1428] hover:border-[#6D4091]')}>
+            {PAYMENT_LABEL[s]}
+          </button>
+        ))}
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+        <select value={how} onChange={(e) => setHow(e.target.value)} aria-label="Payment method"
+          className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-2.5 text-[13px] outline-none focus:border-[#6D4091]">
+          {PAYMENT_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+        </select>
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" aria-label="Amount (BHD)"
+          placeholder={next === 'paid' ? `BHD ${Number(total || 0).toFixed(3)}` : 'Amount (BHD)'}
+          className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />
+        <input value={note} onChange={(e) => setNote(e.target.value)} aria-label="Payment note" placeholder="Note (optional)" maxLength={300}
+          className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-[11px] text-[#6b6480]">A recorded fact — the order stays where it is. Every change is on the timeline.</span>
+        <button type="button" onClick={save} disabled={busy || !changed}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-[#6D4091] px-3 text-[12.5px] font-semibold text-white disabled:opacity-50">
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Record
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ───────────────────────── R3: returns (an event, never a status) ───────────────────────── */
+
+export interface ReturnableLine {
+  id: number
+  item_code: string
+  display_name?: string | null
+  qty: number
+  qty_confirmed?: number | null
+  line_status?: string | null
+  unit_price_bhd?: number | null
+  unit_price_confirmed?: number | null
+}
+
+export function ReturnBox({ orderId, lines, onDone, onCancel }: { orderId: number; lines: ReturnableLine[]; onDone: () => void; onCancel?: () => void }) {
+  const toast = useToast()
+  const live = lines.filter((l) => (l.line_status || 'ok') !== 'removed')
+  const cap = (l: ReturnableLine) => (l.qty_confirmed != null ? l.qty_confirmed : l.qty)
+  const price = (l: ReturnableLine) => Number(l.unit_price_confirmed ?? l.unit_price_bhd ?? 0)
+  const [qty, setQty] = useState<Record<number, number>>({})
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const picked = live.filter((l) => (qty[l.id] || 0) > 0)
+  const value = picked.reduce((s, l) => s + price(l) * (qty[l.id] || 0), 0)   // display only — the server keeps the exact figure
+  const ready = picked.length > 0 && reason.trim().length >= 3
+
+  async function submit() {
+    if (!ready) return
+    setBusy(true)
+    try {
+      const res = await apiPost<{ value_bhd: number }>(`/shop/orders/${orderId}/return`, {
+        lines: picked.map((l) => ({ line_id: l.id, qty: qty[l.id] })), reason: reason.trim(),
+      })
+      toast(`Return recorded · ${bhd(res.value_bhd, 3)}.`, 'success')
+      onDone()
+    } catch (e) {
+      toast(apiDetail(e, 'Could not record the return.'), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-xl border border-[#f3c9d2] bg-[#fff7f8] p-3.5">
+      <div className="text-[12px] font-semibold text-[#1A1428]">Record a return</div>
+      <ul className="divide-y divide-[#E9E4EF] overflow-hidden rounded-xl border border-[#E9E4EF] bg-white">
+        {live.map((l) => (
+          <li key={l.id} className="flex items-center gap-3 p-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-semibold text-[#1A1428]">{l.display_name || l.item_code}</div>
+              <div className="text-[11px] tabular-nums text-[#6b6480]">{l.item_code} · delivered {cap(l)} · {bhd(price(l), 3)} each</div>
+            </div>
+            <Stepper size="sm" value={qty[l.id] || 0} min={0} max={cap(l)} label={`Return ${l.item_code}`}
+              onChange={(v) => setQty((s) => ({ ...s, [l.id]: Math.max(0, Math.min(cap(l), v)) }))} />
+          </li>
+        ))}
+      </ul>
+      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why (required) — damaged, wrong item, shop refused…" aria-label="Return reason" maxLength={300}
+        className="h-10 w-full rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#9f1239]" />
+      <div className="flex items-center justify-between gap-2 text-[12px] text-[#6b6480]">
+        <span>{picked.length ? `${picked.reduce((s, l) => s + (qty[l.id] || 0), 0)} pcs · about ${bhd(value, 3)}` : 'Pick the quantities that came back'}</span>
+        <span>The order stays Delivered; the return goes on its timeline.</span>
+      </div>
+      <div className="flex gap-2">
+        {onCancel && <button type="button" onClick={onCancel} className="h-11 flex-1 rounded-xl border border-[#E2DCEA] bg-white text-[13px] font-semibold text-[#1A1428]">Back</button>}
+        <button type="button" onClick={submit} disabled={busy || !ready} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-[#9f1239] text-[14px] font-semibold text-white disabled:opacity-50">
+          {busy ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} Record return
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ───────────────────────── R3: the Focus invoice ───────────────────────── */
+
+export function InvoiceBox({ orderId, current, onDone }: { orderId: number; current?: string | null; onDone: () => void }) {
+  const toast = useToast()
+  const [value, setValue] = useState(current || '')
+  const [busy, setBusy] = useState(false)
+  async function save() {
+    if (!value.trim() || value.trim() === (current || '')) return
+    setBusy(true)
+    try {
+      await apiPost(`/shop/orders/${orderId}/invoice`, { focus_invoice_no: value.trim() })
+      toast('Focus invoice recorded.', 'success')
+      onDone()
+    } catch (e) {
+      toast(apiDetail(e, 'Could not record the invoice.'), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Focus invoice no" aria-label="Focus invoice number" maxLength={40} spellCheck={false}
+        className="h-10 min-w-[10rem] flex-1 rounded-lg border border-[#E2DCEA] bg-white px-3 font-mono text-[13px] outline-none focus:border-[#6D4091]" />
+      <button type="button" onClick={save} disabled={busy || !value.trim() || value.trim() === (current || '')}
+        className="flex h-10 items-center gap-1.5 rounded-lg border border-[#6D4091] px-3 text-[12.5px] font-semibold text-[#6D4091] disabled:opacity-50">
+        {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} {current ? 'Update' : 'Record'}
+      </button>
+    </div>
+  )
+}
+
 
 export const STATUS_LABEL: Record<string, string> = {
   new: 'Received',
@@ -191,7 +435,7 @@ export function useSalesmenOptions(enabled: boolean) {
 }
 
 export function AssignBox({
-  orderId, currentSalesmanId, suggestedId, suggestedReason, compact, onDone,
+  orderId, currentSalesmanId, suggestedId, suggestedReason, compact, onDone, canBindShop, shopName,
 }: {
   orderId: number
   currentSalesmanId?: number | null
@@ -199,11 +443,15 @@ export function AssignBox({
   suggestedReason?: string | null
   compact?: boolean
   onDone: () => void
+  /** R3: admins may also make the rep the shop's rep (POST assign `also_customer`, audited). */
+  canBindShop?: boolean
+  shopName?: string | null
 }) {
   const toast = useToast()
   const { data: options } = useSalesmenOptions(true)
   const [pick, setPick] = useState<number | ''>(suggestedId ?? currentSalesmanId ?? '')
   const [reason, setReason] = useState('')
+  const [bindShop, setBindShop] = useState(false)
   const [busy, setBusy] = useState(false)
   // When the suggestion arrives after mount, adopt it once (render-phase derived state).
   const proposed = suggestedId ?? currentSalesmanId ?? ''
@@ -217,11 +465,17 @@ export function AssignBox({
     if (pick === '') return
     setBusy(true)
     try {
-      await apiPost(`/shop/orders/${orderId}/assign`, { salesman_id: Number(pick), reason: reason.trim() || undefined })
-      toast(currentSalesmanId ? 'Order reassigned.' : 'Order assigned.', 'success')
+      const res = await apiPost<{ customer_assign?: { changed?: boolean; to_name?: string | null; error?: string } | null }>(
+        `/shop/orders/${orderId}/assign`,
+        { salesman_id: Number(pick), reason: reason.trim() || undefined, also_customer: Boolean(canBindShop && bindShop) },
+      )
+      const ca = res?.customer_assign
+      if (ca?.error) toast(`Order assigned, but the shop's rep was not changed: ${ca.error}`, 'error')
+      else if (ca?.changed) toast(`Order assigned · ${ca.to_name || 'the rep'} is now this shop's rep.`, 'success')
+      else toast(currentSalesmanId ? 'Order reassigned.' : 'Order assigned.', 'success')
       onDone()
     } catch (e) {
-      toast(e instanceof ApiError ? e.body.slice(0, 160) : 'Could not assign the order.', 'error')
+      toast(apiDetail(e, 'Could not assign the order.'), 'error')
     } finally {
       setBusy(false)
     }
@@ -240,11 +494,20 @@ export function AssignBox({
           <option value="">Choose…</option>
           {(options || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
-        {!compact && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" className="h-10 flex-1 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />}
-        <button type="button" onClick={assign} disabled={busy || pick === '' || pick === currentSalesmanId} className="flex h-10 items-center gap-1.5 rounded-lg bg-[#6D4091] px-3.5 text-[13px] font-semibold text-white disabled:opacity-50">
+        {!compact && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={bindShop ? 'Reason (goes on the shop’s record)' : 'Reason (optional)'} className="h-10 flex-1 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />}
+        <button type="button" onClick={assign} disabled={busy || pick === '' || (pick === currentSalesmanId && !bindShop)} className="flex h-10 items-center gap-1.5 rounded-lg bg-[#6D4091] px-3.5 text-[13px] font-semibold text-white disabled:opacity-50">
           {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} {currentSalesmanId ? 'Reassign' : 'Assign'}
         </button>
       </div>
+      {canBindShop && (
+        <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12px] text-[#1A1428]">
+          <input type="checkbox" checked={bindShop} onChange={(e) => setBindShop(e.target.checked)} className="mt-0.5" />
+          <span>
+            Also make this rep <b>{shopName ? `${shopName}’s` : 'this shop’s'}</b> rep
+            <span className="block text-[11px] text-[#6b6480]">Every future order from this shop routes to them, whatever link it arrives on. Recorded with your reason.</span>
+          </span>
+        </label>
+      )}
     </div>
   )
 }

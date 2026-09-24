@@ -27,6 +27,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from app import attribution, shop_pipeline
 from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
@@ -1208,8 +1209,13 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
         "prices_updated": upd, "stock_as_of": stock_as_of or snap["as_of"],
         # false = the snapshot is older than shop_stock_fresh_days: the status still shows, dated
         "stock_fresh": snap["fresh"],
-        "salesmen": [{"id": s["id"], "name": s["name"], "referral_code": s.get("referral_code")}
-                     for s in ctx["salesmen"]],
+        # R3 (attribution): the public picker lists only reps a merchant may pick — active, public
+        # profile, linked login — as id + name; referral codes never leave through the public
+        # payload. Staff (logged in) keep the whole active roster: an admin without a linked rep
+        # row picks whose order it is on the salesman catalog.
+        "salesmen": (attribution.public_reps(ctx) if not staff else
+                     [{"id": s["id"], "name": s["name"], "referral_code": s.get("referral_code")}
+                      for s in ctx["salesmen"]]),
         "offers": offers,
         "campaigns": campaigns_payload(ctx),
         "pairs": [{"item_code": c, "with": w} for c, w in ctx.get("pairs", {}).items() if w],
@@ -1710,7 +1716,7 @@ def salesman_for(ctx: dict, referral_code: str | None, salesman_id: int | None) 
                 return s, "referral"
     if salesman_id:
         for s in ctx["salesmen"]:
-            if int(s["id"]) == int(salesman_id):
+            if int(s["id"]) == int(salesman_id) and attribution.pickable(s):   # only what the picker lists
                 return s, "dropdown"
     default = str(ctx["settings"].get("shop_default_salesman") or "").strip().lower()
     if default:
@@ -1807,7 +1813,7 @@ def resolve_salesman(ctx: dict, *, phone: str | None, session_ref: str | None, p
     if ref_sm:
         return ref_sm, "session_ref", False
     pick = _salesman_by(ctx, pick_id)
-    if pick:
+    if pick and attribution.pickable(pick):     # a pick of a rep the picker never listed is ignored
         return pick, "checkout_pick", False
     default = str(ctx["settings"].get("shop_default_salesman") or "").strip().lower()
     if default:
@@ -1820,12 +1826,17 @@ def resolve_salesman(ctx: dict, *, phone: str | None, session_ref: str | None, p
 def upsert_customer_from_order(row: dict, sm: dict | None, attribution: str, device_id: str | None,
                                existing: dict | None) -> int | None:
     """Create or refresh the merchant record behind an order. Anonymous orders never overwrite
-    what is on file: profile fields are write-if-blank, the sticky rep is written once, and the
-    admin assignment is never touched here. Returns the customer id, or None when the memory
-    layer is unavailable — the order itself must never fail because of it."""
+    what is on file: profile fields are write-if-blank and the admin assignment is never touched
+    here. R3 (attribution): the sticky rep is NOT written at request time any more — the
+    proposed rep is remembered as `first_ref` (the slug the merchant arrived with, else the
+    proposed rep's code) and app.attribution.settle_sticky writes sticky_salesman_id when the
+    assigned rep confirms or delivers. Existing sticky values are left exactly as they are.
+    Returns the customer id, or None when the memory layer is unavailable — the order itself
+    must never fail because of it."""
     c = get_client()
     now = _iso()
-    sticky_ok = sm is not None and attribution in ("session_ref", "checkout_pick", "default", "staff")
+    proposed = sm is not None and attribution in ("session_ref", "checkout_pick", "default", "staff")
+    first_ref = row.get("session_ref") or ((sm or {}).get("referral_code") if proposed else None)
     try:
         if existing:
             upd: dict = {"orders_count": _i(existing.get("orders_count")) + 1, "last_order_at": now,
@@ -1835,9 +1846,8 @@ def upsert_customer_from_order(row: dict, sm: dict | None, attribution: str, dev
                          ("area", row.get("customer_area")), ("email", row.get("customer_email"))):
                 if v and not existing.get(k):
                     upd[k] = v
-            if sticky_ok and not existing.get("sticky_salesman_id"):
-                upd["sticky_salesman_id"] = sm["id"]
-                upd["first_ref"] = existing.get("first_ref") or row.get("session_ref")
+            if first_ref and not existing.get("first_ref"):
+                upd["first_ref"] = first_ref
             devs = [d for d in (existing.get("device_ids") or []) if isinstance(d, str)]
             if device_id and device_id not in devs:
                 upd["device_ids"] = ([device_id] + devs)[:10]
@@ -1845,8 +1855,8 @@ def upsert_customer_from_order(row: dict, sm: dict | None, attribution: str, dev
             return existing["id"]
         ins = {"phone": row["customer_phone"], "name": row.get("customer_name"), "shop": row.get("customer_shop"),
                "area": row.get("customer_area"), "email": row.get("customer_email"),
-               "sticky_salesman_id": sm["id"] if sticky_ok else None,
-               "first_ref": row.get("session_ref"), "first_order_at": now, "last_order_at": now,
+               "sticky_salesman_id": None,
+               "first_ref": first_ref, "first_order_at": now, "last_order_at": now,
                "orders_count": 1, "total_bhd": money(row.get("total_bhd")),
                "device_ids": [device_id] if device_id else [], "created_at": now, "updated_at": now}
         got = c.table("shop_customers").insert(ins).execute().data
@@ -1854,6 +1864,17 @@ def upsert_customer_from_order(row: dict, sm: dict | None, attribution: str, dev
     except Exception as e:  # noqa: BLE001
         log.warning("customer upsert failed (order still created): %s", e)
         return None
+
+
+def staff_rep_conflict(cust: dict | None, sm: dict | None) -> bool:
+    """create_order's staff branch: the shop's recorded rep (admin assignment, else sticky) is a
+    different salesman from the one this order is placed for. Named here because the staff
+    branch's local `attribution` string shadows the module (app.attribution.staff_conflict)."""
+    return attribution.staff_conflict(cust, sm)
+
+
+def staff_recorded_rep(cust: dict | None) -> int | None:
+    return attribution.recorded_rep_id(cust)
 
 
 def _recent_order_count(field: str, value: str | None, hours: int = 24) -> int:
@@ -1972,6 +1993,25 @@ def _select_optional(table: str, cols: str, optional: str, run):
             _forget_column(table, optional)
             log.warning("%s.%s vanished after a cached hit — reading without it: %s", table, optional, e)
             return run(get_client().table(table).select(cols))
+        raise
+
+
+def _update_optional(table: str, upd: dict, optional: tuple[str, ...], run):
+    """`run(query) -> rows` for an UPDATE of `upd` on `table` — the caller adds its filters and
+    executes. The write-side twin of _select_optional: when `upd` names one of the `optional`
+    columns under a cached has_column() hit and PostgREST answers 42703 / PGRST204 (the reverse
+    script dropped it), the probes are forgotten and the update runs once more without those
+    keys. A refused write changed nothing, so the retry is safe; a staff cancel or a 'paid'
+    never 500s for the ten minutes a stale hit would otherwise last."""
+    named = [c for c in optional if c in upd]
+    try:
+        return run(get_client().table(table).update(upd))
+    except Exception as e:  # noqa: BLE001 — only the missing-column case is retried
+        if named and _missing_column(e):
+            for c in named:
+                _forget_column(table, c)
+            log.warning("%s.%s vanished after a cached hit — updating without it: %s", table, ", ".join(named), e)
+            return run(get_client().table(table).update({k: v for k, v in upd.items() if k not in named}))
         raise
 
 
@@ -2155,6 +2195,8 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
             sm = next((s for s in ctx["salesmen"] if int(s["id"]) == _i(body.get("salesman_id"))), None)
         source, attribution = "salesman", "staff"
         referral_code = (sm or {}).get("referral_code")   # so salesman-scoped offers still apply
+        # R3: a rep ordering for a shop whose recorded rep is someone else — flagged, never silent
+        conflict = staff_rep_conflict(existing_cust, sm)
     else:
         sm, attribution, conflict = resolve_salesman(ctx, phone=phone, session_ref=session_ref,
                                                      pick_id=body.get("salesman_id"), customer=existing_cust)
@@ -2212,16 +2254,25 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "line_status": "backorder" if ln["backorder"] else "ok",
         "rule_ids": [a["rule_id"] for a in ln["applied"]] or None,
     } for ln in quote["lines"]]
-    # Header, lines and the created event are three PostgREST writes, not one transaction (the
+    # Header, lines and the events are three PostgREST writes, not one transaction (the
     # plpgsql shop_place_order comes in a later release). Until then: if anything after the
     # header fails, take the header back out (lines/events cascade) and re-raise, so a
     # line-less order can never exist and the merchant's retry creates the order properly.
+    # The 'created' row and the optional 'conflict' row go in ONE insert: one request, so an
+    # informational event can never fail on its own after the order is fully written and
+    # take a complete staff order out with it.
+    events = [{
+        "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
+        "detail": {"source": source, "attribution": attribution, "conflict": bool(conflict),
+                   "clamped": quote.get("_clamped") or []}}]
+    if staff and conflict:
+        events.append({
+            "order_id": order["id"], "actor": staff_email, "event": "conflict",
+            "detail": {"recorded_salesman_id": staff_recorded_rep(existing_cust),
+                       "placed_for_salesman_id": sm["id"] if sm else None, "placed_by": staff_email}})
     try:
         client.table("shop_order_lines").insert(lines).execute()
-        client.table("shop_order_events").insert({
-            "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
-            "detail": {"source": source, "attribution": attribution, "conflict": bool(conflict),
-                       "clamped": quote.get("_clamped") or []}}).execute()
+        client.table("shop_order_events").insert(events).execute()
     except Exception as e:  # noqa: BLE001 — whatever it was, the header must not outlive it
         _discard_lineless_order(client, order["id"], f"lines/event insert failed: {e}")
         raise
@@ -2382,10 +2433,21 @@ def public_order_view(o: dict) -> dict:
         "has_changes": any((ln.get("line_status") or "ok") in ("changed", "removed") for ln in o.get("lines", [])),
         "has_backorder": bool(o.get("has_backorder")), "note": o.get("note"),
         "order_kind": o.get("order_kind") or "standard", "minimum_gap_bhd": o.get("minimum_gap_bhd"),
-        "timeline": [{"ts": e.get("ts"), "event": e.get("event"),
-                      "note": (e.get("detail") or {}).get("note") if isinstance(e.get("detail"), dict) else None}
+        "timeline": [{"ts": e.get("ts"), "event": e.get("event"), "note": _public_note(e)}
                      for e in o.get("events", []) if _public_event(e.get("event"))],
     }
+
+
+def _public_note(e: dict) -> str | None:
+    """The line a merchant may read beside a status move. A cancel made by staff carries an INTERNAL
+    note (the office record) and a reason code: the merchant sees only that reason's public label,
+    never the note (an older staff cancel without a code shows nothing). The merchant's own cancel
+    shows their own words."""
+    d = e.get("detail") if isinstance(e.get("detail"), dict) else {}
+    if str(e.get("event") or "") == "status:cancelled" and str(e.get("actor") or "customer") != "customer":
+        from app import shop_pipeline
+        return shop_pipeline.customer_cancel_text(d.get("reason_code"))
+    return d.get("note")
 
 
 def _public_event(event) -> bool:
@@ -2421,24 +2483,40 @@ def orders_by_tokens(tokens) -> list[dict]:
 
 def list_orders(status: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0,
                 salesman_id: int | None = None) -> dict:
-    qry = get_client().table("shop_orders").select(
-        "id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
-        "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
-        "referral_code,coupon_code,placed_by,customer_id,attribution_source,attribution_conflict,"
-        "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd,notify_result", count="exact")
-    wanted = [s.strip().lower() for s in str(status or "").split(",") if s.strip().lower() in STATUSES]
-    if len(wanted) == 1:
-        qry = qry.eq("status", wanted[0])
-    elif wanted:
-        qry = qry.in_("status", wanted)
-    if salesman_id is not None:
-        qry = qry.eq("salesman_id", salesman_id)
-    if q:
-        s = clean(q, 60).replace("%", "").replace(",", " ")
-        if s:
-            qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%,"
-                          f"customer_phone.ilike.%{s}%")
-    res = qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
+    base_cols = ("id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
+                 "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
+                 "referral_code,coupon_code,placed_by,customer_id,attribution_source,attribution_conflict,"
+                 "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd,notify_result,"
+                 "payment_status,focus_invoice_no,cancel_reason")
+    # R3 columns (scripts/r3_pipeline_migration.sql) — read only once the probe says they exist,
+    # and dropped again for one re-read if PostgREST says otherwise (the reverse script)
+    r3_cols = [c for c in ("returned_bhd", "cancel_reason_code") if has_column("shop_orders", c)]
+
+    def _query(cols: str):
+        qry = get_client().table("shop_orders").select(cols, count="exact")
+        wanted = [s.strip().lower() for s in str(status or "").split(",") if s.strip().lower() in STATUSES]
+        if len(wanted) == 1:
+            qry = qry.eq("status", wanted[0])
+        elif wanted:
+            qry = qry.in_("status", wanted)
+        if salesman_id is not None:
+            qry = qry.eq("salesman_id", salesman_id)
+        if q:
+            s = clean(q, 60).replace("%", "").replace(",", " ")
+            if s:
+                qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%,"
+                              f"customer_phone.ilike.%{s}%")
+        return qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
+
+    try:
+        res = _query(",".join([base_cols, *r3_cols]))
+    except Exception as e:  # noqa: BLE001 — only the vanished-column case is retried
+        if not r3_cols or not _missing_column(e):
+            raise
+        for c in r3_cols:
+            _forget_column("shop_orders", c)
+        log.warning("shop_orders R3 columns vanished after a cached hit — listing without them: %s", e)
+        res = _query(base_cols)
     rows = res.data or []
     # 24-Sep-2026: the list carries two small flags for the "Not notified" badge, never the whole
     # notify_result (1-1.5 KB per row of addresses and provider error text — the detail endpoint
@@ -2450,7 +2528,9 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         r["notify_failed"] = notify_failed(nr, r.get("created_at"), now)
         r["notify_attempts"] = attempt_count(nr)
     return {"orders": rows, "count": res.count if res.count is not None else len(rows),
-            "counts": status_counts(salesman_id)}
+            "counts": status_counts(salesman_id),
+            # the wholesale minimum the small-order gap on a rep's card is measured against
+            "min_order_bhd": money(shop_settings().get("shop_min_order_bhd"))}
 
 
 def status_counts(salesman_id: int | None = None) -> dict[str, int]:
@@ -2496,7 +2576,8 @@ def recent_customers(salesman_id: int | None = None, limit: int = 20) -> list[di
 
 def set_status(order_id: int, status: str, note: str | None, actor: str, *,
                allowed: tuple[str, ...] | None = None, cancelled_by: str = "staff",
-               expected_status: str | None = None) -> dict:
+               expected_status: str | None = None, reason_code: str | None = None,
+               focus_invoice_no: str | None = None) -> dict:
     """Move an order along the lifecycle. `allowed` narrows the statuses this actor's role may set
     (the storekeeper only moves goods). Each stage stamps its own timestamp; Preparing records
     which salesman the storekeeper issued the goods to.
@@ -2504,7 +2585,13 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
     The write is a compare-and-swap on the status just read: the UPDATE also filters on it and
     zero changed rows means someone else moved the order first — nothing is stamped, no event is
     written, the caller sees CAS_CONFLICT_MSG. `expected_status` lets a caller that already
-    decided on an earlier read (the merchant's cancel: only while Received) pin that read too."""
+    decided on an earlier read (the merchant's cancel: only while Received) pin that read too.
+
+    R3 pipeline: a staff cancel needs `reason_code` (shop_pipeline.CANCEL_REASONS; 'other' needs
+    the note), Delivered may carry the optional Focus invoice number, and Confirmed / Delivered
+    settle the merchant's sticky rep (app.attribution.settle_sticky) once, never overwriting.
+    cancel_reason_code is written through _update_optional, so a cancel still lands after the
+    reverse script drops the column under a cached probe."""
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
@@ -2519,6 +2606,7 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
         raise ShopError(f"Cannot move an order from {o['status']} to {status}.")
     now = _iso()
     upd: dict = {"status": status, "updated_at": now}
+    detail: dict = {"note": clean(note, 500) or None, "from": o["status"]}
     stamp = {"confirmed": "confirmed_at", "packed": "packed_at", "out_for_delivery": "out_for_delivery_at",
              "delivered": "delivered_at", "cancelled": "cancelled_at"}.get(status)
     if stamp:
@@ -2530,16 +2618,26 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
         upd["subtotal_confirmed_bhd"] = o.get("subtotal_bhd")
         upd["total_confirmed_bhd"] = o.get("total_bhd")
     if status == "cancelled":
+        code, text = shop_pipeline.validate_cancel(reason_code, note, cancelled_by=cancelled_by)
         upd["cancelled_by"] = cancelled_by
-        upd["cancel_reason"] = clean(note, 300) or None
+        upd["cancel_reason"] = text
+        detail["reason_code"] = code
+        if has_column("shop_orders", "cancel_reason_code"):
+            upd["cancel_reason_code"] = code
+    if status == "delivered":
+        inv = shop_pipeline.clean_invoice_no(focus_invoice_no)
+        if inv:
+            upd["focus_invoice_no"] = inv
+            detail["focus_invoice_no"] = inv
     client = get_client()
-    swapped = (client.table("shop_orders").update(upd).eq("id", order_id)
-               .eq("status", o["status"]).execute().data or [])
+    swapped = _update_optional("shop_orders", upd, ("cancel_reason_code",),
+                               lambda q: q.eq("id", order_id).eq("status", o["status"]).execute().data or [])
     if not swapped:
         raise ShopError(CAS_CONFLICT_MSG)
     client.table("shop_order_events").insert({
-        "order_id": order_id, "actor": actor, "event": f"status:{status}",
-        "detail": {"note": clean(note, 500) or None, "from": o["status"]}}).execute()
+        "order_id": order_id, "actor": actor, "event": f"status:{status}", "detail": detail}).execute()
+    if status in attribution.STICKY_SETTLE_STATUSES:
+        attribution.settle_sticky(client, o, status)
     return get_order(order_id) or {}
 
 
@@ -2671,6 +2769,7 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
         except Exception as e2:  # noqa: BLE001
             log.error("confirm of %s failed (%s) and the header revert failed too: %s", o.get("order_no"), e, e2)
         raise
+    attribution.settle_sticky(client, o, "confirmed")     # the assigned rep confirmed: the merchant's first-touch rep settles
     out = get_order(order_id) or {}
     out["totals"] = totals
     out["changed"] = changed
@@ -2708,8 +2807,10 @@ def set_test_flag(order_id: int, is_test: bool, actor: str) -> dict:
 def assign_order(order_id: int, salesman_id, actor: str, reason: str | None, *, is_admin: bool,
                  actor_salesman_id: int | None = None) -> dict:
     """Assign or reassign an order. Admins may move any open order; a salesman may only take an
-    unassigned order, and only for himself. The first assignment also becomes the merchant's
-    sticky rep when none is recorded yet."""
+    unassigned order, and only for himself. R3: assigning an order no longer touches the
+    merchant record — the sticky rep settles when the assigned rep confirms or delivers
+    (app.attribution.settle_sticky), and an admin who wants the rep to own the SHOP says so
+    explicitly (POST /shop/customers/{id}/assign, or the assign route's `also_customer`)."""
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
@@ -2730,15 +2831,6 @@ def assign_order(order_id: int, salesman_id, actor: str, reason: str | None, *, 
     client.table("shop_order_events").insert({
         "order_id": order_id, "actor": actor, "event": "assigned",
         "detail": {"from": o.get("salesman_name"), "to": sm["name"], "reason": clean(reason, 300) or None}}).execute()
-    if o.get("customer_id"):
-        try:
-            c = (client.table("shop_customers").select("salesman_id,sticky_salesman_id")
-                 .eq("id", o["customer_id"]).limit(1).execute().data)
-            if c and not c[0].get("salesman_id") and not c[0].get("sticky_salesman_id"):
-                client.table("shop_customers").update({"sticky_salesman_id": sm["id"], "updated_at": now}) \
-                    .eq("id", o["customer_id"]).execute()
-        except Exception as e:  # noqa: BLE001
-            log.debug("sticky update after assignment failed: %s", e)
     return get_order(order_id) or {}
 
 

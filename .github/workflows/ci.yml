@@ -73,6 +73,11 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r3_reps
+      # R3b pipeline states, customer attribution, admin audit (the local-Postgres replay SKIPs here)
+      - name: R3 pipeline suite (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r3_pipeline
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
       # R2c exact money: price_cart / confirm / tier_progress on Decimal end to end — 10,000 random
