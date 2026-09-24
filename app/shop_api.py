@@ -754,16 +754,24 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     # ── "Coming soon" (app/upcoming.py; trust plan §6b, release R1b) ─────────────
     # The announced WEKOME range before it lands: a separate, cached, whitelisted payload (never
     # part of the catalog payload, so the home page's LCP does not wait for it), a "notify me"
-    # that reuses the restock table and its limits, an admin list/patch, and the rep's interest
-    # list scoped to his referral code. No price, cost or quantity ever leaves through here.
+    # that reuses the restock table and its limits, an admin list/patch, the kill switch, and the
+    # rep's interest list scoped to his referral code. No price, cost or quantity ever leaves
+    # through here. Every route answers before the migration is applied (empty lists, not 500s).
     from app import upcoming
+
+    # plain 60 s: no stale-while-revalidate, so the kill switch (upcoming_enabled=0) and a
+    # withdrawn card leave every browser within about a minute, not ten
+    UPCOMING_CACHE = "public, max-age=60"
 
     class UpcomingInterestRequest(BaseModel):
         upcoming_id: int
-        phone: str | None = Field(default=None, max_length=32)
+        phone: str | None = Field(default=None, max_length=32)     # required in practice: validated server-side
         qty_interest: int | None = Field(default=None, ge=1, le=shop.MAX_QTY)   # optional, "no commitment"
         device_id: str | None = Field(default=None, max_length=64)
         ref: str | None = Field(default=None, max_length=32)
+
+    class UpcomingSettingsIn(BaseModel):
+        upcoming_enabled: bool
 
     class UpcomingPatch(BaseModel):
         status: str | None = Field(default=None, max_length=16)
@@ -785,23 +793,36 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if not shop.market_enabled():
             raise HTTPException(status_code=404, detail="The marketplace is not open.")
         return Response(content=upcoming.public_json(), media_type="application/json",
-                        headers={"Cache-Control": MARKET_CACHE, "X-Robots-Tag": "noindex, nofollow"})
+                        headers={"Cache-Control": UPCOMING_CACHE, "X-Robots-Tag": "noindex, nofollow"})
 
     @app.post("/public/market/upcoming/interest")
     @limiter.limit("20/minute")      # the restock endpoint's limit: it is the same request, for a card that has no stock yet
     def market_upcoming_interest(request: Request, body: UpcomingInterestRequest) -> dict:
         if not shop.market_enabled():
             raise HTTPException(status_code=404, detail="The marketplace is not open.")
-        ok = upcoming.add_interest(body.upcoming_id, body.phone, body.device_id, body.ref, body.qty_interest)
+        try:
+            ok = upcoming.add_interest(body.upcoming_id, body.phone, body.device_id, body.ref, body.qty_interest)
+        except upcoming.UpcomingError as e:          # no usable phone: the sheet validates first, this is the backstop
+            raise HTTPException(status_code=400, detail=str(e)) from e
         return {"ok": ok}
 
     @app.get("/shop/upcoming")
     def shop_upcoming_list(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
-        """Admins / Shop Admin: every card with its interest count. A rep: the published ones only
-        (for the share cards on Today)."""
+        """Admins / Shop Admin: every card with its interest count and phones. A rep: the published
+        ones only (for the share cards on Today), and none while the kill switch is off."""
         can_edit = user.role == "admin" or has_feature(user, "Shop Admin")
-        return {"items": upcoming.list_admin(all_statuses=can_edit), "can_edit": can_edit,
-                "settings": upcoming.settings()}
+        vals = upcoming.settings()
+        return {"items": upcoming.list_admin(all_statuses=can_edit, vals=vals), "can_edit": can_edit,
+                "settings": vals}
+
+    @app.post("/shop/upcoming/settings")
+    def shop_upcoming_settings(body: UpcomingSettingsIn,
+                               user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """The kill switch from the desk: pause (hide the rail, the page cards, the rep list, stop
+        "notify me") or resume — item statuses untouched, effective within about a minute."""
+        vals = upcoming.set_enabled(body.upcoming_enabled, by=user.email)
+        log_event(user.email, "shop.upcoming_settings", detail={"upcoming_enabled": vals.get("upcoming_enabled")})
+        return {"ok": True, "settings": vals}
 
     @app.patch("/shop/upcoming/{item_id}")
     def shop_upcoming_update(item_id: int, body: UpcomingPatch,
@@ -819,7 +840,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.get("/shop/upcoming/interest")
     def shop_upcoming_interest(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
         """"Shops interested from your link" — a rep sees interest that came through his referral
-        code; admins see all of it."""
+        code, every phone listed; admins see all of it. Marking a group as told is the restock
+        resolve route (POST /shop/restock/resolve with the group's ids)."""
         _sid, admin = _scope(user)
         ref = None
         if not admin:

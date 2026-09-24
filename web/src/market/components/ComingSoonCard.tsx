@@ -48,8 +48,12 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
   const maxChips = compact ? 3 : 8
   const chips = item.variants.slice(0, maxChips)
   const more = item.variants.length - chips.length
-  // the product view uses the WebP size set like a catalog photo; the box view is the one full box photo
-  const photo = view === 'box' && item.box_url ? { srcs: [item.box_url] } : { item: { thumb_urls: item.photo_thumb_urls, product_image_url: item.photo_url, package_image_url: item.box_url } }
+  // both views use a WebP size set like a catalog photo (the box has its own since R1b); the full
+  // JPEG is only the fallback chain
+  const photo =
+    view === 'box' && item.box_url
+      ? { item: { thumb_urls: item.box_thumb_urls, product_image_url: item.box_url, package_image_url: null } }
+      : { item: { thumb_urls: item.photo_thumb_urls, product_image_url: item.photo_url, package_image_url: item.box_url } }
 
   return (
     <article

@@ -11,12 +11,17 @@ Rules kept here (pure functions, tested without a database in tests/test_r1b_upc
   * only `published` items are public;
   * a card retires the moment its catalog_item_code names a live catalog item (is_retired), so a
     product can never show as both "coming soon" and a real product;
-  * the arrival label is month-level ("Arriving October") and drops to "Arriving soon" once that
-    month has passed, so no stale promise stays up (expected_labels).
+  * the arrival label DERIVES from expected_month ("Arriving October") and drops to "Arriving
+    soon" once that month has passed, so no stale promise stays up (expected_labels). The importer
+    never writes a label; changing the month clears any hand-written label unless a new one is
+    sent with it (update_item), so the page can never keep saying "October" in November.
+  * "notify me" needs a phone (normalised the way /public/market/recognize does), otherwise the
+    rep has nobody to message when the stock lands.
 
 Routes are registered by app/shop_api.py (its "Coming soon" block). The public payload is cached
-for 60 s like the catalog context, and is a separate request so the home page's LCP never waits
-for it.
+for 60 s (plain max-age, no stale-while-revalidate: the kill switch must bite within a minute),
+and is a separate request so the home page's LCP never waits for it. Every read tolerates the
+table not existing yet (the API may deploy before the migration): it logs and returns nothing.
 """
 from __future__ import annotations
 
@@ -44,8 +49,8 @@ TABLE = "shop_upcoming_items"
 # (shipment_ref, created_by, catalog_item_code, timestamps) stays inside.
 PUBLIC_FIELDS = (
     "id", "brand", "model_code", "category", "name_en", "name_ar", "spec_en", "spec_ar",
-    "variants", "photo_url", "photo_thumb_urls", "box_url", "expected_label_en", "expected_label_ar",
-    "sort_order",
+    "variants", "photo_url", "photo_thumb_urls", "box_url", "box_thumb_urls",
+    "expected_label_en", "expected_label_ar", "sort_order",
 )
 # A key that must never appear anywhere in the public payload (defence in depth: the table has no
 # such column, and the importer refuses to build a row with one).
@@ -53,8 +58,10 @@ FORBIDDEN_KEY = re.compile(r"price|cost|qty|quantity|amount|value|margin|rmb|usd
 VARIANT_PUBLIC = ("label", "label_ar")
 
 # app_settings keys this module owns (read straight from the table, not via shop.SETTING_DEFAULTS).
-# upcoming_enabled = "0" hides the rail, the brand page and the rep list at once without touching
-# any item's status — the kill switch for the launch window.
+# upcoming_enabled = "0" is the kill switch for the launch window: the public payload empties, a
+# rep's card list and interest list empty, "notify me" stops taking requests — without touching
+# any item's status. It bites within about a minute (60 s public max-age + the portal's 60 s
+# staleTime); admins keep seeing every card in the desk so they can switch it back on.
 SETTING_DEFAULTS = {"upcoming_enabled": "1"}
 
 _TTL = 60.0
@@ -114,6 +121,27 @@ def is_retired(row: dict, active_codes: set[str]) -> bool:
     return bool(code) and code in active_codes
 
 
+def normalise_phone(raw) -> str | None:
+    """The phone a "notify me" request must carry, normalised exactly as /public/market/recognize
+    does (shop.recognize_phone): digits only, an 8-digit Bahrain number gets its 973 prefix, and
+    anything shorter than 8 digits is no phone at all (None)."""
+    digits = re.sub(r"\D", "", str(raw or ""))
+    phone = ("973" + digits) if len(digits) == 8 else digits
+    if len(phone) < 8:
+        return None
+    return phone[:32]
+
+
+def _thumbs(raw) -> dict | None:
+    """A {"160": url, "320": url, "512": url} set, or None (a jsonb column may come back as text)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    return raw if isinstance(raw, dict) and raw else None
+
+
 def _clean_variants(raw) -> list[dict]:
     if isinstance(raw, str):
         try:
@@ -139,13 +167,8 @@ def public_item(row: dict, today: date | None = None) -> dict:
             continue
         out[k] = row.get(k)
     out["variants"] = _clean_variants(row.get("variants"))
-    thumbs = row.get("photo_thumb_urls")
-    if isinstance(thumbs, str):
-        try:
-            thumbs = json.loads(thumbs)
-        except ValueError:
-            thumbs = None
-    out["photo_thumb_urls"] = thumbs if isinstance(thumbs, dict) else None
+    out["photo_thumb_urls"] = _thumbs(row.get("photo_thumb_urls"))
+    out["box_thumb_urls"] = _thumbs(row.get("box_thumb_urls"))
     out["expected_label_en"], out["expected_label_ar"] = en, ar
     return out
 
@@ -204,11 +227,32 @@ def enabled(vals: dict | None = None) -> bool:
     return str((vals or settings()).get("upcoming_enabled", "1")).strip() in ("1", "true", "True", "yes")
 
 
+def set_enabled(on: bool, by: str = "") -> dict[str, str]:
+    """The kill switch from the portal (no database session needed): upcoming_enabled = 1 | 0.
+    Item statuses are untouched; the public cache is dropped so the next request answers."""
+    get_client().table("app_settings").upsert(
+        {"key": "upcoming_enabled", "value": "1" if on else "0", "updated_by": by, "updated_at": _iso()},
+        on_conflict="key").execute()
+    invalidate()
+    return settings()
+
+
 # ── rows ──────────────────────────────────────────────────────────────────────
 
 def _rows() -> list[dict]:
     return (get_client().table(TABLE).select("*")
             .order("sort_order", nullsfirst=False).order("id").limit(500).execute().data or [])
+
+
+def _rows_safe() -> list[dict]:
+    """_rows() for the routes that must answer 200 before the migration lands (the rep's Today
+    page loads them on every visit): a missing table is logged once per call and reads as no
+    cards, never as a 500."""
+    try:
+        return _rows()
+    except Exception as e:  # noqa: BLE001 — the table arrives with the migration
+        log.warning("upcoming rows unavailable (migration not applied?): %s", e)
+        return []
 
 
 def _active_codes() -> set[str]:
@@ -263,9 +307,17 @@ def _iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def list_admin(all_statuses: bool = True) -> list[dict]:
-    """Every row (or the published ones for a rep) with the interest count and the retired flag."""
-    rows = _rows()
+def list_admin(all_statuses: bool = True, vals: dict | None = None) -> list[dict]:
+    """Every row (the office desk) — or, for a rep (all_statuses=False), the published ones only,
+    and none at all while the kill switch is off, so nobody keeps sharing a link to a page that
+    says nothing is announced. Each row carries the interest count, the number of distinct phones
+    and the retired flag; the office desk also gets the phones themselves (interest_phones), so
+    interest that came in without a rep's link can still be answered by someone."""
+    if not all_statuses and not enabled(vals):
+        return []
+    rows = _rows_safe()
+    if not rows:
+        return []
     active = _active_codes()
     counts = interest_counts()
     out = []
@@ -280,6 +332,9 @@ def list_admin(all_statuses: bool = True) -> list[dict]:
         c = counts.get(int(r["id"]), {})
         row["interest_count"] = c.get("count", 0)
         row["interest_shops"] = c.get("shops", 0)
+        if all_statuses:
+            row["interest_phones"] = list(c.get("phones") or [])
+            row["interest_ids"] = list(c.get("ids") or [])
         out.append(row)
     return out
 
@@ -306,6 +361,11 @@ def update_item(item_id: int, changes: dict, by: str = "") -> dict:
         raise UpcomingError("Nothing to change.")
     if patch.get("name_en") is None and "name_en" in patch:
         raise UpcomingError("name_en cannot be blank.")
+    if "expected_month" in patch:
+        # the month moved: any label that did not come with it derives from the month again, so
+        # "Arriving October" (or its Arabic) can never outlive a move to November
+        for k in ("expected_label_en", "expected_label_ar"):
+            patch.setdefault(k, None)
     patch["updated_at"] = _iso()
     res = get_client().table(TABLE).update(patch).eq("id", int(item_id)).execute().data or []
     if not res:
@@ -320,22 +380,29 @@ def update_item(item_id: int, changes: dict, by: str = "") -> dict:
 # ── interest ("notify me when it lands") ──────────────────────────────────────
 
 def _visible_row(upcoming_id: int) -> dict | None:
-    for r in _rows():
+    for r in _rows_safe():
         if int(r.get("id") or 0) == int(upcoming_id):
             return r if r.get("status") == "published" and not is_retired(r, _active_codes()) else None
     return None
 
 
 def add_interest(upcoming_id: int, phone: str | None, device_id: str | None, referral_code: str | None,
-                 qty_interest: int | None) -> bool:
+                 qty_interest: int | None, vals: dict | None = None) -> bool:
     """One row per device and item (the restock table's open unique index dedupes a repeat).
-    Only a live card takes interest; the quantity is optional and never a commitment."""
+    Only a live card takes interest, only while the feature is on, and only with a phone the rep
+    can message (UpcomingError otherwise — the sheet promises "your representative messages you").
+    The quantity is optional and never a commitment."""
+    norm = normalise_phone(phone)
+    if not norm:
+        raise UpcomingError("A phone number is needed so your representative can reach you.")
+    if not enabled(vals):
+        return False
     row = _visible_row(upcoming_id)
     if not row:
         return False
     qty = int(qty_interest) if qty_interest else None
     rec = {"item_code": f"{row['brand']}:{row['model_code']}"[:64], "upcoming_id": int(row["id"]),
-           "phone": (phone or "").strip()[:32] or None,
+           "phone": norm,
            "device_id": (device_id or "").strip()[:64] or None,
            "referral_code": (referral_code or "").strip().lower()[:32] or None,
            "qty_interest": qty if qty and qty > 0 else None}
@@ -361,22 +428,30 @@ def _interest_rows(referral_code: str | None = None) -> list[dict]:
 
 
 def interest_counts() -> dict[int, dict]:
+    """Per card: open requests, distinct phones (newest first, no repeats) and the row ids —
+    what the office desk shows and can mark as told."""
     out: dict[int, dict] = {}
     for r in _interest_rows():
-        g = out.setdefault(int(r["upcoming_id"]), {"count": 0, "shops": 0, "phones": set()})
+        g = out.setdefault(int(r["upcoming_id"]), {"count": 0, "shops": 0, "phones": [], "ids": []})
         g["count"] += 1
-        if r.get("phone"):
-            g["phones"].add(r["phone"])
+        g["ids"].append(r["id"])
+        if r.get("phone") and r["phone"] not in g["phones"]:
+            g["phones"].append(r["phone"])
     for g in out.values():
-        g["shops"] = len(g.pop("phones"))
+        g["shops"] = len(g["phones"])
     return out
 
 
-def list_interest(referral_code: str | None = None) -> list[dict]:
-    """"Shops interested from your link": open interest grouped per upcoming item, newest first.
-    Scoped to the rep's referral code; the admin (None) sees everything."""
+def list_interest(referral_code: str | None = None, vals: dict | None = None) -> list[dict]:
+    """"Shops interested from your link": open interest grouped per upcoming item, newest first,
+    every phone listed so the rep can message each shop. Scoped to the rep's referral code; the
+    admin (None) sees everything. Empty while the kill switch is off or before the migration."""
+    if not enabled(vals):
+        return []
     rows = _interest_rows(referral_code)
-    items = {int(r["id"]): r for r in _rows()}
+    if not rows:
+        return []
+    items = {int(r["id"]): r for r in _rows_safe()}
     by: dict[int, dict] = {}
     for r in rows:
         uid = int(r["upcoming_id"])

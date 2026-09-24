@@ -30,6 +30,23 @@ export function variantLabel(v: UpcomingVariant): string {
   return (locale.lang === 'ar' && v.label_ar) || v.label
 }
 
+/**
+ * "earbuds, cables, chargers and screen protectors" — the category words of the cards actually
+ * on the page, in shelf order, each once. Publish only the cables and the headline says cables;
+ * never the whole-range list from the owner's draft copy.
+ */
+export function categoryPhrase(items: UpcomingItem[]): string {
+  const t = upcomingCopy()
+  const words: string[] = []
+  for (const it of items) {
+    const cat = (it.category || '').trim()
+    if (!cat) continue
+    const word = t.kinds[cat] || (locale.lang === 'ar' ? cat : cat.toLowerCase())
+    if (!words.includes(word)) words.push(word)
+  }
+  return t.kindsJoin(words.length ? words : [t.kindsFallback])
+}
+
 /** the WhatsApp deep link with the model (and the picked variant) prefilled — the rep's own number, as every other card does it */
 export function askRepUrl(rep: RepCard | null, item: UpcomingItem, variant: string | null): string | null {
   if (!rep?.whatsapp_url) return null

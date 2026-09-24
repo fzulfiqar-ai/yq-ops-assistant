@@ -125,7 +125,9 @@ export interface UpcomingItem {
   /** WebP size set ({"160": url, "320": url, "512": url}), same shape as ShopItem.thumb_urls */
   photo_thumb_urls?: Record<string, string> | null
   box_url?: string | null
-  /** "Arriving October" — month-level, set by the owner; "Arriving soon" once the month has passed */
+  /** the box photo's own WebP size set — the card's Box toggle never has to load the full JPEG */
+  box_thumb_urls?: Record<string, string> | null
+  /** "Arriving October" — derived from the owner's month; "Arriving soon" once the month has passed */
   expected_label_en?: string | null
   expected_label_ar?: string | null
   sort_order?: number | null
@@ -146,7 +148,7 @@ export function getUpcoming(): Promise<UpcomingPayload> {
   return request<UpcomingPayload>('/public/market/upcoming')
 }
 
-/** "Notify me when it lands": the restock flow for a card that has no stock yet; the quantity is optional and never a commitment. */
-export function postUpcomingInterest(body: { upcoming_id: number; phone?: string | null; qty_interest?: number | null; device_id?: string; ref?: string | null }): Promise<{ ok: boolean }> {
+/** "Notify me when it lands": the restock flow for a card that has no stock yet. The phone is required (the server answers 400 without a usable one); the quantity is optional and never a commitment. */
+export function postUpcomingInterest(body: { upcoming_id: number; phone: string; qty_interest?: number | null; device_id?: string; ref?: string | null }): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>('/public/market/upcoming/interest', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) })
 }

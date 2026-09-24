@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CalendarClock, Check, Eye, EyeOff, Link2, Loader2, PackageCheck, Users } from 'lucide-react'
-import { apiGet, apiPatch, ApiError } from '@/lib/api'
+import { CalendarClock, Check, ChevronDown, Eye, EyeOff, Link2, Loader2, MessageCircle, PackageCheck, Pause, Play, Users } from 'lucide-react'
+import { apiGet, apiPatch, apiPost, ApiError } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
@@ -10,14 +10,19 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { waLink } from '@/pages/sales/lib'
 
 /**
  * /upcoming — the office's "Coming soon" desk (plan §6b). The cards scripts/import_upcoming.py
  * inserted as drafts: publish or withdraw each one, set the arrival month (the marketplace label
- * derives from it and drops to "Arriving soon" once the month has passed), fix copy, and on
- * arrival link the catalog code — which retires the card automatically while that item is live.
- * The interest count is what the "Notify me" button collected. No price is set here: the price
- * arrives with the price book, like every other SKU.
+ * derives from it — a month change clears any hand-written label — and drops to "Arriving soon"
+ * once the month has passed), fix copy (including an optional label override), and on arrival
+ * link the catalog code — which retires the card automatically while that item is live. The
+ * interest count is what the "Notify me" button collected; expand it to see every phone (with a
+ * WhatsApp link) and mark them told, for requests that came in without a rep's link. "Pause"
+ * is the kill switch (upcoming_enabled): rail, page cards, rep list and "notify me" go dark
+ * within about a minute, no status changes. No price is set here: the price arrives with the
+ * price book, like every other SKU.
  */
 
 type Status = 'draft' | 'published' | 'arrived' | 'withdrawn'
@@ -40,6 +45,7 @@ interface Item {
   photo_url?: string | null
   photo_thumb_urls?: Record<string, string> | null
   box_url?: string | null
+  box_thumb_urls?: Record<string, string> | null
   shipment_ref?: string | null
   expected_month?: string | null
   expected_label_en?: string | null
@@ -50,6 +56,9 @@ interface Item {
   retired?: boolean
   interest_count?: number
   interest_shops?: number
+  /** the desk only: every distinct phone that asked, and the request ids to mark as told */
+  interest_phones?: string[]
+  interest_ids?: number[]
 }
 
 interface Resp {
@@ -57,6 +66,8 @@ interface Resp {
   can_edit: boolean
   settings?: Record<string, string>
 }
+
+const TOLD_MSG = (it: Item) => `Hello, you asked to be told when ${it.brand} ${it.model_code} (${it.name_en}) lands at YQ. It is ${it.status === 'arrived' ? 'in now' : 'on its way'} — shall we add it to your next order?`
 
 const STATUS_TONE: Record<Status, BadgeTone> = { draft: 'grey', published: 'green', arrived: 'accent', withdrawn: 'amber' }
 const STATUS_LABEL: Record<Status, string> = { draft: 'Draft', published: 'Published', arrived: 'Arrived', withdrawn: 'Withdrawn' }
@@ -87,11 +98,30 @@ export default function Upcoming() {
     },
     onError: (e) => toast(errorText(e), 'error'),
   })
+  /** the kill switch: POST /shop/upcoming/settings (audited); statuses stay as they are */
+  const toggle = useMutation({
+    mutationFn: (on: boolean) => apiPost<{ ok: boolean }>('/shop/upcoming/settings', { upcoming_enabled: on }),
+    onSuccess: (_r, on) => {
+      qc.invalidateQueries({ queryKey: ['shop-upcoming'] })
+      toast(on ? 'Coming soon is live again' : 'Coming soon paused — gone from every screen within a minute', 'success')
+    },
+    onError: (e) => toast(errorText(e), 'error'),
+  })
+  /** "Mark as told" for the desk: the restock resolve route with this card's request ids */
+  const told = useMutation({
+    mutationFn: (ids: number[]) => apiPost<{ ok: boolean; n: number }>('/shop/restock/resolve', { ids }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['shop-upcoming'] })
+      toast('Marked as told', 'success')
+    },
+    onError: (e) => toast(errorText(e), 'error'),
+  })
   const [filter, setFilter] = useState<Status | 'all'>('all')
   const [month, setMonth] = useState('')
   const [bulkBusy, setBulkBusy] = useState(false)
   const items = useMemo(() => q.data?.items || [], [q.data])
   const canEdit = q.data?.can_edit !== false
+  const paused = q.data?.settings?.upcoming_enabled === '0'
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: items.length }
     for (const it of items) c[it.status] = (c[it.status] || 0) + 1
@@ -124,10 +154,20 @@ export default function Upcoming() {
     <div>
       <PageHeader
         title="Coming soon"
-        subtitle="Announced ranges before they land — publish the cards, set the arrival month, link each one to its catalog code when the stock is in."
+        subtitle={paused ? 'PAUSED — the rail, the brand page cards, the rep list and "Notify me" are hidden (statuses untouched). Resume to show them again.' : 'Announced ranges before they land — publish the cards, set the arrival month, link each one to its catalog code when the stock is in.'}
         actions={
           canEdit ? (
             <>
+              <Button
+                variant={paused ? 'default' : 'outline'}
+                size="sm"
+                disabled={toggle.isPending}
+                onClick={() => {
+                  if (paused || window.confirm('Pause "Coming soon"? The rail, the page cards, the rep list and "Notify me" disappear within a minute. Statuses are kept; Resume brings everything back.')) toggle.mutate(paused)
+                }}
+              >
+                {toggle.isPending ? <Loader2 size={14} className="animate-spin" /> : paused ? <Play size={14} /> : <Pause size={14} />} {paused ? 'Resume' : 'Pause'}
+              </Button>
               <Button variant="outline" size="sm" disabled={bulkBusy || !counts.draft} onClick={() => bulk((i) => i.status === 'draft', { status: 'published' }, 'Publish')}>
                 {bulkBusy ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />} Publish all drafts
               </Button>
@@ -135,6 +175,11 @@ export default function Upcoming() {
           ) : undefined
         }
       />
+      {paused && (
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-2.5 text-[13px] text-amber-900">
+          <Pause size={14} aria-hidden="true" /> Paused: nothing "coming soon" shows anywhere right now.
+        </div>
+      )}
 
       {/* the numbers */}
       <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -184,7 +229,7 @@ export default function Upcoming() {
       ) : (
         <ul className="space-y-3">
           {shown.map((it) => (
-            <UpcomingRow key={it.id} item={it} canEdit={canEdit} busy={patch.isPending && patch.variables?.id === it.id} onPatch={(body) => patch.mutate({ id: it.id, body })} />
+            <UpcomingRow key={it.id} item={it} canEdit={canEdit} busy={patch.isPending && patch.variables?.id === it.id} onPatch={(body) => patch.mutate({ id: it.id, body })} onTold={(ids) => told.mutate(ids)} telling={told.isPending} />
           ))}
         </ul>
       )}
@@ -192,15 +237,19 @@ export default function Upcoming() {
   )
 }
 
-function UpcomingRow({ item, canEdit, busy, onPatch }: { item: Item; canEdit: boolean; busy: boolean; onPatch: (body: Record<string, unknown>) => void }) {
+function UpcomingRow({ item, canEdit, busy, onPatch, onTold, telling }: { item: Item; canEdit: boolean; busy: boolean; onPatch: (body: Record<string, unknown>) => void; onTold: (ids: number[]) => void; telling: boolean }) {
   const [code, setCode] = useState(item.catalog_item_code || '')
   const [month, setMonth] = useState((item.expected_month || '').slice(0, 7))
   const [editing, setEditing] = useState(false)
-  const [copy, setCopy] = useState({ name_en: item.name_en, name_ar: item.name_ar || '', spec_en: item.spec_en || '', spec_ar: item.spec_ar || '' })
-  const thumb = item.photo_thumb_urls?.['160'] || item.photo_url || item.box_url || null
+  const [showPhones, setShowPhones] = useState(false)
+  // the editor's label fields hold the OVERRIDE (blank = derived from the month), not the shown label
+  const [copy, setCopy] = useState({ name_en: item.name_en, name_ar: item.name_ar || '', spec_en: item.spec_en || '', spec_ar: item.spec_ar || '', expected_label_en: '', expected_label_ar: '' })
+  const thumb = item.photo_thumb_urls?.['160'] || item.photo_url || item.box_thumb_urls?.['160'] || item.box_url || null
   const status = item.status
   const monthDirty = month !== (item.expected_month || '').slice(0, 7)
   const codeDirty = code.trim().toUpperCase() !== (item.catalog_item_code || '')
+  const phones = item.interest_phones || []
+  const ids = item.interest_ids || []
 
   return (
     <li>
@@ -222,18 +271,53 @@ function UpcomingRow({ item, canEdit, busy, onPatch }: { item: Item; canEdit: bo
                   Live in catalog · card retired
                 </Badge>
               )}
-              {(item.interest_count || 0) > 0 && (
-                <Badge tone="accent">
-                  <Users size={11} className="mr-0.5 inline" aria-hidden="true" /> {item.interest_count} notify-me{item.interest_shops ? ` · ${item.interest_shops} phone${item.interest_shops === 1 ? '' : 's'}` : ''}
-                </Badge>
-              )}
+              {(item.interest_count || 0) > 0 &&
+                (phones.length ? (
+                  <button type="button" onClick={() => setShowPhones((v) => !v)} aria-expanded={showPhones} aria-controls={`upcoming-phones-${item.id}`} className="inline-flex items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+                    <Badge tone="accent">
+                      <Users size={11} className="mr-0.5 inline" aria-hidden="true" /> {item.interest_count} notify-me · {phones.length} phone{phones.length === 1 ? '' : 's'}
+                      <ChevronDown size={11} className={cn('ml-0.5 inline transition-transform', showPhones && 'rotate-180')} aria-hidden="true" />
+                    </Badge>
+                  </button>
+                ) : (
+                  <Badge tone="accent">
+                    <Users size={11} className="mr-0.5 inline" aria-hidden="true" /> {item.interest_count} notify-me{item.interest_shops ? ` · ${item.interest_shops} phone${item.interest_shops === 1 ? '' : 's'}` : ''}
+                  </Badge>
+                ))}
             </div>
+            {showPhones && phones.length > 0 && (
+              <ul id={`upcoming-phones-${item.id}`} className="mt-2 divide-y divide-border rounded-xl border border-border bg-muted/30">
+                {phones.map((p) => {
+                  const wa = waLink(p, TOLD_MSG(item))
+                  return (
+                    <li key={p} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                      <span className="text-[13px] tabular-nums">{p}</span>
+                      {wa && (
+                        <a href={wa} target="_blank" rel="noreferrer" aria-label={`WhatsApp ${p}`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-[12px] font-semibold text-[#1d9e50] hover:bg-muted">
+                          <MessageCircle size={13} aria-hidden="true" /> WhatsApp
+                        </a>
+                      )}
+                    </li>
+                  )
+                })}
+                {canEdit && ids.length > 0 && (
+                  <li className="px-3 py-2">
+                    <Button size="sm" variant="outline" disabled={telling} onClick={() => onTold(ids)}>
+                      <Check size={14} /> Mark all as told
+                    </Button>
+                  </li>
+                )}
+              </ul>
+            )}
             {editing ? (
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 <Input value={copy.name_en} onChange={(e) => setCopy({ ...copy, name_en: e.target.value })} placeholder="Name (EN)" />
                 <Input value={copy.name_ar} onChange={(e) => setCopy({ ...copy, name_ar: e.target.value })} placeholder="الاسم (AR)" dir="rtl" />
                 <Input value={copy.spec_en} onChange={(e) => setCopy({ ...copy, spec_en: e.target.value })} placeholder="Spec (EN)" />
                 <Input value={copy.spec_ar} onChange={(e) => setCopy({ ...copy, spec_ar: e.target.value })} placeholder="المواصفات (AR)" dir="rtl" />
+                <Input value={copy.expected_label_en} onChange={(e) => setCopy({ ...copy, expected_label_en: e.target.value })} placeholder={`Arrival label (EN) — blank = "${item.expected_label_en || 'from the month'}"`} />
+                <Input value={copy.expected_label_ar} onChange={(e) => setCopy({ ...copy, expected_label_ar: e.target.value })} placeholder={`عبارة الوصول (AR) — ${item.expected_label_ar || 'من الشهر'}`} dir="rtl" />
+                <p className="text-[11.5px] text-muted-foreground sm:col-span-2">Leave the arrival labels blank to derive them from the month; a hand-written label is cleared whenever the month changes.</p>
                 <div className="flex gap-2 sm:col-span-2">
                   <Button size="sm" disabled={busy || !copy.name_en.trim()} onClick={() => { onPatch(copy); setEditing(false) }}>
                     <Check size={14} /> Save copy
@@ -266,6 +350,7 @@ function UpcomingRow({ item, canEdit, busy, onPatch }: { item: Item; canEdit: bo
             <div className="mt-2 text-[12px] text-muted-foreground">
               Shows as <b className="text-foreground">{item.expected_label_en}</b>
               {item.expected_label_ar ? ` · ${item.expected_label_ar}` : ''}
+              {item.expected_month ? ` · from month ${item.expected_month.slice(0, 7)}` : ' · no month set'}
               {item.shipment_ref ? ` · shipment ${item.shipment_ref}` : ''} · price label “Price on arrival”
             </div>
           </div>

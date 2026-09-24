@@ -27,12 +27,13 @@ create table if not exists shop_upcoming_items (
   spec_en            text,
   spec_ar            text,
   variants           jsonb       not null default '[]'::jsonb,   -- [{label, label_ar, comps}] — colours/connectors/sizes, never counts
-  photo_url          text,
+  photo_url          text,                                        -- object names carry a content hash: a re-imported photo is a new URL
   photo_thumb_urls   jsonb,                                       -- {"160": url, "320": url, "512": url} (WebP, catalog bucket, upcoming/)
   box_url            text,
+  box_thumb_urls     jsonb,                                       -- the box photo's WebP size set (the card's Box toggle)
   shipment_ref       text,                                        -- invoice number(s); internal, never public
   expected_month     date,                                        -- first day of the arrival month; the label derives from it
-  expected_label_en  text,                                        -- optional override of the derived label
+  expected_label_en  text,                                        -- optional override, cleared whenever the month changes without one
   expected_label_ar  text,
   status             text        not null default 'draft'
                      check (status in ('draft', 'published', 'arrived', 'withdrawn')),
@@ -93,11 +94,11 @@ begin
   select count(*) into n from information_schema.columns
   where table_schema = 'public' and table_name = 'shop_upcoming_items'
     and column_name in ('brand', 'model_code', 'name_en', 'name_ar', 'spec_en', 'spec_ar', 'variants', 'photo_url',
-                        'photo_thumb_urls', 'box_url', 'shipment_ref', 'expected_month', 'expected_label_en',
-                        'expected_label_ar', 'status', 'catalog_item_code', 'sort_order', 'created_by',
-                        'created_at', 'updated_at');
-  if n <> 20 then
-    raise exception 'shop_upcoming migration FAILED: shop_upcoming_items has %/20 expected columns', n;
+                        'photo_thumb_urls', 'box_url', 'box_thumb_urls', 'shipment_ref', 'expected_month',
+                        'expected_label_en', 'expected_label_ar', 'status', 'catalog_item_code', 'sort_order',
+                        'created_by', 'created_at', 'updated_at');
+  if n <> 21 then
+    raise exception 'shop_upcoming migration FAILED: shop_upcoming_items has %/21 expected columns', n;
   end if;
   select count(*) into n from pg_constraint
   where conrelid = 'public.shop_upcoming_items'::regclass and contype = 'u'

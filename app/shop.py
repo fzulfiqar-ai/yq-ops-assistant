@@ -2689,6 +2689,10 @@ def list_restock(referral_code: str | None = None) -> list[dict]:
     if referral_code:
         q = q.eq("referral_code", referral_code.lower())
     rows = q.order("created_at", desc=True).limit(500).execute().data or []
+    # "notify me when it lands" for a Coming-soon card (app/upcoming.py) shares this table with
+    # upcoming_id set; those belong to the rep's "Shops interested from your link", not here.
+    # Filtered in Python, not in the query, so this answers before that migration adds the column.
+    rows = [r for r in rows if not r.get("upcoming_id")]
     ctx = context()
     by: dict[str, dict] = {}
     for r in rows:

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Navigate, useParams } from 'react-router-dom'
 import { LayoutGrid } from 'lucide-react'
 import { ComingSoonCard } from '../components/ComingSoonCard'
-import { upcomingCopy } from '../components/ComingSoonShared'
+import { categoryPhrase, upcomingCopy } from '../components/ComingSoonShared'
 import { MarketCard } from '../components/MarketCard'
 import { Rail } from '../components/Rail'
 import { ConnectingState, EmptyState } from '../components/States'
@@ -77,7 +77,8 @@ export default function BrandPage() {
           <h1 id="brand-hero" className="mt-1 text-balance font-display text-2xl font-bold leading-tight text-white lg:text-3xl">
             {t.headline(brand)}
           </h1>
-          <p className="mt-3 max-w-prose text-[15px] leading-relaxed text-white/95">{t.subline(upcoming.length, when)}</p>
+          {/* count, month AND the category words are data from the cards on this page */}
+          <p className="mt-3 max-w-prose text-[15px] leading-relaxed text-white/95">{t.subline(upcoming.length, when, categoryPhrase(upcoming))}</p>
           <p className="mt-2 font-display text-base font-bold text-white/90">{t.tagline}</p>
           <p className="mt-3 inline-flex rounded-full bg-white/15 px-3 py-1 text-xs font-semibold">{t.price}</p>
         </section>

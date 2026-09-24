@@ -17,9 +17,16 @@ What it does (trust plan §6b, release R1b):
      category, name EN/AR, spec, variant chips, expected label; every Arabic line flagged for
      native review), plus the cleaned photos and 160/320/512 WebP thumbs, under
      business_data/upcoming_review/<date>/ (gitignored: the folder is checked);
-  5. with --commit --yes: uploads the photos to the catalog bucket under upcoming/ and inserts the
-     rows as status 'draft' (existing codes keep their status; copy and photos are refreshed).
+  5. with --commit --yes: uploads the photos to the PUBLIC catalog bucket under upcoming/ and
+     inserts the rows as status 'draft' (existing codes keep their status, month and sort; copy
+     and photos are refreshed). Object names carry a content hash ({code}-product-{sha1[:8]}.jpg),
+     so a corrected photo is a NEW URL that reaches phones whose service worker cached the old one.
      Publishing is an admin action in the portal (Coming soon page), after the owner's review.
+
+What is public when: the CARDS (names, specs, chips, month) reach the marketplace only once
+published in the portal. The PHOTOS are public storage objects from --commit onwards — anyone
+holding a storage URL can fetch one, though nothing links to them until the card is published.
+No label text is written: the arrival label always derives from expected_month (app/upcoming.py).
 
 Never reads Wekome_Shipments_Cost_Profit_Review_240926.xlsx; the invoice prices and quantities
 the parser sees are dropped before anything is written. YQ_WEKOME_DIR points at the shipments
@@ -187,7 +194,6 @@ def build_rows(products: list[dict], ships: list[dict], month: str | None = DEFA
             if s["invoice"] not in invoices[ln["code"]]:
                 invoices[ln["code"]].append(s["invoice"])
     m = parse_month(month) if month else None
-    label_en, label_ar = expected_labels(m)
     ordered = sorted(products, key=lambda p: (wk.WK_CATEGORY_ORDER.index(p["category"]), p["code"]))
     rows = []
     for i, p in enumerate(ordered, 1):
@@ -209,11 +215,19 @@ def build_rows(products: list[dict], ships: list[dict], month: str | None = DEFA
             "name_en": p["name"], "name_ar": name_ar, "spec_en": spec_en, "spec_ar": spec_ar,
             "variants": variants, "shipment_ref": " · ".join(invoices.get(p["code"], [])),
             "expected_month": m.isoformat() if m else None,
-            "expected_label_en": label_en, "expected_label_ar": label_ar,
+            # never a literal label: the marketplace derives "Arriving October" from the month, so a
+            # later month change in the portal can never leave stale wording behind
+            "expected_label_en": None, "expected_label_ar": None,
             "status": "draft", "sort_order": i,
         })
     assert_no_money(rows, "rows")
     return rows
+
+
+def row_labels(row: dict) -> tuple[str, str]:
+    """The (en, ar) label a row will show — for the review sheet and the console, the same rule
+    the marketplace applies (app.upcoming.expected_labels)."""
+    return expected_labels(row.get("expected_month"), row.get("expected_label_en"), row.get("expected_label_ar"))
 
 
 def render_images(products: list[dict]) -> dict[str, dict]:
@@ -261,15 +275,17 @@ def review_sheet(rows: list[dict], images: dict[str, dict], out_dir: Path, stats
     for r in rows:
         by_cat.setdefault(r["category"], []).append(r)
     flag = "<span class='flag'>Arabic · needs native review</span>"
+    first_en, first_ar = row_labels(rows[0])
     parts = [
-        f"<h1>WEKOME · Coming soon · owner review</h1>",
+        "<h1>WEKOME · Coming soon · owner review</h1>",
         f"<p class='lede'>{stats['models']} models from invoice AS2026072701 (shipments 1 + 2), merged by model code. "
-        f"Generated {date.today().isoformat()}. Nothing on this sheet is public until the item is published in the portal.</p>",
+        f"Generated {date.today().isoformat()}. The cards on this sheet reach the marketplace only when published in the portal; "
+        "the photos become public storage files at the --commit step (fetchable by anyone holding the storage URL, linked from nowhere until published).</p>",
         "<div class='kpis'>"
         f"<div class='kpi'><b>{stats['models']}</b><span>models</span></div>"
         f"<div class='kpi'><b>{stats['photos']}</b><span>photos (product + box)</span></div>"
         f"<div class='kpi'><b>{stats['shared']}</b><span>photos shared between cards</span></div>"
-        f"<div class='kpi'><b>{e(rows[0]['expected_label_en'])}</b><span>{e(rows[0]['expected_label_ar'])}</span></div>"
+        f"<div class='kpi'><b>{e(first_en)}</b><span>{e(first_ar)}</span></div>"
         "</div>",
         "<p class='hint'>Check per card: the photo shows the right product and box, the name and spec match the WK price list, "
         "the variant chips are the colours/connectors/sizes you will stock, and the Arabic reads naturally. "
@@ -282,6 +298,7 @@ def review_sheet(rows: list[dict], images: dict[str, dict], out_dir: Path, stats
         parts.append(f"<h2>{e(cat)} <span class='cat'>· {e(CATEGORY_AR[cat])}</span> · {len(items)}</h2>")
         for r in items:
             im = images[r["model_code"]]
+            lab_en, lab_ar = row_labels(r)
             chips_en = "".join(f"<span class='chip'>{e(v['label'])}</span>" for v in r["variants"]) or "<span class='cat'>single variant</span>"
             chips_ar = "".join(f"<span class='chip ar'>{e(v['label_ar'])}</span>" for v in r["variants"] if v.get("label_ar"))
             parts.append(
@@ -294,7 +311,7 @@ def review_sheet(rows: list[dict], images: dict[str, dict], out_dir: Path, stats
                 f"<div class='ar'><div><b>{e(r['name_ar'])}</b>{flag}</div><div>{e(r['spec_ar'])}</div></div>"
                 f"<div class='chips'>{chips_en}</div>"
                 + (f"<div class='chips ar'>{chips_ar}</div>" if chips_ar else "")
-                + f"<div class='meta'>Expected: <b>{e(r['expected_label_en'])}</b> · {e(r['expected_label_ar'])} "
+                + f"<div class='meta'>Expected: <b>{e(lab_en)}</b> · {e(lab_ar)} "
                   f"· shipment {e(r['shipment_ref'])} · status <b>{e(r['status'])}</b> · price label: <b>Price on arrival</b></div>"
                 "</div></div>")
     doc = ("<!doctype html><html lang='en'><head><meta charset='utf-8'><title>WEKOME coming soon · owner review</title>"
@@ -329,6 +346,24 @@ def _ignored_by_git(path: Path) -> bool | None:
 
 # ── commit (release step; never run from a dev session) ───────────────────────
 
+def content_tag(raw: bytes) -> str:
+    """The 8-hex content hash in every object name: a changed photo is a new object (and URL), so
+    the one-year cache-control and the service worker's CacheFirst never pin an old picture."""
+    return hashlib.sha1(raw).hexdigest()[:8]
+
+
+def object_paths(code: str, im: dict) -> dict:
+    """Where one model's files go inside the catalog bucket: masters and the WebP size sets, each
+    name carrying its master's content hash."""
+    tag_p, tag_b = content_tag(im["product"]), content_tag(im["box"])
+    return {
+        "product": f"{STORAGE_PREFIX}/{code}-product-{tag_p}.jpg",
+        "box": f"{STORAGE_PREFIX}/{code}-box-{tag_b}.jpg",
+        "thumbs": {s: f"{STORAGE_PREFIX}/thumbs/{code}-product-{tag_p}-{s}.webp" for s, blob in im["thumbs"].items() if blob},
+        "box_thumbs": {s: f"{STORAGE_PREFIX}/thumbs/{code}-box-{tag_b}-{s}.webp" for s, blob in im["box_thumbs"].items() if blob},
+    }
+
+
 def commit(rows: list[dict], images: dict[str, dict]) -> None:
     from app.catalog import THUMB_CACHE, _BUCKET, ensure_bucket, public_url
     from app.database import get_client
@@ -338,23 +373,20 @@ def commit(rows: list[dict], images: dict[str, dict]) -> None:
     for r in rows:
         code = r["model_code"]
         im = images[code]
-        paths = {"product": f"{STORAGE_PREFIX}/{code}-product.jpg", "box": f"{STORAGE_PREFIX}/{code}-box.jpg"}
-        for kind, path in paths.items():
-            bucket.upload(path, im[kind], {"content-type": "image/jpeg", "upsert": "true", "cache-control": THUMB_CACHE})
-        thumbs = {}
-        for s, blob in im["thumbs"].items():
-            if not blob:
-                continue
-            path = f"{STORAGE_PREFIX}/thumbs/{code}-product-{s}.webp"
-            bucket.upload(path, blob, {"content-type": "image/webp", "upsert": "true", "cache-control": THUMB_CACHE})
+        paths = object_paths(code, im)
+        for kind in ("product", "box"):
+            bucket.upload(paths[kind], im[kind], {"content-type": "image/jpeg", "upsert": "true", "cache-control": THUMB_CACHE})
+        thumbs, box_thumbs = {}, {}
+        for s, path in paths["thumbs"].items():
+            bucket.upload(path, im["thumbs"][s], {"content-type": "image/webp", "upsert": "true", "cache-control": THUMB_CACHE})
             thumbs[str(s)] = public_url(path)
-        for s, blob in im["box_thumbs"].items():
-            if blob:
-                bucket.upload(f"{STORAGE_PREFIX}/thumbs/{code}-box-{s}.webp", blob,
-                              {"content-type": "image/webp", "upsert": "true", "cache-control": THUMB_CACHE})
+        for s, path in paths["box_thumbs"].items():
+            bucket.upload(path, im["box_thumbs"][s], {"content-type": "image/webp", "upsert": "true", "cache-control": THUMB_CACHE})
+            box_thumbs[str(s)] = public_url(path)
         r["photo_url"] = public_url(paths["product"])
         r["box_url"] = public_url(paths["box"])
         r["photo_thumb_urls"] = thumbs
+        r["box_thumb_urls"] = box_thumbs
         print(f"  uploaded {code}")
     client = get_client()
     existing = {(x["brand"], x["model_code"]): x for x in
@@ -411,7 +443,8 @@ def main(argv: list[str]) -> int:
         print("  dry run — nothing uploaded, nothing written to the database. Re-run with --commit --yes after the owner's review.")
         return 0
     if not args.yes:
-        print("  --commit needs --yes: this uploads to the catalog bucket and inserts draft rows in production.")
+        print("  --commit needs --yes: this uploads the photos to the PUBLIC catalog bucket (fetchable by URL from then on)"
+              " and inserts draft rows in production (the cards stay unpublished).")
         return 2
     print("WEKOME: committing (upload + draft rows) …")
     commit(rows, images)
