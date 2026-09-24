@@ -542,6 +542,12 @@ class Backend:
         """summary := summary || patch, server side, only while the batch is in `only_status`."""
         raise NotImplementedError
 
+    def reject(self, batch_id: int, patch: dict) -> bool:
+        """status := 'rejected' and summary := summary || patch in ONE statement, only while the
+        batch is still 'previewed'. False when it moved (a commit landed first): the caller answers
+        409 and nothing is overwritten."""
+        raise NotImplementedError
+
     def prune(self) -> dict | None:
         """Retention (ingest_prune()) before a preview; None when not applicable."""
         return None
@@ -656,6 +662,13 @@ class PgBackend(Backend):
             return False
         r = self.query("update ingest_batches set summary = summary || $1::jsonb where id = $2::bigint "
                        "and ($3 = '' or status = $3) returning id", [json.dumps(patch), str(batch_id), only_status or ""])
+        return bool(r)
+
+    def reject(self, batch_id: int, patch: dict) -> bool:
+        if self.read_only or not batch_id:
+            return False
+        r = self.query("update ingest_batches set status = 'rejected', summary = summary || $1::jsonb "
+                       "where id = $2::bigint and status = 'previewed' returning id", [json.dumps(patch), str(batch_id)])
         return bool(r)
 
     def prune(self) -> dict | None:

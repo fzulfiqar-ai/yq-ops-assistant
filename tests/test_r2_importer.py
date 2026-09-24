@@ -431,6 +431,14 @@ class _FakeBackend:
         b["summary"] = (b.get("summary") or {}) | patch
         return True
 
+    def reject(self, batch_id, patch):
+        b = self.batches.get(batch_id)
+        if not b or b.get("status") != "previewed" or self.batches.get(("race", batch_id)):
+            return False
+        b["status"] = "rejected"
+        b["summary"] = (b.get("summary") or {}) | patch
+        return True
+
     def prune(self):
         return {"superseded": 0, "stage_rows_deleted": 0}
 
@@ -708,6 +716,15 @@ def _():
         r = c.post("/ingest/batches/3/reject", json={"reason": "wrong day"})
         assert r.status_code == 200 and fb2.batches[3]["status"] == "rejected" and fb2.batches[3]["summary"]["reject_reason"] == "wrong day"
         assert seen["log"][-1] == "ingest.reject"
+        # the race: the batch read as 'previewed', but a commit lands before the reject's UPDATE —
+        # the conditional update matches nothing, the answer is 409 and nothing is overwritten
+        fb2.batches[4] = {"id": 4, "status": "previewed", "summary": {"commit": {"ok": True}}, "exceptions": []}
+        fb2.batches[("race", 4)] = True
+        logs_before = len(seen["log"])
+        r = c.post("/ingest/batches/4/reject", json={"reason": "clicked Discard after a lost response"})
+        assert r.status_code == 409, (r.status_code, r.text)
+        assert fb2.batches[4]["summary"] == {"commit": {"ok": True}} and len(seen["log"]) == logs_before
+        del fb2.batches[("race", 4)], fb2.batches[4]
         r = c.post("/ingest/batches/3/undo", json={})
         assert r.status_code == 200 and r.json()["ok"] is True and fb2.calls[-1][0] == "ingest_undo"
         assert seen["flush"] == 1 and seen["log"][-1] == "ingest.undo" and seen["sync"] == 0, seen

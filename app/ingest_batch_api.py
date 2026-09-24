@@ -300,8 +300,10 @@ def register(app, limiter) -> None:  # noqa: C901 - one registration function, a
                 return None
             if b["status"] != "previewed":
                 return {"ok": False, "error": f"Batch is {b['status']}; only a previewed batch can be rejected."}
-            backend.update_batch(batch_id, status="rejected",
-                                 summary=(b.get("summary") or {}) | {"rejected_by": admin.email, "reject_reason": (body.reason if body else None)})
+            # one conditional statement: if a commit landed in between, nothing is overwritten
+            if not backend.reject(batch_id, {"rejected_by": admin.email, "reject_reason": (body.reason if body else None)}):
+                return {"ok": False, "conflict": True,
+                        "error": "This batch changed a moment ago (it may have been committed). Refresh the list."}
             try:
                 backend.prune()          # its staged rows have no further use
             except Exception:  # noqa: BLE001
@@ -313,6 +315,8 @@ def register(app, limiter) -> None:  # noqa: C901 - one registration function, a
             return _unavailable(e)
         if out is None:
             raise HTTPException(status_code=404, detail="Batch not found.")
+        if out.get("conflict"):
+            raise HTTPException(status_code=409, detail=out["error"])
         if out.get("ok"):
             await run_in_threadpool(audit.log_event, admin.email, "ingest.reject", detail={"batch_id": batch_id, "reason": (body.reason if body else None)})
         return out
