@@ -35,6 +35,9 @@ create table if not exists salesman_kickback_statements (
   approved_by     text,
   approved_at     timestamptz,
   paid_at         timestamptz,
+  -- replaced by two partial unique indexes in scripts/r3_statements_migration.sql (R3a): superseded
+  -- rows of one data date collided here once superseding became routine. Kept for a fresh
+  -- database so the file stays what production ran; R3a drops it by its definition.
   unique (salesman, period, basis, status, data_through)
 );
 alter table salesman_kickback_statements enable row level security;   -- service role only; no policies

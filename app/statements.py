@@ -14,6 +14,18 @@ once cannot both "approve"), and every move writes an audit_log row. The figures
 from build_rows(), which is exactly what the rep's Today card computes (app.shop.rep_month_sales +
 tier_progress on the owner's ex-VAT basis), so a statement can never disagree with the screen.
 
+One month is paid once (re-review fixes, 24-Sep-2026):
+  * a rep, month and basis can hold ONE approved-or-paid row. transition() refuses to approve a
+    draft while one exists and names it, so the admin supersedes it deliberately first; the
+    partial unique index in scripts/r3_statements_migration.sql backs that up under a race.
+  * a month is approved only once it has ended in Bahrain (the running month can be drafted as a
+    documented moment, never approved) and only months with loaded sales can be drafted at all.
+  * create_draft() compares FIGURES (sales, tier, kickback), not data dates: a rep whose open
+    draft / approved / paid row already carries the current figures is skipped and stale open
+    drafts are retired, so a later data day never spawns a second copy of the same month.
+  * data_through is capped at the last day of the period, so an August statement made in
+    September says "data to 31 Aug", not the September load date.
+
 Owner decisions in force: basis = ex-VAT (net_bhd), net of Focus Sales Returns only once a Sales
 Return register is loaded (returns_bhd stays NULL until then — never estimated), the whole month at
 the reached tier. Money is Decimal, 3 dp, ROUND_HALF_UP; JSON carries 3-dp strings.
@@ -25,9 +37,10 @@ from the payload when PostgREST says they are not there yet.
 """
 from __future__ import annotations
 
+import calendar
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.database import get_client
@@ -37,6 +50,8 @@ log = logging.getLogger(__name__)
 TABLE = "salesman_kickback_statements"
 BASES = ("net_ex_vat", "vat_incl_display")
 STATUSES = ("snapshot", "draft", "approved", "paid", "superseded")
+CHAIN = ("draft", "approved", "paid")          # the payable chain; snapshots sit outside it
+CLOSED = ("approved", "paid")                  # money that is final
 # Forward-only. A key that is missing or maps to () is terminal.
 TRANSITIONS: dict[str, tuple[str, ...]] = {
     "draft": ("approved", "superseded"),
@@ -55,7 +70,13 @@ _Q3 = Decimal("0.001")
 
 
 class StatementError(ValueError):
-    """An admin-facing problem (HTTP 400 at the edge; CONFLICT_MSG is a 409)."""
+    """An admin-facing problem (HTTP 400 at the edge)."""
+
+
+class StatementConflict(StatementError):
+    """A refusal caused by another row's state — a lost compare-and-swap, an approved or paid
+    statement already in place, a duplicate written concurrently. HTTP 409 at the edge: the
+    admin refreshes and decides, nothing is retried blindly."""
 
 
 # ── money ─────────────────────────────────────────────────────────────────────
@@ -94,6 +115,14 @@ def _missing_table(e: Exception) -> bool:
         ("relation" in msg and "does not exist" in msg) or "Could not find the table" in msg
 
 
+def _unique_violation(e: Exception) -> bool:
+    """Postgres 23505 through PostgREST: the partial unique indexes of r3_statements_migration.sql
+    (one approved/paid row per rep-month-basis; one chain row per data date) refused a write."""
+    code = str(getattr(e, "code", "") or "")
+    msg = str(e)
+    return code == "23505" or "23505" in msg or "duplicate key value" in msg
+
+
 # ── pure rules ────────────────────────────────────────────────────────────────
 
 def can_transition(current: str | None, target: str | None) -> bool:
@@ -108,6 +137,48 @@ def valid_period(period) -> str:
     if len(p) != 7 or p[4] != "-" or not (p[:4].isdigit() and p[5:].isdigit()) or not 1 <= int(p[5:]) <= 12:
         raise StatementError("Period must be YYYY-MM.")
     return p
+
+
+def period_end(period: str) -> date:
+    """The last calendar day of 'YYYY-MM'."""
+    p = valid_period(period)
+    y, m = int(p[:4]), int(p[5:7])
+    return date(y, m, calendar.monthrange(y, m)[1])
+
+
+def month_label(period: str) -> str:
+    """'2026-09' → 'September 2026' (for refusals an admin reads)."""
+    p = valid_period(period)
+    return f"{calendar.month_name[int(p[5:7])]} {p[:4]}"
+
+
+def cap_data_through(data_date, period: str) -> str | None:
+    """The data date a statement carries: the latest loaded sale, but never past the period's own
+    last day — an August statement frozen from a September load says 'data to 31 Aug'."""
+    d = str(data_date or "")[:10]
+    if not d:
+        return None
+    end = period_end(period).isoformat()
+    return d if d <= end else end
+
+
+def month_has_ended(period: str, today: date | None = None) -> bool:
+    """True once the whole of `period` is in the past in Bahrain (UTC+3)."""
+    if today is None:
+        from app import shop
+        today = shop.bahrain_today()
+    return valid_period(period) < today.strftime("%Y-%m")
+
+
+def figures(r: dict) -> tuple[Decimal, int, Decimal]:
+    """What makes two statements 'the same month': the frozen sales, the tier and the kickback.
+    The data date is deliberately NOT part of it — a later load that changes nothing must not
+    spawn a second copy of the month."""
+    try:
+        tier = int(r.get("tier_reached") or 0)
+    except (TypeError, ValueError):
+        tier = 0
+    return (d3(r.get("sales_bhd")), tier, d3(r.get("kickback_bhd")))
 
 
 def public_row(r: dict) -> dict:
@@ -149,7 +220,10 @@ def build_rows(period: str, basis: str | None = None) -> list[dict]:
     """One row per rep with a target: the month's Accessories sales on `basis` (giveaways out, SIM
     never), the tier reached and the kickback at that tier's rate on the whole month. Exactly
     app.shop's rep_month_sales / rep_target / tier_progress, so the frozen figure equals the Today
-    card at the moment of freezing. Reps whose target row yields no tiers are skipped."""
+    card at the moment of freezing. Reps whose target row yields no tiers are skipped.
+
+    Refuses a period after the month of the latest loaded sale (there is nothing to freeze), and
+    caps data_through at the period's last day."""
     from app import shop
     basis = basis or shop.KICKBACK_BASIS
     if basis not in BASES:
@@ -162,13 +236,17 @@ def build_rows(period: str, basis: str | None = None) -> list[dict]:
     rows: list[dict] = []
     for name in sorted({str(t["salesman"]) for t in targets if t.get("salesman")}):
         amt, data_date = shop.rep_month_sales(name, basis=basis, period=period)
+        latest = str(data_date or "")[:10] or None
+        if latest and period > latest[:7]:
+            raise StatementError(f"No sales are loaded for {month_label(period)} yet — the latest loaded sale is {latest}.")
+        data_through = cap_data_through(latest, period)
         tgt = shop.rep_target(name, period)
-        tp = shop.tier_progress(tgt, amt, data_date, basis=basis)
+        tp = shop.tier_progress(tgt, amt, data_through, basis=basis)
         if not tp:
             continue
         rows.append({
             "salesman": name, "salesman_id": sid.get(name), "period": period, "basis": basis,
-            "data_through": (str(data_date or "")[:10] or None), "sales_bhd": s3(tp["mtd_bhd"]),
+            "data_through": data_through, "sales_bhd": s3(tp["mtd_bhd"]),
             "returns_bhd": None,                       # valued only from a Sales Return register
             "tier_reached": int(tp["tier_reached"]), "rate": float(tp["kickback_pct"]),
             "kickback_bhd": s3(tp["kickback_bhd"]), "target_snapshot": tgt,
@@ -213,16 +291,26 @@ def get_statement(statement_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def closed_rows(salesman: str, period: str, basis: str, *, exclude_id: int | None = None) -> list[dict]:
+    """The approved / paid statements of one rep-month-basis (at most one once the R3 index is in
+    place; the code refuses a second one before the database has to)."""
+    rows = (_select().eq("salesman", salesman).eq("period", period).eq("basis", basis)
+            .in_("status", list(CLOSED)).order("id", desc=True).execute().data or [])
+    return [r for r in rows if exclude_id is None or int(r.get("id") or 0) != int(exclude_id)]
+
+
 def rep_summary(sm: dict | None) -> dict:
     """For /shop/me: `last_closed` = the rep's most recent approved or paid statement (the money
-    that is final), `draft` = the newest open draft (the month being closed). Keyed by the Focus
-    name, like the targets. None / None for an unlinked login or before the table exists."""
+    that is final), `draft` = the newest open draft (the month being closed; `in_progress` when
+    that month has not ended yet, so the card says 'so far', not 'awaiting approval'). Keyed by
+    the Focus name, like the targets. None / None for an unlinked login or before the table
+    exists."""
     out: dict = {"last_closed": None, "draft": None}
     name = str((sm or {}).get("focus_name") or "").strip()
     if not name:
         return out
     try:
-        closed = (_select().eq("salesman", name).in_("status", ["approved", "paid"])
+        closed = (_select().eq("salesman", name).in_("status", list(CLOSED))
                   .order("period", desc=True).order("id", desc=True).limit(1).execute().data or [])
         draft = (_select().eq("salesman", name).eq("status", "draft")
                  .order("period", desc=True).order("id", desc=True).limit(1).execute().data or [])
@@ -235,6 +323,11 @@ def rep_summary(sm: dict | None) -> dict:
         if rows:
             r = public_row(rows[0])
             out[key] = {k: r.get(k) for k in keep}
+    if out["draft"]:
+        try:
+            out["draft"]["in_progress"] = not month_has_ended(str(out["draft"].get("period") or ""))
+        except StatementError:
+            out["draft"]["in_progress"] = False
     return out
 
 
@@ -246,11 +339,21 @@ def _audit(by: str, event: str, detail: dict) -> None:
 
 
 def create_draft(period: str, by: str, note: str | None = None, basis: str | None = None) -> dict:
-    """Freeze the month as draft rows, one per rep with a target. A rep whose identical draft
-    already exists (same period, basis, status and data_through) is skipped, never rewritten; an
-    OLDER open draft for the same rep/period/basis (an earlier data date) is moved to superseded
-    — forward only, audited — so one month has one open draft per rep. Approved and paid rows are
-    never touched by this. Returns what was created, skipped and superseded."""
+    """Freeze the month as draft rows, one per rep with a target, and return what was created,
+    skipped and superseded. Per rep:
+
+      * an open draft / approved / paid row that already carries the current FIGURES (sales,
+        tier, kickback — whatever its data date) means nothing has changed: the rep is skipped
+        and any other open draft is retired (superseded by that row), so a month never gains a
+        second copy just because another day of data was loaded;
+      * otherwise the current open drafts are stale and move to superseded (forward only,
+        audited), the new draft is inserted, and each retired row is linked to it;
+      * an approved / paid row is never touched. When the new figures differ from it the draft is
+        still written, with a note: approval of the new draft is refused until the old row is
+        superseded by hand. When that row sits on the SAME data date the rep is skipped instead
+        (the database allows one chain row per data date), with the same instruction.
+
+    A concurrent duplicate (the partial unique index) is a StatementConflict (409), never a 500."""
     from app import shop
     basis = basis or shop.KICKBACK_BASIS
     period = valid_period(period)
@@ -259,7 +362,7 @@ def create_draft(period: str, by: str, note: str | None = None, basis: str | Non
         raise StatementError("No rep has a target row for this month — import targets first.")
     client = get_client()
     try:
-        existing = (client.table(TABLE).select("id,salesman,status,data_through")
+        existing = (client.table(TABLE).select("id,salesman,status,data_through,sales_bhd,tier_reached,kickback_bhd")
                     .eq("period", period).eq("basis", basis).execute().data or [])
     except Exception as e:  # noqa: BLE001
         if _missing_table(e):
@@ -271,36 +374,61 @@ def create_draft(period: str, by: str, note: str | None = None, basis: str | Non
     created, skipped, superseded = [], [], []
     when = _now_iso()
     for r in rows:
-        mine = by_rep.get(r["salesman"], [])
+        name = r["salesman"]
+        mine = sorted(by_rep.get(name, []), key=lambda x: int(x.get("id") or 0))
+        chain = [x for x in mine if x.get("status") in CHAIN]
+        closed = [x for x in chain if x.get("status") in CLOSED]
+        open_drafts = [x for x in chain if x.get("status") == "draft"]
         new_dt = str(r["data_through"] or "")
-        same = [x for x in mine if x.get("status") in ("draft", "approved", "paid")
-                and str(x.get("data_through") or "") == new_dt]
+        same = [x for x in chain if figures(x) == figures(r)]
         if same:
-            skipped.append({"salesman": r["salesman"], "id": same[0]["id"],
-                            "reason": f"a {same[0].get('status')} statement with the same data date exists"})
+            keep = next((x for x in same if x.get("status") in CLOSED), None) or same[-1]
+            skipped.append({"salesman": name, "id": keep["id"],
+                            "reason": (f"#{keep['id']} ({keep.get('status')}, data to {keep.get('data_through') or '?'}) "
+                                       f"already carries these figures")})
+            for old in open_drafts:                      # every other open draft is stale now
+                if old["id"] != keep["id"]:
+                    moved = _move(old["id"], "draft", "superseded", by, when,
+                                  reason=f"figures unchanged — #{keep['id']} already carries them",
+                                  superseded_by_id=keep["id"])
+                    if moved:
+                        superseded.append({"salesman": name, "id": old["id"], "by": keep["id"]})
             continue
-        closed = [x for x in mine if x.get("status") in ("approved", "paid")]
+        blocker = [x for x in closed if str(x.get("data_through") or "") == new_dt]
+        if blocker:
+            b = blocker[0]
+            skipped.append({"salesman": name, "id": b["id"],
+                            "reason": (f"#{b['id']} is {b.get('status')} on the same data date with different figures — "
+                                       f"supersede #{b['id']} first, then create the draft again")})
+            continue
+        # the open drafts are stale: retire them BEFORE the insert (one chain row per data date),
+        # then link each to the new draft
+        retired: list[int] = []
+        for old in open_drafts:
+            moved = _move(old["id"], "draft", "superseded", by, when,
+                          reason=f"replaced by a newer draft (data to {r['data_through']})")
+            if moved:
+                retired.append(old["id"])
         payload = {**r, "status": "draft", "note": note, "created_by": by,
                    "target_snapshot": r["target_snapshot"] if r["target_snapshot"] is not None else {}}
-        ins = client.table(TABLE).insert(payload).execute().data or []
+        try:
+            ins = client.table(TABLE).insert(payload).execute().data or []
+        except Exception as e:  # noqa: BLE001
+            if _unique_violation(e):
+                raise StatementConflict(f"{name} · {month_label(period)}: a statement on the same data date was written "
+                                        f"a moment ago — refresh and try again") from e
+            raise
         new_id = (ins[0] or {}).get("id") if ins else None
-        created.append({"salesman": r["salesman"], "id": new_id, "sales_bhd": r["sales_bhd"],
+        for old_id in retired:
+            _link_superseded(old_id, new_id)
+            superseded.append({"salesman": name, "id": old_id, "by": new_id})
+        created.append({"salesman": name, "id": new_id, "sales_bhd": r["sales_bhd"],
                         "tier_reached": r["tier_reached"], "kickback_bhd": r["kickback_bhd"],
                         "data_through": r["data_through"],
                         # a correction after approval: the admin must supersede the closed row by hand
-                        "note": (f"{len(closed)} approved/paid statement(s) exist for this rep — supersede "
-                                 f"the old one deliberately if this draft replaces it") if closed else None})
-        for old in mine:
-            # only an OLDER open draft gives way (an earlier data date); a draft carrying newer data
-            # than this run (a data rollback) stays, and approved/paid rows are never touched here
-            if (old.get("status") == "draft" and old["id"] != new_id
-                    and str(old.get("data_through") or "") < new_dt):
-                moved = _move(old["id"], "draft", "superseded", by, when,
-                              reason=f"replaced by draft {new_id} (data to {r['data_through']})",
-                              superseded_by_id=new_id)
-                if moved:
-                    superseded.append({"salesman": r["salesman"], "id": old["id"], "by": new_id})
-    total = total_kickback([c for c in created] or [])
+                        "note": (f"#{closed[-1]['id']} is {closed[-1].get('status')} with different figures — "
+                                 f"approval of this draft is refused until #{closed[-1]['id']} is superseded") if closed else None})
+    total = total_kickback(created)
     _audit(by, "kickback.statement", {"period": period, "basis": basis, "status": "draft",
                                       "reps": len(created), "skipped": len(skipped), "superseded": len(superseded),
                                       "total_kickback_bhd": total, "note": note})
@@ -312,7 +440,8 @@ def _move(statement_id: int, from_status: str, to_status: str, by: str, when: st
           reason: str | None = None, superseded_by_id: int | None = None) -> dict | None:
     """The compare-and-swap: UPDATE … WHERE id = $1 AND status = $from. Only status and the
     who/when columns are named — no amount can travel through here. Returns the row moved, or
-    None when the status had already changed underneath (the caller decides how to answer)."""
+    None when the status had already changed underneath (the caller decides how to answer). A
+    unique-index refusal (a second approved/paid row written concurrently) is a StatementConflict."""
     fields: dict = {"status": to_status}
     extra: dict = {}
     if to_status == "approved":
@@ -331,19 +460,42 @@ def _move(statement_id: int, from_status: str, to_status: str, by: str, when: st
         return (client.table(TABLE).update(payload).eq("id", int(statement_id)).eq("status", from_status)
                 .execute().data or [])
     try:
-        rows = _run({**fields, **{k: v for k, v in extra.items() if v is not None}})
-    except Exception as e:  # noqa: BLE001 — the R3 columns are optional until their migration runs
-        if extra and _missing_column(e):
-            log.info("%s: optional columns not there yet, moving without them (%s)", TABLE, e)
-            rows = _run(fields)
-        else:
-            raise
+        try:
+            rows = _run({**fields, **{k: v for k, v in extra.items() if v is not None}})
+        except Exception as e:  # noqa: BLE001 — the R3 columns are optional until their migration runs
+            if extra and _missing_column(e):
+                log.info("%s: optional columns not there yet, moving without them (%s)", TABLE, e)
+                rows = _run(fields)
+            else:
+                raise
+    except Exception as e:  # noqa: BLE001
+        if _unique_violation(e):
+            raise StatementConflict("Another approved or paid statement for this rep and month was written a moment "
+                                    "ago — refresh and supersede one of them deliberately") from e
+        raise
     return rows[0] if rows else None
+
+
+def _link_superseded(old_id: int, new_id: int | None) -> None:
+    """After the replacement draft exists: record which row replaced a retired draft. Only
+    superseded_by_id is named, only on a row that is already superseded and unlinked; silently
+    skipped until the R3 columns exist."""
+    if not new_id:
+        return
+    try:
+        (get_client().table(TABLE).update({"superseded_by_id": int(new_id)}).eq("id", int(old_id))
+         .eq("status", "superseded").is_("superseded_by_id", "null").execute())
+    except Exception as e:  # noqa: BLE001
+        if not _missing_column(e):
+            log.warning("could not link superseded statement %s to %s: %s", old_id, new_id, e)
 
 
 def transition(statement_id: int, to_status: str, by: str, reason: str | None = None) -> dict:
     """Move one statement forward (approve / paid / supersede). Refuses anything that is not a
-    forward step, and answers CONFLICT_MSG when the row moved under the caller's feet. Audited."""
+    forward step, answers CONFLICT_MSG when the row moved under the caller's feet, and refuses to
+    approve (a) a month that has not ended in Bahrain and (b) a month that already has an
+    approved or paid statement for that rep and basis — the refusal names that row so the admin
+    supersedes it deliberately. Audited."""
     if to_status not in STATUSES or to_status in ("draft", "snapshot"):
         raise StatementError(f"Cannot move a statement to '{to_status}'.")
     try:
@@ -359,9 +511,21 @@ def transition(statement_id: int, to_status: str, by: str, reason: str | None = 
         raise StatementError(f"A {cur} statement cannot become {to_status}.")
     if to_status == "superseded" and not (reason or "").strip():
         raise StatementError("A reason is required to supersede a statement.")
+    if to_status == "approved":
+        period = str(row.get("period") or "")
+        if not month_has_ended(period):
+            raise StatementError(f"{month_label(period)} has not ended yet — approve once the month closes and the "
+                                 f"final Focus load is in.")
+        others = closed_rows(str(row.get("salesman") or ""), period, str(row.get("basis") or ""),
+                             exclude_id=int(statement_id))
+        if others:
+            o = others[0]
+            raise StatementConflict(f"{row.get('salesman')} · {month_label(period)} already has a {o.get('status')} "
+                                    f"statement (#{o.get('id')}, BHD {s3(o.get('kickback_bhd'))}). Supersede #{o.get('id')} "
+                                    f"first if this draft replaces it.")
     moved = _move(int(statement_id), cur, to_status, by, _now_iso(), reason=(reason or "").strip() or None)
     if not moved:
-        raise StatementError(CONFLICT_MSG)
+        raise StatementConflict(CONFLICT_MSG)
     _audit(by, f"kickback.statement_{to_status}",
            {"id": int(statement_id), "salesman": row.get("salesman"), "period": row.get("period"),
             "basis": row.get("basis"), "from": cur, "to": to_status, "kickback_bhd": s3(row.get("kickback_bhd")),

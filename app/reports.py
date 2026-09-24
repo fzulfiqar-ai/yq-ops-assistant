@@ -343,31 +343,40 @@ def attainment_rows(sql_rows: list[dict], salesmen: list[dict] | None = None, to
     return out
 
 
-def salesman_attainment() -> list[dict]:
+ATTAINMENT_ERROR = "Attainment could not be computed — the sales view or the targets table did not answer."
+
+
+def salesman_attainment_result() -> dict:
     """Per-rep current-month attainment (Accessories, ex-VAT) with the tier reached and the
-    estimated kickback — one SQL, then app.shop.tier_progress per row. [] when the targets table
-    or the view is not there (the dashboard payload keeps its shape)."""
+    estimated kickback — one SQL, then app.shop.tier_progress per row. {"rows": [], "error": msg}
+    when the SQL fails, so a screen says "could not compute" rather than "no sales loaded"."""
     try:
         rows = exec_sql(ATTAINMENT_SQL) or []
     except Exception as e:  # noqa: BLE001
         log.warning("attainment unavailable: %s", e)
-        return []
+        return {"rows": [], "error": ATTAINMENT_ERROR}
     salesmen: list[dict] = []
     try:
         salesmen = (get_client().table("salesmen").select("id,name,focus_name,is_active,referral_code")
                     .limit(500).execute().data or [])
     except Exception as e:  # noqa: BLE001 — names only; the figures do not depend on it
         log.debug("salesmen unavailable for attainment names: %s", e)
-    return attainment_rows(rows, salesmen)
+    return {"rows": attainment_rows(rows, salesmen), "error": None}
+
+
+def salesman_attainment() -> list[dict]:
+    """The attainment rows alone ([] on failure) — see salesman_attainment_result."""
+    return salesman_attainment_result()["rows"]
 
 
 def top_salesmen_from_attainment(rows: list[dict], limit: int = 8) -> list[dict]:
     """The Dashboard's "Top salesmen" from the attainment rows: Accessories, the current month,
     ex-VAT `net_bhd` beside the VAT-inclusive `revenue_bhd`, `orders` = invoices. Names with no
-    sales this month are left out; outlets without a target row still show (no_target)."""
+    sales this month are left out; outlets without a target row still show (no_target). Nothing
+    about money owed travels here: the tier, kickback and referral code stay behind Shop Admin on
+    /shop/attainment — the Dashboard is a default member page."""
     out = [{"salesman": r["salesman"], "orders": r["invoices"], "qty": None,
-            "revenue_bhd": r["gross_bhd"], "net_bhd": r["net_bhd"], "no_target": r["no_target"],
-            "tier_reached": r.get("tier_reached")}
+            "revenue_bhd": r["gross_bhd"], "net_bhd": r["net_bhd"], "no_target": r["no_target"]}
            for r in rows if float(r.get("net_bhd") or 0) > 0]
     return out[:limit]
 
@@ -459,7 +468,7 @@ def dashboard(force: bool = False) -> dict:
             "fresh": ex.submit(data_freshness),
             "daily_mtd": ex.submit(daily_sales_mtd),
             "split": ex.submit(sales_split_mtd),
-            "attainment": ex.submit(salesman_attainment),
+            "attainment": ex.submit(salesman_attainment_result),
         }
         r = {k: f.result() for k, f in futs.items()}
     out = _assemble_dashboard(r)
@@ -486,6 +495,10 @@ def _assemble_dashboard(r: dict) -> dict:
         "current_receivables_bhd": s["current_receivables_bhd"],
     }
     fresh = r["fresh"]
+    # `attainment` is {"rows", "error"} from salesman_attainment_result (a bare list is tolerated)
+    att = r.get("attainment")
+    att_rows = att.get("rows") if isinstance(att, dict) else (att or [])
+    att_error = att.get("error") if isinstance(att, dict) else None
     return {
         "data_as_of": s.get("data_date"),
         "data_stale": fresh["stale"],
@@ -501,11 +514,12 @@ def _assemble_dashboard(r: dict) -> dict:
         # (SIM never counts towards a rep), ex-VAT beside gross — derived from the attainment rows
         # so the widget and the Salesmen page can never disagree. The all-time, all-division
         # v_sales_by_salesman rollup stays on the Sales page (reports.sales()).
-        "by_salesman": top_salesmen_from_attainment(r["attainment"]),
+        "by_salesman": top_salesmen_from_attainment(att_rows),
         "by_salesman_scope": {
             "division": "Accessories", "basis": "net_ex_vat",
-            "period": (r["attainment"][0].get("period") if r["attainment"] else None),
-            "data_through": (r["attainment"][0].get("data_through") if r["attainment"] else None),
+            "period": (att_rows[0].get("period") if att_rows else None),
+            "data_through": (att_rows[0].get("data_through") if att_rows else None),
+            "error": att_error,
         },
         "agents": r["agents"],
         "alerts": a,
@@ -515,7 +529,10 @@ def _assemble_dashboard(r: dict) -> dict:
         "pace": _pace({**kpis, "rev_mtd_acc": sum(
             float(d.get("revenue_bhd") or 0) for d in (r["split"]["by_division"] or [])
             if str(d.get("division") or "") == "Accessories")}, s.get("data_date")),
-        "attainment": r["attainment"],
+        # Kept for the payload's shape only. The per-rep rows (kickback, tier, referral code)
+        # are money and live behind Shop Admin on /shop/attainment; the Dashboard feature is a
+        # default member grant, so they never travel with it (re-review, 24-Sep-2026).
+        "attainment": [],
     }
 
 

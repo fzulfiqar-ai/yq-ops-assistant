@@ -62,6 +62,8 @@ export interface StatementBrief {
   approved_at?: string | null
   paid_at?: string | null
   created_at?: string | null
+  /** a draft of a month that has not ended yet (a documented moment, not yet approvable) */
+  in_progress?: boolean
 }
 
 export interface ShopMe {

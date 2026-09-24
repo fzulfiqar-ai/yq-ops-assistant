@@ -747,8 +747,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         rank: int | None = Field(default=None, ge=0, le=100000)
 
     def _statement_http(e: Exception) -> HTTPException:
+        """StatementConflict (a lost CAS, an approved/paid row already in place, a concurrent
+        duplicate) is a 409; a missing row 404; any other admin-facing refusal 400."""
         msg = str(e)
-        code = 409 if msg == statements.CONFLICT_MSG else 404 if msg == "Statement not found." else 400
+        code = (409 if isinstance(e, statements.StatementConflict) or msg == statements.CONFLICT_MSG
+                else 404 if msg == "Statement not found." else 400)
         return HTTPException(status_code=code, detail=msg)
 
     @app.get("/shop/statements")
@@ -805,10 +808,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def shop_attainment(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
         """Every rep's current month: Accessories ex-VAT sales vs the effective target row, the
         tier reached and the estimated kickback. Reps with sales but no target are flagged."""
-        rows = _reports.salesman_attainment()
+        res = _reports.salesman_attainment_result()
+        rows = res["rows"]
         first = rows[0] if rows else {}
         return {"rows": rows, "period": first.get("period"), "data_through": first.get("data_through"),
-                "basis": shop.KICKBACK_BASIS, "division": "Accessories", "count": len(rows)}
+                "basis": shop.KICKBACK_BASIS, "division": "Accessories", "count": len(rows),
+                "error": res.get("error")}     # set when the SQL failed: "could not compute", not "no sales"
 
     def _rep_or_empty(user: CurrentUser) -> tuple[dict | None, dict | None]:
         """(salesman row, empty answer) — the empty answer is set for a login with no salesman
@@ -827,32 +832,43 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if admin:
             name = (rep or "").strip()
             if name.isdigit():
-                name = str((shop._salesman_by_id(int(name)) or {}).get("focus_name") or "")
+                name = str((shop._salesman_by_id(int(name)) or {}).get("focus_name") or "").strip()
                 if not name:
                     raise HTTPException(status_code=404, detail="That salesman has no Focus name.")
-            return {**followups.followups(name, include_holdout=True), "scope": "admin"}
+            # the company book is an explicit ask (all_reps), never the side effect of a blank name
+            out = (followups.followups(None, all_reps=True, include_holdout=True) if not name
+                   else followups.followups(name, include_holdout=True))
+            return {**out, "scope": "admin"}
         sm, empty = _rep_or_empty(user)
         if empty:
             return {**empty, "rep": None, "due": [], "lapsed": [], "counts": {}, "scope": "rep"}
-        if not sm.get("focus_name"):
+        focus = str(sm.get("focus_name") or "").strip()
+        if not focus:
             return {"hint": "Your login has no Focus name yet — ask the office to set it on the Salesmen page.",
                     "rep": None, "due": [], "lapsed": [], "counts": {}, "scope": "rep"}
-        out = followups.followups(sm["focus_name"])
+        out = followups.followups(focus)
         first = str(sm.get("name") or "").split(" ")[0] or None
         return {**out, "scope": "rep",
                 "due": [{**r, "wa_text": followups.wa_text(r, first)} for r in out["due"]],
                 "lapsed": [{**r, "wa_text": followups.wa_text(r, first)} for r in out["lapsed"]]}
 
     @app.post("/shop/me/followups/tap")
-    def shop_me_followups_tap(body: FollowupTapIn, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+    @limiter.limit("60/minute")
+    def shop_me_followups_tap(request: Request, body: FollowupTapIn,
+                              user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
         """Measurement only: which shop the rep acted on, from which list, through which channel.
-        audit_log 'followup.tap' (never a shop_events row: those are merchant funnel events)."""
+        audit_log 'followup.tap' (never a shop_events row: those are merchant funnel events).
+        Rate-limited, and only a shop on the caller's own current list is recorded — a tap on
+        anything else is dropped (ok: false), so the holdout measurement cannot be flooded."""
         sm = shop.salesman_for_user(user.email)
+        shop_name = shop.clean(body.shop, 160)
+        if not sm or not followups.on_list(sm.get("focus_name"), shop_name):
+            return {"ok": False, "reason": "not on your list"}
         kind = body.kind if body.kind in ("due", "lapsed") else "other"
         channel = body.channel if body.channel in ("wa", "call", "order", "view") else "other"
         log_event(user.email, "followup.tap",
-                  detail={"salesman_id": (sm or {}).get("id"), "rep": (sm or {}).get("focus_name"),
-                          "shop": shop.clean(body.shop, 160), "kind": kind, "channel": channel, "rank": body.rank})
+                  detail={"salesman_id": sm.get("id"), "rep": str(sm.get("focus_name") or "").strip(),
+                          "shop": shop_name, "kind": kind, "channel": channel, "rank": body.rank})
         return {"ok": True}
 
     @app.get("/shop/me/baskets")

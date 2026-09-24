@@ -53,6 +53,13 @@ jobs:
           python -m tests.test_r1_data
           python -m tests.test_r1_orders
           python -m tests.test_r1b_upcoming
+      # R3a: follow-ups, statements (one approval per month, figure-based dedup, the CLI's
+      # --commit path on a fake connection), attainment, gates. The two scratch-Postgres
+      # replays print SKIP here (no cluster, no psycopg); they run on the dev machine.
+      - name: R3 suite - reps (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r3_reps
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
 

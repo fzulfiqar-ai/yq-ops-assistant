@@ -56,15 +56,20 @@ def main(argv: list[str]) -> int:
         print("\nDry run. Nothing written. Add --commit to freeze these rows.")
         return 0
 
+    # A draft shares its data date with nothing else in the payable chain (draft / approved / paid:
+    # the one_per_data_date index of r3_statements_migration.sql); a snapshot only with another
+    # snapshot. Checked here so the refusal is a sentence, not a 23505 traceback.
+    same_as = ["draft", "approved", "paid"] if a.status == "draft" else ["snapshot"]
     import psycopg
     with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=30) as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute("set local lock_timeout = '2s'")
         for r in rows:
-            cur.execute("""select 1 from salesman_kickback_statements where salesman=%s and period=%s and basis=%s
-                           and status=%s and data_through is not distinct from %s""",
-                        (r["salesman"], r["period"], r["basis"], a.status, r["data_through"]))
-            if cur.fetchone():
-                raise SystemExit(f"REFUSED: a {a.status} statement for {r['salesman']} {r['period']} "
+            cur.execute("""select id, status from salesman_kickback_statements where salesman=%s and period=%s and basis=%s
+                           and status = any(%s) and data_through is not distinct from %s order by id limit 1""",
+                        (r["salesman"], r["period"], r["basis"], same_as, r["data_through"]))
+            hit = cur.fetchone()
+            if hit:
+                raise SystemExit(f"REFUSED: statement #{hit[0]} ({hit[1]}) for {r['salesman']} {r['period']} "
                                  f"{r['basis']} data_through {r['data_through']} already exists")
             cur.execute("""insert into salesman_kickback_statements
                            (salesman, salesman_id, period, basis, status, data_through, sales_bhd, returns_bhd,
@@ -73,10 +78,11 @@ def main(argv: list[str]) -> int:
                         (r["salesman"], r["salesman_id"], r["period"], r["basis"], a.status, r["data_through"],
                          r["sales_bhd"], r["returns_bhd"], r["tier_reached"], r["rate"], r["kickback_bhd"],
                          json.dumps(r["target_snapshot"], default=str), a.note, a.by))
+        # money in the audit row is a 3-dp string (a Decimal is not JSON; a float is not money)
         cur.execute("insert into audit_log (ts, user_email, event, detail) values (now(), %s, %s, %s)",
                     (a.by, "kickback.statement",
                      json.dumps({"period": a.period, "basis": a.basis, "status": a.status, "reps": len(rows),
-                                 "total_kickback_bhd": total, "note": a.note})))
+                                 "total_kickback_bhd": f"{total:.3f}", "note": a.note})))
     print(f"\nFrozen {len(rows)} rows ({a.status}, {a.basis}).")
     return 0
 

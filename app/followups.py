@@ -79,8 +79,10 @@ def _i(x, default: int = 0) -> int:
 
 # ── the one SQL: a rep's shops with cadence and value (v_sales, yq_readonly) ──
 
-# $1 = the rep's Focus name ('' = every rep, admin only). Names in v_sales carry a warehouse
-# suffix ("Ahmed Aradi - Acc WH"), hence the `name - %` pattern shared with rep_month_sales.
+# $1 = the rep's Focus name; '' = every rep, which only load_shops(all_reps=True) ever sends (the
+# admin route). Names in v_sales carry a warehouse suffix ("Ahmed Aradi - Acc WH"): the match is
+# the whole name or the part before ' - ' (rep_base), the same rule as rep_month_sales' `name - %`
+# but with no LIKE, so a '%' or '_' in an admin-typed Focus name cannot widen the match.
 SHOPS_SQL = """
 WITH mx AS (SELECT MAX(sale_date) AS d FROM v_sales),
 base AS (
@@ -113,15 +115,22 @@ SELECT o.customer_name, o.rep, o.rep_visits, a.visits, a.last_date::text AS last
        mx.d::text AS data_through
 FROM owner o JOIN agg a USING (customer_name)
 LEFT JOIN gaps g USING (customer_name) LEFT JOIN val USING (customer_name) CROSS JOIN mx
-WHERE ($1 = '' OR o.rep = $1 OR o.rep LIKE $1 || ' - %')
+WHERE ($1 = '' OR o.rep = $1 OR split_part(o.rep, ' - ', 1) = $1)
 ORDER BY o.customer_name
 """
 
 
-def load_shops(focus_name: str | None, run=exec_sql_params) -> list[dict]:
-    """The SQL above for one rep ('' = all). `run(sql, params)` is exec_sql_params in production
-    and a psycopg adapter in the local-Postgres test."""
-    return run(SHOPS_SQL, [str(focus_name or "").strip()]) or []
+def load_shops(focus_name: str | None, run=exec_sql_params, *, all_reps: bool = False) -> list[dict]:
+    """The SQL above for one rep, or for every rep when `all_reps` is set explicitly (the admin
+    route only). A blank name without it is an error, never the whole company book: a salesman
+    whose focus_name is empty or whitespace must see nothing. `run(sql, params)` is
+    exec_sql_params in production and a psycopg adapter in the local-Postgres test."""
+    name = str(focus_name or "").strip()
+    if all_reps:
+        return run(SHOPS_SQL, [""]) or []
+    if not name:
+        raise ValueError("a rep's Focus name is required (all_reps=True for the company book)")
+    return run(SHOPS_SQL, [name]) or []
 
 
 # ── pure rules ────────────────────────────────────────────────────────────────
@@ -270,20 +279,33 @@ def _chunks(seq: list, n: int):
         yield seq[i:i + n]
 
 
+REGULARS_PAGE = 500        # under PostgREST's max-rows (1000 on Supabase), which truncates silently
+
+
 def load_regulars(shop_names: list[str]) -> dict[str, list[dict]]:
     """v_customer_regulars rows for these shops only (service role; the view is never granted to
-    the read-only RPC because it carries names). {} when the view is not there."""
+    the read-only RPC because it carries names). Only rows that are due are ever used, so they
+    are the only rows fetched — filtered server-side, in a fixed order, and paged, because
+    PostgREST caps a response at max-rows without saying so (one shop alone has had 143 rows).
+    {} when the view is not there."""
     from app.database import get_client
     out: dict[str, list[dict]] = {}
     if not shop_names:
         return out
     try:
         for chunk in _chunks(shop_names, 80):
-            rows = (get_client().table("v_customer_regulars")
-                    .select("customer_name,item_code,times_bought,median_qty,cadence_days,last_bought,days_since,due")
-                    .in_("customer_name", chunk).limit(5000).execute().data or [])
-            for r in rows:
-                out.setdefault(str(r.get("customer_name") or ""), []).append(r)
+            start = 0
+            while True:
+                rows = (get_client().table("v_customer_regulars")
+                        .select("customer_name,item_code,times_bought,median_qty,cadence_days,last_bought,days_since,due")
+                        .in_("customer_name", chunk).eq("due", True)
+                        .order("customer_name").order("item_code")
+                        .range(start, start + REGULARS_PAGE - 1).execute().data or [])
+                for r in rows:
+                    out.setdefault(str(r.get("customer_name") or ""), []).append(r)
+                if len(rows) < REGULARS_PAGE:
+                    break
+                start += REGULARS_PAGE
     except Exception as e:  # noqa: BLE001 — the list still works, just without the SKU hints
         log.warning("v_customer_regulars unavailable (no SKU hints): %s", e)
     return out
@@ -312,25 +334,45 @@ def _display_names() -> dict[str, str]:
         return {}
 
 
-def followups(focus_name: str | None, *, include_holdout: bool = False, force: bool = False) -> dict:
-    """The rep's ranked lists. `focus_name` '' / None = every rep (admin only; the route enforces
-    it). Cached per (rep, holdout view) for _TTL seconds."""
+def followups(focus_name: str | None, *, all_reps: bool = False, include_holdout: bool = False,
+              force: bool = False) -> dict:
+    """The rep's ranked lists. The company book (every shop with its owner) is only ever served
+    when `all_reps` is passed explicitly — the admin route does; a blank name on its own raises,
+    so no login can be handed every rep's shops by an empty focus_name. Cached per (rep, holdout
+    view) for _TTL seconds."""
     name = str(focus_name or "").strip()
-    key = (name, bool(include_holdout))
+    if not all_reps and not name:
+        raise ValueError("a rep's Focus name is required (all_reps=True for the company book)")
+    key = ("*" if all_reps else name, bool(include_holdout))
     now = time.monotonic()
     if not force:
         hit = _cache.get(key)
         if hit and hit[0] > now:
             return hit[1]
-    shops = load_shops(name)
+    shops = load_shops(None, all_reps=True) if all_reps else load_shops(name)
     shop_names = [str(s.get("customer_name")) for s in shops if s.get("customer_name")]
     regulars = load_regulars(shop_names)
     contacts = load_contacts(shop_names)
     out = rank_shops(shops, regulars, contacts, include_holdout=include_holdout, names=_display_names())
-    out["rep"] = name or None
+    out["rep"] = None if all_reps else name
     with _lock:
         _cache[key] = (now + _TTL, out)
     return out
+
+
+def on_list(focus_name: str | None, shop: str) -> bool:
+    """Is `shop` on this rep's CURRENT due / lapsed list (the cached one the screen shows)? For
+    the tap log: a tap on a shop the rep was never shown is noise, not a measurement."""
+    name = str(focus_name or "").strip()
+    if not name or not shop:
+        return False
+    try:
+        out = followups(name)
+    except Exception as e:  # noqa: BLE001
+        log.debug("follow-up list unavailable for a tap check (%s): %s", name, e)
+        return False
+    want = _norm(shop)
+    return any(_norm(r.get("shop")) == want for r in (out.get("due") or []) + (out.get("lapsed") or []))
 
 
 # ── "Baskets from your link not sent" (shop_events, PII-free) ─────────────────
@@ -441,11 +483,29 @@ def baskets_not_sent(sm: dict, days: int = BASKET_DAYS, now: datetime | None = N
 
 # ── "My link this week" (a rep-scoped analytics summary) ──────────────────────
 
-def link_week(sm: dict, days: int = 7) -> dict:
+LINK_TTL = 180.0           # shop.analytics reads every event of the window; once per rep per few minutes
+
+
+def link_week(sm: dict, days: int = 7, *, force: bool = False) -> dict:
     """The small card: the funnel from the rep's link over `days`, orders and value. Built on
-    shop.analytics(days, salesman=sm) — the same scoping the admin analytics page uses."""
+    shop.analytics(days, salesman=sm) — the same scoping the admin analytics page uses — and
+    cached per rep for LINK_TTL seconds, because that call replays the whole company's events
+    and the Today screen mounts it on every visit."""
     from app import shop
+    key = ("link", str((sm or {}).get("id")), int(days))
+    now = time.monotonic()
+    if not force:
+        hit = _cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
     a = shop.analytics(days, salesman=sm)
+    out = _link_summary(a, days)
+    with _lock:
+        _cache[key] = (now + LINK_TTL, out)
+    return out
+
+
+def _link_summary(a: dict, days: int) -> dict:
     f = a.get("funnel") or {}
     return {"days": a.get("days", days), "since": a.get("since"),
             "sessions": _i(f.get("sessions")), "item_views": _i(f.get("item_views")), "adds": _i(f.get("adds")),

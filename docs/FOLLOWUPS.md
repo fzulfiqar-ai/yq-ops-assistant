@@ -53,7 +53,7 @@ gets the unlinked hint, not company-wide figures).
 ## Statements (`/shop/statements*`, admin only)
 
 `salesman_kickback_statements` (M8) + `scripts/r3_statements_migration.sql` (paid_by, superseded_at/by/reason/by_id,
-an index). A statement is written once; amounts are never edited.
+an index, and the two uniqueness rules below). A statement is written once; amounts are never edited.
 
 ```
 draft ──► approved ──► paid
@@ -65,16 +65,30 @@ snapshot                           (a documented moment; never moved)
 * `POST /shop/statements/draft {period}` freezes `app.statements.build_rows(period)` — the same
   `rep_month_sales` / `rep_target` / `tier_progress` the Today card uses (ex-VAT, giveaways out, SIM never, whole
   month at the reached tier, `returns_bhd = NULL` until a Sales Return register is loaded). One row per rep with a
-  target. A rep whose draft/approved/paid row has the same `data_through` is skipped; an **older** open draft of
-  the same rep/period/basis moves to `superseded` (forward, audited); approved/paid rows are never touched — the
-  response notes them so the admin supersedes deliberately.
+  target. `data_through` is capped at the period's last day (an August statement made in September says "data to
+  31 Aug"); a period after the month of the latest loaded sale is refused. Per rep the comparison is on
+  **figures** (sales, tier, kickback), never on the data date: a draft/approved/paid row that already carries
+  the current figures means the rep is skipped and any other open draft is retired; otherwise the open drafts
+  move to `superseded` (forward, audited, linked to the new draft by `superseded_by_id`) and the new draft is
+  written. Approved/paid rows are never touched — when the new figures differ the draft is still written, with a
+  note (shown in the toast) that approval is refused until the closed row is superseded by hand; when that row
+  sits on the *same* data date the rep is skipped with the same instruction. A concurrent duplicate (the partial
+  unique index) is a 409, never a 500.
 * `POST …/{id}/approve | paid | supersede {reason}`: compare-and-swap on the status the caller saw (`UPDATE … WHERE id
   AND status = <from>`); a lost race is a 409 ("changed a moment ago"). Only `status`, `approved_by/at`,
   `paid_at/by`, `superseded_*` are ever in an UPDATE. Every move writes `audit_log` `kickback.statement_<to>`.
-* `GET /shop/me` gains `last_closed` (the rep's latest approved/paid statement) and `draft` (the open one). The Me
-  screen shows "August final · Tier 2 · BHD 51.250 · approved 3 Sep".
+  **Approve** additionally refuses (a) a month that has not ended in Bahrain (400) and (b) a rep-month-basis that
+  already has an approved or paid row (409, naming that row: "Supersede #N first"). The database enforces (b) too:
+  `salesman_kickback_statements_one_closed_idx` — UNIQUE (salesman, period, basis) WHERE status IN ('approved','paid')
+  — and `…_one_per_data_date_idx` — UNIQUE (salesman, period, basis, data_through) WHERE status IN ('draft',
+  'approved','paid'). They replace M8's UNIQUE (…, status, data_through), on which two superseded rows of one data
+  date collided. Snapshots (CLI only, never paid) sit outside both; the CLI refuses a duplicate snapshot itself.
+* `GET /shop/me` gains `last_closed` (the rep's latest approved/paid statement) and `draft` (the open one, with
+  `in_progress` while its month runs). The Me screen shows "August final · Tier 2 · BHD 51.250 · approved 3 Sep"
+  and "September so far · Tier 1 · BHD 56.244 · a record as of 24 Sep, final after the month ends".
 * `scripts/close_kickback_month.py` now calls `app.statements.build_rows`, so the CLI and the button freeze the
-  same figures.
+  same figures; its audit row carries the total as a 3-dp string (a Decimal is not JSON) and a `--commit` run is
+  unit-tested against a fake connection.
 
 ## Attainment (`GET /shop/attainment`, Shop Admin; Dashboard `by_salesman`)
 

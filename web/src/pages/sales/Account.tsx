@@ -124,7 +124,10 @@ export default function Account() {
         ) : null}
         {meQ.data?.draft ? (
           <div className="mt-2 text-[11.5px] text-muted-foreground">
-            {monthName(meQ.data.draft.period)} draft · {meQ.data.draft.tier_reached > 0 ? `Tier ${meQ.data.draft.tier_reached}` : 'below Tier 1'} · {bhdStr(meQ.data.draft.kickback_bhd)} · awaiting the office's approval
+            {monthName(meQ.data.draft.period)} {meQ.data.draft.in_progress ? 'so far' : 'draft'} · {meQ.data.draft.tier_reached > 0 ? `Tier ${meQ.data.draft.tier_reached}` : 'below Tier 1'} · {bhdStr(meQ.data.draft.kickback_bhd)}
+            {meQ.data.draft.in_progress
+              ? ` · a record as of ${meQ.data.draft.data_through ? dayLabel(meQ.data.draft.data_through) : 'today'}, final after the month ends`
+              : " · awaiting the office's approval"}
           </div>
         ) : null}
       </section>

@@ -30,9 +30,12 @@ const month = (ym?: string | null) => {
   return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })
 }
 const day = (iso?: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '')
-const currentPeriod = () => {
-  const d = new Date(Date.now() + 3 * 3600 * 1000)   // Bahrain, UTC+3
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+/** The month being closed: the last one that has ENDED in Bahrain (UTC+3). The running month can be
+ *  drafted as a documented moment but never approved, so it is not the default. */
+const lastEndedPeriod = () => {
+  const d = new Date(Date.now() + 3 * 3600 * 1000)
+  const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1))
+  return `${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}`
 }
 function apiMessage(e: unknown, fallback: string): string {
   if (!(e instanceof ApiError)) return fallback
@@ -68,7 +71,7 @@ interface AttainRow {
   progress_pct?: number | null
   days_left?: number | null
 }
-interface AttainResp { rows: AttainRow[]; period?: string | null; data_through?: string | null; basis?: string; division?: string; count: number }
+interface AttainResp { rows: AttainRow[]; period?: string | null; data_through?: string | null; basis?: string; division?: string; count: number; error?: string | null }
 
 export function AttainmentTab() {
   const { data, isLoading, isError } = useQuery({ queryKey: ['shop-attainment'], queryFn: () => apiGet<AttainResp>('/shop/attainment'), staleTime: 60_000 })
@@ -112,6 +115,8 @@ export function AttainmentTab() {
         <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
       ) : isError ? (
         <p className="text-sm text-destructive">Could not load the attainment.</p>
+      ) : data?.error ? (
+        <p className="text-sm text-destructive">{data.error} Nothing here is "no sales" — the figures could not be computed.</p>
       ) : (
         <>
           <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -165,14 +170,14 @@ interface Statement {
 interface ListResp { statements: Statement[]; available: boolean; summary: Record<string, { count: number; kickback_bhd: string }> }
 interface PreviewRow { salesman: string; sales_bhd: string; tier_reached: number; rate: number; kickback_bhd: string; data_through?: string | null }
 interface PreviewResp { period: string; basis: string; rows: PreviewRow[]; total_kickback_bhd: string }
-interface DraftResp { period: string; created: { salesman: string; id: number | null; kickback_bhd: string; note?: string | null }[]; skipped: { salesman: string; reason: string }[]; superseded: { salesman: string; id: number }[]; total_kickback_bhd: string }
+interface DraftResp { period: string; created: { salesman: string; id: number | null; kickback_bhd: string; note?: string | null }[]; skipped: { salesman: string; id?: number | null; reason: string }[]; superseded: { salesman: string; id: number; by?: number | null }[]; total_kickback_bhd: string }
 
 const TONE: Record<string, BadgeTone> = { draft: 'amber', approved: 'accent', paid: 'green', superseded: 'grey', snapshot: 'ink' }
 
 export function StatementsTab() {
   const qc = useQueryClient()
   const toast = useToast()
-  const [period, setPeriod] = useState(currentPeriod())
+  const [period, setPeriod] = useState(lastEndedPeriod())
   const [filter, setFilter] = useState<string>('')
   const [preview, setPreview] = useState<PreviewResp | null>(null)
   const [previewing, setPreviewing] = useState(false)
@@ -187,6 +192,13 @@ export function StatementsTab() {
     onSuccess: (r) => {
       setPreview(null)
       toast(`${month(r.period)}: ${r.created.length} draft${r.created.length === 1 ? '' : 's'} created${r.skipped.length ? `, ${r.skipped.length} unchanged` : ''}${r.superseded.length ? `, ${r.superseded.length} older draft${r.superseded.length === 1 ? '' : 's'} superseded` : ''} · ${bhd3s(r.total_kickback_bhd)}`, 'success')
+      // what needs a decision: a draft written next to an approved/paid month, or a rep held back
+      // because the closed row sits on the same data date — the admin must supersede deliberately
+      const attention = [
+        ...r.created.filter((c) => c.note).map((c) => `${c.salesman}: ${c.note}`),
+        ...r.skipped.filter((s) => /supersede/i.test(s.reason)).map((s) => `${s.salesman}: ${s.reason}`),
+      ]
+      if (attention.length) toast(attention.join(' — '), 'error')
       refresh()
     },
     onError: (e) => toast(apiMessage(e, 'Could not create the draft.'), 'error'),
@@ -270,6 +282,7 @@ export function StatementsTab() {
       <p className="mb-3 text-sm text-muted-foreground">
         A statement freezes a rep's month exactly as the Today card computed it (Accessories, ex-VAT, whole month at the reached tier).
         It moves <strong>draft → approved → paid</strong>; a correction is a <em>new</em> draft and the old row is superseded. Amounts are never edited.
+        A month is approved once per rep and only after it has ended; a running month can be drafted as a record but not approved.
         Returns are deducted only once the Focus Sales Return register is loaded — until then they show as not valued.
       </p>
 

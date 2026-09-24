@@ -29,9 +29,10 @@ interface Kpis {
 }
 interface ChannelRow { channel: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
 /** R3a: the dashboard's salesman rows are the CURRENT MONTH, ACCESSORIES ONLY (ex-VAT net beside gross);
- *  no_target / tier_reached come from the attainment (an outlet such as Causeway has no target row). */
-interface SalesmanRow { salesman: string; orders: number; qty: number | null; revenue_bhd: number; net_bhd: number; no_target?: boolean; tier_reached?: number | null }
-interface SalesmanScope { division?: string; basis?: string; period?: string | null; data_through?: string | null }
+ *  no_target comes from the attainment (an outlet such as Causeway has no target row). Tier, kickback and
+ *  referral codes never travel here — they are Shop Admin data on the Salesmen page. */
+interface SalesmanRow { salesman: string; orders: number; qty: number | null; revenue_bhd: number; net_bhd: number; no_target?: boolean }
+interface SalesmanScope { division?: string; basis?: string; period?: string | null; data_through?: string | null; error?: string | null }
 interface AgentRow { agent: string; last_run: string; summary: string }
 interface ActionItem { action: string; to: string; bhd: number; urgency: number }
 interface Health {
@@ -492,7 +493,9 @@ export default function Dashboard() {
             The kickback basis: accessories only, giveaways excluded, SIM never counts{smScope?.data_through ? ` · sales data to ${fmtDate(smScope.data_through)}` : ''}.
             The all-time, all-division rollup is on the Sales page.
           </div>
-          {isLoading ? <Skeleton className="h-[260px]" /> : salesmen.length === 0 ? (
+          {isLoading ? <Skeleton className="h-[260px]" /> : smScope?.error ? (
+            <p className="text-sm text-destructive">{smScope.error}</p>
+          ) : salesmen.length === 0 ? (
             <p className="text-sm text-muted-foreground">No accessories sales loaded for this month yet.</p>
           ) : (
             <ResponsiveContainer width="100%" height={260}>
