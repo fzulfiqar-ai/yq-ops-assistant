@@ -37,7 +37,19 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     # Cacheable by any CDN in front of the API; stale-if-error keeps the last catalog on screen
     # while the free-tier container wakes up. Never indexed: trade prices are public, not promoted.
+    # The same three numbers drive the edge Worker (web/workers/market.js), which reads them from
+    # this header rather than carrying its own copy.
     MARKET_CACHE = "public, max-age=60, stale-while-revalidate=600, stale-if-error=86400"
+
+    def _etag_matches(header: str | None, etag: str) -> bool:
+        """RFC 7232 If-None-Match, weak comparison: the gzip and identity bodies are the same
+        entity, so W/"…" on either side matches; `*` matches anything."""
+        if not header:
+            return False
+        def core(t: str) -> str:
+            return t[2:] if t.startswith("W/") else t
+        tags = [t.strip() for t in header.split(",") if t.strip()]
+        return "*" in tags or any(core(t) == core(etag) for t in tags)
 
     # ── models ────────────────────────────────────────────────────────────────
     class QuoteLine(BaseModel):
@@ -269,12 +281,29 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def market_catalog(request: Request, ref: str | None = None):
         """The marketplace catalog for the root URL and every /{slug} storefront. Same payload as
         /public/catalog/{token} plus `rep` (the storefront card) — no token in the URL, so a
-        rotation never breaks the storefront or the pre-JS prefetch."""
-        data = shop.market_json(ref)
-        if data is None:
+        rotation never breaks the storefront or the pre-JS prefetch.
+
+        R6 hot path: the open/closed switch comes from the cached context (refreshed in the
+        background) instead of shop_settings(), whose 60 s cache used to expire on a merchant's
+        request and query Supabase from it; the body is the pre-gzipped bytes made once per
+        refresh (the GZip middleware leaves an already-encoded response alone) and carries a weak
+        ETag, so If-None-Match from the browser, the service worker or the edge Worker is a 304
+        with no body at all."""
+        ctx = shop.context()
+        if not shop._flag(ctx["settings"], "shop_market_enabled"):
             raise HTTPException(status_code=404, detail="The marketplace is not open.")
-        return Response(content=data, media_type="application/json",
-                        headers={"Cache-Control": MARKET_CACHE, "X-Robots-Tag": "noindex, nofollow"})
+        tok = ctx.get("share_token") or share_token(create=True)
+        entry = shop.public_catalog_entry(tok, ref)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        headers = {"Cache-Control": MARKET_CACHE, "X-Robots-Tag": "noindex, nofollow",
+                   "ETag": entry["etag"], "Vary": "Accept-Encoding"}
+        if _etag_matches(request.headers.get("if-none-match"), entry["etag"]):
+            return Response(status_code=304, headers=headers)
+        if "gzip" in request.headers.get("accept-encoding", "").lower():
+            headers["Content-Encoding"] = "gzip"
+            return Response(content=entry["gz"], media_type="application/json", headers=headers)
+        return Response(content=entry["raw"], media_type="application/json", headers=headers)
 
     @app.get("/public/rep/{slug}")
     @limiter.limit("60/minute")
@@ -457,8 +486,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise HTTPException(status_code=400, detail=f"Image too large ({e}).") from e
         if not content_matches(file.filename or "", data):
             raise HTTPException(status_code=400, detail="That file is not a valid image.")
+        from starlette.concurrency import run_in_threadpool
         from app.catalog import upload_campaign_image
-        urls = upload_campaign_image(data)
+        # two WebP encodes + two storage uploads: off the single event loop (R6), or every
+        # merchant request queues behind the admin's upload and Render's 5 s health check fails
+        urls = await run_in_threadpool(upload_campaign_image, data)
         if not urls:
             raise HTTPException(status_code=500, detail="Could not store the image.")
         log_event(user.email, "shop.campaign_image", detail={"bytes": len(data)})

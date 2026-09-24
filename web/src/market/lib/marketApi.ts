@@ -2,6 +2,14 @@
  * The marketplace's transport: the token-less `/public/market*` family (docs/SHOP.md
  * § Marketplace) plus the order-token endpoints it shares with the legacy shop. Same rules as
  * lib/shopApi: no auth header, no supabase client, every field optional on read.
+ *
+ * The catalog itself (R6) is read from the SAME ORIGIN first — /api/market, the edge Worker in
+ * web/workers/market.js that keeps the last good copy of the API's /public/market in Cloudflare's
+ * cache: 60 s fresh, stale while it revalidates, and served straight from the edge when the free
+ * Render origin is cold (11–12 s) or down. When no Worker is in front of the host (local preview,
+ * `vite preview`, the old vercel.app 308 host) the same-origin call answers with index.html, and
+ * the app falls back to the API exactly as before. Nothing else moves: quote, order, events and
+ * restock still go to the API directly.
  */
 import {
   API_BASE,
@@ -16,10 +24,20 @@ import {
   type QuoteRequest,
   type RepCard,
 } from '@/lib/shopApi'
+import { noteCatalog } from './rum'
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
+/** Same as lib/shopApi request(): a cold origin behind the edge can still take ~50 s. */
+const EDGE_TIMEOUT_MS = 60000
 
+/** The same-origin edge path for the catalog — MIRRORS public/catalog-prefetch.js (the prefetch's
+ *  `url` must equal this for getMarket() to pick it up). */
 export function marketPath(ref?: string | null): string {
+  return `/api/market${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`
+}
+
+/** The API's own path for the same answer: the fallback, and what the legacy callers still use. */
+export function marketApiPath(ref?: string | null): string {
   return `/public/market${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`
 }
 
@@ -27,18 +45,64 @@ export function marketPath(ref?: string | null): string {
 export function getMarket(ref?: string | null): Promise<CatalogPayload> {
   const path = marketPath(ref)
   const early = typeof window !== 'undefined' ? window.__yqCatalog : undefined
-  if (early && early.url === `${API_BASE}${path}`) {
+  if (early && early.url === path) {
     early.res
       .finally(() => {
         if (window.__yqCatalog === early) window.__yqCatalog = undefined
       })
       .catch(() => {})
     return early.res.then(
-      (text) => JSON.parse(text) as CatalogPayload,
-      () => request<CatalogPayload>(path),
+      (text) => {
+        let data: CatalogPayload
+        try {
+          data = JSON.parse(text) as CatalogPayload
+        } catch {
+          // a 200 that is not the catalog after all (a garbled or HTML body): the ordinary path, API last
+          return fetchMarket(ref)
+        }
+        noteCatalog(early.src || 'pre')
+        return data
+      },
+      () => fetchMarket(ref),
     )
   }
-  return request<CatalogPayload>(path)
+  return fetchMarket(ref)
+}
+
+/** Edge first, API second. A non-JSON same-origin answer is the SPA's index.html (no Worker in
+ *  front), a non-2xx one is passed through from the origin (404 = closed, 5xx = down), and a body
+ *  that says JSON but does not parse is treated the same: all fall back to the API call, whose
+ *  error then carries the real status for MarketContext. */
+async function fetchMarket(ref?: string | null): Promise<CatalogPayload> {
+  const edge = await fetchEdge(marketPath(ref))
+  if (edge) {
+    try {
+      const data = JSON.parse(edge.text) as CatalogPayload
+      noteCatalog(edge.src)
+      return data
+    } catch {
+      /* not the catalog: the API decides */
+    }
+  }
+  const data = await request<CatalogPayload>(marketApiPath(ref))
+  noteCatalog('api')
+  return data
+}
+
+async function fetchEdge(path: string): Promise<{ text: string; src: string } | null> {
+  if (typeof window === 'undefined' || !window.location.origin.startsWith('http')) return null
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), EDGE_TIMEOUT_MS)
+  try {
+    const res = await fetch(path, { signal: ctrl.signal })
+    if (!res.ok || !(res.headers.get('content-type') || '').includes('application/json')) return null
+    const text = await res.text()
+    return { text, src: `edge-${(res.headers.get('x-yq-cache') || 'miss').toLowerCase()}` }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export function getRep(slug: string): Promise<RepCard> {

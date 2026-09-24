@@ -15,6 +15,7 @@ Business numbers (thresholds, prefixes, badges) live in app_settings ('shop_*' k
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import logging
@@ -59,9 +60,17 @@ LINE_STATUSES = ("ok", "changed", "removed", "backorder")
 EVENTS = ("view", "item", "add", "checkout", "order", "search", "search_zero", "remove", "qty", "cart",
           "checkout_start", "rail_click", "reco_click", "share", "install", "reorder", "cancel", "vitals",
           "push_subscribe", "error")
-# event meta keys we keep (short strings / numbers only — never free text that could carry PII)
+# event meta keys we keep (short strings / numbers only — never free text that could carry PII).
+# R6 RUM (web/src/market/lib/vitals.ts): route = a template such as "/t/:category", never the raw
+# path; vp = phone/tablet/desktop/wide; catalog_ms / catalog_src = when the catalog arrived and from
+# where (edge-hit, edge-stale, api, pre-…); lcp_el + the four LCP phases (ttfb / delay / load /
+# render) from web-vitals/attribution. Client-error telemetry (both ErrorBoundaries): build =
+# __BUILD_ID__, code = the error class, reason = its scrubbed message. record_event keeps the
+# first 12 keys of an event — the vitals bag is exactly 12, core numbers first.
 _META_KEYS = frozenset({"q", "rail", "pos", "results", "count", "value", "lcp", "inp", "cls", "reason",
-                        "from", "to", "code", "attribution", "where"})
+                        "from", "to", "code", "attribution", "where",
+                        "route", "vp", "catalog_ms", "catalog_src",
+                        "lcp_el", "lcp_ttfb", "lcp_delay", "lcp_load", "lcp_render", "build"})
 MAX_LINES = 60
 MAX_QTY = 9999
 
@@ -782,21 +791,48 @@ def public_catalog_json(token: str | None, referral_code: str | None = None) -> 
     """The public catalog as ready-to-send JSON bytes, built once per context refresh and
     per salesman link. Every visitor between two refreshes gets the same answer, so none of
     them should pay for building and serializing 180 items. None = bad token."""
+    entry = public_catalog_entry(token, referral_code)
+    return None if entry is None else entry["raw"]
+
+
+def public_catalog_entry(token: str | None, referral_code: str | None = None) -> dict | None:
+    """`{"raw": bytes, "gz": bytes, "etag": str}` for one catalog answer (R6, 24-Sep-2026): the
+    JSON, its gzip made ONCE per refresh at level 9 (the middleware used to re-compress ~210 KB at
+    level 4 for every visitor on a 0.1-CPU container) and a weak ETag over the JSON, so the
+    /public/market route answers If-None-Match with a bodiless 304 and the edge Worker
+    (web/workers/market.js) revalidates its copy for free. Cached per context refresh and per
+    salesman link exactly as the bytes were; unknown ?ref= values share the no-ref copy, so junk
+    links cannot grow the cache. A token that is not the cached share token is validated by
+    catalog_payload and served uncached. None = bad token."""
     ctx = context()
     good = ctx.get("share_token")
     if not (token and good and secrets.compare_digest(token, good)):
-        return None if catalog_payload(token, referral_code) is None else _serialize(token, referral_code)
-    # unknown ?ref= values all share the no-ref copy, so junk links cannot grow the cache
+        payload = catalog_payload(token, referral_code)
+        return None if payload is None else _entry(_encode(payload))
     key = (resolve_ref(ctx, referral_code) or {}).get("referral_code") or ""
-    cached = ctx["public_json"].get(key)
+    store = ctx.setdefault("public_json", {})
+    cached = store.get(key)
     if cached is None:
-        cached = ctx["public_json"][key] = _serialize(token, key or None)
+        raw = _serialize(token, key or None)
+        if raw is None:
+            return None
+        cached = store[key] = _entry(raw)
     return cached
+
+
+def _entry(raw: bytes) -> dict:
+    # mtime=0: the gzip bytes depend on the JSON alone, never on the clock
+    return {"raw": raw, "gz": gzip.compress(raw, compresslevel=9, mtime=0),
+            "etag": 'W/"' + hashlib.sha1(raw).hexdigest()[:24] + '"'}
+
+
+def _encode(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), default=str).encode()
 
 
 def _serialize(token: str | None, referral_code: str | None) -> bytes | None:
     payload = catalog_payload(token, referral_code)
-    return None if payload is None else json.dumps(payload, separators=(",", ":"), default=str).encode()
+    return None if payload is None else _encode(payload)
 
 
 def resolve_code(ctx: dict, raw) -> str | None:
@@ -3734,8 +3770,22 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
     def _p75(key: str):
         vals = sorted(_f(_meta(e).get(key)) for e in ev if e.get("event") == "vitals" and _meta(e).get(key) is not None)
         return round(vals[min(len(vals) - 1, int(len(vals) * 0.75))], 3) if vals else None
-    vitals = {"samples": sum(1 for e in ev if e.get("event") == "vitals"),
-              "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls")}
+    beacons = [e for e in ev if e.get("event") == "vitals"]
+    # R6: one beacon per visit on pagehide, even with no metric (an abandoned cold visit), so `samples`
+    # is the beacons that carry a metric and `visits` all of them; the catalog source and the LCP
+    # phases say where the time went (docs/RELEASE.md, the watch) — the portal card shows the three
+    # core numbers, the rest is read from this JSON or in SQL
+    with_metric = [e for e in beacons if any(_meta(e).get(k) is not None for k in ("lcp", "inp", "cls"))]
+    by_src: dict[str, int] = {}
+    for e in beacons:
+        src = str(_meta(e).get("catalog_src") or "none")[:24]
+        by_src[src] = by_src.get(src, 0) + 1
+    vitals = {"samples": len(with_metric), "visits": len(beacons),
+              "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls"),
+              "lcp_ttfb_ms_p75": _p75("lcp_ttfb"), "lcp_delay_ms_p75": _p75("lcp_delay"),
+              "lcp_load_ms_p75": _p75("lcp_load"), "lcp_render_ms_p75": _p75("lcp_render"),
+              "catalog_ms_p75": _p75("catalog_ms"),
+              "catalog_src": sorted(({"src": k, "visits": v} for k, v in by_src.items()), key=lambda r: -r["visits"])}
     return {
         "search": search, "rails": rail_perf, "engagement": engagement, "ops": ops, "identity": identity, "vitals": vitals,
         "days": days, "since": since[:10],

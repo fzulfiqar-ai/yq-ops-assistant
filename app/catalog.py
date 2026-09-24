@@ -81,18 +81,25 @@ def _safe_code(code: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", (code or "").strip()) or "item"
 
 
-# The marketplace's responsive photo set (srcset 160/320/512, WebP). The legacy 256px JPEG
-# stays for exports and older clients; `thumb_urls` in the public payload points at these.
-THUMB_SIZES = (160, 320, 512)
+# The marketplace's responsive photo set (srcset 160/320/512, WebP) plus the 1024 rendition the
+# Lightbox and the package view show instead of the multi-MB originals (R6, 24-Sep-2026 — the
+# audit found the zoom downloading 6.3 MB files). The legacy 256px JPEG stays for exports and
+# older clients; `thumb_urls` in the public payload points at these. Adding a size here changes
+# the payload for EVERY item, so the release backfills it first:
+#   python -m scripts.make_market_thumbs --only-missing      (before the API deploy)
+THUMB_SIZES = (160, 320, 512, 1024)
+# WebP encoder effort: 6 (slowest, ~3 % smaller) for the offline backfill script; 4 on the upload
+# request path, where the 0.1-CPU container encodes five files per photo while the admin waits.
+WEBP_METHOD_REQUEST = 4
 # storage-level cache: the files are content-stable per code+kind+size (re-uploads overwrite), so
 # a long max-age is safe — the service worker and Cloudflare stop revalidating every photo.
 THUMB_CACHE = "31536000"
 
 
-def make_thumb(data: bytes, size: int = 256, fmt: str = "JPEG") -> bytes | None:
+def make_thumb(data: bytes, size: int = 256, fmt: str = "JPEG", *, method: int = 6) -> bytes | None:
     """Square-fit thumbnail on a white matte. JPEG q82 (exports) or WebP q80 (marketplace).
     Exports embed these instead of the full photos, which is what turned a 10-minute Excel
-    build into seconds."""
+    build into seconds. `method` is the WebP encoder effort (see WEBP_METHOD_REQUEST)."""
     try:
         from PIL import Image
         im = Image.open(io.BytesIO(data))
@@ -106,7 +113,7 @@ def make_thumb(data: bytes, size: int = 256, fmt: str = "JPEG") -> bytes | None:
         im.thumbnail((size, size), Image.LANCZOS)
         out = io.BytesIO()
         if fmt.upper() == "WEBP":
-            im.save(out, "WEBP", quality=82 if size <= 160 else 80, method=6)
+            im.save(out, "WEBP", quality=82 if size <= 160 else 80, method=method)
         else:
             im.save(out, "JPEG", quality=82)
         return out.getvalue()
@@ -123,7 +130,7 @@ def thumb_path(code: str, kind: str, size: int | None = None) -> str:
 
 
 def upload_thumb(code: str, kind: str, full_image: bytes, *, sizes: tuple[int, ...] = THUMB_SIZES,
-                 legacy: bool = True) -> int:
+                 legacy: bool = True, method: int = 6) -> int:
     """Best-effort thumbnail uploads (fixed paths per code+kind, overwritten on re-upload):
     the legacy 256 JPEG plus one WebP per marketplace size. Returns how many were stored."""
     bucket = get_client().storage.from_(_BUCKET)
@@ -132,7 +139,7 @@ def upload_thumb(code: str, kind: str, full_image: bytes, *, sizes: tuple[int, .
     if legacy:
         jobs.append((thumb_path(code, kind), make_thumb(full_image), "image/jpeg"))
     for s in sizes:
-        jobs.append((thumb_path(code, kind, s), make_thumb(full_image, s, "WEBP"), "image/webp"))
+        jobs.append((thumb_path(code, kind, s), make_thumb(full_image, s, "WEBP", method=method), "image/webp"))
     for path, blob, ctype in jobs:
         if not blob:
             continue
@@ -144,7 +151,7 @@ def upload_thumb(code: str, kind: str, full_image: bytes, *, sizes: tuple[int, .
     return done
 
 
-def make_banner(data: bytes, width: int = 1200) -> bytes | None:
+def make_banner(data: bytes, width: int = 1200, *, method: int = 6) -> bytes | None:
     """A campaign image: width-limited WebP that keeps its aspect (banners are not square)."""
     try:
         from PIL import Image
@@ -158,7 +165,7 @@ def make_banner(data: bytes, width: int = 1200) -> bytes | None:
             im = im.convert("RGB")
         im.thumbnail((width, width * 2), Image.LANCZOS)
         out = io.BytesIO()
-        im.save(out, "WEBP", quality=82, method=6)
+        im.save(out, "WEBP", quality=82, method=method)
         return out.getvalue()
     except Exception as e:  # noqa: BLE001
         log.warning("banner failed: %s", e)
@@ -172,7 +179,7 @@ def upload_campaign_image(data: bytes) -> dict | None:
     bucket = get_client().storage.from_(_BUCKET)
     urls: dict[str, str] = {}
     for w, key in ((1200, "url"), (600, "url_600")):
-        blob = make_banner(data, w)
+        blob = make_banner(data, w, method=WEBP_METHOD_REQUEST)
         if not blob:
             return None
         path = f"campaigns/{stamp}-{w}.webp"
@@ -189,7 +196,7 @@ def upload_image(code: str, kind: str, data: bytes, content_type: str, by: str =
     path = f"items/{_safe_code(code)}-{kind}-{int(time.time())}{ext}"
     get_client().storage.from_(_BUCKET).upload(
         path, data, {"content-type": content_type, "upsert": "false"})
-    upload_thumb(code, kind, data)
+    upload_thumb(code, kind, data, method=WEBP_METHOD_REQUEST)
     url = public_url(path)
     col = f"{kind}_image_url"
     get_client().table("catalog_items").update(

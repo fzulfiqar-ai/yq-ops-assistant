@@ -59,6 +59,13 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r2_loader
+      # R6 speed + reliability: the ETag/304 hot path on a synthetic context, uploads off the loop,
+      # the migration pair, RUM/error meta, the edge Worker config (its node half SKIPs here — the
+      # web job runs it for real)
+      - name: R6 suite - speed and reliability (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r6_speed
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
       # R2c exact money: price_cart / confirm / tier_progress on Decimal end to end — 10,000 random
@@ -88,6 +95,10 @@ jobs:
       # with the project's own typescript — Enter never substitutes a sold-out code, sold out last
       - name: Sold-out ordering (node, no browser)
         run: node scripts/soldout_order_test.mjs
+      # R6 edge catalog Worker (web/workers/market.js) on fakes: cache states, the 3 s soft timeout,
+      # non-200 never stored, missing chunks → 404
+      - name: Edge Worker behaviour (node, no network)
+        run: node scripts/market_worker_test.mjs
       # Advisory until the design-system pass clears the 18 pre-existing portal findings
       # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
       # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.

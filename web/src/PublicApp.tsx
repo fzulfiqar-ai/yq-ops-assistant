@@ -17,7 +17,7 @@ const OrderStatus = lazy(() => import('@/pages/OrderStatus'))
 export default function PublicApp() {
   return (
     <StrictMode>
-      <ErrorBoundary>
+      <ErrorBoundary where="public">
         <ToastProvider>
           <BrowserRouter>
             <Suspense fallback={null}>

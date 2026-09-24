@@ -1,15 +1,22 @@
-# Cloudflare Pages response headers (20-Sep-2026) — the Pages twin of web/vercel.json "headers".
-# Vite copies public/ to the build root, so both builds ship this file; Pages reads it and never
-# serves it, Vercel serves it as a harmless static file. CHANGE BOTH FILES TOGETHER.
+# Cloudflare Workers static-asset response headers (20-Sep-2026) — the twin of web/vercel.json "headers".
+# Vite copies public/ to the build root, so both builds ship this file; the asset layer reads it and
+# never serves it, Vercel serves it as a harmless static file. CHANGE BOTH FILES TOGETHER.
 # HSTS (21-Sep-2026): 180 days, subdomains included (ops. is on the same zone), no preload yet
 # so it stays reversible; the zone-level always_use_https redirect makes the first hop safe.
-# Pages has no rewrite rule: with no 404.html it serves index.html for every unmatched route itself.
+# The asset layer has no rewrite rule: with no 404.html it serves index.html for every unmatched
+# navigation itself. A non-navigation request for a path that is not a file reaches the market's
+# Worker (web/workers/market.js, no run_worker_first): the same-origin catalog at /api/market, and a
+# real 404 for a missing chunk or font. The Worker sets its own headers on what it answers; these
+# apply to the files the asset layer serves.
 # static.cloudflareinsights.com / cloudflareinsights.com: the zone injects Cloudflare Web Analytics
 # (free real-user vitals per hostname, no cookies) into every HTML response; without these two
 # allowances the strict CSP logs a console error on every page.
+# No Google Fonts hosts since R6 (24-Sep-2026): both apps self-host their fonts from /fonts, so
+# style-src, font-src and connect-src are 'self' (plus the API, storage and analytics origins).
+# connect-src 'self' also covers the same-origin /api/market and /version.json.
 
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://vofwqcqmdwdidueqxtxy.supabase.co; media-src 'self' blob: https://vofwqcqmdwdidueqxtxy.supabase.co; connect-src 'self' https://cloudflareinsights.com https://yq-ops-assistant.onrender.com https://vofwqcqmdwdidueqxtxy.supabase.co https://fonts.googleapis.com https://fonts.gstatic.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://vofwqcqmdwdidueqxtxy.supabase.co; media-src 'self' blob: https://vofwqcqmdwdidueqxtxy.supabase.co; connect-src 'self' https://cloudflareinsights.com https://yq-ops-assistant.onrender.com https://vofwqcqmdwdidueqxtxy.supabase.co; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   X-Robots-Tag: noindex, nofollow
   Referrer-Policy: strict-origin-when-cross-origin

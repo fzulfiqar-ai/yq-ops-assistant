@@ -529,8 +529,9 @@ const seg = (s: string) => encodeURIComponent(s)
 
 declare global {
   interface Window {
-    /** The catalog request index.html starts before the app has even downloaded. */
-    __yqCatalog?: { url: string; res: Promise<string> }
+    /** The catalog request index.html starts before the app has even downloaded (public/catalog-prefetch.js);
+     *  `src` says where the market copy came from (pre-edge-hit / pre-api …) for the RUM beacon. */
+    __yqCatalog?: { url: string; res: Promise<string>; src?: string }
   }
 }
 

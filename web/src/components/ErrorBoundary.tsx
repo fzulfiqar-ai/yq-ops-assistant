@@ -1,10 +1,13 @@
 import { Component, type ReactNode } from 'react'
+import { reportError } from '@/lib/errorMeta'
 
 interface State {
   error: Error | null
 }
 
-export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
+/** The portal's (and the public /c /o links') last line of defence. `where` names the door in the
+ *  shop_events `error` row the boundary sends (R6): 'portal' by default, 'public' from PublicApp. */
+export class ErrorBoundary extends Component<{ children: ReactNode; where?: string }, State> {
   state: State = { error: null }
 
   static getDerivedStateFromError(error: Error): State {
@@ -13,6 +16,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
 
   componentDidCatch(error: Error) {
     console.error('[YQ] Unhandled error:', error)
+    reportError(this.props.where || 'portal', error)
   }
 
   render() {
