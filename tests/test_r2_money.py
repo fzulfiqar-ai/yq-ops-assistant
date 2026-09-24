@@ -450,26 +450,77 @@ def _():
     ctx = _ctx([_item("T02", 2.95)], rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"])])
     ln = price_cart([{"item_code": "T02", "qty": 12}], ctx=ctx)["lines"][0]
     assert (ln["unit_price_bhd"], ln["discount_bhd"], ln["line_total_bhd"]) == (2.655, 3.54, 31.86), ln
-    # a half-fils unit price rounds UP (2.6655 -> 2.666), the float engine's behaviour on this very number
+    # plain (non-tie) roundings: 2.961 x 0.9 = 2.6649 -> 2.665 and 2.962 x 0.9 = 2.6658 -> 2.666 come out
+    # the same under ANY rounding mode — they guard the arithmetic, not the rule. The ties are next.
     ctx = _ctx([_item("T02", "2.961")], rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"])])
     ln = price_cart([{"item_code": "T02", "qty": 12}], ctx=ctx)["lines"][0]
-    assert ln["unit_price_bhd"] == 2.665 and ln["line_total_bhd"] == 31.98, ln     # 2.961 x 0.9 = 2.6649 -> 2.665
+    assert ln["unit_price_bhd"] == 2.665 and ln["line_total_bhd"] == 31.98, ln
     ctx = _ctx([_item("T02", "2.962")], rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"])])
     ln = price_cart([{"item_code": "T02", "qty": 12}], ctx=ctx)["lines"][0]
-    assert ln["unit_price_bhd"] == 2.666, ln                                        # 2.962 x 0.9 = 2.6658 -> 2.666
+    assert ln["unit_price_bhd"] == 2.666, ln
+
+
+@test("pricing: exact half-fils ties round UP — fixtures the float engine booked one fils LOW")
+def _():
+    """Until R2c the unit was float(list) x (1 - pct/100), then Decimal(str(float)) HALF_UP. On an
+    exact tie the float product can land a hair BELOW the tie — 2.135 x 0.9 is 1.9214999999999998
+    in binary, not 1.9215 — and the old engine rounded it DOWN. Every fixture here comes from the
+    old-vs-new differential run: a tie the old engine booked one fils low, which the exact Decimal
+    product rounds half-up. (0.145 x 50% = 0.0725 is also a tie, but halving a float keeps its
+    digits, so the old engine got THAT one right — it proves nothing on its own.)"""
+    from app.shop import price_cart
+    # 2.135 x 0.9 = 1.9215 exactly -> 1.922 (old engine: 1.921). 12 x 1.922 = 23.064; discount 12 x 0.213 = 2.556
+    ctx = _ctx([_item("T02", "2.135")], rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"])])
+    q = price_cart([{"item_code": "T02", "qty": 12}], ctx=ctx)
+    ln = q["lines"][0]
+    assert (ln["unit_price_bhd"], ln["line_total_bhd"], ln["discount_bhd"]) == (1.922, 23.064, 2.556), ln
+    assert (q["subtotal_bhd"], q["discount_bhd"], q["total_bhd"]) == (25.62, 2.556, 23.064), q
+    # 0.29 x 0.95 = 0.2755 exactly -> 0.276 (old engine: 0.275; the float product is 0.27549999999999997)
+    ctx = _ctx([_item("X05", "0.29")], rules=[_rule(6, "qty_tier", min_qty=6, pct_off=5, item_codes=["X05"])])
+    ln = price_cart([{"item_code": "X05", "qty": 7}], ctx=ctx)["lines"][0]
+    assert (ln["unit_price_bhd"], ln["line_total_bhd"], ln["discount_bhd"]) == (0.276, 1.932, 0.098), ln
+    # 1.01 x 0.85 = 0.8585 exactly -> 0.859 (old engine: 0.858)
+    ctx = _ctx([_item("K09", "1.01")], rules=[_rule(7, "qty_tier", min_qty=1, pct_off=15, item_codes=["K09"])])
+    ln = price_cart([{"item_code": "K09", "qty": 1}], ctx=ctx)["lines"][0]
+    assert (ln["unit_price_bhd"], ln["line_total_bhd"], ln["discount_bhd"]) == (0.859, 0.859, 0.151), ln
+    # the same tie reached through a float list price (production rows arrive as floats): 2.135 as a float
+    ctx = _ctx([_item("T02", 2.135)], rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"])])
+    assert price_cart([{"item_code": "T02", "qty": 12}], ctx=ctx)["lines"][0]["unit_price_bhd"] == 1.922
+    # a salesman offer on a referral link: 18.73 x 0.95 = 17.7935 exactly -> 17.794 (old engine: 17.793) —
+    # cart #26968 of the 30,000-cart differential run, one of the 65 the old engine got wrong
+    ctx = _ctx([_item("TB-T25", 18.73)], rules=[_rule(8, "salesman_offer", pct_off=5, item_codes=["TB-T25"],
+                                                    referral_codes=["harsh"])])
+    q = price_cart([{"item_code": "TB-T25", "qty": 1}], referral_code="harsh", ctx=ctx)
+    ln = q["lines"][0]
+    assert (ln["unit_price_bhd"], ln["line_total_bhd"], ln["discount_bhd"]) == (17.794, 17.794, 0.936), ln
+    assert (q["subtotal_bhd"], q["discount_bhd"], q["total_bhd"]) == (18.73, 0.936, 17.794), q
+    # cart level too: 5% of the eligible line totals 1198.08 + 1.45 = 1199.53 is 59.9765 exactly -> 59.977
+    # (the old engine summed the lines as floats and booked 59.976) — cart #19261 of the differential run
+    ctx = _ctx([_item("T27-C", 24.96), _item("M01 UL-1Mtr", "0.29")],
+               rules=[_rule(9, "cart_value", "5% over 25", min_value_bhd=25, pct_off=5)])
+    q = price_cart([{"item_code": "T27-C", "qty": 48}, {"item_code": "M01 UL-1Mtr", "qty": 5}], ctx=ctx)
+    assert [x["amount_bhd"] for x in q["discounts"]] == [59.977], q["discounts"]
+    assert (q["subtotal_bhd"], q["discount_bhd"], q["total_bhd"]) == (1199.53, 59.977, 1139.553), q
 
 
 @test("pricing: stacked percentages compound on the exact value and round once, where the unit is booked")
 def _():
     from app.shop import price_cart
     # 10% then 15% stackable on 2.95: 2.95 x 0.9 x 0.85 = 2.25675 exactly -> 2.257 (half-up on the 4th place)
-    ctx = _ctx([_item("T02", 2.95)], rules=[_rule(5, "qty_tier", min_qty=1, pct_off=10, item_codes=["T02"]),
-                                             _rule(6, "qty_tier", min_qty=1, pct_off=15, item_codes=["T02"], stackable=True)])
+    rules = [_rule(5, "qty_tier", min_qty=1, pct_off=10, item_codes=["T02"]),
+             _rule(6, "qty_tier", min_qty=1, pct_off=15, item_codes=["T02"], stackable=True)]
+    ctx = _ctx([_item("T02", 2.95)], rules=rules)
     q = price_cart([{"item_code": "T02", "qty": 3}], ctx=ctx)
     ln = q["lines"][0]
     assert ln["unit_price_bhd"] == 2.257 and ln["line_total_bhd"] == 6.771 and ln["discount_bhd"] == 2.079, ln
     assert [a["rule_id"] for a in ln["applied"]] == [5, 6]
     assert q["subtotal_bhd"] == 8.85 and q["discount_bhd"] == 2.079 and q["total_bhd"] == 6.771
+    # a tie the float engine lost: 2.5 x 0.9 x 0.85 = 1.9125 exactly -> 1.913 (old engine: 1.912 — its
+    # float product is 1.9124999999999999). 3 x 1.913 = 5.739; discount 3 x 0.587 = 1.761
+    q = price_cart([{"item_code": "T02", "qty": 3}], ctx=_ctx([_item("T02", "2.5")], rules=rules))
+    ln = q["lines"][0]
+    assert (ln["unit_price_bhd"], ln["line_total_bhd"], ln["discount_bhd"]) == (1.913, 5.739, 1.761), ln
+    assert (q["subtotal_bhd"], q["discount_bhd"], q["total_bhd"]) == (7.5, 1.761, 5.739), q
 
 
 @test("pricing: sub-dinar prices and large quantities never drift (0.005 x 999, 0.145 x 7 x 50%)")
@@ -479,29 +530,67 @@ def _():
     assert q["subtotal_bhd"] == 4.995 and q["total_bhd"] == 4.995, q
     ctx = _ctx([_item("B", "0.145")], rules=[_rule(1, "qty_tier", min_qty=1, pct_off=50, item_codes=["B"])])
     ln = price_cart([{"item_code": "B", "qty": 7}], ctx=ctx)["lines"][0]
-    # 0.0725 -> 0.073 half-up; 7 x 0.073 = 0.511; discount 7 x (0.145 - 0.073) = 0.504; 0.511 + 0.504 = 1.015 = 7 x 0.145
+    # 0.0725 is a tie -> 0.073 half-up (one the float engine also got right: halving keeps a float's digits);
+    # 7 x 0.073 = 0.511; discount 7 x (0.145 - 0.073) = 0.504; 0.511 + 0.504 = 1.015 = 7 x 0.145 — the
+    # identity holds on the fils figures, not on an unrounded 7 x 0.0725
     assert (ln["unit_price_bhd"], ln["line_total_bhd"], ln["discount_bhd"]) == (0.073, 0.511, 0.504), ln
 
 
-@test("pricing: item_tiers publishes the same fils unit price the engine books at that quantity")
+@test("pricing: item_tiers publishes exactly the fils unit price the engine books at that tier — floor included")
 def _():
     from app.shop import item_tiers, price_cart
+    # fixed: the margin floor. cost 0.7 x (1 + 20%) x (1 + 10% VAT) = 0.924. The 10% tier on 1.000 would
+    # be 0.900; the cart charges min(list, floor) = 0.924, so THAT is the tier published. 5% (0.950) sits
+    # above the floor and is published as is.
+    rules = [_rule(1, "qty_tier", min_qty=12, pct_off=10, item_codes=["F1"]),
+             _rule(2, "qty_tier", min_qty=6, pct_off=5, item_codes=["F1"])]
+    ctx = _ctx([_item("F1", "1.000")], rules=rules, costs={"F1": "0.7"}, shop_min_margin_pct="0.2", shop_vat_rate="0.10")
+    tiers = item_tiers(ctx, ctx["items"]["F1"])
+    assert [(t["min_qty"], t["unit_price_bhd"], t["rule_id"]) for t in tiers] == [(6, 0.95, 2), (12, 0.924, 1)], tiers
+    assert tiers[1]["label"] == "12+ → BHD 0.924", tiers[1]
+    for t in tiers:
+        ln = price_cart([{"item_code": "F1", "qty": t["min_qty"]}], ctx=ctx)["lines"][0]
+        assert ln["unit_price_bhd"] == t["unit_price_bhd"], (t, ln)
+    # cost 0.8 puts the floor (1.056) above the list price: both tiers are lifted back to 1.000 — no
+    # saving, so no tier is shown — and the cart indeed charges the list price
+    ctx = _ctx([_item("F1", "1.000")], rules=rules, costs={"F1": "0.8"}, shop_min_margin_pct="0.2", shop_vat_rate="0.10")
+    assert item_tiers(ctx, ctx["items"]["F1"]) == [], "a tier the floor lifts back to the list price is not a tier"
+    assert price_cart([{"item_code": "F1", "qty": 12}], ctx=ctx)["lines"][0]["unit_price_bhd"] == 1.0
+    # fixed: a book rate with more than three decimals is booked to the fils FIRST, then discounted —
+    # 1.2345 -> 1.235 x 0.9 = 1.1115 -> 1.112 (the rule on the raw rate would say 1.11105 -> 1.111)
+    ctx = _ctx([_item("F2", "1.2345")], rules=[_rule(3, "qty_tier", min_qty=6, pct_off=10, item_codes=["F2"])], costs={})
+    t = item_tiers(ctx, ctx["items"]["F2"])
+    assert [x["unit_price_bhd"] for x in t] == [1.112], t
+    assert price_cart([{"item_code": "F2", "qty": 6}], ctx=ctx)["lines"][0]["unit_price_bhd"] == 1.112
+    # random catalogues WITH costs (so the floor bites) and random margin / VAT settings: at the tier's own
+    # quantity the cart books exactly the published figure; above it (MOQ over the tier) never a dearer one
     rng = random.Random(SEED + 1)
-    for _ in range(300):
+    checked = clamped = above_moq = 0
+    for _ in range(600):
         items, costs = random_catalogue(rng)
         rules, _c = random_rules(rng, items)
+        st = random_settings(rng)
         ctx = _ctx(items, rules=[r for r in rules if r["kind"] == "qty_tier" and not r.get("stackable")
-                                 and not r["scope"]["referral_codes"]], costs={}, shop_allow_backorder="1")
+                                 and not r["scope"]["referral_codes"]], costs=costs, shop_allow_backorder="1",
+                   shop_min_margin_pct=st["shop_min_margin_pct"], shop_vat_rate=st["shop_vat_rate"])
         for it in items:
             if not it.get("standard_rate") or dec(it["standard_rate"]) <= 0:
                 continue
             for t in item_tiers(ctx, it):
-                q = price_cart([{"item_code": it["item_code"], "qty": max(t["min_qty"], it["moq"] or 1)}], ctx=ctx)
-                ln = q["lines"][0]
-                if ln["unavailable"]:
-                    continue
-                assert ln["unit_price_bhd"] <= t["unit_price_bhd"], (it["item_code"], t, ln)
                 assert _f2d(t["unit_price_bhd"]) == _f2d(t["unit_price_bhd"]).quantize(FILS)
+                qty = max(t["min_qty"], it["moq"] or 1)
+                q = price_cart([{"item_code": it["item_code"], "qty": qty}], ctx=ctx)
+                ln = q["lines"][0]
+                assert not ln["unavailable"], (it["item_code"], t, ln)
+                if qty == t["min_qty"]:
+                    assert ln["unit_price_bhd"] == t["unit_price_bhd"], (it["item_code"], t, ln)
+                    checked += 1
+                    clamped += it["item_code"] in q["_clamped"]
+                else:
+                    assert ln["unit_price_bhd"] <= t["unit_price_bhd"], (it["item_code"], t, ln)
+                    above_moq += 1
+    # the generator really exercised the floor and the MOQ-over-tier branch (seed 2609: 520 / 124 / 20-ish)
+    assert checked > 300 and clamped > 50 and above_moq > 10, (checked, clamped, above_moq)
 
 
 @test(f"PROPERTY: {N_CARTS:,} random carts equal a pure-Decimal reference to the fils; sum(lines) - discounts + delivery == total")
@@ -516,7 +605,9 @@ def _():
         lines, coupon, ref, staff, force = random_cart(rng, items, coupons)
         q = price_cart(lines, coupon, ref, ctx=ctx, staff=staff, force_backorder=force)
         want = reference_quote(lines, coupon, ref, ctx, staff=staff, force_backorder=force)
-        where = f"cart #{n}: lines={lines} coupon={coupon} ref={ref} staff={staff} force={force} rules={[f'{r["id"]}:{r["kind"]}' for r in rules]}"
+        # (no quote reuse inside the f-string: CI and the image run Python 3.11, before PEP 701)
+        rule_ids = [f"{r['id']}:{r['kind']}" for r in rules]
+        where = f"cart #{n}: lines={lines} coupon={coupon} ref={ref} staff={staff} force={force} rules={rule_ids}"
         # headline money, to the fils
         got = {k: _f2d(q[k]) for k in ("subtotal_bhd", "discount_bhd", "delivery_bhd", "total_bhd", "min_order_bhd")}
         assert got["subtotal_bhd"] == want["subtotal"], f"subtotal {got} vs {want['subtotal']} — {where}"
@@ -649,9 +740,12 @@ def _confirm_env(db, ctx):
 @test("confirm: the confirmed unit and line totals stored are the engine's fils figures (no float re-arithmetic)")
 def _():
     from app.shop import confirm_order
-    ctx = _ctx([_item("T02", "2.961"), _item("X05", "0.145")],
+    # both lines are exact half-fils ties the float engine booked one fils LOW (2.135 x 0.9 = 1.9215 ->
+    # 1.922, it stored 1.921; 0.29 x 0.95 = 0.2755 -> 0.276, it stored 0.275): the stored confirmed
+    # prices prove HALF_UP on the exact product, not just the arithmetic
+    ctx = _ctx([_item("T02", "2.135"), _item("X05", "0.29")],
                rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"]),
-                      _rule(6, "qty_tier", min_qty=7, pct_off=50, item_codes=["X05"])])
+                      _rule(6, "qty_tier", min_qty=7, pct_off=5, item_codes=["X05"])])
     db = {"shop_orders": [{"id": 1, "order_no": "YQ-2609-0001", "status": "new", "subtotal_bhd": 30.0, "total_bhd": 30.0,
                            "coupon_code": None, "referral_code": None}],
           "shop_order_lines": [{"id": 11, "order_id": 1, "item_code": "T02", "qty": 3, "qty_confirmed": None, "line_status": "ok"},
@@ -660,11 +754,12 @@ def _():
     with _confirm_env(db, ctx):
         out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 12}], "Tomorrow", None, actor="rep@example.com")
     by = {ln["id"]: ln for ln in db["shop_order_lines"]}
-    assert by[11]["unit_price_confirmed"] == 2.665 and by[11]["line_total_confirmed"] == 31.98, by[11]   # 2.6649 -> 2.665
-    assert by[12]["unit_price_confirmed"] == 0.073 and by[12]["line_total_confirmed"] == 0.511, by[12]   # 0.0725 -> 0.073
+    assert by[11]["unit_price_confirmed"] == 1.922 and by[11]["line_total_confirmed"] == 23.064, by[11]  # 12 x 1.922
+    assert by[12]["unit_price_confirmed"] == 0.276 and by[12]["line_total_confirmed"] == 1.932, by[12]   # 7 x 0.276
     hdr = db["shop_orders"][0]
-    assert hdr["status"] == "confirmed" and hdr["total_confirmed_bhd"] == 32.491 and hdr["subtotal_confirmed_bhd"] == 36.547, hdr
-    assert out["totals"]["total_bhd"] == 32.491 and all(isinstance(v, float) for v in
+    # subtotal 12 x 2.135 + 7 x 0.29 = 27.65; total 23.064 + 1.932 = 24.996 (old engine: 23.052 + 1.925 = 24.977)
+    assert hdr["status"] == "confirmed" and hdr["total_confirmed_bhd"] == 24.996 and hdr["subtotal_confirmed_bhd"] == 27.65, hdr
+    assert out["totals"]["total_bhd"] == 24.996 and all(isinstance(v, float) for v in
                                                            (hdr["total_confirmed_bhd"], by[11]["unit_price_confirmed"]))
     assert _f2d(hdr["total_confirmed_bhd"]) == sum((_f2d(by[i]["line_total_confirmed"]) for i in (11, 12)), ZERO)
 

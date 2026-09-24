@@ -840,8 +840,16 @@ def _discounted_unit(rule: dict, list_price) -> Decimal:
 
 def item_tiers(ctx: dict, item: dict) -> list[dict]:
     """Quantity tiers that apply to an item (public — no salesman-scoped rules). The unit price
-    is the fils figure price_cart books for that tier (same rule, same rounding)."""
-    lp = _d(item.get("standard_rate"))
+    is the fils figure price_cart books when that tier is the best rule on the line — the same
+    steps in the same order: the list price to the fils, the rule on it, rounded once, then the
+    margin floor (min(list, floor)). So the catalogue never shows a tier price the cart will not
+    charge: a tier the floor lifts back to the list price is not published, and two tiers at one
+    quantity keep the cheaper. (Until R2c the rule ran on the unrounded book rate and the floor
+    was skipped here, so a below-floor tier was advertised and then not given.)"""
+    lp = dmoney(item.get("standard_rate"))
+    if lp <= 0:
+        return []
+    floor = _floor_d(ctx, str(item.get("item_code") or ""))
     tiers = []
     for r in ctx["rules"]:
         if r["kind"] != "qty_tier" or not r.get("min_qty") or not _rule_matches_item(r, item):
@@ -849,10 +857,12 @@ def item_tiers(ctx: dict, item: dict) -> list[dict]:
         if r["scope"]["referral_codes"]:
             continue
         unit = dmoney(max(D0, _discounted_unit(r, lp)))
-        if lp > 0 and unit < lp:
+        if floor is not None and unit < floor:
+            unit = min(lp, floor)
+        if unit < lp:
             tiers.append({"min_qty": _i(r["min_qty"]), "unit_price_bhd": float(unit),
                           "label": f"{_i(r['min_qty'])}+ → BHD {unit:.3f}", "rule_id": r["id"]})
-    tiers.sort(key=lambda t: t["min_qty"])
+    tiers.sort(key=lambda t: (t["min_qty"], t["unit_price_bhd"]))
     # keep only tiers that actually improve on the previous one
     out: list[dict] = []
     for t in tiers:
