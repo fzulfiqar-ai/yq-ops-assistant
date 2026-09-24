@@ -28,7 +28,10 @@ interface Kpis {
   current_receivables_bhd?: number
 }
 interface ChannelRow { channel: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
-interface SalesmanRow { salesman: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
+/** R3a: the dashboard's salesman rows are the CURRENT MONTH, ACCESSORIES ONLY (ex-VAT net beside gross);
+ *  no_target / tier_reached come from the attainment (an outlet such as Causeway has no target row). */
+interface SalesmanRow { salesman: string; orders: number; qty: number | null; revenue_bhd: number; net_bhd: number; no_target?: boolean; tier_reached?: number | null }
+interface SalesmanScope { division?: string; basis?: string; period?: string | null; data_through?: string | null }
 interface AgentRow { agent: string; last_run: string; summary: string }
 interface ActionItem { action: string; to: string; bhd: number; urgency: number }
 interface Health {
@@ -57,6 +60,7 @@ interface DashboardData {
   revenue_trend: { period_month: string; gross_bhd: number; net_revenue_bhd: number }[]
   by_channel: ChannelRow[]
   by_salesman: SalesmanRow[]
+  by_salesman_scope?: SalesmanScope | null
   agents: AgentRow[]
   alerts: { negative_margin_count: number }
   daily_mtd?: DailyRow[]
@@ -209,7 +213,10 @@ export default function Dashboard() {
   const trend = (data?.revenue_trend || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
   const channels = data?.by_channel || []
   const channelTotal = channels.reduce((s, c) => s + Number(c.revenue_bhd || 0), 0) || 1
-  const salesmen = (data?.by_salesman || []).map((s) => ({ ...s, name: s.salesman, rev: Number(s.revenue_bhd || 0) }))
+  // ex-VAT accessories sales this month — the kickback basis — with gross kept for the tooltip
+  const salesmen = (data?.by_salesman || []).map((s) => ({ ...s, name: s.salesman, rev: Number(s.net_bhd ?? s.revenue_bhd ?? 0), gross: Number(s.revenue_bhd || 0) }))
+  const smScope = data?.by_salesman_scope
+  const smMonth = smScope?.period ? new Date(Number(smScope.period.slice(0, 4)), Number(smScope.period.slice(5, 7)) - 1, 1).toLocaleDateString('en-GB', { month: 'long' }) : ''
 
   const hour = new Date().getHours()
   const daypart = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
@@ -478,16 +485,24 @@ export default function Dashboard() {
       {/* Salesmen + top customers */}
       <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="p-5 lg:col-span-2">
-          <div className="mb-4 font-display text-base font-semibold">Top salesmen (gross revenue)</div>
-          {isLoading ? <Skeleton className="h-[260px]" /> : (
+          <div className="mb-1 font-display text-base font-semibold">
+            Top salesmen · Accessories{smMonth ? ` · ${smMonth}` : ' · this month'} (ex-VAT)
+          </div>
+          <div className="mb-3 text-[12px] text-muted-foreground">
+            The kickback basis: accessories only, giveaways excluded, SIM never counts{smScope?.data_through ? ` · sales data to ${fmtDate(smScope.data_through)}` : ''}.
+            The all-time, all-division rollup is on the Sales page.
+          </div>
+          {isLoading ? <Skeleton className="h-[260px]" /> : salesmen.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No accessories sales loaded for this month yet.</p>
+          ) : (
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={salesmen} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
                 <XAxis type="number" hide tickFormatter={(v) => bhd(v, 0)} />
                 <YAxis type="category" dataKey="name" width={110} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
-                <Tooltip formatter={(value) => [bhd(Number(value), 0), 'Gross']} cursor={{ fill: 'hsl(var(--accent))' }}
+                <Tooltip formatter={(value, _name, item) => [`${bhd(Number(value), 3)} ex-VAT · ${bhd(Number((item?.payload as { gross?: number } | undefined)?.gross || 0), 3)} gross`, 'Accessories']} cursor={{ fill: 'hsl(var(--accent))' }}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 <Bar dataKey="rev" radius={[0, 6, 6, 0]}>
-                  {salesmen.map((_, i) => <Cell key={i} fill={i === 0 ? '#7c3aed' : '#a78bfa'} />)}
+                  {salesmen.map((s, i) => <Cell key={i} fill={s.no_target ? '#c4b5fd' : i === 0 ? '#7c3aed' : '#a78bfa'} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>

@@ -27,25 +27,11 @@ load_dotenv(ROOT / ".env")
 
 
 def build(period: str, basis: str) -> list[dict]:
-    from app import shop
-    from app.database import get_client
-    targets = get_client().table("salesman_targets").select("*").execute().data or []
-    salesmen = get_client().table("salesmen").select("id,focus_name").execute().data or []
-    sid = {(s.get("focus_name") or "").strip(): s["id"] for s in salesmen if s.get("focus_name")}
-    rows = []
-    for name in sorted({t["salesman"] for t in targets}):
-        amt, data_date = shop.rep_month_sales(name, basis=basis, period=period)
-        tgt = shop.rep_target(name, period)
-        tp = shop.tier_progress(tgt, amt, data_date, basis=basis)
-        if not tp:
-            continue
-        rows.append({
-            "salesman": name, "salesman_id": sid.get(name), "period": period, "basis": basis,
-            "data_through": (data_date or "")[:10] or None, "sales_bhd": tp["mtd_bhd"], "returns_bhd": None,
-            "tier_reached": tp["tier_reached"], "rate": tp["kickback_pct"], "kickback_bhd": tp["kickback_bhd"],
-            "target_snapshot": tgt,
-        })
-    return rows
+    """The rows to freeze. Since R3a the maths lives in app.statements.build_rows (the same
+    function the admin's "Create draft" button calls), so the CLI and the portal freeze
+    identical figures. Amounts come back as 3-dp strings (Decimal, never float)."""
+    from app.statements import build_rows
+    return build_rows(period, basis)
 
 
 def main(argv: list[str]) -> int:
@@ -58,12 +44,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--commit", action="store_true")
     a = ap.parse_args(argv)
 
+    from decimal import Decimal
     rows = build(a.period, a.basis)
-    total = round(sum(r["kickback_bhd"] for r in rows), 3)
+    total = sum((Decimal(str(r["kickback_bhd"])) for r in rows), Decimal("0.000"))
     print(f"{a.period} on {a.basis} ({a.status}) -- {len(rows)} reps with a target, total kickback {total:.3f}")
     for r in rows:
-        if r["sales_bhd"] or r["kickback_bhd"]:
-            print(f"  {r['salesman'][:24]:24s} {r['sales_bhd']:10.3f}  T{r['tier_reached']}  {r['kickback_bhd']:8.3f}  data {r['data_through']}")
+        if Decimal(str(r["sales_bhd"])) or Decimal(str(r["kickback_bhd"])):
+            print(f"  {r['salesman'][:24]:24s} {Decimal(str(r['sales_bhd'])):10.3f}  T{r['tier_reached']}  "
+                  f"{Decimal(str(r['kickback_bhd'])):8.3f}  data {r['data_through']}")
     if not a.commit:
         print("\nDry run. Nothing written. Add --commit to freeze these rows.")
         return 0

@@ -258,12 +258,118 @@ def movers(k: int = 5) -> dict:
     return {"rising": rising, "falling": falling}
 
 
+# Salesman attainment (R3a, 24-Sep-2026): ONE SQL over the effective target row per rep
+# (a month-specific row beats the standing '' row) LEFT JOINed to the current month's
+# Accessories sales — the month of the latest loaded sale, giveaways out, SIM never, ex-VAT
+# net_bhd — with the rep matched exactly as app.shop.rep_month_sales does (`name` or
+# `name - %`, because Focus names carry a warehouse suffix). A rep with sales but no target
+# row still appears (no_target = true), so nobody's month is invisible. Every row then goes
+# through app.shop.tier_progress, the same function the rep's Today card uses.
+ATTAINMENT_SQL = """
+WITH mx AS (SELECT MAX(sale_date) AS d FROM v_sales),
+per AS (SELECT to_char(d, 'YYYY-MM') AS period, date_trunc('month', d)::date AS m0,
+               (date_trunc('month', d) + interval '1 month')::date AS m1, d FROM mx),
+tg AS (
+  SELECT DISTINCT ON (t.salesman) t.salesman, t.period, t.team, t.target_bhd, t.tier2_bhd, t.tier3_bhd,
+         t.kickback_t1, t.kickback_t2, t.kickback_t3
+  FROM salesman_targets t, per WHERE t.period IN ('', per.period)
+  ORDER BY t.salesman, t.period DESC),
+s AS (
+  SELECT v.salesman_resolved AS rep, SUM(v.net_bhd) AS net_bhd, SUM(v.revenue_bhd) AS gross_bhd,
+         COUNT(DISTINCT v.invoice_no) AS invoices,
+         COUNT(DISTINCT v.customer_name) FILTER (WHERE NOT v.is_cash_customer) AS shops,
+         MAX(v.sale_date) AS last_sale
+  FROM v_sales v, per
+  WHERE v.sale_date >= per.m0 AND v.sale_date < per.m1 AND v.division = 'Accessories' AND NOT v.is_giveaway
+  GROUP BY v.salesman_resolved),
+m AS (
+  SELECT s.*, t.salesman AS target_salesman
+  FROM s LEFT JOIN LATERAL (
+    SELECT salesman FROM tg WHERE s.rep = tg.salesman OR s.rep LIKE tg.salesman || ' - %'
+    ORDER BY length(tg.salesman) DESC LIMIT 1) t ON true),
+agg AS (
+  SELECT COALESCE(target_salesman, rep) AS salesman, SUM(net_bhd) AS net_bhd, SUM(gross_bhd) AS gross_bhd,
+         SUM(invoices) AS invoices, SUM(shops) AS shops, MAX(last_sale) AS last_sale,
+         bool_and(target_salesman IS NULL) AS no_target
+  FROM m GROUP BY 1)
+SELECT COALESCE(tg.salesman, agg.salesman) AS salesman, tg.period AS target_period, tg.team,
+       tg.target_bhd, tg.tier2_bhd, tg.tier3_bhd, tg.kickback_t1, tg.kickback_t2, tg.kickback_t3,
+       ROUND(COALESCE(agg.net_bhd, 0)::numeric, 3) AS net_bhd, ROUND(COALESCE(agg.gross_bhd, 0)::numeric, 3) AS gross_bhd,
+       COALESCE(agg.invoices, 0) AS invoices, COALESCE(agg.shops, 0) AS shops, agg.last_sale::text AS last_sale,
+       (tg.salesman IS NULL) AS no_target, per.period, per.d::text AS data_through
+FROM tg FULL OUTER JOIN agg ON agg.salesman = tg.salesman CROSS JOIN per
+ORDER BY net_bhd DESC, salesman
+"""
+
+_TARGET_KEYS = ("salesman", "period", "team", "target_bhd", "tier2_bhd", "tier3_bhd",
+                "kickback_t1", "kickback_t2", "kickback_t3")
+
+
+def attainment_rows(sql_rows: list[dict], salesmen: list[dict] | None = None, today=None) -> list[dict]:
+    """Pure: ATTAINMENT_SQL rows → the table the portal shows. `tier` is app.shop.tier_progress
+    (None when the rep has no target row); `salesman_id` / `name` / `is_active` come from the
+    salesmen table when a row's focus_name matches. Sorted by ex-VAT sales, highest first."""
+    from decimal import Decimal, ROUND_HALF_UP
+    from app import shop
+    today = today or shop.bahrain_today()
+    by_focus = {str(s.get("focus_name") or "").strip(): s for s in (salesmen or []) if s.get("focus_name")}
+    out: list[dict] = []
+    for r in sql_rows or []:
+        name = str(r.get("salesman") or "")
+        no_target = bool(r.get("no_target")) or r.get("target_bhd") is None
+        target = None if no_target else {k: r.get(k) for k in _TARGET_KEYS}
+        if target is not None:
+            target["period"] = r.get("target_period") if r.get("target_period") is not None else ""
+        net = float(Decimal(str(r.get("net_bhd") or 0)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
+        tier = shop.tier_progress(target, net, r.get("data_through"), today=today) if target else None
+        sm = by_focus.get(name) or {}
+        out.append({
+            "salesman": name, "salesman_id": sm.get("id"), "name": sm.get("name") or name,
+            "is_active": sm.get("is_active"), "referral_code": sm.get("referral_code"),
+            "team": (target or {}).get("team") or None, "target_period": (target or {}).get("period"),
+            "no_target": no_target, "period": r.get("period"), "data_through": r.get("data_through"),
+            "net_bhd": net, "gross_bhd": float(r.get("gross_bhd") or 0), "basis": shop.KICKBACK_BASIS,
+            "invoices": int(float(r.get("invoices") or 0)), "shops": int(float(r.get("shops") or 0)),
+            "last_sale": r.get("last_sale"),
+            "tier": tier,
+            "tier_reached": tier["tier_reached"] if tier else None,
+            "kickback_pct": tier["kickback_pct"] if tier else None,
+            "kickback_bhd": tier["kickback_bhd"] if tier else None,
+            "next_tier": tier["next_tier"] if tier else None,
+            "progress_pct": tier["progress_pct"] if tier else None,
+            "days_left": tier["days_left"] if tier else None,
+        })
+    out.sort(key=lambda x: (-x["net_bhd"], x["salesman"]))
+    return out
+
+
 def salesman_attainment() -> list[dict]:
-    """Per-salesman MTD vs target leaderboard -- RETIRED 21-Sep-2026. The seeded targets were
-    removed before launch; real targets arrive later as a file (scripts/import_targets.py into
-    salesman_targets(salesman, period)). Kept as an empty list so the dashboard payload shape is
-    unchanged; re-implement against the period column when the owner's file exists."""
-    return []
+    """Per-rep current-month attainment (Accessories, ex-VAT) with the tier reached and the
+    estimated kickback — one SQL, then app.shop.tier_progress per row. [] when the targets table
+    or the view is not there (the dashboard payload keeps its shape)."""
+    try:
+        rows = exec_sql(ATTAINMENT_SQL) or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("attainment unavailable: %s", e)
+        return []
+    salesmen: list[dict] = []
+    try:
+        salesmen = (get_client().table("salesmen").select("id,name,focus_name,is_active,referral_code")
+                    .limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001 — names only; the figures do not depend on it
+        log.debug("salesmen unavailable for attainment names: %s", e)
+    return attainment_rows(rows, salesmen)
+
+
+def top_salesmen_from_attainment(rows: list[dict], limit: int = 8) -> list[dict]:
+    """The Dashboard's "Top salesmen" from the attainment rows: Accessories, the current month,
+    ex-VAT `net_bhd` beside the VAT-inclusive `revenue_bhd`, `orders` = invoices. Names with no
+    sales this month are left out; outlets without a target row still show (no_target)."""
+    out = [{"salesman": r["salesman"], "orders": r["invoices"], "qty": None,
+            "revenue_bhd": r["gross_bhd"], "net_bhd": r["net_bhd"], "no_target": r["no_target"],
+            "tier_reached": r.get("tier_reached")}
+           for r in rows if float(r.get("net_bhd") or 0) > 0]
+    return out[:limit]
 
 
 def daily_sales_mtd() -> list[dict]:
@@ -349,7 +455,6 @@ def dashboard(force: bool = False) -> dict:
             "movers": ex.submit(movers, 5),
             "trend": ex.submit(revenue_trend, 12),
             "channel": ex.submit(sales_by_channel),
-            "salesman": ex.submit(sales_by_salesman),
             "agents": ex.submit(agents_status),
             "fresh": ex.submit(data_freshness),
             "daily_mtd": ex.submit(daily_sales_mtd),
@@ -392,7 +497,16 @@ def _assemble_dashboard(r: dict) -> dict:
         "top_customers": s["top_customers"],
         "revenue_trend": r["trend"],
         "by_channel": r["channel"],
-        "by_salesman": r["salesman"][:8],
+        # R3a (24-Sep-2026): the dashboard's top salesmen are the CURRENT MONTH, ACCESSORIES ONLY
+        # (SIM never counts towards a rep), ex-VAT beside gross — derived from the attainment rows
+        # so the widget and the Salesmen page can never disagree. The all-time, all-division
+        # v_sales_by_salesman rollup stays on the Sales page (reports.sales()).
+        "by_salesman": top_salesmen_from_attainment(r["attainment"]),
+        "by_salesman_scope": {
+            "division": "Accessories", "basis": "net_ex_vat",
+            "period": (r["attainment"][0].get("period") if r["attainment"] else None),
+            "data_through": (r["attainment"][0].get("data_through") if r["attainment"] else None),
+        },
         "agents": r["agents"],
         "alerts": a,
         "daily_mtd": r["daily_mtd"],

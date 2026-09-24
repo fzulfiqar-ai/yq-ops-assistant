@@ -12,6 +12,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DataTable, type Column } from '@/components/DataTable'
+import { AttainmentTab, StatementsTab } from './SalesmenRollups'
+import { useAuth } from '@/lib/auth'
 
 interface Salesman {
   id: number
@@ -275,9 +277,14 @@ function SalesmanDialog({
   )
 }
 
+type Tab = 'reps' | 'attainment' | 'statements'
+
 export default function Salesmen() {
   const qc = useQueryClient()
   const toast = useToast()
+  const { me } = useAuth()
+  const isAdmin = me?.role === 'admin'
+  const [tab, setTab] = useState<Tab>('reps')
   const { data, isLoading } = useQuery({ queryKey: ['shop-salesmen'], queryFn: () => apiGet<SalesmenResp>('/shop/salesmen') })
   const { data: teamData } = useQuery({ queryKey: ['team-emails'], queryFn: () => apiGet<TeamUsersResp>('/team'), retry: false })
   const [edit, setEdit] = useState<Partial<Salesman> | null>(null)
@@ -362,24 +369,44 @@ export default function Salesmen() {
       } },
   ]
 
+  // R3a: the rollups. Attainment is the Salesmen page's business; statements are money → admin only.
+  const tabs: { key: Tab; label: string }[] = [
+    { key: 'reps', label: 'Reps' },
+    { key: 'attainment', label: 'Attainment' },
+    ...(isAdmin ? [{ key: 'statements' as Tab, label: 'Statements' }] : []),
+  ]
+
   return (
     <div>
-      <PageHeader title="Salesmen" subtitle="Referral links, QR codes and Focus mapping"
-        actions={<Button size="sm" onClick={() => setEdit({})}><Plus size={15} /> Add salesman</Button>} />
+      <PageHeader title="Salesmen" subtitle="Referral links, QR codes, Focus mapping, monthly attainment and kickback statements"
+        actions={tab === 'reps' ? <Button size="sm" onClick={() => setEdit({})}><Plus size={15} /> Add salesman</Button> : undefined} />
 
-      <p className="mb-4 text-sm text-muted-foreground">
-        Each salesman gets a personal storefront link and QR code — orders placed through it are credited
-        to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
-        Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
-        marketplace instead of the token link. Contact details are stored in the database only. A rep with
-        orders, merchants or a kickback statement can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
-      </p>
+      <div role="tablist" aria-label="Salesmen views" className="mb-4 inline-grid auto-cols-fr grid-flow-col rounded-xl border border-border bg-card p-1">
+        {tabs.map((t) => (
+          <button key={t.key} role="tab" type="button" aria-selected={tab === t.key} onClick={() => setTab(t.key)}
+            className={cn('h-9 rounded-lg px-4 text-[13px] font-semibold', tab === t.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')}>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-      {isLoading ? (
-        <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
-      ) : (
-        <DataTable rows={rows} cols={cols} exportName="yq-salesmen"
-          empty="No salesmen yet — add your first one to generate a referral link and QR code." />
+      {tab === 'attainment' ? <AttainmentTab /> : tab === 'statements' ? <StatementsTab /> : (
+        <>
+          <p className="mb-4 text-sm text-muted-foreground">
+            Each salesman gets a personal storefront link and QR code — orders placed through it are credited
+            to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
+            Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
+            marketplace instead of the token link. Contact details are stored in the database only. A rep with
+            orders, merchants or a kickback statement can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
+          </p>
+
+          {isLoading ? (
+            <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
+          ) : (
+            <DataTable rows={rows} cols={cols} exportName="yq-salesmen"
+              empty="No salesmen yet — add your first one to generate a referral link and QR code." />
+          )}
+        </>
       )}
 
       {edit && (

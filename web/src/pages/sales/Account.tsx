@@ -6,7 +6,7 @@ import { navFor } from '@/lib/nav'
 import { changeOwnPassword } from '@/lib/password'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
-import { bhd3, initials, monthName, useAuthedBlob, useShopMe } from './lib'
+import { bhd3, bhdStr, dayLabel, initials, monthName, useAuthedBlob, useShopMe } from './lib'
 
 /**
  * /account — who I am, my storefront link and QR, my target, my password, everything else the
@@ -101,6 +101,30 @@ export default function Account() {
               Estimated kickback {bhd3(focus.target.kickback_bhd)} · final after approval ·{' '}
               {focus.target.returns_deducted ? 'returns deducted' : 'returns not yet deducted'}
             </div>
+          </div>
+        ) : null}
+        {/* R3a: the money on record — the latest approved / paid statement, then the open draft */}
+        {meQ.data?.last_closed ? (
+          <div className="mt-2 rounded-xl border border-primary/30 bg-card px-3 py-2.5 text-[12.5px]" aria-label="Last closed month">
+            <span className="text-muted-foreground">{monthName(meQ.data.last_closed.period)} final · </span>
+            <b>{meQ.data.last_closed.tier_reached > 0 ? `Tier ${meQ.data.last_closed.tier_reached}` : 'below Tier 1'}</b>
+            <span className="text-muted-foreground"> · </span>
+            <b className="tabular-nums">{bhdStr(meQ.data.last_closed.kickback_bhd)}</b>
+            <span className="text-muted-foreground">
+              {' '}· {meQ.data.last_closed.status === 'paid'
+                ? `paid${meQ.data.last_closed.paid_at ? ` ${dayLabel(meQ.data.last_closed.paid_at)}` : ''}`
+                : `approved${meQ.data.last_closed.approved_at ? ` ${dayLabel(meQ.data.last_closed.approved_at)}` : ''}, payment to follow`}
+            </span>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              On {bhdStr(meQ.data.last_closed.sales_bhd)} sold{meQ.data.last_closed.basis === 'net_ex_vat' ? ' ex-VAT' : ''}
+              {meQ.data.last_closed.data_through ? ` · sales data to ${dayLabel(meQ.data.last_closed.data_through)}` : ''}
+              {meQ.data.last_closed.returns_bhd == null ? ' · returns not deducted' : ` · returns ${bhdStr(meQ.data.last_closed.returns_bhd)} deducted`}
+            </div>
+          </div>
+        ) : null}
+        {meQ.data?.draft ? (
+          <div className="mt-2 text-[11.5px] text-muted-foreground">
+            {monthName(meQ.data.draft.period)} draft · {meQ.data.draft.tier_reached > 0 ? `Tier ${meQ.data.draft.tier_reached}` : 'below Tier 1'} · {bhdStr(meQ.data.draft.kickback_bhd)} · awaiting the office's approval
           </div>
         ) : null}
       </section>

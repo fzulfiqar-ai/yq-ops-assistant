@@ -10,6 +10,7 @@ import { STATUS_LABEL, STATUS_TONE } from '@/pages/shop-ops/OrderActions'
 import { Badge } from '@/components/ui/badge'
 import { bhd3, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
 import { ComingSoon } from './ComingSoon'
+import { BasketsNotSent, DueThisWeek, LinkThisWeek } from './FollowUps'
 
 /**
  * /today — the salesman's home. What needs him now (orders waiting to be confirmed), how his
@@ -167,6 +168,12 @@ export default function Today() {
             )}
           </section>
 
+          {/* due this week — the rep's Focus book by its own rhythm (R3a) */}
+          <DueThisWeek />
+
+          {/* baskets opened on my link and never sent (R3a) */}
+          <BasketsNotSent />
+
           {/* waiting for stock */}
           {(restockQ.data?.requests?.length || 0) > 0 && (
             <section className="overflow-hidden rounded-2xl border border-border bg-card">
@@ -226,6 +233,9 @@ export default function Today() {
               ))}
             </div>
           </section>
+
+          {/* my link this week — the rep's own 7-day funnel (R3a) */}
+          <LinkThisWeek />
 
           {/* tiered kickback — this month's Focus sales vs the rep's tier thresholds */}
           {tier ? (
