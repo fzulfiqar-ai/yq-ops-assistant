@@ -163,7 +163,7 @@ class ShopError(ValueError):
 CAS_CONFLICT_MSG = "This order changed a moment ago — refresh and try again"
 # A retry (same device + client_order_id) that finds a header whose lines are still being
 # written: not a duplicate, not debris — the first request is in flight. 409 at the edge.
-IN_FLIGHT_MSG = "Your order is still being placed — check My orders in a minute"
+IN_FLIGHT_MSG = "Your order is still being placed — tap Place order again in a minute"
 # A rep with orders, merchants or a kickback statement is history, never a row to delete.
 SALESMAN_REFERENCED_MSG = "Has orders or merchants — deactivate instead"
 
@@ -1913,16 +1913,41 @@ def _discard_lineless_order(client, order_id: int, why: str, *, older_than: str 
         log.error("could not discard line-less order %s (%s): %s", order_id, why, e)
 
 
+def _retire_lineless_order(client, order_id: int, why: str, *, older_than: str | None = None) -> bool:
+    """A header left without lines by an EARLIER request is kept, never deleted (owner rule,
+    24-Sep-2026: no order row is removed once written): it is cancelled with a system reason and
+    its client_order_id released, so the merchant's retry can place the order properly and the
+    row stays in the record. Pinned to status 'new' (and `older_than`), so a real order that a
+    rep already touched, or one whose lines are being written this instant, is never affected."""
+    try:
+        qry = (client.table("shop_orders").update({
+            "status": "cancelled", "cancelled_at": _now().isoformat(), "cancelled_by": "system",
+            "cancel_reason": f"Incomplete order: no lines were saved ({why})"[:300], "client_order_id": None,
+        }).eq("id", order_id).eq("status", "new"))
+        if older_than:
+            qry = qry.lt("created_at", older_than)
+        done = qry.execute().data or []
+        if done:
+            client.table("shop_order_events").insert({
+                "order_id": order_id, "actor": "system", "event": "cancelled",
+                "detail": {"reason": why, "lineless": True}}).execute()
+            log.warning("retired line-less order %s: %s", order_id, why)
+        return bool(done)
+    except Exception as e:  # noqa: BLE001 — leave the reason in the log; the caller decides
+        log.error("could not retire line-less order %s (%s): %s", order_id, why, e)
+        return False
+
+
 def sweep_lineless_orders(min_age_min: int = 10) -> dict:
-    """Housekeeping for shop_jobs (idempotent, never raises): remove Received ('new') headers
+    """Housekeeping for shop_jobs (idempotent, never raises): CANCEL (never delete) Received ('new') headers
     older than `min_age_min` minutes that have no lines — what is left when a create's lines
     insert AND its own discard both failed (a Supabase outage), or when a staff / token-link
     order (no client_order_id, so no retry ever comes back to clean it) died the same way.
     Only a header with zero lines goes, re-checked right before its delete, which is itself
     pinned to status 'new' and the age cutoff; every other order row is flagged or cancelled,
-    never removed (plan §3). Returns {"checked", "removed": [order_no…], "errors"}."""
+    never removed (plan §3). Returns {"checked", "cancelled": [order_no…], "errors"}."""
     cutoff = (_now() - timedelta(minutes=max(1, _i(min_age_min, 10)))).isoformat()
-    out: dict = {"checked": 0, "removed": [], "errors": []}
+    out: dict = {"checked": 0, "cancelled": [], "errors": []}
     try:
         client = get_client()
         heads = (client.table("shop_orders").select("id,order_no,created_at").eq("status", "new")
@@ -1947,12 +1972,8 @@ def sweep_lineless_orders(min_age_min: int = 10) -> dict:
                  .eq("order_id", h["id"]).limit(1).execute().count or 0)
             if n:
                 continue        # lines arrived between the two reads
-            gone = (client.table("shop_orders").delete().eq("id", h["id"]).eq("status", "new")
-                    .lt("created_at", cutoff).execute().data or [])
-            if gone:
-                log.warning("sweep removed line-less order %s (%s, created %s)", h["id"], h.get("order_no"),
-                            h.get("created_at"))
-                out["removed"].append(h.get("order_no") or h["id"])
+            if _retire_lineless_order(client, h["id"], "found by the line-less sweep", older_than=cutoff):
+                out["cancelled"].append(h.get("order_no") or h["id"])
         except Exception as e:  # noqa: BLE001 — one header failing must not stop the sweep
             out["errors"].append(f"{h.get('order_no') or h['id']}: {type(e).__name__}: {e}"[:160])
     return out
@@ -2006,7 +2027,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
                 if created and (_now() - created).total_seconds() < _LINELESS_GRACE_S:
                     raise ShopError(IN_FLIGHT_MSG)
                 cutoff = (_now() - timedelta(seconds=_LINELESS_GRACE_S)).isoformat()
-                _discard_lineless_order(client, o["id"], "retry found a header with no lines", older_than=cutoff)
+                _retire_lineless_order(client, o["id"], "retry found a header with no lines", older_than=cutoff)
     ctx = context()
     vals = ctx["settings"]
     if not staff:

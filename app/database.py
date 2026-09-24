@@ -35,7 +35,7 @@ _user_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
 # for a while (re-probed every _LEGACY_RETRY_S) instead of failing every login.
 _USER_COLUMNS = "email,role,features,status,full_name,must_reset"
 _USER_COLUMNS_LEGACY = "email,role,features,status,full_name"
-_LEGACY_RETRY_S = 600
+_LEGACY_RETRY_S = 60
 _legacy_until = 0.0
 
 

@@ -125,6 +125,8 @@ _BANNED = re.compile(
     re.IGNORECASE,
 )
 _SEMICOLON_MID = re.compile(r";(?!\s*$)")
+# E'…' / e'…' escape strings (also U&'…'), $$ / $tag$ dollar quoting, and any backslash.
+_UNSAFE_LEXEMES = re.compile(r"(?i)(?<![a-z0-9_])(e|u&)'|\$[a-z_0-9]*\$|\\")
 _WHOLE_NUMBER = re.compile(r"^\d+$")
 
 # A set operation of SELECTs is still one read-only statement.
@@ -215,6 +217,12 @@ def validate(sql: str, allowed_features: set[str] | None = None) -> str:
     if _SEMICOLON_MID.search(sql):
         raise SQLValidationError("Only a single SQL statement is allowed.")
 
+    # validate() returns sqlglot's re-rendering of the tree, so the text that runs must mean
+    # exactly what was checked. Backslash escapes (E'…'), dollar quoting and bare backslashes are
+    # where a dialect round-trip can move a string boundary; a data question never needs them.
+    if _UNSAFE_LEXEMES.search(sql):
+        raise SQLValidationError("Escape strings and dollar quoting are not allowed.")
+
     tree = _parse(sql)
     if not isinstance(tree, _READ_ONLY_ROOTS):
         raise SQLValidationError("Only SELECT statements are allowed.")
@@ -239,7 +247,15 @@ def validate(sql: str, allowed_features: set[str] | None = None) -> str:
             )
 
     _cap_rows(tree)
-    return tree.sql(dialect="postgres")
+    out = tree.sql(dialect="postgres")
+    # Defence in depth: the SQL that will run is parsed again and must read exactly the same
+    # relations through the same read-only root as the tree that was checked.
+    again = _parse(out)
+    if not isinstance(again, _READ_ONLY_ROOTS) or referenced_relations(again) != refs \
+            or _UNSAFE_LEXEMES.search(out):
+        log.warning("SQL rejected — rendering changed the statement's meaning")
+        raise SQLValidationError("The query could not be validated.")
+    return out
 
 
 def _literal_rows(node: exp.Expression | None) -> int:

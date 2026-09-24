@@ -963,6 +963,27 @@ def _():
     database.invalidate_user_cache()
 
 
+@test("sql: escape strings, dollar quoting and backslashes are refused; the SQL that runs re-validates to the same relations")
+def _():
+    from app.sql_validator import SQLValidationError, validate
+    bad = [
+        "SELECT E'a\\\\' AS x FROM v_sales",              # the E-string rewrite the re-review found
+        "SELECT e'x' FROM v_sales",
+        "SELECT U&'d\\0061t' FROM v_sales",
+        "SELECT $$x$$ FROM v_sales",
+        "SELECT $tag$x$tag$ FROM v_sales",
+        "SELECT 'a\\b' FROM v_sales",
+    ]
+    for q in bad:
+        try:
+            validate(q)
+        except SQLValidationError:
+            continue
+        raise AssertionError(f"accepted: {q!r}")
+    ok = validate("SELECT item_name, 'Apple' AS brand FROM v_sales WHERE item_name ILIKE 'e%'")
+    assert ok.upper().startswith("SELECT") and "LIMIT" in ok.upper(), ok
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

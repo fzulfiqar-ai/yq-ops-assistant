@@ -681,14 +681,18 @@ async def order_file(po_no: str, file: UploadFile = File(...),
                                                                **{k: summary.get(k) for k in
                                                                   ("docs", "skus", "lines", "purchase_costs_month",
                                                                    "purchase_costs_rows")}})
+            except Exception as e:  # noqa: BLE001
+                skipped = _load_failed("mrn", e)
+            if processed:      # the load itself succeeded; a cache/event hiccup is not a failed cost load
+                try:
                     from app.ai import flush_cache
                     flush_cache()
                     from app import events
                     events.emit("upload", "mrn.uploaded", entity_type="po", entity_key=po_no,
                                 payload={"summary": f"MRN attached to {po_no} — landed costs updated"},
                                 dedupe=False)
-            except Exception as e:  # noqa: BLE001
-                skipped = _load_failed("mrn", e)
+                except Exception as e:  # noqa: BLE001
+                    logging.getLogger(__name__).warning("mrn follow-up (cache flush / event) failed for %s: %s", po_no, e)
     elif kind == "invoice":
         try:
             from app.invoices import load_supplier_prices, parse_invoice
@@ -700,14 +704,18 @@ async def order_file(po_no: str, file: UploadFile = File(...),
                                                            "invoice": summary.get("invoice"),
                                                            "models": summary.get("models"),
                                                            "lines": summary.get("lines")})
+        except Exception as e:  # noqa: BLE001
+            skipped = _load_failed("invoice", e)
+        if processed:          # the load itself succeeded; a cache/event hiccup is not a failed cost load
+            try:
                 from app.ai import flush_cache
                 flush_cache()
                 from app import events
                 events.emit("upload", "invoice.uploaded", entity_type="po", entity_key=po_no,
                             payload={"summary": f"Supplier invoice attached to {po_no} — RMB prices updated"},
                             dedupe=False)
-        except Exception as e:  # noqa: BLE001
-            skipped = _load_failed("invoice", e)
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger(__name__).warning("invoice follow-up (cache flush / event) failed for %s: %s", po_no, e)
 
     ct = mimetypes.guess_type(name)[0] or "application/octet-stream"
     from app.orders import store_order_file

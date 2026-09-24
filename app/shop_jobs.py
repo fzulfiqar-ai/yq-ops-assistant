@@ -160,10 +160,15 @@ def acquire_lease(client, key: str = LOCK_KEY, ttl_min: int = LOCK_TTL_MIN, owne
         return {"acquired": False, "error": f"{type(e).__name__}: {e}"[:160]}
 
 
-def release_lease(client, key: str = LOCK_KEY, owner: str = "shop_jobs") -> None:
+def release_lease(client, key: str = LOCK_KEY, owner: str = "shop_jobs", expires_at: str | None = None) -> None:
+    """Release only the lease this run still holds: when `expires_at` is known the update is pinned
+    to it, so a run that outlived its TTL can never free a newer caller's live lease."""
     try:
-        client.table("app_settings").update({"value": _LOCK_RELEASED, "updated_by": owner,
-                                             "updated_at": _now().isoformat()}).eq("key", key).execute()
+        qry = client.table("app_settings").update({"value": _LOCK_RELEASED, "updated_by": owner,
+                                                   "updated_at": _now().isoformat()}).eq("key", key)
+        if expires_at:
+            qry = qry.eq("value", expires_at)
+        qry.execute()
     except Exception as e:  # noqa: BLE001 — it expires on its own after LOCK_TTL_MIN
         log.debug("lease %s release failed: %s", key, e)
 
@@ -308,9 +313,15 @@ def _reminder_history(client, rows: list[dict]) -> dict[int, dict] | None:
     out: dict[int, dict] = {i: {"count": 0} for i in ids}
     if not ids:
         return out
+    # Only the window that can matter (since the oldest current assignment, capped at 8 days),
+    # newest first: PostgREST caps a response at 1000 rows, so if a cap ever bites it drops the
+    # OLDEST rows, never the newest ones the back-off and the cadence depend on.
+    starts = [t for t in since.values() if t]
+    floor = max(min(starts) if starts else _now() - timedelta(days=8), _now() - timedelta(days=8))
     try:
         evs = (client.table("shop_order_events").select("order_id,ts,detail")
-               .eq("event", "reminded").in_("order_id", ids).order("id").execute().data or [])
+               .eq("event", "reminded").in_("order_id", ids).gte("ts", floor.isoformat())
+               .order("id", desc=True).limit(5000).execute().data or [])
     except Exception as e:  # noqa: BLE001
         log.debug("reminded events read failed: %s", e)
         return None
@@ -324,10 +335,10 @@ def _reminder_history(client, rows: list[dict]) -> dict[int, dict] | None:
         d = e.get("detail") if isinstance(e.get("detail"), dict) else {}
         tried = d.get("attempted") if isinstance(d.get("attempted"), dict) else {}
         slot = out[oid]
-        for who in ("rep", "owner"):
-            if d.get(who):
+        for who in ("rep", "owner"):            # keep the NEWEST stamp whatever the row order
+            if d.get(who) and (slot.get(who) is None or ts > slot[who]):
                 slot[who] = ts
-            if d.get(who) or tried.get(who):
+            if (d.get(who) or tried.get(who)) and (slot.get(who + "_try") is None or ts > slot[who + "_try"]):
                 slot[who + "_try"] = ts
         if d.get("rep") or d.get("owner"):
             slot["count"] += 1
@@ -549,9 +560,15 @@ def stale_data_alert() -> dict:
     return out
 
 
+def sweep_lineless() -> dict:
+    """Cancel (never delete) Received headers left without lines by a failed create (app/shop.py)."""
+    from app import shop
+    return shop.sweep_lineless_orders(10)
+
+
 JOBS = (("notify_retry", notify_retry), ("unassigned_reminder", unassigned_reminder),
         ("unconfirmed_reminder", unconfirmed_reminder), ("cleanup", cleanup),
-        ("stale_data_alert", stale_data_alert))
+        ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless))
 
 
 def run_shop_jobs() -> dict:
@@ -582,7 +599,7 @@ def run_shop_jobs() -> dict:
                 errors.append(name)
     finally:
         if client is not None:
-            release_lease(client)
+            release_lease(client, expires_at=lease.get("expires_at"))
     out["ok"] = not errors
     if errors:
         out["errors"] = errors

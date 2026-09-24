@@ -396,7 +396,7 @@ def _():
         assert fake.rows("shop_orders") == [] and fake.rows("shop_order_lines") == []
 
 
-@test("create: a stale duplicate header with zero lines is not an order — it is removed and the order placed")
+@test("create: a stale duplicate header with zero lines is cancelled (kept, never deleted) and the order placed")
 def _():
     from app.shop import create_order
     stale = _order(7, device_id="dev-1", client_order_id="coid-1")     # created two hours ago
@@ -404,17 +404,18 @@ def _():
     with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
         o = create_order(_body(), market=True)
         assert not o.get("duplicate"), "a line-less header must not be returned as the created order"
-        assert o["id"] != 7 and [r["id"] for r in fake.rows("shop_orders")] == [o["id"]]
+        assert o["id"] != 7 and sorted(r["id"] for r in fake.rows("shop_orders")) == sorted([7, o["id"]])
+        old = next(r for r in fake.rows("shop_orders") if r["id"] == 7)
+        assert old["status"] == "cancelled" and old["cancelled_by"] == "system" and old["client_order_id"] is None, old
         assert len([ln for ln in fake.rows("shop_order_lines") if ln["order_id"] == o["id"]]) == 2
-        # the discard is pinned to the age cutoff in the database too, not only in memory
-        deletes = [c for c in fake.writes("shop_orders") if c[0] == "delete"]
-        assert len(deletes) == 1 and ("eq", "id", 7, False) in deletes[0][3], deletes
-        assert any(f[0] == "lt" and f[1] == "created_at" for f in deletes[0][3]), deletes[0][3]
+        assert not [c for c in fake.writes("shop_orders") if c[0] == "delete"], "never a delete on a written order"
+        ups = [c for c in fake.writes("shop_orders") if c[0] == "update" and ("eq", "id", 7, False) in c[3]]
+        assert ups and any(f[0] == "lt" and f[1] == "created_at" for f in ups[0][3]), ups
         # …and the real duplicate path still answers the retry with the order it already has
         again = create_order(_body(), market=True)
         assert again.get("duplicate") is True and again["id"] == o["id"], again.get("id")
         assert len(again["lines"]) == 2 and again["totals"]["total_bhd"] == o["totals"]["total_bhd"]
-        assert len(fake.rows("shop_orders")) == 1
+        assert len(fake.rows("shop_orders")) == 2
 
 
 @test("create: a duplicate header with zero lines that is seconds old is still being placed — kept, 409 at the edge")
@@ -781,7 +782,7 @@ def _():
     assert "internal nudge" not in str(v) and "rep on leave" not in str(v)
 
 
-@test("sweep: line-less Received headers older than the cutoff go; younger, confirmed or lined ones stay")
+@test("sweep: line-less Received headers older than the cutoff are cancelled (never deleted); younger, confirmed or lined ones untouched")
 def _():
     from app.shop import sweep_lineless_orders
     now = datetime.now(timezone.utc)
@@ -793,17 +794,21 @@ def _():
                shop_order_lines=_lines(3))
     with _patched(fake):
         out = sweep_lineless_orders(10)
-        assert out == {"checked": 2, "removed": ["YQ-2609-0001"], "errors": []}, out
-        assert [r["id"] for r in fake.rows("shop_orders")] == [2, 3, 4]
-        deletes = [c for c in fake.writes("shop_orders") if c[0] == "delete"]
-        assert len(deletes) == 1 and ("eq", "status", "new", False) in deletes[0][3], deletes
-        assert any(f[0] == "lt" and f[1] == "created_at" for f in deletes[0][3]), deletes[0][3]
+        assert out == {"checked": 2, "cancelled": ["YQ-2609-0001"], "errors": []}, out
+        assert [r["id"] for r in fake.rows("shop_orders")] == [1, 2, 3, 4], "no order row is ever deleted"
+        by = {r["id"]: r for r in fake.rows("shop_orders")}
+        assert by[1]["status"] == "cancelled" and by[1]["cancelled_by"] == "system", by[1]
+        assert by[2]["status"] == "new" and by[3]["status"] == "new" and by[4]["status"] == "confirmed"
+        assert not [c for c in fake.writes("shop_orders") if c[0] == "delete"]
+        ups = [c for c in fake.writes("shop_orders") if c[0] == "update"]
+        assert len(ups) == 1 and ("eq", "status", "new", False) in ups[0][3], ups
+        assert any(f[0] == "lt" and f[1] == "created_at" for f in ups[0][3]), ups[0][3]
         assert fake.rows("shop_order_lines") == _lines(3), "lines of a real order are never touched"
-        assert sweep_lineless_orders(10)["removed"] == [], "idempotent"
+        assert sweep_lineless_orders(10)["cancelled"] == [], "idempotent"
         # a database that is down is reported, never raised (shop_jobs runs this unattended)
         fake.fail[("select", "shop_orders")] = RuntimeError("down")
         out = sweep_lineless_orders(10)
-        assert out["removed"] == [] and out["errors"] and "down" in out["errors"][0], out
+        assert out["cancelled"] == [] and out["errors"] and "down" in out["errors"][0], out
 
 
 @test("is_test: PATCH /shop/orders/{id}/test is admin-only, flips the flag once and writes the audit + order event")
