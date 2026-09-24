@@ -18,6 +18,7 @@ Text is kept ASCII so it prints safely on the Windows console.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -138,14 +139,20 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     if not Path(src_path).exists():
         return _finish(False, src_path, f"source folder not found: {src_path}", {}, None, send)
 
+    # 0 - a clean slate. ingest never deletes stale data/clean/*.csv, so a Sales-only upload used to
+    #     re-load the last selling_prices.csv left on this host -- and, once Focus books became
+    #     snapshots (R1), that leftover could have voided a newer book's rows. Clear it first.
+    shutil.rmtree(ROOT / "data" / "clean", ignore_errors=True)
+
     # 1 - ingest (honours the >=80% join hard-gate: non-zero exit => abort, do NOT load)
     r1 = _run("scripts.ingest", src)
     if r1.returncode != 0:
         tail = (r1.stdout or r1.stderr or "")[-600:]
         return _finish(False, src_path, _friendly("ingest", tail), {}, None, send, detail=tail)
 
-    # 2 - load
-    r2 = _run("scripts.load_supabase")
+    # 2 - load. --staged tells the loader which files THIS run parsed: only a Focus price book in
+    #     that folder may void the older rows of its book (scripts/load_supabase.py).
+    r2 = _run("scripts.load_supabase", "--staged", src_path)
     loaded = _loaded_counts(r2.stdout)
     if r2.returncode != 0:
         tail = (r2.stderr or r2.stdout or "")[-600:]

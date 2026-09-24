@@ -47,7 +47,7 @@ grant select on v_catalog_velocity to yq_readonly;
 
 -- ── settings the badges read (mirrored in app/shop.py SETTING_DEFAULTS; the DB value wins) ──
 insert into app_settings (key, value, description) values
-  ('shop_clearance_min_age_days',    '180', 'Shop: no Clearance badge on a catalog item younger than this many days (catalog_items.created_at) - a new line has had no time to sell'),
+  ('shop_clearance_min_age_days',    '180', 'Shop: no Clearance badge on a line younger than this many days - age from its first MA_base price date, else its first sale, else catalog_items.created_at; a new line has had no time to sell'),
   ('shop_best_seller_min_invoices',  '10',  'Shop: Best seller needs at least this many invoices in 90 days (v_catalog_velocity.invoices_90d)'),
   ('shop_best_seller_min_shops',     '5',   'Shop: Best seller needs at least this many named B2B shops in 90 days (v_catalog_velocity.shops_90d)'),
   ('shop_selling_fast_min_invoices', '10',  'Shop: Selling fast needs at least this many invoices in 90 days (v_catalog_velocity.invoices_90d)')

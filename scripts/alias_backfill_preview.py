@@ -4,7 +4,8 @@ what the matcher proposes for each, and what the gap is worth. READ-ONLY unless 
     python -m scripts.alias_backfill_preview                  # print proposals, write nothing
     python -m scripts.alias_backfill_preview --csv out.csv    # also write the table
     python -m scripts.alias_backfill_preview --commit         # insert product_aliases for proposals
-                                                              # at or above --min-confidence (0.9)
+                                                              # at or above --min-confidence (1.0 =
+                                                              # exact product names only)
 
 Why: v_sales.sku_code comes from product_aliases (alias_text = the exact Focus item string). Item
 names that arrived after the last reconcile (July's VFAN lines: T17, T18, X24 / X31 … variants) sell
@@ -12,8 +13,12 @@ well but count as nothing -- so their catalog rows looked like slow stock and wo
 Accessories and SIM are listed separately: SIM never counts toward targets, so a SIM alias only
 tidies reporting. Matching is scripts.reconcile_products.match_alias (method + confidence shown).
 
---commit uses the service key (app.database.get_client), upserts on alias_text, records one
-audit_log row and then calls shop.invalidate() so the market's velocity picks the sales up.
+--commit uses the service key (app.database.get_client) and INSERTS product_aliases rows, never
+overwriting an alias that already exists (a curated alias always wins), then records one audit_log
+row. Only exact-name matches (confidence 1.0) are written by default: a 'code' match (0.9) can pin a
+new variant string ('X24 CC 3Mtr …') to its parent code and inflate that SKU's velocity and badges,
+so those stay in the table for a human to decide (--min-confidence 0.9 to include them on purpose).
+The running API notices within its 60 s catalog cache; nothing in this process can flush it.
 """
 from __future__ import annotations
 
@@ -108,7 +113,8 @@ def _print(rows: list[dict], min_conf: float) -> None:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--commit", action="store_true", help="insert product_aliases rows (otherwise read-only)")
-    ap.add_argument("--min-confidence", type=float, default=0.9)
+    ap.add_argument("--min-confidence", type=float, default=1.0,
+                    help="write proposals at or above this confidence (default 1.0 = exact product names only)")
     ap.add_argument("--csv", help="also write the proposal table to this path")
     args = ap.parse_args(argv)
 
@@ -136,24 +142,34 @@ def main(argv: list[str]) -> int:
     from app.database import get_client
     client = get_client()
     recs = [{"alias_text": r["item_name"], "product_id": r["product_id"]} for r in picked]
+    # insert-only: an alias_text that already exists is skipped, never re-pointed
+    before = _alias_count(client)
     for i in range(0, len(recs), 500):
-        client.table("product_aliases").upsert(recs[i:i + 500], on_conflict="alias_text").execute()
+        client.table("product_aliases").upsert(recs[i:i + 500], on_conflict="alias_text",
+                                               ignore_duplicates=True).execute()
+    after = _alias_count(client)
+    inserted = (after - before) if (before is not None and after is not None) else len(recs)
     try:
         client.table("audit_log").insert({
             "user_email": "alias_backfill", "event": "product_aliases.backfill",
             "question": f"alias_backfill_preview --commit --min-confidence {args.min_confidence}",
-            "detail": {"inserted": len(recs), "codes": sorted({r["proposed_code"] for r in picked}),
+            "detail": {"proposed": len(recs), "inserted": inserted,
+                       "codes": sorted({r["proposed_code"] for r in picked}),
                        "rev_90_bhd": round(sum(r["rev_90"] for r in picked), 3)},
         }).execute()
     except Exception as e:  # noqa: BLE001
         print(f"(audit_log not written: {e})")
-    try:
-        from app.shop import invalidate
-        invalidate()
-    except Exception:  # noqa: BLE001
-        pass
-    print(f"inserted {len(recs)} aliases; shop cache invalidated")
+    print(f"inserted {inserted} of {len(recs)} aliases ({len(recs) - inserted} already existed and were left "
+          f"as they are); the API picks them up within 60 s (its catalog cache TTL)")
     return 0
+
+
+def _alias_count(client) -> int | None:
+    try:
+        r = client.table("product_aliases").select("id", count="exact").limit(1).execute()
+        return int(r.count) if r.count is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 if __name__ == "__main__":
