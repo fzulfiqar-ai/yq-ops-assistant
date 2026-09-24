@@ -209,25 +209,52 @@ could matter (a sequence re-seed on a table without an id; timestamps compared a
 Tools: portable PostgreSQL binaries in `%LOCALAPPDATA%\yq-tools\pgsql` (not in the repo), cluster on port 55432.
 
 
-## Release R2a: `ingest_batches_migration.sql` — the transactional batch importer (written 24-Sep-2026)
+## Release R2a: `ingest_batches_migration.sql` — the transactional batch importer (written 24-Sep-2026, re-reviewed the same day)
 
 Additive; rehearsed on production with `--rehearse` (rolled back); reverse in `ingest_batches_reverse.sql`,
 which refuses while a committed batch exists (its replaced rows live only in `ingest_replaced`).
 
-Tables `ingest_batches`, `ingest_stage`, `ingest_replaced` (RLS on, nothing granted to anon/authenticated;
-SELECT + read policy for `yq_readonly` so the preview's diff can run through the read-only RPC, which is also why
-`orders`, `order_lines`, `stock_movements`, `ledger_entries`, `ar_ageing`, `product_profitability`,
-`product_aliases` and `purchase_costs` gain the same read grant). RPCs (`service_role` only):
+Tables `ingest_batches`, `ingest_stage`, `ingest_replaced` (RLS on, nothing granted to anon/authenticated). The
+migration grants NOTHING to any role: not to `yq_readonly` (the role behind the AI's SQL allowlist keeps its narrow
+grants -- an earlier draft widened it onto `orders`, `order_lines`, `ledger_entries`, `ar_ageing`, `purchase_costs`,
+`product_aliases` and the ingest tables, and that is gone) and not to `service_role`. The API runs the whole batch
+path over its OWN psycopg session on `DATABASE_URL` (`app/ingest_batch.py` `DirectBackend`), with
+`INGEST_STATEMENT_TIMEOUT_S` (default 600 s) as its statement timeout: every RPC through PostgREST is capped by the
+authenticator role's `statement_timeout = 8 s` (read on production 24-Sep-2026; `service_role` has no override) and
+the local replay measured the commit at ~10 s. **Release step: set `DATABASE_URL` (the session-pooler URI) on the
+Render service**; without it the Data page says "Batch importer unavailable" and the default Upload & refresh is
+unaffected. `psycopg[binary]` joins `requirements.txt` / `requirements.lock` for the same reason.
+
+Functions (EXECUTE revoked from public/anon/authenticated/service_role; the owner's session calls them):
 - `ingest_commit(batch, expected)` — one transaction under `pg_advisory_xact_lock`: per target it replaces the
-  file's own scope (sales by invoice-date span, ledger by date span, `stock_balance` per as-of + warehouse,
-  `ar_ageing` per as-of, `product_profitability` per report date, `selling_prices` by the Focus-book snapshot
-  rule with un-void), copies every deleted / voided / changed row into `ingest_replaced` first, records what each
-  staged row became (`ingest_stage.action` / `row_id`), then asserts the preview's per-action counts and the
-  scope's row count and money sums and RAISES on any mismatch (full rollback).
-- `ingest_undo(batch)` — deletes the batch's inserts, restores changed rows column for column, re-inserts deleted
-  rows with their original ids; refuses when a later committed batch overlaps the same scope.
-- `ingest_stage_analyze()` — `ANALYZE ingest_stage` after staging (without statistics the 36k-row ledger diff
-  planned as a nested loop for minutes).
-The old `POST /ingest` refresh path is unchanged and stays the default; `python -m tests.test_r2_importer`
-replays the 240926 drop on the local scratch cluster from the `2026-09-24_pre-r0` backup and proves the result
-equals production's tables (counts, money sums, every day's sales).
+  file's own scope (sales by invoice-date span; the stock ledger by date span **x the items the file carries**;
+  the accounts ledger by date span **x the accounts the file carries** -- a per-account Ledger export must never
+  delete every other account's entries; `stock_balance` per as-of + warehouse, `ar_ageing` per as-of,
+  `product_profitability` per report date, `selling_prices` by the Focus-book snapshot rule with un-void), copies
+  every deleted / voided / changed row into `ingest_replaced` first, records what each staged row became
+  (`ingest_stage.action` / `row_id`), then asserts the preview's per-action counts and the scope's row count and
+  money sums and RAISES on any mismatch (full rollback). It then drops the batch's `unchanged` stage rows (~95 %
+  of a daily drop; undo never needs them).
+- `ingest_undo(batch)` — BEFORE changing anything: refuses when a batch committed later (by `committed_at`, not id)
+  overlaps the scope; when `ingest_runs` shows an `ok` refresh outside the batch path after the commit; when any row
+  the batch inserted / updated / revived no longer reads exactly as the batch wrote it (payload columns compared
+  with `ingest_stage.row`), when a row it voided was un-voided or removed, or when a deleted row's natural key is
+  live again. Then it deletes the batch's inserts, restores changed rows column for column, re-inserts deleted rows
+  with their original ids, and drops the batch's stage rows.
+- `ingest_prune(interval = '2 days')` — retention, called by the API before every preview: supersedes previews
+  nobody committed within the interval, drops the stage rows of rejected / failed / undone batches and the
+  `unchanged` rows of committed ones; returns the two tables' sizes (the preview warns above 100 MB).
+  `ingest_replaced` is never pruned.
+- `ingest_stage_analyze()` — `ANALYZE ingest_stage` (the owner's session runs ANALYZE directly; kept as a wrapper).
+
+Preview gates the admin cannot acknowledge away (`HARD_BLOCKING`): a failed diff, an empty report, a snapshot
+without a date, **a voucher<->invoice join under 80 % (data rule 3)**, and `check_failed` -- any guard whose query
+threw (day shrink, warehouse set, price-book cover) now blocks instead of vanishing. A span replace that would
+remove more than 5 % of the rows in scope, or more rows than it inserts, is BLOCKING (acknowledgeable); invoices
+removed are always BLOCKING; the price book's void-share guard is computed from the diff itself.
+
+The old `POST /ingest` refresh path is unchanged and stays the default; `python -m tests.test_r2_importer` (in
+CI: the pure tests; locally: the replay) runs the API's own `DirectBackend` under a 120 s statement budget against
+the scratch cluster, replays the 240926 drop from the `2026-09-24_pre-r0` backup and proves the result equals
+production's tables, then the per-account Ledger and single-item Stock_ledger scenarios, every undo refusal, a
+statement-timeout rollback, and the full undo back to the byte-identical start.

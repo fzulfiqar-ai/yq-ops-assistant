@@ -53,6 +53,7 @@ jobs:
           python -m tests.test_r1_data
           python -m tests.test_r1_orders
           python -m tests.test_r1b_upcoming
+          python -m tests.test_r2_importer   # R2a batch importer (pure tests; the local-Postgres replay SKIPs here)
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
 

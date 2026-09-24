@@ -71,7 +71,10 @@ interface PreviewSummary {
   stock?: { db_latest_as_of?: string | null; missing_warehouses?: string[]; per_warehouse?: { warehouse: string; delta_qty: string; delta_value: string; file_qty: string | null; db_qty: string | null }[] }
   prices?: Record<string, { file_skus: number; unchanged: number; changes: { sku: string; old: string; new: string }[]; new_skus: string[]; dropped_skus: string[] }>
   receivables?: { rows_sum: string; focus_grand_total: string; gap: string }
+  storage?: { stage_bytes?: number; replaced_bytes?: number; stage_rows?: number; committed_batches?: number }
   blocking_codes: string[]
+  /** blocking codes no acknowledgement can clear (the preview is unreliable, a guard could not run, join < 80 %) */
+  hard_blocking_codes?: string[]
   commit_available: boolean
   migration_applied: boolean
   batch_id: number | null
@@ -81,7 +84,7 @@ interface PreviewResult {
 }
 interface CommitResult {
   ok: boolean; error?: string
-  result?: { targets: Record<string, { actions: Record<string, number>; rows: number; timings?: Record<string, number> }> }
+  result?: { targets: Record<string, { actions: Record<string, number>; rows: number; timings?: Record<string, number> }>; note?: string }
   after?: Record<string, unknown>
 }
 interface BatchRow {
@@ -91,6 +94,8 @@ interface BatchRow {
   undone_by: string | null; undone_at: string | null
   targets: Record<string, { file_rows: number; actions: Record<string, number> | null }>
   blocking_codes: string[]
+  hard_blocking_codes?: string[]
+  last_commit_error?: string | null
   commit: Record<string, Record<string, number>>
 }
 
@@ -129,8 +134,9 @@ function BatchPreview({ preview, onDone }: { preview: PreviewResult; onDone: () 
   const [msg, setMsg] = useState('')
   const s = preview.summary
   const blocking = preview.exceptions.filter((e) => e.severity === 'blocking')
+  const hard = new Set(s.hard_blocking_codes || [])
   const pending = s.blocking_codes.filter((c) => !acked.has(c))
-  const canCommit = Boolean(s.batch_id) && s.commit_available && pending.length === 0 && !commit?.ok
+  const canCommit = Boolean(s.batch_id) && s.commit_available && hard.size === 0 && pending.length === 0 && !commit?.ok
 
   function toggleAck(code: string) {
     setAcked((prev) => { const n = new Set(prev); if (n.has(code)) n.delete(code); else n.add(code); return n })
@@ -271,10 +277,12 @@ function BatchPreview({ preview, onDone }: { preview: PreviewResult; onDone: () 
           {preview.exceptions.map((e, i) => (
             <div key={`${e.code}-${e.target}-${i}`} className="rounded-lg border bg-background px-3 py-2 text-[12.5px]">
               <div className="flex items-start gap-2">
-                {e.severity === 'blocking' ? (
+                {e.severity === 'blocking' && !hard.has(e.code) ? (
                   <label className="mt-0.5 flex cursor-pointer items-center gap-1.5">
                     <input type="checkbox" checked={acked.has(e.code)} onChange={() => toggleAck(e.code)} disabled={Boolean(commit?.ok)} />
                   </label>
+                ) : e.severity === 'blocking' ? (
+                  <span className="mt-0.5 shrink-0 rounded bg-rose-100 px-1 text-[10px] font-semibold uppercase text-rose-800" title="This cannot be acknowledged: fix the export or the check, then preview again.">no override</span>
                 ) : <span className="w-[13px]" />}
                 <Badge tone={SEV_TONE[e.severity]}>{e.severity}</Badge>
                 <span className="font-mono text-[11px] text-muted-foreground">{e.code}</span>
@@ -300,6 +308,7 @@ function BatchPreview({ preview, onDone }: { preview: PreviewResult; onDone: () 
           {commit.ok ? (
             <>
               <div className="flex items-center gap-2 font-semibold"><CheckCircle2 size={15} /> Committed in one transaction; every total re-checked.</div>
+              {commit.result?.note && <div className="mt-1 text-[12px]">{commit.result.note}</div>}
               <div className="mt-1 flex flex-wrap gap-1.5">
                 {Object.entries(commit.result?.targets || {}).map(([t, r]) => (
                   <span key={t} className="rounded-md border bg-background px-2 py-0.5 text-xs">
@@ -327,6 +336,7 @@ function BatchPreview({ preview, onDone }: { preview: PreviewResult; onDone: () 
         {commit?.ok && <button onClick={onDone} className="text-sm text-muted-foreground hover:text-foreground">Close</button>}
         <span className="text-xs text-muted-foreground">
           {!s.batch_id ? 'No batch was created (the importer migration is not applied); commit is not possible.'
+            : hard.size > 0 ? `This preview cannot be committed and no acknowledgement changes that (${Array.from(hard).join(', ')}). Fix the export or the check and preview again.`
             : !s.commit_available ? 'This preview cannot be committed — see the exceptions.'
               : pending.length ? `Acknowledge ${pending.length} blocking exception${pending.length > 1 ? 's' : ''} to enable Commit.`
                 : commit?.ok ? '' : 'Commit applies the drop in one transaction; a mismatch rolls everything back.'}
@@ -342,7 +352,7 @@ function BatchHistory() {
   const [msg, setMsg] = useState('')
   const { data, isLoading } = useQuery({
     queryKey: ['ingest', 'batches'],
-    queryFn: () => apiGet<{ batches: BatchRow[]; migration_applied: boolean }>('/ingest/batches?limit=15'),
+    queryFn: () => apiGet<{ batches: BatchRow[]; migration_applied: boolean; error?: string }>('/ingest/batches?limit=15'),
   })
   const undo = useMutation({
     mutationFn: (id: number) => apiPost<{ ok: boolean; error?: string; result?: { targets: Record<string, Record<string, number>> } }>(`/ingest/batches/${id}/undo`, {}),
@@ -354,7 +364,7 @@ function BatchHistory() {
     onError: (e) => setMsg(e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 160)}` : 'Undo failed.'),
   })
   function askUndo(b: BatchRow) {
-    if (!window.confirm(`Undo batch ${b.id}? Its inserted rows are removed and every row it changed or removed is restored exactly. Refused if a later batch touched the same dates.`)) return
+    if (!window.confirm(`Undo batch ${b.id}? Its inserted rows are removed and every row it changed or removed is restored exactly.\n\nThe undo checks first that every row the batch wrote still reads as it wrote it, and is refused if anything touched those rows since: a batch committed later on the same dates, the default Upload & refresh, a purge or an edit. Then nothing changes.`)) return
     undo.mutate(b.id)
   }
   const rows = data?.batches || []
@@ -363,8 +373,10 @@ function BatchHistory() {
       <div className="flex items-center gap-2">
         <History size={15} className="text-muted-foreground" />
         <div className="text-sm font-semibold">Batch history</div>
-        {data && !data.migration_applied && <Badge tone="amber">importer migration not applied</Badge>}
+        {data && !data.migration_applied && !data.error && <Badge tone="amber">importer migration not applied</Badge>}
+        {data?.error && <Badge tone="rose">batch importer unavailable</Badge>}
       </div>
+      {data?.error && <div className="mt-2 text-[13px] text-rose-700">{data.error}</div>}
       {isLoading && <div className="mt-2 text-[13px] text-muted-foreground">Loading…</div>}
       {data && rows.length === 0 && <div className="mt-2 text-[13px] text-muted-foreground">No batches yet. Tick "Preview first" above to use the batch importer.</div>}
       {rows.length > 0 && (
@@ -397,6 +409,7 @@ function BatchHistory() {
                       <div>{b.created_by || '—'} · {when(b.created_at)}</div>
                       {b.committed_at && <div>committed {when(b.committed_at)}</div>}
                       {b.undone_at && <div>undone by {b.undone_by || '—'} · {when(b.undone_at)}</div>}
+                      {b.status === 'previewed' && b.last_commit_error && <div className="text-rose-700">last commit did not complete: {b.last_commit_error.slice(0, 120)}</div>}
                     </td>
                     <td className="py-1.5 text-right">
                       {b.status === 'committed' && (

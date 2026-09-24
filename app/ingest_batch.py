@@ -17,14 +17,19 @@ snapshot rule) but changes WHEN the database is touched:
                        (full rollback) on any mismatch
     undo_batch()    -> ingest_undo(batch): the batch's inserts go, its replaced rows come back
 
-Two backends speak to the database: RestBackend (the API: Supabase PostgREST + the yq_readonly
-RPC) and PgBackend (psycopg: the read-only CLI with a temp table, or a local replay cluster).
-Both run the SAME diff SQL (diff_sql), so the preview is one implementation. The per-target rules
-(TARGETS) mirror _ingest_target_cfg() in scripts/ingest_batches_migration.sql; the R2 tests
-assert the two agree.
+Every database conversation is a psycopg session (PgBackend): the read-only CLI hands the parsed
+rows to the diff as one jsonb parameter, a local replay cluster uses the real ingest_* tables,
+and the API uses DirectBackend -- its OWN session on DATABASE_URL (the Supabase session pooler)
+with a statement timeout the commit can meet. Nothing goes through PostgREST: its RPCs run under
+the authenticator role's 8 s statement_timeout (read on production 24-Sep-2026) and a commit
+measured ~10 s on the local replay; and the diff does not need yq_readonly (the role behind the
+AI's SQL allowlist) to be widened onto the raw Focus tables. One diff SQL (diff_sql) serves every
+session, so the preview is one implementation. The per-target rules (TARGETS) mirror
+_ingest_target_cfg() in scripts/ingest_batches_migration.sql; the R2 tests assert the two agree.
 
 Money is Decimal throughout (3 dp, ROUND_HALF_UP). Row values keep the parser's numbers; sums
-are never computed in float. Nothing here deletes a batch, a stage row or a replaced row.
+are never computed in float. Nothing here deletes a batch or a replaced row; staged rows are
+pruned by the database functions once they can no longer matter (see ingest_prune()).
 """
 from __future__ import annotations
 
@@ -46,12 +51,22 @@ JOIN_MIN = 0.80                    # the sales voucher<->invoice join gate (scri
 UNALIASED_ALERT_SHARE = 0.02       # plan: unmapped-share alert above 2 % of the file's gross
 SNAPSHOT_MAX_STALE_SHARE = 0.10    # scripts/load_supabase.py mass-void guard
 SNAPSHOT_MIN_SKU_COVER = 0.90
+REMOVED_MAX_SHARE = 0.05           # a span replace that removes more than this share of the rows in scope
+                                   # (or more rows than it inserts) is BLOCKING, not a warning
+STAGE_WARN_MB = 100                # ingest_stage + ingest_replaced above this: warn (free tier caps the DB at 500 MB)
+DEFAULT_STATEMENT_TIMEOUT_S = 600  # the API's own session (INGEST_STATEMENT_TIMEOUT_S); PostgREST's RPCs get 8 s
 SAMPLE = 50
+# Exceptions an admin cannot acknowledge away: the preview itself is unreliable, or the owner's
+# data rule 3 (a voucher<->invoice join under 80 % is a HARD FAIL in scripts/ingest.py) applies.
+HARD_BLOCKING = frozenset({"db_diff_failed", "empty_report", "snapshot_without_date", "sales_join_below_80", "check_failed"})
 
 # Mirrors _ingest_target_cfg() in scripts/ingest_batches_migration.sql (tested for equality).
 #   keys   natural key = the old loader's upsert key
 #   scope  what one export is the whole truth for: an invoice/move date span, a snapshot
 #          partition, or (price books) the whole Focus book
+#   within for a span: only the values of these (text) columns that the file carries are in
+#          scope -- a per-account Ledger export or a Stock_ledger filtered to one item must
+#          never delete everyone else's rows in its date span
 #   money  the sums asserted inside ingest_commit after the load
 TARGETS: dict[str, dict[str, Any]] = {
     "orders": {"keys": ["invoice_no"], "scope": "span", "span_col": "order_date",
@@ -59,9 +74,9 @@ TARGETS: dict[str, dict[str, Any]] = {
     "order_lines": {"keys": ["invoice_no", "line_no"], "scope": "span", "span_col": "line_date",
                     "money": ["gross_bhd", "taxable_bhd"], "report": "Sales_day_book"},
     "stock_movements": {"keys": ["voucher", "item_name", "row_hash"], "scope": "span", "span_col": "move_date",
-                        "money": ["received_qty", "issued_qty"], "report": "Stock_ledger"},
+                        "within": ["item_name"], "money": ["received_qty", "issued_qty"], "report": "Stock_ledger"},
     "ledger_entries": {"keys": ["account", "voucher", "row_hash"], "scope": "span", "span_col": "entry_date",
-                       "money": ["debit_bhd", "credit_bhd"], "report": "Ledger"},
+                       "within": ["account"], "money": ["debit_bhd", "credit_bhd"], "report": "Ledger"},
     "stock_balance": {"keys": ["item_name", "warehouse_name", "as_of_date"], "scope": "partition",
                       "partition": ["as_of_date", "warehouse_name"], "money": ["net_qty", "total_value_bhd"],
                       "report": "Stock_balance_by_warehouse"},
@@ -159,7 +174,14 @@ def parse_folder(folder: str | Path, row_hook=None) -> Parsed:
     if not src.is_dir():
         raise FileNotFoundError(f"drop folder not found: {src}")
     candidates: dict[str, Path] = {}
-    for path in sorted(src.glob("*.xls*")):
+    for path in sorted(src.iterdir()):
+        if not path.is_file() or path.name.startswith("~$"):
+            continue
+        if path.suffix.lower() not in (".xlsx", ".xls"):
+            if not (path.suffix.lower() == ".xml" and path.name.startswith("Transactions_")):
+                out.ignored.append({"file": path.name, "reason": "not an Excel export: the batch importer reads the Focus "
+                                    ".xlsx/.xls reports only (a .csv goes through the default Upload & refresh)"})
+            continue
         kind = ing.classify(path.name)
         if kind is None:
             out.ignored.append({"file": path.name, "reason": "not a recognised Focus report"})
@@ -361,7 +383,9 @@ def scope_of(target: str, rows: list[dict]) -> dict:
     cfg = TARGETS[target]
     if cfg["scope"] == "span":
         dts = sorted(str(r[cfg["span_col"]])[:10] for r in rows if r.get(cfg["span_col"]))
-        return {"kind": "span", "col": cfg["span_col"], "from": dts[0] if dts else None, "to": dts[-1] if dts else None}
+        within = {w: len({str(r.get(w)) for r in rows if r.get(w) is not None}) for w in cfg.get("within", [])}
+        return {"kind": "span", "col": cfg["span_col"], "from": dts[0] if dts else None, "to": dts[-1] if dts else None,
+                "within": within}
     if cfg["scope"] == "partition":
         parts = sorted({tuple("" if r.get(c) is None else str(r.get(c)) for c in cfg["partition"]) for r in rows})
         return {"kind": "partition", "cols": cfg["partition"], "partitions": [list(p) for p in parts]}
@@ -430,6 +454,9 @@ def diff_sql(target: str, col_types: dict[str, str], payload_cols: list[str], sc
     params: list[str] = []
     if cfg["scope"] == "span":
         sc = f'L."{cfg["span_col"]}" between $3::date and $4::date'
+        # ... and only for the accounts / items the file carries (mirrors the migration's 'within')
+        for w in cfg.get("within", []):
+            sc += f' and L."{w}" in (select distinct sw.row->>\'{w}\' from s sw)'
         params = [scope["from"], scope["to"]]
         sample_extra = f", '{cfg['span_col']}', L.\"{cfg['span_col']}\""
     elif cfg["scope"] == "partition":
@@ -511,12 +538,27 @@ class Backend:
     def rpc(self, name: str, args: dict) -> dict:
         raise NotImplementedError
 
+    def merge_summary(self, batch_id: int, patch: dict, only_status: str | None = None) -> bool:
+        """summary := summary || patch, server side, only while the batch is in `only_status`."""
+        raise NotImplementedError
+
+    def prune(self) -> dict | None:
+        """Retention (ingest_prune()) before a preview; None when not applicable."""
+        return None
+
+    def storage(self) -> dict | None:
+        """Sizes of the ingest tables; None when not applicable."""
+        return None
+
+    def close(self) -> None:
+        return None
+
 
 class PgBackend(Backend):
     """psycopg connection. read_only=True (the CLI against production): the session is READ ONLY
     (SELECT and SET only -- a read-only transaction refuses even CREATE TEMP TABLE), the parsed
-    rows are handed to the diff as one jsonb parameter, and rpc() refuses. read_only=False (a
-    local replay cluster): the real ingest_* tables and the real RPCs."""
+    rows are handed to the diff as one jsonb parameter, and rpc() refuses. read_only=False (the
+    API's DirectBackend, or a local replay cluster): the real ingest_* tables and the real RPCs."""
     mode = "pg"
 
     def __init__(self, conn, read_only: bool = True):
@@ -525,10 +567,11 @@ class PgBackend(Backend):
         if read_only:
             self.stage_source = "param"
             conn.read_only = True
-            # a jsonb parameter has no statistics; without this the planner nest-loops the
-            # 36k-row ledger diff (measured in minutes), with it every join is a hash/merge join
-            with conn.cursor() as cur:
-                cur.execute("set enable_nestloop = off")
+        # a jsonb parameter has no statistics, and freshly staged rows have none until ANALYZE;
+        # without this the planner nest-loops the 36k-row ledger diff (measured in minutes), with
+        # it every join is a hash/merge join (seconds). ingest_commit sets the same for itself.
+        with conn.cursor() as cur:
+            cur.execute("set enable_nestloop = off")
 
     @staticmethod
     def _positional(sql: str, params: list[str] | None) -> tuple[str, list]:
@@ -608,69 +651,86 @@ class PgBackend(Backend):
         r = self.query(q, [json.dumps(args[k]) if isinstance(args[k], (dict, list)) else args[k] for k in keys])
         return r[0]["r"]
 
-
-class RestBackend(Backend):
-    """The API's path: Supabase PostgREST (service key) for writes and the yq_readonly RPC for reads."""
-    mode = "rest"
-    read_only = False
-
-    def __init__(self, client=None):
-        self._client = client
-
-    @property
-    def client(self):
-        if self._client is None:
-            from app.database import get_client
-            self._client = get_client()
-        return self._client
-
-    def query(self, sql: str, params: list[str] | None = None) -> list[dict]:
-        from app.db_read import exec_sql, exec_sql_params
-        return exec_sql_params(sql, params) if params else exec_sql(sql)
-
-    def tables_ready(self) -> bool:
-        try:
-            self.client.table("ingest_batches").select("id").limit(1).execute()
-            self.client.table("ingest_stage").select("id").limit(1).execute()
-            return True
-        except Exception:  # noqa: BLE001
+    def merge_summary(self, batch_id: int, patch: dict, only_status: str | None = None) -> bool:
+        if self.read_only or not batch_id:
             return False
+        r = self.query("update ingest_batches set summary = summary || $1::jsonb where id = $2::bigint "
+                       "and ($3 = '' or status = $3) returning id", [json.dumps(patch), str(batch_id), only_status or ""])
+        return bool(r)
 
-    def stage(self, batch_id: int, target: str, rows: list[dict]) -> int:
-        n = 0
-        for i in range(0, len(rows), CHUNK):
-            payload = [{"batch_id": batch_id, "target": target, "row": r} for r in rows[i:i + CHUNK]]
-            self.client.table("ingest_stage").insert(payload).execute()
-            n += len(payload)
-        return n
+    def prune(self) -> dict | None:
+        if self.read_only or not self.tables_ready():
+            return None
+        r = self.query("select ingest_prune() as r")
+        return r[0]["r"] if r else None
 
-    def after_stage(self, batch_id: int) -> None:
+    def storage(self) -> dict | None:
+        if not self.tables_ready():
+            return None
+        r = self.query("select pg_total_relation_size('public.ingest_stage') as stage_bytes, "
+                       "pg_total_relation_size('public.ingest_replaced') as replaced_bytes, "
+                       "(select count(*) from ingest_stage) as stage_rows, "
+                       "(select count(*) from ingest_batches where status = 'committed') as committed_batches")
+        return {k: int(v) for k, v in r[0].items()} if r else None
+
+    def close(self) -> None:
         try:
-            self.client.rpc("ingest_stage_analyze", {}).execute()
-        except Exception:  # noqa: BLE001 -- best-effort; autoanalyze catches up on its own
+            self.conn.close()
+        except Exception:  # noqa: BLE001
             pass
 
-    def new_batch(self, files: list[dict], actor: str | None) -> int:
-        r = self.client.table("ingest_batches").insert({"status": "parsing", "files": files, "created_by": actor}).execute()
-        return int(r.data[0]["id"])
 
-    def update_batch(self, batch_id: int, **fields) -> None:
-        if not batch_id:
-            return
-        self.client.table("ingest_batches").update(fields).eq("id", batch_id).execute()
+class DirectDbUnavailable(RuntimeError):
+    """The API has no DATABASE_URL (or no psycopg): the batch path cannot run."""
 
-    def get_batch(self, batch_id: int) -> dict | None:
-        r = self.client.table("ingest_batches").select("*").eq("id", batch_id).limit(1).execute().data
-        return _batch_row(r[0]) if r else None
 
-    def list_batches(self, limit: int = 20) -> list[dict]:
-        r = self.client.table("ingest_batches").select("*").order("id", desc=True).limit(limit).execute().data or []
-        return [_batch_row(x) for x in r]
+def connect_direct(dsn: str | None = None, statement_timeout_s: int | None = None,
+                   application_name: str = "yq-ingest-batch"):
+    """The API's own database session for the batch path: psycopg over DATABASE_URL (the Supabase
+    session-pooler URI), autocommit, with a statement timeout the commit can meet
+    (INGEST_STATEMENT_TIMEOUT_S, default 600 s) and a lock timeout so a stuck lock fails fast.
+    Every RPC through PostgREST runs under the authenticator role's statement_timeout = 8 s (read
+    on production 24-Sep-2026; service_role has no override), and the replay measured the commit
+    at ~10 s and the ledger diff above that before planner hygiene -- so the API never uses it."""
+    import os
+    dsn = dsn or os.getenv("DATABASE_URL")
+    if not dsn:
+        raise DirectDbUnavailable("DATABASE_URL is not set on this API: the batch importer needs its own database "
+                                  "session (the Supabase session-pooler URI); the default Upload & refresh still works")
+    try:
+        import psycopg
+    except ImportError as e:  # pragma: no cover
+        raise DirectDbUnavailable("psycopg is not installed on this API (requirements.txt: psycopg[binary])") from e
+    if statement_timeout_s is None:
+        try:
+            statement_timeout_s = int(os.getenv("INGEST_STATEMENT_TIMEOUT_S", "") or DEFAULT_STATEMENT_TIMEOUT_S)
+        except ValueError:
+            statement_timeout_s = DEFAULT_STATEMENT_TIMEOUT_S
+    conn = psycopg.connect(dsn, connect_timeout=30, autocommit=True, application_name=application_name)
+    with conn.cursor() as cur:
+        cur.execute(f"set statement_timeout = '{int(statement_timeout_s)}s'")
+        cur.execute("set lock_timeout = '30s'")
+        cur.execute("set idle_in_transaction_session_timeout = '120s'")
+    return conn
 
-    def rpc(self, name: str, args: dict) -> dict:
-        r = self.client.rpc(name, args).execute()
-        data = r.data
-        return json.loads(data) if isinstance(data, str) else data
+
+class DirectBackend(PgBackend):
+    """The API's backend: PgBackend over connect_direct(). Owns its connection (close() it)."""
+    mode = "direct"
+
+    def __init__(self, conn, statement_timeout_s: int | None = None):
+        super().__init__(conn, read_only=False)
+        self.statement_timeout_s = statement_timeout_s
+
+    @classmethod
+    def open(cls, dsn: str | None = None, statement_timeout_s: int | None = None) -> "DirectBackend":
+        conn = connect_direct(dsn, statement_timeout_s=statement_timeout_s)
+        be = cls(conn, statement_timeout_s)
+        try:
+            be.statement_timeout_s = int(str(be.query("show statement_timeout")[0]["statement_timeout"]).rstrip("s"))
+        except Exception:  # noqa: BLE001
+            pass
+        return be
 
 
 def _batch_row(r: dict) -> dict:
@@ -706,6 +766,15 @@ def _exc(code: str, severity: str, message: str, target: str | None = None, coun
          "items": (items or [])[:SAMPLE]}
     e.update(extra)
     return e
+
+
+def _guard_failed(check: str, what: str, target: str, e: Exception) -> dict:
+    """A guard that cannot run is a guard that FAILS: the day-shrink, warehouse-set and price-book
+    checks block the commit (un-acknowledgeably) when their query throws, instead of silently
+    disappearing from the exception list."""
+    return _exc("check_failed", BLOCKING,
+                f"{check} ({what}) could not be checked: {str(e)[:140]}; the commit stays closed until the preview can run it",
+                target, check=check)
 
 
 def _col_types(backend: Backend, target: str) -> dict[str, str]:
@@ -932,16 +1001,25 @@ def build_preview(parsed: Parsed, backend: Backend | None, batch_id: int = 0, to
                 d = _target_diff(backend, batch_id, target, rows, t["scope"])
                 t.update(d)
                 removed = d["actions"].get("deleted", d["actions"].get("voided", 0))
+                inserted, db_rows = d["actions"].get("inserted", 0), d.get("db_rows", 0)
                 if removed:
                     if target in ("orders", "order_lines"):
                         sev, why = BLOCKING, "invoices in the database that this export no longer carries would be removed (deleted or re-lined in Focus?)"
                     elif cfg["scope"] == "book":
                         sev, why = INFO, "live rows of the same Focus book from an older export are not in this file and will be voided (never deleted)"
+                    elif removed > REMOVED_MAX_SHARE * db_rows or removed > inserted:
+                        sev, why = BLOCKING, (f"rows in the file's own scope are not in the file and would be removed -- more than "
+                                              f"{REMOVED_MAX_SHARE:.0%} of the {db_rows} rows in scope or more than the {inserted} it inserts: "
+                                              "a partial or filtered export?")
                     else:
                         sev, why = WARNING, "rows in the file's own scope are not in the file and would be removed (the stock ledger re-costs rows, so a replace here is normal)"
                     exceptions.append(_exc("rows_removed", sev, f"{cfg['report']}: {removed} {why}", target, removed, d["removed_sample"]))
-                if cfg["scope"] == "book":
-                    pass  # the snapshot guard is applied with the price checks below
+                if cfg["scope"] == "book" and db_rows and removed > SNAPSHOT_MAX_STALE_SHARE * db_rows:
+                    # the loader's mass-void guard, from the diff itself (no second query to fail)
+                    exceptions.append(_exc("snapshot_void_guard", BLOCKING,
+                                           f"{cfg['report']}: {removed} live rows would be voided, more than {SNAPSHOT_MAX_STALE_SHARE:.0%} of "
+                                           f"the {db_rows} live Focus rows of {', '.join(t['scope'].get('books') or [])}: is the export complete?",
+                                           target, removed, d["removed_sample"]))
             except Exception as e:  # noqa: BLE001
                 t["diff_error"] = str(e)[:300]
                 exceptions.append(_exc("db_diff_failed", BLOCKING, f"{cfg['report']}: the database diff failed: {str(e)[:160]}", target))
@@ -987,6 +1065,7 @@ def build_preview(parsed: Parsed, backend: Backend | None, batch_id: int = 0, to
                                            "order_lines", items=shrink))
             except Exception as e:  # noqa: BLE001
                 summary["sales"] = {"error": str(e)[:200]}
+                exceptions.append(_guard_failed("days_shrink", "per-day sales vs the database", "order_lines", e))
 
     sb = parsed.rows.get("stock_balance")
     if sb and db_ok:
@@ -999,6 +1078,7 @@ def build_preview(parsed: Parsed, backend: Backend | None, batch_id: int = 0, to
                                        items=summary["stock"]["missing_warehouses"]))
         except Exception as e:  # noqa: BLE001
             summary["stock"] = {"error": str(e)[:200]}
+            exceptions.append(_guard_failed("warehouse_set_shrinks", "the warehouse set vs the latest snapshot", "stock_balance", e))
 
     sp = parsed.rows.get("selling_prices")
     if sp and db_ok:
@@ -1011,11 +1091,7 @@ def build_preview(parsed: Parsed, backend: Backend | None, batch_id: int = 0, to
                 if p["new_skus"]:
                     exceptions.append(_exc("price_new_skus", INFO, f"{book}: {len(p['new_skus'])} SKUs are new to the book",
                                            "selling_prices", items=p["new_skus"]))
-                voids = (summary["targets"].get("selling_prices", {}).get("actions") or {}).get("voided", 0)
-                if p["live_focus_rows"] and voids > SNAPSHOT_MAX_STALE_SHARE * p["live_focus_rows"]:
-                    exceptions.append(_exc("snapshot_void_guard", BLOCKING,
-                                           f"{book}: {voids} live rows would be voided, more than {SNAPSHOT_MAX_STALE_SHARE:.0%} of "
-                                           f"the book's {p['live_focus_rows']} live rows: is the export complete?", "selling_prices", voids))
+                # the void-share half of the mass-void guard comes from the diff (above); this is the SKU-cover half
                 if p["live_skus"] and p["live_skus_covered"] < SNAPSHOT_MIN_SKU_COVER * p["live_skus"]:
                     exceptions.append(_exc("snapshot_void_guard", BLOCKING,
                                            f"{book}: the file names {p['live_skus_covered']} of the book's {p['live_skus']} live SKUs "
@@ -1029,6 +1105,7 @@ def build_preview(parsed: Parsed, backend: Backend | None, batch_id: int = 0, to
                                            items=[{"sku": r.get("sku_code"), "start": r.get("start_date"), "rate": r.get("rate_bhd")} for r in late]))
         except Exception as e:  # noqa: BLE001
             summary["prices"] = {"error": str(e)[:200]}
+            exceptions.append(_guard_failed("snapshot_void_guard", "the file's SKU cover of the live price book", "selling_prices", e))
 
     if db_ok:
         try:
@@ -1084,13 +1161,29 @@ def build_preview(parsed: Parsed, backend: Backend | None, batch_id: int = 0, to
                                    f"{money(parsed.ar_grand_total)}: credit balances lose their sign in this export; "
                                    "both figures are kept, nothing is guessed", "ar_ageing"))
 
+    # storage: the staged rows live in the same free-tier database as the marketplace
+    if db_ok and summary["migration_applied"]:
+        try:
+            st = backend.storage()
+            if st:
+                summary["storage"] = st
+                mb = (st.get("stage_bytes", 0) + st.get("replaced_bytes", 0)) / 1e6
+                if mb > STAGE_WARN_MB:
+                    exceptions.append(_exc("stage_storage_high", WARNING,
+                                           f"ingest_stage + ingest_replaced hold {mb:.0f} MB (warn level {STAGE_WARN_MB} MB): reject or undo "
+                                           "old batches, or run ingest_prune() with a shorter interval", None))
+        except Exception as e:  # noqa: BLE001
+            summary["storage"] = {"error": str(e)[:160]}
+
     blocking = [e for e in exceptions if e["severity"] == BLOCKING]
     summary["blocking_codes"] = sorted({e["code"] for e in blocking})
-    # what a commit needs: a per-row diff for every target, and none of the exceptions that mean the
-    # preview itself is unreliable. (Whether THIS session can commit is a separate matter: the CLI
-    # never does, and the API needs the migration -- summary['batch_id'] says.)
+    # what a commit needs: a per-row diff for every target, and none of the HARD_BLOCKING exceptions
+    # -- the preview itself being unreliable, a guard that could not run, or the owner's data rule 3
+    # (join < 80 %), none of which a checkbox may clear. (Whether THIS session can commit is a
+    # separate matter: the CLI never does, and the API needs the migration -- summary['batch_id'] says.)
+    summary["hard_blocking_codes"] = sorted({e["code"] for e in blocking if e["code"] in HARD_BLOCKING})
     summary["commit_available"] = bool(db_diff) and all(t.get("actions") for t in summary["targets"].values()) \
-        and not any(e["code"] in ("db_diff_failed", "empty_report", "snapshot_without_date") for e in blocking)
+        and not summary["hard_blocking_codes"]
     return summary, exceptions
 
 
@@ -1104,8 +1197,13 @@ def run_preview(folder: str | Path, backend: Backend | None, actor: str | None =
     (default business_data/ingest_previews/<ts>/), best-effort."""
     parsed = parse_folder(folder, row_hook=row_hook)
     batch_id = 0
+    pruned = None
     can_stage = backend is not None and backend.can_stage()
     if can_stage and persist and not backend.read_only and backend.tables_ready():
+        try:
+            pruned = backend.prune()     # retention first, so a stale preview never keeps 50k rows around
+        except Exception as e:  # noqa: BLE001
+            pruned = {"error": str(e)[:160]}
         batch_id = backend.new_batch(parsed.files, actor)
     staged: dict[str, int] = {}
     if can_stage:
@@ -1116,6 +1214,8 @@ def run_preview(folder: str | Path, backend: Backend | None, actor: str | None =
     summary, exceptions = build_preview(parsed, backend, batch_id, today=today)
     summary["batch_id"] = batch_id or None
     summary["staged"] = staged
+    if pruned is not None:
+        summary["pruned"] = pruned
     if batch_id:
         backend.update_batch(batch_id, status="previewed", summary=summary, exceptions=exceptions)
     written = None
@@ -1131,15 +1231,23 @@ class CommitRefused(ValueError):
     """The commit did not start (unacknowledged blocking exceptions, wrong status, no diff)."""
 
 
+class CommitFailed(RuntimeError):
+    """The commit RPC was called and did not complete (raised, timed out, or the response was lost)."""
+
+
 def commit_batch(batch_id: int, backend: Backend, actor: str | None, acknowledged: list[str] | None = None) -> dict:
-    """Commit a previewed batch: every blocking exception must be acknowledged by code, then the
-    RPC applies and re-asserts the preview's totals in one transaction."""
+    """Commit a previewed batch: every blocking exception must be acknowledged by code -- except
+    the HARD_BLOCKING ones, which no acknowledgement clears -- then the RPC applies and
+    re-asserts the preview's totals in one transaction."""
     b = backend.get_batch(batch_id)
     if not b:
         raise CommitRefused(f"batch {batch_id} not found")
     if b["status"] != "previewed":
         raise CommitRefused(f"batch {batch_id} is {b['status']}; only a previewed batch can be committed")
     summary, exceptions = b.get("summary") or {}, b.get("exceptions") or []
+    hard = sorted({e["code"] for e in exceptions if e.get("severity") == BLOCKING and e["code"] in HARD_BLOCKING})
+    if hard:
+        raise CommitRefused("this preview cannot be committed, and no acknowledgement changes that: " + ", ".join(hard))
     if not summary.get("commit_available"):
         raise CommitRefused("this preview cannot be committed (see its exceptions)")
     ack = set(acknowledged or [])
@@ -1229,9 +1337,15 @@ def render_summary_md(summary: dict, exceptions: list[dict]) -> str:
         L.append(f"## MRNs in the ledger: {len(mr['in_ledger'])}; without cost lines: {mr.get('without_cost')}; "
                  f"XML already loaded: {mr.get('xml_already_loaded')}")
     L.append("")
-    L.append(f"## Exceptions ({len(exceptions)}; blocking: {summary.get('blocking_codes')})")
+    L.append(f"## Exceptions ({len(exceptions)}; blocking: {summary.get('blocking_codes')}; "
+             f"cannot be acknowledged: {summary.get('hard_blocking_codes')})")
     for e in exceptions:
         L.append(f"- [{e['severity']}] {e['code']}{' (' + e['target'] + ')' if e.get('target') else ''}: {e['message']}")
+    st = summary.get("storage") or {}
+    if st.get("stage_bytes") is not None:
+        L.append("")
+        L.append(f"Storage: ingest_stage {st['stage_bytes'] / 1e6:.1f} MB ({st.get('stage_rows')} rows), "
+                 f"ingest_replaced {st.get('replaced_bytes', 0) / 1e6:.1f} MB")
     L.append("")
     L.append(f"Commit available: {summary.get('commit_available')}")
     return "\n".join(L) + "\n"

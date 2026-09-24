@@ -18,12 +18,30 @@
 --   * asserts the totals the preview promised -- per-action counts, and the row count and money
 --     sums of the scope after the load -- and RAISES on any mismatch, so everything rolls back.
 -- ingest_undo reverses a committed batch (deletes what it inserted, restores what it changed,
--- re-inserts what it removed) and refuses when a later committed batch touched the same scope.
+-- re-inserts what it removed). Before it changes anything it proves the rows are still the
+-- batch's: every row the batch inserted/updated/revived must still read exactly as the batch
+-- wrote it, every row it voided must still be voided, no live row may carry a deleted row's
+-- key, no batch committed LATER (by commit time) may overlap the scope, and no refresh outside
+-- the batch path (the default POST /ingest, ingest_runs) may have finished after the commit.
+--
+-- Span targets are the whole truth for their date span only for the accounts (Ledger) or items
+-- (Stock_ledger) the file carries -- a per-account Ledger export or a filtered Stock_ledger must
+-- never delete everyone else's rows ("within" in _ingest_target_cfg).
 --
 -- Unchanged rows are never rewritten (same id, same imported_at). Backfilled columns the
 -- importer does not own (product_id, order_id, customer_id, voided_at/void_reason except through
--- the snapshot rule) are never overwritten. Nothing here grants anything to anon/authenticated;
--- EXECUTE on the two RPCs goes to service_role only (the API's key).
+-- the snapshot rule) are never overwritten. Nothing here grants anything to anon/authenticated,
+-- to yq_readonly (the role that runs AI-generated SQL keeps its narrow allowlist) or to
+-- service_role: the API runs the preview diff, ingest_commit and ingest_undo over its OWN
+-- psycopg session on DATABASE_URL (app/ingest_batch.py DirectBackend) with a statement timeout
+-- the commit can meet -- PostgREST's RPCs are capped by the authenticator role's 8 s
+-- statement_timeout (read on production 24-Sep-2026) and a commit measured ~10 s locally.
+--
+-- Storage: ingest_stage only keeps the rows that still matter -- ingest_commit drops a batch's
+-- 'unchanged' rows, ingest_undo drops the batch's rows, and ingest_prune() (called by the API
+-- before every preview) drops the rows of rejected / failed / undone batches and supersedes
+-- previews nobody committed within two days. ingest_replaced (the only copy of what a committed
+-- batch removed or changed) is never pruned.
 
 -- ── 1. tables ─────────────────────────────────────────────────────────────────
 create table if not exists ingest_batches (
@@ -69,27 +87,12 @@ comment on table ingest_batches  is 'One Focus drop: parsed -> previewed -> comm
 comment on table ingest_stage    is 'Parsed rows of a batch, one jsonb row per target row. action/row_id say what ingest_commit did with each.';
 comment on table ingest_replaced is 'Live rows a batch deleted, voided or changed, copied verbatim BEFORE the change, so ingest_undo can put them back.';
 
--- ── 2. read path for the preview (the API diff runs through the yq_readonly RPC) ──
--- The preview joins ingest_stage against the live tables inside run_readonly_query_params, which
--- executes as yq_readonly. That role could read stock_balance and selling_prices already; the
--- other Focus tables (and the three tables above) need the same SELECT grant + read policy.
--- Read-only role, additive; audit_grants only polices anon/authenticated.
-do $$
-declare t text;
-begin
-  foreach t in array array[
-    'ingest_batches', 'ingest_stage', 'ingest_replaced',
-    'orders', 'order_lines', 'stock_movements', 'ledger_entries', 'ar_ageing', 'product_profitability',
-    'product_aliases', 'purchase_costs'
-  ] loop
-    if to_regclass('public.' || t) is null then
-      continue;
-    end if;
-    execute format('grant select on %I to yq_readonly', t);
-    execute format('drop policy if exists %I on %I', t || '_yq_readonly_read', t);
-    execute format('create policy %I on %I for select to yq_readonly using (true)', t || '_yq_readonly_read', t);
-  end loop;
-end $$;
+-- ── 2. read path for the preview ───────────────────────────────────────────────
+-- None needed: the preview diff runs over the API's own session (DATABASE_URL), the same way the
+-- read-only CLI (scripts/ingest_preview.py) already runs it on production. yq_readonly gains no
+-- SELECT here (an earlier draft granted it orders, order_lines, ledger_entries, ar_ageing,
+-- purchase_costs, product_aliases and the ingest_* tables -- that widened the role behind the
+-- AI's SQL allowlist and is gone).
 
 -- ── 3. helpers (internal; EXECUTE revoked from the API roles) ──────────────────
 -- Column list of a public table, in attribute order, with the SQL type name to cast to.
@@ -127,7 +130,8 @@ $$;
 
 -- The one place the per-target rules live (mirrored by app/ingest_batch.py TARGETS; the R2
 -- tests assert both sides agree). keys = natural key (the upsert key of the old loader);
--- scope = what a file is the whole truth for; money = the sums asserted after the load.
+-- scope = what a file is the whole truth for; within = for a span, only the values of these
+-- (text) columns the file carries are in scope; money = the sums asserted after the load.
 create or replace function _ingest_target_cfg(p_target text)
 returns jsonb language sql immutable as $$
   select case p_target
@@ -136,9 +140,9 @@ returns jsonb language sql immutable as $$
     when 'order_lines' then
       '{"keys":["invoice_no","line_no"],"scope":"span","span_col":"line_date","money":["gross_bhd","taxable_bhd"]}'::jsonb
     when 'stock_movements' then
-      '{"keys":["voucher","item_name","row_hash"],"scope":"span","span_col":"move_date","money":["received_qty","issued_qty"]}'::jsonb
+      '{"keys":["voucher","item_name","row_hash"],"scope":"span","span_col":"move_date","within":["item_name"],"money":["received_qty","issued_qty"]}'::jsonb
     when 'ledger_entries' then
-      '{"keys":["account","voucher","row_hash"],"scope":"span","span_col":"entry_date","money":["debit_bhd","credit_bhd"]}'::jsonb
+      '{"keys":["account","voucher","row_hash"],"scope":"span","span_col":"entry_date","within":["account"],"money":["debit_bhd","credit_bhd"]}'::jsonb
     when 'stock_balance' then
       '{"keys":["item_name","warehouse_name","as_of_date"],"scope":"partition","partition":["as_of_date","warehouse_name"],"money":["net_qty","total_value_bhd"]}'::jsonb
     when 'ar_ageing' then
@@ -182,6 +186,8 @@ declare
   partm      text[] := '{}';   -- L.p is not distinct from cast(sp.row->>p), partition columns only
   keym_i_st  text[] := '{}';   -- ins.k is not distinct from cast(st.row->>k)
   parts      text[] := array(select jsonb_array_elements_text(cfg->'partition'));
+  within     text[] := array(select jsonb_array_elements_text(cfg->'within'));
+  w          text; n_w bigint; v_within jsonb := '{}'::jsonb;
   c          record;
   v_scope    text;             -- predicate on alias L: the rows this file is the whole truth for
   v_after    text;             -- predicate on alias L for the post-load assertion
@@ -222,6 +228,9 @@ begin
     if c.col = any(parts) then
       partm := partm || _ingest_eq(format('L.%I', c.col), _ingest_cast('sp.row', c.col, c.typ), c.typ);
     end if;
+    if c.col = any(within) and not (c.typ = 'text' or c.typ like 'character varying%') then
+      raise exception 'ingest: % within-column % must be text, is %', p_target, c.col, c.typ;
+    end if;
     if first_row ? c.col and not (c.col = any(protected)) then
       cols  := cols  || c.col;
       sets  := sets  || format('%I = %s', c.col, _ingest_cast('s.row', c.col, c.typ));
@@ -256,8 +265,16 @@ begin
       raise exception 'ingest: % staged rows carry no % dates', p_target, cfg->>'span_col';
     end if;
     v_scope := format('L.%I between %L::date and %L::date', cfg->>'span_col', v_from, v_to);
+    -- ... and only for the accounts / items the file carries: a per-account Ledger export or a
+    -- Stock_ledger filtered to one item must not delete everyone else's rows in the span
+    foreach w in array within loop
+      v_scope := v_scope || format(' and L.%I in (select distinct sw.row->>%L from ingest_stage sw where sw.batch_id = %s and sw.target = %L)',
+                                   w, w, p_batch_id, p_target);
+      execute format('select count(distinct row->>%L) from ingest_stage where batch_id = %s and target = %L', w, p_batch_id, p_target) into n_w;
+      v_within := v_within || jsonb_build_object(w, n_w);
+    end loop;
     v_after := v_scope;
-    v_scope_json := jsonb_build_object('kind', 'span', 'col', cfg->>'span_col', 'from', v_from, 'to', v_to);
+    v_scope_json := jsonb_build_object('kind', 'span', 'col', cfg->>'span_col', 'from', v_from, 'to', v_to, 'within', v_within);
   elsif cfg->>'scope' = 'partition' then
     if array_length(partm, 1) is distinct from array_length(parts, 1) then
       raise exception 'ingest: % partition columns % not all present on the table', p_target, parts;
@@ -419,6 +436,7 @@ declare
   t        text;
   res      jsonb := '{}'::jsonb;
   missing  text[];
+  n_pruned bigint := 0;
 begin
   perform pg_advisory_xact_lock(hashtext('yq_ingest_commit'));
   select * into b from ingest_batches where id = p_batch_id for update;
@@ -448,16 +466,21 @@ begin
     end if;
     res := res || jsonb_build_object(t, _ingest_apply_target(p_batch_id, t, p_expected->'targets'->t));
   end loop;
+  -- Storage: a staged row that matched an identical live row says nothing an undo needs
+  -- (undo works from the inserted / updated / revived rows and ingest_replaced); ~95 % of a
+  -- daily drop is such rows, so they go now rather than growing the table by ~20 MB a day.
+  delete from ingest_stage where batch_id = p_batch_id and action = 'unchanged';
+  get diagnostics n_pruned = row_count;
   update ingest_batches
      set status = 'committed', committed_by = p_expected->>'actor', committed_at = now(),
-         summary = summary || jsonb_build_object('commit', res)
+         summary = summary || jsonb_build_object('commit', res, 'stage_rows_pruned', n_pruned)
    where id = p_batch_id;
   if to_regclass('public.audit_log') is not null then
     insert into audit_log (user_email, event, question, detail)
     values (coalesce(p_expected->>'actor', 'ingest_commit'), 'ingest.batch_commit', 'batch ' || p_batch_id,
             jsonb_build_object('batch_id', p_batch_id, 'result', res));
   end if;
-  return jsonb_build_object('batch_id', p_batch_id, 'status', 'committed', 'targets', res);
+  return jsonb_build_object('batch_id', p_batch_id, 'status', 'committed', 'targets', res, 'stage_rows_pruned', n_pruned);
 end $$;
 
 create or replace function ingest_undo(p_batch_id bigint, p_actor text default null)
@@ -465,10 +488,15 @@ returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   b        ingest_batches%rowtype;
   later    record;
+  v_run    record;
   t        text;
   c        record;
-  sets     text[]; cols text[]; vals text[];
-  n_del    bigint; n_res bigint; n_back bigint; want bigint;
+  cfg      jsonb;
+  keys     text[];
+  pcols    text[];            -- the payload columns the batch wrote (recorded by ingest_commit)
+  is_book  boolean;
+  sets     text[]; cols text[]; vals text[]; diffs text[]; keym_l_r text[];
+  n_del    bigint; n_res bigint; n_back bigint; want bigint; n_bad bigint; n_pruned bigint;
   res      jsonb := '{}'::jsonb;
 begin
   perform pg_advisory_xact_lock(hashtext('yq_ingest_commit'));
@@ -479,9 +507,15 @@ begin
   if b.status <> 'committed' then
     raise exception 'ingest_undo: batch % is %, only a committed batch can be undone', p_batch_id, b.status;
   end if;
+  if b.committed_at is null or jsonb_typeof(b.summary->'commit') <> 'object' then
+    raise exception 'ingest_undo: batch % has no commit record', p_batch_id;
+  end if;
   perform set_config('enable_nestloop', 'off', true);
-  -- refuse when a later committed batch touched the same scope of any target
-  for later in select id, summary from ingest_batches where id > p_batch_id and status = 'committed' order by id loop
+
+  -- 1. a batch committed LATER (by commit time, not id) that touched the same scope of any target
+  for later in select id, summary, committed_at from ingest_batches
+                where status = 'committed' and id <> p_batch_id and committed_at > b.committed_at
+                order by committed_at loop
     for t in select jsonb_object_keys(b.summary->'commit') loop
       if _ingest_scope_overlap(b.summary->'commit'->t->'scope', later.summary->'commit'->t->'scope') then
         raise exception 'ingest_undo: batch % touched the same % scope after batch %; undo that batch first', later.id, t, p_batch_id;
@@ -489,10 +523,72 @@ begin
     end loop;
   end loop;
 
-  for t in select distinct target from ingest_stage where batch_id = p_batch_id order by 1 loop
+  -- 2. a refresh outside the batch path (the default POST /ingest -> scripts/refresh.py, or the
+  --    loader) finished after the commit. It upserts in place under the same natural keys and
+  --    records nothing per row, so no check below could tell its rows from ours.
+  if to_regclass('public.ingest_runs') is not null then
+    select id, finished_at, file into v_run from ingest_runs
+     where status = 'ok' and finished_at > b.committed_at and coalesce(file, '') not like 'batch %'
+     order by finished_at limit 1;
+    if found then
+      raise exception 'ingest_undo: a refresh outside the batch path loaded data after batch % was committed (ingest_runs % at %: %); undo cannot prove what it would restore',
+        p_batch_id, v_run.id, v_run.finished_at, v_run.file;
+    end if;
+  end if;
+
+  -- 3. every row the batch wrote must still read exactly as it wrote it, BEFORE anything changes
+  for t in select jsonb_object_keys(b.summary->'commit') loop
     if to_regclass('public.' || t) is null then
       raise exception 'ingest_undo: table % does not exist', t;
     end if;
+    cfg := _ingest_target_cfg(t);
+    keys := array(select jsonb_array_elements_text(cfg->'keys'));
+    is_book := (cfg->>'scope') = 'book';
+    pcols := array(select jsonb_array_elements_text(b.summary->'commit'->t->'columns'));
+    if array_length(pcols, 1) is null then
+      raise exception 'ingest_undo: batch % recorded no written columns for %', p_batch_id, t;
+    end if;
+    diffs := '{}'; keym_l_r := '{}';
+    for c in select col, typ from _ingest_cols(t) loop
+      if c.col = any(pcols) then
+        diffs := diffs || format('L.%I is distinct from %s', c.col, _ingest_cast('st.row', c.col, c.typ));
+      end if;
+      if c.col = any(keys) then
+        keym_l_r := keym_l_r || _ingest_eq(format('L.%I', c.col), _ingest_cast('r.row', c.col, c.typ), c.typ);
+      end if;
+    end loop;
+    -- a. inserted / updated / revived rows: still there, still the payload the batch wrote, not voided since
+    execute format($f$select count(*) from ingest_stage st left join %I L on L.id = st.row_id
+                     where st.batch_id = %s and st.target = %L and st.action in ('inserted', 'updated', 'revived')
+                       and (L.id is null or (%s) %s)$f$,
+                   t, p_batch_id, t, array_to_string(diffs, ' or '),
+                   case when is_book then 'or L.voided_at is not null' else '' end) into n_bad;
+    if n_bad > 0 then
+      raise exception 'ingest_undo: % row(s) of % no longer read as batch % wrote them (changed or removed since the commit); undo would not restore a known state',
+        n_bad, t, p_batch_id;
+    end if;
+    -- b. rows it updated / revived / voided must still exist by id; voided ones must still be voided
+    execute format($f$select count(*) from ingest_replaced r left join %I L on L.id = (r.row->>'id')::bigint
+                     where r.batch_id = %s and r.target = %L and r.action in ('updated', 'revived', 'voided')
+                       and (L.id is null %s)$f$,
+                   t, p_batch_id, t, case when is_book then $c$or (r.action = 'voided' and L.voided_at is null)$c$ else '' end) into n_bad;
+    if n_bad > 0 then
+      raise exception 'ingest_undo: % row(s) of % that batch % changed or voided were removed or un-voided since; undo would not restore a known state',
+        n_bad, t, p_batch_id;
+    end if;
+    -- c. rows it deleted: no live row may carry their natural key now (a re-insert would collide or duplicate)
+    execute format($f$select count(*) from ingest_replaced r
+                     where r.batch_id = %s and r.target = %L and r.action = 'deleted'
+                       and exists (select 1 from %I L where %s)$f$,
+                   p_batch_id, t, t, array_to_string(keym_l_r, ' and ')) into n_bad;
+    if n_bad > 0 then
+      raise exception 'ingest_undo: % row(s) batch % deleted from % were loaded again since (same key, new row); undo would duplicate them',
+        n_bad, p_batch_id, t;
+    end if;
+  end loop;
+
+  -- 4. reverse, target by target
+  for t in select jsonb_object_keys(b.summary->'commit') loop
     sets := '{}'; cols := '{}'; vals := '{}';
     for c in select col, typ from _ingest_cols(t) loop
       cols := cols || quote_ident(c.col);
@@ -504,8 +600,8 @@ begin
 
     -- a. rows the batch inserted go away
     select count(*) into want from ingest_stage where batch_id = p_batch_id and target = t and action = 'inserted';
-    execute format('delete from %I L where L.id in (select row_id from ingest_stage where batch_id = %s and target = %L and action = ''inserted'')',
-                   t, p_batch_id, t);
+    execute format('delete from %I L where L.id in (select row_id from ingest_stage where batch_id = %s and target = %L and action = %L)',
+                   t, p_batch_id, t, 'inserted');
     get diagnostics n_del = row_count;
     if n_del <> want then
       raise exception 'ingest_undo: % inserted % rows into %, only % are still there; something else changed them', p_batch_id, want, t, n_del;
@@ -531,9 +627,13 @@ begin
     res := res || jsonb_build_object(t, jsonb_build_object('removed_inserts', n_del, 'restored', n_res, 'reinserted', n_back));
   end loop;
 
+  -- an undone batch can never be committed or undone again: its staged rows have no further use
+  -- (ingest_replaced keeps the record of what it had changed)
+  delete from ingest_stage where batch_id = p_batch_id;
+  get diagnostics n_pruned = row_count;
   update ingest_batches
      set status = 'undone', undone_by = p_actor, undone_at = now(),
-         summary = summary || jsonb_build_object('undo', res)
+         summary = summary || jsonb_build_object('undo', res, 'stage_rows_pruned', coalesce((summary->>'stage_rows_pruned')::bigint, 0) + n_pruned)
    where id = p_batch_id;
   if to_regclass('public.audit_log') is not null then
     insert into audit_log (user_email, event, question, detail)
@@ -543,21 +643,52 @@ begin
   return jsonb_build_object('batch_id', p_batch_id, 'status', 'undone', 'targets', res);
 end $$;
 
--- The preview's diff runs through the yq_readonly RPC right after the rows were staged, before
--- autoanalyze has seen them; the API calls this first so that diff is planned on real statistics.
+-- Retention (the API calls this before every preview; safe to run any time). Previews nobody
+-- committed within p_stale are superseded (rejected); the staged rows of rejected / failed /
+-- undone batches go; a committed batch keeps only the rows it wrote. Returns what it did and
+-- the two tables' sizes so the preview can warn before the free-tier cap is in sight.
+create or replace function ingest_prune(p_stale interval default interval '2 days')
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  n_super bigint; n_a bigint; n_b bigint;
+begin
+  with s as (update ingest_batches
+                set status = 'rejected',
+                    summary = summary || jsonb_build_object('rejected_by', 'ingest_prune',
+                                                            'reject_reason', 'superseded: not committed within ' || p_stale::text)
+              where status in ('parsing', 'previewed') and created_at < now() - p_stale
+              returning id)
+  select count(*) into n_super from s;
+  with d as (delete from ingest_stage st using ingest_batches b
+              where b.id = st.batch_id and b.status in ('rejected', 'failed', 'undone') returning st.id)
+  select count(*) into n_a from d;
+  with d as (delete from ingest_stage st using ingest_batches b
+              where b.id = st.batch_id and b.status = 'committed' and st.action = 'unchanged' returning st.id)
+  select count(*) into n_b from d;
+  return jsonb_build_object('superseded', n_super, 'stage_rows_deleted', n_a + n_b,
+                            'stage_bytes', pg_total_relation_size('public.ingest_stage'),
+                            'replaced_bytes', pg_total_relation_size('public.ingest_replaced'),
+                            'stage_rows', (select count(*) from ingest_stage),
+                            'batches', coalesce((select jsonb_object_agg(status, n) from (select status, count(*) n from ingest_batches group by 1) q), '{}'::jsonb));
+end $$;
+
+-- The preview's diff runs right after the rows were staged, before autoanalyze has seen them;
+-- the API runs ANALYZE first so that diff is planned on real statistics (the session owner can
+-- ANALYZE directly; this wrapper stays for a session that cannot).
 create or replace function ingest_stage_analyze()
 returns void language plpgsql security definer set search_path = public as $$
 begin
   analyze ingest_stage;
 end $$;
 
--- ── 5. grants: the RPCs to service_role only; helpers to nobody but the owner ──
-revoke execute on function ingest_commit(bigint, jsonb) from public, anon, authenticated;
-grant  execute on function ingest_commit(bigint, jsonb) to service_role;
-revoke execute on function ingest_stage_analyze() from public, anon, authenticated;
-grant  execute on function ingest_stage_analyze() to service_role;
-revoke execute on function ingest_undo(bigint, text) from public, anon, authenticated;
-grant  execute on function ingest_undo(bigint, text) to service_role;
+-- ── 5. grants: the RPCs to nobody but the owner ────────────────────────────────
+-- The API calls them over DATABASE_URL (the owner's session). Through PostgREST they would be
+-- capped at 8 s anyway, so service_role gets no EXECUTE either: a stray service-key call cannot
+-- commit or undo a batch.
+revoke execute on function ingest_commit(bigint, jsonb) from public, anon, authenticated, service_role;
+revoke execute on function ingest_undo(bigint, text) from public, anon, authenticated, service_role;
+revoke execute on function ingest_prune(interval) from public, anon, authenticated, service_role;
+revoke execute on function ingest_stage_analyze() from public, anon, authenticated, service_role;
 revoke execute on function _ingest_apply_target(bigint, text, jsonb) from public, anon, authenticated, service_role;
 revoke execute on function _ingest_cols(text) from public, anon, authenticated, service_role;
 revoke execute on function _ingest_cast(text, text, text) from public, anon, authenticated, service_role;
@@ -578,16 +709,23 @@ begin
     raise exception 'ingest tables must not be granted to anon/authenticated';
   end if;
   if exists (select 1 from information_schema.role_routine_grants
-              where routine_name in ('ingest_commit', 'ingest_undo', 'ingest_stage_analyze', '_ingest_apply_target')
-                and grantee in ('anon', 'authenticated', 'PUBLIC')) then
-    raise exception 'ingest RPCs must not be executable by anon/authenticated/public';
+              where routine_name in ('ingest_commit', 'ingest_undo', 'ingest_prune', 'ingest_stage_analyze', '_ingest_apply_target')
+                and grantee in ('anon', 'authenticated', 'PUBLIC', 'service_role', 'yq_readonly')) then
+    raise exception 'ingest RPCs must not be executable by anon/authenticated/public/service_role/yq_readonly';
   end if;
-  if not exists (select 1 from information_schema.role_routine_grants
-                  where routine_name = 'ingest_commit' and grantee = 'service_role') then
-    raise exception 'service_role must be able to execute ingest_commit';
+  if exists (select 1 from information_schema.role_table_grants
+              where grantee = 'yq_readonly'
+                and table_name in ('ingest_batches', 'ingest_stage', 'ingest_replaced', 'orders', 'order_lines',
+                                   'ledger_entries', 'ar_ageing', 'purchase_costs', 'product_aliases')) then
+    raise exception 'yq_readonly must not gain SELECT on the raw Focus tables or the ingest tables';
   end if;
   if _ingest_target_cfg('orders')->>'span_col' <> 'order_date' then
     raise exception 'target config broken';
+  end if;
+  if _ingest_target_cfg('ledger_entries')->'within' <> '["account"]'::jsonb
+     or _ingest_target_cfg('stock_movements')->'within' <> '["item_name"]'::jsonb
+     or _ingest_target_cfg('orders')->'within' is not null then
+    raise exception 'within rule broken';
   end if;
   if _ingest_scope_overlap('{"kind":"span","from":"2026-09-01","to":"2026-09-24"}',
                            '{"kind":"span","from":"2026-09-24","to":"2026-09-30"}') is not true

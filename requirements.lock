@@ -7,6 +7,8 @@
 # Change a dependency: edit requirements.txt, then in a clean Python 3.11 venv:
 #   pip install -r requirements.txt && pip freeze > requirements.lock   (keep this header)
 # and run the test suites before shipping.
+# 24-Sep-2026 (R2a): psycopg 3.3.4 + psycopg-binary 3.3.4 added by hand for app/ingest_batch.py (the batch
+# importer's own DATABASE_URL session); the same pair the local replay ran on.
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
 aiosignal==1.4.0
@@ -51,6 +53,8 @@ pdfplumber==0.11.10
 pillow==12.3.0
 postgrest==2.31.0
 propcache==0.5.4
+psycopg-binary==3.3.4
+psycopg==3.3.4
 pycparser==3.0
 pydantic-core==2.46.5
 pydantic==2.13.5
