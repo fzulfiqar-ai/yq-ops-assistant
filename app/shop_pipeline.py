@@ -4,21 +4,28 @@ B-08, SEC-10, TXN-08).
   * Cancel reasons — a staff cancel needs a reason code from CANCEL_REASONS ('other' needs a
     note); the merchant's own cancel is recorded as customer_request. The code goes to
     shop_orders.cancel_reason_code (once the migration adds it), the text to cancel_reason,
-    and both to the status event, so the reason exists even before the column does.
+    and both to the status event, so the reason exists even before the column does. The note
+    is the OFFICE's record: the merchant's email carries the reason's label only
+    (customer_cancel_text) — "duplicate / fake number" never reaches a shop.
   * Payment — payment_status unpaid | partial | paid (+ method, amount, note) as a
     FACT recorded by the office, never a lifecycle state: an order is Delivered whether or not
-    it is paid. Every change is an order event ('payment') the drawer shows.
+    it is paid. Every change is an order event ('payment') the drawer shows. 'unpaid' is the
+    row's default too, so it reads as "payment not recorded" (Focus holds the ledger), never
+    as a claim that the shop owes.
   * Returns — a 'returned' EVENT with lines, quantities and a reason (never a status): the
     order stays Delivered, the value is on the event (Decimal, 3 dp) and, once the column
-    exists, summed into shop_orders.returned_bhd for the list pill.
+    exists, shop_orders.returned_bhd is recomputed from ALL the order's returned events for
+    the list pill. A line can never be returned beyond what was delivered, across calls.
   * Focus invoice — the optional Focus invoice number recorded at Delivered (or later), and
-    v_shop_focus_recon: delivered orders without an invoice, or whose invoice's salesman or
-    amount in v_sales disagrees with the order.
+    v_shop_focus_recon: delivered orders without an invoice, whose invoice is not in the
+    uploaded ledger (v_sales), whose invoice's salesman or amount disagrees with the order, or
+    whose invoice number sits on more than one delivered order.
 
 Money is Decimal end to end here; floats appear only at the JSON edge (shop.money).
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -39,10 +46,21 @@ CANCEL_REASONS: dict[str, str] = {
 CANCEL_NOTE_MIN = 3
 CANCEL_REASON_REQUIRED = "Pick a cancel reason (out of stock, customer request, duplicate, test, price issue or other)."
 CANCEL_NOTE_REQUIRED = "Say why in the note when the reason is 'other'."
+# What the MERCHANT is told when staff cancel: the reason's label from the fixed list, never the
+# free-text note (that is the office's record — see customer_cancel_text). 'test' and 'other'
+# add nothing beyond "cancelled".
+CUSTOMER_CANCEL_TEXT: dict[str, str] = {
+    "out_of_stock": "Out of stock",
+    "customer_request": "As you asked",
+    "duplicate": "Duplicate order",
+    "price_issue": "Price issue",
+}
 
 PAYMENT_STATUSES = ("unpaid", "partial", "paid")
 PAYMENT_METHODS = ("cash", "benefit", "bank_transfer", "cheque", "credit", "other")
-PAYMENT_LABELS = {"unpaid": "Unpaid", "partial": "Partly paid", "paid": "Paid", "refunded": "Refunded"}
+# 'unpaid' is also the row default (marketplace_migration.sql), so the label says what is true:
+# nothing has been recorded here — payments live in Focus until the office records one.
+PAYMENT_LABELS = {"unpaid": "Payment not recorded", "partial": "Partly paid", "paid": "Paid", "refunded": "Refunded"}
 
 RETURN_REASON_MIN = 3
 RETURN_MAX_LINES = 60
@@ -92,12 +110,20 @@ def validate_cancel(reason_code: str | None, note: str | None, *, cancelled_by: 
     return code, (text or CANCEL_REASONS[code])
 
 
+def customer_cancel_text(reason_code) -> str | None:
+    """The line the merchant's cancel email may carry: the reason's public label, or nothing.
+    The staff note NEVER goes through here — it is internal (cancel_reason + the event)."""
+    return CUSTOMER_CANCEL_TEXT.get(str(reason_code or "").strip().lower())
+
+
 # ── payment ───────────────────────────────────────────────────────────────────
 
 def set_payment(order_id: int, status: str, method: str | None, amount_bhd, note: str | None, actor: str) -> dict:
     """Record the payment fact on an order. Raises ShopError on a bad status/method, an unknown
     order or a cancelled one. Writes payment_status + payment_method (+ paid_at when the column
-    exists) and one 'payment' event with from/to/method/amount/note."""
+    exists) and one 'payment' event with from/to/method/amount/note. A request that names no
+    method keeps the one on the row ('partial, cash' then 'paid' stays cash); paid_at survives
+    the reverse script under a cached probe (shop._update_optional retries without it)."""
     from app import shop
     st = str(status or "").strip().lower()
     if st not in PAYMENT_STATUSES:
@@ -121,16 +147,18 @@ def set_payment(order_id: int, status: str, method: str | None, amount_bhd, note
     if st == "paid" and amt is None:
         amt = q3(o.get("total_confirmed_bhd") if o.get("total_confirmed_bhd") is not None else o.get("total_bhd"))
     now = _iso()
-    upd: dict = {"payment_status": st, "payment_method": m, "updated_at": now}
+    method = m or (str(o.get("payment_method") or "").strip().lower() or None)     # omitted = unchanged
+    upd: dict = {"payment_status": st, "payment_method": method, "updated_at": now}
     if shop.has_column("shop_orders", "paid_at"):
         upd["paid_at"] = now if st == "paid" else None
     client = database.get_client()
-    done = client.table("shop_orders").update(upd).eq("id", order_id).execute().data or []
+    done = shop._update_optional("shop_orders", upd, ("paid_at",),
+                                 lambda q: q.eq("id", order_id).execute().data or [])
     if not done:
         raise shop.ShopError(shop.CAS_CONFLICT_MSG)
     client.table("shop_order_events").insert({
         "order_id": order_id, "actor": actor, "event": "payment",
-        "detail": {"from": o.get("payment_status") or "unpaid", "to": st, "method": m,
+        "detail": {"from": o.get("payment_status") or "unpaid", "to": st, "method": method,
                    "amount_bhd": (float(amt) if amt is not None else None),
                    "note": shop.clean(note, 300) or None}}).execute()
     out = shop.get_order(order_id) or {}
@@ -140,11 +168,36 @@ def set_payment(order_id: int, status: str, method: str | None, amount_bhd, note
 
 # ── returns (an event, never a status) ────────────────────────────────────────
 
+def returned_so_far(events) -> dict[int, int]:
+    """{line_id: units already returned} from an order's earlier 'returned' events."""
+    out: dict[int, int] = {}
+    for ev in events or []:
+        if (ev or {}).get("event") != "returned":
+            continue
+        for x in ((ev.get("detail") or {}).get("lines") or []):
+            lid = _i((x or {}).get("line_id"))
+            out[lid] = out.get(lid, 0) + max(0, _i((x or {}).get("qty")))
+    return out
+
+
+def returned_value(events) -> Decimal:
+    """Σ value_bhd over an order's 'returned' events, Decimal 3 dp — what returned_bhd holds."""
+    total = Decimal("0")
+    for ev in events or []:
+        if (ev or {}).get("event") == "returned":
+            total += q3((ev.get("detail") or {}).get("value_bhd"))
+    return q3(total)
+
+
 def record_return(order_id: int, lines, reason: str | None, actor: str) -> dict:
     """Admin: goods came back. `lines` = [{line_id, qty}]; qty ≤ the confirmed (else ordered)
-    quantity of that line. Value = Σ qty × the line's confirmed unit price (else the ordered
-    one), Decimal 3 dp. Writes one 'returned' event (lines, reason, value) and, when the
-    column exists, adds the value to shop_orders.returned_bhd. The status is untouched."""
+    quantity of that line MINUS what earlier returns already took back, so two returns (or a
+    retry after a timeout) can never record more units than were delivered. Value = Σ qty × the
+    line's confirmed unit price (else the ordered one), Decimal 3 dp — the line price as
+    confirmed; an order-level coupon is not apportioned (the event carries the lines, the office
+    decides the credit). Writes one 'returned' event (lines, reason, value) and, when the column
+    exists, sets shop_orders.returned_bhd to the sum over ALL the order's returned events (read
+    back after the insert, never prev + this). The status is untouched."""
     from app import shop
     from app.audit import log_event
     why = shop.clean(reason, 300)
@@ -156,6 +209,7 @@ def record_return(order_id: int, lines, reason: str | None, actor: str) -> dict:
     if o.get("status") != "delivered":
         raise shop.ShopError("Only a delivered order can have a return recorded.")
     by_id = {int(ln["id"]): ln for ln in o.get("lines") or []}
+    already = returned_so_far(o.get("events"))
     items = list(lines or [])[:RETURN_MAX_LINES]
     if not items:
         raise shop.ShopError("Pick at least one line to return.")
@@ -171,9 +225,14 @@ def record_return(order_id: int, lines, reason: str | None, actor: str) -> dict:
         if (ln.get("line_status") or "ok") == "removed":
             raise shop.ShopError(f"{ln['item_code']} was removed at confirmation — nothing to return.")
         qty = _i((it or {}).get("qty"))
-        cap = _i(ln.get("qty_confirmed")) if ln.get("qty_confirmed") is not None else _i(ln.get("qty"))
+        delivered = _i(ln.get("qty_confirmed")) if ln.get("qty_confirmed") is not None else _i(ln.get("qty"))
+        back = already.get(lid, 0)
+        cap = max(0, delivered - back)
+        if cap <= 0:
+            raise shop.ShopError(f"{ln['item_code']}: all {delivered} delivered units are already returned.")
         if qty <= 0 or qty > cap:
-            raise shop.ShopError(f"Return quantity for {ln['item_code']} must be between 1 and {cap}.")
+            tail = f" ({back} of {delivered} already returned)." if back else "."
+            raise shop.ShopError(f"Return quantity for {ln['item_code']} must be between 1 and {cap}{tail}")
         unit = q3(ln.get("unit_price_confirmed") if ln.get("unit_price_confirmed") is not None else ln.get("unit_price_bhd"))
         value = q3(unit * qty)
         total += value
@@ -185,11 +244,17 @@ def record_return(order_id: int, lines, reason: str | None, actor: str) -> dict:
     client.table("shop_order_events").insert({"order_id": order_id, "actor": actor, "event": "returned",
                                               "detail": detail}).execute()
     if shop.has_column("shop_orders", "returned_bhd"):
-        prev = q3(o.get("returned_bhd"))
         try:
-            client.table("shop_orders").update({"returned_bhd": float(q3(prev + total)), "updated_at": _iso()}) \
+            # the sum of every returned event as it stands now (this one included), not the row
+            # value read earlier plus this call — two office users recording returns at once each
+            # write the full sum, so neither increment is lost
+            evs = (client.table("shop_order_events").select("event,detail").eq("order_id", order_id)
+                   .eq("event", "returned").execute().data or [])
+            client.table("shop_orders").update({"returned_bhd": float(returned_value(evs)), "updated_at": _iso()}) \
                 .eq("id", order_id).execute()
         except Exception as e:  # noqa: BLE001 — the event is the record; the column is a convenience
+            if shop._missing_column(e):
+                shop._forget_column("shop_orders", "returned_bhd")
             log.warning("returned_bhd update failed for %s: %s", o.get("order_no"), e)
     log_event(actor, "shop.order_return", detail={"order_id": order_id, "order_no": o.get("order_no"), **detail})
     return {"ok": True, "order_id": order_id, "order_no": o.get("order_no"), "value_bhd": float(total),
@@ -226,10 +291,35 @@ def set_invoice(order_id: int, focus_invoice_no, actor: str) -> dict:
     return shop.get_order(order_id) or {}
 
 
+RECON_FLAGS = ("missing_invoice", "invoice_not_found", "salesman_mismatch", "amount_mismatch", "invoice_reused")
+
+
+LEDGER_AS_OF_SQL = "SELECT MAX(sale_date)::text AS d FROM v_sales"
+
+
+def ledger_as_of() -> str | None:
+    """The last sale date in the uploaded Focus ledger (v_sales) — 'not in the ledger' means
+    'not in the ledger uploaded up to this date', which the UI says. Read through the read-only
+    RPC (app.db_read's run_readonly_query, yq_readonly-owned) via app.database.get_client at
+    call time. None when unavailable — never a failed reconciliation list."""
+    try:
+        r = database.get_client().rpc("run_readonly_query", {"sql_text": LEDGER_AS_OF_SQL}).execute()
+        data = r.data
+        if isinstance(data, str):
+            data = json.loads(data)
+        d = ((data or [{}])[0] or {}).get("d")
+        return str(d)[:10] if d else None
+    except Exception as e:  # noqa: BLE001 — a missing RPC must not cost the reconciliation list
+        log.debug("ledger_as_of unavailable: %s", e)
+        return None
+
+
 def focus_recon(limit: int = 300) -> dict:
-    """Delivered orders against v_sales by Focus invoice: missing invoice, invoice not found,
-    salesman mismatch, amount mismatch. Reads v_shop_focus_recon (service role only — it joins
-    customer names, which never leave through here). Empty + hint before the migration."""
+    """Delivered orders against v_sales by Focus invoice: missing invoice, invoice not in the
+    uploaded ledger, salesman mismatch, amount mismatch, one invoice number on several delivered
+    orders. Reads v_shop_focus_recon (service role only — it joins customer names, which never
+    leave through here). Empty + hint before the migration. `ledger_as_of` = the last sale date
+    the ledger holds, so "not found" is read against the upload, not against Focus itself."""
     from app.shop import money
     try:
         rows = (database.get_client().table("v_shop_focus_recon").select("*")
@@ -240,7 +330,7 @@ def focus_recon(limit: int = 300) -> dict:
     out = []
     issues = 0
     for r in rows:
-        flags = [k for k in ("missing_invoice", "invoice_not_found", "salesman_mismatch", "amount_mismatch") if r.get(k)]
+        flags = [k for k in RECON_FLAGS if r.get(k)]
         if flags:
             issues += 1
         out.append({
@@ -253,4 +343,4 @@ def focus_recon(limit: int = 300) -> dict:
             "amount_diff_bhd": money(r["amount_diff_bhd"]) if r.get("amount_diff_bhd") is not None else None,
             "flags": flags, "is_test": bool(r.get("is_test")),
         })
-    return {"rows": out, "count": len(out), "issues": issues}
+    return {"rows": out, "count": len(out), "issues": issues, "ledger_as_of": ledger_as_of()}

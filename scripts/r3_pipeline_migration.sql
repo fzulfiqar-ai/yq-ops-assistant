@@ -6,15 +6,17 @@
 --
 -- What this adds:
 --   1. shop_admin_audit (M12): append-only — who, when, entity, action, before/after jsonb — for every
---      admin write to settings, discount rules, campaigns, salesmen, target imports, upcoming items
---      and merchant attribution (app/shop_audit.py). A trigger refuses UPDATE and DELETE, so even the
---      service role can only add rows.
+--      admin write to settings (shop, costing, agents), discount rules, campaigns, salesmen, target
+--      imports, upcoming items and merchant attribution (app/shop_audit.py). A row trigger refuses
+--      UPDATE and DELETE and a statement trigger refuses TRUNCATE, so even the service role (which
+--      holds TRUNCATE on every public table) can only add rows.
 --   2. shop_orders: cancel_reason_code (the fixed list a staff cancel picks from; the text stays in
 --      cancel_reason), paid_at (stamped when payment_status becomes 'paid'), returned_bhd (the sum of
 --      'returned' events, for the list pill). payment_status / payment_method / focus_invoice_no
 --      already exist (marketplace_migration.sql).
 --   3. v_shop_focus_recon: delivered orders against v_sales by Focus invoice number — missing invoice,
---      invoice not found, salesman mismatch, amount mismatch. It joins customer names, so it is
+--      invoice not in the uploaded ledger, salesman mismatch, amount mismatch, and invoice_reused (one
+--      invoice number recorded on more than one delivered order). It joins customer names, so it is
 --      service-role only (never yq_readonly, never anon/authenticated).
 --
 -- Nothing here changes a row: every column is nullable, no UPDATE, no DELETE. The code tolerates
@@ -43,6 +45,10 @@ comment on table shop_admin_audit is
 create or replace function shop_admin_audit_no_rewrite() returns trigger
 language plpgsql as $$
 begin
+  if tg_op = 'TRUNCATE' then          -- statement-level: no OLD row to name
+    raise exception 'shop_admin_audit is append-only (it cannot be truncated)'
+      using errcode = 'restrict_violation';
+  end if;
   raise exception 'shop_admin_audit is append-only (row % cannot be % )', old.id, tg_op
     using errcode = 'restrict_violation';
 end $$;
@@ -52,6 +58,13 @@ drop trigger if exists shop_admin_audit_append_only on shop_admin_audit;
 create trigger shop_admin_audit_append_only
   before update or delete on shop_admin_audit
   for each row execute function shop_admin_audit_no_rewrite();
+
+-- TRUNCATE bypasses row triggers and the service role holds it on every public table: a
+-- statement-level trigger closes that door too, so the audit can be added to and nothing else.
+drop trigger if exists shop_admin_audit_no_truncate on shop_admin_audit;
+create trigger shop_admin_audit_no_truncate
+  before truncate on shop_admin_audit
+  for each statement execute function shop_admin_audit_no_rewrite();
 
 -- ── 2. shop_orders: the pipeline facts ────────────────────────────────────────
 alter table shop_orders add column if not exists cancel_reason_code text;
@@ -85,6 +98,13 @@ with inv as (
   from v_sales
   where invoice_no is not null and trim(invoice_no) <> ''
   group by upper(trim(invoice_no))
+),
+dup as (                                                  -- one Focus invoice on several delivered orders
+  select upper(trim(focus_invoice_no))   as invoice_key,
+         count(*)                        as orders_n
+  from shop_orders
+  where status = 'delivered' and focus_invoice_no is not null and trim(focus_invoice_no) <> ''
+  group by upper(trim(focus_invoice_no))
 )
 select o.id                                              as order_id,
        o.order_no,
@@ -113,16 +133,19 @@ select o.id                                              as order_id,
        case when i.invoice_key is not null
             then round(coalesce(i.invoice_total_bhd, 0) - coalesce(o.total_confirmed_bhd, o.total_bhd, 0), 3) end
                                                                                     as amount_diff_bhd,
-       o.is_test
+       o.is_test,
+       -- appended last: CREATE OR REPLACE VIEW may only add columns at the end
+       (coalesce(d.orders_n, 0) > 1)                                                as invoice_reused
 from shop_orders o
 left join salesmen s on s.id = o.salesman_id
 left join inv i on i.invoice_key = upper(trim(o.focus_invoice_no))
+left join dup d on d.invoice_key = upper(trim(o.focus_invoice_no))
 where o.status = 'delivered';
 
 revoke all on v_shop_focus_recon from anon, authenticated;
 
 comment on view v_shop_focus_recon is
-  'Delivered marketplace orders against the Focus sales ledger (v_sales) by focus_invoice_no: missing invoice, invoice not found, salesman mismatch (Focus salesman vs the rep''s focus_name), amount mismatch (> 0.005 BHD, VAT-inclusive both sides). Carries customer names: service role only.';
+  'Delivered marketplace orders against the Focus sales ledger (v_sales) by focus_invoice_no: missing invoice, invoice not found in the uploaded ledger, salesman mismatch (Focus salesman vs the rep''s focus_name), amount mismatch (> 0.005 BHD, VAT-inclusive both sides), invoice_reused (the same invoice number on more than one delivered order). Carries customer names: service role only.';
 
 -- ── self-check ─────────────────────────────────────────────────────────────────
 do $$
@@ -141,6 +164,10 @@ begin
   if not exists (select 1 from pg_trigger where tgname = 'shop_admin_audit_append_only'
                  and tgrelid = 'public.shop_admin_audit'::regclass) then
     raise exception 'shop_admin_audit append-only trigger missing';
+  end if;
+  if not exists (select 1 from pg_trigger where tgname = 'shop_admin_audit_no_truncate'
+                 and tgrelid = 'public.shop_admin_audit'::regclass) then
+    raise exception 'shop_admin_audit truncate trigger missing';
   end if;
   if not exists (select 1 from pg_tables where schemaname = 'public' and tablename = 'shop_admin_audit' and rowsecurity) then
     raise exception 'shop_admin_audit must have RLS enabled';
@@ -163,8 +190,12 @@ begin
   if exists (select 1 from v_shop_focus_recon where focus_invoice_no is null and not missing_invoice) then
     raise exception 'v_shop_focus_recon: a delivered order without an invoice must read missing_invoice';
   end if;
-  if exists (select 1 from v_shop_focus_recon where focus_invoice_no is null and (salesman_mismatch or amount_mismatch)) then
-    raise exception 'v_shop_focus_recon: no invoice means no mismatch flags';
+  if exists (select 1 from v_shop_focus_recon where focus_invoice_no is null and (salesman_mismatch or amount_mismatch or invoice_reused)) then
+    raise exception 'v_shop_focus_recon: no invoice means no mismatch or reuse flags';
+  end if;
+  if not exists (select 1 from information_schema.columns
+                 where table_schema = 'public' and table_name = 'v_shop_focus_recon' and column_name = 'invoice_reused') then
+    raise exception 'v_shop_focus_recon.invoice_reused missing';
   end if;
   if exists (select 1 from information_schema.role_table_grants
              where table_schema = 'public' and table_name in ('shop_admin_audit', 'v_shop_focus_recon', 'shop_orders')
@@ -174,5 +205,5 @@ begin
   if has_table_privilege('yq_readonly', 'public.v_shop_focus_recon', 'SELECT') then
     raise exception 'v_shop_focus_recon carries customer names and must not be readable by yq_readonly';
   end if;
-  raise notice 'r3_pipeline: ok (shop_admin_audit append-only, 3 shop_orders columns, v_shop_focus_recon answers, no anon/authenticated/yq_readonly grants)';
+  raise notice 'r3_pipeline: ok (shop_admin_audit append-only incl. truncate, 3 shop_orders columns, v_shop_focus_recon answers with invoice_reused, no anon/authenticated/yq_readonly grants)';
 end $$;

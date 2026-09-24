@@ -13,7 +13,10 @@ app.shop.resolve_salesman, and every rule has one home:
   * settle_sticky      — the merchant's sticky (first-touch) rep is written when the assigned
                          rep CONFIRMS or DELIVERS, not when the order is requested: until then
                          the proposed rep is only remembered as `first_ref`. An existing sticky
-                         value is never overwritten here.
+                         value is never overwritten here: the write is one conditional UPDATE
+                         (… where sticky_salesman_id is null and salesman_id is null), so two
+                         reps confirming a new merchant's orders at the same moment cannot both
+                         win — the first commit does. A test order never settles anything.
   * assign_customer    — the admin's explicit, reasoned assignment (shop_customers.salesman_id):
                          audit_log 'shop.customer_assign' {from, to, reason} + a shop_admin_audit
                          row. The admin assignment beats every other rule in resolve_salesman.
@@ -83,22 +86,23 @@ def staff_conflict(cust: dict | None, sm: dict | None) -> bool:
 
 def settle_sticky(client, order: dict, status: str | None = None) -> bool:
     """Write shop_customers.sticky_salesman_id = the order's rep, once, when the order reaches
-    Confirmed or Delivered. Returns True only when a value was written. Never raises."""
+    Confirmed or Delivered. Returns True only when a value was written. Never raises.
+
+    The write is a single conditional UPDATE — the row must still have NO rep on file (no admin
+    assignment, no earlier settle) at the moment the database applies it — so a read-then-write
+    race between two reps cannot make the last writer win. Zero rows changed = already on file
+    (or no such merchant) = False. A test order (is_test) never decides who a shop belongs to."""
     if status is not None and status not in STICKY_SETTLE_STATUSES:
+        return False
+    if (order or {}).get("is_test"):
         return False
     cid, sid = _i((order or {}).get("customer_id")), _i((order or {}).get("salesman_id"))
     if not cid or not sid:
         return False
     try:
-        got = (client.table("shop_customers").select("id,salesman_id,sticky_salesman_id")
-               .eq("id", cid).limit(1).execute().data or [])
-        if not got:
-            return False
-        c = got[0]
-        if c.get("salesman_id") or c.get("sticky_salesman_id"):
-            return False          # already on file (admin assignment or an earlier settle): untouched
-        client.table("shop_customers").update({"sticky_salesman_id": sid, "updated_at": _iso()}).eq("id", cid).execute()
-        return True
+        done = (client.table("shop_customers").update({"sticky_salesman_id": sid, "updated_at": _iso()})
+                .eq("id", cid).is_("salesman_id", "null").is_("sticky_salesman_id", "null").execute().data or [])
+        return bool(done)
     except Exception as e:  # noqa: BLE001 — the status move already happened
         log.warning("sticky settle for order %s failed: %s", (order or {}).get("order_no"), e)
         return False

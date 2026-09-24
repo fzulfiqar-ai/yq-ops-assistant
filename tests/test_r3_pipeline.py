@@ -11,10 +11,15 @@ database or the network: the pure tests pass with no .env at all (CI sets SUPABA
 
 Covered:
   * cancel reasons — a staff cancel needs a code, 'other' needs a note, the merchant's cancel
-    is customer_request; the code reaches the column when it exists and the event always;
-  * payment — unpaid | partial | paid as a recorded fact (+ event), never a status;
+    is customer_request; the code reaches the column when it exists and the event always; the
+    shop's cancel email carries the reason's label only, never the internal note; a cancel
+    still lands after the reverse script drops the column under a cached probe;
+  * payment — unpaid | partial | paid as a recorded fact (+ event), never a status; a request
+    without a method keeps the method on the row; 'paid' survives a dropped paid_at;
   * returns — a 'returned' EVENT with lines / qty / reason, Decimal money, delivered only;
-  * the Focus invoice at Delivered and the reconciliation list (empty + hint pre-migration);
+    never more than delivered across calls; returned_bhd = Σ events, not prev + this;
+  * the Focus invoice at Delivered and the reconciliation list (empty + hint pre-migration;
+    invoice_reused; the ledger's as-of date);
   * the public rep picker (pickable = active + public profile + linked login; id + name only;
     a pick of an unlisted rep is ignored) and the checkout still receives what it reads;
   * the attribution precedence matrix: link A then B, saved details, a new phone, a recognised
@@ -444,6 +449,22 @@ def _():
         o = set_status(1, "cancelled", None, actor="rep@example.com", reason_code="out_of_stock")
         assert o["cancel_reason"] == "Out of stock" and "cancel_reason_code" not in fake.rows("shop_orders")[0]
         assert _events(fake)[-1]["detail"]["reason_code"] == "out_of_stock"
+    # the reverse script drops the column under a cached hit: the cancel still lands (one retry
+    # without the column, the code on the event, the probe forgotten) — never a 500 for the ten
+    # minutes a stale hit would otherwise last
+    import app.shop as s
+    fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
+    fake.columns["shop_orders"] = ORDER_COLS_R3
+    with _patched(fake):
+        assert s.has_column("shop_orders", "cancel_reason_code") is True
+        fake.columns["shop_orders"] = ORDER_COLS_PRE_R3
+        o = set_status(1, "cancelled", "same as 0002", actor="rep@example.com", reason_code="duplicate")
+        assert o["status"] == "cancelled" and o["cancel_reason"] == "same as 0002"
+        assert "cancel_reason_code" not in fake.rows("shop_orders")[0]
+        ups = [c for c in fake.writes("shop_orders") if c[0] == "update"]
+        assert len(ups) == 2 and "cancel_reason_code" in ups[0][2] and "cancel_reason_code" not in ups[1][2], ups
+        assert _events(fake)[-1]["detail"]["reason_code"] == "duplicate"
+        assert "shop_orders.cancel_reason_code" not in s._col_cache
 
 
 @test("cancel: the merchant's own cancel (cancel_by_customer) still needs no code and records customer_request")
@@ -483,6 +504,9 @@ def _():
         assert evs[1]["detail"]["amount_bhd"] == 12.0, "paid with no amount = the confirmed total"
         o = set_payment(1, "unpaid", None, None, "bounced", "admin@example.com")
         assert o["payment_status"] == "unpaid" and fake.rows("shop_orders")[0]["paid_at"] is None
+        assert o["payment_method"] == "benefit", "no method in the request = the method on the row stays"
+        assert [e["detail"]["method"] for e in _events(fake) if e["event"] == "payment"] == ["cash", "benefit", "benefit"]
+        assert o["payment_label"] == "Payment not recorded", "the default state says what is true, never 'owes'"
     # a cancelled order has nothing to pay; before the migration paid_at is never named
     fake = _db(shop_orders=[_order(1, status="cancelled")], shop_order_lines=_lines(1))
     with _patched(fake):
@@ -492,6 +516,18 @@ def _():
     with _patched(fake):
         o = set_payment(1, "paid", "cash", None, None, "admin@example.com")
         assert o["payment_status"] == "paid" and "paid_at" not in fake.rows("shop_orders")[0]
+    # the reverse script drops paid_at under a cached hit: 'paid' still lands (one retry, probe forgotten)
+    import app.shop as s
+    fake = _db(shop_orders=[_order(1, status="delivered")], shop_order_lines=_lines(1))
+    fake.columns["shop_orders"] = ORDER_COLS_R3
+    with _patched(fake):
+        assert s.has_column("shop_orders", "paid_at") is True
+        fake.columns["shop_orders"] = ORDER_COLS_PRE_R3
+        o = set_payment(1, "paid", "cash", None, None, "admin@example.com")
+        assert o["payment_status"] == "paid" and "paid_at" not in fake.rows("shop_orders")[0]
+        ups = [c for c in fake.writes("shop_orders") if c[0] == "update"]
+        assert len(ups) == 2 and "paid_at" in ups[0][2] and "paid_at" not in ups[1][2], ups
+        assert "shop_orders.paid_at" not in s._col_cache
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -525,6 +561,25 @@ def _():
         # a second return adds up on the row
         record_return(1, [{"line_id": 12, "qty": 1}], "wrong colour", "admin@example.com")
         assert fake.rows("shop_orders")[0]["returned_bhd"] == 9.8
+        # and nothing can come back beyond what was delivered, across calls (11: 2 of 2 back; 12: 1 + 1 of 2)
+        _raises(lambda: record_return(1, [{"line_id": 11, "qty": 1}], "again", "admin@example.com"), "already returned")
+        _raises(lambda: record_return(1, [{"line_id": 12, "qty": 1}], "again", "admin@example.com"), "already returned")
+        assert fake.rows("shop_orders")[0]["returned_bhd"] == 9.8 and len([e for e in _events(fake) if e["event"] == "returned"]) == 2
+    # already-returned units cap the next call; the row value is Σ of the events, never prev + this
+    from app.shop_pipeline import returned_so_far, returned_value
+    fake = _db(shop_orders=[_order(2, status="delivered", returned_bhd=None)], shop_order_lines=_lines(2))
+    fake.columns["shop_orders"] = ORDER_COLS_R3
+    with _patched(fake):
+        record_return(2, [{"line_id": 21, "qty": 1}], "damaged", "admin@example.com")          # 1 of 3 back
+        assert fake.rows("shop_orders")[0]["returned_bhd"] == 2.95
+        _raises(lambda: record_return(2, [{"line_id": 21, "qty": 3}], "more", "admin@example.com"),
+                "between 1 and 2 (1 of 3 already returned)")
+        fake.rows("shop_orders")[0]["returned_bhd"] = 0.5          # a stale row value must not compound
+        record_return(2, [{"line_id": 21, "qty": 2}], "the rest", "admin@example.com")
+        assert fake.rows("shop_orders")[0]["returned_bhd"] == 8.85, "recomputed from the events"
+        evs = _events(fake, 2)
+        assert returned_so_far(evs) == {21: 3} and str(returned_value(evs)) == "8.850"
+        _raises(lambda: record_return(2, [{"line_id": 21, "qty": 1}], "again", "admin@example.com"), "already returned")
     # delivered only; before the migration the value stays on the event (no column named)
     fake = _db(shop_orders=[_order(1, status="confirmed")], shop_order_lines=_lines(1))
     with _patched(fake):
@@ -599,14 +654,26 @@ def _():
          "salesman_focus_name": "FURQAN", "order_total_bhd": 10.0, "payment_status": "paid", "focus_invoice_no": "SI-10",
          "invoice_total_bhd": 9.5, "focus_salesman": "HARSH B", "missing_invoice": False, "invoice_not_found": False,
          "salesman_mismatch": True, "amount_mismatch": True, "amount_diff_bhd": -0.5, "is_test": False},
+        # SI-9 again on a second delivered order: both rows read invoice_reused
+        {"order_id": 4, "order_no": "YQ-4", "delivered_at": "2026-09-23", "customer_shop": "D", "salesman_name": "Furqan Ahmed",
+         "salesman_focus_name": "FURQAN", "order_total_bhd": 10.0, "payment_status": "unpaid", "focus_invoice_no": "si-9",
+         "invoice_total_bhd": 10.0, "focus_salesman": "FURQAN", "missing_invoice": False, "invoice_not_found": False,
+         "salesman_mismatch": False, "amount_mismatch": False, "amount_diff_bhd": 0, "is_test": False, "invoice_reused": True},
     ]
+    rows[1]["invoice_reused"] = True
     fake = _db(v_shop_focus_recon=rows)
     with _patched(fake):
         r = focus_recon()
-        assert r["count"] == 3 and r["issues"] == 2 and "hint" not in r
+        assert r["count"] == 4 and r["issues"] == 4 and "hint" not in r
         by = {x["order_no"]: x for x in r["rows"]}
-        assert by["YQ-1"]["flags"] == ["missing_invoice"] and by["YQ-2"]["flags"] == []
+        assert by["YQ-1"]["flags"] == ["missing_invoice"] and by["YQ-2"]["flags"] == ["invoice_reused"]
         assert by["YQ-3"]["flags"] == ["salesman_mismatch", "amount_mismatch"] and by["YQ-3"]["amount_diff_bhd"] == -0.5
+        assert by["YQ-4"]["flags"] == ["invoice_reused"]
+        assert "ledger_as_of" in r and r["ledger_as_of"] is None, "no ledger RPC on the fake: the key is there, the date is not"
+        fake.rpc_results["run_readonly_query"] = [{"d": "2026-09-22"}]
+        assert focus_recon()["ledger_as_of"] == "2026-09-22"
+        fake.rpc_results["run_readonly_query"] = '[{"d": "2026-09-23T00:00:00"}]'    # the RPC may answer json text
+        assert focus_recon()["ledger_as_of"] == "2026-09-23"
 
 
 @test("recon: the migration file defines the view, the append-only audit and the three columns, with a self-check and a reverse")
@@ -615,18 +682,28 @@ def _():
     rev = (ROOT / "scripts" / "r3_pipeline_reverse.sql").read_text(encoding="utf-8")
     low = mig.lower()
     assert "create table if not exists shop_admin_audit" in low and "before update or delete on shop_admin_audit" in low
+    # TRUNCATE bypasses row triggers and the service role holds it: a statement trigger refuses it too
+    assert "before truncate on shop_admin_audit" in low and "for each statement execute function shop_admin_audit_no_rewrite" in low
+    assert "tg_op = 'truncate'" in low, "the shared trigger function must not touch OLD on a statement-level call"
     for col in ("cancel_reason_code", "paid_at", "returned_bhd"):
         assert f"add column if not exists {col}" in low, col
     assert "create or replace view v_shop_focus_recon" in low and "from v_sales" in low
+    assert "as invoice_reused" in low and low.index("o.is_test") < low.index("as invoice_reused"), \
+        "CREATE OR REPLACE VIEW may only append columns: invoice_reused comes after is_test"
     assert "revoke all on v_shop_focus_recon from anon, authenticated" in low
+    check = low.split("self-check")[-1]
+    assert "shop_admin_audit_no_truncate" in check and "invoice_reused" in check, "the self-check covers the new objects"
     import re
     assert not re.search(r"^\s*grant\s", low, re.M), "no GRANT statement in this migration (service role only)"
     assert low.count("do $$") == 1 and "raise exception" in low, "closing self-check"
     assert "commit;" not in low and "\nend;" not in low, "rehearsable (no COMMIT)"
+    rl = rev.lower()
     for stmt in ("drop view if exists v_shop_focus_recon", "drop table if exists shop_admin_audit",
                  "drop column if exists cancel_reason_code", "drop column if exists paid_at", "drop column if exists returned_bhd"):
-        assert stmt in rev.lower(), stmt
-    assert "delete from" not in rev.lower() and "truncate" not in rev.lower(), "the reverse never deletes rows"
+        assert stmt in rl, stmt
+    assert "delete from" not in rl and "truncate" not in rl, "the reverse never deletes rows"
+    assert rl.index("drop table if exists shop_admin_audit") < rl.index("drop function if exists shop_admin_audit_no_rewrite"), \
+        "the table (and both triggers with it) goes before the function they depend on"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -760,6 +837,9 @@ def _():
         assert evs[0]["detail"]["conflict"] is True
         assert evs[1]["detail"] == {"recorded_salesman_id": 2, "placed_for_salesman_id": 1, "placed_by": "rep@example.com"}
         assert fake.rows("shop_customers")[0]["sticky_salesman_id"] == 2, "the shop's record is untouched"
+        ins = [c for c in fake.writes("shop_order_events") if c[0] == "insert"]
+        assert len(ins) == 1 and isinstance(ins[0][2], list) and [x["event"] for x in ins[0][2]] == ["created", "conflict"], \
+            "created + conflict go in ONE insert: an informational row can never discard a complete order on its own"
         # the same rep for his own shop: no flag, no extra event
         fake.rows("shop_customers")[0]["sticky_salesman_id"] = 1
         o = create_order({**body, "customer": {"name": "Test Shop", "phone": "33001122"}}, staff_email="rep@example.com")
@@ -818,9 +898,16 @@ def _():
         assert settle_sticky(fake, _order(1, customer_id=7), "packed") is False
         assert settle_sticky(fake, _order(1, customer_id=None), "confirmed") is False
         assert settle_sticky(fake, _order(1, customer_id=7, salesman_id=None), "confirmed") is False
-        assert fake.rows("shop_customers")[0]["sticky_salesman_id"] is None
+        assert settle_sticky(fake, _order(1, customer_id=7, is_test=True), "confirmed") is False, "a test order settles nothing"
+        assert fake.rows("shop_customers")[0]["sticky_salesman_id"] is None and not fake.writes("shop_customers")
         set_status(1, "confirmed", None, actor="rep@example.com")
         assert fake.rows("shop_customers")[0]["sticky_salesman_id"] == 1
+        # one conditional write, no read-then-write: the row must still have no rep on file when the
+        # database applies it, so two reps confirming a new merchant's orders at once cannot both win
+        w = [c for c in fake.writes("shop_customers") if c[0] == "update"][-1]
+        assert ("is", "salesman_id", "null", False) in w[3] and ("is", "sticky_salesman_id", "null", False) in w[3], w[3]
+        assert not [c for c in fake.calls if c[0] == "select" and c[1] == "shop_customers" and "sticky_salesman_id" in str(c[2])
+                    and c[4].get("limit") == 1], "no pre-read the write could go stale against"
         assert settle_sticky(fake, _order(1, customer_id=7, salesman_id=2), "delivered") is False, "existing value untouched"
         assert fake.rows("shop_customers")[0]["sticky_salesman_id"] == 1
     fake = _db(shop_customers=[{"id": 7, "phone": "97333001122", "salesman_id": 3, "sticky_salesman_id": None}])
@@ -888,14 +975,31 @@ def _():
         assert len(fake.rows("shop_admin_audit")) == 1
     fake = _db(salesman_targets=[{"id": 1, "salesman": "FURQAN", "period": "", "target_bhd": 1000, "kickback_t1": 0.05}])
     with _patched(fake):
-        n = shop_audit.record_target_import(fake, [
-            {"salesman": "FURQAN", "period": "", "target_bhd": 1200, "kickback_t1": 0.05},
-            {"salesman": "HARSH B", "period": "2026-10", "target_bhd": 800}], actor="import Targets Oct.xlsx")
+        rows = [{"salesman": "FURQAN", "period": "", "target_bhd": 1200, "kickback_t1": 0.05},
+                {"salesman": "HARSH B", "period": "2026-10", "target_bhd": 800}]
+        # the script's order: snapshot, upsert, THEN audit — an upsert that fails leaves no audit row
+        # (the table is append-only, so a row for an import that never happened could never be fixed)
+        befores = shop_audit.target_import_snapshots(fake, rows)
+        assert befores == {"FURQAN|standing": fake.rows("salesman_targets")[0], "HARSH B|2026-10": None}
+        fake.fail[("upsert", "salesman_targets")] = RuntimeError("targets down")
+        try:
+            fake.table("salesman_targets").upsert(rows, on_conflict="salesman,period").execute()
+            raise AssertionError("the upsert was meant to fail")
+        except RuntimeError:
+            pass
+        assert fake.rows("shop_admin_audit") == [], "no audit row for an import that did not happen"
+        fake.fail.pop(("upsert", "salesman_targets"))
+        fake.table("salesman_targets").upsert(rows, on_conflict="salesman,period").execute()
+        n = shop_audit.record_target_import(fake, rows, actor="fahmed · import Targets Oct.xlsx", befores=befores)
         assert n == 2
-        rows = fake.rows("shop_admin_audit")
-        assert rows[0]["entity_id"] == "FURQAN|standing" and rows[0]["before"]["target_bhd"] == 1000 and rows[0]["after"]["target_bhd"] == 1200
-        assert rows[1]["entity_id"] == "HARSH B|2026-10" and rows[1]["before"] is None and rows[1]["action"] == "import"
-        assert all(r["actor"] == "import Targets Oct.xlsx" for r in rows)
+        got = fake.rows("shop_admin_audit")
+        assert got[0]["entity_id"] == "FURQAN|standing" and got[0]["before"]["target_bhd"] == 1000 and got[0]["after"]["target_bhd"] == 1200
+        assert got[1]["entity_id"] == "HARSH B|2026-10" and got[1]["before"] is None and got[1]["action"] == "import"
+        assert all(r["actor"] == "fahmed · import Targets Oct.xlsx" for r in got), "the operator is on the row, not only the file"
+    src = (ROOT / "scripts" / "import_targets.py").read_text(encoding="utf-8")
+    assert src.index("target_import_snapshots(c, rows)") < src.index('upsert(rows, on_conflict="salesman,period")') \
+        < src.index("record_target_import(c, rows"), "snapshot → upsert → audit, in that order"
+    assert '"--actor"' in src and "getpass.getuser()" in src, "the operator comes from --actor or the OS user"
 
 
 @test("audit: the call sites — settings, rules, campaigns, salesmen and upcoming edits each leave a before/after row")
@@ -928,11 +1032,20 @@ def _():
             assert r.status_code == 200, r.text[:200]
             r = c.delete("/shop/rules/3")
             assert r.status_code == 200, r.text[:200]
+            # the two admin settings writes outside shop_api (app/main.py) are audited too
+            r = c.put("/settings/costing", json={"dealer_discount": 0.2})
+            assert r.status_code == 200, r.text[:200]
+            r = c.put("/settings/agents", json={"exclude_sim": False})
+            assert r.status_code == 200, r.text[:200]
+            r = c.put("/settings/agents", json={"exclude_sim": False})        # unchanged: no second row
+            assert r.status_code == 200, r.text[:200]
             rows = fake.rows("shop_admin_audit")
             got = [(x["entity"], x["entity_id"], x["action"]) for x in rows]
             assert got == [("settings", "shop", "update"), ("discount_rule", "3", "update"), ("campaign", "4", "update"),
                            ("salesman", "2", "update"), ("upcoming", "5", "update"), ("settings", "upcoming", "update"),
-                           ("discount_rule", "3", "delete")], got
+                           ("discount_rule", "3", "delete"), ("settings", "costing", "update"), ("settings", "agents", "update")], got
+            assert rows[7]["before"] == {"dealer_discount": 0.18} and rows[7]["after"] == {"dealer_discount": 0.2}
+            assert rows[8]["before"] == {"exclude_sim": True} and rows[8]["after"] == {"exclude_sim": False}
             assert rows[0]["before"] == {"shop_min_order_bhd": "20"} and rows[0]["after"] == {"shop_min_order_bhd": "25"}
             assert rows[1]["before"]["pct_off"] == 5 and rows[1]["after"]["pct_off"] == 7
             assert rows[2]["before"]["title"] == "Cables week" and rows[2]["after"]["title"] == "Cables month"
@@ -945,6 +1058,47 @@ def _():
             r = c.get("/shop/audit?entity=discount_rule")
             assert r.status_code == 200 and r.json()["count"] == 2 and r.json()["rows"][0]["changes"]["name"]["to"] is None
     finally:
+        m.app.dependency_overrides.pop(get_current_user, None)
+        import app.settings as app_settings
+        app_settings._cache.update(at=0.0, vals=None)       # the costing write above must not leak into later tests
+
+
+@test("routes: a staff cancel emails the shop the reason's label only — the note is the office's record; other moves carry the note")
+def _():
+    from fastapi.testclient import TestClient
+    import app.main as m
+    import app.shop_notify as notify
+    from app.auth import CurrentUser, get_current_user
+    from app.shop_pipeline import customer_cancel_text
+    assert customer_cancel_text("out_of_stock") == "Out of stock" and customer_cancel_text("customer_request") == "As you asked"
+    assert customer_cancel_text("duplicate") == "Duplicate order" and customer_cancel_text("price_issue") == "Price issue"
+    assert customer_cancel_text("other") is None and customer_cancel_text("test") is None and customer_cancel_text(None) is None
+    sent: list[tuple] = []
+    saved = notify.notify_status
+    notify.notify_status = lambda order_id, status, note=None: sent.append((order_id, status, note)) or {}
+    m.app.dependency_overrides[get_current_user] = lambda: CurrentUser(user_id="a", email="admin@example.com", role="admin")
+    try:
+        fake = _db(shop_orders=[_order(i, customer_email="shop@example.com") for i in (1, 2, 3)],
+                   shop_order_lines=_lines(1) + _lines(2) + _lines(3))
+        fake.columns["shop_orders"] = ORDER_COLS_R3
+        with _patched(fake, _ctx()):
+            c = TestClient(m.app)
+            r = c.post("/shop/orders/1/status", json={"status": "cancelled", "reason_code": "duplicate", "note": "duplicate / fake number"})
+            assert r.status_code == 200, r.text[:200]
+            r = c.post("/shop/orders/2/status", json={"status": "cancelled", "reason_code": "other", "note": "price too low for this shop"})
+            assert r.status_code == 200, r.text[:200]
+            r = c.post("/shop/orders/3/status", json={"status": "confirmed", "note": "Thursday with Furqan"})
+            assert r.status_code == 200, r.text[:200]
+        assert sent == [(1, "cancelled", "Duplicate order"), (2, "cancelled", None), (3, "confirmed", "Thursday with Furqan")], sent
+        # the note itself is the record — cancel_reason and the event — and never the email
+        assert fake.rows("shop_orders")[0]["cancel_reason"] == "duplicate / fake number"
+        assert fake.rows("shop_orders")[1]["cancel_reason"] == "price too low for this shop"
+        assert _events(fake, 2)[-1]["detail"]["note"] == "price too low for this shop"
+        # the UI says so where the note is typed (both order views share the picker)
+        src = (ROOT / "web" / "src" / "pages" / "shop-ops" / "OrderActions.tsx").read_text(encoding="utf-8")
+        assert "Internal note" in src and "This note stays in the office record" in src
+    finally:
+        notify.notify_status = saved
         m.app.dependency_overrides.pop(get_current_user, None)
 
 
@@ -1148,7 +1302,7 @@ def _():
 LOCAL_DSN = os.environ.get("YQ_LOCAL_PG", "postgresql://postgres@localhost:55432/r3_pipeline")
 
 
-@test("local replay: v_shop_focus_recon flags, the append-only audit and the cancel-code CHECK on a schema copy (SKIP without the cluster)")
+@test("local replay: v_shop_focus_recon flags (incl. invoice_reused), the append-only audit (update/delete/truncate) and the cancel-code CHECK on a schema copy (SKIP without the cluster)")
 def _():
     try:
         import psycopg
@@ -1177,7 +1331,8 @@ def _():
               (9002, 'YQ-R3-2', 'tokR3-2xxxxxxxxxxxxxxxxxx', 'delivered', 'C2', '97322222222', 'Shop 2', 901, 'Rep A', 10.000, 10.000, now(), 'SI-9'),
               (9003, 'YQ-R3-3', 'tokR3-3xxxxxxxxxxxxxxxxxx', 'delivered', 'C3', '97333333333', 'Shop 3', 901, 'Rep A', 12.000, 10.000, now(), ' si-10 '),
               (9004, 'YQ-R3-4', 'tokR3-4xxxxxxxxxxxxxxxxxx', 'delivered', 'C4', '97344444444', 'Shop 4', 902, 'Rep B', 5.000, null, now(), 'SI-404'),
-              (9005, 'YQ-R3-5', 'tokR3-5xxxxxxxxxxxxxxxxxx', 'confirmed', 'C5', '97355555555', 'Shop 5', 901, 'Rep A', 7.000, null, null, 'SI-9')""")
+              (9005, 'YQ-R3-5', 'tokR3-5xxxxxxxxxxxxxxxxxx', 'confirmed', 'C5', '97355555555', 'Shop 5', 901, 'Rep A', 7.000, null, null, 'SI-9'),
+              (9006, 'YQ-R3-6', 'tokR3-6xxxxxxxxxxxxxxxxxx', 'delivered', 'C6', '97366666666', 'Shop 6', 901, 'Rep A', 10.000, 10.000, now(), ' si-9 ')""")
         cur.execute("""
             insert into orders (id, invoice_no, order_date, customer_name, salesman) overriding system value
             values (9101, 'SI-9', '2026-09-20', 'Shop 2', 'REP A'), (9102, 'SI-10', '2026-09-21', 'Shop 3', 'REP B')""")
@@ -1189,22 +1344,27 @@ def _():
                    (9203, 'SI-10', 9102, 1, '2026-09-21', 'X', 1, 9.5, 9.5, 8.636, 9.5, 'REP B')""")
         cur.execute("""
             select order_no, missing_invoice, invoice_not_found, salesman_mismatch, amount_mismatch, invoice_total_bhd,
-                   focus_salesman, amount_diff_bhd, order_total_bhd
+                   focus_salesman, amount_diff_bhd, order_total_bhd, invoice_reused
             from v_shop_focus_recon where order_no like 'YQ-R3-%' order by order_no""")
         rows = {r[0]: r[1:] for r in cur.fetchall()}
-        assert set(rows) == {"YQ-R3-1", "YQ-R3-2", "YQ-R3-3", "YQ-R3-4"}, "delivered orders only"
-        r1, r2, r3, r4 = rows["YQ-R3-1"], rows["YQ-R3-2"], rows["YQ-R3-3"], rows["YQ-R3-4"]
-        assert r1[:4] == (True, False, False, False) and r1[4] is None, r1
+        assert set(rows) == {"YQ-R3-1", "YQ-R3-2", "YQ-R3-3", "YQ-R3-4", "YQ-R3-6"}, "delivered orders only"
+        r1, r2, r3, r4, r6 = rows["YQ-R3-1"], rows["YQ-R3-2"], rows["YQ-R3-3"], rows["YQ-R3-4"], rows["YQ-R3-6"]
+        assert r1[:4] == (True, False, False, False) and r1[4] is None and r1[8] is False, r1
         assert r2[:4] == (False, False, False, False) and float(r2[4]) == 10.0 and r2[5] == "REP A" and float(r2[6]) == 0, r2
         # ' si-10 ' joins SI-10 (case / whitespace insensitive); Focus says REP B and 9.500 vs the CONFIRMED 10.000
         assert r3[:4] == (False, False, True, True) and float(r3[4]) == 9.5 and r3[5] == "REP B" and float(r3[6]) == -0.5, r3
         assert float(r3[7]) == 10.0, "the confirmed total is what Focus is compared with"
-        assert r4[:4] == (False, True, False, False) and r4[4] is None and float(r4[7]) == 5.0, r4
-        # the audit is append-only even for the owner of the table
+        assert r4[:4] == (False, True, False, False) and r4[4] is None and float(r4[7]) == 5.0 and r4[8] is False, r4
+        # SI-9 sits on two DELIVERED orders (9002 and 9006, ' si-9 ' normalised): both read invoice_reused;
+        # the confirmed 9005 with the same number does not count, and neither order is otherwise flagged
+        assert r2[8] is True and r6[8] is True and r6[:4] == (False, False, False, False), (r2, r6)
+        assert r3[8] is False, "one order per invoice reads clean"
+        # the audit is append-only even for the owner of the table — rows, and the table as a whole
         cur.execute("insert into shop_admin_audit (actor, entity, entity_id, action, before, after) "
                     "values ('t@example.com', 'settings', 'shop', 'update', '{\"a\": 1}', '{\"a\": 2}') returning id")
         aid = cur.fetchone()[0]
-        for stmt in (f"update shop_admin_audit set actor = 'x' where id = {aid}", f"delete from shop_admin_audit where id = {aid}"):
+        for stmt in (f"update shop_admin_audit set actor = 'x' where id = {aid}", f"delete from shop_admin_audit where id = {aid}",
+                     "truncate shop_admin_audit"):
             cur.execute("savepoint s1")
             try:
                 cur.execute(stmt)
@@ -1212,6 +1372,8 @@ def _():
             except psycopg.Error as e:
                 assert "append-only" in str(e), str(e)
                 cur.execute("rollback to savepoint s1")
+        cur.execute("select count(*) from shop_admin_audit where id = %s", (aid,))
+        assert cur.fetchone()[0] == 1, "the row is still there after the refused statements"
         # the cancel code CHECK
         cur.execute("savepoint s2")
         try:

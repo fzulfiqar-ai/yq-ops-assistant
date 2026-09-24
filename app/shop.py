@@ -1887,6 +1887,25 @@ def _select_optional(table: str, cols: str, optional: str, run):
         raise
 
 
+def _update_optional(table: str, upd: dict, optional: tuple[str, ...], run):
+    """`run(query) -> rows` for an UPDATE of `upd` on `table` — the caller adds its filters and
+    executes. The write-side twin of _select_optional: when `upd` names one of the `optional`
+    columns under a cached has_column() hit and PostgREST answers 42703 / PGRST204 (the reverse
+    script dropped it), the probes are forgotten and the update runs once more without those
+    keys. A refused write changed nothing, so the retry is safe; a staff cancel or a 'paid'
+    never 500s for the ten minutes a stale hit would otherwise last."""
+    named = [c for c in optional if c in upd]
+    try:
+        return run(get_client().table(table).update(upd))
+    except Exception as e:  # noqa: BLE001 — only the missing-column case is retried
+        if named and _missing_column(e):
+            for c in named:
+                _forget_column(table, c)
+            log.warning("%s.%s vanished after a cached hit — updating without it: %s", table, ", ".join(named), e)
+            return run(get_client().table(table).update({k: v for k, v in upd.items() if k not in named}))
+        raise
+
+
 def _is_test(o: dict) -> bool:
     """Test orders (flagged by PATCH /shop/orders/{id}/test, never deleted — plan §3) are left out
     of exactly these figures: GET /shop/analytics (funnel, value, leaderboard, attribution, daily),
@@ -2126,21 +2145,25 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "line_status": "backorder" if ln["backorder"] else "ok",
         "rule_ids": [a["rule_id"] for a in ln["applied"]] or None,
     } for ln in quote["lines"]]
-    # Header, lines and the created event are three PostgREST writes, not one transaction (the
+    # Header, lines and the events are three PostgREST writes, not one transaction (the
     # plpgsql shop_place_order comes in a later release). Until then: if anything after the
     # header fails, take the header back out (lines/events cascade) and re-raise, so a
     # line-less order can never exist and the merchant's retry creates the order properly.
+    # The 'created' row and the optional 'conflict' row go in ONE insert: one request, so an
+    # informational event can never fail on its own after the order is fully written and
+    # take a complete staff order out with it.
+    events = [{
+        "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
+        "detail": {"source": source, "attribution": attribution, "conflict": bool(conflict),
+                   "clamped": quote.get("_clamped") or []}}]
+    if staff and conflict:
+        events.append({
+            "order_id": order["id"], "actor": staff_email, "event": "conflict",
+            "detail": {"recorded_salesman_id": staff_recorded_rep(existing_cust),
+                       "placed_for_salesman_id": sm["id"] if sm else None, "placed_by": staff_email}})
     try:
         client.table("shop_order_lines").insert(lines).execute()
-        client.table("shop_order_events").insert({
-            "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
-            "detail": {"source": source, "attribution": attribution, "conflict": bool(conflict),
-                       "clamped": quote.get("_clamped") or []}}).execute()
-        if staff and conflict:
-            client.table("shop_order_events").insert({
-                "order_id": order["id"], "actor": staff_email, "event": "conflict",
-                "detail": {"recorded_salesman_id": staff_recorded_rep(existing_cust),
-                           "placed_for_salesman_id": sm["id"] if sm else None, "placed_by": staff_email}}).execute()
+        client.table("shop_order_events").insert(events).execute()
     except Exception as e:  # noqa: BLE001 — whatever it was, the header must not outlive it
         _discard_lineless_order(client, order["id"], f"lines/event insert failed: {e}")
         raise
@@ -2446,7 +2469,9 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
 
     R3 pipeline: a staff cancel needs `reason_code` (shop_pipeline.CANCEL_REASONS; 'other' needs
     the note), Delivered may carry the optional Focus invoice number, and Confirmed / Delivered
-    settle the merchant's sticky rep (app.attribution.settle_sticky) once, never overwriting."""
+    settle the merchant's sticky rep (app.attribution.settle_sticky) once, never overwriting.
+    cancel_reason_code is written through _update_optional, so a cancel still lands after the
+    reverse script drops the column under a cached probe."""
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
@@ -2485,8 +2510,8 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
             upd["focus_invoice_no"] = inv
             detail["focus_invoice_no"] = inv
     client = get_client()
-    swapped = (client.table("shop_orders").update(upd).eq("id", order_id)
-               .eq("status", o["status"]).execute().data or [])
+    swapped = _update_optional("shop_orders", upd, ("cancel_reason_code",),
+                               lambda q: q.eq("id", order_id).eq("status", o["status"]).execute().data or [])
     if not swapped:
         raise ShopError(CAS_CONFLICT_MSG)
     client.table("shop_order_events").insert({

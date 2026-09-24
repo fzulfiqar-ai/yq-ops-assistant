@@ -10,7 +10,7 @@ import { getSessionSafe } from '@/lib/supabase'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
-import { bhd, num } from '@/lib/format'
+import { bhd, fmtDate, num } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -67,7 +67,8 @@ interface ShopOrderRow {
   returned_bhd?: number | null
 }
 type StatusCounts = Partial<Record<'new' | 'confirmed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled', number>>
-interface ShopOrdersResp { orders: ShopOrderRow[]; count: number; counts?: StatusCounts; min_order_bhd?: number | null }
+// min_order_bhd also arrives on the list; it is not read here — a stored gap is never paired with today's minimum (pipeline.ts)
+interface ShopOrdersResp { orders: ShopOrderRow[]; count: number; counts?: StatusCounts }
 
 interface OrderLine {
   id: number
@@ -107,6 +108,7 @@ interface OrderDetail extends ShopOrderRow {
   next_statuses?: string[] | null
   status_url?: string | null
   payment_label?: string | null
+  payment_method?: string | null
   customer?: OrderCustomerRep | null
 }
 
@@ -464,7 +466,7 @@ function MyLinkCard({
   )
 }
 
-function OrderDrawer({ id, minOrder, onClose, onChanged }: { id: number; minOrder?: number | null; onClose: () => void; onChanged: () => void }) {
+function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => void; onChanged: () => void }) {
   const toast = useToast()
   const qc = useQueryClient()
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
@@ -508,7 +510,7 @@ function OrderDrawer({ id, minOrder, onClose, onChanged }: { id: number; minOrde
   const actions = data ? (data.next_statuses?.length ? data.next_statuses : nextStatuses(data.status)) : []
   const coupon = data?.coupon_code || data?.coupon?.code || null
   const unassigned = Boolean(data && !data.salesman_id && !data.salesman_name)
-  const gap = data ? minimumGapText(data, minOrder) : null
+  const gap = data ? minimumGapText(data) : null
   const cancelled = data ? cancelSummary(data) : null
   const shopRep = data?.customer
   const shopRepName = shopRep?.salesman_name || shopRep?.sticky_name || null
@@ -663,7 +665,7 @@ function OrderDrawer({ id, minOrder, onClose, onChanged }: { id: number; minOrde
                   <InvoiceBox orderId={id} current={data.focus_invoice_no} onDone={refetchOrder} />
                   {!data.focus_invoice_no && <p className="mt-1.5 text-[11px] text-muted-foreground">Without it this order sits in the Focus check as “no invoice”.</p>}
                 </div>
-                <PaymentBox orderId={id} status={data.payment_status} method={undefined} total={data.total_confirmed_bhd ?? data.total_bhd} onDone={refetchOrder} />
+                <PaymentBox orderId={id} status={data.payment_status} method={data.payment_method} total={data.total_confirmed_bhd ?? data.total_bhd} onDone={refetchOrder} />
                 {returning ? (
                   <ReturnBox orderId={id} lines={data.lines || []} onCancel={() => setReturning(false)} onDone={() => { setReturning(false); refetchOrder() }} />
                 ) : (
@@ -721,7 +723,7 @@ function OrderDrawer({ id, minOrder, onClose, onChanged }: { id: number; minOrde
               </div>
             ) : (
               <>
-                <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional note…" />
+                <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note to the shop (optional) — goes in their update email" aria-label="Note to the shop" />
                 {actions.includes('delivered') && (
                   <Input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} placeholder="Focus invoice no (optional, with Delivered)" maxLength={40} spellCheck={false} className="font-mono" />
                 )}
@@ -763,10 +765,13 @@ interface ReconRow {
   flags: string[]
   is_test?: boolean
 }
-interface ReconResp { rows: ReconRow[]; count: number; issues: number; hint?: string }
+interface ReconResp { rows: ReconRow[]; count: number; issues: number; hint?: string; ledger_as_of?: string | null }
 
+// "Not in the uploaded ledger", never "not in Focus": the check reads the ledger as uploaded up to
+// ledger_as_of, and a recent invoice is simply not uploaded yet.
 const RECON_FLAG_LABEL: Record<string, string> = {
-  missing_invoice: 'No invoice', invoice_not_found: 'Invoice not in Focus', salesman_mismatch: 'Salesman differs', amount_mismatch: 'Amount differs',
+  missing_invoice: 'No invoice', invoice_not_found: 'Not in the uploaded ledger', salesman_mismatch: 'Salesman differs',
+  amount_mismatch: 'Amount differs', invoice_reused: 'Invoice on more than one order',
 }
 
 function FocusCheck({ onOpen, onChanged }: { onOpen: (id: number) => void; onChanged: () => void }) {
@@ -791,8 +796,10 @@ function FocusCheck({ onOpen, onChanged }: { onOpen: (id: number) => void; onCha
       {open && (
         <div className="mt-3">
           <p className="mb-2 text-[12px] text-muted-foreground">
-            Delivered marketplace orders against the Focus sales ledger by invoice number: an order with no invoice recorded, an invoice Focus does not carry,
-            a different salesman on the invoice, or a total that differs by more than 0.005 BHD.
+            Delivered marketplace orders against the uploaded Focus sales ledger
+            {data?.ledger_as_of ? <> (sales up to <b>{fmtDate(data.ledger_as_of)}</b>)</> : null}, by invoice number: an order with no invoice recorded,
+            an invoice the upload does not carry yet, a different salesman on the invoice, a total that differs by more than 0.005 BHD,
+            or one invoice number recorded on more than one order.
           </p>
           {data?.hint ? (
             <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">{data.hint}</p>
@@ -805,7 +812,7 @@ function FocusCheck({ onOpen, onChanged }: { onOpen: (id: number) => void; onCha
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button type="button" onClick={() => onOpen(r.order_id)} className="font-semibold text-foreground hover:text-primary hover:underline">{r.order_no}</button>
-                      {r.flags.map((f) => <Badge key={f} tone={f === 'missing_invoice' ? 'amber' : 'rose'}>{RECON_FLAG_LABEL[f] || f}</Badge>)}
+                      {r.flags.map((f) => <Badge key={f} tone={f === 'missing_invoice' || f === 'invoice_not_found' ? 'amber' : 'rose'}>{RECON_FLAG_LABEL[f] || f}</Badge>)}
                       {!r.flags.length && <Badge tone="green">Matches</Badge>}
                       <PaymentPill status={r.payment_status} orderStatus="delivered" />
                     </div>
@@ -834,7 +841,7 @@ function FocusCheck({ onOpen, onChanged }: { onOpen: (id: number) => void; onCha
 }
 
 function DeskOrders({
-  meData, rows, isLoading, companyKpis, needsCompanyKpi, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus, minOrder,
+  meData, rows, isLoading, companyKpis, needsCompanyKpi, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus,
 }: {
   meData?: ShopMe
   rows: ShopOrderRow[]
@@ -847,7 +854,6 @@ function DeskOrders({
   setQRaw: (v: string) => void
   onRefresh: () => void
   queueFocus?: boolean
-  minOrder?: number | null
 }) {
   const qc = useQueryClient()
   const [openId, setOpenId] = useState<number | null>(null)
@@ -878,7 +884,7 @@ function DeskOrders({
     { key: 'status', label: 'Status', render: (_, r) => (
         <span className="inline-flex flex-wrap items-center gap-1.5">
           <StatusPill status={r.status} />
-          {r.order_kind === 'small' && <Badge tone="accent" title={minimumGapText(r, minOrder) || undefined}>Small</Badge>}
+          {r.order_kind === 'small' && <Badge tone="accent" title={minimumGapText(r) || undefined}>Small</Badge>}
           <NotNotifiedBadge status={r.status} failed={rowNotifyFailed(r)} attempts={r.notify_attempts} />
           {r.status === 'cancelled' && cancelSummary(r) && <span className="text-[11px] text-muted-foreground">{cancelSummary(r)}</span>}
         </span>
@@ -938,7 +944,7 @@ function DeskOrders({
       )}
 
       {openId != null && (
-        <OrderDrawer id={openId} minOrder={minOrder} onClose={() => setOpenId(null)} onChanged={refreshRecon} />
+        <OrderDrawer id={openId} onClose={() => setOpenId(null)} onChanged={refreshRecon} />
       )}
     </div>
   )
@@ -952,11 +958,11 @@ const INK = 'text-[#1A1428]'
 const MUTED = 'text-[#6b6480]'
 const HAIRLINE = 'border-[#E9E4EF]'
 
-function OrderCard({ row, minOrder, onOpen }: { row: ShopOrderRow; minOrder?: number | null; onOpen: () => void }) {
+function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
   const title = row.customer_shop || row.customer_name || 'Order'
   const sub = [row.customer_shop ? row.customer_name : null, row.customer_area].filter(Boolean).join(' · ')
   const age = relTime(row.created_at)
-  const gap = minimumGapText(row, minOrder)
+  const gap = minimumGapText(row)
   const cancelled = row.status === 'cancelled' ? cancelSummary(row) : null
   return (
     <button
@@ -998,7 +1004,7 @@ function OrderCard({ row, minOrder, onOpen }: { row: ShopOrderRow; minOrder?: nu
   )
 }
 
-function FieldOrderSheet({ id, minOrder, onClose, onChanged }: { id: number; minOrder?: number | null; onClose: () => void; onChanged: () => void }) {
+function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () => void; onChanged: () => void }) {
   const toast = useToast()
   const qc = useQueryClient()
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
@@ -1042,7 +1048,7 @@ function FieldOrderSheet({ id, minOrder, onClose, onChanged }: { id: number; min
   const canCancel = allowed.includes('cancelled')
   const coupon = data?.coupon_code || data?.coupon?.code || null
   const [confirming, setConfirming] = useState(false)
-  const gap = data ? minimumGapText(data, minOrder) : null
+  const gap = data ? minimumGapText(data) : null
   const cancelledWhy = data?.status === 'cancelled' ? cancelSummary(data) : null
 
   const footer = !data || confirming ? null : (
@@ -1098,7 +1104,7 @@ function FieldOrderSheet({ id, minOrder, onClose, onChanged }: { id: number; min
       )}
       {canCancel && confirmCancel && (
         <div className={cn('rounded-xl border p-3', HAIRLINE)}>
-          <p className={cn('text-[12.5px] leading-snug', INK)}>Cancel {data.order_no}? The customer sees it as cancelled. Say why:</p>
+          <p className={cn('text-[12.5px] leading-snug', INK)}>Cancel {data.order_no}? The shop is told it is cancelled, and the reason you pick. Say why:</p>
           <div className="mt-2.5">
             <CancelReasonPicker value={cancel.reason_code} note={cancel.note} onChange={setCancel} compact />
           </div>
@@ -1284,7 +1290,7 @@ function FieldOrderSheet({ id, minOrder, onClose, onChanged }: { id: number; min
 }
 
 function FieldOrders({
-  meData, rows, isLoading, isError, counts, bucket, setBucket, qRaw, setQRaw, onRefresh, initialOpen, minOrder,
+  meData, rows, isLoading, isError, counts, bucket, setBucket, qRaw, setQRaw, onRefresh, initialOpen,
 }: {
   meData?: ShopMe
   initialOpen?: number | null
@@ -1297,7 +1303,6 @@ function FieldOrders({
   qRaw: string
   setQRaw: (v: string) => void
   onRefresh: () => void
-  minOrder?: number | null
 }) {
   const navigate = useNavigate()
   const [openId, setOpenId] = useState<number | null>(initialOpen ?? null)
@@ -1398,14 +1403,14 @@ function FieldOrders({
         <ul className="grid gap-2.5 lg:grid-cols-2">
           {rows.map((r) => (
             <li key={r.id}>
-              <OrderCard row={r} minOrder={minOrder} onOpen={() => setOpenId(r.id)} />
+              <OrderCard row={r} onOpen={() => setOpenId(r.id)} />
             </li>
           ))}
         </ul>
       )}
 
       {openId != null && (
-        <FieldOrderSheet id={openId} minOrder={minOrder} onClose={() => setOpenId(null)} onChanged={onRefresh} />
+        <FieldOrderSheet id={openId} onClose={() => setOpenId(null)} onChanged={onRefresh} />
       )}
     </div>
   )
@@ -1497,7 +1502,6 @@ export default function ShopOrders() {
         setQRaw={setQRaw}
         onRefresh={refreshList}
         initialOpen={initialOpen}
-        minOrder={ordersQuery.data?.min_order_bhd}
       />
     )
   }
@@ -1515,7 +1519,6 @@ export default function ShopOrders() {
       setQRaw={setQRaw}
       onRefresh={refreshList}
       queueFocus={queueFocus}
-      minOrder={ordersQuery.data?.min_order_bhd}
     />
   )
 }

@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 import { bhd } from '@/lib/format'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Stepper } from '@/components/ui/stepper'
-import { apiDetail, CANCEL_REASONS, PAYMENT_LABEL, PAYMENT_METHODS, PAYMENT_TONE } from './pipeline'
+import { apiDetail, CANCEL_REASONS, PAYMENT_LABEL, PAYMENT_METHODS, PAYMENT_PILL_LABEL, PAYMENT_TONE } from './pipeline'
 
 /**
  * The actions the marketplace added to an order, shared by the desk drawer, the field sheet and
@@ -24,7 +24,9 @@ import { apiDetail, CANCEL_REASONS, PAYMENT_LABEL, PAYMENT_METHODS, PAYMENT_TONE
 
 /* ───────────────────────── R3: cancel reasons ───────────────────────── */
 
-/** Reason chips (+ a note, required for "Other"). `onChange` gets what the status route needs. */
+/** Reason chips (+ an INTERNAL note, required for "Other"). `onChange` gets what the status route
+ *  needs. The shop's cancel email carries the reason's label only (app/shop_pipeline.py
+ *  customer_cancel_text); the note goes to cancel_reason and the timeline and never leaves. */
 export function CancelReasonPicker({
   value, note, onChange, compact,
 }: {
@@ -55,24 +57,31 @@ export function CancelReasonPicker({
       <input
         value={note}
         onChange={(e) => onChange({ reason_code: value, note: e.target.value })}
-        placeholder={needsNote ? 'Say why (required for Other)' : 'Note for the record (optional)'}
-        aria-label="Cancel note"
+        placeholder={needsNote ? 'Internal note — say why (required for Other)' : 'Internal note (optional)'}
+        aria-label="Internal cancel note"
+        aria-describedby="cancel-note-hint"
         aria-required={needsNote}
         maxLength={300}
         className="h-10 w-full rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#9f1239]"
       />
+      <p id="cancel-note-hint" className="text-[11px] leading-snug text-[#6b6480]">
+        The shop is told the reason only (for example “Out of stock”). This note stays in the office record.
+      </p>
     </div>
   )
 }
 
 /* ───────────────────────── R3: payment ───────────────────────── */
 
-/** Paid / Partly paid pill. Unpaid is shown only once the order is delivered (until then it is
- *  simply not due), so a card never shouts "Unpaid" at a rep who has not delivered yet. */
+/** Paid / Partly paid pill. The default state is shown only once the order is delivered (until
+ *  then nothing is due), and it says "Payment not recorded" rather than "Unpaid": 'unpaid' is
+ *  the column default, and a delivered order may well have been paid in Focus without anyone
+ *  recording it here. */
 export function PaymentPill({ status, orderStatus }: { status?: string | null; orderStatus: string }) {
   const s = status || 'unpaid'
   if (s === 'unpaid' && orderStatus !== 'delivered') return null
-  return <Badge tone={PAYMENT_TONE[s] || 'grey'}>{PAYMENT_LABEL[s] || s}</Badge>
+  const title = s === 'unpaid' ? 'No payment has been recorded on this order here — the Focus ledger is the record until the office records one.' : undefined
+  return <Badge tone={PAYMENT_TONE[s] || 'grey'} title={title}>{PAYMENT_PILL_LABEL[s] || s}</Badge>
 }
 
 export function PaymentBox({
@@ -113,7 +122,7 @@ export function PaymentBox({
   return (
     <div className="rounded-xl border border-[#E9E4EF] bg-white p-3">
       <div className="mb-2 flex items-center justify-between gap-2 text-[12px] font-semibold text-[#1A1428]">
-        <span>Payment</span>
+        <span>Payment{method ? <span className="ml-1.5 font-normal text-[#6b6480]">· {PAYMENT_METHODS.find((m) => m.value === method)?.label || method}</span> : null}</span>
         <PaymentPill status={status} orderStatus="delivered" />
       </div>
       <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Payment status">

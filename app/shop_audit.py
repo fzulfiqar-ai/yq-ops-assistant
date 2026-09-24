@@ -105,8 +105,9 @@ def record(actor: str, entity: str, entity_id, action: str, before=None, after=N
         return False
 
 
-def settings_change(actor: str, current: dict, changes: dict, saved: dict) -> bool:
-    """One row per PUT /settings/shop: only the keys the request named, old → new."""
+def settings_change(actor: str, current: dict, changes: dict, saved: dict, entity_id: str = "shop") -> bool:
+    """One row per settings PUT (shop / costing / agents): only the keys the request named,
+    old → new, and only when something moved."""
     keys = [k for k in (changes or {}) if k in (saved or {})]
     if not keys:
         return False
@@ -114,13 +115,17 @@ def settings_change(actor: str, current: dict, changes: dict, saved: dict) -> bo
     after = {k: saved.get(k) for k in keys}
     if before == after:
         return False
-    return record(actor, "settings", "shop", "update", before, after)
+    return record(actor, "settings", entity_id, "update", before, after)
 
 
-def record_target_import(client, rows: list[dict], actor: str) -> int:
-    """scripts/import_targets.py: before the upsert, one audit row per (salesman, period) with
-    the target row as it was (None for a new one) and as it will be. Returns rows written."""
-    n = 0
+def target_key(r: dict) -> str:
+    return f"{r.get('salesman')}|{r.get('period') or 'standing'}"
+
+
+def target_import_snapshots(client, rows: list[dict]) -> dict[str, dict | None]:
+    """scripts/import_targets.py, BEFORE the upsert: the salesman_targets row per (salesman,
+    period) as it is now — None for a new one — keyed by target_key. Never raises."""
+    out: dict[str, dict | None] = {}
     for r in rows or []:
         before = None
         try:
@@ -129,8 +134,21 @@ def record_target_import(client, rows: list[dict], actor: str) -> int:
             before = got[0] if got else None
         except Exception as e:  # noqa: BLE001
             log.debug("target snapshot failed: %s", e)
-        key = f"{r.get('salesman')}|{r.get('period') or 'standing'}"
-        if record(actor, "target", key, "import", before, r):
+        out[target_key(r)] = before
+    return out
+
+
+def record_target_import(client, rows: list[dict], actor: str, *, befores: dict[str, dict | None] | None = None) -> int:
+    """scripts/import_targets.py, AFTER the upsert succeeded: one audit row per (salesman,
+    period) with the row as it was (`befores` from target_import_snapshots, taken before the
+    write) and as it is now. Written only once the upsert went through — the audit is append-only,
+    so a row for an import that never happened could never be corrected. Returns rows written."""
+    if befores is None:
+        befores = target_import_snapshots(client, rows)
+    n = 0
+    for r in rows or []:
+        key = target_key(r)
+        if record(actor, "target", key, "import", befores.get(key), r):
             n += 1
     return n
 

@@ -5,13 +5,17 @@
 -- with it, so export first if they are wanted) and the three shop_orders columns. No order,
 -- line, event, customer or salesman row is touched: cancel_reason (text), payment_status,
 -- payment_method and focus_invoice_no predate this migration and stay. The running code
--- forgets a dropped column after one failed read (has_column / _forget_column).
+-- forgets a dropped column after one failed read OR write (has_column / _forget_column via
+-- _select_optional and _update_optional), so the API may still be the R3 build when this runs;
+-- rolling the API back first is still the cleaner order.
 
 drop view if exists v_shop_focus_recon;
 
+-- the table goes before the function: both of its triggers (row-level and statement-level)
+-- depend on shop_admin_audit_no_rewrite(), and DROP TABLE takes them with it
 drop trigger if exists shop_admin_audit_append_only on shop_admin_audit;
-drop function if exists shop_admin_audit_no_rewrite();
 drop table if exists shop_admin_audit;
+drop function if exists shop_admin_audit_no_rewrite();
 
 alter table shop_orders drop constraint if exists shop_orders_cancel_reason_code_check;
 alter table shop_orders drop column if exists cancel_reason_code;

@@ -332,9 +332,14 @@ def costing_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
 
 @app.put("/settings/costing")
 def costing_put(body: CostingSettings, admin: CurrentUser = Depends(require_admin)) -> dict:
-    from app.settings import update_settings
+    """Admin settings write: audited (R3 M12) like PUT /settings/shop — one shop_admin_audit
+    row with the keys the request named, old → new."""
+    from app import shop_audit
+    from app.settings import all_settings, update_settings
     changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    current = all_settings(force=True)
     out = update_settings(changes, by=admin.email)
+    shop_audit.settings_change(admin.email, current, changes, out, entity_id="costing")
     log_event(admin.email, "settings.costing", detail=changes)
     return out
 
@@ -349,9 +354,9 @@ class AgentScopeRequest(BaseModel):
     exclude_sim: bool
 
 
-@app.get("/settings/agents")
-def agent_scope_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
-    """Agent data scope — whether the AI agents ignore the SIM/starter-pack division."""
+def _agent_exclude_sim() -> bool:
+    """The stored agent_exclude_sim flag (default on) — read by the GET and, for the audit's
+    'before', by the PUT."""
     from app.database import get_client
     try:
         r = (get_client().table("app_settings").select("value")
@@ -359,14 +364,23 @@ def agent_scope_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
         val = (r[0]["value"] if r else "1")
     except Exception:  # noqa: BLE001
         val = "1"
-    return {"exclude_sim": val == "1"}
+    return val == "1"
+
+
+@app.get("/settings/agents")
+def agent_scope_get(_admin: CurrentUser = Depends(require_admin)) -> dict:
+    """Agent data scope — whether the AI agents ignore the SIM/starter-pack division."""
+    return {"exclude_sim": _agent_exclude_sim()}
 
 
 @app.put("/settings/agents")
 def agent_scope_put(body: AgentScopeRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
-    """Flip whether agents read SIM/starter packs. Views check the flag live — no restart."""
+    """Flip whether agents read SIM/starter packs. Views check the flag live — no restart.
+    Audited (R3 M12): a shop_admin_audit row {exclude_sim: was → now} when it moved."""
     from datetime import datetime, timezone
+    from app import shop_audit
     from app.database import get_client
+    was = _agent_exclude_sim()
     get_client().table("app_settings").upsert(
         {"key": "agent_exclude_sim", "value": "1" if body.exclude_sim else "0",
          "description": "When 1, AI agents ignore the SIM/starter-pack division.",
@@ -380,6 +394,8 @@ def agent_scope_put(body: AgentScopeRequest, admin: CurrentUser = Depends(requir
         _agents._sim_toggle["at"] = 0.0
     except Exception:  # noqa: BLE001
         pass
+    shop_audit.settings_change(admin.email, {"exclude_sim": was}, {"exclude_sim": body.exclude_sim},
+                               {"exclude_sim": body.exclude_sim}, entity_id="agents")
     log_event(admin.email, "settings.agent_scope", detail={"exclude_sim": body.exclude_sim})
     return {"ok": True, "exclude_sim": body.exclude_sim}
 

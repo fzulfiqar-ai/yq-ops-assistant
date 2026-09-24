@@ -668,7 +668,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                                 reason_code=body.reason_code, focus_invoice_no=body.focus_invoice_no)
         except ShopError as e:
             raise _conflict_or_400(e) from e
-        background.add_task(shop_notify.notify_status, order_id, body.status, body.note)
+        # The merchant's email carries the note on every move but a cancel: there the note is the
+        # office's record ("duplicate / fake number", "price too low for this shop") and the shop
+        # is told the reason's public label only — shop_pipeline.customer_cancel_text.
+        customer_note = (shop_pipeline.customer_cancel_text(body.reason_code)
+                         if o.get("status") == "cancelled" else body.note)
+        background.add_task(shop_notify.notify_status, order_id, body.status, customer_note)
         log_event(user.email, "shop.order_status", detail={"order_id": order_id, "status": body.status,
                                                            "reason_code": body.reason_code,
                                                            "focus_invoice_no": o.get("focus_invoice_no")})
