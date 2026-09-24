@@ -581,6 +581,22 @@ def _():
                 assert not amounts & set(e[2]), e
 
 
+@test("statements: a draft frozen mid-month is never approved after the month ends; a paid month says it is final")
+def _():
+    from app import audit, statements as st
+    db = _FakeDB([_stmt(1, "draft", period="2026-08", data_through="2026-08-21"),       # frozen on the 21st
+                  _stmt(2, "draft", period="2026-08", salesman="Karrar Mohamed", data_through="2026-08-31"),
+                  _stmt(3, "paid", period="2026-07", data_through="2026-07-31"),
+                  _stmt(4, "draft", period="2026-07", data_through="2026-07-31", sales_bhd="1300.000")])
+    with _Patched((st, "get_client", lambda: db), (audit, "log_event", lambda *a, **k: None), _today_patch()):
+        e = _raises(lambda: st.transition(1, "approved", by="boss@example.com"), st.StatementError)
+        assert "only has sales data to 2026-08-21" in str(e) and "2026-08-31" in str(e), str(e)
+        assert next(r for r in db.tables["salesman_kickback_statements"] if r["id"] == 1)["status"] == "draft"
+        assert st.transition(2, "approved", by="boss@example.com")["status"] == "approved"
+        e = _raises(lambda: st.transition(4, "approved", by="boss@example.com"), st.StatementConflict)
+        assert "PAID" in str(e) and "final" in str(e) and "Supersede" not in str(e), str(e)
+
+
 @test("statements: one approved/paid row per rep-month-basis — a second approval is refused and names the row; the running month cannot be approved")
 def _():
     from app import audit, statements as st

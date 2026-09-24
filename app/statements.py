@@ -516,10 +516,23 @@ def transition(statement_id: int, to_status: str, by: str, reason: str | None = 
         if not month_has_ended(period):
             raise StatementError(f"{month_label(period)} has not ended yet — approve once the month closes and the "
                                  f"final Focus load is in.")
+        # The figures must cover the WHOLE month: a draft frozen mid-month (data to the 21st, say)
+        # stays a draft after the month ends — create a fresh draft once a Focus load reaches the
+        # last day, and approve that one (money is only ever approved on complete data).
+        end = period_end(period).isoformat()
+        dt = str(row.get("data_through") or "")[:10]
+        if not dt or dt < end:
+            raise StatementError(f"This draft only has sales data to {dt or 'an unknown date'}, not the whole of "
+                                 f"{month_label(period)} (to {end}). Load the month-end Focus reports, create a new "
+                                 f"draft and approve that one.")
         others = closed_rows(str(row.get("salesman") or ""), period, str(row.get("basis") or ""),
                              exclude_id=int(statement_id))
         if others:
             o = others[0]
+            if str(o.get("status")) == "paid":
+                raise StatementConflict(f"{row.get('salesman')} · {month_label(period)} is already PAID (#{o.get('id')}, "
+                                        f"BHD {s3(o.get('kickback_bhd'))}). A paid statement is final; this draft cannot "
+                                        f"be approved — settle any difference as a separate adjustment with the office.")
             raise StatementConflict(f"{row.get('salesman')} · {month_label(period)} already has a {o.get('status')} "
                                     f"statement (#{o.get('id')}, BHD {s3(o.get('kickback_bhd'))}). Supersede #{o.get('id')} "
                                     f"first if this draft replaces it.")
