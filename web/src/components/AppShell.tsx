@@ -1,11 +1,11 @@
 import { Suspense, useEffect, useRef, useState } from 'react'
-import { Link, NavLink, useLocation, useOutlet } from 'react-router-dom'
+import { Link, Navigate, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search, Menu } from 'lucide-react'
+import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search, Menu, KeyRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiGet } from '@/lib/api'
-import { useAuth } from '@/lib/auth'
+import { mustResetOf, passwordScreenFor, useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { navFor, NAV } from '@/lib/nav'
 import { Logo } from './Logo'
@@ -71,11 +71,14 @@ function HeaderMotivator({ name }: { name?: string }) {
 }
 
 export function AppShell() {
-  const { me, signOut } = useAuth()
+  const { me, session, signOut } = useAuth()
   const { theme, toggle } = useTheme()
   const loc = useLocation()
   const outlet = useOutlet()
-  usePrefetchPages(!!me && me.role !== 'salesman')
+  // A temporary password (server-owned must_reset): every API route but the password change
+  // answers 403, so keep the member on Settings and say why instead of a page full of errors.
+  const mustReset = mustResetOf(me, session)
+  usePrefetchPages(!!me && me.role !== 'salesman' && !mustReset)
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem('yq-collapsed') === '1',
   )
@@ -104,6 +107,11 @@ export function AppShell() {
       localStorage.setItem('yq-collapsed', c ? '0' : '1')
       return !c
     })
+  }
+
+  const passwordScreen = passwordScreenFor(me)
+  if (mustReset && loc.pathname !== passwordScreen.split('#')[0]) {
+    return <Navigate to={passwordScreen} replace />
   }
 
   return (
@@ -280,6 +288,15 @@ export function AppShell() {
             </div>
           </div>
         </header>
+
+        {mustReset && (
+          <div role="status" className="relative z-10 flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-5 py-2.5 text-[13px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+            <KeyRound size={16} className="shrink-0" aria-hidden />
+            <p className="min-w-0">
+              <span className="font-bold">Set your own password to continue.</span> You signed in with a temporary password; the rest of the portal opens as soon as you choose your own below.
+            </p>
+          </div>
+        )}
 
         {/* Page content with cross-fade */}
         <main className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden">

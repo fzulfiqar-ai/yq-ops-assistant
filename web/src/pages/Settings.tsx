@@ -5,10 +5,10 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@/lib/auth'
+import { mustResetOf, useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { useToast } from '@/components/Toast'
-import { supabase } from '@/lib/supabase'
+import { changeOwnPassword } from '@/lib/password'
 import { apiGet, apiSend, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
@@ -627,9 +627,13 @@ function PromiseBarCard() {
 }
 
 export default function Settings() {
-  const { me } = useAuth()
+  const { me, session, refreshMe } = useAuth()
   const { theme, toggle } = useTheme()
   const toast = useToast()
+  // On a temporary password the API does not ask for the current one (the member typed it a
+  // minute ago); otherwise it is required so a stolen token alone cannot change it.
+  const mustReset = mustResetOf(me, session)
+  const [p0, setP0] = useState('')
   const [p1, setP1] = useState('')
   const [p2, setP2] = useState('')
   const [busy, setBusy] = useState(false)
@@ -637,13 +641,16 @@ export default function Settings() {
 
   async function changePassword(e: FormEvent) {
     e.preventDefault()
+    if (!mustReset && !p0) return setMsg({ ok: false, text: 'Enter your current password.' })
     if (p1.length < 8) return setMsg({ ok: false, text: 'Password must be at least 8 characters.' })
     if (p1 !== p2) return setMsg({ ok: false, text: 'Passwords do not match.' })
     setBusy(true); setMsg(null)
-    const { error } = await supabase.auth.updateUser({ password: p1, data: { must_reset: false } })
+    const error = await changeOwnPassword(p1, mustReset ? undefined : p0)
+    if (error) { setBusy(false); setMsg({ ok: false, text: error }); toast(error, 'error'); return }
+    setP0(''); setP1(''); setP2(''); setMsg(null)
+    toast(mustReset ? 'Password set — the portal is open.' : 'Password updated successfully.', 'success')
+    await refreshMe()   // /me now says must_reset=false: the shell lets every page through again
     setBusy(false)
-    if (error) { setMsg({ ok: false, text: error.message }); toast(error.message, 'error') }
-    else { setP1(''); setP2(''); setMsg(null); toast('Password updated successfully.', 'success') }
   }
 
   return (
@@ -689,20 +696,28 @@ export default function Settings() {
         </button>
       </Card>
 
-      <Card className="p-6">
+      <Card id="password" className={cn('p-6', mustReset && 'ring-2 ring-amber-300')}>
         <div className="mb-4 flex items-center gap-2 font-display text-base font-semibold">
-          <KeyRound size={18} className="text-primary" /> Change password
+          <KeyRound size={18} className="text-primary" /> {mustReset ? 'Set your own password' : 'Change password'}
         </div>
+        {mustReset && (
+          <p className="mb-3 max-w-sm text-sm text-muted-foreground">
+            Set your own password to continue — you signed in with a temporary one, and the rest of the portal opens as soon as you choose yours.
+          </p>
+        )}
         <form onSubmit={changePassword} className="max-w-sm space-y-3">
-          <Input type="password" placeholder="New password" value={p1} onChange={(e) => setP1(e.target.value)} />
-          <Input type="password" placeholder="Confirm new password" value={p2} onChange={(e) => setP2(e.target.value)} />
+          {!mustReset && (
+            <Input type="password" autoComplete="current-password" placeholder="Current password" value={p0} onChange={(e) => setP0(e.target.value)} />
+          )}
+          <Input type="password" autoComplete="new-password" placeholder="New password" value={p1} onChange={(e) => setP1(e.target.value)} />
+          <Input type="password" autoComplete="new-password" placeholder="Confirm new password" value={p2} onChange={(e) => setP2(e.target.value)} />
           {msg && (
             <div className={cn('rounded-lg px-3 py-2 text-sm', msg.ok ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-destructive/10 text-destructive')}>
               {msg.text}
             </div>
           )}
           <Button type="submit" disabled={busy}>
-            {busy ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Update password
+            {busy ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} {mustReset ? 'Set password' : 'Update password'}
           </Button>
         </form>
       </Card>

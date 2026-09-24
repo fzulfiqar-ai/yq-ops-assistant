@@ -593,20 +593,35 @@ def _():
 
 @test("ratelimit: bearer calls are keyed per user, public calls per client ip")
 def _():
+    import time as _time
+
+    import jwt as _jwt
     from app import ratelimit
     from app.config import settings
-    old = settings.trusted_proxy_hops
+    old = (settings.trusted_proxy_hops, settings.supabase_jwt_secret)
+    ratelimit.reset_cache()
     try:
         settings.trusted_proxy_hops = 1
-        k1 = ratelimit.rate_limit_key(_req({"authorization": "Bearer eyJhbGciOi.first-token.signature-1234567890"}))
-        k2 = ratelimit.rate_limit_key(_req({"authorization": "Bearer eyJhbGciOi.other-token.signature-1234567890"}))
-        k1b = ratelimit.rate_limit_key(_req({"authorization": "Bearer eyJhbGciOi.first-token.signature-1234567890",
-                                             "x-forwarded-for": "8.8.8.8"}))
+        settings.supabase_jwt_secret = "test-shop-secret"
+
+        # R1 (24-Sep-2026): only a token app.auth.get_current_user has VERIFIED earns a user bucket
+        # (it calls ratelimit.remember_verified after the decode); the key function itself never
+        # decodes. Junk shares the IP bucket (tests/test_r1_security.py covers those cases).
+        def tok(sub: str) -> str:
+            raw = _jwt.encode({"sub": sub, "email": f"{sub}@example.com", "aud": "authenticated",
+                               "exp": int(_time.time()) + 300}, "test-shop-secret", algorithm="HS256")
+            ratelimit.remember_verified(raw)
+            return "Bearer " + raw
+        t1, t2 = tok("first"), tok("other")
+        k1 = ratelimit.rate_limit_key(_req({"authorization": t1}))
+        k2 = ratelimit.rate_limit_key(_req({"authorization": t2}))
+        k1b = ratelimit.rate_limit_key(_req({"authorization": t1, "x-forwarded-for": "8.8.8.8"}))
         assert k1.startswith("u:") and k1 != k2 and k1 == k1b, (k1, k2, k1b)          # same user, different ip → same bucket
         assert ratelimit.rate_limit_key(_req({"x-forwarded-for": "1.2.3.4"})) == "1.2.3.4"
         assert ratelimit.rate_limit_key(_req({"authorization": "Bearer x"})) == "10.0.0.9"    # junk header → ip
     finally:
-        settings.trusted_proxy_hops = old
+        settings.trusted_proxy_hops, settings.supabase_jwt_secret = old
+        ratelimit.reset_cache()
 
 
 @test("ratelimit: middleware limits undecorated routes per client and returns 429 with CORS")

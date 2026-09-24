@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useState, type CSSProperties } from 'react'
-import { Link, NavLink, useLocation, useOutlet } from 'react-router-dom'
-import { Bell, BookImage, ClipboardList, CircleUserRound, House, Loader2, LogOut, Users, type LucideIcon } from 'lucide-react'
-import { useAuth } from '@/lib/auth'
+import { Link, Navigate, NavLink, useLocation, useOutlet } from 'react-router-dom'
+import { Bell, BookImage, ClipboardList, CircleUserRound, House, KeyRound, Loader2, LogOut, Users, type LucideIcon } from 'lucide-react'
+import { mustResetOf, passwordScreenFor, useAuth } from '@/lib/auth'
 import { navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
@@ -79,19 +79,21 @@ function Badge({ count, className }: { count: number; className?: string }) {
   )
 }
 
-/** The 15 field logins were handed out with a temporary password: say so once, fix one tap away. */
-function TempPasswordBanner() {
-  const { session } = useAuth()
-  const loc = useLocation()
-  const mustReset = Boolean(session?.user?.user_metadata?.must_reset)
-  if (!mustReset || loc.pathname === '/account' || loc.pathname === '/settings') return null
+/**
+ * The 15 field logins were handed out with a temporary password. While the server-owned
+ * `must_reset` flag is set (/me, or the session metadata on an older API) every other API
+ * route answers 403, so the shell keeps the rep on the password screen and says why, instead
+ * of letting each page show a raw error.
+ */
+function TempPasswordBanner({ mustReset }: { mustReset: boolean }) {
+  if (!mustReset) return null
   return (
-    <div className="border-b border-amber-200 bg-amber-50">
-      <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2">
-        <p className="min-w-0 flex-1 text-[12.5px] font-medium leading-snug text-amber-900">You are using a temporary password — set your own.</p>
-        <Link to="/account#password" className="grid h-10 shrink-0 place-items-center rounded-lg px-3 text-[12.5px] font-bold text-amber-900 underline underline-offset-2 hover:bg-amber-100">
-          Change password
-        </Link>
+    <div role="status" className="border-b border-amber-200 bg-amber-50">
+      <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2.5">
+        <KeyRound size={16} className="shrink-0 text-amber-800" aria-hidden="true" />
+        <p className="min-w-0 flex-1 text-[12.5px] font-medium leading-snug text-amber-900">
+          <span className="font-bold">Set your own password to continue.</span> You signed in with a temporary password; the rest of the app opens as soon as you choose your own.
+        </p>
       </div>
     </div>
   )
@@ -211,11 +213,19 @@ function Sidebar({ tabs, more, name, onSignOut, signingOut }: { tabs: Tab[]; mor
 const CORE = new Set(['/today', '/shop', '/shop-orders', '/customers', '/account', '/settings', '/catalog'])
 
 export function SalesmanShell() {
-  const { me, signOut } = useAuth()
+  const { me, session, signOut } = useAuth()
   const outlet = useOutlet()
+  const loc = useLocation()
   const newCount = useNewOrderCount()
   const [signingOut, setSigningOut] = useState(false)
   useTabbarVar()
+
+  // A temporary password: only the password screen is useful (the API refuses everything else).
+  const mustReset = mustResetOf(me, session)
+  const passwordScreen = passwordScreenFor(me)
+  if (mustReset && loc.pathname !== passwordScreen.split('#')[0]) {
+    return <Navigate to={passwordScreen} replace />
+  }
 
   const name = me?.full_name || me?.email?.split('@')[0] || ''
   const first = firstName(name)
@@ -263,7 +273,7 @@ export function SalesmanShell() {
             </div>
           </header>
 
-          <TempPasswordBanner />
+          <TempPasswordBanner mustReset={mustReset} />
 
           <main className="pb-[calc(var(--yq-tabbar,88px)+env(safe-area-inset-bottom))] md:pb-10">
             <Suspense

@@ -1,15 +1,27 @@
 """SQL guardrails for the /ask endpoint.
 
 Validates LLM-generated SQL before execution. Rules:
-  1. Single SELECT statement only.
-  2. No DML / DDL / dangerous keywords.
-  3. Must reference only the approved view allowlist.
-  4. LIMIT injected at MAX_ROWS if missing.
+  1. Single SELECT statement only (a set operation of SELECTs counts as one).
+  2. No DML / DDL / dangerous keywords or functions; no SELECT … INTO, no row locks.
+  3. Must reference only the approved view allowlist — EVERY relation the statement touches,
+     including subqueries, CTE bodies, joins, comma joins, IN/EXISTS/scalar subqueries and
+     lateral joins. Quoted identifiers, schema-qualified names and CTEs named after an
+     allowlisted view are rejected outright (each was a way past the old `FROM \\w+` scan).
+  4. LIMIT injected at MAX_ROWS if missing, clamped if larger — on the PARSE TREE, so a limit
+     hidden in a comment, a subquery's inner limit or a non-literal expression cannot dodge the
+     cap; the returned SQL is regenerated from the tree.
+
+The relation walk is sqlglot's Postgres parser (R1 security S7, 24-Sep-2026): a query that
+does not parse is rejected, never guessed at. Every CTE body must itself be a SELECT (or a set
+operation of SELECTs): `WITH x AS (TABLE t)` parses without an exp.Table node and is refused.
 """
 from __future__ import annotations
 
 import logging
 import re
+
+import sqlglot
+from sqlglot import exp
 
 log = logging.getLogger(__name__)
 
@@ -102,12 +114,23 @@ MAX_ROWS = 200
 
 _BANNED = re.compile(
     r"\b(insert|update|delete|truncate|drop|create|alter|grant|revoke"
-    r"|copy|pg_read_file|dblink|pg_exec|execute|perform)\b",
+    # the bare TABLE command (`TABLE t` / `WITH x AS (TABLE t)`) reads a relation without a
+    # FROM, which the relation walk cannot see — a data answer never needs it
+    r"|table"
+    r"|copy|pg_read_file|dblink|pg_exec|execute|perform"
+    # functions that run SQL, read files, sleep or signal — none has a place in a data answer
+    r"|query_to_xml|query_to_xml_and_xmlschema|table_to_xml|schema_to_xml|database_to_xml|cursor_to_xml"
+    r"|pg_read_binary_file|pg_ls_dir|pg_stat_file|lo_import|lo_export|pg_sleep|pg_sleep_for|pg_sleep_until"
+    r"|pg_terminate_backend|pg_cancel_backend|pg_notify|pg_advisory_lock|pg_advisory_xact_lock|set_config)\b",
     re.IGNORECASE,
 )
-_LIMIT = re.compile(r"\bLIMIT\s+(\d+)", re.IGNORECASE)
 _SEMICOLON_MID = re.compile(r";(?!\s*$)")
-_TABLE_REF = re.compile(r"\bFROM\s+(\w+)|\bJOIN\s+(\w+)", re.IGNORECASE)
+_WHOLE_NUMBER = re.compile(r"^\d+$")
+
+# A set operation of SELECTs is still one read-only statement.
+_SET_OPS: tuple[type, ...] = tuple(
+    c for c in (getattr(exp, n, None) for n in ("Union", "Intersect", "Except")) if c is not None)
+_READ_ONLY_ROOTS: tuple[type, ...] = (exp.Select, *_SET_OPS)
 
 
 class SQLValidationError(ValueError):
@@ -116,6 +139,59 @@ class SQLValidationError(ValueError):
 
 class FeatureAccessError(SQLValidationError):
     """The SQL is valid but references data the caller's feature pages don't cover."""
+
+
+def _parse(sql: str) -> exp.Expression:
+    try:
+        statements = [s for s in sqlglot.parse(sql, read="postgres") if s is not None]
+    except Exception as e:  # noqa: BLE001 — ParseError, TokenError, …
+        log.info("SQL rejected — unparseable: %s", str(e)[:200])
+        raise SQLValidationError("The query could not be parsed.") from e
+    if len(statements) != 1:
+        raise SQLValidationError("Only a single SQL statement is allowed.")
+    return statements[0]
+
+
+def referenced_relations(tree: exp.Expression) -> set[str]:
+    """Every relation name the statement reads, lower-cased, across every scope — CTE
+    references excluded (their bodies are walked like everything else). Raises on the
+    constructs the allowlist cannot reason about."""
+    ctes: set[str] = set()
+    for cte in tree.find_all(exp.CTE):
+        name = str(cte.alias_or_name or "").lower()
+        alias_ident = cte.args.get("alias")
+        ident = alias_ident.this if isinstance(alias_ident, exp.TableAlias) else None
+        if isinstance(ident, exp.Identifier) and ident.quoted:
+            raise SQLValidationError("Quoted identifiers are not allowed.")
+        if not name:
+            raise SQLValidationError("Every CTE needs a plain name.")
+        if not isinstance(cte.this, _READ_ONLY_ROOTS):
+            # `WITH x AS (TABLE customer_contacts)` (MATERIALIZED or not) parses as a Column
+            # named TABLE aliased to the relation — no exp.Table, nothing for the allowlist to
+            # see. Only a SELECT / set-operation body can be reasoned about.
+            raise SQLValidationError("Every CTE must be a SELECT.")
+        if name in VIEW_ALLOWLIST:
+            # WITH v_sales AS (SELECT * FROM secret) SELECT * FROM v_sales — the outer reference
+            # would look allowlisted while reading whatever the CTE body reads.
+            raise SQLValidationError("Query references data outside the allowed views.")
+        ctes.add(name)
+
+    refs: set[str] = set()
+    for table in tree.find_all(exp.Table):
+        if table.db or table.catalog:
+            raise SQLValidationError("Schema-qualified names are not allowed.")
+        ident = table.this
+        if not isinstance(ident, exp.Identifier):
+            # a table-valued function (generate_series, jsonb_each …): no relation is read,
+            # and the dangerous functions are already banned by name
+            continue
+        if ident.quoted:
+            raise SQLValidationError("Quoted identifiers are not allowed.")
+        name = ident.name.lower()
+        if name in ctes:
+            continue
+        refs.add(name)
+    return refs
 
 
 def validate(sql: str, allowed_features: set[str] | None = None) -> str:
@@ -130,7 +206,7 @@ def validate(sql: str, allowed_features: set[str] | None = None) -> str:
     """
     sql = sql.strip().rstrip(";")
 
-    if not sql.upper().lstrip().startswith("SELECT"):
+    if not sql.upper().lstrip().startswith(("SELECT", "WITH")):
         raise SQLValidationError("Only SELECT statements are allowed.")
 
     if _BANNED.search(sql):
@@ -139,32 +215,59 @@ def validate(sql: str, allowed_features: set[str] | None = None) -> str:
     if _SEMICOLON_MID.search(sql):
         raise SQLValidationError("Only a single SQL statement is allowed.")
 
-    refs = {m.group(1) or m.group(2) for m in _TABLE_REF.finditer(sql)}
-    bad = {r for r in refs if r and r.lower() not in VIEW_ALLOWLIST}
+    tree = _parse(sql)
+    if not isinstance(tree, _READ_ONLY_ROOTS):
+        raise SQLValidationError("Only SELECT statements are allowed.")
+    if tree.find(exp.Into) is not None:
+        raise SQLValidationError("SELECT INTO is not allowed.")
+    if tree.find(exp.Lock) is not None:
+        raise SQLValidationError("Row locks are not allowed.")
+
+    refs = referenced_relations(tree)
+    bad = {r for r in refs if r not in VIEW_ALLOWLIST}
     if bad:
         # Log the specifics server-side; never echo the allowlist to the caller.
         log.info("SQL rejected — non-allowlisted refs: %s", ", ".join(sorted(bad)))
         raise SQLValidationError("Query references data outside the allowed views.")
 
     if allowed_features is not None:
-        denied = sorted({VIEW_FEATURE[r.lower()] for r in refs
-                         if r and r.lower() in VIEW_FEATURE and VIEW_FEATURE[r.lower()] not in allowed_features})
+        denied = sorted({VIEW_FEATURE[r] for r in refs
+                         if r in VIEW_FEATURE and VIEW_FEATURE[r] not in allowed_features})
         if denied:
             raise FeatureAccessError(
                 f"This question needs access you don't have: {', '.join(denied)}. Ask an admin to grant it."
             )
 
-    # Enforce a hard row cap. Inject LIMIT if absent; clamp it down if the LLM supplied a
-    # larger one (a bare "skip if present" check let `LIMIT 1000000` through).
-    m = _LIMIT.search(sql)
-    if not m:
-        sql = f"{sql} LIMIT {MAX_ROWS}"
-    else:
-        try:
-            n = int(m.group(1))
-        except (TypeError, ValueError):
-            n = MAX_ROWS + 1
-        if n > MAX_ROWS:
-            sql = sql[:m.start()] + f"LIMIT {MAX_ROWS}" + sql[m.end():]
+    _cap_rows(tree)
+    return tree.sql(dialect="postgres")
 
-    return sql
+
+def _literal_rows(node: exp.Expression | None) -> int:
+    """The row count of a LIMIT / FETCH operand, which must be a plain whole number. Anything
+    else — a subquery, `5 + 5`, a string, a negative, a parameter — is refused: the cap is
+    only enforceable on a value the validator can read."""
+    if isinstance(node, exp.Literal) and not node.is_string and _WHOLE_NUMBER.match(str(node.this)):
+        return int(node.this)
+    raise SQLValidationError("LIMIT must be a plain whole number.")
+
+
+def _cap_rows(tree: exp.Expression) -> None:
+    """Enforce the hard row cap on the OUTER statement, in place on the parse tree. Inject
+    LIMIT when absent (sqlglot already drops `LIMIT ALL`); clamp a literal larger than
+    MAX_ROWS. Inner limits are left alone — the outer cap bounds the result either way."""
+    top = tree.args.get("limit")
+    if top is None:
+        tree.set("limit", exp.Limit(expression=exp.Literal.number(MAX_ROWS)))
+        return
+    if isinstance(top, exp.Limit):
+        if _literal_rows(top.expression) > MAX_ROWS:
+            top.set("expression", exp.Literal.number(MAX_ROWS))
+        return
+    if isinstance(top, exp.Fetch):
+        opts = top.args.get("limit_options")
+        if opts is not None and opts.args.get("percent"):
+            raise SQLValidationError("FETCH ... PERCENT is not allowed.")
+        if _literal_rows(top.args.get("count")) > MAX_ROWS:
+            top.set("count", exp.Literal.number(MAX_ROWS))
+        return
+    raise SQLValidationError("LIMIT must be a plain whole number.")
