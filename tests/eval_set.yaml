@@ -88,17 +88,17 @@ questions:
   - id: 16
     question: "Show all product margins"
     expected_template: "Product margins"
-    expected_columns: [item_name, gp_margin_pct]
+    expected_columns: [item_name, margin_ex_vat_pct]
 
   - id: 17
     question: "Which products have negative margins?"
     expected_template: "Negative-margin products"
-    expected_columns: [item_name, gp_margin_pct]
+    expected_columns: [item_name, margin_ex_vat_pct]
 
   - id: 18
     question: "Show loss-making items"
     expected_template: "Negative-margin products"
-    expected_columns: [item_name, gp_margin_pct]
+    expected_columns: [item_name, margin_ex_vat_pct]
 
   # ── Receivables ───────────────────────────────────────────────────────────────
   - id: 19

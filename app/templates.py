@@ -174,11 +174,17 @@ TEMPLATES: list[dict] = [
             r"(items?|products?) (with )?negative", r"(items?|products?) below zero",
         ),
         "label": "Negative-margin products",
+        # Computed from the base columns (ex-VAT net = net / 1.1, the v_sales rule) so the answer is
+        # the same before and after economics_v2_migration.sql. Focus's own gp_margin_pct is not a
+        # percentage and never went negative -- this template answered "none" for a year.
         "sql": (
-            "SELECT item_name, gp_margin_pct, gross_profit_bhd, "
-            "net_profit_bhd, np_margin_pct, report_date "
-            "FROM v_product_margin WHERE gp_margin_pct < 0 "
-            "ORDER BY gp_margin_pct ASC LIMIT 50"
+            "SELECT item_name, "
+            "ROUND((net_amount_bhd / 1.1)::numeric, 3) AS net_ex_vat_bhd, cogs_bhd, "
+            "ROUND((net_amount_bhd / 1.1 - cogs_bhd)::numeric, 3) AS gp_ex_vat_bhd, "
+            "ROUND((100.0 * (net_amount_bhd / 1.1 - cogs_bhd) / NULLIF(net_amount_bhd / 1.1, 0))::numeric, 2) "
+            "AS margin_ex_vat_pct, report_date "
+            "FROM v_product_margin WHERE cogs_bhd IS NOT NULL AND net_amount_bhd / 1.1 < cogs_bhd "
+            "ORDER BY (net_amount_bhd / 1.1 - cogs_bhd) ASC LIMIT 50"
         ),
     },
     {
@@ -189,9 +195,13 @@ TEMPLATES: list[dict] = [
         ),
         "label": "Product margins",
         "sql": (
-            "SELECT item_name, gp_margin_pct, gross_profit_bhd, "
-            "net_profit_bhd, np_margin_pct, report_date "
-            "FROM v_product_margin ORDER BY gp_margin_pct DESC LIMIT 50"
+            "SELECT item_name, "
+            "ROUND((100.0 * (net_amount_bhd / 1.1 - cogs_bhd) / NULLIF(net_amount_bhd / 1.1, 0))::numeric, 2) "
+            "AS margin_ex_vat_pct, "
+            "ROUND((net_amount_bhd / 1.1)::numeric, 3) AS net_ex_vat_bhd, cogs_bhd, "
+            "ROUND((net_amount_bhd / 1.1 - cogs_bhd)::numeric, 3) AS gp_ex_vat_bhd, report_date "
+            "FROM v_product_margin WHERE cogs_bhd IS NOT NULL AND net_amount_bhd > 0 "
+            "ORDER BY margin_ex_vat_pct DESC LIMIT 50"
         ),
     },
     # ── Receivables ───────────────────────────────────────────────────────────

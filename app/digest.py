@@ -141,11 +141,11 @@ def overdue_receivables() -> list[dict]:
 
 
 def negative_margins() -> list[dict]:
-    """Items selling below cost — Focus's own gross-margin %, NOT price-vs-total-COGS."""
-    return exec_sql(
-        "SELECT item_name, gp_margin_pct, np_margin_pct, cogs_bhd, list_price_bhd, category_name "
-        "FROM v_product_margin WHERE gp_margin_pct < 0 ORDER BY gp_margin_pct ASC LIMIT 20"
-    )
+    """Items selling below cost on the COMPUTED ex-VAT margin (app/margin_truth.py): the report's
+    own GP % is not a percentage and its GP loses the sign on loss items, so this list was always
+    empty. gp_margin_pct on each row = the computed ex-VAT margin %."""
+    from app.margin_truth import below_cost_rows
+    return below_cost_rows(20)
 
 
 def all_alerts() -> dict:

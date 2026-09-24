@@ -10,7 +10,8 @@ Upserts use each table's natural key (on_conflict) so re-running never double-co
 
 Usage:  python scripts/load_supabase.py [--staged <folder ingest read this run>]
         (scripts/refresh.py passes --staged; without it Focus price books are loaded but never void
-         older rows -- see "Focus price books are snapshots" below)
+         older rows -- see "Focus price books are snapshots" below. The folder may carry two marker
+         files: REPLACE_OK and PARTIAL_OK -- see "Sales are replaced by the file's own date span".)
 """
 from __future__ import annotations
 
@@ -52,6 +53,103 @@ FOCUS_BOOKS = {"MA_base": "masellingpricebook", "modern_trade": "moderntradesell
 SNAPSHOT_MAX_STALE_SHARE = 0.10
 SNAPSHOT_MIN_SKU_COVER = 0.90
 _SP_KEY_COLS = "id,sku_code,price_book,customer_code,warehouse_name,start_date,source_file"
+
+# ── Sales are replaced by the file's own date span (R2, 24-Sep-2026) ─────────
+# orders / order_lines used to be upsert-only, so an invoice Focus deleted or re-lined after an
+# export lived on in the database (21-Sep-2026: 2 invoices in the DB that Focus no longer had).
+# A Focus sales export is the whole truth for its own date span, exactly like the Stock_ledger,
+# so the span is cleared and reloaded -- never a row outside it. Before anything is deleted the
+# loader prints every invoice the DB holds inside the span that the file does not carry ("would
+# disappear"), and a guard refuses the replace when that list is more than SPAN_MAX_DISAPPEAR_SHARE
+# of the span's invoices (and at least SPAN_MIN_DISAPPEAR): a filtered or partial export must not
+# wipe a month. The load then falls back to the old upsert-only path, writes an audit_log row and
+# scripts/verify_numbers.py FAILS on the row counts, which is the signal to look. A REPLACE_OK
+# marker file in the upload folder overrides the guard on purpose.
+SPAN_MAX_DISAPPEAR_SHARE = 0.10
+SPAN_MIN_DISAPPEAR = 5
+REPLACE_OK_MARKER = "REPLACE_OK"
+# A Stock_balance snapshot is replaced per (as_of_date, warehouse_name): a one-warehouse export
+# never erases the other warehouses of the same day. When the warehouse set of a NEW snapshot is
+# smaller than the previous snapshot's, the loader warns, writes an audit_log row and verify FAILS
+# ("Stock snapshot warehouses vs previous") -- unless the folder carries a PARTIAL_OK marker file,
+# which says the narrower export is intended (D5: the 14-Sep-2026 drop shrank the book from 25
+# warehouses to 1 and admin stock value fell 143,105 -> 44,996 without a word).
+PARTIAL_OK_MARKER = "PARTIAL_OK"
+
+
+def marker_present(folder, name: str) -> bool:
+    """True when the upload folder carries the marker file `name` (any extension, any case)."""
+    try:
+        return any(p.name.split(".")[0].upper() == name.upper() for p in Path(folder).iterdir() if p.is_file())
+    except (OSError, TypeError):
+        return False
+
+
+def date_span(values) -> tuple[str, str] | None:
+    """Pure: (min, max) ISO dates of a column (blanks and NaN ignored), or None when empty."""
+    out: list[str] = []
+    for v in values or []:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            continue
+        s = str(v).strip()[:10]
+        if s and s.lower() not in ("nan", "nat", "none"):
+            out.append(s)
+    return (min(out), max(out)) if out else None
+
+
+def month_windows(dmin: str, dmax: str) -> list[tuple[str, str]]:
+    """Pure: [dmin, dmax] cut into calendar-month windows with real month ends (never '-31')."""
+    import calendar
+    wins: list[tuple[str, str]] = []
+    y, m = int(dmin[:4]), int(dmin[5:7])
+    while f"{y:04d}-{m:02d}" <= dmax[:7]:
+        lo = max(dmin, f"{y:04d}-{m:02d}-01")
+        hi = min(dmax, f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}")
+        wins.append((lo, hi))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return wins
+
+
+def disappearing_invoices(db_rows: list[dict], file_invoices: set[str]) -> list[dict]:
+    """Pure: the DB rows (inside the file's span) whose invoice_no the file does not carry -- the
+    invoices a span replace would remove. One entry per invoice, in DB order."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in db_rows:
+        inv = str(r.get("invoice_no") or "").strip()
+        if not inv or inv in file_invoices or inv in seen:
+            continue
+        seen.add(inv)
+        out.append(r)
+    return out
+
+
+def span_guard(disappearing: list[dict], db_invoices_in_span: int, replace_ok: bool = False) -> str | None:
+    """Pure: None when the span replace may proceed, else why it must not."""
+    n = len(disappearing)
+    if replace_ok or n < SPAN_MIN_DISAPPEAR or db_invoices_in_span <= 0:
+        return None
+    if n > SPAN_MAX_DISAPPEAR_SHARE * db_invoices_in_span:
+        return (f"{n} of the {db_invoices_in_span} invoices the database holds in the file's span are not in "
+                f"the file (over {SPAN_MAX_DISAPPEAR_SHARE:.0%}): a filtered or partial export? Add a "
+                f"{REPLACE_OK_MARKER} file to the upload folder to replace on purpose")
+    return None
+
+
+def warehouse_set_guard(previous: set[str], new: set[str], partial_ok: bool = False) -> str | None:
+    """Pure: None when the new snapshot covers at least the previous snapshot's warehouses (or the
+    narrower export was acknowledged with PARTIAL_OK), else the warning text."""
+    if partial_ok or not previous:
+        return None
+    missing = sorted(previous - new)
+    if missing and len(new) < len(previous):
+        shown = ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else "")
+        return (f"the new snapshot covers {len(new)} warehouse(s), the previous one {len(previous)}; "
+                f"missing: {shown}. Export all warehouses, or add a {PARTIAL_OK_MARKER} file to the folder "
+                f"if the narrower export is intended (verify FAILS until then)")
+    return None
 
 
 def focus_book_kind(source_file) -> str | None:
@@ -327,18 +425,163 @@ def _read(name: str) -> pd.DataFrame | None:
     return pd.read_csv(p, dtype=object)
 
 
+def _fetch_span(client, table: str, cols: str, datecol: str, lo: str, hi: str) -> list[dict]:
+    """Every row of `table` with `datecol` in [lo, hi], paged in id order (stable pages)."""
+    out: list[dict] = []
+    off = 0
+    while True:
+        page = (client.table(table).select(cols).gte(datecol, lo).lte(datecol, hi)
+                .order("id").range(off, off + 999).execute().data or [])
+        out += page
+        if len(page) < 1000:
+            break
+        off += 1000
+    return out
+
+
+def _delete_span(client, table: str, datecol: str, dmin: str, dmax: str) -> int:
+    """Delete every row with datecol in [dmin, dmax], month by month (a single PostgREST call
+    never has to return tens of thousands of rows). Returns the number removed."""
+    removed = 0
+    for lo, hi in month_windows(dmin, dmax):
+        try:
+            r = client.table(table).delete(count="exact").gte(datecol, lo).lte(datecol, hi).execute()
+            n = r.count if getattr(r, "count", None) is not None else len(r.data or [])
+        except TypeError:  # a client without the count keyword
+            r = client.table(table).delete().gte(datecol, lo).lte(datecol, hi).execute()
+            n = len(r.data or [])
+        removed += int(n or 0)
+    return removed
+
+
+def _sales_span_replace(client, table: str, df: pd.DataFrame, datecol: str, replace_ok: bool) -> dict:
+    """Clear `table` inside the file's own date span before the upsert (see the header note).
+    Prints the invoices that would disappear; the guard turns a suspicious replace into an
+    upsert-only load with an audit_log row. Returns {span, disappearing, removed, skipped}."""
+    res: dict = {"span": None, "disappearing": [], "removed": 0, "skipped": None}
+    span = date_span(df[datecol].tolist()) if datecol in df.columns else None
+    if not span:
+        print(f"  ({table}: no dates in the file -- upsert only)")
+        return res
+    dmin, dmax = span
+    res["span"] = span
+    file_inv = {str(v).strip() for v in df["invoice_no"].dropna().tolist()}
+    cols = "id,invoice_no," + datecol + (",gross_bhd" if table == "orders" else "")
+    try:
+        db_rows = _fetch_span(client, table, cols, datecol, dmin, dmax)
+    except Exception as e:  # noqa: BLE001 -- cannot see the span: never delete blind
+        print(f"  !! {table}: could not read the database span {dmin}..{dmax} ({str(e)[:120]}); upsert only")
+        res["skipped"] = f"span read failed: {str(e)[:120]}"
+        return res
+    db_inv = {str(r.get("invoice_no") or "").strip() for r in db_rows} - {""}
+    gone = disappearing_invoices(db_rows, file_inv)
+    res["disappearing"] = gone
+    print(f"  {table}: file span {dmin}..{dmax}: {len(file_inv)} invoices in file, {len(db_inv)} in DB, "
+          f"{len(gone)} would disappear")
+    for r in gone[:50]:
+        extra = f"  gross {r.get('gross_bhd')}" if table == "orders" else ""
+        print(f"      - {r.get('invoice_no')}  {str(r.get(datecol) or '')[:10]}{extra}")
+    if len(gone) > 50:
+        print(f"      ... and {len(gone) - 50} more")
+    reason = span_guard(gone, len(db_inv), replace_ok)
+    if reason:
+        print(f"  !! WARNING: {table} span replace SKIPPED -- {reason}. Loaded as upsert only; the rows above "
+              f"stay in the database and verify will FAIL on the row counts.")
+        _audit(client, f"{table}.span_replace_skipped", f"{dmin}..{dmax}",
+               {"table": table, "span": [dmin, dmax], "reason": reason, "db_invoices": len(db_inv),
+                "file_invoices": len(file_inv), "disappearing": [str(r.get("invoice_no")) for r in gone][:200]})
+        res["skipped"] = reason
+        return res
+    res["removed"] = _delete_span(client, table, datecol, dmin, dmax)
+    print(f"  ({table}: cleared {res['removed']} rows in {dmin}..{dmax} before reload)")
+    if gone:
+        _audit(client, f"{table}.span_replace", f"{dmin}..{dmax}",
+               {"table": table, "span": [dmin, dmax], "removed_rows": res["removed"],
+                "disappearing": [str(r.get("invoice_no")) for r in gone][:200]})
+    return res
+
+
+def _previous_warehouses(client, as_of: str) -> tuple[str | None, set[str]]:
+    """(as_of_date, warehouse set) of the latest stock_balance snapshot strictly before `as_of`."""
+    r = (client.table("stock_balance").select("as_of_date").lt("as_of_date", as_of)
+         .order("as_of_date", desc=True).limit(1).execute().data or [])
+    prev = (r or [{}])[0].get("as_of_date")
+    if not prev:
+        return None, set()
+    prev = str(prev)[:10]
+    names: set[str] = set()
+    off = 0
+    while True:
+        page = (client.table("stock_balance").select("warehouse_name").eq("as_of_date", prev)
+                .order("id").range(off, off + 999).execute().data or [])
+        names |= {str(x.get("warehouse_name") or "(unassigned)") for x in page}
+        if len(page) < 1000:
+            break
+        off += 1000
+    return prev, names
+
+
+def _stock_balance_replace(client, sb: pd.DataFrame, partial_ok: bool) -> dict:
+    """Load a Stock_balance snapshot: aggregate duplicate item rows, warn (audit row) when the
+    warehouse set shrank against the previous snapshot, then replace per (as_of_date,
+    warehouse_name) and upsert. Returns {pairs, warnings}."""
+    sb = sb.dropna(subset=["item_name"])
+    sb["warehouse_name"] = sb["warehouse_name"].fillna("(unassigned)")
+    for col in ("net_qty", "total_value_bhd", "selling_rate_bhd"):
+        sb[col] = pd.to_numeric(sb[col], errors="coerce")
+    # Focus can list an item twice in one warehouse — aggregate so the upsert
+    # key (item, warehouse, as_of) is unique (sum qty/value, average rate).
+    sb = (sb.groupby(["item_name", "warehouse_name", "as_of_date"], as_index=False, dropna=False)
+            .agg(net_qty=("net_qty", "sum"),
+                 total_value_bhd=("total_value_bhd", "sum"),
+                 selling_rate_bhd=("selling_rate_bhd", "mean"),
+                 source_file=("source_file", "first")))
+    # Snapshot replace per (as_of_date, warehouse_name): a re-parse never leaves stale rows
+    # of a warehouse the file covers, and a one-warehouse export never erases the others.
+    pairs = sorted({(str(d)[:10], str(w)) for d, w in
+                    zip(sb["as_of_date"].tolist(), sb["warehouse_name"].tolist()) if d is not None
+                    and not (isinstance(d, float) and math.isnan(d))})
+    warnings: list[str] = []
+    for as_of in sorted({d for d, _ in pairs}):
+        new_set = {w for d, w in pairs if d == as_of}
+        try:
+            prev_date, prev_set = _previous_warehouses(client, as_of)
+        except Exception as e:  # noqa: BLE001
+            prev_date, prev_set = None, set()
+            print(f"  (stock_balance: previous snapshot not readable: {str(e)[:100]})")
+        reason = warehouse_set_guard(prev_set, new_set, partial_ok)
+        if reason:
+            print(f"  !! WARNING: stock_balance {as_of} vs {prev_date}: {reason}")
+            warnings.append(reason)
+            _audit(client, "stock_balance.partial_snapshot", f"{as_of} vs {prev_date}",
+                   {"as_of_date": as_of, "previous_as_of": prev_date, "new_warehouses": sorted(new_set),
+                    "previous_warehouses": sorted(prev_set), "reason": reason})
+        else:
+            print(f"  (stock_balance {as_of}: {len(new_set)} warehouse(s)"
+                  + (f"; previous snapshot {prev_date} had {len(prev_set)}" if prev_date else "") + ")")
+    for as_of, wh in pairs:
+        client.table("stock_balance").delete().eq("as_of_date", as_of).eq("warehouse_name", wh).execute()
+    _upsert(client, "stock_balance", _records(sb), on_conflict="item_name,warehouse_name,as_of_date")
+    return {"pairs": pairs, "warnings": warnings}
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     staged: set[str] | None = None
+    staged_folder = None
     if "--staged" in argv:
-        staged = staged_files(argv[argv.index("--staged") + 1])
+        staged_folder = argv[argv.index("--staged") + 1]
+        staged = staged_files(staged_folder)
+    replace_ok = marker_present(staged_folder, REPLACE_OK_MARKER) if staged_folder else False
+    partial_ok = marker_present(staged_folder, PARTIAL_OK_MARKER) if staged_folder else False
     if not CLEAN.exists():
         print(f"ERROR: {CLEAN} not found. Run scripts/ingest.py first.")
         return 1
     client = _client()
     print("Loading data/clean/ -> Supabase\n" + "=" * 60)
     if staged is not None:
-        print(f"  (staged this run: {', '.join(sorted(staged)) or 'nothing'})")
+        print(f"  (staged this run: {', '.join(sorted(staged)) or 'nothing'}"
+              f"{'; REPLACE_OK' if replace_ok else ''}{'; PARTIAL_OK' if partial_ok else ''})")
 
     # 1) products from price books
     sp = _read("selling_prices")
@@ -362,11 +605,16 @@ def main(argv: list[str] | None = None) -> int:
         _upsert(client, "customers",
                 [{"name": n} for n in sorted(names)], on_conflict="name")
 
-    # 3) fact + pricing tables
-    if od is not None:
-        _upsert(client, "orders", _records(od), on_conflict="invoice_no")
+    # 3) fact + pricing tables. Sales headers and lines are replaced inside the file's own date
+    #    span (see the note at the top): lines first, then headers, each by its own file's span.
     if ol is not None:
+        ol = ol.dropna(subset=["invoice_no"])
+        _sales_span_replace(client, "order_lines", ol, "line_date", replace_ok)
         _upsert(client, "order_lines", _records(ol), on_conflict="invoice_no,line_no")
+    if od is not None:
+        od = od.dropna(subset=["invoice_no"])
+        _sales_span_replace(client, "orders", od, "order_date", replace_ok)
+        _upsert(client, "orders", _records(od), on_conflict="invoice_no")
     sm = _read("stock_movements")
     if sm is not None:
         before = len(sm)
@@ -383,19 +631,10 @@ def main(argv: list[str] | None = None) -> int:
         # like stock_balance / ar_ageing replace per as_of_date. Deleted month by month so a
         # single PostgREST call never has to return tens of thousands of rows.
         sm = sm.drop_duplicates(subset=["voucher", "item_name", "row_hash"])
-        dts = sorted(sm["move_date"].dropna().astype(str).unique())
-        if dts:
-            dmin, dmax = dts[0][:10], dts[-1][:10]
-            import calendar
-            months = sorted({d[:7] for d in dts})
-            removed = 0
-            for ym in months:
-                y, m = int(ym[:4]), int(ym[5:7])
-                lo = max(dmin, f"{ym}-01")
-                hi = min(dmax, f"{ym}-{calendar.monthrange(y, m)[1]:02d}")   # real month end, not "-31"
-                r = (client.table("stock_movements").delete()
-                     .gte("move_date", lo).lte("move_date", hi).execute())
-                removed += len(r.data or [])
+        span = date_span(sm["move_date"].tolist())
+        if span:
+            dmin, dmax = span
+            removed = _delete_span(client, "stock_movements", "move_date", dmin, dmax)
             print(f"  (stock_movements: cleared {removed} rows in {dmin}..{dmax} before reload)")
         _upsert(client, "stock_movements", _records(sm),
                 on_conflict="voucher,item_name,row_hash")
@@ -460,25 +699,26 @@ def main(argv: list[str] | None = None) -> int:
         for d in ar["as_of_date"].dropna().unique():
             client.table("ar_ageing").delete().eq("as_of_date", str(d)).execute()
         _upsert(client, "ar_ageing", _records(ar), on_conflict="account,as_of_date")
+    art = _read("receivables_totals")
+    if art is not None:
+        # Focus's own Grand Total per snapshot (scripts/ingest.py parse_receivables_totals). The
+        # table arrives with economics_v2_migration.sql; before it, the figure is printed only.
+        art = art.dropna(subset=["as_of_date"])
+        recs = []
+        for r in _records(art):
+            recs.append({"as_of_date": str(r["as_of_date"])[:10],
+                         "focus_total_bhd": r.get("focus_total_bhd"), "focus_over90_bhd": r.get("focus_over90_bhd"),
+                         "rows_total_bhd": r.get("rows_total_bhd"), "source_file": r.get("source_file")})
+        try:
+            _upsert(client, "ar_ageing_totals", recs, on_conflict="as_of_date")
+        except Exception as e:  # noqa: BLE001
+            print(f"  (ar_ageing_totals not written: {str(e)[:120]} -- apply scripts/economics_v2_migration.sql)")
+            for r in recs:
+                print(f"    Focus Grand Total {r['as_of_date']}: BHD {float(r['focus_total_bhd'] or 0):,.3f} "
+                      f"(rows sum {float(r['rows_total_bhd'] or 0):,.3f})")
     sb = _read("stock_balance")
     if sb is not None:
-        sb = sb.dropna(subset=["item_name"])
-        sb["warehouse_name"] = sb["warehouse_name"].fillna("(unassigned)")
-        for col in ("net_qty", "total_value_bhd", "selling_rate_bhd"):
-            sb[col] = pd.to_numeric(sb[col], errors="coerce")
-        # Focus can list an item twice in one warehouse — aggregate so the upsert
-        # key (item, warehouse, as_of) is unique (sum qty/value, average rate).
-        sb = (sb.groupby(["item_name", "warehouse_name", "as_of_date"], as_index=False, dropna=False)
-                .agg(net_qty=("net_qty", "sum"),
-                     total_value_bhd=("total_value_bhd", "sum"),
-                     selling_rate_bhd=("selling_rate_bhd", "mean"),
-                     source_file=("source_file", "first")))
-        # snapshot replace: clear each as_of_date first so a re-parse never leaves
-        # stale rows (e.g. items whose key changed) double-counting the total.
-        for d in sb["as_of_date"].dropna().unique():
-            client.table("stock_balance").delete().eq("as_of_date", str(d)).execute()
-        _upsert(client, "stock_balance", _records(sb),
-                on_conflict="item_name,warehouse_name,as_of_date")
+        _stock_balance_replace(client, sb, partial_ok)
 
     # Record the load for the "Data as of" freshness banner (best-effort).
     try:

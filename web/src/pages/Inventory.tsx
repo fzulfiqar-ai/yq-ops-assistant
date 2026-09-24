@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { PackageCheck } from 'lucide-react'
+import { ClipboardList, PackageCheck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { bhd, fmtDate, num } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -20,6 +20,16 @@ interface Row {
 }
 interface Warehouse { warehouse_name: string; value_bhd: number; qty: number; items: number }
 interface Receipt { voucher: string; received_on: string; items: number; units: number; value_bhd: number }
+interface ReservedRow { item_code: string; on_hand: number; reserved: number; available: number; in_transit: number; open_orders: number; stock_as_of: string | null }
+interface Reserved {
+  available: boolean
+  rows: ReservedRow[]
+  units: number
+  in_transit: number
+  items: number
+  stock_as_of: string | null
+  rule?: string
+}
 interface Data {
   rows: Row[]
   by_status: Record<string, number>
@@ -29,6 +39,8 @@ interface Data {
   by_warehouse: Warehouse[]
   /** Material Receipt Notes in the last 14 days — a shipment that just landed */
   recent_receipts?: Receipt[]
+  /** staff only (M10): units on open marketplace orders newer than the stock snapshot, and on order with vendors */
+  reserved?: Reserved
 }
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -109,6 +121,59 @@ export default function Inventory() {
                   </Link>
                 ))}
               </div>
+            </Card>
+          )}
+
+          {data.reserved?.available && (
+            <Card className="mb-4 p-5">
+              <div className="mb-1 flex flex-wrap items-center gap-2 font-display text-base font-semibold">
+                <ClipboardList size={18} className="text-primary" /> Reserved by marketplace orders
+                <span className="text-[12px] font-normal text-muted-foreground">
+                  · stock snapshot {data.reserved.stock_as_of ? fmtDate(data.reserved.stock_as_of) : '—'} · staff view, merchants see on-hand only
+                </span>
+              </div>
+              <div className="mb-3 text-[12px] text-muted-foreground">
+                Counts open orders (new or confirmed, not yet issued) placed <b>after</b> the snapshot's end of day in Bahrain — units the
+                snapshot already saw leave the shelf are never counted twice. In transit = procurement orders raised with a vendor and not yet received.
+              </div>
+              {data.reserved.rows.length === 0 ? (
+                <div className="rounded-lg border border-dashed px-3 py-2 text-sm text-muted-foreground">
+                  Reserved 0 units · in transit {num(data.reserved.in_transit)} — no open marketplace order is newer than the stock snapshot.
+                </div>
+              ) : (
+                <>
+                  <div className="mb-2 text-sm">
+                    <b className="tabular-nums">{num(data.reserved.units)}</b> units reserved on <b>{num(data.reserved.items)}</b> items
+                    {data.reserved.in_transit > 0 && <> · <b className="tabular-nums">{num(data.reserved.in_transit)}</b> units in transit</>}
+                  </div>
+                  <div className="overflow-auto rounded-xl border">
+                    <table className="w-full border-collapse text-sm">
+                      <thead className="bg-secondary/90">
+                        <tr className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          <th className="px-3 py-2 text-left">Code</th>
+                          <th className="px-3 py-2 text-right">On hand</th>
+                          <th className="px-3 py-2 text-right">Reserved</th>
+                          <th className="px-3 py-2 text-right">Available</th>
+                          <th className="px-3 py-2 text-right">In transit</th>
+                          <th className="px-3 py-2 text-right">Open orders</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.reserved.rows.map((r) => (
+                          <tr key={r.item_code} className={cn('border-t', Number(r.available) < 0 && 'bg-rose-50/60 dark:bg-rose-500/5')}>
+                            <td className="px-3 py-1.5 font-medium">{r.item_code}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">{num(r.on_hand)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums font-semibold text-amber-600">{num(r.reserved)}</td>
+                            <td className={cn('px-3 py-1.5 text-right tabular-nums font-semibold', Number(r.available) < 0 ? 'text-rose-600' : 'text-emerald-600')}>{num(r.available)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">{Number(r.in_transit) > 0 ? num(r.in_transit) : '—'}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">{num(r.open_orders)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
             </Card>
           )}
 

@@ -207,6 +207,28 @@ def _shop_invalidate() -> None:
         pass
 
 
+def _attach_reserved(rows: list[dict], role: str) -> None:
+    """Staff catalog only (M10, R2): units reserved by open marketplace orders newer than the stock
+    snapshot and units in transit, from v_catalog_reserved. Admins and members also get
+    `available` (on hand minus reserved); a salesman sees the reserved count only, because the
+    catalog never emits on-hand quantities to reps. Silent before the migration; merchants use
+    app/shop.py, which does not read this."""
+    try:
+        res = exec_sql("SELECT item_code, reserved, available, in_transit FROM v_catalog_reserved "
+                       "WHERE reserved > 0 OR in_transit > 0") or []
+    except Exception:  # noqa: BLE001 -- view not there yet
+        return
+    by = {str(r.get("item_code")): r for r in res}
+    for r in rows:
+        x = by.get(str(r.get("item_code")))
+        if not x:
+            continue
+        r["reserved"] = float(x.get("reserved") or 0)
+        r["in_transit"] = float(x.get("in_transit") or 0)
+        if role != "salesman":
+            r["available"] = float(x.get("available") or 0)
+
+
 def list_catalog(include_inactive: bool = False, role: str = "admin") -> dict:
     """Catalog grouped for the portal page. Admin/member see all price tiers;
     the SALESMAN role gets ONLY the B2B price (standard_rate from the price book) —
@@ -225,6 +247,7 @@ def list_catalog(include_inactive: bool = False, role: str = "admin") -> dict:
         for r in rows:
             r["stock_status"] = stock_status_for(r.pop("stock_qty", None), low)
             r["moq"] = int(r.get("moq") or 1)
+        _attach_reserved(rows, role)
     except Exception as e:  # noqa: BLE001 — shop migration not applied yet → legacy columns only
         log.warning("catalog stock join unavailable (%s) — legacy query", e)
         rows = exec_sql(base + " FROM v_catalog v " + order) or []

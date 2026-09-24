@@ -216,6 +216,9 @@ SUBSCRIPTIONS: dict[str, list] = {
     "po.uploaded": [],       # feed-only
     "invoice.uploaded": [],  # feed-only
     "mrn.uploaded": [_react_margin_negative],
+    # scripts/alias_autofill.py after each load: > 2% of the last 30 days' accessory lines carry
+    # no catalog code, so attributed sales and velocity are short -- tell the owner
+    "data.unmapped_share": [_react_notify_warn],
 }
 
 

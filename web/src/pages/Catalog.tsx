@@ -35,6 +35,11 @@ export interface CatalogItem {
   stock_status?: 'in_stock' | 'low_stock' | 'out_of_stock' | null
   moq?: number | null
   pack_size?: number | null
+  /** staff only (M10): units on open marketplace orders newer than the stock snapshot */
+  reserved?: number | null
+  /** on hand minus reserved — admins and members only */
+  available?: number | null
+  in_transit?: number | null
 }
 
 const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Sold out' }
@@ -48,6 +53,22 @@ function StockPill({ status }: { status: string }) {
     <span className={cn('inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase', STOCK_STYLE[status] || 'bg-secondary text-muted-foreground')}>
       {STOCK_LABEL[status] || status}
     </span>
+  )
+}
+
+/** Staff-only reserved / in-transit line under the stock pill (nothing when there is nothing to say). */
+function ReservedLine({ it }: { it: CatalogItem }) {
+  const reserved = Number(it.reserved ?? 0)
+  const transit = Number(it.in_transit ?? 0)
+  if (reserved <= 0 && transit <= 0) return null
+  const parts: string[] = []
+  if (reserved > 0) parts.push(`Reserved ${reserved.toLocaleString('en-US')}`)
+  if (reserved > 0 && it.available != null) parts.push(`Available ${Number(it.available).toLocaleString('en-US')}`)
+  if (transit > 0) parts.push(`In transit ${transit.toLocaleString('en-US')}`)
+  return (
+    <div className="mt-1 text-[10.5px] font-medium text-amber-700 dark:text-amber-300" title="Open marketplace orders newer than the stock snapshot (staff view)">
+      {parts.join(' · ')}
+    </div>
   )
 }
 
@@ -105,6 +126,7 @@ function ItemCard({ it, isAdmin, onEdit, onView }: {
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{it.brand || 'VFAN'}</span>
         </div>
         {it.stock_status && <div className="mt-1"><StockPill status={it.stock_status} /></div>}
+        <ReservedLine it={it} />
         {it.spec && (
           <button onClick={() => onView(it)}
             className="mt-0.5 line-clamp-2 whitespace-pre-line text-left text-[12px] leading-snug text-muted-foreground hover:text-foreground"
@@ -147,6 +169,7 @@ function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => voi
             <div className="font-display text-lg font-bold">{item.item_code}</div>
             <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.brand || 'VFAN'} · {(item.category || '').toLowerCase()}</div>
             {item.stock_status && <div className="mt-1"><StockPill status={item.stock_status} /></div>}
+            <ReservedLine it={item} />
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={16} /></button>
         </div>

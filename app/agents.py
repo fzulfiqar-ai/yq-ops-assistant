@@ -175,15 +175,15 @@ def inventory_reorder() -> dict:
 # ── Margin Guardian ──────────────────────────────────────────────────────────
 
 def margin_guardian(thin_threshold: float = 5.0) -> dict:
-    """Negative and thin-margin products (Focus COGS basis)."""
-    rows = _q(
-        "SELECT item_name, product_name, category_name, gp_margin_pct, np_margin_pct, "
-        "cogs_bhd, list_price_bhd FROM v_product_margin "
-        f"WHERE gp_margin_pct IS NOT NULL AND gp_margin_pct < {thin_threshold} "
-        "ORDER BY gp_margin_pct ASC LIMIT 40"
-    )
-    negative = [r for r in rows if _f(r, "gp_margin_pct") < 0]
-    thin = [r for r in rows if 0 <= _f(r, "gp_margin_pct") < thin_threshold]
+    """Negative and thin-margin products on the COMPUTED ex-VAT margin (app/margin_truth.py:
+    ex-VAT sales vs Focus COGS; the report's own GP % is not a percentage and never fired)."""
+    from app.margin_truth import thin_margin_rows
+    try:
+        rows = thin_margin_rows(thin_threshold, 40)
+    except Exception:  # noqa: BLE001
+        rows = []
+    negative = [r for r in rows if r.get("is_below_cost")]
+    thin = [r for r in rows if not r.get("is_below_cost") and _f(r, "gp_margin_pct") < thin_threshold]
     return {
         "negative_count": len(negative),
         "thin_count": len(thin),
@@ -556,12 +556,16 @@ def cashflow_forecast() -> dict:
 # ── Anomaly / audit agent ────────────────────────────────────────────────────
 
 def anomaly_scan() -> dict:
-    """Pricing/data anomalies. Below-cost uses Focus's OWN gross-margin % (gp_margin_pct
-    < 0), NOT per-unit price vs cumulative-period COGS (which gave false positives)."""
-    below_cost = _q(
-        "SELECT item_name, gp_margin_pct, net_amount_bhd, cogs_bhd FROM v_product_margin "
-        "WHERE gp_margin_pct < 0 ORDER BY gp_margin_pct ASC LIMIT 20"
-    )
+    """Pricing/data anomalies. Below-cost = the item's EX-VAT sales on the latest profitability
+    report are under its COGS (app/margin_truth.py, computed -- never the report's own GP %,
+    which is not a percentage and could never fire; UK03 20W Charger is the case that proved it:
+    ex-VAT 399.58 vs COGS 483.20)."""
+    from app.margin_truth import below_cost_rows
+    try:
+        below_cost = below_cost_rows(20)
+    except Exception as e:  # noqa: BLE001
+        log.warning("below-cost scan unavailable: %s", e)
+        below_cost = []
     negative_stock = _q(
         "SELECT item_name, warehouse_name, balance_qty FROM v_current_stock "
         "WHERE balance_qty < 0 ORDER BY balance_qty ASC LIMIT 20"
@@ -652,10 +656,12 @@ def procurement() -> dict:
 def fraud_scan() -> dict:
     """Transaction-integrity signals: products SOLD below cost, negative (phantom) stock,
     and items sold at a wide price spread (possible unauthorised discounting)."""
-    below_cost = _q(
-        "SELECT item_name, gp_margin_pct, net_amount_bhd FROM v_product_margin "
-        "WHERE gp_margin_pct < 0 ORDER BY gp_margin_pct ASC LIMIT 15"
-    )
+    from app.margin_truth import below_cost_rows
+    try:
+        below_cost = below_cost_rows(15)      # computed ex-VAT margin, see anomaly_scan
+    except Exception as e:  # noqa: BLE001
+        log.warning("below-cost scan unavailable: %s", e)
+        below_cost = []
     neg_stock = _q(
         "SELECT item_name, warehouse_name, balance_qty FROM v_current_stock "
         "WHERE balance_qty < 0 ORDER BY balance_qty ASC LIMIT 15"

@@ -32,7 +32,9 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | View | Canonical (live) definition | Baseline in views.sql |
 |---|---|---|
 | `v_current_stock` | `stock_migration.sql` | **SILENTLY WRONG** — identical columns, different source. Baseline reads the `stock_movements` ledger; canonical reads the `stock_balance` snapshot at `MAX(as_of_date)`. The ledger basis measured **~8.6× overstated** |
-| `v_product_margin` | `stock_migration.sql` | **SILENTLY WRONG** — identical columns. Canonical filters to `report_date = MAX(report_date)`; without it the view sums **every loaded period**, double-counting margin and breaking the verified below-cost figure |
+| `v_product_margin` | `economics_v2_migration.sql` (R2, 24-Sep-2026; before that `selling_prices_void_migration.sql` → `stock_migration.sql`) | **SILENTLY WRONG** — identical first 15 columns. Canonical filters to `report_date = MAX(report_date)`, skips voided price rows and appends the computed ex-VAT margin (`gp_computed_bhd`, `net_ex_vat_bhd`, `gp_ex_vat_bhd`, `margin_ex_vat_pct`, `is_below_cost`, `ex_vat_source`); the baseline sums **every loaded period** and has none of them |
+| `v_product_economics` | `economics_v2_migration.sql` (R2; before that `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no` |
+| `v_catalog_reserved`, `ar_ageing_totals` | `economics_v2_migration.sql` (R2) | not in the baseline — staff reserved-stock view (M10) and Focus's own AR Grand Total per snapshot |
 | `v_sales` | `division_payment_migration.sql` | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway` |
 | `v_receivables` | `receivables_consolidation_migration.sql` | **STALE, different source table** — baseline is ledger-based, canonical reads `ar_ageing`. Lacks the 15 ageing columns; also carries 4 the canonical does *not* have (`last_entry_date`, `salesman`, `last_narration`, `days_outstanding`). Only `account` overlaps cleanly — `outstanding_bhd` changes meaning |
 | `v_low_stock` | `lowstock_unification_migration.sql` | **STALE, diverges both ways** — lacks `sold_90d`, `days_cover`, `suggested_reorder_qty`, `status`; carries `product_name`, `sku_code`, `category_name`, `warehouse_name`, `balance_value_bhd`, `as_of_date` which the canonical drops |
@@ -180,6 +182,30 @@ closing `DO` block raises if a column or a check is missing, or if anything is g
 `python -m tests.test_shop` passed (51/51, the new cases cover the enums and the 3-code cap). Rendering and
 admin contract: `docs/MARKETPLACE.md` § Campaign creative.
 
+
+## R2 (24-Sep-2026, not yet applied): `economics_v2_migration.sql` — costs, margin truth, AR total, reserved stock
+
+Additive and idempotent, with `economics_v2_reverse.sql`. **Rehearsed on production 24-Sep-2026**
+(`python -m scripts.apply_sql scripts/economics_v2_migration.sql --rehearse`: every statement ran, rolled
+back; the reverse rehearsed the same way). Its closing `DO` block asserts, on live data, that
+`gp_computed_bhd = net − COGS` on every costed row, that **UK03 20W Charger (USB + Type-C Port)** is
+`is_below_cost` (ex-VAT 399.580 vs COGS 483.200; the Focus export shows GP +43.40 and "GP Margin %"
+980.03), that every SKU with an MRN cost is costed from the MRN (never the stale 14-Sep extract), that
+reserved stock is never negative, and that nothing is granted to `anon`/`authenticated`.
+
+What it changes: `v_product_economics` (MRN receipt cost first, `purchase_costs` by `effective_date desc,
+id desc` as the fallback; 3 columns appended), `v_product_margin` (6 columns appended, 15 kept),
+`ar_ageing_totals` (Focus's Grand Total per ageing snapshot, written by `scripts/load_supabase.py` from
+`parse_receivables_totals`; 24-Sep: rows 9,078.860 vs Focus 8,633.840 — credits shown as positive), and
+`v_catalog_reserved` (staff only: on-hand / reserved / available / in-transit; reserved = open, un-issued,
+non-test marketplace orders created after the snapshot's end of day in Bahrain — 0 units today).
+
+Code that reads the new columns tolerates their absence (`app/margin_truth.py` computes the same
+figures inline from `net_amount_bhd / 1.1` and `cogs_bhd`; `app/reports.py` and `app/catalog.py` skip the
+reserved view and the totals table until they exist), so the API may deploy before the apply. Replayed
+end to end on the local scratch Postgres (`python -m scripts.local_replay_db --db r2_loader`, then
+`python -m tests.test_r2_loader`): the 240926 drop reloads to the §2 preview numbers exactly and
+`verify_numbers` passes every per-day / per-salesman check to the fils.
 
 ## Backup, restore and the preservation gate (24-Sep-2026)
 

@@ -67,8 +67,10 @@ v_inventory_aging     On-hand stock by idleness
   item_name, current_stock, stock_value, last_sold, days_since_sale
 
 v_product_margin      Profitability per item, latest period (Focus COGS basis)
-  item_name, category_name, net_amount_bhd, cogs_bhd, gross_profit_bhd,
-  gp_margin_pct[below cost if < 0], np_margin_pct
+  item_name, category_name, net_amount_bhd[sales INCL. VAT], cogs_bhd, gross_profit_bhd,
+  gp_margin_pct[NOT a percentage: never use], np_margin_pct
+  Margin = ROUND(100*(net_amount_bhd/1.1 - cogs_bhd)/NULLIF(net_amount_bhd/1.1,0), 2) (ex-VAT vs COGS);
+  below cost = net_amount_bhd/1.1 < cogs_bhd. The report's own GP columns lose the sign on losses.
 
 v_price_list          CURRENT SELLING PRICE per product (the price list — one row per SKU).
   sku_code, item_name, price_bhd[current standard selling price], unit_name, price_book
@@ -162,7 +164,8 @@ RULES:
   split ("this month cash vs credit", "SIM sales in June") aggregate v_sales with the
   month anchor and GROUP BY sale_type / division instead.
 - Exclude free stock from revenue-quality analyses: AND NOT is_giveaway (v_sales).
-- Below cost = v_product_margin WHERE gp_margin_pct < 0. Low stock = v_stock_health
+- Below cost = v_product_margin WHERE net_amount_bhd / 1.1 < cogs_bhd (ex-VAT sales under COGS;
+  gp_margin_pct is not a percentage). Low stock = v_stock_health
   WHERE status IN ('urgent_out_of_stock','low_stock').
 TERMINOLOGY:
 - "price" / "how much" / "selling price" -> v_price_list.price_bhd (current). Always return

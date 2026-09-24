@@ -44,6 +44,7 @@ _TABLE_LABEL = {
     "ar_ageing": "Customer_summary_ageing", "product_profitability": "Product_Profitability_Report",
     "selling_prices": "Price book", "ledger_entries": "Ledger",
     "products": "Item master", "customers": "Customer master",
+    "ar_ageing_totals": "Receivables Focus total",
 }
 
 
@@ -90,6 +91,8 @@ def _briefing(ok: bool, data_date, changes: dict, verify: dict | None, error: st
         lines.append("New SKUs: " + ", ".join(map(str, changes["new_skus"][:8])))
     if changes.get("anomaly"):
         lines.append("Integrity: " + str(changes["anomaly"]))
+    if changes.get("aliases"):
+        lines.append("Aliases: " + str(changes["aliases"]))
     if changes.get("error"):
         lines.append("(change-detect warn: " + str(changes["error"]) + ")")
     return head, "\n".join(lines)
@@ -182,6 +185,16 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
+    # 3d - exact-name aliases for new Focus item strings (insert-only, confidence 1.0) and the
+    #      unmapped-share warning event (> 2% of the last 30 days' accessory lines without a code)
+    alias_res: dict = {}
+    try:
+        from scripts.alias_autofill import autofill, summary_line
+        alias_res = autofill()
+        alias_res["line"] = summary_line(alias_res)
+    except Exception as e:  # noqa: BLE001
+        alias_res = {"error": str(e)[:160], "line": f"alias autofill failed: {str(e)[:120]}"}
+
     # 4 - verify (post-load validation vs the source reports)
     verify: dict | None = None
     try:
@@ -206,6 +219,8 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
         }
     except Exception as e:  # noqa: BLE001
         changes = {"error": str(e)[:160]}
+    changes["aliases"] = alias_res.get("line")
+    changes["unmapped_share"] = (alias_res.get("share") or {}).get("share")
 
     ok = bool(verify and verify.get("ok"))
 
