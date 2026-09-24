@@ -381,7 +381,9 @@ def _():
     assert "res.status >= 500 || res.status === 429" in src, "the last good copy covers 5xx, 429 and the synthetic 504 only"
     assert "ORIGIN_BG_MS = 25000" in src and "ORIGIN_HARD_MS" not in src.split("async function revalidate", 1)[1].split("\n}", 1)[0], "background work fits the ~30 s waitUntil window"
     assert "x-yq-grace-until" in src and "async function mark(" in src, "a soft failure opens a grace window for the visitors behind"
-    assert "x-yq-reps" in src and "async function canonicalRef(" in src, "unknown slugs fold onto the no-ref copy"
+    # 25-Sep-2026: the origin decides who is a rep (the public payload has no referral codes since R3)
+    assert "x-yq-no-rep" in src and "async function recheckSlug(" in src, "unknown slugs fold onto the no-ref copy by verdict"
+    assert "x-yq-reps" not in src and "salesmen" not in src.split("async function store(", 1)[1], "never a rep list from salesmen[]"
     assert "'if-none-match'" in src and "etagMatches(" in src
     assert "'cache-control': 'no-store'" in src and "status: 404" in src
     assert "cache: 'no-store'" in src, "the subrequest bypasses Cloudflare's transparent fetch cache"
