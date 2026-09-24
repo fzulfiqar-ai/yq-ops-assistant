@@ -1,22 +1,36 @@
 // The marketplace on Cloudflare (Workers static assets — what Cloudflare now calls Pages), 20-Sep-2026.
-// No Worker code: the `assets` block serves web/dist-market as-is, so every request is a static-asset
-// request (free and unlimited on the Free plan). `single-page-application` returns index.html with
-// HTTP 200 for any path that is not a file (the same behaviour as the old Vercel rewrite); response
-// headers come from public/_headers, copied into the build root by Vite.
-// Deploy: python -m scripts.deploy_cf market (builds first) or .github/workflows/cf-deploy.yml.
+// The `assets` block serves web/dist-market as-is: every request is a static-asset request (free and
+// unlimited on the Free plan) EXCEPT the three prefixes in run_worker_first, which reach the script in
+// workers/market.js first (release R6, 24-Sep-2026):
+//   /api/*     the same-origin catalog (/api/market[?ref=]) — the Render origin through the Cache API:
+//              fresh 60 s, stale-while-revalidate, the last good copy when the origin is cold or down
+//   /assets/*  a missing chunk is a real 404 (no-store) instead of index.html + "immutable"
+//   /fonts/*   same
+// `single-page-application` still returns index.html with HTTP 200 for any other path that is not a
+// file (the old Vercel rewrite); response headers for static files come from public/_headers, copied
+// into the build root by Vite. The Worker sets its own headers on what it answers itself.
+// Budget: only run_worker_first requests count against Workers Free (100k/day) — see workers/market.js.
+// Deploy: python -m scripts.deploy_cf market (builds first) or .github/workflows/cf-deploy.yml; a
+// release uploads a version and switches traffic with `wrangler versions deploy` (docs/RELEASE.md),
+// so a rollback is the previous version @100%.
 // `routes` with custom_domain attach the hostnames: wrangler creates the DNS records and the
 // certificate in the zone (same account) on deploy.
 {
   "name": "yq-marketplace",
+  "main": "workers/market.js",
   "compatibility_date": "2026-09-18",
   "assets": {
     "directory": "./dist-market",
-    "not_found_handling": "single-page-application"
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/assets/*", "/fonts/*"]
   },
   "routes": [
     { "pattern": "yqmarketplace.com", "custom_domain": true },
     { "pattern": "www.yqmarketplace.com", "custom_domain": true }
   ],
   "workers_dev": true,
-  "observability": { "enabled": false }
+  // Workers Logs (free tier: 200k events/day, 3-day retention): the Worker logs one line per origin
+  // timeout/error and nothing per hit, so the volume is tiny and a cold-origin day is visible.
+  "observability": { "enabled": true }
 }

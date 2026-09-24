@@ -12,14 +12,13 @@
     <meta property="og:description" content="A full team of AI agents working for you." />
     <meta property="og:type" content="website" />
     <link rel="preconnect" href="%VITE_API_URL%" crossorigin />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <!-- A plain stylesheet on purpose: the media="print" onload swap is an inline handler,
-         which the Content-Security-Policy blocks, and the fonts then never load. -->
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
+    <!-- portal-fonts: Inter + Space Grotesk self-hosted from public/fonts (OFL, the fontsource latin
+         variable builds; @font-face in src/index.css). The Google Fonts stylesheet this replaces was
+         render-blocking and its two hosts were the last third parties in the CSP (R6, 24-Sep-2026).
+         The market build swaps this whole block for its own fonts: vite.config.ts marketHtml(). -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/inter-v1.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="/fonts/space-grotesk-v1.woff2" />
+    <!-- /portal-fonts -->
     <title>YQ Bahrain · AI Portal</title>
     <!-- Starts the catalog request for /c/{token} before the app downloads (see the file). -->
     <script src="/catalog-prefetch.js" data-api="%VITE_API_URL%"></script>

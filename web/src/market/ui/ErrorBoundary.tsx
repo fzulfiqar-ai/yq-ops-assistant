@@ -1,11 +1,16 @@
 import { Component, type ReactNode } from 'react'
+import { errorMeta } from '@/lib/errorMeta'
+import { track } from '../lib/events'
+import { routeName } from '../lib/vitals'
 import { S } from '../strings'
 
 interface State {
   error: Error | null
 }
 
-/** Last line of defence for the merchant: a calm card and a reload, in market tokens. */
+/** Last line of defence for the merchant: a calm card and a reload, in market tokens. The error
+ *  itself goes out as a shop_events `error` row (build, class, scrubbed message, route template)
+ *  so a broken release is seen in Shop Analytics before a merchant reports it (R6). */
 export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
   state: State = { error: null }
 
@@ -15,6 +20,11 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
 
   componentDidCatch(error: Error) {
     console.error('[YQ] Unhandled error:', error)
+    try {
+      track('error', { meta: { ...errorMeta('market', error, routeName(window.location.pathname)) } })
+    } catch {
+      /* telemetry never throws */
+    }
   }
 
   render() {

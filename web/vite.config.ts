@@ -90,9 +90,9 @@ const BOOT_HTML = `<div id="yq-boot" aria-hidden="true"><span><i><img src="${BOO
 /**
  * The market build rewrites the shared index.html: its own entry (src/main.market.tsx — one
  * network hop less than main.tsx → MarketApp), its own head (title, OG, manifest, plum theme,
- * viewport-fit for the floating nav, self-hosted font preloads instead of the Google Fonts
- * stylesheet, storage preconnect) and `data-app="market"` on <html> (token scope) and on the
- * prefetch script. `order: 'pre'` so the entry swap happens before Vite resolves the module graph.
+ * viewport-fit for the floating nav, its own self-hosted font preloads in place of the portal's,
+ * storage preconnect) and `data-app="market"` on <html> (token scope) and on the prefetch script.
+ * `order: 'pre'` so the entry swap happens before Vite resolves the module graph.
  */
 function marketHtml(): Plugin {
   return {
@@ -115,10 +115,9 @@ function marketHtml(): Plugin {
             '<meta name="theme-color" content="#6d28d9" />',
             `<meta name="theme-color" content="${MARKET.theme}" />\n    <meta name="color-scheme" content="light" />\n    <meta name="mobile-web-app-capable" content="yes" />\n    <meta name="robots" content="noindex, nofollow" />\n    <link rel="manifest" href="${MARKET.manifest}" />`,
           )
-          // the two Google Fonts preconnects + the blocking stylesheet → self-hosted, preloaded woff2
-          .replace(/\s*<link rel="preconnect" href="https:\/\/fonts\.googleapis\.com" \/>/, '')
-          .replace(/\s*<link rel="preconnect" href="https:\/\/fonts\.gstatic\.com" crossorigin \/>/, `\n    <link rel="preconnect" href="${MARKET.imageOrigin}" />`)
-          .replace(/\s*<!-- A plain stylesheet on purpose:[\s\S]*?<link\s+href="https:\/\/fonts\.googleapis\.com[^"]*"\s+rel="stylesheet"\s*\/>/, `\n    ${fontLinks}\n    <link rel="preload" as="image" type="image/webp" href="/yq-logo-160.webp" fetchpriority="high" />`)
+          // the portal's font preloads (index.html <!-- portal-fonts --> block) → the market's own
+          // preloaded woff2, the storage preconnect and the boot-logo preload
+          .replace(/\s*<!-- portal-fonts[\s\S]*?<!-- \/portal-fonts -->/, `\n    <link rel="preconnect" href="${MARKET.imageOrigin}" />\n    ${fontLinks}\n    <link rel="preload" as="image" type="image/webp" href="/yq-logo-160.webp" fetchpriority="high" />`)
           // Vite has already substituted %VITE_API_URL% by the time this runs — match the shape, not the placeholder.
           .replace(/(<script src="\/catalog-prefetch\.js" data-api="[^"]*")/, '$1 data-app="market"')
           // the first painted frame (see BOOT_CSS): night field + logo tile before React exists
@@ -153,11 +152,19 @@ function marketPwa(apiUrl: string) {
     filename: 'sw.js',
     // public/market.webmanifest is linked by marketHtml(); the plugin must not add a second one.
     manifest: false,
-    includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'yq-icon-32.png', 'yq-icon-512.png', 'market.webmanifest', 'fonts/*.woff2'],
+    // Nothing beyond the glob: includeAssets used to list the same files again (duplicate manifest
+    // entries) and pulled in PNGs the market never renders.
+    includeAssets: [],
     workbox: {
-      globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,webmanifest,woff2}'],
-      // never let the worker answer the version file or any API path from cache
-      globIgnores: ['version.json'],
+      // The precache is the offline shell: the chunks, the stylesheet, index.html, the SVGs and the
+      // market's two fonts. NOT the PNGs (R6): the manifest icons, the shortcut icons, the Apple
+      // touch icon and the portal's logo are never rendered by the market — the OS fetches the
+      // manifest icons at install time on its own — yet they were 281 KB of the 1.1 MB precache
+      // every new browser downloaded on the first idle after load.
+      globPatterns: ['**/*.{js,css,html,ico,svg,webp,webmanifest,woff2}'],
+      // never let the worker answer the version file or any API path from cache; the portal's
+      // fonts are copied into every build (shared public/) but the market never loads them
+      globIgnores: ['version.json', 'fonts/inter-*.woff2', 'fonts/space-grotesk-*.woff2'],
       navigateFallback: '/index.html',
       navigateFallbackDenylist: [/^\/public\//, /^\/api\//, /\/version\.json$/],
       cleanupOutdatedCaches: true,
@@ -165,7 +172,16 @@ function marketPwa(apiUrl: string) {
       skipWaiting: false,
       runtimeCaching: [
         {
-          // the catalog only (not quote/order/event): serve stale for a day if the API is asleep
+          // the same-origin edge copy of the catalog (web/workers/market.js, /api/market[?ref=]):
+          // the worker holds the last answer for a day so a merchant offline, or with the whole
+          // edge unreachable, still opens the shelf; 4 s at the network first because the edge
+          // answers a stale copy in well under that and only a cold-origin MISS takes longer
+          urlPattern: /^https?:\/\/[^/]+\/api\/market(\?.*)?$/,
+          handler: 'NetworkFirst',
+          options: { cacheName: 'yq-market-catalog', networkTimeoutSeconds: 4, expiration: { maxEntries: 8, maxAgeSeconds: 86400 } },
+        },
+        {
+          // the API's own copy — the fallback path (no Worker in front) keeps the same protection
           urlPattern: new RegExp(`^${api}/public/market(\\?.*)?$`),
           handler: 'NetworkFirst',
           options: { cacheName: 'yq-market-catalog', networkTimeoutSeconds: 4, expiration: { maxEntries: 8, maxAgeSeconds: 86400 } },

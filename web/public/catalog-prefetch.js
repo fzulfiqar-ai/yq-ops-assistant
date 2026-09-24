@@ -3,7 +3,13 @@
 // lib/shopApi.ts getCatalog() / market/lib/marketApi.ts getMarket() pick up window.__yqCatalog.
 //
 //   portal build   /c/{token}[?ref=]   → /public/catalog/{token}[?ref=]
-//   market build   any page            → /public/market[?ref=]  (data-app="market" on this tag)
+//   market build   any page            → /api/market[?ref=]     (data-app="market" on this tag)
+//                                        the SAME-ORIGIN edge copy (web/workers/market.js: 60 s fresh,
+//                                        stale while it revalidates, the last good copy when the API is
+//                                        cold), falling back to the API's /public/market[?ref=] when the
+//                                        answer is not JSON (no Worker in front: local preview, an old
+//                                        host) or fails. getMarket() matches on the /api/market key and
+//                                        reads `src` (edge-hit / edge-stale / … / api) for the RUM beacon.
 //
 // A separate same-origin file, never an inline <script>: the site's Content-Security-Policy
 // (script-src 'self', web/vercel.json) blocks inline scripts, which silently disabled the
@@ -15,6 +21,7 @@
   var app = el && el.getAttribute('data-app')
   var params = new URLSearchParams(location.search)
   var url = null
+  var direct = null
   if (app === 'market') {
     var ref = (params.get('ref') || '').toLowerCase()
     if (!ref) {
@@ -30,18 +37,31 @@
         } catch (e) { /* ignore */ }
       }
     }
-    url = api + '/public/market' + (ref ? '?ref=' + encodeURIComponent(ref) : '')
+    var qs = ref ? '?ref=' + encodeURIComponent(ref) : ''
+    url = '/api/market' + qs                 // MIRRORS market/lib/marketApi.ts marketPath()
+    direct = api + '/public/market' + qs
   } else {
     var m = location.pathname.match(/^\/c\/([^/]+)\/?$/)
     if (!m) return
     var r = params.get('ref')
     url = api + '/public/catalog/' + m[1] + (r ? '?ref=' + encodeURIComponent(r) : '')
   }
-  var res = fetch(url).then(function (r) {
-    return r.ok ? r.text() : Promise.reject(r.status)
-  })
+  var early = { url: url, res: null, src: 'pre' }
+  function text(r) { return r.ok ? r.text() : Promise.reject(r.status) }
+  function json(r) { return r.ok && (r.headers.get('content-type') || '').indexOf('application/json') >= 0 }
+  var res = direct
+    ? fetch(url).then(function (r) {
+        if (!json(r)) return Promise.reject(r.status)   // index.html: no Worker in front of this host
+        early.src = 'pre-edge-' + String(r.headers.get('x-yq-cache') || 'miss').toLowerCase()
+        return r.text()
+      }).catch(function () {
+        early.src = 'pre-api'
+        return fetch(direct).then(text)
+      })
+    : fetch(url).then(text)
   res.catch(function () {})
-  window.__yqCatalog = { url: url, res: res }
+  early.res = res
+  window.__yqCatalog = early
   if (app !== 'market') return
 
   // The largest paint of the home page is promo slide 1: its uploaded image, or the centre photo of

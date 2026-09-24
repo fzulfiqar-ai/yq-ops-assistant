@@ -610,11 +610,18 @@ def install_campaign(page: Page, campaign: dict) -> None:
     def on_catalog(route: Route) -> None:
         req = route.request
         path = req.url.split("?")[0]
-        if req.method != "GET" or not path.endswith("/public/market"):
+        # the app reads the same-origin edge copy (/api/market, R6) first and the API's
+        # /public/market as the fallback — the synthetic campaign must ride whichever answers
+        if req.method != "GET" or not (path.endswith("/public/market") or path.endswith("/api/market")):
             route.continue_()
             return
         try:
             res = route.fetch()
+            if "application/json" not in (res.headers.get("content-type") or ""):
+                # /api/market with no Worker in front of this host answers index.html; hand it back
+                # untouched so the app falls back to the API, where the campaign is added below
+                route.fulfill(response=res)
+                return
             body = res.json()
         except Exception as exc:  # noqa: BLE001 — a dead API is a run-level failure, reported by the caller
             route.abort()
@@ -623,6 +630,7 @@ def install_campaign(page: Page, campaign: dict) -> None:
         json_route(route, body)
 
     page.route("**/public/market*", on_catalog)
+    page.route("**/api/market*", on_catalog)
 
 
 class Net:

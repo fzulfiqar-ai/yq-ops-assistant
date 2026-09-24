@@ -369,14 +369,14 @@ def _():
     assert "shop_clearance_show_retail" in src
 
 
-@test("payload: thumb_urls carries the 160/320/512 WebP set only when a product photo exists")
+@test("payload: thumb_urls carries the 160/320/512/1024 WebP set only when a product photo exists")
 def _():
     from app.catalog import THUMB_SIZES, thumb_path
     from app.shop import _thumb_urls
-    assert THUMB_SIZES == (160, 320, 512)
+    assert THUMB_SIZES == (160, 320, 512, 1024)     # 1024 = the Lightbox / package view rendition (R6)
     assert _thumb_urls({"item_code": "X01", "product_image_url": None}) is None
     urls = _thumb_urls({"item_code": "X01", "product_image_url": "https://x/items/X01-product-1.jpg"})
-    assert set(urls) == {"160", "320", "512"}, urls
+    assert set(urls) == {"160", "320", "512", "1024"}, urls
     assert all(u.endswith(f"/thumbs/X01-product-{s}.webp") for s, u in urls.items()), urls
     assert thumb_path("X01", "product") == "thumbs/X01-product.jpg"      # legacy 256 JPEG path unchanged
     assert thumb_path("UK 15/A", "package", 320) == "thumbs/UK_15_A-package-320.webp"

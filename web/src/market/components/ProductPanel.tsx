@@ -9,6 +9,7 @@ import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
 import { Lightbox } from './Lightbox'
+import { largePhotoChain, screenPx } from '../lib/photos'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
@@ -161,7 +162,7 @@ export default function ProductPanel({ code }: { code: string }) {
           <div className="relative bg-surface md:overflow-hidden md:rounded-lg md:border md:border-line-2">
             <ProductImage
               key={view}
-              srcs={view === 'package' ? [item.package_image_url, item.product_image_url, item.thumb_url] : undefined}
+              srcs={view === 'package' ? largePhotoChain(item, 'package', phone ? 272 : 416) : undefined}
               item={view === 'product' ? item : undefined}
               alt={`${name} — ${view === 'package' ? S.card.viewPackage : S.card.viewProduct}`}
               sizes={SIZES_HERO}
@@ -181,9 +182,10 @@ export default function ProductPanel({ code }: { code: string }) {
                 start={view === 'package' ? 1 : 0}
                 onClose={() => setZoom(false)}
                 photos={[
-                  { src: item.product_image_url || item.thumb_urls?.['512'] || item.thumb_url || '', label: S.card.viewProduct },
-                  ...(item.package_image_url ? [{ src: item.package_image_url, label: S.card.viewPackage }] : []),
-                ].filter((x) => x.src)}
+                  // the 1024 / 512 WebP rendition first, the multi-MB original only as the last resort
+                  { srcs: largePhotoChain(item, 'product', screenPx()), label: S.card.viewProduct },
+                  ...(item.package_image_url ? [{ srcs: largePhotoChain(item, 'package', screenPx()), label: S.card.viewPackage }] : []),
+                ].filter((x) => x.srcs.length > 0)}
               />
             )}
             <div className="absolute start-3 top-3 flex flex-wrap gap-1.5">

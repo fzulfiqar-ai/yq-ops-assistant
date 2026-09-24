@@ -2,6 +2,29 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Self-hosted portal fonts (R6, 24-Sep-2026): the latin variable builds of Inter and Space Grotesk
+   from @fontsource-variable/inter and @fontsource-variable/space-grotesk 5.3.0 (OFL — the licences
+   sit beside the files in public/fonts), the same source the marketplace's Instrument Sans came from.
+   Preloaded from index.html; they replace the render-blocking Google Fonts stylesheet. The
+   unicode-range is Google's latin subset, so a non-Latin glyph falls to the system font instead of
+   downloading nothing. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-v1.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/space-grotesk-v1.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @layer base {
   :root {
     --background: 250 40% 99%;

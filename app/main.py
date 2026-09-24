@@ -105,7 +105,12 @@ async def _warm_embeddings() -> None:
 @app.get("/health")
 @limiter.limit(settings.rate_limit)
 async def health(request: Request) -> dict:
-    return {"status": "ok", "service": "yq-ops-assistant", "version": app.version}
+    """Liveness plus `commit`: the deployed SHA (Render exports RENDER_GIT_COMMIT into the
+    container), so the release smoke test can prove WHICH build answers (docs/RELEASE.md).
+    Kept tiny — the keep-warm cron hits this every 10 minutes."""
+    import os
+    commit = (os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or "")[:12]
+    return {"status": "ok", "service": "yq-ops-assistant", "version": app.version, "commit": commit}
 
 
 class AskRequest(BaseModel):
@@ -205,6 +210,7 @@ async def assistant_upload(file: UploadFile = File(...),
                            user: CurrentUser = Depends(require_feature("AI Assistant"))) -> dict:
     """Upload a PDF/Excel/CSV for the chat to read (kept 24h, visible only to you)."""
     from fastapi import HTTPException
+    from starlette.concurrency import run_in_threadpool
     from app.chat_extras import extract_text, store_doc
     from app.uploads import UploadTooLarge, read_capped
     try:
@@ -212,7 +218,11 @@ async def assistant_upload(file: UploadFile = File(...),
     except UploadTooLarge as e:
         raise HTTPException(status_code=413, detail=str(e))
     name = file.filename or "document"
-    text = extract_text(data, name)
+    # Every upload route (R6): the parse / encode / storage work after read_capped runs in the
+    # threadpool. These handlers are `async def`, so anything synchronous here blocks the ONE
+    # event loop — the ea49ea6 outage was exactly this shape (a sync refresh, Render's 5 s
+    # health check timing out, the container killed mid-upload).
+    text = await run_in_threadpool(extract_text, data, name)
     if not text.strip():
         raise HTTPException(status_code=400,
                             detail="Couldn't read any text from that file (PDF, Excel, CSV or TXT).")
@@ -448,8 +458,9 @@ async def field_note_photo(file: UploadFile = File(...),
         return {"error": f"Photo too large ({e})."}
     if not content_matches(file.filename or "", data):
         return {"error": "That file isn't a valid image."}
+    from starlette.concurrency import run_in_threadpool
     from app.field_notes import upload_photo
-    path = upload_photo(data, ext, PHOTO_TYPES[ext])
+    path = await run_in_threadpool(upload_photo, data, ext, PHOTO_TYPES[ext])
     if not path:
         return {"error": "Could not save the photo — try again."}
     log_event(user.email, "field_note_photo", detail={"ext": ext, "bytes": len(data)})
@@ -474,18 +485,19 @@ async def po_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(r
         return {"error": f"File too large ({e})."}
     if not content_matches(file.filename or "", data):
         return {"error": "That file isn't a valid PDF."}
+    from starlette.concurrency import run_in_threadpool
     try:
         from scripts.ingest_po import load_pos, parse_po_bytes
-        rows = parse_po_bytes(data, file.filename or "upload.pdf")
+        rows = await run_in_threadpool(parse_po_bytes, data, file.filename or "upload.pdf")
     except Exception as e:  # noqa: BLE001
         return {"error": f"Could not read the PDF ({type(e).__name__})."}
     if not rows:
         return {"error": "No PO lines found — is this a Focus Purchase Order PDF? "
                          "(Proforma / packing list: open the order and use 'Attach file'.)"}
-    load_pos(rows)
+    await run_in_threadpool(load_pos, rows)
     try:  # keep the PO PDF in the order's file vault
         from app.orders import store_order_file
-        store_order_file(rows[0]["po_no"], "po", data, ".pdf", "application/pdf", admin.email)
+        await run_in_threadpool(store_order_file, rows[0]["po_no"], "po", data, ".pdf", "application/pdf", admin.email)
     except Exception:  # noqa: BLE001
         pass
     value_bhd = round(sum((r.get("gross_bhd") or 0) for r in rows), 3)
@@ -517,18 +529,19 @@ async def mrn_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(
         return {"error": f"File too large ({e})."}
     if not data.lstrip()[:1] == b"<":
         return {"error": "That file isn't valid XML."}
+    from starlette.concurrency import run_in_threadpool
     try:
         from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
-        rows = parse_mrn_bytes(data)
+        rows = await run_in_threadpool(parse_mrn_bytes, data)
     except Exception as e:  # noqa: BLE001
         return {"error": f"Could not read the MRN XML ({type(e).__name__})."}
     if not rows:
         return {"error": "No received lines found — is this a Focus MRN export?"}
-    summary = load_mrn_costs(rows)
+    summary = await run_in_threadpool(load_mrn_costs, rows)
     try:  # keep the MRN XML in the order's file vault
         from app.orders import store_order_file
         for doc in summary.get("docs", []):
-            store_order_file(doc, "mrn", data, ".xml", "application/xml", admin.email)
+            await run_in_threadpool(store_order_file, doc, "mrn", data, ".xml", "application/xml", admin.email)
     except Exception:  # noqa: BLE001
         pass
     try:  # costs changed → flush cached query results so margins refresh
@@ -605,8 +618,9 @@ async def order_photo(po_no: str, file: UploadFile = File(...),
         return {"error": f"Photo too large ({e})."}
     if not content_matches(file.filename or "", data):
         return {"error": "That file isn't a valid image."}
+    from starlette.concurrency import run_in_threadpool
     from app.orders import store_order_file
-    path = store_order_file(po_no, "photo", data, ext, PHOTO_TYPES[ext], user.email)
+    path = await run_in_threadpool(store_order_file, po_no, "photo", data, ext, PHOTO_TYPES[ext], user.email)
     if not path:
         return {"error": "Could not save the photo — try again."}
     log_event(user.email, "order_photo", detail={"po_no": po_no})
@@ -664,18 +678,19 @@ async def order_file(po_no: str, file: UploadFile = File(...),
         log_event(user.email, "cost_load_failed", detail={"po_no": po_no, "source": source, "error": err})
         return f"stored only: loading costs failed ({err[:120]})"
 
+    from starlette.concurrency import run_in_threadpool
     if loads_costs and user.role != "admin":
         skipped = "stored only: loading costs needs an admin"
     elif ext == ".xml":
-        ok, why = _mrn_cost_gate(data, po_no)
+        ok, why = await run_in_threadpool(_mrn_cost_gate, data, po_no)
         if not ok:
             skipped = f"stored only: {why}"
         else:
             try:
                 from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
-                rows = parse_mrn_bytes(data)
+                rows = await run_in_threadpool(parse_mrn_bytes, data)
                 if rows:
-                    summary = load_mrn_costs(rows)
+                    summary = await run_in_threadpool(load_mrn_costs, rows)
                     processed = "landed cost loaded"
                     log_event(user.email, "cost_load", detail={"po_no": po_no, "source": "mrn", "file": name,
                                                                **{k: summary.get(k) for k in
@@ -696,9 +711,9 @@ async def order_file(po_no: str, file: UploadFile = File(...),
     elif kind == "invoice":
         try:
             from app.invoices import load_supplier_prices, parse_invoice
-            rows = parse_invoice(data, name)
+            rows = await run_in_threadpool(parse_invoice, data, name)
             if rows:
-                summary = load_supplier_prices(rows)
+                summary = await run_in_threadpool(load_supplier_prices, rows)
                 processed = "supplier prices loaded"
                 log_event(user.email, "cost_load", detail={"po_no": po_no, "source": "invoice", "file": name,
                                                            "invoice": summary.get("invoice"),
@@ -719,7 +734,7 @@ async def order_file(po_no: str, file: UploadFile = File(...),
 
     ct = mimetypes.guess_type(name)[0] or "application/octet-stream"
     from app.orders import store_order_file
-    path = store_order_file(po_no, kind, data, ext, ct, user.email, filename=name)
+    path = await run_in_threadpool(store_order_file, po_no, kind, data, ext, ct, user.email, filename=name)
     if not path:
         return {"error": "Could not save the file — try again."}
     log_event(user.email, "order_file", detail={"po_no": po_no, "kind": kind, "processed": processed,
@@ -744,18 +759,22 @@ async def attach_loose_doc(file: UploadFile = File(...),
         data = await read_capped(file)
     except UploadTooLarge as e:
         return {"error": f"File too large ({e})."}
+    from starlette.concurrency import run_in_threadpool
     m = _re.search(r"VF\d{6,}", name, _re.I)
     po_no = None
     if m:
         vf = m.group(0)
-        row = (get_client().table("order_files").select("po_no")
-               .ilike("filename", f"%{vf}%").limit(1).execute().data or [None])[0]
+
+        def _match() -> dict | None:
+            return (get_client().table("order_files").select("po_no")
+                    .ilike("filename", f"%{vf}%").limit(1).execute().data or [None])[0]
+        row = await run_in_threadpool(_match)
         po_no = row.get("po_no") if row else None
     if not po_no:
         return {"error": "Couldn't match this to an order — open the order and use 'Attach file'."}
     ct = mimetypes.guess_type(name)[0] or "application/octet-stream"
     from app.orders import store_order_file
-    store_order_file(po_no, "doc", data, ext, ct, user.email, filename=name)
+    await run_in_threadpool(store_order_file, po_no, "doc", data, ext, ct, user.email, filename=name)
     log_event(user.email, "attach_doc", detail={"po_no": po_no, "file": name})
     return {"ok": True, "po_no": po_no}
 
@@ -770,14 +789,15 @@ async def invoice_upload(file: UploadFile = File(...), admin: CurrentUser = Depe
         data = await read_capped(file)
     except UploadTooLarge as e:
         return {"error": f"File too large ({e})."}
+    from starlette.concurrency import run_in_threadpool
     try:
         from app.invoices import load_supplier_prices, parse_invoice
-        rows = parse_invoice(data, file.filename or "invoice")
+        rows = await run_in_threadpool(parse_invoice, data, file.filename or "invoice")
     except Exception as e:  # noqa: BLE001
         return {"error": f"Could not read the invoice ({type(e).__name__})."}
     if not rows:
         return {"error": "No price lines found — is this a VFAN proforma invoice?"}
-    r = load_supplier_prices(rows)
+    r = await run_in_threadpool(load_supplier_prices, rows)
     try:  # supplier RMB estimates feed v_price_tracker → flush cached answers
         from app.ai import flush_cache
         flush_cache()
@@ -850,9 +870,10 @@ async def order_verify(file: UploadFile = File(...),
     except UploadTooLarge as e:
         return {"ok": False, "verdict": "unreadable", "lines": [], "flags": 0,
                 "summary": f"File too large ({e})."}
+    from starlette.concurrency import run_in_threadpool
     try:
         from app.order_verify import verify_order
-        rep = verify_order(data, file.filename or "order.xlsx")
+        rep = await run_in_threadpool(verify_order, data, file.filename or "order.xlsx")
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "verdict": "unreadable", "lines": [], "flags": 0,
                 "summary": f"Could not read the order ({type(e).__name__})."}
@@ -1352,7 +1373,10 @@ async def catalog_image(code: str, kind: str = "product", file: UploadFile = Fil
         raise HTTPException(status_code=413, detail=str(e))
     if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="Please upload an image file.")
-    url = upload_image(code, kind, data, file.content_type or "image/jpeg", by=admin.email)
+    from starlette.concurrency import run_in_threadpool
+    # five WebP encodes (160/320/512/1024 + the legacy JPEG) plus six storage uploads — seconds of
+    # CPU on this container; never on the event loop (R6)
+    url = await run_in_threadpool(upload_image, code, kind, data, file.content_type or "image/jpeg", by=admin.email)
     log_event(admin.email, "catalog.image", detail={"item_code": code, "kind": kind})
     return {"ok": True, "url": url}
 
@@ -1469,8 +1493,9 @@ async def finds_photo(file: UploadFile = File(...),
         return {"error": f"Photo too large ({e})."}
     if not content_matches(file.filename or "", data):
         return {"error": "That file isn't a valid image."}
+    from starlette.concurrency import run_in_threadpool
     from app.product_finds import upload_photo
-    path = upload_photo(data, ext, PHOTO_TYPES[ext])
+    path = await run_in_threadpool(upload_photo, data, ext, PHOTO_TYPES[ext])
     if not path:
         return {"error": "Could not save the photo — try again."}
     return {"image_path": path}
