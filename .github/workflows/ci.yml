@@ -78,6 +78,7 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r3_pipeline
+          python -m tests.test_r2_importer   # R2a batch importer (pure tests; the local-Postgres replay SKIPs here)
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
       # R2c exact money: price_cart / confirm / tier_progress on Decimal end to end — 10,000 random

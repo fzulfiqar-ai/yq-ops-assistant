@@ -22,6 +22,9 @@ sqlglot           # app/sql_validator.py: the /ask allowlist walks a real Postgr
 
 # --- data layer ---
 supabase
+psycopg[binary]   # app/ingest_batch.py: the batch importer's OWN session on DATABASE_URL. PostgREST
+                  # caps every RPC at the authenticator role's 8 s statement_timeout; a batch commit
+                  # needs more, so the preview diff, ingest_commit and ingest_undo never go through it.
 python-dotenv
 requests
 tenacity
