@@ -7,6 +7,9 @@ export const locale: { lang: 'en' | 'ar'; dir: 'ltr' | 'rtl' } = { lang: 'en', d
 
 export const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
+/** Arabic count of "designs" with the noun in the form the number takes (1, 2, 3–10, 11+); Western digits. */
+const arDesigns = (n: number) => (n === 1 ? 'تصميم واحد' : n === 2 ? 'تصميمان' : n >= 3 && n <= 10 ? `${n} تصاميم` : `${n} تصميمًا`)
+
 export const S = {
   brand: 'YQ Marketplace',
   company: 'YQ Bahrain',
@@ -581,6 +584,88 @@ export const S = {
     noRep: 'Place your first order and your YQ representative shows up here.',
     /** the footer column before a representative is known — real delivery terms, not a placeholder */
     deliveryTitle: 'Delivery & ordering',
+  },
+  /**
+   * "Coming soon" (plan §6b): the WEKOME range announced before it lands. EN and AR side by side
+   * (components pick by `locale.lang`); the count and the month are payload data, never literals;
+   * numbers stay in Western digits. WEKOME is presented as the step-up range beside VFAN — never
+   * "sub-premium", and no margin, price or quality claim beyond the supplier specs.
+   */
+  upcoming: {
+    en: {
+      kicker: 'Coming soon',
+      rail: (brand: string) => `Coming soon · ${brand}`,
+      headline: (brand: string) => `${brand} is coming to YQ`,
+      /* the owner's §6b sentence; `kinds` is built from the categories actually on the page (ComingSoonShared.categoryPhrase), never a fixed list */
+      subline: (n: number, when: string, kinds: string) => `Our new step-up range: ${n} designs in ${kinds}, in retail-ready boxes. ${when}.`,
+      /** category → the word the sentence uses; wall and car chargers share "chargers" as the owner's copy does */
+      kinds: { 'Wireless Audio': 'earbuds', 'Wired Earphones': 'earphones', Speakers: 'speakers', 'Data Cables': 'cables', 'Wall Chargers': 'chargers', 'Car Chargers': 'chargers', 'Screen Protectors': 'screen protectors' } as Record<string, string>,
+      kindsFallback: 'accessories',
+      kindsJoin: (parts: string[]) => (parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`),
+      tagline: 'A step up for your shelf.',
+      price: 'Price on arrival',
+      notify: 'Notify me when it lands',
+      notified: 'We will tell you when it lands',
+      ask: 'Ask your rep',
+      askYq: 'Ask YQ',
+      seeAll: 'See the range',
+      photoProduct: 'Product',
+      photoBox: 'Box',
+      variant: 'Variant',
+      variantAny: 'Any',
+      notifyTitle: (code: string) => `Notify me · ${code}`,
+      notifyLine: 'Your representative messages you when it lands. No payment, no commitment.',
+      phone: 'Phone',
+      phoneHint: 'So your representative can reach you',
+      phoneBad: 'Enter an 8-digit Bahrain number, or an international number starting with +.',
+      qty: 'Quantity you have in mind',
+      qtyHint: 'Optional · no commitment',
+      send: 'Notify me',
+      sent: 'We will tell you when it lands',
+      failed: 'Could not save — please try again.',
+      askText: (first: string, brand: string, code: string, name: string, variant: string) => `Hello${first ? ` ${first}` : ''}, I am interested in ${brand} ${code} (${name})${variant ? `, ${variant}` : ''} when it arrives. Can you tell me more?`,
+      empty: 'Nothing announced right now.',
+      emptyHint: 'New lines are announced here before they land.',
+      liveNow: (brand: string) => `${brand} on the shelf now`,
+      browseBrand: (brand: string) => `Browse ${brand}`,
+      designs: (n: number) => plural(n, 'design', 'designs'),
+    },
+    ar: {
+      kicker: 'قريبًا',
+      rail: (brand: string) => `قريبًا · ${brand}`,
+      headline: (brand: string) => (brand === 'WEKOME' ? 'ويكوم قادمة إلى YQ' : `${brand} قادمة إلى YQ`),
+      subline: (n: number, when: string, kinds: string) => `تشكيلتنا الجديدة الأرقى: ${arDesigns(n)} من ${kinds}، في علب جاهزة للعرض. ${when}.`,
+      kinds: { 'Wireless Audio': 'السماعات', 'Wired Earphones': 'السماعات السلكية', Speakers: 'مكبرات الصوت', 'Data Cables': 'الكيابل', 'Wall Chargers': 'الشواحن', 'Car Chargers': 'الشواحن', 'Screen Protectors': 'حمايات الشاشة' } as Record<string, string>,
+      kindsFallback: 'الإكسسوارات',
+      kindsJoin: (parts: string[]) => parts.join(' و'),
+      tagline: 'خطوة أرقى لرفوف محلك',
+      price: 'السعر عند الوصول',
+      notify: 'أخبروني عند الوصول',
+      notified: 'سنخبرك عند الوصول',
+      ask: 'اسأل مندوبك',
+      askYq: 'اسأل YQ',
+      seeAll: 'شاهد التشكيلة',
+      photoProduct: 'المنتج',
+      photoBox: 'العلبة',
+      variant: 'الخيار',
+      variantAny: 'أي خيار',
+      notifyTitle: (code: string) => `أخبروني · ${code}`,
+      notifyLine: 'يراسلك مندوبك عند الوصول. بلا دفع وبلا التزام.',
+      phone: 'الهاتف',
+      phoneHint: 'ليتمكن مندوبك من التواصل معك',
+      phoneBad: 'أدخل رقمًا بحرينيًا من 8 أرقام، أو رقمًا دوليًا يبدأ بـ +.',
+      qty: 'الكمية التي تفكر فيها',
+      qtyHint: 'اختياري · بلا التزام',
+      send: 'أخبروني',
+      sent: 'سنخبرك عند الوصول',
+      failed: 'تعذّر الحفظ — حاول مرة أخرى.',
+      askText: (first: string, brand: string, code: string, name: string, variant: string) => `مرحبًا${first ? ` ${first}` : ''}، أنا مهتم بـ ${brand} ${code} (${name})${variant ? `، ${variant}` : ''} عند وصوله. هل يمكنك إخباري بالمزيد؟`,
+      empty: 'لا يوجد إعلان حاليًا.',
+      emptyHint: 'تُعلن المنتجات الجديدة هنا قبل وصولها.',
+      liveNow: (brand: string) => `${brand} على الرف الآن`,
+      browseBrand: (brand: string) => `تصفّح ${brand}`,
+      designs: (n: number) => arDesigns(n),
+    },
   },
   states: {
     loading: 'Loading the marketplace…',

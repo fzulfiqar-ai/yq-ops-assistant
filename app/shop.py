@@ -633,6 +633,8 @@ _RESERVED_FALLBACK = frozenset({
     "shop", "admin", "assets", "static", "me", "health", "share", "optout", "login", "invite", "catalog",
     "market", "marketplace", "track", "app", "sw.js", "version.json", "manifest.webmanifest", "robots.txt",
     "quick", "fonts", "about", "help", "ask", "saved",
+    # marketplace brand pages (24-Sep-2026, R1b): /brands/{brand}, /wekome and /coming-soon redirect there
+    "brands", "wekome", "coming-soon",
 })
 
 
@@ -3329,6 +3331,10 @@ def list_restock(referral_code: str | None = None) -> list[dict]:
     if referral_code:
         q = q.eq("referral_code", referral_code.lower())
     rows = q.order("created_at", desc=True).limit(500).execute().data or []
+    # "notify me when it lands" for a Coming-soon card (app/upcoming.py) shares this table with
+    # upcoming_id set; those belong to the rep's "Shops interested from your link", not here.
+    # Filtered in Python, not in the query, so this answers before that migration adds the column.
+    rows = [r for r in rows if not r.get("upcoming_id")]
     ctx = context()
     by: dict[str, dict] = {}
     for r in rows:

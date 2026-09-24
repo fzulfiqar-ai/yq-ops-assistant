@@ -25,6 +25,7 @@ const MyYQPage = lazy(() => import('@/market/pages/MyYQPage'))
 const QuickOrderPage = lazy(() => import('@/market/pages/QuickOrderPage'))
 const LegacyRedirect = lazy(() => import('@/market/pages/LegacyRedirect'))
 const AboutPage = lazy(() => import('@/market/pages/AboutPage'))
+const BrandPage = lazy(() => import('@/market/pages/BrandPage'))
 
 /**
  * YQ Marketplace — the merchant front door (built with VITE_APP=market, its own hostname, its own
@@ -34,13 +35,14 @@ const AboutPage = lazy(() => import('@/market/pages/AboutPage'))
  *
  * Routes: / home · /{slug} salesman storefront · /p/{code} product deep link · /t/{category} ·
  * /shop · /search · /quick · /cart · /checkout · /orders · /me · /o/{token} tracking ·
+ * /brands/{brand} (the "Coming soon" range; /wekome and /coming-soon redirect there) ·
  * /c/{token} legacy redirect. A slug is matched LAST and validated against the payload.
  *
  * RESERVED first segments live in four places — here, public/catalog-prefetch.js,
  * app/shop.py (_RESERVED_FALLBACK) and the shop_reserved_slugs table. Keep them equal.
  */
 // eslint-disable-next-line react-refresh/only-export-components
-export const RESERVED = new Set(['search', 'cart', 'checkout', 'orders', 'p', 't', 'o', 'c', 'join', 'shop', 'me', 'quick', 'about', 'help', 'ask', 'saved'])
+export const RESERVED = new Set(['search', 'cart', 'checkout', 'orders', 'p', 't', 'o', 'c', 'join', 'shop', 'me', 'quick', 'about', 'help', 'ask', 'saved', 'brands', 'wekome', 'coming-soon'])
 
 /** Reads ?ref / ?src on any entry URL (shared product links carry them); scrolls to top on page changes (not overlays). */
 function EntryParams() {
@@ -109,6 +111,9 @@ export default function MarketApp() {
                     <Route path="/search" element={<SearchPage />} />
                     <Route path="/quick" element={<QuickOrderPage />} />
                     <Route path="/about" element={<AboutPage />} />
+                    <Route path="/brands/:brand" element={<BrandPage />} />
+                    <Route path="/wekome" element={<Navigate to="/brands/wekome" replace />} />
+                    <Route path="/coming-soon" element={<Navigate to="/brands/wekome" replace />} />
                     <Route path="/cart" element={<CartPage />} />
                     <Route path="/checkout" element={<CheckoutPage />} />
                     <Route path="/orders" element={<MyOrdersPage />} />

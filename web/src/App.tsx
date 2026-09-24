@@ -17,6 +17,7 @@ const Leads = lazy(() => import('@/pages/Leads'))
 const Coaching = lazy(() => import('@/pages/Coaching'))
 const Agents = lazy(() => import('@/pages/Agents'))
 const Catalog = lazy(() => import('@/pages/Catalog'))
+const Upcoming = lazy(() => import('@/pages/Upcoming'))
 const Finds = lazy(() => import('@/pages/Finds'))
 const Inventory = lazy(() => import('@/pages/Inventory'))
 const StockMovement = lazy(() => import('@/pages/StockMovement'))
@@ -73,6 +74,7 @@ export default function App() {
           <Route path="assistant" element={<Gate feature="AI Assistant"><Assistant /></Gate>} />
           <Route path="field-notes" element={<Gate feature="AI Assistant"><FieldNotes /></Gate>} />
           <Route path="catalog" element={<Gate feature="Catalog"><Catalog /></Gate>} />
+          <Route path="upcoming" element={<Gate feature="Catalog"><Upcoming /></Gate>} />
           <Route path="finds" element={<Gate feature="Product Finds"><Finds /></Gate>} />
           <Route path="inventory" element={<Gate feature="Inventory"><Inventory /></Gate>} />
           <Route path="stock" element={<Gate feature="Stock Movement"><StockMovement /></Gate>} />
