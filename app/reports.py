@@ -451,7 +451,32 @@ def inventory() -> dict:
         "stock_qty": float(t.get("q", 0)),
         "by_warehouse": stock_by_warehouse(),
         "recent_receipts": arrivals,
+        "reserved": reserved_stock(),
     }
+
+
+def reserved_stock() -> dict:
+    """Staff-only reserved stock (v_catalog_reserved, M10): units on open marketplace orders newer
+    than the stock snapshot, and units on order with vendors. {"available": False} before the
+    migration; merchants never see this (app/shop.py reads on-hand only)."""
+    try:
+        rows = exec_sql(
+            "SELECT item_code, on_hand, reserved, available, in_transit, open_orders, stock_as_of::text AS stock_as_of "
+            "FROM v_catalog_reserved WHERE reserved > 0 OR in_transit > 0 "
+            "ORDER BY reserved DESC, in_transit DESC, item_code LIMIT 100"
+        ) or []
+        tot = (exec_sql(
+            "SELECT COALESCE(SUM(reserved),0) AS r, COALESCE(SUM(in_transit),0) AS t, "
+            "COUNT(*) FILTER (WHERE reserved > 0) AS n, COALESCE(SUM(open_orders),0) AS o, "
+            "MAX(stock_as_of)::text AS as_of FROM v_catalog_reserved LIMIT 1"
+        ) or [{}])[0]
+    except Exception:  # noqa: BLE001 -- view not there yet
+        return {"available": False, "rows": [], "units": 0, "in_transit": 0, "items": 0, "stock_as_of": None}
+    return {"available": True, "rows": rows, "units": float(tot.get("r") or 0),
+            "in_transit": float(tot.get("t") or 0), "items": int(tot.get("n") or 0),
+            "stock_as_of": tot.get("as_of"),
+            "rule": "open marketplace orders (new / confirmed, not issued, not test) created after the "
+                    "snapshot's end of day in Bahrain; in transit = procurement orders raised, not received"}
 
 
 def sales() -> dict:
@@ -478,23 +503,47 @@ def sales() -> dict:
 
 
 def margins() -> dict:
-    rows = exec_sql(
-        "SELECT item_name, category_name, gp_margin_pct, np_margin_pct, gross_profit_bhd, "
-        "net_amount_bhd, cogs_bhd FROM v_product_margin WHERE gp_margin_pct IS NOT NULL "
-        "ORDER BY gp_margin_pct ASC LIMIT 200"
-    )
-    neg = [r for r in rows if (r.get("gp_margin_pct") or 0) < 0]
-    tt = exec_sql(
-        "SELECT COALESCE(SUM(net_amount_bhd),0) AS net, COALESCE(SUM(gross_profit_bhd),0) AS gp, "
-        "COALESCE(SUM(cogs_bhd),0) AS cogs FROM v_product_margin LIMIT 1"
-    )
-    t = (tt or [{}])[0]
-    net, gp = float(t.get("net", 0)), float(t.get("gp", 0))
+    """Profitability on the COMPUTED margin (app/margin_truth.py): ex-VAT sales vs Focus COGS.
+    The report's own GP % is not a percentage and its GP loses the sign on loss items, so the
+    Margins page and 'Selling below cost' tile used to be quietly wrong. `basis` says whether the
+    figures came from the migrated view ('view') or were computed inline ('inline')."""
+    from app.margin_truth import margin_rows, margin_totals
+    rows, basis = margin_rows(limit=200)
+    # The totals are one SUM over the whole view, never over the (limited, margin-ascending) rows:
+    # once the report passes the row cap the best margins would be the ones cut off.
+    tot, _ = margin_totals()
+    net, net_ex = round(tot["net"], 3), round(tot["net_ex"], 3)
+    gp_ex, gp_rep = round(tot["gp_ex"], 3), round(tot["gp_rep"], 3)
     return {
-        "rows": rows, "count": len(rows), "negative_count": len(neg),
-        "total_net_bhd": net, "total_gp_bhd": gp,
-        "gp_pct": (gp / net * 100) if net else 0.0,
+        "rows": rows, "count": tot["n"], "negative_count": tot["below"],
+        "total_net_bhd": net, "total_net_ex_vat_bhd": net_ex,
+        "total_gp_bhd": gp_ex, "total_gp_report_basis_bhd": gp_rep,
+        "gp_pct": (gp_ex / net_ex * 100) if net_ex else 0.0,
+        "basis": basis,
     }
+
+
+def _focus_ar_total() -> dict | None:
+    """Focus's own Grand Total for the ageing snapshot the page shows (ar_ageing_totals, R2), or
+    None before economics_v2_migration.sql / when the snapshot has no stored total.
+
+    The snapshot date is anchored on v_receivables (the view the rows above come from), never on
+    the ar_ageing table: exec_sql runs as yq_readonly, which is granted the views and not
+    ar_ageing, so `(SELECT MAX(as_of_date) FROM ar_ageing)` raised 'permission denied' on
+    production and the except below hid it -- focus_total stayed null forever (R2 review)."""
+    try:
+        r = exec_sql(
+            "SELECT as_of_date::text AS as_of_date, focus_total_bhd, focus_over90_bhd, rows_total_bhd "
+            "FROM ar_ageing_totals WHERE as_of_date = (SELECT MAX(as_of_date) FROM v_receivables) LIMIT 1"
+        )
+    except Exception:  # noqa: BLE001 -- table not there yet
+        return None
+    if not r:
+        return None
+    t = r[0]
+    return {"as_of_date": t.get("as_of_date"), "focus_total_bhd": float(t.get("focus_total_bhd") or 0),
+            "focus_over90_bhd": float(t.get("focus_over90_bhd") or 0),
+            "rows_total_bhd": float(t.get("rows_total_bhd") or 0)}
 
 
 def receivables() -> dict:
@@ -508,9 +557,18 @@ def receivables() -> dict:
     buckets = {k: sum(float(r.get(k) or 0) for r in rows) for k in
                ("b_0_30", "b_31_60", "b_61_90", "b_91_120", "b_121_150", "b_151_180", "b_181_210", "b_over_210")}
     overdue = [r for r in rows if (r.get("overdue_bhd") or 0) > 0]
+    # Focus's Grand Total beside the row sum. The export shows every balance positive, so customer
+    # credits load as money owed and the rows overstate the book (24-Sep-2026: +445.020). Both are
+    # shown, the gap is flagged, no sign is guessed (R2, plan 5b).
+    focus = _focus_ar_total()
+    gap = round(total - focus["focus_total_bhd"], 3) if focus else None
     return {
         "rows": rows, "count": len(rows), "total": total, "over_90": over90,
         "overdue_count": len(overdue), "buckets": buckets,
+        "focus_total": focus["focus_total_bhd"] if focus else None,
+        "focus_over_90": focus["focus_over90_bhd"] if focus else None,
+        "focus_as_of": focus["as_of_date"] if focus else None,
+        "focus_gap": gap,
     }
 
 

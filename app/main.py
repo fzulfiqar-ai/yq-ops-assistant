@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import Depends, FastAPI, File, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
@@ -524,7 +524,10 @@ async def mrn_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(
         return {"error": f"Could not read the MRN XML ({type(e).__name__})."}
     if not rows:
         return {"error": "No received lines found — is this a Focus MRN export?"}
-    summary = load_mrn_costs(rows)
+    # synchronous PostgREST calls (now a ledger lookup per receipt too): off the one event loop,
+    # as /ingest does, so /health keeps answering and Render does not kill the container
+    from starlette.concurrency import run_in_threadpool
+    summary = await run_in_threadpool(load_mrn_costs, rows)
     try:  # keep the MRN XML in the order's file vault
         from app.orders import store_order_file
         for doc in summary.get("docs", []):
@@ -672,10 +675,12 @@ async def order_file(po_no: str, file: UploadFile = File(...),
             skipped = f"stored only: {why}"
         else:
             try:
+                from starlette.concurrency import run_in_threadpool
+
                 from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
                 rows = parse_mrn_bytes(data)
                 if rows:
-                    summary = load_mrn_costs(rows)
+                    summary = await run_in_threadpool(load_mrn_costs, rows)   # off the event loop
                     processed = "landed cost loaded"
                     log_event(user.email, "cost_load", detail={"po_no": po_no, "source": "mrn", "file": name,
                                                                **{k: summary.get(k) for k in
@@ -1829,9 +1834,31 @@ def ingest_purge(body: PurgeRequest, admin: CurrentUser = Depends(require_admin)
     return {"ok": True, "deleted": n, "report": body.report}
 
 
+LOADER_MARKERS = ("REPLACE_OK", "PARTIAL_OK")
+
+
+def _write_markers(staging, replace_ok: bool, partial_ok: bool) -> list[str]:
+    """The loader's two override markers (scripts/load_supabase.py: REPLACE_OK lets a span replace
+    prune the invoices the guards would keep, PARTIAL_OK accepts a stock snapshot narrower than
+    the previous one), written into the staging folder when the admin ticked them on the upload.
+    /ingest deletes every file it does not recognise as a Focus report and refuses non-workbook
+    suffixes, so a marker could never reach the loader from the portal before -- the FAIL note
+    told the owner to add a file the page would throw away. Each marker is audited by the caller.
+    Returns the names written."""
+    from pathlib import Path
+    out: list[str] = []
+    for flag, name in zip((replace_ok, partial_ok), LOADER_MARKERS):
+        if flag:
+            (Path(staging) / name).write_bytes(b"")
+            out.append(name)
+    return out
+
+
 @app.post("/ingest")
 async def ingest_file(
     files: list[UploadFile] = File(...),
+    replace_ok: bool = Form(False),
+    partial_ok: bool = Form(False),
     user: CurrentUser = Depends(require_admin),
 ) -> dict:
     """Upload one or more Focus exports from the dashboard → one verified refresh + briefing.
@@ -1839,7 +1866,9 @@ async def ingest_file(
     Each upload is staged FRESH (Focus export filenames vary per export, so a persistent folder
     would pile up old reports); data/clean is cleared too so a partial upload never reloads a stale
     table. Upload the full daily set together for a complete refresh; upload a subset to refresh
-    just those reports (the rest keep their last-known data in Supabase)."""
+    just those reports (the rest keep their last-known data in Supabase). `replace_ok` /
+    `partial_ok` (admin, audited) write the loader's REPLACE_OK / PARTIAL_OK markers into the
+    staging folder -- see _write_markers."""
     import re
     import shutil
     from pathlib import Path
@@ -1894,6 +1923,9 @@ async def ingest_file(
         log_event(user.email, "ingest", detail={"recognised": 0, "ignored": [i["file"] for i in ignored]})
         return {"files": saved, "recognised": [], "ignored": ignored, "ok": False,
                 "error": "No recognised Focus reports in the upload — nothing was loaded."}
+    markers = _write_markers(staging, replace_ok, partial_ok)
+    if markers:
+        log_event(user.email, "ingest_markers", detail={"markers": markers, "files": [r["file"] for r in recognised]})
 
     # Verified refresh engine: ingest (de-dup by type) -> load -> flush cache -> verify ->
     # what-changed -> briefing -> ingest_runs.
@@ -1911,7 +1943,7 @@ async def ingest_file(
     res = await run_in_threadpool(refresh, folder=str(staging), send=True)
     log_event(user.email, "ingest", detail={
         "recognised": [r["report"] for r in recognised],
-        "ignored": [i["file"] for i in ignored], "ok": res.get("ok"),
+        "ignored": [i["file"] for i in ignored], "ok": res.get("ok"), "markers": markers,
     })
     try:
         from app.reports import coverage
@@ -1934,6 +1966,7 @@ async def ingest_file(
         "loaded": res.get("loaded") or {},
         "coverage": cov,
         "uploaded_by": user.email,
+        "markers": markers,
     }
 
 

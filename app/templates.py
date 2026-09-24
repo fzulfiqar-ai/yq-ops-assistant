@@ -174,11 +174,27 @@ TEMPLATES: list[dict] = [
             r"(items?|products?) (with )?negative", r"(items?|products?) below zero",
         ),
         "label": "Negative-margin products",
+        # Two forms of one question. `sql_view` reads the view's own computed columns
+        # (economics_v2_migration.sql: is_below_cost / margin_ex_vat_pct, whose ex-VAT net is the
+        # day book's Taxable total for most items) -- the SAME basis the Margins page and the agents
+        # use, so an item near break-even is flagged everywhere or nowhere. `sql` is the inline
+        # form (ex-VAT net = net / 1.1, the v_sales rule) that works on the view before the
+        # migration; match() picks by probing the view, and app.ai retries with the other form
+        # when the chosen one raises. Focus's own gp_margin_pct is not a percentage and never went
+        # negative -- this template answered "none" for a year.
+        "sql_view": (
+            "SELECT item_name, net_ex_vat_bhd, cogs_bhd, gp_ex_vat_bhd, margin_ex_vat_pct, "
+            "ex_vat_source, report_date FROM v_product_margin WHERE is_below_cost "
+            "ORDER BY gp_ex_vat_bhd ASC LIMIT 50"
+        ),
         "sql": (
-            "SELECT item_name, gp_margin_pct, gross_profit_bhd, "
-            "net_profit_bhd, np_margin_pct, report_date "
-            "FROM v_product_margin WHERE gp_margin_pct < 0 "
-            "ORDER BY gp_margin_pct ASC LIMIT 50"
+            "SELECT item_name, "
+            "ROUND((net_amount_bhd / 1.1)::numeric, 3) AS net_ex_vat_bhd, cogs_bhd, "
+            "ROUND((net_amount_bhd / 1.1 - cogs_bhd)::numeric, 3) AS gp_ex_vat_bhd, "
+            "ROUND((100.0 * (net_amount_bhd / 1.1 - cogs_bhd) / NULLIF(net_amount_bhd / 1.1, 0))::numeric, 2) "
+            "AS margin_ex_vat_pct, report_date "
+            "FROM v_product_margin WHERE cogs_bhd IS NOT NULL AND net_amount_bhd / 1.1 < cogs_bhd "
+            "ORDER BY (net_amount_bhd / 1.1 - cogs_bhd) ASC LIMIT 50"
         ),
     },
     {
@@ -188,10 +204,20 @@ TEMPLATES: list[dict] = [
             r"gross profit (by product|summary|report)",
         ),
         "label": "Product margins",
+        "sql_view": (
+            "SELECT item_name, margin_ex_vat_pct, net_ex_vat_bhd, cogs_bhd, gp_ex_vat_bhd, "
+            "ex_vat_source, report_date FROM v_product_margin "
+            "WHERE cogs_bhd IS NOT NULL AND net_ex_vat_bhd > 0 "
+            "ORDER BY margin_ex_vat_pct DESC LIMIT 50"
+        ),
         "sql": (
-            "SELECT item_name, gp_margin_pct, gross_profit_bhd, "
-            "net_profit_bhd, np_margin_pct, report_date "
-            "FROM v_product_margin ORDER BY gp_margin_pct DESC LIMIT 50"
+            "SELECT item_name, "
+            "ROUND((100.0 * (net_amount_bhd / 1.1 - cogs_bhd) / NULLIF(net_amount_bhd / 1.1, 0))::numeric, 2) "
+            "AS margin_ex_vat_pct, "
+            "ROUND((net_amount_bhd / 1.1)::numeric, 3) AS net_ex_vat_bhd, cogs_bhd, "
+            "ROUND((net_amount_bhd / 1.1 - cogs_bhd)::numeric, 3) AS gp_ex_vat_bhd, report_date "
+            "FROM v_product_margin WHERE cogs_bhd IS NOT NULL AND net_amount_bhd > 0 "
+            "ORDER BY margin_ex_vat_pct DESC LIMIT 50"
         ),
     },
     # ── Receivables ───────────────────────────────────────────────────────────
@@ -244,12 +270,39 @@ _SKU_CODE = re.compile(r"\b[A-Z]{1,4}\s?\d{1,4}[A-Z]{0,3}\b")
 _ITEM_LOOKUP = re.compile(r"\b(margin|price|cost|profit|sell|rate)\b[\w\s]{0,15}\b(on|of|for|for the)\b", re.I)
 
 
-def match(question: str) -> tuple[str, str] | None:
-    """Return (label, sql) if the question matches a deterministic template, else None."""
+def _view_ok() -> bool:
+    """Does v_product_margin carry the computed margin columns? Probed and cached by
+    app.margin_truth; False (the inline form) when there is no database to ask."""
+    try:
+        from app.margin_truth import view_computes_margin
+        return view_computes_margin()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def match(question: str, view_ok: bool | None = None) -> tuple[str, str] | None:
+    """Return (label, sql) if the question matches a deterministic template, else None.
+    A template with two forms returns `sql_view` when the migrated view is available (`view_ok`,
+    probed when None) and the inline `sql` otherwise."""
     # product-specific question -> bypass templates so the LLM answers precisely (price/margin/cost)
     if _SKU_CODE.search(question) or _ITEM_LOOKUP.search(question):
         return None
     for t in TEMPLATES:
         if t["pattern"].search(question):
-            return t["label"], t["sql"]
+            sql = t["sql"]
+            if t.get("sql_view") and (view_ok if view_ok is not None else _view_ok()):
+                sql = t["sql_view"]
+            return t["label"], sql
+    return None
+
+
+def alternate_sql(label: str, sql: str) -> str | None:
+    """The other form of a two-form template (view <-> inline), for one retry when the form that
+    was chosen raised (the view reverted, or the probe was stale). None for one-form templates."""
+    for t in TEMPLATES:
+        if t["label"] == label and t.get("sql_view"):
+            if sql == t["sql_view"]:
+                return t["sql"]
+            if sql == t["sql"]:
+                return t["sql_view"]
     return None

@@ -29,6 +29,88 @@ OUT_DIR = ROOT / "data" / "clean"
 JOIN_MIN = 0.80
 TOTAL_MARKERS = ("sub total", "grand total", "total", "opening balance", "closing balance")
 
+# ── Header contract per report kind (R2, 24-Sep-2026) ────────────────────────
+# Every parser below reads cells by POSITION. Focus has never moved a column, but the day it does
+# (a renamed label, an inserted column, a different export layout) positional parsing would load
+# wrong numbers into the wrong columns without a single error. check_header() finds the header row
+# by its labels and refuses to parse when the labels are not exactly these, in this order (extra
+# trailing columns are allowed: the profitability report carries three 'Base Link doc. number'
+# columns and the ageing report ~45 repeats after the Base block, none of which is read).
+# Labels captured from the 14-Sep, 21-Sep and 24-Sep-2026 exports (all identical).
+EXPECTED_HEADERS: dict[str, list[str]] = {
+    "orders": ["Date", "Invoice", "Customer", "Gross", "Salesman", "Payment Mode", "Sales Account Name"],
+    "order_lines": ["Date", "Voucher", "Customer Account", "Item", "Quantity", "Rate", "Gross", "Discount",
+                    "Taxable", "VAT Amount", "Total Amount", "Narration", "Warehouse Name"],
+    "stock_movements": ["Date", "Voucher", "Received Quantity", "Rate", "Issued Quantity", "Rate",
+                        "Balance Quantity", "Value", "Value", "Value", "Avg Rate", "Warehouse Name",
+                        "To Warehouse Name", "Narration", "Voucher name"],
+    "ledger_entries": ["Date", "Voucher", "Account", "Debit", "Credit", "Balance", "Currency", "Payment Mode",
+                       "Salesman", "Narration"],
+    "product_profitability": ["Particulars", "Gross", "Discount %", "Net amount", "COGS", "Gross Profit",
+                              "GP Margin %", "Misc Charges", "Net Profit", "NP Margin %"],
+    "stock_balance": ["Particulars", "Net Quantity", "Selling Rate", "Total Value"],
+    "receivables": ["Account", "Balance Amount", "Ledger Balance Amount", "On Account Amount", "Unadjusted Amount",
+                    "Net Amount", "0-30 Days", "31-60 Days", "61-90 Days", "91-120 Days", "121-150 Days",
+                    "151-180 Days", "181-210 Days", "> 210 Days", "Total amount"],
+    "selling_prices": ["Item Name", "Item Code", "Customer Name", "Customer Code", "Warehouse Name", "Warehouse Code",
+                       "Currency", "Start date", "End date", "MinQty", "MaxQty", "Unit Name", "Rate",
+                       *[f"Val {n}" for n in range(1, 14)], "Status", "Narration"],
+}
+HEADER_SCAN_ROWS = 12          # the title block is 5 rows; a header past row 12 is not a Focus export
+
+
+class HeaderMismatch(ValueError):
+    """The report's header row is not the one the parser was written for. Loading positionally
+    would put numbers in the wrong columns, so the load stops here with the diff spelled out."""
+
+
+def _norm_label(v) -> str:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    return " ".join(str(v).split()).strip().lower()
+
+
+def header_row_index(grid, kind: str, scan_rows: int = HEADER_SCAN_ROWS) -> int | None:
+    """Pure: the index of the row whose leading cells are exactly EXPECTED_HEADERS[kind], or None."""
+    want = [_norm_label(x) for x in EXPECTED_HEADERS[kind]]
+    for i in range(min(scan_rows, len(grid))):
+        cells = [_norm_label(c) for c in list(grid.iloc[i])]
+        if len(cells) >= len(want) and cells[: len(want)] == want:
+            return i
+    return None
+
+
+def check_header(grid, kind: str, scan_rows: int = HEADER_SCAN_ROWS) -> int:
+    """Locate the header row of a `kind` export by its labels; raise HeaderMismatch on any change.
+
+    Returns the header row index (data starts on the next row). The error names the report kind,
+    the expected labels and the closest row found (the one sharing the most labels), position by
+    position, so whoever reads the log can see exactly which column Focus renamed or moved."""
+    if kind not in EXPECTED_HEADERS:
+        raise HeaderMismatch(f"no header contract for report kind '{kind}'")
+    idx = header_row_index(grid, kind, scan_rows)
+    if idx is not None:
+        return idx
+    want = EXPECTED_HEADERS[kind]
+    wantn = [_norm_label(x) for x in want]
+    best_i, best_hits, best_cells = None, -1, []
+    for i in range(min(scan_rows, len(grid))):
+        cells = [_norm_label(c) for c in list(grid.iloc[i])]
+        hits = sum(1 for j, w in enumerate(wantn) if j < len(cells) and cells[j] == w)
+        if hits > best_hits:
+            best_i, best_hits, best_cells = i, hits, cells
+    diffs = []
+    for j, w in enumerate(want):
+        got = best_cells[j] if j < len(best_cells) else ""
+        if _norm_label(w) != got:
+            diffs.append(f"col {j}: expected '{w}', found '{got}'")
+    raise HeaderMismatch(
+        f"{kind}: header row not found in the first {scan_rows} rows. Expected {want}. "
+        f"Closest row {best_i} matched {max(best_hits, 0)}/{len(want)} labels; differences: "
+        + ("; ".join(diffs[:8]) if diffs else "none")
+        + ". Focus changed the export layout -- update EXPECTED_HEADERS and the parser together; nothing was loaded."
+    )
+
 
 # --------------------------------------------------------------------------- helpers
 def norm_num(v) -> float | None:
@@ -139,9 +221,9 @@ def report_date_from_title(grid: pd.DataFrame) -> str | None:
 
 # --------------------------------------------------------------------------- per-file parsers
 def parse_orders(grid: pd.DataFrame, src: str) -> list[dict]:
-    # header row 6 (index 5): Date, Invoice, Customer, Gross, Salesman, Payment Mode, Sales Account Name
+    # header (row 6 in every export so far): Date, Invoice, Customer, Gross, Salesman, Payment Mode, Sales Account Name
     rows = []
-    for i in range(6, len(grid)):
+    for i in range(check_header(grid, "orders") + 1, len(grid)):
         r = list(grid.iloc[i])
         if is_total(r[0]):
             continue
@@ -161,10 +243,10 @@ def parse_orders(grid: pd.DataFrame, src: str) -> list[dict]:
 
 
 def parse_order_lines(grid: pd.DataFrame, src: str) -> list[dict]:
-    # header row 6: Date,Voucher,Customer Account,Item,Quantity,Rate,Gross,Discount,Taxable,VAT Amount,Total Amount,Narration,Warehouse Name
+    # header: Date,Voucher,Customer Account,Item,Quantity,Rate,Gross,Discount,Taxable,VAT Amount,Total Amount,Narration,Warehouse Name
     rows = []
     seq: dict[str, int] = {}
-    for i in range(6, len(grid)):
+    for i in range(check_header(grid, "order_lines") + 1, len(grid)):
         r = list(grid.iloc[i])
         if is_total(r[0]):
             continue
@@ -195,12 +277,12 @@ def parse_order_lines(grid: pd.DataFrame, src: str) -> list[dict]:
 
 
 def parse_stock(grid: pd.DataFrame, src: str) -> list[dict]:
-    # grouped by item. header row 6 positions:
+    # grouped by item. header positions:
     # 0 Date,1 Voucher,2 RecvQty,3 Rate,4 IssQty,5 Rate,6 BalQty,7 Value,8 Value,9 Value,
     # 10 AvgRate,11 Warehouse,12 ToWarehouse,13 Narration,14 Voucher name
     rows = []
     current_item = None
-    for i in range(6, len(grid)):
+    for i in range(check_header(grid, "stock_movements") + 1, len(grid)):
         r = list(grid.iloc[i])
         first = r[0]
         if is_total(first):
@@ -253,11 +335,11 @@ def _voucher_prefix(voucher: str | None) -> str | None:
 
 
 def parse_ledger(grid: pd.DataFrame, src: str) -> list[dict]:
-    # grouped by account. header row 6:
+    # grouped by account. header:
     # 0 Date,1 Voucher,2 Account,3 Debit,4 Credit,5 Balance,6 Currency,7 Payment Mode,8 Salesman,9 Narration
     rows = []
     current_account = None
-    for i in range(6, len(grid)):
+    for i in range(check_header(grid, "ledger_entries") + 1, len(grid)):
         r = list(grid.iloc[i])
         first = r[0]
         if is_total(first):
@@ -287,7 +369,7 @@ def parse_ledger(grid: pd.DataFrame, src: str) -> list[dict]:
 def parse_profitability(grid: pd.DataFrame, src: str) -> list[dict]:
     rpt = report_date_from_title(grid)
     rows = []
-    for i in range(6, len(grid)):
+    for i in range(check_header(grid, "product_profitability") + 1, len(grid)):
         r = list(grid.iloc[i])
         name = txt(r[0])
         if name is None or is_total(name):
@@ -312,7 +394,7 @@ def parse_profitability(grid: pd.DataFrame, src: str) -> list[dict]:
 def parse_pricebook(grid: pd.DataFrame, src: str, price_book: str) -> list[dict]:
     # header row 1 (index 0). 28 cols; Val 1..Val 13 at indices 13..25.
     rows = []
-    for i in range(1, len(grid)):
+    for i in range(check_header(grid, "selling_prices") + 1, len(grid)):
         r = list(grid.iloc[i])
         if is_total(r[0]) or txt(r[0]) is None:
             continue
@@ -360,16 +442,9 @@ def parse_stock_balance(grid: pd.DataFrame, src: str) -> list[dict]:
     item rows. Cols: 0 Particulars(item), 1 Net Quantity, 2 Selling Rate, 3 Total Value.
     """
     as_of = report_date_from_title(grid)
-    hrow = None
-    for i in range(min(10, len(grid))):
-        cells = [str(c).strip().lower() if c is not None else "" for c in grid.iloc[i]]
-        if "particulars" in cells:
-            hrow = i
-            break
-    start = (hrow + 1) if hrow is not None else 6
     rows = []
     current_wh = None
-    for i in range(start, len(grid)):
+    for i in range(check_header(grid, "stock_balance") + 1, len(grid)):
         r = list(grid.iloc[i])
         name = txt(r[0])
         if name is None or is_total(name):
@@ -402,15 +477,7 @@ def parse_receivables(grid: pd.DataFrame, src: str) -> list[dict]:
     after the Transaction & Local repeats of the same bucket labels).
     """
     as_of = report_date_from_title(grid)
-    # locate header row (col0 == 'Account', col1 startswith 'Balance')
-    hrow = None
-    for i in range(min(12, len(grid))):
-        r = list(grid.iloc[i])
-        if str(r[0]).strip().lower() == "account" and str(r[1]).strip().lower().startswith("balance"):
-            hrow = i
-            break
-    if hrow is None:
-        return []
+    hrow = check_header(grid, "receivables")
     header = [str(c).strip() if c is not None else "" for c in grid.iloc[hrow]]
 
     def col(name: str) -> int | None:
@@ -450,6 +517,44 @@ def parse_receivables(grid: pd.DataFrame, src: str) -> list[dict]:
             "source_file": src,
         })
     return rows
+
+
+# The five ageing buckets past 90 days, by position in the Base block (91-120 ... > 210).
+_AR_OVER90_COLS = (9, 10, 11, 12, 13)
+
+
+def parse_receivables_totals(grid: pd.DataFrame, src: str) -> dict | None:
+    """Focus's OWN 'Grand Total' line of the ageing report, kept beside the per-account rows.
+
+    Measured 24-Sep-2026: the rows sum to BHD 9,078.860 while Focus's Grand Total is 8,633.840;
+    on 21-Sep 9,998.380 vs 9,474.590. The export shows every balance as a positive number, so
+    customer CREDITS (money we owe them) load as money owed to us and the row sum overstates the
+    book. No sign is guessed here: the report's own total is stored (ar_ageing_totals) and the
+    Receivables page shows both figures with the gap flagged for accounts to explain.
+    Returns {as_of_date, focus_total_bhd, focus_over90_bhd, rows_total_bhd, source_file}, or None
+    when the report has no Grand Total row (nothing is invented)."""
+    as_of = report_date_from_title(grid)
+    hrow = check_header(grid, "receivables")
+    rows_total = 0.0
+    for i in range(hrow + 1, len(grid)):
+        r = list(grid.iloc[i])
+        acct = txt(r[0])
+        if acct is None:
+            continue
+        if acct.strip().lower() == "grand total":
+            total = norm_num(r[1])
+            if total is None:
+                return None
+            over90 = sum((norm_num(r[j]) or 0.0) for j in _AR_OVER90_COLS if len(r) > j)
+            return {"as_of_date": as_of, "focus_total_bhd": round(total, 3),
+                    "focus_over90_bhd": round(over90, 3), "rows_total_bhd": round(rows_total, 3),
+                    "source_file": src}
+        if is_total(acct):
+            continue
+        bal = norm_num(r[1])
+        if bal is not None:
+            rows_total += bal
+    return None
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -543,6 +648,13 @@ def main() -> int:
 
     for kind, path in candidates.items():
         grid = read_grid(path)
+        # Header contract: the parsers read by column position, so a changed layout stops the run
+        # here (nothing written, non-zero exit) instead of loading numbers into the wrong columns.
+        try:
+            check_header(grid, kind.split(":")[0])
+        except HeaderMismatch as e:
+            print(f"  !! HARD FAIL: {path.name}: {e}")
+            return 2
         if kind == "orders":
             recs = parse_orders(grid, path.name)
         elif kind == "order_lines":
@@ -555,6 +667,13 @@ def main() -> int:
             recs = parse_profitability(grid, path.name)
         elif kind == "receivables":
             recs = parse_receivables(grid, path.name)
+            totals = parse_receivables_totals(grid, path.name)
+            if totals:
+                tables.setdefault("receivables_totals", []).append(totals)
+                print(f"  OK  {path.name:52} -> receivables_totals      Focus Grand Total BHD "
+                      f"{totals['focus_total_bhd']:,.3f} (rows sum {totals['rows_total_bhd']:,.3f})")
+            else:
+                print(f"  (no Grand Total row in {path.name}: Focus total not recorded)")
         elif kind == "stock_balance":
             recs = parse_stock_balance(grid, path.name)
         elif kind.startswith("selling_prices:"):
@@ -572,7 +691,8 @@ def main() -> int:
         df = pd.DataFrame(recs)
         out = OUT_DIR / f"{tbl}.csv"
         df.to_csv(out, index=False, encoding="utf-8")
-        print(f"  wrote {out.relative_to(ROOT)}  ({len(df)} rows)")
+        shown = out.relative_to(ROOT) if out.is_relative_to(ROOT) else out
+        print(f"  wrote {shown}  ({len(df)} rows)")
 
     # data-quality: voucher<->invoice join (rule 3 & 4)
     print("=" * 70)

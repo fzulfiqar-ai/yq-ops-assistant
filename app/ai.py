@@ -15,7 +15,7 @@ from typing import Any
 from app.database import get_client
 from app.llm_router import Redactor, chat, chat_stream
 from app.sql_validator import FeatureAccessError, SQLValidationError, validate
-from app.templates import match as template_match
+from app.templates import alternate_sql as template_alternate, match as template_match
 
 log = logging.getLogger(__name__)
 
@@ -67,8 +67,10 @@ v_inventory_aging     On-hand stock by idleness
   item_name, current_stock, stock_value, last_sold, days_since_sale
 
 v_product_margin      Profitability per item, latest period (Focus COGS basis)
-  item_name, category_name, net_amount_bhd, cogs_bhd, gross_profit_bhd,
-  gp_margin_pct[below cost if < 0], np_margin_pct
+  item_name, category_name, net_amount_bhd[sales INCL. VAT], cogs_bhd, gross_profit_bhd,
+  gp_margin_pct[NOT a percentage: never use], np_margin_pct
+  Margin = ROUND(100*(net_amount_bhd/1.1 - cogs_bhd)/NULLIF(net_amount_bhd/1.1,0), 2) (ex-VAT vs COGS);
+  below cost = net_amount_bhd/1.1 < cogs_bhd. The report's own GP columns lose the sign on losses.
 
 v_price_list          CURRENT SELLING PRICE per product (the price list — one row per SKU).
   sku_code, item_name, price_bhd[current standard selling price], unit_name, price_book
@@ -162,7 +164,8 @@ RULES:
   split ("this month cash vs credit", "SIM sales in June") aggregate v_sales with the
   month anchor and GROUP BY sale_type / division instead.
 - Exclude free stock from revenue-quality analyses: AND NOT is_giveaway (v_sales).
-- Below cost = v_product_margin WHERE gp_margin_pct < 0. Low stock = v_stock_health
+- Below cost = v_product_margin WHERE net_amount_bhd / 1.1 < cogs_bhd (ex-VAT sales under COGS;
+  gp_margin_pct is not a percentage). Low stock = v_stock_health
   WHERE status IN ('urgent_out_of_stock','low_stock').
 TERMINOLOGY:
 - "price" / "how much" / "selling price" -> v_price_list.price_bhd (current). Always return
@@ -282,6 +285,38 @@ def _fmt_hist(history: list[dict] | None, n: int = 6) -> str:
     return "\n".join(f"{h.get('role')}: {str(h.get('content', ''))[:200]}" for h in turns)
 
 
+# The margin hint has two forms (app.templates has the same pair). _VIEW_SCHEMA carries the inline
+# formula, which works on v_product_margin before and after economics_v2_migration.sql; once the
+# view carries the computed columns (app.margin_truth.view_computes_margin) the LLM is told to use
+# THEM, so its answers sit on the same basis as the Margins page, the agents and the templates
+# (the view's ex-VAT net is the day book's Taxable total for most items, not net / 1.1).
+_MARGIN_HINT_INLINE = (
+    "  Margin = ROUND(100*(net_amount_bhd/1.1 - cogs_bhd)/NULLIF(net_amount_bhd/1.1,0), 2) (ex-VAT vs COGS);\n"
+    "  below cost = net_amount_bhd/1.1 < cogs_bhd. The report's own GP columns lose the sign on losses.")
+_MARGIN_HINT_VIEW = (
+    "  Also: net_ex_vat_bhd, gp_ex_vat_bhd, margin_ex_vat_pct[the ex-VAT margin %, USE THIS], is_below_cost[boolean].\n"
+    "  below cost = WHERE is_below_cost. The report's own GP columns lose the sign on losses.")
+_MARGIN_RULE_INLINE = (
+    "- Below cost = v_product_margin WHERE net_amount_bhd / 1.1 < cogs_bhd (ex-VAT sales under COGS;\n"
+    "  gp_margin_pct is not a percentage).")
+_MARGIN_RULE_VIEW = (
+    "- Below cost = v_product_margin WHERE is_below_cost; margin = margin_ex_vat_pct (ex-VAT vs COGS;\n"
+    "  gp_margin_pct is not a percentage).")
+
+
+def _schema_text(view_ok: bool | None = None) -> str:
+    """The schema prompt, with the margin hint in the view form when the migrated view is there."""
+    if view_ok is None:
+        try:
+            from app.margin_truth import view_computes_margin
+            view_ok = view_computes_margin()
+        except Exception:  # noqa: BLE001
+            view_ok = False
+    if not view_ok:
+        return _VIEW_SCHEMA
+    return _VIEW_SCHEMA.replace(_MARGIN_HINT_INLINE, _MARGIN_HINT_VIEW).replace(_MARGIN_RULE_INLINE, _MARGIN_RULE_VIEW)
+
+
 def _llm_sql(question: str, model_name: str | None = None, history: list[dict] | None = None,
              error_hint: str | None = None) -> str:
     """Call LLM to generate SQL for the question. Returns raw SQL. `error_hint` (the previous
@@ -293,7 +328,7 @@ def _llm_sql(question: str, model_name: str | None = None, history: list[dict] |
                 "You are a PostgreSQL query generator for YQ Bahrain Mobile Accessories. "
                 "Generate ONE SELECT query using ONLY the views listed. "
                 "Return ONLY the SQL — no markdown fences, no explanation.\n\n"
-                + _VIEW_SCHEMA
+                + _schema_text()
             ),
         },
     ]
@@ -480,8 +515,7 @@ def ask(question: str, user_email: str = "system", model_name: str | None = None
         tmpl = template_match(question)
         if tmpl:
             label, raw_sql = tmpl
-            sql_used = validate(raw_sql, allowed_features)
-            rows = exec_sql(sql_used)
+            sql_used, rows = _run_template(label, raw_sql, allowed_features)
             reply = _fmt_template(label, rows)
 
         else:
@@ -508,6 +542,22 @@ def ask(question: str, user_email: str = "system", model_name: str | None = None
     if reply and reply.strip():  # never cache an empty answer (would serve blank for 7 days)
         _store_cache(client, key, question, reply, sql_used, rows)
     return {"reply": reply, "sql_used": sql_used, "cached": False, "row_count": len(rows)}
+
+
+def _run_template(label: str, raw_sql: str, allowed_features: set[str] | None) -> tuple[str, list[dict]]:
+    """Validate and run a template's SQL; a two-form template (app.templates: the margin pair,
+    view columns vs the inline formula) is retried once with its other form when the chosen one
+    raises -- the view may predate economics_v2_migration.sql, or have been reversed since the
+    probe. Returns (sql_used, rows)."""
+    sql_used = validate(raw_sql, allowed_features)
+    try:
+        return sql_used, exec_sql(sql_used)
+    except Exception:  # noqa: BLE001
+        alt = template_alternate(label, raw_sql)
+        if not alt:
+            raise
+        sql_used = validate(alt, allowed_features)
+        return sql_used, exec_sql(sql_used)
 
 
 def _stream_words(text: str):
@@ -563,8 +613,7 @@ def ask_stream(question: str, user_email: str = "system", model_name: str | None
         tmpl = template_match(question)
         if tmpl:
             label, raw_sql = tmpl
-            sql_used = validate(raw_sql, allowed_features)
-            rows = exec_sql(sql_used)
+            sql_used, rows = _run_template(label, raw_sql, allowed_features)
             reply = _fmt_template(label, rows)
             yield from _stream_words(reply)
             _store_cache(client, key, question, reply, sql_used, rows)

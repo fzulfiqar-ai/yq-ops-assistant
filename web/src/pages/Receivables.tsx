@@ -2,7 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { apiGet } from '@/lib/api'
-import { bhd, num } from '@/lib/format'
+import { bhd, fmtDate, num } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import { Card } from '@/components/ui/card'
@@ -22,6 +23,12 @@ interface Data {
   count: number
   overdue_count: number
   buckets: Record<string, number>
+  /** Focus's own Grand Total for this snapshot (R2). null until the ageing totals are stored. */
+  focus_total?: number | null
+  focus_over_90?: number | null
+  focus_as_of?: string | null
+  /** row sum minus Focus total: positive = the rows show more than Focus's own book */
+  focus_gap?: number | null
 }
 
 const BUCKET_LABELS: [string, string][] = [
@@ -41,6 +48,7 @@ export default function Receivables() {
   const [params] = useSearchParams()
   const { data, isLoading } = useQuery({ queryKey: ['report', 'receivables'], queryFn: () => apiGet<Data>('/report/receivables') })
   const bucketData = data ? BUCKET_LABELS.map(([k, label]) => ({ label, value: Number(data.buckets[k] || 0) })) : []
+  const hasGap = data?.focus_total != null && data.focus_gap != null && Math.abs(Number(data.focus_gap)) > 0.005
   return (
     <div>
       <PageHeader title="Receivables" subtitle="Cash & trade-debtor balances with ageing (Focus AR)" />
@@ -48,12 +56,31 @@ export default function Receivables() {
         <Skeleton className="h-[60vh]" />
       ) : (
         <>
-          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <Stat label="Total receivable" value={bhd(data.total, 0)} tone="violet" />
-            <Stat label="Over 90 days" value={bhd(data.over_90, 0)} tone="rose" />
+          <div className={cn('mb-4 grid grid-cols-2 gap-3', data.focus_total != null ? 'lg:grid-cols-5' : 'lg:grid-cols-4')}>
+            <Stat label="Total receivable (rows)" value={bhd(data.total, 0)} tone="violet"
+              foot={data.focus_total != null ? 'sum of the accounts below' : undefined} />
+            {data.focus_total != null && (
+              <Stat label="Focus total" value={bhd(data.focus_total, 0)} tone={hasGap ? 'amber' : 'slate'}
+                foot={hasGap
+                  ? `Rows are ${bhd(Math.abs(Number(data.focus_gap)), 2)} ${Number(data.focus_gap) > 0 ? 'above' : 'below'} Focus's own Grand Total`
+                  : "matches Focus's own Grand Total"} />
+            )}
+            <Stat label="Over 90 days" value={bhd(data.over_90, 0)} tone="rose"
+              foot={data.focus_over_90 != null && Math.abs(Number(data.focus_over_90) - data.over_90) > 0.005
+                ? `Focus: ${bhd(data.focus_over_90, 0)}` : undefined} />
             <Stat label="Debtor accounts" value={num(data.count)} />
             <Stat label="With overdue" value={num(data.overdue_count)} tone="amber" />
           </div>
+
+          {hasGap && (
+            <Card className="mb-4 border-amber-300/70 bg-amber-50/60 p-4 text-[13px] leading-relaxed dark:border-amber-500/30 dark:bg-amber-500/5">
+              <b>Credits may be shown as owed.</b> The ageing export lists every balance as a positive number, so a
+              customer credit (money YQ owes the shop) is counted here as money owed to YQ. The accounts below add up to{' '}
+              <b>{bhd(data.total, 2)}</b>; Focus's own Grand Total for the same snapshot
+              {data.focus_as_of ? ` (${fmtDate(data.focus_as_of)})` : ''} is <b>{bhd(Number(data.focus_total), 2)}</b> — a gap of{' '}
+              <b>{bhd(Number(data.focus_gap), 2)}</b>. No sign is guessed: ask accounts for a signed or Dr/Cr ageing export to settle which accounts are credits.
+            </Card>
+          )}
 
           <Card className="mb-4 p-5">
             <div className="mb-3 font-display text-base font-semibold">Ageing buckets (days past due)</div>
