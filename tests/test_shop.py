@@ -601,11 +601,14 @@ def _():
         settings.trusted_proxy_hops = 1
         settings.supabase_jwt_secret = "test-shop-secret"
 
-        # R1 (24-Sep-2026): only a token that VERIFIES earns a user bucket; junk shares the IP
-        # bucket (tests/test_r1_security.py covers the junk cases), so mint real HS256 tokens.
+        # R1 (24-Sep-2026): only a token app.auth.get_current_user has VERIFIED earns a user bucket
+        # (it calls ratelimit.remember_verified after the decode); the key function itself never
+        # decodes. Junk shares the IP bucket (tests/test_r1_security.py covers those cases).
         def tok(sub: str) -> str:
-            return "Bearer " + _jwt.encode({"sub": sub, "email": f"{sub}@example.com", "aud": "authenticated",
-                                            "exp": int(_time.time()) + 300}, "test-shop-secret", algorithm="HS256")
+            raw = _jwt.encode({"sub": sub, "email": f"{sub}@example.com", "aud": "authenticated",
+                               "exp": int(_time.time()) + 300}, "test-shop-secret", algorithm="HS256")
+            ratelimit.remember_verified(raw)
+            return "Bearer " + raw
         t1, t2 = tok("first"), tok("other")
         k1 = ratelimit.rate_limit_key(_req({"authorization": t1}))
         k2 = ratelimit.rate_limit_key(_req({"authorization": t2}))

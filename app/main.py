@@ -153,8 +153,10 @@ class OrchestrateRequest(BaseModel):
 @app.post("/orchestrate")
 @limiter.limit(settings.rate_limit)
 def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
-                               user: CurrentUser = Depends(get_current_user)) -> dict:
-    """Agentic entry point — routes to specialist agents, synthesizes one briefing."""
+                         user: CurrentUser = Depends(require_feature("AI Assistant"))) -> dict:
+    """Agentic entry point — routes to specialist agents, synthesizes one briefing. Gated like
+    /ask: the free-text SQL path runs under the caller's feature scope, and only the Assistant
+    page calls this."""
     from app.orchestrator import orchestrate
     result = orchestrate(body.question, user, history=body.history, model_name=body.model)
     # capture the question text so ops_sentinel (Phase F) can cluster knowledge gaps
@@ -166,7 +168,7 @@ def orchestrate_endpoint(request: Request, body: OrchestrateRequest,
 @app.post("/orchestrate/stream")
 @limiter.limit(settings.rate_limit)
 async def orchestrate_stream_endpoint(request: Request, body: OrchestrateRequest,
-                                      user: CurrentUser = Depends(get_current_user)):
+                                      user: CurrentUser = Depends(require_feature("AI Assistant"))):
     """Streaming agentic briefing: routing preamble → per-agent headlines → synthesis.
     Two fast-paths first: uploaded-document Q&A, and deterministic product-photo cards."""
     from fastapi.responses import StreamingResponse
@@ -649,10 +651,19 @@ async def order_file(po_no: str, file: UploadFile = File(...),
         kind = "doc"
 
     # Smart processing — actually LOAD the data so the order calculates, not just store the file.
-    # Admin-only, and every load leaves an audit_log row with what changed.
+    # Admin-only, and every load leaves an audit_log row with what changed — a FAILED load too
+    # (load_mrn_costs may have written mrn_lines / mrn_landed_costs before the purchase_costs
+    # upsert failed, so a silent `pass` would leave real cost changes unaudited).
     processed = None
     skipped = None
     loads_costs = ext == ".xml" or kind == "invoice"
+
+    def _load_failed(source: str, exc: Exception) -> str:
+        err = f"{type(exc).__name__}: {exc}"[:300]
+        logging.getLogger(__name__).warning("cost load failed for %s (%s): %s", po_no, source, err)
+        log_event(user.email, "cost_load_failed", detail={"po_no": po_no, "source": source, "error": err})
+        return f"stored only: loading costs failed ({err[:120]})"
+
     if loads_costs and user.role != "admin":
         skipped = "stored only: loading costs needs an admin"
     elif ext == ".xml":
@@ -676,8 +687,8 @@ async def order_file(po_no: str, file: UploadFile = File(...),
                     events.emit("upload", "mrn.uploaded", entity_type="po", entity_key=po_no,
                                 payload={"summary": f"MRN attached to {po_no} — landed costs updated"},
                                 dedupe=False)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                skipped = _load_failed("mrn", e)
     elif kind == "invoice":
         try:
             from app.invoices import load_supplier_prices, parse_invoice
@@ -695,8 +706,8 @@ async def order_file(po_no: str, file: UploadFile = File(...),
                 events.emit("upload", "invoice.uploaded", entity_type="po", entity_key=po_no,
                             payload={"summary": f"Supplier invoice attached to {po_no} — RMB prices updated"},
                             dedupe=False)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            skipped = _load_failed("invoice", e)
 
     ct = mimetypes.guess_type(name)[0] or "application/octet-stream"
     from app.orders import store_order_file
@@ -1563,15 +1574,16 @@ def agents_list(caller: CurrentUser = Depends(get_caller)) -> list:
 @app.get("/agents/{name}")
 def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get_caller)) -> dict:
     """Run one agent. The machine key and admins may run any; a member may run only the agents
-    behind pages granted to them (orchestrator.AGENT_FEATURE), and only an admin may have the
-    result emailed — `email=true` from anyone else is ignored, never a 4xx (audit S2)."""
+    behind pages granted to them (orchestrator.AGENT_FEATURE). Only the machine key (the n8n
+    agent flows call `?email=1` with X-Agent-Key) or an admin may have the result emailed —
+    `email=true` from a member is ignored, never a 4xx (audit S2)."""
     from app.agents import run_agent
     from fastapi import HTTPException
     if caller.role not in ("admin", "agent"):
         from app.orchestrator import allowed_agents
         if name not in allowed_agents(caller):
             raise HTTPException(status_code=403, detail="Requires access to this agent's page.")
-    email = bool(email) and caller.role == "admin"
+    email = bool(email) and caller.role in ("admin", "agent")
     try:
         result = run_agent(name)
     except KeyError:
@@ -1611,6 +1623,9 @@ def me(user: CurrentUser = Depends(get_current_user)) -> dict:
 
 class PasswordChangeRequest(BaseModel):
     password: str
+    # required unless the login is on a temporary password (must_reset): a stolen access token
+    # alone must not be enough to take the account over for good
+    current_password: str | None = None
 
 
 @app.post("/auth/password")
@@ -1620,12 +1635,22 @@ def auth_password(request: Request, body: PasswordChangeRequest,
     """The member sets a new password. The API performs the change itself (admin API), which
     is what lets it clear the server-owned must_reset flag with certainty — the SPA used to
     write user_metadata directly, which the user can also write. One of the three routes a
-    must_reset login may call (app.auth.MUST_RESET_EXEMPT)."""
+    must_reset login may call (app.auth.MUST_RESET_EXEMPT).
+
+    A login that is NOT on a temporary password must prove the current password (checked with
+    a fresh sign-in, like verify_login); a must_reset login already typed it a minute ago."""
     from fastapi import HTTPException
-    from app.user_auth import set_password
+    from app.user_auth import check_password, set_password
     pw = body.password or ""
     if len(pw) < 8 or len(pw) > 128:
         raise HTTPException(status_code=400, detail="Password must be 8 to 128 characters.")
+    if not user.must_reset:
+        current = body.current_password or ""
+        if not current:
+            raise HTTPException(status_code=400, detail="Enter your current password.")
+        if not check_password(user.email, current):
+            log_event(user.email, "auth.password_change_refused", detail={"reason": "current password wrong"})
+            raise HTTPException(status_code=403, detail="Current password is incorrect.")
     if not set_password(user.email, pw):
         raise HTTPException(status_code=404, detail="Account not found.")
     log_event(user.email, "auth.password_change", detail={"forced": bool(user.must_reset)})

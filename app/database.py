@@ -48,21 +48,42 @@ def invalidate_user_cache(email: str | None = None) -> None:
         _user_cache.pop(key, None)
 
 
+def missing_column_error(exc: Exception, column: str) -> bool:
+    """True when PostgREST says `column` is not there, whatever the wrapper or the verb:
+      - a SELECT naming it: Postgres 42703 'column user_roles.must_reset does not exist'
+      - an INSERT / UPDATE payload naming it: PostgREST PGRST204 "Could not find the
+        'must_reset' column of 'user_roles' in the schema cache" (PostgREST 14.x)."""
+    text = f"{getattr(exc, 'code', '')} {getattr(exc, 'message', '')} {getattr(exc, 'details', '')} {exc}"
+    if column not in text:
+        return False
+    return ("42703" in text or "does not exist" in text or "PGRST204" in text
+            or "schema cache" in text or f"Could not find the '{column}' column" in text)
+
+
 def _missing_must_reset(exc: Exception) -> bool:
-    """PostgREST's 'column user_roles.must_reset does not exist' (42703), whatever the wrapper."""
-    text = f"{getattr(exc, 'code', '')} {getattr(exc, 'message', '')} {exc}"
-    return "must_reset" in text and ("42703" in text or "does not exist" in text)
+    return missing_column_error(exc, "must_reset")
+
+
+def must_reset_column_absent() -> bool:
+    """True while the DB is known to predate the must_reset column (writers then leave it out
+    of their payloads instead of paying a failing round trip)."""
+    return time.time() < _legacy_until
+
+
+def note_must_reset_absent() -> None:
+    """A read or a write just learned the column is missing: remember it for _LEGACY_RETRY_S."""
+    global _legacy_until
+    _legacy_until = time.time() + _LEGACY_RETRY_S
 
 
 def _select_user_row(email: str) -> dict[str, Any] | None:
-    global _legacy_until
-    cols = _USER_COLUMNS_LEGACY if time.time() < _legacy_until else _USER_COLUMNS
+    cols = _USER_COLUMNS_LEGACY if must_reset_column_absent() else _USER_COLUMNS
     try:
         resp = get_client().table("user_roles").select(cols).eq("email", email).limit(1).execute()
     except Exception as exc:  # noqa: BLE001
         if cols == _USER_COLUMNS_LEGACY or not _missing_must_reset(exc):
             raise
-        _legacy_until = time.time() + _LEGACY_RETRY_S
+        note_must_reset_absent()
         resp = get_client().table("user_roles").select(_USER_COLUMNS_LEGACY).eq("email", email).limit(1).execute()
     return (resp.data or [None])[0]
 

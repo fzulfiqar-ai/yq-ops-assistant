@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@supabase/supabase-js'
 import { supabase, getSessionSafe } from './supabase'
-import { apiGet, ApiError, API_BASE } from './api'
+import { apiGet, ApiError, API_BASE, PASSWORD_CHANGE_EVENT } from './api'
 
 export type Role = 'admin' | 'member' | 'salesman' | 'storekeeper'
 
@@ -11,6 +11,20 @@ export interface Me {
   role: Role
   features: string[]
   full_name?: string
+  /** Server-owned: true = still on the temporary password; every route but /me, /auth/features
+   *  and POST /auth/password answers 403 until the member sets their own (app/auth.py). */
+  must_reset?: boolean
+}
+
+/** Where a login that must set its own password is sent (the shells redirect there). */
+export function passwordScreenFor(me: Me | null): string {
+  return me?.role === 'salesman' ? '/account#password' : '/settings'
+}
+
+/** The server flag first (/me), the session's user_metadata copy as the fallback for an older API. */
+export function mustResetOf(me: Me | null, session: Session | null): boolean {
+  if (me && typeof me.must_reset === 'boolean') return me.must_reset
+  return Boolean(session?.user?.user_metadata?.must_reset)
 }
 
 /**
@@ -137,6 +151,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearTimeout(bootTimer)
       sub.subscription.unsubscribe()
     }
+  }, [])
+
+  // The api layer saw 403 password_change_required: flip the flag at once so the shell
+  // redirects, without waiting for the next /me.
+  useEffect(() => {
+    const onRequired = () => setMe((m) => (m && !m.must_reset ? { ...m, must_reset: true } : m))
+    window.addEventListener(PASSWORD_CHANGE_EVENT, onRequired)
+    return () => window.removeEventListener(PASSWORD_CHANGE_EVENT, onRequired)
   }, [])
 
   const signIn = async (email: string, password: string) => {

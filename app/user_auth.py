@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 from supabase import create_client
 
 from app.config import settings
-from app.database import cached_user_row, get_client, invalidate_user_cache
+from app.database import (cached_user_row, get_client, invalidate_user_cache, missing_column_error,
+                          must_reset_column_absent, note_must_reset_absent)
 
 log = logging.getLogger(__name__)
 
@@ -114,13 +115,16 @@ def verify_login(email: str, password: str) -> dict | None:
 # ── user provisioning ────────────────────────────────────────────────────────
 
 def _missing_column(exc: Exception, column: str) -> bool:
-    text = f"{getattr(exc, 'code', '')} {getattr(exc, 'message', '')} {exc}"
-    return column in text and ("42703" in text or "does not exist" in text)
+    """A SELECT says 42703; an INSERT/UPDATE payload naming an unknown column gets PostgREST's
+    PGRST204 'Could not find the ... column ... in the schema cache'. Both mean 'not migrated
+    yet' (app.database.missing_column_error)."""
+    return missing_column_error(exc, column)
 
 
 def _write_role_row(row: dict, *, insert: bool) -> None:
-    """Insert or update a user_roles row; when the DB predates the must_reset column, retry
-    without it (the API deploys before user_roles_must_reset_migration.sql)."""
+    """Insert or update a user_roles row; when the DB predates the must_reset column, leave it
+    out (known absent) or retry without it on PGRST204 / 42703 — the API deploys before
+    user_roles_must_reset_migration.sql, and /team/invite + /team/accept must keep working."""
     client = get_client()
 
     def _go(payload: dict) -> None:
@@ -129,11 +133,15 @@ def _write_role_row(row: dict, *, insert: bool) -> None:
         else:
             client.table("user_roles").update(payload).eq("email", payload["email"]).execute()
 
+    if "must_reset" in row and must_reset_column_absent():
+        _go({k: v for k, v in row.items() if k != "must_reset"})
+        return
     try:
         _go(row)
     except Exception as exc:  # noqa: BLE001
         if "must_reset" not in row or not _missing_column(exc, "must_reset"):
             raise
+        note_must_reset_absent()
         _go({k: v for k, v in row.items() if k != "must_reset"})
 
 
@@ -155,17 +163,37 @@ def _upsert_role(email: str, role: str, features: list[str],
 def _clear_must_reset(email: str) -> None:
     """user_roles.must_reset = false (no-op before the migration adds the column)."""
     email = email.strip().lower()
+    if must_reset_column_absent():
+        invalidate_user_cache(email)
+        return
     try:
         get_client().table("user_roles").update({"must_reset": False}).eq("email", email).execute()
     except Exception as exc:  # noqa: BLE001
-        if not _missing_column(exc, "must_reset"):
+        if _missing_column(exc, "must_reset"):
+            note_must_reset_absent()
+        else:
             log.warning("clear must_reset failed for %s: %s", email, exc)
     invalidate_user_cache(email)
 
 
+def check_password(email: str, password: str) -> bool:
+    """True when `password` signs `email` in (a fresh client, never the cached service client).
+    POST /auth/password uses it so a stolen access token alone cannot change the password."""
+    email = (email or "").strip().lower()
+    if not email or not password:
+        return False
+    try:
+        sess = _fresh_client().auth.sign_in_with_password({"email": email, "password": password})
+    except Exception:  # noqa: BLE001 — wrong password, banned, network
+        return False
+    return bool(sess and getattr(sess, "session", None) and sess.session.access_token)
+
+
 def create_member(email: str, full_name: str, role: str, features: list[str],
                   password: str, invited_by: str = "", must_reset: bool = True) -> dict:
-    """Create (or update) a Supabase Auth user + their user_roles row."""
+    """Create (or update) a Supabase Auth user + their user_roles row. A re-invited member whose
+    auth user was BANNED when they were disabled (update_access) is unbanned in the same call,
+    else the row says active while Supabase still refuses the sign-in."""
     email = email.strip().lower()
     if role not in ROLES:
         role = "member"
@@ -173,7 +201,8 @@ def create_member(email: str, full_name: str, role: str, features: list[str],
     client = get_client()
     existing = _find_auth_user(email)
     if existing:
-        client.auth.admin.update_user_by_id(existing.id, {"password": password, "user_metadata": meta})
+        client.auth.admin.update_user_by_id(
+            existing.id, {"password": password, "user_metadata": meta, "ban_duration": "none"})
     else:
         client.auth.admin.create_user(
             {"email": email, "password": password, "email_confirm": True, "user_metadata": meta}

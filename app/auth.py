@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import hmac
 import logging
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt
 from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientError
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -33,7 +35,36 @@ log = logging.getLogger(__name__)
 # set a new password. `must_reset` lives in user_roles (server-owned; the auth user_metadata
 # copy is writable by the user, so it is never consulted for enforcement).
 MUST_RESET_EXEMPT: frozenset[str] = frozenset({"/me", "/auth/features", "/auth/password"})
-MUST_RESET_DETAIL = "password change required"
+# The 403 body is {"detail": {"code": ..., "message": ...}} so the SPA's api layer can recognise
+# it and send the member to their password screen instead of showing a raw error.
+MUST_RESET_CODE = "password_change_required"
+MUST_RESET_DETAIL: dict[str, str] = {"code": MUST_RESET_CODE,
+                                     "message": "Set your own password to continue."}
+
+# An unknown `kid` makes PyJWT refresh the JWK set over the network. Supabase rotates keys
+# rarely, so one refresh per minute per process is plenty; anything more is a token flood
+# (each made-up ES256 token used to cost a 150 ms-1.4 s fetch in the threadpool).
+JWKS_REFRESH_MIN_INTERVAL_S = 60.0
+
+
+class _ThrottledJWKClient(PyJWKClient):
+    """PyJWKClient whose unknown-kid refresh happens at most once per
+    JWKS_REFRESH_MIN_INTERVAL_S process-wide. Inside the window an unknown kid fails at once
+    from the cached set (no network), exactly as a bad signature would."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._last_refresh = 0.0     # monotonic time of the last refresh=True fetch
+
+    def get_signing_keys(self, refresh: bool = False):
+        if refresh:
+            now = time.monotonic()
+            if now - self._last_refresh < JWKS_REFRESH_MIN_INTERVAL_S:
+                if self.jwk_set_cache is not None and self.jwk_set_cache.get() is not None:
+                    return super().get_signing_keys(refresh=False)
+                raise PyJWKClientError("JWKS refresh throttled: unknown signing key")
+            self._last_refresh = now
+        return super().get_signing_keys(refresh=refresh)
 
 
 @lru_cache
@@ -44,7 +75,7 @@ def _jwks_client() -> PyJWKClient:
     signing key through `cryptography` on EVERY request (an asymmetric key parse per API
     call). With it, the parsed key object is reused and only the JWK *set* refreshes.
     """
-    return PyJWKClient(
+    return _ThrottledJWKClient(
         f"{settings.supabase_url}/auth/v1/.well-known/jwks.json",
         cache_keys=True,
     )
@@ -97,6 +128,10 @@ def get_current_user(
             detail="Invalid or expired token.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+    # The ONLY place a token earns a per-user rate-limit bucket: here, in the threadpool, after
+    # it verified. app.ratelimit.rate_limit_key never decodes anything itself.
+    from app.ratelimit import remember_verified
+    remember_verified(creds.credentials)
 
     email = payload.get("email") or ""
     user_id = payload.get("sub") or ""

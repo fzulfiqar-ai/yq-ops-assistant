@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Check, ChevronRight, Copy, ExternalLink, KeyRound, Loader2, LogOut, MessageCircle, QrCode } from 'lucide-react'
-import { useAuth } from '@/lib/auth'
+import { mustResetOf, useAuth } from '@/lib/auth'
 import { navFor } from '@/lib/nav'
 import { changeOwnPassword } from '@/lib/password'
 import { cn } from '@/lib/utils'
@@ -13,9 +13,13 @@ import { bhd3, initials, monthName, useAuthedBlob, useShopMe } from './lib'
  * office has switched on for me, and sign out. Deliberately short: a salesman opens this once.
  */
 export default function Account() {
-  const { me, signOut } = useAuth()
+  const { me, session, signOut, refreshMe } = useAuth()
   const toast = useToast()
   const meQ = useShopMe()
+  // On a temporary password the API does not ask for the current one (the rep typed it a minute
+  // ago); otherwise it is required so a stolen token alone cannot change it.
+  const mustReset = mustResetOf(me, session)
+  const [p0, setP0] = useState('')
   const [p1, setP1] = useState('')
   const [p2, setP2] = useState('')
   const [busy, setBusy] = useState(false)
@@ -31,17 +35,22 @@ export default function Account() {
 
   async function changePassword(e: FormEvent) {
     e.preventDefault()
+    if (!mustReset && !p0) return toast('Enter your current password.', 'error')
     if (p1.length < 8) return toast('Password must be at least 8 characters.', 'error')
     if (p1 !== p2) return toast('Passwords do not match.', 'error')
     setBusy(true)
-    const error = await changeOwnPassword(p1)
-    setBusy(false)
-    if (error) toast(error, 'error')
-    else {
-      setP1('')
-      setP2('')
-      toast('Password updated.', 'success')
+    const error = await changeOwnPassword(p1, mustReset ? undefined : p0)
+    if (error) {
+      setBusy(false)
+      toast(error, 'error')
+      return
     }
+    setP0('')
+    setP1('')
+    setP2('')
+    toast(mustReset ? 'Password set — the app is open.' : 'Password updated.', 'success')
+    await refreshMe()   // /me now says must_reset=false: the shell lets every tab through again
+    setBusy(false)
   }
   const copy = async () => {
     try {
@@ -145,15 +154,23 @@ export default function Account() {
       )}
 
       {/* password */}
-      <section id="password" className="mt-4 rounded-2xl border border-border bg-card p-4">
+      <section id="password" className={cn('mt-4 rounded-2xl border border-border bg-card p-4', mustReset && 'border-amber-300 ring-2 ring-amber-200')}>
         <h2 className="flex items-center gap-2 font-display text-[15px] font-bold">
-          <KeyRound size={16} className="text-primary" aria-hidden="true" /> Change password
+          <KeyRound size={16} className="text-primary" aria-hidden="true" /> {mustReset ? 'Set your own password' : 'Change password'}
         </h2>
+        {mustReset && (
+          <p className="mt-1.5 text-[12.5px] leading-snug text-muted-foreground">
+            Set your own password to continue — you signed in with a temporary one, and the rest of the app opens as soon as you choose yours.
+          </p>
+        )}
         <form onSubmit={changePassword} className="mt-3 grid gap-2 sm:max-w-sm">
+          {!mustReset && (
+            <input type="password" autoComplete="current-password" value={p0} onChange={(e) => setP0(e.target.value)} placeholder="Current password" className="h-12 rounded-xl border border-border bg-card px-3.5 text-[16px] outline-none focus:border-primary" />
+          )}
           <input type="password" autoComplete="new-password" value={p1} onChange={(e) => setP1(e.target.value)} placeholder="New password" className="h-12 rounded-xl border border-border bg-card px-3.5 text-[16px] outline-none focus:border-primary" />
           <input type="password" autoComplete="new-password" value={p2} onChange={(e) => setP2(e.target.value)} placeholder="Confirm new password" className="h-12 rounded-xl border border-border bg-card px-3.5 text-[16px] outline-none focus:border-primary" />
           <button type="submit" disabled={busy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground disabled:opacity-50">
-            {busy ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Update password
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} {mustReset ? 'Set password' : 'Update password'}
           </button>
         </form>
       </section>

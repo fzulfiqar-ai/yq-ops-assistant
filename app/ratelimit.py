@@ -23,8 +23,16 @@ office behind one NAT address never shares a bucket; public calls are keyed by c
 THE SECOND BUG (R1 security S5, 24-Sep-2026). The per-user key used to be handed to ANY
 `Bearer` header, so a bot could mint a fresh bucket per request with junk tokens and the
 public limits never bit. Now every /public/*, /team/* and /health call is keyed by client IP
-only, and elsewhere a token earns a user bucket only after it verifies (the same decoding as
-app.auth); verified hashes are remembered ~5 min so the check costs nothing per request.
+only, and elsewhere a token earns a user bucket only after app.auth.get_current_user has
+VERIFIED it.
+
+THE KEY FUNCTION NEVER VERIFIES ANYTHING (review of R1). slowapi's middleware calls
+`rate_limit_key` synchronously on the event loop for every request. A first version decoded
+the token here; with an asymmetric header naming an unknown `kid`, PyJWT refreshes the JWKS
+over the network (up to 30 s), so a burst of made-up tokens could freeze the single loop and
+trip Render's health check (the ea49ea6 outage mode). Now `rate_limit_key` only looks a token
+digest up in `_verified`, which `remember_verified` fills from get_current_user (threadpool)
+after a successful decode. Unknown token → the IP bucket, always, at zero cost.
 """
 from __future__ import annotations
 
@@ -39,17 +47,14 @@ from app.config import settings
 IP_ONLY_PREFIXES: tuple[str, ...] = ("/public/", "/team/")
 IP_ONLY_PATHS: frozenset[str] = frozenset({"/health"})
 
-_VERIFIED_TTL_S = 300      # a verified token keeps its user bucket this long without re-checking
-_REJECTED_TTL_S = 60       # a token that failed stays "junk" this long (no signature work per hit)
+_VERIFIED_TTL_S = 300      # a verified token keeps its user bucket this long without re-verifying
 _CACHE_MAX = 4096
 _verified: dict[str, float] = {}     # token digest → monotonic expiry
-_rejected: dict[str, float] = {}
 
 
 def reset_cache() -> None:
     """Forget every remembered token (tests)."""
     _verified.clear()
-    _rejected.clear()
 
 
 def _prune(cache: dict[str, float], now: float) -> None:
@@ -61,14 +66,20 @@ def _prune(cache: dict[str, float], now: float) -> None:
         cache.clear()
 
 
-def _verify(token: str) -> bool:
-    """True when the bearer token verifies as a Supabase access token (shared with app.auth)."""
-    from app.auth import _decode_token
-    try:
-        _decode_token(token)
-        return True
-    except Exception:  # noqa: BLE001 — bad signature, expired, wrong audience, junk
-        return False
+def token_digest(token: str) -> str:
+    """The short, stable id of a bearer token — what the user bucket is keyed on."""
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()[:16]
+
+
+def remember_verified(token: str) -> None:
+    """Called by app.auth.get_current_user (threadpool) after a token DECODED successfully.
+    From now on (for _VERIFIED_TTL_S) requests carrying this token are keyed per user."""
+    token = (token or "").strip()
+    if len(token) < 20:
+        return
+    now = time.monotonic()
+    _prune(_verified, now)
+    _verified[token_digest(token)] = now + _VERIFIED_TTL_S
 
 
 def client_ip(request: Request) -> str:
@@ -85,28 +96,21 @@ def client_ip(request: Request) -> str:
 
 
 def user_key(token: str) -> str | None:
-    """'u:<hash>' for a token that verifies (cached), None for anything else."""
+    """'u:<hash>' for a token get_current_user has already verified, None for anything else.
+    A pure dictionary lookup: no decoding, no signature work, no network — ever."""
     token = token.strip()
     if len(token) < 20:
         return None
-    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-    now = time.monotonic()
-    if _verified.get(digest, 0.0) > now:
+    digest = token_digest(token)
+    if _verified.get(digest, 0.0) > time.monotonic():
         return "u:" + digest
-    if _rejected.get(digest, 0.0) > now:
-        return None
-    if _verify(token):
-        _prune(_verified, now)
-        _verified[digest] = now + _VERIFIED_TTL_S
-        return "u:" + digest
-    _prune(_rejected, now)
-    _rejected[digest] = now + _REJECTED_TTL_S
     return None
 
 
 def rate_limit_key(request: Request) -> str:
-    """slowapi key: client IP on the public surface; per user only for a VERIFIED bearer token;
-    client IP for everything else (no token, a junk token, an expired one)."""
+    """slowapi key: client IP on the public surface; per user only for a bearer token that
+    get_current_user has verified; client IP for everything else (no token, a junk token, an
+    expired one, or a valid token's very first request)."""
     path = request.scope.get("path") or ""
     if path in IP_ONLY_PATHS or path.startswith(IP_ONLY_PREFIXES):
         return client_ip(request)

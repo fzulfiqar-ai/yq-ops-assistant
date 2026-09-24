@@ -7,10 +7,13 @@ Validates LLM-generated SQL before execution. Rules:
      including subqueries, CTE bodies, joins, comma joins, IN/EXISTS/scalar subqueries and
      lateral joins. Quoted identifiers, schema-qualified names and CTEs named after an
      allowlisted view are rejected outright (each was a way past the old `FROM \\w+` scan).
-  4. LIMIT injected at MAX_ROWS if missing, clamped if larger.
+  4. LIMIT injected at MAX_ROWS if missing, clamped if larger — on the PARSE TREE, so a limit
+     hidden in a comment, a subquery's inner limit or a non-literal expression cannot dodge the
+     cap; the returned SQL is regenerated from the tree.
 
 The relation walk is sqlglot's Postgres parser (R1 security S7, 24-Sep-2026): a query that
-does not parse is rejected, never guessed at.
+does not parse is rejected, never guessed at. Every CTE body must itself be a SELECT (or a set
+operation of SELECTs): `WITH x AS (TABLE t)` parses without an exp.Table node and is refused.
 """
 from __future__ import annotations
 
@@ -111,6 +114,9 @@ MAX_ROWS = 200
 
 _BANNED = re.compile(
     r"\b(insert|update|delete|truncate|drop|create|alter|grant|revoke"
+    # the bare TABLE command (`TABLE t` / `WITH x AS (TABLE t)`) reads a relation without a
+    # FROM, which the relation walk cannot see — a data answer never needs it
+    r"|table"
     r"|copy|pg_read_file|dblink|pg_exec|execute|perform"
     # functions that run SQL, read files, sleep or signal — none has a place in a data answer
     r"|query_to_xml|query_to_xml_and_xmlschema|table_to_xml|schema_to_xml|database_to_xml|cursor_to_xml"
@@ -118,10 +124,8 @@ _BANNED = re.compile(
     r"|pg_terminate_backend|pg_cancel_backend|pg_notify|pg_advisory_lock|pg_advisory_xact_lock|set_config)\b",
     re.IGNORECASE,
 )
-_LIMIT = re.compile(r"\bLIMIT\s+(\d+)", re.IGNORECASE)
-_LIMIT_ALL = re.compile(r"\bLIMIT\s+ALL\b", re.IGNORECASE)
-_FETCH = re.compile(r"\bFETCH\s+(?:FIRST|NEXT)\s+(\d+)", re.IGNORECASE)
 _SEMICOLON_MID = re.compile(r";(?!\s*$)")
+_WHOLE_NUMBER = re.compile(r"^\d+$")
 
 # A set operation of SELECTs is still one read-only statement.
 _SET_OPS: tuple[type, ...] = tuple(
@@ -161,6 +165,11 @@ def referenced_relations(tree: exp.Expression) -> set[str]:
             raise SQLValidationError("Quoted identifiers are not allowed.")
         if not name:
             raise SQLValidationError("Every CTE needs a plain name.")
+        if not isinstance(cte.this, _READ_ONLY_ROOTS):
+            # `WITH x AS (TABLE customer_contacts)` (MATERIALIZED or not) parses as a Column
+            # named TABLE aliased to the relation — no exp.Table, nothing for the allowlist to
+            # see. Only a SELECT / set-operation body can be reasoned about.
+            raise SQLValidationError("Every CTE must be a SELECT.")
         if name in VIEW_ALLOWLIST:
             # WITH v_sales AS (SELECT * FROM secret) SELECT * FROM v_sales — the outer reference
             # would look allowlisted while reading whatever the CTE body reads.
@@ -229,29 +238,36 @@ def validate(sql: str, allowed_features: set[str] | None = None) -> str:
                 f"This question needs access you don't have: {', '.join(denied)}. Ask an admin to grant it."
             )
 
-    # Enforce a hard row cap on the OUTER statement. Inject LIMIT if absent; clamp it down if
-    # the LLM supplied a larger one (a bare "skip if present" check let `LIMIT 1000000` through).
-    # The parser says whether the top level is limited; the textual edit uses the LAST LIMIT in
-    # the query, which is the outer one whenever the statement has one.
-    top_limit = tree.args.get("limit")
-    if isinstance(top_limit, exp.Fetch):
-        m = _FETCH.search(sql)
-        if m and int(m.group(1)) > MAX_ROWS:
-            sql = sql[:m.start()] + f"FETCH FIRST {MAX_ROWS}" + sql[m.end():]
-    elif top_limit is None:
-        m = _LIMIT_ALL.search(sql)
-        sql = (sql[:m.start()] + f"LIMIT {MAX_ROWS}" + sql[m.end():]) if m else f"{sql} LIMIT {MAX_ROWS}"
-    else:
-        matches = list(_LIMIT.finditer(sql))
-        if matches:
-            m = matches[-1]
-            try:
-                n = int(m.group(1))
-            except (TypeError, ValueError):
-                n = MAX_ROWS + 1
-            if n > MAX_ROWS:
-                sql = sql[:m.start()] + f"LIMIT {MAX_ROWS}" + sql[m.end():]
-        else:
-            sql = f"{sql} LIMIT {MAX_ROWS}"     # a limit the regex cannot see (e.g. an expression)
+    _cap_rows(tree)
+    return tree.sql(dialect="postgres")
 
-    return sql
+
+def _literal_rows(node: exp.Expression | None) -> int:
+    """The row count of a LIMIT / FETCH operand, which must be a plain whole number. Anything
+    else — a subquery, `5 + 5`, a string, a negative, a parameter — is refused: the cap is
+    only enforceable on a value the validator can read."""
+    if isinstance(node, exp.Literal) and not node.is_string and _WHOLE_NUMBER.match(str(node.this)):
+        return int(node.this)
+    raise SQLValidationError("LIMIT must be a plain whole number.")
+
+
+def _cap_rows(tree: exp.Expression) -> None:
+    """Enforce the hard row cap on the OUTER statement, in place on the parse tree. Inject
+    LIMIT when absent (sqlglot already drops `LIMIT ALL`); clamp a literal larger than
+    MAX_ROWS. Inner limits are left alone — the outer cap bounds the result either way."""
+    top = tree.args.get("limit")
+    if top is None:
+        tree.set("limit", exp.Limit(expression=exp.Literal.number(MAX_ROWS)))
+        return
+    if isinstance(top, exp.Limit):
+        if _literal_rows(top.expression) > MAX_ROWS:
+            top.set("expression", exp.Literal.number(MAX_ROWS))
+        return
+    if isinstance(top, exp.Fetch):
+        opts = top.args.get("limit_options")
+        if opts is not None and opts.args.get("percent"):
+            raise SQLValidationError("FETCH ... PERCENT is not allowed.")
+        if _literal_rows(top.args.get("count")) > MAX_ROWS:
+            top.set("count", exp.Literal.number(MAX_ROWS))
+        return
+    raise SQLValidationError("LIMIT must be a plain whole number.")

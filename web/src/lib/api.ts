@@ -10,6 +10,39 @@ export class ApiError extends Error {
     this.status = status
     this.body = body
   }
+  /** The server's `detail.code` when the body is FastAPI's {"detail": {"code": ...}} shape. */
+  get code(): string | null {
+    try {
+      const j = JSON.parse(this.body) as { detail?: unknown }
+      const d = j.detail
+      if (d && typeof d === 'object' && 'code' in d && typeof (d as { code: unknown }).code === 'string') {
+        return (d as { code: string }).code
+      }
+    } catch {
+      /* not json */
+    }
+    return null
+  }
+}
+
+/**
+ * The API answers 403 {"detail": {"code": "password_change_required", ...}} on every route while
+ * the login is still on its temporary password (server-owned `must_reset`). The shells listen for
+ * this event and send the member to their password screen instead of showing the raw error.
+ */
+export const PASSWORD_CHANGE_REQUIRED = 'password_change_required'
+export const PASSWORD_CHANGE_EVENT = 'yq:password-change-required'
+
+async function fail(res: Response): Promise<never> {
+  const err = new ApiError(res.status, await res.text().catch(() => ''))
+  if (err.status === 403 && err.code === PASSWORD_CHANGE_REQUIRED) {
+    try {
+      window.dispatchEvent(new Event(PASSWORD_CHANGE_EVENT))
+    } catch {
+      /* no window (tests) */
+    }
+  }
+  throw err
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -21,7 +54,7 @@ async function authHeaders(): Promise<Record<string, string>> {
 }
 
 async function handle<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ''))
+  if (!res.ok) return fail(res)
   const ct = res.headers.get('content-type') || ''
   return (ct.includes('application/json') ? res.json() : res.text()) as Promise<T>
 }
@@ -83,7 +116,7 @@ export async function apiDownload(path: string, body?: unknown, fallbackName = '
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: body === undefined ? undefined : JSON.stringify(body),
   }, UPLOAD_TIMEOUT_MS)
-  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ''))
+  if (!res.ok) return fail(res)
   const blob = await res.blob()
   const cd = res.headers.get('content-disposition') || ''
   const m = cd.match(/filename="?([^"]+)"?/)
@@ -113,7 +146,8 @@ export async function apiStream(
     body: JSON.stringify(body),
     signal,
   })
-  if (!res.ok || !res.body) throw new ApiError(res.status, await res.text().catch(() => ''))
+  if (!res.ok) return fail(res)
+  if (!res.body) throw new ApiError(res.status, '')
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   for (;;) {

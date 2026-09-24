@@ -1649,10 +1649,13 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
                 .eq("id", quote["_coupon_rule_id"]).execute()
         except Exception as e:  # noqa: BLE001
             log.warning("coupon use count failed: %s", e)
+    # the rep is the ORDER's rep (resolve_salesman ran above) — passed as the trusted keyword,
+    # since record_event ignores a salesman_id in the body and a checkout pick or a default
+    # rep has no referral code to derive it from
     record_event({"event": "order", "session_id": body.get("session_id"),
-                  "referral_code": row["referral_code"], "salesman_id": row["salesman_id"],
+                  "referral_code": row["referral_code"],
                   "src": row["src"], "device_id": device_id, "customer_id": row.get("customer_id"),
-                  "meta": {"attribution": attribution}}, ip=ip, ua=ua)
+                  "meta": {"attribution": attribution}}, ip=ip, ua=ua, salesman_id=row["salesman_id"])
     order["lines"] = quote["lines"]
     order["salesman"] = sm
     order["status_url"] = f"{market_base()}/o/{token}" if market_base() else f"/o/{token}"

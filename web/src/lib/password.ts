@@ -1,6 +1,21 @@
 import { apiPost, ApiError } from './api'
 import { supabase } from './supabase'
 
+/** FastAPI's {"detail": "reason"} → the reason; anything else → the fallback. */
+function detailOf(e: ApiError, fallback: string): string {
+  try {
+    const j = JSON.parse(e.body) as { detail?: unknown }
+    if (typeof j.detail === 'string' && j.detail) return j.detail
+    if (j.detail && typeof j.detail === 'object' && 'message' in j.detail) {
+      const m = (j.detail as { message?: unknown }).message
+      if (typeof m === 'string' && m) return m
+    }
+  } catch {
+    /* not json */
+  }
+  return fallback
+}
+
 /**
  * Change the signed-in user's own password.
  *
@@ -8,18 +23,22 @@ import { supabase } from './supabase'
  * server-owned `must_reset` flag with certainty — while that flag is set every other API route
  * answers 403, so the old client-side `supabase.auth.updateUser` alone would leave the member
  * locked out. An API that does not have the route yet (plain 404) still gets the direct change.
+ *
+ * `currentPassword` is required by the API unless the login is still on its temporary password
+ * (must_reset): a stolen access token alone must not be enough to take the account over.
  * Resolves to an error message to show, or null on success.
  */
-export async function changeOwnPassword(password: string): Promise<string | null> {
+export async function changeOwnPassword(password: string, currentPassword?: string): Promise<string | null> {
   try {
-    await apiPost('/auth/password', { password })
+    await apiPost('/auth/password', { password, current_password: currentPassword || null })
   } catch (e) {
     if (e instanceof ApiError && e.status === 404 && !e.body.includes('Account')) {
       const { error } = await supabase.auth.updateUser({ password, data: { must_reset: false } })
       return error ? error.message : null
     }
     if (e instanceof ApiError) {
-      if (e.status === 400) return 'Password must be 8 to 128 characters.'
+      if (e.status === 400) return detailOf(e, 'Password must be 8 to 128 characters.')
+      if (e.status === 403) return detailOf(e, 'Current password is incorrect.')
       if (e.status === 429) return 'Too many attempts — wait a minute and try again.'
       return `Could not change the password (${e.status}).`
     }
