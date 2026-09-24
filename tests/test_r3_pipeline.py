@@ -1394,6 +1394,28 @@ def _():
         conn.close()
 
 
+@test("cancel: the merchant's status page shows a staff cancel's public reason label, never the internal note")
+def _():
+    from app import shop, shop_pipeline
+    events = [
+        {"ts": "2026-09-25T08:00:00Z", "event": "created", "actor": "customer", "detail": {}},
+        {"ts": "2026-09-25T09:00:00Z", "event": "status:cancelled", "actor": "rep@example.com",
+         "detail": {"reason_code": "out_of_stock", "note": "INTERNAL: shop owes us from June, do not supply"}},
+    ]
+    view = shop.public_order_view({"order_no": "YQ-2609-0099", "status": "cancelled", "lines": [], "events": events,
+                                   "token": "t" * 32})
+    notes = [x.get("note") for x in view["timeline"]]
+    assert all("INTERNAL" not in str(n or "") for n in notes), notes
+    assert notes[-1] == shop_pipeline.customer_cancel_text("out_of_stock"), notes
+    # an older staff cancel with no reason code shows nothing; the merchant's own cancel shows their words
+    old = shop.public_order_view({"order_no": "X", "status": "cancelled", "lines": [], "token": "t" * 32, "events": [
+        {"ts": "t", "event": "status:cancelled", "actor": "rep@example.com", "detail": {"note": "internal text"}}]})
+    assert old["timeline"][-1]["note"] is None
+    own = shop.public_order_view({"order_no": "Y", "status": "cancelled", "lines": [], "token": "t" * 32, "events": [
+        {"ts": "t", "event": "status:cancelled", "actor": "customer", "detail": {"note": "ordered by mistake"}}]})
+    assert own["timeline"][-1]["note"] == "ordered by mistake"
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

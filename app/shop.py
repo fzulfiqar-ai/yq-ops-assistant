@@ -2324,10 +2324,21 @@ def public_order_view(o: dict) -> dict:
         "has_changes": any((ln.get("line_status") or "ok") in ("changed", "removed") for ln in o.get("lines", [])),
         "has_backorder": bool(o.get("has_backorder")), "note": o.get("note"),
         "order_kind": o.get("order_kind") or "standard", "minimum_gap_bhd": o.get("minimum_gap_bhd"),
-        "timeline": [{"ts": e.get("ts"), "event": e.get("event"),
-                      "note": (e.get("detail") or {}).get("note") if isinstance(e.get("detail"), dict) else None}
+        "timeline": [{"ts": e.get("ts"), "event": e.get("event"), "note": _public_note(e)}
                      for e in o.get("events", []) if _public_event(e.get("event"))],
     }
+
+
+def _public_note(e: dict) -> str | None:
+    """The line a merchant may read beside a status move. A cancel made by staff carries an INTERNAL
+    note (the office record) and a reason code: the merchant sees only that reason's public label,
+    never the note (an older staff cancel without a code shows nothing). The merchant's own cancel
+    shows their own words."""
+    d = e.get("detail") if isinstance(e.get("detail"), dict) else {}
+    if str(e.get("event") or "") == "status:cancelled" and str(e.get("actor") or "customer") != "customer":
+        from app import shop_pipeline
+        return shop_pipeline.customer_cancel_text(d.get("reason_code"))
+    return d.get("note")
 
 
 def _public_event(event) -> bool:
