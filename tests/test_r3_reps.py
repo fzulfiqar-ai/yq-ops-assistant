@@ -940,8 +940,8 @@ def _():
     # the SQL failing is an error flag, not an empty month
     with _Patched((reports, "exec_sql", lambda sql: (_ for _ in ()).throw(RuntimeError("boom")))):
         res = reports.salesman_attainment_result()
+        assert reports.salesman_attainment() == []     # inside the stub: never the live database
     assert res["rows"] == [] and res["error"] == reports.ATTAINMENT_ERROR
-    assert reports.salesman_attainment() == []
 
 
 def _keys(obj, out: set):
