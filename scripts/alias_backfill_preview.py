@@ -116,6 +116,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--min-confidence", type=float, default=1.0,
                     help="write proposals at or above this confidence (default 1.0 = exact product names only)")
     ap.add_argument("--csv", help="also write the proposal table to this path")
+    ap.add_argument("--exclude", default="", help="comma-separated proposed codes to hold back (ambiguous "
+                    "near-duplicates the owner must settle first, e.g. 'X24 CC 1Mtr,X24 CL 1Mtr')")
     args = ap.parse_args(argv)
 
     from app.db_read import exec_sql
@@ -135,7 +137,11 @@ def main(argv: list[str]) -> int:
         print("(preview only -- nothing written; add --commit to insert the aliases)")
         return 0
 
-    picked = [r for r in rows if r["proposed_code"] and r["product_id"] and r["confidence"] >= args.min_confidence]
+    held = {c.strip().upper() for c in (args.exclude or "").split(",") if c.strip()}
+    picked = [r for r in rows if r["proposed_code"] and r["product_id"] and r["confidence"] >= args.min_confidence
+              and r["proposed_code"].upper() not in held]
+    if held:
+        print(f"held back (not written): {', '.join(sorted(held))}")
     if not picked:
         print("nothing to commit")
         return 0
@@ -152,7 +158,7 @@ def main(argv: list[str]) -> int:
     try:
         client.table("audit_log").insert({
             "user_email": "alias_backfill", "event": "product_aliases.backfill",
-            "question": f"alias_backfill_preview --commit --min-confidence {args.min_confidence}",
+            "question": f"alias_backfill_preview --commit --min-confidence {args.min_confidence} --exclude {args.exclude!r}",
             "detail": {"proposed": len(recs), "inserted": inserted,
                        "codes": sorted({r["proposed_code"] for r in picked}),
                        "rev_90_bhd": round(sum(r["rev_90"] for r in picked), 3)},
