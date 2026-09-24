@@ -1,0 +1,88 @@
+# Exact versions of the production API image (24-Sep-2026, release R1). Resolved from
+# requirements.txt by pip on Python 3.11 at 2026-09-24 12:34 UTC -- the same minute Render built the
+# live image for commit e0808aa (CI's api job installed this exact set). Installing from this file
+# makes a rollback rebuild the SAME dependencies instead of whatever is newest that day (the audit's
+# D-11; PyJWT moved 2.13 -> 2.15 under us today).
+#
+# Change a dependency: edit requirements.txt, then in a clean Python 3.11 venv:
+#   pip install -r requirements.txt && pip freeze > requirements.lock   (keep this header)
+# and run the test suites before shipping.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+attrs==26.1.0
+certifi==2026.7.22
+cffi==2.1.1
+charset_normalizer==3.5.1
+click==8.5.0
+cryptography==50.0.1
+defusedxml==0.7.1
+deprecated==1.3.1
+deprecation==2.1.0
+edge-tts==7.2.8
+et-xmlfile==2.0.0
+fastapi==0.141.1
+fonttools==4.66.0
+fpdf2==2.8.8
+frozenlist==1.8.0
+h11==0.16.0
+h2==4.4.1
+hpack==4.2.0
+httpcore2==2.13.1
+httpcore==1.0.9
+httptools==0.8.0
+httpx2==2.13.1
+httpx==0.28.1
+hyperframe==6.1.0
+idna==3.20
+jiter==0.17.0
+limits==5.8.0
+multidict==6.9.1
+numpy==2.4.6
+openai==3.19.2
+openpyxl==3.1.5
+packaging==26.3
+pandas==3.0.6
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.3.0
+postgrest==2.31.0
+propcache==0.5.4
+pycparser==3.0
+pydantic-core==2.46.5
+pydantic==2.13.5
+PyJWT==2.15.0
+pypdfium2==5.13.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+pyyaml==6.0.3
+realtime==2.31.0
+requests==2.34.2
+segno==1.6.6
+six==1.17.0
+slowapi==0.1.10
+sniffio==1.3.1
+sqlglot==30.19.0
+starlette==1.7.0
+storage3==2.31.0
+strenum==0.4.15
+supabase-auth==2.31.0
+supabase-functions==2.31.0
+supabase==2.31.0
+tabulate==0.10.0
+tenacity==9.1.4
+truststore==0.10.4
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.53.0
+uvloop==0.22.1
+watchfiles==1.3.0
+websockets==15.0.1
+wrapt==2.4.1
+xlrd==2.0.2
+yarl==1.25.1

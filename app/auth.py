@@ -54,7 +54,9 @@ class _ThrottledJWKClient(PyJWKClient):
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        self._last_refresh = 0.0     # monotonic time of the last refresh=True fetch
+        # monotonic time of the last refresh=True fetch; -inf so the first refresh is never held
+        # back by how long the host happens to have been up (monotonic counts from boot on Linux)
+        self._last_refresh = float("-inf")
 
     def get_signing_keys(self, refresh: bool = False):
         if refresh:

@@ -24,8 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# requirements.lock pins the exact versions (a rollback rebuilds the same image); requirements.txt
+# is the human-edited list it is resolved from.
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY app ./app
 # scripts/ powers the data-ingest + verified-refresh path (/ingest, MRN/PO uploads).

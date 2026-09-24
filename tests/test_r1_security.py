@@ -582,6 +582,8 @@ def _():
             pass
     assert len(fetches) == 2, f"5 unknown kids must cost ONE refresh, not {len(fetches) - 1}"
     c._last_refresh -= auth.JWKS_REFRESH_MIN_INTERVAL_S + 1        # the window elapsed
+    if getattr(c, "_last_successful_fetch", None) is not None:   # PyJWT >= 2.14 has its own cooldown too
+        c._last_successful_fetch -= max(getattr(c, "cooldown_duration", 0), auth.JWKS_REFRESH_MIN_INTERVAL_S) + 1
     try:
         c.get_signing_key_from_jwt(_es256_token("bogus-later"))
     except jwt.exceptions.PyJWKClientError:
