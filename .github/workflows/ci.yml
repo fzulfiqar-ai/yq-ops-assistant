@@ -53,6 +53,12 @@ jobs:
           python -m tests.test_r1_data
           python -m tests.test_r1_orders
           python -m tests.test_r1b_upcoming
+      # R2c exact money: price_cart / confirm / tier_progress on Decimal end to end — 10,000 random
+      # carts against a pure-Decimal reference, to the fils (no DB)
+      - name: Exact money (release R2; no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r2_money
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
 
