@@ -207,3 +207,27 @@ shop_orders alone REFUSED (122 lines + 41 events would cascade), salesmen alone 
 would lose their rep), and a restore over a newer order REFUSED. The drill also caught two restore bugs before they
 could matter (a sequence re-seed on a table without an id; timestamps compared as text across time zones).
 Tools: portable PostgreSQL binaries in `%LOCALAPPDATA%\yq-tools\pgsql` (not in the repo), cluster on port 55432.
+
+
+## Release R2a: `ingest_batches_migration.sql` — the transactional batch importer (written 24-Sep-2026)
+
+Additive; rehearsed on production with `--rehearse` (rolled back); reverse in `ingest_batches_reverse.sql`,
+which refuses while a committed batch exists (its replaced rows live only in `ingest_replaced`).
+
+Tables `ingest_batches`, `ingest_stage`, `ingest_replaced` (RLS on, nothing granted to anon/authenticated;
+SELECT + read policy for `yq_readonly` so the preview's diff can run through the read-only RPC, which is also why
+`orders`, `order_lines`, `stock_movements`, `ledger_entries`, `ar_ageing`, `product_profitability`,
+`product_aliases` and `purchase_costs` gain the same read grant). RPCs (`service_role` only):
+- `ingest_commit(batch, expected)` — one transaction under `pg_advisory_xact_lock`: per target it replaces the
+  file's own scope (sales by invoice-date span, ledger by date span, `stock_balance` per as-of + warehouse,
+  `ar_ageing` per as-of, `product_profitability` per report date, `selling_prices` by the Focus-book snapshot
+  rule with un-void), copies every deleted / voided / changed row into `ingest_replaced` first, records what each
+  staged row became (`ingest_stage.action` / `row_id`), then asserts the preview's per-action counts and the
+  scope's row count and money sums and RAISES on any mismatch (full rollback).
+- `ingest_undo(batch)` — deletes the batch's inserts, restores changed rows column for column, re-inserts deleted
+  rows with their original ids; refuses when a later committed batch overlaps the same scope.
+- `ingest_stage_analyze()` — `ANALYZE ingest_stage` after staging (without statistics the 36k-row ledger diff
+  planned as a nested loop for minutes).
+The old `POST /ingest` refresh path is unchanged and stays the default; `python -m tests.test_r2_importer`
+replays the 240926 drop on the local scratch cluster from the `2026-09-24_pre-r0` backup and proves the result
+equals production's tables (counts, money sums, every day's sales).

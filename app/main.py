@@ -2226,3 +2226,9 @@ async def meta_webhook(request: Request) -> dict:
 from app.shop_api import register as _register_shop  # noqa: E402
 
 _register_shop(app, limiter)
+
+# ── Batch importer (preview -> commit -> undo) — routes live in app/ingest_batch_api.py ──
+# The old POST /ingest above is unchanged and stays the default path (R2a, 24-Sep-2026).
+from app.ingest_batch_api import register as _register_ingest_batch  # noqa: E402
+
+_register_ingest_batch(app, limiter)
