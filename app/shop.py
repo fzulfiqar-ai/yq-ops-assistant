@@ -24,7 +24,7 @@ import secrets
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
@@ -169,12 +169,53 @@ SALESMAN_REFERENCED_MSG = "Has orders or merchants — deactivate instead"
 
 
 # ── money helpers ─────────────────────────────────────────────────────────────
+# BHD is a 3-decimal currency (1 fils = 0.001). The pricing engine (price_cart and the helpers it
+# calls), the confirm re-price and tier_progress work on Decimal from end to end (R2c,
+# 24-Sep-2026): dmoney() rounds to the fils, ROUND_HALF_UP, at exactly the business steps where
+# a figure is booked, and nothing money-shaped is ever added up as a float. money() is the
+# JSON/DB edge — the same 3-dp figure as a float, which the API, the order writer and the tests
+# always had. An exact 3-dp float round-trips through str(), so the two forms never disagree.
+
+FILS = Decimal("0.001")
+D0 = Decimal(0)
+
+
+def _d(x, default: Decimal = D0) -> Decimal:
+    """An exact Decimal for any numeric input. A float goes through str() — its shortest
+    round-trip form, so 2.95 stays 2.95 and never 2.95000000000000017763568394002504646778106689453125.
+    None or junk = `default`."""
+    if x is None:
+        return default
+    if isinstance(x, Decimal):
+        return x
+    try:
+        return Decimal(str(x).strip())
+    except (InvalidOperation, ValueError):
+        return default
+
+
+def dmoney(x) -> Decimal:
+    """BHD to the fils, ROUND_HALF_UP — the one rounding rule, applied at every business step."""
+    return _d(x).quantize(FILS, rounding=ROUND_HALF_UP)
+
 
 def money(x) -> float:
-    """BHD is a 3-decimal currency — round half-up at every boundary."""
+    """dmoney() at the JSON/DB edge: the same 3-dp figure as a float."""
     if x is None:
         return 0.0
-    return float(Decimal(str(x)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
+    return float(dmoney(x))
+
+
+def edge_floats(obj):
+    """The JSON/DB edge of a quote: every Decimal becomes the float of its (already 3-dp) value,
+    lists and dicts are walked, everything else passes through. Called once, on the way out."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: edge_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [edge_floats(v) for v in obj]
+    return obj
 
 
 def _f(x, default: float = 0.0) -> float:
@@ -784,30 +825,44 @@ def _rule_matches_ref(rule: dict, referral_code: str | None) -> bool:
     return bool(referral_code) and referral_code.lower() in refs
 
 
-def _discounted_unit(rule: dict, list_price: float) -> float:
+def _discounted_unit(rule: dict, list_price) -> Decimal:
+    """The unit price a rule gives on `list_price` — an exact Decimal, not yet rounded: stackable
+    rules compound on it and the caller rounds once, where the unit price is booked."""
+    lp = _d(list_price)
     if rule.get("fixed_price_bhd") is not None:
-        return min(list_price, _f(rule["fixed_price_bhd"]))
+        return min(lp, _d(rule["fixed_price_bhd"]))
     if rule.get("pct_off") is not None:
-        return list_price * (1 - _f(rule["pct_off"]) / 100.0)
+        return lp * (1 - _d(rule["pct_off"]) / 100)
     if rule.get("amount_off_bhd") is not None:
-        return list_price - _f(rule["amount_off_bhd"])
-    return list_price
+        return lp - _d(rule["amount_off_bhd"])
+    return lp
 
 
 def item_tiers(ctx: dict, item: dict) -> list[dict]:
-    """Quantity tiers that apply to an item (public — no salesman-scoped rules)."""
-    lp = _f(item.get("standard_rate"))
+    """Quantity tiers that apply to an item (public — no salesman-scoped rules). The unit price
+    is the fils figure price_cart books when that tier is the best rule on the line — the same
+    steps in the same order: the list price to the fils, the rule on it, rounded once, then the
+    margin floor (min(list, floor)). So the catalogue never shows a tier price the cart will not
+    charge: a tier the floor lifts back to the list price is not published, and two tiers at one
+    quantity keep the cheaper. (Until R2c the rule ran on the unrounded book rate and the floor
+    was skipped here, so a below-floor tier was advertised and then not given.)"""
+    lp = dmoney(item.get("standard_rate"))
+    if lp <= 0:
+        return []
+    floor = _floor_d(ctx, str(item.get("item_code") or ""))
     tiers = []
     for r in ctx["rules"]:
         if r["kind"] != "qty_tier" or not r.get("min_qty") or not _rule_matches_item(r, item):
             continue
         if r["scope"]["referral_codes"]:
             continue
-        unit = money(max(0.0, _discounted_unit(r, lp)))
-        if lp and unit < lp:
-            tiers.append({"min_qty": _i(r["min_qty"]), "unit_price_bhd": unit,
+        unit = dmoney(max(D0, _discounted_unit(r, lp)))
+        if floor is not None and unit < floor:
+            unit = min(lp, floor)
+        if unit < lp:
+            tiers.append({"min_qty": _i(r["min_qty"]), "unit_price_bhd": float(unit),
                           "label": f"{_i(r['min_qty'])}+ → BHD {unit:.3f}", "rule_id": r["id"]})
-    tiers.sort(key=lambda t: t["min_qty"])
+    tiers.sort(key=lambda t: (t["min_qty"], t["unit_price_bhd"]))
     # keep only tiers that actually improve on the previous one
     out: list[dict] = []
     for t in tiers:
@@ -1162,14 +1217,22 @@ def rule_summary(r: dict) -> str:
 
 # ── pricing engine ────────────────────────────────────────────────────────────
 
-def _floor_for(ctx: dict, code: str) -> float | None:
-    """Lowest VAT-inclusive unit price allowed: landed cost x (1 + margin) x (1 + VAT).
-    The price book is VAT-inclusive (owner's workbook), so the floor must be too."""
+def _floor_d(ctx: dict, code: str) -> Decimal | None:
+    """Lowest VAT-inclusive unit price allowed: landed cost x (1 + margin) x (1 + VAT), to the
+    fils. The price book is VAT-inclusive (owner's workbook), so the floor must be too."""
     cost = cost_for(ctx, code)
-    if cost is None or cost <= 0:
+    if cost is None or _d(cost) <= 0:
         return None
     vals = ctx["settings"]
-    return money(cost * (1 + _f(vals.get("shop_min_margin_pct"), 0.2)) * (1 + _f(vals.get("shop_vat_rate"), 0.0)))
+    margin = _d(vals.get("shop_min_margin_pct"), Decimal("0.2"))
+    vat = _d(vals.get("shop_vat_rate"), D0)
+    return dmoney(_d(cost) * (1 + margin) * (1 + vat))
+
+
+def _floor_for(ctx: dict, code: str) -> float | None:
+    """_floor_d() at the edge (margin_health, rule_impact): the same fils figure as a float."""
+    floor = _floor_d(ctx, code)
+    return None if floor is None else float(floor)
 
 
 def normalize_lines(raw_lines) -> list[tuple[str, int]]:
@@ -1204,6 +1267,7 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
     exact tie (same tier, same closes-the-gap flag, same overshoot) a clearing line ranks first —
     the minimum doubles as the clearance engine, at the price-book price."""
     items = ctx.get("items") or {}
+    remaining = _d(remaining)
     if remaining <= 0 or not items:
         return []
     in_cart = set(cart_codes)
@@ -1233,8 +1297,8 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
         if code in in_cart:
             continue
         it = items.get(code) or {}
-        price = _f(it.get("standard_rate"))
-        stock = _f(it.get("stock_qty"))
+        price = _d(it.get("standard_rate"))
+        stock = _d(it.get("stock_qty"))
         if price <= 0 or stock <= 0:
             continue
         pack = max(_i(it.get("pack_size"), 1), 1)
@@ -1243,11 +1307,11 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
         qty = max(moq, pack)
         while price * qty < remaining and qty < 999:
             qty += pack
-        value = money(price * qty)
+        value = dmoney(price * qty)
         over = value - remaining
-        if over > price * pack + 1e-9 and value > remaining:      # more than one pack past the gap: try a smaller step
+        if over > price * pack and value > remaining:      # more than one pack past the gap: try a smaller step
             qty = max(moq, pack)
-            value = money(price * qty)
+            value = dmoney(price * qty)
             over = value - remaining
         closes = value >= remaining
         clearing = "clearance" in (badges.get(code) or [])
@@ -1257,7 +1321,7 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
     for tier, _c, _o, _cl, code, qty, value in scored[:max(limit, 0)]:
         it = items[code]
         out.append({"item_code": code, "display_name": it.get("display_name") or code, "qty": qty,
-                    "unit_price_bhd": money(it.get("standard_rate")), "value_bhd": value,
+                    "unit_price_bhd": money(it.get("standard_rate")), "value_bhd": float(value),
                     "closes_gap": value >= remaining,
                     "why": "pairs" if tier == 0 else "popular" if tier == 1 else "in_stock"})
     return out
@@ -1313,7 +1377,15 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     `staff` = the salesman/staff path (a rep quoting or placing for a shop): its own backorder
     setting, so the office can keep ordering sold-out lines in while merchants cannot.
     `force_backorder` = a sold-out line is priced as a backorder whatever either switch says —
-    the rep's confirmation re-price, where his explicit confirmation is the decision."""
+    the rep's confirmation re-price, where his explicit confirmation is the decision.
+
+    Money (R2c, 24-Sep-2026): every figure is a Decimal from the list price to the total, rounded
+    to the fils (dmoney, ROUND_HALF_UP) at exactly the business steps where a number is booked —
+    the unit price after the rules, each line total, each line's discount, each cart-level
+    amount, the subtotal, the delivery fee and the total. Nothing is ever summed as a float. The
+    returned dict is the JSON/DB edge (edge_floats): the same 3-dp values as floats, so the API
+    shape, the order writer and the confirmed-price columns are unchanged. tests/test_r2_money.py
+    holds the property test (10,000 random carts vs a pure-Decimal reference, to the fils)."""
     ctx = ctx or context()
     vals = ctx["settings"]
     low_units = _i(vals.get("shop_low_stock_units"), 10)
@@ -1327,15 +1399,15 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     good: list[dict] = []       # the priced ones — all the arithmetic below uses these
     warnings: list[str] = []
     clamped: list[str] = []
-    subtotal = 0.0
+    subtotal = D0
 
     def _blocked(code: str, qty: int, reason: str, **extra) -> dict:
         """A line that cannot be ordered as it stands. It stays visible with its
         reason and a price of zero — one dead line must never zero the whole cart,
         which is what a customer reads as 'the site is broken'."""
         ln = {"item_code": code, "display_name": code, "spec": None, "image_url": None,
-              "qty": qty, "moq": 1, "list_price_bhd": 0.0, "unit_price_bhd": 0.0,
-              "discount_bhd": 0.0, "line_total_bhd": 0.0, "stock_status": STOCK_OUT,
+              "qty": qty, "moq": 1, "list_price_bhd": D0, "unit_price_bhd": D0,
+              "discount_bhd": D0, "line_total_bhd": D0, "stock_status": STOCK_OUT,
               "backorder": False, "applied": [], "warning": None,
               "unavailable": True, "blocked_reason": reason, "_floor": None}
         ln.update(extra)
@@ -1348,12 +1420,12 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
             lines.append(_blocked(raw_code, qty, "No longer in the catalog."))
             continue
         lp = it.get("standard_rate")
-        if lp is None or _f(lp) <= 0:
+        if lp is None or _d(lp) <= 0:
             lines.append(_blocked(code, qty, "Price on request — ask your salesman.",
                                   display_name=it.get("display_name") or code, spec=it.get("spec"),
                                   image_url=it.get("product_image_url")))
             continue
-        lp = money(lp)
+        lp = dmoney(lp)
         moq = max(_i(it.get("moq"), 1), 1)
         status = stock_status_for(it.get("stock_qty"), low_units)
         backorder = status == STOCK_OUT
@@ -1391,26 +1463,26 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                 if u < unit:
                     unit = u
                     applied.append({"rule_id": r["id"], "name": r["name"], "kind": r["kind"]})
-        unit = money(max(unit, 0.0))
-        floor = _floor_for(ctx, code)
+        unit = dmoney(max(unit, D0))
+        floor = _floor_d(ctx, code)
         if floor is not None and unit < floor:
             unit = min(lp, floor)
             clamped.append(code)
-        line_total = money(unit * qty)
-        subtotal += money(lp * qty)
+        line_total = dmoney(unit * qty)
+        subtotal += dmoney(lp * qty)
         line = {
             "item_code": code, "display_name": it.get("display_name") or code, "spec": it.get("spec"),
             "image_url": it.get("product_image_url"), "qty": qty, "moq": moq,
-            "list_price_bhd": lp, "unit_price_bhd": unit, "discount_bhd": money((lp - unit) * qty),
+            "list_price_bhd": lp, "unit_price_bhd": unit, "discount_bhd": dmoney((lp - unit) * qty),
             "line_total_bhd": line_total, "stock_status": status, "backorder": backorder,
             "applied": applied, "warning": None, "unavailable": False, "blocked_reason": None,
             "_floor": floor,
         }
         lines.append(line)
         good.append(line)
-    subtotal = money(subtotal)
-    item_discount = money(sum(ln["discount_bhd"] for ln in good))
-    net = money(subtotal - item_discount)
+    subtotal = dmoney(subtotal)
+    item_discount = dmoney(sum((ln["discount_bhd"] for ln in good), D0))
+    net = dmoney(subtotal - item_discount)
 
     # cart-level: automatic cart_value rules vs coupon — customer gets the better unless stackable
     discounts = [{"rule_id": a["rule_id"], "name": a["name"], "kind": a["kind"],
@@ -1419,23 +1491,24 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     # The cart-level cap is the headroom above the floor on COVERED lines only. A line with no
     # cost on file contributes nothing — it used to lift the cap entirely (`unlimited`), so one
     # floorless SKU let a coupon price every other line below its floor (D3, 24-Sep-2026).
-    headroom = sum(max(0.0, (ln["unit_price_bhd"] - ln["_floor"]) * ln["qty"])
-                   for ln in good if ln["_floor"] is not None)
+    headroom = sum((max(D0, (ln["unit_price_bhd"] - ln["_floor"]) * ln["qty"])
+                    for ln in good if ln["_floor"] is not None), D0)
     cap = headroom
 
-    def _cart_amount(rule: dict) -> float:
-        eligible = sum(ln["line_total_bhd"] for ln in good if _rule_matches_item(rule, ctx["items"][ln["item_code"]]))
-        if rule.get("min_value_bhd") is not None and net < _f(rule["min_value_bhd"]):
-            return 0.0
+    def _cart_amount(rule: dict) -> Decimal:
+        eligible = sum((ln["line_total_bhd"] for ln in good
+                        if _rule_matches_item(rule, ctx["items"][ln["item_code"]])), D0)
+        if rule.get("min_value_bhd") is not None and net < _d(rule["min_value_bhd"]):
+            return D0
         if rule.get("pct_off") is not None:
-            return eligible * _f(rule["pct_off"]) / 100.0
+            return eligible * _d(rule["pct_off"]) / 100
         if rule.get("amount_off_bhd") is not None and eligible > 0:
-            return min(eligible, _f(rule["amount_off_bhd"]))
-        return 0.0
+            return min(eligible, _d(rule["amount_off_bhd"]))
+        return D0
 
     auto = [r for r in ctx["rules"] if r["kind"] == "cart_value" and _rule_matches_ref(r, ref)]
-    best_auto, best_amt = None, 0.0
-    stack_auto: list[tuple[dict, float]] = []
+    best_auto, best_amt = None, D0
+    stack_auto: list[tuple[dict, Decimal]] = []
     for r in auto:
         amt = _cart_amount(r)
         if amt <= 0:
@@ -1446,7 +1519,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
             best_auto, best_amt = r, amt
 
     coupon_out = None
-    coupon_rule, coupon_amt = None, 0.0
+    coupon_rule, coupon_amt = None, D0
     cc = (coupon_code or "").strip().upper()
     if cc:
         match = next((r for r in ctx["rules"] if r["kind"] == "coupon"
@@ -1458,14 +1531,14 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         else:
             amt = _cart_amount(match)
             if amt <= 0:
-                mv = _f(match.get("min_value_bhd"))
-                msg = (f"Add BHD {money(mv - net):.3f} more to use this code." if mv > net
+                mv = _d(match.get("min_value_bhd"))
+                msg = (f"Add BHD {dmoney(mv - net):.3f} more to use this code." if mv > net
                        else "This code does not apply to these items.")
                 coupon_out = {"code": cc, "valid": False, "message": msg}
             else:
                 coupon_rule, coupon_amt = match, amt
 
-    cart_discounts: list[tuple[dict, float]] = []
+    cart_discounts: list[tuple[dict, Decimal]] = []
     if coupon_rule and best_auto:
         if coupon_rule.get("stackable") or best_auto.get("stackable"):
             cart_discounts += [(best_auto, best_amt), (coupon_rule, coupon_amt)]
@@ -1482,10 +1555,10 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         cart_discounts.append((best_auto, best_amt))
     cart_discounts += stack_auto
 
-    cart_total = 0.0
+    cart_total = D0
     for r, amt in cart_discounts:
-        amt = money(min(amt, max(0.0, cap - cart_total)))
-        if amt < money(_cart_amount(r)):
+        amt = dmoney(min(amt, max(D0, cap - cart_total)))
+        if amt < dmoney(_cart_amount(r)):
             clamped.append(f"cart:{r['id']}")
         if amt <= 0:
             continue
@@ -1495,48 +1568,48 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         # What the code actually took off after the margin-floor cap — never claim more. A code
         # that could take nothing off is not "applied": say so, and do not spend it (no
         # _coupon_rule_id, so max_uses is untouched).
-        given = money(sum(d["amount_bhd"] for d in discounts
-                          if d["kind"] == "coupon" and d["rule_id"] == coupon_rule["id"]))
+        given = dmoney(sum((d["amount_bhd"] for d in discounts
+                            if d["kind"] == "coupon" and d["rule_id"] == coupon_rule["id"]), D0))
         if given <= 0:
             coupon_out = {"code": cc, "valid": False,
                           "message": ("This code cannot lower these items further - they are already "
                                       "at the lowest price we can offer.")}
             coupon_rule = None
-        elif given + 0.0005 < money(coupon_amt):
+        elif given < dmoney(coupon_amt):
             coupon_out = {"code": cc, "valid": True,
                           "message": (f"{rule_summary(coupon_rule)} applied - capped at BHD {given:.3f} "
                                       f"to keep these items above cost.")}
         else:
             coupon_out = {"code": cc, "valid": True, "message": f"{rule_summary(coupon_rule)} applied"}
 
-    discount_total = money(item_discount + cart_total)
-    net_after = money(subtotal - discount_total)
-    threshold = money(vals.get("shop_free_delivery_threshold_bhd"))
-    fee = money(vals.get("shop_delivery_fee_bhd"))
-    delivery = fee if (good and threshold > 0 and fee > 0 and net_after < threshold) else 0.0
-    total = money(net_after + delivery)
+    discount_total = dmoney(item_discount + cart_total)
+    net_after = dmoney(subtotal - discount_total)
+    threshold = dmoney(vals.get("shop_free_delivery_threshold_bhd"))
+    fee = dmoney(vals.get("shop_delivery_fee_bhd"))
+    delivery = fee if (good and threshold > 0 and fee > 0 and net_after < threshold) else D0
+    total = dmoney(net_after + delivery)
 
     progress = None
     if threshold > 0:
-        remaining = money(max(0.0, threshold - net_after))
+        remaining = dmoney(max(D0, threshold - net_after))
         progress = {"kind": "free_delivery", "threshold_bhd": threshold, "remaining_bhd": remaining,
                     "unlocked": remaining <= 0,
                     "label": ("Free delivery unlocked" if remaining <= 0
                               else f"Add BHD {remaining:.3f} more for free delivery")}
     else:
-        nxt = sorted((r for r in auto if r.get("min_value_bhd") is not None and _f(r["min_value_bhd"]) > net_after),
-                     key=lambda r: _f(r["min_value_bhd"]))
+        nxt = sorted((r for r in auto if r.get("min_value_bhd") is not None and _d(r["min_value_bhd"]) > net_after),
+                     key=lambda r: _d(r["min_value_bhd"]))
         if nxt:
             r = nxt[0]
-            remaining = money(_f(r["min_value_bhd"]) - net_after)
-            progress = {"kind": "cart_value", "threshold_bhd": money(r["min_value_bhd"]),
+            remaining = dmoney(_d(r["min_value_bhd"]) - net_after)
+            progress = {"kind": "cart_value", "threshold_bhd": dmoney(r["min_value_bhd"]),
                         "remaining_bhd": remaining, "unlocked": False,
                         "label": f"Add BHD {remaining:.3f} more to unlock {r['name']}"}
         elif best_auto:
-            progress = {"kind": "cart_value", "threshold_bhd": money(best_auto.get("min_value_bhd")),
-                        "remaining_bhd": 0.0, "unlocked": True, "label": f"{best_auto['name']} applied"}
+            progress = {"kind": "cart_value", "threshold_bhd": dmoney(best_auto.get("min_value_bhd")),
+                        "remaining_bhd": D0, "unlocked": True, "label": f"{best_auto['name']} applied"}
 
-    min_order = money(vals.get("shop_min_order_bhd"))
+    min_order = dmoney(vals.get("shop_min_order_bhd"))
     small_mode = small_order_mode(vals)
     # One thing at a time, in the order the customer can act on it: clear the dead
     # line first, then top up to the minimum. Totals above are already the price of
@@ -1559,17 +1632,17 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     elif not good:
         block_reason = "Your order is empty."
     elif net_after < min_order and small_mode == "block":
-        block_reason = f"Minimum order is BHD {min_order:.3f} — add BHD {money(min_order - net_after):.3f} more."
+        block_reason = f"Minimum order is BHD {min_order:.3f} — add BHD {dmoney(min_order - net_after):.3f} more."
     can_submit = block_reason is None
     # The wholesale minimum as a sales engine: how far to go, and what would close the gap.
     minimum = None
     gap_suggestions: list[dict] = []
     if min_order > 0 and good:
-        remaining = money(max(0.0, min_order - net_after))
+        remaining = dmoney(max(D0, min_order - net_after))
         under = remaining > 0
         minimum = {"value_bhd": min_order, "remaining_bhd": remaining, "met": not under,
                    "mode": small_mode, "kind": ("small" if under and small_mode != "block" else "standard"),
-                   "fee_bhd": money(vals.get("shop_small_order_fee_bhd")) if under and small_mode == "request" else 0.0}
+                   "fee_bhd": dmoney(vals.get("shop_small_order_fee_bhd")) if under and small_mode == "request" else D0}
         if under:
             gap_suggestions = gap_fillers(ctx, [ln["item_code"] for ln in good], remaining, referral_code,
                                           limit=_i(vals.get("shop_gap_suggestions"), 6))
@@ -1577,7 +1650,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         log.info("shop margin floor clamped: %s", ", ".join(clamped))
     for ln in lines:
         ln.pop("_floor", None)
-    return {
+    return edge_floats({
         "ok": True, "lines": lines,
         "subtotal_bhd": subtotal, "discount_bhd": discount_total, "delivery_bhd": delivery,
         "total_bhd": total, "units": sum(ln["qty"] for ln in good), "items": len(good),
@@ -1587,7 +1660,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         "has_backorder": any(ln["backorder"] for ln in good),
         "_coupon_rule_id": coupon_rule["id"] if coupon_rule else None,
         "_clamped": clamped,
-    }
+    })
 
 
 # ── salesman resolution ───────────────────────────────────────────────────────
@@ -2955,19 +3028,22 @@ def tier_progress(target: dict | None, mtd: float, data_date: str | None,
     the data can lag the calendar, and the countdown must follow the calendar, not the data.
     Returns None when the rep has no target row. `progress_pct` is against the TOP tier so the bar
     never sits at 100% before the last tier; `next_tier` is None once the top tier is reached.
-    The figure is always an ESTIMATE until a statement is approved (is_estimate)."""
-    from decimal import Decimal, ROUND_HALF_UP
+    The figure is always an ESTIMATE until a statement is approved (is_estimate).
+
+    Money (R2c): the thresholds, the month-to-date figure, the kickback and the gap are Decimals
+    to the fils (ROUND_HALF_UP) from the target row to the returned dict; floats only at the
+    edge, where the payload is built."""
     if not target:
         return None
     tiers: list[dict] = []
     for n, (tk, kk) in enumerate((("target_bhd", "kickback_t1"), ("tier2_bhd", "kickback_t2"),
                                   ("tier3_bhd", "kickback_t3")), start=1):
-        thr = _f(target.get(tk))
+        thr = _d(target.get(tk))
         if thr > 0:
-            tiers.append({"n": n, "bhd": money(thr), "pct": _f(target.get(kk))})
+            tiers.append({"n": n, "bhd": dmoney(thr), "pct": _f(target.get(kk))})
     if not tiers:
         return None
-    mtd = max(0.0, _f(mtd))
+    mtd = max(D0, _d(mtd))
     reached = [t for t in tiers if mtd >= t["bhd"]]
     ahead = [t for t in tiers if mtd < t["bhd"]]
     top = tiers[-1]["bhd"]
@@ -2991,19 +3067,22 @@ def tier_progress(target: dict | None, mtd: float, data_date: str | None,
         except Exception:  # noqa: BLE001
             pass
     rate = reached[-1]["pct"] if reached else 0.0
-    kick = (Decimal(str(mtd)) * Decimal(str(rate))).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
-    return {
+    kick = dmoney(mtd * _d(rate))
+    # against the TOP tier, to a tenth of a percent, half-up — the bar's number, not money
+    pct = (min(Decimal(100), mtd / top * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+           if top > 0 else D0)
+    return edge_floats({
         "team": target.get("team") or "normal",
         "month": month, "data_through": str(data_date)[:10] if data_date else None, "days_left": days_left,
         "data_age_days": data_age,
         "basis": basis, "is_estimate": True, "returns_deducted": False,
-        "mtd_bhd": money(mtd), "tiers": tiers,
+        "mtd_bhd": dmoney(mtd), "tiers": tiers,
         "tier_reached": reached[-1]["n"] if reached else 0,
-        "kickback_pct": rate, "kickback_bhd": float(kick),
-        "next_tier": ({"n": nxt["n"], "bhd": nxt["bhd"], "gap_bhd": money(nxt["bhd"] - mtd),
+        "kickback_pct": rate, "kickback_bhd": kick,
+        "next_tier": ({"n": nxt["n"], "bhd": nxt["bhd"], "gap_bhd": dmoney(nxt["bhd"] - mtd),
                        "pct": nxt["pct"]} if nxt else None),
-        "progress_pct": round(min(100.0, mtd / top * 100), 1) if top else 0.0,
-    }
+        "progress_pct": pct,
+    })
 
 
 def rep_month_sales(focus_name: str, basis: str = KICKBACK_BASIS, period: str | None = None) -> tuple[float, str | None]:
@@ -3217,13 +3296,13 @@ def rule_impact(row: dict, ctx: dict | None = None) -> dict:
         it = ctx["items"][code]
         if r["kind"] in ("qty_tier", "bundle_price", "salesman_offer", "cart_value") and _rule_matches_item(r, it):
             touched.append(code)
-            lp = _f(it.get("standard_rate"))
+            lp = _d(it.get("standard_rate"))
             if lp <= 0:
                 continue
             unit = _discounted_unit(r, lp)
-            floor = _floor_for(ctx, code)
+            floor = _floor_d(ctx, code)
             if floor is not None and unit < floor:
-                breaches.append({"item_code": code, "unit_bhd": money(unit), "floor_bhd": floor})
+                breaches.append({"item_code": code, "unit_bhd": money(unit), "floor_bhd": float(floor)})
     return {"items": len(touched), "breaches": breaches[:50], "breach_count": len(breaches)}
 
 
