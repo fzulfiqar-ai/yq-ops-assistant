@@ -65,6 +65,12 @@ business_data/
 Focus ERP*/
 costs/
 business_data/
+# Vendor drop folders (invoices, forwarder bills, receipts, cost/profit reviews with planned
+# shelf prices). Any folder named after a supplier stays out of the repo by default.
+Wekome/
+/Wekome*/
+/VFAN*/
+/Vendor*/
 *.xlsm
 *.zip
 # Dead Railway config, deleted in e947e3f but still present on disk.
