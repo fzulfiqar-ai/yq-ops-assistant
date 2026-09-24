@@ -169,6 +169,19 @@ EXPECTED_GATES = {
     ("POST", "/ingest"): ["admin"],
     ("GET", "/settings/shop"): ["admin"],
     ("PUT", "/settings/shop"): ["admin"],
+    # R3a (24-Sep-2026): statements are money → admin; attainment is the Salesmen page → Shop Admin;
+    # the rep cards are personal → Shop Orders (scoped to the caller's own salesman row in-route)
+    ("GET", "/shop/statements"): ["admin"],
+    ("GET", "/shop/statements/preview"): ["admin"],
+    ("POST", "/shop/statements/draft"): ["admin"],
+    ("POST", "/shop/statements/{statement_id}/approve"): ["admin"],
+    ("POST", "/shop/statements/{statement_id}/paid"): ["admin"],
+    ("POST", "/shop/statements/{statement_id}/supersede"): ["admin"],
+    ("GET", "/shop/attainment"): ["feature:Shop Admin"],
+    ("GET", "/shop/me/followups"): ["feature:Shop Orders"],
+    ("POST", "/shop/me/followups/tap"): ["feature:Shop Orders"],
+    ("GET", "/shop/me/baskets"): ["feature:Shop Orders"],
+    ("GET", "/shop/me/link-week"): ["feature:Shop Orders"],
 }
 
 
