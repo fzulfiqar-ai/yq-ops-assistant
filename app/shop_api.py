@@ -223,7 +223,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request))
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        background.add_task(shop_notify.notify_new_order, o["id"])
+        if not o.get("duplicate"):     # an idempotent re-submit is not a new order: no second fan-out
+            background.add_task(shop_notify.notify_new_order, o["id"])
         sm = o.get("salesman") or {}
         contact = ({"name": sm.get("name"), "phone": sm.get("whatsapp") or sm.get("phone")} if sm
                    else _owner_contact())
@@ -537,7 +538,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), staff_email=user.email)
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        background.add_task(shop_notify.notify_new_order, o["id"])
+        if not o.get("duplicate"):     # same guard as market_order: a re-submit never re-alerts
+            background.add_task(shop_notify.notify_new_order, o["id"])
         log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"]})
         sm = o.get("salesman") or {}
         return {

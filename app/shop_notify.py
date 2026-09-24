@@ -13,7 +13,8 @@ channel → {"sent": bool, "reason"?: str, ...} plus a little metadata:
   email_rep · email_owner · customer_email · telegram · whatsapp   (24-Sep-2026: the rep and the
   owner get SEPARATE sends, so Resend's testing-mode 403 on one address no longer loses the other)
   at · attempts[] (ISO timestamps, one per fan-out — shop_jobs.notify_retry stops at 3) · recipients[]
-Rows written before 24-Sep carry a single `email` key; all_channels_failed() reads both shapes.
+Rows written before 24-Sep carry a single `email` key; all_channels_failed() reads both shapes, and
+notify_failed() is the one "nobody was told" rule shared by notify_retry, shop.list_orders and the badge.
 """
 from __future__ import annotations
 
@@ -235,6 +236,8 @@ def _whatsapp_cloud(number: str | None, text: str) -> dict:
 INTERNAL_CHANNELS = ("email_rep", "email_owner", "email", "telegram", "whatsapp")
 MAX_NOTIFY_ATTEMPTS = 3      # first fan-out + up to two shop_jobs.notify_retry re-runs
 _ATTEMPTS_KEPT = 5           # timestamps kept in notify_result.attempts (the count is what matters)
+NOTIFY_GRACE_MIN = 15        # a null notify_result younger than this may still be the background task
+RETRY_TAG = "Re-sent (first alert did not reach you)"
 
 
 def channel_results(result) -> dict[str, bool]:
@@ -261,6 +264,54 @@ def attempt_count(result) -> int:
     return n if n else 1
 
 
+def _age_minutes(created_at, now: datetime | None = None) -> int | None:
+    if not created_at:
+        return None
+    try:
+        d = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    d = d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    return int(((now or datetime.now(timezone.utc)) - d).total_seconds() // 60)
+
+
+def notify_failed(result, created_at=None, now: datetime | None = None) -> bool:
+    """The one definition of "nobody at YQ was told" shared by the portal's list rows
+    (shop.list_orders → notify_failed), the badge and shop_jobs.notify_retry: every internal
+    channel failed, or the fan-out raised before any send (error only), or there is no result at
+    all and the order is older than NOTIFY_GRACE_MIN (a younger null may still be the background
+    task). The order's status is the caller's business — the badge shows it for 'new' only."""
+    if result is None:
+        age = _age_minutes(created_at, now)
+        return age is None or age >= NOTIFY_GRACE_MIN
+    return all_channels_failed(result)
+
+
+def _placed_ago(o: dict, now: datetime) -> str:
+    """'placed N h ago' / 'placed N min ago' for a re-sent alert (never claims a cadence)."""
+    age = _age_minutes(o.get("created_at"), now) or 0
+    return f"placed {age // 60} h ago" if age >= 60 else f"placed {age} min ago"
+
+
+def _previous_result(client, order_id: int) -> dict:
+    """The stored notify_result alone (a light read for the except path, so a broken get_order()
+    never wipes the attempts history and notify_retry still stops at MAX_NOTIFY_ATTEMPTS)."""
+    try:
+        rows = client.table("shop_orders").select("notify_result").eq("id", order_id).limit(1).execute().data or []
+        prev = rows[0].get("notify_result") if rows else None
+        return prev if isinstance(prev, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        log.debug("notify_new_order(%s): previous result unreadable: %s", order_id, e)
+        return {}
+
+
+def _with_attempts(result: dict, prev: dict, now: str) -> None:
+    attempts = list(prev.get("attempts") or ([prev["at"]] if prev.get("at") else []))
+    attempts.append(now)
+    result["attempts"] = attempts[-_ATTEMPTS_KEPT:]
+    result["attempt"] = len(attempts)
+
+
 def owner_addresses(exclude: str | None = None) -> list[str]:
     """ALERT_EMAIL_TO as a list, minus the rep's own address so nobody gets the same order twice."""
     out: list[str] = []
@@ -279,19 +330,18 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
     second "order received" mail. Safe to run in a background task; never raises."""
     from app.database import get_client
     from app.shop import get_order
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     # The attempt is counted before anything can fail, so a broken order read still moves the
     # retry counter and notify_retry stops at MAX_NOTIFY_ATTEMPTS.
     result: dict = {"at": now, "attempts": [now], "attempt": 1}
+    prev: dict | None = None
     try:
         o = get_order(order_id)
         if not o:
             return {"error": "order not found"}
         prev = o.get("notify_result") if isinstance(o.get("notify_result"), dict) else {}
-        attempts = list(prev.get("attempts") or ([prev["at"]] if prev.get("at") else []))
-        attempts.append(now)
-        result["attempts"] = attempts[-_ATTEMPTS_KEPT:]
-        result["attempt"] = len(attempts)
+        _with_attempts(result, prev, now)
 
         def kept(channel: str) -> dict | None:
             """On a retry, a channel that delivered before is carried over untouched."""
@@ -300,22 +350,27 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
 
         sm = o.get("salesman") or {}
         placed_by_staff = o.get("source") == "salesman"   # the salesman placed it himself — do not alert him
-        subject = f"YQ Shop · New order {o['order_no']} — {o.get('customer_name')} · {_money(o.get('total_bhd'))}"
-        text = order_text(o, audience="salesman")
+        # A re-send days later must not read like a fresh order: say so in the subject and the intro.
+        resent = f"{RETRY_TAG} · {_placed_ago(o, now_dt)}" if retry else ""
+        subject = (f"YQ Shop · {resent} · New order {o['order_no']}" if resent else f"YQ Shop · New order {o['order_no']}") \
+            + f" — {o.get('customer_name')} · {_money(o.get('total_bhd'))}"
+        text = (f"{resent}\n" if resent else "") + order_text(o, audience="salesman")
         # rep copy — his order to confirm
         rep_to = sm.get("email") if (sm.get("email") and sm.get("notify_email", True) and not placed_by_staff) else None
         owners = owner_addresses(exclude=rep_to)
         result["recipients"] = ([rep_to] if rep_to else []) + owners
         if rep_to:
             body = order_html(o, f"New order {o['order_no']}",
-                              "A customer ordered from the marketplace and this order is yours. "
+                              (f"{resent}. " if resent else "")
+                              + "A customer ordered from the marketplace and this order is yours. "
                               "Please confirm availability and delivery.")
             result["email_rep"] = kept("email_rep") or _email(subject, body, rep_to)
         # owner copy — what came in and who has it
         if owners:
             body = order_html(o, f"New order {o['order_no']}",
-                              (f"Placed by {sm.get('name') or o.get('placed_by')} for the shop." if placed_by_staff else
-                               f"A customer ordered from the shared catalog. {'Assigned to ' + sm['name'] + '.' if sm else 'No salesman assigned — please pick it up.'}"))
+                              (f"{resent}. " if resent else "")
+                              + (f"Placed by {sm.get('name') or o.get('placed_by')} for the shop." if placed_by_staff else
+                                 f"A customer ordered from the shared catalog. {'Assigned to ' + sm['name'] + '.' if sm else 'No salesman assigned — please pick it up.'}"))
             result["email_owner"] = kept("email_owner") or _email(subject, body, ",".join(owners))
         if not rep_to and not owners:
             result["email"] = {"sent": False, "emailed": False, "reason": "no_recipient (rep has no email; ALERT_EMAIL_TO unset)"}
@@ -337,10 +392,15 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
         if sm and sm.get("notify_whatsapp", True) and not placed_by_staff:
             # the rep's own copy: the plain order, without the owner-channel "Assigned to" prefix
             result["whatsapp"] = kept("whatsapp") or \
-                _whatsapp_cloud(sm.get("whatsapp") or sm.get("phone"), order_text(o, audience="salesman"))
+                _whatsapp_cloud(sm.get("whatsapp") or sm.get("phone"),
+                                (f"{resent}\n" if resent else "") + order_text(o, audience="salesman"))
     except Exception as e:  # noqa: BLE001
         log.warning("notify_new_order(%s) failed: %s", order_id, e)
         result["error"] = f"{type(e).__name__}: {e}"[:200]
+        if prev is None:
+            # get_order() itself raised: the stored history was never read, so read it the light
+            # way — otherwise every failed run would start the attempts list over at 1.
+            _with_attempts(result, _previous_result(get_client(), order_id), now)
     # Persist even a failed attempt: the attempt count is what stops notify_retry after 3 runs.
     try:
         get_client().table("shop_orders").update({

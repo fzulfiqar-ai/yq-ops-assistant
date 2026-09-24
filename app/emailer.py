@@ -8,7 +8,14 @@ Providers, tried IN ORDER for EVERY recipient until one accepts the message (24-
      In "testing mode" (no verified domain) Resend answers 403 for every address except the
      account owner's; that used to end the send for the rep AND the owner in one go.
   2. Brevo   (BREVO_API_KEY)   — HTTPS.
-  3. SMTP    (SMTP_USER/SMTP_PASS; SMTP_HOST default smtp.gmail.com, SMTP_PORT 587).
+  3. SMTP    (SMTP_USER/SMTP_PASS; SMTP_HOST default smtp.gmail.com, SMTP_PORT 587) — NOT on Render:
+     free Render web services have had outbound ports 25/465/587 blocked since 26-Sep-2025, and the
+     connection times out instead of being refused. So SMTP is registered only when the RENDER env
+     var (Render sets RENDER=true) is absent, or EMAIL_SMTP_ENABLED=1 says the host really can
+     reach the port (a paid instance). Connect timeout 5 s, so a blocked port costs one short wait.
+     Consequence on free Render today: reps get email only after the Resend domain
+     (yqmarketplace.com) is verified or BREVO_API_KEY is set; the owner's own address gets through
+     in Resend testing mode.
 Each recipient is its own send, so one rejected address never loses the others' copies, and
 the caller gets a per-recipient result it can store (shop_orders.notify_result).
 
@@ -98,8 +105,19 @@ def email_title(result: dict) -> str:
     return AGENT_EMAIL_TITLES.get(name) or name.replace("_", " ").title() or "Operations Briefing"
 
 
+_SMTP_CONNECT_TIMEOUT_S = 5   # a blocked port (free Render) must not hold a request for 20 s per address
+
+
+def smtp_allowed() -> bool:
+    """Whether direct SMTP can work on this host: anywhere but Render, or on Render only with an
+    explicit EMAIL_SMTP_ENABLED=1 (a paid instance). Free Render blocks outbound SMTP ports."""
+    if os.getenv("EMAIL_SMTP_ENABLED", "").strip() == "1":
+        return True
+    return os.getenv("RENDER", "").strip().lower() != "true"
+
+
 def smtp_configured() -> bool:
-    return bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and os.getenv("ALERT_EMAIL_TO"))
+    return bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and os.getenv("ALERT_EMAIL_TO")) and smtp_allowed()
 
 
 @contextmanager
@@ -175,7 +193,8 @@ def _send_brevo(subject: str, html: str, to: str) -> dict:
 
 
 def _send_smtp(subject: str, html: str, to: str) -> dict:
-    """Direct SMTP (works locally; blocked on Railway's network, allowed on Render)."""
+    """Direct SMTP (works locally and on hosts with open SMTP ports; blocked on Railway and on
+    FREE Render, where the connect times out — see smtp_allowed())."""
     user = os.getenv("SMTP_USER", "")
     pw = os.getenv("SMTP_PASS", "")
     host = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -185,7 +204,7 @@ def _send_smtp(subject: str, html: str, to: str) -> dict:
     msg["From"] = user
     msg["To"] = to
     msg.attach(MIMEText(html, "html"))
-    with _force_ipv4(), smtplib.SMTP(host, port, timeout=20) as s:
+    with _force_ipv4(), smtplib.SMTP(host, port, timeout=_SMTP_CONNECT_TIMEOUT_S) as s:
         s.starttls()
         s.login(user, pw)
         s.sendmail(user, [to], msg.as_string())
@@ -193,13 +212,15 @@ def _send_smtp(subject: str, html: str, to: str) -> dict:
 
 
 def providers() -> list[tuple[str, object]]:
-    """The configured providers in fallback order: Resend → Brevo → SMTP."""
+    """The configured providers in fallback order: Resend → Brevo → SMTP. SMTP joins only where it
+    can connect (smtp_allowed): on free Render the SMTP_* vars are set but the port is blocked, and
+    trying it would just add a timeout per address to every send."""
     out: list[tuple[str, object]] = []
     if os.getenv("RESEND_API_KEY", ""):
         out.append(("resend", _send_resend))
     if os.getenv("BREVO_API_KEY", ""):
         out.append(("brevo", _send_brevo))
-    if os.getenv("SMTP_USER", "") and os.getenv("SMTP_PASS", ""):
+    if os.getenv("SMTP_USER", "") and os.getenv("SMTP_PASS", "") and smtp_allowed():
         out.append(("smtp", _send_smtp))
     return out
 

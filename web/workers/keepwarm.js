@@ -7,7 +7,9 @@
  *   SCHEDULER_CRON  GET each SCHEDULER_PATHS entry with X-Agent-Key — the shop jobs (order alert
  *                   retries, unassigned + unconfirmed reminders, cleanup, stale-stock alert), the
  *                   daily agents and the agent reactions. Same method, path and header as
- *                   .github/workflows/shop-cron.yml, which stays as the backstop.
+ *                   .github/workflows/shop-cron.yml, which keeps only its manual trigger now (its
+ *                   schedule is commented out; the API's run_shop_jobs also holds a 10-minute lease,
+ *                   so a stray second caller is skipped rather than doubled).
  *
  * Logging rule (same as shop-cron.yml): never the response body. It carries order numbers and
  * merchant/shop names; the status and the top-level keys say enough to tell "ran" from "did nothing".

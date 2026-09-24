@@ -3,11 +3,14 @@
     python -m tests.test_r1_alerts
 
 Pure tests, no database, no network: every provider, channel and table is a fake. Covers
-app/emailer.py (per-recipient sends, Resend → Brevo → SMTP fall-through), app/shop_notify.py
-(separate rep/owner copies, retry keeps delivered channels, the "every channel failed" reader),
-app/shop_jobs.py (unconfirmed_reminder selection + escalation + audit rows, notify_retry attempts,
-stale_data_alert marks sent only on delivery, run_shop_jobs ok:false), app/schedules.py
-(hour >= RUN_HOUR with the last_ran guard) and the Cloudflare Worker cron files.
+app/emailer.py (per-recipient sends, Resend → Brevo → SMTP fall-through, SMTP off on Render),
+app/shop_notify.py (separate rep/owner copies, retry keeps delivered channels and is labelled
+re-sent, the one notify_failed rule, attempts history survives a broken get_order),
+app/shop_jobs.py (unconfirmed_reminder selection + escalation + audit rows for every attempt,
+hourly back-off, 07:00-22:00 Bahrain window, reassign resets the cadence, 7-day/10-reminder cap
+into a daily digest, notify_retry attempts, stale_data_alert marks sent only on delivery, the run
+lease, run_shop_jobs ok:false), app/shop.list_orders flags, app/schedules.py (hour >= RUN_HOUR
+with the last_ran guard), the shop_api duplicate guard and the Cloudflare Worker cron files.
 Same lightweight runner as tests/test_v3.py.
 """
 from __future__ import annotations
@@ -263,10 +266,11 @@ def _fake_post(script: dict):
 
 class _FakeSMTP:
     sent: list[tuple[str, list[str]]] = []
+    timeouts: list[int] = []
     fail = False
 
     def __init__(self, host, port, timeout=0):
-        pass
+        _FakeSMTP.timeouts.append(timeout)
 
     def __enter__(self):
         return self
@@ -291,8 +295,9 @@ def _():
     import requests
     from app import emailer
     post = _fake_post({"resend": [403], "brevo": [401]})
-    _FakeSMTP.sent, _FakeSMTP.fail = [], False
-    with env(RESEND_API_KEY="k", BREVO_API_KEY="b", SMTP_USER="u@x", SMTP_PASS="p", EMAIL_FROM="YQ <no-reply@yq.test>"), \
+    _FakeSMTP.sent, _FakeSMTP.fail, _FakeSMTP.timeouts = [], False, []
+    with env(RESEND_API_KEY="k", BREVO_API_KEY="b", SMTP_USER="u@x", SMTP_PASS="p", EMAIL_FROM="YQ <no-reply@yq.test>",
+             RENDER=None, EMAIL_SMTP_ENABLED=None), \
             patched(requests, post=post), patched(emailer.smtplib, SMTP=_FakeSMTP):
         assert [n for n, _ in emailer.providers()] == ["resend", "brevo", "smtp"]
         r = emailer.send_html("s", "<p>x</p>", to="rep@x.test, owner@y.test")
@@ -302,6 +307,30 @@ def _():
     assert sorted(a for _, a in post.calls) == ["owner@y.test", "owner@y.test", "rep@x.test", "rep@x.test"], post.calls
     assert [to for _, to in _FakeSMTP.sent] == [["rep@x.test"], ["owner@y.test"]], _FakeSMTP.sent
     assert r["to"] == "rep@x.test, owner@y.test" and "failed" not in r
+    assert _FakeSMTP.timeouts == [5, 5], "a blocked port must cost 5 s per address, not 20"
+
+
+@test("emailer: SMTP is not registered on Render (RENDER=true) unless EMAIL_SMTP_ENABLED=1 — the port is blocked")
+def _():
+    import requests
+    from app import emailer
+    base = dict(RESEND_API_KEY="k", BREVO_API_KEY=None, SMTP_USER="u@x", SMTP_PASS="p")
+    with env(**base, RENDER="true", EMAIL_SMTP_ENABLED=None):
+        assert [n for n, _ in emailer.providers()] == ["resend"], emailer.providers()
+        assert emailer.smtp_allowed() is False and emailer.smtp_configured() is False
+        # a rep rejected by Resend's testing mode fails fast — no 20 s SMTP wait, no smtp in tried
+        post = _fake_post({"resend": [403]})
+        with patched(requests, post=post):
+            r = emailer.send_one("s", "<p>x</p>", "rep@x.test")
+        assert r["emailed"] is False and r["tried"] == ["resend"] and "403" in r["reason"], r
+    with env(**base, RENDER="true", EMAIL_SMTP_ENABLED="1"):
+        assert [n for n, _ in emailer.providers()] == ["resend", "smtp"], "the explicit override brings SMTP back"
+    with env(**base, RENDER="TRUE", EMAIL_SMTP_ENABLED="0"):
+        assert [n for n, _ in emailer.providers()] == ["resend"]
+    with env(**base, RENDER=None, EMAIL_SMTP_ENABLED=None):
+        assert [n for n, _ in emailer.providers()] == ["resend", "smtp"], "off Render SMTP stays available"
+    assert emailer._SMTP_CONNECT_TIMEOUT_S == 5
+    assert "allowed on Render" not in emailer.__doc__ and "allowed on Render" not in (emailer._send_smtp.__doc__ or "")
 
 
 @test("emailer: one address rejected by Resend (testing mode) never loses the other")
@@ -329,6 +358,19 @@ def _():
     assert r["emailed"] is False and r["results"][0]["reason"].startswith("no_email_provider"), r
     with env(ALERT_EMAIL_TO=None):
         assert emailer.send_html("s", "<p>x</p>")["reason"].startswith("no_recipient")
+
+
+@test("notify: notify_failed is the one rule — error-only and a null older than 15 min count as failed")
+def _():
+    from app.shop_notify import NOTIFY_GRACE_MIN, notify_failed
+    assert NOTIFY_GRACE_MIN == 15
+    assert notify_failed(LEGACY_FAILED, ago(hours=1), NOW) is True
+    assert notify_failed({"at": "x", "error": "boom"}, ago(hours=1), NOW) is True, "raised before any send = nobody told"
+    assert notify_failed({}, ago(hours=1), NOW) is True
+    assert notify_failed(dict(LEGACY_FAILED, email_owner={"sent": True}), ago(hours=1), NOW) is False
+    assert notify_failed(None, ago(minutes=5), NOW) is False, "the background task may still be running"
+    assert notify_failed(None, ago(minutes=15), NOW) is True
+    assert notify_failed(None, None, NOW) is True and notify_failed(None, "garbage", NOW) is True
 
 
 @test("emailer: a 429 from Resend is retried once, and a provider exception is a reason not a crash")
@@ -405,19 +447,25 @@ def _():
     prev = dict(LEGACY_FAILED, customer_email={"sent": True, "emailed": True, "to": "buyer@shop.test"})
     db = FakeDB(shop_orders=[{"id": 91}])
     ch = Channels(email_ok=True)
-    with env(ALERT_EMAIL_TO="owner@yq.test"), patched(shop, get_order=lambda oid: _order(notify_result=prev)), \
+    placed = (datetime.now(timezone.utc) - timedelta(hours=5, minutes=10)).isoformat()
+    with env(ALERT_EMAIL_TO="owner@yq.test"), patched(shop, get_order=lambda oid: _order(notify_result=prev, created_at=placed)), \
             patched(database, get_client=lambda: db), ch.patch(shop_notify):
         r = shop_notify.notify_new_order(91, retry=True)
     assert [to for _, to in ch.emails] == ["ahmed@yq.test", "owner@yq.test"], ch.emails   # buyer NOT re-sent
     assert r["customer_email"].get("kept") is True and r["customer_email"]["sent"] is True
     assert r["attempt"] == 2 and r["attempts"] == [LEGACY_FAILED["at"], r["at"]], r["attempts"]
     assert r["email_rep"]["sent"] and r["email_owner"]["sent"] and not shop_notify.all_channels_failed(r)
-    # a first (non-retry) run never carries anything over, even if the old row says sent
+    # a re-send days later must not read like a fresh order: subject, Telegram and WhatsApp say so
+    tag = "Re-sent (first alert did not reach you) · placed 5 h ago"
+    assert all(tag in s for s, _ in ch.emails), ch.emails
+    assert tag in ch.telegrams[0] and tag in ch.whatsapps[0][1], (ch.telegrams, ch.whatsapps)
+    # a first (non-retry) run never carries anything over, even if the old row says sent — and is not labelled re-sent
     ch2 = Channels(email_ok=True)
-    with env(ALERT_EMAIL_TO="owner@yq.test"), patched(shop, get_order=lambda oid: _order(notify_result=prev)), \
+    with env(ALERT_EMAIL_TO="owner@yq.test"), patched(shop, get_order=lambda oid: _order(notify_result=prev, created_at=placed)), \
             patched(database, get_client=lambda: db), ch2.patch(shop_notify):
         r2 = shop_notify.notify_new_order(91)
     assert "buyer@shop.test" in [to for _, to in ch2.emails] and "kept" not in r2["customer_email"]
+    assert not any("Re-sent" in s for s, _ in ch2.emails) and "Re-sent" not in ch2.telegrams[0]
 
 
 @test("notify: an order the rep placed himself gets no rep copy and no WhatsApp; errors are persisted too")
@@ -440,10 +488,17 @@ def _():
     # get_order raising → error recorded AND the attempt persisted (so retries still stop at 3)
     def boom(oid):
         raise RuntimeError("db down")
+    db = FakeDB(shop_orders=[{"id": 91}])     # a row with no history yet
     with patched(shop, get_order=boom), patched(database, get_client=lambda: db), ch.patch(shop_notify):
         r = shop_notify.notify_new_order(91)
     assert r["error"].startswith("RuntimeError") and r["attempt"] == 1 and shop_notify.all_channels_failed(r)
     assert db.written("shop_orders", "update")[-1][2]["notify_result"] is r
+    # ... and a persistent get_order failure does NOT reset the history: the stored attempts are read the light way
+    db2 = FakeDB(shop_orders=[{"id": 91, "notify_result": dict(LEGACY_FAILED, attempts=["a", "b"])}])
+    with patched(shop, get_order=boom), patched(database, get_client=lambda: db2), ch.patch(shop_notify):
+        r = shop_notify.notify_new_order(91)
+    assert r["attempt"] == 3 and r["attempts"] == ["a", "b", r["at"]], r
+    assert shop_notify.attempt_count(r) >= shop_notify.MAX_NOTIFY_ATTEMPTS, "notify_retry can now mark it exhausted"
 
 
 # ── shop_jobs ──────────────────────────────────────────────────────────────────
@@ -452,19 +507,25 @@ REPS = {4: {"id": 4, "name": "Ahmed", "email": "ahmed@yq.test", "phone": "390000
         5: {"id": 5, "name": "Faisal", "email": "", "phone": "39000001"}}
 
 
-def _jobs_ctx(db, ch: Channels, settings: dict | None = None):
-    """Patch everything unconfirmed_reminder / notify_retry / stale_data_alert reach for."""
+def _jobs_ctx(db, ch: Channels, settings: dict | None = None, now: datetime = NOW):
+    """Patch everything unconfirmed_reminder / notify_retry / stale_data_alert reach for.
+    NOW is 10:00 UTC = 13:00 Bahrain, inside the 07:00-22:00 send window."""
     import app.shop as shop
     from app import shop_jobs, shop_notify
     vals = dict(shop.SETTING_DEFAULTS, **(settings or {}))
 
     @contextmanager
     def ctx():
-        with patched(shop_jobs, get_client=lambda: db, _now=lambda: NOW), \
+        with patched(shop_jobs, get_client=lambda: db, _now=lambda: now), \
                 patched(shop, shop_settings=lambda force=False: vals, _salesman_by_id=lambda sid: REPS.get(sid)), \
                 ch.patch(shop_notify), env(ALERT_EMAIL_TO="owner@yq.test", APP_BASE_URL="https://ops.test"):
             yield
     return ctx()
+
+
+def _events(db) -> dict[int, dict]:
+    """{order_id: detail} of the 'reminded' rows written in this run (the last one per order)."""
+    return {p["order_id"]: p["detail"] for _, _, ps in db.written("shop_order_events", "insert") for p in ps}
 
 
 def _unconfirmed_rows() -> list[dict]:
@@ -506,18 +567,22 @@ def _():
     assert len(owner_mail) == 1 and "unconfirmed past 4 h 00 min" in owner_mail[0], owner_mail
     assert any("Faisal" in t and "Ahmed" in t for t in ch.telegrams), ch.telegrams
     assert out["owner"]["sent"] is True
-    # audit rows: A (rep), B (rep+owner), H (owner only — the rep could not be reached) ; C/D/E/F/G untouched
-    events = {p["order_id"]: p["detail"] for _, _, ps in db.written("shop_order_events", "insert") for p in ps}
+    # audit rows: A (rep), B (rep+owner), H (owner delivered, rep tried and not reached) ; C/D/E/F/G untouched
+    events = _events(db)
     assert set(events) == {1, 2, 8}, events
-    assert events[1] == {"rep": True, "owner": False, "level": "rep", "age_min": 180, "sla_min": 120}
-    assert events[2]["rep"] and events[2]["owner"] and events[2]["level"] == "owner"
-    assert events[8] == {"rep": False, "owner": True, "level": "owner", "age_min": 26 * 60, "sla_min": 120}
+    assert events[1] == {"rep": True, "owner": False, "attempted": {"rep": True, "owner": False}, "attempted_at": NOW.isoformat(),
+                         "level": "rep", "age_min": 180, "sla_min": 120}, events[1]
+    assert events[2]["rep"] and events[2]["owner"] and events[2]["level"] == "owner" and events[2]["attempted"] == {"rep": True, "owner": True}
+    assert events[8] == {"rep": False, "owner": True, "attempted": {"rep": True, "owner": True}, "attempted_at": NOW.isoformat(),
+                         "level": "owner", "age_min": 26 * 60, "sla_min": 120}, events[8]
     assert all(p["actor"] == "shop_jobs" and p["event"] == "reminded" for _, _, ps in db.written("shop_order_events", "insert") for p in ps)
+    assert not any("resend" in json.dumps(d).lower() for d in events.values()), "provider error text never lands in the timeline"
     stamped = sorted(i for _, _, _, ids in db.written("shop_orders", "update") for i in ids)
     assert stamped == [1, 2, 8], stamped
+    assert "digest" not in out and "backoff" not in out
 
 
-@test("jobs: unconfirmed_reminder — nothing delivered → no stamp, no event, tries again next run")
+@test("jobs: unconfirmed_reminder — nothing delivered → no stamp, but the attempt is recorded and held for an hour")
 def _():
     from app import shop_jobs
     db = FakeDB(shop_orders=_unconfirmed_rows()[:2], shop_order_events=[])
@@ -525,7 +590,24 @@ def _():
     with _jobs_ctx(db, ch):
         out = shop_jobs.unconfirmed_reminder()
     assert out["reminded"] == [] and out["escalated"] == [] and out["reason"].startswith("no channel delivered"), out
-    assert not db.written("shop_orders", "update") and not db.written("shop_order_events", "insert")
+    assert not db.written("shop_orders", "update"), "sla_notified_at is stamped only when someone was reached"
+    events = _events(db)
+    assert set(events) == {1, 2} and events[1]["level"] == "attempt", events
+    assert events[1] == {"rep": False, "owner": False, "attempted": {"rep": True, "owner": False}, "attempted_at": NOW.isoformat(),
+                         "level": "attempt", "age_min": 180, "sla_min": 120}, events[1]
+    assert events[2]["attempted"] == {"rep": True, "owner": True} and not events[2]["rep"] and not events[2]["owner"]
+    assert len(ch.emails) == 2, ch.emails            # Ahmed's digest + the owner escalation, once each
+    # the very next tick (a dead channel): nothing is sent again — back-off, not a 15-minute hammer
+    ch2 = Channels(email_ok=True)
+    with _jobs_ctx(db, ch2):
+        out = shop_jobs.unconfirmed_reminder()
+    assert ch2.emails == [] and out["reminded"] == [] and sorted(out["backoff"]) == ["A", "B"] and "reason" not in out, out
+    # 61 minutes later the rep channel is tried again (and now delivers)
+    ch3 = Channels(email_ok=True)
+    with _jobs_ctx(db, ch3, now=NOW + timedelta(minutes=61)):
+        out = shop_jobs.unconfirmed_reminder()
+    assert sorted(out["reminded"]) == ["A", "B"] and "backoff" not in out, out
+    assert sorted(out["escalated"]) == ["A", "B"], out            # A is 241 min from assignment by now: past 2x the SLA
     # the 12 h cadence: an order reminded 13 h ago is due again, one reminded 11 h ago is not
     rows = [dict(_unconfirmed_rows()[0], id=1, order_no="A"), dict(_unconfirmed_rows()[0], id=2, order_no="B")]
     db = FakeDB(shop_orders=rows, shop_order_events=[
@@ -535,9 +617,210 @@ def _():
     with _jobs_ctx(db, ch):
         out = shop_jobs.unconfirmed_reminder()
     assert out["reminded"] == ["A"], out
+    # a failed attempt 30 min ago holds; one 61 min ago is retried
+    db = FakeDB(shop_orders=rows, shop_order_events=[
+        {"id": 1, "order_id": 1, "event": "reminded", "ts": ago(minutes=30), "detail": {"rep": False, "owner": False, "attempted": {"rep": True, "owner": False}}},
+        {"id": 2, "order_id": 2, "event": "reminded", "ts": ago(minutes=61), "detail": {"rep": False, "owner": False, "attempted": {"rep": True, "owner": False}}}])
+    ch = Channels(email_ok=True)
+    with _jobs_ctx(db, ch):
+        out = shop_jobs.unconfirmed_reminder()
+    assert out["reminded"] == ["B"] and out["backoff"] == ["A"], out
     # settings switch it off
     with _jobs_ctx(FakeDB(shop_orders=rows), Channels(), {"shop_confirm_sla_min": "0"}):
         assert shop_jobs.unconfirmed_reminder()["skipped"]
+
+
+@test("jobs: nudges go out 07:00-22:00 Bahrain only; notify_retry is the first alert and is not gated")
+def _():
+    import app.database as database
+    import app.shop as shop
+    from app import shop_jobs
+    bahrain = timezone(timedelta(hours=3))
+
+    def rows_at(now: datetime) -> list[dict]:
+        base = dict(_unconfirmed_rows()[0])
+        return [dict(base, id=1, order_no="A", created_at=(now - timedelta(hours=3)).isoformat(), assigned_at=None),
+                dict(base, id=2, order_no="B", created_at=(now - timedelta(hours=5)).isoformat(), assigned_at=(now - timedelta(hours=5)).isoformat()),
+                {"id": 9, "order_no": "U", "status": "new", "salesman_id": None, "created_at": (now - timedelta(hours=1)).isoformat(),
+                 "sla_notified_at": None, "customer_shop": "Shop", "customer_area": "Riffa", "total_bhd": 12.0}]
+    for hour, minute, expect_run in ((6, 59, False), (7, 0, True), (13, 0, True), (21, 59, True), (22, 0, False), (3, 15, False)):
+        now = datetime(2026, 9, 24, hour, minute, tzinfo=bahrain).astimezone(timezone.utc)
+        assert shop_jobs.in_send_window(now) is expect_run, (hour, minute)
+        db = FakeDB(shop_orders=rows_at(now), shop_order_events=[])
+        ch = Channels(email_ok=True)
+        with _jobs_ctx(db, ch, now=now):
+            a = shop_jobs.unconfirmed_reminder()
+            b = shop_jobs.unassigned_reminder()
+        if expect_run:
+            assert a["reminded"] and b["notified"] == 1, (hour, a, b)
+        else:
+            assert a["skipped"].startswith("outside 07:00-22:00 Bahrain") and b["skipped"].startswith("outside"), (hour, a, b)
+            assert ch.emails == [] and not db.writes, (hour, db.writes)
+    # notify_retry at 03:15 Bahrain still re-sends a new-order alert nobody got
+    now = datetime(2026, 9, 24, 3, 15, tzinfo=bahrain).astimezone(timezone.utc)
+    db = FakeDB(shop_orders=[{"id": 1, "order_no": "A", "status": "new", "created_at": (now - timedelta(hours=2)).isoformat(),
+                              "notify_result": dict(LEGACY_FAILED)}])
+    ch = Channels(email_ok=True)
+    with _jobs_ctx(db, ch, now=now), patched(shop, get_order=lambda oid: _order(id=oid, notify_result=dict(LEGACY_FAILED), customer_email=None)), \
+            patched(database, get_client=lambda: db):
+        out = shop_jobs.notify_retry()
+    assert out["retried"] == ["A"], out
+
+
+@test("jobs: a reassigned order starts its cadence over — reminders older than assigned_at are ignored, age from assignment")
+def _():
+    from app import shop_jobs
+    # created 5 h ago, first rep reminded 4 h ago, handed to Ahmed 3 h ago: Ahmed has never been reminded
+    row = dict(_unconfirmed_rows()[0], id=1, order_no="A", created_at=ago(hours=5), assigned_at=ago(hours=3))
+    db = FakeDB(shop_orders=[row], shop_order_events=[
+        {"id": 1, "order_id": 1, "event": "reminded", "ts": ago(hours=4), "detail": {"rep": True, "owner": True, "level": "owner"}}])
+    ch = Channels(email_ok=True)
+    with _jobs_ctx(db, ch):
+        out = shop_jobs.unconfirmed_reminder()
+    assert out["reminded"] == ["A"] and out["escalated"] == [], out     # 3 h from assignment: past the SLA, not yet 2x
+    ev = _events(db)[1]
+    assert ev["age_min"] == 180 and ev["level"] == "rep", ev                # from assigned_at, not created_at
+    assert "waiting 3 h 00 min" in ch.whatsapps[0][1], ch.whatsapps      # the rep's text counts from assignment too
+    # the same row with the old reminder AFTER assignment: the 12 h cadence holds
+    db = FakeDB(shop_orders=[row], shop_order_events=[
+        {"id": 1, "order_id": 1, "event": "reminded", "ts": ago(hours=2), "detail": {"rep": True}}])
+    ch = Channels(email_ok=True)
+    with _jobs_ctx(db, ch):
+        out = shop_jobs.unconfirmed_reminder()
+    assert out["reminded"] == [] and ch.emails == [], out
+
+
+@test("jobs: after 7 days or 10 delivered reminders an order leaves per-order chasing for one daily owner digest")
+def _():
+    from app import shop_jobs
+    base = _unconfirmed_rows()[0]
+    old = dict(base, id=1, order_no="OLD", created_at=ago(days=8), assigned_at=ago(days=8))
+    many = dict(base, id=2, order_no="MANY", created_at=ago(days=2), assigned_at=ago(days=2))
+    fresh = dict(base, id=3, order_no="FRESH", created_at=ago(hours=3), assigned_at=ago(hours=3))
+    ten = [{"id": i + 1, "order_id": 2, "event": "reminded", "ts": ago(hours=46 - 4 * i), "detail": {"rep": True}} for i in range(10)]
+    db = FakeDB(shop_orders=[old, many, fresh], shop_order_events=ten, app_settings=[])
+    ch = Channels(email_ok=True)
+    with _jobs_ctx(db, ch):
+        out = shop_jobs.unconfirmed_reminder()
+    assert out["reminded"] == ["FRESH"] and out["escalated"] == [], out
+    assert out["digest"]["orders"] == ["OLD", "MANY"] and out["digest"]["sent"] is True and out["digest"]["email"] is True, out["digest"]
+    owner_mail = [s for s, to in ch.emails if to == "owner@yq.test"]
+    assert len(owner_mail) == 1 and "daily digest: 2 order(s)" in owner_mail[0], ch.emails
+    body = ch.telegrams[0]
+    assert "8 days" in body and "OLD" in body and "MANY" in body and "FRESH" not in body and "Ahmed" in body, body
+    marker = db.written("app_settings", "upsert")
+    assert marker and marker[0][2]["key"] == "shop_unconfirmed_digest_at", marker
+    ev = _events(db)
+    assert ev[1]["level"] == "digest" and ev[1]["owner"] and not ev[1]["rep"] and ev[2]["level"] == "digest" and ev[3]["level"] == "rep", ev
+    # the digest already went out today → skipped; the fresh order's rep cadence is untouched
+    db = FakeDB(shop_orders=[old, many], shop_order_events=ten,
+                app_settings=[{"key": "shop_unconfirmed_digest_at", "value": ago(hours=3)}])
+    ch = Channels(email_ok=True)
+    with _jobs_ctx(db, ch):
+        out = shop_jobs.unconfirmed_reminder()
+    assert out["digest"]["skipped"] and ch.emails == [] and ch.telegrams == [] and not db.writes, out
+    # a digest nobody received leaves no marker and no rows, so the next tick tries again
+    db = FakeDB(shop_orders=[old], shop_order_events=[], app_settings=[])
+    with _jobs_ctx(db, Channels(email_ok=False)):
+        out = shop_jobs.unconfirmed_reminder()
+    assert out["digest"]["sent"] is False and out["digest"]["reason"].startswith("no channel") and not db.writes, out
+
+
+@test("jobs: the run lease — one conditional upsert on app_settings, a live lease skips the run, released at the end")
+def _():
+    from app import shop_jobs
+    db = FakeDB(app_settings=[])
+    with _jobs_ctx(db, Channels()):
+        first = shop_jobs.acquire_lease(db)
+        second = shop_jobs.acquire_lease(db)
+    assert first["acquired"] is True and first["expires_at"] == "2026-09-24T10:10:00Z", first
+    assert second == {"acquired": False, "held_until": "2026-09-24T10:10:00Z"}, second
+    row = next(r for r in db.rows["app_settings"] if r["key"] == "shop_jobs_lock")
+    assert row["value"] == "2026-09-24T10:10:00Z" and row["updated_by"] == "shop_jobs"
+    # a lease from a run that died is taken over once it expired — by the atomic UPDATE ... WHERE value < now
+    with _jobs_ctx(db, Channels(), now=NOW + timedelta(minutes=11)):
+        third = shop_jobs.acquire_lease(db)
+    assert third["acquired"] is True and third["expires_at"] == "2026-09-24T10:21:00Z", third
+    conditional = [f for t, op, f in db.queries if t == "app_settings" and op == "update"
+                   and ("lt", "value", "2026-09-24T10:11:00Z", False) in f]
+    assert conditional, db.queries                                   # the take-over is UPDATE ... WHERE value < now
+    with _jobs_ctx(db, Channels()):
+        shop_jobs.release_lease(db)
+        assert row["value"] == "1970-01-01T00:00:00Z"
+        assert shop_jobs.acquire_lease(db)["acquired"] is True
+    assert len(db.written("app_settings", "insert")) == 1, "only the first-ever lease is an insert"
+    # run_shop_jobs: skipped while another caller holds it, otherwise runs everything and lets go
+    db = FakeDB(app_settings=[{"key": "shop_jobs_lock", "value": "2026-09-24T10:05:00Z"}])
+    ran: list[str] = []
+    jobs = (("fine", lambda: ran.append("fine") or {"checked": 0}),)
+    with _jobs_ctx(db, Channels()), patched(shop_jobs, JOBS=jobs):
+        out = shop_jobs.run_shop_jobs()
+    assert out["ok"] is True and out["skipped"] == "another run holds the lease" and ran == [] and "fine" not in out, out
+    db = FakeDB(app_settings=[{"key": "shop_jobs_lock", "value": "1970-01-01T00:00:00Z"}])
+    with _jobs_ctx(db, Channels()), patched(shop_jobs, JOBS=jobs):
+        out = shop_jobs.run_shop_jobs()
+    assert out["ok"] is True and out["fine"] == {"checked": 0} and ran == ["fine"], out
+    assert db.rows["app_settings"][0]["value"] == "1970-01-01T00:00:00Z", "released at the end"
+    # a job that raises still releases the lease
+    def boom():
+        raise RuntimeError("x")
+    with _jobs_ctx(db, Channels()), patched(shop_jobs, JOBS=(("broken", boom),)):
+        out = shop_jobs.run_shop_jobs()
+    assert out["ok"] is False and db.rows["app_settings"][0]["value"] == "1970-01-01T00:00:00Z"
+    # a lock table that cannot be read never silences the jobs for good (fail-open, error reported)
+    class Broken:
+        def table(self, name):
+            raise ConnectionError("db down")
+    with patched(shop_jobs, get_client=lambda: Broken(), _now=lambda: NOW), patched(shop_jobs, JOBS=jobs):
+        out = shop_jobs.run_shop_jobs()
+    assert out["fine"] == {"checked": 0} and out["lease"]["error"].startswith("ConnectionError"), out
+
+
+@test("shop: list_orders carries notify_failed + notify_attempts, never the whole notify_result")
+def _():
+    import app.shop as shop
+    now = datetime.now(timezone.utc)
+    rows = [
+        {"id": 1, "order_no": "A", "status": "new", "created_at": (now - timedelta(hours=2)).isoformat(), "notify_result": dict(LEGACY_FAILED)},
+        {"id": 2, "order_no": "B", "status": "new", "created_at": (now - timedelta(hours=2)).isoformat(),
+         "notify_result": dict(LEGACY_FAILED, email_owner={"sent": True}, attempts=["a", "b"])},
+        {"id": 3, "order_no": "C", "status": "new", "created_at": (now - timedelta(minutes=3)).isoformat(), "notify_result": None},
+        {"id": 4, "order_no": "D", "status": "new", "created_at": (now - timedelta(minutes=30)).isoformat(), "notify_result": None},
+        {"id": 5, "order_no": "E", "status": "new", "created_at": (now - timedelta(hours=1)).isoformat(), "notify_result": {"at": "x", "error": "boom"}},
+        {"id": 6, "order_no": "F", "status": "delivered", "created_at": (now - timedelta(days=3)).isoformat(), "notify_result": dict(LEGACY_FAILED)},
+    ]
+    db = FakeDB(shop_orders=rows)
+    with patched(shop, get_client=lambda: db):
+        r = shop.list_orders(status="new")
+    got = {o["order_no"]: (o["notify_failed"], o["notify_attempts"]) for o in r["orders"]}
+    assert got == {"A": (True, 1), "B": (False, 2), "C": (False, 0), "D": (True, 0), "E": (True, 1)}, got
+    assert all("notify_result" not in o for o in r["orders"]), "addresses and provider text stay off the list"
+    assert r["count"] == 5 and r["counts"]["new"] == 5 and r["counts"]["delivered"] == 1, r
+    with patched(shop, get_client=lambda: db):
+        r = shop.list_orders(status="delivered")
+    assert r["orders"][0]["notify_failed"] is True, "status is the UI's business: the badge shows it for 'new' only"
+
+
+@test("api: the legacy and staff order routes skip the fan-out for an idempotent duplicate, like market_order")
+def _():
+    src = (ROOT / "app" / "shop_api.py").read_text(encoding="utf-8").splitlines()
+    calls = [i for i, line in enumerate(src) if "add_task(shop_notify.notify_new_order" in line]
+    assert len(calls) == 3, calls     # /public/shop/{token}/order, /public/market/order, /shop/order
+    for i in calls:
+        assert "if not o.get(\"duplicate\")" in src[i - 1], (i + 1, src[i - 1])
+
+
+@test("cron: shop-cron.yml keeps workflow_dispatch but no live schedule; the Worker jsonc states the Render hours budget")
+def _():
+    wf = (ROOT / ".github" / "workflows" / "shop-cron.yml").read_text(encoding="utf-8")
+    on_block = wf.split("\non:", 1)[1].split("\npermissions:", 1)[0]
+    assert re.search(r"^\s+workflow_dispatch:", on_block, re.M), on_block
+    assert not re.search(r"^\s+schedule:", on_block, re.M), "the schedule must stay commented out while the Worker runs"
+    assert "re-enable only if the cloudflare keep-warm worker" in wf.lower(), "the note that says when to bring it back"
+    jsonc = (ROOT / "web" / "wrangler.keepwarm.jsonc").read_text(encoding="utf-8")
+    assert "750" in jsonc and "720-744" in jsonc, "the free-hours budget belongs next to the trigger that spends it"
+    doc = (ROOT / "docs" / "SHOP.md").read_text(encoding="utf-8")
+    assert "750 free instance-hours" in doc and "07:00–22:00 Bahrain" in doc and "shop_jobs_lock" in doc
 
 
 @test("jobs: notify_retry re-runs the fan-out for young 'new' orders nobody heard about, stops at 3 attempts")
@@ -612,12 +895,14 @@ def _():
 
     def boom():
         raise RuntimeError("table missing")
-    with patched(shop_jobs, JOBS=(("fine", lambda: {"checked": 0}), ("broken", boom), ("errored", lambda: {"error": "x"}))):
+    lock_db = FakeDB(app_settings=[])      # run_shop_jobs takes its lease here — never on the real app_settings
+    with _jobs_ctx(lock_db, Channels()), \
+            patched(shop_jobs, JOBS=(("fine", lambda: {"checked": 0}), ("broken", boom), ("errored", lambda: {"error": "x"}))):
         out = shop_jobs.run_shop_jobs()
     assert out["ok"] is False and out["errors"] == ["broken", "errored"] and out["broken"]["error"].startswith("RuntimeError"), out
-    with patched(shop_jobs, JOBS=(("fine", lambda: {"checked": 0}),)):
+    with _jobs_ctx(lock_db, Channels()), patched(shop_jobs, JOBS=(("fine", lambda: {"checked": 0}),)):
         out = shop_jobs.run_shop_jobs()
-    assert out["ok"] is True and "errors" not in out
+    assert out["ok"] is True and "errors" not in out and "lease" not in out
 
 
 # ── schedules ──────────────────────────────────────────────────────────────────

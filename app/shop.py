@@ -1836,7 +1836,17 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
             qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%,"
                           f"customer_phone.ilike.%{s}%")
     res = qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
-    return {"orders": res.data or [], "count": res.count if res.count is not None else len(res.data or []),
+    rows = res.data or []
+    # 24-Sep-2026: the list carries two small flags for the "Not notified" badge, never the whole
+    # notify_result (1-1.5 KB per row of addresses and provider error text — the detail endpoint
+    # has it for one order at a time). Same definition as shop_jobs.notify_retry.
+    from app.shop_notify import attempt_count, notify_failed
+    now = _now()
+    for r in rows:
+        nr = r.pop("notify_result", None)
+        r["notify_failed"] = notify_failed(nr, r.get("created_at"), now)
+        r["notify_attempts"] = attempt_count(nr)
+    return {"orders": rows, "count": res.count if res.count is not None else len(rows),
             "counts": status_counts(salesman_id)}
 
 
