@@ -26,7 +26,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.catalog import CATEGORY_ORDER, public_url, share_token, thumb_path, THUMB_SIZES
+from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
 from app.db_read import exec_sql, exec_sql_params
@@ -89,7 +89,16 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_clearance_days_cover": "365",  # stock on hand covers this many days of sales → aging
     "shop_clearance_min_units": "12",    # …and there are at least this many units to clear
     "shop_clearance_max": "24",          # the worst N by cover wear the Clearance badge
-    "shop_clearance_show_retail": "1",   # clearance cards show the real retail price as the anchor even if compare is off
+    # owner, 24-Sep-2026: the retail anchor's source (ModernTradeSellerBook) is one retailer's book,
+    # not the outlets' — hidden until confirmed (the live setting already holds 0)
+    "shop_clearance_show_retail": "0",   # clearance cards show the real retail price as the anchor even if compare is off
+    # R1 data honesty (24-Sep-2026): a badge needs evidence, not just units. The counts come from
+    # v_catalog_velocity (catalog_velocity_v2_migration.sql); until it runs the floors are skipped.
+    "shop_clearance_min_age_days": "180",     # no Clearance badge on a line younger than this: age = first MA_base price
+                                              # date, else first sale, else catalog_items.created_at (see _load_first_seen)
+    "shop_best_seller_min_invoices": "10",    # Best seller: at least this many invoices in 90 days…
+    "shop_best_seller_min_shops": "5",        # …from at least this many named B2B shops
+    "shop_selling_fast_min_invoices": "10",   # Selling fast: at least this many invoices in 90 days
     # marketplace (16-Sep-2026)
     "shop_sticky_days": "90",
     "shop_public_tiers": "1",
@@ -342,20 +351,91 @@ def _load_items() -> list[dict]:
     return rows
 
 
-def _load_costs() -> dict[str, float]:
-    """Latest landed cost per code via the service client (the view is never granted to agents)."""
+def _load_costs(sources: dict[str, str] | None = None) -> dict[str, float]:
+    """Latest landed cost per code via the service client (the view is never granted to agents).
+
+    mrn_landed_costs (real receipts, XML) wins. Codes it does not cover fall back to the latest
+    purchase_costs row per SKU (MAX(id): the owner's landed-cost workbook and cost imports), matched
+    case-insensitively — those codes are typed by hand. Every cost is stored under BOTH its exact
+    spelling and the UPPER-cased code, so any lookup path (cost_for, margin_health, the floor) finds
+    it whatever the catalog's casing. `sources`, when given, is filled with code -> 'mrn' |
+    'purchase_costs' under the same keys. D3 (24-Sep-2026): 31 of 182 visible SKUs had no floor at
+    all, and one floorless line used to uncap every cart discount."""
     out: dict[str, float] = {}
+    src: dict[str, str] = sources if sources is not None else {}
+
+    def _put(code: str, cost: float, origin: str) -> None:
+        # first writer wins per key: the latest row per spelling, and never a fallback over an MRN cost
+        for k in (code, code.upper()):
+            if k not in out:
+                out[k] = cost
+                src[k] = origin
+
     try:
         rows = (get_client().table("mrn_landed_costs")
                 .select("sku_code,landed_cost_bhd,effective_date,id")
                 .order("sku_code").order("effective_date", desc=True).order("id", desc=True)
                 .limit(5000).execute().data or [])
+        seen: set[str] = set()
         for r in rows:
-            code = r.get("sku_code")
-            if code and code not in out and r.get("landed_cost_bhd") is not None:
-                out[code] = _f(r["landed_cost_bhd"])
+            code = str(r.get("sku_code") or "").strip()
+            if code and code not in seen and r.get("landed_cost_bhd") is not None:
+                seen.add(code)
+                _put(code, _f(r["landed_cost_bhd"]), "mrn")
     except Exception as e:  # noqa: BLE001
         log.warning("landed costs unavailable (no margin floor): %s", e)
+    try:
+        rows = (get_client().table("purchase_costs").select("sku_code,landed_cost_bhd,id")
+                .order("id", desc=True).limit(5000).execute().data or [])
+        added = 0
+        for r in rows:                      # highest id first, so the first row per code is the latest
+            code = str(r.get("sku_code") or "").strip()
+            if not code or code.upper() in out or _f(r.get("landed_cost_bhd")) <= 0:
+                continue
+            _put(code, _f(r["landed_cost_bhd"]), "purchase_costs")
+            added += 1
+        if added:
+            log.debug("margin floors: %d codes from purchase_costs (no MRN cost)", added)
+    except Exception as e:  # noqa: BLE001
+        log.warning("purchase_costs unavailable (MRN floors only): %s", e)
+    return out
+
+
+def cost_for(ctx: dict, code: str) -> float | None:
+    """Landed cost for a catalog code: the exact spelling first, then the UPPER-cased key (both
+    are stored by _load_costs). None = no cost on file."""
+    costs = ctx.get("costs") or {}
+    cost = costs.get(code)
+    if cost is None:
+        cost = costs.get(str(code).upper())
+    return cost
+
+
+def cost_source_for(ctx: dict, code: str) -> str | None:
+    """'mrn' | 'purchase_costs' for the cost cost_for() returns, None when there is none."""
+    sources = ctx.get("cost_sources") or {}
+    return sources.get(code) or sources.get(str(code).upper())
+
+
+COST_SANITY_SHARE = 0.10   # a cost under this share of the list price is flagged, never trusted quietly
+
+
+def cost_flags(ctx: dict) -> dict[str, str]:
+    """Pure: catalog codes whose cost on file is implausibly low -- under COST_SANITY_SHARE of the
+    list price. A purchase_costs fallback row can be a typo or a per-carton figure (24-Sep-2026:
+    X10 LT / X10 MK carry 0.0126 against a 0.400 price), and such a cost floors nothing while
+    margin health would show it as a 96 % margin. The cost stays in use (the floor is still better
+    than none); the flag travels with margin_health() so the owner sees which rows to fix."""
+    out: dict[str, str] = {}
+    for code in ctx.get("order") or []:
+        it = (ctx.get("items") or {}).get(code) or {}
+        cost, lp = cost_for(ctx, code), _f(it.get("standard_rate"))
+        if cost is None or cost <= 0 or lp <= 0 or cost >= COST_SANITY_SHARE * lp:
+            continue
+        origin = cost_source_for(ctx, code)
+        label = "purchase_costs fallback cost" if origin == "purchase_costs" else "landed cost"
+        out[code] = (f"{label} BHD {cost:.4f} is under {COST_SANITY_SHARE:.0%} of the BHD {lp:.3f} "
+                     f"list price - check the cost row before trusting this margin")
     return out
 
 
@@ -568,11 +648,13 @@ def _build_context() -> dict:
     public request needs is in here, so a warm request touches the database zero times."""
     vals = shop_settings(force=True)
     items = _load_items()
+    cost_sources: dict[str, str] = {}
     ctx = {
         "settings": vals,
         "items": {str(r["item_code"]): r for r in items},
         "order": [str(r["item_code"]) for r in items],
-        "costs": _load_costs(),
+        "costs": _load_costs(cost_sources),
+        "cost_sources": cost_sources,
         "rules": _load_rules(),
         "salesmen": _load_salesmen(),
         "campaigns": _load_campaigns(),
@@ -581,14 +663,19 @@ def _build_context() -> dict:
     # Item codes are stored exactly as the price book spells them ("X05 UL-1Mtr"),
     # so every lookup that starts from user input goes through this index.
     ctx["by_upper"] = {code.upper(): code for code in ctx["order"]}
+    ctx["cost_flags"] = cost_flags(ctx)
     ctx["pairs"] = _load_pairs(set(ctx["order"]))
     ctx["drops"] = _load_price_drops(_i(vals.get("shop_price_drop_days"), 30))
     ctx["reserved_slugs"] = _load_reserved_slugs()
     # Both used to be a database call on EVERY catalog request (~350 ms together).
     ctx["share_token"] = share_token(create=False)
-    ctx["prices_updated"] = (exec_sql("SELECT MAX(start_date)::text AS d FROM selling_prices "
-                                      "WHERE price_book = 'MA_base' AND start_date <= CURRENT_DATE")
-                             or [{}])[0].get("d")
+    ctx["prices_updated"] = prices_updated_date()     # voided rows skipped once the column exists
+    # Badge evidence and line ages are read HERE, in the background refresh, never on a request
+    # (R1: the lazy read used to fire on the checkout path and cache {} for a minute on a blip).
+    ctx["_velocity_extra"] = _load_velocity_extra()
+    first_seen = _load_first_seen()
+    for code, it in ctx["items"].items():
+        it["first_seen"] = first_seen.get(code)
     ctx["public_json"] = {}     # serialized public payloads, per referral code — see public_catalog_json
     return ctx
 
@@ -711,6 +798,88 @@ def item_tiers(ctx: dict, item: dict) -> list[dict]:
 
 # ── public payload ────────────────────────────────────────────────────────────
 
+_EVIDENCE_COLS = ("invoices_90d", "shops_30d", "shops_90d")
+
+
+def _load_velocity_extra() -> dict[str, dict]:
+    """Evidence counts per code from v_catalog_velocity: invoices_90d, shops_30d and shops_90d
+    (named B2B shops — catalog_velocity_v2_migration.sql). Loaded by _build_context, i.e. in the
+    background refresh, never on a customer request. {} when the columns are not there yet or on
+    any error — every caller then keeps the volume-only rules that ran before R1, so deploying
+    this code ahead of the migration changes nothing."""
+    out: dict[str, dict] = {}
+    try:
+        rows = exec_sql("SELECT item_code, invoices_90d, shops_30d, shops_90d FROM v_catalog_velocity") or []
+        for r in rows:
+            code = str(r.get("item_code") or "")
+            if code:
+                out[code] = {k: _i(r.get(k)) for k in _EVIDENCE_COLS if r.get(k) is not None}
+    except Exception as e:  # noqa: BLE001 — the view predates the migration, or the RPC is down
+        log.debug("velocity evidence unavailable (volume-only badges): %s", e)
+    return out
+
+
+def _velocity_extra(ctx: dict) -> dict[str, dict]:
+    """The evidence counts _build_context loaded for this context. Never queries: a synthetic
+    context (tests build ctx by hand) simply has none, {}."""
+    cached = ctx.get("_velocity_extra")
+    if not isinstance(cached, dict):
+        cached = ctx["_velocity_extra"] = {}
+    return cached
+
+
+def _load_first_seen() -> dict[str, str]:
+    """When each SKU first existed, for the clearance age guard: the first MA_base price date
+    (voided rows skipped once selling_prices_void_migration.sql has run), then -- for a code with
+    no price row -- its first sale date. catalog_items.created_at is the last resort in _badges:
+    190 of 194 items were seeded on 2026-07-03, so on its own it would hide every Clearance badge
+    until 30-Dec-2026. Loaded by _build_context (background); {} on error."""
+    out: dict[str, str] = {}
+    q = ("SELECT sku_code, MIN(start_date)::text AS d FROM selling_prices "
+         "WHERE price_book = 'MA_base' AND sku_code IS NOT NULL{f} GROUP BY sku_code")
+    try:
+        try:
+            rows = exec_sql(q.format(f=" AND voided_at IS NULL"))
+        except Exception:  # noqa: BLE001 — no voided_at column yet
+            rows = exec_sql(q.format(f=""))
+        for r in rows or []:
+            if r.get("sku_code") and r.get("d"):
+                out[str(r["sku_code"])] = str(r["d"])[:10]
+    except Exception as e:  # noqa: BLE001
+        log.warning("first price dates unavailable (clearance age falls back to created_at): %s", e)
+    try:
+        rows = exec_sql("SELECT sku_code, MIN(sale_date)::text AS d FROM v_sales "
+                        "WHERE sku_code IS NOT NULL GROUP BY sku_code") or []
+        for r in rows:
+            code = str(r.get("sku_code") or "")
+            if code and code not in out and r.get("d"):
+                out[code] = str(r["d"])[:10]
+    except Exception as e:  # noqa: BLE001
+        log.debug("first sale dates unavailable: %s", e)
+    return out
+
+
+def _evidence(ctx: dict, it: dict, key: str) -> int | None:
+    """invoices_90d / shops_30d / shops_90d for one item: the item row first (a test, or a later
+    _load_items, can carry them), then the cached view read. None = unknown."""
+    v = it.get(key)
+    if v is None:
+        v = (_velocity_extra(ctx).get(str(it.get("item_code") or "")) or {}).get(key)
+    return None if v is None else _i(v)
+
+
+def social_proof_text(ctx: dict, it: dict, proof_min: int) -> str | None:
+    """"Ordered by N shops in the last 30 days": N counts NAMED B2B shops (v_catalog_velocity.shops_30d),
+    never the cash counter or the outlets. Until catalog_velocity_v2 runs, customers_30d (every
+    customer name) stands in. None below the minimum, and never "0 shops"."""
+    n = _evidence(ctx, it, "shops_30d")
+    if n is None:
+        n = _i(it.get("customers_30d"))
+    if n <= 0 or n < proof_min:
+        return None
+    return f"Ordered by {n} shops in the last 30 days"
+
+
 def _badges(ctx: dict) -> dict[str, list[str]]:
     vals = ctx["settings"]
     top_n = max(_i(vals.get("shop_best_seller_top_n"), 3), 0)
@@ -722,13 +891,27 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
     cl_days = _i(vals.get("shop_clearance_days_cover"), 365)
     cl_min = _i(vals.get("shop_clearance_min_units"), 12)
     cl_max = _i(vals.get("shop_clearance_max"), 24)
+    cl_age = _i(vals.get("shop_clearance_min_age_days"), 180)
+    bs_inv = _i(vals.get("shop_best_seller_min_invoices"), 10)
+    bs_shops = _i(vals.get("shop_best_seller_min_shops"), 5)
+    sf_inv = _i(vals.get("shop_selling_fast_min_invoices"), 10)
+
+    def _meets(it: dict, key: str, floor: int) -> bool:
+        """A badge floor holds when the evidence count is known and reaches it. An unknown count
+        (the velocity view predates catalog_velocity_v2) keeps the pre-R1 volume-only rule."""
+        v = _evidence(ctx, it, key)
+        return v is None or v >= floor
+
     out: dict[str, list[str]] = {c: [] for c in ctx["order"]}
     by_cat: dict[str, list[dict]] = {}
     for code in ctx["order"]:
         it = ctx["items"][code]
         by_cat.setdefault(str(it.get("category") or "OTHER"), []).append(it)
+    # Best seller: the top N by 90-day units per category, but only among items with breadth —
+    # enough invoices from enough named shops. Units alone can be one shop's restock.
     for _cat, items in by_cat.items():
-        ranked = sorted((i for i in items if _f(i.get("sold_90d")) > 0),
+        ranked = sorted((i for i in items if _f(i.get("sold_90d")) > 0
+                         and _meets(i, "invoices_90d", bs_inv) and _meets(i, "shops_90d", bs_shops)),
                         key=lambda i: _f(i.get("sold_90d")), reverse=True)[:top_n]
         for i in ranked:
             out[str(i["item_code"])].append("best_seller")
@@ -745,7 +928,7 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
         created = _parse_ts(it.get("created_at"))
         if created and created >= cutoff:
             out[code].append("new")
-        if selling_fast(it.get("stock_qty"), it.get("sold_90d"), low_days):
+        if selling_fast(it.get("stock_qty"), it.get("sold_90d"), low_days) and _meets(it, "invoices_90d", sf_inv):
             out[code].append("selling_fast")
         if code in offer_codes:
             out[code].append("on_offer")
@@ -753,12 +936,20 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
         if drop and drop["was"] > drop["now"] > 0:
             out[code].append("price_drop")
     # Clearance: real stock that the last 90 days of sales would take a year+ to move. The worst
-    # movers first, capped, and never something that is also a best seller / trending / new.
+    # movers first, capped, and never something that is also a best seller / trending / new — nor
+    # a line younger than shop_clearance_min_age_days: it has had no time to sell, and on 24-Sep-2026
+    # 11 of the 24 "Last chance" badges sat on July's top sellers (D2). A line's age runs from its
+    # first MA_base price date (item["first_seen"], else its first sale — _load_first_seen), and
+    # only then from catalog_items.created_at, which is a 2026-07-03 bulk seed for 190 of 194 items.
+    young_after = _now() - timedelta(days=max(cl_age, 0))
     aging: list[tuple[float, str]] = []
     for code in ctx["order"]:
         if any(b in out[code] for b in ("best_seller", "trending", "new")):
             continue
         it = ctx["items"][code]
+        born = _parse_ts(it.get("first_seen") or it.get("created_at"))
+        if cl_age > 0 and born and born > young_after:
+            continue
         qty, s90 = _f(it.get("stock_qty")), _f(it.get("sold_90d"))
         if qty < cl_min:
             continue
@@ -858,7 +1049,6 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
         anchor_ok = show_compare or (clearance_retail and "clearance" in badges.get(code, []))
         compare = money(b2c) if (anchor_ok and lp is not None and b2c is not None and _f(b2c) > _f(lp)) else None
         save_pct = int(round((1 - _f(lp) / _f(b2c)) * 100)) if compare else None
-        cust = _i(it.get("customers_30d"))
         stock_as_of = stock_as_of or it.get("stock_as_of")
         tiers = item_tiers(ctx, it)
         items.append({
@@ -883,7 +1073,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "tiers": tiers if public_tiers else [],
             "has_tiers": bool(tiers),
             "badges": badges.get(code, []),
-            "social_proof": f"Ordered by {cust} shops this month" if cust >= proof_min else None,
+            "social_proof": social_proof_text(ctx, it, proof_min),
         })
         if staff:   # added outside the public literal on purpose — the public block must never carry it
             items[-1]["stock_qty"] = max(_i(it.get("stock_qty")), 0)
@@ -952,7 +1142,7 @@ def rule_summary(r: dict) -> str:
 def _floor_for(ctx: dict, code: str) -> float | None:
     """Lowest VAT-inclusive unit price allowed: landed cost x (1 + margin) x (1 + VAT).
     The price book is VAT-inclusive (owner's workbook), so the floor must be too."""
-    cost = ctx["costs"].get(code)
+    cost = cost_for(ctx, code)
     if cost is None or cost <= 0:
         return None
     vals = ctx["settings"]
@@ -1151,14 +1341,12 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     discounts = [{"rule_id": a["rule_id"], "name": a["name"], "kind": a["kind"],
                   "amount_bhd": ln["discount_bhd"]}
                  for ln in good for a in ln["applied"]]
-    headroom = 0.0
-    unlimited = False
-    for ln in good:
-        if ln["_floor"] is None:
-            unlimited = True
-        else:
-            headroom += max(0.0, (ln["unit_price_bhd"] - ln["_floor"]) * ln["qty"])
-    cap = float("inf") if unlimited else headroom
+    # The cart-level cap is the headroom above the floor on COVERED lines only. A line with no
+    # cost on file contributes nothing — it used to lift the cap entirely (`unlimited`), so one
+    # floorless SKU let a coupon price every other line below its floor (D3, 24-Sep-2026).
+    headroom = sum(max(0.0, (ln["unit_price_bhd"] - ln["_floor"]) * ln["qty"])
+                   for ln in good if ln["_floor"] is not None)
+    cap = headroom
 
     def _cart_amount(rule: dict) -> float:
         eligible = sum(ln["line_total_bhd"] for ln in good if _rule_matches_item(rule, ctx["items"][ln["item_code"]]))
@@ -1229,7 +1417,22 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         cart_total += amt
         discounts.append({"rule_id": r["id"], "name": r["name"], "kind": r["kind"], "amount_bhd": amt})
     if coupon_rule and coupon_out is None:
-        coupon_out = {"code": cc, "valid": True, "message": f"{rule_summary(coupon_rule)} applied"}
+        # What the code actually took off after the margin-floor cap — never claim more. A code
+        # that could take nothing off is not "applied": say so, and do not spend it (no
+        # _coupon_rule_id, so max_uses is untouched).
+        given = money(sum(d["amount_bhd"] for d in discounts
+                          if d["kind"] == "coupon" and d["rule_id"] == coupon_rule["id"]))
+        if given <= 0:
+            coupon_out = {"code": cc, "valid": False,
+                          "message": ("This code cannot lower these items further - they are already "
+                                      "at the lowest price we can offer.")}
+            coupon_rule = None
+        elif given + 0.0005 < money(coupon_amt):
+            coupon_out = {"code": cc, "valid": True,
+                          "message": (f"{rule_summary(coupon_rule)} applied - capped at BHD {given:.3f} "
+                                      f"to keep these items above cost.")}
+        else:
+            coupon_out = {"code": cc, "valid": True, "message": f"{rule_summary(coupon_rule)} applied"}
 
     discount_total = money(item_discount + cart_total)
     net_after = money(subtotal - discount_total)
@@ -3105,10 +3308,11 @@ def margin_health() -> dict:
     min_margin = _f(vals.get("shop_min_margin_pct"), 0.2)
     low_units = _i(vals.get("shop_low_stock_units"), 10)
     rows = []
+    flags = ctx.get("cost_flags") or {}
     for code in ctx["order"]:
         it = ctx["items"][code]
         lp = it.get("standard_rate")
-        cost = ctx["costs"].get(code)
+        cost = cost_for(ctx, code)          # the same cost the floor uses (exact or UPPER key, MRN or fallback)
         ex_vat = money(_f(lp) / (1 + vat)) if lp is not None else None
         profit = money(ex_vat - cost) if (ex_vat is not None and cost) else None
         margin = round(profit / ex_vat, 4) if (profit is not None and ex_vat) else None
@@ -3117,6 +3321,8 @@ def margin_health() -> dict:
             "item_code": code, "spec": it.get("spec"), "category": it.get("category"),
             "price_incl_vat_bhd": money(lp) if lp is not None else None, "price_ex_vat_bhd": ex_vat,
             "landed_cost_bhd": money(cost) if cost else None, "profit_bhd": profit,
+            "cost_source": cost_source_for(ctx, code) if cost else None,
+            "cost_flag": flags.get(code),   # an implausibly low cost (see cost_flags): the margin shown is not trusted
             "margin_pct": margin, "markup_pct": markup, "floor_bhd": _floor_for(ctx, code),
             "stock_status": stock_status_for(it.get("stock_qty"), low_units),
             "sold_90d": _i(it.get("sold_90d")),
@@ -3127,6 +3333,7 @@ def margin_health() -> dict:
     return {"rows": rows, "summary": {
         "items": len(rows), "with_cost": sum(1 for r in rows if r["landed_cost_bhd"]),
         "below_floor": sum(1 for r in rows if r["status"] == "below_floor"),
+        "flagged_costs": sum(1 for r in rows if r["cost_flag"]),
         "vat_rate": vat, "min_margin_pct": min_margin}}
 
 

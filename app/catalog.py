@@ -313,11 +313,21 @@ def public_catalog(token: str) -> dict | None:
     ) or []
     cats = sorted({r.get("category") or "OTHER" for r in rows},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
-    upd = (exec_sql(
-        "SELECT MAX(start_date)::text AS d FROM selling_prices "
-        "WHERE price_book = 'MA_base' AND start_date <= CURRENT_DATE") or [{}])[0].get("d")
     return {"items": rows, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain",
-            "prices_updated": upd}
+            "prices_updated": prices_updated_date()}
+
+
+def prices_updated_date() -> str | None:
+    """The latest MA_base start_date that is live today -- the "Prices updated" stamp on the
+    catalog and the market. Skips voided rows (selling_prices_void_migration.sql) so a voided
+    phantom can never date the stamp; until that column exists the plain query answers."""
+    base = ("SELECT MAX(start_date)::text AS d FROM selling_prices "
+            "WHERE price_book = 'MA_base' AND start_date <= CURRENT_DATE")
+    try:
+        rows = exec_sql(base + " AND voided_at IS NULL")
+    except Exception:  # noqa: BLE001 — no voided_at column yet
+        rows = exec_sql(base)
+    return (rows or [{}])[0].get("d")
 
 
 # ── branded exports (.xlsx + .pdf) — thumbnails make these fast ────────────────

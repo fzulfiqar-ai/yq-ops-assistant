@@ -11,6 +11,7 @@ import glob
 import math
 import os
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,19 +25,24 @@ warnings.filterwarnings("ignore")
 
 from app.database import get_client  # noqa: E402
 from scripts.ingest import (  # noqa: E402
-    parse_order_lines, parse_orders, parse_receivables, parse_stock, parse_stock_balance, read_grid,
+    parse_order_lines, parse_orders, parse_pricebook, parse_receivables, parse_stock, parse_stock_balance,
+    read_grid,
 )
+from scripts.load_supabase import pricebook_key  # noqa: E402
 
 DATA_DIR = ROOT / "business_data"
 CLEAN_DIR = ROOT / "data" / "clean"
 
 # Report types that have NO cross-check rule here. They still load (data/clean/<table>.csv), so a
 # refresh made only of these must not be reported as a FAIL -- it is "loaded, nothing to compare".
+# (Price books left this list on 24-Sep-2026: see _price_book_checks.)
 _UNCHECKED = {
     "product_profitability": "Product_Profitability_Report",
-    "selling_prices": "price book",
     "ledger_entries": "Ledger",
 }
+
+# filename key (lower-cased substring, as classify() sees it) -> price_book
+_PRICE_BOOKS = (("masellingpricebook", "MA_base"), ("moderntradesellerbook", "modern_trade"))
 
 
 def _latest_source_dir() -> Path:
@@ -72,6 +78,16 @@ def _find(key: str, src_dir: Path) -> str | None:
         if key in os.path.basename(p).lower():
             return p
     return None
+
+
+def _find_newest_book(key: str, src_dir: Path) -> str | None:
+    """The price book to check when a folder holds several exports of one book: the NEWEST by
+    export_date (docProps.created / mtime), never the one that sorts first alphabetically (the
+    older download counter). ingest de-duplicates by mtime, so this is the file that was loaded."""
+    paths = [p for p in glob.glob(str(src_dir / "*.xls*")) if key in os.path.basename(p).lower()]
+    if not paths:
+        return None
+    return max(sorted(paths), key=lambda p: (export_date(p), os.path.getmtime(p)))
 
 
 def _sql_sum(sql: str, params: list | None = None) -> float | None:
@@ -136,6 +152,129 @@ def _db_sum_eq(table: str, col: str, eqcol: str, eqval) -> float:
     return _rest_sum(table, col, "id", filters=[lambda q: q.eq(eqcol, eqval)])
 
 
+def export_date(path) -> str:
+    """The day a Focus price book was exported, ISO. The workbook's docProps `created` stamp (the
+    exporter writes it; a price book has no title block to read a date from), else the file's
+    mtime -- the EARLIER of the two, because `created` carries the server's clock (measured
+    2 h 30 ahead of the download time on the 14-Sep-2026 book) and could roll past midnight."""
+    p = Path(path)
+    cands: list[str] = []
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(p, read_only=True)
+        try:
+            c = wb.properties.created
+        finally:
+            wb.close()
+        if c:
+            cands.append(c.date().isoformat())
+    except Exception:  # noqa: BLE001 — not an xlsx, or no properties part
+        pass
+    try:
+        cands.append(datetime.fromtimestamp(p.stat().st_mtime).date().isoformat())
+    except OSError:
+        pass
+    return min(cands) if cands else date.today().isoformat()
+
+
+def current_prices(rows: list[dict], today: str | None = None) -> dict[str, float]:
+    """Pure: the price v_price_list_by_book shows per SKU, derived from ONE parsed price-book file
+    by the view's own rule -- Authorized, rate > 0, started, not ended; the base (blank-warehouse)
+    layer first, then the latest start_date, then the row later in the file (= the higher id)."""
+    today = today or date.today().isoformat()
+    best: dict[str, tuple[tuple, float]] = {}
+    for i, r in enumerate(rows):
+        sku = r.get("sku_code")
+        start, end = r.get("start_date"), r.get("end_date")
+        rate = _nn(r.get("rate_bhd"))
+        if not sku or (r.get("status") or "") != "Authorized" or rate <= 0 or not start:
+            continue
+        if str(start) > today or (end and str(end) < today):
+            continue
+        rank = (r.get("warehouse_name") in (None, ""), str(start), i)
+        if sku not in best or rank > best[sku][0]:
+            best[sku] = (rank, rate)
+    return {s: v[1] for s, v in best.items()}
+
+
+def _db_book_prices(book: str) -> dict[str, float]:
+    """{sku: live price} for one book from v_price_list_by_book (RPC, ordered REST fallback)."""
+    try:
+        from app.db_read import exec_sql_params
+        rows = exec_sql_params("SELECT sku_code, price_bhd FROM v_price_list_by_book WHERE price_book = $1", [book])
+    except Exception:  # noqa: BLE001
+        rows = (get_client().table("v_price_list_by_book").select("sku_code,price_bhd")
+                .eq("price_book", book).order("sku_code").limit(5000).execute().data or [])
+    return {str(r["sku_code"]): _nn(r.get("price_bhd")) for r in (rows or []) if r.get("sku_code")}
+
+
+def _db_today() -> str:
+    """The database's CURRENT_DATE (UTC), which is what every price view compares start_date
+    against. The local clock is 3 h ahead of it in Bahrain, so a price starting "today" would
+    otherwise look live here and not there between midnight and 03:00."""
+    try:
+        from app.db_read import exec_sql
+        d = (exec_sql("SELECT CURRENT_DATE::text AS d") or [{}])[0].get("d")
+        if d:
+            return str(d)[:10]
+    except Exception:  # noqa: BLE001
+        pass
+    return date.today().isoformat()
+
+
+def _db_live_focus_rows(book: str, key: str) -> list[dict]:
+    """Live rows of `book` that came from a FOCUS export of it (source_file starts with the book's
+    file stem; workbook imports 'YQ_MRN%' are a separate source of truth and never count). Filters
+    voided rows when the column exists (selling_prices_void_migration.sql), everything otherwise."""
+    cols = "sku_code, price_book, customer_code, warehouse_name, start_date::text AS start_date, source_file"
+    base = f"SELECT {cols} FROM selling_prices WHERE price_book = $1 AND source_file ILIKE $2"
+    like = f"{key}%"
+    try:
+        from app.db_read import exec_sql_params
+        try:
+            return exec_sql_params(base + " AND voided_at IS NULL", [book, like]) or []
+        except Exception:  # noqa: BLE001 — no voided_at column yet
+            return exec_sql_params(base, [book, like]) or []
+    except Exception:  # noqa: BLE001
+        q = (get_client().table("selling_prices")
+             .select("sku_code,price_book,customer_code,warehouse_name,start_date,source_file")
+             .eq("price_book", book).ilike("source_file", like).order("id").limit(5000))
+        return q.execute().data or []
+
+
+def _price_book_checks(src: Path, checks: list) -> None:
+    """Three source-backed checks per price book in the upload (none when no book was uploaded):
+      * the current price per SKU derived from the FILE equals v_price_list_by_book, SKU by SKU
+        (as of the database's own CURRENT_DATE);
+      * no live Focus row of that book is dated after the file's export day unless the file itself
+        carries it (a scheduled price Focus knows about). 14-Sep-2026: 165 day-first rows put
+        prices on 5-Oct and 1-Nov that Focus never set -- this is the check that would have caught
+        them;
+      * no live Focus row of that book at all whose key the file does not carry: the file is the
+        whole book, so such rows are older exports the loader's snapshot rule should have voided.
+        This is the line that FAILS the refresh when the loader's mass-void guard skipped the void
+        (the stale rows stay live), and until selling_prices_void_migration.sql has run.
+    Workbook rows (YQ_MRN%) never count; the newest export in the folder is the one checked."""
+    today = _db_today()
+    for key, book in _PRICE_BOOKS:
+        f = _find_newest_book(key, src)
+        if not f:
+            continue
+        rows = parse_pricebook(read_grid(f), os.path.basename(f), book)
+        if not rows:
+            continue
+        exported = export_date(f)
+        want = current_prices(rows, today=today)
+        live = _db_book_prices(book)
+        agree = sum(1 for s, p in want.items() if s in live and abs(live[s] - p) < 0.0005)
+        checks.append((f"{book} price = file ({len(want)} SKUs)", float(len(want)), float(agree), 0.0))
+        keys = {pricebook_key(r) for r in rows}
+        stale = [r for r in _db_live_focus_rows(book, key) if pricebook_key(r) not in keys]
+        ghosts = [r for r in stale if str(r.get("start_date") or "")[:10] > exported]
+        checks.append((f"{book} rows after {exported} not in file", 0.0, float(len(ghosts)), 0.0))
+        checks.append((f"{book} live rows not in file (older exports)", 0.0, float(len(stale)), 0.0))
+
+
 def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
     """Crosscheck DB view totals against the source Focus reports in src_dir.
 
@@ -187,6 +326,7 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
         db = (_db_sum_eq("stock_balance", "total_value_bhd", "as_of_date", aod)
               if aod else _db_sum("stock_balance", "total_value_bhd"))
         checks.append(("Stock value BHD", report, db, 0.5))
+    _price_book_checks(src, checks)   # only when a price book is part of the upload
 
     # How many checks above are backed by an actual source FILE. Everything after this point
     # is DB-vs-DB and cannot detect a bad load, so this is the number that decides whether the
@@ -249,13 +389,13 @@ def main() -> int:
     if src is not None and not src.is_absolute():
         src = ROOT / src
     ok, rows = run_checks(src)
-    print("=" * 64)
-    print(f"{'METRIC':24} {'REPORT':>14} {'DB':>14}  RESULT")
-    print("-" * 64)
+    print("=" * 72)
+    print(f"{'METRIC':48} {'REPORT':>14} {'DB':>14}  RESULT")
+    print("-" * 72)
     for r in rows:
-        print(f"{r['metric']:24} {r['report']:>14,.2f} {r['db']:>14,.2f}  "
+        print(f"{r['metric']:48} {r['report']:>14,.2f} {r['db']:>14,.2f}  "
               f"{'PASS' if r['passed'] else 'FAIL'} ({r['diff_pct']:.2f}%)")
-    print("=" * 64)
+    print("=" * 72)
     print("ALL CHECKS PASS" if ok else "SOME CHECKS FAILED - investigate before trusting the dashboard.")
     return 0 if ok else 2
 

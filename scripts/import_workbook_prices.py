@@ -97,6 +97,11 @@ def main(argv: list[str]) -> int:
         print("DRY RUN — nothing written" if a.dry_run else "nothing to do")
         return 0
 
+    from scripts.load_supabase import void_columns_present
+    # A row this script updates is the owner's CURRENT price: if the loader's snapshot rule (or the
+    # void migration) had voided that key, updating its rate alone would leave it invisible to every
+    # price view. Clear the void with the update -- only once the columns exist.
+    unvoid = {"voided_at": None, "void_reason": None} if void_columns_present(client) else {}
     now = datetime.now(timezone.utc).isoformat()
     written = 0
     for code, cur, price, since in changes:
@@ -114,7 +119,7 @@ def main(argv: list[str]) -> int:
                     .is_("customer_code", "null").is_("warehouse_name", "null").eq("start_date", start)
                     .limit(1).execute().data or [])
         if existing:
-            client.table("selling_prices").update(row).eq("id", existing[0]["id"]).execute()
+            client.table("selling_prices").update({**row, **unvoid}).eq("id", existing[0]["id"]).execute()
         else:
             client.table("selling_prices").insert(row).execute()
         written += 1

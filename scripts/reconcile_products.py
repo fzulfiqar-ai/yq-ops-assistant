@@ -5,10 +5,17 @@ carry the clean Item Code + Item Name. This builds `product_aliases` (alias_text
 and prints a MATCH-RATE REPORT so Furqan can see and fix anything unmatched before trusting
 totals. Runs offline on data/clean/ by default; add --push to upsert aliases into Supabase.
 
-Match strategy (best-effort, transparent):
-  1. exact normalized item_name == product.item_name
-  2. leading code token (e.g. 'F19', 'X02', 'H09') == product.sku_code (or its prefix)
-  3. normalized prefix containment
+Match strategy (best-effort, transparent; match_alias() returns the method and a confidence):
+  1. exact normalized item_name == product.item_name                       (exact_name, 1.0)
+  2. the LONGEST product code that opens the string on a token boundary     (code, 0.9)
+     -- 'X24 CC 1Mtr Cable …' is X24 CC 1Mtr, not X24 CC
+  3. the normalized product name is a prefix of the string                 (name_prefix, 0.7)
+  4. leading token shares the code family before '-' (X02 -> first X02-*)  (code_family, 0.6)
+
+Rule 3 used to compare only the first 40 characters of either side, so a string that shared a
+40-character opening with a longer product name -- or a short string that any product name
+happened to start with -- was assigned that product. A code is now proposed only when the whole
+normalized product name is a prefix of the string (24-Sep-2026, alias backfill D2).
 
 Usage:  python scripts/reconcile_products.py [--push]
 """
@@ -25,6 +32,8 @@ CLEAN = ROOT / "data" / "clean"
 ALIAS_OUT = CLEAN / "product_aliases.csv"
 UNMATCHED_OUT = CLEAN / "unmatched_items.csv"
 
+CONFIDENCE = {"exact_name": 1.0, "code": 0.9, "name_prefix": 0.7, "code_family": 0.6}
+
 
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s).strip().lower())
@@ -35,6 +44,49 @@ def lead_code(s: str) -> str:
     return tok
 
 
+def build_index(products) -> dict:
+    """Lookup tables for match_alias() from (sku_code, item_name) pairs (item_name may be None)."""
+    by_name: dict[str, str] = {}
+    by_code: dict[str, str] = {}
+    code_prefix: dict[str, str] = {}
+    codes: list[tuple[str, str]] = []
+    for sku, name in products:
+        if sku is None or (isinstance(sku, float) and pd.isna(sku)):
+            continue
+        sku = str(sku).strip()
+        if not sku:
+            continue
+        if name is not None and not (isinstance(name, float) and pd.isna(name)) and norm(name):
+            by_name.setdefault(norm(name), sku)
+        by_code.setdefault(sku.upper(), sku)
+        code_prefix.setdefault(sku.split("-")[0].upper(), sku)
+        codes.append((norm(sku), sku))
+    codes.sort(key=lambda t: -len(t[0]))            # longest code first: the most specific match wins
+    names = sorted(by_name.items(), key=lambda t: -len(t[0]))
+    return {"by_name": by_name, "by_code": by_code, "code_prefix": code_prefix, "codes": codes, "names": names}
+
+
+def match_alias(alias: str, idx: dict) -> tuple[str | None, str, float]:
+    """(sku_code, method, confidence) for one item string; (None, 'unmatched', 0.0) when nothing fits."""
+    n = norm(alias)
+    if not n:
+        return None, "unmatched", 0.0
+    sku = idx["by_name"].get(n)
+    if sku:
+        return sku, "exact_name", CONFIDENCE["exact_name"]
+    for cn, sku in idx["codes"]:
+        if n == cn or n.startswith(cn + " ") or n.startswith(cn + "-") or n.startswith(cn + "/"):
+            return sku, "code", CONFIDENCE["code"]
+    for pn, sku in idx["names"]:
+        if n.startswith(pn):                          # the WHOLE product name opens the string
+            return sku, "name_prefix", CONFIDENCE["name_prefix"]
+    lc = lead_code(alias)
+    sku = idx["code_prefix"].get(lc) or idx["code_prefix"].get(lc.split("-")[0])
+    if sku:
+        return sku, "code_family", CONFIDENCE["code_family"]
+    return None, "unmatched", 0.0
+
+
 def main(argv: list[str]) -> int:
     sp = CLEAN / "selling_prices.csv"
     if not sp.exists():
@@ -42,11 +94,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     products = pd.read_csv(sp, dtype=object).dropna(subset=["sku_code"]).drop_duplicates("sku_code")
-    by_name = {norm(r.item_name): r.sku_code for r in products.itertuples() if pd.notnull(r.item_name)}
-    by_code = {str(r.sku_code).upper(): r.sku_code for r in products.itertuples()}
-    code_prefix = {}
-    for r in products.itertuples():
-        code_prefix.setdefault(str(r.sku_code).split("-")[0].upper(), r.sku_code)
+    idx = build_index((r.sku_code, r.item_name) for r in products.itertuples())
 
     # gather distinct item strings from the fact reports
     aliases: set[str] = set()
@@ -60,19 +108,12 @@ def main(argv: list[str]) -> int:
 
     matched: list[tuple[str, str]] = []
     unmatched: list[str] = []
+    methods: dict[str, int] = {}
     for a in sorted(aliases):
-        n = norm(a)
-        sku = by_name.get(n)
-        if sku is None:
-            lc = lead_code(a)
-            sku = by_code.get(lc) or code_prefix.get(lc) or code_prefix.get(lc.split("-")[0])
-        if sku is None:  # prefix containment fallback
-            for pn, psku in by_name.items():
-                if pn and (n.startswith(pn[:40]) or pn.startswith(n[:40])):
-                    sku = psku
-                    break
+        sku, method, _conf = match_alias(a, idx)
         if sku:
             matched.append((a, sku))
+            methods[method] = methods.get(method, 0) + 1
         else:
             unmatched.append(a)
 
@@ -83,7 +124,8 @@ def main(argv: list[str]) -> int:
 
     print("=" * 60)
     print(f"Distinct item strings : {len(aliases)}")
-    print(f"Matched to a SKU      : {len(matched)} ({rate:.1%})")
+    print(f"Matched to a SKU      : {len(matched)} ({rate:.1%})  "
+          + ", ".join(f"{m} {n}" for m, n in sorted(methods.items(), key=lambda t: -CONFIDENCE.get(t[0], 0))))
     print(f"Unmatched             : {len(unmatched)}  -> review {UNMATCHED_OUT.relative_to(ROOT)}")
     print(f"Aliases written       : {ALIAS_OUT.relative_to(ROOT)}")
     if unmatched[:10]:
