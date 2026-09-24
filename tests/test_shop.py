@@ -45,7 +45,7 @@ def test(name):
 def _item(code, price, stock=100, cat="CABLE", moq=1, b2c=None, sold_90d=0, sold_30d=0, prev_30d=0, customers_30d=0):
     return {"item_code": code, "display_name": code, "spec": f"{code} spec", "category": cat, "brand": "VFAN",
             "standard_rate": price, "b2c_rate": b2c, "product_image_url": None, "package_image_url": None,
-            "sort_order": None, "created_at": "2026-07-03T00:00:00+00:00", "moq": moq, "pack_size": None,
+            "sort_order": None, "created_at": "2025-07-03T00:00:00+00:00", "moq": moq, "pack_size": None,
             "stock_qty": stock, "stock_as_of": "2026-09-14", "sold_30d": sold_30d, "prev_30d": prev_30d,
             "sold_90d": sold_90d, "customers_30d": customers_30d}
 
@@ -64,8 +64,11 @@ def _ctx(items, rules=(), costs=None, **settings):
     from app.shop import SETTING_DEFAULTS
     vals = dict(SETTING_DEFAULTS)
     vals.update({k: str(v) for k, v in settings.items()})
+    # R1 (24-Sep-2026): the cart cap comes from covered lines only, so every synthetic item carries a
+    # nominal landed cost (floor ~ 0) unless the test sets costs itself.
     return {"settings": vals, "items": {i["item_code"]: i for i in items},
-            "order": [i["item_code"] for i in items], "costs": costs or {}, "rules": list(rules),
+            "order": [i["item_code"] for i in items],
+            "costs": costs if costs is not None else {i["item_code"]: 0.001 for i in items}, "rules": list(rules),
             "salesmen": [{"id": 1, "name": "Furqan Ahmed", "referral_code": "furqan", "is_active": True},
                          {"id": 2, "name": "Harsh Bhatia", "referral_code": "harsh", "is_active": True}],
             "loaded_at": ""}

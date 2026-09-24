@@ -13,7 +13,9 @@ Usage:  python scripts/load_supabase.py
 from __future__ import annotations
 
 import math
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +23,146 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 CLEAN = ROOT / "data" / "clean"
 CHUNK = 500
+
+# ── Focus price books are snapshots (R1, 24-Sep-2026) ────────────────────────
+# A Focus price-book export is the WHOLE book at export time. Rows an earlier export of the same
+# book carried that the newest one no longer does are not history: they are stale, or -- as on
+# 14-Sep-2026 -- mis-parsed (165 day-first rows Focus never held, which put fake "Was" pills on the
+# market and queued price changes for 5-Oct and 1-Nov). After each Focus book loads, such rows are
+# VOIDED, never deleted: voided_at / void_reason (selling_prices_void_migration.sql), and every
+# price view skips them. Workbook imports (scripts/import_workbook_prices.py, source 'YQ_MRN%')
+# are a different source of truth and are never touched; nor is a NEWER export already on file.
+FOCUS_BOOKS = {"MA_base": "masellingpricebook", "modern_trade": "moderntradesellerbook"}
+
+
+def focus_book_kind(source_file) -> str | None:
+    """The price_book a Focus export file name belongs to ('MA_base' / 'modern_trade'), or None for
+    anything else (workbook imports, blanks). The portal stages 'MASellingPriceBook (40).xlsx' as
+    'MASellingPriceBook _40_.xlsx' (app/main.py sanitises the name): both spell the same book."""
+    n = Path(str(source_file or "")).name.strip().lower()
+    for book, stem in FOCUS_BOOKS.items():
+        if n.startswith(stem):
+            return book
+    return None
+
+
+def focus_book_seq(source_file) -> int:
+    """The download counter in a Focus book file name -- '(40)' or the portal's '_40_' -- else 0.
+    Later exports carry higher numbers, which is what makes "older" decidable."""
+    m = re.search(r"[(_\s](\d+)[)_]", Path(str(source_file or "")).name)
+    return int(m.group(1)) if m else 0
+
+
+def pricebook_key(r: dict) -> tuple:
+    """The natural key the upsert uses (pricebook_key_migration.sql), normalised so a CSV row and a
+    PostgREST row compare equal: blanks, None and NaN become '', dates keep their first 10 chars."""
+    def _s(v) -> str:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return ""
+        return str(v).strip()
+    return (_s(r.get("sku_code")), _s(r.get("price_book")), _s(r.get("customer_code")),
+            _s(r.get("warehouse_name")), _s(r.get("start_date"))[:10])
+
+
+def stale_pricebook_rows(loaded: list[dict], existing: list[dict]) -> list[dict]:
+    """Pure: which live rows the upload just made supersedes.
+
+    loaded   -- the rows just upserted (any price_book; only Focus-book source files count)
+    existing -- live (voided_at is null) rows of the same price_book(s): id, price_book,
+                source_file and the key columns
+    Returns the existing rows to void: same price_book, from a DIFFERENT Focus export of that book
+    whose counter is not newer than the loaded file's, and whose key the loaded file does not carry.
+    Rows of other sources (workbook imports), rows the file still carries and rows of a newer export
+    are left alone."""
+    books: dict[str, dict] = {}
+    for r in loaded:
+        book = r.get("price_book")
+        src = str(r.get("source_file") or "")
+        if not book or focus_book_kind(src) != book:
+            continue
+        b = books.setdefault(book, {"src": src, "seq": focus_book_seq(src), "keys": set()})
+        if focus_book_seq(src) > b["seq"]:          # two exports of one book in one load: the newest rules
+            b["src"], b["seq"] = src, focus_book_seq(src)
+        b["keys"].add(pricebook_key(r))
+    out: list[dict] = []
+    for r in existing:
+        b = books.get(r.get("price_book") or "")
+        if not b:
+            continue
+        rsrc = str(r.get("source_file") or "")
+        if rsrc == b["src"] or focus_book_kind(rsrc) != r.get("price_book"):
+            continue
+        if focus_book_seq(rsrc) > b["seq"]:          # a newer export is on file: an older file never voids it
+            continue
+        if pricebook_key(r) in b["keys"]:
+            continue
+        out.append(r)
+    return out
+
+
+def is_dayfirst_twin(phantom: dict, twin: dict) -> bool:
+    """The rule selling_prices_void_migration.sql applies: `twin` is the month-first reading of the
+    day-first `phantom` -- same SKU / book / customer / warehouse / rate, and twin.start_date is
+    phantom.start_date with day and month swapped (so day <= 12 and day != month)."""
+    def _s(v) -> str:
+        return "" if v is None or (isinstance(v, float) and math.isnan(v)) else str(v).strip()
+    if any(_s(phantom.get(k)) != _s(twin.get(k))
+           for k in ("sku_code", "price_book", "customer_code", "warehouse_name")):
+        return False
+    try:
+        if abs(float(phantom.get("rate_bhd")) - float(twin.get("rate_bhd"))) > 1e-9:
+            return False
+        p = datetime.strptime(_s(phantom.get("start_date"))[:10], "%Y-%m-%d").date()
+        t = datetime.strptime(_s(twin.get("start_date"))[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return False
+    if p.day > 12 or p.day == p.month:
+        return False
+    return (t.year, t.month, t.day) == (p.year, p.day, p.month)
+
+
+def _void_superseded_prices(client, loaded: list[dict]) -> int:
+    """Void live selling_prices rows an older Focus export of the same book left behind (see
+    stale_pricebook_rows). Returns how many were voided; 0 with a printed reason when the void
+    columns are not there yet (the migration has not run) -- the load itself is unaffected."""
+    books = sorted({r.get("price_book") for r in loaded
+                    if r.get("price_book") and focus_book_kind(r.get("source_file")) == r.get("price_book")})
+    if not books:
+        return 0
+    existing: list[dict] = []
+    for book in books:
+        off = 0
+        while True:
+            try:
+                page = (client.table("selling_prices")
+                        .select("id,sku_code,price_book,customer_code,warehouse_name,start_date,source_file")
+                        .eq("price_book", book).is_("voided_at", "null").order("id")
+                        .range(off, off + 999).execute().data or [])
+            except Exception as e:  # noqa: BLE001 — voided_at missing until selling_prices_void_migration.sql
+                print(f"  (selling_prices snapshot rule skipped: {str(e)[:120]} -- apply "
+                      f"scripts/selling_prices_void_migration.sql)")
+                return 0
+            existing += page
+            if len(page) < 1000:
+                break
+            off += 1000
+    stale = stale_pricebook_rows(loaded, existing)
+    if not stale:
+        print("  (selling_prices: no superseded Focus book rows to void)")
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    srcs = {r["price_book"]: str(r["source_file"]) for r in loaded
+            if focus_book_kind(r.get("source_file")) == r.get("price_book")}
+    by_book: dict[str, list[int]] = {}
+    for r in stale:
+        by_book.setdefault(str(r["price_book"]), []).append(int(r["id"]))
+    for book, ids in by_book.items():
+        reason = f"superseded by {srcs.get(book, '?')} (Focus book snapshot: key not in the newer export)"
+        for i in range(0, len(ids), CHUNK):
+            (client.table("selling_prices").update({"voided_at": now, "void_reason": reason})
+             .in_("id", ids[i:i + CHUNK]).execute())
+        print(f"  voided   selling_prices {len(ids):7}  ({book}: rows of older Focus books not in {srcs.get(book)})")
+    return len(stale)
 
 
 def _client():
@@ -163,8 +305,11 @@ def main() -> int:
         if before - len(sp):
             print(f"  (folded {before - len(sp)} selling_prices rows that repeat the same "
                   f"SKU/book/customer/warehouse/start_date -- kept the last one)")
-        _upsert(client, "selling_prices", _records(sp),
-                on_conflict=",".join(key))
+        sp_recs = _records(sp)
+        _upsert(client, "selling_prices", sp_recs, on_conflict=",".join(key))
+        # Each Focus book is a snapshot: rows an older export of the same book carried that this
+        # one does not are voided (never deleted) -- see stale_pricebook_rows.
+        _void_superseded_prices(client, sp_recs)
     ar = _read("receivables")
     if ar is not None:
         ar = ar.dropna(subset=["account"])
@@ -206,7 +351,6 @@ def main() -> int:
 
     # Record the load for the "Data as of" freshness banner (best-effort).
     try:
-        from datetime import datetime, timezone
         latest = client.table("order_lines").select("line_date").order(
             "line_date", desc=True).limit(1).execute().data
         data_date = (latest or [{}])[0].get("line_date")
