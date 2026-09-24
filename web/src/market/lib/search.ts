@@ -1,12 +1,14 @@
 import MiniSearch from 'minisearch'
 import type { ShopItem } from '@/lib/shopApi'
+import { availabilityRank } from './facets'
 
 /**
  * Client-side search over the ~180-item catalog (plan §Q). Merchants type "type c", "iphone
  * cable", "20w", "tws" — so a synonym field is built INTO each document at index time and the
  * query is expanded for the highest-value terms, then MiniSearch does prefix + fuzzy matching.
- * Ranking: score → in stock first → best seller/trending → catalog (shelf) order. ~20 ms to build
- * on a mid-range phone; the index is rebuilt whenever the payload changes and never serialized.
+ * Ranking: in stock first (the sold-out rule, facets.ts) → score → best seller/trending → catalog
+ * (shelf) order. ~20 ms to build on a mid-range phone; the index is rebuilt whenever the payload
+ * changes and never serialized.
  */
 
 const SYNONYMS: Record<string, string[]> = {
@@ -125,19 +127,22 @@ export function searchItems(index: SearchIndex, items: ShopItem[], q: string, li
   let hits = index.mini.search(expandQuery(query))
   if (!hits.length) hits = index.mini.search(query, { combineWith: 'OR', fuzzy: 0.3, prefix: true })
   const rank = (it: ShopItem) => {
-    const out = it.stock_status === 'out_of_stock' ? 1 : 0
     const hot = (it.badges || []).some((b) => b === 'best_seller' || b === 'trending') ? 0 : 1
-    return [out, hot, index.order.get(it.item_code) ?? 0] as const
+    return [hot, index.order.get(it.item_code) ?? 0] as const
   }
   const scored = hits
     .map((h) => ({ it: byCode.get(String(h.id)), score: h.score }))
     .filter((x): x is { it: ShopItem; score: number } => Boolean(x.it))
   scored.sort((a, b) => {
-    // scores within 15% of each other are "the same" — let stock and velocity break the tie
+    // availability is the primary key: a sold-out line never outranks one the merchant can have
+    // today, however well it matched — it still shows, after the available hits
+    const av = availabilityRank(a.it) - availabilityRank(b.it)
+    if (av) return av
+    // scores within 15% of each other are "the same" — let velocity break the tie
     if (Math.abs(a.score - b.score) > Math.max(a.score, b.score) * 0.15) return b.score - a.score
     const ra = rank(a.it)
     const rb = rank(b.it)
-    return ra[0] - rb[0] || ra[1] - rb[1] || ra[2] - rb[2]
+    return ra[0] - rb[0] || ra[1] - rb[1]
   })
   return scored.slice(0, limit).map((x) => x.it)
 }

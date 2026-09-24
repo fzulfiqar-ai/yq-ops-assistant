@@ -195,6 +195,8 @@ export interface CatalogPayload {
   brand?: string | null
   prices_updated?: string | null
   stock_as_of?: string | null
+  /** R1: false = the stock snapshot is older than shop_stock_fresh_days — "Sold out" still shows, with the date beside it. Absent on an older API = treated as fresh. */
+  stock_fresh?: boolean | null
   categories?: string[] | null
   items?: ShopItem[] | null
   salesmen?: Salesman[] | null

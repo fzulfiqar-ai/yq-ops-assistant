@@ -40,6 +40,10 @@ jobs:
         run: pip install -r requirements.txt
       - name: Shop suite (pricing, routing, rate limits; live checks SKIP without secrets)
         run: python -m tests.test_shop
+      # R1 sold-out rule: price_cart both paths, the stale-snapshot reason, the copy, the harness
+      # order and the migration (its node half prints SKIP here — the web job runs it for real)
+      - name: Sold-out rule (release R1; no DB)
+        run: python -m tests.test_r1_soldout
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
 
@@ -58,6 +62,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install
         run: npm ci
+      # R1 sold-out rule on the real listing helpers (facets / search / quickParse), transpiled
+      # with the project's own typescript — Enter never substitutes a sold-out code, sold out last
+      - name: Sold-out ordering (node, no browser)
+        run: node scripts/soldout_order_test.mjs
       # Advisory until the design-system pass clears the 18 pre-existing portal findings
       # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
       # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.

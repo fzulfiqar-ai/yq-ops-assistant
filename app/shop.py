@@ -72,7 +72,20 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_vat_rate": "0.10",
     "shop_low_stock_units": "10",
     "shop_low_stock_days_cover": "30",
+    # The sold-out rule (owner, 24-Sep-2026). shop_allow_backorder governs the MERCHANT paths (the
+    # marketplace and the legacy token links): '1' = a sold-out line is a backorder the rep confirms,
+    # '0' = it is blocked at the quote with a plain reason ("Sold out — can't be ordered right now.
+    # Remove it to send your order.") and the UI shows "Tell me when back" instead of Add. Flipped at
+    # release R1, reversible from Settings. shop_allow_backorder_staff is the SALESMAN/staff path
+    # (/shop/*): a rep may still order a sold-out line in for a shop with the office.
     "shop_allow_backorder": "1",
+    "shop_allow_backorder_staff": "1",
+    # "Sold out" is a VERIFIED zero: the Focus "Stock balance by warehouse" report omits zero-balance
+    # items (checked read-only 24-Sep-2026: 0 rows with qty <= 0 across the 13 snapshots since June),
+    # so a SKU absent from the latest snapshot has none (stock_status_for(None) = out). That reading
+    # is only as good as the snapshot is recent: past this many days the status still shows, with
+    # the snapshot date beside it (stock_snapshot / sold_out_reason) — never a new "unknown" state.
+    "shop_stock_fresh_days": "3",
     "shop_min_order_bhd": "0",
     "shop_free_delivery_threshold_bhd": "0",
     "shop_delivery_fee_bhd": "0",
@@ -1080,6 +1093,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
     cats = sorted({i.get("category") or "OTHER" for i in items},
                   key=lambda c: (CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99, c))
     upd = ctx.get("prices_updated")      # read once per context refresh, not once per visitor
+    snap = stock_snapshot(ctx)           # the market shows the snapshot date beside "Sold out" once it is stale
     offers = []
     for r in ctx["rules"]:
         if r["kind"] not in ("cart_value", "qty_tier") or r["scope"]["referral_codes"]:
@@ -1093,7 +1107,9 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
         })
     out = {
         "items": items, "categories": cats, "brand": "VFAN", "company": "YQ Bahrain",
-        "prices_updated": upd, "stock_as_of": stock_as_of,
+        "prices_updated": upd, "stock_as_of": stock_as_of or snap["as_of"],
+        # false = the snapshot is older than shop_stock_fresh_days: the status still shows, dated
+        "stock_fresh": snap["fresh"],
         "salesmen": [{"id": s["id"], "name": s["name"], "referral_code": s.get("referral_code")}
                      for s in ctx["salesmen"]],
         "offers": offers,
@@ -1107,7 +1123,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "small_order_mode": small_order_mode(vals),
             "free_delivery_threshold_bhd": money(vals.get("shop_free_delivery_threshold_bhd")),
             "delivery_fee_bhd": money(vals.get("shop_delivery_fee_bhd")),
-            "allow_backorder": _flag(vals, "shop_allow_backorder"),
+            "allow_backorder": allow_backorder(vals, staff),
             "show_retail_compare": show_compare,
             "public_tiers": public_tiers,
             "areas": [a.strip() for a in str(vals.get("shop_areas") or "").split(",") if a.strip()],
@@ -1240,13 +1256,63 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
     return out
 
 
+# The sold-out rule at the quote (owner wording, 24-Sep-2026): what a merchant reads on a sold-out
+# line the shop takes no backorder for. It is true whether the line sold out before or after he
+# added it — a cart that held a backorder line when the switch flipped was sold out all along —
+# and the short form is what the cart-level reason carries. Kept as constants so the tests and the
+# UI copy cannot drift apart. A stale stock snapshot puts its date in the reason (sold_out_reason).
+SOLD_OUT_REASON = "Sold out — can't be ordered right now. Remove it to send your order."
+SOLD_OUT_SHORT = "Sold out"
+
+
+def stock_snapshot(ctx: dict) -> dict:
+    """The stock snapshot every status is read from: its date (the latest as_of_date the items
+    carry), its age in days on the Bahrain calendar, and whether it is fresh (age within
+    shop_stock_fresh_days). A SKU absent from the snapshot is a verified zero — the Focus report
+    omits zero-balance rows — and that reading is only as good as the snapshot is recent: past
+    the window the status still shows, with the date beside it (no "unknown" state)."""
+    dates = [str(it.get("stock_as_of"))[:10] for it in (ctx.get("items") or {}).values() if it.get("stock_as_of")]
+    as_of = max(dates) if dates else None
+    fresh_days = max(_i((ctx.get("settings") or {}).get("shop_stock_fresh_days"), 3), 0)
+    age = label = None
+    if as_of:
+        try:
+            d = date.fromisoformat(as_of)
+            age = (bahrain_today() - d).days
+            label = f"{d.day} {d.strftime('%b')}"
+        except ValueError:
+            label = as_of
+    return {"as_of": as_of, "age_days": age, "fresh": age is not None and age <= fresh_days,
+            "fresh_days": fresh_days, "label": label}
+
+
+def sold_out_reason(snap: dict | None = None) -> str:
+    """SOLD_OUT_REASON — naming the snapshot date when the snapshot is stale, so the merchant
+    reads what "sold out" is measured against."""
+    if snap and not snap.get("fresh") and snap.get("label"):
+        return f"Sold out as of {snap['label']} — can't be ordered right now. Remove it to send your order."
+    return SOLD_OUT_REASON
+
+
+def allow_backorder(vals: dict, staff: bool = False) -> bool:
+    """May a sold-out line be ordered as a backorder on this path? Merchants follow
+    shop_allow_backorder; salesmen/staff (/shop/*) follow shop_allow_backorder_staff."""
+    return _flag(vals, "shop_allow_backorder_staff" if staff else "shop_allow_backorder")
+
+
 def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | None = None,
-               ctx: dict | None = None) -> dict:
-    """Price a cart server-side. Raises ShopError for anything the customer must fix."""
+               ctx: dict | None = None, *, staff: bool = False, force_backorder: bool = False) -> dict:
+    """Price a cart server-side. Raises ShopError for anything the customer must fix.
+    `staff` = the salesman/staff path (a rep quoting or placing for a shop): its own backorder
+    setting, so the office can keep ordering sold-out lines in while merchants cannot.
+    `force_backorder` = a sold-out line is priced as a backorder whatever either switch says —
+    the rep's confirmation re-price, where his explicit confirmation is the decision."""
     ctx = ctx or context()
     vals = ctx["settings"]
     low_units = _i(vals.get("shop_low_stock_units"), 10)
-    allow_bo = _flag(vals, "shop_allow_backorder")
+    allow_bo = force_backorder or allow_backorder(vals, staff)
+    snap = stock_snapshot(ctx)
+    sold_out_why = sold_out_reason(snap)
     ref = (referral_code or "").strip().lower() or None
     lines_in = normalize_lines(raw_lines)
 
@@ -1285,8 +1351,10 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         status = stock_status_for(it.get("stock_qty"), low_units)
         backorder = status == STOCK_OUT
         if qty < moq or (backorder and not allow_bo):
-            # owner, 15-Sep: customers read "Sold out" (true, and it says the line sells)
-            reason = (f"Minimum order is {moq}." if qty < moq else "Sold out.")
+            # owner, 15-Sep: customers read "Sold out" (true, and it says the line sells). With
+            # backorder off the line is never silently dropped or zeroed: it stays in the cart,
+            # unavailable, with the reason spelled out — and the order cannot be sent until it goes.
+            reason = (f"Minimum order is {moq}." if qty < moq else sold_out_why)
             lines.append(_blocked(code, qty, reason,
                                   display_name=it.get("display_name") or code, spec=it.get("spec"),
                                   image_url=it.get("product_image_url"), moq=moq,
@@ -1471,8 +1539,14 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     if blocked:
         names = ", ".join(ln["item_code"] for ln in blocked[:3])
         more = f" and {len(blocked) - 3} more" if len(blocked) > 3 else ""
-        block_reason = (f"Remove {names}{more} to send this order — "
-                        f"{blocked[0]['blocked_reason'].rstrip('.').lower()}."
+        why = blocked[0]["blocked_reason"]
+        # the sold-out line's reason already tells the merchant what to do; the cart carries its
+        # short form — with the snapshot date when the snapshot is stale
+        if why == sold_out_why:
+            short = SOLD_OUT_SHORT.lower() + (f" as of {snap['label']}" if not snap["fresh"] and snap["label"] else "")
+        else:
+            short = why.rstrip(".").lower()
+        block_reason = (f"Remove {names}{more} to send this order — {short}."
                         if len(blocked) == 1 else
                         f"Remove {names}{more} to send this order.")
     elif not good:
@@ -1954,7 +2028,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
             source = "market"
         else:   # the legacy token link keeps its coarse channel values
             source = {"session_ref": "referral", "checkout_pick": "dropdown"}.get(attribution, "default")
-    quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx)
+    quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx, staff=staff)
     if not quote["can_submit"]:
         raise ShopError(quote["block_reason"] or " ".join(quote["warnings"]) or "Order cannot be submitted.")
     minimum = quote.get("minimum") or {}
@@ -2366,7 +2440,10 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
         raise ShopError("Every line was removed — cancel the order instead.")
     totals = None
     try:
-        q = price_cart(live, o.get("coupon_code"), o.get("referral_code"))
+        # a rep confirming is the staff path, and his confirmation IS the decision: a line that sold
+        # out after the order was placed stays a priced backorder here whatever either backorder
+        # switch says — never a zeroed "unavailable" line understating the confirmed totals
+        q = price_cart(live, o.get("coupon_code"), o.get("referral_code"), staff=True, force_backorder=True)
         totals = {k: v for k, v in q.items() if not k.startswith("_")}
     except ShopError as e:
         log.info("confirm re-price skipped for %s: %s", o.get("order_no"), e)

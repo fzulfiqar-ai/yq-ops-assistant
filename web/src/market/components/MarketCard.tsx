@@ -3,9 +3,7 @@ import { Check, Clock, Eye, Heart, MessageCircle, Plus, Store } from 'lucide-rea
 import { cn } from '@/lib/utils'
 import type { BadgeKind, ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
-import { deviceId, readCustomer } from '../lib/device'
 import { track } from '../lib/events'
-import { postRestock } from '../lib/marketApi'
 import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, stepOf, unitAt, variantOf } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
@@ -16,6 +14,7 @@ import { ProductImage, SIZES_GRID, SIZES_RAIL, SIZES_THUMB } from '../ui/Product
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
 import { QtySheet } from './QtySheet'
+import { useTellBack } from './RestockAsk'
 
 /**
  * The product card (v3), three densities, one reading order so a merchant scans the same way
@@ -30,6 +29,12 @@ import { QtySheet } from './QtySheet'
  *   → facts   anchors, then ONE line   "Was 2.000 · ↓5%" (price-book cuts only) then the margin
  *                                      strip → "Only a few left" → shops → price breaks
  *   → action  Add · 12 → ✓ Added → stepper
+ *             sold out: "Backorder" where the shop allows one (shop_allow_backorder), otherwise the
+ *             add is gone and the one action is "Tell me when back" — the restock request the rep
+ *             sees in the portal (RestockAsk: never sent without a phone, the rep on WhatsApp as
+ *             the secondary route). The line keeps its URL and its card; it is labelled "Sold out"
+ *             (never "Out of stock"; dated once the stock snapshot is stale) and sits after the
+ *             available lines.
  *
  *   grid    — the shelf; two badges, tiers, "Ordered by N shops"
  *   compact — rails and the mega-nav; fixed width clamp(10rem, 46vw, 13rem), one badge
@@ -282,7 +287,6 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const [added, setAdded] = useState(false)
   /** 'add' — no line yet, the keypad states the first quantity; 'edit' — change the line's quantity */
   const [keypad, setKeypad] = useState<'add' | 'edit' | null>(null)
-  const [asked, setAsked] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   const imgWrap = useRef<HTMLDivElement>(null)
   useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -312,14 +316,8 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const canOrder = !out || m.allowBackorder
   const selected = qty > 0
   const nudgeTier = selected ? nextTier(item, qty) : null
-  const tellRep = out && !m.allowBackorder && m.rep?.whatsapp_url
-  // productName() again rather than `name`: handing `name` to a function would make the React Compiler drop the memoised callbacks below
-  const tellUrl = tellRep ? `${m.rep!.whatsapp_url!.split('?text=')[0]}?text=${encodeURIComponent(S.card.tellBackText(m.rep!.first_name || '', item.item_code, productName(item)))}` : null
-  const askBack = () => {
-    setAsked(true)
-    toast(S.card.tellBackDone, 'success')
-    postRestock({ item_code: item.item_code, phone: readCustomer().phone || null, device_id: deviceId(), referral_code: m.ref || null }).catch(() => undefined)
-  }
+  /** the sold-out rule's one action: a restock request the rep sees — with a phone to come back to, never a silent backorder */
+  const { asked, ask: askBack, sheet: tellSheet } = useTellBack(item)
 
   const open = useCallback(() => {
     if (from) track('rail_click', { item_code: item.item_code, meta: { rail: from } })
@@ -395,17 +393,11 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
       // a plum wash of the same weight as the Add block it replaced
       return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad('edit')} className="w-full bg-plum-wash" />
     }
-    if (tellUrl) {
-      return (
-        <a href={tellUrl} target="_blank" rel="noreferrer" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm border border-line bg-surface text-sm font-semibold text-ink transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', tall)}>
-          <MessageCircle size={15} aria-hidden="true" /> {m.rep?.first_name ? S.card.tellRep(m.rep.first_name) : S.card.askYq}
-        </a>
-      )
-    }
     /**
      * Nothing is remembered for this line yet, so there is no honest quantity to add: the button
      * opens the keypad (pre-filled at the minimum, quick picks) and the merchant states a
      * wholesale quantity. Once one is remembered the button adds it straight away, "Add · 12".
+     * Sold out with backorder off: no add at all — the slot is "Tell me when back".
      */
     const askFirst = canOrder && defaultQty <= 1
     const press = canOrder ? (askFirst ? () => setKeypad('add') : add) : askBack
@@ -457,7 +449,13 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
     )
   }
 
-  const keypadEl = keypad && <QtySheet item={item} value={keypad === 'add' ? 0 : qty} onApply={keypad === 'add' ? addQty : setQty} onRemove={removeWithUndo} onClose={() => setKeypad(null)} />
+  // the card's overlays: the quantity keypad and the "Tell me when back" phone sheet
+  const keypadEl = (
+    <>
+      {keypad && <QtySheet item={item} value={keypad === 'add' ? 0 : qty} onApply={keypad === 'add' ? addQty : setQty} onRemove={removeWithUndo} onClose={() => setKeypad(null)} />}
+      {tellSheet}
+    </>
+  )
   const lowWord = (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap font-semibold text-deal-ink">
       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-deal" aria-hidden="true" />
@@ -469,7 +467,9 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   if (variant === 'list') {
     const meta = Boolean(badges[0] || mg || out || low || firstTier)
     return (
-      <article className={cn('flex items-center gap-3 border-b border-line-2 py-2.5', selected && '-mx-2 rounded-sm bg-plum-wash/60 px-2', className)}>
+      // data-stock: the availability the card was rendered with — the QA harness reads it to assert
+      // that no available card ever follows a sold-out one on a listing (scripts/qa/market_qa.py)
+      <article data-stock={item.stock_status || 'in_stock'} className={cn('flex items-center gap-3 border-b border-line-2 py-2.5', selected && '-mx-2 rounded-sm bg-plum-wash/60 px-2', className)}>
         <button type="button" onClick={open} className="h-14 w-14 shrink-0 self-start overflow-hidden rounded-sm border border-line-2 bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 md:h-[4.5rem] md:w-[4.5rem]" aria-label={`${S.card.quickView}: ${name}`}>
           <div ref={imgWrap}>
             <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={72} imgClassName={cn('p-1', out && 'opacity-70 saturate-[.25]')} iconSize={18} showCaption={false} />
@@ -488,9 +488,9 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
             // used to push out of the clipped box — a last-chance line that never says so is worse
             // than a margin the merchant can still read on the card or the panel.
             <span className="mt-1 flex h-5 min-w-0 flex-wrap items-center gap-x-2 gap-y-1 overflow-hidden text-2xs leading-5 tnum">
-              {/* out of stock is a state, not an error: red is kept for things that went wrong.
+              {/* sold out is a state, not an error: red is kept for things that went wrong.
                   Same chip as the grid card's, so one product reads the same in both densities. */}
-              {out ? <Chip tone="grey">{S.card.stockOut}</Chip> : low ? lowWord : null}
+              {out ? <Chip tone="grey">{m.soldOutLabel}</Chip> : low ? lowWord : null}
               {badges[0] && <Chip tone={listBadgeTone(badges[0])}>{badgeMeta(badges[0]).label}</Chip>}
               {mg && (
                 // the same two numbers as the card's strip, without the amber fill: a filled
@@ -548,6 +548,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
 
   return (
     <article
+      data-stock={item.stock_status || 'in_stock'}
       className={cn(
         'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition duration-2 ease-m',
         compact ? 'cv-compact w-[clamp(10rem,46vw,13rem)] shrink-0 lg:w-auto' : priority ? '' : 'cv-card',
@@ -598,7 +599,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
               (margin) belongs under the photo, never as a sticker across the product */}
           {out && (
             <span className={cn('absolute bottom-2 max-w-[calc(100%-1rem)]', compact ? 'start-2.5' : 'start-3')}>
-              <Chip tone="grey">{S.card.stockOut}</Chip>
+              <Chip tone="grey">{m.soldOutLabel}</Chip>
             </span>
           )}
           {/* desktop hover reveal */}

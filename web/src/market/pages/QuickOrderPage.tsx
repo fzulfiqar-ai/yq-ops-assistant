@@ -1,20 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ArrowRight, ClipboardPaste, Plus, RotateCcw, Save, X } from 'lucide-react'
+import { ArrowRight, ClipboardPaste, Clock, Plus, RotateCcw, Save, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { fetchOrderCached } from '../hooks/useRecentOrders'
 import { useMarket } from '../MarketContext'
 import { lastQty, rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, fmtDateShort, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
+import { bhd, fmtDateShort, isOut, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
 import { bestSellers, orderLines, regularStock } from '../lib/home'
-import { parseList, resolveQuery } from '../lib/quickParse'
+import { parseList, resolveQuick } from '../lib/quickParse'
 import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
 import { MarketCard } from '../components/MarketCard'
+import { TellBackButton } from '../components/RestockAsk'
 import { Spotlight } from '../components/Spotlight'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
+import { Chip } from '../ui/Chip'
 import { Input, Label, Textarea } from '../ui/Field'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 import { SectionHeader } from '../ui/SectionHeader'
@@ -31,6 +33,18 @@ import { useToast } from '../ui/Toast'
  * The total is shown once: the sticky bar carries it on a phone, the aside card on desktop. With
  * nothing composed yet there is no summary card and no disabled CTA — the page shows the paste
  * action, the merchant's own lists and Popular restocks instead of empty canvas.
+ *
+ * The sold-out rule here (lib/quickParse resolveQuick, one rule for typing, Enter and the list):
+ *   · a typed code that is an available SKU locks at once;
+ *   · a typed code that IS a sold-out SKU adds nothing — the SKU is shown greyed with "Sold out"
+ *     and "Tell me when back" (an explicit Backorder tap only where the shop takes one), and the
+ *     in-stock lines are listed under it for the merchant to pick by hand. Enter never
+ *     substitutes: before this "UK05⏎" keyed UK15 and "C03⏎" put a headset on a cable order;
+ *   · otherwise Enter takes the query's best match, and only when it is available.
+ * Suggestions list the lines a merchant can have today first, each row wears its stock state; a
+ * greyed sold-out row (backorder off) cannot be picked and carries "Tell me when back" instead.
+ * Loaded lists (?load=, a saved list) leave sold-out lines out where the shop takes no backorder
+ * — and say how many were left out.
  */
 
 interface Row {
@@ -40,6 +54,10 @@ interface Row {
   qty: number
   candidates: ShopItem[]
   suggestions: ShopItem[]
+  /** what Enter may lock: the query's best match, only when available (resolveQuick) */
+  best: ShopItem | null
+  /** the typed code IS a sold-out SKU: shown, never added */
+  exactOut: ShopItem | null
 }
 interface SavedList {
   name: string
@@ -49,7 +67,7 @@ interface SavedList {
 
 const LISTS_KEY = 'yq-lists'
 let nextId = 1
-const newRow = (): Row => ({ id: nextId++, query: '', item: null, qty: 0, candidates: [], suggestions: [] })
+const newRow = (): Row => ({ id: nextId++, query: '', item: null, qty: 0, candidates: [], suggestions: [], best: null, exactOut: null })
 
 function readLists(): SavedList[] {
   try {
@@ -87,16 +105,28 @@ export default function QuickOrderPage() {
   const last = rememberedOrders()[0] || null
 
   const setRow = useCallback((id: number, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r))), [])
+  /** may this line sit in the order? sold out only as a backorder, and only where the shop allows one */
+  const orderable = useCallback((item: ShopItem) => !isOut(item) || m.allowBackorder, [m.allowBackorder])
   const lockRow = useCallback(
     (id: number, item: ShopItem, qty?: number) => {
+      if (!orderable(item)) return
       // a row must never land at 0 — that is a line the merchant cannot order
       const q = normalizeQty(item, qty && qty > 0 ? qty : lastQty(item.item_code) || minQtyOf(item) || 1)
       setRows((rs) => {
-        const next = rs.map((r) => (r.id === id ? { ...r, item, query: productName(item), qty: q, candidates: [], suggestions: [] } : r))
+        const next = rs.map((r) => (r.id === id ? { ...r, item, query: productName(item), qty: q, candidates: [], suggestions: [], best: null, exactOut: null } : r))
         return next.some((r) => !r.item) ? next : [...next, newRow()]
       })
     },
-    [],
+    [orderable],
+  )
+  /** the lines a loaded list may hold — and a word on the ones it may not (sold out, no backorder) */
+  const keepOrderable = useCallback(
+    (raw: { item: ShopItem; qty: number }[]) => {
+      const lines = raw.filter((l) => orderable(l.item))
+      if (lines.length < raw.length) toast(S.card.leftOut(raw.length - lines.length), 'info')
+      return lines
+    },
+    [orderable, toast],
   )
 
   /* load templates from ?load= */
@@ -105,7 +135,8 @@ export default function QuickOrderPage() {
     const load = params.get('load')
     if (!load || loadedRef.current === load || !m.items.length) return
     loadedRef.current = load
-    const apply = (lines: { item: ShopItem; qty: number }[]) => {
+    const apply = (raw: { item: ShopItem; qty: number }[]) => {
+      const lines = keepOrderable(raw)
       if (!lines.length) return
       setRows([...lines.map((l) => ({ ...newRow(), item: l.item, query: productName(l.item), qty: normalizeQty(l.item, l.qty) })), newRow()])
     }
@@ -116,31 +147,30 @@ export default function QuickOrderPage() {
     const next = new URLSearchParams(params)
     next.delete('load')
     setParams(next, { replace: true })
-  }, [params, setParams, m.items.length, m.itemsByCode, last])
+  }, [params, setParams, m.items.length, m.itemsByCode, last, keepOrderable])
 
   const onQuery = (row: Row, value: string) => {
     if (!value.trim()) {
-      setRow(row.id, { query: value, item: null, suggestions: [], candidates: [] })
+      setRow(row.id, { query: value, item: null, suggestions: [], candidates: [], best: null, exactOut: null })
       return
     }
-    const { item, candidates } = resolveQuery(value, m.items, m.index)
-    const exact = item && item.item_code.replace(/[\s-]/g, '').toLowerCase() === value.replace(/[\s-]/g, '').toLowerCase()
-    const hits = m.index ? m.index.mini.search(value, { prefix: true, fuzzy: 0.2 }).slice(0, 6) : []
-    const suggestions = hits.map((h) => m.itemsByCode.get(String(h.id))).filter((x): x is ShopItem => Boolean(x))
+    const r = resolveQuick(value, m.items, m.index)
     // typing a code resolves the line: lock it the way picking it does — with a quantity and a
     // fresh row underneath. Without this the row read "0" and the order could not be sent.
-    if (exact && item) {
-      lockRow(row.id, item, row.qty)
+    if (r.lock) {
+      lockRow(row.id, r.lock, row.qty)
       // the typed row's input unmounts with it: carry the caret to the fresh row so codes can run on
       window.setTimeout(() => Array.from(inputs.current.values()).pop()?.focus(), 0)
       return
     }
-    setRow(row.id, { query: value, item: null, suggestions: suggestions.length ? suggestions : candidates, candidates })
+    setRow(row.id, { query: value, item: null, best: r.best, exactOut: r.exactOut, suggestions: r.suggestions, candidates: r.candidates })
   }
   const onKey = (row: Row, e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      const pick = row.item || row.suggestions[0] || row.candidates[0]
+      // Enter takes the query's best match, only when available; a typed sold-out code has no
+      // target at all (never a substitute) — the list stays open for the merchant to decide
+      const pick = row.item || row.best
       if (pick) {
         lockRow(row.id, pick)
         const idx = rows.findIndex((r) => r.id === row.id)
@@ -156,7 +186,19 @@ export default function QuickOrderPage() {
   const applyPaste = () => {
     const parsed = parseList(pasteText, m.items, m.index)
     if (!parsed.length) return
-    const made = parsed.map((p) => ({ ...newRow(), query: p.item ? productName(p.item) : p.query, item: p.item, qty: p.item ? normalizeQty(p.item, p.qty || lastQty(p.item.item_code) || minQtyOf(p.item) || 1) : 0, candidates: p.candidates, suggestions: p.item ? [] : p.candidates }))
+    const made = parsed.map((p) => {
+      // a pasted code that IS a sold-out SKU is shown on its row, never resolved, with the in-stock lines to pick from
+      const exactOut = p.exact && isOut(p.exact) ? p.exact : null
+      return {
+        ...newRow(),
+        query: p.item ? productName(p.item) : p.query,
+        item: p.item,
+        qty: p.item ? normalizeQty(p.item, p.qty || lastQty(p.item.item_code) || minQtyOf(p.item) || 1) : 0,
+        candidates: p.candidates,
+        suggestions: p.item ? [] : p.candidates.filter((c) => c.item_code !== exactOut?.item_code),
+        exactOut,
+      }
+    })
     setRows((rs) => [...rs.filter((r) => r.item || r.query.trim()), ...made, newRow()])
     track('search', { meta: { rail: 'quick_paste', results: made.filter((r) => r.item).length, count: made.length } })
     setPasteText('')
@@ -186,7 +228,11 @@ export default function QuickOrderPage() {
     toast(S.quick.listSaved(name), 'success')
   }
   const loadList = (l: SavedList) => {
-    const lines = l.lines.map((x) => ({ item: m.itemsByCode.get(x.item_code)!, qty: x.qty })).filter((x) => x.item)
+    // a saved line that has sold out since is left out where the shop takes no backorders — the
+    // server would only block it at the quote, and a list must never manufacture a backorder —
+    // and the merchant is told how many were left out (keepOrderable)
+    const known = l.lines.map((x) => ({ item: m.itemsByCode.get(x.item_code), qty: x.qty })).filter((x): x is { item: ShopItem; qty: number } => Boolean(x.item))
+    const lines = keepOrderable(known)
     setRows([...lines.map((x) => ({ ...newRow(), item: x.item, query: productName(x.item), qty: normalizeQty(x.item, x.qty) })), newRow()])
   }
   const deleteList = (name: string) => {
@@ -256,74 +302,131 @@ export default function QuickOrderPage() {
 
           {/* rows */}
           <ol className="mt-4 space-y-2">
-            {rows.map((row) => (
-              <li key={row.id} className={cn('relative rounded-lg', row.item && 'border border-plum/40 bg-surface p-2.5')}>
-                {row.item ? (
-                  <div className="flex items-center gap-3">
-                    <div className="h-12 w-12 shrink-0 overflow-hidden rounded-sm border border-line-2">
-                      <ProductImage item={row.item} alt="" sizes={SIZES_THUMB} size={48} imgClassName="p-1" iconSize={16} showCaption={false} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-semibold text-ink">{productName(row.item)}</div>
-                      <div className="text-xs tnum text-ink-2">
-                        {row.item.item_code} · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
-                        {stepOf(row.item) > 1 && row.qty % stepOf(row.item) === 0 ? ` · ${S.card.packs(stepOf(row.item))}` : ''}
+            {rows.map((row) => {
+              const exactOut = row.exactOut
+              return (
+                <li key={row.id} className={cn('relative rounded-lg', row.item && 'border border-plum/40 bg-surface p-2.5')}>
+                  {row.item ? (
+                    <div className="flex items-center gap-3">
+                      <div className="h-12 w-12 shrink-0 overflow-hidden rounded-sm border border-line-2">
+                        <ProductImage item={row.item} alt="" sizes={SIZES_THUMB} size={48} imgClassName="p-1" iconSize={16} showCaption={false} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-semibold text-ink">{productName(row.item)}</div>
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs tnum text-ink-2">
+                          <span className="truncate">
+                            {row.item.item_code} · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
+                            {stepOf(row.item) > 1 && row.qty % stepOf(row.item) === 0 ? ` · ${S.card.packs(stepOf(row.item))}` : ''}
+                          </span>
+                          {/* a locked sold-out line is a backorder (only possible where the shop allows one): say so before "Add all" */}
+                          {isOut(row.item) && <Chip tone="warn">{S.card.backorder}</Chip>}
+                        </div>
+                      </div>
+                      {/* one delete control per line: the stepper removes the row at its minimum, the
+                          way the restock rows do — a second trash beside it read as two ways to delete */}
+                      <div className="flex items-center gap-2">
+                        <span className="hidden text-sm font-semibold tnum text-ink sm:block">{bhd((unitAt(row.item, row.qty) ?? 0) * row.qty)}</span>
+                        <Stepper value={row.qty} step={stepOf(row.item)} min={minQtyOf(row.item)} size="sm" label={productName(row.item)} onChange={(n) => setRow(row.id, { qty: n })} onRemove={() => remove(row.id)} />
                       </div>
                     </div>
-                    {/* one delete control per line: the stepper removes the row at its minimum, the
-                        way the restock rows do — a second trash beside it read as two ways to delete */}
-                    <div className="flex items-center gap-2">
-                      <span className="hidden text-sm font-semibold tnum text-ink sm:block">{bhd((unitAt(row.item, row.qty) ?? 0) * row.qty)}</span>
-                      <Stepper value={row.qty} step={stepOf(row.item)} min={minQtyOf(row.item)} size="sm" label={productName(row.item)} onChange={(n) => setRow(row.id, { qty: n })} onRemove={() => remove(row.id)} />
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        ref={(el) => {
-                          if (el) inputs.current.set(row.id, el)
-                          else inputs.current.delete(row.id)
-                        }}
-                        value={row.query}
-                        onChange={(e) => onQuery(row, e.target.value)}
-                        onKeyDown={(e) => onKey(row, e)}
-                        placeholder={S.quick.row}
-                        aria-label={S.quick.row}
-                        autoCapitalize="characters"
-                        autoCorrect="off"
-                        spellCheck={false}
-                        tall={false}
-                        className="flex-1"
-                      />
-                      {row.query.trim() && (
-                        <button type="button" onClick={() => remove(row.id)} aria-label={S.quick.remove} className="grid h-9 w-9 shrink-0 place-items-center rounded-xs text-ink-3 hover:bg-bad-soft hover:text-bad">
-                          <X size={15} aria-hidden="true" />
-                        </button>
-                      )}
-                    </div>
-                    {row.suggestions.length > 0 && (
-                      <ul className="mt-2 divide-y divide-line-2 overflow-hidden rounded-sm border border-line" role="listbox">
-                        {row.suggestions.map((s) => (
-                          <li key={s.item_code}>
-                            <button type="button" role="option" aria-selected={false} onClick={() => lockRow(row.id, s)} className="flex w-full items-center gap-2.5 px-2.5 py-2 text-start text-sm hover:bg-plum-wash">
-                              <span className="h-8 w-8 shrink-0 overflow-hidden rounded-xs border border-line-2">
-                                <ProductImage item={s} alt="" sizes={SIZES_THUMB} size={32} imgClassName="p-0.5" iconSize={12} showCaption={false} />
+                  ) : (
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          ref={(el) => {
+                            if (el) inputs.current.set(row.id, el)
+                            else inputs.current.delete(row.id)
+                          }}
+                          value={row.query}
+                          onChange={(e) => onQuery(row, e.target.value)}
+                          onKeyDown={(e) => onKey(row, e)}
+                          placeholder={S.quick.row}
+                          aria-label={S.quick.row}
+                          autoCapitalize="characters"
+                          autoCorrect="off"
+                          spellCheck={false}
+                          tall={false}
+                          className="flex-1"
+                        />
+                        {row.query.trim() && (
+                          <button type="button" onClick={() => remove(row.id)} aria-label={S.quick.remove} className="grid h-9 w-9 shrink-0 place-items-center rounded-xs text-ink-3 hover:bg-bad-soft hover:text-bad">
+                            <X size={15} aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+                      {exactOut && (
+                        /* the typed code IS a sold-out SKU: it is shown — greyed, with its state — and
+                           nothing is added. "Tell me when back" is the action; where the shop takes
+                           backorders the tap is explicit and says so. Enter does nothing on this row. */
+                        <div data-stock="out_of_stock" className="mt-2 rounded-sm border border-line bg-surface-2/60 px-2.5 py-2">
+                          <div className="flex items-center gap-2.5">
+                            <span className="h-8 w-8 shrink-0 overflow-hidden rounded-xs border border-line-2">
+                              <ProductImage item={exactOut} alt="" sizes={SIZES_THUMB} size={32} imgClassName="p-0.5 opacity-70 saturate-[.25]" iconSize={12} showCaption={false} />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-medium text-ink-2">{productName(exactOut)}</span>
+                              <span className="block text-xs tnum text-ink-3">
+                                {exactOut.item_code}
+                                {exactOut.price_bhd != null ? ` · ${bhd(exactOut.price_bhd)}` : ''}
                               </span>
-                              <span className="min-w-0 flex-1 truncate font-medium text-ink">{productName(s)}</span>
-                              <span className="text-xs tnum text-ink-2">{s.item_code}</span>
-                              <span className="whitespace-nowrap text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? bhd(s.price_bhd) : ''}</span>
-                              <Plus size={14} className="text-plum" aria-hidden="true" />
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    {row.query.trim() && !row.suggestions.length && m.index && <p className="mt-1.5 text-xs text-warn">{S.quick.notFound}</p>}
-                  </div>
-                )}
-              </li>
-            ))}
+                            </span>
+                            <Chip tone="grey">{m.soldOutLabel}</Chip>
+                          </div>
+                          <p className="mt-1.5 text-xs leading-snug text-ink-2">{S.quick.soldOutExact}</p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <TellBackButton item={exactOut} />
+                            {m.allowBackorder && (
+                              <Button variant="ghost" size="sm" onClick={() => lockRow(row.id, exactOut)} icon={<Clock size={14} aria-hidden="true" />}>
+                                {S.card.backorder}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      {row.suggestions.length > 0 && (
+                        <>
+                          {exactOut && <p className="mb-1 mt-2.5 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.quick.alternatives}</p>}
+                          <ul className={cn('divide-y divide-line-2 overflow-hidden rounded-sm border border-line', !exactOut && 'mt-2')} role="listbox">
+                            {row.suggestions.map((s) => {
+                              const out = isOut(s)
+                              const can = orderable(s)
+                              return (
+                                /* the stock state rides on the row: sold out is a grey chip (a state, not an error), a few
+                                   left the amber word — the same wording the cards use. Where the shop takes no
+                                   backorders a sold-out row is greyed, cannot be picked, and carries "Tell me when back"
+                                   instead of the +; otherwise the tap is a backorder and the row says so with a clock. */
+                                <li key={s.item_code} data-stock={s.stock_status || 'in_stock'} className={cn('flex items-center', !can && 'bg-surface-2/60 pe-2')}>
+                                  <button
+                                    type="button"
+                                    role="option"
+                                    aria-selected={false}
+                                    aria-disabled={!can || undefined}
+                                    disabled={!can}
+                                    onClick={() => lockRow(row.id, s)}
+                                    className={cn('flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-start text-sm', can ? 'hover:bg-plum-wash' : 'cursor-not-allowed')}
+                                  >
+                                    <span className="h-8 w-8 shrink-0 overflow-hidden rounded-xs border border-line-2">
+                                      <ProductImage item={s} alt="" sizes={SIZES_THUMB} size={32} imgClassName={cn('p-0.5', out && 'opacity-70 saturate-[.25]')} iconSize={12} showCaption={false} />
+                                    </span>
+                                    <span className={cn('min-w-0 flex-1 truncate font-medium', out ? 'text-ink-2' : 'text-ink')}>{productName(s)}</span>
+                                    {out ? <Chip tone="grey">{m.soldOutLabel}</Chip> : s.stock_status === 'low_stock' ? <Chip tone="deal">{S.card.stockLow}</Chip> : null}
+                                    <span className="text-xs tnum text-ink-2">{s.item_code}</span>
+                                    <span className="whitespace-nowrap text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? bhd(s.price_bhd) : ''}</span>
+                                    {can && (out ? <Clock size={14} className="text-ink-3" aria-hidden="true" /> : <Plus size={14} className="text-plum" aria-hidden="true" />)}
+                                  </button>
+                                  {!can && <TellBackButton item={s} />}
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        </>
+                      )}
+                      {row.query.trim() && !row.suggestions.length && !exactOut && m.index && <p className="mt-1.5 text-xs text-warn">{S.quick.notFound}</p>}
+                    </div>
+                  )}
+                </li>
+              )
+            })}
           </ol>
           <Button variant="ghost" className="mt-2" onClick={() => setRows((rs) => [...rs, newRow()])} icon={<Plus size={15} aria-hidden="true" />}>
             {S.quick.addLine}

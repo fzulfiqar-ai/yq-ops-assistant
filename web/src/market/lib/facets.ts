@@ -189,6 +189,56 @@ export function readFacets(params: URLSearchParams, groups: FacetGroup[]): Facet
   return sel
 }
 
+/* ───────────────────────── availability: the sold-out rule ─────────────────────────
+   Owner rule (24-Sep-2026): a line nobody can have today stays on the shelf — same URL, same
+   record, labelled "Sold out" — but it sits AFTER every line that ships, on every listing
+   (category, brand, search, promotional shelves, the home grid, quick-order suggestions), whatever
+   sort the merchant chose. The chosen sort applies WITHIN each availability group. One comparator,
+   so no listing can drift from another; the server already sends the payload sold-out last
+   (app/shop.py _load_items), and this keeps that true after any client-side filter or sort. */
+
+type Stocked = Pick<ShopItem, 'stock_status'>
+
+/** 0 = a merchant can have it today (in stock / a few left) · 1 = sold out */
+export function availabilityRank(it: Stocked): 0 | 1 {
+  return it.stock_status === 'out_of_stock' ? 1 : 0
+}
+
+/** The primary key of every listing sort: available before sold out. */
+export function byAvailability(a: Stocked, b: Stocked): number {
+  return availabilityRank(a) - availabilityRank(b)
+}
+
+/** `cmp` decides only between lines of the same availability group. */
+export function withinAvailability<T extends Stocked>(cmp: (a: T, b: T) => number): (a: T, b: T) => number {
+  return (a, b) => byAvailability(a, b) || cmp(a, b)
+}
+
+/** Stable: the available lines in their incoming order, then the sold-out ones in theirs. */
+export function partitionByAvailability<T extends Stocked>(items: readonly T[]): T[] {
+  const have: T[] = []
+  const sold: T[] = []
+  for (const it of items) (availabilityRank(it) ? sold : have).push(it)
+  return have.concat(sold)
+}
+
+/**
+ * The home "All products" grid: every product the merchant can have today first — the ones no
+ * rail has shown yet, then the ones a rail already carries (they sink, they never vanish) — and
+ * the sold-out lines last, in plain shelf order (a rail never carries a sold-out line; the last
+ * order's codes can, and inside the sold-out band that means nothing). Before this the rail
+ * products were moved behind the sold-out block, so ~50 in-stock lines sat under all 53 sold-out.
+ */
+export function homeGridOrder(items: readonly ShopItem[], railCodes: ReadonlySet<string>): ShopItem[] {
+  return items
+    .map((item, index) => {
+      const out = availabilityRank(item)
+      return { item, index, out, rail: !out && railCodes.has(item.item_code) ? 1 : 0 }
+    })
+    .sort((a, b) => a.out - b.out || a.rail - b.rail || a.index - b.index)
+    .map((x) => x.item)
+}
+
 /* ───────────────────────── sort & filter ───────────────────────── */
 
 export type SortMode = 'shelf' | 'popular' | 'price_asc' | 'price_desc'
@@ -239,18 +289,18 @@ function popularity(it: ShopItem): number {
   return s
 }
 
+/** The merchant's sort, applied within each availability group (sold out always last). */
 export function sortItems(items: ShopItem[], mode: SortMode): ShopItem[] {
   const arr = items.slice()
-  const out = (i: ShopItem) => (i.stock_status === 'out_of_stock' ? 1 : 0)
   switch (mode) {
     case 'popular':
-      return arr.sort((a, b) => out(a) - out(b) || popularity(b) - popularity(a))
+      return arr.sort(withinAvailability((a, b) => popularity(b) - popularity(a)))
     case 'price_asc':
-      return arr.sort((a, b) => out(a) - out(b) || (Number(a.price_bhd) || Infinity) - (Number(b.price_bhd) || Infinity))
+      return arr.sort(withinAvailability((a, b) => (Number(a.price_bhd) || Infinity) - (Number(b.price_bhd) || Infinity)))
     case 'price_desc':
-      return arr.sort((a, b) => out(a) - out(b) || (Number(b.price_bhd) || 0) - (Number(a.price_bhd) || 0))
+      return arr.sort(withinAvailability((a, b) => (Number(b.price_bhd) || 0) - (Number(a.price_bhd) || 0)))
     default:
-      return arr
+      return partitionByAvailability(arr)
   }
 }
 
@@ -260,16 +310,17 @@ const DESTINATIONS: readonly QuickFilter[] = ['deals', 'clearance', 'drops', 'of
 /**
  * Shelf order on a destination shelf: lines in stock first ("while stock lasts"); on a deals or
  * last-chance shelf the real price drops and offers lead, then clearing lines by the merchant's real
- * margin (marginOf, highest first), then the shelf order. Anything else keeps the shelf order.
+ * margin (marginOf, highest first), then the shelf order. Anything else keeps the shelf order —
+ * sold-out lines last, as everywhere.
  */
 export function shelfOrder(items: ShopItem[], filters: ReadonlySet<QuickFilter>): ShopItem[] {
-  if (!DESTINATIONS.some((f) => filters.has(f))) return items
+  if (!DESTINATIONS.some((f) => filters.has(f))) return partitionByAvailability(items)
   const deals = filters.has('deals') || filters.has('clearance')
   return items
     .map((item, index) => ({
       item,
       index,
-      out: item.stock_status === 'out_of_stock' ? 1 : 0,
+      out: availabilityRank(item),
       tier: deals && !(isRealDrop(item) || isOffer(item)) ? 1 : 0,
       pct: deals ? (marginOf(item)?.pct ?? -1) : 0,
     }))

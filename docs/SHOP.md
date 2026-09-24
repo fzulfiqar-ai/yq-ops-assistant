@@ -19,8 +19,24 @@ Code: `app/shop.py` (payload, pricing engine, orders, salesmen, rules, margins),
 - Stock is shown as a status only: `in_stock` / `low_stock` ("Only a few left", units ≤ `shop_low_stock_units`)
   / `out_of_stock`. Never a number. A `selling_fast` badge appears when days of cover (90-day velocity)
   drop below `shop_low_stock_days_cover`.
-- Out-of-stock items can still be ordered as **backorder** when `shop_allow_backorder=1`. The shop never
-  mutates stock; Focus stays the system of record and the salesman confirms every order.
+- **The sold-out rule (release R1, 24-Sep-2026).** A sold-out line stays on the shelf — same URL, same
+  record, labelled **"Sold out"** (never "Out of stock"; Arabic «نفدت الكمية») — and sits after every
+  available line on every listing (`app/shop.py _load_items` server-side, `web/src/market/lib/facets.ts`
+  client-side, one comparator). Two switches decide whether it can still be ordered as a **backorder**:
+  `shop_allow_backorder` for **merchants (marketplace + share link)** and `shop_allow_backorder_staff`
+  for the salesman app (`/shop/*`, default `1`). With the merchant switch off, Add is replaced by
+  **"Tell me when back"** (a restock request the rep sees; it is never sent without a phone number),
+  nothing sold out reaches the cart from any path (cards, panel, palette ⇧Enter, Order again, Quick
+  order — Enter never substitutes another SKU for a typed sold-out code), and a sold-out cart line is
+  blocked at the quote with `Sold out — can't be ordered right now. Remove it to send your order.`
+  A rep's confirmation re-price always keeps its backorder lines whatever either switch says.
+  The shop never mutates stock; Focus stays the system of record and the salesman confirms every order.
+- **"Sold out" is a verified zero.** The Focus *Stock balance by warehouse* report omits zero-balance items
+  (checked read-only 24-Sep-2026: 0 rows with `net_qty <= 0` across the 13 `stock_balance` snapshots since
+  June), so a catalog SKU absent from the latest snapshot has none. That reading is only as good as the
+  snapshot is recent: older than `shop_stock_fresh_days` (default 3) the status still shows, with the
+  snapshot date beside it ("Sold out · stock as of 21 Sep", the blocked reason "Sold out as of 21 Sep — …",
+  `stock_fresh: false` in the payload). There is no "unknown" state.
 - All prices/discounts are computed server-side (`app/shop.py::price_cart`); client totals are ignored.
 - **Margin floor:** no rule/coupon/tier may price a unit below
   `landed_cost × (1 + shop_min_margin_pct) × (1 + shop_vat_rate)` (price-book rates are VAT-inclusive).
@@ -168,7 +184,7 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
 - `GET /shop/unpriced-stock` (Shop Admin) → `{ "rows": [{ item_name, warehouse_name, stock_qty, value_bhd, matched_code,
   match_source, as_of_date }] }` — stock with no active catalog code (not in the current price book) = cannot be sold online.
 - `GET /settings/shop` → `{ "settings": { shop_min_margin_pct, shop_vat_rate, shop_low_stock_units, shop_low_stock_days_cover,
-  shop_allow_backorder, shop_min_order_bhd, shop_free_delivery_threshold_bhd, shop_delivery_fee_bhd, shop_default_salesman,
+  shop_allow_backorder, shop_allow_backorder_staff, shop_stock_fresh_days, shop_min_order_bhd, shop_free_delivery_threshold_bhd, shop_delivery_fee_bhd, shop_default_salesman,
   shop_order_prefix, shop_social_proof_min_customers, shop_show_retail_compare, shop_best_seller_top_n,
   shop_trending_growth_pct, shop_trending_min_units, shop_new_days } }` (all strings; booleans are "1"/"0");
   `PUT /settings/shop` body `{ "settings": {…partial} }` (admin).
@@ -231,7 +247,8 @@ Salesman default features are `Catalog` + `Shop Orders`; logins are created from
   order and share lookups go through `shop.resolve_code()`. Before this, 23 mixed-case SKUs could not be ordered.
 - **A line that cannot be ordered no longer fails the whole quote.** `POST …/quote` returns it in `lines[]` with
   `unavailable: true`, `blocked_reason` (`No longer in the catalog.`, `Price on request — ask your salesman.`,
-  `Sold out.` when backorders are off, `Minimum order is N.`) and zero prices. Totals, `items` and `units`
+  `Sold out — can't be ordered right now. Remove it to send your order.` when backorders are off (dated
+  `Sold out as of 21 Sep — …` once the stock snapshot is stale), `Minimum order is N.`) and zero prices. Totals, `items` and `units`
   cover the orderable lines only. `can_submit` is false and `block_reason` says what to do next, in this order:
   remove the dead line(s), then reach the minimum order. `POST …/order` refuses with that same `block_reason`.
   An empty cart is still a 400.
