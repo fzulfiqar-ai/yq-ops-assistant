@@ -16,14 +16,23 @@
 --   update app_settings set value = '0', updated_by = 'release R1', updated_at = now()
 --    where key = 'shop_allow_backorder';           -- merchants: no backorder → "Tell me when back"
 
+-- "Sold out" is a VERIFIED zero: the Focus "Stock balance by warehouse" report omits zero-balance
+-- items (checked read-only 24-Sep-2026: 0 rows with net_qty <= 0 across the 13 stock_balance
+-- snapshots since 2026-06-01), so a SKU absent from the latest snapshot has none. That reading is
+-- only as good as the snapshot is recent: past shop_stock_fresh_days the status still shows, with
+-- the snapshot date beside it (app/shop.py stock_snapshot / sold_out_reason). Code default '3'.
 insert into app_settings (key, value, description) values
-  ('shop_allow_backorder_staff', '1', 'Shop: 1 = a salesman/staff order (/shop/*) may include a sold-out line as a backorder, whatever shop_allow_backorder says for merchants')
+  ('shop_allow_backorder_staff', '1', 'Shop: 1 = a salesman/staff order (/shop/*) may include a sold-out line as a backorder, whatever shop_allow_backorder says for merchants'),
+  ('shop_stock_fresh_days', '3', 'Shop: a stock snapshot older than this many days is stale — "Sold out" still shows, dated with the snapshot day')
 on conflict (key) do nothing;
 
 do $$
 begin
   if not exists (select 1 from app_settings where key = 'shop_allow_backorder_staff') then
     raise exception 'shop_allow_backorder_staff was not seeded';
+  end if;
+  if not exists (select 1 from app_settings where key = 'shop_stock_fresh_days') then
+    raise exception 'shop_stock_fresh_days was not seeded';
   end if;
   if not exists (select 1 from app_settings where key = 'shop_allow_backorder') then
     raise exception 'shop_allow_backorder (the merchant switch) is missing — shop_migration.sql was never applied';

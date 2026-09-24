@@ -1366,8 +1366,6 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
         if st.key in ("home", "storefront", "campaign", "reduced_home"):
             home_checks(run, page, vp, p)
             paste_offers(run, page)
-        if st.key in SOLDOUT_ROOTS:
-            soldout_order_check(run, page, SOLDOUT_ROOTS[st.key])
         if st.key == "home" and vp.name == LEAD_PHONE:
             band_hint_check(run, page)
         if st.key == "campaign":
@@ -1415,6 +1413,20 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
         # last: it holds the track and could follow a slide link
         if st.key == "home" and vp.name == LEAD_PHONE:
             slider_timing(run, page)
+
+        # last of all, on a FRESH page of the same context (same init script, same no-prod-writes
+        # net): the sold-out order check presses "Show more" until the whole listing is rendered
+        # (~180 cards). Nothing above may see that expanded page — the geometry checks and the
+        # viewport / full-page shots were silently taken on it before (a ~30k px capture on a phone).
+        if st.key in SOLDOUT_ROOTS:
+            fresh = ctx.new_page()
+            install_mocks(fresh, st.order_kind)
+            try:
+                fresh.goto(base + st.route, wait_until="domcontentloaded", timeout=40000)
+                settle(fresh, st)
+                soldout_order_check(run, fresh, SOLDOUT_ROOTS[st.key])
+            finally:
+                fresh.close()
 
     except PWError as exc:
         finding(run, "fail", "page-crash", "Playwright error: " + str(exc)[:300])

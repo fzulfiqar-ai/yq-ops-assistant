@@ -1,17 +1,24 @@
 /**
- * The sold-out rule, exercised on the real listing helpers — plain node, no test runner, no deps.
+ * The sold-out rule, exercised on the real listing helpers — plain node, no test runner, no new deps.
  *
  *   node web/scripts/soldout_order_test.mjs        (from the repo root or from web/)
  *
- * Node 22.15+/24 strips the TypeScript types on import; the one thing it cannot do is resolve the
- * extensionless relative imports and the `@/` alias the Vite build resolves, so a resolve hook
- * (module.registerHooks) maps those onto src/*.ts. Nothing is compiled or written. Exit 1 on any
- * failure. tests/test_r1_soldout.py runs this script and reports its result.
+ * The TypeScript sources are transpiled on load with the project's own `typescript` (a load hook
+ * from module.registerHooks, Node 22.15+), and a resolve hook maps the extensionless relative
+ * imports and the `@/` alias the Vite build resolves onto src/*.ts. Nothing is compiled to disk.
+ * Exit 1 on any failure. tests/test_r1_soldout.py runs this script and reports its result; the CI
+ * web job runs it after `npm ci`.
+ *
+ * What it proves: every listing helper keeps sold out last (partition, every sort, every shelf, the
+ * home grid, search, the Codes group) and — the R1 blocker — Quick order's Enter NEVER substitutes:
+ * a typed code that is a sold-out SKU locks nothing and has no Enter target, whatever in-stock
+ * neighbour the fuzzy index finds one edit away (the live payload had 45 such substitutions).
  */
 import { registerHooks } from 'node:module'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
+import ts from 'typescript'
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const isFile = (p) => existsSync(p) && statSync(p).isFile()
@@ -26,6 +33,17 @@ registerHooks({
       if (isFile(cand)) return { url: pathToFileURL(cand).href, shortCircuit: true }
     }
     return next(spec, ctx)
+  },
+  load(url, ctx, next) {
+    if (url.startsWith('file:') && /\.tsx?$/.test(url)) {
+      const file = fileURLToPath(url)
+      const { outputText } = ts.transpileModule(readFileSync(file, 'utf8'), {
+        fileName: file,
+        compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+      })
+      return { format: 'module', source: outputText, shortCircuit: true }
+    }
+    return next(url, ctx)
   },
 })
 
@@ -59,6 +77,10 @@ const CATALOG = [
   item('C05', 'in_stock', { name: 'Lightning cable 2m', price: 1.5, badges: ['best_seller'], proof: 'Ordered by 12 shops this month' }),
   item('UK15', 'in_stock', { name: '20W charger', price: 1.5, category: 'CHARGER' }),
   item('UK16', 'out_of_stock', { name: '20W charger dual', price: 2.0, category: 'CHARGER' }),
+  // the review's substitutions in miniature: a sold-out code with an in-stock neighbour one edit away
+  item('UK05', 'out_of_stock', { name: 'QC3.0 charger', price: 1.8, category: 'CHARGER' }),
+  item('C10', 'out_of_stock', { name: 'Car charger dual USB', price: 0.7, category: 'CAR CHARGER' }),
+  item('T10', 'in_stock', { name: 'Wireless headset', price: 2.5, category: 'BLUETOOTH HEADSET' }),
 ]
 const codes = (arr) => arr.map((i) => i.item_code)
 const out = (i) => i.stock_status === 'out_of_stock'
@@ -67,6 +89,8 @@ const noAvailableAfterSoldOut = (arr) => {
   const k = firstOut(arr)
   return k < 0 || arr.slice(k).every(out)
 }
+const HAVE = ['C02', 'C03', 'C05', 'UK15', 'T10']
+const SOLD = ['C01', 'C04', 'UK16', 'UK05', 'C10']
 
 /* ── the runner ── */
 const TESTS = []
@@ -76,36 +100,39 @@ const assert = (cond, msg) => {
 }
 const eq = (a, b, msg) => assert(JSON.stringify(a) === JSON.stringify(b), `${msg}: got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`)
 
-test('strings: zero stock reads "Sold out", never "Out of stock"; the Arabic sits beside it', () => {
+test('strings: zero stock reads "Sold out", never "Out of stock"; the Arabic sits beside it; the dated form', () => {
   eq(S.card.stockOut, 'Sold out', 'S.card.stockOut')
   eq(S.card.soldOut, 'Sold out', 'S.card.soldOut')
   eq(S.card.stockOutAr, 'نفدت الكمية', 'S.card.stockOutAr')
   assert(!/out of stock/i.test(S.card.backorderNote), 'backorderNote still says "Out of stock"')
+  eq(S.card.soldOutAsOf('21 Sep'), 'Sold out · stock as of 21 Sep', 'the stale-snapshot label')
+  eq(S.card.leftOut(1), '1 sold-out line left out', 'leftOut singular')
+  eq(S.card.leftOut(3), '3 sold-out lines left out', 'leftOut plural')
 })
 
 test('partitionByAvailability: stable — each group keeps its incoming order', () => {
-  eq(codes(facets.partitionByAvailability(CATALOG)), ['C02', 'C03', 'C05', 'UK15', 'C01', 'C04', 'UK16'], 'partition')
+  eq(codes(facets.partitionByAvailability(CATALOG)), [...HAVE, ...SOLD], 'partition')
   eq(codes(facets.partitionByAvailability([])), [], 'empty')
 })
 
 test('sortItems: every sort applies within the availability groups', () => {
   const shelf = facets.sortItems(CATALOG, 'shelf')
-  eq(codes(shelf), ['C02', 'C03', 'C05', 'UK15', 'C01', 'C04', 'UK16'], 'shelf')
+  eq(codes(shelf), [...HAVE, ...SOLD], 'shelf')
   const asc = facets.sortItems(CATALOG, 'price_asc')
   assert(noAvailableAfterSoldOut(asc), 'price_asc: an available line after a sold-out one')
-  eq(codes(asc), ['C02', 'C03', 'C05', 'UK15', 'C01', 'C04', 'UK16'], 'price_asc within groups')
+  eq(codes(asc), ['C02', 'C03', 'C05', 'UK15', 'T10', 'C01', 'C10', 'C04', 'UK05', 'UK16'], 'price_asc within groups')
   const desc = facets.sortItems(CATALOG, 'price_desc')
   assert(noAvailableAfterSoldOut(desc), 'price_desc: an available line after a sold-out one')
-  eq(codes(desc), ['C05', 'UK15', 'C03', 'C02', 'UK16', 'C04', 'C01'], 'price_desc within groups')
+  eq(codes(desc), ['T10', 'C05', 'UK15', 'C03', 'C02', 'UK16', 'UK05', 'C04', 'C10', 'C01'], 'price_desc within groups')
   const pop = facets.sortItems(CATALOG, 'popular')
   assert(noAvailableAfterSoldOut(pop), 'popular: an available line after a sold-out one')
   // C01 is a best seller but sold out: it must not lead the popular sort
   eq(pop[0].item_code, 'C05', 'popular leads with the available best seller')
-  eq(pop[pop.length - 3].item_code, 'C01', 'the sold-out best seller leads only the sold-out group')
+  eq(pop[firstOut(pop)].item_code, 'C01', 'the sold-out best seller leads only the sold-out group')
 })
 
 test('shelfOrder: the plain shelf and every destination shelf keep sold out last', () => {
-  eq(codes(facets.shelfOrder(CATALOG, new Set())), ['C02', 'C03', 'C05', 'UK15', 'C01', 'C04', 'UK16'], 'plain shelf')
+  eq(codes(facets.shelfOrder(CATALOG, new Set())), [...HAVE, ...SOLD], 'plain shelf')
   for (const f of ['best', 'moving', 'new', 'deals', 'clearance', 'drops', 'offers']) {
     assert(noAvailableAfterSoldOut(facets.shelfOrder(CATALOG, new Set([f]))), `destination ${f}`)
   }
@@ -114,8 +141,8 @@ test('shelfOrder: the plain shelf and every destination shelf keep sold out last
 test('homeGridOrder: unseen available → available on a rail → sold out in shelf order', () => {
   // C01 is sold out AND in the rail set (a last-order code): it keeps its shelf place in the sold-out band
   const rails = new Set(['C02', 'C01'])
-  eq(codes(facets.homeGridOrder(CATALOG, rails)), ['C03', 'C05', 'UK15', 'C02', 'C01', 'C04', 'UK16'], 'home grid')
-  eq(codes(facets.homeGridOrder(CATALOG, new Set())), ['C02', 'C03', 'C05', 'UK15', 'C01', 'C04', 'UK16'], 'no rails')
+  eq(codes(facets.homeGridOrder(CATALOG, rails)), ['C03', 'C05', 'UK15', 'T10', 'C02', ...SOLD], 'home grid')
+  eq(codes(facets.homeGridOrder(CATALOG, new Set())), [...HAVE, ...SOLD], 'no rails')
 })
 
 test('searchItems: availability is the primary key, then the score band', () => {
@@ -136,36 +163,87 @@ test('groupResults: the Codes group is partitioned before the cut to three', () 
   eq(codes(g.codes), ['C02', 'C03', 'C05'], 'codes: the three available C0* lines lead')
   assert(noAvailableAfterSoldOut(g.products), 'products group')
   const uk = groups.groupResults('uk', CATALOG, index, search.searchItems)
-  eq(codes(uk.codes), ['UK15', 'UK16'], 'codes: available first, sold out kept')
+  eq(codes(uk.codes), ['UK15', 'UK16', 'UK05'], 'codes: available first, sold out kept')
   eq(uk.exact, null, 'no exact code')
 })
 
-test('resolveQuery: an exact sold-out code is never resolved — it is offered after in-stock siblings', () => {
+test('resolveQuery: an exact sold-out code is never resolved — it is offered after in-stock siblings, and named as `exact`', () => {
   const index = search.buildIndex(CATALOG)
   const r = quick.resolveQuery('c01', CATALOG, index)
   eq(r.item, null, 'sold-out exact code resolved')
+  eq(r.exact && r.exact.item_code, 'C01', 'the exact match is named')
   assert(r.candidates.some((c) => c.item_code === 'C01'), 'the sold-out line is offered')
   assert(noAvailableAfterSoldOut(r.candidates), `candidates: ${codes(r.candidates)}`)
   assert(r.candidates[0].item_code !== 'C01', `in-stock alternatives first: ${codes(r.candidates)}`)
   const ok = quick.resolveQuery('uk-15', CATALOG, index)
   eq(ok.item && ok.item.item_code, 'UK15', 'an available exact code resolves')
+  eq(ok.exact && ok.exact.item_code, 'UK15', 'and is the exact match')
   const noIndex = quick.resolveQuery('C04', CATALOG, null)
   eq(noIndex.item, null, 'sold out without an index')
   eq(codes(noIndex.candidates), ['C04'], 'offered alone without an index')
+  eq(quick.resolveQuery('braided', CATALOG, index).exact, null, 'a name is not an exact code')
 })
 
 test('resolveQuery: a clear fuzzy winner resolves only when available; candidates are partitioned', () => {
   const index = search.buildIndex(CATALOG)
   const win = quick.resolveQuery('braided', CATALOG, index)
   eq(win.item && win.item.item_code, 'C03', 'the clear available winner resolves')
-  const dual = quick.resolveQuery('charger dual', CATALOG, index)
+  const dual = quick.resolveQuery('20w charger dual', CATALOG, index)
   eq(dual.item, null, 'a sold-out clear winner must not resolve')
   assert(dual.candidates.some((c) => c.item_code === 'UK16'), 'the sold-out winner is offered')
   assert(noAvailableAfterSoldOut(dual.candidates), `candidates: ${codes(dual.candidates)}`)
-  const list = quick.parseList('24 x C01\n12 UK15\ncharger dual 6', CATALOG, index)
+  const list = quick.parseList('24 x C01\n12 UK15\n20w charger dual 6', CATALOG, index)
   eq(list.map((r) => (r.item ? r.item.item_code : null)), [null, 'UK15', null], 'a pasted list never resolves a sold-out line')
   eq(list[0].qty, 24, 'the quantity survives')
   assert(list[0].candidates.some((c) => c.item_code === 'C01'), 'the sold-out code is offered on its row')
+  eq(list[0].exact && list[0].exact.item_code, 'C01', 'the pasted row knows its code is a sold-out SKU')
+})
+
+test('resolveQuick: a typed SOLD-OUT code adds NOTHING — no lock, no Enter target — whatever in-stock neighbour is one edit away', () => {
+  const index = search.buildIndex(CATALOG)
+  for (const it of CATALOG.filter(out)) {
+    for (const q of [it.item_code, it.item_code.toLowerCase(), ` ${it.item_code} `, it.item_code.replace(/(\D)(\d)/, '$1-$2')]) {
+      const r = quick.resolveQuick(q, CATALOG, index)
+      eq(r.lock, null, `${JSON.stringify(q)}: locked a line`)
+      eq(r.best, null, `${JSON.stringify(q)}: Enter would lock ${r.best && r.best.item_code}`)
+      eq(r.exactOut && r.exactOut.item_code, it.item_code, `${JSON.stringify(q)}: the sold-out SKU itself is what is shown`)
+      assert(!r.suggestions.some((s) => s.item_code === it.item_code), `${JSON.stringify(q)}: the sold-out SKU is also in the suggestions`)
+      assert(noAvailableAfterSoldOut(r.suggestions), `${JSON.stringify(q)}: suggestions ${codes(r.suggestions)}`)
+    }
+  }
+  // the review's cases in miniature: UK05 → UK15, C10 → T10 are one edit apart, so the index offers the
+  // neighbour — as a suggestion the merchant picks by hand, never as what Enter takes
+  const uk05 = quick.resolveQuick('UK05', CATALOG, index)
+  assert(uk05.suggestions.some((s) => s.item_code === 'UK15'), `UK15 is offered as an alternative: ${codes(uk05.suggestions)}`)
+  eq(uk05.best, null, 'Enter must not take UK15')
+  const c10 = quick.resolveQuick('C10', CATALOG, index)
+  assert(c10.suggestions.some((s) => s.item_code === 'T10'), `T10 is offered as an alternative: ${codes(c10.suggestions)}`)
+  eq(c10.best, null, 'Enter must not put a headset on a car-charger row')
+  // without an index the sold-out SKU is still shown, with nothing to substitute
+  const bare = quick.resolveQuick('C04', CATALOG, null)
+  eq(bare.exactOut && bare.exactOut.item_code, 'C04', 'no index: still the sold-out SKU')
+  eq(bare.best, null, 'no index: no Enter target')
+  eq(codes(bare.suggestions), [], 'no index: nothing else offered')
+})
+
+test('resolveQuick: an available code locks at once; a name gives Enter its best match only when that match is available', () => {
+  const index = search.buildIndex(CATALOG)
+  for (const it of CATALOG.filter((i) => !out(i))) {
+    const r = quick.resolveQuick(it.item_code.toLowerCase(), CATALOG, index)
+    eq(r.lock && r.lock.item_code, it.item_code, `${it.item_code}: lock`)
+    eq(r.exactOut, null, `${it.item_code}: not sold out`)
+  }
+  const braided = quick.resolveQuick('braided', CATALOG, index)
+  eq(braided.lock, null, 'a name never locks by itself')
+  eq(braided.best && braided.best.item_code, 'C03', 'Enter takes the available best match')
+  eq(braided.exactOut, null, 'a name is not a sold-out code')
+  assert(noAvailableAfterSoldOut(braided.suggestions), `suggestions ${codes(braided.suggestions)}`)
+  const dual = quick.resolveQuick('20w charger dual', CATALOG, index)
+  eq(dual.best, null, `the best match is sold out: Enter takes nothing (got ${dual.best && dual.best.item_code})`)
+  assert(dual.suggestions.some((s) => s.item_code === 'UK16'), 'the sold-out match is still offered, greyed')
+  const none = quick.resolveQuick('zzzzzz', CATALOG, index)
+  eq(none.best, null, 'no hit, no target')
+  eq(codes(none.suggestions), [], 'no hit, nothing offered')
 })
 
 let failed = 0

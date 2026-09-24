@@ -3,10 +3,12 @@ import { ShopApiError, type Campaign, type CatalogPayload, type MyOrderSummary, 
 import { useQuote, type QuoteFetcher } from '@/pages/shop/useQuote'
 import { currentRef, forgetRef, isRecognized, lastQty, readNote, rememberQty, rememberedOrders, writeNote } from './lib/device'
 import { track } from './lib/events'
-import { minQtyOf, normalizeQty } from './lib/format'
+import { fmtDateShort, isOut, minQtyOf, normalizeQty } from './lib/format'
 import { getMarket, postMarketQuote, postMyOrders } from './lib/marketApi'
 import type { SearchIndex } from './lib/search'
 import { cartStore, useCartLines } from './store/cart'
+import { S } from './strings'
+import { useToast } from './ui/Toast'
 
 /**
  * Two contexts, one provider:
@@ -34,6 +36,11 @@ export interface MarketValue {
   /** live campaigns for this visitor (audience filter applied) */
   campaigns: Campaign[]
   allowBackorder: boolean
+  /** the stock snapshot every status is read from (ISO date), and whether the API called it stale */
+  stockAsOf: string | null
+  stockStale: boolean
+  /** "Sold out" — or, once the snapshot is stale, "Sold out · stock as of 21 Sep": the one label every surface uses */
+  soldOutLabel: string
   showCompare: boolean
   publicTiers: boolean
   rep: RepCard | null
@@ -203,15 +210,28 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
     return last ? normalizeQty(item, last) : minQtyOf(item)
   }, [])
 
+  /*
+   * The sold-out rule at the cart's door (R1): once the shop takes no backorder, nothing sold out
+   * reaches the cart from ANY path — the card, the panel, the palette's ⇧Enter, "Order again", a
+   * loaded list — the line is left out and the merchant is told how many were. The server would
+   * only refuse it at the quote, with a reason that reads as if it sold out after the add.
+   */
+  const toast = useToast()
+  const allowBackorder = settings.allow_backorder !== false
+
   const add = useCallback(
     (item: ShopItem, qty?: number, from?: string) => {
+      if (isOut(item) && !allowBackorder) {
+        toast(S.card.leftOut(1), 'info')
+        return 0
+      }
       const q = qty && qty > 0 ? normalizeQty(item, qty) : defaultQty(item)
       cartStore.set(item.item_code, q)
       rememberQty(item.item_code, q)
       track('add', { item_code: item.item_code, meta: { count: q, ...(from ? { rail: from } : {}) } })
       return q
     },
-    [defaultQty],
+    [defaultQty, allowBackorder, toast],
   )
 
   const setQty = useCallback((item: ShopItem, qty: number) => {
@@ -225,13 +245,19 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
     track('remove', { item_code: code })
   }, [])
 
-  const addMany = useCallback((entries: { item: ShopItem; qty: number }[], from: string) => {
-    const rows = entries.filter((e) => e.qty > 0).map((e) => ({ item_code: e.item.item_code, qty: normalizeQty(e.item, e.qty) }))
-    cartStore.setMany(rows)
-    for (const r of rows) rememberQty(r.item_code, r.qty)
-    track('reorder', { meta: { count: rows.length, rail: from } })
-    return rows.length
-  }, [])
+  const addMany = useCallback(
+    (entries: { item: ShopItem; qty: number }[], from: string) => {
+      const wanted = entries.filter((e) => e.qty > 0)
+      const kept = allowBackorder ? wanted : wanted.filter((e) => !isOut(e.item))
+      const rows = kept.map((e) => ({ item_code: e.item.item_code, qty: normalizeQty(e.item, e.qty) }))
+      cartStore.setMany(rows)
+      for (const r of rows) rememberQty(r.item_code, r.qty)
+      track('reorder', { meta: { count: rows.length, rail: from } })
+      if (wanted.length > kept.length) toast(S.card.leftOut(wanted.length - kept.length), 'info')
+      return rows.length
+    },
+    [allowBackorder, toast],
+  )
 
   const setNote = useCallback((n: string) => {
     setNoteState(n)
@@ -259,6 +285,11 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
     () => (data?.campaigns || []).filter((c) => c.audience === 'all' || (c.audience === 'recognized') === recognized),
     [data, recognized],
   )
+  // a stale snapshot (older than shop_stock_fresh_days, the API decides) keeps every status and
+  // puts the snapshot date beside "Sold out"; an older API that sends no flag counts as fresh
+  const stockAsOf = data?.stock_as_of || null
+  const stockStale = data?.stock_fresh === false
+  const soldOutLabel = stockStale && fmtDateShort(stockAsOf) ? S.card.soldOutAsOf(fmtDateShort(stockAsOf) as string) : S.card.stockOut
 
   const market = useMemo<MarketValue>(
     () => ({
@@ -269,7 +300,10 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       categories,
       settings,
       campaigns,
-      allowBackorder: settings.allow_backorder !== false,
+      allowBackorder,
+      stockAsOf,
+      stockStale,
+      soldOutLabel,
       showCompare: settings.show_retail_compare !== false,
       publicTiers: settings.public_tiers !== false,
       rep: data?.rep || null,
@@ -286,7 +320,7 @@ export function MarketProvider({ children, initialRef }: { children: ReactNode; 
       pairsFor,
       reload,
     }),
-    [data, status, items, itemsByCode, categories, settings, campaigns, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
+    [data, status, items, itemsByCode, categories, settings, campaigns, allowBackorder, stockAsOf, stockStale, soldOutLabel, ref, setRef, recognized, index, ensureIndex, defaultQty, add, setQty, remove, addMany, pairsFor, reload],
   )
 
   const order = useMemo<OrderValue>(

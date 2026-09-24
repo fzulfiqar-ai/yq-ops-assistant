@@ -2,10 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, Clock, Heart, Maximize2, MessageCircle, Plus, Share2, Store } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
-import { deviceId, readCustomer, rememberViewed } from '../lib/device'
+import { rememberViewed } from '../lib/device'
 import { track } from '../lib/events'
-import { postRestock } from '../lib/marketApi'
-import { badgeMeta, bhd, cardBadges, isOut, minQtyOf, niceCategory, priceAnchor, productDetail, productName, stepOf, stockMeta } from '../lib/format'
+import { badgeMeta, bhd, cardBadges, fmtDateShort, isOut, minQtyOf, niceCategory, priceAnchor, productDetail, productName, stepOf, stockMeta } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
@@ -19,6 +18,7 @@ import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
 import { MarginStrip, MarketCard, VariantChips, WasPill } from './MarketCard'
 import { QtySheet } from './QtySheet'
+import { useTellBack } from './RestockAsk'
 
 /**
  * The product, over whichever page the merchant is on: a bottom sheet on phones, a dialog on
@@ -38,9 +38,10 @@ export default function ProductPanel({ code }: { code: string }) {
   const [view, setView] = useState<'product' | 'package'>('product')
   const [added, setAdded] = useState(false)
   const [keypad, setKeypad] = useState(false)
-  const [asked, setAsked] = useState(false)
   const [zoom, setZoom] = useState(false)
   const saved = useIsSaved(code)
+  // the sold-out rule's one live action once backorder is off — before the early return, as every hook must be
+  const tell = useTellBack(item)
   // a new product always opens on its product shot
   const [codeSeen, setCodeSeen] = useState(code)
   if (codeSeen !== code) {
@@ -132,23 +133,14 @@ export default function ProductPanel({ code }: { code: string }) {
       ) : !canOrder ? (
         // the sold-out rule with backorder off: the add stays in its slot, disabled and reading
         // "Sold out", so the merchant sees that this line cannot be ordered — and the one live
-        // action is the restock request the rep sees (postRestock), never a silent backorder
+        // action is the restock request the rep sees (RestockAsk: a phone first, never a silent
+        // backorder; the rep on WhatsApp as the secondary route)
         <div className="flex items-center gap-2">
           <Button size="lg" variant="secondary" disabled className="hidden min-[400px]:inline-flex" icon={<Plus size={17} aria-hidden="true" />}>
             {S.card.stockOut}
           </Button>
-          <Button
-            size="lg"
-            className="min-w-[9rem]"
-            disabled={asked}
-            icon={asked ? <Check size={16} aria-hidden="true" /> : <MessageCircle size={16} aria-hidden="true" />}
-            onClick={() => {
-              setAsked(true)
-              toast(S.card.tellBackDone, 'success')
-              postRestock({ item_code: item.item_code, phone: readCustomer().phone || null, device_id: deviceId(), referral_code: m.ref || null }).catch(() => undefined)
-            }}
-          >
-            {asked ? S.card.tellBackDone : S.card.tellBack}
+          <Button size="lg" className="min-w-[9rem]" disabled={tell.asked} icon={tell.asked ? <Check size={16} aria-hidden="true" /> : <MessageCircle size={16} aria-hidden="true" />} onClick={tell.ask}>
+            {tell.asked ? S.card.tellBackDone : S.card.tellBack}
           </Button>
         </div>
       ) : (
@@ -233,7 +225,7 @@ export default function ProductPanel({ code }: { code: string }) {
 
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
             <Chip tone={stock.tone === 'warn' ? 'deal' : stock.tone} dot size="md">
-              {stock.label}
+              {out ? m.soldOutLabel : stock.label}
             </Chip>
             {item.social_proof && (
               <span className="inline-flex items-center gap-1.5 text-xs text-ink-2">
@@ -242,6 +234,8 @@ export default function ProductPanel({ code }: { code: string }) {
               </span>
             )}
           </div>
+          {/* a stale stock snapshot: every status stays, and the day it was read on is said right here, not only in the footer */}
+          {m.stockStale && fmtDateShort(m.stockAsOf) && <p className="mt-1.5 text-xs font-medium text-ink-2">{S.states.stockAsOf(fmtDateShort(m.stockAsOf) as string)}</p>}
           {out && m.allowBackorder && <p className="mt-2.5 rounded-sm bg-warn-soft px-3 py-2 text-xs leading-snug text-warn">{S.card.backorderNote}</p>}
 
           <div ref={setPriceEl} className="mt-4 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
@@ -329,6 +323,7 @@ export default function ProductPanel({ code }: { code: string }) {
         </div>
       </div>
       {keypad && <QtySheet item={item} value={qty} onApply={(n) => m.setQty(item, n)} onRemove={() => m.remove(item.item_code)} onClose={() => setKeypad(false)} />}
+      {tell.sheet}
     </Sheet>
   )
 }

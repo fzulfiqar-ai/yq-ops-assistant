@@ -216,6 +216,16 @@ export const S = {
     tellRep: (first: string) => `Tell ${first}`,
     askYq: 'Ask YQ',
     tellBack: 'Tell me when back',
+    /** the restock request needs a number to come back to: the small sheet that asks for one */
+    tellBackPhone: 'Your phone number',
+    tellBackWhy: 'We need a number to reach you when it is back.',
+    tellBackPhoneBad: 'Enter an 8-digit Bahrain number, or one with a country code.',
+    /** the secondary route on the same sheet / toast: the rep on WhatsApp */
+    tellRepWa: (first: string) => `Tell ${first} on WhatsApp`,
+    /** the sold-out rule at every add path: lines the shop takes no backorder for are left out, and said so */
+    leftOut: (n: number) => `${plural(n, 'sold-out line', 'sold-out lines')} left out`,
+    /** a stale stock snapshot: the state stays, the date it was read on rides beside it */
+    soldOutAsOf: (d: string) => `Sold out · stock as of ${d}`,
     saveItem: 'Save',
     savedItem: 'Saved',
     zoom: 'Zoom photo',
@@ -344,6 +354,9 @@ export const S = {
     listSaved: (name: string) => `Restock list saved: ${name}`,
     pastePlaceholder: '24 x C18\n12 UK15\ntws 6',
     listPlaceholder: 'Weekly cables',
+    /** the typed code IS a sold-out SKU: nothing is added; the line is shown with its state and the in-stock lines are offered */
+    soldOutExact: 'Sold out — nothing was added. Pick an in-stock line below, or ask to be told when it is back.',
+    alternatives: 'In stock instead',
   },
   restock: {
     title: 'Your restock',
