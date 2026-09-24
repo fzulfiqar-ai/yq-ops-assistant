@@ -57,6 +57,52 @@ def _doc_month(doc_no: str | None) -> str | None:
     return f"20{int(m.group(1)):02d}-{int(m.group(2)):02d}-01" if m else None
 
 
+def _doc_seq(doc_no: str | None) -> tuple[int, int, int] | None:
+    """YQ-26-09-2 → (2026, 9, 2): Focus numbers receipts sequentially within a month, so within
+    one doc month a lower sequence is the earlier receipt."""
+    m = re.match(r"\s*YQ-(\d{2})-(\d{2})-(\d+)\s*$", str(doc_no or ""))
+    return (2000 + int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def current_cost_dates(existing: list[dict], ledger: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Pure: ({SKU upper: receipt date}, {SKU upper: doc_no}) for the rows mrn_landed_costs holds.
+    A row's date is the LATER of its stored effective_date and the ledger's move date for its doc:
+    every row written before R2 is dated to the 1st of its doc month (YQ-26-09-2 at 2026-09-01
+    while the ledger books MRN:YQ-26-09-2 on 2026-09-20), and comparing a real receipt date
+    against that convention let an OLDER receipt of the same month (YQ-26-09-1, 14-Sep) pass the
+    'never older' guard and overwrite the newer landed cost -- the cost the marketplace discount
+    floor and v_product_economics read. scripts/mrn_dates_migration.sql re-dates the stored rows
+    as well; this keeps the guard right on a database that has not had it yet."""
+    have: dict[str, str] = {}
+    docs: dict[str, str] = {}
+    for r in existing:
+        sku = str(r.get("sku_code") or "").strip().upper()
+        if not sku:
+            continue
+        stored = str(r.get("effective_date") or "")[:10]
+        doc = str(r.get("doc_no") or "").strip()
+        have[sku] = max(stored, ledger.get(doc, ""))
+        docs[sku] = doc
+    return have, docs
+
+
+def older_than_existing(r: dict, have: dict[str, str], have_docs: dict[str, str] | None = None) -> bool:
+    """Pure: would `r` (a dated, folded receipt line) replace a NEWER cost already on file? By
+    receipt date first; then, when the existing row is still dated to the 1st of its doc month
+    (no ledger voucher resolved it -- YQ-26-06-3 today) and both receipts belong to the same doc
+    month, by Focus's sequence number: YQ-26-06-1 never overwrites YQ-26-06-3."""
+    sku = str(r.get("code") or "").upper()
+    cur = have.get(sku, "")
+    eff = r.get("eff") or ""
+    if eff < cur:
+        return True
+    if not have_docs or not cur:
+        return False
+    hdoc = have_docs.get(sku)
+    a, b = _doc_seq(r.get("doc_no")), _doc_seq(hdoc)
+    return bool(a and b and a[:2] == b[:2] and a[2] < b[2] and cur == _doc_month(hdoc))
+
+
 def decode_focus_date(v) -> str | None:
     """Pure: a Focus date serial (year<<16 | month<<8 | day) → ISO date, or None when it is not one.
     Header/Date 132778260 → 2026-09-20 (checked against the ledger's MRN:YQ-26-09-2 move date)."""
@@ -191,13 +237,15 @@ def apply_receipt_dates(rows: list[dict], ledger: dict[str, str]) -> dict[str, t
     return resolved
 
 
-def build_payloads(rows: list[dict], have: dict[str, str]) -> dict:
-    """Pure: the three table payloads from dated, folded rows. `have` = {SKU upper: effective_date}
-    already in mrn_landed_costs -- a SKU's current cost is never replaced by an OLDER receipt."""
+def build_payloads(rows: list[dict], have: dict[str, str], have_docs: dict[str, str] | None = None) -> dict:
+    """Pure: the three table payloads from dated, folded rows. `have` = {SKU upper: receipt date}
+    already in mrn_landed_costs (resolved through the ledger, current_cost_dates) and `have_docs`
+    = {SKU upper: doc_no} -- a SKU's current cost is never replaced by an OLDER receipt
+    (older_than_existing)."""
     final = dedupe_latest(rows)
     kept, skipped = [], []
     for r in final:
-        if (r["eff"] or "") < have.get(r["code"].upper(), ""):
+        if older_than_existing(r, have, have_docs):
             skipped.append(r["code"])
             continue
         kept.append(r)
@@ -232,17 +280,21 @@ def load_mrn_costs(rows: list[dict], client=None, dry_run: bool = False) -> dict
         from app.database import get_client
         client = get_client()
 
-    dates = apply_receipt_dates(rows, ledger_receipt_dates(client, {r.get("mrn_no") or r.get("doc_no") for r in rows}))
-    folded = fold_duplicate_lines(rows)
     # current cost = latest receipt per SKU -- and never older than what the table already holds.
     # The API path uploads ONE file at a time, and a bulk run may not see every folder: without
-    # this guard an older receipt silently replaced a newer landed cost for the same SKU.
+    # this guard an older receipt silently replaced a newer landed cost for the same SKU. The
+    # rows on file are compared by their REAL receipt date (the ledger's move date for their doc,
+    # current_cost_dates), never by the 1st-of-month date the pre-R2 loader stored.
     try:
-        have = {r["sku_code"].upper(): (r.get("effective_date") or "")
-                for r in (client.table("mrn_landed_costs").select("sku_code,effective_date").execute().data or [])}
+        existing = client.table("mrn_landed_costs").select("sku_code,effective_date,doc_no").execute().data or []
     except Exception:  # noqa: BLE001 -- table may not exist yet on a fresh DB
-        have = {}
-    p = build_payloads(folded, have)
+        existing = []
+    docs_needed = {r.get("mrn_no") or r.get("doc_no") for r in rows} | {r.get("doc_no") for r in existing}
+    ledger = ledger_receipt_dates(client, docs_needed)
+    dates = apply_receipt_dates(rows, ledger)
+    folded = fold_duplicate_lines(rows)
+    have, have_docs = current_cost_dates(existing, ledger)
+    p = build_payloads(folded, have, have_docs)
     if p["skipped_older"]:
         print(f"  (kept {len(p['skipped_older'])} newer landed costs already in mrn_landed_costs)")
     if not dry_run:

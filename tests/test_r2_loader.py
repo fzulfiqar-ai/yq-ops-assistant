@@ -10,7 +10,9 @@ this file reads or writes production.
 """
 from __future__ import annotations
 
+import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -320,46 +322,145 @@ class _FakeDB:
         return _FakeQ(self.tables, name)
 
 
-@test("loader: order_lines / orders are cleared inside the file's span only; the invoices that vanish are listed and audited")
+def _notices(text: str) -> list[dict]:
+    from scripts.load_supabase import NOTICE_PREFIX
+    return [json.loads(l[len(NOTICE_PREFIX):]) for l in text.splitlines() if l.startswith(NOTICE_PREFIX)]
+
+
+@test("loader: sales span replace = plan, UPSERT, then prune by id -- never emptier than old or new, rows outside the span untouched, vanished invoices audited")
 def _():
-    from scripts.load_supabase import _sales_span_replace
+    from scripts.load_supabase import _records, _sales_span_plan, _sales_span_prune, _upsert, row_key, stale_row_ids
+    assert row_key({"invoice_no": " SI : 1 ", "line_no": 2.0}, ("invoice_no", "line_no")) == ("SI : 1", "2")
+    assert row_key({"invoice_no": "SI : 1", "line_no": "3"}, ("invoice_no", "line_no")) == ("SI : 1", "3")
+    assert stale_row_ids([{"id": 1, "invoice_no": "A"}, {"id": 2, "invoice_no": "B"}, {"invoice_no": "C"}], {("A",)}, ("invoice_no",)) == [2]
     db = {"orders": [
-        {"id": 1, "invoice_no": "SI : Z", "order_date": "2026-08-01", "gross_bhd": 9.0},   # before the span
-        {"id": 2, "invoice_no": "SI : A", "order_date": "2026-09-01", "gross_bhd": 1.0},
-        {"id": 3, "invoice_no": "SI : D", "order_date": "2026-09-03", "gross_bhd": 4.0},   # in span, not in file
-        {"id": 4, "invoice_no": "SI : B", "order_date": "2026-09-10", "gross_bhd": 2.0},   # after the span
+        {"id": 1, "invoice_no": "SI : Z", "order_date": "2026-08-01", "gross_bhd": 9.0, "salesman": "Rep A"},   # before the span
+        {"id": 2, "invoice_no": "SI : A", "order_date": "2026-09-01", "gross_bhd": 1.0, "salesman": "Rep A"},
+        {"id": 3, "invoice_no": "SI : D", "order_date": "2026-09-03", "gross_bhd": 4.0, "salesman": "Rep A"},   # in span, not in file
+        {"id": 4, "invoice_no": "SI : B", "order_date": "2026-09-10", "gross_bhd": 2.0, "salesman": "Rep A"},   # after the span
     ], "audit_log": []}
     client = _FakeDB(db)
-    od = pd.DataFrame([{"invoice_no": "SI : A", "order_date": "2026-09-01", "gross_bhd": "1.0"},
-                       {"invoice_no": "SI : C", "order_date": "2026-09-05", "gross_bhd": "3.0"}])
-    res = _sales_span_replace(client, "orders", od, "order_date", replace_ok=False)
-    assert res["span"] == ("2026-09-01", "2026-09-05") and [r["invoice_no"] for r in res["disappearing"]] == ["SI : D"]
-    assert res["removed"] == 2 and res["skipped"] is None, res
-    assert sorted(r["invoice_no"] for r in db["orders"]) == ["SI : B", "SI : Z"]        # outside the span: untouched
+    od = pd.DataFrame([{"invoice_no": "SI : A", "order_date": "2026-09-01", "gross_bhd": "1.5", "salesman": "Rep A"},
+                       {"invoice_no": "SI : C", "order_date": "2026-09-05", "gross_bhd": "3.0", "salesman": "Rep A"}])
+    plan = _sales_span_plan(client, "orders", od, "order_date", replace_ok=False)
+    assert plan["span"] == ("2026-09-01", "2026-09-05") and [r["invoice_no"] for r in plan["disappearing"]] == ["SI : D"]
+    assert plan["prune_ids"] == [3] and plan["skipped"] is None and plan["missing_salesmen"] == {}, plan
+    assert len(db["orders"]) == 4 and db["audit_log"] == []                     # the plan deletes nothing
+    _upsert(client, "orders", _records(od), on_conflict="invoice_no")
+    # between the upsert and the prune the table holds old + new: never an empty span
+    assert sorted(r["invoice_no"] for r in db["orders"]) == ["SI : A", "SI : B", "SI : C", "SI : D", "SI : Z"]
+    a = next(r for r in db["orders"] if r["invoice_no"] == "SI : A")
+    assert a["id"] == 2 and a["gross_bhd"] == "1.5"                                # updated in place, same id
+    removed = _sales_span_prune(client, "orders", plan)
+    assert removed == 1 and sorted(r["invoice_no"] for r in db["orders"]) == ["SI : A", "SI : B", "SI : C", "SI : Z"]
     assert len(db["audit_log"]) == 1 and db["audit_log"][0]["event"] == "orders.span_replace"
-    assert db["audit_log"][0]["detail"]["disappearing"] == ["SI : D"]
-    # the guard: 6 of 30 invoices in the span missing from the file (20%) -> upsert only, audited, nothing removed
-    db = {"orders": [{"id": i, "invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": 1.0} for i in range(1, 31)],
+    assert db["audit_log"][0]["detail"]["disappearing"] == ["SI : D"] and db["audit_log"][0]["detail"]["removed_rows"] == 1
+    # order_lines: the key is (invoice_no, line_no) -- a re-lined invoice loses its dropped line only, no audit (no invoice vanished)
+    db = {"order_lines": [{"id": 10 + n, "invoice_no": "SI : A", "line_no": n, "line_date": "2026-09-01", "warehouse_name": "Rep A"}
+                          for n in (1, 2, 3)], "audit_log": []}
+    ol = pd.DataFrame([{"invoice_no": "SI : A", "line_no": "1", "line_date": "2026-09-01", "warehouse_name": "Rep A"},
+                       {"invoice_no": "SI : A", "line_no": "2", "line_date": "2026-09-01", "warehouse_name": "Rep A"}])
+    plan = _sales_span_plan(_FakeDB(db), "order_lines", ol, "line_date", False)
+    assert plan["prune_ids"] == [13] and plan["disappearing"] == [] and plan["skipped"] is None
+    _upsert(_FakeDB(db), "order_lines", _records(ol), on_conflict="invoice_no,line_no")
+    assert _sales_span_prune(_FakeDB(db), "order_lines", plan) == 1
+    assert [(r["id"], str(r["line_no"])) for r in db["order_lines"]] == [(11, "1"), (12, "2")] and db["audit_log"] == []
+    # the share guard: 6 of 30 invoices in the span missing from the file (20%) -> upsert only, audited, noticed, nothing pruned
+    db = {"orders": [{"id": i, "invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": 1.0, "salesman": "Rep A"} for i in range(1, 31)],
           "audit_log": []}
-    od = pd.DataFrame([{"invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": "1.0"} for i in range(1, 25)])
-    res = _sales_span_replace(_FakeDB(db), "orders", od, "order_date", replace_ok=False)
-    assert res["skipped"] and "6 of the 30 invoices" in res["skipped"] and res["removed"] == 0, res
-    assert len(db["orders"]) == 30 and db["audit_log"][0]["event"] == "orders.span_replace_skipped"
+    od = pd.DataFrame([{"invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": "1.0", "salesman": "Rep A"} for i in range(1, 25)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        plan = _sales_span_plan(_FakeDB(db), "orders", od, "order_date", replace_ok=False)
+    assert plan["skipped"] and "6 of the 30 invoices" in plan["skipped"] and plan["prune_ids"] == [], plan
+    assert _sales_span_prune(_FakeDB(db), "orders", plan) == 0 and len(db["orders"]) == 30
+    assert db["audit_log"][0]["event"] == "orders.span_replace_skipped"
     assert db["audit_log"][0]["detail"]["disappearing"] == [f"SI : {i}" for i in range(25, 31)]
-    res = _sales_span_replace(_FakeDB(db), "orders", od, "order_date", replace_ok=True)
-    assert res["skipped"] is None and res["removed"] == 30
+    n = _notices(buf.getvalue())
+    assert len(n) == 1 and n[0]["kind"] == "span_replace_skipped" and "6 invoice(s) in the database are not in the file (SI : 25, SI : 26, SI : 27, SI : 28, SI : 29 ...)" in n[0]["text"]
+    assert "REPLACE_OK" in n[0]["text"] and n[0]["detail"]["disappearing_count"] == 6 and len(n[0]["detail"]["disappearing"]) == 6
+    plan = _sales_span_plan(_FakeDB(db), "orders", od, "order_date", replace_ok=True)
+    assert plan["skipped"] is None and sorted(plan["prune_ids"]) == list(range(25, 31))
     # a handful (under 5) always replaces: 3 of 20 is the 21-Sep case (2 invoices Focus had deleted)
-    db = {"orders": [{"id": i, "invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": 1.0} for i in range(1, 21)],
+    db = {"orders": [{"id": i, "invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": 1.0, "salesman": "Rep A"} for i in range(1, 21)],
           "audit_log": []}
-    od = pd.DataFrame([{"invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": "1.0"} for i in range(1, 18)])
-    res = _sales_span_replace(_FakeDB(db), "orders", od, "order_date", replace_ok=False)
-    assert res["skipped"] is None and res["removed"] == 20 and len(res["disappearing"]) == 3
-    # a span the database cannot be read for is never deleted blind
+    od = pd.DataFrame([{"invoice_no": f"SI : {i}", "order_date": "2026-09-02", "gross_bhd": "1.0", "salesman": "Rep A"} for i in range(1, 18)])
+    plan = _sales_span_plan(_FakeDB(db), "orders", od, "order_date", replace_ok=False)
+    assert plan["skipped"] is None and sorted(plan["prune_ids"]) == [18, 19, 20] and len(plan["disappearing"]) == 3
+    # a span the database cannot be read for is never pruned blind
     class _Broken(_FakeDB):
         def table(self, name):
             raise RuntimeError("connection reset")
-    res = _sales_span_replace(_Broken({}), "order_lines", od.rename(columns={"order_date": "line_date"}), "line_date", False)
-    assert res["skipped"] and "span read failed" in res["skipped"] and res["removed"] == 0
+    plan = _sales_span_plan(_Broken({}), "order_lines", od.rename(columns={"order_date": "line_date", "salesman": "warehouse_name"}), "line_date", False)
+    assert plan["skipped"] and "span read failed" in plan["skipped"] and plan["prune_ids"] == []
+    assert _sales_span_prune(_Broken({}), "order_lines", plan) == 0
+    # the upsert-first order is in main(): plan, upsert, prune, for lines then headers
+    src = (ROOT / "scripts" / "load_supabase.py").read_text(encoding="utf-8")
+    i_plan, i_up, i_prune = src.index('_sales_span_plan(client, "order_lines"'), src.index('_upsert(client, "order_lines"'), src.index('_sales_span_prune(client, "order_lines"')
+    assert i_plan < i_up < i_prune and "_sales_span_replace" not in src
+    assert '_delete_span(client, "order' not in src and '_delete_span(client, "stock_movements"' in src   # the ledger keeps its range replace
+
+
+@test("loader: a salesman with invoices in the DB span but absent from the file stops the prune (upsert only, audited, noticed); REPLACE_OK overrides; refresh carries the notice")
+def _():
+    from scripts.load_supabase import _records, _sales_span_plan, _sales_span_prune, _upsert, salesman_guard
+    rows = ([{"invoice_no": f"SI : {i}", "warehouse_name": "Rep A"} for i in range(1, 91)]
+            + [{"invoice_no": f"SI : {i}", "warehouse_name": "Rep B"} for i in range(91, 95)]
+            + [{"invoice_no": "SI : 91", "warehouse_name": "Rep B"}, {"invoice_no": "SI : 95", "warehouse_name": None}])
+    reason, missing = salesman_guard(rows, {"Rep A"}, "warehouse_name")
+    assert missing == {"Rep B": 4} and "Rep B (4 invoices)" in reason and "REPLACE_OK" in reason, reason
+    assert salesman_guard(rows, {"Rep A", "Rep B"}, "warehouse_name") == (None, {})
+    assert salesman_guard(rows, {"Rep A"}, "warehouse_name", replace_ok=True) == (None, {"Rep B": 4})
+    assert salesman_guard([], {"Rep A"}, "warehouse_name") == (None, {}) and salesman_guard(rows, set(), "warehouse_name")[1] == {"Rep A": 90, "Rep B": 4}
+    # integrated: 4 of 94 invoices (4%) are Rep B's -- the share guard passes, the salesman guard does not
+    db = {"order_lines": [{"id": i, "invoice_no": f"SI : {i}", "line_no": 1, "line_date": "2026-09-02",
+                           "warehouse_name": "Rep A" if i <= 90 else "Rep B", "gross_bhd": 1.0} for i in range(1, 95)], "audit_log": []}
+    ol = pd.DataFrame([{"invoice_no": f"SI : {i}", "line_no": "1", "line_date": "2026-09-02", "warehouse_name": "Rep A", "gross_bhd": "1.0"}
+                       for i in range(1, 91)])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        plan = _sales_span_plan(_FakeDB(db), "order_lines", ol, "line_date", False)
+    assert plan["skipped"] and "Rep B (4 invoices)" in plan["skipped"] and plan["prune_ids"] == [] and len(plan["disappearing"]) == 4, plan
+    assert plan["missing_salesmen"] == {"Rep B": 4}
+    a = db["audit_log"][0]
+    assert a["event"] == "order_lines.span_replace_skipped" and a["detail"]["missing_salesmen"] == {"Rep B": 4} and a["detail"]["disappearing_count"] == 4
+    n = _notices(buf.getvalue())
+    assert len(n) == 1 and n[0]["kind"] == "span_replace_skipped"
+    assert "4 invoice(s) in the database are not in the file (SI : 91, SI : 92, SI : 93, SI : 94)" in n[0]["text"] and "Rep B (4)" in n[0]["text"]
+    assert n[0]["detail"]["disappearing"] == [f"SI : {i}" for i in range(91, 95)] and n[0]["detail"]["missing_salesmen"] == {"Rep B": 4}
+    _upsert(_FakeDB(db), "order_lines", _records(ol), on_conflict="invoice_no,line_no")
+    assert _sales_span_prune(_FakeDB(db), "order_lines", plan) == 0 and len(db["order_lines"]) == 94   # Rep B's lines stay
+    plan = _sales_span_plan(_FakeDB(db), "order_lines", ol, "line_date", True)                       # REPLACE_OK: on purpose
+    assert plan["skipped"] is None and sorted(plan["prune_ids"]) == [91, 92, 93, 94]
+    # the same guard on the register (salesman column)
+    db = {"orders": [{"id": i, "invoice_no": f"SI : {i}", "order_date": "2026-09-02", "salesman": "Rep A" if i < 94 else "Rep B", "gross_bhd": 1.0}
+                     for i in range(1, 95)], "audit_log": []}
+    od = pd.DataFrame([{"invoice_no": f"SI : {i}", "order_date": "2026-09-02", "salesman": "Rep A", "gross_bhd": "1.0"} for i in range(1, 94)])
+    with contextlib.redirect_stdout(io.StringIO()):
+        plan = _sales_span_plan(_FakeDB(db), "orders", od, "order_date", False)
+    assert plan["skipped"] and plan["missing_salesmen"] == {"Rep B": 1} and "Rep B (1 invoice)" in plan["skipped"]
+    # scripts/refresh.py lifts the notices into changes + the briefing (same prefix on both sides)
+    from scripts import load_supabase as ls, refresh as rf
+    assert rf.NOTICE_PREFIX == ls.NOTICE_PREFIX
+    line = next(l for l in buf.getvalue().splitlines() if l.startswith(ls.NOTICE_PREFIX))
+    got = rf._loader_notices("  upserted order_lines 90\n" + line + "\n" + ls.NOTICE_PREFIX + "not json\n\n")
+    assert len(got) == 2 and got[0]["kind"] == "span_replace_skipped" and got[0]["detail"]["missing_salesmen"] == {"Rep B": 4}
+    assert got[1] == {"kind": "notice", "text": "not json", "detail": {}} and rf._loader_notices("") == []
+    head, body = rf._briefing(False, "2026-09-24", {"loader": [got[0]["text"]]}, None, None)
+    assert head == "Data refresh - needs attention" and "Loader: order_lines 2026-09-02..2026-09-02: replace skipped" in body
+    src = (ROOT / "scripts" / "refresh.py").read_text(encoding="utf-8")
+    assert 'changes["loader"] = [n["text"] for n in notices]' in src and '{"loader": [n["text"] for n in notices]}' in src
+    # the portal: /ingest writes the markers the loader reads (admin, audited); the Data page shows changes.loader
+    from app.main import LOADER_MARKERS, _write_markers
+    with tempfile.TemporaryDirectory() as d:
+        assert _write_markers(d, False, False) == [] and not any(Path(d).iterdir())
+        assert _write_markers(d, True, True) == ["REPLACE_OK", "PARTIAL_OK"] == list(LOADER_MARKERS)
+        assert ls.marker_present(d, "REPLACE_OK") and ls.marker_present(d, "PARTIAL_OK") and ls.staged_files(d) == set()
+    main_src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    assert "replace_ok: bool = Form(False)" in main_src and "partial_ok: bool = Form(False)" in main_src
+    assert 'log_event(user.email, "ingest_markers"' in main_src
+    page = (ROOT / "web" / "src" / "pages" / "DataPage.tsx").read_text(encoding="utf-8")
+    assert "form.append('replace_ok', 'true')" in page and "form.append('partial_ok', 'true')" in page and "result.changes.loader.map" in page
 
 
 @test("loader: stock_balance is replaced per (as_of_date, warehouse); a narrower snapshot warns + audits, PARTIAL_OK does not")
@@ -596,6 +697,56 @@ def _():
                                                              "landed_unit_bhd": 1.3415, "product_unit_bhd": 1.043}
 
 
+@test("mrn: the guard compares against the existing doc's RESOLVED receipt date (ledger), and within a month by doc sequence -- an older receipt never overwrites month-dated rows")
+def _():
+    from scripts.ingest_mrn import _doc_seq, build_payloads, current_cost_dates, load_mrn_costs, older_than_existing
+    assert _doc_seq("YQ-26-09-2") == (2026, 9, 2) and _doc_seq(" yq-26-09-2 ") is None and _doc_seq(None) is None and _doc_seq("PO-77") is None
+    # production today: every row dated to the 1st of its doc month; the ledger knows the real dates
+    existing = [{"sku_code": "BE05", "effective_date": "2026-09-01", "doc_no": "YQ-26-09-2"},
+                {"sku_code": "M04", "effective_date": "2026-09-01", "doc_no": "YQ-26-09-2"},
+                {"sku_code": "T02", "effective_date": "2025-11-10", "doc_no": "YQ-25-11-1"},
+                {"sku_code": "Z9", "effective_date": "2026-06-01", "doc_no": "YQ-26-06-3"},      # no ledger voucher
+                {"sku_code": "", "effective_date": "2026-01-01", "doc_no": "x"}]
+    have, docs = current_cost_dates(existing, {"YQ-26-09-2": "2026-09-20", "YQ-25-11-1": "2025-11-10"})
+    assert have == {"BE05": "2026-09-20", "M04": "2026-09-20", "T02": "2025-11-10", "Z9": "2026-06-01"}
+    assert docs["BE05"] == "YQ-26-09-2" and docs["Z9"] == "YQ-26-06-3"
+    # YQ-26-09-1 (ledger 14-Sep) shares BE05 with YQ-26-09-2 (20-Sep): 09-14 >= '2026-09-01' passed the old guard
+    r_old = {"code": "BE05", "eff": "2026-09-14", "doc_no": "YQ-26-09-1"}
+    assert older_than_existing(r_old, have, docs) is True
+    assert older_than_existing(r_old, {"BE05": "2026-09-01"}) is False, "the unresolved comparison the review found"
+    assert older_than_existing({"code": "BE05", "eff": "2026-09-20", "doc_no": "YQ-26-09-2"}, have, docs) is False   # the same receipt again
+    assert older_than_existing({"code": "BE05", "eff": "2026-09-25", "doc_no": "YQ-26-09-3"}, have, docs) is False   # a newer one
+    # no voucher for YQ-26-06-3: within the doc month the sequence number decides (06-1 < 06-3), 06-4 and July pass
+    assert older_than_existing({"code": "Z9", "eff": "2026-06-07", "doc_no": "YQ-26-06-1"}, have, docs) is True
+    assert older_than_existing({"code": "Z9", "eff": "2026-06-07", "doc_no": "YQ-26-06-4"}, have, docs) is False
+    assert older_than_existing({"code": "Z9", "eff": "2026-07-03", "doc_no": "YQ-26-07-1"}, have, docs) is False
+    assert older_than_existing({"code": "Z9", "eff": "2026-06-07", "doc_no": "YQ-26-06-1"}, {"Z9": "2026-06-30"}, {"Z9": "YQ-26-06-3"}) is True
+    assert older_than_existing({"code": "NEW", "eff": "2026-06-07", "doc_no": "YQ-26-06-1"}, have, docs) is False
+    rows = [{"code": "BE05", "landed": 1.2, "product": 1.0, "qty": 10, "doc_no": "YQ-26-09-1", "mrn_no": "YQ-26-09-1", "eff": "2026-09-14", "eff_source": "ledger"},
+            {"code": "X77", "landed": 0.2, "product": 0.1, "qty": 5, "doc_no": "YQ-26-09-1", "mrn_no": "YQ-26-09-1", "eff": "2026-09-14", "eff_source": "ledger"}]
+    p = build_payloads(rows, have, docs)
+    assert p["skipped_older"] == ["BE05"] and [c["sku_code"] for c in p["mrn_landed_costs"]] == ["X77"] and len(p["mrn_lines"]) == 2
+    # through the client: the existing docs' ledger dates are looked up alongside the upload's
+    db = {"stock_movements": [{"voucher": "MRN:YQ-26-09-2", "move_date": "2026-09-20"}, {"voucher": "MRN:YQ-26-09-1", "move_date": "2026-09-14"}],
+          "mrn_landed_costs": [{"sku_code": "BE05", "effective_date": "2026-09-01", "doc_no": "YQ-26-09-2", "landed_cost_bhd": 1.3415}],
+          "mrn_lines": [], "purchase_costs": []}
+    up = [{"code": "BE05", "landed": 1.2, "product": 1.0, "qty": 10, "doc_no": "YQ-26-09-1", "mrn_no": "YQ-26-09-1", "eff": "2026-09-01", "eff_source": "month", "xml_date": None}]
+    s = load_mrn_costs(up, client=_FakeDB(db), dry_run=True)
+    assert s["receipt_dates"] == {"YQ-26-09-1": "2026-09-14"} and s["payloads"]["skipped_older"] == ["BE05"] and s["skus"] == 0
+    s = load_mrn_costs(up, client=_FakeDB(db), dry_run=False)
+    assert db["mrn_landed_costs"][0]["landed_cost_bhd"] == 1.3415 and db["mrn_landed_costs"][0]["doc_no"] == "YQ-26-09-2"   # untouched
+    assert len(db["mrn_lines"]) == 1 and db["purchase_costs"] == []
+    # the data migration that re-dates the stored rows, and its reverse
+    sql = (ROOT / "scripts" / "mrn_dates_migration.sql").read_text(encoding="utf-8").lower()
+    assert "update mrn_landed_costs m" in sql and "min(move_date)" in sql and "voucher like 'mrn:%'" in sql
+    assert "m.effective_date < l.received_on" in sql and "date_trunc('month', m.effective_date) = date_trunc('month', l.received_on)" in sql
+    assert not any(s in sql for s in ("delete from", "insert into", "drop ", "truncate")) and "raise exception" in sql
+    rev = (ROOT / "scripts" / "mrn_dates_reverse.sql").read_text(encoding="utf-8").lower()
+    assert "date_trunc('month', m.effective_date)::date" in rev and "delete from" not in rev and "raise exception" in rev
+    main_src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    assert main_src.count("await run_in_threadpool(load_mrn_costs, rows)") == 2, "the MRN loads run off the event loop"
+
+
 @test("mrn: load_mrn_costs dry run resolves dates from the ledger through the client and writes nothing")
 def _():
     from scripts.ingest_mrn import load_mrn_costs
@@ -808,17 +959,72 @@ def _():
     assert "WHERE gp_margin_pct < 0" not in src
 
 
-@test("templates: the two margin templates compute the ex-VAT margin inline and pass the SQL validator; eval labels unchanged")
+@test("templates: the margin pair has a view form (is_below_cost / margin_ex_vat_pct) and an inline form; match() picks by the probe; app.ai retries with the other; the LLM hint follows")
 def _():
+    from app import ai, templates
+    from app import margin_truth as mt
     from app.sql_validator import validate
-    from app.templates import match
-    label, sql = match("Which products have negative margins?")
+    label, sql = templates.match("Which products have negative margins?", view_ok=False)
     assert label == "Negative-margin products" and "net_amount_bhd / 1.1 < cogs_bhd" in sql and "gp_margin_pct" not in sql
     assert "margin_ex_vat_pct" in validate(sql)
-    label, sql = match("Show all product margins")
+    label, vsql = templates.match("Which products have negative margins?", view_ok=True)
+    assert "FROM v_product_margin WHERE is_below_cost" in vsql and "ex_vat_source" in vsql and "/ 1.1" not in vsql
+    validate(vsql)
+    assert templates.alternate_sql(label, vsql) == sql and templates.alternate_sql(label, sql) == vsql
+    assert templates.alternate_sql("Total sales today", "SELECT 1") is None and templates.alternate_sql(label, "SELECT 2") is None
+    label, sql = templates.match("Show all product margins", view_ok=False)
     assert label == "Product margins" and "margin_ex_vat_pct" in sql and "gp_margin_pct" not in sql
     validate(sql)
-    assert match("Show loss-making items")[0] == "Negative-margin products"
+    s2 = templates.match("Show all product margins", view_ok=True)[1]
+    assert "net_ex_vat_bhd > 0" in s2 and "ORDER BY margin_ex_vat_pct DESC" in s2 and "/ 1.1" not in s2
+    validate(s2)
+    assert templates.match("Show loss-making items", view_ok=False)[0] == "Negative-margin products"
+    assert templates.match("total sales today", view_ok=True)[1] == templates.match("total sales today", view_ok=False)[1]   # one-form templates
+    # the probe: True once the view answers is_below_cost, False when it raises or there is no database; cached
+    mt._probe.update(at=0.0, ok=None)
+    assert mt.view_computes_margin(q=lambda s: [{"is_below_cost": False}], force=True) is True
+    assert mt.view_computes_margin(q=lambda s: (_ for _ in ()).throw(RuntimeError("no column"))) is True     # cached
+    assert mt.view_computes_margin(q=lambda s: (_ for _ in ()).throw(RuntimeError("no column")), force=True) is False
+    assert templates.match("Which products have negative margins?")[1] == templates.match("Which products have negative margins?", view_ok=False)[1]
+    mt._probe.update(at=0.0, ok=None)
+    saved = mt.exec_sql
+    mt.exec_sql = lambda s: (_ for _ in ()).throw(RuntimeError("no database here"))
+    try:
+        assert mt.view_computes_margin(force=True) is False and templates._view_ok() is False
+    finally:
+        mt.exec_sql = saved
+        mt._probe.update(at=0.0, ok=None)
+    # the runner: the view form raises (view not migrated, or reversed) -> the inline form answers, once
+    calls: list[str] = []
+
+    def fake_exec(s):
+        calls.append(s)
+        if "is_below_cost" in s:
+            raise RuntimeError('column "is_below_cost" does not exist')
+        if s.startswith("SELECT 1"):
+            raise RuntimeError("boom")
+        return [dict(_UK03)]
+    saved = ai.exec_sql
+    ai.exec_sql = fake_exec
+    try:
+        label, vsql = templates.match("Which products have negative margins?", view_ok=True)
+        used, rows = ai._run_template(label, vsql, None)
+        assert used == validate(templates.match("Which products have negative margins?", view_ok=False)[1]), used
+        assert rows[0]["item_name"].startswith("UK03") and len(calls) == 2 and "is_below_cost" in calls[0] and "/ 1.1" in calls[1]
+        try:
+            ai._run_template("Total sales today", "SELECT 1 AS x FROM v_sales LIMIT 1", None)
+            raise AssertionError("a one-form template must raise")
+        except RuntimeError as e:
+            assert "boom" in str(e)
+    finally:
+        ai.exec_sql = saved
+    src = (ROOT / "app" / "ai.py").read_text(encoding="utf-8")
+    assert src.count("_run_template(label, raw_sql, allowed_features)") == 2
+    # the LLM schema hint: inline formula by default, the view's own columns once the probe says so
+    assert ai._MARGIN_HINT_INLINE in ai._VIEW_SCHEMA and ai._MARGIN_RULE_INLINE in ai._VIEW_SCHEMA
+    t = ai._schema_text(True)
+    assert "is_below_cost[boolean]" in t and "WHERE is_below_cost" in t and "net_amount_bhd/1.1 < cogs_bhd" not in t and "net_amount_bhd / 1.1 < cogs_bhd" not in t
+    assert ai._schema_text(False) == ai._VIEW_SCHEMA and "+ _schema_text()" in src
 
 
 @test("reports: margins() counts below-cost on the computed margin; receivables() shows the Focus total and the gap; inventory() carries reserved")
@@ -828,17 +1034,22 @@ def _():
 
     def fake(sql):
         if "FROM v_product_margin" in sql:
+            if "SUM(" in sql:          # margin_totals: the whole view, never the limited rows (a third item is beyond the cap)
+                if state.get("totals_inline") and "is_below_cost" in sql:
+                    raise RuntimeError('column "is_below_cost" does not exist')
+                return [{"n": 3, "below": 1, "net": 659.8, "net_ex": 599.58, "gp_ex": 46.38, "gp_rep": 96.6}]
             return [dict(_UK03), {**_UK03, "item_name": "OK", "net_amount_bhd": 110.0, "cogs_bhd": 50.0, "net_ex_vat_bhd": 100.0,
                                   "gp_computed_bhd": 60.0, "gp_ex_vat_bhd": 50.0, "margin_ex_vat_pct": 50.0, "is_below_cost": False}]
+        if "FROM ar_ageing_totals" in sql:       # anchored on v_receivables' as_of_date (yq_readonly cannot read ar_ageing)
+            assert "(SELECT MAX(as_of_date) FROM v_receivables)" in sql and "FROM ar_ageing)" not in sql, sql
+            if state["totals"] == "missing":
+                raise RuntimeError("relation ar_ageing_totals does not exist")
+            return state["totals"]
         if "FROM v_receivables" in sql:
             return [{"account": "A", "group_name": "Retail", "outstanding_bhd": 9000.0, "overdue_bhd": 0, "over_90_bhd": 0,
                      "b_0_30": 9000.0, "b_31_60": 0, "b_61_90": 0, "b_91_120": 0, "b_121_150": 0, "b_151_180": 0, "b_181_210": 0, "b_over_210": 0},
                     {"account": "B", "group_name": "Retail", "outstanding_bhd": 78.86, "overdue_bhd": 28.0, "over_90_bhd": 28.0,
                      "b_0_30": 50.86, "b_31_60": 0, "b_61_90": 0, "b_91_120": 28.0, "b_121_150": 0, "b_151_180": 0, "b_181_210": 0, "b_over_210": 0}]
-        if "FROM ar_ageing_totals" in sql:
-            if state["totals"] == "missing":
-                raise RuntimeError("relation ar_ageing_totals does not exist")
-            return state["totals"]
         if "FROM v_catalog_reserved WHERE reserved > 0" in sql:
             if state["reserved"] is None:
                 raise RuntimeError("relation v_catalog_reserved does not exist")
@@ -851,8 +1062,16 @@ def _():
              "reserved": [{"item_code": "X01", "on_hand": 100, "reserved": 12, "available": 88, "in_transit": 0, "open_orders": 2, "stock_as_of": "2026-09-24"}]}
     try:
         m = reports.margins()
-        assert m["negative_count"] == 1 and m["basis"] == "view" and m["rows"][0]["is_below_cost"] and round(m["gp_pct"], 2) == round((50.0 - 83.62) / 499.58 * 100, 2)
-        assert m["total_gp_bhd"] == -33.62 and m["total_net_ex_vat_bhd"] == 499.58 and m["total_gp_report_basis_bhd"] == 16.6
+        assert m["negative_count"] == 1 and m["basis"] == "view" and m["rows"][0]["is_below_cost"] and len(m["rows"]) == 2
+        assert m["count"] == 3 and m["total_gp_bhd"] == 46.38 and m["total_net_ex_vat_bhd"] == 599.58 and m["total_gp_report_basis_bhd"] == 96.6
+        assert round(m["gp_pct"], 2) == round(46.38 / 599.58 * 100, 2) and m["total_net_bhd"] == 659.8
+        tot, basis = mt.margin_totals()
+        assert basis == "view" and tot == {"net": 659.8, "net_ex": 599.58, "gp_ex": 46.38, "gp_rep": 96.6, "n": 3, "below": 1}
+        state["totals_inline"] = True                                  # before the migration: the inline SUM
+        tot, basis = mt.margin_totals()
+        assert basis == "inline" and tot["n"] == 3
+        state["totals_inline"] = False
+        assert "COUNT(*) FILTER (WHERE net_amount_bhd / 1.1 < cogs_bhd)" in mt._TOTALS_INLINE and "LIMIT" not in mt._TOTALS and "LIMIT" not in mt._TOTALS_INLINE
         r = reports.receivables()
         assert r["total"] == 9078.86 and r["focus_total"] == 8633.84 and r["focus_gap"] == 445.02 and r["focus_as_of"] == "2026-09-24"
         assert r["focus_over_90"] == 4724.26 and r["over_90"] == 28.0
@@ -869,6 +1088,9 @@ def _():
         reports.exec_sql, mt.exec_sql = saved
     src = (ROOT / "app" / "reports.py").read_text(encoding="utf-8")
     assert '"reserved": reserved_stock(),' in src
+    # the Focus total is anchored on v_receivables (granted to yq_readonly), never on the ar_ageing table
+    assert "FROM ar_ageing_totals WHERE as_of_date = (SELECT MAX(as_of_date) FROM v_receivables) LIMIT 1" in src
+    assert "(SELECT MAX(as_of_date) FROM ar_ageing) LIMIT 1" not in src
 
 
 @test("catalog: reserved / available attach to the staff catalog only; a salesman never receives available (on-hand)")
@@ -909,10 +1131,33 @@ def _():
     assert "grant select on v_product_economics, v_product_margin, v_catalog_reserved, ar_ageing_totals to yq_readonly" in low
     assert "uk03 20w charger (usb%" in low and "raise exception" in low and "grantee in ('anon', 'authenticated')" in low
     assert "cols[1:15] <> array['item_name', 'report_date'" in low
+    # review fixes: the day-book totals are one GROUP BY (+ index), not a correlated SUM per item;
+    # in-transit is an allow-list of the in-flight stages; backorder lines never reserve
+    assert "with tx as (" in low and "group by ol.item_name" in low and "left join tx on tx.item_name = pp.item_name" in low
+    assert "where ol.item_name = pp.item_name" not in low
+    assert "create index if not exists order_lines_item_name_idx on order_lines (item_name)" in low
+    assert "po.stage in ('raised', 'paid', 'invoiced', 'advance_paid', 'po_raised')" in low and "po.stage not in" not in low
+    assert "not in ('removed', 'cancelled', 'backorder')" in low
+    from app.procurement import STAGES, STAGE_ALIASES
+    in_flight = {"raised", "paid", "invoiced", "advance_paid", "po_raised"}
+    assert in_flight == {s["key"] for s in STAGES if s["key"] in ("raised", "paid")} | set(STAGE_ALIASES)
+    assert "closed" in {s["key"] for s in STAGES} and "closed" not in in_flight
+    assert "editable in settings" not in low and "update app_settings set value" in low
     rev = (ROOT / "scripts" / "economics_v2_reverse.sql").read_text(encoding="utf-8").lower()
     assert "drop view if exists v_catalog_reserved" in rev and "drop table if exists ar_ageing_totals" in rev
+    assert "drop index if exists order_lines_item_name_idx" in rev
     assert rev.count("create view v_product_economics as") == 1 and rev.count("create view v_product_margin as") == 1
     assert "gp_computed_bhd" not in rev and "voided_at is null" in rev and "expected the 6 original columns" in rev
+    # alias_autofill: the hold-back setting has no endpoint (say so), and main() survives a failed read
+    from scripts import alias_autofill as aa
+    assert "no settings endpoint" in aa.__doc__.lower()
+    saved = aa.autofill
+    aa.autofill = lambda dry_run=False: {"error": "read failed: RPC down", "share": None, "picked": 0}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert aa.main(["--dry-run"]) == 2
+    finally:
+        aa.autofill = saved
 
 
 # ── 7. local replay Postgres (SKIP when the cluster / database is not there) ──
@@ -967,6 +1212,21 @@ def _():
         stale = _q(conn, "SELECT COUNT(*) AS n FROM v_product_economics e WHERE e.cost_source = 'purchase_costs' AND EXISTS "
                          "(SELECT 1 FROM mrn_landed_costs m WHERE upper(m.sku_code) = upper(e.sku_code) AND m.landed_cost_bhd > 0)")[0]["n"]
         assert stale == 0
+        # the day-book totals come from one GROUP BY (+ index) and agree with the correlated per-item SUM on every row
+        import time as _t
+        t0 = _t.perf_counter()
+        _q(conn, "SELECT * FROM v_product_margin")
+        ms = (_t.perf_counter() - t0) * 1000
+        mism = _q(conn, "SELECT COUNT(*) AS n FROM v_product_margin v CROSS JOIN LATERAL ("
+                        "SELECT ROUND(SUM(ol.taxable_bhd)::numeric, 3) AS taxable, "
+                        "ROUND((SUM(ol.gross_bhd) - COALESCE(SUM(ol.discount_bhd), 0))::numeric, 3) AS net_lines "
+                        "FROM order_lines ol WHERE ol.item_name = v.item_name) t "
+                        "WHERE v.net_ex_vat_bhd IS DISTINCT FROM (CASE WHEN v.net_amount_bhd IS NULL THEN NULL "
+                        "WHEN t.taxable IS NOT NULL AND t.net_lines IS NOT NULL AND ABS(t.net_lines - v.net_amount_bhd) <= 0.011 THEN t.taxable "
+                        "ELSE ROUND((v.net_amount_bhd / 1.1)::numeric, 3) END)")[0]["n"]
+        assert mism == 0, mism
+        assert _q(conn, "SELECT COUNT(*) AS n FROM pg_indexes WHERE indexname = 'order_lines_item_name_idx'")[0]["n"] == 1
+        print(f"    v_product_margin full scan {ms:.0f} ms (the correlated SUM took ~1,200 ms here); CTE totals agree on every row")
         r = _q(conn, "SELECT COUNT(*) AS n, COALESCE(SUM(reserved),0) AS reserved, COALESCE(SUM(in_transit),0) AS transit, MAX(stock_as_of)::text AS as_of FROM v_catalog_reserved")[0]
         print(f"    v_catalog_reserved: {r['n']} active codes, reserved {r['reserved']} u, in transit {r['transit']} u, stock as of {r['as_of']}")
         assert r["n"] > 0
@@ -977,6 +1237,118 @@ def _():
         cols = [c["column_name"] for c in _q(conn, "SELECT column_name FROM information_schema.columns WHERE table_name='v_product_margin' ORDER BY ordinal_position")]
         assert len(cols) == 15 and "is_below_cost" not in cols
         assert _q(conn, "SELECT to_regclass('public.v_catalog_reserved') AS r")[0]["r"] is None
+        assert _q(conn, "SELECT COUNT(*) AS n FROM pg_indexes WHERE indexname = 'order_lines_item_name_idx'")[0]["n"] == 0
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def _grant_like_production(conn) -> None:
+    """Production's yq_readonly grant set, re-created on the replay copy (pg_dump --no-privileges kept
+    the RLS policies and dropped the grants): every view, plus every table that carries a
+    *_yq_readonly_read policy -- checked equal to production's role_table_grants on 24-Sep-2026
+    (20 tables; orders, order_lines, ar_ageing and stock_movements are NOT among them)."""
+    _q(conn, "GRANT USAGE ON SCHEMA public TO yq_readonly")
+    _q(conn, "DO $$ DECLARE v record; BEGIN "
+             "FOR v IN SELECT viewname FROM pg_views WHERE schemaname = 'public' LOOP "
+             "EXECUTE format('GRANT SELECT ON %I TO yq_readonly', v.viewname); END LOOP; "
+             "FOR v IN SELECT DISTINCT tablename FROM pg_policies WHERE 'yq_readonly' = ANY(roles) LOOP "
+             "EXECUTE format('GRANT SELECT ON %I TO yq_readonly', v.tablename); END LOOP; END $$")
+
+
+@test("local: as yq_readonly (production's grant set) the Receivables Focus total, margin totals, reserved stock, the staff catalog attach and both template forms all answer; the ar_ageing anchor did not")
+def _():
+    conn = _local_conn()
+    if conn is None:
+        return
+    from app import catalog, db_read, reports, templates
+    from app import margin_truth as mt
+    saved = (db_read.exec_sql, reports.exec_sql, mt.exec_sql, catalog.exec_sql)
+    exec_sql, _ = _local_exec(conn)
+    try:
+        _q(conn, (ROOT / "scripts" / "economics_v2_migration.sql").read_text(encoding="utf-8"))
+        _grant_like_production(conn)
+        assert _q(conn, "SELECT COUNT(*) AS n FROM information_schema.role_table_grants WHERE grantee = 'yq_readonly' "
+                        "AND table_name IN ('ar_ageing', 'orders', 'order_lines', 'stock_movements')")[0]["n"] == 0
+        as_of = _q(conn, "SELECT MAX(as_of_date)::text AS d FROM ar_ageing")[0]["d"]
+        _q(conn, "INSERT INTO ar_ageing_totals (as_of_date, focus_total_bhd, focus_over90_bhd, rows_total_bhd, source_file) "
+                 "VALUES (%s::date, 8633.84, 4724.26, 9078.86, 'test')", (as_of,))
+        _q(conn, "SET LOCAL ROLE yq_readonly")
+        assert _q(conn, "SELECT current_user AS u")[0]["u"] == "yq_readonly"
+        # the query the R2 build shipped: 'permission denied for table ar_ageing', swallowed into focus_total = null forever
+        _q(conn, "SAVEPOINT p")
+        try:
+            _q(conn, "SELECT 1 FROM ar_ageing_totals WHERE as_of_date = (SELECT MAX(as_of_date) FROM ar_ageing)")
+            failed = None
+        except Exception as e:  # noqa: BLE001
+            failed = str(e)
+        _q(conn, "ROLLBACK TO SAVEPOINT p")
+        assert failed and "permission denied" in failed and "ar_ageing" in failed, failed
+        db_read.exec_sql = reports.exec_sql = mt.exec_sql = catalog.exec_sql = exec_sql
+        f = reports._focus_ar_total()
+        assert f and f["focus_total_bhd"] == 8633.84 and f["as_of_date"] == as_of and f["rows_total_bhd"] == 9078.86, f
+        r = reports.receivables()
+        assert r["focus_total"] == 8633.84 and r["focus_as_of"] == as_of and r["focus_gap"] is not None and r["total"] > 0
+        m = reports.margins()
+        assert m["basis"] == "view" and m["count"] >= 100 and m["negative_count"] >= 1 and m["total_net_ex_vat_bhd"] > 0, {k: m[k] for k in m if k != "rows"}
+        tot, basis = mt.margin_totals()
+        assert basis == "view" and tot["n"] == m["count"] and tot["below"] == m["negative_count"]
+        assert mt.below_cost_rows(5)[0]["is_below_cost"] and mt.view_computes_margin(force=True) is True
+        rs = reports.reserved_stock()
+        assert rs["available"] is True and rs["stock_as_of"], rs
+        rows = [{"item_code": "X01"}]
+        catalog._attach_reserved(rows, "admin")
+        for q in ("Which products have negative margins?", "Show all product margins"):
+            for ok in (True, False):
+                exec_sql(templates.match(q, view_ok=ok)[1])
+        print(f"    yq_readonly: Focus total {f['focus_total_bhd']} for {as_of} (gap {r['focus_gap']:+.3f}); margins {m['count']} items, "
+              f"{m['negative_count']} below cost, GP ex-VAT {m['total_gp_bhd']:,.3f}; reserved view {len(rs['rows'])} rows")
+        _q(conn, "RESET ROLE")
+    finally:
+        db_read.exec_sql, reports.exec_sql, mt.exec_sql, catalog.exec_sql = saved
+        mt._probe.update(at=0.0, ok=None)
+        conn.rollback()
+        conn.close()
+
+
+@test("local: mrn_dates_migration re-dates the month-dated rows from the ledger (YQ-26-09-2 -> 2026-09-20), leaves YQ-26-06-3, reverses; the guard refuses YQ-26-09-1 before and after")
+def _():
+    conn = _local_conn()
+    if conn is None:
+        return
+    from scripts.ingest_mrn import load_mrn_costs
+    try:
+        def dates():
+            return {r["doc_no"]: r["d"] for r in _q(conn, "SELECT doc_no, MIN(effective_date)::text AS d FROM mrn_landed_costs GROUP BY 1")}
+        before = dates()
+        if before.get("YQ-26-09-2") != "2026-09-01":
+            print("    SKIP: the replay copy no longer carries month-dated MRN rows")
+            return
+        client = _PgClient(conn)
+        sku = _q(conn, "SELECT sku_code FROM mrn_landed_costs WHERE doc_no = 'YQ-26-09-2' ORDER BY sku_code LIMIT 1")[0]["sku_code"]
+        cost = _q(conn, "SELECT landed_cost_bhd FROM mrn_landed_costs WHERE sku_code = %s", (sku,))[0]["landed_cost_bhd"]
+        older = [{"code": sku, "landed": 0.1, "product": 0.1, "qty": 1, "doc_no": "YQ-26-09-1", "mrn_no": "YQ-26-09-1",
+                  "eff": "2026-09-01", "eff_source": "month", "xml_date": None}]
+        # un-migrated rows (today's production): the stored doc's ledger date is resolved before the comparison
+        with contextlib.redirect_stdout(io.StringIO()):
+            s = load_mrn_costs(older, client=client, dry_run=True)
+        assert s["receipt_dates"] == {"YQ-26-09-1": "2026-09-14"} and s["payloads"]["skipped_older"] == [sku] and s["skus"] == 0, s
+        with contextlib.redirect_stdout(io.StringIO()):
+            load_mrn_costs(older, client=client, dry_run=False)
+        assert _q(conn, "SELECT landed_cost_bhd, doc_no FROM mrn_landed_costs WHERE sku_code = %s", (sku,))[0] == {"landed_cost_bhd": cost, "doc_no": "YQ-26-09-2"}
+        _q(conn, (ROOT / "scripts" / "mrn_dates_migration.sql").read_text(encoding="utf-8"))
+        after = dates()
+        assert after["YQ-26-09-2"] == "2026-09-20" and after["YQ-26-02-2"] == "2026-02-08" and after["YQ-26-02-1"] == "2026-02-05", after
+        assert after["YQ-25-12-2"] == "2025-12-23" and after["YQ-25-12-1"] == "2025-12-18" and after["YQ-25-09-2"] == "2025-09-27"
+        assert after["YQ-26-06-3"] == "2026-06-01" and after["YQ-26-06-1"] == "2026-06-07"     # no ledger voucher for 06-3: untouched
+        with contextlib.redirect_stdout(io.StringIO()):
+            s = load_mrn_costs(older, client=client, dry_run=True)
+        assert s["payloads"]["skipped_older"] == [sku]
+        _q(conn, (ROOT / "scripts" / "mrn_dates_migration.sql").read_text(encoding="utf-8"))     # idempotent
+        assert dates() == after
+        _q(conn, (ROOT / "scripts" / "mrn_dates_reverse.sql").read_text(encoding="utf-8"))
+        assert dates() == before
+        print(f"    re-dated {sum(1 for d in after if after[d] != before[d])} of {len(after)} receipts from the ledger; YQ-26-09-1 refused for {sku} before and after")
     finally:
         conn.rollback()
         conn.close()
@@ -1019,6 +1391,17 @@ def _():
         _q(conn, "INSERT INTO procurement_orders (title, vendor, stage, lines) VALUES ('t2', 'VFAN', 'received', %s::jsonb)", (f'[{{"item": "{code}", "qty": 999}}]',))
         t = _q(conn, "SELECT in_transit FROM v_catalog_reserved WHERE item_code = %s", (code,))[0]["in_transit"]
         assert t == 300, t
+        # an allow-list of the in-flight stages: 'closed' (the stage after received) and 'proposed' never count
+        _q(conn, "INSERT INTO procurement_orders (title, vendor, stage, lines) VALUES ('t3', 'VFAN', 'closed', %s::jsonb)", (f'[{{"item": "{code}", "qty": 555}}]',))
+        _q(conn, "INSERT INTO procurement_orders (title, vendor, stage, lines) VALUES ('t4', 'VFAN', 'proposed', %s::jsonb)", (f'[{{"item": "{code}", "qty": 77}}]',))
+        _q(conn, "INSERT INTO procurement_orders (title, vendor, stage, lines) VALUES ('t5', 'VFAN', 'po_raised', %s::jsonb)", (f'[{{"item": "{code}", "qty": 50}}]',))
+        t = _q(conn, "SELECT in_transit FROM v_catalog_reserved WHERE item_code = %s", (code,))[0]["in_transit"]
+        assert t == 350, t
+        # a backorder line was never on hand: it never reserves shelf stock
+        order("R2T-8", "new", next_day, qty=9)
+        _q(conn, "UPDATE shop_order_lines SET line_status = 'backorder' WHERE order_id = (SELECT id FROM shop_orders WHERE order_no = 'R2T-8')")
+        again = _q(conn, "SELECT reserved, available FROM v_catalog_reserved WHERE item_code = %s", (code,))[0]
+        assert again["reserved"] == after["reserved"] and again["available"] == after["available"], (after, again)
     finally:
         conn.rollback()
         conn.close()
@@ -1207,26 +1590,36 @@ def _():
     tmp = Path(tempfile.mkdtemp(prefix="r2replay_"))
     try:
         _q(conn, (ROOT / "scripts" / "economics_v2_migration.sql").read_text(encoding="utf-8"))
+        # ingest the real drop into a scratch clean folder first (it writes CSVs only), so the planted
+        # rows can carry a salesman the export really has -- a name it does not carry stops the
+        # prune on purpose (the per-salesman guard, probed on this span further down)
+        ingest.OUT_DIR = tmp / "clean"
+        ls.CLEAN = tmp / "clean"
+        sys.argv = ["ingest", str(DROP_240926)]
+        assert ingest.main() == 0
+        rep = str(pd.read_csv(tmp / "clean" / "orders.csv", dtype=object)["salesman"].dropna().iloc[0])
+        wh = str(pd.read_csv(tmp / "clean" / "order_lines.csv", dtype=object)["warehouse_name"].dropna().iloc[0])
         # plant rows the replace must and must not touch
         _q(conn, "INSERT INTO orders (invoice_no, order_date, customer_name, gross_bhd, salesman) VALUES "
-                 "('SI : R2-OUTSIDE', '2025-01-05', 'CUST-test', 9.5, 'Karrar'), ('SI : R2-INSIDE', '2026-09-10', 'CUST-test', 4.25, 'Karrar')")
+                 "('SI : R2-OUTSIDE', '2025-01-05', 'CUST-test', 9.5, %s), ('SI : R2-INSIDE', '2026-09-10', 'CUST-test', 4.25, %s)", (rep, rep))
         _q(conn, "INSERT INTO order_lines (invoice_no, line_no, line_date, customer_account, item_name, quantity, gross_bhd, warehouse_name) VALUES "
-                 "('SI : R2-OUTSIDE', 1, '2025-01-05', 'CUST-test', 'X01 test', 1, 9.5, 'Karrar'), ('SI : R2-INSIDE', 1, '2026-09-10', 'CUST-test', 'X01 test', 1, 4.25, 'Karrar')")
+                 "('SI : R2-OUTSIDE', 1, '2025-01-05', 'CUST-test', 'X01 test', 1, 9.5, %s), ('SI : R2-INSIDE', 1, '2026-09-10', 'CUST-test', 'X01 test', 1, 4.25, %s)", (wh, wh))
         as_of = _q(conn, "SELECT MAX(as_of_date)::text AS d FROM stock_balance")[0]["d"]
         _q(conn, "INSERT INTO stock_balance (item_name, warehouse_name, net_qty, selling_rate_bhd, total_value_bhd, as_of_date) VALUES "
                  "('R2 VAN ITEM', 'R2 Test Van', 3, 1, 3, %s::date), ('R2 STALE ITEM', 'Accessories Warehouse', 3, 1, 3, %s::date)", (as_of, as_of))
         before = _q(conn, "SELECT (SELECT COUNT(*) FROM orders) AS o, (SELECT COUNT(*) FROM order_lines) AS l, (SELECT COUNT(*) FROM stock_movements) AS sm")[0]
-        # ingest the real drop into a scratch clean folder, then load through the psycopg client
-        ingest.OUT_DIR = tmp / "clean"
-        ls.CLEAN = tmp / "clean"
+        # load through the psycopg client
         client = _PgClient(conn)
         ls._client = lambda: client
         vn.get_client = lambda: client
         db_read.exec_sql, db_read.exec_sql_params = exec_sql, exec_sql_params
-        sys.argv = ["ingest", str(DROP_240926)]
-        assert ingest.main() == 0
-        rc = ls.main(["--staged", str(DROP_240926)])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = ls.main(["--staged", str(DROP_240926)])
+        print(buf.getvalue()[-1500:])
         assert rc == 0
+        assert _notices(buf.getvalue()) == [], "a faithful full-span drop raises no loader notice"
+        assert "pruned 1 rows" in buf.getvalue() and buf.getvalue().index("upserted order_lines") < buf.getvalue().index("order_lines: pruned")
         # the §2 preview numbers, exactly
         o = _q(conn, "SELECT COUNT(*) AS n, ROUND(SUM(gross_bhd)::numeric, 3) AS s FROM orders WHERE invoice_no <> 'SI : R2-OUTSIDE'")[0]
         l = _q(conn, "SELECT COUNT(*) AS n, ROUND(SUM(taxable_bhd)::numeric, 3) AS s FROM order_lines WHERE invoice_no <> 'SI : R2-OUTSIDE'")[0]
@@ -1267,6 +1660,23 @@ def _():
         assert ok, [r["metric"] for r in rows if not r["passed"]]
         day = next(r for r in rows if r["metric"].startswith("Sales per day: max"))
         assert day["db"] <= 0.005 and next(r for r in rows if r["metric"].startswith("Sales lines"))["report"] == 11956.0
+        assert not any(m == "Stock value BHD" for m in names), "the whole-day stock value check is gone (the scoped one stands)"
+        # the per-salesman guard on the real span: one invoice under a name the export does not carry
+        # stops the prune (upsert only, noticed); REPLACE_OK prunes exactly that row
+        _q(conn, "INSERT INTO orders (invoice_no, order_date, customer_name, gross_bhd, salesman) VALUES ('SI : R2-GHOST', '2026-09-11', 'CUST-test', 1.0, 'R2 Ghost Rep')")
+        ghost = _q(conn, "SELECT id FROM orders WHERE invoice_no = 'SI : R2-GHOST'")[0]["id"]
+        od = pd.read_csv(tmp / "clean" / "orders.csv", dtype=object).dropna(subset=["invoice_no"])
+        gbuf = io.StringIO()
+        with contextlib.redirect_stdout(gbuf):
+            plan = ls._sales_span_plan(client, "orders", od, "order_date", False)
+        assert plan["skipped"] and plan["missing_salesmen"] == {"R2 Ghost Rep": 1} and plan["prune_ids"] == [] and plan["db_invoices"] == 2744, plan["skipped"]
+        gn = _notices(gbuf.getvalue())
+        assert len(gn) == 1 and "R2 Ghost Rep (1)" in gn[0]["text"] and gn[0]["detail"]["disappearing"] == ["SI : R2-GHOST"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            plan = ls._sales_span_plan(client, "orders", od, "order_date", True)
+        assert plan["skipped"] is None and plan["prune_ids"] == [ghost]
+        assert ls._sales_span_prune(client, "orders", plan) == 1
+        assert _q(conn, "SELECT COUNT(*) AS n FROM orders")[0]["n"] == 2744
         # the alias autofill on the replay copy: nothing invents, the share is measured
         from scripts.alias_autofill import autofill
         res = autofill(exec_sql=exec_sql, client=client, emit=lambda *a, **k: True)

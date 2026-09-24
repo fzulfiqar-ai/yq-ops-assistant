@@ -36,8 +36,10 @@ interface IngestResult {
   ok: boolean
   data_as_of?: string
   verify?: { ok: boolean; rows: VerifyRow[] }
-  changes?: { catalog?: string; new_skus?: string[]; anomaly?: string }
+  changes?: { catalog?: string; new_skus?: string[]; anomaly?: string; loader?: string[] }
   error?: string
+  /** loader override markers written for this upload (REPLACE_OK / PARTIAL_OK) */
+  markers?: string[]
   /** raw subprocess tail for the developer — never the headline */
   detail?: string
   /** rows written per report, e.g. { Sales_day_book: 140 } */
@@ -64,6 +66,10 @@ export default function DataPage() {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<IngestResult | null>(null)
   const [error, setError] = useState('')
+  // The loader's two override markers (scripts/load_supabase.py). Off by default: a normal daily
+  // upload never needs them, and each one is audited server-side when ticked.
+  const [replaceOk, setReplaceOk] = useState(false)
+  const [partialOk, setPartialOk] = useState(false)
 
   const { data: cov } = useQuery({ queryKey: ['data', 'coverage'], queryFn: () => apiGet<Coverage[]>('/data/coverage') })
   const { data: purgeTargets } = useQuery({ queryKey: ['purge-targets'], queryFn: () => apiGet<{ targets: PurgeTarget[] }>('/ingest/purge-targets') })
@@ -109,8 +115,11 @@ export default function DataPage() {
     try {
       const form = new FormData()
       files.forEach((f) => form.append('files', f))
+      if (replaceOk) form.append('replace_ok', 'true')
+      if (partialOk) form.append('partial_ok', 'true')
       setResult(await apiUpload<IngestResult>('/ingest', form))
       setFiles([])
+      setReplaceOk(false); setPartialOk(false)
       qc.invalidateQueries({ queryKey: ['data', 'coverage'] })
     } catch (e) {
       setError(e instanceof ApiError ? `${e.status}: ${e.body.slice(0, 200)}` : 'Upload failed.')
@@ -189,6 +198,22 @@ export default function DataPage() {
           </div>
         )}
 
+        {files.length > 0 && (
+          <div className="mt-3 grid gap-1.5 text-[12.5px] text-muted-foreground sm:grid-cols-2">
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={replaceOk} onChange={(e) => setReplaceOk(e.target.checked)} className="mt-0.5" />
+              <span><span className="font-medium text-foreground">Replace on purpose</span> — this sales export is complete;
+                invoices in the database for its dates that it no longer lists should be removed, even a whole salesman's
+                (otherwise the loader keeps them and verify fails).</span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={partialOk} onChange={(e) => setPartialOk(e.target.checked)} className="mt-0.5" />
+              <span><span className="font-medium text-foreground">Partial export intended</span> — this stock snapshot covers
+                fewer warehouses than the previous one on purpose (the others keep their last snapshot).</span>
+            </label>
+          </div>
+        )}
+
         <div className="mt-4 flex items-center gap-3">
           <Button onClick={upload} disabled={!files.length || busy}>
             {busy ? <Loader2 className="animate-spin" size={16} /> : <UploadCloud size={16} />}
@@ -225,6 +250,18 @@ export default function DataPage() {
               <div className="text-[13px] text-amber-700">
                 <span className="font-medium">Ignored:</span> {result.ignored.map((i) => `${i.file} (${i.reason})`).join('; ')}
               </div>
+            ) : null}
+            {/* what the loader's guards refused: a skipped span replace (with the invoices and the
+                salesmen that would have vanished), a stock snapshot narrower than the previous one */}
+            {result.changes?.loader?.length ? (
+              <div className="space-y-1 text-[13px] text-amber-800">
+                {result.changes.loader.map((t, i) => (
+                  <div key={i}><span className="font-medium">Loader:</span> {t}</div>
+                ))}
+              </div>
+            ) : null}
+            {result.markers?.length ? (
+              <div className="text-[12px] text-muted-foreground">Overrides used: {result.markers.join(', ')}</div>
             ) : null}
             {result.verify?.rows?.length ? (
               <div>

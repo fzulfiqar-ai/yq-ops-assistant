@@ -32,7 +32,8 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | View | Canonical (live) definition | Baseline in views.sql |
 |---|---|---|
 | `v_current_stock` | `stock_migration.sql` | **SILENTLY WRONG** — identical columns, different source. Baseline reads the `stock_movements` ledger; canonical reads the `stock_balance` snapshot at `MAX(as_of_date)`. The ledger basis measured **~8.6× overstated** |
-| `v_product_margin` | `economics_v2_migration.sql` (R2, 24-Sep-2026; before that `selling_prices_void_migration.sql` → `stock_migration.sql`) | **SILENTLY WRONG** — identical first 15 columns. Canonical filters to `report_date = MAX(report_date)`, skips voided price rows and appends the computed ex-VAT margin (`gp_computed_bhd`, `net_ex_vat_bhd`, `gp_ex_vat_bhd`, `margin_ex_vat_pct`, `is_below_cost`, `ex_vat_source`); the baseline sums **every loaded period** and has none of them |
+| `v_product_margin` | `economics_v2_migration.sql` (R2, 24-Sep-2026; before that `selling_prices_void_migration.sql` → `stock_migration.sql`) | **SILENTLY WRONG** — identical first 15 columns. Canonical filters to `report_date = MAX(report_date)`, skips voided price rows and appends the computed ex-VAT margin (`gp_computed_bhd`, `net_ex_vat_bhd`, `gp_ex_vat_bhd`, `margin_ex_vat_pct`, `is_below_cost`, `ex_vat_source`) from one `GROUP BY` over `order_lines` (+ `order_lines_item_name_idx`); the baseline sums **every loaded period** and has none of them |
+| `mrn_landed_costs.effective_date` (data) | `mrn_dates_migration.sql` (R2) | not a view: re-dates the pre-R2 rows from the 1st of the month to the ledger's MRN move date (reverse: `mrn_dates_reverse.sql`) |
 | `v_product_economics` | `economics_v2_migration.sql` (R2; before that `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no` |
 | `v_catalog_reserved`, `ar_ageing_totals` | `economics_v2_migration.sql` (R2) | not in the baseline — staff reserved-stock view (M10) and Focus's own AR Grand Total per snapshot |
 | `v_sales` | `division_payment_migration.sql` | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway` |
@@ -194,18 +195,49 @@ back; the reverse rehearsed the same way). Its closing `DO` block asserts, on li
 reserved stock is never negative, and that nothing is granted to `anon`/`authenticated`.
 
 What it changes: `v_product_economics` (MRN receipt cost first, `purchase_costs` by `effective_date desc,
-id desc` as the fallback; 3 columns appended), `v_product_margin` (6 columns appended, 15 kept),
-`ar_ageing_totals` (Focus's Grand Total per ageing snapshot, written by `scripts/load_supabase.py` from
-`parse_receivables_totals`; 24-Sep: rows 9,078.860 vs Focus 8,633.840 — credits shown as positive), and
-`v_catalog_reserved` (staff only: on-hand / reserved / available / in-transit; reserved = open, un-issued,
-non-test marketplace orders created after the snapshot's end of day in Bahrain — 0 units today).
+id desc` as the fallback; 3 columns appended), `v_product_margin` (6 columns appended, 15 kept; the
+day-book totals per item come from one `GROUP BY` CTE over `order_lines` joined once, plus the index
+`order_lines_item_name_idx` — the correlated per-item SUM it replaced cost 365 ms as `yq_readonly` on
+production and 1.2 s on the local copy per call, the CTE form 15 ms), `ar_ageing_totals` (Focus's Grand
+Total per ageing snapshot, written by `scripts/load_supabase.py` from `parse_receivables_totals`; 24-Sep:
+rows 9,078.860 vs Focus 8,633.840 — credits shown as positive), and `v_catalog_reserved` (staff only:
+on-hand / reserved / available / in-transit; reserved = open, un-issued, non-test marketplace orders
+created after the snapshot's end of day in Bahrain, backorder lines excluded — 0 units today; in-transit
+= an allow-list of the in-flight procurement stages `raised` / `paid` and their legacy aliases, so a
+`closed` order never counts). The `alias_autofill_exclude` setting it seeds has **no settings endpoint**:
+`update app_settings set value = 'A,B' where key = 'alias_autofill_exclude';`.
 
 Code that reads the new columns tolerates their absence (`app/margin_truth.py` computes the same
-figures inline from `net_amount_bhd / 1.1` and `cogs_bhd`; `app/reports.py` and `app/catalog.py` skip the
-reserved view and the totals table until they exist), so the API may deploy before the apply. Replayed
-end to end on the local scratch Postgres (`python -m scripts.local_replay_db --db r2_loader`, then
-`python -m tests.test_r2_loader`): the 240926 drop reloads to the §2 preview numbers exactly and
-`verify_numbers` passes every per-day / per-salesman check to the fils.
+figures inline from `net_amount_bhd / 1.1` and `cogs_bhd`, and probes the view once per 5 minutes so the
+chat templates and the LLM hint switch to `is_below_cost` / `margin_ex_vat_pct` after the apply;
+`app/reports.py` and `app/catalog.py` skip the reserved view and the totals table until they exist), so
+the API may deploy before the apply. **Everything `exec_sql` runs goes through the RPC as `yq_readonly`**,
+which is granted the views and 20 tables, not `orders` / `order_lines` / `ar_ageing` / `stock_movements`:
+the Receivables Focus total is anchored on `v_receivables`, never on `ar_ageing` (the R2 build's query
+raised `permission denied` there and the page showed no total). `tests/test_r2_loader.py` re-creates
+that grant set on the replay copy and runs the report, catalog, margin-truth and template queries with
+`SET LOCAL ROLE yq_readonly`. Replayed end to end on the local scratch Postgres
+(`python -m scripts.local_replay_db --db r2_loader`, then `python -m tests.test_r2_loader`): the 240926
+drop reloads to the §2 preview numbers exactly and `verify_numbers` passes every per-day /
+per-salesman check to the fils.
+
+### R2 data step, same release: `mrn_dates_migration.sql` — real receipt dates on `mrn_landed_costs`
+
+Apply **right after `economics_v2_migration.sql` and before any MRN is uploaded** (rehearse with
+`--rehearse` first; reverse: `mrn_dates_reverse.sql`). Every row the pre-R2 loader wrote is dated to the
+1st of its doc month (production 24-Sep-2026: `YQ-26-09-2` at 2026-09-01, `YQ-26-02-2` at 2026-02-01,
+`YQ-25-12-2` at 2025-12-01). The loader now dates new receipts by the ledger's move date, and its
+"never older" guard compared the two conventions — an OLDER receipt of the same month (`YQ-26-09-1`,
+ledger 2026-09-14 ≥ 2026-09-01) would have passed it and overwritten the newer receipt's landed cost
+for every shared SKU (the marketplace discount floor and `v_product_economics` read that cost). The
+migration moves each row to `MIN(move_date)` of the ledger voucher `MRN:<doc_no>`, forward only and
+within the same month; rows without a voucher (`YQ-26-06-3`) keep their date. Data-only, idempotent, no
+row deleted or inserted; the closing `DO` block raises if any row is still dated before its receipt.
+`scripts/ingest_mrn.py` also resolves the stored doc's ledger date before comparing (and, within one
+doc month, falls back to Focus's sequence number), so an un-migrated database is guarded too. Replayed
+on the local copy: 7 of 8 receipts re-dated (2025-09-27, 2025-12-18, 2025-12-23, 2026-02-05,
+2026-02-08, 2026-06-07, 2026-09-20), `YQ-26-06-3` untouched, reverse restores, `YQ-26-09-1` refused
+for a `YQ-26-09-2` SKU before and after.
 
 ## Backup, restore and the preservation gate (24-Sep-2026)
 

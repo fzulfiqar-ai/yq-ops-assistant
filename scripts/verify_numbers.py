@@ -152,12 +152,6 @@ def _db_sum_between(view: str, col: str, datecol: str, dmin: str, dmax: str) -> 
     return _rest_sum(view, col, filters=[lambda q: q.gte(datecol, dmin), lambda q: q.lte(datecol, dmax)])
 
 
-def _latest_as_of(table: str) -> str | None:
-    c = get_client()
-    r = c.table(table).select("as_of_date").order("as_of_date", desc=True).limit(1).execute().data
-    return (r or [{}])[0].get("as_of_date")
-
-
 def group_sums(rows: list[dict], key, val: str) -> dict[str, tuple[float, int]]:
     """Pure: {group key: (sum of `val`, row count)} over parsed report rows. `key` is a callable or
     a column name; blank keys group under '(none)'."""
@@ -339,15 +333,6 @@ def _receivables_total_checks(f: str, ar: list[dict], checks: list) -> None:
     else:
         checks.append((f"Receivables Focus total {tot.get('as_of_date')} stored", _nn(tot["focus_total_bhd"]), stored,
                        0.0, ABS_TOL_BHD, note))
-
-
-def _db_sum_eq(table: str, col: str, eqcol: str, eqval) -> float:
-    """Sum `col` over rows where `eqcol` = `eqval`. Scopes a snapshot table (stock_balance) to its
-    latest as_of_date so retained earlier snapshots aren't double-counted on the next upload."""
-    s = _sql_sum(f"SELECT COALESCE(SUM({col}),0) AS s FROM {table} WHERE {eqcol} = $1", [str(eqval)])
-    if s is not None:
-        return s
-    return _rest_sum(table, col, filters=[lambda q: q.eq(eqcol, eqval)])
 
 
 def export_date(path) -> str:
@@ -541,13 +526,12 @@ def run_checks(src_dir: Path | None = None) -> tuple[bool, list[dict]]:
                        _db_sum("v_receivables", "outstanding_bhd"), 0.5))
         _receivables_total_checks(f, ar, checks)
     f = _find("stock_balance_by_warehouse", src)
-    if f:  # Stock selling-value — scope the DB sum to the latest snapshot (don't sum retained history)
+    if f:  # Stock snapshot: warehouse set vs the previous snapshot, rows and selling value, all
+        # scoped to the file's own as_of_date AND warehouses (_stock_snapshot_checks). The older
+        # whole-day 'Stock value BHD' check summed every warehouse of the latest as_of_date, so a
+        # same-day re-export that no longer lists a warehouse (Focus omits zero-stock warehouses,
+        # the loader keeps that warehouse's earlier rows) gave a false FAIL beside the scoped one.
         sb = parse_stock_balance(read_grid(f), "x")
-        report = sum(_nn(r["total_value_bhd"]) for r in sb)
-        aod = _latest_as_of("stock_balance")
-        db = (_db_sum_eq("stock_balance", "total_value_bhd", "as_of_date", aod)
-              if aod else _db_sum("stock_balance", "total_value_bhd"))
-        checks.append(("Stock value BHD", report, db, 0.5))
         _stock_snapshot_checks(sb, src, checks)
     _price_book_checks(src, checks)   # only when a price book is part of the upload
 

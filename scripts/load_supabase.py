@@ -11,11 +11,15 @@ Upserts use each table's natural key (on_conflict) so re-running never double-co
 Usage:  python scripts/load_supabase.py [--staged <folder ingest read this run>]
         (scripts/refresh.py passes --staged; without it Focus price books are loaded but never void
          older rows -- see "Focus price books are snapshots" below. The folder may carry two marker
-         files: REPLACE_OK and PARTIAL_OK -- see "Sales are replaced by the file's own date span".)
+         files: REPLACE_OK and PARTIAL_OK -- see "Sales are replaced by the file's own date span".
+         The Data page upload writes them from its two check boxes; a local run drops the files
+         into the folder by hand. Every guard that fires prints a LOADER_NOTICE line that
+         scripts/refresh.py carries into the briefing and the Data page.)
 """
 from __future__ import annotations
 
 import math
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,23 +62,53 @@ _SP_KEY_COLS = "id,sku_code,price_book,customer_code,warehouse_name,start_date,s
 # orders / order_lines used to be upsert-only, so an invoice Focus deleted or re-lined after an
 # export lived on in the database (21-Sep-2026: 2 invoices in the DB that Focus no longer had).
 # A Focus sales export is the whole truth for its own date span, exactly like the Stock_ledger,
-# so the span is cleared and reloaded -- never a row outside it. Before anything is deleted the
-# loader prints every invoice the DB holds inside the span that the file does not carry ("would
-# disappear"), and a guard refuses the replace when that list is more than SPAN_MAX_DISAPPEAR_SHARE
-# of the span's invoices (and at least SPAN_MIN_DISAPPEAR): a filtered or partial export must not
-# wipe a month. The load then falls back to the old upsert-only path, writes an audit_log row and
-# scripts/verify_numbers.py FAILS on the row counts, which is the signal to look. A REPLACE_OK
-# marker file in the upload folder overrides the guard on purpose.
+# so the rows inside that span that the file no longer carries are removed -- never a row outside
+# it. The order of operations is UPSERT FIRST, PRUNE AFTER (R2 review): the file's rows are written
+# first, and only when every batch succeeded are the span's stale rows deleted, by id, key by key
+# ((invoice_no) for orders, (invoice_no, line_no) for order_lines). The tables are therefore never
+# emptier than the old truth or the new one: a transient Supabase error, a bad batch or a crash
+# mid-load leaves old + new rows, not an empty year that v_sales, the rep Today view, the
+# kickback targets and the hourly agent crons would read (the earlier delete-then-reload cleared
+# 11,956 lines and 2,743 invoices before the first upsert batch, for tens of seconds at best).
+# Before anything is planned the loader prints every invoice the DB holds inside the span that the
+# file does not carry ("would disappear"), and two guards refuse the prune:
+#   * more than SPAN_MAX_DISAPPEAR_SHARE of the span's invoices (and at least SPAN_MIN_DISAPPEAR)
+#     would disappear -- a filtered or partial export must not wipe a month;
+#   * a salesman (register `salesman`; day book `warehouse_name`, which IS the salesman) has
+#     invoices in the database span and is absent from the file altogether -- one small rep left
+#     out of an export is under 10% of the invoices, and cutting him cut his attribution and his
+#     kickback target while verify still PASSED (DB = file, the rep on neither side).
+# The load then stays upsert-only, writes an audit_log row, prints a LOADER_NOTICE line that
+# scripts/refresh.py carries into the briefing and the Data page, and scripts/verify_numbers.py
+# FAILS on the row counts / the per-salesman check, which is the signal to look. REPLACE_OK
+# overrides both guards on purpose: the Data page upload's "Replace on purpose" option writes the
+# marker into the staging folder (audited), or drop a REPLACE_OK file into the folder given to
+# `python -m scripts.refresh <folder>`.
 SPAN_MAX_DISAPPEAR_SHARE = 0.10
 SPAN_MIN_DISAPPEAR = 5
 REPLACE_OK_MARKER = "REPLACE_OK"
+REPLACE_HINT = ("To replace on purpose, tick 'Replace on purpose' (REPLACE_OK) on the Data page upload, or run "
+                "`python -m scripts.refresh <folder>` with a REPLACE_OK file in the folder")
 # A Stock_balance snapshot is replaced per (as_of_date, warehouse_name): a one-warehouse export
 # never erases the other warehouses of the same day. When the warehouse set of a NEW snapshot is
 # smaller than the previous snapshot's, the loader warns, writes an audit_log row and verify FAILS
 # ("Stock snapshot warehouses vs previous") -- unless the folder carries a PARTIAL_OK marker file,
 # which says the narrower export is intended (D5: the 14-Sep-2026 drop shrank the book from 25
-# warehouses to 1 and admin stock value fell 143,105 -> 44,996 without a word).
+# warehouses to 1 and admin stock value fell 143,105 -> 44,996 without a word). The Data page
+# upload's "Partial export intended" option writes the marker; so does a PARTIAL_OK file in the
+# folder given to `python -m scripts.refresh <folder>`.
+# Same-day re-exports: Focus omits a warehouse whose stock is zero, so a re-export of the SAME
+# as_of_date keeps the earlier rows of a warehouse the new file no longer lists (the per-pair
+# replace only touches the warehouses the file covers). Those rows are that day's last known
+# truth for that warehouse; verify checks the snapshot scoped to the file's own warehouses.
 PARTIAL_OK_MARKER = "PARTIAL_OK"
+PARTIAL_HINT = ("Export all warehouses, or tick 'Partial export intended' (PARTIAL_OK) on the Data page upload -- "
+                "or run `python -m scripts.refresh <folder>` with a PARTIAL_OK file in the folder -- if the "
+                "narrower export is intended (verify FAILS until then)")
+# the natural key of each sales table (the upsert's on_conflict) and its salesman column
+SALES_KEYS = {"orders": ("invoice_no",), "order_lines": ("invoice_no", "line_no")}
+SALES_SALESMAN_COL = {"orders": "salesman", "order_lines": "warehouse_name"}
+PRUNE_CHUNK = 200            # ids per DELETE ... IN (...) call (the id list travels in the URL)
 
 
 def marker_present(folder, name: str) -> bool:
@@ -133,9 +167,54 @@ def span_guard(disappearing: list[dict], db_invoices_in_span: int, replace_ok: b
         return None
     if n > SPAN_MAX_DISAPPEAR_SHARE * db_invoices_in_span:
         return (f"{n} of the {db_invoices_in_span} invoices the database holds in the file's span are not in "
-                f"the file (over {SPAN_MAX_DISAPPEAR_SHARE:.0%}): a filtered or partial export? Add a "
-                f"{REPLACE_OK_MARKER} file to the upload folder to replace on purpose")
+                f"the file (over {SPAN_MAX_DISAPPEAR_SHARE:.0%}): a filtered or partial export? {REPLACE_HINT}")
     return None
+
+
+def _key_str(v) -> str:
+    """Pure: a key column value spelt the way the CSV and PostgREST both spell it ('1', not '1.0';
+    blanks, None and NaN are '')."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    s = str(v).strip()
+    if re.fullmatch(r"-?\d+\.0+", s):
+        s = s.split(".")[0]
+    return s
+
+
+def row_key(r: dict, keycols) -> tuple:
+    """Pure: the natural key of a row, normalised (see _key_str)."""
+    return tuple(_key_str(r.get(c)) for c in keycols)
+
+
+def stale_row_ids(db_rows: list[dict], file_keys: set[tuple], keycols) -> list[int]:
+    """Pure: ids of the database rows (inside the file's span) whose natural key the file does
+    not carry -- the rows the prune removes AFTER the upsert has succeeded. A row the file carries
+    is never listed, whatever its date, so a re-dated invoice survives; ids never change on an
+    upsert, so the list stays exact between the plan and the prune."""
+    return [int(r["id"]) for r in db_rows if r.get("id") is not None and row_key(r, keycols) not in file_keys]
+
+
+def salesman_guard(db_rows: list[dict], file_names: set[str], col: str,
+                   replace_ok: bool = False) -> tuple[str | None, dict[str, int]]:
+    """Pure: (reason or None, {missing name: invoices in the DB span}). A name (register
+    `salesman`; day book `warehouse_name` = the salesman) that has invoices inside the database's
+    copy of the span but is absent from the file altogether is a filtered export, not a set of
+    deleted invoices: the prune must not run. Blank names are not reps and never count."""
+    present = {str(n).strip() for n in file_names if str(n or "").strip()}
+    inv_by_name: dict[str, set[str]] = {}
+    for r in db_rows:
+        n = str(r.get(col) or "").strip()
+        inv = str(r.get("invoice_no") or "").strip()
+        if n and inv:
+            inv_by_name.setdefault(n, set()).add(inv)
+    missing = {n: len(v) for n, v in sorted(inv_by_name.items()) if n not in present}
+    if replace_ok or not missing:
+        return None, missing
+    shown = ", ".join(f"{n} ({k} invoice{'s' if k != 1 else ''})" for n, k in list(missing.items())[:6])
+    shown += " ..." if len(missing) > 6 else ""
+    return (f"{len(missing)} salesman/warehouse name(s) with invoices in the database span are absent from the "
+            f"file: {shown}: a filtered export? {REPLACE_HINT}"), missing
 
 
 def warehouse_set_guard(previous: set[str], new: set[str], partial_ok: bool = False) -> str | None:
@@ -147,9 +226,19 @@ def warehouse_set_guard(previous: set[str], new: set[str], partial_ok: bool = Fa
     if missing and len(new) < len(previous):
         shown = ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else "")
         return (f"the new snapshot covers {len(new)} warehouse(s), the previous one {len(previous)}; "
-                f"missing: {shown}. Export all warehouses, or add a {PARTIAL_OK_MARKER} file to the folder "
-                f"if the narrower export is intended (verify FAILS until then)")
+                f"missing: {shown}. {PARTIAL_HINT}")
     return None
+
+
+NOTICE_PREFIX = "LOADER_NOTICE "
+
+
+def _notice(kind: str, text: str, detail: dict | None = None) -> None:
+    """One machine-readable line per thing the owner must see: scripts/refresh.py lifts these
+    into the briefing and the /ingest response (the Data page), where only 'upserted' counts used
+    to arrive -- a skipped replace was visible in the console and audit_log alone."""
+    import json
+    print(NOTICE_PREFIX + json.dumps({"kind": kind, "text": text, "detail": detail or {}}, default=str))
 
 
 def focus_book_kind(source_file) -> str | None:
@@ -454,51 +543,94 @@ def _delete_span(client, table: str, datecol: str, dmin: str, dmax: str) -> int:
     return removed
 
 
-def _sales_span_replace(client, table: str, df: pd.DataFrame, datecol: str, replace_ok: bool) -> dict:
-    """Clear `table` inside the file's own date span before the upsert (see the header note).
-    Prints the invoices that would disappear; the guard turns a suspicious replace into an
-    upsert-only load with an audit_log row. Returns {span, disappearing, removed, skipped}."""
-    res: dict = {"span": None, "disappearing": [], "removed": 0, "skipped": None}
+def _sales_span_plan(client, table: str, df: pd.DataFrame, datecol: str, replace_ok: bool) -> dict:
+    """Phase 1 of the span replace, BEFORE the upsert (see the header note): read the database's
+    rows inside the file's own date span, list the invoices and the salesmen the file no longer
+    carries, run the two guards and work out which rows the prune will remove. Nothing is deleted
+    here. Returns {table, span, disappearing, missing_salesmen, prune_ids, skipped, db_invoices,
+    file_invoices}; `skipped` carries the guard's reason (upsert-only load, audited, noticed)."""
+    keycols = SALES_KEYS[table]
+    smcol = SALES_SALESMAN_COL[table]
+    res: dict = {"table": table, "span": None, "disappearing": [], "missing_salesmen": {}, "prune_ids": [],
+                 "skipped": None, "db_invoices": 0, "file_invoices": 0}
     span = date_span(df[datecol].tolist()) if datecol in df.columns else None
     if not span:
         print(f"  ({table}: no dates in the file -- upsert only)")
         return res
     dmin, dmax = span
     res["span"] = span
-    file_inv = {str(v).strip() for v in df["invoice_no"].dropna().tolist()}
-    cols = "id,invoice_no," + datecol + (",gross_bhd" if table == "orders" else "")
+    file_inv = {_key_str(v) for v in df["invoice_no"].tolist()} - {""}
+    key_lists = [df[c].tolist() if c in df.columns else [None] * len(df) for c in keycols]
+    file_keys = {tuple(_key_str(v) for v in vals) for vals in zip(*key_lists)}
+    file_names = {str(v).strip() for v in df[smcol].dropna().tolist()} if smcol in df.columns else set()
+    cols = ["id", "invoice_no", datecol, smcol] + [k for k in keycols if k != "invoice_no"]
+    if table == "orders":
+        cols.append("gross_bhd")
     try:
-        db_rows = _fetch_span(client, table, cols, datecol, dmin, dmax)
-    except Exception as e:  # noqa: BLE001 -- cannot see the span: never delete blind
+        db_rows = _fetch_span(client, table, ",".join(cols), datecol, dmin, dmax)
+    except Exception as e:  # noqa: BLE001 -- cannot see the span: never prune blind
         print(f"  !! {table}: could not read the database span {dmin}..{dmax} ({str(e)[:120]}); upsert only")
         res["skipped"] = f"span read failed: {str(e)[:120]}"
         return res
     db_inv = {str(r.get("invoice_no") or "").strip() for r in db_rows} - {""}
     gone = disappearing_invoices(db_rows, file_inv)
-    res["disappearing"] = gone
+    res["disappearing"], res["db_invoices"], res["file_invoices"] = gone, len(db_inv), len(file_inv)
     print(f"  {table}: file span {dmin}..{dmax}: {len(file_inv)} invoices in file, {len(db_inv)} in DB, "
           f"{len(gone)} would disappear")
     for r in gone[:50]:
         extra = f"  gross {r.get('gross_bhd')}" if table == "orders" else ""
-        print(f"      - {r.get('invoice_no')}  {str(r.get(datecol) or '')[:10]}{extra}")
+        print(f"      - {r.get('invoice_no')}  {str(r.get(datecol) or '')[:10]}  {r.get(smcol) or ''}{extra}")
     if len(gone) > 50:
         print(f"      ... and {len(gone) - 50} more")
-    reason = span_guard(gone, len(db_inv), replace_ok)
-    if reason:
+    sm_reason, missing = salesman_guard(db_rows, file_names, smcol, replace_ok)
+    res["missing_salesmen"] = missing
+    reasons = [x for x in (span_guard(gone, len(db_inv), replace_ok), sm_reason) if x]
+    if reasons:
+        reason = "; ".join(reasons)
         print(f"  !! WARNING: {table} span replace SKIPPED -- {reason}. Loaded as upsert only; the rows above "
               f"stay in the database and verify will FAIL on the row counts.")
-        _audit(client, f"{table}.span_replace_skipped", f"{dmin}..{dmax}",
-               {"table": table, "span": [dmin, dmax], "reason": reason, "db_invoices": len(db_inv),
-                "file_invoices": len(file_inv), "disappearing": [str(r.get("invoice_no")) for r in gone][:200]})
+        detail = {"table": table, "span": [dmin, dmax], "reason": reason, "db_invoices": len(db_inv),
+                  "file_invoices": len(file_inv), "disappearing_count": len(gone), "missing_salesmen": missing,
+                  "disappearing": [str(r.get("invoice_no")) for r in gone][:200]}
+        _audit(client, f"{table}.span_replace_skipped", f"{dmin}..{dmax}", detail)
+        first = ", ".join(str(r.get("invoice_no")) for r in gone[:5]) + (" ..." if len(gone) > 5 else "")
+        _notice("span_replace_skipped",
+                f"{table} {dmin}..{dmax}: replace skipped, loaded as upsert only -- {len(gone)} invoice(s) in the "
+                f"database are not in the file" + (f" ({first})" if first else "")
+                + (f"; salesmen absent from the file: " + ", ".join(f"{n} ({k})" for n, k in list(missing.items())[:6])
+                   if missing else "") + f". {reason}",
+                {**detail, "disappearing": detail["disappearing"][:20]})
         res["skipped"] = reason
         return res
-    res["removed"] = _delete_span(client, table, datecol, dmin, dmax)
-    print(f"  ({table}: cleared {res['removed']} rows in {dmin}..{dmax} before reload)")
+    res["prune_ids"] = stale_row_ids(db_rows, file_keys, keycols)
+    return res
+
+
+def _sales_span_prune(client, table: str, plan: dict) -> int:
+    """Phase 2 of the span replace, AFTER the upsert succeeded: delete, by id, the rows of the
+    plan the file no longer carries. Runs only when the plan was not skipped; an upsert that
+    raised never reaches it (the load aborts with old + new rows in place, never fewer)."""
+    if plan.get("skipped") or not plan.get("span"):
+        return 0
+    ids: list[int] = plan.get("prune_ids") or []
+    removed = 0
+    for i in range(0, len(ids), PRUNE_CHUNK):
+        chunk = ids[i:i + PRUNE_CHUNK]
+        try:
+            r = client.table(table).delete(count="exact").in_("id", chunk).execute()
+            n = r.count if getattr(r, "count", None) is not None else len(r.data or [])
+        except TypeError:  # a client without the count keyword
+            r = client.table(table).delete().in_("id", chunk).execute()
+            n = len(r.data or [])
+        removed += int(n or 0)
+    dmin, dmax = plan["span"]
+    print(f"  ({table}: pruned {removed} rows in {dmin}..{dmax} that the file no longer carries -- after the upsert)")
+    gone = plan.get("disappearing") or []
     if gone:
         _audit(client, f"{table}.span_replace", f"{dmin}..{dmax}",
-               {"table": table, "span": [dmin, dmax], "removed_rows": res["removed"],
+               {"table": table, "span": [dmin, dmax], "removed_rows": removed,
                 "disappearing": [str(r.get("invoice_no")) for r in gone][:200]})
-    return res
+    return removed
 
 
 def _previous_warehouses(client, as_of: str) -> tuple[str | None, set[str]]:
@@ -553,9 +685,10 @@ def _stock_balance_replace(client, sb: pd.DataFrame, partial_ok: bool) -> dict:
         if reason:
             print(f"  !! WARNING: stock_balance {as_of} vs {prev_date}: {reason}")
             warnings.append(reason)
-            _audit(client, "stock_balance.partial_snapshot", f"{as_of} vs {prev_date}",
-                   {"as_of_date": as_of, "previous_as_of": prev_date, "new_warehouses": sorted(new_set),
-                    "previous_warehouses": sorted(prev_set), "reason": reason})
+            detail = {"as_of_date": as_of, "previous_as_of": prev_date, "new_warehouses": sorted(new_set),
+                      "previous_warehouses": sorted(prev_set), "reason": reason}
+            _audit(client, "stock_balance.partial_snapshot", f"{as_of} vs {prev_date}", detail)
+            _notice("partial_snapshot", f"stock_balance {as_of} vs {prev_date}: {reason}", detail)
         else:
             print(f"  (stock_balance {as_of}: {len(new_set)} warehouse(s)"
                   + (f"; previous snapshot {prev_date} had {len(prev_set)}" if prev_date else "") + ")")
@@ -606,15 +739,18 @@ def main(argv: list[str] | None = None) -> int:
                 [{"name": n} for n in sorted(names)], on_conflict="name")
 
     # 3) fact + pricing tables. Sales headers and lines are replaced inside the file's own date
-    #    span (see the note at the top): lines first, then headers, each by its own file's span.
+    #    span (see the note at the top): plan, UPSERT, then prune -- lines first, then headers,
+    #    each by its own file's span. The prune never runs before the upsert succeeded.
     if ol is not None:
         ol = ol.dropna(subset=["invoice_no"])
-        _sales_span_replace(client, "order_lines", ol, "line_date", replace_ok)
+        plan = _sales_span_plan(client, "order_lines", ol, "line_date", replace_ok)
         _upsert(client, "order_lines", _records(ol), on_conflict="invoice_no,line_no")
+        _sales_span_prune(client, "order_lines", plan)
     if od is not None:
         od = od.dropna(subset=["invoice_no"])
-        _sales_span_replace(client, "orders", od, "order_date", replace_ok)
+        plan = _sales_span_plan(client, "orders", od, "order_date", replace_ok)
         _upsert(client, "orders", _records(od), on_conflict="invoice_no")
+        _sales_span_prune(client, "orders", plan)
     sm = _read("stock_movements")
     if sm is not None:
         before = len(sm)

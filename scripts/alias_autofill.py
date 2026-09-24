@@ -14,7 +14,10 @@ attributed numbers are short. scripts/refresh.py calls autofill() after each loa
     holds back (the near-duplicate SKUs still to be settled: 'X24 CC 1Mtr' / 'X24 CL 1Mtr' on
     24-Sep-2026, held back from alias_backfill_preview --commit with --exclude) are never written
     either: the list lives in app_settings 'alias_autofill_exclude' (comma-separated codes, seeded
-    by economics_v2_migration.sql) with DEFAULT_HOLD_BACK as the fallback before the setting exists;
+    by economics_v2_migration.sql) with DEFAULT_HOLD_BACK as the fallback before the setting exists.
+    No settings endpoint edits this key (app/settings.py takes the numeric costing keys only,
+    app/shop_api.py the shop_* keys): the developer changes it with one statement,
+      update app_settings set value = 'A,B' where key = 'alias_autofill_exclude';
   * then the unmapped share of the last 30 days of ACCESSORY lines (SIM never counts toward
     targets) is measured on v_sales, anchored to the data's own last sale date, and when it is
     above UNMAPPED_SHARE_MAX an agent event 'data.unmapped_share' (severity warn) is emitted through
@@ -215,7 +218,7 @@ def main(argv: list[str]) -> int:
     dry = "--dry-run" in argv
     res = autofill(dry_run=dry)
     print(summary_line(res))
-    if res.get("share", {}).get("top"):
+    if (res.get("share") or {}).get("top"):          # share is None when the read failed
         for t in res["share"]["top"]:
             print(f"   {t['lines']:4} lines  BHD {t['rev']:>9,.3f}  {t['item_name'][:70]}")
     if dry:

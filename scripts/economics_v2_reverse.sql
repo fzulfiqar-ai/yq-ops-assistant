@@ -54,6 +54,8 @@ where pp.report_date = (select max(report_date) from product_profitability);
 
 drop table if exists ar_ageing_totals;
 
+drop index if exists order_lines_item_name_idx;                  -- added for the v_product_margin day-book join
+
 delete from app_settings where key = 'alias_autofill_exclude';   -- scripts/alias_autofill.py falls back to its default list
 
 revoke all on v_product_economics, v_product_margin from anon, authenticated;

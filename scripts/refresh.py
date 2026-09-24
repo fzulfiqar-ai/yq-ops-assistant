@@ -56,6 +56,32 @@ def _loaded_counts(stdout: str) -> dict:
     return out
 
 
+NOTICE_PREFIX = "LOADER_NOTICE "     # the same prefix scripts/load_supabase.py prints (kept in sync by tests)
+
+
+def _loader_notices(stdout: str) -> list[dict]:
+    """The LOADER_NOTICE lines the loader prints, one JSON object each ({kind, text, detail}): a
+    span replace the guards skipped (with the invoices and salesmen that would have vanished), a
+    stock snapshot narrower than the previous one. They reach the briefing and the /ingest
+    response, so the Data page shows them beside the 'upserted' counts instead of leaving them in
+    the console and audit_log. A malformed line is kept as plain text rather than dropped."""
+    import json
+    out: list[dict] = []
+    for line in (stdout or "").splitlines():
+        if not line.startswith(NOTICE_PREFIX):
+            continue
+        raw = line[len(NOTICE_PREFIX):].strip()
+        try:
+            n = json.loads(raw)
+        except ValueError:
+            n = None
+        if isinstance(n, dict) and n.get("text"):
+            out.append({"kind": str(n.get("kind") or "notice"), "text": str(n["text"]), "detail": n.get("detail") or {}})
+        elif raw:
+            out.append({"kind": "notice", "text": raw[:400], "detail": {}})
+    return out
+
+
 def _friendly(stage: str, tail: str) -> str:
     """Turn a subprocess failure into one sentence a non-engineer can act on. The raw tail is
     still returned separately as `detail`; it is no longer the headline the Data page shows."""
@@ -93,6 +119,8 @@ def _briefing(ok: bool, data_date, changes: dict, verify: dict | None, error: st
         lines.append("Integrity: " + str(changes["anomaly"]))
     if changes.get("aliases"):
         lines.append("Aliases: " + str(changes["aliases"]))
+    for t in changes.get("loader") or []:
+        lines.append("Loader: " + str(t))
     if changes.get("error"):
         lines.append("(change-detect warn: " + str(changes["error"]) + ")")
     return head, "\n".join(lines)
@@ -157,9 +185,10 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     #     that folder may void the older rows of its book (scripts/load_supabase.py).
     r2 = _run("scripts.load_supabase", "--staged", src_path)
     loaded = _loaded_counts(r2.stdout)
+    notices = _loader_notices(r2.stdout)
     if r2.returncode != 0:
         tail = (r2.stderr or r2.stdout or "")[-600:]
-        return _finish(False, src_path, _friendly("load", tail), {}, None, send,
+        return _finish(False, src_path, _friendly("load", tail), {"loader": [n["text"] for n in notices]}, None, send,
                        detail=tail, loaded=loaded)
 
     # 3 - flush stale answer cache
@@ -221,6 +250,10 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
         changes = {"error": str(e)[:160]}
     changes["aliases"] = alias_res.get("line")
     changes["unmapped_share"] = (alias_res.get("share") or {}).get("share")
+    # what the loader's guards refused (a skipped span replace with the invoices / salesmen that
+    # would have vanished, a narrower stock snapshot): the Data page and the briefing show these
+    changes["loader"] = [n["text"] for n in notices]
+    changes["loader_notices"] = notices
 
     ok = bool(verify and verify.get("ok"))
 

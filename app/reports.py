@@ -507,15 +507,15 @@ def margins() -> dict:
     The report's own GP % is not a percentage and its GP loses the sign on loss items, so the
     Margins page and 'Selling below cost' tile used to be quietly wrong. `basis` says whether the
     figures came from the migrated view ('view') or were computed inline ('inline')."""
-    from app.margin_truth import margin_rows
+    from app.margin_truth import margin_rows, margin_totals
     rows, basis = margin_rows(limit=200)
-    neg = [r for r in rows if r.get("is_below_cost")]
-    net = round(sum(float(r.get("net_amount_bhd") or 0) for r in rows), 3)
-    net_ex = round(sum(float(r.get("net_ex_vat_bhd") or 0) for r in rows), 3)
-    gp_ex = round(sum(float(r.get("gp_ex_vat_bhd") or 0) for r in rows), 3)
-    gp_rep = round(sum(float(r.get("gp_computed_bhd") or 0) for r in rows), 3)
+    # The totals are one SUM over the whole view, never over the (limited, margin-ascending) rows:
+    # once the report passes the row cap the best margins would be the ones cut off.
+    tot, _ = margin_totals()
+    net, net_ex = round(tot["net"], 3), round(tot["net_ex"], 3)
+    gp_ex, gp_rep = round(tot["gp_ex"], 3), round(tot["gp_rep"], 3)
     return {
-        "rows": rows, "count": len(rows), "negative_count": len(neg),
+        "rows": rows, "count": tot["n"], "negative_count": tot["below"],
         "total_net_bhd": net, "total_net_ex_vat_bhd": net_ex,
         "total_gp_bhd": gp_ex, "total_gp_report_basis_bhd": gp_rep,
         "gp_pct": (gp_ex / net_ex * 100) if net_ex else 0.0,
@@ -525,11 +525,16 @@ def margins() -> dict:
 
 def _focus_ar_total() -> dict | None:
     """Focus's own Grand Total for the ageing snapshot the page shows (ar_ageing_totals, R2), or
-    None before economics_v2_migration.sql / when the snapshot has no stored total."""
+    None before economics_v2_migration.sql / when the snapshot has no stored total.
+
+    The snapshot date is anchored on v_receivables (the view the rows above come from), never on
+    the ar_ageing table: exec_sql runs as yq_readonly, which is granted the views and not
+    ar_ageing, so `(SELECT MAX(as_of_date) FROM ar_ageing)` raised 'permission denied' on
+    production and the except below hid it -- focus_total stayed null forever (R2 review)."""
     try:
         r = exec_sql(
             "SELECT as_of_date::text AS as_of_date, focus_total_bhd, focus_over90_bhd, rows_total_bhd "
-            "FROM ar_ageing_totals WHERE as_of_date = (SELECT MAX(as_of_date) FROM ar_ageing) LIMIT 1"
+            "FROM ar_ageing_totals WHERE as_of_date = (SELECT MAX(as_of_date) FROM v_receivables) LIMIT 1"
         )
     except Exception:  # noqa: BLE001 -- table not there yet
         return None

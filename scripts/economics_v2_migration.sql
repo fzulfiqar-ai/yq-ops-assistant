@@ -14,7 +14,8 @@
 --    gp_ex_vat_bhd, margin_ex_vat_pct, is_below_cost, ex_vat_source appended. The ex-VAT net is the
 --    day book's own Taxable total for the item when the lines reconcile to the report's net amount
 --    (the report is VAT-inclusive: its net equals the lines' gross), else net / 1.1 (the same VAT
---    rule v_sales applies).
+--    rule v_sales applies). The per-item day-book totals are one GROUP BY over order_lines
+--    (+ an index on order_lines.item_name), not a correlated SUM per item.
 -- 3. ar_ageing_totals: Focus's own Grand Total per ageing snapshot (parse_receivables_totals).
 --    The export shows every balance positive, so customer credits load as money owed and the row
 --    sum overstates the book (24-Sep: rows 9,078.860 vs Focus 8,633.840). No sign is guessed: both
@@ -23,10 +24,11 @@
 --    catalog code. reserved = open marketplace orders (new / confirmed, not yet issued, not test)
 --    created AFTER the newest stock snapshot's end of day in Bahrain -- the one rule that never
 --    double-counts a unit the snapshot already saw leave the shelf (0 units today; the "all open"
---    rule would reserve 251 and double-count van issues). in_transit = procurement_orders lines
---    raised and not yet received (0 today: the table is empty). Merchants keep on-hand status;
---    nothing in app/shop.py reads this view.
--- No row is deleted or rewritten anywhere in this file.
+--    rule would reserve 251 and double-count van issues); backorder lines never reserve (they
+--    were never on hand). in_transit = procurement_orders lines in the in-flight stages
+--    (raised / paid and their legacy aliases -- an allow-list, so 'closed' never counts; 0 today:
+--    the table is empty). Merchants keep on-hand status; nothing in app/shop.py reads this view.
+-- No row is deleted or rewritten anywhere in this file (one index is added on order_lines).
 
 -- ── 1. v_product_economics: MRN first, purchase_costs as the fallback ──────────
 create or replace view v_product_economics as
@@ -59,7 +61,21 @@ left join lateral (
 ) c on true;
 
 -- ── 2. v_product_margin: computed GP and an ex-VAT margin (existing 15 columns kept) ──
+-- The day book's totals per item come from ONE pass over order_lines (the `tx` CTE, GROUP BY
+-- item_name) joined once, not a correlated SUM per profitability item: that form re-read the
+-- whole table 161 times (365 ms as yq_readonly on production, 1.1-1.4 s on the local copy) on
+-- every margins report, agent and digest call, and grew with retained history. The index below
+-- serves the same lookup wherever else an item's lines are wanted.
+create index if not exists order_lines_item_name_idx on order_lines (item_name);
+
 create or replace view v_product_margin as
+with tx as (
+  select ol.item_name,
+         round(sum(ol.taxable_bhd)::numeric, 3)                                          as taxable,
+         round((sum(ol.gross_bhd) - coalesce(sum(ol.discount_bhd), 0))::numeric, 3)      as net_lines
+  from order_lines ol
+  group by ol.item_name
+)
 select
   pp.item_name, pp.report_date, pp.gross_bhd, pp.discount_pct, pp.net_amount_bhd, pp.cogs_bhd,
   pp.gross_profit_bhd, pp.gp_margin_pct, pp.misc_charges_bhd, pp.net_profit_bhd, pp.np_margin_pct,
@@ -89,12 +105,7 @@ left join lateral (
   order by id desc
   limit 1
 ) sp on true
-left join lateral (
-  select round(sum(ol.taxable_bhd)::numeric, 3)                          as taxable,
-         round((sum(ol.gross_bhd) - coalesce(sum(ol.discount_bhd), 0))::numeric, 3) as net_lines
-  from order_lines ol
-  where ol.item_name = pp.item_name
-) tx on true
+left join tx on tx.item_name = pp.item_name
 cross join lateral (
   select case when pp.net_amount_bhd is null then null
               when tx.taxable is not null and tx.net_lines is not null
@@ -138,7 +149,9 @@ open_lines as (
   where o.status in ('new', 'confirmed')
     and o.issued_at is null
     and coalesce(o.is_test, false) = false
-    and coalesce(l.line_status, 'ok') not in ('removed', 'cancelled')
+    -- a backorder line is a unit that was never on hand: it must not reserve shelf stock
+    -- (it pushed `available` negative); removed / cancelled lines are not open either
+    and coalesce(l.line_status, 'ok') not in ('removed', 'cancelled', 'backorder')
     and o.created_at > ((snap.as_of + 1)::timestamp at time zone 'Asia/Bahrain')
   group by 1
 ),
@@ -149,7 +162,10 @@ po_lines as (
   from procurement_orders po
   cross join lateral jsonb_array_elements(case when jsonb_typeof(po.lines) = 'array' then po.lines
                                                else '[]'::jsonb end) ln
-  where po.stage not in ('proposed', 'reviewed', 'received', 'cancelled')   -- raised with the vendor, not yet received
+  -- raised with the vendor and not yet received: an ALLOW-list of the in-flight stages
+  -- (app/procurement.py STAGES + the legacy aliases it still resolves). A deny-list let every
+  -- 'closed' order -- the stage after 'received' -- count as in transit forever.
+  where po.stage in ('raised', 'paid', 'invoiced', 'advance_paid', 'po_raised')
 ),
 transit as (
   select coalesce(
@@ -177,7 +193,11 @@ where ci.is_active;
 
 -- ── 4b. The alias autofill's hold-back list (scripts/alias_autofill.py, run after every load) ──
 -- Exact-name aliases are written automatically; the codes here never are. Seeded with the owner's
--- 24-Sep-2026 hold-back (near-duplicate SKUs not yet merged); editable in Settings.
+-- 24-Sep-2026 hold-back (near-duplicate SKUs not yet merged). There is NO settings endpoint for
+-- this key (app/settings.py accepts the numeric costing keys, app/shop_api.py the shop_* keys):
+-- it is edited by the developer with one statement --
+--   update app_settings set value = 'X24 CC 1Mtr,X24 CL 1Mtr' where key = 'alias_autofill_exclude';
+-- (comma-separated catalog codes, case-insensitive).
 insert into app_settings (key, value, description)
 values ('alias_autofill_exclude', 'X24 CC 1Mtr,X24 CL 1Mtr',
         'Comma-separated catalog codes the after-load alias autofill must never map a Focus sales string to (owner-held near-duplicates).')
