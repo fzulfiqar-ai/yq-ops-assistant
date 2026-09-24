@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { LayoutGrid, List } from 'lucide-react'
 import type { OrderStatusPayload } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
@@ -34,6 +34,9 @@ import { Button } from '../ui/Button'
  * 24 on a phone (2 columns, and the home stays inside reach of the band and the footer — the
  * catalogue is what Browse is for), 60 on desktop (both 4 and 5 columns divide it).
  */
+
+/** "Coming soon · WEKOME" (R1b): its own chunk and its own request, mounted after the in-stock rails; renders nothing until a card is published */
+const ComingSoonRail = lazy(() => import('../components/ComingSoonRail'))
 
 const FIRST = 12
 const CHUNK = { phone: 24, desktop: 60 }
@@ -186,6 +189,11 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
             ))}
           </Rail>
         )}
+      </Sect>
+      <Sect>
+        <Suspense fallback={null}>
+          <ComingSoonRail />
+        </Suspense>
       </Sect>
       <Sect reveal={desktop}>{continueCard}</Sect>
 

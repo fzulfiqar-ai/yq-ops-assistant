@@ -20,7 +20,7 @@
     if (!ref) {
       // /{slug} → that rep's storefront; otherwise the rep this phone remembers (90 days)
       var seg = location.pathname.split('/').filter(Boolean)
-      var reserved = { search: 1, cart: 1, checkout: 1, orders: 1, p: 1, t: 1, o: 1, c: 1, join: 1, shop: 1, me: 1, quick: 1, about: 1, help: 1, ask: 1, saved: 1 }
+      var reserved = { search: 1, cart: 1, checkout: 1, orders: 1, p: 1, t: 1, o: 1, c: 1, join: 1, shop: 1, me: 1, quick: 1, about: 1, help: 1, ask: 1, saved: 1, brands: 1, wekome: 1, 'coming-soon': 1 }
       if (seg.length === 1 && !reserved[seg[0].toLowerCase()] && /^[a-z0-9][a-z0-9-]{1,31}$/.test(seg[0].toLowerCase())) {
         ref = seg[0].toLowerCase()
       } else {

@@ -750,3 +750,79 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.get("/shop/unpriced-stock")
     def shop_unpriced_stock(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
         return {"rows": shop.unpriced_stock()}
+
+    # ── "Coming soon" (app/upcoming.py; trust plan §6b, release R1b) ─────────────
+    # The announced WEKOME range before it lands: a separate, cached, whitelisted payload (never
+    # part of the catalog payload, so the home page's LCP does not wait for it), a "notify me"
+    # that reuses the restock table and its limits, an admin list/patch, and the rep's interest
+    # list scoped to his referral code. No price, cost or quantity ever leaves through here.
+    from app import upcoming
+
+    class UpcomingInterestRequest(BaseModel):
+        upcoming_id: int
+        phone: str | None = Field(default=None, max_length=32)
+        qty_interest: int | None = Field(default=None, ge=1, le=shop.MAX_QTY)   # optional, "no commitment"
+        device_id: str | None = Field(default=None, max_length=64)
+        ref: str | None = Field(default=None, max_length=32)
+
+    class UpcomingPatch(BaseModel):
+        status: str | None = Field(default=None, max_length=16)
+        expected_month: str | None = Field(default=None, max_length=10)      # YYYY-MM
+        expected_label_en: str | None = Field(default=None, max_length=80)
+        expected_label_ar: str | None = Field(default=None, max_length=80)
+        name_en: str | None = Field(default=None, max_length=160)
+        name_ar: str | None = Field(default=None, max_length=160)
+        spec_en: str | None = Field(default=None, max_length=300)
+        spec_ar: str | None = Field(default=None, max_length=300)
+        category: str | None = Field(default=None, max_length=60)
+        catalog_item_code: str | None = Field(default=None, max_length=64)   # links the card to the live item (auto-retire)
+        sort_order: int | None = None
+
+    @app.get("/public/market/upcoming")
+    @limiter.limit("60/minute")
+    def market_upcoming(request: Request):
+        """Published, not-yet-retired upcoming cards (whitelisted fields only), cached 60 s."""
+        if not shop.market_enabled():
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        return Response(content=upcoming.public_json(), media_type="application/json",
+                        headers={"Cache-Control": MARKET_CACHE, "X-Robots-Tag": "noindex, nofollow"})
+
+    @app.post("/public/market/upcoming/interest")
+    @limiter.limit("20/minute")      # the restock endpoint's limit: it is the same request, for a card that has no stock yet
+    def market_upcoming_interest(request: Request, body: UpcomingInterestRequest) -> dict:
+        if not shop.market_enabled():
+            raise HTTPException(status_code=404, detail="The marketplace is not open.")
+        ok = upcoming.add_interest(body.upcoming_id, body.phone, body.device_id, body.ref, body.qty_interest)
+        return {"ok": ok}
+
+    @app.get("/shop/upcoming")
+    def shop_upcoming_list(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
+        """Admins / Shop Admin: every card with its interest count. A rep: the published ones only
+        (for the share cards on Today)."""
+        can_edit = user.role == "admin" or has_feature(user, "Shop Admin")
+        return {"items": upcoming.list_admin(all_statuses=can_edit), "can_edit": can_edit,
+                "settings": upcoming.settings()}
+
+    @app.patch("/shop/upcoming/{item_id}")
+    def shop_upcoming_update(item_id: int, body: UpcomingPatch,
+                             user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """Publish / withdraw / mark arrived, set the expected month or labels, edit copy, link the
+        catalog code. Publishing is an office action, so the gate is Shop Admin (admins pass)."""
+        changes = body.model_dump(exclude_unset=True)
+        try:
+            row = upcoming.update_item(item_id, changes, by=user.email)
+        except upcoming.UpcomingError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.upcoming_update", detail={"id": item_id, "keys": sorted(changes), "status": row.get("status")})
+        return row
+
+    @app.get("/shop/upcoming/interest")
+    def shop_upcoming_interest(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """"Shops interested from your link" — a rep sees interest that came through his referral
+        code; admins see all of it."""
+        _sid, admin = _scope(user)
+        ref = None
+        if not admin:
+            sm = shop.salesman_for_user(user.email)
+            ref = (sm or {}).get("referral_code") or "-"
+        return {"interest": upcoming.list_interest(ref)}

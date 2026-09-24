@@ -24,6 +24,7 @@ import {
   BadgePercent,
   BarChart3,
   PackageCheck,
+  PackagePlus,
   type LucideIcon,
 } from 'lucide-react'
 import type { Me, Role } from './auth'
@@ -51,6 +52,8 @@ export const NAV: NavItem[] = [
   { section: 'Sell', label: 'Catalog', to: '/shop', icon: BookImage, feature: 'Catalog', roles: ['salesman'] },
   { section: 'Sell', label: 'Catalog', to: '/catalog', icon: BookImage, feature: 'Catalog', roles: ['admin', 'member'] },
   { section: 'Sell', label: 'Order for a shop', to: '/shop', icon: ShoppingBag, feature: 'Catalog', roles: ['admin', 'member'] },
+  // The "Coming soon" desk: publish the announced range, set the month, link catalog codes on arrival.
+  { section: 'Sell', label: 'Coming soon', to: '/upcoming', icon: PackagePlus, feature: 'Catalog', roles: ['admin', 'member'] },
   { section: 'Sell', label: 'Product Finds', to: '/finds', icon: Sparkles, feature: 'Product Finds' },
   { section: 'Sell', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads' },
   { section: 'Sell', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing' },

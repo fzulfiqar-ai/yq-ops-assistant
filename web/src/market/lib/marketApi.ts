@@ -101,3 +101,52 @@ export function postRestock(body: { item_code: string; phone?: string | null; de
 export function recognizePhone(phone: string, deviceId: string): Promise<{ known: { shop?: string | null; area?: string | null; first_name?: string | null; orders_count?: number } | null }> {
   return request('/public/market/recognize', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ phone, device_id: deviceId }) })
 }
+
+/* ───────────────────────── "Coming soon" (app/upcoming.py) ─────────────────────────
+   The announced range before it lands: a separate, lazily fetched payload, never part of the
+   catalog. Whitelisted server-side — no price, cost or quantity field exists in this shape. */
+
+export interface UpcomingVariant {
+  label: string
+  label_ar?: string | null
+}
+
+export interface UpcomingItem {
+  id: number
+  brand: string
+  model_code: string
+  category?: string | null
+  name_en: string
+  name_ar?: string | null
+  spec_en?: string | null
+  spec_ar?: string | null
+  variants: UpcomingVariant[]
+  photo_url?: string | null
+  /** WebP size set ({"160": url, "320": url, "512": url}), same shape as ShopItem.thumb_urls */
+  photo_thumb_urls?: Record<string, string> | null
+  box_url?: string | null
+  /** "Arriving October" — month-level, set by the owner; "Arriving soon" once the month has passed */
+  expected_label_en?: string | null
+  expected_label_ar?: string | null
+  sort_order?: number | null
+}
+
+export interface UpcomingPayload {
+  enabled: boolean
+  brand: string
+  /** how many cards are live — the headline's number comes from here, never from copy */
+  count: number
+  expected_label_en: string
+  expected_label_ar: string
+  items: UpcomingItem[]
+}
+
+/** Published upcoming cards (whitelisted), cached 60 s at the API and CDN. */
+export function getUpcoming(): Promise<UpcomingPayload> {
+  return request<UpcomingPayload>('/public/market/upcoming')
+}
+
+/** "Notify me when it lands": the restock flow for a card that has no stock yet; the quantity is optional and never a commitment. */
+export function postUpcomingInterest(body: { upcoming_id: number; phone?: string | null; qty_interest?: number | null; device_id?: string; ref?: string | null }): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>('/public/market/upcoming/interest', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) })
+}

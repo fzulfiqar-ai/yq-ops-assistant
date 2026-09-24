@@ -530,6 +530,8 @@ _RESERVED_FALLBACK = frozenset({
     "shop", "admin", "assets", "static", "me", "health", "share", "optout", "login", "invite", "catalog",
     "market", "marketplace", "track", "app", "sw.js", "version.json", "manifest.webmanifest", "robots.txt",
     "quick", "fonts", "about", "help", "ask", "saved",
+    # marketplace brand pages (24-Sep-2026, R1b): /brands/{brand}, /wekome and /coming-soon redirect there
+    "brands", "wekome", "coming-soon",
 })
 
 

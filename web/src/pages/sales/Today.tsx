@@ -9,6 +9,7 @@ import { useToast } from '@/components/Toast'
 import { STATUS_LABEL, STATUS_TONE } from '@/pages/shop-ops/OrderActions'
 import { Badge } from '@/components/ui/badge'
 import { bhd3, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
+import { ComingSoon } from './ComingSoon'
 
 /**
  * /today — the salesman's home. What needs him now (orders waiting to be confirmed), how his
@@ -202,6 +203,9 @@ export default function Today() {
               </ul>
             </section>
           )}
+
+          {/* coming soon: the announced range to pre-sell + the shops interested from my link */}
+          <ComingSoon link={link} />
         </div>
 
         <div className="space-y-4">
