@@ -27,6 +27,13 @@
 # repo goes quiet for two months, this file stops running and Supabase pauses again. Push
 # something, or check the Actions tab, before that clock runs out.
 #
+# MEASURED (21-24 Sep 2026): the "*/10" below really fires with a MEDIAN GAP OF ~201 MINUTES.
+# GitHub throttles scheduled workflows on free public repos far harder than "drifts by several
+# minutes", so this job alone never kept Render warm in business hours (cold /public/market
+# 12.4 s). The Render keep-warm is now the Cloudflare Worker cron (web/wrangler.keepwarm.jsonc,
+# /health every 10 min 06:00-22:59 Bahrain). This workflow stays as the SUPABASE backstop: a
+# 3.4-hour cadence is still hundreds of times inside the 7-day pause window.
+#
 # SETUP: needs two repository secrets — Settings -> Secrets and variables -> Actions.
 # Both were added 15-Sep-2026; names are case-sensitive and must match exactly:
 #   SUPABASE_URL       https://<ref>.supabase.co
@@ -38,9 +45,9 @@ name: keepalive
 
 on:
   schedule:
-    # Every 10 minutes. GitHub's scheduler drifts by several minutes under load, so this
-    # spacing still lands comfortably inside Render's 15-minute idle window. It is far more
-    # often than Supabase needs, which is fine — the DB ping is a single indexed row read.
+    # Nominally every 10 minutes; in practice GitHub fires it about every 3.4 h (see MEASURED
+    # above), which is why the Render keep-warm moved to the Cloudflare Worker cron. Still far
+    # more often than Supabase needs — the DB ping is a single indexed row read.
     - cron: '*/10 * * * *'
   workflow_dispatch:
   # Self-verify: a change to this file runs it straight away rather than waiting for the

@@ -147,10 +147,19 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
 - `GET /shop/orders?status=&q=&limit=50&offset=0` (feature **Shop Orders**; salesman role sees only orders whose
   salesman is linked to their login via `salesmen.user_email`) → `{ "orders": [{ id, order_no, status, customer_name,
   customer_phone, customer_shop, customer_area, salesman_id, salesman_name, total_bhd, items_count, units_count,
-  has_backorder, created_at, updated_at, source, referral_code, coupon_code }], "count": n, "hint"?: "…" }`
+  has_backorder, created_at, updated_at, source, referral_code, coupon_code, notify_failed, notify_attempts }],
+  "count": n, "hint"?: "…" }`. `notify_failed` / `notify_attempts` (24-Sep-2026) are computed server-side from the
+  stored `notify_result` with the same rule as `shop_jobs.notify_retry` (`shop_notify.notify_failed`): every rep/owner
+  channel failed, or the fan-out raised before any send, or no result at all once the order is older than 15 min. The
+  list never carries the whole `notify_result` (addresses and provider error text) — the detail below does.
 - `GET /shop/orders/{id}` → the full order row (`subtotal_bhd`, `discount_bhd`, `delivery_bhd`, `total_bhd`, `coupon_code`,
   `customer_email`, `note`, `notify_result`, …) + `lines[]` + `events[]` + `salesman` + `whatsapp_url` (prefilled message to
-  the customer) + `status_url` + `next_statuses[]`
+  the customer) + `status_url` + `next_statuses[]`. `notify_result` is a flat map channel → `{ sent, reason? }` —
+  `email_rep`, `email_owner` (separate sends, per-recipient `results[]`), `customer_email`, `telegram`, `whatsapp` — plus
+  `at`, `attempts[]`, `recipients[]`; rows before 24-Sep carry one `email` key. The portal shows a **Not notified** badge
+  on `new` orders only (the one status `notify_retry` still acts on); a closed order that was never alerted gets a muted
+  note in its Notifications panel instead. A re-sent alert says so in its subject and intro
+  (`Re-sent (first alert did not reach you) · placed N h ago`).
 - `POST /shop/orders/{id}/status` body `{ "status": "confirmed", "note": "" }` → `{ "ok": true, "order": {…} }`
   (allowed: new→confirmed|cancelled, confirmed→packed|delivered|cancelled, packed→delivered|cancelled)
 - `GET /shop/me` → `{ "salesman": {…}|null, "link": "https://…/c/{token}?ref=furqan", "qr_url": "/shop/salesmen/1/qr.png",
@@ -220,15 +229,22 @@ Salesman default features are `Catalog` + `Shop Orders`; logins are created from
    `mailto:` link, both pre-filled with the salesman's address/number and the whole order. These need no
    keys and work today; the send comes from the customer's own device, so the salesman can reply directly.
 3. **Automatic server email/Telegram** (`app/shop_notify.py`) — fires by itself, with no customer action,
-   as soon as an email provider (`RESEND_API_KEY` or SMTP) or `TELEGRAM_BOT_TOKEN` is set on the host. This
-   is the only path that still reaches the salesman when the customer closes the tab without tapping anything.
+   as soon as an email provider (`RESEND_API_KEY`, `BREVO_API_KEY`, or SMTP off Render) or `TELEGRAM_BOT_TOKEN` is
+   set on the host. This is the only path that still reaches the salesman when the customer closes the tab
+   without tapping anything. **On free Render (today's host) SMTP cannot work**: outbound ports 25/465/587 have
+   been blocked since 26-Sep-2025 and the connect only times out, so `app/emailer.py` does not even register the
+   SMTP provider while `RENDER=true` (override: `EMAIL_SMTP_ENABLED=1` on a paid instance). Until the Resend
+   domain (yqmarketplace.com) is verified or `BREVO_API_KEY` is set, Resend's testing mode delivers to the
+   account owner's address only — reps get **no email**, and the rep leg of `notify_retry` / `unconfirmed_reminder`
+   reaches them through the owner escalation alone.
 
 ## Setup
 1. Apply `scripts/shop_migration.sql` (`python -m scripts.apply_sql scripts/shop_migration.sql`, needs `DATABASE_URL`
    in `.env` — Supabase → Settings → Database → Session pooler URI — or paste the file into the SQL editor).
 2. Add salesmen on **Salesmen** (Shop Admin) — name, phone, email; copy their link / QR. Contact details live only in the DB.
 3. Settings → Shop: minimum order, free-delivery threshold, low-stock thresholds, backorder on/off, margin floor, VAT rate.
-4. Render env: an email provider (`RESEND_API_KEY` or SMTP), `ALERT_EMAIL_TO` (owner copy), optional Telegram, `APP_BASE_URL`.
+4. Render env: an email provider (`RESEND_API_KEY` with a verified domain, or `BREVO_API_KEY`; SMTP only off Render),
+   `ALERT_EMAIL_TO` (owner copy), optional Telegram, `APP_BASE_URL`.
 5. Grant salesmen the **Shop Orders** feature (Team page) and link their login on the Salesmen page (`user_email`).
 6. `python -m tests.test_shop` — pricing engine + live checks.
 
@@ -280,8 +296,19 @@ starting only at 3.35 s, and the API answering in ~1.4 s even when awake. What c
   load without blocking paint. Logo 82 KB PNG → 4 KB WebP.
 - **Sold out last.** `_load_items` sorts sold-out SKUs after every in-stock one; the page keeps sold out last under
   every sort. The Sold out pill is red.
-- **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` pings
-  every 10 minutes, but GitHub's scheduler can drift; only a paid instance removes cold starts entirely.
+- **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` says
+  `*/10`, but measured 21–24 Sep 2026 GitHub fires it with a median gap of ~201 min, so it never kept the API warm
+  in business hours (a cold `/public/market` took 12.4 s). Since 24-Sep the keep-warm is the Cloudflare Worker cron
+  (`web/wrangler.keepwarm.jsonc` + `web/workers/keepwarm.js`, Workers Free): `GET /health` every 10 min from
+  06:00 to 22:59 Bahrain and the scheduler paths every 15 min. `keepalive.yml` stays as the Supabase 7-day-pause
+  backstop; `shop-cron.yml` keeps only its manual trigger (schedule commented out — re-enable only if the Worker
+  is removed). Only a paid instance removes cold starts entirely.
+- **Render free-hours budget.** The Worker's `*/15` scheduler trigger runs around the clock, so the free Render
+  service is awake ~24/7: about **720–744 of the 750 free instance-hours** per workspace per month. That fits only
+  while `yq-ops-assistant` is the workspace's only free web service (verified 24-Sep-2026); a second free service
+  would take the workspace past 750 h late in the month and Render suspends both until the 1st. If that day
+  comes, trim the scheduler trigger to business hours plus a sparse overnight one (Workers Free allows 5 crons)
+  or move the API to a paid instance.
 
 ## Marketplace (16-Sep-2026) — the token-less front door, attribution, lifecycle
 
@@ -345,8 +372,25 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
 - Setting `shop_market_url` (the marketplace origin): when set, `shop.salesman_link()` returns `{market}/{slug}`
   (the QR encodes it) and `shop.market_base()` drives every merchant-facing URL (`status_url`, tracking links in
   emails and WhatsApp). Empty = legacy `/c/{token}?ref=` on `APP_BASE_URL`. Portal screens: `docs/MARKETPLACE.md`.
-- `GET /scheduler/shop-jobs` (X-Agent-Key) — unassigned reminders after `shop_assign_sla_min` (re-alert every 2 h)
-  + session cleanup; called every 15 min by `.github/workflows/shop-cron.yml`.
+- `GET /scheduler/shop-jobs` (X-Agent-Key) — `app/shop_jobs.py`, called every 15 min by the Cloudflare Worker cron
+  (`web/wrangler.keepwarm.jsonc`; `.github/workflows/shop-cron.yml` is manual-only now). The run first takes a
+  **lease** — `app_settings` key `shop_jobs_lock` holding an ISO expiry 10 min ahead, taken with one conditional
+  update (`value < now`) so two callers cannot both win — and answers `{ok:true, skipped:"another run holds the
+  lease"}` while another caller holds a live one; it is released at the end. Jobs, in order:
+  `notify_retry` (orders < 48 h old whose new-order alert reached nobody — `shop_notify.notify_failed` — get
+  `notify_new_order(retry=True)` again, 3 attempts in all, delivered channels kept, the re-send labelled as such);
+  `unassigned_reminder` (after `shop_assign_sla_min`, owner channel, every 2 h);
+  `unconfirmed_reminder` (24-Sep-2026: an assigned order still `new` after `shop_confirm_sla_min` = 120 min from
+  assignment reminds the rep by email + WhatsApp Cloud, at most every `shop_confirm_renotify_hours` = 12; past 2× the
+  SLA the owner channel is told too; **every attempt** is a `shop_order_events` row `event='reminded'` —
+  `detail.rep/owner` = who was reached, `detail.attempted` = who was tried — so a channel that did not deliver is
+  retried at most **hourly**, not every tick; rows older than the order's `assigned_at` are ignored, so a reassigned
+  order starts its cadence over; after **7 days** from assignment or **10 delivered reminders** the per-order chasing
+  stops and the order becomes one line in a single **daily owner digest** (marker `shop_unconfirmed_digest_at`,
+  `reminded` rows with `level:'digest'`); `sla_notified_at` is stamped only when someone was reached); `cleanup`;
+  `stale_data_alert` (Telegram, owner email as fallback). Nudges (unassigned, unconfirmed, digest) go out only
+  **07:00–22:00 Bahrain**; `notify_retry` is the first alert and is not gated. A reminder or the stale marker is
+  recorded only when a channel really delivered. The answer carries `ok:false` + `errors[]` when a job raised.
 
 ### Views for the learning loop
 `v_customer_regulars` (Focus cadence per merchant × SKU: times bought, median qty, cadence days, due flag — service

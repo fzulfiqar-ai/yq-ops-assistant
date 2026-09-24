@@ -118,6 +118,11 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_phone_daily_cap": "10",
     "shop_device_daily_cap": "20",
     "shop_assign_sla_min": "30",
+    # 24-Sep-2026: an assigned order left in 'new' this long gets the rep a reminder (shop_jobs.
+    # unconfirmed_reminder), repeated at most every shop_confirm_renotify_hours; past 2x the SLA
+    # the owner channel is told too. 0 switches the job off.
+    "shop_confirm_sla_min": "120",
+    "shop_confirm_renotify_hours": "12",
     "shop_market_enabled": "1",
     # the merchant-facing origin (the marketplace's hostname); empty = fall back to APP_BASE_URL
     "shop_market_url": "",
@@ -2290,7 +2295,7 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         "id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
         "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
         "referral_code,coupon_code,placed_by,customer_id,attribution_source,attribution_conflict,"
-        "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd", count="exact")
+        "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd,notify_result", count="exact")
     wanted = [s.strip().lower() for s in str(status or "").split(",") if s.strip().lower() in STATUSES]
     if len(wanted) == 1:
         qry = qry.eq("status", wanted[0])
@@ -2304,7 +2309,17 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
             qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%,"
                           f"customer_phone.ilike.%{s}%")
     res = qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
-    return {"orders": res.data or [], "count": res.count if res.count is not None else len(res.data or []),
+    rows = res.data or []
+    # 24-Sep-2026: the list carries two small flags for the "Not notified" badge, never the whole
+    # notify_result (1-1.5 KB per row of addresses and provider error text — the detail endpoint
+    # has it for one order at a time). Same definition as shop_jobs.notify_retry.
+    from app.shop_notify import attempt_count, notify_failed
+    now = _now()
+    for r in rows:
+        nr = r.pop("notify_result", None)
+        r["notify_failed"] = notify_failed(nr, r.get("created_at"), now)
+        r["notify_attempts"] = attempt_count(nr)
+    return {"orders": rows, "count": res.count if res.count is not None else len(rows),
             "counts": status_counts(salesman_id)}
 
 

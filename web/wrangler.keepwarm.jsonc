@@ -1,0 +1,46 @@
+// yq-keepwarm: a Cloudflare Worker with Cron Triggers (Workers Free plan, 24-Sep-2026) that keeps the
+// Render API warm and runs the shop's scheduled endpoints. It replaces the GitHub Actions cadence:
+// keepalive.yml says "*/10" and shop-cron.yml "*/15", but GitHub throttles scheduled workflows on
+// free public repos to a median gap of ~201 min (measured 21-24 Sep), so the API was cold (11-12 s)
+// in business hours, assigned orders were never chased and the 08:00 agent hour was mostly missed.
+// keepalive.yml stays as the Supabase 7-day-pause backstop; shop-cron.yml keeps only its manual
+// trigger (its schedule is commented out — this Worker is the one scheduler, and the API's
+// run_shop_jobs holds a 10-minute lease so a stray second caller is skipped, not doubled).
+//
+// Code: workers/keepwarm.js (no build step). Triggers, in UTC:
+//   */10 3-19 * * *   GET /health                          06:00-22:59 Bahrain, every 10 min
+//   */15 * * * *      GET the SCHEDULER_PATHS with X-Agent-Key (the same call shop-cron.yml makes)
+// Both count as Worker requests: ~200/day against the free 100,000/day. Cron Triggers are free.
+//
+// RENDER FREE-HOURS BUDGET: the */15 scheduler trigger runs around the clock, so the free Render
+// service never idles long enough to spin down. That is ~720-744 of the 750 free instance-hours
+// per workspace per month (Render bills a free instance for the hours it is awake). It fits only
+// while yq-ops-assistant is the ONLY free web service in the workspace (verified 24-Sep-2026); a
+// second free service would push the workspace over 750 h late in the month and Render suspends
+// BOTH until the 1st. Options if that day comes: trim the scheduler trigger to business hours plus
+// a sparse overnight one (Workers Free allows 5 cron triggers), or move the API to a paid instance.
+//
+// DEPLOY (from web/, needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in the env, like deploy_cf.py):
+//   npx --yes wrangler@4 deploy -c wrangler.keepwarm.jsonc
+//   npx --yes wrangler@4 secret put AGENT_API_KEY -c wrangler.keepwarm.jsonc   (paste the Render value)
+// The secret is the API's AGENT_API_KEY (the value behind the X-Agent-Key header); without it the
+// scheduler leg logs an error and does nothing, the health leg still runs.
+// Verify: Workers & Pages -> yq-keepwarm -> Triggers shows both crons; Logs (or
+// `wrangler tail -c wrangler.keepwarm.jsonc`) shows "/health -> HTTP 200" lines. The Worker has
+// no public URL (workers_dev off, no routes) - a dashboard "Send request" answers 404 by design.
+{
+  "name": "yq-keepwarm",
+  "main": "workers/keepwarm.js",
+  "compatibility_date": "2026-09-18",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "vars": {
+    "API_URL": "https://yq-ops-assistant.onrender.com",
+    // Comma-separated; mirrors the loop in .github/workflows/shop-cron.yml. Trim to
+    // "/scheduler/shop-jobs" if the agent reactions or the daily agents should stay on GitHub only.
+    "SCHEDULER_PATHS": "/scheduler/shop-jobs,/scheduler/run-due,/events/dispatch"
+  },
+  "triggers": {
+    "crons": ["*/10 3-19 * * *", "*/15 * * * *"]
+  }
+}

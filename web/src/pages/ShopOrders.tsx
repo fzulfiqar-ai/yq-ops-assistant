@@ -51,6 +51,11 @@ interface ShopOrderRow {
   attribution_conflict?: boolean
   expected_delivery?: string | null
   total_confirmed_bhd?: number | null
+  // 24-Sep-2026: list rows carry two small flags computed server-side (shop.list_orders) for the
+  // "Not notified" badge; the full notify_result (channel by channel) comes with the detail only.
+  notify_failed?: boolean
+  notify_attempts?: number
+  notify_result?: Record<string, unknown> | null
 }
 type StatusCounts = Partial<Record<'new' | 'confirmed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled', number>>
 interface ShopOrdersResp { orders: ShopOrderRow[]; count: number; counts?: StatusCounts }
@@ -67,7 +72,7 @@ interface OrderLine {
   stock_status?: 'in_stock' | 'low_stock' | 'out_of_stock' | null
   backorder?: boolean
 }
-interface OrderEvent { ts: string; event: string; note?: string | null }
+interface OrderEvent { ts: string; event: string; note?: string | null; detail?: Record<string, unknown> | null }
 interface OrderDetail extends ShopOrderRow {
   customer_email?: string | null
   note?: string | null
@@ -78,7 +83,6 @@ interface OrderDetail extends ShopOrderRow {
   coupon?: { code?: string | null; message?: string | null } | null
   lines: OrderLine[]
   events: OrderEvent[]
-  notify_result?: Record<string, unknown> | null
   whatsapp_url?: string | null
   next_statuses?: string[] | null
   status_url?: string | null
@@ -159,11 +163,72 @@ function relTime(iso?: string | null): string {
   }
 }
 
-function eventLabel(event: string): string {
+function eventLabel(event: string, detail?: Record<string, unknown> | null): string {
   if (event === 'created') return 'Order created'
   if (event === 'assigned') return 'Assigned'
+  if (event === 'reminded') {
+    if (detail?.level === 'digest') return 'In the daily office digest'
+    if (detail?.owner) return 'Reminder sent · office told'
+    if (detail?.rep) return 'Reminder sent to the rep'
+    return 'Reminder attempted · rep not reached'
+  }
   if (event.startsWith('status:')) return `Marked ${STATUS_LABEL[event.slice(7)] || event.slice(7)}`
   return event.replace(/[_:]/g, ' ')
+}
+
+// ── notify_result (app/shop_notify.py) ────────────────────────────────────────
+// A flat map channel → { sent, reason? } plus metadata (at, attempts, recipients). Rows written
+// before 24-Sep-2026 carry one `email` key; newer ones `email_rep` + `email_owner`.
+
+/** The channels that tell YQ's own people (the customer's receipt is not one of them). */
+const INTERNAL_CHANNELS = ['email_rep', 'email_owner', 'email', 'telegram', 'whatsapp']
+const CHANNEL_LABEL: Record<string, string> = {
+  email_rep: 'Email · rep', email_owner: 'Email · office', email: 'Email',
+  customer_email: 'Email · customer', telegram: 'Telegram', whatsapp: 'WhatsApp',
+}
+const NOTIFY_META = new Set(['at', 'attempts', 'attempt', 'recipients', 'error'])
+
+function isChannel(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && 'sent' in (v as Record<string, unknown>)
+}
+
+const NOTIFY_GRACE_MIN = 15   // app/shop_notify.NOTIFY_GRACE_MIN
+
+/** The same definition as app/shop_notify.notify_failed() (which also drives notify_retry and the
+ *  list rows' notify_failed): no rep/owner channel delivered, or the fan-out raised before any send
+ *  (a result with only `error`), or no result at all once the order is older than 15 minutes — a
+ *  younger null may still be the background task. Status is the caller's business. */
+function notifyFailed(nr: Record<string, unknown> | null | undefined, createdAt?: string | null): boolean {
+  if (!nr || typeof nr !== 'object') {
+    if (!createdAt) return false
+    const t = Date.parse(createdAt)
+    return Number.isFinite(t) && Date.now() - t >= NOTIFY_GRACE_MIN * 60_000
+  }
+  const flags = INTERNAL_CHANNELS.filter((k) => isChannel(nr[k])).map((k) => Boolean((nr[k] as Record<string, unknown>).sent))
+  return !flags.some(Boolean)
+}
+
+function attemptsOf(nr: Record<string, unknown> | null | undefined): number {
+  if (!nr || typeof nr !== 'object') return 0
+  return Array.isArray(nr.attempts) && nr.attempts.length ? nr.attempts.length : 1
+}
+
+/** A list row: the server flag when the API sends it, else (an older API) the row's own result. */
+function rowNotifyFailed(r: ShopOrderRow): boolean {
+  return typeof r.notify_failed === 'boolean' ? r.notify_failed : notifyFailed(r.notify_result, r.created_at)
+}
+
+/** Only for a 'new' order: that is the one status notify_retry still acts on, and the one where a
+ *  missed alert means nobody is working the order. A closed order gets a muted note in its
+ *  Notifications panel instead. */
+function NotNotifiedBadge({ status, failed, attempts }: { status: string; failed: boolean; attempts?: number }) {
+  if (status !== 'new' || !failed) return null
+  const n = attempts || 0
+  return (
+    <Badge tone="rose" title={`No alert reached the rep or the office${n > 1 ? ` (${n} attempts)` : ''}. Call them.`}>
+      Not notified
+    </Badge>
+  )
 }
 
 function nextStatuses(status: string): string[] {
@@ -232,9 +297,12 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
-function NotifyResult({ data }: { data: Record<string, unknown> }) {
-  const entries = Object.entries(data)
-  if (!entries.length) return <p className="text-[12px] text-muted-foreground">No notifications sent.</p>
+function NotifyResult({ data, status }: { data: Record<string, unknown>; status: string }) {
+  const entries = Object.entries(data).filter(([k]) => !NOTIFY_META.has(k))
+  const attempts = Array.isArray(data.attempts) ? data.attempts.length : 0
+  const error = typeof data.error === 'string' ? data.error : null
+  const failed = notifyFailed(data)
+  if (!entries.length && !error) return <p className="text-[12px] text-muted-foreground">No notifications sent.</p>
   return (
     <div className="space-y-1 rounded-xl border p-3">
       {entries.map(([channel, v]) => {
@@ -242,12 +310,22 @@ function NotifyResult({ data }: { data: Record<string, unknown> }) {
         const sent = obj ? Boolean(obj.sent) : Boolean(v)
         const reason = obj && typeof obj.reason === 'string' ? obj.reason : undefined
         return (
-          <div key={channel} className="flex items-center justify-between text-[12px]">
-            <span className="capitalize text-muted-foreground">{channel}</span>
-            <span className={sent ? 'font-medium text-emerald-600' : 'text-muted-foreground'}>{sent ? 'Sent' : reason || 'Not sent'}</span>
+          <div key={channel} className="flex items-center justify-between gap-3 text-[12px]">
+            <span className="shrink-0 text-muted-foreground">{CHANNEL_LABEL[channel] || channel.replace(/_/g, ' ')}</span>
+            <span className={cn('min-w-0 truncate text-right', sent ? 'font-medium text-emerald-600' : 'text-muted-foreground')} title={sent ? undefined : reason}>
+              {sent ? 'Sent' : reason || 'Not sent'}
+            </span>
           </div>
         )
       })}
+      {error && <div className="text-[12px] text-[#9f1239]">Error: {error}</div>}
+      {(attempts > 1 || failed) && (
+        <div className="pt-1 text-[11px] text-muted-foreground">
+          {attempts > 1 ? `${attempts} attempts` : '1 attempt'}
+          {failed && status === 'new' && (attempts >= 3 ? ' · no more retries — call the rep' : ' · retried while the order is new (up to 3)')}
+          {failed && status !== 'new' && ' · no alert reached the rep or the office when this order came in; it was handled anyway'}
+        </div>
+      )}
     </div>
   )
 }
@@ -377,7 +455,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
         <div className="flex items-center justify-between border-b px-5 py-4">
           <div>
             <div className="font-display text-base font-semibold">{data?.order_no || 'Order'}</div>
-            {data && <div className="mt-1"><StatusPill status={data.status} /></div>}
+            {data && <div className="mt-1 flex flex-wrap items-center gap-1.5"><StatusPill status={data.status} /><NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} /></div>}
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={18} /></button>
         </div>
@@ -507,7 +585,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
                     <li key={i} className="flex gap-2 text-[12px]">
                       <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
                       <div>
-                        <div className="font-medium">{eventLabel(e.event)}</div>
+                        <div className="font-medium">{eventLabel(e.event, e.detail)}</div>
                         <div className="text-muted-foreground">{fmtDateTime(e.ts)}{e.note ? ` · ${e.note}` : ''}</div>
                       </div>
                     </li>
@@ -519,7 +597,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
             {data.notify_result && (
               <section>
                 <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Notifications</div>
-                <NotifyResult data={data.notify_result} />
+                <NotifyResult data={data.notify_result} status={data.status} />
               </section>
             )}
           </div>
@@ -584,7 +662,7 @@ function DeskOrders({
       ) },
     { key: 'items_count', label: 'Items / Units', align: 'right', render: (_, r) => `${num(r.items_count)} / ${num(r.units_count)}` },
     { key: 'total_bhd', label: 'Total', align: 'right', render: (_, r) => bhd(r.total_bhd, 3) },
-    { key: 'status', label: 'Status', render: (_, r) => <span className="inline-flex items-center gap-1.5"><StatusPill status={r.status} />{r.order_kind === 'small' && <Badge tone="accent">Small</Badge>}</span> },
+    { key: 'status', label: 'Status', render: (_, r) => <span className="inline-flex items-center gap-1.5"><StatusPill status={r.status} />{r.order_kind === 'small' && <Badge tone="accent">Small</Badge>}<NotNotifiedBadge status={r.status} failed={rowNotifyFailed(r)} attempts={r.notify_attempts} /></span> },
     { key: 'has_backorder', label: 'Backorder', render: (_, r) => (
         r.has_backorder
           ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600"><PackageX size={12} /> Backorder</span>
@@ -676,6 +754,7 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
         {row.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
         {row.has_backorder && <Badge tone="amber">Backorder</Badge>}
         {row.order_kind === 'small' && <Badge tone="accent">Small order</Badge>}
+        <NotNotifiedBadge status={row.status} failed={rowNotifyFailed(row)} attempts={row.notify_attempts} />
         <span className={cn('ml-auto shrink-0 text-[11px]', MUTED)}>
           {row.order_no}{age ? ` · ${age}` : ''}
         </span>
@@ -805,6 +884,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             {data.source === 'market' && <Badge tone="accent">Marketplace</Badge>}
             {data.attribution_conflict && <Badge tone="amber">Referral conflict</Badge>}
             {data.has_backorder && <Badge tone="amber">Backorder</Badge>}
+            <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
             {data.expected_delivery && <span className={cn('text-[11.5px]', MUTED)}>Expected: {data.expected_delivery}</span>}
           </div>
 
@@ -916,7 +996,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
                   <li key={i} className="flex gap-2.5">
                     <span className="mt-[0.4rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6D4091]" aria-hidden="true" />
                     <div className="min-w-0">
-                      <div className={cn('text-[12.5px] font-semibold', INK)}>{eventLabel(e.event)}</div>
+                      <div className={cn('text-[12.5px] font-semibold', INK)}>{eventLabel(e.event, e.detail)}</div>
                       <div className={cn('text-[11.5px]', MUTED)}>{fmtDateTime(e.ts)}{e.note ? ` · ${e.note}` : ''}</div>
                     </div>
                   </li>

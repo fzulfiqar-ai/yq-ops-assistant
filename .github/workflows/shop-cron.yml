@@ -1,13 +1,24 @@
 # The shop's scheduler (16-Sep-2026). n8n is down and nothing else runs the API's scheduled
 # endpoints, so GitHub's free cron does it:
 #
-#   /scheduler/shop-jobs  — marketplace housekeeping: re-alert admins about orders nobody has
-#                           taken after shop_assign_sla_min minutes; clean up expired sessions.
-#   /scheduler/run-due    — the per-agent schedules (acts only in the 08:00 Bahrain hour, idempotent).
+#   /scheduler/shop-jobs  — marketplace housekeeping (app/shop_jobs.py): retry new-order alerts that
+#                           reached nobody; re-alert admins about orders nobody has taken after
+#                           shop_assign_sla_min; remind reps about assigned orders still 'new' after
+#                           shop_confirm_sla_min (owner told past 2x); clean up sessions; stale-stock alert.
+#   /scheduler/run-due    — the per-agent schedules (first call from 08:00 Bahrain onwards, idempotent).
 #   /events/dispatch      — agent-to-agent reactions (stock.low -> draft PO, etc.), budgeted.
 #
-# GitHub's scheduler drifts by several minutes under load, so a "30-minute" reminder lands at
-# 30-45 minutes. That is fine for an internal nudge; never promise it to a merchant.
+# MEASURED (21-24 Sep 2026): "*/15" here really fired with a median gap of ~201 min — GitHub throttles
+# scheduled workflows on free public repos far beyond "drifts by several minutes". The scheduler is
+# therefore the Cloudflare Worker cron (web/wrangler.keepwarm.jsonc + web/workers/keepwarm.js): the
+# same GETs with the same X-Agent-Key header every 15 min. The schedule below is COMMENTED OUT (24-Sep-
+# 2026, shipped with the Worker deploy): two callers would overlap — the API's run_shop_jobs holds a
+# 10-minute lease (app_settings 'shop_jobs_lock') so a collision is skipped, not doubled, but there is
+# no reason to invite one. This file keeps its manual trigger (Actions -> shop-cron -> Run workflow)
+# as the hand-cranked backstop and self-verify. Never promise a cadence to a merchant.
+# The JSON answer of /scheduler/shop-jobs carries ok:false when a job errored (the HTTP status stays
+# 200) and {ok:true, skipped:"another run holds the lease"} when it yielded; the log line below shows
+# the top-level keys, so "errors" or "skipped" appearing there is the tell.
 #
 # SETUP: one repository secret — Settings -> Secrets and variables -> Actions:
 #   AGENT_API_KEY   the same value as the API's AGENT_API_KEY on Render (X-Agent-Key header).
@@ -15,11 +26,12 @@
 name: shop-cron
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # Re-enable only if the Cloudflare keep-warm Worker (web/wrangler.keepwarm.jsonc) is removed:
+  # schedule:
+  #   - cron: '*/15 * * * *'
   workflow_dispatch:
-  # Self-verify, same as keepalive.yml: editing this file runs it at once instead of waiting for
-  # the schedule (which GitHub throttles to roughly every 2 hours on free public repos).
+  # Self-verify, same as keepalive.yml: editing this file runs it once, straight away. One extra
+  # call is harmless — run_shop_jobs yields to a live lease if the Worker's tick lands at the same time.
   push:
     paths:
       - '.github/workflows/shop-cron.yml'
