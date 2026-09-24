@@ -3,10 +3,11 @@
 # never serves it, Vercel serves it as a harmless static file. CHANGE BOTH FILES TOGETHER.
 # HSTS (21-Sep-2026): 180 days, subdomains included (ops. is on the same zone), no preload yet
 # so it stays reversible; the zone-level always_use_https redirect makes the first hop safe.
-# The asset layer has no rewrite rule: with no 404.html it serves index.html for every unmatched route
-# itself — except /api/*, /assets/* and /fonts/*, which the market's Worker (web/workers/market.js)
-# answers first: the same-origin catalog, and a real 404 for a missing chunk. The Worker sets its own
-# headers on what it answers; these apply to the files the asset layer serves.
+# The asset layer has no rewrite rule: with no 404.html it serves index.html for every unmatched
+# navigation itself. A non-navigation request for a path that is not a file reaches the market's
+# Worker (web/workers/market.js, no run_worker_first): the same-origin catalog at /api/market, and a
+# real 404 for a missing chunk or font. The Worker sets its own headers on what it answers; these
+# apply to the files the asset layer serves.
 # static.cloudflareinsights.com / cloudflareinsights.com: the zone injects Cloudflare Web Analytics
 # (free real-user vitals per hostname, no cookies) into every HTML response; without these two
 # allowances the strict CSP logs a console error on every page.

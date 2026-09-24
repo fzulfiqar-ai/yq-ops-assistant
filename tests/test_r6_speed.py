@@ -348,14 +348,20 @@ def _jsonc(rel: str) -> dict:
     return json.loads(txt)
 
 
-@test("wrangler.market.jsonc: Worker main + ASSETS binding, run_worker_first for /api, /assets, /fonts; routes unchanged")
+@test("wrangler.market.jsonc: Worker main + ASSETS binding, NO run_worker_first (files and navigations never spend an invocation); routes unchanged")
 def _():
     cfg = _jsonc("web/wrangler.market.jsonc")
     assert cfg["main"] == "workers/market.js" and cfg["name"] == "yq-marketplace"
     a = cfg["assets"]
     assert a["directory"] == "./dist-market" and a["binding"] == "ASSETS"
-    assert a["not_found_handling"] == "single-page-application", "every other path keeps the SPA fallback"
-    assert a["run_worker_first"] == ["/api/*", "/assets/*", "/fonts/*"]
+    assert a["not_found_handling"] == "single-page-application", "a navigation to an unknown path is the asset layer's index.html, free"
+    # review of 24-Sep-2026: /assets/* and /fonts/* in run_worker_first = every chunk a billed
+    # invocation and, past Workers Free (100k/day), a 429 instead of the file; and ANY run_worker_first
+    # array turns on static routing, under which the SPA fallback answers every miss itself and the
+    # Worker never sees a missing chunk. With no list, a non-navigation miss (a chunk fetch, the
+    # /api/market fetch) reaches the Worker and a navigation gets index.html for free.
+    assert "run_worker_first" not in a, a
+    assert cfg["compatibility_date"] >= "2025-04-01", "assets_navigation_prefers_asset_serving must be on"
     assert [r["pattern"] for r in cfg["routes"]] == ["yqmarketplace.com", "www.yqmarketplace.com"]
     assert (ROOT / "web/workers/market.js").exists()
     assert _jsonc("web/wrangler.portal.jsonc").get("main") is None, "the portal stays assets-only"
@@ -368,6 +374,14 @@ def _():
     assert "'https://yq-ops-assistant.onrender.com'" in src and "'/public/market'" in src and "'/api/market'" in src
     assert "stale-while-revalidate" in src and "stale-if-error" in src
     assert "if (fresh.status !== 200) return passThrough(fresh)" in src, "a non-200 is never stored"
+    assert "if (!/application\\/json/i.test(type)) return null" in src, "a non-JSON 200 is passed through, never relabelled"
+    # review of 24-Sep-2026: a 404/410 is the origin's answer (store closed) — copy deleted, never covered
+    assert "function isGone(status)" in src and "status === 404 || status === 410" in src
+    assert src.count("await remove(cache, key)") == 2, "deleted in the soft-timeout branch AND in the background refresh"
+    assert "res.status >= 500 || res.status === 429" in src, "the last good copy covers 5xx, 429 and the synthetic 504 only"
+    assert "ORIGIN_BG_MS = 25000" in src and "ORIGIN_HARD_MS" not in src.split("async function revalidate", 1)[1].split("\n}", 1)[0], "background work fits the ~30 s waitUntil window"
+    assert "x-yq-grace-until" in src and "async function mark(" in src, "a soft failure opens a grace window for the visitors behind"
+    assert "x-yq-reps" in src and "async function canonicalRef(" in src, "unknown slugs fold onto the no-ref copy"
     assert "'if-none-match'" in src and "etagMatches(" in src
     assert "'cache-control': 'no-store'" in src and "status: 404" in src
     assert "cache: 'no-store'" in src, "the subrequest bypasses Cloudflare's transparent fetch cache"
@@ -483,8 +497,28 @@ def _():
     for needle in ("render_deploy.py", "wrangler versions upload", "wrangler versions deploy", "@100%",
                    "db_backup", "--restore", "prod_gate", "compare", "apply_sql", "--rehearse", "audit_grants",
                    "/health", "market_qa.py", "shop_events_error_migration.sql", "make_market_thumbs",
-                   "Stop rule", "Rollback"):
+                   "Stop rule", "Rollback",
+                   # review of 24-Sep-2026
+                   "Sec-Fetch-Mode: cors", "Sec-Fetch-Mode: navigate", "Workers Free", "429", "catalog_src",
+                   "percentile_cont", "deploys the web at push time"):
         assert needle in doc, needle
+    assert "curl -sI https://yq-ops-assistant" not in doc, "FastAPI answers HEAD with 405: the API smoke is a GET"
+    assert "-D - -H 'Accept-Encoding: gzip'" in doc and "If-None-Match: <that etag>" in doc
+    api_step = doc.split("### 3. API", 1)[1].split("### 4. Web", 1)[0]
+    assert api_step.index("make_market_thumbs --only-missing") < api_step.index("render_deploy deploy --commit"), "thumbs before the API deploy, in that order on the page too"
+
+
+@test("review fixes: guarded catalog parses, the package chain ends on the product photo, analytics carries catalog_src + the LCP phases")
+def _():
+    api = _read("web/src/market/lib/marketApi.ts")
+    assert api.count("JSON.parse(") == 2 and len(re.findall(r"try \{\s*(?:const )?data = JSON\.parse\(", api)) == 2, "both parses are guarded"
+    assert "return fetchMarket(ref)" in api and "request<CatalogPayload>(marketApiPath(ref))" in api, "a body that does not parse falls back to the API"
+    photos = _read("web/src/market/lib/photos.ts")
+    assert "kind === 'package' ? item?.product_image_url : null, item?.thumb_url" in photos, "a broken package original ends on the product photo, not the empty tile"
+    body = _read("app/shop.py").split("def analytics(", 1)[1].split("\n    return {", 1)[0]
+    for k in ('"samples"', '"visits"', '"lcp_ttfb_ms_p75"', '"lcp_load_ms_p75"', '"lcp_render_ms_p75"', '"catalog_ms_p75"', '"catalog_src"'):
+        assert k in body, k
+    assert 'for k in ("lcp", "inp", "cls")' in body, "samples = beacons that carry a metric; visits = every beacon"
 
 
 def main() -> int:

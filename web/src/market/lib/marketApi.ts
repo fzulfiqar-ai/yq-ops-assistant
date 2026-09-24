@@ -53,7 +53,13 @@ export function getMarket(ref?: string | null): Promise<CatalogPayload> {
       .catch(() => {})
     return early.res.then(
       (text) => {
-        const data = JSON.parse(text) as CatalogPayload
+        let data: CatalogPayload
+        try {
+          data = JSON.parse(text) as CatalogPayload
+        } catch {
+          // a 200 that is not the catalog after all (a garbled or HTML body): the ordinary path, API last
+          return fetchMarket(ref)
+        }
         noteCatalog(early.src || 'pre')
         return data
       },
@@ -64,14 +70,19 @@ export function getMarket(ref?: string | null): Promise<CatalogPayload> {
 }
 
 /** Edge first, API second. A non-JSON same-origin answer is the SPA's index.html (no Worker in
- *  front), a non-2xx one is passed through from the origin (404 = closed, 5xx = down): both fall
- *  back to the API call, whose error then carries the real status for MarketContext. */
+ *  front), a non-2xx one is passed through from the origin (404 = closed, 5xx = down), and a body
+ *  that says JSON but does not parse is treated the same: all fall back to the API call, whose
+ *  error then carries the real status for MarketContext. */
 async function fetchMarket(ref?: string | null): Promise<CatalogPayload> {
   const edge = await fetchEdge(marketPath(ref))
   if (edge) {
-    const data = JSON.parse(edge.text) as CatalogPayload
-    noteCatalog(edge.src)
-    return data
+    try {
+      const data = JSON.parse(edge.text) as CatalogPayload
+      noteCatalog(edge.src)
+      return data
+    } catch {
+      /* not the catalog: the API decides */
+    }
   }
   const data = await request<CatalogPayload>(marketApiPath(ref))
   noteCatalog('api')

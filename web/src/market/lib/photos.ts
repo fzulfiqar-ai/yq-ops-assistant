@@ -10,10 +10,11 @@ import type { ShopItem } from '@/lib/shopApi'
  * every merchant downloads; the product 1024 is read from the payload when it is there and derived
  * the same way from an older payload.
  *
- * Every chain ends with the original, and ProductImage / Lightbox walk on when a candidate 404s:
+ * Every chain ends with the original (the package chain then walks on to the product photo and its
+ * thumb, as the panel did before R6), and ProductImage / Lightbox walk on when a candidate 404s:
  * a photo whose renditions are not built yet (uploaded before R6, before the release backfill —
  * `python -m scripts.make_market_thumbs --only-missing`) costs one failed request and then shows
- * exactly what it showed before.
+ * exactly what it showed before; a broken package original shows the product, not "Photo coming soon".
  */
 export type PhotoKind = 'product' | 'package'
 export type PhotoItem = Pick<ShopItem, 'thumb_url' | 'thumb_urls' | 'product_image_url' | 'package_image_url'>
@@ -41,11 +42,12 @@ export function wantSize(cssPx: number): LargeSize {
   return cssPx * dpr > 560 ? 1024 : 512
 }
 
-/** The fallback chain for a large view: the wanted rendition, the smaller one, then the original(s). */
+/** The fallback chain for a large view: the wanted rendition, the smaller one, the original, then
+ *  (package) the product photo — so a broken package file ends on the product, never on the empty tile. */
 export function largePhotoChain(item: PhotoItem | null | undefined, kind: PhotoKind, cssPx: number): string[] {
   const want = wantSize(cssPx)
   const original = kind === 'package' ? item?.package_image_url : item?.product_image_url
-  const chain = [rendition(item, kind, want), want === 1024 ? rendition(item, kind, 512) : null, original, kind === 'product' ? item?.thumb_url : null]
+  const chain = [rendition(item, kind, want), want === 1024 ? rendition(item, kind, 512) : null, original, kind === 'package' ? item?.product_image_url : null, item?.thumb_url]
   const out: string[] = []
   for (const s of chain) if (typeof s === 'string' && s.length > 0 && !out.includes(s)) out.push(s)
   return out

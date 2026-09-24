@@ -3691,8 +3691,22 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
     def _p75(key: str):
         vals = sorted(_f(_meta(e).get(key)) for e in ev if e.get("event") == "vitals" and _meta(e).get(key) is not None)
         return round(vals[min(len(vals) - 1, int(len(vals) * 0.75))], 3) if vals else None
-    vitals = {"samples": sum(1 for e in ev if e.get("event") == "vitals"),
-              "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls")}
+    beacons = [e for e in ev if e.get("event") == "vitals"]
+    # R6: one beacon per visit on pagehide, even with no metric (an abandoned cold visit), so `samples`
+    # is the beacons that carry a metric and `visits` all of them; the catalog source and the LCP
+    # phases say where the time went (docs/RELEASE.md, the watch) — the portal card shows the three
+    # core numbers, the rest is read from this JSON or in SQL
+    with_metric = [e for e in beacons if any(_meta(e).get(k) is not None for k in ("lcp", "inp", "cls"))]
+    by_src: dict[str, int] = {}
+    for e in beacons:
+        src = str(_meta(e).get("catalog_src") or "none")[:24]
+        by_src[src] = by_src.get(src, 0) + 1
+    vitals = {"samples": len(with_metric), "visits": len(beacons),
+              "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls"),
+              "lcp_ttfb_ms_p75": _p75("lcp_ttfb"), "lcp_delay_ms_p75": _p75("lcp_delay"),
+              "lcp_load_ms_p75": _p75("lcp_load"), "lcp_render_ms_p75": _p75("lcp_render"),
+              "catalog_ms_p75": _p75("catalog_ms"),
+              "catalog_src": sorted(({"src": k, "visits": v} for k, v in by_src.items()), key=lambda r: -r["visits"])}
     return {
         "search": search, "rails": rail_perf, "engagement": engagement, "ops": ops, "identity": identity, "vitals": vitals,
         "days": days, "since": since[:10],

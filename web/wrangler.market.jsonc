@@ -1,15 +1,30 @@
 // The marketplace on Cloudflare (Workers static assets — what Cloudflare now calls Pages), 20-Sep-2026.
-// The `assets` block serves web/dist-market as-is: every request is a static-asset request (free and
-// unlimited on the Free plan) EXCEPT the three prefixes in run_worker_first, which reach the script in
-// workers/market.js first (release R6, 24-Sep-2026):
-//   /api/*     the same-origin catalog (/api/market[?ref=]) — the Render origin through the Cache API:
-//              fresh 60 s, stale-while-revalidate, the last good copy when the origin is cold or down
-//   /assets/*  a missing chunk is a real 404 (no-store) instead of index.html + "immutable"
-//   /fonts/*   same
-// `single-page-application` still returns index.html with HTTP 200 for any other path that is not a
-// file (the old Vercel rewrite); response headers for static files come from public/_headers, copied
-// into the build root by Vite. The Worker sets its own headers on what it answers itself.
-// Budget: only run_worker_first requests count against Workers Free (100k/day) — see workers/market.js.
+// The `assets` block serves web/dist-market as-is. What reaches the script in workers/market.js
+// (release R6, 24-Sep-2026, revised after review) is decided by Cloudflare's router, in this order:
+//   a path that IS a file               the asset layer: free, unlimited, no invocation (every chunk, font,
+//                                       icon, sw.js, version.json)
+//   a NAVIGATION to an unknown path     index.html from the asset layer (`single-page-application`), free,
+//   (Sec-Fetch-Mode: navigate)          no invocation — assets_navigation_prefers_asset_serving, default
+//                                       since compatibility date 2025-04-01
+//   any other unknown path              the Worker: /api/market[?ref=] (a fetch, never a navigation) → the
+//                                       Render origin through the Cache API — fresh 60 s, stale-while-
+//                                       revalidate, the last good copy when the origin is cold or down, a
+//                                       404 forwarded when the store is closed; a missing chunk or font
+//                                       (a script/font fetch is not a navigation) → a real 404 + no-store
+//                                       instead of index.html + "immutable"; anything else → the binding's
+//                                       own SPA answer
+// There is deliberately NO run_worker_first. The first R6 cut listed /api/*, /assets/* and /fonts/*:
+// every chunk request was then a billed invocation and, past the Workers Free cap (100k/day), a 429
+// instead of the file — the whole store down until the daily reset. And listing ONLY /api/* does not
+// work either: any run_worker_first array turns on "static routing", under which the asset layer's
+// SPA fallback answers every miss itself (index.html + immutable for a missing chunk, the audit's
+// D-10) and the Worker never sees it — read in the shared router (@cloudflare/workers-shared
+// asset-worker canFetch: has_static_routing keeps not_found_handling for the existence check) and
+// verified in wrangler dev on all three configurations, 24-Sep-2026. /api/market needs no rule: it
+// is not a file, so a fetch of it reaches the Worker by the miss path. Budget and the cliff: the
+// header of workers/market.js.
+// Response headers for static files come from public/_headers, copied into the build root by Vite; the
+// Worker sets its own headers on what it answers itself.
 // Deploy: python -m scripts.deploy_cf market (builds first) or .github/workflows/cf-deploy.yml; a
 // release uploads a version and switches traffic with `wrangler versions deploy` (docs/RELEASE.md),
 // so a rollback is the previous version @100%.
@@ -22,15 +37,16 @@
   "assets": {
     "directory": "./dist-market",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/assets/*", "/fonts/*"]
+    "not_found_handling": "single-page-application"
   },
   "routes": [
     { "pattern": "yqmarketplace.com", "custom_domain": true },
     { "pattern": "www.yqmarketplace.com", "custom_domain": true }
   ],
   "workers_dev": true,
-  // Workers Logs (free tier: 200k events/day, 3-day retention): the Worker logs one line per origin
-  // timeout/error and nothing per hit, so the volume is tiny and a cold-origin day is visible.
+  // Workers Logs (free tier: 200k events/day, 3-day retention): one invocation event per request that
+  // reaches the script — /api/market and the odd missing chunk, the same small set as the budget —
+  // plus the Worker's own console line on an origin timeout/error (nothing per hit), so the volume is
+  // tiny and a cold-origin day is visible.
   "observability": { "enabled": true }
 }
