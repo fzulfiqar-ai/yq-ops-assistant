@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Copy, ExternalLink, QrCode, X, Check, Loader2 } from 'lucide-react'
+import { Plus, Pencil, Trash2, Copy, ExternalLink, QrCode, X, Check, Loader2, UserX } from 'lucide-react'
 import { apiGet, apiPost, apiPatch, apiDelete, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import { useToast } from '@/components/Toast'
@@ -33,9 +33,45 @@ interface Salesman {
   photo_url?: string | null
   public_profile?: boolean
   public_whatsapp?: boolean
+  // distinct orders / merchants / kickback statements that point at this rep (all time).
+  // null = the API could not count them. A referenced rep is never deleted (the server
+  // refuses too): deactivate instead. `statements` arrives with the R1 API (older API: absent).
+  references?: { orders: number; merchants: number; statements?: number } | null
 }
 interface SalesmenResp { salesmen: Salesman[] }
 interface TeamUsersResp { users: { email: string }[] }
+
+/** True when the API could not count what references this rep (or is an older API without the
+ *  counts): the row must not claim history as a fact, nor offer Delete. */
+function refsUnknown(r: Salesman): boolean {
+  return r.references === undefined || r.references === null
+}
+
+/** Why a rep cannot be deleted, or null when nothing references them. Unknown counts read as
+ *  "keep" — the server would refuse anyway, and a wrong Delete button is worse than a missing one. */
+function keepReason(r: Salesman): string | null {
+  const refs = r.references
+  if (refs === undefined || refs === null) return 'Could not check this rep\'s orders — deactivate instead of deleting.'
+  const statements = refs.statements ?? 0
+  if (refs.orders + refs.merchants + statements === 0) return null
+  const parts = [
+    refs.orders ? `${refs.orders} order${refs.orders === 1 ? '' : 's'}` : '',
+    refs.merchants ? `${refs.merchants} merchant${refs.merchants === 1 ? '' : 's'}` : '',
+    statements ? `${statements} kickback statement${statements === 1 ? '' : 's'}` : '',
+  ].filter(Boolean)
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0]
+  return `Has ${list} — reps with history are deactivated, never deleted, so their orders and statements keep their name.`
+}
+
+/** The API's error detail (FastAPI wraps it as {"detail": "…"}); falls back to the raw body. */
+function apiMessage(e: unknown, fallback: string): string {
+  if (!(e instanceof ApiError)) return fallback
+  try {
+    const d = (JSON.parse(e.body) as { detail?: unknown }).detail
+    if (typeof d === 'string' && d) return d
+  } catch { /* not JSON */ }
+  return e.body.slice(0, 160) || fallback
+}
 
 /** Fetch a protected binary endpoint (the QR PNG needs the bearer token) and hand back an
  *  object URL — plain <img src> can't carry an Authorization header. */
@@ -256,14 +292,22 @@ export default function Salesmen() {
   })
 
   async function remove(r: Salesman) {
-    if (!window.confirm(`Remove ${r.name}? Their referral link will stop working.`)) return
+    // Only a rep nobody references reaches here (the row shows Deactivate otherwise); the
+    // server refuses with 409 regardless, and that reason is what the toast shows.
+    if (!window.confirm(`Remove ${r.name}? Their referral link will stop working. This cannot be undone.`)) return
     try {
       await apiDelete(`/shop/salesmen/${r.id}`)
       toast('Salesman removed.', 'success')
       refresh()
     } catch (e) {
-      toast(e instanceof ApiError ? e.body.slice(0, 160) : 'Delete failed.', 'error')
+      toast(apiMessage(e, 'Delete failed.'), 'error')
+      refresh()
     }
+  }
+
+  function deactivate(r: Salesman) {
+    if (!window.confirm(`Deactivate ${r.name}? Their link and storefront stop working; their orders and merchants keep their name.`)) return
+    toggleActive.mutate(r)
   }
 
   const emailOptions = (teamData?.users || []).map((u) => u.email)
@@ -295,12 +339,27 @@ export default function Salesmen() {
         <Toggle checked={r.is_active} onChange={() => toggleActive.mutate(r)} label={r.is_active ? 'Active' : 'Inactive'} />
       ) },
     { key: 'orders_30d', label: 'Orders (30d)', align: 'right', render: (_, r) => num(r.orders_30d) },
-    { key: 'id', label: '', align: 'right', render: (_, r) => (
-        <div className="flex justify-end gap-1.5">
-          <Button type="button" variant="outline" size="sm" onClick={() => setEdit(r)}><Pencil size={13} /></Button>
-          <Button type="button" variant="destructive" size="sm" onClick={() => remove(r)}><Trash2 size={13} /></Button>
-        </div>
-      ) },
+    { key: 'id', label: '', align: 'right', render: (_, r) => {
+        const keep = keepReason(r)
+        return (
+          <div className="flex justify-end gap-1.5">
+            <Button type="button" variant="outline" size="sm" onClick={() => setEdit(r)}><Pencil size={13} /></Button>
+            {keep === null ? (
+              <Button type="button" variant="destructive" size="sm" title="Remove this rep (nothing references them)" onClick={() => remove(r)}>
+                <Trash2 size={13} />
+              </Button>
+            ) : r.is_active ? (
+              <Button type="button" variant="outline" size="sm" title={keep} onClick={() => deactivate(r)}>
+                <UserX size={13} /> Deactivate
+              </Button>
+            ) : (
+              <span className="self-center text-[12px] text-muted-foreground" title={keep}>
+                {refsUnknown(r) ? 'Kept (could not check history)' : 'Kept (has history)'}
+              </span>
+            )}
+          </div>
+        )
+      } },
   ]
 
   return (
@@ -312,7 +371,8 @@ export default function Salesmen() {
         Each salesman gets a personal storefront link and QR code — orders placed through it are credited
         to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
         Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
-        marketplace instead of the token link. Contact details are stored in the database only.
+        marketplace instead of the token link. Contact details are stored in the database only. A rep with
+        orders, merchants or a kickback statement can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
       </p>
 
       {isLoading ? (

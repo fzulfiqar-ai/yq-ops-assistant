@@ -104,6 +104,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         status: str = Field(max_length=16)
         note: str | None = Field(default=None, max_length=500)
 
+    class TestFlagRequest(BaseModel):
+        is_test: bool
+
     class SalesmanIn(BaseModel):
         name: str | None = Field(default=None, max_length=80)
         phone: str | None = Field(default=None, max_length=32)
@@ -202,6 +205,14 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         d = wa_digits(cfg.wa_human_number) if cfg.wa_human_number else None
         return {"name": "YQ Bahrain", "phone": d} if d else None
 
+    def _conflict_or_400(e: ShopError) -> HTTPException:
+        """A lost compare-and-swap (someone moved the order first), a retry that caught its own
+        first request still in flight, or a refused delete is a 409 so the client can tell
+        'refresh / wait and retry' from a validation mistake."""
+        msg = str(e)
+        code = 409 if msg in (shop.CAS_CONFLICT_MSG, shop.IN_FLIGHT_MSG, shop.SALESMAN_REFERENCED_MSG) else 400
+        return HTTPException(status_code=code, detail=msg)
+
     # ── public ────────────────────────────────────────────────────────────────
     @app.post("/public/shop/{token}/quote")
     @limiter.limit("60/minute")
@@ -222,7 +233,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request))
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_new_order, o["id"])
         sm = o.get("salesman") or {}
         contact = ({"name": sm.get("name"), "phone": sm.get("whatsapp") or sm.get("phone")} if sm
@@ -297,7 +308,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), market=True)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e       # 409 when the first request is still in flight
         if not o.get("duplicate"):
             background.add_task(shop_notify.notify_new_order, o["id"])
         sm = o.get("salesman") or {}
@@ -330,7 +341,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.cancel_by_customer(order_token, body.reason if body else None)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_customer_cancel, o["id"])
         shop.record_event({"event": "cancel", "salesman_id": o.get("salesman_id"), "device_id": o.get("device_id"),
                            "customer_id": o.get("customer_id"), "meta": {"reason": (body.reason if body else None) or ""}},
@@ -536,7 +547,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), staff_email=user.email)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_new_order, o["id"])
         log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"]})
         sm = o.get("salesman") or {}
@@ -604,7 +615,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.set_status(order_id, body.status, body.note, actor=user.email, allowed=allowed)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_status, order_id, body.status, body.note)
         log_event(user.email, "shop.order_status", detail={"order_id": order_id, "status": body.status})
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, body.status)
@@ -625,7 +636,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             o = shop.confirm_order(order_id, [ln.model_dump() for ln in body.lines], body.expected_delivery,
                                    body.note, actor=user.email)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_status, order_id, "confirmed", body.note)
         log_event(user.email, "shop.order_confirm",
                   detail={"order_id": order_id, "changed": o.get("changed"), "removed": o.get("removed")})
@@ -636,6 +647,22 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         o.pop("ip_hash", None)
         return {"ok": True, "order": o, "totals": totals, "changed": o.get("changed"), "removed": o.get("removed"),
                 "whatsapp_url": o["whatsapp_url"], "next_statuses": o["next_statuses"]}
+
+    @app.patch("/shop/orders/{order_id}/test")
+    def shop_order_test_flag(order_id: int, body: TestFlagRequest,
+                             admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Admin only: flag an order as a test or clear the flag. It stays on record (never
+        deleted) and leaves exactly: /shop/analytics, the rep KPIs in /shop/me, the checkout
+        quick-pick and Orders (30d) on the Salesmen page. It still shows in the order list and
+        its status buckets — cancel it with a note if it must leave the queue. Needs
+        shop_orders.is_test (M2); 400 naming the migration until then."""
+        try:
+            o = shop.set_test_flag(order_id, body.is_test, actor=admin.email)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if str(e) == "Order not found." else 400, detail=str(e)) from e
+        log_event(admin.email, "shop.order_test_flag",
+                  detail={"order_id": order_id, "order_no": o.get("order_no"), "is_test": body.is_test})
+        return {"ok": True, "order_id": order_id, "order_no": o.get("order_no"), "is_test": bool(o.get("is_test"))}
 
     @app.post("/shop/orders/{order_id}/assign")
     def shop_order_assign(order_id: int, body: AssignRequest, background: BackgroundTasks,
@@ -713,8 +740,16 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.delete("/shop/salesmen/{salesman_id}")
     def shop_salesmen_delete(salesman_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
-        shop.delete_salesman(salesman_id)
-        log_event(user.email, "shop.salesman_delete", detail={"id": salesman_id})
+        """Only a rep nobody references can go; one with orders or merchants is refused (409) —
+        deactivate instead. The audit entry names the rep, since the row is gone afterwards."""
+        try:
+            gone = shop.delete_salesman(salesman_id)
+        except ShopError as e:
+            if str(e) == "Salesman not found.":
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
+        log_event(user.email, "shop.salesman_delete",
+                  detail={"id": salesman_id, "name": gone.get("name"), "focus_name": gone.get("focus_name")})
         return {"ok": True}
 
     @app.get("/shop/salesmen/{salesman_id}/qr.png")
