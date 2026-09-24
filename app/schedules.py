@@ -1,9 +1,13 @@
 """Per-agent scheduling (NEXT bucket).
 
-The admin picks a cadence per agent in the portal (Off / Daily / Weekly); a single hourly call
-to GET /scheduler/run-due (from n8n) runs + emails the agents that are due. All scheduled runs are
-at 08:00 Asia/Bahrain; weekly = Monday. A per-day `last_ran` guard makes it idempotent, so calling
-run-due more than once in the 8 o'clock hour never double-sends.
+The admin picks a cadence per agent in the portal (Off / Daily / Weekly); a periodic call to
+GET /scheduler/run-due (the Cloudflare Worker cron every 15 min, GitHub's shop-cron as backstop)
+runs + emails the agents that are due. Scheduled runs happen at the first call from 08:00
+Asia/Bahrain onwards; weekly = Monday. A per-day `last_ran` guard makes it idempotent, so however
+many calls land after 08:00 nothing double-sends.
+
+24-Sep-2026: the check used to be `hour == RUN_HOUR`. GitHub's free scheduler fires roughly every
+3.4 h, so the 08:00 hour was missed on most days and the daily agents never ran.
 """
 from __future__ import annotations
 
@@ -39,14 +43,14 @@ def set_schedule(agent: str, cadence: str, by: str = "") -> dict:
 
 
 def run_due(send: bool = True) -> dict:
-    """Run + email the agents due right now. n8n calls this hourly; it acts only in the 08:00
-    Bahrain hour and never runs an agent twice in the same day."""
+    """Run + email the agents due right now. Called every 15 min (Worker cron) or so; it acts from
+    08:00 Bahrain onwards and never runs an agent twice in the same day (`last_ran`)."""
     from app.agents import AGENTS, run_agent
     from app.emailer import send_agent
 
     now = datetime.now(timezone.utc).astimezone(_BAHRAIN)
-    if now.hour != RUN_HOUR:
-        return {"ran": [], "count": 0, "skipped": f"not the run hour (Bahrain {now.hour:02d}:00)"}
+    if now.hour < RUN_HOUR:
+        return {"ran": [], "count": 0, "skipped": f"before the run hour (Bahrain {now.hour:02d}:{now.minute:02d})"}
     today = now.date().isoformat()
     client = get_client()
     rows = client.table("agent_schedules").select("agent,cadence,last_ran").execute().data or []

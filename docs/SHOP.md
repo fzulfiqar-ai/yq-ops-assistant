@@ -134,7 +134,10 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
   has_backorder, created_at, updated_at, source, referral_code, coupon_code }], "count": n, "hint"?: "…" }`
 - `GET /shop/orders/{id}` → the full order row (`subtotal_bhd`, `discount_bhd`, `delivery_bhd`, `total_bhd`, `coupon_code`,
   `customer_email`, `note`, `notify_result`, …) + `lines[]` + `events[]` + `salesman` + `whatsapp_url` (prefilled message to
-  the customer) + `status_url` + `next_statuses[]`
+  the customer) + `status_url` + `next_statuses[]`. `notify_result` (also on list rows since 24-Sep-2026) is a flat map
+  channel → `{ sent, reason? }` — `email_rep`, `email_owner` (separate sends, per-recipient `results[]`), `customer_email`,
+  `telegram`, `whatsapp` — plus `at`, `attempts[]`, `recipients[]`; rows before 24-Sep carry one `email` key. The portal
+  shows a **Not notified** badge when no rep/owner channel delivered.
 - `POST /shop/orders/{id}/status` body `{ "status": "confirmed", "note": "" }` → `{ "ok": true, "order": {…} }`
   (allowed: new→confirmed|cancelled, confirmed→packed|delivered|cancelled, packed→delivered|cancelled)
 - `GET /shop/me` → `{ "salesman": {…}|null, "link": "https://…/c/{token}?ref=furqan", "qr_url": "/shop/salesmen/1/qr.png",
@@ -263,8 +266,12 @@ starting only at 3.35 s, and the API answering in ~1.4 s even when awake. What c
   load without blocking paint. Logo 82 KB PNG → 4 KB WebP.
 - **Sold out last.** `_load_items` sorts sold-out SKUs after every in-stock one; the page keeps sold out last under
   every sort. The Sold out pill is red.
-- **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` pings
-  every 10 minutes, but GitHub's scheduler can drift; only a paid instance removes cold starts entirely.
+- **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` says
+  `*/10`, but measured 21–24 Sep 2026 GitHub fires it with a median gap of ~201 min, so it never kept the API warm
+  in business hours (a cold `/public/market` took 12.4 s). Since 24-Sep the keep-warm is the Cloudflare Worker cron
+  (`web/wrangler.keepwarm.jsonc` + `web/workers/keepwarm.js`, Workers Free): `GET /health` every 10 min from
+  06:00 to 22:59 Bahrain and the scheduler paths every 15 min. `keepalive.yml` stays as the Supabase 7-day-pause
+  backstop. Only a paid instance removes cold starts entirely.
 
 ## Marketplace (16-Sep-2026) — the token-less front door, attribution, lifecycle
 
@@ -328,8 +335,15 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
 - Setting `shop_market_url` (the marketplace origin): when set, `shop.salesman_link()` returns `{market}/{slug}`
   (the QR encodes it) and `shop.market_base()` drives every merchant-facing URL (`status_url`, tracking links in
   emails and WhatsApp). Empty = legacy `/c/{token}?ref=` on `APP_BASE_URL`. Portal screens: `docs/MARKETPLACE.md`.
-- `GET /scheduler/shop-jobs` (X-Agent-Key) — unassigned reminders after `shop_assign_sla_min` (re-alert every 2 h)
-  + session cleanup; called every 15 min by `.github/workflows/shop-cron.yml`.
+- `GET /scheduler/shop-jobs` (X-Agent-Key) — `app/shop_jobs.py`, called every 15 min by the Cloudflare Worker cron
+  (`web/wrangler.keepwarm.jsonc`; `.github/workflows/shop-cron.yml` is the ~3.4 h backstop). Jobs, in order:
+  `notify_retry` (orders < 48 h old whose new-order alert reached nobody get `notify_new_order` again, 3 attempts
+  in all, delivered channels kept); `unassigned_reminder` (after `shop_assign_sla_min`, owner channel, every 2 h);
+  `unconfirmed_reminder` (24-Sep-2026: an assigned order still `new` after `shop_confirm_sla_min` = 120 min from
+  assignment reminds the rep by email + WhatsApp Cloud, at most every `shop_confirm_renotify_hours` = 12; past 2× the
+  SLA the owner channel is told too; each nudge is a `shop_order_events` row `event='reminded'` and stamps
+  `sla_notified_at`); `cleanup`; `stale_data_alert` (Telegram, owner email as fallback). A reminder or the stale marker
+  is recorded only when a channel really delivered. The answer carries `ok:false` + `errors[]` when a job raised.
 
 ### Views for the learning loop
 `v_customer_regulars` (Focus cadence per merchant × SKU: times bought, median qty, cadence days, due flag — service

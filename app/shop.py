@@ -96,6 +96,11 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_phone_daily_cap": "10",
     "shop_device_daily_cap": "20",
     "shop_assign_sla_min": "30",
+    # 24-Sep-2026: an assigned order left in 'new' this long gets the rep a reminder (shop_jobs.
+    # unconfirmed_reminder), repeated at most every shop_confirm_renotify_hours; past 2x the SLA
+    # the owner channel is told too. 0 switches the job off.
+    "shop_confirm_sla_min": "120",
+    "shop_confirm_renotify_hours": "12",
     "shop_market_enabled": "1",
     # the merchant-facing origin (the marketplace's hostname); empty = fall back to APP_BASE_URL
     "shop_market_url": "",
@@ -1784,7 +1789,7 @@ def public_order_view(o: dict) -> dict:
         "order_kind": o.get("order_kind") or "standard", "minimum_gap_bhd": o.get("minimum_gap_bhd"),
         "timeline": [{"ts": e.get("ts"), "event": e.get("event"),
                       "note": (e.get("detail") or {}).get("note") if isinstance(e.get("detail"), dict) else None}
-                     for e in o.get("events", [])],
+                     for e in o.get("events", []) if e.get("event") != "reminded"],   # internal nudges stay internal
     }
 
 
@@ -1817,7 +1822,7 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         "id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
         "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
         "referral_code,coupon_code,placed_by,customer_id,attribution_source,attribution_conflict,"
-        "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd", count="exact")
+        "expected_delivery,total_confirmed_bhd,order_kind,minimum_gap_bhd,notify_result", count="exact")
     wanted = [s.strip().lower() for s in str(status or "").split(",") if s.strip().lower() in STATUSES]
     if len(wanted) == 1:
         qry = qry.eq("status", wanted[0])

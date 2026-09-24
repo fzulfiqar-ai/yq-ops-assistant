@@ -1,12 +1,19 @@
 """Shop order notifications — salesman alert, owner copy, customer confirmation, status updates.
 
 Channels (all reuse existing modules; each one is inert until its keys are set on the host):
-  * email      → app.emailer.send_html   (Resend → Brevo → SMTP)
+  * email      → app.emailer.send_html   (Resend → Brevo → SMTP, per recipient)
   * telegram   → app.notify.send_telegram (owner channel)
   * whatsapp   → the CUSTOMER taps a wa.me link to the salesman (assist mode, always works);
                  app.whatsapp.send_text is tried too, but only succeeds inside an open 24 h
                  customer-initiated session window (Meta policy), so it never carries the routing.
 Everything user-supplied is html.escape()d before it reaches an email body.
+
+notify_result (stored on shop_orders, read by the portal's Notifications panel) is a flat map of
+channel → {"sent": bool, "reason"?: str, ...} plus a little metadata:
+  email_rep · email_owner · customer_email · telegram · whatsapp   (24-Sep-2026: the rep and the
+  owner get SEPARATE sends, so Resend's testing-mode 403 on one address no longer loses the other)
+  at · attempts[] (ISO timestamps, one per fan-out — shop_jobs.notify_retry stops at 3) · recipients[]
+Rows written before 24-Sep carry a single `email` key; all_channels_failed() reads both shapes.
 """
 from __future__ import annotations
 
@@ -223,52 +230,124 @@ def _whatsapp_cloud(number: str | None, text: str) -> dict:
         return {"sent": False, "reason": f"{type(e).__name__}: {e}"[:200]}
 
 
-def notify_new_order(order_id: int) -> dict:
-    """Fan out a new order. Safe to run in a background task; never raises."""
+# The channels that tell YQ's own people about an order (the customer's confirmation copy is not
+# one of them: a merchant who got their receipt while nobody at YQ was told is still "not notified").
+INTERNAL_CHANNELS = ("email_rep", "email_owner", "email", "telegram", "whatsapp")
+MAX_NOTIFY_ATTEMPTS = 3      # first fan-out + up to two shop_jobs.notify_retry re-runs
+_ATTEMPTS_KEPT = 5           # timestamps kept in notify_result.attempts (the count is what matters)
+
+
+def channel_results(result) -> dict[str, bool]:
+    """{channel: delivered} for every internal channel present in a notify_result (either shape)."""
+    if not isinstance(result, dict):
+        return {}
+    return {k: bool(v.get("sent")) for k, v in result.items()
+            if k in INTERNAL_CHANNELS and isinstance(v, dict)}
+
+
+def all_channels_failed(result) -> bool:
+    """True when no internal channel delivered: a missing result, an error before any send, or a
+    result whose every rep/owner channel says sent=false. Drives the portal's "Not notified" badge
+    and shop_jobs.notify_retry."""
+    flags = channel_results(result)
+    return not any(flags.values())
+
+
+def attempt_count(result) -> int:
+    """Fan-outs so far. Rows written before attempts[] existed count as one."""
+    if not isinstance(result, dict):
+        return 0
+    n = len(result.get("attempts") or [])
+    return n if n else 1
+
+
+def owner_addresses(exclude: str | None = None) -> list[str]:
+    """ALERT_EMAIL_TO as a list, minus the rep's own address so nobody gets the same order twice."""
+    out: list[str] = []
+    for a in (os.getenv("ALERT_EMAIL_TO", "") or "").split(","):
+        a = a.strip()
+        if a and a.lower() != (exclude or "").strip().lower() and a.lower() not in [x.lower() for x in out]:
+            out.append(a)
+    return out
+
+
+def notify_new_order(order_id: int, retry: bool = False) -> dict:
+    """Fan out a new order: a copy to the rep, a separate copy to the owner addresses, the
+    customer's confirmation, Telegram and (when Cloud API is set) WhatsApp. Every channel is
+    recorded on its own in notify_result. With retry=True (shop_jobs.notify_retry) channels that
+    already delivered on an earlier attempt are kept, not re-sent — the merchant never gets a
+    second "order received" mail. Safe to run in a background task; never raises."""
     from app.database import get_client
     from app.shop import get_order
-    result: dict = {"at": datetime.now(timezone.utc).isoformat()}
+    now = datetime.now(timezone.utc).isoformat()
+    # The attempt is counted before anything can fail, so a broken order read still moves the
+    # retry counter and notify_retry stops at MAX_NOTIFY_ATTEMPTS.
+    result: dict = {"at": now, "attempts": [now], "attempt": 1}
     try:
         o = get_order(order_id)
         if not o:
             return {"error": "order not found"}
+        prev = o.get("notify_result") if isinstance(o.get("notify_result"), dict) else {}
+        attempts = list(prev.get("attempts") or ([prev["at"]] if prev.get("at") else []))
+        attempts.append(now)
+        result["attempts"] = attempts[-_ATTEMPTS_KEPT:]
+        result["attempt"] = len(attempts)
+
+        def kept(channel: str) -> dict | None:
+            """On a retry, a channel that delivered before is carried over untouched."""
+            r = prev.get(channel) if retry else None
+            return dict(r, kept=True) if isinstance(r, dict) and r.get("sent") else None
+
         sm = o.get("salesman") or {}
         placed_by_staff = o.get("source") == "salesman"   # the salesman placed it himself — do not alert him
         subject = f"YQ Shop · New order {o['order_no']} — {o.get('customer_name')} · {_money(o.get('total_bhd'))}"
         text = order_text(o, audience="salesman")
-        # salesman + owner copy (one send; both see the same order)
-        recipients = []
-        if sm.get("email") and sm.get("notify_email", True) and not placed_by_staff:
-            recipients.append(sm["email"])
-        owner = os.getenv("ALERT_EMAIL_TO", "")
-        for a in owner.split(","):
-            a = a.strip()
-            if a and a.lower() not in [r.lower() for r in recipients]:
-                recipients.append(a)
-        body = order_html(o, f"New order {o['order_no']}",
-                          (f"Placed by {sm.get('name') or o.get('placed_by')} for the shop." if placed_by_staff else
-                           f"A customer ordered from the shared catalog. {'Assigned to ' + sm['name'] + '.' if sm else 'No salesman assigned — please pick it up.'}"))
-        result["recipients"] = recipients
-        result["email"] = _email(subject, body, ",".join(recipients))
+        # rep copy — his order to confirm
+        rep_to = sm.get("email") if (sm.get("email") and sm.get("notify_email", True) and not placed_by_staff) else None
+        owners = owner_addresses(exclude=rep_to)
+        result["recipients"] = ([rep_to] if rep_to else []) + owners
+        if rep_to:
+            body = order_html(o, f"New order {o['order_no']}",
+                              "A customer ordered from the marketplace and this order is yours. "
+                              "Please confirm availability and delivery.")
+            result["email_rep"] = kept("email_rep") or _email(subject, body, rep_to)
+        # owner copy — what came in and who has it
+        if owners:
+            body = order_html(o, f"New order {o['order_no']}",
+                              (f"Placed by {sm.get('name') or o.get('placed_by')} for the shop." if placed_by_staff else
+                               f"A customer ordered from the shared catalog. {'Assigned to ' + sm['name'] + '.' if sm else 'No salesman assigned — please pick it up.'}"))
+            result["email_owner"] = kept("email_owner") or _email(subject, body, ",".join(owners))
+        if not rep_to and not owners:
+            result["email"] = {"sent": False, "emailed": False, "reason": "no_recipient (rep has no email; ALERT_EMAIL_TO unset)"}
         # customer confirmation
         if o.get("customer_email"):
             cbody = order_html(o, f"Thank you — order {o['order_no']} received",
                                "We have your order. Your salesman will confirm availability and delivery shortly.",
                                show_contact=False)
-            result["customer_email"] = _email(f"YQ Bahrain · Order {o['order_no']} received", cbody, o["customer_email"])
+            result["customer_email"] = kept("customer_email") or \
+                _email(f"YQ Bahrain · Order {o['order_no']} received", cbody, o["customer_email"])
         if not sm:
             # Nobody owns this order yet: the admins must assign it (portal → Shop Orders → queue).
             text = "UNASSIGNED marketplace order — assign it in the portal.\n" + text
             if _base():
                 text += f"\nQueue: {_base()}/shop-orders?queue=1"
-        result["telegram"] = _telegram(text)
+        elif not placed_by_staff:
+            text = f"Assigned to {sm.get('name')}.\n" + text
+        result["telegram"] = kept("telegram") or _telegram(text)
         if sm and sm.get("notify_whatsapp", True) and not placed_by_staff:
-            result["whatsapp"] = _whatsapp_cloud(sm.get("whatsapp") or sm.get("phone"), text)
-        get_client().table("shop_orders").update({
-            "notify_result": result, "notified_at": datetime.now(timezone.utc).isoformat()}).eq("id", order_id).execute()
+            # the rep's own copy: the plain order, without the owner-channel "Assigned to" prefix
+            result["whatsapp"] = kept("whatsapp") or \
+                _whatsapp_cloud(sm.get("whatsapp") or sm.get("phone"), order_text(o, audience="salesman"))
     except Exception as e:  # noqa: BLE001
         log.warning("notify_new_order(%s) failed: %s", order_id, e)
         result["error"] = f"{type(e).__name__}: {e}"[:200]
+    # Persist even a failed attempt: the attempt count is what stops notify_retry after 3 runs.
+    try:
+        get_client().table("shop_orders").update({
+            "notify_result": result, "notified_at": datetime.now(timezone.utc).isoformat()}).eq("id", order_id).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("notify_new_order(%s): could not store notify_result: %s", order_id, e)
+        result.setdefault("error", f"store: {type(e).__name__}: {e}"[:200])
     return result
 
 
