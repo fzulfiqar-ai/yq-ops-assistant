@@ -88,7 +88,6 @@ export default function ProductPanel({ code }: { code: string }) {
   const canOrder = !out || m.allowBackorder
   const anchor = priceAnchor(item)
   const tiers = m.publicTiers ? item.tiers || [] : []
-  const tellUrl = out && !m.allowBackorder && m.rep?.whatsapp_url ? `${m.rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.card.tellBackText(m.rep.first_name || '', item.item_code, name))}` : null
   const shareUrl = `${window.location.origin}/p/${encodeURIComponent(item.item_code)}${m.rep ? `?ref=${encodeURIComponent(m.rep.slug)}` : ''}`
   const phone = viewport === 'phone'
   const detail = productDetail(item)
@@ -130,25 +129,28 @@ export default function ProductPanel({ code }: { code: string }) {
         </div>
       ) : qty > 0 ? (
         <Stepper value={qty} step={step} min={min} size="lg" label={name} onChange={(n) => m.setQty(item, n)} onRemove={() => m.remove(item.item_code)} onValueClick={() => setKeypad(true)} />
-      ) : tellUrl ? (
-        <Button variant="secondary" size="lg" onClick={() => window.open(tellUrl, '_blank', 'noreferrer')} icon={<MessageCircle size={16} aria-hidden="true" />}>
-          {S.card.tellRep(m.rep?.first_name || 'us')}
-        </Button>
       ) : !canOrder ? (
-        <Button
-          size="lg"
-          variant="secondary"
-          className="min-w-[9rem]"
-          disabled={asked}
-          icon={asked ? <Check size={16} aria-hidden="true" /> : <MessageCircle size={16} aria-hidden="true" />}
-          onClick={() => {
-            setAsked(true)
-            toast(S.card.tellBackDone, 'success')
-            postRestock({ item_code: item.item_code, phone: readCustomer().phone || null, device_id: deviceId(), referral_code: m.ref || null }).catch(() => undefined)
-          }}
-        >
-          {asked ? S.card.tellBackDone : S.card.tellBack}
-        </Button>
+        // the sold-out rule with backorder off: the add stays in its slot, disabled and reading
+        // "Sold out", so the merchant sees that this line cannot be ordered — and the one live
+        // action is the restock request the rep sees (postRestock), never a silent backorder
+        <div className="flex items-center gap-2">
+          <Button size="lg" variant="secondary" disabled className="hidden min-[400px]:inline-flex" icon={<Plus size={17} aria-hidden="true" />}>
+            {S.card.stockOut}
+          </Button>
+          <Button
+            size="lg"
+            className="min-w-[9rem]"
+            disabled={asked}
+            icon={asked ? <Check size={16} aria-hidden="true" /> : <MessageCircle size={16} aria-hidden="true" />}
+            onClick={() => {
+              setAsked(true)
+              toast(S.card.tellBackDone, 'success')
+              postRestock({ item_code: item.item_code, phone: readCustomer().phone || null, device_id: deviceId(), referral_code: m.ref || null }).catch(() => undefined)
+            }}
+          >
+            {asked ? S.card.tellBackDone : S.card.tellBack}
+          </Button>
+        </div>
       ) : (
         // a backorder is not an add: "we will order it in, date unconfirmed" must not wear the
         // same + as the line that ships today

@@ -30,6 +30,10 @@ import { QtySheet } from './QtySheet'
  *   → facts   anchors, then ONE line   "Was 2.000 · ↓5%" (price-book cuts only) then the margin
  *                                      strip → "Only a few left" → shops → price breaks
  *   → action  Add · 12 → ✓ Added → stepper
+ *             sold out: "Backorder" where the shop allows one (shop_allow_backorder), otherwise the
+ *             add is gone and the one action is "Tell me when back" — the restock request
+ *             (postRestock), which the rep sees in the portal. The line keeps its URL and its card;
+ *             it is labelled "Sold out" (never "Out of stock") and sits after the available lines.
  *
  *   grid    — the shelf; two badges, tiers, "Ordered by N shops"
  *   compact — rails and the mega-nav; fixed width clamp(10rem, 46vw, 13rem), one badge
@@ -312,9 +316,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const canOrder = !out || m.allowBackorder
   const selected = qty > 0
   const nudgeTier = selected ? nextTier(item, qty) : null
-  const tellRep = out && !m.allowBackorder && m.rep?.whatsapp_url
-  // productName() again rather than `name`: handing `name` to a function would make the React Compiler drop the memoised callbacks below
-  const tellUrl = tellRep ? `${m.rep!.whatsapp_url!.split('?text=')[0]}?text=${encodeURIComponent(S.card.tellBackText(m.rep!.first_name || '', item.item_code, productName(item)))}` : null
+  /** the sold-out rule's one action: a restock request the rep sees (never a silent backorder) */
   const askBack = () => {
     setAsked(true)
     toast(S.card.tellBackDone, 'success')
@@ -395,17 +397,11 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
       // a plum wash of the same weight as the Add block it replaced
       return <Stepper value={qty} step={step} min={min} size={size} label={name} onChange={setQty} onRemove={removeWithUndo} onValueClick={() => setKeypad('edit')} className="w-full bg-plum-wash" />
     }
-    if (tellUrl) {
-      return (
-        <a href={tellUrl} target="_blank" rel="noreferrer" className={cn('flex w-full items-center justify-center gap-1.5 rounded-sm border border-line bg-surface text-sm font-semibold text-ink transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', tall)}>
-          <MessageCircle size={15} aria-hidden="true" /> {m.rep?.first_name ? S.card.tellRep(m.rep.first_name) : S.card.askYq}
-        </a>
-      )
-    }
     /**
      * Nothing is remembered for this line yet, so there is no honest quantity to add: the button
      * opens the keypad (pre-filled at the minimum, quick picks) and the merchant states a
      * wholesale quantity. Once one is remembered the button adds it straight away, "Add · 12".
+     * Sold out with backorder off: no add at all — the slot is "Tell me when back".
      */
     const askFirst = canOrder && defaultQty <= 1
     const press = canOrder ? (askFirst ? () => setKeypad('add') : add) : askBack
@@ -469,7 +465,9 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   if (variant === 'list') {
     const meta = Boolean(badges[0] || mg || out || low || firstTier)
     return (
-      <article className={cn('flex items-center gap-3 border-b border-line-2 py-2.5', selected && '-mx-2 rounded-sm bg-plum-wash/60 px-2', className)}>
+      // data-stock: the availability the card was rendered with — the QA harness reads it to assert
+      // that no available card ever follows a sold-out one on a listing (scripts/qa/market_qa.py)
+      <article data-stock={item.stock_status || 'in_stock'} className={cn('flex items-center gap-3 border-b border-line-2 py-2.5', selected && '-mx-2 rounded-sm bg-plum-wash/60 px-2', className)}>
         <button type="button" onClick={open} className="h-14 w-14 shrink-0 self-start overflow-hidden rounded-sm border border-line-2 bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 md:h-[4.5rem] md:w-[4.5rem]" aria-label={`${S.card.quickView}: ${name}`}>
           <div ref={imgWrap}>
             <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={72} imgClassName={cn('p-1', out && 'opacity-70 saturate-[.25]')} iconSize={18} showCaption={false} />
@@ -488,7 +486,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
             // used to push out of the clipped box — a last-chance line that never says so is worse
             // than a margin the merchant can still read on the card or the panel.
             <span className="mt-1 flex h-5 min-w-0 flex-wrap items-center gap-x-2 gap-y-1 overflow-hidden text-2xs leading-5 tnum">
-              {/* out of stock is a state, not an error: red is kept for things that went wrong.
+              {/* sold out is a state, not an error: red is kept for things that went wrong.
                   Same chip as the grid card's, so one product reads the same in both densities. */}
               {out ? <Chip tone="grey">{S.card.stockOut}</Chip> : low ? lowWord : null}
               {badges[0] && <Chip tone={listBadgeTone(badges[0])}>{badgeMeta(badges[0]).label}</Chip>}
@@ -548,6 +546,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
 
   return (
     <article
+      data-stock={item.stock_status || 'in_stock'}
       className={cn(
         'group relative flex flex-col overflow-hidden rounded-lg border bg-surface transition duration-2 ease-m',
         compact ? 'cv-compact w-[clamp(10rem,46vw,13rem)] shrink-0 lg:w-auto' : priority ? '' : 'cv-card',

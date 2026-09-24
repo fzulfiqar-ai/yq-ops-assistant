@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ArrowRight, ClipboardPaste, Plus, RotateCcw, Save, X } from 'lucide-react'
+import { ArrowRight, ClipboardPaste, Clock, Plus, RotateCcw, Save, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { fetchOrderCached } from '../hooks/useRecentOrders'
 import { useMarket } from '../MarketContext'
 import { lastQty, rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, fmtDateShort, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
+import { partitionByAvailability } from '../lib/facets'
+import { bhd, fmtDateShort, isOut, minQtyOf, normalizeQty, stepOf, unitAt, productName } from '../lib/format'
 import { bestSellers, orderLines, regularStock } from '../lib/home'
 import { parseList, resolveQuery } from '../lib/quickParse'
 import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
@@ -15,6 +16,7 @@ import { MarketCard } from '../components/MarketCard'
 import { Spotlight } from '../components/Spotlight'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
+import { Chip } from '../ui/Chip'
 import { Input, Label, Textarea } from '../ui/Field'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 import { SectionHeader } from '../ui/SectionHeader'
@@ -31,6 +33,11 @@ import { useToast } from '../ui/Toast'
  * The total is shown once: the sticky bar carries it on a phone, the aside card on desktop. With
  * nothing composed yet there is no summary card and no disabled CTA — the page shows the paste
  * action, the merchant's own lists and Popular restocks instead of empty canvas.
+ *
+ * The sold-out rule here: suggestions list the lines a merchant can have today first, each row
+ * wears its stock state, and Enter never resolves a row to a sold-out line — it takes the first
+ * in-stock suggestion, or leaves the list open. A sold-out suggestion is a tap (a backorder, when
+ * the shop allows it) or, with backorder off, a greyed row that cannot be picked at all.
  */
 
 interface Row {
@@ -87,8 +94,11 @@ export default function QuickOrderPage() {
   const last = rememberedOrders()[0] || null
 
   const setRow = useCallback((id: number, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r))), [])
+  /** may this line sit in the order? sold out only as a backorder, and only where the shop allows one */
+  const orderable = useCallback((item: ShopItem) => !isOut(item) || m.allowBackorder, [m.allowBackorder])
   const lockRow = useCallback(
     (id: number, item: ShopItem, qty?: number) => {
+      if (!orderable(item)) return
       // a row must never land at 0 — that is a line the merchant cannot order
       const q = normalizeQty(item, qty && qty > 0 ? qty : lastQty(item.item_code) || minQtyOf(item) || 1)
       setRows((rs) => {
@@ -96,7 +106,7 @@ export default function QuickOrderPage() {
         return next.some((r) => !r.item) ? next : [...next, newRow()]
       })
     },
-    [],
+    [orderable],
   )
 
   /* load templates from ?load= */
@@ -105,7 +115,8 @@ export default function QuickOrderPage() {
     const load = params.get('load')
     if (!load || loadedRef.current === load || !m.items.length) return
     loadedRef.current = load
-    const apply = (lines: { item: ShopItem; qty: number }[]) => {
+    const apply = (raw: { item: ShopItem; qty: number }[]) => {
+      const lines = raw.filter((l) => orderable(l.item))
       if (!lines.length) return
       setRows([...lines.map((l) => ({ ...newRow(), item: l.item, query: productName(l.item), qty: normalizeQty(l.item, l.qty) })), newRow()])
     }
@@ -116,17 +127,19 @@ export default function QuickOrderPage() {
     const next = new URLSearchParams(params)
     next.delete('load')
     setParams(next, { replace: true })
-  }, [params, setParams, m.items.length, m.itemsByCode, last])
+  }, [params, setParams, m.items.length, m.itemsByCode, last, orderable])
 
   const onQuery = (row: Row, value: string) => {
     if (!value.trim()) {
       setRow(row.id, { query: value, item: null, suggestions: [], candidates: [] })
       return
     }
+    // resolveQuery never hands back a sold-out line as `item`: a sold-out code typed exactly lands
+    // in the suggestions with its state on it, after any in-stock sibling, for the merchant to pick
     const { item, candidates } = resolveQuery(value, m.items, m.index)
     const exact = item && item.item_code.replace(/[\s-]/g, '').toLowerCase() === value.replace(/[\s-]/g, '').toLowerCase()
     const hits = m.index ? m.index.mini.search(value, { prefix: true, fuzzy: 0.2 }).slice(0, 6) : []
-    const suggestions = hits.map((h) => m.itemsByCode.get(String(h.id))).filter((x): x is ShopItem => Boolean(x))
+    const suggestions = partitionByAvailability(hits.map((h) => m.itemsByCode.get(String(h.id))).filter((x): x is ShopItem => Boolean(x)))
     // typing a code resolves the line: lock it the way picking it does — with a quantity and a
     // fresh row underneath. Without this the row read "0" and the order could not be sent.
     if (exact && item) {
@@ -140,7 +153,9 @@ export default function QuickOrderPage() {
   const onKey = (row: Row, e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      const pick = row.item || row.suggestions[0] || row.candidates[0]
+      // Enter takes the first line the merchant can have today; a sold-out match is never picked
+      // by a keystroke — the list stays open with its stock states for him to decide
+      const pick = row.item || row.suggestions.find((s) => !isOut(s)) || row.candidates.find((s) => !isOut(s))
       if (pick) {
         lockRow(row.id, pick)
         const idx = rows.findIndex((r) => r.id === row.id)
@@ -186,7 +201,9 @@ export default function QuickOrderPage() {
     toast(S.quick.listSaved(name), 'success')
   }
   const loadList = (l: SavedList) => {
-    const lines = l.lines.map((x) => ({ item: m.itemsByCode.get(x.item_code)!, qty: x.qty })).filter((x) => x.item)
+    // a saved line that has sold out since is left out where the shop takes no backorders — the
+    // server would only block it at the quote, and a list must never manufacture a backorder
+    const lines = l.lines.map((x) => ({ item: m.itemsByCode.get(x.item_code)!, qty: x.qty })).filter((x) => x.item && orderable(x.item))
     setRows([...lines.map((x) => ({ ...newRow(), item: x.item, query: productName(x.item), qty: normalizeQty(x.item, x.qty) })), newRow()])
   }
   const deleteList = (name: string) => {
@@ -265,9 +282,13 @@ export default function QuickOrderPage() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-semibold text-ink">{productName(row.item)}</div>
-                      <div className="text-xs tnum text-ink-2">
-                        {row.item.item_code} · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
-                        {stepOf(row.item) > 1 && row.qty % stepOf(row.item) === 0 ? ` · ${S.card.packs(stepOf(row.item))}` : ''}
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs tnum text-ink-2">
+                        <span className="truncate">
+                          {row.item.item_code} · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
+                          {stepOf(row.item) > 1 && row.qty % stepOf(row.item) === 0 ? ` · ${S.card.packs(stepOf(row.item))}` : ''}
+                        </span>
+                        {/* a locked sold-out line is a backorder (only possible where the shop allows one): say so before "Add all" */}
+                        {isOut(row.item) && <Chip tone="warn">{S.card.backorder}</Chip>}
                       </div>
                     </div>
                     {/* one delete control per line: the stepper removes the row at its minimum, the
@@ -304,19 +325,35 @@ export default function QuickOrderPage() {
                     </div>
                     {row.suggestions.length > 0 && (
                       <ul className="mt-2 divide-y divide-line-2 overflow-hidden rounded-sm border border-line" role="listbox">
-                        {row.suggestions.map((s) => (
-                          <li key={s.item_code}>
-                            <button type="button" role="option" aria-selected={false} onClick={() => lockRow(row.id, s)} className="flex w-full items-center gap-2.5 px-2.5 py-2 text-start text-sm hover:bg-plum-wash">
-                              <span className="h-8 w-8 shrink-0 overflow-hidden rounded-xs border border-line-2">
-                                <ProductImage item={s} alt="" sizes={SIZES_THUMB} size={32} imgClassName="p-0.5" iconSize={12} showCaption={false} />
-                              </span>
-                              <span className="min-w-0 flex-1 truncate font-medium text-ink">{productName(s)}</span>
-                              <span className="text-xs tnum text-ink-2">{s.item_code}</span>
-                              <span className="whitespace-nowrap text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? bhd(s.price_bhd) : ''}</span>
-                              <Plus size={14} className="text-plum" aria-hidden="true" />
-                            </button>
-                          </li>
-                        ))}
+                        {row.suggestions.map((s) => {
+                          const out = isOut(s)
+                          const can = orderable(s)
+                          return (
+                            <li key={s.item_code}>
+                              {/* the stock state rides on the row: sold out is a grey chip (a state, not an error), a few
+                                  left the amber word — the same wording the cards use. Where the shop takes no
+                                  backorders a sold-out row is greyed and cannot be picked; otherwise the tap is a backorder. */}
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={false}
+                                aria-disabled={!can || undefined}
+                                disabled={!can}
+                                onClick={() => lockRow(row.id, s)}
+                                className={cn('flex w-full items-center gap-2.5 px-2.5 py-2 text-start text-sm', can ? 'hover:bg-plum-wash' : 'cursor-not-allowed bg-surface-2/60')}
+                              >
+                                <span className="h-8 w-8 shrink-0 overflow-hidden rounded-xs border border-line-2">
+                                  <ProductImage item={s} alt="" sizes={SIZES_THUMB} size={32} imgClassName={cn('p-0.5', out && 'opacity-70 saturate-[.25]')} iconSize={12} showCaption={false} />
+                                </span>
+                                <span className={cn('min-w-0 flex-1 truncate font-medium', out ? 'text-ink-2' : 'text-ink')}>{productName(s)}</span>
+                                {out ? <Chip tone="grey">{S.card.stockOut}</Chip> : s.stock_status === 'low_stock' ? <Chip tone="deal">{S.card.stockLow}</Chip> : null}
+                                <span className="text-xs tnum text-ink-2">{s.item_code}</span>
+                                <span className="whitespace-nowrap text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? bhd(s.price_bhd) : ''}</span>
+                                {can ? out ? <Clock size={14} className="text-ink-3" aria-hidden="true" /> : <Plus size={14} className="text-plum" aria-hidden="true" /> : <span className="w-3.5" aria-hidden="true" />}
+                              </button>
+                            </li>
+                          )
+                        })}
                       </ul>
                     )}
                     {row.query.trim() && !row.suggestions.length && m.index && <p className="mt-1.5 text-xs text-warn">{S.quick.notFound}</p>}

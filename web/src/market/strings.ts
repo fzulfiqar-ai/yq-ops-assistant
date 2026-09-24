@@ -240,13 +240,16 @@ export const S = {
     perPc: '/pc',
     stockIn: 'In stock',
     stockLow: 'Only a few left',
-    stockOut: 'Out of stock',
+    /** the owner's wording for zero stock (24-Sep-2026): "Sold out" — never "Out of stock" in the merchant UI */
+    stockOut: 'Sold out',
+    /** the Arabic for it, set down now for the AR pass: «نفدت الكمية» */
+    stockOutAr: 'نفدت الكمية',
     /** narrow cards: "Retail 2.200" (S.deals.retail) then this, e.g. "41% margin" — a share of retail */
     marginPct: (pct: number) => `${pct}% margin`,
     pcsPlus: (n: number) => `${n}+ pcs`,
     minPcs: (n: number) => `Min ${n} pcs`,
     tellBackText: (first: string, code: string, name: string) => `Hello${first ? ` ${first}` : ''}, please tell me when ${code} (${name}) is back in stock.`,
-    backorderNote: 'Out of stock — order now and your representative confirms the date.',
+    backorderNote: 'Sold out — order now and your representative confirms the date.',
     linkCopied: 'Link copied — paste it into WhatsApp',
     breaksCaption: 'Quantity price breaks',
     colQty: 'Quantity',

@@ -8,8 +8,9 @@ about, the product panel, the opening moment, an injected campaign) and asserts 
 redesign must keep: no horizontal overflow, no console/page/request errors, self-hosted fonts and
 no Google Fonts, tap targets and input sizes on touch, no cropped product/campaign imagery, no
 product in two home rails, the pinned phone search band, the slider's dots and autoplay, the
-wholesale-minimum wording and the small-order flow, reveals under reduced motion, and the banned
-merchandising words.
+wholesale-minimum wording and the small-order flow, reveals under reduced motion, the banned
+merchandising words, and the sold-out rule ("Sold out" never "Out of stock"; no available card
+after the first sold-out card on the home grid, Browse and a category shelf).
 
 Run:  python scripts/qa/market_qa.py --base http://localhost:5174 --out <dir> [--only home,cart_under] [--quick]
 Exit: 1 when a hard check fails (warnings never fail the run). See scripts/qa/README.md.
@@ -63,10 +64,14 @@ STR = {
     "spot.title": "Right now at YQ",
     "cart.mini": "Your restock",
     "home.all": "All products",
+    "card.soldOut": "Sold out",
+    "card.tellBack": "Tell me when back",
+    "states.showMore": "Show more (",
 }
 
-# Text that must never reach a merchant's screen (owner's honest-merchandising rule).
-BANNED = r"slow mover|no minimum|Save \d+%"
+# Text that must never reach a merchant's screen: the owner's honest-merchandising rule, and the
+# sold-out rule (24-Sep-2026) — zero stock reads "Sold out" (Arabic «نفدت الكمية»), never "Out of stock".
+BANNED = r"slow mover|no minimum|Save \d+%|out of stock"
 
 CART_KEY = "yq-shop-cart:market"
 SPLASH_KEY = "yq-splash-session"
@@ -1009,6 +1014,88 @@ def band_hint_check(run: Run, page: Page) -> None:
         run.notes.append("search band: the hint crossfade stays inside the pill and leaves one line")
 
 
+# The sold-out rule (24-Sep-2026): on every listing the sold-out cards come after every available
+# one, whatever sort the merchant chose. Each MarketCard carries data-stock (in_stock / low_stock /
+# out_of_stock) for exactly this check. The grids page in chunks, so "Show more" is pressed until
+# the whole listing is on the page — otherwise the sold-out tail is never rendered and the check
+# proves nothing.
+SOLDOUT_ROOTS = {"home": 'section[aria-labelledby="home-all"]', "shop": "main", "category": "main"}
+SOLDOUT_EXPAND_MAX = 12
+
+STOCK_ORDER = r"""
+(root) => {
+  const scope = document.querySelector(root);
+  if (!scope) return null;
+  const cards = [...scope.querySelectorAll('article[data-stock]')];
+  const states = cards.map((a) => a.getAttribute('data-stock'));
+  const firstOut = states.indexOf('out_of_stock');
+  const late = [];
+  if (firstOut >= 0) {
+    states.forEach((s, i) => {
+      if (i > firstOut && s !== 'out_of_stock') {
+        const code = (cards[i].querySelector('[class*="tnum"]') || cards[i]).textContent.trim().slice(0, 24);
+        late.push({ index: i, state: s, code });
+      }
+    });
+  }
+  return {
+    total: states.length,
+    available: states.filter((s) => s !== 'out_of_stock').length,
+    soldOut: states.filter((s) => s === 'out_of_stock').length,
+    firstOut,
+    late: late.slice(0, 6),
+  };
+}
+"""
+
+
+def expand_listing(page: Page) -> int:
+    """Presses “Show more” until the listing is complete (bounded). Returns the presses made."""
+    presses = 0
+    while presses < SOLDOUT_EXPAND_MAX:
+        btn = page.get_by_role("button", name=re.compile(r"^" + re.escape(STR["states.showMore"])))
+        target = None
+        for i in range(btn.count()):
+            if btn.nth(i).is_visible():
+                target = btn.nth(i)
+                break
+        if target is None:
+            break
+        try:
+            target.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
+            target.click(timeout=4000)
+        except PWError:
+            break
+        presses += 1
+        page.wait_for_timeout(350)
+    return presses
+
+
+def soldout_order_check(run: Run, page: Page, root: str) -> None:
+    presses = expand_listing(page)
+    found = page.evaluate(STOCK_ORDER, root)
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(250)
+    if not found:
+        finding(run, "warn", "soldout-order", "no listing root at " + root + " — the sold-out order was not checked")
+        return
+    run.notes.append(
+        "sold-out order: " + str(found["available"]) + " available · " + str(found["soldOut"]) + " sold out"
+        + " (" + str(found["total"]) + " cards, Show more ×" + str(presses) + ")"
+    )
+    if found["late"]:
+        who = ", ".join(x["code"] + " (#" + str(x["index"]) + ", " + x["state"] + ")" for x in found["late"][:3])
+        finding(
+            run,
+            "fail",
+            "soldout-order",
+            str(len(found["late"])) + " available card(s) after the first sold-out card (#" + str(found["firstOut"]) + "): " + who,
+            found,
+        )
+    elif found["soldOut"] == 0:
+        run.notes.append("sold-out order: no sold-out card rendered on this listing, so the rule was not exercised")
+
+
 def paste_offers(run: Run, page: Page) -> None:
     """How many times the first-visit home sends the merchant to /quick (the owner asked for ≤2)."""
     links = page.evaluate(
@@ -1279,6 +1366,8 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
         if st.key in ("home", "storefront", "campaign", "reduced_home"):
             home_checks(run, page, vp, p)
             paste_offers(run, page)
+        if st.key in SOLDOUT_ROOTS:
+            soldout_order_check(run, page, SOLDOUT_ROOTS[st.key])
         if st.key == "home" and vp.name == LEAD_PHONE:
             band_hint_check(run, page)
         if st.key == "campaign":

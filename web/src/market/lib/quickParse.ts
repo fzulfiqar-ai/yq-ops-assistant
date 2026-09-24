@@ -1,5 +1,6 @@
 import type { ShopItem } from '@/lib/shopApi'
-import { codeKey } from './format'
+import { partitionByAvailability } from './facets'
+import { codeKey, isOut } from './format'
 import type { SearchIndex } from './search'
 
 /**
@@ -9,6 +10,11 @@ import type { SearchIndex } from './search'
  * `C18 24`, or a bare code/name (default quantity). Resolution: exact code (space/dash/case
  * insensitive) → the index's top hit when it clearly wins (≥1.5× the runner-up) → otherwise
  * "pick one" with the top three.
+ *
+ * The sold-out rule: a sold-out line is NEVER resolved on its own — not from an exact code, not as
+ * the clear winner. It is offered as a candidate, after the in-stock alternatives, so the merchant
+ * sees the state and chooses; a backorder line must be his decision, never a side effect of Enter
+ * or of a pasted list (verified before this: a sold-out best match silently became a backorder).
  */
 
 export interface ParsedRow {
@@ -16,6 +22,13 @@ export interface ParsedRow {
   query: string
   qty: number | null
   item: ShopItem | null
+  candidates: ShopItem[]
+}
+
+export interface Resolved {
+  /** the one line this query means — never a sold-out one */
+  item: ShopItem | null
+  /** what to offer instead (or as well): available lines first, then sold-out */
   candidates: ShopItem[]
 }
 
@@ -42,18 +55,31 @@ export function parseToken(raw: string): { query: string; qty: number | null } {
   return { query: t, qty: null }
 }
 
-export function resolveQuery(query: string, items: ShopItem[], index: SearchIndex | null): { item: ShopItem | null; candidates: ShopItem[] } {
-  const key = codeKey(query)
-  const exact = items.find((i) => codeKey(i.item_code) === key)
-  if (exact) return { item: exact, candidates: [] }
-  if (!index) return { item: null, candidates: [] }
+/** The index hits for a query, best first (AND, then a looser OR pass), as catalog items. */
+function rankedHits(query: string, items: ShopItem[], index: SearchIndex): { it: ShopItem; score: number }[] {
   const hits = index.mini.search(query, { prefix: true, fuzzy: 0.2, combineWith: 'AND' })
   const alt = hits.length ? hits : index.mini.search(query, { prefix: true, fuzzy: 0.3, combineWith: 'OR' })
   const byCode = new Map(items.map((i) => [i.item_code, i]))
-  const ranked = alt.map((h) => ({ it: byCode.get(String(h.id)), score: h.score })).filter((x): x is { it: ShopItem; score: number } => Boolean(x.it))
+  return alt.map((h) => ({ it: byCode.get(String(h.id)), score: h.score })).filter((x): x is { it: ShopItem; score: number } => Boolean(x.it))
+}
+
+export function resolveQuery(query: string, items: ShopItem[], index: SearchIndex | null): Resolved {
+  const key = codeKey(query)
+  const exact = items.find((i) => codeKey(i.item_code) === key)
+  if (exact && !isOut(exact)) return { item: exact, candidates: [] }
+  if (exact) {
+    // the code is right but the line is sold out: offer it with its in-stock siblings ahead of it
+    const near = index ? rankedHits(query, items, index).map((r) => r.it).filter((i) => i.item_code !== exact.item_code) : []
+    return { item: null, candidates: partitionByAvailability([exact, ...near.slice(0, 2)]) }
+  }
+  if (!index) return { item: null, candidates: [] }
+  const ranked = rankedHits(query, items, index)
   if (!ranked.length) return { item: null, candidates: [] }
-  if (ranked.length === 1 || ranked[0].score >= ranked[1].score * 1.5) return { item: ranked[0].it, candidates: ranked.slice(0, 3).map((r) => r.it) }
-  return { item: null, candidates: ranked.slice(0, 3).map((r) => r.it) }
+  const top = ranked[0]
+  const clear = ranked.length === 1 || top.score >= ranked[1].score * 1.5
+  const candidates = partitionByAvailability(ranked.slice(0, 3).map((r) => r.it))
+  if (clear && !isOut(top.it)) return { item: top.it, candidates }
+  return { item: null, candidates }
 }
 
 export function parseList(text: string, items: ShopItem[], index: SearchIndex | null): ParsedRow[] {

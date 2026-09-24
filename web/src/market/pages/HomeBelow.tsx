@@ -10,7 +10,7 @@ import { Rail } from '../components/Rail'
 import { EmptyState, Footer } from '../components/States'
 import { useReveal } from '../hooks/useReveal'
 import { useMarket } from '../MarketContext'
-import { applyQuickFilters, type QuickFilter } from '../lib/facets'
+import { applyQuickFilters, homeGridOrder, type QuickFilter } from '../lib/facets'
 import { fmtDate } from '../lib/format'
 import { dealSets, homeRails, pickedUpAgain, regularStock, type RegularLine } from '../lib/home'
 import { PageTail } from '../shell/ShellContext'
@@ -28,7 +28,8 @@ import { Button } from '../ui/Button'
  * Moving fast (the one tinted block in the middle of the page) → Picked up again → the paste card
  * (first visits, phone) → All products → "Ready to restock?" → footer. Every product appears in at
  * most one rail (lib/home homeRails; Picked up again skips anything already shown) and rail
- * products sink to the end of the grid, which grows from 12 cards to one page on idle.
+ * products sink towards the end of the grid — but never below the sold-out lines, which are last
+ * on every listing (lib/facets homeGridOrder). The grid grows from 12 cards to one page on idle.
  *
  * That page is a column multiple, so the grid never ends on a ragged half-row above "Show more":
  * 24 on a phone (2 columns, and the home stays inside reach of the band and the footer — the
@@ -102,8 +103,9 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
     let r = items
     if (inStockOnly) r = r.filter((i) => i.stock_status !== 'out_of_stock')
     if (dealsOnly) r = applyQuickFilters(r, DEALS)
-    if (!filtering && railCodes.size) r = [...r.filter((i) => !railCodes.has(i.item_code)), ...r.filter((i) => railCodes.has(i.item_code))]
-    return r
+    // available first (unseen, then the rail products), sold out last; a filtered grid keeps the
+    // shelf order inside the same bands, with nothing sinking for the rails
+    return homeGridOrder(r, filtering ? new Set<string>() : railCodes)
   }, [items, inStockOnly, dealsOnly, filtering, railCodes])
 
   // the first grid page is on screen; the rest of the first chunk arrives on idle

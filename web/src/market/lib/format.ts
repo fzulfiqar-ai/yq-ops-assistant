@@ -140,11 +140,14 @@ export function hasBadge(item: ShopItem, kind: BadgeKind): boolean {
   return (item.badges || []).includes(kind)
 }
 
-/** Status only — the public shop never reveals a stock number (docs/SHOP.md). */
+/**
+ * Status only — the public shop never reveals a stock number (docs/SHOP.md). Sold out is a state,
+ * not an error: grey, never red (red stays for things that went wrong), the same chip the cards wear.
+ */
 export const STOCK_META: Record<StockStatus, { label: string; tone: ChipTone }> = {
   in_stock: { label: S.card.stockIn, tone: 'ok' },
   low_stock: { label: S.card.stockLow, tone: 'warn' },
-  out_of_stock: { label: S.card.stockOut, tone: 'bad' },
+  out_of_stock: { label: S.card.stockOut, tone: 'grey' },
 }
 
 export function stockMeta(status?: StockStatus | null) {

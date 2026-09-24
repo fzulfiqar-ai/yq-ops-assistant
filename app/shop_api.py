@@ -524,7 +524,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def shop_staff_quote(body: StaffQuoteRequest, user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
         sm = shop.salesman_for_user(user.email)
         try:
-            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, (sm or {}).get("referral_code"))
+            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, (sm or {}).get("referral_code"), staff=True)
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {k: v for k, v in q.items() if not k.startswith("_")}
