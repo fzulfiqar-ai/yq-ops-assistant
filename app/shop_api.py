@@ -32,6 +32,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             if any(has_feature(user, f) for f in features):
                 return user
             raise HTTPException(status_code=403, detail=f"Requires access to one of {features}.")
+        _dep.features = features       # read by tests/test_r1_security.py's route → gate table
         return _dep
 
     # Cacheable by any CDN in front of the API; stale-if-error keeps the last catalog on screen
@@ -332,9 +333,10 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         background.add_task(shop_notify.notify_customer_cancel, o["id"])
-        shop.record_event({"event": "cancel", "salesman_id": o.get("salesman_id"), "device_id": o.get("device_id"),
+        # the rep comes from the ORDER (server-side), the one place record_event trusts a salesman_id
+        shop.record_event({"event": "cancel", "device_id": o.get("device_id"),
                            "customer_id": o.get("customer_id"), "meta": {"reason": (body.reason if body else None) or ""}},
-                          ip=_ip(request), ua=_ua(request))
+                          ip=_ip(request), ua=_ua(request), salesman_id=o.get("salesman_id"))
         return {"ok": True, "status": o["status"], "order": shop.public_order_view(o)}
 
     @app.post("/public/shop/my-orders")
@@ -461,8 +463,14 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.post("/shop/restock/resolve")
     def shop_restock_resolve(body: RestockResolve, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        n = shop.resolve_restock(body.ids)
-        log_event(user.email, "shop.restock_resolve", detail={"n": n})
+        """A rep resolves only requests that carry his own referral code (the same scope as his
+        list); an admin resolves any."""
+        ref = None
+        if user.role != "admin":
+            sm = shop.salesman_for_user(user.email)
+            ref = (sm or {}).get("referral_code") or "-"
+        n = shop.resolve_restock(body.ids, referral_code=ref)
+        log_event(user.email, "shop.restock_resolve", detail={"n": n, "asked": len(body.ids)})
         return {"ok": True, "n": n}
 
     # ── portal: rules (Shop Admin) ────────────────────────────────────────────
@@ -656,8 +664,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return {"ok": True, "order": o}
 
     @app.get("/shop/assignment-queue")
-    def shop_assignment_queue(_user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Unassigned open orders with a suggested rep (history, not AI)."""
+    def shop_assignment_queue(_admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Unassigned open orders with a suggested rep (history, not AI). Admin-only: it lists
+        every unassigned merchant (shop, area, value), which is nobody's territory yet."""
         return shop.assignment_queue()
 
     @app.get("/shop/picklist")
@@ -683,7 +692,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.get("/shop/me")
     def shop_me(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        return shop.me_payload(user.email)
+        return shop.me_payload(user.email, is_admin=user.role == "admin")
 
     # ── portal: salesmen (Shop Admin) ─────────────────────────────────────────
     @app.get("/shop/salesmen")

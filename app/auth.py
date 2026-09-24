@@ -4,7 +4,10 @@ get_current_user decodes a Supabase JWT (HS256, audience "authenticated") using
 SUPABASE_JWT_SECRET, then fetches the caller's role from user_roles.
 
 - 401 if the token is missing/invalid/expired.
-- 403 if the user has no role row (not provisioned for this tool).
+- 403 if the user has no role row (not provisioned for this tool), if the row's status is
+  not 'active' (a disabled member keeps a valid Supabase session until it expires — the row
+  is the gate), or if `must_reset` is set and the route is not one of the few needed to
+  change the password (R1 security, 24-Sep-2026).
 
 Every data endpoint except /health depends on get_current_user.
 """
@@ -21,10 +24,16 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
-from app.database import fetch_role
+from app.database import cached_user_row
 
 _bearer = HTTPBearer(auto_error=False)
 log = logging.getLogger(__name__)
+
+# A member on a temporary password may only find out who they are, load the feature list and
+# set a new password. `must_reset` lives in user_roles (server-owned; the auth user_metadata
+# copy is writable by the user, so it is never consulted for enforcement).
+MUST_RESET_EXEMPT: frozenset[str] = frozenset({"/me", "/auth/features", "/auth/password"})
+MUST_RESET_DETAIL = "password change required"
 
 
 @lru_cache
@@ -64,9 +73,12 @@ class CurrentUser:
     user_id: str
     email: str
     role: str
+    status: str = "active"
+    must_reset: bool = False
 
 
 def get_current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> CurrentUser:
     if creds is None or not creds.credentials:
@@ -89,14 +101,27 @@ def get_current_user(
     email = payload.get("email") or ""
     user_id = payload.get("sub") or ""
 
-    role = fetch_role(email)
-    if role is None:
+    row = cached_user_row(email)
+    role = row.get("role") if row else None
+    if not role:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User has no assigned role for this tool.",
         )
+    user_status = str(row.get("status") or "active")
+    if user_status != "active":
+        # verify_login already refuses a disabled member; this closes the window for a token
+        # minted before the switch (and update_access also bans the auth user).
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account is disabled.",
+        )
+    # The column may not exist until user_roles_must_reset_migration.sql runs: absent = False.
+    must_reset = bool(row.get("must_reset"))
+    if must_reset and request.scope.get("path") not in MUST_RESET_EXEMPT:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MUST_RESET_DETAIL)
 
-    return CurrentUser(user_id=user_id, email=email, role=role)
+    return CurrentUser(user_id=user_id, email=email, role=role, status=user_status, must_reset=must_reset)
 
 
 def require_roles(*allowed: str):
@@ -171,6 +196,7 @@ def require_feature(feature: str):
             )
         return user
 
+    _dep.feature = feature       # read by tests/test_r1_security.py's route → gate table
     return _dep
 
 
@@ -203,4 +229,19 @@ def get_caller(
                for p in AGENT_PATH_PREFIXES):
             return CurrentUser(user_id="agent", email=AGENT_EMAIL, role="agent")
         log.warning("agent key presented on non-automation path %s — ignored", path)
-    return get_current_user(creds)
+    return get_current_user(request, creds)
+
+
+def require_agent_or_admin(caller: CurrentUser = Depends(get_caller)) -> CurrentUser:
+    """The machine key (schedulers, crons) OR an admin login — nobody else.
+
+    Digests, briefs, event dispatch and agent runs read COGS, margins and receivables and can
+    send owner alerts; before R1 any login's JWT could call them (audit S2). Built on get_caller
+    so a dependency override of get_caller (scripts/smoke_check.py) still flows through.
+    """
+    if caller.role not in ("agent", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Requires the automation key or an admin login.",
+        )
+    return caller

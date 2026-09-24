@@ -17,6 +17,8 @@ python-multipart  # REQUIRED: FastAPI raises at import time on any File()/Upload
 # --- auth / crypto ---
 PyJWT
 cryptography
+sqlglot           # app/sql_validator.py: the /ask allowlist walks a real Postgres parse tree
+                  # (subqueries, CTEs, joins) instead of a FROM/JOIN regex. Pure Python.
 
 # --- data layer ---
 supabase

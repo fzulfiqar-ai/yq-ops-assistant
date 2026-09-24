@@ -26,7 +26,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.audit import log_event
-from app.auth import CurrentUser, get_caller, get_current_user, require_admin, require_feature
+from app.auth import (CurrentUser, get_caller, get_current_user, require_admin, require_agent_or_admin,
+                      require_feature)
 from app.config import settings
 from app.ratelimit import rate_limit_key
 
@@ -53,12 +54,18 @@ _DEV_ORIGINS = [
     "http://localhost:5175", "http://127.0.0.1:5175",
     "http://localhost:8501",
 ]
+# Explicit, not "*": the API authenticates with a bearer header and sets no cookies, so
+# credentials are never needed cross-origin (CSRF therefore does not apply: a cross-site form
+# cannot attach the Authorization header). The header list is what web/src/lib/api.ts,
+# shopApi.ts and market/lib/marketApi.ts send plus the crons' X-Agent-Key; Content-Disposition
+# is exposed so a download can read its filename (R1 security, 24-Sep-2026).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(set(settings.allowed_origins) | set(_DEV_ORIGINS)),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Agent-Key", "Accept"],
+    expose_headers=["Content-Disposition", "Retry-After"],
 )
 
 
@@ -108,7 +115,7 @@ class AskRequest(BaseModel):
 
 @app.post("/ask")
 @limiter.limit(settings.rate_limit)
-def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(require_feature("AI Assistant"))) -> dict:
     from app.ai import ask as ai_ask
     from app.auth import feature_set
     return ai_ask(body.question, user_email=user.email, model_name=body.model,
@@ -117,7 +124,8 @@ def ask(request: Request, body: AskRequest, user: CurrentUser = Depends(get_curr
 
 @app.post("/ask/stream")
 @limiter.limit(settings.rate_limit)
-async def ask_stream_endpoint(request: Request, body: AskRequest, user: CurrentUser = Depends(get_current_user)):
+async def ask_stream_endpoint(request: Request, body: AskRequest,
+                              user: CurrentUser = Depends(require_feature("AI Assistant"))):
     """Token-streaming answer — yields text chunks as they're produced."""
     from fastapi.responses import StreamingResponse
     from app.ai import ask_stream
@@ -254,20 +262,23 @@ def llm_health(_user: CurrentUser = Depends(get_current_user)) -> dict:
     return {"providers": health()}
 
 
+# Digests, briefs, dispatch and the scheduler read COGS, margins and receivables and can send the
+# owner alerts: the machine key (crons) or an admin login only — a member's JWT no longer runs
+# them (audit S2; require_agent_or_admin keeps X-Agent-Key working for GitHub/Cloudflare crons).
 @app.get("/digest/daily")
-def digest_daily(_caller: CurrentUser = Depends(get_caller)) -> dict:
+def digest_daily(_caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     from app.digest import daily_summary
     return daily_summary()
 
 
 @app.get("/digest/alerts")
-def digest_alerts(_caller: CurrentUser = Depends(get_caller)) -> dict:
+def digest_alerts(_caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     from app.digest import all_alerts
     return all_alerts()
 
 
 @app.get("/escalation/check")
-def escalation_check(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
+def escalation_check(send: bool = True, _caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     """Evaluate the escalation rules and fire the freshly-triggered ones (deduped 24h) to
     email + Telegram. Schedulers (n8n) call this hourly with X-Agent-Key. `send=false` previews."""
     from app.escalation import check
@@ -275,7 +286,7 @@ def escalation_check(send: bool = True, _caller: CurrentUser = Depends(get_calle
 
 
 @app.get("/escalation/brief")
-def escalation_brief(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
+def escalation_brief(send: bool = True, _caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     """Run every agent and send ONE combined morning briefing (email + Telegram). Schedulers
     (n8n) call this each morning with X-Agent-Key. `send=false` previews without sending."""
     from app.escalation import daily_brief
@@ -372,7 +383,7 @@ def agent_scope_put(body: AgentScopeRequest, admin: CurrentUser = Depends(requir
 
 
 @app.get("/events/dispatch")
-def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(get_caller)) -> dict:
+def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     """Called hourly by n8n: fan out unprocessed agent_events to subscribed agents
     (rules-only). Reactions draft into pending_actions / notify; nothing auto-executes."""
     from app.events import dispatch
@@ -381,7 +392,7 @@ def events_dispatch(limit: int = 50, _caller: CurrentUser = Depends(get_caller))
 
 @app.get("/feed")
 def events_feed(limit: int = 50, type: str | None = None, severity: str | None = None,
-                _user: CurrentUser = Depends(get_current_user)) -> dict:
+                _user: CurrentUser = Depends(require_feature("Live Feed"))) -> dict:
     """The ops activity feed: recent events + reactions, plus latest agent runs (Phase E)."""
     from app.events import feed
     from app.reports import agents_status
@@ -390,14 +401,14 @@ def events_feed(limit: int = 50, type: str | None = None, severity: str | None =
 
 
 @app.get("/scheduler/run-due")
-def scheduler_run_due(send: bool = True, _caller: CurrentUser = Depends(get_caller)) -> dict:
+def scheduler_run_due(send: bool = True, _caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     """Called hourly by n8n: runs + emails the agents due now (08:00 Bahrain, idempotent per day)."""
     from app.schedules import run_due
     return run_due(send=send)
 
 
 @app.get("/scheduler/shop-jobs")
-def scheduler_shop_jobs(_caller: CurrentUser = Depends(get_caller)) -> dict:
+def scheduler_shop_jobs(_caller: CurrentUser = Depends(require_agent_or_admin)) -> dict:
     """Marketplace housekeeping (unassigned-order reminders, session cleanup). Called every
     15 minutes by .github/workflows/shop-cron.yml with the machine key; idempotent."""
     from app.shop_jobs import run_shop_jobs
@@ -534,9 +545,52 @@ async def mrn_upload(file: UploadFile = File(...), admin: CurrentUser = Depends(
     return summary
 
 
+def _mrn_cost_gate(data: bytes, po_no: str, today=None) -> tuple[bool, str | None]:
+    """May this MRN XML load landed costs for the order at `po_no`? (ok, reason-when-not).
+
+    Every Transaction must carry a Focus receipt number in the YQ-YY-MM-n form whose month is no
+    later than next month (a receipt "from the future" would out-rank every real receipt in the
+    latest-cost rule forever), and its PONo must be the order in the URL, so a receipt cannot
+    be attached to — and re-cost — a different order. Pure: unit-tested in tests/test_r1_security.py."""
+    import re as _re
+    from datetime import date as _date
+    from xml.etree import ElementTree as ET
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return False, "not a Focus MRN export"
+    today = today or _date.today()
+    limit = (today.year + (1 if today.month == 12 else 0), 1 if today.month == 12 else today.month + 1)
+    want = (po_no or "").strip().upper()
+    seen = 0
+    for trans in root.iter("Transaction"):
+        seen += 1
+        header = trans.find("Header")
+        doc_no = (header.findtext("DocNo") if header is not None else "") or ""
+        m = _re.match(r"^\s*YQ-(\d{2})-(\d{2})-\d+\s*$", doc_no)
+        if not m:
+            return False, f"receipt number '{doc_no[:24]}' is not in the YQ-YY-MM-n form"
+        ym = (2000 + int(m.group(1)), int(m.group(2)))
+        if not 1 <= ym[1] <= 12 or ym > limit:
+            return False, f"receipt {doc_no.strip()} is dated after next month"
+        po = None
+        hx = trans.find("HeaderExtra")
+        if hx is not None:
+            for pair in hx.findall("IdNamePair"):
+                if (pair.findtext("Name") or "") == "PONo":
+                    po = (pair.findtext("Tag") or "").replace("PO:", "").strip().upper() or None
+        if not po:
+            return False, "the receipt names no PO number"
+        if po != want:
+            return False, f"the receipt belongs to PO {po}, not {want or '?'}"
+    if not seen:
+        return False, "no receipt transactions in the file"
+    return True, None
+
+
 @app.post("/orders/{po_no}/photo")
 async def order_photo(po_no: str, file: UploadFile = File(...),
-                      user: CurrentUser = Depends(get_current_user)) -> dict:
+                      user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Attach a shelf/shipment photo to an order (rear camera on mobile). Stored in the order vault."""
     from app.uploads import (MAX_PHOTO_BYTES, PHOTO_TYPES, UploadTooLarge,
                              content_matches, photo_ext, read_capped)
@@ -559,9 +613,13 @@ async def order_photo(po_no: str, file: UploadFile = File(...),
 
 @app.post("/orders/{po_no}/file")
 async def order_file(po_no: str, file: UploadFile = File(...),
-                     user: CurrentUser = Depends(get_current_user)) -> dict:
+                     user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Attach ANY related document to an order (proforma invoice, packing list, Excel, photo …),
-    so everything about the order lives in one place."""
+    so everything about the order lives in one place.
+
+    Storing the file needs the Orders page. LOADING costs from it (an MRN XML → landed costs,
+    a proforma → supplier RMB prices) is admin-only, and an MRN must pass _mrn_cost_gate; any
+    other caller gets the file stored and `skipped` says why nothing was loaded (audit S3)."""
     import mimetypes
     from app.uploads import UploadTooLarge, content_matches, photo_ext, read_capped
     name = file.filename or ""
@@ -591,29 +649,46 @@ async def order_file(po_no: str, file: UploadFile = File(...),
         kind = "doc"
 
     # Smart processing — actually LOAD the data so the order calculates, not just store the file.
+    # Admin-only, and every load leaves an audit_log row with what changed.
     processed = None
-    if ext == ".xml":
-        try:
-            from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
-            rows = parse_mrn_bytes(data)
-            if rows:
-                load_mrn_costs(rows)
-                processed = "landed cost loaded"
-                from app.ai import flush_cache
-                flush_cache()
-                from app import events
-                events.emit("upload", "mrn.uploaded", entity_type="po", entity_key=po_no,
-                            payload={"summary": f"MRN attached to {po_no} — landed costs updated"},
-                            dedupe=False)
-        except Exception:  # noqa: BLE001
-            pass
+    skipped = None
+    loads_costs = ext == ".xml" or kind == "invoice"
+    if loads_costs and user.role != "admin":
+        skipped = "stored only: loading costs needs an admin"
+    elif ext == ".xml":
+        ok, why = _mrn_cost_gate(data, po_no)
+        if not ok:
+            skipped = f"stored only: {why}"
+        else:
+            try:
+                from scripts.ingest_mrn import load_mrn_costs, parse_mrn_bytes
+                rows = parse_mrn_bytes(data)
+                if rows:
+                    summary = load_mrn_costs(rows)
+                    processed = "landed cost loaded"
+                    log_event(user.email, "cost_load", detail={"po_no": po_no, "source": "mrn", "file": name,
+                                                               **{k: summary.get(k) for k in
+                                                                  ("docs", "skus", "lines", "purchase_costs_month",
+                                                                   "purchase_costs_rows")}})
+                    from app.ai import flush_cache
+                    flush_cache()
+                    from app import events
+                    events.emit("upload", "mrn.uploaded", entity_type="po", entity_key=po_no,
+                                payload={"summary": f"MRN attached to {po_no} — landed costs updated"},
+                                dedupe=False)
+            except Exception:  # noqa: BLE001
+                pass
     elif kind == "invoice":
         try:
             from app.invoices import load_supplier_prices, parse_invoice
             rows = parse_invoice(data, name)
             if rows:
-                load_supplier_prices(rows)
+                summary = load_supplier_prices(rows)
                 processed = "supplier prices loaded"
+                log_event(user.email, "cost_load", detail={"po_no": po_no, "source": "invoice", "file": name,
+                                                           "invoice": summary.get("invoice"),
+                                                           "models": summary.get("models"),
+                                                           "lines": summary.get("lines")})
                 from app.ai import flush_cache
                 flush_cache()
                 from app import events
@@ -628,13 +703,14 @@ async def order_file(po_no: str, file: UploadFile = File(...),
     path = store_order_file(po_no, kind, data, ext, ct, user.email, filename=name)
     if not path:
         return {"error": "Could not save the file — try again."}
-    log_event(user.email, "order_file", detail={"po_no": po_no, "kind": kind, "processed": processed})
-    return {"ok": True, "kind": kind, "processed": processed}
+    log_event(user.email, "order_file", detail={"po_no": po_no, "kind": kind, "processed": processed,
+                                                "skipped": skipped})
+    return {"ok": True, "kind": kind, "processed": processed, "skipped": skipped}
 
 
 @app.post("/orders/attach-doc")
 async def attach_loose_doc(file: UploadFile = File(...),
-                           user: CurrentUser = Depends(get_current_user)) -> dict:
+                           user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Attach a shipment document (packing list, etc.) dropped on the main page — auto-matched to its
     order by the VFAN invoice number that already appears on one of the order's files."""
     import mimetypes
@@ -744,7 +820,7 @@ def order_proposal_export(body: OrderExportRequest,
 
 @app.post("/orders/verify")
 async def order_verify(file: UploadFile = File(...),
-                       user: CurrentUser = Depends(get_current_user)) -> dict:
+                       user: CurrentUser = Depends(require_feature("Orders"))) -> dict:
     """Verify an order .xlsx (price vs last VFAN, math/discount, margin, qty sanity) — the human gate."""
     from app.uploads import UploadTooLarge, read_capped
     if not (file.filename or "").lower().endswith((".xls", ".xlsx")):
@@ -1471,18 +1547,34 @@ def coaching_brief(account: str, _user: CurrentUser = Depends(require_feature("S
 
 
 @app.get("/agents")
-def agents_list(_caller: CurrentUser = Depends(get_caller)) -> list:
+def agents_list(caller: CurrentUser = Depends(get_caller)) -> list:
+    """The agent roster. The machine key and admins see every agent; a member sees only the
+    agents behind pages granted to them — the same rule /agents/{name} enforces, so the Agents
+    and Assistant pages list exactly what the member may run (audit S2)."""
     from app.agents import list_agents
-    return list_agents()
+    rows = list_agents()
+    if caller.role in ("admin", "agent"):
+        return rows
+    from app.orchestrator import allowed_agents
+    allowed = set(allowed_agents(caller))
+    return [r for r in rows if r.get("name") in allowed]
 
 
 @app.get("/agents/{name}")
 def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get_caller)) -> dict:
+    """Run one agent. The machine key and admins may run any; a member may run only the agents
+    behind pages granted to them (orchestrator.AGENT_FEATURE), and only an admin may have the
+    result emailed — `email=true` from anyone else is ignored, never a 4xx (audit S2)."""
     from app.agents import run_agent
+    from fastapi import HTTPException
+    if caller.role not in ("admin", "agent"):
+        from app.orchestrator import allowed_agents
+        if name not in allowed_agents(caller):
+            raise HTTPException(status_code=403, detail="Requires access to this agent's page.")
+    email = bool(email) and caller.role == "admin"
     try:
         result = run_agent(name)
     except KeyError:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"Unknown agent '{name}'.")
     if email:
         from app.emailer import send_agent
@@ -1501,7 +1593,8 @@ def auth_features(_user: CurrentUser = Depends(get_current_user)) -> dict:
 
 @app.get("/me")
 def me(user: CurrentUser = Depends(get_current_user)) -> dict:
-    """Identity + access for the SPA: role + granted feature pages."""
+    """Identity + access for the SPA: role + granted feature pages. `must_reset` is the
+    server-owned flag: while it is set every other route answers 403 (see app.auth)."""
     role, features, full_name = user.role, [], ""
     try:
         from app.user_auth import _user_row
@@ -1512,7 +1605,31 @@ def me(user: CurrentUser = Depends(get_current_user)) -> dict:
             full_name = row.get("full_name") or ""
     except Exception:  # columns may predate the team migration
         pass
-    return {"email": user.email, "role": role, "features": features, "full_name": full_name}
+    return {"email": user.email, "role": role, "features": features, "full_name": full_name,
+            "must_reset": bool(user.must_reset)}
+
+
+class PasswordChangeRequest(BaseModel):
+    password: str
+
+
+@app.post("/auth/password")
+@limiter.limit("5/minute")
+def auth_password(request: Request, body: PasswordChangeRequest,
+                  user: CurrentUser = Depends(get_current_user)) -> dict:
+    """The member sets a new password. The API performs the change itself (admin API), which
+    is what lets it clear the server-owned must_reset flag with certainty — the SPA used to
+    write user_metadata directly, which the user can also write. One of the three routes a
+    must_reset login may call (app.auth.MUST_RESET_EXEMPT)."""
+    from fastapi import HTTPException
+    from app.user_auth import set_password
+    pw = body.password or ""
+    if len(pw) < 8 or len(pw) > 128:
+        raise HTTPException(status_code=400, detail="Password must be 8 to 128 characters.")
+    if not set_password(user.email, pw):
+        raise HTTPException(status_code=404, detail="Account not found.")
+    log_event(user.email, "auth.password_change", detail={"forced": bool(user.must_reset)})
+    return {"ok": True, "must_reset": False}
 
 
 # ── Team & access management (admin) ─────────────────────────────────────────
@@ -1604,7 +1721,7 @@ class ActionRequest(BaseModel):
 
 
 @app.post("/action")
-def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_current_user)) -> dict:
+def submit_action(body: ActionRequest, user: CurrentUser = Depends(require_feature("AI Agents"))) -> dict:
     from app.actions import submit_action as _submit
     result = _submit(body.action_type, {**body.payload, "notes": body.notes}, requested_by=user.email)
     log_event(user.email, "action.submit", detail={"action_type": body.action_type})
@@ -1612,7 +1729,7 @@ def submit_action(body: ActionRequest, user: CurrentUser = Depends(get_current_u
 
 
 @app.get("/actions")
-def list_actions(status: str | None = None, _user: CurrentUser = Depends(get_current_user)) -> list:
+def list_actions(status: str | None = None, _user: CurrentUser = Depends(require_admin)) -> list:
     from app.actions import list_actions as _list
     return _list(status=status)
 

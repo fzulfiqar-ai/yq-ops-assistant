@@ -29,6 +29,15 @@ def get_client() -> Client:
 _USER_TTL_S = 60
 _user_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
 
+# `must_reset` is server-owned (R1 security, 24-Sep-2026) and arrives with
+# scripts/user_roles_must_reset_migration.sql. The API must deploy BEFORE the migration, so
+# a select that names the column is retried without it and the legacy shape is remembered
+# for a while (re-probed every _LEGACY_RETRY_S) instead of failing every login.
+_USER_COLUMNS = "email,role,features,status,full_name,must_reset"
+_USER_COLUMNS_LEGACY = "email,role,features,status,full_name"
+_LEGACY_RETRY_S = 600
+_legacy_until = 0.0
+
 
 def invalidate_user_cache(email: str | None = None) -> None:
     """Drop cached user_roles rows (one email, or all when None)."""
@@ -39,24 +48,37 @@ def invalidate_user_cache(email: str | None = None) -> None:
         _user_cache.pop(key, None)
 
 
+def _missing_must_reset(exc: Exception) -> bool:
+    """PostgREST's 'column user_roles.must_reset does not exist' (42703), whatever the wrapper."""
+    text = f"{getattr(exc, 'code', '')} {getattr(exc, 'message', '')} {exc}"
+    return "must_reset" in text and ("42703" in text or "does not exist" in text)
+
+
+def _select_user_row(email: str) -> dict[str, Any] | None:
+    global _legacy_until
+    cols = _USER_COLUMNS_LEGACY if time.time() < _legacy_until else _USER_COLUMNS
+    try:
+        resp = get_client().table("user_roles").select(cols).eq("email", email).limit(1).execute()
+    except Exception as exc:  # noqa: BLE001
+        if cols == _USER_COLUMNS_LEGACY or not _missing_must_reset(exc):
+            raise
+        _legacy_until = time.time() + _LEGACY_RETRY_S
+        resp = get_client().table("user_roles").select(_USER_COLUMNS_LEGACY).eq("email", email).limit(1).execute()
+    return (resp.data or [None])[0]
+
+
 def cached_user_row(email: str) -> dict[str, Any] | None:
     """The user_roles row for `email`, cached for _USER_TTL_S.
 
     Keyed on the exact string passed so callers that normalise the address and callers
     that don't each keep their existing semantics; in the normal all-lowercase case both
     share one entry, collapsing the two per-request lookups into a single query.
+    The row carries `must_reset` once the column exists; callers treat a missing key as False.
     """
     hit = _user_cache.get(email)
     if hit and time.time() - hit[0] < _USER_TTL_S:
         return hit[1]
-    resp = (
-        get_client().table("user_roles")
-        .select("email,role,features,status,full_name")
-        .eq("email", email)
-        .limit(1)
-        .execute()
-    )
-    row = (resp.data or [None])[0]
+    row = _select_user_row(email)
     _user_cache[email] = (time.time(), row)
     return row
 

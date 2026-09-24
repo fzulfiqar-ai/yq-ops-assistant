@@ -19,14 +19,56 @@ hop count is the safe rule.
 
 KEYS. Authenticated calls are keyed per user (a short hash of the bearer token) so the whole
 office behind one NAT address never shares a bucket; public calls are keyed by client IP.
+
+THE SECOND BUG (R1 security S5, 24-Sep-2026). The per-user key used to be handed to ANY
+`Bearer` header, so a bot could mint a fresh bucket per request with junk tokens and the
+public limits never bit. Now every /public/*, /team/* and /health call is keyed by client IP
+only, and elsewhere a token earns a user bucket only after it verifies (the same decoding as
+app.auth); verified hashes are remembered ~5 min so the check costs nothing per request.
 """
 from __future__ import annotations
 
 import hashlib
+import time
 
 from starlette.requests import Request
 
 from app.config import settings
+
+# Paths where the caller's identity must never influence the bucket.
+IP_ONLY_PREFIXES: tuple[str, ...] = ("/public/", "/team/")
+IP_ONLY_PATHS: frozenset[str] = frozenset({"/health"})
+
+_VERIFIED_TTL_S = 300      # a verified token keeps its user bucket this long without re-checking
+_REJECTED_TTL_S = 60       # a token that failed stays "junk" this long (no signature work per hit)
+_CACHE_MAX = 4096
+_verified: dict[str, float] = {}     # token digest → monotonic expiry
+_rejected: dict[str, float] = {}
+
+
+def reset_cache() -> None:
+    """Forget every remembered token (tests)."""
+    _verified.clear()
+    _rejected.clear()
+
+
+def _prune(cache: dict[str, float], now: float) -> None:
+    if len(cache) < _CACHE_MAX:
+        return
+    for k in [k for k, exp in cache.items() if exp <= now]:
+        cache.pop(k, None)
+    if len(cache) >= _CACHE_MAX:     # still full of live entries: start over rather than grow
+        cache.clear()
+
+
+def _verify(token: str) -> bool:
+    """True when the bearer token verifies as a Supabase access token (shared with app.auth)."""
+    from app.auth import _decode_token
+    try:
+        _decode_token(token)
+        return True
+    except Exception:  # noqa: BLE001 — bad signature, expired, wrong audience, junk
+        return False
 
 
 def client_ip(request: Request) -> str:
@@ -42,10 +84,35 @@ def client_ip(request: Request) -> str:
     return peer[:64]
 
 
+def user_key(token: str) -> str | None:
+    """'u:<hash>' for a token that verifies (cached), None for anything else."""
+    token = token.strip()
+    if len(token) < 20:
+        return None
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    now = time.monotonic()
+    if _verified.get(digest, 0.0) > now:
+        return "u:" + digest
+    if _rejected.get(digest, 0.0) > now:
+        return None
+    if _verify(token):
+        _prune(_verified, now)
+        _verified[digest] = now + _VERIFIED_TTL_S
+        return "u:" + digest
+    _prune(_rejected, now)
+    _rejected[digest] = now + _REJECTED_TTL_S
+    return None
+
+
 def rate_limit_key(request: Request) -> str:
-    """slowapi key: per user when a bearer token is present, per client IP otherwise."""
+    """slowapi key: client IP on the public surface; per user only for a VERIFIED bearer token;
+    client IP for everything else (no token, a junk token, an expired one)."""
+    path = request.scope.get("path") or ""
+    if path in IP_ONLY_PATHS or path.startswith(IP_ONLY_PREFIXES):
+        return client_ip(request)
     auth = request.headers.get("authorization", "")
-    if auth[:7].lower() == "bearer " and len(auth) > 27:
-        digest = hashlib.sha256(auth[7:].strip().encode("utf-8")).hexdigest()
-        return "u:" + digest[:16]
+    if auth[:7].lower() == "bearer ":
+        key = user_key(auth[7:])
+        if key:
+            return key
     return client_ip(request)

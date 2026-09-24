@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { Check, ChevronRight, Copy, ExternalLink, KeyRound, Loader2, LogOut, MessageCircle, QrCode } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { navFor } from '@/lib/nav'
-import { supabase } from '@/lib/supabase'
+import { changeOwnPassword } from '@/lib/password'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
 import { bhd3, initials, monthName, useAuthedBlob, useShopMe } from './lib'
@@ -34,9 +34,9 @@ export default function Account() {
     if (p1.length < 8) return toast('Password must be at least 8 characters.', 'error')
     if (p1 !== p2) return toast('Passwords do not match.', 'error')
     setBusy(true)
-    const { error } = await supabase.auth.updateUser({ password: p1, data: { must_reset: false } })
+    const error = await changeOwnPassword(p1)
     setBusy(false)
-    if (error) toast(error.message, 'error')
+    if (error) toast(error, 'error')
     else {
       setP1('')
       setP2('')

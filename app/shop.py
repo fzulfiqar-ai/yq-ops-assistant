@@ -1324,23 +1324,23 @@ def _salesman_by(ctx: dict, sid) -> dict | None:
 
 
 def recognize_phone(raw_phone: str | None, device_id: str | None) -> dict | None:
-    """A returning merchant on a new phone: the shop name, area and first name for a number we
-    already know — nothing else (no email, no history). The device joins the merchant's list so
-    the next visit is recognised without typing. None for an unknown number."""
+    """A returning merchant: the shop name, area and first name for a number we already know —
+    nothing else (no email, no history) — and ONLY when the calling device has already ordered
+    as that merchant (its id is in the merchant's device_ids, written by create_order). Any
+    other device gets None, exactly like an unknown number, so the public endpoint cannot be
+    used to look up who owns a phone (R1 security S4, 24-Sep-2026). Never writes: the device
+    list is earned by an order, not by asking."""
     digits = re.sub(r"\D", "", str(raw_phone or ""))
     phone = ("973" + digits) if len(digits) == 8 else digits
-    if len(phone) < 8:
+    dev = (device_id or "").strip()
+    if len(phone) < 8 or not dev:
         return None
     cust = _customer_by_phone(phone)
     if not cust:
         return None
-    if device_id:
-        try:
-            devs = [d for d in (cust.get("device_ids") or []) if isinstance(d, str) and d != device_id]
-            get_client().table("shop_customers").update({"device_ids": ([device_id] + devs)[:10], "updated_at": _iso()}) \
-                .eq("id", cust["id"]).execute()
-        except Exception as e:  # noqa: BLE001
-            log.debug("recognize device update failed: %s", e)
+    devs = [d for d in (cust.get("device_ids") or []) if isinstance(d, str)]
+    if dev not in devs:
+        return None
     first = (str(cust.get("name") or "").strip().split(" ") or [""])[0]
     return {"shop": cust.get("shop") or None, "area": cust.get("area") or None, "first_name": first or None,
             "orders_count": int(cust.get("orders_count") or 0)}
@@ -1662,7 +1662,12 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
 
 # ── events ────────────────────────────────────────────────────────────────────
 
-def record_event(body: dict, ip: str | None = None, ua: str | None = None) -> bool:
+def record_event(body: dict, ip: str | None = None, ua: str | None = None, *,
+                 salesman_id: int | None = None) -> bool:
+    """Store a funnel event. Attribution is derived on the SERVER from the event's referral
+    code (the rep whose link or slug this session arrived with); a `salesman_id` in the body is
+    ignored, so the browser cannot credit an arbitrary rep (R1 security, 24-Sep-2026). Trusted
+    callers that already know the rep — the order-cancel route — pass `salesman_id` explicitly."""
     ev = str(body.get("event") or "").strip().lower()
     if ev not in EVENTS:
         return False
@@ -1674,12 +1679,21 @@ def record_event(body: dict, ip: str | None = None, ua: str | None = None) -> bo
                 if k in _META_KEYS and isinstance(v, (str, int, float, bool))}
     else:
         meta = None
+    referral_code = clean(body.get("referral_code"), 32).lower() or None
+    sid = _i(salesman_id) or None
+    if sid is None and referral_code:
+        try:
+            ref = resolve_ref(context(), referral_code)
+        except Exception as e:  # noqa: BLE001 — an unresolvable ref is an event without a rep, not a lost event
+            log.debug("event attribution lookup failed: %s", e)
+            ref = None
+        sid = int(ref["salesman_id"]) if ref else None
     try:
         get_client().table("shop_events").insert({
             "session_id": clean(body.get("session_id"), 64) or None, "event": ev,
             "item_code": clean(body.get("item_code"), 64).upper() or None,
-            "referral_code": clean(body.get("referral_code"), 32).lower() or None,
-            "salesman_id": _i(body.get("salesman_id")) or None,
+            "referral_code": referral_code,
+            "salesman_id": sid,
             "src": clean(body.get("src"), 80) or None,
             "device_id": clean(body.get("device_id"), 64) or None,
             "customer_id": _i(body.get("customer_id")) or None,
@@ -2337,8 +2351,17 @@ def rep_target(focus_name: str, period: str | None) -> dict | None:
     return (rows or [None])[0]
 
 
-def me_payload(email: str) -> dict:
+UNLINKED_HINT = "Your login is not linked to a salesman yet — an admin can link it on the Salesmen page."
+
+
+def me_payload(email: str, *, is_admin: bool = False) -> dict:
+    """The Today / Me card. A login without a salesmen row sees company-wide totals ONLY when
+    it is an admin; any other unlinked login gets empty KPIs and the hint (R1 security)."""
     sm = salesman_for_user(email)
+    if not sm and not is_admin:
+        return {"salesman": None, "link": None, "qr_url": None,
+                "kpis": {"orders_7d": 0, "orders_30d": 0, "value_30d_bhd": 0.0, "customers_30d": 0},
+                "focus": None, "hint": UNLINKED_HINT}
     client = get_client()
     now = _now()
     d7, d30 = (now - timedelta(days=7)).isoformat(), (now - timedelta(days=30)).isoformat()
@@ -2707,11 +2730,16 @@ def list_restock(referral_code: str | None = None) -> list[dict]:
     return out
 
 
-def resolve_restock(ids: list[int]) -> int:
+def resolve_restock(ids: list[int], referral_code: str | None = None) -> int:
+    """Mark requests notified. With `referral_code` (a rep) only that rep's rows are touched, so
+    ids guessed from another rep's list are simply not matched; returns the rows actually updated."""
     if not ids:
         return 0
-    get_client().table("shop_restock_requests").update({"notified_at": _iso()}).in_("id", ids[:200]).execute()
-    return len(ids[:200])
+    q = get_client().table("shop_restock_requests").update({"notified_at": _iso()}).in_("id", ids[:200])
+    if referral_code is not None:
+        q = q.eq("referral_code", str(referral_code).lower())
+    resp = q.execute()
+    return len(resp.data or [])
 
 
 def delete_rule(rule_id: int) -> None:

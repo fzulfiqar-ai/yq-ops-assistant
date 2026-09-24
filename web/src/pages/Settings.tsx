@@ -8,7 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { useToast } from '@/components/Toast'
-import { supabase } from '@/lib/supabase'
+import { changeOwnPassword } from '@/lib/password'
 import { apiGet, apiSend, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
@@ -638,9 +638,9 @@ export default function Settings() {
     if (p1.length < 8) return setMsg({ ok: false, text: 'Password must be at least 8 characters.' })
     if (p1 !== p2) return setMsg({ ok: false, text: 'Passwords do not match.' })
     setBusy(true); setMsg(null)
-    const { error } = await supabase.auth.updateUser({ password: p1, data: { must_reset: false } })
+    const error = await changeOwnPassword(p1)
     setBusy(false)
-    if (error) { setMsg({ ok: false, text: error.message }); toast(error.message, 'error') }
+    if (error) { setMsg({ ok: false, text: error }); toast(error, 'error') }
     else { setP1(''); setP2(''); setMsg(null); toast('Password updated successfully.', 'success') }
   }
 

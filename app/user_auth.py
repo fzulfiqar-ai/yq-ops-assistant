@@ -10,6 +10,15 @@ Two onboarding paths (admin chooses per invite):
   • email invite   — a row in `app_invites` + a link the member opens to set their
     own password (works once a sending domain is verified in Resend).
 
+`must_reset` is SERVER-OWNED (R1 security S6, 24-Sep-2026): the truth is user_roles.must_reset
+(scripts/user_roles_must_reset_migration.sql), enforced by app.auth.get_current_user and
+cleared only here after the API itself sets the new password (POST /auth/password). The copy in
+the auth user_metadata is kept for the SPA banner but is user-writable, so nothing trusts it.
+Until the migration runs the column is absent; every write below tolerates that.
+
+Disabling a member also BANS the Supabase auth user (and re-activating unbans), so a disabled
+login cannot mint fresh tokens while the user_roles row already refuses the old ones.
+
 A FRESH client is used for sign-in so the cached service-role client
 (`app.database.get_client`) is never re-authenticated as the signing-in user.
 """
@@ -91,30 +100,66 @@ def verify_login(email: str, password: str) -> dict | None:
         log.warning("login: %s authenticated but not provisioned/active", email)
         return None
     meta = (getattr(sess, "user", None) and getattr(sess.user, "user_metadata", None)) or {}
+    # the server-owned flag when the column exists, else the metadata hint (display only)
+    must_reset = row["must_reset"] if row.get("must_reset") is not None else meta.get("must_reset")
     return {
         "email": email,
         "role": row.get("role", "member"),
         "features": row.get("features") or [],
         "full_name": row.get("full_name") or meta.get("full_name") or "",
-        "must_reset": bool(meta.get("must_reset")),
+        "must_reset": bool(must_reset),
     }
 
 
 # ── user provisioning ────────────────────────────────────────────────────────
 
+def _missing_column(exc: Exception, column: str) -> bool:
+    text = f"{getattr(exc, 'code', '')} {getattr(exc, 'message', '')} {exc}"
+    return column in text and ("42703" in text or "does not exist" in text)
+
+
+def _write_role_row(row: dict, *, insert: bool) -> None:
+    """Insert or update a user_roles row; when the DB predates the must_reset column, retry
+    without it (the API deploys before user_roles_must_reset_migration.sql)."""
+    client = get_client()
+
+    def _go(payload: dict) -> None:
+        if insert:
+            client.table("user_roles").insert(payload).execute()
+        else:
+            client.table("user_roles").update(payload).eq("email", payload["email"]).execute()
+
+    try:
+        _go(row)
+    except Exception as exc:  # noqa: BLE001
+        if "must_reset" not in row or not _missing_column(exc, "must_reset"):
+            raise
+        _go({k: v for k, v in row.items() if k != "must_reset"})
+
+
 def _upsert_role(email: str, role: str, features: list[str],
-                 full_name: str = "", invited_by: str = "", status: str = "active") -> None:
+                 full_name: str = "", invited_by: str = "", status: str = "active",
+                 must_reset: bool | None = None) -> None:
     email = email.strip().lower()
     row: dict = {"email": email, "role": role, "features": features, "status": status}
     if full_name:
         row["full_name"] = full_name
     if invited_by:
         row["invited_by"] = invited_by
-    client = get_client()
-    if _user_row(email):
-        client.table("user_roles").update(row).eq("email", email).execute()
-    else:
-        client.table("user_roles").insert(row).execute()
+    if must_reset is not None:
+        row["must_reset"] = bool(must_reset)
+    _write_role_row(row, insert=not _user_row(email))
+    invalidate_user_cache(email)
+
+
+def _clear_must_reset(email: str) -> None:
+    """user_roles.must_reset = false (no-op before the migration adds the column)."""
+    email = email.strip().lower()
+    try:
+        get_client().table("user_roles").update({"must_reset": False}).eq("email", email).execute()
+    except Exception as exc:  # noqa: BLE001
+        if not _missing_column(exc, "must_reset"):
+            log.warning("clear must_reset failed for %s: %s", email, exc)
     invalidate_user_cache(email)
 
 
@@ -133,19 +178,41 @@ def create_member(email: str, full_name: str, role: str, features: list[str],
         client.auth.admin.create_user(
             {"email": email, "password": password, "email_confirm": True, "user_metadata": meta}
         )
-    _upsert_role(email, role, features, full_name, invited_by, status="active")
+    _upsert_role(email, role, features, full_name, invited_by, status="active", must_reset=must_reset)
     return {"email": email, "role": role, "features": features, "full_name": full_name}
 
 
 def set_password(email: str, password: str) -> bool:
-    """Set a user's password and clear the must_reset flag (used by force-reset)."""
+    """Set a user's password and clear must_reset — the only path that clears the server-owned
+    flag (POST /auth/password for the member themself; an admin force-reset)."""
     u = _find_auth_user(email)
     if not u:
         return False
     meta = dict(getattr(u, "user_metadata", None) or {})
     meta["must_reset"] = False
     get_client().auth.admin.update_user_by_id(u.id, {"password": password, "user_metadata": meta})
+    _clear_must_reset(email)
     return True
+
+
+# Supabase has no "banned forever"; a century is the documented way to spell it.
+_BAN_FOREVER = "876000h"
+
+
+def set_auth_ban(email: str, banned: bool) -> bool:
+    """Ban (or unban) the Supabase auth user so a disabled member cannot sign in again or refresh
+    a session. Returns False when the auth user is missing or the call fails — the user_roles
+    status is the gate the API enforces either way."""
+    u = _find_auth_user(email)
+    if not u:
+        return False
+    try:
+        get_client().auth.admin.update_user_by_id(
+            u.id, {"ban_duration": _BAN_FOREVER if banned else "none"})
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("auth %s failed for %s: %s", "ban" if banned else "unban", email, e)
+        return False
 
 
 def update_access(email: str, role: str | None = None,
@@ -160,6 +227,8 @@ def update_access(email: str, role: str | None = None,
     if upd:
         get_client().table("user_roles").update(upd).eq("email", email.strip().lower()).execute()
         invalidate_user_cache(email)
+    if status is not None:
+        set_auth_ban(email, banned=(status != "active"))
 
 
 def remove_user(email: str) -> None:
