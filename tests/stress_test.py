@@ -299,6 +299,12 @@ def _():
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    import os
+    if os.getenv("YQ_TEST_ALLOW_PROD_WRITES") != "1":
+        print("SKIP: tests.stress_test writes to the production database (pending_actions, query_cache).\n"
+              "The marketplace is live; run it against a local/staging DATABASE or set "
+              "YQ_TEST_ALLOW_PROD_WRITES=1 deliberately.")
+        return 0
     print("\n" + "=" * 60)
     print("  YQ Bahrain AI Ops - Stress & Integration Tests")
     print("=" * 60 + "\n")

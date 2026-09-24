@@ -179,3 +179,31 @@ closing `DO` block raises if a column or a check is missing, or if anything is g
 `anon`/`authenticated`; `python -m scripts.audit_grants` afterwards was **clean (exit 0)**, and
 `python -m tests.test_shop` passed (51/51, the new cases cover the enums and the 3-code cap). Rendering and
 admin contract: `docs/MARKETPLACE.md` § Campaign creative.
+
+
+## Backup, restore and the preservation gate (24-Sep-2026)
+
+Before **every** production change: `python -m scripts.db_backup --all --out business_data/backups/<date>_<label>`
+(every public table inside ONE read-only REPEATABLE READ transaction, UTC timestamps, manifest with columns and
+max id / created_at, re-verified on write) and `python -m scripts.prod_gate snapshot --label <label>`. After the
+change: a second gate snapshot and `python -m scripts.prod_gate compare A.json B.json`, which fails if any
+pre-existing order, line, event, merchant, salesman link, target or audit row disappeared or changed without an
+explaining event. Rehearse every migration first as `BEGIN; SET LOCAL lock_timeout='2s'; <file>; <checks>; ROLLBACK;`.
+
+`db_backup --restore` now refuses (dry run and `--yes` alike) when:
+- a table outside `--tables` references a restored table with ON DELETE CASCADE / SET NULL and holds rows
+  (restoring `shop_orders` alone would have deleted every line and event; `salesmen` alone would have blanked
+  the salesman on every order and merchant);
+- the live table holds rows newer than the backup (max id, or created_at compared as timestamptz);
+- the backup's columns do not fit the live table.
+It deletes children first, loads parents first, asserts every count and writes an audit_log row.
+
+**Drill, 24-Sep-2026 (local scratch Postgres 17.6, never production):** schema of the 19 marketplace/people/audit
+tables copied with a read-only `pg_dump --schema-only`; backup `2026-09-24_prerollout` restored in about 1 s
+(salesmen 18, targets 15, user_roles 19, audit_log 607, shop_customers 15, shop_orders 17, lines 122, events 41,
+shop_events 2,557 ...). md5 over every business field of shop_orders, shop_order_lines, shop_order_events,
+shop_customers and salesman_targets: **identical** to production. Guards proven on the scratch copy: restoring
+shop_orders alone REFUSED (122 lines + 41 events would cascade), salesmen alone REFUSED (17 orders + 15 merchants
+would lose their rep), and a restore over a newer order REFUSED. The drill also caught two restore bugs before they
+could matter (a sequence re-seed on a table without an id; timestamps compared as text across time zones).
+Tools: portable PostgreSQL binaries in `%LOCALAPPDATA%\yq-tools\pgsql` (not in the repo), cluster on port 55432.

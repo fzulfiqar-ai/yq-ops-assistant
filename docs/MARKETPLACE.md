@@ -395,9 +395,10 @@ maskable + shortcuts) → `web/public/`.
 
 1. **SQL first** — `python -m scripts.apply_sql scripts/marketplace_campaign_creative_migration.sql`,
    then `python -m scripts.audit_grants` (exit 0).
-2. **Render** — trigger a redeploy through the Render API (`docs/DEPLOY_RENDER.md`); pushes do not
-   reach it (no GitHub-app webhook), so the API is the only path.
-3. **`python -m scripts.deploy_web market`**, then **`python -m scripts.deploy_web portal`** — both
+2. **Render** — `python -m scripts.render_deploy deploy --commit <sha> --wait` (deploy-only; never
+   `scripts/deploy_render.py`, which would overwrite the live env set); pushes do not reach it.
+3. **Superseded 20-Sep-2026:** web now ships to Cloudflare (`cf-deploy.yml` on push, or
+   `python -m scripts.deploy_cf market|portal`). Historical: `scripts.deploy_web market|portal` — both
    projects are CLI-deployed from `web/`; the script swaps the CLI link, deploys and restores it.
    Vercel builds with the project's env, so a local `.env` never leaks into the bundle.
 4. **Portal settings** — the production **wholesale minimum is set in Settings → Shop**

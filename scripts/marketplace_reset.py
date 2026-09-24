@@ -19,8 +19,13 @@ storage bucket.
 
 Safety: --execute refuses unless --backup-dir points at a scripts/db_backup.py folder whose
 manifest covers every table below (that folder is the rollback: `python -m scripts.db_backup
---restore <dir> --tables shop_customers,shop_orders,... --yes`). The run is written to
+--restore <dir> --tables <the list printed at the end> --yes`). The run is written to
 audit_log so the reset is visible in the portal's history.
+
+LIVE-DATA LOCK (24-Sep-2026): the marketplace is live and holds real orders. --execute now
+also refuses while shop_orders has ANY row, unless the owner has explicitly authorised wiping
+live orders for this one run and the operator passes --i-understand-this-deletes-live-orders.
+An old "start fresh" instruction is not that authorisation.
 """
 from __future__ import annotations
 
@@ -65,6 +70,8 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--backup-dir", help="scripts/db_backup.py folder that covers every table above")
+    ap.add_argument("--i-understand-this-deletes-live-orders", dest="live_ok", action="store_true",
+                    help="required while real orders exist; needs the owner's explicit written go-ahead")
     a = ap.parse_args(argv)
 
     with _conn() as conn:
@@ -83,6 +90,10 @@ def main(argv: list[str]) -> int:
             print("\nDry run. Nothing changed. Re-run with --execute --backup-dir <folder> to wipe.")
             return 0
 
+        if before.get("shop_orders", 0) and not a.live_ok:
+            print(f"\nREFUSED: shop_orders holds {before['shop_orders']} live order(s). The marketplace is live; "
+                  f"a reset would delete real transactions. See the LIVE-DATA LOCK note in this script.")
+            return 2
         if not a.backup_dir:
             print("\nREFUSED: --execute needs --backup-dir (take one with: python -m scripts.db_backup)")
             return 2
@@ -116,7 +127,8 @@ def main(argv: list[str]) -> int:
                  json.dumps({"deleted": before, "backup": str(a.backup_dir),
                              "at": datetime.now(timezone.utc).isoformat()})))
         print(f"\nReset complete: {total} rows removed across {len(TABLES)} tables. "
-              f"Rollback: python -m scripts.db_backup --restore {a.backup_dir} --tables {','.join(TABLES)} --yes")
+              f"Rollback (db_backup orders parents first itself): python -m scripts.db_backup --restore "
+              f"{a.backup_dir} --tables {','.join(reversed(TABLES))} --yes")
     return 0
 
 

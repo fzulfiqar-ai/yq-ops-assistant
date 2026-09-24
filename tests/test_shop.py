@@ -3,8 +3,13 @@
     python -m tests.test_shop
 
 Same lightweight runner as tests/test_v3.py (no pytest). The pricing-engine tests run against a
-synthetic context (no DB). Live checks are read-only and SKIP (print, not fail) until
+synthetic context (no DB). Live checks read production and SKIP (print, not fail) until
 scripts/shop_migration.sql has been applied.
+
+ONE test writes to production (a salesman-placed order, then removes it). The marketplace is
+live, so that test SKIPS unless YQ_TEST_ALLOW_PROD_WRITES=1 is set deliberately; even then it
+stubs every notification channel, removes only its own rows and never touches the order counter
+(a gap in YQ-YYMM numbering is harmless; a reused number is not).
 """
 from __future__ import annotations
 
@@ -697,16 +702,25 @@ def _():
     import re
     from app.database import get_client
     from app.shop import create_order, recent_customers
+    import os
+    import app.shop_notify as sn
     from app.shop_notify import notify_new_order
+    if os.getenv("YQ_TEST_ALLOW_PROD_WRITES") != "1":
+        print("   SKIP — writes a real order to production; set YQ_TEST_ALLOW_PROD_WRITES=1 to run it deliberately")
+        return
     if not _migrated():
         print("   SKIP — scripts/shop_migration.sql not applied")
         return
     from app.shop import context
     code = next(c for c in context()["order"] if context()["items"][c].get("standard_rate"))
+    device = f"yq-test-{os.getpid()}"
     o = create_order({"lines": [{"item_code": code, "qty": 1}],
                       "customer": {"name": "Staff Test Shop", "phone": "33001122", "shop": "Test Shop", "area": "Manama"},
-                      "note": "automated test — delete me"}, staff_email="fzulfiqar@pie-int.com")
+                      "note": "automated test — delete me", "device_id": device}, staff_email="fzulfiqar@pie-int.com")
     c = get_client()
+    stubs = {k: getattr(sn, k) for k in ("_email", "_telegram", "_whatsapp_cloud") if hasattr(sn, k)}
+    for k in stubs:   # never send a real email / Telegram / WhatsApp from a test
+        setattr(sn, k, lambda *a, **kw: {"sent": False, "reason": "test-stub"})
     try:
         assert o["source"] == "salesman" and o["placed_by"] == "fzulfiqar@pie-int.com", (o["source"], o.get("placed_by"))
         assert o["salesman"]["name"] == "Furqan Ahmed" and o["src"] == "salesman"
@@ -716,11 +730,10 @@ def _():
         recent = recent_customers(o["salesman_id"])
         assert any(r["phone"] == "97333001122" for r in recent), recent[:2]
     finally:
-        c.table("shop_orders").delete().eq("id", o["id"]).execute()
-        c.table("shop_events").delete().eq("src", "salesman").eq("event", "order").execute()
-        period = re.search(r"-(\d{4})-", o["order_no"]).group(1)
-        n = c.table("shop_counters").select("n").eq("period", period).execute().data[0]["n"]
-        c.table("shop_counters").update({"n": max(n - 1, 0)}).eq("period", period).execute()
+        for k, fn in stubs.items():
+            setattr(sn, k, fn)
+        c.table("shop_orders").delete().eq("id", o["id"]).execute()      # lines + events cascade with it
+        c.table("shop_events").delete().eq("device_id", device).execute()  # only THIS test's analytics rows
         try:   # the merchant record the order created (marketplace_migration.sql)
             c.table("shop_customers").delete().eq("phone", "97333001122").execute()
         except Exception:  # noqa: BLE001

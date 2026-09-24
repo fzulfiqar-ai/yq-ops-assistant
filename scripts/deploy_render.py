@@ -113,15 +113,11 @@ def main() -> None:
                 break
 
     if svc:
-        svc_id = svc["id"]
-        print(f"Service already exists ({svc_id}) — syncing env vars and redeploying.")
-        status, res = call("PUT", f"/services/{svc_id}/env-vars", token, env_vars)
-        if status not in (200, 201):
-            die(f"failed to set env vars (HTTP {status}): {res}")
-        print(f"  env vars synced ({len(env_vars)})")
-        status, res = call("POST", f"/services/{svc_id}/deploys", token, {"clearCache": "do_not_clear"})
-        if status not in (200, 201):
-            die(f"failed to trigger deploy (HTTP {status}): {res}")
+        # 24-Sep-2026: this branch used to PUT every var from .env.render. Render's PUT replaces the
+        # WHOLE env set, so it would revert CORS/base URL and delete every key added since Aug. Refuse.
+        die(f"service {svc['id']} already exists. This script only CREATES the service now.\n"
+            "       To redeploy:  python -m scripts.render_deploy deploy --commit <sha> --wait\n"
+            "       To change an env var: Render dashboard, one key at a time.")
     else:
         print(f"Creating web service '{SERVICE_NAME}' (docker, free, {REGION})...")
         payload = {

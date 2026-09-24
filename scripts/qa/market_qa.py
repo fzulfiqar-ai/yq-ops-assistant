@@ -16,6 +16,9 @@ Exit: 1 when a hard check fails (warnings never fail the run). See scripts/qa/RE
 
 Safety: an order is NEVER placed. POST /public/market/order is intercepted and answered with a
 mocked receipt, and so are the order-status read and the phone-recognition lookup behind it.
+Every other mutating /public/* call (funnel events, vitals, restock requests, push, cancel) is
+answered locally too, so a run against production writes nothing (only the quote POST, which
+writes nothing, reaches the API).
 """
 
 from __future__ import annotations
@@ -728,6 +731,22 @@ def new_context(browser, vp: Viewport, st: State):
         locale="en-GB",
     )
     ctx.add_init_script(init_script(st))
+
+    # 24-Sep-2026: the harness must never write to production. Page-level mocks (install_mocks)
+    # answer the order / receipt / recognize calls; this context-wide net answers EVERY other
+    # mutating /public/* call (funnel events, vitals, restock "tell me", push, cancel ...) locally.
+    # Only the quote POST passes through: it prices a cart and writes nothing.
+    def no_prod_writes(route: Route) -> None:
+        req = route.request
+        if req.method in ("GET", "HEAD") or req.url.split("?")[0].endswith("/quote"):
+            route.fallback()
+            return
+        if req.method == "OPTIONS":
+            route.fulfill(status=204, headers=dict(CORS), body="")
+            return
+        json_route(route, {"ok": True, "qa": "not sent"})
+
+    ctx.route("**/public/**", no_prod_writes)
     return ctx
 
 
