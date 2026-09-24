@@ -69,8 +69,11 @@ def _ctx(items, rules=(), costs=None, **settings):
     return {"settings": vals, "items": {i["item_code"]: i for i in items},
             "order": [i["item_code"] for i in items],
             "costs": costs if costs is not None else {i["item_code"]: 0.001 for i in items}, "rules": list(rules),
-            "salesmen": [{"id": 1, "name": "Furqan Ahmed", "referral_code": "furqan", "is_active": True},
-                         {"id": 2, "name": "Harsh Bhatia", "referral_code": "harsh", "is_active": True}],
+            # R3 (attribution): a rep is pickable at checkout only with a linked login + public profile
+            "salesmen": [{"id": 1, "name": "Furqan Ahmed", "referral_code": "furqan", "is_active": True,
+                          "user_email": "furqan@example.com"},
+                         {"id": 2, "name": "Harsh Bhatia", "referral_code": "harsh", "is_active": True,
+                          "user_email": "harsh@example.com"}],
             "loaded_at": ""}
 
 

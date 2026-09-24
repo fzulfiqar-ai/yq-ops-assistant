@@ -19,7 +19,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from fastapi import BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
     from pydantic import BaseModel, Field
 
-    from app import shop, shop_notify
+    from app import attribution, shop, shop_audit, shop_notify, shop_pipeline
     from app.audit import log_event
     from app.auth import CurrentUser, get_current_user, has_feature, require_admin, require_feature
     from app.catalog import share_token
@@ -89,6 +89,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     class AssignRequest(BaseModel):
         salesman_id: int
         reason: str | None = Field(default=None, max_length=300)
+        # R3: "also make this shop's rep" — admins only; the customer assignment is audited on its own
+        also_customer: bool = False
 
     class ConfirmLine(BaseModel):
         line_id: int
@@ -104,9 +106,34 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     class StatusRequest(BaseModel):
         status: str = Field(max_length=16)
         note: str | None = Field(default=None, max_length=500)
+        # R3 pipeline: a staff cancel names its reason (shop_pipeline.CANCEL_REASONS); Delivered may
+        # carry the Focus invoice number
+        reason_code: str | None = Field(default=None, max_length=32)
+        focus_invoice_no: str | None = Field(default=None, max_length=shop_pipeline.INVOICE_MAX)
 
     class TestFlagRequest(BaseModel):
         is_test: bool
+
+    class PaymentRequest(BaseModel):
+        status: str = Field(max_length=16)                  # unpaid | partial | paid
+        method: str | None = Field(default=None, max_length=20)
+        amount_bhd: float | None = Field(default=None, ge=0)
+        note: str | None = Field(default=None, max_length=300)
+
+    class ReturnLine(BaseModel):
+        line_id: int
+        qty: int = Field(ge=1, le=shop.MAX_QTY)
+
+    class ReturnRequest(BaseModel):
+        lines: list[ReturnLine] = Field(max_length=shop_pipeline.RETURN_MAX_LINES)
+        reason: str = Field(max_length=300)
+
+    class InvoiceRequest(BaseModel):
+        focus_invoice_no: str = Field(max_length=shop_pipeline.INVOICE_MAX)
+
+    class CustomerAssignRequest(BaseModel):
+        salesman_id: int
+        reason: str = Field(max_length=300)
 
     class SalesmanIn(BaseModel):
         name: str | None = Field(default=None, max_length=80)
@@ -428,21 +455,26 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(user.email, "shop.campaign_create", detail={"id": row.get("id")})
+        shop_audit.record(user.email, "campaign", row.get("id"), "create", None, row)
         return row
 
     @app.patch("/shop/campaigns/{campaign_id}")
     def shop_campaigns_update(campaign_id: int, body: CampaignIn, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        before = shop_audit.snapshot("shop_campaigns", campaign_id)
         try:
             row = shop.upsert_campaign(body.model_dump(exclude_unset=True), by=user.email, campaign_id=campaign_id)
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(user.email, "shop.campaign_update", detail={"id": campaign_id})
+        shop_audit.record(user.email, "campaign", campaign_id, "update", before, row)
         return row
 
     @app.delete("/shop/campaigns/{campaign_id}")
     def shop_campaigns_delete(campaign_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        before = shop_audit.snapshot("shop_campaigns", campaign_id)
         shop.delete_campaign(campaign_id)
         log_event(user.email, "shop.campaign_delete", detail={"id": campaign_id})
+        shop_audit.record(user.email, "campaign", campaign_id, "delete", before, None)
         return {"ok": True}
 
     @app.post("/shop/campaigns/image")
@@ -497,21 +529,26 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(user.email, "shop.rule_create", detail={"id": row.get("id"), "kind": row.get("kind")})
+        shop_audit.record(user.email, "discount_rule", row.get("id"), "create", None, row)
         return row
 
     @app.patch("/shop/rules/{rule_id}")
     def shop_rules_update(rule_id: int, body: RuleIn, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        before = shop_audit.snapshot("discount_rules", rule_id)
         try:
             row = shop.upsert_rule(body.model_dump(exclude_unset=True), by=user.email, rule_id=rule_id)
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(user.email, "shop.rule_update", detail={"id": rule_id})
+        shop_audit.record(user.email, "discount_rule", rule_id, "update", before, row)
         return row
 
     @app.delete("/shop/rules/{rule_id}")
     def shop_rules_delete(rule_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        before = shop_audit.snapshot("discount_rules", rule_id)
         shop.delete_rule(rule_id)
         log_event(user.email, "shop.rule_delete", detail={"id": rule_id})
+        shop_audit.record(user.email, "discount_rule", rule_id, "delete", before, None)
         return {"ok": True}
 
     @app.post("/shop/rules/preview")
@@ -612,6 +649,10 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
         o["steps"] = shop.order_steps(o)
         o["status_label"] = shop.STATUS_LABELS.get(o["status"], o["status"])
+        o["payment_label"] = shop_pipeline.PAYMENT_LABELS.get(o.get("payment_status") or "unpaid", "Unpaid")
+        o["cancel_reasons"] = shop_pipeline.CANCEL_REASONS
+        if user.role == "admin":     # the shop's recorded rep (admin assignment / sticky) for the drawer
+            o["customer"] = attribution.customer_rep(o.get("customer_id"))
         o.pop("ip_hash", None)
         return o
 
@@ -623,11 +664,14 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise HTTPException(status_code=404, detail="Order not found.")
         allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
         try:
-            o = shop.set_status(order_id, body.status, body.note, actor=user.email, allowed=allowed)
+            o = shop.set_status(order_id, body.status, body.note, actor=user.email, allowed=allowed,
+                                reason_code=body.reason_code, focus_invoice_no=body.focus_invoice_no)
         except ShopError as e:
             raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_status, order_id, body.status, body.note)
-        log_event(user.email, "shop.order_status", detail={"order_id": order_id, "status": body.status})
+        log_event(user.email, "shop.order_status", detail={"order_id": order_id, "status": body.status,
+                                                           "reason_code": body.reason_code,
+                                                           "focus_invoice_no": o.get("focus_invoice_no")})
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, body.status)
         nxt = list(shop.NEXT_STATUS.get(o["status"], ()))
         o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
@@ -677,8 +721,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.post("/shop/orders/{order_id}/assign")
     def shop_order_assign(order_id: int, body: AssignRequest, background: BackgroundTasks,
                           user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Admins assign or reassign; a salesman may only take an unassigned order for himself."""
+        """Admins assign or reassign; a salesman may only take an unassigned order for himself.
+        R3: `also_customer` (admins) makes the rep the SHOP's rep too — the same audited write as
+        POST /shop/customers/{id}/assign, with the order as the reason when none was typed."""
         sid, is_admin = _scope(user)
+        if body.also_customer and not is_admin:
+            raise HTTPException(status_code=403, detail="Only an admin can change a shop's rep.")
         try:
             o = shop.assign_order(order_id, body.salesman_id, actor=user.email, reason=body.reason,
                                   is_admin=is_admin, actor_salesman_id=(sid if sid and sid > 0 else None))
@@ -686,11 +734,86 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise HTTPException(status_code=400, detail=str(e)) from e
         background.add_task(shop_notify.notify_assigned, order_id)
         log_event(user.email, "shop.order_assign",
-                  detail={"order_id": order_id, "salesman_id": body.salesman_id, "reason": body.reason})
+                  detail={"order_id": order_id, "salesman_id": body.salesman_id, "reason": body.reason,
+                          "also_customer": bool(body.also_customer)})
+        customer_assign = None
+        if body.also_customer and o.get("customer_id"):
+            try:
+                customer_assign = attribution.assign_customer(
+                    o["customer_id"], body.salesman_id, actor=user.email,
+                    reason=(body.reason or "").strip() or f"Assigned with order {o.get('order_no')}")
+            except ShopError as e:
+                customer_assign = {"error": str(e)}      # the order is assigned; the shop's rep was not changed
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, o.get("status"))
         o["next_statuses"] = list(shop.NEXT_STATUS.get(o["status"], ()))
         o.pop("ip_hash", None)
-        return {"ok": True, "order": o}
+        return {"ok": True, "order": o, "customer_assign": customer_assign}
+
+    # ── R3 pipeline: payment, returns, Focus invoice (admin) ─────────────────────
+    @app.post("/shop/orders/{order_id}/payment")
+    def shop_order_payment(order_id: int, body: PaymentRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Record the payment fact (unpaid | partial | paid + method, amount, note) as an order
+        event; Delivered stays Delivered. Never a lifecycle state."""
+        try:
+            o = shop_pipeline.set_payment(order_id, body.status, body.method, body.amount_bhd, body.note, actor=admin.email)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if str(e) == "Order not found." else 400, detail=str(e)) from e
+        log_event(admin.email, "shop.order_payment",
+                  detail={"order_id": order_id, "order_no": o.get("order_no"), "status": body.status,
+                          "method": body.method, "amount_bhd": body.amount_bhd})
+        o.pop("ip_hash", None)
+        return {"ok": True, "order": o, "payment_status": o.get("payment_status"), "payment_label": o.get("payment_label")}
+
+    @app.post("/shop/orders/{order_id}/return")
+    def shop_order_return(order_id: int, body: ReturnRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+        """A 'returned' EVENT with lines, quantities and a reason on a delivered order — the
+        order keeps its status; the value is on the event (and summed on the row once the
+        column exists). Audited."""
+        try:
+            out = shop_pipeline.record_return(order_id, [ln.model_dump() for ln in body.lines], body.reason,
+                                              actor=admin.email)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if str(e) == "Order not found." else 400, detail=str(e)) from e
+        return out
+
+    @app.post("/shop/orders/{order_id}/invoice")
+    def shop_order_invoice(order_id: int, body: InvoiceRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Record or correct the Focus invoice number on a delivered order (the reconciliation
+        list's 'no invoice' rows are closed here)."""
+        try:
+            o = shop_pipeline.set_invoice(order_id, body.focus_invoice_no, actor=admin.email)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if str(e) == "Order not found." else 400, detail=str(e)) from e
+        log_event(admin.email, "shop.order_invoice",
+                  detail={"order_id": order_id, "order_no": o.get("order_no"), "focus_invoice_no": o.get("focus_invoice_no")})
+        return {"ok": True, "order_id": order_id, "focus_invoice_no": o.get("focus_invoice_no")}
+
+    @app.get("/shop/focus-recon")
+    def shop_focus_recon(limit: int = 300, _admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Delivered orders vs Focus (v_shop_focus_recon): no invoice recorded, invoice not in
+        v_sales, salesman or amount mismatch. Empty + hint before the migration."""
+        return shop_pipeline.focus_recon(limit)
+
+    # ── R3 attribution: the shop's rep (admin) ────────────────────────────────────
+    @app.post("/shop/customers/{customer_id}/assign")
+    def shop_customer_assign(customer_id: int, body: CustomerAssignRequest,
+                             admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Make a rep the merchant's rep (shop_customers.salesman_id — beats every other routing
+        rule). A reason is required; audit_log 'shop.customer_assign' {from, to, reason} plus a
+        shop_admin_audit row."""
+        try:
+            out = attribution.assign_customer(customer_id, body.salesman_id, actor=admin.email, reason=body.reason)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if str(e) == "Unknown merchant." else 400, detail=str(e)) from e
+        return {"ok": True, **out}
+
+    # ── R3 admin audit (M12) ──────────────────────────────────────────────────────
+    @app.get("/shop/audit")
+    def shop_audit_list(entity: str | None = None, limit: int = 100, offset: int = 0,
+                        _admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Read-only: who changed what (settings, rules, campaigns, salesmen, targets, upcoming,
+        shop reps), newest first, with the changed keys. Empty + hint before the migration."""
+        return shop_audit.list_audit(entity, limit, offset)
 
     @app.get("/shop/assignment-queue")
     def shop_assignment_queue(_admin: CurrentUser = Depends(require_admin)) -> dict:
@@ -735,11 +858,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(user.email, "shop.salesman_create", detail={"id": row.get("id"), "name": row.get("name")})
+        shop_audit.record(user.email, "salesman", row.get("id"), "create", None, row)
         return row
 
     @app.patch("/shop/salesmen/{salesman_id}")
     def shop_salesmen_update(salesman_id: int, body: SalesmanIn,
                              user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        before = shop_audit.snapshot("salesmen", salesman_id)
         try:
             row = shop.upsert_salesman(body.model_dump(exclude_none=True), by=user.email, salesman_id=salesman_id)
         except ShopError as e:
@@ -747,12 +872,14 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         except IndexError as e:
             raise HTTPException(status_code=404, detail="Salesman not found.") from e
         log_event(user.email, "shop.salesman_update", detail={"id": salesman_id})
+        shop_audit.record(user.email, "salesman", salesman_id, "update", before, row)
         return row
 
     @app.delete("/shop/salesmen/{salesman_id}")
     def shop_salesmen_delete(salesman_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
         """Only a rep nobody references can go; one with orders or merchants is refused (409) —
         deactivate instead. The audit entry names the rep, since the row is gone afterwards."""
+        before = shop_audit.snapshot("salesmen", salesman_id)
         try:
             gone = shop.delete_salesman(salesman_id)
         except ShopError as e:
@@ -761,6 +888,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise _conflict_or_400(e) from e
         log_event(user.email, "shop.salesman_delete",
                   detail={"id": salesman_id, "name": gone.get("name"), "focus_name": gone.get("focus_name")})
+        shop_audit.record(user.email, "salesman", salesman_id, "delete", before, None)
         return {"ok": True}
 
     @app.get("/shop/salesmen/{salesman_id}/qr.png")
@@ -780,11 +908,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.put("/settings/shop")
     def shop_settings_put(body: ShopSettingsIn, admin: CurrentUser = Depends(require_admin)) -> dict:
+        current = shop.shop_settings()          # what the keys held before this write (cached read)
         try:
             vals = shop.update_shop_settings(body.settings, by=admin.email)
         except ShopError as e:      # e.g. shop_market_promises is not a valid promise list — nothing was saved
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(admin.email, "settings.shop", detail={"keys": sorted(body.settings.keys())})
+        shop_audit.settings_change(admin.email, current, body.settings, vals)
         ignored = sorted(k for k in body.settings if k not in shop.SETTING_DEFAULTS)
         return {"ok": True, "settings": vals, "ignored": ignored}
 
@@ -866,8 +996,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                                user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
         """The kill switch from the desk: pause (hide the rail, the page cards, the rep list, stop
         "notify me") or resume — item statuses untouched, effective within about a minute."""
+        before = upcoming.settings()
         vals = upcoming.set_enabled(body.upcoming_enabled, by=user.email)
         log_event(user.email, "shop.upcoming_settings", detail={"upcoming_enabled": vals.get("upcoming_enabled")})
+        shop_audit.record(user.email, "settings", "upcoming", "update",
+                          {"upcoming_enabled": before.get("upcoming_enabled")}, {"upcoming_enabled": vals.get("upcoming_enabled")})
         return {"ok": True, "settings": vals}
 
     @app.patch("/shop/upcoming/{item_id}")
@@ -876,11 +1009,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         """Publish / withdraw / mark arrived, set the expected month or labels, edit copy, link the
         catalog code. Publishing is an office action, so the gate is Shop Admin (admins pass)."""
         changes = body.model_dump(exclude_unset=True)
+        before = shop_audit.snapshot(upcoming.TABLE, item_id)
         try:
             row = upcoming.update_item(item_id, changes, by=user.email)
         except upcoming.UpcomingError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log_event(user.email, "shop.upcoming_update", detail={"id": item_id, "keys": sorted(changes), "status": row.get("status")})
+        shop_audit.record(user.email, "upcoming", item_id, "update", before, row)
         return row
 
     @app.get("/shop/upcoming/interest")

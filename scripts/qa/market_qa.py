@@ -1541,16 +1541,21 @@ def find_slug(api: str) -> str | None:
             data = json.load(r)
     except Exception:  # noqa: BLE001
         return None
+    # R3: the public payload lists pickable reps as id + name only (no referral codes). A rep's
+    # slug defaults to the slugified first name (app.shop.slugify), so try that; an older API
+    # still carries referral_code and is used as before. Every candidate is verified via ?ref=.
     for s in data.get("salesmen") or []:
-        code = (s.get("referral_code") or "").strip().lower()
-        if not code:
-            continue
-        try:
-            with urllib.request.urlopen(api + "/public/market?ref=" + code, timeout=10) as r2:
-                if (json.load(r2) or {}).get("ref"):
-                    return code
-        except Exception:  # noqa: BLE001
-            continue
+        first = str(s.get("name") or "").strip().split(" ")[0].lower()
+        guess = re.sub(r"[^a-z0-9]+", "-", first).strip("-")
+        for code in ((s.get("referral_code") or "").strip().lower(), guess):
+            if not code:
+                continue
+            try:
+                with urllib.request.urlopen(api + "/public/market?ref=" + code, timeout=10) as r2:
+                    if (json.load(r2) or {}).get("ref"):
+                        return code
+            except Exception:  # noqa: BLE001
+                continue
     return None
 
 

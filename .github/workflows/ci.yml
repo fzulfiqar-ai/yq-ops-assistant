@@ -53,6 +53,11 @@ jobs:
           python -m tests.test_r1_data
           python -m tests.test_r1_orders
           python -m tests.test_r1b_upcoming
+      # R3b pipeline states, customer attribution, admin audit (the local-Postgres replay SKIPs here)
+      - name: R3 pipeline suite (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r3_pipeline
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
 

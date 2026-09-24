@@ -626,6 +626,141 @@ function PromiseBarCard() {
   )
 }
 
+/* ───────────────────────── R3: the admin audit (M12) ─────────────────────────
+   Read-only: who changed which shop setting, discount rule, campaign, salesman, target, upcoming
+   item or merchant rep, with the keys that moved. GET /shop/audit answers an empty list plus a
+   hint until scripts/r3_pipeline_migration.sql runs; rows are append-only on the server. */
+
+interface AuditRow {
+  id: number
+  at: string
+  actor: string
+  entity: string
+  entity_id?: string | null
+  action: string
+  before?: Record<string, unknown> | null
+  after?: Record<string, unknown> | null
+  changes?: Record<string, { from: unknown; to: unknown }> | null
+}
+interface AuditResp { rows: AuditRow[]; count: number; hint?: string; entities?: string[] }
+
+const AUDIT_ENTITY_LABEL: Record<string, string> = {
+  settings: 'Settings', discount_rule: 'Discount rule', campaign: 'Campaign', salesman: 'Salesman',
+  target: 'Target', upcoming: 'Coming soon', shop_customer: 'Shop’s rep', order: 'Order',
+}
+const AUDIT_ACTION_TONE: Record<string, string> = {
+  create: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
+  update: 'bg-accent text-accent-foreground',
+  delete: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200',
+  import: 'bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200',
+  assign: 'bg-accent text-accent-foreground',
+}
+
+function auditValue(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—'
+  if (typeof v === 'string') return v.length > 80 ? `${v.slice(0, 77)}…` : v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  try {
+    const s = JSON.stringify(v)
+    return s.length > 80 ? `${s.slice(0, 77)}…` : s
+  } catch {
+    return String(v)
+  }
+}
+
+function fmtAuditTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return iso
+  }
+}
+
+function AuditCard() {
+  const [entity, setEntity] = useState('')
+  const [open, setOpen] = useState<number | null>(null)
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['shop-audit', entity],
+    queryFn: () => apiGet<AuditResp>(`/shop/audit?limit=100${entity ? `&entity=${encodeURIComponent(entity)}` : ''}`),
+    staleTime: 30_000,
+  })
+  const rows = data?.rows || []
+  const entities = data?.entities || Object.keys(AUDIT_ENTITY_LABEL)
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex flex-wrap items-center gap-2 font-display text-base font-semibold">
+        <ShieldCheck size={18} className="text-primary" /> Audit
+        <select value={entity} onChange={(e) => setEntity(e.target.value)} aria-label="Filter by what changed"
+          className="ml-auto h-9 rounded-lg border border-input bg-card px-2.5 text-[13px] font-medium text-foreground shadow-sm outline-none focus-visible:border-primary">
+          <option value="">Everything</option>
+          {entities.map((e) => <option key={e} value={e}>{AUDIT_ENTITY_LABEL[e] || e}</option>)}
+        </select>
+      </div>
+      <p className="mb-3 text-sm text-muted-foreground">
+        Every admin change to shop settings, discount rules, campaigns, salesmen, targets, Coming-soon items and a shop’s rep —
+        who, when, and what moved. Rows are kept for good; nothing here can be edited.
+      </p>
+      {data?.hint && (
+        <div className="mb-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden /> {data.hint}
+        </div>
+      )}
+      {isLoading ? (
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      ) : isError ? (
+        <p className="text-sm text-muted-foreground">Could not load the audit.</p>
+      ) : rows.length === 0 ? (
+        !data?.hint && <p className="text-sm text-muted-foreground">No changes recorded yet.</p>
+      ) : (
+        <ol className="divide-y overflow-hidden rounded-xl border">
+          {rows.map((r) => {
+            const changes = Object.entries(r.changes || {})
+            const isOpen = open === r.id
+            return (
+              <li key={r.id}>
+                <button type="button" onClick={() => setOpen(isOpen ? null : r.id)} aria-expanded={isOpen}
+                  className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-left text-[13px] hover:bg-accent/40">
+                  <span className="w-[6.5rem] shrink-0 tabular-nums text-muted-foreground">{fmtAuditTime(r.at)}</span>
+                  <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', AUDIT_ACTION_TONE[r.action] || 'bg-accent text-accent-foreground')}>{r.action}</span>
+                  <span className="font-semibold">{AUDIT_ENTITY_LABEL[r.entity] || r.entity}{r.entity_id ? ` #${r.entity_id}` : ''}</span>
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                    {changes.length ? changes.slice(0, 3).map(([k]) => k).join(', ') + (changes.length > 3 ? ` +${changes.length - 3}` : '') : r.action === 'delete' ? 'removed' : ''}
+                  </span>
+                  <span className="max-w-[12rem] truncate text-[12px] text-muted-foreground">{r.actor}</span>
+                </button>
+                {isOpen && (
+                  <div className="border-t bg-secondary/30 px-3 py-2.5 text-[12.5px]">
+                    {changes.length ? (
+                      <table className="w-full">
+                        <tbody>
+                          {changes.map(([k, v]) => (
+                            <tr key={k} className="align-top">
+                              <td className="w-[11rem] py-0.5 pr-3 font-mono text-[12px] text-muted-foreground">{k}</td>
+                              <td className="py-0.5 pr-3 text-muted-foreground line-through decoration-muted-foreground/60">{auditValue(v.from)}</td>
+                              <td className="py-0.5 font-medium">{auditValue(v.to)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <p className="text-muted-foreground">
+                        {r.action === 'delete' ? `Removed: ${auditValue(r.before)}` : r.action === 'create' ? `Created: ${auditValue(r.after)}` : 'No field moved.'}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ol>
+      )}
+      {data && data.count > rows.length && (
+        <p className="mt-2 text-[11.5px] text-muted-foreground">Showing the latest {rows.length} of {data.count}.</p>
+      )}
+    </Card>
+  )
+}
+
 export default function Settings() {
   const { me, session, refreshMe } = useAuth()
   const { theme, toggle } = useTheme()
@@ -686,6 +821,7 @@ export default function Settings() {
       {me?.role === 'admin' && <ShopSettingsCard />}
       {me?.role === 'admin' && <PromiseBarCard />}
       {me?.role === 'admin' && <AgentScopeCard />}
+      {me?.role === 'admin' && <AuditCard />}
 
       <Card className="mb-4 p-6">
         <div className="mb-4 font-display text-base font-semibold">Appearance</div>

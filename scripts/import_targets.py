@@ -140,8 +140,12 @@ def main(argv: list[str]) -> int:
     if not a.commit:
         print(f"\nDry run: {len(rows)} rows would be upserted on (salesman, period). Add --commit to write.")
         return 0
+    # R3 admin audit (M12): the target row as it was and as it will be, one shop_admin_audit row
+    # per (salesman, period) — a rename or a re-scaled percentage is documented, never silent
+    from app.shop_audit import record_target_import
+    audited = record_target_import(c, rows, actor=f"import {path.name}")
     c.table("salesman_targets").upsert(rows, on_conflict="salesman,period").execute()
-    print(f"\nLoaded {len(rows)} targets.")
+    print(f"\nLoaded {len(rows)} targets ({audited} audit rows).")
     return 0
 
 

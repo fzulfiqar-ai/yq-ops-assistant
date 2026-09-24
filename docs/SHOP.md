@@ -360,7 +360,8 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   → confirms with changes, re-prices at the confirmed quantities (`subtotal/total_confirmed_bhd`), returns
   `changed[]`, `removed[]`, `totals`, a prefilled WhatsApp to the merchant, `next_statuses`.
 - `POST /shop/orders/{id}/assign` `{salesman_id, reason?}` — admins reassign any open order; a salesman may only take an
-  unassigned one for himself. First assignment sets the merchant's sticky rep when none is recorded. Notifies the rep.
+  unassigned one for himself. Notifies the rep. (R3: assigning an order no longer touches the merchant record — the
+  sticky rep settles when the assigned rep confirms or delivers; `also_customer:true` binds the shop explicitly.)
 - `GET /shop/assignment-queue` → unassigned open orders with `age_min` and a suggestion (rep who served the phone
   before, else most orders in the area in 90 days).
 - `GET /shop/picklist?salesman_id=` (Storekeeper or Shop Orders) → confirmed/preparing orders grouped by salesman with
@@ -392,6 +393,40 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   **07:00–22:00 Bahrain**; `notify_retry` is the first alert and is not gated. A reminder or the stale marker is
   recorded only when a channel really delivered. The answer carries `ok:false` + `errors[]` when a job raised.
 
+### Release R3b — pipeline states, customer attribution, admin audit (24-Sep-2026)
+Migration `scripts/r3_pipeline_migration.sql` (reverse `r3_pipeline_reverse.sql`); the code answers before it runs.
+- **Cancel reasons.** `POST /shop/orders/{id}/status {status:'cancelled', reason_code, note?}` — a staff cancel needs
+  `reason_code` in `out_of_stock | customer_request | duplicate | test | price_issue | other` (`other` needs the note);
+  400 with the list otherwise. The code goes to `cancel_reason_code` (once the column exists), the text to
+  `cancel_reason`, and the code to the `status:cancelled` event always. The merchant's own cancel is `customer_request`.
+- **Payment** (admin): `POST /shop/orders/{id}/payment {status: unpaid|partial|paid, method?, amount_bhd?, note?}` →
+  `payment_status` + `payment_method` (+ `paid_at`), one `payment` event. A recorded fact, never a lifecycle state;
+  Paid / Partly paid pills on every order view (Unpaid shows only once Delivered).
+- **Returns** (admin): `POST /shop/orders/{id}/return {lines:[{line_id, qty}], reason}` on a delivered order → a
+  `returned` EVENT with lines, quantities, reason and the Decimal value at the confirmed price; `returned_bhd` sums
+  them once the column exists. The status is untouched. `audit_log 'shop.order_return'`.
+- **Focus invoice.** `status` accepts `focus_invoice_no` with Delivered; `POST /shop/orders/{id}/invoice` (admin)
+  records or corrects it later (`invoice` event). `GET /shop/focus-recon` (admin) reads `v_shop_focus_recon`
+  (service role only): delivered orders with `missing_invoice`, `invoice_not_found`, `salesman_mismatch`
+  (Focus salesman vs the rep's `focus_name`) or `amount_mismatch` (> 0.005 BHD, VAT-inclusive both sides).
+  Shop Orders (desk) shows it as the "Focus check" section.
+- **Small-order gap.** `GET /shop/orders` returns `min_order_bhd`; rep cards print "BHD x short of the BHD y minimum"
+  from `minimum_gap_bhd`.
+- **Attribution.** The public picker (`salesmen` in the catalog payload) lists only pickable reps — active, public
+  profile, linked login — as `{id, name}`; a pick of any other rep is ignored server-side. The sticky rep is no
+  longer written at request time: the proposed rep is kept as `first_ref` and `sticky_salesman_id` settles when the
+  assigned rep **confirms or delivers** (`app/attribution.settle_sticky`), never over an existing value. A staff
+  order for a shop whose recorded rep is someone else sets `attribution_conflict` + a `conflict` event.
+  `POST /shop/customers/{id}/assign {salesman_id, reason}` (admin, reason required) writes
+  `shop_customers.salesman_id/assigned_by/assigned_at`, `audit_log 'shop.customer_assign' {from,to,reason}` and a
+  `shop_admin_audit` row; `POST /shop/orders/{id}/assign` takes `also_customer:true` (admins) to do the same.
+  `GET /shop/orders/{id}` (admins) carries `customer` = the shop's recorded rep.
+- **Admin audit (M12).** `shop_admin_audit(id, at, actor, entity, entity_id, action, before, after)`, append-only
+  (a trigger refuses UPDATE/DELETE). `app/shop_audit.py` is called from settings, discount rules, campaigns,
+  salesmen, upcoming edits and `scripts/import_targets.py`. `GET /shop/audit?entity=&limit=&offset=` (admin) →
+  rows with the derived `changes`; the Settings page shows it as the read-only "Audit" card.
+- Tests: `python -m tests.test_r3_pipeline` (no database).
+
 ### Views for the learning loop
 `v_customer_regulars` (Focus cadence per merchant × SKU: times bought, median qty, cadence days, due flag — service
 role only, carries customer names), `v_shop_assignment_queue`, `v_shop_search_terms`, `v_shop_rail_perf`
@@ -402,4 +437,4 @@ role only, carries customer names), `v_shop_assignment_queue`, `v_shop_search_te
 `python -m scripts.audit_grants` (exit 0). The in-process smoke on 16-Sep-2026 walked: market → rep card →
 idempotent order → my-orders → confirm 2→1 (1.500→0.750) → storekeeper refused `delivered`, allowed `packed`
 (goods issued to the rep) → on the way → delivered → customer cancel refused; second order cancelled by the
-customer; third order unassigned → queue → admin assign → merchant's sticky rep set.
+customer; third order unassigned → queue → admin assign → (since R3) the merchant's sticky rep settles at confirm.
