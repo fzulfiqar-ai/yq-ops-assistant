@@ -69,21 +69,28 @@ export default function Account() {
         </div>
         {focus?.revenue_90d_bhd ? (
           <div className="mt-4 rounded-xl bg-muted px-3 py-2.5 text-[12.5px]">
-            <span className="text-muted-foreground">90-day accessories sales </span>
+            <span className="text-muted-foreground">90-day accessories sales{focus.basis === 'net_ex_vat' ? ' (ex-VAT)' : ''} </span>
             <b className="tabular-nums">{bhd3(focus.revenue_90d_bhd)}</b>
           </div>
+        ) : null}
+        {focus?.error ? (
+          <div role="status" className="mt-2 rounded-xl bg-muted px-3 py-2.5 text-[12.5px] text-muted-foreground">{focus.error}</div>
         ) : null}
         {focus?.target ? (
           <div className="mt-2 rounded-xl bg-muted px-3 py-2.5 text-[12.5px]">
             <span className="text-muted-foreground">{monthName(focus.target.month)} kickback · </span>
             <b className="tabular-nums">{bhd3(focus.target.mtd_bhd)}</b>
-            <span className="text-muted-foreground"> sold · </span>
+            <span className="text-muted-foreground"> sold{focus.target.basis === 'net_ex_vat' ? ' ex-VAT' : ''} · </span>
             <b>{focus.target.tier_reached > 0 ? `Tier ${focus.target.tier_reached} (${Math.round(focus.target.kickback_pct * 100)}%)` : 'below Tier 1'}</b>
             {focus.target.next_tier ? (
               <span className="text-muted-foreground"> · {bhd3(focus.target.next_tier.gap_bhd)} to Tier {focus.target.next_tier.n}</span>
             ) : null}
             <div className="mt-1 text-[11px] text-muted-foreground">
               Tiers {focus.target.tiers.map((t) => `BHD ${t.bhd.toLocaleString('en-US')} (${Math.round(t.pct * 100)}%)`).join(' · ')}
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              Estimated kickback {bhd3(focus.target.kickback_bhd)} · final after approval ·{' '}
+              {focus.target.returns_deducted ? 'returns deducted' : 'returns not yet deducted'}
             </div>
           </div>
         ) : null}

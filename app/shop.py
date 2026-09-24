@@ -2237,13 +2237,31 @@ def salesman_for_user(email: str | None) -> dict | None:
     return row
 
 
-def tier_progress(target: dict | None, mtd: float, data_date: str | None) -> dict | None:
+# Owner decision 24-Sep-2026: the kickback base is EX-VAT (taxable) Accessories sales, net of
+# Focus Sales Returns once a Sales Return register is loaded (never estimated), with the reached
+# tier's rate applied to the whole month. `net_bhd` in v_sales = COALESCE(taxable_bhd, gross/1.1).
+KICKBACK_BASIS = "net_ex_vat"
+_BASIS_COLUMN = {"net_ex_vat": "net_bhd", "vat_incl_display": "revenue_bhd"}
+
+
+def bahrain_today() -> date:
+    """Today in Bahrain (UTC+3 all year, no DST) without depending on tzdata being installed."""
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+
+
+def tier_progress(target: dict | None, mtd: float, data_date: str | None,
+                  today: date | None = None, basis: str = KICKBACK_BASIS) -> dict | None:
     """Where a rep stands this month against the tiered kickback scheme (21-Sep-2026):
     tiers = monthly sales thresholds (target_bhd = Tier 1, tier2_bhd, tier3_bhd), each paying
-    kickback_tN of the month's sales once reached. Pure: no I/O, unit-tested in tests/test_shop.py.
+    kickback_tN of the WHOLE month's sales once reached (owner confirmed 24-Sep-2026).
+    Pure: no I/O, unit-tested in tests/test_shop.py.
 
+    `mtd` is on `basis` (ex-VAT by default). `today` (Bahrain date) drives days_left: the month of
+    the data can lag the calendar, and the countdown must follow the calendar, not the data.
     Returns None when the rep has no target row. `progress_pct` is against the TOP tier so the bar
-    never sits at 100% before the last tier; `next_tier` is None once the top tier is reached."""
+    never sits at 100% before the last tier; `next_tier` is None once the top tier is reached.
+    The figure is always an ESTIMATE until a statement is approved (is_estimate)."""
+    from decimal import Decimal, ROUND_HALF_UP
     if not target:
         return None
     tiers: list[dict] = []
@@ -2261,25 +2279,62 @@ def tier_progress(target: dict | None, mtd: float, data_date: str | None) -> dic
     nxt = ahead[0] if ahead else None
     days_left = None
     month = None
+    data_age = None
     if data_date:
         try:
             import calendar
             d = date.fromisoformat(str(data_date)[:10])
             month = d.strftime("%Y-%m")
-            days_left = calendar.monthrange(d.year, d.month)[1] - d.day
+            if today is None:
+                days_left = calendar.monthrange(d.year, d.month)[1] - d.day
+            else:
+                data_age = max(0, (today - d).days)
+                if (today.year, today.month) == (d.year, d.month):
+                    days_left = calendar.monthrange(today.year, today.month)[1] - today.day
+                else:
+                    days_left = 0            # the data's month is over; figures await the final load
         except Exception:  # noqa: BLE001
             pass
     rate = reached[-1]["pct"] if reached else 0.0
+    kick = (Decimal(str(mtd)) * Decimal(str(rate))).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
     return {
         "team": target.get("team") or "normal",
         "month": month, "data_through": str(data_date)[:10] if data_date else None, "days_left": days_left,
+        "data_age_days": data_age,
+        "basis": basis, "is_estimate": True, "returns_deducted": False,
         "mtd_bhd": money(mtd), "tiers": tiers,
         "tier_reached": reached[-1]["n"] if reached else 0,
-        "kickback_pct": rate, "kickback_bhd": money(mtd * rate),
+        "kickback_pct": rate, "kickback_bhd": float(kick),
         "next_tier": ({"n": nxt["n"], "bhd": nxt["bhd"], "gap_bhd": money(nxt["bhd"] - mtd),
                        "pct": nxt["pct"]} if nxt else None),
         "progress_pct": round(min(100.0, mtd / top * 100), 1) if top else 0.0,
     }
+
+
+def rep_month_sales(focus_name: str, basis: str = KICKBACK_BASIS, period: str | None = None) -> tuple[float, str | None]:
+    """(Accessories sales on `basis`, last loaded sale date) for a rep's month: `period` 'YYYY-MM',
+    default = the month of the latest loaded sale. SIM never counts (owner, 21-Sep); giveaways excluded."""
+    col = _BASIS_COLUMN[basis]
+    month_start = ("to_date($2 || '-01', 'YYYY-MM-DD')" if period
+                   else "date_trunc('month', (SELECT MAX(sale_date) FROM v_sales))::date")
+    params = [focus_name] + ([period] if period else [])
+    rows = exec_sql_params(
+        f"SELECT COALESCE(SUM({col}),0) AS amt, (SELECT MAX(sale_date) FROM v_sales)::text AS d "
+        f"FROM v_sales WHERE sale_date >= {month_start} "
+        f"AND sale_date < ({month_start} + interval '1 month')::date "
+        "AND NOT is_giveaway AND division = 'Accessories' "
+        "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", params)
+    r0 = (rows or [{}])[0]
+    return _f(r0.get("amt")), r0.get("d")
+
+
+def rep_target(focus_name: str, period: str | None) -> dict | None:
+    rows = exec_sql_params(
+        "SELECT salesman, period, team, target_bhd, tier2_bhd, tier3_bhd, "
+        "kickback_t1, kickback_t2, kickback_t3 FROM salesman_targets "
+        "WHERE salesman = $1 AND period IN ('', $2) ORDER BY period DESC LIMIT 1",
+        [focus_name, str(period or "")[:7]])
+    return (rows or [None])[0]
 
 
 def me_payload(email: str) -> dict:
@@ -2303,28 +2358,21 @@ def me_payload(email: str) -> dict:
         try:
             # Rep figures are MOBILE ACCESSORIES only (owner, 21-Sep-2026): Batelco SIM sales
             # never count towards a rep's revenue or target, so both queries filter the division.
+            # Ex-VAT, like the kickback base (owner, 24-Sep-2026), so one screen never mixes bases.
             rev = exec_sql_params(
-                "SELECT COALESCE(SUM(revenue_bhd),0) AS rev FROM v_sales "
+                "SELECT COALESCE(SUM(net_bhd),0) AS rev FROM v_sales "
                 "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND division = 'Accessories' "
+                "AND NOT is_giveaway "
                 "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
-            focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev"))}
-            # Tiered kickback (21-Sep-2026): this month's accessories sales (month of the latest
-            # loaded sale, giveaways excluded) vs the rep's standing or month-specific target row.
-            mtd = exec_sql_params(
-                "SELECT COALESCE(SUM(revenue_bhd),0) AS rev, (SELECT MAX(sale_date) FROM v_sales)::text AS d "
-                "FROM v_sales WHERE sale_date >= date_trunc('month', (SELECT MAX(sale_date) FROM v_sales))::date "
-                "AND NOT is_giveaway AND division = 'Accessories' "
-                "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
-            m0 = (mtd or [{}])[0]
-            data_date = m0.get("d")
-            tgt = exec_sql_params(
-                "SELECT salesman, period, team, target_bhd, tier2_bhd, tier3_bhd, "
-                "kickback_t1, kickback_t2, kickback_t3 FROM salesman_targets "
-                "WHERE salesman = $1 AND period IN ('', $2) ORDER BY period DESC LIMIT 1",
-                [sm["focus_name"], str(data_date or "")[:7]])
-            focus["target"] = tier_progress((tgt or [None])[0], _f(m0.get("rev")), data_date)
+            focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev")), "basis": KICKBACK_BASIS}
+            # Tiered kickback: this month's accessories sales (month of the latest loaded sale,
+            # giveaways excluded, EX-VAT) vs the rep's standing or month-specific target row.
+            amt, data_date = rep_month_sales(sm["focus_name"])
+            focus["target"] = tier_progress(rep_target(sm["focus_name"], str(data_date or "")[:7]), amt,
+                                            data_date, today=bahrain_today())
         except Exception as e:  # noqa: BLE001
-            log.debug("focus kpis failed: %s", e)
+            log.warning("focus kpis failed for %s: %s", sm.get("focus_name"), e)
+            focus = {"error": "Sales figures are unavailable right now; the office has been notified."}
     return {"salesman": sm, "link": salesman_link(sm) if sm else None,
             "qr_url": f"/shop/salesmen/{sm['id']}/qr.png" if sm else None, "kpis": kpis, "focus": focus}
 

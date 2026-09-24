@@ -410,6 +410,32 @@ def _tiers():
     assert one["tier_reached"] == 1 and one["next_tier"] is None and one["days_left"] is None
 
 
+@test("targets: ex-VAT basis, calendar countdown, whole-month rate, exact fils (owner 24-Sep-2026)")
+def _tiers_basis():
+    from datetime import date
+    from app import shop
+    row = {"team": "mobile_accessories", "target_bhd": 500, "tier2_bhd": 1200, "tier3_bhd": 2000,
+           "kickback_t1": 0.05, "kickback_t2": 0.07, "kickback_t3": 0.08}
+    # the 240926 preview's figures: Karrar 1,216.510 ex-VAT -> T2 7% on the whole month = 85.156
+    t = shop.tier_progress(row, 1216.51, "2026-09-24", today=date(2026, 9, 24))
+    assert t["tier_reached"] == 2 and t["kickback_bhd"] == 85.156, t
+    assert t["basis"] == "net_ex_vat" and t["is_estimate"] and t["returns_deducted"] is False
+    # Ahmed 1,124.880 ex-VAT stays T1 (5% = 56.244) although his VAT-inclusive figure crosses 1,200
+    a = shop.tier_progress(row, 1124.88, "2026-09-24", today=date(2026, 9, 24))
+    assert a["tier_reached"] == 1 and a["kickback_bhd"] == 56.244 and a["next_tier"]["gap_bhd"] == 75.12, a
+    # days left follow the Bahrain calendar, not the last loaded sale (data to 21-Sep, today 24-Sep)
+    c = shop.tier_progress(row, 10.0, "2026-09-21", today=date(2026, 9, 24))
+    assert c["days_left"] == 6 and c["data_age_days"] == 3, c
+    # after the month turns, September's card shows 0 days left until its final data is loaded
+    z = shop.tier_progress(row, 10.0, "2026-09-30", today=date(2026, 10, 2))
+    assert z["days_left"] == 0 and z["month"] == "2026-09"
+    # the whole-month rule: one fils over a threshold moves the rate for every dinar (as the email says)
+    edge = shop.tier_progress({"target_bhd": 100, "tier2_bhd": 200, "tier3_bhd": 300, "kickback_t1": 0.05,
+                               "kickback_t2": 0.07, "kickback_t3": 0.08}, 300.001, "2026-09-24")
+    assert edge["tier_reached"] == 3 and edge["kickback_bhd"] == 24.0, edge
+    assert shop.KICKBACK_BASIS == "net_ex_vat" and shop._BASIS_COLUMN["net_ex_vat"] == "net_bhd"
+
+
 # ── marketplace: attribution, lifecycle, storefront card (pure) ───────────────
 
 def _cust(**kw):

@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 import { useToast } from '@/components/Toast'
 import { STATUS_LABEL, STATUS_TONE } from '@/pages/shop-ops/OrderActions'
 import { Badge } from '@/components/ui/badge'
-import { bhd3, firstName, greeting, monthName, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
+import { bhd3, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useShopMe, waLink } from './lib'
 
 /**
  * /today — the salesman's home. What needs him now (orders waiting to be confirmed), how his
@@ -207,7 +207,7 @@ export default function Today() {
         <div className="space-y-4">
           {/* month */}
           <section className="rounded-2xl border border-border bg-card p-4">
-            <h2 className="font-display text-[15px] font-bold">Your month</h2>
+            <h2 className="font-display text-[15px] font-bold">Marketplace · last 30 days</h2>
             <div className="mt-3 grid grid-cols-2 gap-2">
               {[
                 { k: 'Orders · 7 days', v: kpis?.orders_7d ?? 0 },
@@ -235,9 +235,10 @@ export default function Today() {
               </div>
               <div className="mt-2 flex items-baseline gap-1.5">
                 <span className="font-display text-[22px] font-bold tabular-nums leading-none">{bhd3(tier.mtd_bhd)}</span>
-                <span className="text-[12px] text-muted-foreground">accessories sold this month</span>
+                <span className="text-[12px] text-muted-foreground">accessories sold this month{tier.basis === 'net_ex_vat' ? ', ex-VAT' : ''}</span>
               </div>
-              <div className="relative mt-3 h-2 rounded-full bg-muted" role="progressbar" aria-valuenow={tier.progress_pct} aria-valuemin={0} aria-valuemax={100}>
+              <div className="relative mt-3 h-2 rounded-full bg-muted" role="progressbar" aria-valuenow={tier.progress_pct} aria-valuemin={0} aria-valuemax={100}
+                aria-label={`Kickback progress, ${monthName(tier.month)}`} aria-valuetext={`BHD ${tier.mtd_bhd.toFixed(3)} sold; ${tier.tier_reached > 0 ? `Tier ${tier.tier_reached} reached` : 'below Tier 1'}`}>
                 <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${tier.progress_pct}%` }} />
                 {tier.tiers.map((t) => {
                   const top = tier.tiers[tier.tiers.length - 1].bhd || 1
@@ -259,8 +260,17 @@ export default function Today() {
                 {tier.days_left != null && <span className="text-muted-foreground">{tier.days_left} day{tier.days_left === 1 ? '' : 's'} left</span>}
               </div>
               <div className="mt-1 text-[12px] text-muted-foreground">
-                Kickback so far <b className="tabular-nums text-foreground">{bhd3(tier.kickback_bhd)}</b>
-                {tier.data_through ? <> · sales to {tier.data_through}</> : null}
+                Estimated kickback{tier.basis === 'net_ex_vat' ? ' (ex-VAT)' : ''} <b className="tabular-nums text-foreground">{bhd3(tier.kickback_bhd)}</b>
+                <span> · final after approval</span>
+              </div>
+              <div className="mt-1 text-[11.5px] text-muted-foreground">
+                {tier.returns_deducted ? 'Returns deducted' : 'Returns not yet deducted'}
+                {tier.data_through ? (
+                  <span className={cn((tier.data_age_days ?? 0) > 1 && 'font-semibold text-amber-700')}>
+                    {' '}· sales data to {dayLabel(tier.data_through)}
+                    {(tier.data_age_days ?? 0) > 1 ? ` (${tier.data_age_days} days old)` : ''}
+                  </span>
+                ) : null}
               </div>
             </section>
           ) : null}

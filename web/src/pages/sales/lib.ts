@@ -18,7 +18,11 @@ export interface TierProgress {
   team: 'normal' | 'mobile_accessories' | string
   month: string | null            // YYYY-MM
   data_through: string | null     // last loaded sale date
-  days_left: number | null
+  days_left: number | null        // calendar days left in the month (Bahrain date)
+  data_age_days?: number | null   // how old the sales data is
+  basis?: 'net_ex_vat' | string   // owner, 24-Sep-2026: ex-VAT sales
+  is_estimate?: boolean           // always true until a statement is approved
+  returns_deducted?: boolean      // false until the Focus Sales Return register is loaded
   mtd_bhd: number
   tiers: { n: number; bhd: number; pct: number }[]
   tier_reached: number            // 0 = below Tier 1
@@ -26,6 +30,13 @@ export interface TierProgress {
   kickback_bhd: number
   next_tier: { n: number; bhd: number; gap_bhd: number; pct: number } | null
   progress_pct: number            // vs the top tier
+}
+
+/** "2026-09-24" -> "24 Sep" */
+export function dayLabel(iso?: string | null): string {
+  if (!iso) return ''
+  const d = new Date(`${iso.slice(0, 10)}T12:00:00`)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 }
 
 /** "2026-09" -> "September" */
@@ -40,7 +51,7 @@ export interface ShopMe {
   link?: string | null
   qr_url?: string | null
   kpis?: { orders_7d?: number; orders_30d?: number; value_30d_bhd?: number; customers_30d?: number } | null
-  focus?: { revenue_90d_bhd?: number | null; target?: TierProgress | null } | null
+  focus?: { revenue_90d_bhd?: number | null; basis?: string; target?: TierProgress | null; error?: string } | null
   hint?: string | null
 }
 
