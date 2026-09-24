@@ -131,6 +131,11 @@ class ShopError(ValueError):
     """A customer-facing validation problem (HTTP 400 at the edge)."""
 
 
+# Every status transition is a compare-and-swap on the status the writer read (R1, 24-Sep-2026):
+# a merchant cancel racing a rep confirm can no longer both "succeed". The loser gets this.
+CAS_CONFLICT_MSG = "This order changed a moment ago — refresh and try again"
+
+
 # ── money helpers ─────────────────────────────────────────────────────────────
 
 def money(x) -> float:
@@ -1510,6 +1515,39 @@ def market_base() -> str:
     return u or _base_url()
 
 
+# ── schema probes ─────────────────────────────────────────────────────────────
+
+# Migrations are applied by hand, so a deploy can run before (or without) the columns it knows
+# about. Readers of the R1 columns (shop_orders.is_test, shop_order_lines.*_confirmed — see
+# scripts/shop_orders_ops_migration.sql) probe once and degrade to the old shape instead of
+# failing a whole page on "column does not exist". A hit is remembered for 10 minutes, a miss for
+# one, so the flag starts working within a minute of the migration without a restart.
+_col_cache: dict[str, tuple[float, bool]] = {}
+_COL_TTL_HIT, _COL_TTL_MISS = 600.0, 60.0
+
+
+def has_column(table: str, column: str) -> bool:
+    key = f"{table}.{column}"
+    hit = _col_cache.get(key)
+    now = time.monotonic()
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        get_client().table(table).select(column).limit(1).execute()
+        ok = True
+    except Exception as e:  # noqa: BLE001 — a missing column (or a network blip) means "not yet"
+        log.debug("column probe %s failed: %s", key, e)
+        ok = False
+    _col_cache[key] = (now + (_COL_TTL_HIT if ok else _COL_TTL_MISS), ok)
+    return ok
+
+
+def _is_test(o: dict) -> bool:
+    """Test orders (flagged, never deleted — plan §3) stay out of KPIs, analytics and quick-picks.
+    Rows read before the column exists simply lack the key, which reads as a real order."""
+    return bool(o.get("is_test"))
+
+
 # ── order creation ────────────────────────────────────────────────────────────
 
 def _totals_from_order(o: dict) -> dict:
@@ -1524,6 +1562,17 @@ def _totals_from_order(o: dict) -> dict:
                       for ln in o.get("lines", [])],
             "has_backorder": bool(o.get("has_backorder")), "can_submit": True, "warnings": [], "discounts": [],
             "coupon": None, "progress": None, "block_reason": None, "min_order_bhd": 0.0}
+
+
+def _discard_lineless_order(client, order_id: int, why: str) -> None:
+    """The one delete on the order path: a header that never got its lines is not an order.
+    Lines and events cascade with it (shop_migration.sql). Never called on a header that has
+    lines — every other order row is flagged or cancelled, never removed (plan §3)."""
+    try:
+        client.table("shop_orders").delete().eq("id", order_id).execute()
+        log.warning("discarded line-less order %s: %s", order_id, why)
+    except Exception as e:  # noqa: BLE001 — leave the reason in the log; the caller re-raises its own
+        log.error("could not discard line-less order %s (%s): %s", order_id, why, e)
 
 
 def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
@@ -1557,11 +1606,17 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         except Exception:  # noqa: BLE001
             dup = None
         if dup:
-            o = get_order(dup[0]["id"]) or {}
-            o["duplicate"] = True
-            o["status_url"] = f"{_base_url()}/o/{o.get('token')}" if _base_url() else f"/o/{o.get('token')}"
-            o["totals"] = _totals_from_order(o)
-            return o
+            o = get_order(dup[0]["id"])
+            if o and o.get("lines"):
+                o["duplicate"] = True
+                o["status_url"] = f"{_base_url()}/o/{o.get('token')}" if _base_url() else f"/o/{o.get('token')}"
+                o["totals"] = _totals_from_order(o)
+                return o
+            # A header without lines is the debris of an earlier attempt whose lines insert
+            # died, not an order: returning it as a "duplicate" would hand the merchant an
+            # empty order and the rep nothing to confirm. Clear it and place the order properly.
+            if o:
+                _discard_lineless_order(client, o["id"], "retry found a header with no lines")
     ctx = context()
     vals = ctx["settings"]
     if not staff:
@@ -1637,11 +1692,19 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "line_status": "backorder" if ln["backorder"] else "ok",
         "rule_ids": [a["rule_id"] for a in ln["applied"]] or None,
     } for ln in quote["lines"]]
-    client.table("shop_order_lines").insert(lines).execute()
-    client.table("shop_order_events").insert({
-        "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
-        "detail": {"source": source, "attribution": attribution, "conflict": bool(conflict),
-                   "clamped": quote.get("_clamped") or []}}).execute()
+    # Header, lines and the created event are three PostgREST writes, not one transaction (the
+    # plpgsql shop_place_order comes in a later release). Until then: if anything after the
+    # header fails, take the header back out (lines/events cascade) and re-raise, so a
+    # line-less order can never exist and the merchant's retry creates the order properly.
+    try:
+        client.table("shop_order_lines").insert(lines).execute()
+        client.table("shop_order_events").insert({
+            "order_id": order["id"], "actor": (staff_email if staff else "customer"), "event": "created",
+            "detail": {"source": source, "attribution": attribution, "conflict": bool(conflict),
+                       "clamped": quote.get("_clamped") or []}}).execute()
+    except Exception as e:  # noqa: BLE001 — whatever it was, the header must not outlive it
+        _discard_lineless_order(client, order["id"], f"lines/event insert failed: {e}")
+        raise
     if quote.get("_coupon_rule_id"):
         try:
             r = client.table("discount_rules").select("uses").eq("id", quote["_coupon_rule_id"]).execute().data
@@ -1852,13 +1915,17 @@ def status_counts(salesman_id: int | None = None) -> dict[str, int]:
 
 def recent_customers(salesman_id: int | None = None, limit: int = 20) -> list[dict]:
     """A salesman's recent shops (one row per phone, latest first) for the checkout quick-pick."""
+    test_col = has_column("shop_orders", "is_test")
     qry = get_client().table("shop_orders").select(
-        "customer_name,customer_phone,customer_shop,customer_area,customer_email,created_at")
+        "customer_name,customer_phone,customer_shop,customer_area,customer_email,created_at"
+        + (",is_test" if test_col else ""))
     if salesman_id is not None:
         qry = qry.eq("salesman_id", salesman_id)
     rows = qry.order("created_at", desc=True).limit(500).execute().data or []
     seen: dict[str, dict] = {}
     for r in rows:
+        if _is_test(r):
+            continue
         key = r.get("customer_phone") or r.get("customer_name")
         if not key:
             continue
@@ -1872,13 +1939,21 @@ def recent_customers(salesman_id: int | None = None, limit: int = 20) -> list[di
 
 
 def set_status(order_id: int, status: str, note: str | None, actor: str, *,
-               allowed: tuple[str, ...] | None = None, cancelled_by: str = "staff") -> dict:
+               allowed: tuple[str, ...] | None = None, cancelled_by: str = "staff",
+               expected_status: str | None = None) -> dict:
     """Move an order along the lifecycle. `allowed` narrows the statuses this actor's role may set
     (the storekeeper only moves goods). Each stage stamps its own timestamp; Preparing records
-    which salesman the storekeeper issued the goods to."""
+    which salesman the storekeeper issued the goods to.
+
+    The write is a compare-and-swap on the status just read: the UPDATE also filters on it and
+    zero changed rows means someone else moved the order first — nothing is stamped, no event is
+    written, the caller sees CAS_CONFLICT_MSG. `expected_status` lets a caller that already
+    decided on an earlier read (the merchant's cancel: only while Received) pin that read too."""
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
+    if expected_status and o["status"] != expected_status:
+        raise ShopError(CAS_CONFLICT_MSG)
     status = str(status or "").strip().lower()
     if status not in STATUSES:
         raise ShopError("Unknown status.")
@@ -1902,7 +1977,10 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
         upd["cancelled_by"] = cancelled_by
         upd["cancel_reason"] = clean(note, 300) or None
     client = get_client()
-    client.table("shop_orders").update(upd).eq("id", order_id).execute()
+    swapped = (client.table("shop_orders").update(upd).eq("id", order_id)
+               .eq("status", o["status"]).execute().data or [])
+    if not swapped:
+        raise ShopError(CAS_CONFLICT_MSG)
     client.table("shop_order_events").insert({
         "order_id": order_id, "actor": actor, "event": f"status:{status}",
         "detail": {"note": clean(note, 500) or None, "from": o["status"]}}).execute()
@@ -1917,7 +1995,10 @@ def cancel_by_customer(order_token: str, reason: str | None) -> dict:
         raise ShopError("Order not found.")
     if o["status"] != "new":
         raise ShopError("This order is already being processed — please message your salesman to change it.")
-    return set_status(o["id"], "cancelled", reason, actor="customer", cancelled_by="customer")
+    # pinned to 'new': a rep confirming between this read and the write makes the cancel lose
+    # (confirmed → cancelled is a staff move, never the merchant's)
+    return set_status(o["id"], "cancelled", reason, actor="customer", cancelled_by="customer",
+                      expected_status="new")
 
 
 def confirm_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str) -> dict:
@@ -1933,6 +2014,9 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
     by_id = {int(ln["id"]): ln for ln in o["lines"]}
     changed: list[dict] = []
     removed: list[str] = []
+    # Everything is decided in memory first; the database is not touched until the header
+    # compare-and-swap below has won, so a losing confirm leaves the lines exactly as they were.
+    line_updates: dict[int, dict] = {}
     for ch in (changes or []):
         ln = by_id.get(_i((ch or {}).get("line_id")))
         if not ln:
@@ -1952,11 +2036,11 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
                        line_status=("changed" if qc != _i(ln["qty"]) else ("backorder" if ln.get("backorder") else "ok")))
             if qc != _i(ln["qty"]):
                 changed.append({"item_code": ln["item_code"], "from": _i(ln["qty"]), "to": qc})
-        client.table("shop_order_lines").update(upd).eq("id", ln["id"]).execute()
+        line_updates.setdefault(int(ln["id"]), {}).update(upd)
         ln.update(upd)
     for ln in o["lines"]:
         if ln.get("qty_confirmed") is None:
-            client.table("shop_order_lines").update({"qty_confirmed": ln["qty"]}).eq("id", ln["id"]).execute()
+            line_updates.setdefault(int(ln["id"]), {})["qty_confirmed"] = ln["qty"]
             ln["qty_confirmed"] = ln["qty"]
     live = [{"item_code": ln["item_code"], "qty": _i(ln.get("qty_confirmed"))}
             for ln in o["lines"] if (ln.get("line_status") or "ok") != "removed" and _i(ln.get("qty_confirmed")) > 0]
@@ -1968,12 +2052,26 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
         totals = {k: v for k, v in q.items() if not k.startswith("_")}
     except ShopError as e:
         log.info("confirm re-price skipped for %s: %s", o.get("order_no"), e)
+    if totals and has_column("shop_order_lines", "unit_price_confirmed"):
+        # the confirmed price per line (tiers move with confirmed quantities) — R4's confirmed
+        # email and tracking read these; until the migration lands the totals alone are stored
+        priced = {str(pl["item_code"]).upper(): pl for pl in totals.get("lines", [])}
+        for ln in o["lines"]:
+            pl = priced.get(str(ln["item_code"]).upper())
+            if pl and (ln.get("line_status") or "ok") != "removed":
+                line_updates.setdefault(int(ln["id"]), {}).update(
+                    unit_price_confirmed=money(pl["unit_price_bhd"]), line_total_confirmed=money(pl["line_total_bhd"]))
     now = _iso()
     upd_o: dict = {"status": "confirmed", "confirmed_at": now, "updated_at": now,
                    "expected_delivery": clean(expected_delivery, 120) or None,
                    "subtotal_confirmed_bhd": totals["subtotal_bhd"] if totals else o.get("subtotal_bhd"),
                    "total_confirmed_bhd": totals["total_bhd"] if totals else o.get("total_bhd")}
-    client.table("shop_orders").update(upd_o).eq("id", order_id).execute()
+    swapped = (client.table("shop_orders").update(upd_o).eq("id", order_id)
+               .eq("status", o["status"]).execute().data or [])
+    if not swapped:
+        raise ShopError(CAS_CONFLICT_MSG)
+    for line_id, upd in line_updates.items():
+        client.table("shop_order_lines").update(upd).eq("id", line_id).execute()
     client.table("shop_order_events").insert({
         "order_id": order_id, "actor": actor, "event": "status:confirmed",
         "detail": {"note": clean(note, 500) or None, "from": o["status"], "changed": changed, "removed": removed,
@@ -1983,6 +2081,29 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
     out["changed"] = changed
     out["removed"] = removed
     return out
+
+
+def set_test_flag(order_id: int, is_test: bool, actor: str) -> dict:
+    """Admin: mark an order as a test (orders 90 and 97 — plan §3) or clear the mark. Flagged
+    orders stay on record but leave every figure (analytics, rep KPIs, quick-picks). Needs
+    shop_orders.is_test from scripts/shop_orders_ops_migration.sql; until then a clear error."""
+    o = get_order(order_id)
+    if not o:
+        raise ShopError("Order not found.")
+    if "is_test" not in o:
+        raise ShopError("The test flag is not available yet — apply scripts/shop_orders_ops_migration.sql first.")
+    flag = bool(is_test)
+    if bool(o.get("is_test")) == flag:
+        return o
+    client = get_client()
+    done = (client.table("shop_orders").update({"is_test": flag, "updated_at": _iso()})
+            .eq("id", order_id).execute().data or [])
+    if not done:
+        raise ShopError(CAS_CONFLICT_MSG)
+    client.table("shop_order_events").insert({
+        "order_id": order_id, "actor": actor, "event": "test_flag",
+        "detail": {"is_test": flag, "was": bool(o.get("is_test"))}}).execute()
+    return get_order(order_id) or {}
 
 
 def assign_order(order_id: int, salesman_id, actor: str, reason: str | None, *, is_admin: bool,
@@ -2139,6 +2260,37 @@ def salesman_link(s: dict) -> str:
     return f"{base}{path}" if base else path
 
 
+# Every foreign key that can point at a rep. A rep with any of these is history, not a row to
+# delete: orders keep their salesman for kickback and returns, merchants keep their sticky rep.
+_SALESMAN_REFS: tuple[tuple[str, str, str], ...] = (
+    ("shop_orders", "salesman_id", "orders"), ("shop_orders", "issued_to_salesman_id", "orders"),
+    ("shop_customers", "salesman_id", "merchants"), ("shop_customers", "sticky_salesman_id", "merchants"),
+)
+
+
+def salesman_references(salesman_id: int | None = None) -> dict[int, dict[str, int]]:
+    """{rep id: {"orders": n, "merchants": n}} — how many orders / merchants point at each rep
+    (one rep when `salesman_id` is given). Raises ShopError when a count cannot be taken: an
+    unknown answer must never read as "nothing references this rep"."""
+    out: dict[int, dict[str, int]] = {}
+    client = get_client()
+    for table, col, kind in _SALESMAN_REFS:
+        try:
+            qry = client.table(table).select(col)
+            if salesman_id is not None:
+                qry = qry.eq(col, salesman_id)
+            else:
+                qry = qry.not_.is_(col, "null")
+            rows = qry.limit(10000).execute().data or []
+        except Exception as e:  # noqa: BLE001
+            raise ShopError(f"Could not check {kind} for this salesman — try again.") from e
+        for r in rows:
+            sid = _i(r.get(col))
+            if sid:
+                out.setdefault(sid, {"orders": 0, "merchants": 0})[kind] += 1
+    return out
+
+
 def list_salesmen() -> list[dict]:
     rows = _load_salesmen(active_only=False)
     since = (_now() - timedelta(days=30)).isoformat()
@@ -2150,9 +2302,14 @@ def list_salesmen() -> list[dict]:
                 counts[o["salesman_id"]] = counts.get(o["salesman_id"], 0) + 1
     except Exception:  # noqa: BLE001
         pass
+    try:
+        refs = salesman_references()
+    except ShopError:
+        refs = None      # unknown → the page treats every rep as referenced (deactivate only)
     for s in rows:
         s["link"] = salesman_link(s)
         s["orders_30d"] = counts.get(s["id"], 0)
+        s["references"] = (refs.get(s["id"], {"orders": 0, "merchants": 0}) if refs is not None else None)
     return rows
 
 
@@ -2210,9 +2367,19 @@ def upsert_salesman(payload: dict, by: str = "", salesman_id: int | None = None)
     return row
 
 
-def delete_salesman(salesman_id: int) -> None:
+def delete_salesman(salesman_id: int) -> dict:
+    """Remove a rep nobody references. A rep with orders or merchants is refused — deactivate
+    instead (the FK would otherwise null out the salesman on every order). Returns what the
+    audit entry needs (id, name, focus_name); the row is gone by then."""
+    sm = _salesman_by_id(salesman_id)
+    if not sm:
+        raise ShopError("Salesman not found.")
+    refs = salesman_references(salesman_id).get(int(salesman_id), {})
+    if any(refs.values()):
+        raise ShopError("Has orders or merchants — deactivate instead")
     get_client().table("salesmen").delete().eq("id", salesman_id).execute()
     invalidate()
+    return {"id": sm["id"], "name": sm.get("name"), "focus_name": sm.get("focus_name")}
 
 
 # Every salesman request resolves the login to its salesmen row (scope, KPIs, link). The Today
@@ -2342,11 +2509,13 @@ def me_payload(email: str) -> dict:
     client = get_client()
     now = _now()
     d7, d30 = (now - timedelta(days=7)).isoformat(), (now - timedelta(days=30)).isoformat()
-    q = client.table("shop_orders").select("id,total_bhd,customer_phone,created_at,status").gte("created_at", d30)
+    q = client.table("shop_orders").select("id,total_bhd,customer_phone,created_at,status"
+                                           + (",is_test" if has_column("shop_orders", "is_test") else "")) \
+        .gte("created_at", d30)
     if sm:
         q = q.eq("salesman_id", sm["id"])
     rows = q.limit(5000).execute().data or []
-    live = [o for o in rows if o.get("status") != "cancelled"]
+    live = [o for o in rows if o.get("status") != "cancelled" and not _is_test(o)]
     kpis = {
         "orders_7d": sum(1 for o in live if str(o.get("created_at")) >= d7),
         "orders_30d": len(live),
@@ -2781,8 +2950,10 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
     orders = (client.table("shop_orders")
               .select("id,status,total_bhd,units_count,salesman_id,salesman_name,referral_code,src,coupon_code,"
                       "customer_phone,created_at,has_backorder,source,attribution_source,attribution_conflict,"
-                      "assigned_at,confirmed_at,cancelled_by,customer_id,device_id")
+                      "assigned_at,confirmed_at,cancelled_by,customer_id,device_id"
+                      + (",is_test" if has_column("shop_orders", "is_test") else ""))
               .gte("created_at", since).limit(5000).execute().data or [])
+    orders = [o for o in orders if not _is_test(o)]     # test orders never count, cancelled or not
     if salesman:
         code = str(salesman.get("referral_code") or "").lower()
         ev = [e for e in ev if (e.get("salesman_id") == salesman["id"]) or
