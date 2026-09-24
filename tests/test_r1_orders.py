@@ -48,16 +48,17 @@ def _same(a, b) -> bool:
 
 
 class _Query:
-    """One builder chain. eq / neq / in_ / is_ / ilike (and .not_) are real filters; order,
-    range, gte and friends are recorded and ignored (the fixtures are tiny and pre-sorted)."""
+    """One builder chain. eq / neq / in_ / is_ / ilike / lt / lte / gt / gte (and .not_) are real
+    filters (the comparisons are on strings — ISO timestamps in one format compare right);
+    order, range, like and or_ are recorded and ignored (the fixtures are tiny and pre-sorted)."""
 
     def __init__(self, db: "_FakeDB", table: str):
         self.db, self.table = db, table
         self.op, self.payload, self.filters, self.negate = "select", None, [], False
-        self.cols, self.want_count, self.lim = "*", None, None
+        self.cols, self.want_count, self.lim, self.head = "*", None, None, False
 
-    def select(self, cols="*", count=None):
-        self.op, self.cols, self.want_count = "select", cols, count
+    def select(self, cols="*", count=None, head=False):
+        self.op, self.cols, self.want_count, self.head = "select", cols, count, head
         return self
 
     def insert(self, payload):
@@ -106,7 +107,9 @@ class _Query:
             raise AttributeError(name)
 
         def call(*a, **_kw):
-            if name in ("gte", "gt", "lte", "lt", "like", "or_"):
+            if name in ("gte", "gt", "lte", "lt"):
+                return self._filter(name, a[0], a[1])
+            if name in ("like", "or_"):
                 return self._filter("noop", a[0] if a else None, a[1] if len(a) > 1 else None)
             return self
         return call
@@ -132,6 +135,12 @@ class _Query:
                 ok = any(_same(got, v) for v in val)
             elif kind == "ilike":
                 ok = str(got or "").lower() == str(val).lower().strip("%")
+            elif kind in ("lt", "lte", "gt", "gte"):
+                if got is None:
+                    ok = False
+                else:
+                    a, b = str(got), str(val)
+                    ok = {"lt": a < b, "lte": a <= b, "gt": a > b, "gte": a >= b}[kind]
             else:
                 ok = True
             if neg:
@@ -140,13 +149,28 @@ class _Query:
                 return False
         return True
 
+    def _check_payload_columns(self):
+        """A write naming a column the table does not have: what PostgREST answers (PGRST204)."""
+        known = self.db.columns.get(self.table)
+        if known is None:
+            return
+        items = self.payload if isinstance(self.payload, list) else [self.payload]
+        for p in items:
+            for c in p or {}:
+                if c not in known:
+                    raise RuntimeError(f"PGRST204: Could not find the '{c}' column of '{self.table}' in the schema cache")
+
     def execute(self):
         db = self.db
-        # (op, table, payload-or-select-columns, filters) — what the assertions read back
-        db.calls.append((self.op, self.table, self.cols if self.op == "select" else self.payload, list(self.filters)))
+        # (op, table, payload-or-select-columns, filters, meta) — what the assertions read back
+        db.calls.append((self.op, self.table, self.cols if self.op == "select" else self.payload, list(self.filters),
+                         {"count": self.want_count, "head": self.head, "limit": self.lim}))
+        n_call = db.ncalls[(self.op, self.table)] = db.ncalls.get((self.op, self.table), 0) + 1
         fail = db.fail.get((self.op, self.table))
+        if callable(fail):
+            fail = fail(n_call)          # per-call injection: fn(nth call of this op on this table) → exc | None
         if fail is not None:
-            raise fail
+            raise fail  # type: ignore[misc]
         rows = db.tables.setdefault(self.table, [])
         if self.op == "select":
             known = db.columns.get(self.table)
@@ -159,9 +183,10 @@ class _Query:
             hook = db.after_select.get(self.table)
             if hook:
                 hook(n)      # the other writer: runs after this read was taken, before the caller's write
-            return SimpleNamespace(data=(out[: self.lim] if self.lim else out),
-                                   count=(len(out) if self.want_count else None))
+            data = [] if self.head else (out[: self.lim] if self.lim else out)
+            return SimpleNamespace(data=data, count=(len(out) if self.want_count else None))
         if self.op in ("insert", "upsert"):
+            self._check_payload_columns()
             items = self.payload if isinstance(self.payload, list) else [self.payload]
             out = []
             for p in items:
@@ -171,6 +196,7 @@ class _Query:
                 out.append(dict(r))
             return SimpleNamespace(data=out, count=None)
         if self.op == "update":
+            self._check_payload_columns()
             out = []
             for r in rows:
                 if self._match(r):
@@ -195,9 +221,11 @@ class _FakeDB:
         # Tables not listed accept every column (the migration is "applied").
         self.columns: dict[str, set] = {k: set(v) for k, v in (columns or {}).items()}
         self.calls: list[tuple] = []
-        self.fail: dict[tuple, Exception] = {}        # (op, table) → exception to raise at execute()
+        # (op, table) → exception to raise at execute(), or fn(nth call) → exception | None
+        self.fail: dict[tuple, object] = {}
         self.after_select: dict[str, object] = {}     # table → fn(nth select) — the racing writer
         self.selects: dict[str, int] = {}
+        self.ncalls: dict[tuple, int] = {}
         self.rpc_results = {"shop_next_order_no": "YQ-2609-0101"}
         self._ids: dict[str, int] = {}
 
@@ -314,7 +342,7 @@ def _lines(order_id):
 def _db(**tables) -> _FakeDB:
     base = {"salesmen": SALESMEN, "app_settings": [{"key": "shop_market_url", "value": "https://yqmarketplace.com"}],
             "shop_customers": [], "shop_customer_phones": [], "shop_orders": [], "shop_order_lines": [],
-            "shop_order_events": [], "shop_events": []}
+            "shop_order_events": [], "shop_events": [], "salesman_kickback_statements": []}
     base.update(tables)
     return _FakeDB(base)
 
@@ -368,21 +396,42 @@ def _():
         assert fake.rows("shop_orders") == [] and fake.rows("shop_order_lines") == []
 
 
-@test("create: a duplicate header with zero lines is not an order — it is removed and the order placed")
+@test("create: a stale duplicate header with zero lines is not an order — it is removed and the order placed")
 def _():
     from app.shop import create_order
-    stale = _order(7, device_id="dev-1", client_order_id="coid-1")
+    stale = _order(7, device_id="dev-1", client_order_id="coid-1")     # created two hours ago
     fake = _db(shop_orders=[stale])                    # header only: the debris of a dead attempt
     with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
         o = create_order(_body(), market=True)
         assert not o.get("duplicate"), "a line-less header must not be returned as the created order"
         assert o["id"] != 7 and [r["id"] for r in fake.rows("shop_orders")] == [o["id"]]
         assert len([ln for ln in fake.rows("shop_order_lines") if ln["order_id"] == o["id"]]) == 2
+        # the discard is pinned to the age cutoff in the database too, not only in memory
+        deletes = [c for c in fake.writes("shop_orders") if c[0] == "delete"]
+        assert len(deletes) == 1 and ("eq", "id", 7, False) in deletes[0][3], deletes
+        assert any(f[0] == "lt" and f[1] == "created_at" for f in deletes[0][3]), deletes[0][3]
         # …and the real duplicate path still answers the retry with the order it already has
         again = create_order(_body(), market=True)
         assert again.get("duplicate") is True and again["id"] == o["id"], again.get("id")
         assert len(again["lines"]) == 2 and again["totals"]["total_bhd"] == o["totals"]["total_bhd"]
         assert len(fake.rows("shop_orders")) == 1
+
+
+@test("create: a duplicate header with zero lines that is seconds old is still being placed — kept, 409 at the edge")
+def _():
+    from fastapi.testclient import TestClient
+    import app.main as m
+    from app.shop import IN_FLIGHT_MSG, create_order
+    fresh = _order(7, device_id="dev-1", client_order_id="coid-1",
+                   created_at=(datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat())
+    fake = _db(shop_orders=[fresh])                    # the first request is between its header and its lines
+    with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
+        _raises(lambda: create_order(_body(), market=True), IN_FLIGHT_MSG)
+        assert [r["id"] for r in fake.rows("shop_orders")] == [7], "the in-flight header must survive the retry"
+        assert fake.writes() == [], fake.writes()
+        r = TestClient(m.app).post("/public/market/order", json=_body())
+        assert r.status_code == 409 and r.json()["detail"] == IN_FLIGHT_MSG, (r.status_code, r.text[:200])
+        assert [r_["id"] for r_ in fake.rows("shop_orders")] == [7] and fake.writes() == []
 
 
 # ── 2. compare-and-swap status moves ──────────────────────────────────────────
@@ -451,6 +500,47 @@ def _():
             assert ln["qty_confirmed"] == ln["qty"] and "unit_price_confirmed" not in ln, ln
 
 
+@test("cas: a confirm that fails after the header swap puts the header back — no event, and the retry goes through")
+def _():
+    from app.shop import confirm_order
+    changes = [{"line_id": 11, "qty_confirmed": 2}, {"line_id": 12, "qty_confirmed": 1}]
+    fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
+    fake.fail[("update", "shop_order_lines")] = lambda n: RuntimeError("line update blip") if n == 2 else None
+    with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
+        try:
+            confirm_order(1, changes, "Tomorrow", "trimmed", actor="rep@example.com")
+            raise AssertionError("expected the line failure to propagate")
+        except RuntimeError as e:
+            assert "line update blip" in str(e), e       # the original error, not a swallowed one
+        row = fake.rows("shop_orders")[0]
+        assert row["status"] == "new", row
+        assert not row.get("confirmed_at") and row.get("total_confirmed_bhd") is None, row
+        assert not row.get("expected_delivery") and row.get("subtotal_confirmed_bhd") is None, row
+        assert fake.rows("shop_order_events") == [] and fake.writes("shop_order_events") == []
+        upd = [c for c in fake.writes("shop_orders") if c[0] == "update"]
+        assert len(upd) == 2, upd
+        # the revert is a compare-and-swap of its own: only the 'confirmed' row with the confirmed_at just written
+        assert ("eq", "status", "confirmed", False) in upd[1][3] and upd[1][2]["status"] == "new", upd[1]
+        assert any(f[0] == "eq" and f[1] == "confirmed_at" and f[2] for f in upd[1][3]), upd[1][3]
+        # nobody raced, so the rep simply confirms again
+        fake.fail.clear()
+        out = confirm_order(1, changes, "Tomorrow", "trimmed", actor="rep@example.com")
+        assert out["status"] == "confirmed" and out["changed"] == [{"item_code": "T02", "from": 3, "to": 2},
+                                                                    {"item_code": "X05", "from": 2, "to": 1}]
+        assert [e["event"] for e in fake.rows("shop_order_events")] == ["status:confirmed"]
+        assert {ln["id"]: ln["qty_confirmed"] for ln in fake.rows("shop_order_lines")} == {11: 2, 12: 1}
+    # a failed event insert is the same story
+    fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
+    fake.fail[("insert", "shop_order_events")] = RuntimeError("event insert died")
+    with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
+        try:
+            confirm_order(1, [], None, None, actor="rep@example.com")
+            raise AssertionError("expected the event failure to propagate")
+        except RuntimeError:
+            pass
+        assert fake.rows("shop_orders")[0]["status"] == "new" and fake.rows("shop_order_events") == []
+
+
 @test("cas: the merchant's cancel loses to the rep's confirm on either read — no cancel is written")
 def _():
     from app.shop import CAS_CONFLICT_MSG, cancel_by_customer
@@ -508,20 +598,56 @@ def _():
         _raises(lambda: delete_salesman(2), "not found")
 
 
-@test("salesmen: the list carries reference counts so the page can offer Deactivate instead of Delete")
+@test("salesmen: the list carries distinct reference counts (orders, merchants, statements) and a test-free Orders (30d)")
 def _():
     from app.shop import list_salesmen
-    fake = _db(shop_orders=[_order(1, salesman_id=1), _order(2, salesman_id=1, issued_to_salesman_id=1)],
-               shop_customers=[{"id": 5, "phone": "97333001122", "sticky_salesman_id": 1}])
+    # order 2 names rep 1 twice (salesman + issued_to), merchant 5 twice (salesman + sticky): each counts once
+    fake = _db(shop_orders=[_order(1, salesman_id=1), _order(2, salesman_id=1, issued_to_salesman_id=1),
+                            _order(3, salesman_id=1, is_test=True)],
+               shop_customers=[{"id": 5, "phone": "97333001122", "salesman_id": 1, "sticky_salesman_id": 1},
+                               {"id": 6, "phone": "97333001133", "salesman_id": 2}],
+               salesman_kickback_statements=[{"id": 1, "salesman": "HARSH B", "salesman_id": 2, "period": "2026-09"}])
     with _patched(fake):
         rows = {s["id"]: s for s in list_salesmen()}
-        assert rows[1]["references"] == {"orders": 3, "merchants": 1}, rows[1]["references"]
-        assert rows[2]["references"] == {"orders": 0, "merchants": 0}, rows[2]["references"]
+        assert rows[1]["references"] == {"orders": 3, "merchants": 1, "statements": 0}, rows[1]["references"]
+        assert rows[2]["references"] == {"orders": 0, "merchants": 1, "statements": 1}, rows[2]["references"]
+        assert rows[1]["orders_30d"] == 2, "the test order must not count in Orders (30d)"
         assert rows[1]["link"] == "https://yqmarketplace.com/furqan"
     fake = _db()
     fake.fail[("select", "shop_customers")] = RuntimeError("down")
     with _patched(fake):
         assert all(s["references"] is None for s in list_salesmen()), "unknown counts must read as unknown, not zero"
+
+
+@test("salesmen: a kickback statement alone keeps a rep; the delete path asks for HEAD counts; a 23503 is a refusal, not a 500")
+def _():
+    from fastapi.testclient import TestClient
+    import app.main as m
+    from app.auth import CurrentUser, get_current_user
+    from app.shop import SALESMAN_REFERENCED_MSG, delete_salesman
+    fake = _db(salesman_kickback_statements=[{"id": 1, "salesman": "HARSH B", "salesman_id": 2, "period": "2026-09"}])
+    with _patched(fake):
+        _raises(lambda: delete_salesman(2), SALESMAN_REFERENCED_MSG)
+        assert fake.writes("salesmen") == [] and [s["id"] for s in fake.rows("salesmen")] == [1, 2]
+        heads = [c for c in fake.calls if c[0] == "select" and c[4]["head"]]
+        assert len(heads) == 5 and all(c[4]["count"] == "exact" and c[4]["limit"] == 1 for c in heads), heads
+        assert {c[1] for c in heads} == {"shop_orders", "shop_customers", "salesman_kickback_statements"}
+
+    class _FkViolation(Exception):          # what postgrest raises for ON DELETE RESTRICT
+        code = "23503"
+
+    fake = _db()
+    fake.fail[("delete", "salesmen")] = _FkViolation("update or delete on table salesmen violates foreign key constraint")
+    with _patched(fake):
+        _raises(lambda: delete_salesman(2), SALESMAN_REFERENCED_MSG)
+        assert [s["id"] for s in fake.rows("salesmen")] == [1, 2]
+    m.app.dependency_overrides[get_current_user] = lambda: CurrentUser(user_id="t", email="admin@example.com", role="admin")
+    try:
+        with _patched(fake):
+            r = TestClient(m.app).delete("/shop/salesmen/2")
+            assert r.status_code == 409 and r.json()["detail"] == SALESMAN_REFERENCED_MSG, (r.status_code, r.text[:200])
+    finally:
+        m.app.dependency_overrides.pop(get_current_user, None)
 
 
 @test("salesmen: DELETE route answers 409 with the reason and audits name + focus_name on success")
@@ -603,6 +729,81 @@ def _():
         assert has_column("shop_orders", "is_test") is True
         n = len(fake.calls)
         assert has_column("shop_orders", "is_test") is True and len(fake.calls) == n, "the probe must be cached"
+
+
+@test("is_test: a column dropped under a cached hit (the reverse script) costs one re-read, never a page")
+def _():
+    import app.shop as s
+    from app.shop import analytics, confirm_order, has_column, me_payload, recent_customers
+    real = _order(1, status="delivered", total_bhd=10.0, created_at=(NOW - timedelta(days=1)).isoformat())
+    fake = _db(shop_orders=[real], shop_order_lines=_lines(1))
+    with _patched(fake):
+        assert has_column("shop_orders", "is_test") is True          # remembered for 10 minutes
+        fake.columns["shop_orders"] = ORDER_COLS_PRE_M2               # …then the column is dropped
+        assert analytics(30)["orders"] == 1
+        reads = [c for c in fake.calls if c[0] == "select" and c[1] == "shop_orders"]
+        assert "is_test" in str(reads[-2][2]) and "is_test" not in str(reads[-1][2]), [c[2] for c in reads[-2:]]
+        assert "shop_orders.is_test" not in s._col_cache, "the stale hit must be forgotten"
+        # the next reader probes again, gets the miss, and never names the column
+        n = len(fake.calls)
+        assert me_payload("rep@example.com")["kpis"]["orders_30d"] == 1 and len(recent_customers(1)) == 1
+        later = [c for c in fake.calls[n:] if c[0] == "select" and c[1] == "shop_orders"]
+        assert later[0][2] == "is_test" and all("is_test" not in str(c[2]) for c in later[1:]), [c[2] for c in later]
+        assert s._col_cache["shop_orders.is_test"][1] is False
+    # confirm_order: the *_confirmed line columns vanish under a cached hit → totals only, no revert needed
+    fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
+    with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
+        assert has_column("shop_order_lines", "unit_price_confirmed") is True
+        fake.columns["shop_order_lines"] = set(_lines(1)[0]) | {"note"}
+        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 2}], "Tomorrow", None, actor="rep@example.com")
+        assert out["status"] == "confirmed" and out["total_confirmed_bhd"] == 9.9, out["total_confirmed_bhd"]
+        by = {ln["id"]: ln for ln in fake.rows("shop_order_lines")}
+        assert by[11]["qty_confirmed"] == 2 and by[12]["qty_confirmed"] == 2
+        assert all("unit_price_confirmed" not in ln for ln in by.values()), by
+        assert [e["event"] for e in fake.rows("shop_order_events")] == ["status:confirmed"]
+        assert "shop_order_lines.unit_price_confirmed" not in s._col_cache
+
+
+@test("is_test: the merchant's status page never shows the test flag (or any other internal event)")
+def _():
+    from app.shop import public_order_view
+    o = _order(1, status="confirmed")
+    o["lines"], o["salesman"] = _lines(1), dict(SALESMEN[0])
+    o["events"] = [{"ts": "2026-09-24T08:00:00+00:00", "event": "created", "detail": {"source": "market"}},
+                   {"ts": "2026-09-24T08:01:00+00:00", "event": "assigned", "detail": {"reason": "rep on leave"}},
+                   {"ts": "2026-09-24T08:02:00+00:00", "event": "test_flag", "detail": {"is_test": True, "was": False}},
+                   {"ts": "2026-09-24T08:03:00+00:00", "event": "status:confirmed", "detail": {"note": "see you Monday"}},
+                   {"ts": "2026-09-24T08:04:00+00:00", "event": "reminded", "detail": {"note": "internal nudge"}}]
+    with _patched(_db()):
+        v = public_order_view(o)
+    assert [t["event"] for t in v["timeline"]] == ["created", "status:confirmed"], v["timeline"]
+    assert v["timeline"][1]["note"] == "see you Monday"
+    assert "internal nudge" not in str(v) and "rep on leave" not in str(v)
+
+
+@test("sweep: line-less Received headers older than the cutoff go; younger, confirmed or lined ones stay")
+def _():
+    from app.shop import sweep_lineless_orders
+    now = datetime.now(timezone.utc)
+    old, young = (now - timedelta(minutes=30)).isoformat(), (now - timedelta(minutes=2)).isoformat()
+    fake = _db(shop_orders=[_order(1, created_at=old),                        # debris → goes
+                            _order(2, created_at=young),                      # still being placed → stays
+                            _order(3, created_at=old),                        # has lines → stays
+                            _order(4, status="confirmed", created_at=old)],   # staff touched it → stays
+               shop_order_lines=_lines(3))
+    with _patched(fake):
+        out = sweep_lineless_orders(10)
+        assert out == {"checked": 2, "removed": ["YQ-2609-0001"], "errors": []}, out
+        assert [r["id"] for r in fake.rows("shop_orders")] == [2, 3, 4]
+        deletes = [c for c in fake.writes("shop_orders") if c[0] == "delete"]
+        assert len(deletes) == 1 and ("eq", "status", "new", False) in deletes[0][3], deletes
+        assert any(f[0] == "lt" and f[1] == "created_at" for f in deletes[0][3]), deletes[0][3]
+        assert fake.rows("shop_order_lines") == _lines(3), "lines of a real order are never touched"
+        assert sweep_lineless_orders(10)["removed"] == [], "idempotent"
+        # a database that is down is reported, never raised (shop_jobs runs this unattended)
+        fake.fail[("select", "shop_orders")] = RuntimeError("down")
+        out = sweep_lineless_orders(10)
+        assert out["removed"] == [] and out["errors"] and "down" in out["errors"][0], out
 
 
 @test("is_test: PATCH /shop/orders/{id}/test is admin-only, flips the flag once and writes the audit + order event")

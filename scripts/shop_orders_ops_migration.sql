@@ -4,9 +4,13 @@
 --   Reverse:  scripts/shop_orders_ops_reverse.sql
 --
 -- Why: the 17 live orders include two placed while testing (90 and 97). Plan §3: nothing on an
--- order is ever deleted — a test order is FLAGGED and the figures (analytics, rep KPIs, the
--- checkout quick-pick) leave it out. The alert retry (A) and the confirmed-values email (R4)
--- need their own columns. Every column has a default or is nullable, so no row changes.
+-- order is ever deleted — a test order is FLAGGED and exactly these figures leave it out:
+-- GET /shop/analytics, the rep KPIs in GET /shop/me, the checkout quick-pick (/shop/customers)
+-- and Orders (30d) on the Salesmen page. It still counts in the order list and its status
+-- buckets, in shop_customers.orders_count / total_bhd, in v_shop_orders_agent and in the
+-- shop_events funnel (cancel it with a note if it must leave the queue). The alert retry (A) and
+-- the confirmed-values email (R4) need their own columns. Every column has a default or is
+-- nullable, so no row changes.
 --
 -- The code tolerates these columns being absent (app/shop.py has_column probes the table once
 -- and degrades to the old shape), so this can land before or after the R1 deploy. The test
@@ -18,7 +22,7 @@ alter table shop_orders add column if not exists confirm_notified_at timestamptz
 alter table shop_orders add column if not exists notify_attempts     integer     not null default 0;
 
 comment on column shop_orders.is_test is
-  'Placed while testing (orders 90 and 97). Stays on record, never deleted; excluded from every figure. Set via PATCH /shop/orders/{id}/test (admin).';
+  'Placed while testing (orders 90 and 97). Stays on record, never deleted. Excluded from GET /shop/analytics, the rep KPIs in /shop/me, the checkout quick-pick and Orders (30d) on the Salesmen page; still counted in the order list and status buckets, shop_customers counters, v_shop_orders_agent and the shop_events funnel. Set via PATCH /shop/orders/{id}/test (admin).';
 comment on column shop_orders.confirm_notified_at is
   'When the merchant was told the order is confirmed (with confirmed values); NULL = not yet / every channel failed.';
 comment on column shop_orders.notify_attempts is

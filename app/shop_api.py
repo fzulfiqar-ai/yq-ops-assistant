@@ -206,10 +206,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return {"name": "YQ Bahrain", "phone": d} if d else None
 
     def _conflict_or_400(e: ShopError) -> HTTPException:
-        """A lost compare-and-swap (someone moved the order first) or a refused delete is a
-        409 so the client can tell 'refresh and retry' from a validation mistake."""
+        """A lost compare-and-swap (someone moved the order first), a retry that caught its own
+        first request still in flight, or a refused delete is a 409 so the client can tell
+        'refresh / wait and retry' from a validation mistake."""
         msg = str(e)
-        code = 409 if msg == shop.CAS_CONFLICT_MSG or msg.startswith("Has orders or merchants") else 400
+        code = 409 if msg in (shop.CAS_CONFLICT_MSG, shop.IN_FLIGHT_MSG, shop.SALESMAN_REFERENCED_MSG) else 400
         return HTTPException(status_code=code, detail=msg)
 
     # ── public ────────────────────────────────────────────────────────────────
@@ -232,7 +233,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request))
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_new_order, o["id"])
         sm = o.get("salesman") or {}
         contact = ({"name": sm.get("name"), "phone": sm.get("whatsapp") or sm.get("phone")} if sm
@@ -307,7 +308,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), market=True)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e       # 409 when the first request is still in flight
         if not o.get("duplicate"):
             background.add_task(shop_notify.notify_new_order, o["id"])
         sm = o.get("salesman") or {}
@@ -546,7 +547,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         try:
             o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), staff_email=user.email)
         except ShopError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_new_order, o["id"])
         log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"]})
         sm = o.get("salesman") or {}
@@ -650,8 +651,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.patch("/shop/orders/{order_id}/test")
     def shop_order_test_flag(order_id: int, body: TestFlagRequest,
                              admin: CurrentUser = Depends(require_admin)) -> dict:
-        """Admin only: flag an order as a test (it leaves analytics, rep KPIs and quick-picks but
-        stays on record — never deleted) or clear the flag. Needs shop_orders.is_test (M2)."""
+        """Admin only: flag an order as a test or clear the flag. It stays on record (never
+        deleted) and leaves exactly: /shop/analytics, the rep KPIs in /shop/me, the checkout
+        quick-pick and Orders (30d) on the Salesmen page. It still shows in the order list and
+        its status buckets — cancel it with a note if it must leave the queue. Needs
+        shop_orders.is_test (M2); 400 naming the migration until then."""
         try:
             o = shop.set_test_flag(order_id, body.is_test, actor=admin.email)
         except ShopError as e:

@@ -2,8 +2,10 @@
 -- is_test forgets which orders were tests (90 and 97) and dropping the confirmed prices
 -- loses what the rep confirmed per line — take
 --   python -m scripts.db_backup --tables shop_orders,shop_order_lines
--- FIRST. The code tolerates the columns being absent again (has_column probes, 1-minute miss
--- cache), so no deploy is needed to reverse.
+-- FIRST. No deploy is needed to reverse, but RESTART THE API AFTER REVERSING: has_column()
+-- remembers a hit for 10 minutes, and until then every reader that meets 42703 / PGRST204
+-- forgets the probe and re-reads without the column (one extra round trip per reader, once);
+-- a restart clears the cache outright.
 alter table shop_order_lines drop column if exists line_total_confirmed;
 alter table shop_order_lines drop column if exists unit_price_confirmed;
 alter table shop_orders      drop column if exists notify_attempts;

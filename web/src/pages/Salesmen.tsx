@@ -33,24 +33,34 @@ interface Salesman {
   photo_url?: string | null
   public_profile?: boolean
   public_whatsapp?: boolean
-  // orders / merchants that point at this rep (all time). null = the API could not count them.
-  // A referenced rep is never deleted (the server refuses too): deactivate instead.
-  references?: { orders: number; merchants: number } | null
+  // distinct orders / merchants / kickback statements that point at this rep (all time).
+  // null = the API could not count them. A referenced rep is never deleted (the server
+  // refuses too): deactivate instead. `statements` arrives with the R1 API (older API: absent).
+  references?: { orders: number; merchants: number; statements?: number } | null
 }
 interface SalesmenResp { salesmen: Salesman[] }
 interface TeamUsersResp { users: { email: string }[] }
+
+/** True when the API could not count what references this rep (or is an older API without the
+ *  counts): the row must not claim history as a fact, nor offer Delete. */
+function refsUnknown(r: Salesman): boolean {
+  return r.references === undefined || r.references === null
+}
 
 /** Why a rep cannot be deleted, or null when nothing references them. Unknown counts read as
  *  "keep" — the server would refuse anyway, and a wrong Delete button is worse than a missing one. */
 function keepReason(r: Salesman): string | null {
   const refs = r.references
   if (refs === undefined || refs === null) return 'Could not check this rep\'s orders — deactivate instead of deleting.'
-  if (refs.orders + refs.merchants === 0) return null
+  const statements = refs.statements ?? 0
+  if (refs.orders + refs.merchants + statements === 0) return null
   const parts = [
     refs.orders ? `${refs.orders} order${refs.orders === 1 ? '' : 's'}` : '',
     refs.merchants ? `${refs.merchants} merchant${refs.merchants === 1 ? '' : 's'}` : '',
+    statements ? `${statements} kickback statement${statements === 1 ? '' : 's'}` : '',
   ].filter(Boolean)
-  return `Has ${parts.join(' and ')} — reps with history are deactivated, never deleted, so their orders keep their name.`
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0]
+  return `Has ${list} — reps with history are deactivated, never deleted, so their orders and statements keep their name.`
 }
 
 /** The API's error detail (FastAPI wraps it as {"detail": "…"}); falls back to the raw body. */
@@ -343,7 +353,9 @@ export default function Salesmen() {
                 <UserX size={13} /> Deactivate
               </Button>
             ) : (
-              <span className="self-center text-[12px] text-muted-foreground" title={keep}>Kept (has history)</span>
+              <span className="self-center text-[12px] text-muted-foreground" title={keep}>
+                {refsUnknown(r) ? 'Kept (could not check history)' : 'Kept (has history)'}
+              </span>
             )}
           </div>
         )
@@ -360,7 +372,7 @@ export default function Salesmen() {
         to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
         Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
         marketplace instead of the token link. Contact details are stored in the database only. A rep with
-        orders or merchants can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
+        orders, merchants or a kickback statement can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
       </p>
 
       {isLoading ? (
