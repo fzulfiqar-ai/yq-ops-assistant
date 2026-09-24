@@ -44,6 +44,15 @@ jobs:
       # order and the migration (its node half prints SKIP here — the web job runs it for real)
       - name: Sold-out rule (release R1; no DB)
         run: python -m tests.test_r1_soldout
+      - name: R1 suites - alerts, security gates, data honesty, order safety, Coming Soon (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid   # only builds the JWKS client URL; nothing is fetched
+        run: |
+          python -m tests.test_r1_alerts
+          python -m tests.test_r1_security
+          python -m tests.test_r1_data
+          python -m tests.test_r1_orders
+          python -m tests.test_r1b_upcoming
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
 
