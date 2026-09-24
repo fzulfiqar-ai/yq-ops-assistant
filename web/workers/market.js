@@ -41,13 +41,20 @@
  *     is forwarded, the copy kept. The stored copy keeps the origin's ETag: revalidation sends
  *     If-None-Match, and a 304 just re-stamps the copy (no body crosses the wire); a browser
  *     If-None-Match that matches gets a 304 from here without touching the origin.
- *     ?ref= is validated against the slug shape and lowercased, then canonicalized against the reps the
- *     catalog itself lists (salesmen[].referral_code, kept on the no-ref copy as X-Yq-Reps): an unknown
- *     slug shares the no-ref copy — no key of its own, no origin call — so nobody can grow the cache or
- *     spend the API's per-IP budget by inventing slugs. While no no-ref copy exists yet the origin
- *     decides: the payload's own `ref` picks the key, so an unknown slug's answer lands under the no-ref
- *     key and every later one is a HIT. A rep added today is known as soon as the no-ref copy refreshes
- *     (its normal stale-while-revalidate cadence, which the unknown-slug requests themselves drive).
+ *     ?ref= is validated against the slug shape and lowercased; junk shares the no-ref copy. Whether a
+ *     well-formed slug is a rep is the ORIGIN's call — the public payload carries no referral codes
+ *     (R3: rep ids and names only), so the edge has no list to check against and must not guess. The
+ *     payload's own `ref` decides: a rep's answer is stored under the slug's key; any other slug's
+ *     answer is the no-ref catalog, stored under the no-ref key, and the slug's key gets a small
+ *     NO-REP VERDICT (X-Yq-No-Rep, never served). While the verdict stands the slug is a HIT on the
+ *     no-ref copy with no origin call; once it is NO_REP_TTL old the slug is still answered at once
+ *     and the origin is asked again in the background, so a rep added today is recognised within
+ *     NO_REP_TTL of their first link visit. Cost of an invented slug: one origin call per NO_REP_TTL
+ *     (the origin serves it from its in-process no-ref entry; past its 60/min per-IP limit it answers
+ *     429, which a real rep's first visitor gets passed through — the app then asks the API directly).
+ *     (Before 25-Sep-2026 the edge folded every slug the no-ref copy's salesmen[].referral_code did not
+ *     list; once R3 removed those codes it folded every rep link, and the app, seeing ref: null,
+ *     dropped the rep and bounced /{slug} to /.)
  *
  *  2. /assets/* and /fonts/*  — reached only for a MISSING file (see above): it becomes a real 404 with
  *     Cache-Control: no-store. The asset layer's SPA answer for an unknown path is index.html + HTTP 200 +
@@ -86,7 +93,8 @@ const ORIGIN_BG_MS = 25000    // a background refresh: waitUntil work is cut ~30
 const SLUG = /^[a-z0-9][a-z0-9-]{1,31}$/
 const STORED_AT = 'x-yq-stored-at'
 const STORED_CC = 'x-yq-origin-cache-control'
-const STORED_REPS = 'x-yq-reps'          // on the no-ref copy: the referral codes the catalog lists
+const NO_REP = 'x-yq-no-rep'             // on a slug's key: the origin answered this slug with ref: null
+const NO_REP_TTL = 600                   // seconds a no-rep verdict stands before the origin is asked again
 const GRACE_UNTIL = 'x-yq-grace-until'   // set after a soft failure: serve at once until then
 const SYNTHETIC = 'x-yq-origin'          // on the Worker's own 504: 'timeout' | 'error'
 
@@ -128,14 +136,26 @@ async function catalog(request, url, env, ctx) {
     return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD', 'cache-control': 'no-store' } })
   }
   const cache = caches.default
-  const ref = await canonicalRef(cache, url.origin, normalizeRef(url.searchParams.get('ref')))
+  let ref = normalizeRef(url.searchParams.get('ref'))
+  let cached = null
+  if (ref) {
+    const own = await match(cache, keyFor(url.origin, ref))
+    if (own && own.headers.get(NO_REP)) {
+      // the origin said this slug is nobody: the no-ref copy answers it; an old verdict is re-asked
+      // in the background, never on the visitor's time
+      if (ageOf(own) >= NO_REP_TTL) ctx.waitUntil(recheckSlug(cache, url.origin, ref))
+      ref = ''
+    } else {
+      cached = own
+    }
+  }
   const key = keyFor(url.origin, ref)
   const originUrl = originFor(ref)
-  const cached = await match(cache, key)
+  if (!ref) cached = await match(cache, key)
 
   if (cached) {
     const rules = parseCacheControl(cached.headers.get(STORED_CC))
-    const age = Math.max(0, Math.floor((Date.now() - Number(cached.headers.get(STORED_AT) || 0)) / 1000))
+    const age = ageOf(cached)
     const grace = Number(cached.headers.get(GRACE_UNTIL) || 0) > Date.now()
     if (age < rules.fresh) return reply(request, cached, 'HIT', age)
     if (age < rules.fresh + rules.swr) {
@@ -194,18 +214,33 @@ function originFor(ref) {
   return `${ORIGIN}${ORIGIN_PATH}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`
 }
 
+/** Seconds since a stored copy (or verdict) was written. */
+function ageOf(stored) {
+  return Math.max(0, Math.floor((Date.now() - Number(stored.headers.get(STORED_AT) || 0)) / 1000))
+}
+
+/** The small marker on a slug's key that says "the origin answered ref: null" — never served. */
+async function putNoRep(cache, origin, ref) {
+  const marker = new Response('', {
+    status: 200,
+    headers: { [NO_REP]: '1', [STORED_AT]: String(Date.now()), 'cache-control': `public, s-maxage=${DEFAULTS.sie}` },
+  })
+  try {
+    await cache.put(keyFor(origin, ref), marker)
+  } catch {
+    /* no cache: the slug is simply asked again next time */
+  }
+}
+
 /**
- * A slug the catalog does not list is the no-ref catalog (the API answers exactly that for it), so it
- * is folded onto the no-ref key here: no key of its own, no origin call. The list is the X-Yq-Reps
- * header of the stored no-ref copy; with no such copy yet the slug is kept and the origin's own
- * answer decides (store() keys by the payload's `ref`).
+ * An old no-rep verdict: re-stamp it first (the visitors behind this one do not start their own
+ * check), then ask the origin. store() files the answer — under the slug's own key if the slug is a
+ * rep now, else as the no-ref copy with a fresh verdict. Anything but a 200 leaves the verdict as is.
  */
-async function canonicalRef(cache, origin, ref) {
-  if (!ref) return ''
-  const base = await match(cache, keyFor(origin, ''))
-  const reps = base ? base.headers.get(STORED_REPS) : null
-  if (reps == null) return ref
-  return reps.split(',').includes(ref) ? ref : ''
+async function recheckSlug(cache, origin, ref) {
+  await putNoRep(cache, origin, ref)
+  const fresh = await fromOrigin(originFor(ref), null, ORIGIN_BG_MS)
+  if (fresh.status === 200) await store(cache, origin, ref, fresh)
 }
 
 async function match(cache, key) {
@@ -284,7 +319,8 @@ async function revalidate(cache, origin, ref, cached, timeoutMs) {
  * Store a 200 origin answer. Returns the stored Response (a fresh clone for the caller to serve), or
  * null when the answer is not the catalog (not JSON, or JSON that does not parse): the caller then
  * passes the origin's answer through as it is, and nothing is kept. The payload's own `ref` decides
- * the key: an unknown slug's answer IS the no-ref catalog and is stored as that.
+ * the key: an unknown slug's answer IS the no-ref catalog and is stored as that, and the slug's own
+ * key gets the no-rep verdict (which also retires the copy of a rep who was deactivated).
  */
 async function store(cache, origin, ref, res) {
   const type = res.headers.get('content-type') || ''
@@ -298,17 +334,14 @@ async function store(cache, origin, ref, res) {
   }
   if (!data || typeof data !== 'object') return null
   const payloadRef = data.ref && typeof data.ref === 'object' ? normalizeRef(data.ref.referral_code) : ''
-  const key = keyFor(origin, ref && payloadRef === ref ? ref : '')
-  const reps = Array.isArray(data.salesmen)
-    ? data.salesmen.map((s) => normalizeRef(s && s.referral_code)).filter(Boolean).join(',')
-    : ''
+  const isRep = Boolean(ref) && payloadRef === ref
+  const key = keyFor(origin, isRep ? ref : '')
   const etag = res.headers.get('etag') || (await weakEtag(body))
   const headers = new Headers({
     'content-type': 'application/json',
     etag,
     [STORED_AT]: String(Date.now()),
     [STORED_CC]: res.headers.get('cache-control') || '',
-    [STORED_REPS]: reps,
     // the Cache API evicts at s-maxage: keep the copy for the whole stale-if-error window and let
     // the age rules above decide what "fresh" means
     'cache-control': `public, s-maxage=${parseCacheControl(res.headers.get('cache-control')).sie}`,
@@ -319,6 +352,7 @@ async function store(cache, origin, ref, res) {
   } catch {
     /* workers.dev / local preview: no cache, still served */
   }
+  if (ref && !isRep) await putNoRep(cache, origin, ref)
   return stored
 }
 

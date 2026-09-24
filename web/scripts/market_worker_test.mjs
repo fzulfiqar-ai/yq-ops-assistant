@@ -8,7 +8,10 @@
  * The Workers runtime globals the script uses (Request/Response/Headers, AbortSignal.timeout,
  * crypto.subtle) exist in Node 20+; `caches.default` and `fetch` are replaced by fakes here so the
  * cache states, the origin calls and the timeouts can be asserted exactly. The fake origin behaves
- * like app/shop.py for ?ref=: a listed rep gets `ref` filled, an unknown slug gets the no-ref payload.
+ * like app/shop.py for ?ref=: a rep gets `ref` filled, an unknown slug gets the no-ref payload, and
+ * the public salesmen[] carries id + name only (R3) - NO referral codes, exactly as production does.
+ * (Until 25-Sep-2026 this fake still listed referral codes, so the suite passed while the real edge
+ * folded every rep link onto the no-ref copy.)
  */
 import worker from '../workers/market.js'
 
@@ -51,12 +54,13 @@ class FakeCache {
 const ORIGIN_CC = 'public, max-age=60, stale-while-revalidate=600, stale-if-error=86400'
 const REPS = ['furqan', 'harsh']
 const refOf = (url) => (new URL(url).searchParams.get('ref') || '').toLowerCase()
-/** the API's payload shape for the parts the Worker reads: items, salesmen[].referral_code, ref */
+/** the API's payload shape for the parts the Worker reads: items, ref - and salesmen[] as the public
+ *  API sends it since R3: id + name, never a referral code */
 const catalogJson = (n, ref = '') =>
   JSON.stringify({
     items: [{ item_code: `X0${n}` }],
     n,
-    salesmen: REPS.map((code, i) => ({ id: i + 1, name: code, referral_code: code })),
+    salesmen: REPS.map((code, i) => ({ id: i + 1, name: code })),
     ref: REPS.includes(ref) ? { referral_code: ref, salesman_id: REPS.indexOf(ref) + 1 } : null,
   })
 const originOk = (n, extra = {}, ref = '') =>
@@ -119,8 +123,7 @@ console.log('miss, hit, conditional')
   check(globalThis.caches.default.map.has(KEY), 'the 200 is stored under the same-origin key')
   const stored = globalThis.caches.default.map.get(KEY)
   check(/s-maxage=86400/.test(stored.headers.get('cache-control')), 'the stored copy lives for the stale-if-error window (Cache API TTL = s-maxage)')
-  check(stored.headers.get('x-yq-reps') === 'furqan,harsh', 'the no-ref copy carries the reps the catalog lists')
-  check(!r1.headers.has('x-yq-reps') && !r1.headers.has('x-yq-stored-at'), 'the bookkeeping headers never leave the edge')
+  check(!r1.headers.has('x-yq-no-rep') && !r1.headers.has('x-yq-stored-at') && !r1.headers.has('x-yq-origin-cache-control'), 'the bookkeeping headers never leave the edge')
 
   const r2 = await call('/api/market')
   check(r2.status === 200 && r2.headers.get('x-yq-cache') === 'HIT' && originCalls.length === 1, 'second request is a HIT with no origin call')
@@ -139,55 +142,77 @@ console.log('miss, hit, conditional')
   check(p.status === 405, 'POST is 405 (the quote and order routes never go through the edge)')
 }
 
-/* ── 2. ref handling: known reps have a key, everything else is the no-ref copy ────────────────── */
+/* ── 2. ref handling: the origin decides who is a rep, the edge remembers it per slug ──────────── */
 console.log('ref')
 {
   reset()
   const f = await call('/api/market?ref=Furqan')
   check(originCalls[0].url.endsWith('/public/market?ref=furqan'), 'a slug is lowercased before it reaches the origin')
-  check(globalThis.caches.default.map.has(KEY + '?ref=furqan') && (await f.json()).ref.referral_code === 'furqan', 'a listed rep has its own copy, with the rep filled')
+  check(globalThis.caches.default.map.has(KEY + '?ref=furqan') && (await f.json()).ref.referral_code === 'furqan', 'a rep has its own copy, with the rep filled')
   const junk = await call('/api/market?ref=%3Cscript%3E')
   check(originCalls.length === 2 && originCalls[1].url.endsWith('/public/market') && junk.status === 200, 'a junk ref shares the no-ref copy (one origin call, no new key)')
   const again = await call('/api/market?ref=%21%21')
   check(again.headers.get('x-yq-cache') === 'HIT' && originCalls.length === 2, 'junk refs cannot grow the cache or burn origin calls')
 
-  // a well-formed slug nobody has: canonicalized against the no-ref copy's rep list
-  const unknown = await call('/api/market?ref=zzzz-not-a-rep')
-  check(unknown.status === 200 && unknown.headers.get('x-yq-cache') === 'HIT' && originCalls.length === 2, 'an unknown slug is a HIT on the no-ref copy: no origin call')
-  check((await unknown.json()).ref === null, 'and gets the no-ref catalog, as the API itself would answer')
-  for (const s of ['aaaa', 'bbbb-1', 'cccc-2', 'dddd-3']) await call(`/api/market?ref=${s}`)
-  check(originCalls.length === 2 && keys().length === 2, 'four more unknown slugs: still two keys, still two origin calls')
+  // THE 25-Sep-2026 REGRESSION: the no-ref copy exists and lists no referral codes (the real API
+  // since R3) - a rep link must still reach the origin and come back with its rep
   const harsh = await call('/api/market?ref=harsh')
-  check(originCalls.length === 3 && originCalls[2].url.endsWith('?ref=harsh') && harsh.headers.get('x-yq-cache') === 'MISS' && keys().includes(KEY + '?ref=harsh'), 'the other listed rep gets a key and an origin call of its own')
-  check((await harsh.json()).ref.referral_code === 'harsh', 'rep isolation: the harsh copy is the harsh payload')
-  check((await (await call('/api/market?ref=furqan')).json()).ref.referral_code === 'furqan', 'and the furqan copy still the furqan payload')
+  check(originCalls.length === 3 && originCalls[2].url.endsWith('?ref=harsh') && harsh.headers.get('x-yq-cache') === 'MISS', 'a rep link with a warm no-ref copy still asks the origin')
+  check((await harsh.json()).ref.referral_code === 'harsh' && keys().includes(KEY + '?ref=harsh'), 'and gets its rep filled, under a key of its own')
+  check((await (await call('/api/market?ref=harsh')).json()).ref.referral_code === 'harsh' && originCalls.length === 3, 'the next harsh visitor is a HIT with the rep')
+  check((await (await call('/api/market?ref=furqan')).json()).ref.referral_code === 'furqan', 'rep isolation: the furqan copy is still the furqan payload')
 
-  // a cold edge (no no-ref copy yet): the origin decides, and its answer for an unknown slug is
-  // stored as the no-ref copy so every later unknown slug is a HIT
+  // a well-formed slug nobody has: the origin says ref: null once, then the verdict answers
+  const unknown = await call('/api/market?ref=zzzz-not-a-rep')
+  check(originCalls.length === 4 && originCalls[3].url.endsWith('?ref=zzzz-not-a-rep') && unknown.status === 200, 'an unknown slug is asked once')
+  check((await unknown.json()).ref === null, 'and gets the no-ref catalog, as the API answers it')
+  const verdict = globalThis.caches.default.map.get(KEY + '?ref=zzzz-not-a-rep')
+  check(Boolean(verdict) && verdict.headers.get('x-yq-no-rep') === '1', 'its key holds a no-rep verdict, not a catalog copy')
+  const second = await call('/api/market?ref=zzzz-not-a-rep')
+  check(second.headers.get('x-yq-cache') === 'HIT' && originCalls.length === 4, 'the same unknown slug again: a HIT on the no-ref copy, no origin call')
+  const body2 = await second.json()
+  check(body2.ref === null && Array.isArray(body2.items), 'the verdict itself is never served: the visitor gets the catalog')
+  for (const s of ['aaaa', 'bbbb-1']) await call(`/api/market?ref=${s}`)
+  check(originCalls.length === 6, 'each invented slug costs one origin call')
+  for (const s of ['aaaa', 'bbbb-1', 'aaaa']) await call(`/api/market?ref=${s}`)
+  check(originCalls.length === 6, 'repeats of invented slugs cost nothing')
+
+  // a rep added after their slug was first tried: the old verdict is re-asked in the background
+  originImpl = async (url) => {
+    const ref = refOf(url)
+    const body = JSON.parse(catalogJson(1, ref))
+    if (ref === 'zzzz-not-a-rep') body.ref = { referral_code: 'zzzz-not-a-rep', salesman_id: 9 }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', 'cache-control': ORIGIN_CC, etag: `W/"v1-${ref}"` } })
+  }
+  await globalThis.caches.default.age(KEY + '?ref=zzzz-not-a-rep', 601)
+  waits = []
+  const answered = await call('/api/market?ref=zzzz-not-a-rep')
+  check(answered.headers.get('x-yq-cache') === 'HIT' && (await answered.json()).ref === null, 'an old verdict still answers at once (no visitor waits for the check)')
+  check(waits.length === 1, 'and one background re-check is started')
+  await Promise.all(waits)
+  check(originCalls.length === 7 && originCalls[6].url.endsWith('?ref=zzzz-not-a-rep'), 'the re-check asked the origin about that slug')
+  const promoted = await call('/api/market?ref=zzzz-not-a-rep')
+  check(promoted.headers.get('x-yq-cache') === 'HIT' && (await promoted.json()).ref.referral_code === 'zzzz-not-a-rep', 'the new rep is recognised from then on')
+
+  // a rep deactivated: the next refresh of their copy retires it for a verdict
+  originImpl = originLike(1)
+  const before = REPS.slice()
+  REPS.splice(REPS.indexOf('furqan'), 1)
+  await globalThis.caches.default.age(KEY + '?ref=furqan', 120)
+  waits = []
+  await call('/api/market?ref=furqan')
+  await Promise.all(waits)
+  check(globalThis.caches.default.map.get(KEY + '?ref=furqan').headers.get('x-yq-no-rep') === '1', 'a deactivated rep: the refresh replaced the copy with a verdict')
+  check((await (await call('/api/market?ref=furqan')).json()).ref === null, 'and the slug now gets the no-ref catalog')
+  REPS.splice(0, REPS.length, ...before)
+
+  // a cold edge (nothing stored): the origin decides, an unknown slug's answer becomes the no-ref copy
   reset()
   const cold = await call('/api/market?ref=zzzz-not-a-rep')
   check(originCalls.length === 1 && originCalls[0].url.endsWith('?ref=zzzz-not-a-rep') && cold.headers.get('x-yq-cache') === 'MISS', 'cold edge + unknown slug: one origin call')
-  check(keys().length === 1 && keys()[0] === KEY, 'stored under the no-ref key (the payload said ref: null)')
-  const next = await call('/api/market?ref=yyyy-not-a-rep')
-  check(next.headers.get('x-yq-cache') === 'HIT' && originCalls.length === 1, 'the next unknown slug is a HIT')
-
-  // a rep the no-ref copy does not list yet (added today) becomes known when that copy refreshes
-  reset()
-  await call('/api/market')
-  originImpl = async (url) => {
-    const ref = refOf(url)
-    const body = JSON.parse(catalogJson(2, ref))
-    body.salesmen.push({ id: 3, name: 'new', referral_code: 'newrep' })
-    if (ref === 'newrep') body.ref = { referral_code: 'newrep', salesman_id: 3 }
-    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', 'cache-control': ORIGIN_CC, etag: `W/"v2-${ref}"` } })
-  }
-  check((await call('/api/market?ref=newrep')).headers.get('x-yq-cache') === 'HIT' && originCalls.length === 1, 'until then the new slug is the no-ref copy')
-  await globalThis.caches.default.age(KEY, 120)
-  waits = []
-  await call('/api/market')
-  await Promise.all(waits)
-  const known = await call('/api/market?ref=newrep')
-  check(known.headers.get('x-yq-cache') === 'MISS' && (await known.json()).ref.referral_code === 'newrep' && keys().includes(KEY + '?ref=newrep'), 'after the no-ref copy refreshed the new rep has a key of their own')
+  check(keys().includes(KEY) && keys().includes(KEY + '?ref=zzzz-not-a-rep') && keys().length === 2, 'stored as the no-ref copy plus the verdict for that slug')
+  const plain = await call('/api/market')
+  check(plain.headers.get('x-yq-cache') === 'HIT' && originCalls.length === 1, 'the plain catalog is then a HIT')
 }
 
 /* ── 3. stale-while-revalidate ─────────────────────────────────────────────────────────────────── */
