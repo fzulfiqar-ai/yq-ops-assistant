@@ -17,6 +17,14 @@
 # nothing) and web deploys were manual via scripts/deploy_cf.py.
 # Until both exist the job SKIPS with a notice - it never fails, so it can never become a source of
 # failure e-mails the way shop-cron was while its secret was missing.
+#
+# CI FIRST (lead decision D11, 25-Sep-2026): a push used to deploy whether or not ci.yml passed on
+# it. Now the `ci-passed` job waits for ci.yml's run on the SAME commit and the deploy needs it: a
+# red or missing CI run deploys nothing. It stays a push trigger with the web/** paths filter (a
+# workflow_run trigger has no paths filter, and a deploy on every green push would stamp a new
+# /version.json and prompt every merchant to update for nothing). A CI run that is re-run to green
+# does not start a deploy by itself: run this workflow by hand (workflow_dispatch) on that commit.
+# Kept to this one file, so the commit that added it (ci(deploy): ...) can be dropped on its own.
 name: cf-deploy
 
 on:
@@ -35,7 +43,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ci.yml runs on the same push; wait for its run on this exact commit and pass only if it passed
+  ci-passed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for ci.yml on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          for i in $(seq 1 120); do
+            state=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=1" --jq '.workflow_runs[0] | if . == null then "none" else "\(.status)/\(.conclusion)" end')
+            case "$state" in
+              completed/success) echo "ci passed on $SHA"; exit 0 ;;
+              completed/cancelled) echo "::error::ci on $SHA was cancelled (a newer push?) - nothing is deployed; once ci is green on main, run cf-deploy by hand"; exit 1 ;;
+              completed/*) echo "::error::ci did not pass on $SHA ($state) - nothing is deployed"; exit 1 ;;
+              none) if [ "$i" -gt 20 ]; then echo "::error::no ci run for $SHA - nothing is deployed"; exit 1; fi ;;
+            esac
+            sleep 20
+          done
+          echo "::error::ci still running on $SHA after 40 minutes - nothing is deployed"
+          exit 1
+
   deploy:
+    needs: ci-passed
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
