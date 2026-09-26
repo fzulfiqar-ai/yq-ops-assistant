@@ -796,7 +796,7 @@ function CampaignDialog({ campaign, rules, catalog, catalogStatus, onClose, onSa
           </div>
         )}
 
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
           <div className="space-y-5">
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="block">

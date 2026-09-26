@@ -103,8 +103,10 @@ export default function Today() {
         )}
       </div>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-6">
-        <div className="space-y-4">
+      {/* minmax(0,…) at every width: an `auto` phone column grows to the widest nowrap line (a long
+          shop name + badges) and pushes every card past the screen edge */}
+      <div className="mt-5 grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-6">
+        <div className="min-w-0 space-y-4">
           {/* quick actions */}
           <div className="grid grid-cols-3 gap-2 md:gap-3">
             {[
@@ -215,7 +217,7 @@ export default function Today() {
           <ComingSoon link={link} />
         </div>
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {/* month */}
           <section className="rounded-2xl border border-border bg-card p-4">
             <h2 className="font-display text-[15px] font-bold">Marketplace · last 30 days</h2>
