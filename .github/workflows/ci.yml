@@ -21,9 +21,12 @@ on:
 permissions:
   contents: read
 
+# A pull request's newer push cancels its older run; a push to main never does: cf-deploy waits for
+# ci.yml on its own commit (decision D11), and a newer non-web push cancelling that run would leave the
+# web commit never deployed (review C2). Main runs are few; each one finishes.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   api:
