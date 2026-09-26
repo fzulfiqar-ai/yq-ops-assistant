@@ -215,6 +215,10 @@ export const S = {
      * Arabic for the AR pass puts the amount before «د.ب», as every Arabic price does.
      */
     minimum: (amount: string) => `Wholesale orders from ${amount}`,
+    /** the phone strip's one line: the minimum, short */
+    minimumShort: (amount: string) => `Min. order ${amount}`,
+    /** the phone strip opens the full list on About · How ordering works */
+    more: 'How ordering works',
     minimumAr: (amount: string) => `طلبات الجملة من ${amount} د.ب`,
   },
   spot: {

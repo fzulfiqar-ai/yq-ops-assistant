@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Download } from 'lucide-react'
+import { ChevronRight, Download } from 'lucide-react'
 import type { MarketPromise as PromiseRow } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
@@ -19,10 +19,8 @@ import { locale, S } from '../strings'
  * footer prints its date, so a freshness claim here would contradict the same page (app/shop.py
  * SETTING_DEFAULTS, and tests/test_shop.py guards every promise against it in en and ar).
  *
- * The phone strip WRAPS (it never scrolls): the four promises measure ~660px, so a single row sliced
- * the stock claim mid-word at every phone width and hid "Every order confirmed by your rep"
- * entirely — the two most wholesale-specific claims, on the first screen. Tidy rows say every one
- * (with the wholesale minimum leading, three rows on the narrowest phones).
+ * The phone strip is ONE line (see PromiseStrip): the minimum and free delivery, then a chevron to
+ * About · How ordering works, which lists every promise. It never scrolls sideways.
  */
 
 /**
@@ -108,20 +106,34 @@ export function PromiseBar() {
   )
 }
 
+/**
+ * Phones: ONE line with the two facts that decide an order (the wholesale minimum, short, and the
+ * office's first promise — free delivery today); the whole strip opens About · How ordering works,
+ * where every promise is spelled out. Five promises in three wrapped rows was too much to read on
+ * the first screen (owner, 27-Sep-2026). Screen readers still hear every promise via the label.
+ */
 export function PromiseStrip({ className }: { className?: string }) {
   const promises = usePromises()
+  const { settings } = useMarket()
   if (!promises.length) return null
+  const min = Number(settings.min_order_bhd) || 0
+  const short = (p: PromiseRow) => (p.key === 'minimum' && min > 0 && p.en === S.promise.minimum(bhd(min)) ? S.promise.minimumShort(bhd(min)) : text(p))
   return (
-    <ul className={cn('flex flex-wrap items-center gap-x-3 gap-y-1.5 text-2xs font-medium text-ink-2', className)} aria-label={S.promise.title}>
-      {promises.map((p) => {
+    <Link
+      to="/about#trade"
+      className={cn('hit relative flex items-center gap-3 text-2xs font-medium text-ink-2', className)}
+      aria-label={`${S.promise.title}: ${promises.map(text).join(' · ')}. ${S.promise.more}`}
+    >
+      {promises.slice(0, 2).map((p, i) => {
         const Icon = iconFor(p)
         return (
-          <li key={p.key} className="inline-flex max-w-full items-center gap-1">
+          <span key={p.key} className={cn('inline-flex items-center gap-1 whitespace-nowrap', i > 0 && 'min-w-0')}>
             <Icon size={12} className="shrink-0 text-plum" aria-hidden="true" />
-            {text(p)}
-          </li>
+            <span className={cn(i > 0 && 'truncate')}>{short(p)}</span>
+          </span>
         )
       })}
-    </ul>
+      <ChevronRight size={14} className="ms-auto shrink-0 text-ink-3 rtl:rotate-180" aria-hidden="true" />
+    </Link>
   )
 }
