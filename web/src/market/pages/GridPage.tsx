@@ -270,7 +270,7 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
       <div className="hidden items-end gap-3 lg:flex lg:pt-2">
         <div className="min-w-0 flex-1">
           {breadcrumb && (
-            <Link to={breadcrumb.to} className="-ms-1 inline-flex h-8 items-center rounded-xs px-1 text-xs font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+            <Link to={breadcrumb.to} className="hit relative -ms-1 inline-flex h-8 items-center rounded-xs px-1 text-xs font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
               {breadcrumb.label}
             </Link>
           )}

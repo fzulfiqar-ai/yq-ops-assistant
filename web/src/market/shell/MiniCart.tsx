@@ -116,7 +116,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                       {item && !dead ? (
                         <Stepper value={line.qty} step={stepOf(item)} min={minQtyOf(item)} size="xs" label={name} onChange={(n) => setQty(item, n)} onRemove={() => remove(line.item_code)} />
                       ) : (
-                        <button type="button" onClick={() => remove(line.item_code)} className="text-xs font-semibold text-ink-2 hover:text-ink hover:underline">
+                        <button type="button" onClick={() => remove(line.item_code)} className="hit relative text-xs font-semibold text-ink-2 hover:text-ink hover:underline">
                           {S.cart.remove}
                         </button>
                       )}

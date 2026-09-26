@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useReveal } from '../hooks/useReveal'
 import { useShell } from '../shell/ShellContext'
+import { scrollMotion } from '../shell/useViewport'
 import { S } from '../strings'
 import { SectionHeader } from '../ui/SectionHeader'
 
@@ -61,7 +62,8 @@ export function Rail({ id, title, subtitle, action, seeAllTo, children, max = 6 
       ro.disconnect()
     }
   }, [tablet, all.length])
-  const by = (dir: 1 | -1) => scroller.current?.scrollBy({ left: dir * scroller.current.clientWidth * 0.8, behavior: 'smooth' })
+  // smooth only without prefers-reduced-motion — a rail never forces an animated scroll
+  const by = (dir: 1 | -1) => scroller.current?.scrollBy({ left: dir * scroller.current.clientWidth * 0.8, behavior: scrollMotion() })
 
   const arrows = tablet ? (
     <>

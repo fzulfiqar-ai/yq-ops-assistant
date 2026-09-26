@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils'
 /**
  * The market button. One accent (plum) for the primary action; everything else is quiet.
  * Heights are the tap targets: 40 (dense rows), 44 (cards, default), 48 (sheet footers), 56 (hero).
+ * The 40px size also carries an invisible 44px hit area on touch screens (`hit`, market.css).
  */
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'wa' | 'ink'
@@ -24,7 +25,7 @@ const VARIANT: Record<ButtonVariant, string> = {
 }
 
 const SIZE: Record<ButtonSize, string> = {
-  sm: 'h-10 rounded-sm px-3.5 text-sm',
+  sm: 'hit relative h-10 rounded-sm px-3.5 text-sm',
   md: 'h-11 rounded-sm px-4 text-sm',
   lg: 'h-12 rounded-md px-5 text-base',
   xl: 'h-14 rounded-md px-6 text-md',

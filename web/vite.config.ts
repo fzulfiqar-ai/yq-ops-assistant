@@ -58,6 +58,8 @@ const BOOT_CSS = [
   "@media(min-width:1024px){#yq-boot span{padding-bottom:112px}#yq-boot i{width:96px;height:96px}}",
   "@media(max-height:520px){#yq-boot i{display:none}}",
   "@keyframes yq-boot-out{to{opacity:0;visibility:hidden}}",
+  // a load that will not play the opening (public/catalog-prefetch.js, lib/splashGate.ts) never paints it
+  "html[data-boot=off] #yq-boot{display:none}",
 ].join('')
 /**
  * The tile's mark travels IN the HTML, as a data: URI — one request fewer on the critical path, and

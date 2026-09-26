@@ -347,9 +347,13 @@ four absolutely positioned, blurred ellipses; `motion` is banned in this bundle)
 {shop}" with the "Refill my shelf" shortcut (820 ms) → the composition **rests** ~400 ms and leaves
 at 1.9 s (2.8 s with the shortcut) in a 320 ms fade with a 2 % scale.
 
-- **Once per browser session** (`sessionStorage yq-splash-session`), **standalone PWA included**. The
-  30-day `localStorage` stamp no longer gates it; it only decides when a returning merchant gets the
-  longer welcome with the shortcut.
+- **At most once per device every 7 days, and never twice in a tab** (`lib/splashGate.ts`:
+  `localStorage yq-splash-at` + `sessionStorage yq-splash-session`, in try/catch — blocked storage
+  means no opening), **standalone PWA included**. Every rep or WhatsApp link opens a new tab, so a
+  session gate alone covered a ready catalog again each time. `public/catalog-prefetch.js` mirrors
+  the rule and switches the served night frame off (`html[data-boot=off]`) on every other load. The
+  30-day `yq-splash-seen` stamp only decides when a returning merchant gets the longer welcome with
+  the shortcut.
 - **Instant first frame:** the served HTML carries a static `#yq-boot` node with the same night field
   and the same logo tile in the same place (`marketHtml()`), `Shell.tsx` paints the same night as the
   chunk's Suspense fallback, and `Splash` removes the static node as it mounts (and then does not
@@ -461,7 +465,8 @@ and the phone lookup are intercepted and mocked; everything else — catalog, qu
 the live API, so the report's numbers are real. Service workers are blocked.
 
 **Hard checks:** horizontal overflow · console/page errors · failed or ≥400 requests · no Google
-Fonts request and both market fonts loaded · tap targets ≥36px and inputs ≥16px on touch · no
+Fonts request and both market fonts loaded · tap targets ≥36px and inputs ≥16px on touch (a small
+control reaches 44px with the invisible `.hit` area in `market.css`, never by being redrawn) · no
 `object-fit: cover` outside circular avatars · banned copy (`slow mover`, `no minimum`, `Save N%`) ·
 each state's required wording ("away from your wholesale order", "Wholesale order ready") · a product
 code in at most one home section · slider dot count == slide count · the bottom nav is exactly Home ·
@@ -470,8 +475,8 @@ rotating hint never paints outside the pill and leaves no ghost · the desktop a
 sticky header · an injected campaign renders exactly once and never again in the aside · every
 `.reveal` ends at opacity 1 · under reduced motion nothing is hidden and the opening is the static
 frame · the restock actions, small-order sheet, checkout submit and placed screen · the opening plays
-once per session and never on a reload. **Warnings** (never fatal): tap targets between 36 and 44px,
-slider autoplay/hold timing, gap-filler mix, a repeated paste offer, `copy-drift` (a literal the
+on a fresh device, never on a reload and never in a new tab within 7 days. **Warnings** (never
+fatal): tap targets between 36 and 44px, slider autoplay/hold timing, gap-filler mix, a repeated paste offer, `copy-drift` (a literal the
 harness checks is no longer in `strings.ts`), a missing rep slug.
 
 **Last full run against the local preview (20-Sep-2026): 200 pages, 264 screenshots, 0 hard

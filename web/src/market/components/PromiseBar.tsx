@@ -85,7 +85,9 @@ export function PromiseBar() {
                 {i > 0 && <li aria-hidden="true" className={cn('h-3 w-px shrink-0 bg-white/15', i >= 4 && 'hidden xl:block')} />}
                 <li className={cn('min-w-0', i >= 4 && 'hidden xl:block')}>
                   {p.to ? (
-                    <Link to={p.to} className={cn('inline-flex max-w-full items-center gap-1.5 transition-colors duration-1 ease-m hover:text-white', onDark)}>
+                    // `hit`: the text is 16px tall; on a touch screen the band is 48px and the
+                    // link's invisible hit area takes 44 of it (the look is unchanged)
+                    <Link to={p.to} className={cn('hit relative inline-flex max-w-full items-center gap-1.5 transition-colors duration-1 ease-m hover:text-white', onDark)}>
                       {inner}
                     </Link>
                   ) : (

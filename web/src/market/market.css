@@ -452,6 +452,23 @@
   animation-duration: 180ms;
 }
 
+/* Touch hit area: `.hit` grows a control's TAP target to at least 44x44 px (46, so a fractional
+ * layout width never lands at 43.9), centred on it, with an invisible ::after — the drawn box, its
+ * padding and the layout stay exactly as they are, so nothing looks different. Coarse pointers only
+ * (phones, tablets, a 1024 touch screen); a mouse keeps the drawn box. min(0px, …): a side that is
+ * already that big is never shrunk. The element needs a position (Tailwind `relative`, or its own
+ * absolute) and no ::after of its own, and must not clip (overflow-hidden would cut its own hit area). */
+@media (pointer: coarse) {
+  .hit::after {
+    content: '';
+    position: absolute;
+    top: min(0px, calc(50% - 23px));
+    bottom: min(0px, calc(50% - 23px));
+    left: min(0px, calc(50% - 23px));
+    right: min(0px, calc(50% - 23px));
+  }
+}
+
 /* thin, quiet scrollbars on desktop */
 @media (pointer: fine) {
   * {

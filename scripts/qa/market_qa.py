@@ -1488,7 +1488,7 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
 
 
 def run_opening(browser, vp: Viewport, base: str, out: Path, report: Report) -> None:
-    """Plays once per session, never on a reload, static under reduced motion."""
+    """Plays on a fresh device, never on a reload or in a new tab within 7 days, static under reduced motion."""
     for mode in ("motion", "reduced"):
         st = State("opening", "/", "The opening moment · " + mode, kind="opening", reduced=(mode == "reduced"))
         run = Run(state="opening_" + mode, route="/", viewport=vp.name, label=st.label)
@@ -1526,6 +1526,21 @@ def run_opening(browser, vp: Viewport, base: str, out: Path, report: Report) -> 
             if again:
                 finding(run, "fail", "opening-once", "the opening replayed on a reload in the same session (data-splash=" + again + ")")
             shot(run, page, out, "after-reload")
+
+            # A new tab on the same device (every rep or WhatsApp link opens one) is a new session but
+            # not a new week: no opening, and the served night frame (#yq-boot) is switched off by
+            # catalog-prefetch.js before its first paint (web/src/market/lib/splashGate.ts).
+            tab = ctx.new_page()
+            install_mocks(tab, "standard")
+            tab.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+            boot = tab.evaluate("() => document.documentElement.getAttribute('data-boot')")
+            tab.wait_for_timeout(700)
+            tab_splash = tab.evaluate("() => { const s = document.querySelector('[data-splash]'); return s ? s.getAttribute('data-splash') : null; }")
+            if tab_splash:
+                finding(run, "fail", "opening-weekly", "the opening replayed in a new tab within 7 days (data-splash=" + tab_splash + ")")
+            if boot != "off":
+                finding(run, "fail", "opening-weekly", "the night boot frame was left on for a new tab within 7 days (data-boot=" + str(boot) + ")")
+            tab.close()
             for msg in net.errors:
                 finding(run, "fail", "page-error", msg)
             for msg in net.console:

@@ -183,7 +183,7 @@ export default function CheckoutPage() {
         <div>
           <h1 className="hidden font-display text-2xl font-bold text-ink lg:block">{pageTitle}</h1>
           {/* the order, folded */}
-          <Link to="/cart" className="mt-1 flex items-center justify-between gap-3 rounded-md border border-line bg-surface px-3.5 py-2.5 text-sm hover:bg-plum-wash lg:mt-4">
+          <Link to="/cart" className="hit relative mt-1 flex items-center justify-between gap-3 rounded-md border border-line bg-surface px-3.5 py-2.5 text-sm hover:bg-plum-wash lg:mt-4">
             <span className="text-ink-2">{S.cart.summary(items, units)}</span>
             <span className="font-display font-bold tnum text-ink">{bhd(quote?.total_bhd)}</span>
             <span className="font-semibold text-plum">{S.cart.edit}</span>
@@ -202,7 +202,7 @@ export default function CheckoutPage() {
                       {S.small.fee(bhd(smallFee))}
                     </p>
                   )}
-                  <Link to="/cart" className="-ms-1 mt-1.5 inline-flex h-10 items-center rounded-sm px-1 text-sm font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+                  <Link to="/cart" className="hit relative -ms-1 mt-1.5 inline-flex h-10 items-center rounded-sm px-1 text-sm font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
                     {S.small.keep}
                   </Link>
                 </div>
@@ -253,7 +253,7 @@ export default function CheckoutPage() {
                             setOtherArea(false)
                             set('area', a)
                           }}
-                          className={cn('h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
+                          className={cn('hit relative h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
                         >
                           {a}
                         </button>
@@ -266,7 +266,7 @@ export default function CheckoutPage() {
                         setOtherArea(true)
                         if (areas.includes(customer.area.trim())) set('area', '')
                       }}
-                      className={cn('h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', otherArea ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
+                      className={cn('hit relative h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', otherArea ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
                     >
                       {S.checkout.other}
                     </button>
@@ -284,7 +284,7 @@ export default function CheckoutPage() {
                 {S.checkout.deliveryOptions.map((o) => {
                   const on = deliveryPref === o
                   return (
-                    <button key={o} type="button" aria-pressed={on} onClick={() => setDeliveryPref(on ? null : o)} className={cn('h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}>
+                    <button key={o} type="button" aria-pressed={on} onClick={() => setDeliveryPref(on ? null : o)} className={cn('hit relative h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}>
                       {o}
                     </button>
                   )
@@ -363,7 +363,7 @@ export default function CheckoutPage() {
           <div className="mt-4 rounded-lg border border-line bg-surface">
             <div className="flex items-center justify-between px-4 pt-3">
               <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">{S.cart.title}</h2>
-              <Link to="/cart" className="text-xs font-semibold text-plum hover:underline">
+              <Link to="/cart" className="hit relative text-xs font-semibold text-plum hover:underline">
                 {S.cart.edit}
               </Link>
             </div>

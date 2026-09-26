@@ -109,11 +109,11 @@ export const SearchField = forwardRef<
       />
       {showHints && hints && <SearchHints hints={hints} className="absolute inset-y-0 end-24 start-11 items-center text-md" leadClassName="text-ink-3" hintClassName="text-ink-2" />}
       {value && (
-        <button type="button" onClick={() => onChange('')} aria-label={S.states.clear} className="absolute end-[4.75rem] top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-xs text-ink-2 hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+        <button type="button" onClick={() => onChange('')} aria-label={S.states.clear} className="hit absolute end-[4.75rem] top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-xs text-ink-2 hover:bg-plum-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
           <X size={16} aria-hidden="true" />
         </button>
       )}
-      <button type="submit" className={cn('absolute end-1.5 top-1/2 -translate-y-1/2 rounded-sm bg-ink px-3.5 text-sm font-semibold text-white transition duration-1 ease-m hover:bg-ink/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', size === 'lg' ? 'h-9' : 'h-8')}>
+      <button type="submit" className={cn('hit absolute end-1.5 top-1/2 -translate-y-1/2 rounded-sm bg-ink px-3.5 text-sm font-semibold text-white transition duration-1 ease-m hover:bg-ink/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', size === 'lg' ? 'h-9' : 'h-8')}>
         {S.search.submit}
       </button>
     </form>

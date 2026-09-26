@@ -16,6 +16,18 @@
 // first version of this. index.html passes the API base in data-api. Plain ES5, no modules.
 ;(function () {
   var el = document.currentScript
+  // The opening's night frame (#yq-boot, vite.config.ts) is in every market page's HTML. It stays only
+  // on a load that will play the opening — at most once a week per device, never twice in a tab
+  // (MIRRORS market/lib/splashGate.ts: the same two keys, the same 7 days). Any other load hides it
+  // before its first paint, so no night flash covers a ready catalog.
+  if (el && el.getAttribute('data-app') === 'market') {
+    var boot = false
+    try {
+      var age = Date.now() - Number(localStorage.getItem('yq-splash-at') || 0)
+      boot = !sessionStorage.getItem('yq-splash-session') && !(age >= 0 && age < 7 * 86400000)
+    } catch (e) { /* storage blocked: no opening, so no frame */ }
+    if (!boot) document.documentElement.setAttribute('data-boot', 'off')
+  }
   var api = el && el.getAttribute('data-api')
   if (!api || api.charAt(0) === '%' || !window.fetch) return
   var app = el && el.getAttribute('data-app')

@@ -5,12 +5,14 @@
 #          shop suite. The pricing engine, validation, routing, notification text and rate-limit
 #          tests need no database; the live read-only checks print SKIP when no Supabase
 #          credentials are present, so this job needs NO repository secrets.
-#   web  — npm ci, eslint and the production Vite build of web/, so a type error or a broken
-#          import can never reach Vercel. VITE_* values are placeholders: the build only needs
-#          them to exist, the real ones are set per Vercel project.
+#   web  — npm ci, eslint and BOTH production Vite builds of web/ (the portal, then the marketplace:
+#          its own HTML, PWA and Tailwind config), then the Lighthouse bundle budgets on the market
+#          build, so a type error, a broken import, a market build failure or a budget overrun
+#          never reaches Cloudflare. VITE_* values are placeholders: the builds only need them to
+#          exist.
 #
-# This does not deploy. Render auto-deploys main on its own; the marketplace and portal are
-# built by Vercel. A red run here is the signal not to ship.
+# This does not deploy (cf-deploy.yml, which waits for this workflow on the same commit, and the
+# Render API trigger do). A red run here is the signal not to ship.
 name: ci
 
 on:
@@ -81,7 +83,13 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r3_pipeline
-          python -m tests.test_r2_importer   # R2a batch importer (pure tests; the local-Postgres replay SKIPs here)
+      # R2a batch importer: the pure tests; the local-Postgres replay SKIPs here. Its own step — it
+      # used to sit on a folded second line of the step above, which YAML read as extra arguments to
+      # test_r3_pipeline, so it never ran.
+      - name: R2 importer suite (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r2_importer
       - name: Template eval (deterministic answers, no DB)
         run: python tests/run_eval.py
       # R2c exact money: price_cart / confirm / tier_progress on Decimal end to end — 10,000 random
@@ -127,3 +135,16 @@ jobs:
           VITE_SUPABASE_URL: https://example.supabase.co
           VITE_SUPABASE_ANON_KEY: ci-placeholder
         run: npm run build
+      # the marketplace exactly as cf-deploy builds it (VITE_APP=market -> web/dist-market); until
+      # now it was first built at deploy time, after the merge
+      - name: Build the marketplace
+        env:
+          VITE_APP: market
+          VITE_API_URL: https://api.invalid
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder
+        run: npm run build:market
+      # the Lighthouse budgets (.github/lighthouserc.json, read by the script) as a hard gate on the
+      # market build: the home routes' up-front scripts, the stylesheet and the market's own fonts
+      - name: Bundle budgets (lighthouserc)
+        run: python3 ../scripts/qa/bundle_sizes.py dist-market --gate

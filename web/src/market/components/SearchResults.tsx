@@ -37,7 +37,7 @@ export function SearchEmpty({ onPick }: { onPick: (q: string) => void }) {
   const [recent] = useState<string[]>(() => recentSearches())
   const popular = useMemo(() => bestSellers(items).slice(0, POPULAR_MAX), [items])
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
-  const chip = 'inline-flex h-10 items-center gap-1.5 rounded-full bg-surface px-3.5 text-sm text-ink shadow-1 ring-1 ring-inset ring-line transition duration-1 ease-m hover:bg-plum-wash hover:ring-ink/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
+  const chip = 'hit relative inline-flex h-10 items-center gap-1.5 rounded-full bg-surface px-3.5 text-sm text-ink shadow-1 ring-1 ring-inset ring-line transition duration-1 ease-m hover:bg-plum-wash hover:ring-ink/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
   return (
     <div className="space-y-7">
       <p className="flex items-center gap-1.5 text-xs text-ink-2">
@@ -122,7 +122,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
   const codesSold = useMemo(() => soldOutSplit(grouped.codes, grouped.codes), [grouped.codes])
   const productsSold = useMemo(() => soldOutSplit(grouped.products, grouped.products), [grouped.products])
   const askUrl = rep?.whatsapp_url && q.trim() ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.shop.askHave(rep.first_name || '', q.trim()))}` : null
-  const chip = 'h-9 rounded-full border border-line bg-surface px-3.5 text-sm text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
+  const chip = 'hit relative h-9 rounded-full border border-line bg-surface px-3.5 text-sm text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
 
   if (total === 0 && grouped.categories.length === 0) {
     return (

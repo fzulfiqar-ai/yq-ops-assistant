@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
+import { splashDue } from '../lib/splashGate'
 import { useMarket } from '../MarketContext'
 import { CartDock } from './CartDock'
 import { FloatingNav } from './FloatingNav'
@@ -12,18 +13,13 @@ import { isPhoneLike } from './useViewport'
 const DesktopShell = lazy(() => import('./DesktopShell'))
 const ProductPanel = lazy(() => import('../components/ProductPanel'))
 const loadSplash = () => import('../components/Splash')
-// A session's first load: start fetching the opening with the app itself (not at the shell's first
-// render), so the overlay lands as close to the first paint as a lazy chunk can. Same key as Splash.tsx.
+// A load that will play the opening (at most once a week per device and once per tab session —
+// lib/splashGate.ts, the same predicate as Splash.tsx): start fetching it with the app itself (not at
+// the shell's first render), so the overlay lands as close to the first paint as a lazy chunk can.
 // NEEDS_SPLASH also colours the Suspense gap: without it the shell paints the finished header and the
 // home skeleton first and the night field drops on top a round trip later (seconds on a cold 4G
 // cache), which reads as a glitch — app, dark overlay, app — instead of an entrance.
-const NEEDS_SPLASH = (() => {
-  try {
-    return !sessionStorage.getItem('yq-splash-session')
-  } catch {
-    return false // storage blocked: the opening stays out of the way anyway
-  }
-})()
+const NEEDS_SPLASH = splashDue()
 if (NEEDS_SPLASH) void loadSplash()
 const Splash = lazy(() => loadSplash().then((mod) => ({ default: mod.Splash })))
 const SearchPalette = lazy(() => import('../components/SearchPalette'))

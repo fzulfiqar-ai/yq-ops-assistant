@@ -12,6 +12,10 @@ import { S } from '../strings'
  * Desktop "Shop" panel: the eight categories on the left (hover to preview), and on the right
  * that category's facet chips plus four best sellers with Add — a merchant can start an order
  * from the menu without landing on a page.
+ *
+ * Hover is a MOUSE thing here: the enter / leave handlers read the pointer type, so the
+ * compatibility mouse events a touch screen fires around a tap never open, close or preview
+ * anything (StickyHeader opens the panel on the first tap). Keyboard focus still previews.
  */
 export function MegaNav({ onClose, onEnter, onLeave }: { onClose: () => void; onEnter: () => void; onLeave: () => void }) {
   const { categories, items } = useMarket()
@@ -28,8 +32,8 @@ export function MegaNav({ onClose, onEnter, onLeave }: { onClose: () => void; on
   return (
     <div
       role="menu"
-      onMouseEnter={onEnter}
-      onMouseLeave={onLeave}
+      onPointerEnter={(e) => e.pointerType === 'mouse' && onEnter()}
+      onPointerLeave={(e) => e.pointerType === 'mouse' && onLeave()}
       className="absolute start-0 top-full z-header mt-2 flex w-[min(960px,calc(100vw-2*var(--m-gutter)))] overflow-hidden rounded-xl border border-line bg-surface shadow-3 [animation:m-pop_180ms_var(--m-ease-spring)_both]"
     >
       <ul className="w-[240px] shrink-0 border-e border-line-2 bg-canvas p-2">
@@ -41,7 +45,7 @@ export function MegaNav({ onClose, onEnter, onLeave }: { onClose: () => void; on
               <Link
                 to={`/t/${categorySlug(c)}`}
                 role="menuitem"
-                onMouseEnter={() => setHover(c)}
+                onPointerEnter={(e) => e.pointerType === 'mouse' && setHover(c)}
                 onFocus={() => setHover(c)}
                 onClick={onClose}
                 className={cn(

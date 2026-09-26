@@ -351,7 +351,7 @@ export default function CartPage() {
 
           <div className="mt-4">
             {!couponOpen ? (
-              <button type="button" onClick={() => setCouponOpen(true)} className="inline-flex h-10 items-center gap-1.5 rounded-sm text-sm font-semibold text-plum underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+              <button type="button" onClick={() => setCouponOpen(true)} className="hit relative inline-flex h-10 items-center gap-1.5 rounded-sm text-sm font-semibold text-plum underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
                 <Tag size={13} aria-hidden="true" /> {S.cart.coupon}
               </button>
             ) : (

@@ -60,3 +60,17 @@ export function useReducedMotion(): boolean {
     () => false,
   )
 }
+
+/**
+ * The behavior for a one-off programmatic scroll (a rail arrow, a jump to a field): 'smooth' only
+ * when the viewer has not asked for reduced motion. Read at the moment of the scroll, so a
+ * component needs no subscription for it; the CSS kill switch (market.css) cannot reach a
+ * scrollBy / scrollTo / scrollIntoView call that names its own behavior.
+ */
+export function scrollMotion(): ScrollBehavior {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+  } catch {
+    return 'auto'
+  }
+}

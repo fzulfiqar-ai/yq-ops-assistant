@@ -221,7 +221,7 @@ export default function MyYQPage() {
           <section className="mt-4 rounded-lg border border-line bg-surface p-4 lg:mt-0">
             <div className="flex items-center justify-between">
               <h2 className="font-display text-base font-bold text-ink">{S.me.details}</h2>
-              <button type="button" onClick={() => (editing ? saveDetails() : setEditing(true))} className="-me-2 inline-flex h-10 items-center rounded-sm px-3 text-sm font-semibold text-plum hover:bg-plum-wash">
+              <button type="button" onClick={() => (editing ? saveDetails() : setEditing(true))} className="hit relative -me-2 inline-flex h-10 items-center rounded-sm px-3 text-sm font-semibold text-plum hover:bg-plum-wash">
                 {editing ? S.me.done : S.me.edit}
               </button>
             </div>
@@ -271,7 +271,7 @@ export default function MyYQPage() {
               </dl>
             )}
             {(customer.phone || customer.name) && !editing && (
-              <button type="button" onClick={forget} className="-ms-2 mt-2 inline-flex h-10 items-center gap-1.5 rounded-sm px-2 text-xs font-semibold text-bad hover:bg-bad-soft">
+              <button type="button" onClick={forget} className="hit relative -ms-2 mt-2 inline-flex h-10 items-center gap-1.5 rounded-sm px-2 text-xs font-semibold text-bad hover:bg-bad-soft">
                 <Trash2 size={13} aria-hidden="true" /> {S.me.forget}
               </button>
             )}
@@ -340,7 +340,7 @@ export default function MyYQPage() {
           </section>
 
           <div className="mt-6 flex flex-wrap items-center justify-end gap-2 text-2xs text-ink-3">
-            <button type="button" onClick={clearAll} className="inline-flex h-10 items-center rounded-sm px-2 font-semibold text-ink-2 hover:bg-plum-wash hover:text-ink">
+            <button type="button" onClick={clearAll} className="hit relative inline-flex h-10 items-center rounded-sm px-2 font-semibold text-ink-2 hover:bg-plum-wash hover:text-ink">
               {S.me.clear}
             </button>
           </div>

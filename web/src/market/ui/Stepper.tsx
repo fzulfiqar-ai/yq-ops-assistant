@@ -9,7 +9,9 @@ import { cn } from '@/lib/utils'
  * and, when `onValueClick` is given, opens the keypad sheet.
  *
  * Sizes are the market's tap targets: xs 32 (mini-cart), sm 40 (rows), md 44 (cards — it takes
- * the place of the Add button, so it must be exactly as tall), lg 48 (sheet footers).
+ * the place of the Add button, so it must be exactly as tall), lg 48 (sheet footers). On a touch
+ * screen every ± button also has an invisible 44px hit area (`hit`, market.css); the drawn sizes
+ * stay as listed.
  */
 
 export interface StepperProps {
@@ -121,7 +123,7 @@ export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, lab
         onContextMenu={(e) => e.preventDefault()}
         aria-label={willRemove ? `Remove ${label}` : `Decrease ${label} by ${step}`}
         className={cn(
-          'grid shrink-0 place-items-center text-ink-2 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70',
+          'hit relative grid shrink-0 place-items-center text-ink-2 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70',
           willRemove && 'hover:bg-bad-soft hover:text-bad',
           BTN[size],
         )}
@@ -151,7 +153,7 @@ export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, lab
         onContextMenu={(e) => e.preventDefault()}
         disabled={atMax}
         aria-label={`Increase ${label} by ${step}`}
-        className={cn('grid shrink-0 place-items-center bg-plum text-white transition duration-1 ease-m hover:bg-plum-deep active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70', BTN[size])}
+        className={cn('hit relative grid shrink-0 place-items-center bg-plum text-white transition duration-1 ease-m hover:bg-plum-deep active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70', BTN[size])}
       >
         <Plus size={icon} aria-hidden="true" />
       </button>

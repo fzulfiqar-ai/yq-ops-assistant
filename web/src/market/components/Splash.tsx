@@ -4,6 +4,7 @@ import { ArrowRight } from 'lucide-react'
 import type { MarketPromise } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
 import { readCustomer, rememberedOrders } from '../lib/device'
+import { markSplashShown, splashDue } from '../lib/splashGate'
 import { PROMISE_ICON_FALLBACK, PROMISE_ICONS } from '../lib/icons'
 import { useFinePointer, useReducedMotion } from '../shell/useViewport'
 import { locale, S } from '../strings'
@@ -19,10 +20,11 @@ import { locale, S } from '../strings'
  * 320 ms fade with a 2 % scale that reveals the app already rendered below. Every element must
  * settle before HOLD_MS — an opening that is still moving when it exits reads as a glitch.
  *
- * - Once per browser session (sessionStorage), standalone PWA included. The 30-day localStorage
- *   stamp no longer gates the opening: it only decides when a returning merchant gets the longer
- *   welcome with the shortcut (at most once per 30 days per device); other sessions greet them by
- *   name in the brisk timing.
+ * - At most once per device every 7 days, and never twice in a tab session (lib/splashGate.ts),
+ *   standalone PWA included — every rep or WhatsApp link opens a new tab, so a session gate alone
+ *   covered a ready catalog again each time. The 30-day stamp only decides when a returning
+ *   merchant gets the longer welcome with the shortcut (at most once per 30 days per device); other
+ *   openings greet them by name in the brisk timing.
  * - Tap, click, wheel or Esc skips. The skip control takes focus; focus goes back afterwards.
  * - Reduced motion: the same frame, static (no rise, pop or sweep), 600 ms, then a plain fade.
  * - An overlay only: the catalog loads and the page renders underneath the whole time.
@@ -35,7 +37,6 @@ import { locale, S } from '../strings'
  *   the logo does not replay its pop when the static frame already showed it.
  */
 
-const SESSION_KEY = 'yq-splash-session'
 const SEEN_KEY = 'yq-splash-seen'
 const WELCOME_EVERY_DAYS = 30
 
@@ -66,8 +67,8 @@ interface Opening {
 }
 
 function planOpening(recognized: boolean): Opening | null {
+  if (!splashDue()) return null
   try {
-    if (sessionStorage.getItem(SESSION_KEY)) return null
     const customer = readCustomer()
     const returning = recognized && rememberedOrders().length > 0
     const seen = Number(localStorage.getItem(SEEN_KEY) || 0)
@@ -77,7 +78,7 @@ function planOpening(recognized: boolean): Opening | null {
       refill: returning && Date.now() - seen > WELCOME_EVERY_DAYS * 864e5,
     }
   } catch {
-    return null // storage blocked: no way to keep it to once a session, so stay out of the way
+    return null // storage blocked: no way to keep it to once a week, so stay out of the way
   }
 }
 
@@ -110,14 +111,14 @@ export function Splash() {
     document.getElementById(BOOT_ID)?.remove()
   }, [])
 
-  // mark the session, take focus for the skip control
+  // stamp the device (7 days) and the tab, take focus for the skip control
   useEffect(() => {
     if (!plan) return
+    markSplashShown()
     try {
-      sessionStorage.setItem(SESSION_KEY, '1')
       if (plan.refill) localStorage.setItem(SEEN_KEY, String(Date.now()))
     } catch {
-      /* quota / blocked: it simply plays again on the next load */
+      /* quota / blocked: the welcome simply offers the shortcut again next time */
     }
     const active = document.activeElement
     if (active instanceof HTMLElement && active !== document.body && !rootRef.current?.contains(active)) returnFocus.current = active

@@ -173,7 +173,7 @@ export default function ProductPanel({ code }: { code: string }) {
               iconSize={48}
               vtName={phone ? 'product-photo' : undefined}
             />
-            <button type="button" onClick={() => setZoom(true)} aria-label={S.card.zoom} className="absolute end-3 bottom-3 grid h-10 w-10 place-items-center rounded-full border border-line bg-surface/95 text-ink-2 shadow-1 hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+            <button type="button" onClick={() => setZoom(true)} aria-label={S.card.zoom} className="hit absolute end-3 bottom-3 grid h-10 w-10 place-items-center rounded-full border border-line bg-surface/95 text-ink-2 shadow-1 hover:text-plum focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
               <Maximize2 size={16} aria-hidden="true" />
             </button>
             {zoom && (
@@ -204,7 +204,7 @@ export default function ProductPanel({ code }: { code: string }) {
                   type="button"
                   onClick={() => setView(v)}
                   aria-pressed={view === v}
-                  className={cn('h-9 flex-1 rounded-sm border text-xs font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
+                  className={cn('hit relative h-9 flex-1 rounded-sm border text-xs font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
                 >
                   {v === 'package' ? S.card.viewPackage : S.card.viewProduct}
                 </button>

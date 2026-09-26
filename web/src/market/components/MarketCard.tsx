@@ -424,7 +424,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         disabled={!canOrder && asked}
         aria-label={label}
         className={cn(
-          'flex w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
+          'hit relative flex w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
           tall,
           canOrder ? (out ? 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash' : 'bg-plum text-white shadow-1 hover:bg-plum-deep') : asked ? 'cursor-default border border-ok/30 bg-ok-soft text-ok' : 'border border-line bg-surface text-ink hover:border-ink/25 hover:bg-plum-wash',
         )}
@@ -563,7 +563,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           aria-pressed={saved}
           aria-label={`${saved ? S.card.savedItem : S.card.saveItem} — ${name}`}
           className={cn(
-            'absolute end-2 top-2 z-[1] grid h-9 w-9 place-items-center rounded-full border bg-surface/95 shadow-1 transition duration-1 ease-m after:absolute after:-inset-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
+            'absolute end-2 top-2 z-[1] grid h-9 w-9 place-items-center rounded-full border bg-surface/95 shadow-1 transition duration-1 ease-m after:absolute after:-inset-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
             saved ? 'border-plum/40 text-plum' : 'border-line text-ink-3 hover:text-plum',
           )}
         >
@@ -615,7 +615,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
       <div className={cn('flex flex-1 flex-col border-t border-line-2 [container-type:inline-size]', compact ? 'px-2.5 pb-2.5 pt-2' : 'p-3')}>
         <CardKicker item={item} />
         <h3 className={cn('mt-0.5 font-sans font-semibold tracking-normal text-ink', compact ? 'text-[13px] leading-[17px]' : 'text-sm md:text-[14px] md:leading-[19px]')}>
-          <button type="button" onClick={open} className={cn('block w-full rounded-xs text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', compact ? 'min-h-[36px]' : 'min-h-[36px] md:min-h-[38px]')}>
+          <button type="button" onClick={open} className={cn('hit relative block w-full rounded-xs text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', compact ? 'min-h-[36px]' : 'min-h-[36px] md:min-h-[38px]')}>
             <span className="line-clamp-2">{name}</span>
           </button>
         </h3>
@@ -662,7 +662,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
             <p className="text-2xs leading-4 tnum text-ink-2">
               <TierLine qty={firstTier.min_qty} price={bhd(firstTier.unit_price_bhd)} />
               {tiers.length > 1 && (
-                <button type="button" onClick={open} className="ms-1.5 font-semibold text-plum hover:underline">
+                <button type="button" onClick={open} className="hit relative ms-1.5 font-semibold text-plum hover:underline">
                   {S.card.breaks(tiers.length)}
                 </button>
               )}

@@ -194,7 +194,7 @@ export default function TrackingPage() {
                   {S.placed.install}
                 </Button>
               )}
-              <Link to={m.rep ? `/${m.rep.slug}` : '/'} className="mt-3 inline-flex h-10 items-center text-sm font-semibold text-plum hover:underline">
+              <Link to={m.rep ? `/${m.rep.slug}` : '/'} className="hit relative mt-3 inline-flex h-10 items-center text-sm font-semibold text-plum hover:underline">
                 {S.placed.continue}
               </Link>
               <p className="mt-3 border-t border-line-2 pt-3 font-display text-xs font-semibold tracking-[-0.01em] text-ink-3">{S.tagline}</p>

@@ -42,6 +42,7 @@ export function StickyHeader() {
   const [pathSeen, setPathSeen] = useState(pathname)
   const closeTimer = useRef<number | undefined>(undefined)
   const headerRef = useRef<HTMLElement>(null)
+  const megaRef = useRef<HTMLDivElement>(null)
   const desktop = viewport === 'desktop' || viewport === 'wide'
   const wide = viewport === 'wide'
 
@@ -54,6 +55,25 @@ export function StickyHeader() {
     setPathSeen(pathname)
     setMega(false)
   }
+  // An open mega-nav closes on a tap / click outside it and on Esc. A mouse also closes it by leaving
+  // (below); a touch screen has no leave, so without this the panel would stay over the page.
+  useEffect(() => {
+    if (!mega) return
+    const onDown = (e: PointerEvent) => {
+      if (megaRef.current && !megaRef.current.contains(e.target as Node)) setMega(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setMega(false)
+      megaRef.current?.querySelector<HTMLElement>('button[aria-haspopup]')?.focus()
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [mega])
   useEffect(() => {
     if (!bump) return
     const id = window.setTimeout(() => setBump(false), 340)
@@ -103,14 +123,15 @@ export function StickyHeader() {
     closeTimer.current = window.setTimeout(() => setMega(false), 160)
   }
 
-  const linkBase = 'inline-flex h-10 items-center gap-1.5 rounded-sm px-3 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
+  // `hit`: 40px drawn, a 44px tap area on touch screens (market.css) — the look is unchanged
+  const linkBase = 'hit relative inline-flex h-10 items-center gap-1.5 rounded-sm px-3 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
   const linkCls = ({ isActive }: { isActive: boolean }) => cn(linkBase, isActive ? 'bg-plum-soft text-plum-ink' : 'text-ink-2 hover:bg-plum-wash hover:text-ink')
 
   return (
     <header ref={headerRef} className="sticky top-0 z-header">
       <div className="glass border-b border-line">
         <div className="container-m flex h-header items-center gap-3 lg:gap-4">
-          <Link to="/" aria-label={`${S.brand} · ${S.kicker}`} className="flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+          <Link to="/" aria-label={`${S.brand} · ${S.kicker}`} className="hit relative flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
             <img src="/yq-logo-160.webp" alt="" width={40} height={40} className="h-10 w-10 rounded-sm" />
             <span className="hidden lg:block">
               <span className="block font-display text-md font-bold leading-tight text-ink">{S.brand}</span>
@@ -118,9 +139,17 @@ export function StickyHeader() {
             </span>
           </Link>
 
-          {/* Browse: mega-nav (desktop) / link (tablet) */}
+          {/* Browse: mega-nav (desktop) / link (tablet). Hover opens it for a MOUSE only; a tap toggles
+              it. Pointer events with the mouse type, not mouseenter: on a touch screen a tap fires a
+              compatibility mouseenter (open) right before its click (toggle -> closed), so the panel
+              needed two taps. */}
           {desktop ? (
-            <div className="relative shrink-0" onMouseEnter={openMega} onMouseLeave={closeMegaSoon}>
+            <div
+              ref={megaRef}
+              className="relative shrink-0"
+              onPointerEnter={(e) => e.pointerType === 'mouse' && openMega()}
+              onPointerLeave={(e) => e.pointerType === 'mouse' && closeMegaSoon()}
+            >
               <button
                 type="button"
                 aria-haspopup="true"
@@ -226,7 +255,7 @@ export function StickyHeader() {
                   key={c}
                   to={to}
                   className={cn(
-                    'shrink-0 rounded-full px-3.5 py-1.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
+                    'hit relative shrink-0 rounded-full px-3.5 py-1.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
                     active ? 'bg-ink text-white' : 'text-ink-2 hover:bg-plum-wash hover:text-ink',
                   )}
                 >

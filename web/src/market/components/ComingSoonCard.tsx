@@ -77,7 +77,7 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
                 type="button"
                 aria-pressed={view === v}
                 onClick={() => setView(v)}
-                className={cn('relative h-7 rounded-full px-2.5 text-2xs font-semibold transition duration-1 ease-m after:absolute after:-inset-y-1.5 after:inset-x-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'bg-ink text-white' : 'text-ink-2 hover:text-ink')}
+                className={cn('relative h-7 rounded-full px-2.5 text-2xs font-semibold transition duration-1 ease-m after:absolute after:-inset-y-2 after:inset-x-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', view === v ? 'bg-ink text-white' : 'text-ink-2 hover:text-ink')}
               >
                 {v === 'product' ? t.photoProduct : t.photoBox}
               </button>
@@ -102,7 +102,8 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
               const label = variantLabel(v)
               const on = picked === label
               return (
-                <button key={v.label} type="button" aria-pressed={on} onClick={() => setPicked(on ? null : label)} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+                // a 22px chip; `hit` gives it a 44px tap area on touch without changing the chip
+                <button key={v.label} type="button" aria-pressed={on} onClick={() => setPicked(on ? null : label)} className="hit relative rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
                   <Chip tone={on ? 'plum' : 'spec'}>{label}</Chip>
                 </button>
               )

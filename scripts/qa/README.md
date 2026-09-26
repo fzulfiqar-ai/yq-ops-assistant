@@ -71,7 +71,7 @@ pre-stamp `sessionStorage['yq-splash-session']`.
 | `request-failed` | no failed or ≥400 request except the event ping and the intercepted order calls |
 | `google-fonts` | no request to fonts.googleapis/gstatic — the market self-hosts |
 | `fonts` | `document.fonts.check` for Sora and Instrument Sans |
-| `tap-target` | on touch viewports every visible control is ≥36px in both dimensions (a Tailwind `after:-inset-*` hit expander counts; a checkbox is measured by its label) |
+| `tap-target` | on touch viewports every visible control is ≥36px in both dimensions (a Tailwind `after:-inset-*` hit expander or the market's `.hit` class counts; a checkbox is measured by its label) |
 | `input-font-size` | inputs ≥16px on touch (iOS zoom) |
 | `object-fit-cover` | no cropped `<img>` outside circular avatars; a campaign creative that asked for `image_fit: cover` is a warning, not a failure |
 | `banned-copy` | no `slow mover`, `no minimum`, `Save N%` |
@@ -87,7 +87,7 @@ pre-stamp `sessionStorage['yq-splash-session']`.
 | `reduced-motion-reveal` / `reduced-motion-opening` | under `prefers-reduced-motion` nothing is hidden and the opening is the static frame |
 | `restock-actions`, `small-order-cta`, `small-order-sheet` | "Keep restocking" + "Request a small order", and the sheet opens on "Small order request" |
 | `checkout-submit`, `placed-screen` | the mocked order lands on "Small order request received" / "Wholesale order received" |
-| `opening-plays` / `opening-once` / `opening-reduced` | the opening plays on a fresh session, never on a reload, static under reduced motion |
+| `opening-plays` / `opening-once` / `opening-weekly` / `opening-reduced` | the opening plays on a fresh device, never on a reload, never in a new tab within 7 days (nor its night boot frame), static under reduced motion |
 
 **Warnings (reported, never fatal)**
 
@@ -121,6 +121,7 @@ production except GET requests and the quote**:
 | `readonly_api.py` | A local stand-in for the API on 127.0.0.1:8002. It records production GETs once and replays them, replays the quote POST per body, and answers every other write itself (logged to `writes.log`; `upstream.log` proves nothing else went out). `--upcoming <review folder>` serves pending "Coming soon" rows as preview cards. |
 | `review_run.py` | Serves one built `dist-market` with `vite preview --strictPort` and takes lab Lighthouse (mobile and desktop, median of 3). It runs the harness on the 8 review screens with `--reduced-motion`, which gives stable frames, and with `--full-check` also runs every state with motion on. It also writes `meta.json` and `bundle.json`. It refuses a build that is not pointed at the stub. |
 | `review_pack.py` | Makes before\|after composites per screen × viewport (side by side for portrait, stacked for landscape, in CSS pixels, ≤ 1560 px) and pairs long pages tile by tile, plus `findings.json` per screen. |
+| `bundle_sizes.py` | The first-load script / stylesheet gzip and the market's fonts against `.github/lighthouserc.json`. A font counts only when a file of the build names it (CSS `@font-face`, the HTML, a script or the service worker); the portal's fonts, copied by the shared `public/`, are listed as not loaded. `--gate` exits 1 on a broken budget (CI's web job). |
 | `design_review.py` | Builds one self-contained `index.html` of the two runs, with WebP data URIs, the harness counts (BEFORE failures that come from rules new in R4 are labelled "expected"), Lighthouse and bundle budgets. |
 
 ```bash
