@@ -1050,7 +1050,7 @@ def band_hint_check(run: Run, page: Page) -> None:
 # proves nothing.
 SOLDOUT_ROOTS = {"home": 'section[aria-labelledby="home-all"]', "shop": "main", "category": "main"}
 # R4: the sold-out lines sit after a ruled divider "Not in stock now · N lines" — never hidden
-SOLDOUT_DIVIDER = 'p.shelf-divider'
+SOLDOUT_DIVIDER = '.shelf-divider'  # a heading (h2/h3), never role=separator, so it is read out
 SOLDOUT_EXPAND_MAX = 12
 
 STOCK_ORDER = r"""

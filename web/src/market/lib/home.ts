@@ -274,6 +274,19 @@ export interface RegularLine {
   qty: number
 }
 
+/**
+ * Order again, split by what one tap can honestly add: the lines a shop can have today (in stock —
+ * or sold out while the shop takes backorders, allow_backorder) and the sold-out lines it cannot.
+ * The second half is never dropped in silence: every reorder surface shows it greyed, after the
+ * divider, with "Tell me when back". Order is kept within each half.
+ */
+export function splitReorder(lines: RegularLine[], allowBackorder: boolean): { add: RegularLine[]; sold: RegularLine[] } {
+  const add: RegularLine[] = []
+  const sold: RegularLine[] = []
+  for (const l of lines) (l.item.stock_status === 'out_of_stock' && !allowBackorder ? sold : add).push(l)
+  return { add, sold }
+}
+
 /** Lines of the newest order, with what was actually confirmed. */
 export function orderLines(order: OrderStatusPayload | null, byCode: Map<string, ShopItem>): RegularLine[] {
   const out: RegularLine[] = []

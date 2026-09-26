@@ -9,7 +9,7 @@ import { useRecentOrders } from '../hooks/useRecentOrders'
 import { bestSellers, regularStock } from '../lib/home'
 import { useSaved } from '../store/saved'
 import { useMarket, useOrder } from '../MarketContext'
-import { readCustomer, rememberedOrders, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
+import { EMPTY_CUSTOMER, readCustomer, rememberedOrders, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
 import { bhd, fmtDate, initials } from '../lib/format'
 import { canPromptInstall, isIos, isStandalone, onInstallChange, promptInstall } from '../lib/install'
@@ -39,7 +39,7 @@ export default function MyYQPage() {
   const savedItems = useMemo(() => savedCodes.map((c) => mkt.itemsByCode.get(c)).filter((x): x is NonNullable<typeof x> => Boolean(x)), [savedCodes, mkt.itemsByCode])
   const { myOrders } = useOrder()
   const toast = useToast()
-  const [customer, setCustomer] = useState<CustomerDraft>(() => readCustomer())
+  const [customer, setCustomer] = useState<CustomerDraft>(() => (saveDetailsEnabled() ? readCustomer() : EMPTY_CUSTOMER))
   const [editing, setEditing] = useState(false)
   const [installable, setInstallable] = useState(() => canPromptInstall())
   usePageTitle(S.me.title, false, `${S.me.title} · ${S.brand}`)
@@ -48,6 +48,8 @@ export default function MyYQPage() {
   const open = myOrders.find((o) => o.status !== 'delivered' && o.status !== 'cancelled') || null
 
   const saveDetails = () => {
+    // saving here IS the merchant's choice to keep them on this phone
+    setSaveDetails(true)
     writeCustomer(customer)
     setEditing(false)
   }
@@ -58,6 +60,8 @@ export default function MyYQPage() {
   }
   const clearAll = () => {
     if (!window.confirm(S.me.clearConfirm)) return
+    // the saved details and the choice to keep them go together (and the in-memory copy with them)
+    setSaveDetails(false)
     try {
       for (const k of ['yq-orders', 'yq-qty', 'yq-shop-customer', 'yq-searches', 'yq-viewed', 'yq-cart-note', 'yq-lists', 'yq-view']) localStorage.removeItem(k)
     } catch {

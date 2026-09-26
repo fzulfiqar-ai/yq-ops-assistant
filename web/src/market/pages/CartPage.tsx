@@ -8,13 +8,14 @@ import { ProgressBar } from '../components/ProgressBar'
 import { QtySheet } from '../components/QtySheet'
 import { Rail } from '../components/Rail'
 import { SmallOrderSheet } from '../components/SmallOrderSheet'
+import { SoldOutRows } from '../components/SoldOut'
 import { SmallRequestButton, WholesaleFillers, WholesaleState } from '../components/WholesaleState'
 import { useRecentOrders } from '../hooks/useRecentOrders'
 import { useMarket, useOrder } from '../MarketContext'
 import { rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
 import { bhd, fmtDateShort, minQtyOf, money, nextTier, productName, stepOf, unitAt, variantOf } from '../lib/format'
-import { bestSellers, orderLines, regularStock, type RegularLine } from '../lib/home'
+import { bestSellers, orderLines, regularStock, splitReorder, type RegularLine } from '../lib/home'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { useCartCounts, useCartLines } from '../store/cart'
 import { useSaved } from '../store/saved'
@@ -70,7 +71,10 @@ export default function CartPage() {
   const recent = useRecentOrders(hasOrders, 3)
   const inCart = useMemo(() => new Set(lines.map((l) => l.item_code)), [lines])
   const lastOrder = recent[0] || null
-  const againLines = useMemo(() => orderLines(lastOrder, itemsByCode).filter((l) => l.item.stock_status !== 'out_of_stock' && !inCart.has(l.item.item_code)), [lastOrder, itemsByCode, inCart])
+  // the last order, split by what one tap can add today (backorder respected) — the sold-out rest is
+  // shown on the card with "Tell me when back", never dropped in silence
+  const againSplit = useMemo(() => splitReorder(orderLines(lastOrder, itemsByCode).filter((l) => !inCart.has(l.item.item_code)), m.allowBackorder), [lastOrder, itemsByCode, inCart, m.allowBackorder])
+  const againLines = againSplit.add
   // with lines, the Order again card shows the last order, so the regulars rail skips those codes;
   // an empty restock shows Order again as a button only, so its regulars rail keeps them
   const regulars = useMemo(() => regularStock(recent, itemsByCode, new Set(inCart.size ? [...inCart, ...againLines.map((l) => l.item.item_code)] : [])), [recent, itemsByCode, inCart, againLines])
@@ -219,6 +223,8 @@ export default function CartPage() {
           </div>
         )}
       </dl>
+      {/* a fact about the figures above (the price book is VAT-inclusive), never a change to them */}
+      <p className="mt-1.5 text-end text-2xs text-ink-2">{S.vat.note}</p>
       {/* the only live total on this surface — the visible ones (here and in the page bar) are
        * silent, so a stepper tap says the total once instead of announcing every re-render */}
       <p role="status" aria-atomic="true" className="sr-only">
@@ -296,14 +302,12 @@ export default function CartPage() {
                           {dead ? '—' : bhd(q?.line_total_bhd ?? (Number(item?.price_bhd) || 0) * line.qty)}
                         </div>
                       </div>
-                      {dead && q?.blocked_reason && (
-                        <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-bad">
-                          <AlertTriangle size={12} aria-hidden="true" /> {q.blocked_reason}
-                        </p>
-                      )}
+                      {/* a line that can no longer be ordered is a state, not an error: grey, never red —
+                          red stays for real errors (the quote failing, a refused coupon, the blocked order) */}
+                      {dead && q?.blocked_reason && <p className="mt-1.5 text-xs text-ink-2">{q.blocked_reason}</p>}
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         {dead && !(item && Number(q?.moq || 1) > line.qty) ? (
-                          <Button variant="danger" size="sm" icon={<Trash2 size={13} aria-hidden="true" />} onClick={() => removeWithUndo(item, line.item_code, line.qty)}>
+                          <Button variant="secondary" size="sm" className="text-ink-2" icon={<Trash2 size={13} aria-hidden="true" />} onClick={() => removeWithUndo(item, line.item_code, line.qty)}>
                             {S.cart.remove}
                           </Button>
                         ) : (
@@ -386,7 +390,7 @@ export default function CartPage() {
             <h2 id="restock-more" className="font-display text-lg font-bold text-ink lg:text-xl">
               {S.restock.more}
             </h2>
-            {againLines.length > 0 && <OrderAgainCard lines={againLines} placedAt={lastOrder?.created_at} />}
+            {(againLines.length > 0 || againSplit.sold.length > 0) && <OrderAgainCard lines={againLines} sold={againSplit.sold} placedAt={lastOrder?.created_at} />}
             {showRegulars && (
               <Rail id="restock-regular" title={S.restock.regular} seeAllTo="/quick?load=regular">
                 {regulars.map((r) => (
@@ -503,8 +507,8 @@ function EmptyShelf() {
   )
 }
 
-/** The last order, one tap back into the restock (only the lines still in stock and not already added). */
-function OrderAgainCard({ lines, placedAt }: { lines: RegularLine[]; placedAt?: string | null }) {
+/** The last order, one tap back into the restock (the lines that can be ordered today and are not already added), then its sold-out lines with "Tell me when back". */
+function OrderAgainCard({ lines, sold, placedAt }: { lines: RegularLine[]; sold: RegularLine[]; placedAt?: string | null }) {
   const m = useMarket()
   const { openProduct } = useShell()
   const total = lines.reduce((s, l) => s + (unitAt(l.item, l.qty) ?? 0) * l.qty, 0)
@@ -516,30 +520,35 @@ function OrderAgainCard({ lines, placedAt }: { lines: RegularLine[]; placedAt?: 
         </span>
         <div className="min-w-0 flex-1">
           <h3 className="font-display text-base font-bold text-ink">{S.restock.again}</h3>
-          <p className="truncate text-xs text-ink-2">{S.restock.againLine(lines.length, fmtDateShort(placedAt))}</p>
+          <p className="truncate text-xs text-ink-2">{S.restock.againLine(lines.length + sold.length, fmtDateShort(placedAt))}</p>
         </div>
       </div>
-      <ul className="no-scrollbar mt-3 flex gap-2 overflow-x-auto px-4 pb-1">
-        {lines.map((l) => {
-          const name = productName(l.item)
-          return (
-            <li key={l.item.item_code} className="shrink-0">
-              <button type="button" onClick={() => openProduct(l.item.item_code, 'order_again')} aria-label={name} title={name} className="relative block h-14 w-14 overflow-hidden rounded-md border border-line-2 bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
-                <ProductImage item={l.item} alt="" sizes={SIZES_THUMB} size={56} imgClassName="p-1" iconSize={16} showCaption={false} />
-                <span className="absolute bottom-0.5 end-0.5 rounded-xs bg-ink/85 px-1 text-[10px] font-bold leading-[14px] tnum text-white">×{l.qty}</span>
-              </button>
-            </li>
-          )
-        })}
-      </ul>
-      <div className="mt-3 flex flex-wrap gap-2 border-t border-line-2 p-3">
-        <Button className="min-w-0 flex-1" onClick={() => m.addMany(lines, 'order_again_cart')} icon={<Plus size={16} aria-hidden="true" />}>
-          <span className="min-w-0 truncate">{S.restock.addAll(lines.length, bhd(total))}</span>
-        </Button>
-        <LinkButton to="/quick?load=last" variant="secondary">
-          {S.restock.edit}
-        </LinkButton>
-      </div>
+      {lines.length > 0 && (
+        <>
+          <ul className="no-scrollbar mt-3 flex gap-2 overflow-x-auto px-4 pb-1">
+            {lines.map((l) => {
+              const name = productName(l.item)
+              return (
+                <li key={l.item.item_code} className="shrink-0">
+                  <button type="button" onClick={() => openProduct(l.item.item_code, 'order_again')} aria-label={name} title={name} className="relative block h-14 w-14 overflow-hidden rounded-md border border-line-2 bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+                    <ProductImage item={l.item} alt="" sizes={SIZES_THUMB} size={56} imgClassName="p-1" iconSize={16} showCaption={false} />
+                    <span className="absolute bottom-0.5 end-0.5 rounded-xs bg-ink/85 px-1 text-[10px] font-bold leading-[14px] tnum text-white">×{l.qty}</span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+          <div className="mt-3 flex flex-wrap gap-2 border-t border-line-2 p-3">
+            <Button className="min-w-0 flex-1" onClick={() => m.addMany(lines, 'order_again_cart')} icon={<Plus size={16} aria-hidden="true" />}>
+              <span className="min-w-0 truncate">{S.restock.addAll(lines.length, bhd(total))}</span>
+            </Button>
+            <LinkButton to="/quick?load=last" variant="secondary">
+              {S.restock.edit}
+            </LinkButton>
+          </div>
+        </>
+      )}
+      <SoldOutRows items={sold.map((l) => l.item)} className={cn('px-4 pb-1.5', !lines.length && 'mt-3')} />
     </div>
   )
 }

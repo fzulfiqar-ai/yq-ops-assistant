@@ -6,6 +6,7 @@ import { SearchHints } from '../components/SearchField'
 import { useMarket, useOrder } from '../MarketContext'
 import { isDeal } from '../lib/facets'
 import { bhd, categorySlug, niceCategory } from '../lib/format'
+import { dealSets } from '../lib/home'
 import { NAV_ICONS } from '../lib/icons'
 import { useCartAddTick, useCartCounts, useCartLines } from '../store/cart'
 import { S } from '../strings'
@@ -15,7 +16,8 @@ import { useShell } from './ShellContext'
 /**
  * Tablet/desktop header. Sticky, glass, 72px. Logo + "Where Bahrain restocks." · Browse (mega-nav
  * on desktop, link on tablet) · a large search trigger with a rotating example that opens the
- * palette · Deals (only when real deals or last-chance lines are in stock) · Quick order · Orders ·
+ * palette · Deals (only when real deals or last-chance lines are in stock; "Last chance" while there
+ * is no live offer and no real price drop) · Quick order · Orders ·
  * My YQ · Restock (line count, and a thin wholesale-progress line when a minimum is set; drawer
  * below 1280, page above). A category strip rides under it on Home and Browse.
  *
@@ -27,7 +29,7 @@ import { useShell } from './ShellContext'
  */
 export function StickyHeader() {
   const { viewport, openPalette, openCart, paletteOpen } = useShell()
-  const { categories, items, itemsByCode, rep } = useMarket()
+  const { categories, items, itemsByCode, rep, data } = useMarket()
   const { quote } = useOrder()
   const lines = useCartLines()
   const { items: count, units } = useCartCounts()
@@ -61,6 +63,9 @@ export function StickyHeader() {
   const estimate = lines.reduce((s, l) => s + (Number(itemsByCode.get(l.item_code)?.price_bhd) || 0) * l.qty, 0)
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
   const hasDeals = useMemo(() => items.some((i) => i.stock_status !== 'out_of_stock' && isDeal(i)), [items])
+  // the shortcut says "Deals" only when a live offer or a real price-book drop is on the shelf; with
+  // neither, the same link holds only last-chance lines and reads "Last chance" (the clearance word)
+  const dealsLabel = useMemo(() => (dealSets(items, data?.offers).hasRealDeals ? S.nav.deals : S.shop.clearance), [items, data])
   const dealsActive = pathname === '/shop' && (new URLSearchParams(search).get('f') || '').split(',').includes('deals')
   const showStrip = pathname === '/' || pathname === '/shop' || pathname.startsWith('/t/') || (pathname.split('/').filter(Boolean).length === 1 && !['/search', '/cart', '/checkout', '/orders', '/me', '/quick', '/about'].includes(pathname))
 
@@ -163,7 +168,7 @@ export function StickyHeader() {
                 <span aria-hidden="true" className="grid h-5 w-5 place-items-center rounded-full bg-deal-soft text-deal-ink">
                   <Tag size={12} strokeWidth={2.2} />
                 </span>
-                <span>{S.nav.deals}</span>
+                <span>{dealsLabel}</span>
               </Link>
             )}
             {desktop && (

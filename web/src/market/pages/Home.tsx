@@ -11,7 +11,7 @@ import { ClosedState, ConnectingState, HomeSkeleton, OfflineBanner } from '../co
 import { fetchOrderCached, useRecentOrders } from '../hooks/useRecentOrders'
 import { useMarket, useOrder } from '../MarketContext'
 import { currentRef, forgetRef, isSlugShaped, rememberedOrders, rememberRef } from '../lib/device'
-import { categoryTiles, heroSplit, liveOffer, orderLines } from '../lib/home'
+import { categoryTiles, heroSplit, liveOffer, orderLines, splitReorder } from '../lib/home'
 import { buildSlides, heroDeck, SECTION_SLIDE_IDS, useClaimSlides } from '../lib/slides'
 import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
@@ -125,9 +125,11 @@ export default function Home() {
   const latest = recent[0] || null
   const lastLines = useMemo(() => orderLines(latest, itemsByCode), [latest, itemsByCode])
   const lastCodes = useMemo(() => new Set(lastLines.map((l) => l.item.item_code)), [lastLines])
-  // Order again offers only what is on the shelf, so its count and ≈ total are what one tap adds —
-  // the same lines the "Order again" slide is built from
-  const againLines = useMemo(() => lastLines.filter((l) => l.item.stock_status !== 'out_of_stock'), [lastLines])
+  // Order again's one tap adds only what can be ordered today (in stock, or sold out while the shop
+  // takes backorders), so its count and ≈ total are what the tap adds — the same lines the "Order
+  // again" slide is built from. The sold-out rest is shown on the card, greyed, with "Tell me when back".
+  const reorder = useMemo(() => splitReorder(lastLines, m.allowBackorder), [lastLines, m.allowBackorder])
+  const againLines = reorder.add
   const openOrder = useMemo(() => myOrders.find((o) => o.status !== 'delivered' && o.status !== 'cancelled') || null, [myOrders])
   const desktop = isDesktopLike(viewport)
 
@@ -178,13 +180,13 @@ export default function Home() {
 
   // the Order again card (cart empty, last order known — or still loading) already offers the
   // reorder: no second button above it
-  const againCard = lines.length === 0 && recognized && (againLines.length > 0 || pendingOrders)
+  const againCard = lines.length === 0 && recognized && (againLines.length > 0 || reorder.sold.length > 0 || pendingOrders)
   const continueTop = lines.length > 0 || recognized
   // With nothing to continue the card is the paste card, and it keeps its mid-page slot (HomeBelow)
   // — the phone's one paste moment besides the closing band, which is why the phone deck drops
   // 'd:quick'. Desktop already makes that offer twice (the hero/aside and the band), so there the
   // card renders only when there IS something to continue.
-  const continueCard = <ContinueRestock lastLines={againLines} placedAt={latest?.created_at} pending={pendingOrders} paste={!desktop} />
+  const continueCard = <ContinueRestock lastLines={againLines} soldLines={reorder.sold} placedAt={latest?.created_at} pending={pendingOrders} paste={!desktop} />
 
   return (
     <div className="px-gutter lg:px-0 lg:pt-5">

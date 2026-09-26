@@ -1,17 +1,19 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ArrowDownUp, ChevronDown, ClipboardList, Flame, Heart, Hourglass, LayoutGrid, List, Percent, Sparkles, Star, Tag, TrendingDown, X, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { CategoryBanner } from '../components/CampaignStrip'
 import { MarketCard } from '../components/MarketCard'
+import { SoldOutDivider } from '../components/SoldOut'
 import { useMarket } from '../MarketContext'
 import { ClosedState, ConnectingState, EmptyState } from '../components/States'
 import { revealActiveChip, useEdgeFade } from '../hooks/useEdgeFade'
 import { useReveal } from '../hooks/useReveal'
 import { track } from '../lib/events'
-import { applyQuickFilters, facetsFor, isDeal, isEssential, isMoving, isOffer, isRealDrop, matchesFacets, parseFilters, readFacets, shelfOrder, sortItems, type QuickFilter, type SortMode } from '../lib/facets'
+import { applyQuickFilters, facetsFor, isDeal, isEssential, isMoving, isOffer, isRealDrop, matchesFacets, parseFilters, readFacets, shelfOrder, soldOutSplit, sortItems, type QuickFilter, type SortMode } from '../lib/facets'
 import { hasBadge } from '../lib/format'
+import { dealSets } from '../lib/home'
 import { useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useSaved } from '../store/saved'
@@ -137,6 +139,7 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
     setVisible(FIRST)
   }
   const shown = Math.min(visible, result.length)
+  const sold = useMemo(() => soldOutSplit(result, result.slice(0, shown)), [result, shown])
   const active = filters.size + Object.keys(sel).length + (brand ? 1 : 0)
 
   /* ── stuck chips row (phones/tablets) ── */
@@ -238,7 +241,14 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
       on ? 'bg-ink text-white shadow-1' : 'bg-surface text-ink shadow-1 ring-1 ring-inset ring-line hover:bg-plum-wash hover:ring-ink/15',
       extra,
     )
+  /* "Deals" is a promise of a real deal — a live offer or a real price-book drop (was_bhd) on this
+   * shelf. With neither, the deals filter holds exactly the last-chance lines, so the same chip reads
+   * "Last chance" (the clearance wording), and the separate Last chance chip stands down so the row
+   * never shows the same word twice — unless that one is the filter the merchant arrived with. */
+  const dealsReal = useMemo(() => dealSets(items, data?.offers).hasRealDeals, [items, data])
   const chips = CHIPS.filter((c) => filters.has(c.key) || ((!c.extra || !category) && (!c.test || items.some(c.test))))
+    .filter((c) => dealsReal || (c.key === 'deals' ? filters.has('deals') || !filters.has('clearance') : c.key !== 'clearance' || filters.has('clearance')))
+    .map((c) => (c.key === 'deals' && !dealsReal ? { ...c, label: S.shop.clearance } : c))
 
   const viewToggle = (
     <div className="inline-flex shrink-0 rounded-sm border border-line bg-surface p-0.5" role="group" aria-label={S.shop.view}>
@@ -417,8 +427,11 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
         )
       ) : view === 'list' ? (
         <div className="mt-1 lg:mt-3">
-          {result.slice(0, shown).map((it) => (
-            <MarketCard key={it.item_code} item={it} variant="list" from="grid" />
+          {result.slice(0, shown).map((it, i) => (
+            <Fragment key={it.item_code}>
+              {i === sold.firstOut && <SoldOutDivider as="h2" count={sold.soldTotal} className="mb-1 mt-5" />}
+              <MarketCard item={it} variant="list" from="grid" />
+            </Fragment>
           ))}
         </div>
       ) : (
@@ -427,16 +440,20 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
         // row to carry the old price beside today's — and a 5-up grid under a 4-up rail on the
         // same page read as two pages stitched together.
         <div ref={gridRef} className="mt-2 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:mt-4 lg:grid-cols-4 3xl:grid-cols-5">
-          {result.slice(0, shown).map((it, i) =>
-            desktop ? (
-              // .reveal on a plain wrapper (the card keeps its hover transition and .cv-card); className never changes
-              <div key={it.item_code} className="reveal grid grid-cols-1" style={{ ['--i' as string]: i % cols }}>
+          {result.slice(0, shown).map((it, i) => (
+            <Fragment key={it.item_code}>
+              {/* the sold-out lines start a row of their own under the divider, so their stagger restarts at column 0 */}
+              {i === sold.firstOut && <SoldOutDivider as="h2" count={sold.soldTotal} className="col-span-full mt-3" />}
+              {desktop ? (
+                // .reveal on a plain wrapper (the card keeps its hover transition and .cv-card); className never changes
+                <div className="reveal grid grid-cols-1" style={{ ['--i' as string]: (sold.firstOut >= 0 && i >= sold.firstOut ? i - sold.firstOut : i) % cols }}>
+                  <MarketCard item={it} from="grid" priority={i < 2} />
+                </div>
+              ) : (
                 <MarketCard item={it} from="grid" priority={i < 2} />
-              </div>
-            ) : (
-              <MarketCard key={it.item_code} item={it} from="grid" priority={i < 2} />
-            ),
-          )}
+              )}
+            </Fragment>
+          ))}
         </div>
       )}
       {shown < result.length && (
@@ -446,6 +463,7 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
           </Button>
         </div>
       )}
+      {data && result.length > 0 && <p className="mt-6 text-center text-xs text-ink-2">{S.vat.note}</p>}
     </div>
   )
 }

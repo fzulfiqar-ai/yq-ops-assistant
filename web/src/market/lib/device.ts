@@ -185,8 +185,14 @@ export function writeCustomer(c: CustomerDraft | null): void {
   write(KEYS.customer, c)
 }
 
+/**
+ * Keeping the checkout details is opt-in: off until the merchant ticks "Save my details on this
+ * phone" and an order goes through with it ticked (or saves them on My YQ). A shop phone is often
+ * shared, so nothing is kept on a keystroke or from an abandoned checkout. A device that already
+ * ordered with the box ticked carries an explicit `true` and keeps its prefill.
+ */
 export function saveDetailsEnabled(): boolean {
-  return read<boolean>(KEYS.save, true) !== false
+  return read<boolean>(KEYS.save, false) === true
 }
 
 export function setSaveDetails(on: boolean): void {
@@ -194,9 +200,28 @@ export function setSaveDetails(on: boolean): void {
   if (!on) writeCustomer(null)
 }
 
-/** The merchant is "recognized" when this device has placed an order or kept its details. */
+/**
+ * Under the old always-save default the checkout wrote the details on every keystroke, before any
+ * order and without the merchant ever choosing to keep them. Such a record — details with no `true`
+ * save flag beside them — is forgotten, once, when this module first loads. The new flow never
+ * leaves that shape: the record is written only together with the flag (a successful order with the
+ * box ticked, or a My YQ save).
+ */
+function forgetUnchosenDetails(): void {
+  try {
+    if (localStorage.getItem(KEYS.customer) !== null && localStorage.getItem(KEYS.save) !== 'true') {
+      localStorage.removeItem(KEYS.customer)
+      cache.delete(KEYS.customer)
+    }
+  } catch {
+    /* storage blocked: nothing was kept either */
+  }
+}
+forgetUnchosenDetails()
+
+/** The merchant is "recognized" when this device has placed an order or chose to keep its details. */
 export function isRecognized(): boolean {
-  return rememberedOrders().length > 0 || Boolean(readCustomer().phone)
+  return rememberedOrders().length > 0 || (saveDetailsEnabled() && Boolean(readCustomer().phone))
 }
 
 /* ───────────────────────── searches & views ───────────────────────── */

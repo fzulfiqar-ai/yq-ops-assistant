@@ -223,6 +223,15 @@ export function partitionByAvailability<T extends Stocked>(items: readonly T[]):
 }
 
 /**
+ * Where a listing's "Not in stock now · N lines" divider goes (components/SoldOut): the index of the
+ * first sold-out line in the page on screen (-1: none yet — the page has not reached them), and how
+ * many sold-out lines the whole listing holds. The listing is already in availability order.
+ */
+export function soldOutSplit(all: readonly Stocked[], page: readonly Stocked[]): { firstOut: number; soldTotal: number } {
+  return { firstOut: page.findIndex((i) => availabilityRank(i) === 1), soldTotal: all.reduce((n, i) => n + availabilityRank(i), 0) }
+}
+
+/**
  * The home "All products" grid: every product the merchant can have today first — the ones no
  * rail has shown yet, then the ones a rail already carries (they sink, they never vanish) — and
  * the sold-out lines last, in plain shelf order (a rail never carries a sold-out line; the last

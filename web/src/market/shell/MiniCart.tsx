@@ -100,7 +100,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                 return (
                   <li key={line.item_code} className="flex items-center gap-3 py-2.5">
                     <button type="button" onClick={() => openProduct(line.item_code, 'minicart')} className="h-11 w-11 shrink-0 overflow-hidden rounded-sm border border-line-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70" aria-label={name}>
-                      <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={44} imgClassName="p-1" iconSize={16} showCaption={false} />
+                      <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={44} imgClassName={cn('p-1', dead && 'opacity-45 saturate-50')} iconSize={16} showCaption={false} />
                     </button>
                     <div className="min-w-0 flex-1">
                       {/* two lines, not an ellipsis: in this catalog the part that tells two SKUs
@@ -108,14 +108,15 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                           "1Mtr" vs "2Mtr" — and this is the panel where the merchant checks what
                           they are about to order */}
                       <div className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{name}</div>
-                      <div className={cn('text-xs tnum', dead ? 'text-bad' : 'text-ink-2')}>{dead ? q?.blocked_reason || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : line.item_code}</div>
+                      {/* a line that can no longer be ordered is a state, not an error: grey, never red */}
+                      <div className="text-xs tnum text-ink-2">{dead ? q?.blocked_reason || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : line.item_code}</div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <span className="text-sm font-semibold tnum text-ink">{dead ? '—' : bhd(q?.line_total_bhd ?? (Number(item?.price_bhd) || 0) * line.qty)}</span>
                       {item && !dead ? (
                         <Stepper value={line.qty} step={stepOf(item)} min={minQtyOf(item)} size="xs" label={name} onChange={(n) => setQty(item, n)} onRemove={() => remove(line.item_code)} />
                       ) : (
-                        <button type="button" onClick={() => remove(line.item_code)} className="text-xs font-semibold text-bad hover:underline">
+                        <button type="button" onClick={() => remove(line.item_code)} className="text-xs font-semibold text-ink-2 hover:text-ink hover:underline">
                           {S.cart.remove}
                         </button>
                       )}

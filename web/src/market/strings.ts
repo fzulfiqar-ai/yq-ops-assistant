@@ -19,6 +19,13 @@ export const S = {
   searchPlaceholder: 'Search or type a code…',
   searchLabel: 'Search the marketplace',
   categories: { title: 'Shop by category', browse: 'Browse categories' },
+  /**
+   * The VAT disclosure: the MA selling price book is VAT-inclusive, so every BHD figure on the
+   * marketplace already includes it. A static fact printed beside the prices (the shelf and grid
+   * footers, the restock totals, the order's totals) — it never changes a price, a total or the
+   * quote. The Arabic is set down now for the AR pass.
+   */
+  vat: { note: 'Prices include 10% VAT', noteAr: 'الأسعار شاملة ضريبة القيمة المضافة 10%' },
   home: {
     quick: 'Quick order',
     addAll: (n: number, total: string) => `Add all ${n} · ≈ ${total}`,
@@ -199,7 +206,17 @@ export const S = {
     /** the round sticker on the New arrivals slide (words only, never a number) */
     stickerNew: 'New',
   },
-  promise: { title: 'The YQ promise', app: 'Add YQ app' },
+  promise: {
+    title: 'The YQ promise',
+    app: 'Add YQ app',
+    /**
+     * The wholesale minimum, stated up front — before the first add, in the promise band and the
+     * phone strip. The amount is settings.min_order_bhd formatted (bhd()), never typed here. The
+     * Arabic for the AR pass puts the amount before «د.ب», as every Arabic price does.
+     */
+    minimum: (amount: string) => `Wholesale orders from ${amount}`,
+    minimumAr: (amount: string) => `طلبات الجملة من ${amount} د.ب`,
+  },
   spot: {
     title: 'Right now at YQ',
     popular: 'Popular right now',
@@ -316,6 +333,8 @@ export const S = {
     notOnShelf: (q: string) => `“${q}” isn’t on our shelf`,
     notOnShelfHint: 'Try a code or another word — or ask your representative, who knows the warehouse.',
     removeFilter: (label: string) => `Remove filter: ${label}`,
+    /** the ruled divider before the sold-out lines of a listing (home grid, shelves, search groups) — a heading, so it is read out */
+    notInStock: (n: number) => `Not in stock now · ${plural(n, 'line', 'lines')}`,
   },
   search: {
     submit: 'Search',
@@ -507,7 +526,8 @@ export const S = {
     quick: 'Quick actions',
     orders: 'Your orders',
     details: 'Your shop details',
-    noDetails: 'Nothing saved yet — your shop details stay on this phone after your first wholesale order.',
+    /** keeping details is opt-in: ticked "Save my details" on a wholesale order, or added here */
+    noDetails: 'Nothing saved yet — tick “Save my details on this phone” when you order, or add them here.',
     /** the action on the empty details card */
     addDetails: 'Add my details',
     edit: 'Edit',

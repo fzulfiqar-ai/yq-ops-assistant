@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Check, Copy, Download, Mail, MessageCircle, RotateCcw, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { MarketOrderResponse, OrderStatusPayload } from '@/lib/shopApi'
 import { CheckMark } from '../components/CheckMark'
+import { SoldOutRows } from '../components/SoldOut'
 import { EmptyState } from '../components/States'
 import { useMarket, useOrder } from '../MarketContext'
 import { forgetOrder } from '../lib/device'
+import { splitReorder } from '../lib/home'
 import { track } from '../lib/events'
 import { bhd, fmtDateTime, money } from '../lib/format'
 import { canPromptInstall, isIos, isStandalone, onInstallChange, promptInstall } from '../lib/install'
@@ -99,13 +101,24 @@ export default function TrackingPage() {
       setBusy(false)
     }
   }
+  /* Order again follows the shop's backorder setting (m.addMany leaves sold-out lines out while it is
+   * off, and says how many). Those lines are not dropped in silence: they are listed under the button,
+   * greyed, each with "Tell me when back" — and when nothing at all could be added the page stays put
+   * instead of opening an empty restock. */
+  const reorderSold = useMemo(() => {
+    const again = (data?.lines || []).filter((ln) => (ln.line_status || 'ok') !== 'removed').flatMap((ln) => {
+      const item = m.itemsByCode.get(ln.item_code)
+      return item ? [{ item, qty: 1 }] : []
+    })
+    return splitReorder(again, m.allowBackorder).sold.map((l) => l.item)
+  }, [data, m.itemsByCode, m.allowBackorder])
   const reorder = () => {
     const entries = lines
       .filter((ln) => (ln.line_status || 'ok') !== 'removed')
       .map((ln) => ({ item: m.itemsByCode.get(ln.item_code)!, qty: Number(ln.qty_confirmed ?? ln.qty) || 1 }))
       .filter((e) => e.item)
-    m.addMany(entries, 'reorder')
-    navigate('/cart')
+    const added = m.addMany(entries, 'reorder')
+    if (added > 0) navigate('/cart')
   }
   const copySummary = async () => {
     const text = [`YQ ${S.track.order(data?.order_no || '')}`, ...lines.map((l) => `${l.qty_confirmed ?? l.qty} x ${l.item_code}`), `${S.cart.total} ${bhd(total)}`, window.location.href].join('\n')
@@ -297,6 +310,9 @@ export default function TrackingPage() {
                   </Button>
                 )}
               </div>
+              {/* what Order again cannot add today (sold out, no backorder): named here, with "Tell me when
+                  back" — not on the just-placed confirmation, where reordering is not the next step */}
+              {!placed && lines.length > 0 && <SoldOutRows items={reorderSold} className="mt-4" />}
               {cancelOpen && (
                 <div className="mt-3 rounded-md border border-bad/20 bg-bad-soft p-3.5">
                   <p className="text-sm font-medium text-bad">{S.track.cancelConfirm}</p>
@@ -337,25 +353,29 @@ export default function TrackingPage() {
                   )
                 })}
               </ul>
-              <dl className="space-y-1.5 border-t border-line-2 px-4 py-3 text-sm">
-                {Number(data.discount_bhd) > 0 && (
+              <div className="border-t border-line-2 px-4 py-3">
+                <dl className="space-y-1.5 text-sm">
+                  {Number(data.discount_bhd) > 0 && (
+                    <div className="flex justify-between">
+                      <dt className="text-ok">{S.cart.discount}</dt>
+                      <dd className="tnum text-ok">−{bhd(data.discount_bhd)}</dd>
+                    </div>
+                  )}
                   <div className="flex justify-between">
-                    <dt className="text-ok">{S.cart.discount}</dt>
-                    <dd className="tnum text-ok">−{bhd(data.discount_bhd)}</dd>
+                    <dt className="text-ink-2">{S.cart.delivery}</dt>
+                    <dd className="tnum">{Number(data.delivery_bhd) > 0 ? bhd(data.delivery_bhd) : S.cart.free}</dd>
                   </div>
-                )}
-                <div className="flex justify-between">
-                  <dt className="text-ink-2">{S.cart.delivery}</dt>
-                  <dd className="tnum">{Number(data.delivery_bhd) > 0 ? bhd(data.delivery_bhd) : S.cart.free}</dd>
-                </div>
-                <div className="flex justify-between border-t border-line-2 pt-2">
-                  <dt className="font-semibold">
-                    {S.cart.total}
-                    {data.total_confirmed_bhd != null && data.total_confirmed_bhd !== data.total_bhd ? ` ${S.track.confirmed}` : ''}
-                  </dt>
-                  <dd className="font-display text-md font-extrabold tnum">{bhd(total)}</dd>
-                </div>
-              </dl>
+                  <div className="flex justify-between border-t border-line-2 pt-2">
+                    <dt className="font-semibold">
+                      {S.cart.total}
+                      {data.total_confirmed_bhd != null && data.total_confirmed_bhd !== data.total_bhd ? ` ${S.track.confirmed}` : ''}
+                    </dt>
+                    <dd className="font-display text-md font-extrabold tnum">{bhd(total)}</dd>
+                  </div>
+                </dl>
+                {/* a fact about the figures above (the price book is VAT-inclusive), never a change to them */}
+                <p className="mt-1.5 text-end text-2xs text-ink-2">{S.vat.note}</p>
+              </div>
             </section>
           )}
           {data && (data.customer?.shop || data.customer?.area) && (

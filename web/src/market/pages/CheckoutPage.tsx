@@ -38,7 +38,7 @@ export default function CheckoutPage() {
   const [customer, setCustomer] = useState<CustomerDraft>(() => (saveDetailsEnabled() ? readCustomer() : EMPTY_CUSTOMER))
   const [save, setSave] = useState(() => saveDetailsEnabled())
   const [website, setWebsite] = useState('')
-  const [more, setMore] = useState(() => Boolean(readCustomer().email))
+  const [more, setMore] = useState(() => saveDetailsEnabled() && Boolean(readCustomer().email))
   const [pickOpen, setPickOpen] = useState(false)
   const [pick, setPick] = useState<number | ''>('')
   const [touched, setTouched] = useState<Record<string, boolean>>({})
@@ -64,9 +64,6 @@ export default function CheckoutPage() {
   useEffect(() => {
     if (lines.length === 0 && !submitting) navigate('/cart', { replace: true })
   }, [lines.length, submitting, navigate])
-  useEffect(() => {
-    if (save) writeCustomer(customer)
-  }, [customer, save])
 
   const nameOk = customer.name.trim().length > 1
   const phoneOk = isPhone(customer.phone)
@@ -144,7 +141,9 @@ export default function CheckoutPage() {
       cartStore.clear()
       setCoupon('')
       setNote('')
+      // kept only now — after the order went through, and only if the box is ticked (never per keystroke)
       setSaveDetails(save)
+      if (save) writeCustomer({ name: customer.name.trim(), phone: cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() })
       refreshMyOrders()
       navigate(`/o/${res.token}`, { replace: true, state: { placed: res } })
     } catch (err: unknown) {

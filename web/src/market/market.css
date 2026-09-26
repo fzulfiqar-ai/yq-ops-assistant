@@ -1117,3 +1117,22 @@
   }
 }
 /* end v3: sweep */
+
+/* The sold-out divider ("Not in stock now · N lines", components/SoldOut.tsx): the words between two
+ * hairlines in the page's own line colour, before the first sold-out line of a listing. Quiet on
+ * purpose — the sold-out lines are a state, never an alarm. The type is set by the utilities on the
+ * element (text-xs · semibold · ink-2); only the rules live here. */
+@layer components {
+  .shelf-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .shelf-divider::before,
+  .shelf-divider::after {
+    content: '';
+    flex: 1 1 0;
+    height: 1px;
+    background-color: hsl(var(--m-line));
+  }
+}

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { LayoutGrid, List } from 'lucide-react'
 import type { OrderStatusPayload } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
@@ -7,10 +7,11 @@ import { CtaBand } from '../components/CtaBand'
 import { DealsSection } from '../components/DealsSection'
 import { MarketCard } from '../components/MarketCard'
 import { Rail } from '../components/Rail'
+import { SoldOutDivider } from '../components/SoldOut'
 import { EmptyState, Footer } from '../components/States'
 import { useReveal } from '../hooks/useReveal'
 import { useMarket } from '../MarketContext'
-import { applyQuickFilters, homeGridOrder, type QuickFilter } from '../lib/facets'
+import { applyQuickFilters, homeGridOrder, soldOutSplit, type QuickFilter } from '../lib/facets'
 import { fmtDate } from '../lib/format'
 import { dealSets, homeRails, pickedUpAgain, regularStock, type RegularLine } from '../lib/home'
 import { PageTail } from '../shell/ShellContext'
@@ -101,6 +102,9 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
   const [dealsOnly, setDealsOnly] = useState(false)
   const [visible, setVisible] = useState(FIRST)
   const hasDeals = useMemo(() => applyQuickFilters(items, DEALS).length > 0, [items])
+  // "Deals" only when a live offer or a real price-book drop exists; otherwise the same pill holds
+  // exactly the last-chance lines and says so (the clearance wording)
+  const dealsLabel = useMemo(() => (dealSets(items, offerRules).hasRealDeals ? S.nav.deals : S.shop.clearance), [items, offerRules])
   const filtering = inStockOnly || dealsOnly
   const grid = useMemo(() => {
     let r = items
@@ -130,6 +134,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
     setVisible(FIRST)
   }
   const shownCount = Math.min(visible, grid.length)
+  const sold = useMemo(() => soldOutSplit(grid, grid.slice(0, shownCount)), [grid, shownCount])
 
   // Everything that can add a section (or a card inside one) below the fold — and nothing else:
   // this page re-renders on every cart change, and each rescan forces layout.
@@ -220,7 +225,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
             <div className="flex basis-full items-center gap-1.5 lg:ms-auto lg:basis-auto">
               {[
                 { on: inStockOnly, which: 'stock' as const, label: S.shop.inStock },
-                { on: dealsOnly, which: 'deals' as const, label: S.nav.deals, hide: !hasDeals },
+                { on: dealsOnly, which: 'deals' as const, label: dealsLabel, hide: !hasDeals },
               ]
                 .filter((t) => !t.hide)
                 .map((t) => (
@@ -242,7 +247,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           {grid.length === 0 ? (
             <EmptyState
               className="mt-3"
-              title={S.states.noMatch(dealsOnly ? S.nav.deals : S.shop.inStock)}
+              title={S.states.noMatch(dealsOnly ? dealsLabel : S.shop.inStock)}
               action={
                 <Button
                   variant="secondary"
@@ -257,8 +262,11 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
             />
           ) : view === 'list' ? (
             <div className="mt-2">
-              {grid.slice(0, shownCount).map((it) => (
-                <MarketCard key={it.item_code} item={it} variant="list" />
+              {grid.slice(0, shownCount).map((it, i) => (
+                <Fragment key={it.item_code}>
+                  {i === sold.firstOut && <SoldOutDivider count={sold.soldTotal} className="mb-1 mt-5" />}
+                  <MarketCard item={it} variant="list" />
+                </Fragment>
               ))}
             </div>
           ) : (
@@ -266,8 +274,11 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
             // clipped to "20W Charger + Type-C Cable (US…" — and the end of the name is the half
             // that tells two SKUs apart in this catalogue. The fifth column waits for 3xl.
             <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:grid-cols-4 3xl:grid-cols-5">
-              {grid.slice(0, shownCount).map((it) => (
-                <MarketCard key={it.item_code} item={it} />
+              {grid.slice(0, shownCount).map((it, i) => (
+                <Fragment key={it.item_code}>
+                  {i === sold.firstOut && <SoldOutDivider count={sold.soldTotal} className="col-span-full mt-3" />}
+                  <MarketCard item={it} />
+                </Fragment>
               ))}
             </div>
           )}
@@ -278,6 +289,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
               </Button>
             </div>
           )}
+          {grid.length > 0 && <p className="mt-6 text-center text-xs text-ink-2">{S.vat.note}</p>}
         </section>
       </Sect>
 

@@ -53,6 +53,7 @@ const search = await mod('market/lib/search.ts')
 const groups = await mod('market/lib/searchGroups.ts')
 const quick = await mod('market/lib/quickParse.ts')
 const { S } = await mod('market/strings.ts')
+const home = await mod('market/lib/home.ts')
 
 /* ── a small catalog: shelf order is the array order, as the payload's is ── */
 const item = (code, stock, extra = {}) => ({
@@ -244,6 +245,45 @@ test('resolveQuick: an available code locks at once; a name gives Enter its best
   const none = quick.resolveQuick('zzzzzz', CATALOG, index)
   eq(none.best, null, 'no hit, no target')
   eq(codes(none.suggestions), [], 'no hit, nothing offered')
+})
+
+test('soldOutSplit: the divider sits before the first sold-out line on the page, and counts the whole listing', () => {
+  const list = facets.partitionByAvailability(CATALOG)
+  eq(facets.soldOutSplit(list, list), { firstOut: HAVE.length, soldTotal: SOLD.length }, 'whole listing on screen')
+  eq(facets.soldOutSplit(list, list.slice(0, 3)), { firstOut: -1, soldTotal: SOLD.length }, 'a first page that has not reached the sold-out lines: no divider yet')
+  eq(facets.soldOutSplit(list, list.slice(0, HAVE.length + 1)), { firstOut: HAVE.length, soldTotal: SOLD.length }, 'the page that reaches them')
+  const have = list.filter((i) => !out(i))
+  eq(facets.soldOutSplit(have, have), { firstOut: -1, soldTotal: 0 }, 'nothing sold out: no divider')
+  eq(S.shop.notInStock(1), 'Not in stock now · 1 line', 'divider singular')
+  eq(S.shop.notInStock(54), 'Not in stock now · 54 lines', 'divider plural')
+})
+
+test('splitReorder: Order again adds what can be ordered today — backorder respected — and keeps the sold-out rest to show, in order', () => {
+  const lines = CATALOG.map((it, i) => ({ item: it, qty: i + 1 }))
+  const off = home.splitReorder(lines, false)
+  eq(off.add.map((l) => l.item.item_code), HAVE, 'backorder off: in stock (a few left included) only')
+  eq(off.sold.map((l) => l.item.item_code), SOLD, 'backorder off: every sold-out line kept, never dropped')
+  eq(off.add.map((l) => l.qty), [2, 3, 5, 6, 10], 'quantities travel with their lines')
+  const on = home.splitReorder(lines, true)
+  eq(on.add.map((l) => l.item.item_code), codes(CATALOG), 'backorder on: every line can be ordered, in order')
+  eq(on.sold, [], 'backorder on: nothing left out')
+})
+
+test('"Deals" only for a live offer or a real price-book drop; clearance alone is "Last chance"', () => {
+  const clearing = [item('L1', 'in_stock', { badges: ['clearance'] }), item('L2', 'in_stock', { badges: ['clearance'] })]
+  eq(home.dealSets(clearing, []).hasRealDeals, false, 'clearance only')
+  eq(home.dealSets([...clearing, { ...item('D1', 'in_stock', { price: 1.5 }), was_bhd: 2 }], []).hasRealDeals, true, 'a real was_bhd drop')
+  eq(home.dealSets([...clearing, { ...item('D2', 'in_stock', { price: 1.5 }), was_bhd: 1.5 }], []).hasRealDeals, false, 'was_bhd not above the price is no drop')
+  eq(home.dealSets([...clearing, item('O1', 'in_stock', { badges: ['on_offer'] })], []).hasRealDeals, true, 'a live offer line')
+  eq(home.dealSets([...clearing, { ...item('D3', 'out_of_stock', { price: 1.5 }), was_bhd: 2 }], []).hasRealDeals, false, 'a sold-out drop is no deal on the shelf')
+  eq(S.shop.clearance, 'Last chance', 'the clearance wording the entry falls back to')
+  eq(S.nav.deals, 'Deals', 'the deals wording')
+})
+
+test('strings: the VAT note and the wholesale minimum promise (the amount comes from the payload, formatted)', () => {
+  eq(S.vat.note, 'Prices include 10% VAT', 'VAT note')
+  eq(S.vat.noteAr, 'الأسعار شاملة ضريبة القيمة المضافة 10%', 'VAT note, Arabic')
+  eq(S.promise.minimum('BHD 20.000'), 'Wholesale orders from BHD 20.000', 'minimum promise')
 })
 
 let failed = 0

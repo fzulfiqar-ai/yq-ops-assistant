@@ -1,9 +1,10 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Download } from 'lucide-react'
 import type { MarketPromise as PromiseRow } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
+import { bhd, money } from '../lib/format'
 import { PROMISE_ICON_FALLBACK, PROMISE_ICONS } from '../lib/icons'
 import { canPromptInstall, isStandalone, onInstallChange, promptInstall } from '../lib/install'
 import { locale, S } from '../strings'
@@ -20,12 +21,24 @@ import { locale, S } from '../strings'
  *
  * The phone strip WRAPS (it never scrolls): the four promises measure ~660px, so a single row sliced
  * the stock claim mid-word at every phone width and hid "Every order confirmed by your rep"
- * entirely — the two most wholesale-specific claims, on the first screen. Two tidy rows say all four.
+ * entirely — the two most wholesale-specific claims, on the first screen. Tidy rows say every one
+ * (with the wholesale minimum leading, three rows on the narrowest phones).
  */
 
+/**
+ * The office's promises, led by the wholesale minimum whenever the shop has one: a merchant learns
+ * it here, before the first add, instead of in the restock after it. The amount is the payload's
+ * settings.min_order_bhd, never a number typed into the page; a promise the office already keyed
+ * 'minimum' wins over the derived one.
+ */
 function usePromises(): PromiseRow[] {
   const { settings } = useMarket()
-  return (settings.promises || []).filter((p) => p && p.en)
+  return useMemo(() => {
+    const rows = (settings.promises || []).filter((p) => p && p.en)
+    const min = Number(settings.min_order_bhd) || 0
+    if (min <= 0 || rows.some((p) => p.key === 'minimum')) return rows
+    return [{ key: 'minimum', en: S.promise.minimum(bhd(min)), ar: S.promise.minimumAr(money(min)), icon: 'package', to: '/about#trade' }, ...rows]
+  }, [settings])
 }
 
 function text(p: PromiseRow): string {
@@ -65,9 +78,12 @@ export function PromiseBar() {
               </>
             )
             return (
+              // The bar holds four promises at 1024 without cutting a word; with the minimum leading
+              // there are five, so below xl the fifth waits for the width (every one of them was
+              // being cut mid-word at 1024) — it is back from 1280, where all five fit whole.
               <Fragment key={p.key}>
-                {i > 0 && <li aria-hidden="true" className="h-3 w-px shrink-0 bg-white/15" />}
-                <li className="min-w-0">
+                {i > 0 && <li aria-hidden="true" className={cn('h-3 w-px shrink-0 bg-white/15', i >= 4 && 'hidden xl:block')} />}
+                <li className={cn('min-w-0', i >= 4 && 'hidden xl:block')}>
                   {p.to ? (
                     <Link to={p.to} className={cn('inline-flex max-w-full items-center gap-1.5 transition-colors duration-1 ease-m hover:text-white', onDark)}>
                       {inner}

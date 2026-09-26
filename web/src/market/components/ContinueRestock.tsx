@@ -12,6 +12,7 @@ import { S } from '../strings'
 import { Button, LinkButton } from '../ui/Button'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 import { Skeleton } from '../ui/Skeleton'
+import { SoldOutRows } from './SoldOut'
 
 /**
  * "Continue your restock" — one card that always answers "what do I do next?":
@@ -29,13 +30,16 @@ const WholesaleState = lazy(() => import('./WholesaleState').then((mod) => ({ de
 
 export function ContinueRestock({
   lastLines,
+  soldLines = [],
   placedAt,
   pending,
   paste = true,
   className,
 }: {
-  /** the lines of the last order that are on the shelf — what "Add all" can honestly add (Home filters) */
+  /** the lines of the last order that can be ordered today — what "Add all" can honestly add (Home splits them, lib/home splitReorder) */
   lastLines: RegularLine[]
+  /** the last order's sold-out lines the shop takes no backorder for: shown greyed, with "Tell me when back" — never hidden */
+  soldLines?: RegularLine[]
   placedAt?: string | null
   /** this phone remembers an order and it is still loading: hold the slot instead of offering the paste card */
   pending?: boolean
@@ -46,7 +50,7 @@ export function ContinueRestock({
   const { recognized } = useMarket()
   const lines = useCartLines()
   if (lines.length) return <ResumeCard lines={lines} className={className} />
-  if (recognized && lastLines.length) return <AgainCard lines={lastLines} placedAt={placedAt} className={className} />
+  if (recognized && (lastLines.length || soldLines.length)) return <AgainCard lines={lastLines} sold={soldLines} placedAt={placedAt} className={className} />
   if (pending) return <AgainSkeleton className={className} />
   return paste ? <PasteCard className={className} /> : null
 }
@@ -191,7 +195,7 @@ function AgainSkeleton({ className }: { className?: string }) {
   )
 }
 
-function AgainCard({ lines, placedAt, className }: { lines: RegularLine[]; placedAt?: string | null; className?: string }) {
+function AgainCard({ lines, sold, placedAt, className }: { lines: RegularLine[]; sold: RegularLine[]; placedAt?: string | null; className?: string }) {
   const m = useMarket()
   const navigate = useNavigate()
   const total = lines.reduce((s, l) => s + (unitAt(l.item, l.qty) ?? 0) * l.qty, 0)
@@ -212,27 +216,33 @@ function AgainCard({ lines, placedAt, className }: { lines: RegularLine[]; place
           </h2>
           <p className="truncate text-xs text-ink-2">
             {S.home.lastOrder}
-            {date ? ` · ${date}` : ''} · {S.states.products(lines.length)}
+            {date ? ` · ${date}` : ''} · {S.states.products(lines.length + sold.length)}
           </p>
         </div>
       </div>
-      <ul className="rail px-4 pb-1 pt-4 lg:px-5" style={{ ['--m-rail-gap' as string]: '10px' }} aria-label={S.home.lastOrder}>
-        {lines.map((l) => (
-          <li key={l.item.item_code}>
-            <Thumb item={l.item} code={l.item.item_code} qty={l.qty} low={l.item.stock_status === 'low_stock'} size="lg" />
-          </li>
-        ))}
-        <li aria-hidden="true" className="w-1 shrink-0" />
-      </ul>
-      <div className="flex gap-2 p-4 pt-3 lg:px-5 lg:pb-5">
-        <Button size="lg" className="min-w-0 flex-1 rounded-full" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />}>
-          <span className="truncate">{S.home.addAll(lines.length, bhd(total))}</span>
-        </Button>
-        <LinkButton to="/quick?load=last" size="lg" variant="secondary" aria-label={S.home.editQty} title={S.home.editQty} className="w-12 shrink-0 rounded-full px-0 lg:w-auto lg:px-5">
-          <SquarePen size={17} aria-hidden="true" />
-          <span className="hidden lg:inline">{S.home.editQty}</span>
-        </LinkButton>
-      </div>
+      {lines.length > 0 && (
+        <>
+          <ul className="rail px-4 pb-1 pt-4 lg:px-5" style={{ ['--m-rail-gap' as string]: '10px' }} aria-label={S.home.lastOrder}>
+            {lines.map((l) => (
+              <li key={l.item.item_code}>
+                <Thumb item={l.item} code={l.item.item_code} qty={l.qty} low={l.item.stock_status === 'low_stock'} size="lg" />
+              </li>
+            ))}
+            <li aria-hidden="true" className="w-1 shrink-0" />
+          </ul>
+          <div className="flex gap-2 p-4 pt-3 lg:px-5 lg:pb-5">
+            <Button size="lg" className="min-w-0 flex-1 rounded-full" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />}>
+              <span className="truncate">{S.home.addAll(lines.length, bhd(total))}</span>
+            </Button>
+            <LinkButton to="/quick?load=last" size="lg" variant="secondary" aria-label={S.home.editQty} title={S.home.editQty} className="w-12 shrink-0 rounded-full px-0 lg:w-auto lg:px-5">
+              <SquarePen size={17} aria-hidden="true" />
+              <span className="hidden lg:inline">{S.home.editQty}</span>
+            </LinkButton>
+          </div>
+        </>
+      )}
+      {/* the last order's sold-out lines: after the ones one tap can add, greyed, each with "Tell me when back" */}
+      <SoldOutRows items={sold.map((l) => l.item)} className={cn('px-4 pb-2 lg:px-5', lines.length ? '-mt-1' : 'pt-3')} />
     </section>
   )
 }

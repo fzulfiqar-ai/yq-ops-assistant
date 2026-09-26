@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Clock, Hash, MessageCircle } from 'lucide-react'
 import type { ShopItem } from '@/lib/shopApi'
@@ -14,6 +14,8 @@ import { ProductImage } from '../ui/ProductImage'
 import { SectionHeader } from '../ui/SectionHeader'
 import { Skeleton } from '../ui/Skeleton'
 import { MarketCard } from './MarketCard'
+import { soldOutSplit } from '../lib/facets'
+import { SoldOutDivider } from './SoldOut'
 
 /**
  * Search, shared by the Search page and the desktop palette.
@@ -115,6 +117,10 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
   const { categories, items, rep } = useMarket()
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
   const total = grouped.codes.length + grouped.products.length
+  // each group keeps the sold-out rule (lib/searchGroups, lib/search): available first, then — under
+  // the divider, with that group's own count — the sold-out lines
+  const codesSold = useMemo(() => soldOutSplit(grouped.codes, grouped.codes), [grouped.codes])
+  const productsSold = useMemo(() => soldOutSplit(grouped.products, grouped.products), [grouped.products])
   const askUrl = rep?.whatsapp_url && q.trim() ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.shop.askHave(rep.first_name || '', q.trim()))}` : null
   const chip = 'h-9 rounded-full border border-line bg-surface px-3.5 text-sm text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
 
@@ -155,10 +161,13 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
         <section aria-label={S.search.codes}>
           <h2 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.codes}</h2>
           <div className="mt-1">
-            {grouped.codes.map((it) => (
-              <div key={it.item_code} data-code={it.item_code} className={cn('rounded-sm transition-colors', activeCode === it.item_code && 'bg-plum-wash ring-1 ring-plum/20')}>
-                <MarketCard item={it} variant="list" from={from} />
-              </div>
+            {grouped.codes.map((it, i) => (
+              <Fragment key={it.item_code}>
+                {i === codesSold.firstOut && <SoldOutDivider count={codesSold.soldTotal} className="mb-1 mt-3" />}
+                <div data-code={it.item_code} className={cn('rounded-sm transition-colors', activeCode === it.item_code && 'bg-plum-wash ring-1 ring-plum/20')}>
+                  <MarketCard item={it} variant="list" from={from} />
+                </div>
+              </Fragment>
             ))}
           </div>
         </section>
@@ -169,10 +178,13 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
             {S.search.products} <span className="tnum text-ink-3">· {grouped.products.length}</span>
           </h2>
           <div className="mt-1">
-            {grouped.products.map((it) => (
-              <div key={it.item_code} data-code={it.item_code} className={cn('rounded-sm transition-colors', activeCode === it.item_code && 'bg-plum-wash ring-1 ring-plum/20')}>
-                <MarketCard item={it} variant="list" from={from} />
-              </div>
+            {grouped.products.map((it, i) => (
+              <Fragment key={it.item_code}>
+                {i === productsSold.firstOut && <SoldOutDivider count={productsSold.soldTotal} className="mb-1 mt-3" />}
+                <div data-code={it.item_code} className={cn('rounded-sm transition-colors', activeCode === it.item_code && 'bg-plum-wash ring-1 ring-plum/20')}>
+                  <MarketCard item={it} variant="list" from={from} />
+                </div>
+              </Fragment>
             ))}
           </div>
         </section>
