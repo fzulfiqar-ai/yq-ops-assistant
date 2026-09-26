@@ -511,6 +511,22 @@
  * switch above; nothing here ever hides content under reduced motion.
  */
 
+/* phone promise line (components/PromiseBar.tsx PromiseStrip): each sentence fades in; the
+ * reduced-motion kill switch above zeroes it, and the strip never rotates under reduced motion */
+@keyframes promise-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.promise-fade {
+  animation: promise-in 260ms var(--m-ease) both;
+}
+
 /* v3: reveal */
 /* Scroll reveal, driven by hooks/useReveal.ts. Double gate: content is hidden only when motion is
  * allowed AND the hook has confirmed IntersectionObserver (it sets html[data-reveal]). Every .reveal

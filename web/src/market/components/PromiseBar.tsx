@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { createElement, Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Download } from 'lucide-react'
 import type { MarketPromise as PromiseRow } from '@/lib/shopApi'
@@ -35,7 +35,9 @@ function usePromises(): PromiseRow[] {
     const rows = (settings.promises || []).filter((p) => p && p.en)
     const min = Number(settings.min_order_bhd) || 0
     if (min <= 0 || rows.some((p) => p.key === 'minimum')) return rows
-    return [{ key: 'minimum', en: S.promise.minimum(bhd(min)), ar: S.promise.minimumAr(money(min)), icon: 'package', to: '/about#trade' }, ...rows]
+    // a round threshold reads as a headline ("BHD 20"); prices elsewhere keep their 3 decimals
+    const amount = Number.isInteger(min) ? `BHD ${min}` : bhd(min)
+    return [{ key: 'minimum', en: S.promise.minimum(amount), ar: S.promise.minimumAr(money(min)), icon: 'package', to: '/about#trade' }, ...rows]
   }, [settings])
 }
 
@@ -106,33 +108,45 @@ export function PromiseBar() {
   )
 }
 
+const ROTATE_MS = 3500
+
 /**
- * Phones: ONE line with the two facts that decide an order (the wholesale minimum, short, and the
- * office's first promise — free delivery today); the whole strip opens About · How ordering works,
- * where every promise is spelled out. Five promises in three wrapped rows was too much to read on
- * the first screen (owner, 27-Sep-2026). Screen readers still hear every promise via the label.
+ * Phones: ONE line, one promise at a time — the wholesale minimum first — fading to the next every
+ * 3.5 s for a single round, then resting on the minimum (owner, 27-Sep-2026: five promises in three
+ * wrapped rows was too much to read). A touch or focus holds the sentence on screen; under reduced
+ * motion it never moves; a hidden tab does not advance it. The line opens About · How ordering
+ * works; screen readers hear every promise once through the label, never the changing text.
  */
 export function PromiseStrip({ className }: { className?: string }) {
   const promises = usePromises()
-  const { settings } = useMarket()
-  if (!promises.length) return null
-  const min = Number(settings.min_order_bhd) || 0
-  const short = (p: PromiseRow) => (p.key === 'minimum' && min > 0 && p.en === S.promise.minimum(bhd(min)) ? S.promise.minimumShort(bhd(min)) : text(p))
+  const [shown, setShown] = useState(0)
+  const [held, setHeld] = useState(false)
+  const n = promises.length
+  useEffect(() => {
+    if (n < 2 || held || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    let step = 0
+    const timer = window.setInterval(() => {
+      if (document.hidden) return
+      step += 1
+      setShown(step % n)
+      if (step >= n) window.clearInterval(timer) // one round, back on the minimum, then still
+    }, ROTATE_MS)
+    return () => window.clearInterval(timer)
+  }, [n, held])
+  if (!n) return null
+  const p = promises[Math.min(shown, n - 1)]
   return (
     <Link
       to="/about#trade"
-      className={cn('hit relative flex items-center gap-3 text-2xs font-medium text-ink-2', className)}
+      onPointerDown={() => setHeld(true)}
+      onFocus={() => setHeld(true)}
+      className={cn('hit relative flex items-center gap-3 text-xs font-medium text-ink-2', className)}
       aria-label={`${S.promise.title}: ${promises.map(text).join(' · ')}. ${S.promise.more}`}
     >
-      {promises.slice(0, 2).map((p, i) => {
-        const Icon = iconFor(p)
-        return (
-          <span key={p.key} className={cn('inline-flex items-center gap-1 whitespace-nowrap', i > 0 && 'min-w-0')}>
-            <Icon size={12} className="shrink-0 text-plum" aria-hidden="true" />
-            <span className={cn(i > 0 && 'truncate')}>{short(p)}</span>
-          </span>
-        )
-      })}
+      <span key={p.key} className="promise-fade inline-flex min-w-0 items-center gap-1.5" aria-hidden="true">
+        {createElement(iconFor(p), { size: 13, className: 'shrink-0 text-plum', 'aria-hidden': true })}
+        <span className="truncate">{text(p)}</span>
+      </span>
       <ChevronRight size={14} className="ms-auto shrink-0 text-ink-3 rtl:rotate-180" aria-hidden="true" />
     </Link>
   )
