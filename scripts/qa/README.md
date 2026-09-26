@@ -41,8 +41,9 @@ masks a broken build.
 
 ## Viewports
 
-phones 320×640, 360×780, 390×844 (DPR 2), 430×932 · tablet 768×1024 (touch) · laptop/desktop
-1024×768, 1280×800, 1440×900, 1920×1080. `--quick` keeps 390×844 and 1440×900, which are also the
+the six R4 design viewports — phones 360×780 and 430×932 (DPR 2) · tablet 768×1024 (touch) · a touch
+laptop 1024×768 (the desktop shell under touch rules) · 1366×768 · 1920×1080. `--quick` keeps 430×932
+and 1366×768, which are also the
 "lead" viewports that carry the extras (full-page shots, element crops, slider timing, the campaign
 injection, reduced motion, the opening). iOS safe-area insets cannot be simulated in Chromium, so
 they are not covered here — check a real phone for the notch.
@@ -109,6 +110,30 @@ mix lines, not push one SKU) · `paste-repeat` (home sends the merchant to `/qui
   negative insets, which is how the app grows a 36px pill to 44px without changing its look.
 - Findings are grouped per control shape and height, so a rail of twelve cards is one row with a
   count, not twelve rows.
+
+## Before/after design reviews
+
+A design review compares two builds screen by screen. Four scripts do it, and **nothing reaches
+production except GET requests and the quote**:
+
+| script | what it does |
+|---|---|
+| `readonly_api.py` | A local stand-in for the API on 127.0.0.1:8002. It records production GETs once and replays them, replays the quote POST per body, and answers every other write itself (logged to `writes.log`; `upstream.log` proves nothing else went out). `--upcoming <review folder>` serves pending "Coming soon" rows as preview cards. |
+| `review_run.py` | Serves one built `dist-market` with `vite preview --strictPort` and takes lab Lighthouse (mobile and desktop, median of 3). It runs the harness on the 8 review screens with `--reduced-motion`, which gives stable frames, and with `--full-check` also runs every state with motion on. It also writes `meta.json` and `bundle.json`. It refuses a build that is not pointed at the stub. |
+| `review_pack.py` | Makes before\|after composites per screen × viewport (side by side for portrait, stacked for landscape, in CSS pixels, ≤ 1560 px) and pairs long pages tile by tile, plus `findings.json` per screen. |
+| `design_review.py` | Builds one self-contained `index.html` of the two runs, with WebP data URIs, the harness counts (BEFORE failures that come from rules new in R4 are labelled "expected"), Lighthouse and bundle budgets. |
+
+```bash
+python scripts/qa/readonly_api.py --cache <scratch>/stub --upcoming business_data/upcoming_review/2026-09-24 &
+# build each side against the stub (web/ of that checkout):  VITE_API_URL=http://localhost:8002 npm run build:market
+python scripts/qa/review_run.py --dist <before>/web/dist-market --out business_data/design_review/<date>/before --label before --commit <sha> --port 5173 --full-check
+python scripts/qa/review_run.py --dist web/dist-market --out business_data/design_review/<date>/after --label after --commit <sha> --port 5174 --full-check
+python scripts/qa/review_pack.py --before .../before --after .../after --out .../pack
+python scripts/qa/design_review.py --before .../before --after .../after --out .../index.html [--notes notes.html]
+```
+
+Run the two sides one after the other, never in parallel. The `--reduced-motion` flag is also
+available on `market_qa.py` directly.
 
 ## Related gates
 

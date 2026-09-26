@@ -37,6 +37,11 @@ from typing import Any
 from playwright.sync_api import Error as PWError
 from playwright.sync_api import Page, Route, sync_playwright
 
+try:  # run as a script: scripts/qa is on sys.path
+    from readonly_api import qa_receipt
+except ImportError:  # imported as scripts.qa.market_qa
+    from scripts.qa.readonly_api import qa_receipt
+
 # ── copy under test ────────────────────────────────────────────────────────────────────────────
 # Literals mirrored from web/src/market/strings.ts. verify_strings() re-reads that file and warns
 # when a literal has drifted, so this harness fails loudly on copy changes instead of silently
@@ -67,6 +72,9 @@ STR = {
     "card.soldOut": "Sold out",
     "card.tellBack": "Tell me when back",
     "states.showMore": "Show more (",
+    "shop.notInStock": "Not in stock now",
+    "avail.few": "Few left",
+    "head.list": "YQ Trade List",
 }
 
 # Text that must never reach a merchant's screen: the owner's honest-merchandising rule, and the
@@ -75,6 +83,10 @@ BANNED = r"slow mover|no minimum|Save \d+%|out of stock"
 
 CART_KEY = "yq-shop-cart:market"
 SPLASH_KEY = "yq-splash-session"
+
+# --reduced-motion: every state runs under prefers-reduced-motion, so two builds shot one after the
+# other show the same frame (no slider or search-hint mid-rotation). Used by design reviews.
+REDUCE_ALL = False
 
 # ── viewports ──────────────────────────────────────────────────────────────────────────────────
 
@@ -90,21 +102,22 @@ class Viewport:
     touch: bool = False
 
 
+# R4 (25-Sep-2026): the six design viewports of the Stockbook spec — narrow and large phone, tablet
+# portrait, tablet LANDSCAPE (the desktop layout under touch rules: no hover-only reveals, 44px
+# targets), laptop and wide. The 1024x768 row is a touch context, so the tap-target and input-size
+# probes run on the desktop shell too.
 VIEWPORTS: list[Viewport] = [
-    Viewport("320x640", 320, 640, "phone", 1, True, True),
     Viewport("360x780", 360, 780, "phone", 1, True, True),
-    Viewport("390x844", 390, 844, "phone", 2, True, True),
-    Viewport("430x932", 430, 932, "phone", 1, True, True),
+    Viewport("430x932", 430, 932, "phone", 2, True, True),
     Viewport("768x1024", 768, 1024, "tablet", 1, False, True),
-    Viewport("1024x768", 1024, 768, "desktop"),
-    Viewport("1280x800", 1280, 800, "desktop"),
-    Viewport("1440x900", 1440, 900, "desktop"),
+    Viewport("1024x768", 1024, 768, "desktop", 1, False, True),
+    Viewport("1366x768", 1366, 768, "desktop"),
     Viewport("1920x1080", 1920, 1080, "desktop"),
 ]
-QUICK_VIEWPORTS = {"390x844", "1440x900"}
+QUICK_VIEWPORTS = {"430x932", "1366x768"}
 # the one phone and the one desktop that carry the expensive extras (crops, slider timing, campaign)
-LEAD_PHONE = "390x844"
-LEAD_DESKTOP = "1440x900"
+LEAD_PHONE = "430x932"
+LEAD_DESKTOP = "1366x768"
 
 ALL_CLASSES = ("phone", "tablet", "desktop")
 
@@ -177,7 +190,9 @@ def states(slug: str | None) -> list[State]:
         State("me", "/me", "My YQ", ready="main"),
         State("about", "/about", "About & help", ready="main"),
         State("about_trade", "/about#trade", "About · trade prices", ready="main"),
-        State("product", "/p/UK04-C", "Product panel · UK04-C", ready="main"),
+        State("product", "/p/UK04-C", "Product · UK04-C (the page on desktop, the sheet on phones)", ready="main"),
+        State("brand", "/brands/wekome", "Brand · WEKOME (Coming soon)", ready="main"),
+        State("tracking", "/o/qa-token", "Tracking · a mocked order", ready="main"),
         State("campaign", "/", "Home with an injected campaign", kind="campaign", ready="main", lead_only=True),
         State("reduced_home", "/", "Home, reduced motion", ready="main", reduced=True, lead_only=True),
         State(
@@ -492,9 +507,18 @@ PROBE = r"""
 FONTS = r"""
 async () => {
   try { await document.fonts.ready; } catch (e) { /* older engines */ }
+  /* what the stylesheet declares and whether each face loaded: `check()` alone is true for a family
+     no @font-face declares, so the positive proof is the declared face's own status */
+  const faces = [...document.fonts].map((f) => ({ family: f.family.replace(/^"|"$/g, ''), status: f.status }));
+  const declared = (name) => faces.filter((f) => f.family === name);
+  const loaded = (name) => { const d = declared(name); return d.length > 0 && d.every((f) => f.status === 'loaded'); };
+  const errored = faces.filter((f) => f.status === 'error').map((f) => f.family);
   return {
-    sora: document.fonts.check('16px Sora'),
-    instrument: document.fonts.check('16px "Instrument Sans"'),
+    instrument: document.fonts.check('16px "Instrument Sans"') && loaded('Instrument Sans'),
+    mono: loaded('IBM Plex Mono'),
+    monoDeclared: declared('IBM Plex Mono').length > 0,
+    sora: declared('Sora').length > 0,
+    errored,
   };
 }
 """
@@ -580,18 +604,8 @@ def install_mocks(page: Page, order_kind: str) -> None:
         if route.request.method == "OPTIONS":
             route.fulfill(status=204, headers=dict(CORS), body="")
             return
-        json_route(
-            route,
-            {
-                "order_no": QA_ORDER["order_no"],
-                "order_kind": order_kind,
-                "status": "new",
-                "status_label": "Received",
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "lines": [],
-                "total_bhd": 0,
-            },
-        )
+        # the same fictional receipt the local read-only stub serves (QA shop, QA rep, 3 lines)
+        json_route(route, dict(qa_receipt(), order_kind=order_kind))
 
     def on_recognize(route: Route) -> None:
         if route.request.method == "OPTIONS":
@@ -740,7 +754,7 @@ def new_context(browser, vp: Viewport, st: State):
         is_mobile=vp.mobile,
         has_touch=vp.touch,
         service_workers="block",
-        reduced_motion="reduce" if st.reduced else "no-preference",
+        reduced_motion="reduce" if (st.reduced or REDUCE_ALL) else "no-preference",
         locale="en-GB",
     )
     ctx.add_init_script(init_script(st))
@@ -849,10 +863,17 @@ def common_checks(run: Run, page: Page, vp: Viewport, st: State, net: Net, p: di
         finding(run, "fail", "google-fonts", "the market build must self-host fonts: " + url)
 
     fonts = page.evaluate(FONTS)
-    if not fonts.get("sora"):
-        finding(run, "fail", "fonts", "Sora is not loaded (document.fonts.check)")
     if not fonts.get("instrument"):
-        finding(run, "fail", "fonts", "Instrument Sans is not loaded (document.fonts.check)")
+        finding(run, "fail", "fonts", "Instrument Sans is not loaded (document.fonts)")
+    if fonts.get("monoDeclared") and not fonts.get("mono"):
+        finding(run, "fail", "fonts", "IBM Plex Mono is declared but did not load (document.fonts)")
+    for fam in fonts.get("errored") or []:
+        finding(run, "fail", "fonts", "a declared face failed to load: " + str(fam))
+    # R4 retired Sora (Instrument Sans carries the display sizes): a build that still declares it is
+    # the previous design — reported, never failed, so a BEFORE run can be compared with an AFTER run
+    if fonts.get("sora"):
+        finding(run, "warn", "fonts", "Sora is still declared (retired by R4: the display face is Instrument Sans)")
+    run.notes.append("fonts: instrument=" + str(bool(fonts.get("instrument"))) + " plex-mono=" + str(bool(fonts.get("mono"))) + " sora-declared=" + str(bool(fonts.get("sora"))))
 
     # one row per control shape and height — a rail of 12 cards, or 22 area chips, is one finding
     groups: dict[tuple[str, int], list[dict]] = {}
@@ -1028,6 +1049,8 @@ def band_hint_check(run: Run, page: Page) -> None:
 # the whole listing is on the page — otherwise the sold-out tail is never rendered and the check
 # proves nothing.
 SOLDOUT_ROOTS = {"home": 'section[aria-labelledby="home-all"]', "shop": "main", "category": "main"}
+# R4: the sold-out lines sit after a ruled divider "Not in stock now · N lines" — never hidden
+SOLDOUT_DIVIDER = 'p.shelf-divider'
 SOLDOUT_EXPAND_MAX = 12
 
 STOCK_ORDER = r"""
@@ -1041,7 +1064,7 @@ STOCK_ORDER = r"""
   if (firstOut >= 0) {
     states.forEach((s, i) => {
       if (i > firstOut && s !== 'out_of_stock') {
-        const code = (cards[i].querySelector('[class*="tnum"]') || cards[i]).textContent.trim().slice(0, 24);
+        const code = (cards[i].querySelector('.code') || cards[i].querySelector('[class*="tnum"]') || cards[i]).textContent.trim().slice(0, 24);
         late.push({ index: i, state: s, code });
       }
     });
@@ -1091,6 +1114,22 @@ def soldout_order_check(run: Run, page: Page, root: str) -> None:
         "sold-out order: " + str(found["available"]) + " available · " + str(found["soldOut"]) + " sold out"
         + " (" + str(found["total"]) + " cards, Show more ×" + str(presses) + ")"
     )
+    # the R4 divider: present exactly when a sold-out line is rendered, and above the first one
+    divider = page.evaluate(
+        "([root, sel]) => { const scope = document.querySelector(root); if (!scope) return null;"
+        " const d = scope.querySelector(sel); const first = scope.querySelector('article[data-stock=\"out_of_stock\"]');"
+        " if (!d) return { present: false, text: '' };"
+        " const above = first ? Boolean(d.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING) : null;"
+        " return { present: true, text: (d.textContent || '').trim().slice(0, 60), above }; }",
+        [root, SOLDOUT_DIVIDER],
+    )
+    if divider and found["soldOut"] > 0:
+        if not divider["present"]:
+            finding(run, "fail", "soldout-divider", "sold-out cards are rendered without the “" + STR["shop.notInStock"] + "” divider")
+        elif divider["above"] is False:
+            finding(run, "fail", "soldout-divider", "the divider sits below the first sold-out card")
+        else:
+            run.notes.append("sold-out divider: “" + divider["text"] + "”")
     if found["late"]:
         who = ", ".join(x["code"] + " (#" + str(x["index"]) + ", " + x["state"] + ")" for x in found["late"][:3])
         finding(
@@ -1187,9 +1226,9 @@ def slider_timing(run: Run, page: Page) -> None:
                 return round(time.time() - t0, 1)
         return None
 
-    moved = wait_change(start, 7.0)
+    moved = wait_change(start, 7.5)
     if moved is None:
-        finding(run, "warn", "slider-autoplay", "the slide did not change within 7s (dwell is 5.5s) — autoplay may be paused")
+        finding(run, "warn", "slider-autoplay", "the slide did not change within 7.5s (dwell is 6s) — autoplay may be paused")
     else:
         run.notes.append("autoplay advanced after " + str(moved) + "s")
 
@@ -1573,9 +1612,12 @@ def main() -> int:
     ap.add_argument("--api", default="http://127.0.0.1:8001", help="the API the preview talks to (used to find a rep slug)")
     ap.add_argument("--out", required=True, help="output directory for results.json, index.md and the PNGs")
     ap.add_argument("--only", default="", help="comma-separated state keys (see results.json / README)")
-    ap.add_argument("--quick", action="store_true", help="only 390x844 and 1440x900")
+    ap.add_argument("--quick", action="store_true", help="only the lead viewports, 430x932 and 1366x768")
     ap.add_argument("--list", action="store_true", help="print the states and exit")
+    ap.add_argument("--reduced-motion", action="store_true", help="run every state under prefers-reduced-motion (stable frames for before/after reviews)")
     args = ap.parse_args()
+    global REDUCE_ALL
+    REDUCE_ALL = args.reduced_motion
 
     base = args.base.rstrip("/")
     out = Path(args.out)
