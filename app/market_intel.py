@@ -582,7 +582,9 @@ def refresh_item(item_id: int) -> dict:
 
 
 def _new_item(f: dict, yq_code: str | None, actor: str, now: datetime, title: str | None = None) -> dict:
-    title = title or f.get("title") or (f.get("note") or "")[:80] or None
+    # Only a typed name (or the catalog's) becomes the title: a free-text note can name a shop or a
+    # person, and item titles are what other reps see. The office reads the note as `first_note`.
+    title = title or f.get("title") or None
     row = {"kind": f["kind"], "title": title, "norm_key": norm_name(f.get("title") or f.get("note")),
            "brand": f.get("brand"), "competitor": f.get("competitor"), "category": f.get("category"),
            "barcode": f.get("barcode"), "yq_item_code": yq_code, "status": "new",
@@ -593,11 +595,12 @@ def _new_item(f: dict, yq_code: str | None, actor: str, now: datetime, title: st
 def _card(result: str, obs: dict, item: dict | None, stats: dict | None, yq: dict | None,
           near: dict | None, photos: int, *, replayed: bool = False) -> dict:
     shops = int((stats or {}).get("shop_count") or (item or {}).get("shop_count") or 0)
-    title = (item or {}).get("title") or (yq or {}).get("display_name") or "this item"
+    title = (item or {}).get("title") or (yq or {}).get("display_name")
     if result == "already_in_yq":
-        msg = f"We already sell this: {(yq or {}).get('display_name') or title}. Your sighting is attached to it for the office."
+        msg = f"We already sell this: {(yq or {}).get('display_name') or title or 'a YQ item'}. Your sighting is attached to it for the office."
     elif result == "seen_before":
-        msg = f"Added your sighting to “{title}”" + (f" (now {shops} shop{'s' if shops != 1 else ''})." if shops else ".")
+        msg = (f"Added your sighting to “{title}”" if title else "Added your sighting to one the team already reported") \
+            + (f" (now {shops} shop{'s' if shops != 1 else ''})." if shops else ".")
     elif result == "new_find":
         msg = "New find saved. The office will review it."
     else:
@@ -640,6 +643,7 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
     `photos` = [(filename, bytes)], at most MAX_PHOTOS. Every photo is validated before anything is
     written; a retry with the same client_uuid returns the stored card and writes nothing."""
     now = now or _now()
+    actor = (actor or "").strip().lower()
     if len(photos) > MAX_PHOTOS:
         raise MarketIntelError(f"At most {MAX_PHOTOS} photos per sighting.")
     f = clean_fields(raw)
@@ -778,8 +782,10 @@ def legacy_capture(actor: str, f: dict, processed: list[dict], cu: str) -> dict:
 def _cluster_out(r: dict, signed: dict, *, office: bool) -> dict:
     pmin, pmax = money_out(r.get("price_min")), money_out(r.get("price_max"))
     cover = signed.get((r.get("cover_bucket") or "", r.get("cover_path") or "")) if r.get("cover_path") else None
+    # an item without a typed name shows the office its first note; a rep only ever sees a typed name
+    title = r.get("title") or ((clean_text(r.get("first_note"), 80) if office else None))
     out = {"item_id": r.get("item_id"), "kind": r.get("kind"), "kind_label": KIND_LABELS.get(r.get("kind"), "Other"),
-           "title": r.get("title"), "brand": r.get("brand"), "competitor": r.get("competitor"),
+           "title": title, "brand": r.get("brand"), "competitor": r.get("competitor"),
            "category": r.get("category"), "barcode": r.get("barcode"), "yq_item_code": r.get("yq_item_code"),
            "status": r.get("status"),
            "status_label": (STATUS_LABELS if office else REP_STATUS_LABELS).get(r.get("status"), ""),
@@ -858,7 +864,8 @@ def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: 
                 or q in _ci(r.get("yq_item_code")) or (qd and len(qd) >= 6 and qd in str(r.get("barcode") or ""))]
     mine_ids: set[int] = set()
     if not office and actor:
-        own = c.table("market_observations").select("item_id").eq("created_by", actor).limit(2000).execute().data or []
+        own = (c.table("market_observations").select("item_id").eq("created_by", actor.strip().lower())
+               .limit(2000).execute().data or [])
         mine_ids = {int(o["item_id"]) for o in own if o.get("item_id") is not None}
     if office and (f.get("rep") or f.get("area")):
         q2 = c.table("market_observations").select("item_id,salesman_id,area")
@@ -986,7 +993,7 @@ def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
     cl = c.table("v_market_clusters").select("*").eq("item_id", item_id).limit(1).execute().data or []
     q = c.table("market_observations").select("*").eq("item_id", item_id)
     if not office:
-        q = q.eq("created_by", actor)
+        q = q.eq("created_by", (actor or "").strip().lower())
     obs = q.order("observed_at", desc=True).order("id", desc=True).limit(500).execute().data or []
     photos = _photos_for([int(o["id"]) for o in obs])
     signed = sign_many([(p.get("bucket"), p.get("path")) for ps in photos.values() for p in ps
@@ -997,7 +1004,8 @@ def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
     ctx_items = (_catalog_ctx() or {}).get("items") or {}
     out = {"available": True, "item": {
                "id": item["id"], "kind": item.get("kind"), "kind_label": KIND_LABELS.get(item.get("kind"), "Other"),
-               "title": item.get("title"), "brand": item.get("brand"), "competitor": item.get("competitor"),
+               "title": item.get("title") or (clean_text((cl[0] if cl else {}).get("first_note"), 80) if office else None),
+               "brand": item.get("brand"), "competitor": item.get("competitor"),
                "category": item.get("category"), "barcode": item.get("barcode"),
                "yq_item_code": item.get("yq_item_code"), "status": item.get("status"),
                "status_label": (STATUS_LABELS if office else REP_STATUS_LABELS).get(item.get("status"), ""),
@@ -1065,7 +1073,7 @@ def mine(actor: str, limit: int = 50) -> dict:
     if not available():
         return _unavailable({"observations": []})
     c = get_client()
-    obs = (c.table("market_observations").select("*").eq("created_by", actor)
+    obs = (c.table("market_observations").select("*").eq("created_by", (actor or "").strip().lower())
            .order("created_at", desc=True).order("id", desc=True)
            .limit(max(1, min(int(limit or 50), 200))).execute().data or [])
     item_ids = sorted({int(o["item_id"]) for o in obs if o.get("item_id") is not None})

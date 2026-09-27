@@ -171,7 +171,7 @@ function ClusterCard({ c, onOpen, showMine }: { c: MiCluster; onOpen?: () => voi
           {c.yq_item_code ? <Badge tone="green">YQ {c.yq_item_code}</Badge> : c.kind === 'new_product' ? <Badge tone="amber">Gap</Badge> : null}
           {c.system_signals > 0 && <Badge tone="accent">Marketplace demand</Badge>}
         </div>
-        <div className="line-clamp-2 text-[14px] font-semibold leading-snug text-foreground">{c.title || 'Unnamed sighting'}</div>
+        <div className="line-clamp-2 text-[14px] font-semibold leading-snug text-foreground">{c.title || `${c.kind_label}, not named yet`}</div>
         {(c.brand || c.category) && (
           <div className="truncate text-[12px] text-muted-foreground">{[c.brand, c.category].filter(Boolean).join(' · ')}</div>
         )}

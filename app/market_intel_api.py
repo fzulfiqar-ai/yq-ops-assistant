@@ -48,6 +48,10 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def _office(user: CurrentUser) -> bool:
         return user.role != "salesman"
 
+    def _me(user: CurrentUser) -> str:
+        """The login as a sighting stores it (created_by) and "my own" compares it: lower case."""
+        return (user.email or "").strip().lower()
+
     def _caps(user: CurrentUser) -> dict:
         return {"office": _office(user), "can_review": user.role in mi.REVIEW_ROLES,
                 "can_approve": user.role in mi.APPROVE_ROLES, "can_capture": not is_read_only(user.role)}
@@ -126,7 +130,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                "demand_level": demand_level, "demand_qty": demand_qty, "shop_name": shop_name,
                "shop_phone": shop_phone, "area": area, "barcode": barcode}
         try:
-            card = await run_in_threadpool(mi.capture, user.email, raw, blobs)
+            card = await run_in_threadpool(mi.capture, _me(user), raw, blobs)
         except mi.MarketIntelError as e:
             _fail(e)
         log_event(user.email, "market_intel.capture",
@@ -137,7 +141,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.get("/market-intel/mine")
     def market_intel_mine(limit: int = 50, user: CurrentUser = Depends(gate)) -> dict:
-        return {**mi.mine(user.email, limit=limit), "capabilities": _caps(user)}
+        return {**mi.mine(_me(user), limit=limit), "capabilities": _caps(user)}
 
     # ── the board ─────────────────────────────────────────────────────────────
     @app.get("/market-intel/items")
@@ -151,7 +155,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if office:                     # a rep never filters by another rep (or learns who saw what)
             filters.update(rep=rep, area=area)
         try:
-            out = mi.board(office=office, actor=user.email, filters=filters, limit=limit)
+            out = mi.board(office=office, actor=_me(user), filters=filters, limit=limit)
         except mi.MarketIntelError as e:
             _fail(e)
         return {**out, "capabilities": _caps(user)}
@@ -159,7 +163,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.get("/market-intel/items/{item_id}")
     def market_intel_item(item_id: int, user: CurrentUser = Depends(gate)) -> dict:
         try:
-            out = mi.item_detail(item_id, office=_office(user), actor=user.email)
+            out = mi.item_detail(item_id, office=_office(user), actor=_me(user))
         except mi.MarketIntelError as e:
             _fail(e)
         return {**out, "capabilities": _caps(user)}

@@ -311,7 +311,9 @@ def _clusters_view(db: _FakeDB) -> list[dict]:
                     "cover_bucket": cover[0]["bucket"] if cover else None, "cover_path": cover[0]["path"] if cover else None,
                     "has_ai_suggestion": i.get("ai_suggestion") is not None, "ai_confidence": i.get("ai_confidence"),
                     "verified": bool(i.get("verified")), "status_changed_at": i.get("status_changed_at"),
-                    "created_at": i.get("created_at"), "updated_at": i.get("updated_at")})
+                    "created_at": i.get("created_at"), "updated_at": i.get("updated_at"),
+                    "first_note": next((o["note"] for o in sorted(mine, key=lambda o: (str(o.get("observed_at")), o["id"]))
+                                        if str(o.get("note") or "").strip()), None)})
     return out
 
 
@@ -908,6 +910,26 @@ def _():
         r2 = c.get("/market-intel/items?rep=2&area=Riffa", headers=_h("rep1")).json()
         assert {i["item_id"] for i in r2["items"]} == {a["item"]["id"], b["item"]["id"]}
         assert c.get("/market-intel/review", headers=_h("rep1")).status_code == 403
+
+
+@test("board: a note never becomes a title other reps read — the office sees it as the name, reps see only typed names")
+def _():
+    from app import market_intel as mi
+    fake = _db()
+    with _env(fake):
+        a = _cap("rep1@example.com", [], kind="shop_asked", note="Shop of Mr Example wants 20 cables")
+        b = _cap("rep2@example.com", [], kind="shop_asked", note="cables example mr of shop wants 20")
+        assert a["result"] == "new_find" and b["result"] == "seen_before" and a["item"]["id"] == b["item"]["id"]
+        assert "Mr Example" not in b["message"] and "already reported" in b["message"], b["message"]
+        rep = mi.board(office=False, actor="rep2@example.com")
+        office = mi.board(office=True)
+        detail_rep = mi.item_detail(a["item"]["id"], office=False, actor="rep2@example.com")
+        detail_office = mi.item_detail(a["item"]["id"], office=True)
+    assert fake.rows("market_items")[0]["title"] is None
+    assert rep["items"][0]["title"] is None and "Mr Example" not in json.dumps(rep)
+    assert detail_rep["item"]["title"] is None and "Mr Example" not in json.dumps(detail_rep)
+    assert office["items"][0]["title"] == "Shop of Mr Example wants 20 cables"
+    assert detail_office["item"]["title"] == "Shop of Mr Example wants 20 cables"
 
 
 @test("item: office sees every sighting with the rep's name, shops, decisions; a rep only his own; flagged photos hidden from him")

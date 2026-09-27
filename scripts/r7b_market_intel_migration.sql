@@ -252,7 +252,8 @@ select i.id                                   as item_id,
        cover.path                             as cover_path,
        (i.ai_suggestion is not null)          as has_ai_suggestion,
        i.ai_confidence, i.verified,
-       i.status_changed_at, i.created_at, i.updated_at
+       i.status_changed_at, i.created_at, i.updated_at,
+       fn.note                                as first_note   -- the office's name for an item nobody named (never shown to reps)
 from market_items i
 left join obs on obs.item_id = i.id
 left join ph  on ph.item_id = i.id
@@ -262,7 +263,14 @@ left join lateral (
   where o.item_id = i.id and not p.has_people_flag
   order by o.observed_at desc, p.position, p.id
   limit 1
-) cover on true;
+) cover on true
+left join lateral (
+  select o.note
+  from market_observations o
+  where o.item_id = i.id and nullif(btrim(o.note), '') is not null
+  order by o.observed_at, o.id
+  limit 1
+) fn on true;
 revoke all on v_market_clusters from anon, authenticated;
 
 comment on view v_market_clusters is
