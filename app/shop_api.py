@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def register(app, limiter) -> None:  # noqa: C901 — one registration function, many small routes
-    from fastapi import BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
+    from fastapi import BackgroundTasks, Depends, File, HTTPException, Query, Request, Response, UploadFile
     from pydantic import BaseModel, Field
 
     from app import attribution, shop, shop_audit, shop_notify, shop_pipeline
@@ -631,6 +631,15 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         salesman_id: int | None = None          # admins without a linked salesman row choose one
         customer: Customer
         note: str | None = Field(default=None, max_length=1000)
+        # Sprint 5: made when the checkout opens and kept until the order is placed, so a retry
+        # after a timeout returns the order the first tap created (create_order's idempotency,
+        # keyed with the server-side device id staff:<login email>)
+        client_order_id: str | None = Field(default=None, max_length=64)
+
+    def _staff_device(email: str) -> str:
+        """The idempotency device of a logged-in rep: never sent by the client, never written to a
+        merchant's device list (create_order keeps it on the order row only)."""
+        return f"staff:{(email or '').strip().lower()}"[:64]
 
     @app.get("/shop/catalog")
     def shop_staff_catalog(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
@@ -651,17 +660,24 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.post("/shop/order")
     def shop_staff_order(request: Request, body: StaffOrderRequest, background: BackgroundTasks,
                          user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:
-        """A salesman (or admin) places an order FOR a shop — source 'salesman', placed_by = login."""
+        """A salesman (or admin) places an order FOR a shop — source 'salesman', placed_by = login.
+        Sprint 5: idempotent per (staff:<email>, client_order_id) — a re-submit of the same
+        checkout returns the order it already created (duplicate: true), never a second one."""
+        payload = body.model_dump()
+        payload["device_id"] = _staff_device(user.email) if body.client_order_id else None
         try:
-            o = shop.create_order(body.model_dump(), ip=_ip(request), ua=_ua(request), staff_email=user.email)
+            o = shop.create_order(payload, ip=_ip(request), ua=_ua(request), staff_email=user.email)
         except ShopError as e:
             raise _conflict_or_400(e) from e
         if not o.get("duplicate"):     # same guard as market_order: a re-submit never re-alerts
             background.add_task(shop_notify.notify_new_order, o["id"])
-        log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"]})
-        sm = o.get("salesman") or {}
+            followups.forget_rep(shop.salesman_for_user(user.email))   # the book and Today now know this shop
+        log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"],
+                                                           "duplicate": bool(o.get("duplicate"))})
+        sm = o.get("salesman") or shop._salesman_by_id(o.get("salesman_id")) or {}
         return {
-            "ok": True, "order_id": o["id"], "order_no": o["order_no"], "token": o["token"],
+            "ok": True, "duplicate": bool(o.get("duplicate")),
+            "order_id": o["id"], "order_no": o["order_no"], "token": o["token"],
             "status_url": o["status_url"],
             "salesman": ({"name": sm.get("name"), "phone": sm.get("whatsapp") or sm.get("phone")} if sm else None),
             "whatsapp_url": shop_notify.salesman_to_customer_wa_url(o, "new"),   # the salesman's tap TO the shop
@@ -1110,6 +1126,74 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if empty:
             return {**empty, "days": 7, "orders": 0, "sessions": 0}
         return followups.link_week(sm, 7)
+
+    # ── Sprint 5 "rep speed" (27-Sep-2026): the book, the usual basket, Today in one call ──
+    # Personal like the cards above: a rep sees his own Focus shops and his own app customers;
+    # an admin with no salesman row sees every app customer (to order for any shop); any other
+    # login without one gets the hint. Management (read-only, masked contacts) never has a book.
+    class BookPhoneIn(BaseModel):
+        shop: str = Field(max_length=160)        # the Focus customer name (the book row's focus_name)
+        phone: str = Field(max_length=32)
+
+    def _book_owner(user: CurrentUser) -> tuple[dict | None, bool, dict | None]:
+        """(salesman row, admin, empty answer). An admin without a row gets the app customers."""
+        sm = shop.salesman_for_user(user.email)
+        admin = user.role == "admin"
+        if sm or admin:
+            return sm, admin, None
+        return None, False, {"hint": shop.UNLINKED_HINT}
+
+    @app.get("/shop/me/book")
+    def shop_me_book(user: CurrentUser = Depends(require_any_feature("Catalog", "Shop Orders"))) -> dict:
+        """The merged book: the rep's Focus shops (holdout shops included for search, never marked
+        due) and the shops he ordered for in the app, one row per shop (same phone or same shop
+        name), due first — each with its last order date and an over-90 credit chip."""
+        sm, admin, empty = _book_owner(user)
+        if empty or masks_contacts(user.role):
+            return {**(empty or {"hint": shop.UNLINKED_HINT}), "shops": [], "count": 0, "counts": {}}
+        return followups.book(sm, admin=admin)
+
+    @app.get("/shop/me/basket")
+    def shop_me_basket(shop_key: str = Query(alias="shop", max_length=200),
+                       user: CurrentUser = Depends(require_any_feature("Catalog", "Shop Orders"))) -> dict:
+        """One shop of the caller's book: its usual basket (Focus regulars, due first, median
+        quantity), its last app order and the suggested repeat for "Order again" / the restock
+        link. 404 for a shop outside the caller's book."""
+        sm, admin, empty = _book_owner(user)
+        if empty or masks_contacts(user.role):
+            raise HTTPException(status_code=404, detail="Shop not found.")
+        out = followups.shop_basket(sm, shop_key, admin=admin)
+        if out is None:
+            raise HTTPException(status_code=404, detail="Shop not found.")
+        return out
+
+    @app.post("/shop/me/book/phone")
+    @limiter.limit("30/minute")
+    def shop_me_book_phone(request: Request, body: BookPhoneIn,
+                           user: CurrentUser = Depends(require_any_feature("Catalog", "Shop Orders"))) -> dict:
+        """Save a phone for a Focus shop of the caller's book that has none on file (fill-blank
+        only — a number already there is kept). Audited without the digits."""
+        sm, admin, empty = _book_owner(user)
+        if empty:
+            raise HTTPException(status_code=404, detail="Shop not found.")
+        try:
+            out = followups.save_shop_phone(sm, body.shop, body.phone, user.email, admin=admin)
+        except followups.BookError as e:
+            raise HTTPException(status_code=404 if e.missing else 400, detail=str(e)) from e
+        log_event(user.email, "shop.book_phone", detail={"salesman_id": (sm or {}).get("id"),
+                                                         "shop": shop.clean(body.shop, 160), "saved": out["saved"]})
+        return out
+
+    @app.get("/shop/me/today")
+    def shop_me_today(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """Today in one call: the rep card and money strip, "To confirm" (oldest first, age, over
+        the confirm SLA), in progress, due top 5, baskets not sent, link week, restock. The heavy
+        half is cached 60 s per rep; the order queue is read live. A login with no salesman row
+        gets the hint (an admin: the company queue and KPIs, as /shop/me gives him); management is
+        not a rep and reads orders on its own pages."""
+        if is_read_only(user.role):
+            return followups.today(None, user.email, is_admin=False)
+        return followups.today(shop.salesman_for_user(user.email), user.email, is_admin=user.role == "admin")
 
     # ── portal: salesmen (Shop Admin) ─────────────────────────────────────────
     @app.get("/shop/salesmen")
