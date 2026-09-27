@@ -116,8 +116,9 @@ function ToConfirm({ t }: { t: TodayData }) {
         </Link>
       )}
       {(t.in_progress || 0) > 0 && (
-        <Link to="/shop-orders?bucket=progress" className="flex items-center justify-between border-t border-border bg-muted/60 px-4 py-2.5 text-[12.5px] font-medium text-muted-foreground hover:text-foreground">
-          <span>{t.in_progress} in progress (confirmed, preparing, on the way)</span>
+        <Link to="/shop-orders?bucket=confirmed" className="flex items-center justify-between border-t border-border bg-muted/60 px-4 py-2.5 text-[12.5px] font-medium text-muted-foreground hover:text-foreground">
+          {/* the rep's flow is Received → Confirmed → Delivered: the storekeeper's stamps are never named here */}
+          <span>{t.in_progress} confirmed, not yet delivered</span>
           <ChevronRight size={15} aria-hidden="true" />
         </Link>
       )}
