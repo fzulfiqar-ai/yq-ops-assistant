@@ -143,6 +143,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     class InvoiceRequest(BaseModel):
         focus_invoice_no: str = Field(max_length=shop_pipeline.INVOICE_MAX)
 
+    class FocusLinkRequest(BaseModel):
+        # R7a: the office's answer to a suggested (or hand-typed) Focus invoice for this order
+        invoice_key: str = Field(max_length=shop_pipeline.INVOICE_MAX)
+        action: str = Field(max_length=10)                  # accept | reject
+        note: str | None = Field(default=None, max_length=300)
+
     class CustomerAssignRequest(BaseModel):
         salesman_id: int
         reason: str = Field(max_length=300)
@@ -830,6 +836,31 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         """Delivered orders vs Focus (v_shop_focus_recon): no invoice recorded, invoice not in
         v_sales, salesman or amount mismatch. Empty + hint before the migration."""
         return shop_pipeline.focus_recon(limit)
+
+    # ── R7a Focus link: suggestions and the one-tap accept (admin, like the recon) ───────
+    @app.get("/shop/focus/candidates")
+    def shop_focus_candidates(limit: int = 300, per_order: int = shop_pipeline.CANDIDATES_PER_ORDER,
+                              _admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Open orders without a confirmed Focus link, each with the invoices that may cover it
+        (v_shop_focus_candidates: invoice note / stock issue naming the order, or the same rep's
+        invoice with the same lines), best first, with the line-by-line differences. Empty +
+        hint before scripts/r7_focus_links_migration.sql."""
+        return shop_pipeline.list_focus_candidates(limit, per_order)
+
+    @app.post("/shop/orders/{order_id}/focus-link")
+    def shop_order_focus_link(order_id: int, body: FocusLinkRequest,
+                              admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Accept or reject one Focus invoice for this order. Accept links it, fills an empty
+        invoice number and moves an open order to Delivered (no money column, no merchant
+        message, never a cancelled order); reject means it is never suggested again. Audited
+        (audit_log 'shop.focus_link' + shop_admin_audit 'focus_link') inside
+        shop_pipeline.decide_focus_link. 404 unknown order, 409 the order moved meanwhile."""
+        try:
+            return shop_pipeline.decide_focus_link(order_id, body.invoice_key, body.action, admin.email, body.note)
+        except ShopError as e:
+            if str(e) == "Order not found.":
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
 
     # ── R3 attribution: the shop's rep (admin) ────────────────────────────────────
     @app.post("/shop/customers/{customer_id}/assign")

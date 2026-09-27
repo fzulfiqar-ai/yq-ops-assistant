@@ -450,6 +450,45 @@ Migration `scripts/r3_pipeline_migration.sql` (reverse `r3_pipeline_reverse.sql`
   reverse script is still the cleaner order.
 - Tests: `python -m tests.test_r3_pipeline` (no database; the local replay SKIPs without the scratch cluster).
 
+### Release R7a — Focus link v1 (27-Sep-2026, `scripts/r7_focus_links_migration.sql`)
+The R3 check could never match: Focus stores `SI : SI-YQ-26-09-119` where staff type `SI-YQ-26-09-119`, names the rep
+`<name> - Acc WH` where `salesmen.focus_name` is `<name>`, and a rep often invoices two orders of one shop together.
+- **One key.** `shop_pipeline.clean_invoice_no` = the views' `upper(regexp_replace(trim(x), '^SI\s*:\s*', '', 'i'))`:
+  `SI : SI-YQ-26-09-119`, `SI:SI-YQ-26-09-119` and ` si-yq-26-09-119 ` are all `SI-YQ-26-09-119`, and that is what
+  Delivered / `POST …/invoice` store.
+- **`shop_order_focus_links`** (many to many; `state` suggested | confirmed | rejected; `method` narration_ref | sio_ref |
+  auto_items | manual; `confidence`, `allocated_bhd` = the order's total at accept, `sio_key`, `note`, who/when).
+  Service role only. Never deleted by the app; an undo is a reject.
+- **`v_shop_focus_recon`** keeps its 23 columns (+ `linked_orders_n`, `linked_orders_total_bhd`, `invoice_keys`,
+  `link_state` appended). An order's invoices are its confirmed links, else the number typed at Delivered (unless that
+  pair was rejected); the rep matches suffix-aware; the invoice total is compared with the **sum of every order on
+  it**; `invoice_reused` = several orders on one invoice and not all of them confirmed by a person.
+- **`v_shop_focus_candidates`** — for live orders (Received … Delivered, not test, not cancelled) without a confirmed
+  link: `narration_ref` 1.000 (the invoice's Narration names the order number — the storekeeper types
+  `YQ-2609-0019`, several comma-separated), `sio_ref` 0.950 (a Stock Issue Voucher's Narration names it and the same
+  rep's SI with ≥ 60 % of those SKUs follows within 0-2 days), `auto_items` ≤ 0.900 (same rep, invoice dated order
+  day −1 … +7, ≥ 60 % of the order's alias-resolved SKUs on it; backorder lines count only when there is nothing
+  else). Line diff counts, `rank` per order, `invoice_orders_n`. Rejected pairs never return; an invoice fully covered
+  by confirmed links is not auto-suggested again. Production 27-Sep-2026 (read-only): the six real pairs (8 orders)
+  are each order's rank 1; 0006 also gets SI-99 on items alone until 0002 + 0003 are accepted. ~25 ms.
+- **`GET /shop/focus/candidates?limit=300&per_order=5`** (admin) → `{orders:[{order_id, order_no, status,
+  status_label, created_at, customer_shop, salesman_id, salesman_name, order_total_bhd, typed_invoice_key,
+  candidates:[{invoice_key, invoice_date, focus_salesman, focus_customer, invoice_total_bhd, invoice_open_bhd,
+  invoice_linked_n, invoice_orders_n, amount_diff_bhd, method, method_label, confidence, overlap_share, sio_key, rank,
+  exact, lines:{order, invoice, matched, qty_diff, price_diff, missing_on_invoice, extra_on_invoice}}]}], count,
+  candidates, ledger_as_of}`; before the migration `{orders:[], count:0, candidates:0, hint}`.
+- **`POST /shop/orders/{id}/focus-link {invoice_key, action: accept|reject, note?}`** (admin). Accept: a confirmed
+  link (method / confidence from the suggestion, else `manual` — which must be in the uploaded `v_sales`), the invoice
+  number on the order **only when its field is empty**, and an open order moved to Delivered through `set_status`
+  (compare-and-swap; actor `focus-recon:<email>`; the status event's detail carries `invoice_key`, `method`,
+  `confidence`; a Received order passes Confirmed with `keep_totals`, so no confirmed total is written). No money
+  column, no merchant message, a cancelled order refused (400). Reject: stored as rejected; the order row untouched.
+  The same decision twice writes nothing. `audit_log 'shop.focus_link'` + `shop_admin_audit` (`focus_link`,
+  `accept`/`reject`, before/after = the link row). 404 unknown order, 409 lost race, 400 with the hint before the
+  migration. The manual payment endpoints are unchanged.
+- Tests: `python -m tests.test_r7a_focus` (no database; the local replay applies the migration + reverse inside a
+  rolled-back transaction on synthetic data and SKIPs without a cluster — `YQ_LOCAL_PG_R7` points it at one).
+
 ### Views for the learning loop
 `v_customer_regulars` (Focus cadence per merchant × SKU: times bought, median qty, cadence days, due flag — service
 role only, carries customer names), `v_shop_assignment_queue`, `v_shop_search_terms`, `v_shop_rail_perf`
