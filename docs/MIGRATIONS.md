@@ -372,3 +372,25 @@ four new roles (change those people on the Team page first). Both files were run
 the migration twice, the reverse refused with a management row and with a pending finance invite, then restored
 the six roles twice.
 
+## Release R7b (27-Sep-2026, not yet applied): `r7b_command_views_migration.sql` — the Command Centre order view
+
+Additive and idempotent, with `r7b_command_views_reverse.sql`; **not rehearsed on production** (the build session
+had read-only access only) — rehearse with `--rehearse`, apply, then `python -m scripts.audit_grants`. Order: after
+`r7_focus_links_migration.sql` (the file stops with a clear message if `shop_order_focus_links` is missing).
+
+Creates one view, `v_command_orders`: one row per marketplace order with status, source, the rep (id + name),
+`has_customer` (a flag, never the id), `is_test`, the lifecycle timestamps, the order and confirmed totals, units
+ordered vs units confirmed and the line count (one `GROUP BY` over `shop_order_lines`), `has_invoice_no` (a flag,
+never the number) and the confirmed Focus links (count + first decision time). No shop or merchant name, phone,
+email, token, IP or invoice number. `REVOKE ALL ... FROM anon, authenticated`; `GRANT SELECT` to `yq_readonly`
+only (the Command Centre's read path, `app/metrics.py`); not `security_invoker`. No row is written. The closing
+`DO` block asserts the 22 columns, that none of the personal columns is present, the grants, and one row per order.
+
+Code first is fine: `app/metrics.py` probes the view (a miss is remembered 5 minutes and re-probed on every upload)
+and until it exists reads `v_shop_orders_agent` — test orders cannot be told apart, the accepted rate and the
+invoice match rate are not shown, and the page says so. The view body was run read-only on production 27-Sep-2026
+as a plain SELECT (one row per order). Replayed on a throwaway local Postgres (synthetic schema and data, one
+rolled-back transaction: `python -m tests.test_r7b_command` with `YQ_LOCAL_PG_R7B` set): applied twice, the
+Command Centre's own order and match SQL run as `yq_readonly`, anon/authenticated refused, reverse twice,
+re-applied, refused without the links table. The reverse drops the view only (no CASCADE; nothing depends on it).
+
