@@ -280,6 +280,27 @@ check('the order’s own cart discount is shared pro rata over the requested lin
   eq(q.estTotal, 23.7)
 })
 
+check('a substitute inherits the replaced line’s share; the share never outgrows the discount as placed (shop_heart.compute_totals)', () => {
+  // as placed: items 23.000, cart discount 2.300, delivery 1.000 → 21.700
+  const o = order({ total_bhd: 21.7, discount_bhd: 2.3, delivery_bhd: 1 })
+  // TST-B (8.000) → TST-C × 4 (6.400): the share follows it — 2.300 × 21.4 / 23 = 2.140 (not 1.500 on TST-A alone)
+  let p = H.planEdit(o, draftWith(o, { 2: { sub: { code: 'TST-C', qty: 4 } } }), [], catalog, 'confirm')
+  eq(p.estTotal, 20.26, '21.400 − 2.140 + 1.000')
+  // TST-A 10 → 20: 2.300 × 38 / 23 = 3.800 would outgrow the 2.300 placed — capped
+  p = H.planEdit(o, draftWith(o, { 1: { qty: 20, reason: 'customer_changed' } }), [], catalog, 'confirm')
+  eq(p.estTotal, 36.7, '38.000 − 2.300 + 1.000')
+  // a saved substitute (substitute_for_line) of a requested line carries its share; one of an added line does not
+  const saved = order({ status: 'confirmed', total_bhd: 21.7, total_confirmed_bhd: 20.26, discount_bhd: 2.3, delivery_bhd: 1,
+    lines: [line(1, 'TST-A', 10, 1.5, { qty_confirmed: 10 }),
+      line(2, 'TST-B', 4, 2.0, { qty_confirmed: 0, line_status: 'substituted', substitute_item_code: 'TST-C' }),
+      line(3, 'TST-C', 4, 1.6, { qty_confirmed: 4, line_status: 'added', added_at_stage: 'confirm', substitute_for_line: 2 }),
+      line(4, 'TST-D', 2, 1.5, { qty_confirmed: 2, line_status: 'added', added_at_stage: 'confirm' }),
+      line(5, 'TST-C', 1, 1.6, { qty_confirmed: 1, line_status: 'added', added_at_stage: 'amend', substitute_for_line: 4 })] })
+  p = H.planEdit(saved, H.initialDraft(saved.lines), [], catalog, 'amend')
+  // items 15 + 6.4 + 3 + 1.6 = 26.000; share over 15 + 6.4 = 21.4 → 2.140; 26 − 2.14 + 1 = 24.86
+  eq(p.estTotal, 24.86)
+})
+
 /* ── deliver with changes ── */
 check('deliver: equal to confirmed = the one tap (nothing sent); a difference needs a reason; below the minimum needs the tick', () => {
   const o = order({ status: 'confirmed', total_confirmed_bhd: 23,

@@ -605,8 +605,11 @@ def _():
     from app.shop import confirm_order
     fake = _one("new")
     with _patched(fake):
-        _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 7}], None, None, actor=REP),
-                "Pick a reason for T02")
+        # (a request with NO reason at all is an order desk from before R7c: accepted as 'other' —
+        # see "legacy confirm" below; one reason anywhere makes every changed line need its own)
+        _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 7},
+                                          {"line_id": 12, "qty_confirmed": 3, "reason": "out_of_stock"}],
+                                      None, None, actor=REP), "Pick a reason for T02")
         _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 7, "reason": "bogus"}], None, None, actor=REP),
                 "Pick a reason for T02")
         _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 7, "reason": "other"}], None, None, actor=REP),
@@ -1343,7 +1346,8 @@ def _r(x: Decimal) -> Decimal:
 def _ref_total(order: dict, lines: list[dict], key: str) -> Decimal:
     """An independent pure-Decimal statement of the price lock (not app code): each line at its
     locked unit × the chosen quantity, the order's cart-level discount shared pro rata over the
-    REQUESTED lines, delivery as ordered."""
+    REQUESTED lines — never more than the discount as placed (a raised quantity does not grow it)
+    nor more than those lines' value — delivery as ordered. (No substitutes in the random edits.)"""
     unit = {ln["id"]: D(ln["unit_price_confirmed"] if ln.get("unit_price_confirmed") is not None else ln["unit_price_bhd"])
             for ln in lines}
     orig = [ln for ln in lines if not ln.get("added_at_stage")]
@@ -1352,7 +1356,7 @@ def _ref_total(order: dict, lines: list[dict], key: str) -> Decimal:
     q = {ln["id"]: int(ln.get(key) if ln.get(key) is not None else 0) for ln in lines}
     s1 = sum((_r(unit[ln["id"]] * q[ln["id"]]) for ln in orig), Decimal(0))
     items = sum((_r(unit[ln["id"]] * q[ln["id"]]) for ln in lines), Decimal(0))
-    cart = min(_r(cart0 * s1 / s0), s1) if cart0 > 0 and s0 > 0 else Decimal(0)
+    cart = min(_r(cart0 * s1 / s0), cart0, s1) if cart0 > 0 and s0 > 0 else Decimal(0)
     return _r(items - cart + D(order["delivery_bhd"]))
 
 
@@ -1612,6 +1616,299 @@ def _():
     finally:
         conn.rollback()
         conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. the R7b+R7c review, stream F1 (order money + security): one regression test per fix
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _costed(order_id, confirmed=False):
+    """_lines with the R7c landed-cost snapshot on each line (synthetic figures)."""
+    out = _lines(order_id, confirmed=confirmed)
+    for ln, (cost, src) in zip(out, ((1.1, "mrn"), (0.8, "purchase_costs"))):
+        ln.update(unit_cost_bhd=cost, cost_source=src)
+    return out
+
+
+MGMT_MARGINS = "mgmt-margins@example.com"
+
+
+@test("F1.1 cost: a line's landed cost never reaches a salesman, the storekeeper or management without Margins — drawer and every write answer")
+def _():
+    users = USERS + [{"email": MGMT_MARGINS, "role": "management", "features": ["Shop Orders", "Margins"],
+                      "status": "active", "full_name": "Boss Two", "must_reset": False}]
+    try:
+        with _quiet_notify():
+            fake = _db(user_roles=users, shop_orders=[_order(1, "new"), _order(2, "confirmed"), _order(3, "confirmed")],
+                       shop_order_lines=_costed(1) + _costed(2, True) + _costed(3, True))
+            with _patched(fake):
+                c = _client(REP, "salesman")
+                answers = [c.get("/shop/orders/1"),
+                           c.post("/shop/orders/1/confirm", json={"lines": []}),
+                           c.post("/shop/orders/1/amend", json={"lines": [{"line_id": 11, "qty_confirmed": 9,
+                                                                           "reason": "damaged"}]}),
+                           c.post("/shop/orders/1/deliver", json={}),
+                           c.post("/shop/orders/2/status", json={"status": "cancelled", "reason_code": "duplicate"})]
+                s = _client(STORE, "storekeeper")
+                answers += [s.get("/shop/orders/3"), s.post("/shop/orders/3/status", json={"status": "packed"})]
+                answers += [_client(MGMT, "management").get("/shop/orders/3")]
+                for r in answers:
+                    assert r.status_code == 200, (r.request.url, r.status_code, r.text[:200])
+                    assert "unit_cost_bhd" not in r.text and "cost_source" not in r.text, (r.request.url, r.text[:300])
+                    assert r.json().get("lines") or (r.json().get("order") or {}).get("lines"), "the lines are there"
+                # admins and a role that holds 'Margins' still read it
+                for email, role in ((ADMIN, "admin"), (MGMT_MARGINS, "management")):
+                    ln = _client(email, role).get("/shop/orders/3").json()["lines"][0]
+                    assert ln["unit_cost_bhd"] == 1.1 and ln["cost_source"] == "mrn", (role, ln)
+    finally:
+        _drop_client()
+
+
+@test("F1.2 cas: confirm / amend / deliver take expected_updated_at — a stale read is 409 and writes nothing; no field = an older client, unchecked")
+def _():
+    from app.shop import CAS_CONFLICT_MSG, amend_order, confirm_order, deliver_with_changes
+    stale = (NOW - timedelta(days=1)).isoformat()
+    cases = [
+        ("new", lambda: confirm_order(1, [], None, None, actor=REP, expected_updated_at=stale)),
+        ("confirmed", lambda: amend_order(1, [{"line_id": 11, "qty_confirmed": 9, "reason": "damaged"}], None, None,
+                                          actor=REP, expected_updated_at=stale)),
+        ("confirmed", lambda: deliver_with_changes(1, actor=REP, expected_updated_at=stale)),
+        ("packed", lambda: deliver_with_changes(1, [{"line_id": 11, "qty_delivered": 9, "reason": "damaged"}],
+                                                actor=REP, expected_updated_at=stale)),
+    ]
+    for status, call in cases:
+        fake = _one(status)
+        before = [dict(r) for r in fake.rows("shop_orders")], [dict(r) for r in fake.rows("shop_order_lines")]
+        with _patched(fake):
+            _raises(call, CAS_CONFLICT_MSG)
+        assert fake.writes() == [], status
+        assert (fake.rows("shop_orders"), fake.rows("shop_order_lines")) == before
+    # the same instant written another way ('Z' for +00:00) is the same read
+    fake = _one("new", updated_at="2026-09-27T06:00:00.250000+00:00")
+    with _patched(fake):
+        confirm_order(1, [], None, None, actor=REP, expected_updated_at="2026-09-27T06:00:00.25Z")
+    assert fake.rows("shop_orders")[0]["status"] == "confirmed"
+    try:
+        with _quiet_notify():
+            fake = _db(shop_orders=[_order(1, "new"), _order(2, "confirmed")], shop_order_lines=_lines(1) + _lines(2, True))
+            with _patched(fake):
+                c = _client(REP, "salesman")
+                r = c.post("/shop/orders/1/confirm", json={"lines": [], "expected_updated_at": stale})
+                assert r.status_code == 409 and r.json()["detail"] == CAS_CONFLICT_MSG
+                assert fake.writes("shop_orders") == [] and fake.writes("shop_order_events") == []
+                read = c.get("/shop/orders/1").json()["updated_at"]
+                r = c.post("/shop/orders/1/confirm", json={"lines": [], "expected_updated_at": read})
+                assert r.status_code == 200, r.text[:200]
+                now = r.json()["order"]["updated_at"]
+                amend = {"lines": [{"line_id": 11, "qty_confirmed": 9, "reason": "damaged"}]}
+                r = c.post("/shop/orders/1/amend", json={**amend, "expected_updated_at": read})   # the old read
+                assert r.status_code == 409 and _lines_by(fake)[11]["qty_confirmed"] == 10
+                r = c.post("/shop/orders/1/deliver", json={"expected_updated_at": read})
+                assert r.status_code == 409 and fake.rows("shop_orders")[0]["status"] == "confirmed"
+                r = c.post("/shop/orders/1/amend", json={**amend, "expected_updated_at": now})
+                assert r.status_code == 200 and _lines_by(fake)[11]["qty_confirmed"] == 9
+                r = c.post("/shop/orders/1/deliver", json={"expected_updated_at": r.json()["order"]["updated_at"]})
+                assert r.status_code == 200 and r.json()["order"]["status"] == "delivered"
+                r = c.post("/shop/orders/2/deliver", json={})                                     # no field at all
+                assert r.status_code == 200
+    finally:
+        _drop_client()
+
+
+@test("F1.3 money: a substitute inherits the replaced line's share of the cart discount; the share never outgrows the discount as placed")
+def _():
+    from app.shop import confirm_order
+    from app.shop_heart import compute_totals
+
+    def placed() -> _FakeDB:     # 37.500 of goods − 2.000 cart discount + 1.000 delivery = 36.500
+        return _db(shop_orders=[_order(1, "new", discount_bhd=2.0, delivery_bhd=1.0, total_bhd=36.5)],
+                   shop_order_lines=_lines(1))
+    # X05 (8.000) → C18 × 4 (5.000): 2 × (29.5 + 5) / 37.5 = 1.840 (the old rule: 1.573 on T02 alone)
+    fake = placed()
+    with _patched(fake):
+        confirm_order(1, [{"line_id": 12, "substitute_item_code": "C18"}], None, None, actor=REP,
+                      shop_agreed={"via": "phone"})
+    assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 33.66           # 34.500 − 1.840 + 1.000
+    # X05 → UK21 × 4 (21.000): 2 × 50.5 / 37.5 = 2.693 would outgrow the 2.000 placed — capped
+    fake = placed()
+    with _patched(fake):
+        confirm_order(1, [{"line_id": 12, "substitute_item_code": "UK21"}], None, None, actor=REP,
+                      shop_agreed={"via": "phone"})
+    assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 49.5             # 50.500 − 2.000 + 1.000
+    # a raised quantity never grows it either: T02 10 → 20
+    fake = placed()
+    with _patched(fake):
+        confirm_order(1, [{"line_id": 11, "qty_confirmed": 20, "reason": "customer_changed"}], None, None, actor=REP)
+    assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 66.0             # 67.000 − 2.000 + 1.000
+    # the chain: a substitute of a substitute of a requested line carries; one of a plain added line does not
+    a = _line(1, 1, "T02", 10, 2.95)
+    b = _line(2, 1, "X05", 4, 2.0, qty_confirmed=0, line_status="substituted")
+    s1 = _line(3, 1, "C18", 4, 1.25, qty_confirmed=0, line_status="substituted", added_at_stage="confirm",
+               substitute_for_line=2)
+    s2 = _line(4, 1, "UK20N", 1, 4.5, qty_confirmed=1, line_status="added", added_at_stage="amend", substitute_for_line=3)
+    add = _line(5, 1, "UK21", 1, 5.25, qty_confirmed=1, line_status="added", added_at_stage="amend")
+    s3 = _line(6, 1, "C18", 2, 1.25, qty_confirmed=2, line_status="added", added_at_stage="amend", substitute_for_line=5)
+    t = compute_totals({"discount_bhd": 2.0, "delivery_bhd": 0}, [a, b, s1, s2, add, s3],
+                       lambda ln: ln["qty_confirmed"] if ln.get("qty_confirmed") is not None else ln["qty"])
+    # share over T02 29.500 + UK20N 4.500 = 34.000 → 2 × 34 / 37.5 = 1.813; items 41.750
+    assert t["cart_discount_bhd"] == D("1.813") and t["items_bhd"] == D("41.750") and t["total_bhd"] == D("39.937"), t
+
+
+@test("F1.4 email: lines through line_view (confirmed, then delivered quantities and money), the effective total, the as-ordered one struck")
+def _():
+    import app.shop_notify as sn
+    from app import shop
+    sent: list = []
+
+    def rec(subject, body, to):
+        sent.append((subject, body, to))
+        return {"sent": True, "emailed": True}
+    quiet = dict(_email=rec, _telegram=lambda *a, **k: {"sent": True}, _whatsapp_cloud=lambda *a, **k: {"sent": True})
+    fake = _one("new", customer_email="shop@example.test")
+    with _patched(fake), _swap(sn, **quiet):
+        shop.confirm_order(1, [{"line_id": 11, "qty_confirmed": 6, "reason": "out_of_stock", "note": "INTERNAL count"}],
+                           None, None, actor=REP)
+        sn.notify_status(1, "confirmed", None)
+        rows = sn.email_lines(shop.get_order(1))
+        assert [(r["item_code"], r["qty"], r["total"]) for r in rows] == [("T02", 6, 17.7), ("X05", 4, 8.0)]
+        assert rows[0]["tags"] == ["ordered 10", "Out of stock"] and rows[1]["tags"] == []
+        shop.deliver_with_changes(1, [{"line_id": 11, "qty_delivered": 5, "reason": "damaged"}], actor=REP)
+        sn.notify_status(1, "delivered", None)
+    confirmed, delivered = sent[0][1], sent[1][1]
+    assert ">6</td>" in confirmed and "17.700" in confirmed and "29.500" not in confirmed
+    assert "BHD 25.700" in confirmed and "<s>BHD 37.500</s>" in confirmed and "INTERNAL" not in confirmed
+    assert ">5</td>" in delivered and "14.750" in delivered and "BHD 22.750" in delivered
+    assert "confirmed 6" in delivered and "<s>BHD 37.500</s>" in delivered and "Damaged in stock" in delivered
+    # an order as placed shows no struck-through reference
+    with _patched(_db()):
+        assert "<s>" not in sn.order_html(_order(9, "new", lines=_lines(9)), "h", "i")
+    # a rep's order placed IN the shop: its customer email says Confirmed, never "will confirm shortly"
+    sent.clear()
+    fake = _db()
+    cust = {"name": "Test Shop", "phone": "33001122", "shop": "Test Shop", "area": "Manama", "email": "shop@example.test"}
+    with _patched(fake), _swap(sn, **quiet):
+        staff = shop.create_order(_body(customer=cust), staff_email=REP)
+        sn.notify_new_order(staff["id"])
+        market = shop.create_order(_body(customer=cust, device_id="dev-7", client_order_id="c-7"), market=True)
+        sn.notify_new_order(market["id"])
+    mails = [(s, b) for s, b, to in sent if to == "shop@example.test"]
+    assert len(mails) == 2, [m[0] for m in mails]
+    (s1, b1), (s2, b2) = mails
+    assert s1.endswith("confirmed") and "Your order is confirmed" in b1 and "will confirm" not in b1
+    assert s2.endswith("received") and "will confirm availability" in b2
+
+
+@test("F1.5 editor: re-substituting or restoring a line takes its earlier substitute out (confirmed 0, 'unavailable') in the same plan")
+def _():
+    from app.shop import amend_order, confirm_order, get_order, public_order_view
+    fake = _db(shop_orders=[_order(1, "new", total_bhd=47.5, subtotal_bhd=47.5)],
+               shop_order_lines=[_line(11, 1, "T02", 10, 2.95), _line(12, 1, "UK20", 4, 4.5)])
+    with _patched(fake):
+        confirm_order(1, [{"line_id": 12, "substitute_item_code": "UK20N"}], None, None, actor=REP)   # same price
+        first = next(ln["id"] for ln in fake.rows("shop_order_lines") if ln["item_code"] == "UK20N")
+        amend_order(1, [{"line_id": 12, "substitute_item_code": "C18", "reason": "out_of_stock"}], None, None,
+                    actor=REP, shop_agreed={"via": "phone"})
+        by = _lines_by(fake)
+        assert (by[first]["qty_confirmed"], by[first]["line_status"], by[first]["change_reason"]) == \
+            (0, "unavailable", "out_of_stock"), by[first]
+        second = next(ln["id"] for ln in fake.rows("shop_order_lines") if ln["item_code"] == "C18")
+        assert by[second]["qty_confirmed"] == 4 and by[second]["substitute_for_line"] == 12
+        assert by[12]["substitute_item_code"] == "C18" and by[12]["line_status"] == "substituted"
+        assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 34.5               # 29.500 + 4 × 1.250
+        ev = _events(fake, 1, "amended")[-1]["detail"]["lines"]
+        assert sorted(x["item_code"] for x in ev) == ["UK20", "UK20N"]
+        # keeping the substitute (changing it) while restoring its line is refused — nothing written
+        n = len(fake.writes())
+        _raises(lambda: amend_order(1, [{"line_id": 12, "qty_confirmed": 4, "reason": "customer_changed"},
+                                        {"line_id": second, "qty_confirmed": 2, "reason": "customer_changed"}],
+                                    None, None, actor=REP), "keep one of them")
+        assert len(fake.writes()) == n
+        # restore UK20 itself: C18 goes out too (sent unchanged beside it or not)
+        amend_order(1, [{"line_id": 12, "qty_confirmed": 4, "reason": "customer_changed"},
+                        {"line_id": second, "qty_confirmed": 4}], None, None, actor=REP)
+        by = _lines_by(fake)
+        assert (by[second]["qty_confirmed"], by[second]["line_status"]) == (0, "unavailable")
+        assert (by[12]["qty_confirmed"], by[12]["line_status"], by[12]["substitute_item_code"]) == (4, "ok", None)
+        assert sorted(ln["item_code"] for ln in by.values() if (ln.get("qty_confirmed") or 0) > 0) == ["T02", "UK20"]
+        assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 47.5
+        pub = public_order_view(get_order(1))
+    gone = {ln["item_code"]: ln["disposition"] for ln in pub["lines"] if ln["item_code"] in ("UK20N", "C18")}
+    assert gone == {"UK20N": "unavailable", "C18": "unavailable"}, "a substitute taken out is gone, not 'added'"
+
+
+@test("F1.6 reopen: a delivered order reopened takes the lines added at the door out (confirmed 0, 'unavailable', the reopen reason)")
+def _():
+    from app.shop import deliver_with_changes, reopen_order
+    fake = _one("confirmed")
+    with _patched(fake):
+        deliver_with_changes(1, [], [{"item_code": "C18", "qty": 4}], actor=REP)
+        assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 42.5
+        o = reopen_order(1, "Delivered to the wrong shop", ADMIN)
+    add = next(ln for ln in fake.rows("shop_order_lines") if ln.get("added_at_stage") == "delivery")
+    assert (add["qty_confirmed"], add["line_status"], add["qty_delivered"], add["change_reason"]) == \
+        (0, "unavailable", None, "other"), add
+    assert "Delivered to the wrong shop" in add["note"] and add["line_total_confirmed"] == 0.0 and add["qty"] == 4
+    assert o["status"] == "confirmed" and o["total_confirmed_bhd"] == 37.5, "back to what was confirmed"
+    back = next(x for x in _events(fake, 1, "reopened")[0]["detail"]["lines"] if x["line_id"] == add["id"])
+    assert (back["qty_confirmed"], back["line_status"], back["qty_delivered"]) == (4, "added", 4), back
+    assert all(ln["qty_delivered"] is None for ln in fake.rows("shop_order_lines"))
+
+
+@test("F1.7 told: a born-confirmed staff order starts as told (no 'Shop not told yet'); a later step asks for the tap again")
+def _():
+    from app import shop, shop_heart
+    fake = _db()
+    try:
+        with _quiet_notify(), _patched(fake):
+            o = shop.create_order(_body(), staff_email=REP)
+            c = _client(REP, "salesman")
+            j = c.get(f"/shop/orders/{o['id']}").json()
+            assert j["status"] == "confirmed" and j["shop_told"] is True, j.get("shop_told")
+            t02 = next(ln["id"] for ln in j["lines"] if ln["item_code"] == "T02")
+            r = c.post(f"/shop/orders/{o['id']}/amend", json={"lines": [{"line_id": t02, "qty_confirmed": 9,
+                                                                          "reason": "damaged"}]})
+            assert r.status_code == 200 and r.json()["order"]["shop_told"] is False
+    finally:
+        _drop_client()
+    created = {"event": "created", "ts": "2026-09-27T06:00:01+00:00", "detail": {}}
+    born = {"event": "status:confirmed", "ts": "2026-09-27T06:00:01+00:00", "detail": {"born_confirmed": True}}
+    later = {"event": "status:confirmed", "ts": "2026-09-27T06:00:05+00:00", "detail": {}}
+    assert shop_heart.notify_state([created, born], {"source": "market"})["shop_told"] is True, "the event flag alone"
+    assert shop_heart.notify_state([created], {"source": "salesman"})["shop_told"] is True, "the source alone"
+    assert shop_heart.notify_state([created, later], {"source": "market"})["shop_told"] is False
+    assert shop_heart.notify_state([created, later])["shop_told"] is False, "an older caller (events only)"
+
+
+@test("F1.9 legacy: a confirm from a pre-R7c desk (changed lines, no reason anywhere, nothing added) is accepted as 'other' — adverse still needs the tick")
+def _():
+    from app.shop import amend_order, confirm_order
+    from app.shop_heart import ADVERSE_MSG, LEGACY_NOTE
+    fake = _one("new")
+    with _patched(fake):
+        _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 3}], None, None, actor=REP), ADVERSE_MSG)
+        assert fake.writes() == [], "under the minimum: the old desk has no tick to send"
+        confirm_order(1, [{"line_id": 11, "qty_confirmed": 7}, {"line_id": 12, "line_status": "removed", "note": "none left"}],
+                      "Tomorrow", None, actor=REP)
+    by = _lines_by(fake)
+    assert (by[11]["qty_confirmed"], by[11]["change_reason"], by[11]["note"]) == (7, "other", LEGACY_NOTE)
+    assert (by[12]["line_status"], by[12]["change_reason"], by[12]["note"]) == ("unavailable", "other",
+                                                                             f"{LEGACY_NOTE}: none left")
+    d = _events(fake, 1, "status:confirmed")[0]["detail"]
+    assert d["legacy_client"] is True and fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 20.65
+    # Amend never existed before R7c: a reasonless amend is still refused
+    with _patched(fake):
+        _raises(lambda: amend_order(1, [{"line_id": 11, "qty_confirmed": 8}], None, None, actor=REP), "reason for T02")
+    # the same old body over HTTP
+    try:
+        with _quiet_notify():
+            fake = _one("new")
+            with _patched(fake):
+                r = _client(REP, "salesman").post("/shop/orders/1/confirm", json={
+                    "lines": [{"line_id": 11, "qty_confirmed": 8}], "expected_delivery": "Tomorrow"})
+                assert r.status_code == 200, r.text[:200]
+            assert _lines_by(fake)[11]["change_reason"] == "other"
+    finally:
+        _drop_client()
 
 
 def main() -> int:
