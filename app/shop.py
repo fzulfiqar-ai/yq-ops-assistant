@@ -1946,7 +1946,7 @@ def recognize_phone(raw_phone: str | None, device_id: str | None) -> dict | None
     list is earned by an order, not by asking."""
     digits = re.sub(r"\D", "", str(raw_phone or ""))
     phone = ("973" + digits) if len(digits) == 8 else digits
-    dev = (device_id or "").strip()
+    dev = public_device(device_id) or ""
     if len(phone) < 8 or not dev:
         return None
     cust = _customer_by_phone(phone)
@@ -2345,20 +2345,39 @@ def sweep_lineless_orders(min_age_min: int = 10) -> dict:
 
 REUSE_FAILED_MSG = "Please enter your phone number — the one from your last order can't be used on this phone."
 
+# A logged-in rep's idempotency "device" (app/shop_api.py _staff_device): staff:<login email>. It is
+# predictable (the rep's e-mail shows on the public status page), so it is NEVER a merchant device:
+# the public paths refuse it (public_device) and "Same as last time" never reuses a staff order.
+STAFF_DEVICE_PREFIX = "staff:"
+
+
+def is_staff_device(device_id) -> bool:
+    return str(device_id or "").strip().lower().startswith(STAFF_DEVICE_PREFIX)
+
+
+def public_device(raw) -> str | None:
+    """A device id sent by the public storefront, or None: the staff namespace (staff:<email>) is
+    never accepted from a browser — it would match a rep-placed order's device (the reuse check, the
+    retry lookup) and could be written into a merchant's device list."""
+    dev = clean(raw, 64)
+    return None if not dev or is_staff_device(dev) else dev
+
 
 def reuse_details(reuse_token: str | None, device_id: str | None) -> dict | None:
     """"Same as last time" at checkout (R7d): the contact details of an earlier order, read on the
     SERVER from that order's token — the merchant's phone never travels to the browser. Only for
     the device that placed that order (its device_id is on the order row): a forwarded tracking
     link carries the token but not the device, so it can never place an order in someone else's
-    name. None when the token is unknown, the devices differ or the order has no phone."""
+    name. None when the token is unknown, the devices differ or the order has no phone — and for
+    every rep-placed order (source 'salesman', device staff:<email>): no merchant device placed it,
+    and its device is guessable, so it has nothing to reuse."""
     tok = clean(reuse_token, 64)
-    dev = clean(device_id, 64)
+    dev = public_device(device_id)
     if len(tok) < 16 or not dev:
         return None
     try:
         rows = retry_read(lambda: (get_client().table("shop_orders")
-                                   .select("customer_name,customer_phone,customer_shop,customer_area,device_id")
+                                   .select("customer_name,customer_phone,customer_shop,customer_area,device_id,source")
                                    .eq("token", tok).limit(1).execute().data or []), what="reuse details")
     except Exception as e:  # noqa: BLE001 — no reuse, the merchant types the number
         log.debug("reuse details unavailable: %s", e)
@@ -2366,6 +2385,8 @@ def reuse_details(reuse_token: str | None, device_id: str | None) -> dict | None
     if not rows:
         return None
     r = rows[0]
+    if r.get("source") == "salesman" or is_staff_device(r.get("device_id")):
+        return None
     if not r.get("device_id") or not secrets.compare_digest(str(r["device_id"]), dev) or not r.get("customer_phone"):
         return None
     return {"phone": r["customer_phone"], "name": r.get("customer_name") or "", "shop": r.get("customer_shop") or "",
@@ -2400,7 +2421,8 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     email = clean(cust.get("email"), 160) or None
     if email and not _EMAIL.match(email):
         raise ShopError("Please enter a valid email or leave it blank.")
-    device_id = clean(body.get("device_id"), 64) or None
+    # a public caller never speaks in the staff namespace (staff:<email> is the rep's own retry key)
+    device_id = (clean(body.get("device_id"), 64) or None) if staff else public_device(body.get("device_id"))
     client_order_id = clean(body.get("client_order_id"), 64) or None
     client = get_client()
     if device_id and client_order_id:

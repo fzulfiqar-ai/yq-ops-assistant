@@ -37,7 +37,8 @@ interface StockCost {
   dead_uncosted: number
 }
 interface Warehouse { warehouse_name: string; value_bhd: number; qty: number; items: number }
-interface Receipt { voucher: string; received_on: string; items: number; units: number; value_bhd: number }
+/** value_bhd is the receipt's landed cost: absent for a login without 'Margins' */
+interface Receipt { voucher: string; received_on: string; items: number; units: number; value_bhd?: number }
 interface ReservedRow { item_code: string; on_hand: number; reserved: number; available: number; in_transit: number; open_orders: number; stock_as_of: string | null }
 interface Reserved {
   available: boolean
@@ -53,8 +54,11 @@ interface Data {
   by_status: Record<string, number>
   /** the Focus stock balance is valued at the SELLING rate */
   stock_value: number
-  stock_value_cost: number
+  /** at-cost figures: only for admins and logins holding 'Margins' (absent otherwise, with cost_hidden) */
+  stock_value_cost?: number
   stock_cost?: StockCost | null
+  /** true when this login may not read cost: no at-cost tile, column or export column */
+  cost_hidden?: boolean
   stock_qty: number
   by_warehouse: Warehouse[]
   /** Material Receipt Notes in the last 14 days — a shipment that just landed */
@@ -108,6 +112,9 @@ export default function Inventory() {
   const s = data?.by_status || {}
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
   const sc = data?.stock_cost
+  // cost is for admins and 'Margins' holders: the API leaves it out for everyone else (cost_hidden)
+  const showCost = !!data && !data.cost_hidden
+  const shownCols = showCost ? cols : cols.filter((c) => c.key !== 'cost_value_bhd')
   return (
     <div>
       <PageHeader title="Inventory" subtitle="Velocity-aware stock health — what to reorder, what's stuck" />
@@ -118,7 +125,7 @@ export default function Inventory() {
       ) : (
         <>
           <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-6">
-            {sc ? (
+            {!showCost ? null : sc ? (
               <Stat label="Stock value (at cost)" value={bhd(sc.cost_value_bhd, 0)} tone="violet"
                 foot={sc.items_uncosted > 0
                   ? `capital invested · Focus average cost, else landed · ${num(sc.items_uncosted)} item${sc.items_uncosted === 1 ? '' : 's'} without a usable cost`
@@ -131,7 +138,7 @@ export default function Inventory() {
             <Stat label="Units on hand" value={num(data.stock_qty)} />
             <Stat label="Low stock (<30d)" value={num(alerts)} tone="amber" />
             <Stat label="Urgent out-of-stock" value={num(s.urgent_out_of_stock || 0)} tone="rose" />
-            <Stat label="Dead stock (at cost)" value={sc ? bhd(sc.dead_cost_bhd, 0) : num(s.dead_stock || 0)}
+            <Stat label={sc ? 'Dead stock (at cost)' : 'Dead stock'} value={sc ? bhd(sc.dead_cost_bhd, 0) : num(s.dead_stock || 0)}
               foot={sc ? `${num(sc.dead_count)} item${sc.dead_count === 1 ? '' : 's'} · no sale in 90 days` : 'items · no sale in 90 days'} />
           </div>
 
@@ -151,7 +158,9 @@ export default function Inventory() {
                     </span>
                     <span className="shrink-0 text-right">
                       <span className="block font-semibold tabular-nums text-primary">{num(Number(r.units))} units</span>
-                      <span className="block text-[11.5px] tabular-nums text-muted-foreground">{bhd(r.value_bhd, 0)} at cost</span>
+                      {showCost && r.value_bhd != null && (
+                        <span className="block text-[11.5px] tabular-nums text-muted-foreground">{bhd(r.value_bhd, 0)} at cost</span>
+                      )}
                     </span>
                   </Link>
                 ))}
@@ -228,7 +237,7 @@ export default function Inventory() {
 
           <DataTable
             rows={data.rows}
-            cols={cols}
+            cols={shownCols}
             exportName="inventory-health"
             initialQuery={params.get('q') || ''}
             rowClass={(r) => (r.status === 'urgent_out_of_stock' ? 'bg-rose-50/60 dark:bg-rose-500/5'

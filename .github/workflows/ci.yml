@@ -144,6 +144,7 @@ jobs:
           python -m tests.test_r7d_analytics
           python -m tests.test_r7d_profit
           python -m tests.test_r7d_ops
+          python -m tests.test_r7d_least_privilege
 
   web:
     runs-on: ubuntu-latest
@@ -181,6 +182,9 @@ jobs:
       # order (never a shop-A duplicate for shop B), the Change carry, "shop told" on a rep-placed order
       - name: Rep screen rules (node, no browser)
         run: node scripts/rep_ui_test.mjs
+      # least privilege (R7d review): management's drill links need the page's own grant
+      - name: Least-privilege routing (node, no browser)
+        run: node scripts/least_privilege_test.mjs
       # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
       # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
       # does not. Type errors fail it too: tsc -b runs inside `npm run build`.

@@ -100,14 +100,23 @@ export const MANAGEMENT_NAV: { to: string; label: string; section: string; icon:
   { to: '/market-intel', label: 'Market Intel', section: 'Company', icon: Radar, feature: 'Market Intel' },
 ]
 
-/** Pages the Command Centre's tiles open for management although they are not in its menu. */
-const MANAGEMENT_DRILLS = ['/sales', '/prices']
+/** Pages the Command Centre's tiles open for management although they are not in its menu, with
+ *  the page each one needs (the same grant as that page's own route). */
+const MANAGEMENT_DRILLS: { to: string; feature: string }[] = [
+  { to: '/sales', feature: 'Sales' },
+  { to: '/prices', feature: 'Margins' },
+]
 
-/** May management open this route? Only its own pages and the tiles' drill-downs, plus the profile screen. */
-export function managementMayOpen(pathname: string): boolean {
+/**
+ * May management open this route? Only its own pages and the tiles' drill-downs, each only when the
+ * login holds that page's feature (a management login without 'Margins' is never sent to
+ * Profitability or the Price tracker), plus the profile screen.
+ */
+export function managementMayOpen(pathname: string, features: readonly string[] = []): boolean {
   if (pathname === '/settings' || pathname === '/') return true
-  const allowed = [...MANAGEMENT_NAV.map((m) => m.to), ...MANAGEMENT_DRILLS]
-  return allowed.some((to) => pathname === to || pathname.startsWith(`${to}/`))
+  const pages: { to: string; feature?: string }[] = [...MANAGEMENT_NAV, ...MANAGEMENT_DRILLS]
+  return pages.some((m) => (pathname === m.to || pathname.startsWith(`${m.to}/`))
+    && (!m.feature || features.includes(m.feature)))
 }
 
 export function canAccess(me: Me | null, item: NavItem): boolean {

@@ -791,6 +791,36 @@ def cached_report(key: str):
     _report_cache[key] = (time.time(), out)
     return out
 
+
+# The Inventory report's cost fields (R7d stock AT COST): per item and the at-cost totals. Cost is
+# for admins and logins holding 'Margins' only; everyone else with 'Inventory' reads the same report
+# without them (the selling-price value, units, cover and reorder stay).
+INVENTORY_COST_ROW_KEYS = ("cost_value_bhd", "cost_source")
+INVENTORY_COST_KEYS = ("stock_value_cost", "stock_cost")
+
+
+def inventory_for_viewer(out: dict, sees_cost: bool) -> dict:
+    """The inventory payload a login may read. A NEW dict when cost is taken out — the cached report
+    is shared by every caller and is never changed."""
+    if sees_cost or not isinstance(out, dict):
+        return out
+    shown = {k: v for k, v in out.items() if k not in INVENTORY_COST_KEYS}
+    shown["rows"] = [{k: v for k, v in r.items() if k not in INVENTORY_COST_ROW_KEYS} for r in out.get("rows") or []]
+    # a goods receipt's value is its landed cost (one-item receipts would give the unit cost away)
+    if isinstance(out.get("recent_receipts"), list):
+        shown["recent_receipts"] = [{k: v for k, v in r.items() if k != "value_bhd"} if isinstance(r, dict) else r
+                                    for r in out["recent_receipts"]]
+    shown["cost_hidden"] = True
+    return shown
+
+
+def report_for_viewer(key: str, out, sees_cost: bool):
+    """GET /report/{key}: the cached report cut to what this login may read."""
+    if key == "inventory":
+        return inventory_for_viewer(out, sees_cost)
+    return out
+
+
 # report key -> the feature a member must have to read it
 REPORT_FEATURE = {
     "dashboard": "Dashboard",

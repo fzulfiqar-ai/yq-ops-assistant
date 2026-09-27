@@ -141,7 +141,7 @@ export function Gate({ feature, roles, children }: { feature?: string; roles?: R
   const allowed = roles
     ? !!me && roles.includes(me.role)
     : !!me && (me.role === 'admin' || (feature ? (me.features || []).includes(feature) : false))
-  const ok = allowed && (!isManagement(me) || managementMayOpen(pathname))
+  const ok = allowed && (!isManagement(me) || managementMayOpen(pathname, me?.features || []))
   if (!ok) {
     return (
       <div className="grid min-h-[60vh] place-items-center">
