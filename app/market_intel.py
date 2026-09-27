@@ -671,6 +671,7 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
     item = find_item(f, yq_code, now)
     if item and not yq_item and item.get("yq_item_code"):
         yq_item = ((ctx or {}).get("items") or {}).get(item["yq_item_code"])
+        yq_code = str(yq_item["item_code"]) if yq_item else None
     has_text = bool(f["title"] or f["note"] or f["barcode"])
     if yq_item:
         result = "already_in_yq"
