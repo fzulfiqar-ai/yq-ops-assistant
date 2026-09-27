@@ -146,7 +146,7 @@ function orderedChips(item: ShopItem, items: readonly ShopItem[]): string[] {
 /* ───────────────────────── shared pieces (also used by ProductPanel) ───────────────────────── */
 
 /** "VFAN · UK04-C": the maker's mark, then the code — the one thing that always tells two look-alikes apart. */
-export function CardKicker({ item, className }: { item: ShopItem; className?: string }) {
+export function CardKicker({ item, className }: { item: Pick<ShopItem, 'brand' | 'item_code'>; className?: string }) {
   const brand = (item.brand || '').trim()
   return (
     <span className={cn('flex min-w-0 items-baseline gap-1 text-2xs leading-[14px] text-ink-3', className)}>

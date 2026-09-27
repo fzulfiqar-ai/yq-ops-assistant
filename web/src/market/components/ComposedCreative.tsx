@@ -20,7 +20,7 @@ import { ProductImage } from '../ui/ProductImage'
 const POS = ['c', 'l', 'r'] as const
 
 export interface ComposedCreativeProps {
-  products: ShopItem[]
+  products: Pick<ShopItem, 'item_code' | 'thumb_url' | 'thumb_urls' | 'product_image_url' | 'package_image_url'>[]
   canvas: SlideCanvas
   size: SlideSize
   /** slide 1: the centre photo loads eager + fetchpriority high (the LCP candidate), the rest eager */

@@ -93,7 +93,9 @@ export default function DesktopShell() {
             aria-label={S.cart.mini}
           >
             <MiniCart />
-            <Spotlight />
+            {/* a brand launch page is not the place for the rotating clearance / deals ad: the
+                restock stays, the Spotlight goes */}
+            {!/^\/brands\//.test(pathname) && <Spotlight />}
           </aside>
         )}
       </div>

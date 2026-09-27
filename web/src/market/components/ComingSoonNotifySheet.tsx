@@ -1,14 +1,16 @@
 import { useState, type FormEvent } from 'react'
+import { MessageCircle } from 'lucide-react'
 import type { UpcomingItem } from '../lib/marketApi'
 import { postUpcomingInterest } from '../lib/marketApi'
 import { deviceId, readCustomer } from '../lib/device'
 import { cleanPhone, isPhone } from '../lib/format'
 import { useMarket } from '../MarketContext'
-import { Button } from '../ui/Button'
+import { AnchorButton, Button } from '../ui/Button'
+import { Chip } from '../ui/Chip'
 import { Hint, Input, Label } from '../ui/Field'
 import { Sheet } from '../ui/Sheet'
 import { useToast } from '../ui/Toast'
-import { rememberNotified, upcomingCopy, upcomingName } from './ComingSoonShared'
+import { askRepUrl, rememberNotified, upcomingCopy, upcomingName, upcomingSpec, variantLabel } from './ComingSoonShared'
 
 /**
  * "Notify me when it lands" — the sold-out restock request, for a card that has no stock yet.
@@ -17,8 +19,14 @@ import { rememberNotified, upcomingCopy, upcomingName } from './ComingSoonShared
  * number to message. An OPTIONAL quantity labelled "no commitment" tells the rep how much
  * interest there is; it never becomes an order. One request per device and card; the rep sees
  * it on his Today screen under "Shops interested from your link".
+ *
+ * The card keeps one action, so what it used to carry lives here: the full supplier spec (muted),
+ * a variant picker ("Any" by default) when the model comes in two or more, and — under "Notify
+ * me" — "Ask your rep" on WhatsApp, prefilled with the model and the picked variant, when the shop
+ * came through a rep. The picked variant only names the model in the message and the subtitle;
+ * the notify POST is unchanged (card, phone, quantity, device, ref).
  */
-export function ComingSoonNotifySheet({ item, variant, open, onClose, onDone }: { item: UpcomingItem; variant: string | null; open: boolean; onClose: () => void; onDone: () => void }) {
+export function ComingSoonNotifySheet({ item, open, onClose, onDone }: { item: UpcomingItem; open: boolean; onClose: () => void; onDone: () => void }) {
   const t = upcomingCopy()
   const toast = useToast()
   const { rep, ref } = useMarket()
@@ -26,7 +34,11 @@ export function ComingSoonNotifySheet({ item, variant, open, onClose, onDone }: 
   const [touched, setTouched] = useState(false)
   const [qty, setQty] = useState('')
   const [busy, setBusy] = useState(false)
+  const [picked, setPicked] = useState<string | null>(null)
   const name = upcomingName(item)
+  const spec = upcomingSpec(item)
+  const variants = item.variants.map(variantLabel)
+  const askUrl = askRepUrl(rep, item, picked)
   const phoneOk = isPhone(phone)
   const phoneBad = touched && !phoneOk
 
@@ -66,14 +78,42 @@ export function ComingSoonNotifySheet({ item, variant, open, onClose, onDone }: 
       open={open}
       onClose={onClose}
       title={t.notifyTitle(item.model_code)}
-      subtitle={variant ? `${name} · ${variant}` : name}
+      subtitle={picked ? `${name} · ${picked}` : name}
       footer={
-        <Button type="submit" form="upcoming-notify" full size="lg" loading={busy}>
-          {t.send}
-        </Button>
+        <div className="flex flex-col gap-2">
+          <Button type="submit" form="upcoming-notify" full size="lg" loading={busy}>
+            {t.send}
+          </Button>
+          {askUrl && (
+            <AnchorButton href={askUrl} target="_blank" rel="noreferrer" variant="wa" size="lg" full icon={<MessageCircle size={16} aria-hidden="true" />}>
+              {rep?.first_name ? t.ask : t.askYq}
+            </AnchorButton>
+          )}
+        </div>
       }
     >
       <form id="upcoming-notify" onSubmit={submit} noValidate className="space-y-4 px-4 py-4 md:px-5">
+        {spec && <p className="text-xs leading-4 text-ink-3">{spec}</p>}
+        {variants.length >= 2 && (
+          <div>
+            <p id="upcoming-variant" className="mb-2 text-sm font-semibold text-ink">
+              {t.variant}
+            </p>
+            <div role="group" aria-labelledby="upcoming-variant" className="flex flex-wrap gap-x-1.5 gap-y-2.5">
+              {[null, ...variants].map((v) => {
+                const on = picked === v
+                return (
+                  // a 24 px chip; `hit` gives it a 44 px tap area on touch without changing the chip
+                  <button key={v ?? ''} type="button" aria-pressed={on} onClick={() => setPicked(v)} className="hit relative max-w-full rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+                    <Chip tone={on ? 'ink' : 'spec'} size="md">
+                      {v ?? t.variantAny}
+                    </Chip>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
         <p className="text-sm leading-snug text-ink-2">{t.notifyLine}</p>
         <div>
           <Label htmlFor="upcoming-phone" hint={t.phoneHint}>

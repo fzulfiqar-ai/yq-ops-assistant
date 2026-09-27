@@ -1,11 +1,13 @@
 import type { RepCard } from '@/lib/shopApi'
 import type { UpcomingItem, UpcomingVariant } from '../lib/marketApi'
+import { scrollMotion } from '../shell/useViewport'
 import { locale, S } from '../strings'
 
 /**
  * What the "Coming soon" surfaces share (card, notify sheet, rail, brand page): the locale's copy
- * block, the EN/AR pick per field, the WhatsApp deep link with the model and variant prefilled,
- * and the per-phone memory of which cards were asked about. No component here, so fast refresh
+ * block, the EN/AR pick per field, the section labels and fact pills, the disc pictures for the
+ * night stage, the WhatsApp deep links (one model and variant, or the whole range), and the
+ * per-phone memory of which cards were asked about. No component here, so fast refresh
  * stays happy and the card and the sheet do not import each other.
  */
 
@@ -30,21 +32,80 @@ export function variantLabel(v: UpcomingVariant): string {
   return (locale.lang === 'ar' && v.label_ar) || v.label
 }
 
+/** a section's heading and circle label: "Cables", "Wireless audio" — the category's own name when it has no entry; never a count */
+export function sectionLabel(cat: string | null | undefined): string {
+  const c = (cat || '').trim()
+  return upcomingCopy().sections[c] || c
+}
+
+/** the section's element id on the brand page: "wk-data-cables" */
+export function sectionId(cat: string | null | undefined): string {
+  const slug = (cat || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return `wk-${slug || 'all'}`
+}
+
 /**
- * "earbuds, cables, chargers and screen protectors" — the category words of the cards actually
- * on the page, in shelf order, each once. Publish only the cables and the headline says cables;
- * never the whole-range list from the owner's draft copy.
+ * A button's jump to a section of this page: scrollIntoView (smooth unless reduced motion), then
+ * keyboard focus on the section's heading. Never a #hash link — the URL (and a rep's ?ref=) stays
+ * exactly as it came in. The section's scroll-margin keeps it clear of the pinned header.
  */
-export function categoryPhrase(items: UpcomingItem[]): string {
-  const t = upcomingCopy()
-  const words: string[] = []
-  for (const it of items) {
-    const cat = (it.category || '').trim()
-    if (!cat) continue
-    const word = t.kinds[cat] || (locale.lang === 'ar' ? cat : cat.toLowerCase())
-    if (!words.includes(word)) words.push(word)
+export function jumpTo(id: string): void {
+  const el = document.getElementById(id)
+  if (!el) return
+  el.scrollIntoView({ behavior: scrollMotion(), block: 'start' })
+  el.querySelector<HTMLElement>('[data-jump-focus]')?.focus({ preventScroll: true })
+}
+
+/**
+ * The card's one row of fact pills: the supplier spec split at its "·" ("Bluetooth 5.3", "230 mAh
+ * case"), then the variant labels (colours, connectors, sizes). The row is clipped to one line, so
+ * only the pills that fit show; the full spec and the variant picker live in the notify sheet.
+ */
+export function specPills(it: UpcomingItem): string[] {
+  const out: string[] = []
+  const push = (s: string) => {
+    const v = s.trim()
+    if (v && !out.includes(v)) out.push(v)
   }
-  return t.kindsJoin(words.length ? words : [t.kindsFallback])
+  upcomingSpec(it).split('·').forEach(push)
+  it.variants.forEach((v) => push(variantLabel(v)))
+  return out
+}
+
+/** A disc-ready picture for ComposedCreative / ProductImage: the model's product photo or its box photo (both carry a WebP size set). */
+export function asCreative(it: UpcomingItem, kind: 'photo' | 'box') {
+  return {
+    item_code: `wk:${it.id}`,
+    thumb_urls: (kind === 'box' ? it.box_thumb_urls : it.photo_thumb_urls) || null,
+    product_image_url: (kind === 'box' ? it.box_url : it.photo_url) || null,
+  }
+}
+
+const hasPhoto = (it: UpcomingItem) => Boolean(it.photo_url || it.photo_thumb_urls?.['320'])
+
+/** The night stage's three discs: the first photo of three DIFFERENT categories (earbuds, a cable, a charger — not three cables), topped up in page order when fewer categories exist. */
+export function stageArt(items: UpcomingItem[]) {
+  const picked: UpcomingItem[] = []
+  const cats = new Set<string>()
+  for (const it of items) {
+    if (picked.length >= 3) break
+    const c = (it.category || '').trim()
+    if (!hasPhoto(it) || cats.has(c)) continue
+    cats.add(c)
+    picked.push(it)
+  }
+  for (const it of items) {
+    if (picked.length >= 3) break
+    if (hasPhoto(it) && !picked.includes(it)) picked.push(it)
+  }
+  return picked.map((it) => asCreative(it, 'photo'))
+}
+
+/** "Hello Furqan, I am interested in the WEKOME range when it arrives…" — the rep's own number, for the whole range (the desktop tile) */
+export function askRangeUrl(rep: RepCard | null, brand: string): string | null {
+  if (!rep?.whatsapp_url) return null
+  const text = upcomingCopy().askRangeText(rep.first_name || '', brand)
+  return `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(text)}`
 }
 
 /** the WhatsApp deep link with the model (and the picked variant) prefilled — the rep's own number, as every other card does it */
