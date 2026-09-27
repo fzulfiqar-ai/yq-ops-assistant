@@ -1150,6 +1150,14 @@ def update_item(item_id: int, changes: dict, actor: str, role: str) -> dict:
                 diffs[k] = {"from": item.get(k), "to": v}
     if "title" in upd:
         upd["norm_key"] = norm_name(upd["title"])
+    if changes.get("verified") is not None:
+        # a person confirms (or withdraws) the AI Head's reading; there is nothing to verify without one
+        want = bool(changes["verified"])
+        if want and not item.get("ai_suggestion"):
+            raise MarketIntelError("There is no AI suggestion to verify.")
+        if want != bool(item.get("verified")):
+            upd["verified"] = want
+            diffs["verified"] = {"from": bool(item.get("verified")), "to": want}
     new_status = changes.get("status")
     moved: list[int] = []
     target = None
@@ -1280,6 +1288,15 @@ def flag_photo(photo_id: int, flag: bool, actor: str, role: str) -> dict:
            .eq("id", photo_id).execute().data)
     if got is not None and len(got) == 0:
         raise MarketIntelError("That photo does not exist.", 404)
+    # on the item's history too, when the photo's sighting is on an item (who flagged it, and when)
+    try:
+        oid = (got or [{}])[0].get("observation_id")
+        obs = get_client().table("market_observations").select("item_id").eq("id", oid).limit(1).execute().data or []
+        if obs and obs[0].get("item_id"):
+            _decision(int(obs[0]["item_id"]), "edit", actor, role,
+                      detail={"photo_people": {"photo_id": photo_id, "to": bool(flag)}})
+    except Exception as e:  # noqa: BLE001 — the flag itself is saved; the history line is best-effort
+        log.info("market intel photo flag history not written: %s", e)
     return {"ok": True, "photo_id": photo_id, "has_people": bool(flag)}
 
 

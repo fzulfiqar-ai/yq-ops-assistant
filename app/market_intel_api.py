@@ -68,6 +68,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         action: str | None = Field(default=None, max_length=20)
         reason: str | None = Field(default=None, max_length=500)
         merged_into: int | None = None
+        verified: bool | None = None      # a reviewer confirms the AI Head's reading
 
     class ApproveRequest(BaseModel):
         action: str = Field(max_length=20)

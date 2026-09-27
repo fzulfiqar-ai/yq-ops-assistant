@@ -616,6 +616,14 @@ function ItemBody({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] 
     onSuccess: () => invalidate(d.item.id),
     onError: (e) => toast(errorText(e, 'Could not change the photo.'), 'error'),
   })
+  const verify = useMutation({
+    mutationFn: () => apiPatch(`/market-intel/items/${d.item.id}`, { verified: true }),
+    onSuccess: () => {
+      toast('AI reading marked verified.', 'success')
+      invalidate(d.item.id)
+    },
+    onError: (e) => toast(errorText(e, 'Could not verify it.'), 'error'),
+  })
   const c = d.cluster
   return (
     <div className="space-y-5 px-4 py-4 sm:px-5">
@@ -682,6 +690,16 @@ function ItemBody({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] 
 
       {d.ai_suggestion && (
         <div className="rounded-2xl border border-border p-3">
+          {caps.can_review && !d.ai_suggestion.verified && (
+            <button
+              type="button"
+              disabled={verify.isPending}
+              onClick={() => verify.mutate()}
+              className="float-right -mr-1 -mt-1 inline-flex h-8 items-center gap-1 rounded-lg px-2 text-[12px] font-semibold text-primary hover:bg-accent disabled:opacity-50"
+            >
+              {verify.isPending ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <CheckCircle2 size={12} aria-hidden="true" />} Mark verified
+            </button>
+          )}
           <div className="mb-1.5 flex items-center gap-2">
             <Sparkles size={15} className="text-primary" aria-hidden="true" />
             <span className="text-[13px] font-semibold">AI reading of the photos</span>
@@ -729,7 +747,7 @@ function ItemBody({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] 
               <li key={x.id} className="text-[12.5px]">
                 <div className="font-semibold">
                   {x.event === 'edit'
-                    ? `Edited ${Object.keys(x.detail || {}).join(', ')}`
+                    ? editLabel(x.detail)
                     : x.event === 'identify'
                       ? 'A photo was identified'
                       : x.event === 'merge'
@@ -749,6 +767,16 @@ function ItemBody({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] 
       )}
     </div>
   )
+}
+
+function editLabel(detail?: Record<string, unknown> | null): string {
+  const d = detail || {}
+  const people = d.photo_people as { to?: boolean } | undefined
+  if (people) return people.to ? 'A photo was flagged: people in it' : 'A photo flag was removed'
+  const verified = d.verified as { to?: boolean } | undefined
+  if (verified && Object.keys(d).length === 1) return verified.to ? 'AI reading verified' : 'AI reading marked unverified again'
+  const names: Record<string, string> = { title: 'name', yq_item_code: 'YQ code', verified: 'AI verification' }
+  return `Edited ${Object.keys(d).map((k) => names[k] || k).join(', ')}`
 }
 
 /* ───────────────────────── decide: statuses, approval, edits ───────────────────────── */

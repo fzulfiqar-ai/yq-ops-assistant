@@ -1074,6 +1074,54 @@ def _():
     assert [d["event"] for d in fake.rows("market_item_decisions")] == ["identify", "identify"]
 
 
+@test("AI reading: stays Unverified until a reviewer verifies it; nothing to verify without one; a photo flag is on the history")
+def _():
+    from app import market_intel as mi
+    fake, a, _b, _u2 = _seeded()
+    iid = a["item"]["id"]
+    with _env(fake):
+        _raises(lambda: mi.update_item(iid, {"verified": True}, "boss@example.com", "admin"), "no AI suggestion")
+        for it in fake.rows("market_items"):
+            if it["id"] == iid:
+                it.update(ai_suggestion={"brand": "Anker"}, ai_confidence=0.7, verified=False)
+        _raises(lambda: mi.update_item(iid, {"verified": True}, "mgmt@example.com", "management"), "only the office", 403)
+        assert mi.update_item(iid, {"verified": True}, "clerk@example.com", "member")["changed"] is True
+        assert mi.item_detail(iid, office=True)["ai_suggestion"]["label"] == "Verified"
+        pid = fake.rows("market_photos")[0]["id"]
+        mi.flag_photo(pid, True, "clerk@example.com", "member")
+    dec = fake.rows("market_item_decisions")
+    assert dec[0]["detail"] == {"verified": {"from": False, "to": True}} and dec[0]["actor"] == "clerk@example.com"
+    assert dec[1]["detail"] == {"photo_people": {"photo_id": pid, "to": True}}
+
+
+@test("AI Head script: suggestions are validated, ranking is distinct shops x recency, never approved / merged items")
+def _():
+    from scripts import market_intel_ai_head as ah
+    ok, bad = ah.validate_suggestions([
+        {"item_id": 1, "suggestion": {"brand": "Brand X"}, "confidence": 0.6234},
+        {"item_id": "x", "suggestion": {"a": 1}, "confidence": 0.5},
+        {"item_id": 2, "suggestion": {}, "confidence": 0.5},
+        {"item_id": 3, "suggestion": {"a": 1}, "confidence": 1.5},
+        {"item_id": 4, "suggestion": {"a": "x" * 5000}, "confidence": 0.5},
+    ])
+    assert ok == [{"item_id": 1, "suggestion": {"brand": "Brand X"}, "confidence": 0.623}] and len(bad) == 4
+    assert ah.validate_suggestions({"not": "a list"})[1]
+    now = datetime(2026, 9, 27, tzinfo=timezone.utc)
+    rows = [
+        {"row_type": "item", "item_id": 1, "status": "new", "shops": 5, "observations": 7, "system_signals": 0, "last_seen": now - timedelta(days=14)},
+        {"row_type": "item", "item_id": 2, "status": "opportunity", "shops": 2, "observations": 2, "system_signals": 0, "last_seen": now},
+        {"row_type": "item", "item_id": 3, "status": "approved", "shops": 9, "observations": 9, "system_signals": 0, "last_seen": now},
+        {"row_type": "item", "item_id": 4, "status": "merged", "shops": 9, "observations": 9, "system_signals": 0, "last_seen": now},
+        {"row_type": "unassigned", "observation_id": 9, "item_id": None, "status": "new", "shops": 0, "observations": 1,
+         "system_signals": 0, "last_seen": now - timedelta(days=70)},
+    ]
+    ranked = ah.rank(rows, now, top=10)
+    assert [r.get("item_id") or r.get("observation_id") for r in ranked] == [2, 1, 9]
+    assert ranked[0]["score"] == 2.0 and ranked[1]["score"] == round(5 / 3, 4)
+    src = (ROOT / "scripts" / "market_intel_ai_head.py").read_text(encoding="utf-8").lower()
+    assert "verified = false" in src and "and not verified" in src and "update market_items set status" not in src
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 8. system demand signals
 # ═══════════════════════════════════════════════════════════════════════════════
