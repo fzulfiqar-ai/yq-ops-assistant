@@ -18,6 +18,12 @@ def _split_csv(value: str | None) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def is_production_env(env) -> bool:
+    """RENDER set to anything but a false-ish value (Render exports RENDER=true), or ENV=production."""
+    render = str(env.get("RENDER") or "").strip().lower()
+    return render not in ("", "0", "false", "no") or str(env.get("ENV") or "").strip().lower() == "production"
+
+
 class Settings:
     """Typed access to environment configuration."""
 
@@ -89,9 +95,13 @@ class Settings:
         # Empty by default → agent-key auth is disabled until set in the environment.
         self.agent_api_key: str = os.getenv("AGENT_API_KEY", "")
         # The business owner's login(s): the team API never changes their role, pages or status and
-        # never removes them (app/user_auth.check_team_change). Comma-separated; lower-cased.
+        # never removes them (app/user_auth.check_team_change), and a temporary-password flag never
+        # locks them out (app/auth.py, the break-glass path). Comma-separated; lower-cased.
         self.owner_emails: list[str] = [e.lower() for e in _split_csv(
             os.getenv("OWNER_EMAILS", "fzulfiqar@pie-int.com"))]
+        # Production = the Render container (Render exports RENDER=true) or ENV=production anywhere
+        # else. The interactive API docs (/docs, /redoc, /openapi.json) are served only outside it.
+        self.is_production: bool = is_production_env(os.environ)
 
     def require_supabase(self) -> None:
         """Raise a clear error if Supabase config is missing (used by scripts/DB paths)."""

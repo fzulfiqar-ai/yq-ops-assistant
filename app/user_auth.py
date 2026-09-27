@@ -14,7 +14,9 @@ Two onboarding paths (admin chooses per invite):
 (scripts/user_roles_must_reset_migration.sql), enforced by app.auth.get_current_user and
 cleared only here after the API itself sets the new password (POST /auth/password). The copy in
 the auth user_metadata is kept for the SPA banner but is user-writable, so nothing trusts it.
-Until the migration runs the column is absent; every write below tolerates that.
+Until the migration runs the column is absent; every write below tolerates that. Release R7b: the
+flag covers every role but an owner, and a password change signs the login's OTHER sessions out
+(revoke_other_sessions; the session that changed it stays signed in).
 
 Disabling a member also BANS the Supabase auth user (and re-activating unbans), so a disabled
 login cannot mint fresh tokens while the user_roles row already refuses the old ones.
@@ -463,6 +465,41 @@ def set_password(email: str, password: str) -> bool:
     get_client().auth.admin.update_user_by_id(u.id, {"password": password, "user_metadata": meta})
     _clear_must_reset(email)
     return True
+
+
+def must_reset_of(row: dict | None, email: str | None) -> bool:
+    """The server-owned flag as GET /me reports it: the column's value once
+    user_roles_must_reset_migration.sql has added it, never for an owner (app.auth lets the owner
+    through), and False while the column is missing — the API enforces nothing then, so the SPA must
+    not send anyone to the password screen on the user-writable metadata copy either."""
+    if not row or "must_reset" not in row or is_owner(email):
+        return False
+    return bool(row.get("must_reset"))
+
+
+# Supabase Auth's own sign-out, scope "others" (GoTrue POST /logout?scope=others): every session of
+# the login except the one the access token belongs to is deleted with its refresh tokens, so no
+# other device can refresh again. Chosen over a SECURITY DEFINER function that deletes auth.sessions
+# rows (release R7b): it is the documented API, needs no migration, no grant on the auth schema and
+# no service_role-only function to guard. It needs the member's own access token, which a verified
+# password change always has. The access tokens those sessions already hold are refused by
+# app.auth.end_other_sessions until they expire.
+SIGN_OUT_OTHERS = "others"
+
+
+def revoke_other_sessions(access_token: str) -> bool:
+    """Sign out every other session of the login behind `access_token`. True when Supabase took it;
+    False (logged) when it could not — the password has changed either way, and app.auth still
+    refuses the old sessions' tokens in this process."""
+    token = (access_token or "").strip()
+    if not token:
+        return False
+    try:
+        get_client().auth.admin.sign_out(token, SIGN_OUT_OTHERS)
+        return True
+    except Exception as e:  # noqa: BLE001 — never fail the password change over this
+        log.warning("sign out of the other sessions failed: %s", type(e).__name__)
+        return False
 
 
 # Supabase has no "banned forever"; a century is the documented way to spell it.

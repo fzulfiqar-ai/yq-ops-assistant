@@ -41,7 +41,15 @@ from app.ratelimit import rate_limit_key
 # slowapi's stock key returned Render's proxy address for everyone, one global bucket.
 limiter = Limiter(key_func=rate_limit_key, default_limits=[settings.rate_limit_default])
 
-app = FastAPI(title="YQ Bahrain Ops Assistant", version="0.3.0")
+
+def docs_kwargs(production: bool) -> dict:
+    """R7b (plan §25 P1): the interactive docs and the schema list every route, parameter and body
+    shape. Handy on a laptop, a free map for anyone probing production — so /docs, /redoc and
+    /openapi.json exist only when settings.is_production is false (RENDER / ENV=production unset)."""
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None} if production else {}
+
+
+app = FastAPI(title="YQ Bahrain Ops Assistant", version="0.3.0", **docs_kwargs(settings.is_production))
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Added before CORS so CORS stays outermost and a 429 still carries the allow-origin header;
@@ -1720,18 +1728,21 @@ def me(user: CurrentUser = Depends(get_current_user)) -> dict:
     server-owned flag: while it is set every other route answers 403 (see app.auth).
     `read_only` (management): every write is refused, so the SPA hides its write controls."""
     from app.features import is_read_only, may_hold
-    role, features, full_name = user.role, [], ""
+    role, features, full_name, must_reset = user.role, [], "", bool(user.must_reset)
     try:
-        from app.user_auth import _user_row
-        row = _user_row(user.email)
+        # R7b: read the row as it is NOW (not the 60 s cache the gate shares), so the flag the SPA
+        # acts on is the true one the moment the migration adds the column or an admin re-invites.
+        from app.user_auth import _fresh_row, must_reset_of
+        row = _fresh_row(user.email)
         if row:
             role = row.get("role", role)
             features = row.get("features") or []
             full_name = row.get("full_name") or ""
+            must_reset = must_reset_of(row, user.email)
     except Exception:  # columns may predate the team migration
         pass
     return {"email": user.email, "role": role, "features": [f for f in features if may_hold(role, f)],
-            "full_name": full_name, "must_reset": bool(user.must_reset), "read_only": is_read_only(role)}
+            "full_name": full_name, "must_reset": must_reset, "read_only": is_read_only(role)}
 
 
 class PasswordChangeRequest(BaseModel):
@@ -1751,9 +1762,16 @@ def auth_password(request: Request, body: PasswordChangeRequest,
     must_reset login may call (app.auth.MUST_RESET_EXEMPT).
 
     A login that is NOT on a temporary password must prove the current password (checked with
-    a fresh sign-in, like verify_login); a must_reset login already typed it a minute ago."""
+    a fresh sign-in, like verify_login); a must_reset login already typed it a minute ago.
+
+    R7b: once the password has changed, every OTHER session of the login is signed out
+    (app.user_auth.revoke_other_sessions — Supabase's sign-out, scope "others") and the tokens
+    those sessions already hold are refused from now on (app.auth.end_other_sessions); the session
+    that made the change stays signed in. The answer's shape is unchanged; the audit row records
+    whether Supabase took the sign-out."""
     from fastapi import HTTPException
-    from app.user_auth import check_password, set_password
+    from app.auth import end_other_sessions
+    from app.user_auth import check_password, revoke_other_sessions, set_password
     pw = body.password or ""
     if len(pw) < 8 or len(pw) > 128:
         raise HTTPException(status_code=400, detail="Password must be 8 to 128 characters.")
@@ -1766,7 +1784,13 @@ def auth_password(request: Request, body: PasswordChangeRequest,
             raise HTTPException(status_code=403, detail="Current password is incorrect.")
     if not set_password(user.email, pw):
         raise HTTPException(status_code=404, detail="Account not found.")
-    log_event(user.email, "auth.password_change", detail={"forced": bool(user.must_reset)})
+    others_signed_out = None          # None: a token without a session id (nothing to keep apart)
+    if user.session_id:
+        auth_header = request.headers.get("authorization") or ""
+        others_signed_out = revoke_other_sessions(auth_header[7:] if auth_header[:7].lower() == "bearer " else "")
+        end_other_sessions(user.user_id, user.session_id)
+    log_event(user.email, "auth.password_change",
+              detail={"forced": bool(user.must_reset), "other_sessions_signed_out": others_signed_out})
     return {"ok": True, "must_reset": False}
 
 
