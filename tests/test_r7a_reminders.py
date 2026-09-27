@@ -497,6 +497,7 @@ def _():
     with ctx(db, Channels(email_ok=False), NOW):
         out = shop_jobs.unconfirmed_reminder()
     assert out["reminded"] == [] and out["reason"].startswith("no channel delivered"), out
+    assert len(db.written("shop_notifications")) == 1, "one insert for the whole run, not one per order"
     first = db.notes()
     got = sorted((n["order_id"], n["kind"], n["channel"], n["recipient_role"], n["status"], n["attempt"]) for n in first)
     assert got == [(1, "reminder", "email", "rep", "failed", 1), (1, "reminder", "whatsapp", "rep", "skipped", 1),

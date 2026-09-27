@@ -599,21 +599,22 @@ def unconfirmed_reminder() -> dict:
         for r in owner_due:
             tried.setdefault(r["id"], {})["owner"] = bool(owner_res["sent"])
 
-    stamped: list[int] = []
-    for r in active:
-        d = tried.get(r["id"])
-        if not d:
-            continue
-        got_rep, got_owner = bool(d.get("rep")), bool(d.get("owner"))
-        s, age = slot(r), _sla_age(r, now, since="assigned_at")
-        notes: list[dict] = []
+    attempted = [r for r in active if r["id"] in tried]
+    notes: list[dict] = []
+    for r in attempted:
+        d, s, age = tried[r["id"]], slot(r), _sla_age(r, now, since="assigned_at")
         if "rep" in d:
             sm, res = rep_res[r["id"]]
             notes += _rep_rows(sm, res, r["id"], now, s.get("rep_tries", 0) + 1, {"age_min": age, "sla_min": sla})
         if "owner" in d:
             notes += _owner_rows("escalation", "owner", owner_res, [r["id"]], now,
                                  {r["id"]: s.get("owner_tries", 0) + 1}, {"age_min": age, "sla_min": sla})
-        logged = shop_notify.log_notifications(notes, client)
+    logged = shop_notify.log_notifications(notes, client)       # one insert for the whole run
+
+    stamped: list[int] = []
+    for r in attempted:
+        d, s, age = tried[r["id"]], slot(r), _sla_age(r, now, since="assigned_at")
+        got_rep, got_owner = bool(d.get("rep")), bool(d.get("owner"))
         # Every attempt, a failed one too, is in the log, so the next run backs off for an hour
         # instead of hammering a dead channel. The order's timeline gets a 'reminded' event only
         # when someone was reached or the chase moved up a level (the first rep try, the first
