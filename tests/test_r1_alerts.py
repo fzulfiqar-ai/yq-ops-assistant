@@ -719,11 +719,13 @@ def _():
     with _jobs_ctx(db, ch):
         out = shop_jobs.unconfirmed_reminder()
     assert out["digest"]["skipped"] and ch.emails == [] and ch.telegrams == [] and not db.writes, out
-    # a digest nobody received leaves no marker and no rows, so the next tick tries again
+    # a digest nobody received leaves no marker and no timeline rows, so the next tick tries again
+    # (R7a: the failed attempt itself is logged in shop_notifications — the only write)
     db = FakeDB(shop_orders=[old], shop_order_events=[], app_settings=[])
     with _jobs_ctx(db, Channels(email_ok=False)):
         out = shop_jobs.unconfirmed_reminder()
-    assert out["digest"]["sent"] is False and out["digest"]["reason"].startswith("no channel") and not db.writes, out
+    assert out["digest"]["sent"] is False and out["digest"]["reason"].startswith("no channel"), out
+    assert [w[0] for w in db.writes] == ["shop_notifications"], db.writes
 
 
 @test("jobs: the run lease — one conditional upsert on app_settings, a live lease skips the run, released at the end")
