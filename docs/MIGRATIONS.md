@@ -372,3 +372,44 @@ four new roles (change those people on the Team page first). Both files were run
 the migration twice, the reverse refused with a management row and with a pending finance invite, then restored
 the six roles twice.
 
+## Release R7b (27-Sep-2026, not yet applied): `r7b_ai_head_migration.sql` — the Weekly AI Head
+
+Additive and idempotent, with `r7b_ai_head_reverse.sql`; **not rehearsed on production** (the build session had
+read-only access only) — rehearse with `--rehearse`, apply, then `python -m scripts.audit_grants`. Needs
+`r7_focus_links_migration.sql` (and the older shop / marketplace / statements files); its first block refuses and
+names the file to apply when an object is missing.
+
+Creates, owned by postgres (never `security_invoker`): fourteen read-only views `v_agent_*` for the owner's weekly
+review (orders, lines, the pseudonymous funnel stream, funnel per day, search demand, rep governance, statements,
+Focus links, customer regulars, Focus sales, items, market signals, data trust, insights) — no phone, email, token,
+IP hash, user agent or raw device / session id, and every free-text column through `ai_agent_mask(text)` (emails →
+`[email]`, runs of 8+ digits → `[number]`; order numbers and invoice keys survive); the table `ai_insights`
+(RLS on, service role only, a trigger keeps the approved words immutable and the status path proposed → approved |
+rejected, approved → done); and the LOGIN role `ai_head_ro` with **no password** (the owner sets it:
+`alter role ai_head_ro password '…'`), `statement_timeout` 15 s, `default_transaction_read_only` on, idle-in-transaction
+60 s, 3 connections. Grants: SELECT on the views to `ai_head_ro` and `yq_readonly` (except
+`v_agent_customer_regulars`: shop names with cadence stay off `yq_readonly`, the marketplace_migration 9a rule),
+EXECUTE on the mask to both and `service_role`; everything revoked from `anon` / `authenticated`.
+
+**`ai_head_ro` is a member of no role** — a deliberate change from the plan's "member of `yq_readonly`", after a
+read-only look at production (27-Sep-2026): `yq_readonly` holds SELECT on `customer_contacts` and `leads` (phones,
+emails) and OWNS the SECURITY DEFINER functions `run_readonly_query(text)` / `run_readonly_query_params(text, jsonb)`,
+so a member could DROP them or GRANT EXECUTE on them to `anon`. The closing `DO` block raises if the login is a
+member of anything, can read a base table or the RPCs, lacks its settings, or if any view is not owned by postgres,
+is `security_invoker`, carries a contact column, or is granted to `anon` / `authenticated`.
+
+Proven read-only on production 27-Sep-2026 (each view body run as a plain SELECT, the mask inlined, nothing created):
+every body answers with its documented columns in under 1 s and no cell looks like a phone number or an email.
+Replayed on a local scratch cluster (Postgres 17, synthetic schema and data, `tests/test_r7b_ai_head.py`): the
+migration applied twice; the login connects read-only with a 15 s timeout, reads every view and no base table, and
+cannot write even inside `SET TRANSACTION READ WRITE`; the pack built through it; `scripts/weekly_report.compute()`
+gives identical results through the views and through the base tables; the trigger refuses a text change and a
+rejected → approved move; the reverse refused while `ai_insights` held rows, then (with `set yq.ai_insights_drop =
+'yes'`) dropped everything, ran again cleanly, and the migration re-applied after it.
+
+The API needs no order: `GET /management/insights` answers `{"available": false}` until the table exists, and
+`scripts/ai_head/pack.py` falls back to `DATABASE_URL` in a read-only transaction (with a warning) until the views
+and the login exist. The reverse refuses while `ai_insights` holds the owner's decisions; back it up
+(`python -m scripts.db_backup --tables ai_insights`) and `set yq.ai_insights_drop = 'yes'` in the same session to
+drop it anyway. Owner steps and the Sunday routine: `scripts/ai_head/README.md`.
+
