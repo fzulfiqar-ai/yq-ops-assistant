@@ -316,3 +316,20 @@ CI: the pure tests; locally: the replay) runs the API's own `DirectBackend` unde
 the scratch cluster, replays the 240926 drop from the `2026-09-24_pre-r0` backup and proves the result equals
 production's tables, then the per-account Ledger and single-item Stock_ledger scenarios, every undo refusal, a
 statement-timeout rollback, and the full undo back to the byte-identical start.
+
+
+## Release R7a (27-Sep-2026, not yet applied): `r7_notifications_migration.sql` — the notifications log
+
+Additive and idempotent, with `r7_notifications_reverse.sql` (drops the table only; take
+`python -m scripts.db_backup --tables shop_notifications` first if the delivery history is wanted). Creates
+`shop_notifications` (one row per channel per alert attempt; `order_id` references `shop_orders` like
+`shop_order_events`; CHECKs on `kind`, `recipient_role`, `status`; indexes `(order_id, created_at desc)` and
+`(kind, created_at desc)`; RLS on, no policies; nothing granted to `anon` / `authenticated` (table and identity
+sequence) or `yq_readonly`). The closing `DO` block asserts all of it. No other table changes: the legacy
+`reminded` rows in `shop_order_events` are kept and still read by the reminder back-off.
+
+Order: any time. The code probes the table (hit cached 10 min, miss 1 min) and keeps writing one `reminded`
+event per attempt until it exists, so the API may deploy first. Rehearse with `--rehearse`, apply, then
+`python -m scripts.audit_grants`. Verified 27-Sep-2026 on a throwaway local Postgres 17 with Supabase-style default
+grants: applied twice, bad kind / role / status / order refused, reverse twice, re-applied. Contract:
+`docs/SHOP.md` § scheduler (Notifications log); tests: `python -m tests.test_r7a_reminders`.

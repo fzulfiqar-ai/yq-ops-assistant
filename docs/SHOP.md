@@ -383,15 +383,31 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   `unassigned_reminder` (after `shop_assign_sla_min`, owner channel, every 2 h);
   `unconfirmed_reminder` (24-Sep-2026: an assigned order still `new` after `shop_confirm_sla_min` = 120 min from
   assignment reminds the rep by email + WhatsApp Cloud, at most every `shop_confirm_renotify_hours` = 12; past 2× the
-  SLA the owner channel is told too; **every attempt** is a `shop_order_events` row `event='reminded'` —
-  `detail.rep/owner` = who was reached, `detail.attempted` = who was tried — so a channel that did not deliver is
-  retried at most **hourly**, not every tick; rows older than the order's `assigned_at` are ignored, so a reassigned
-  order starts its cadence over; after **7 days** from assignment or **10 delivered reminders** the per-order chasing
-  stops and the order becomes one line in a single **daily owner digest** (marker `shop_unconfirmed_digest_at`,
-  `reminded` rows with `level:'digest'`); `sla_notified_at` is stamped only when someone was reached); `cleanup`;
-  `stale_data_alert` (Telegram, owner email as fallback). Nudges (unassigned, unconfirmed, digest) go out only
-  **07:00–22:00 Bahrain**; `notify_retry` is the first alert and is not gated. A reminder or the stale marker is
-  recorded only when a channel really delivered. The answer carries `ok:false` + `errors[]` when a job raised.
+  SLA the owner channel is told too; **every attempt** is logged in `shop_notifications` (R7a, below) so a channel
+  that did not deliver is retried at most **hourly**, not every tick, while the order's timeline gets a
+  `shop_order_events` row `event='reminded'` — `detail.rep/owner` = who was reached, `detail.attempted` = who was
+  tried — only when someone was reached or the chase moved up a level (the first rep try, the first owner
+  escalation); rows older than the order's `assigned_at` are ignored, so a reassigned order starts its cadence over;
+  after **7 days** from assignment or **10 delivered reminders** the per-order chasing stops and the order becomes one
+  line in a single **daily owner digest** (marker `shop_unconfirmed_digest_at`, `reminded` rows with
+  `level:'digest'`); `sla_notified_at` is stamped only when someone was reached); `cleanup`; `stale_data_alert`
+  (Telegram, owner email as fallback). Nudges (unassigned, unconfirmed, digest, stale data) go out only
+  **07:00–22:00 Bahrain** and **never on Friday or Saturday**; `notify_retry` is the first alert and is not gated.
+  The SLA age that makes an order overdue (`business_minutes`) leaves Friday and Saturday out; the 7-day cap stays on
+  calendar days. Staff-placed orders (`source='salesman'`) and test orders (`is_test`) are never chased. A reminder
+  or the stale marker is recorded only when a channel really delivered. The answer carries `ok:false` + `errors[]`
+  when a job raised.
+- **Notifications log (R7a, `scripts/r7_notifications_migration.sql`, reverse `r7_notifications_reverse.sql`).**
+  `shop_notifications` holds one row per channel per alert attempt: `kind` (`new_order` | `retry` | `reminder` |
+  `escalation` | `owner_digest` | `stale_data`; `status_update` reserved), `channel`, `recipient_role` (`rep` |
+  `owner` | `merchant`; `management` reserved), `recipient_masked` (`a***@example.com`, `***1234`), `status`
+  (`sent` | `failed` | `skipped` = channel not set up / no recipient), `provider`, `error` (scrubbed of addresses and
+  numbers), `level` (`rep` | `owner` | `digest` | `unassigned`), `attempt`, `detail`. The new-order fan-out
+  (`shop_notify.notify_new_order`) logs its `notify_result` channels (a channel kept from an earlier attempt gets no
+  row); `shop_jobs` logs its reminders, escalations, unassigned nudges, the digest and the stale-data alert. The
+  reminder back-off reads this table **and** the legacy `reminded` events together (an event that repeats a logged
+  attempt is skipped by `detail.attempted_at`), so the counters carry across the switch. Until the table exists —
+  and right after a reverse — every attempt is an event again, exactly as before; the old `reminded` rows are kept.
 
 ### Release R3b — pipeline states, customer attribution, admin audit (24-Sep-2026)
 Migration `scripts/r3_pipeline_migration.sql` (reverse `r3_pipeline_reverse.sql`); the code answers before it runs.
