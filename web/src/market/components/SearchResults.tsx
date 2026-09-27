@@ -1,15 +1,16 @@
 import { Fragment, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, Clock, Hash, MessageCircle } from 'lucide-react'
+import { Check, ChevronRight, Clock, Hash, MessageCircle } from 'lucide-react'
 import type { ShopItem } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { recentSearches } from '../lib/device'
+import { track } from '../lib/events'
 import { categorySlug, niceCategory } from '../lib/format'
 import { bestSellers, categoryTiles } from '../lib/home'
 import type { Grouped } from '../lib/searchGroups'
 import { S } from '../strings'
-import { AnchorButton } from '../ui/Button'
+import { AnchorButton, Button } from '../ui/Button'
 import { ProductImage } from '../ui/ProductImage'
 import { SectionHeader } from '../ui/SectionHeader'
 import { Skeleton } from '../ui/Skeleton'
@@ -25,8 +26,9 @@ import { SoldOutDivider } from './SoldOut'
  * categories as photo tiles with their line counts.
  * Typing: instant grouped results — Codes (exact/prefix, ≤3) · Products (≤20, list rows with
  * inline Add so a mission shopper never leaves) · Categories (≤2).
- * Nothing found: the copy sends the merchant to their representative and the card carries that
- * WhatsApp action, then the shelf's own category tiles (photo + line count) — never bare pills.
+ * Nothing found: "We don't stock “q” yet — tell {rep}": one action (WhatsApp with the words
+ * prefilled, or a plain "Tell YQ" when there is no WhatsApp to open) that also logs the request as
+ * a demand signal, then the shelf's own category tiles (photo + line count) — never bare pills.
  */
 
 const POPULAR_MAX = 6
@@ -113,46 +115,89 @@ function CategoryGrid({ tiles, className }: { tiles: { category: string; count: 
   )
 }
 
-export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'search_row', className }: { q: string; grouped: Grouped; hints: string[]; onPick: (q: string) => void; activeCode?: string | null; from?: string; className?: string }) {
+/*
+ * "Tell {rep}" on a search that found nothing (R7d, plan §12 / §23 item 7): the tap is also a demand
+ * signal — one shop_events 'product_request' per query per page load (meta.q = the words, nothing
+ * else), which Market Intel can roll up with the zero-result searches.
+ */
+const requested = new Set<string>()
+function logRequest(q: string): void {
+  const key = q.trim().toLowerCase()
+  if (key.length < 2 || requested.has(key)) return
+  requested.add(key)
+  track('product_request', { meta: { q: q.trim().slice(0, 60) } })
+}
+
+/** The zero-result card: "We don't stock “q” yet", the did-you-mean words, and ONE action to tell the rep. */
+function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[]; onPick: (q: string) => void; className?: string }) {
   const { categories, items, rep } = useMarket()
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
+  const [noted, setNoted] = useState('')
+  const query = q.trim()
+  const first = rep?.first_name || ''
+  const askUrl = rep?.whatsapp_url && query ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.shop.askHave(first, query))}` : null
+  const chip = 'hit relative h-9 rounded-full border border-line bg-surface px-3.5 text-sm text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
+  return (
+    <div className={cn('rounded-lg border border-line bg-surface p-5 text-start lg:p-6', className)}>
+      <p className="font-display text-base font-bold text-ink">{S.shop.notOnShelf(query)}</p>
+      <p className="mt-1 text-sm text-ink-2">
+        {S.shop.tellNeed(first)} {S.shop.notOnShelfHint}
+      </p>
+      {hints.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-ink-2">{S.states.didYouMean}</span>
+          {hints.map((h) => (
+            <button key={h} type="button" onClick={() => onPick(h)} className={cn(chip, 'font-semibold text-plum')}>
+              {h}
+            </button>
+          ))}
+        </div>
+      )}
+      {/* one action: the rep on WhatsApp with the words prefilled — or, with no WhatsApp to open, the request itself */}
+      {askUrl ? (
+        <AnchorButton href={askUrl} target="_blank" rel="noreferrer" variant="wa" className="mt-4" onClick={() => logRequest(query)} icon={<MessageCircle size={15} aria-hidden="true" />}>
+          {first ? S.card.tellRepWa(first) : S.cart.askUs}
+        </AnchorButton>
+      ) : noted === query ? (
+        <p role="status" className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-plum-wash px-3 py-2 text-sm font-medium text-plum-ink">
+          <Check size={15} aria-hidden="true" /> {S.shop.noted(query)}
+        </p>
+      ) : (
+        query && (
+          <Button
+            variant="secondary"
+            className="mt-4"
+            onClick={() => {
+              logRequest(query)
+              setNoted(query)
+            }}
+            icon={<MessageCircle size={15} aria-hidden="true" />}
+          >
+            {first ? S.card.tellRep(first) : S.shop.tellYq}
+          </Button>
+        )
+      )}
+      {tiles.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h3>
+          <CategoryGrid tiles={tiles} className="mt-2" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'search_row', className }: { q: string; grouped: Grouped; hints: string[]; onPick: (q: string) => void; activeCode?: string | null; from?: string; className?: string }) {
+  const { items } = useMarket()
   const total = grouped.codes.length + grouped.products.length
   // each group keeps the sold-out rule (lib/searchGroups, lib/search): available first, then — under
   // the divider, with that group's own count — the sold-out lines
   const codesSold = useMemo(() => soldOutSplit(grouped.codes, grouped.codes), [grouped.codes])
   const productsSold = useMemo(() => soldOutSplit(grouped.products, grouped.products), [grouped.products])
-  const askUrl = rep?.whatsapp_url && q.trim() ? `${rep.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.shop.askHave(rep.first_name || '', q.trim()))}` : null
   const chip = 'hit relative h-9 rounded-full border border-line bg-surface px-3.5 text-sm text-ink hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70'
 
   if (total === 0 && grouped.categories.length === 0) {
-    return (
-      <div className={cn('rounded-lg border border-line bg-surface p-5 text-start lg:p-6', className)}>
-        <p className="font-display text-base font-bold text-ink">{S.shop.notOnShelf(q.trim())}</p>
-        <p className="mt-1 text-sm text-ink-2">{S.shop.notOnShelfHint}</p>
-        {hints.length > 0 && (
-          <div className="mt-4 flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-ink-2">{S.states.didYouMean}</span>
-            {hints.map((h) => (
-              <button key={h} type="button" onClick={() => onPick(h)} className={cn(chip, 'font-semibold text-plum')}>
-                {h}
-              </button>
-            ))}
-          </div>
-        )}
-        {/* the hint above sends the merchant to their representative — so the card carries that action */}
-        {askUrl && (
-          <AnchorButton href={askUrl} target="_blank" rel="noreferrer" variant="wa" className="mt-4" icon={<MessageCircle size={15} aria-hidden="true" />}>
-            {rep!.first_name ? S.cart.ask(rep!.first_name) : S.cart.askUs}
-          </AnchorButton>
-        )}
-        {tiles.length > 0 && (
-          <div className="mt-6">
-            <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2">{S.search.categories}</h3>
-            <CategoryGrid tiles={tiles} className="mt-2" />
-          </div>
-        )}
-      </div>
-    )
+    return <NotStocked q={q} hints={hints} onPick={onPick} className={className} />
   }
 
   return (

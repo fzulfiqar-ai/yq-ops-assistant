@@ -16,7 +16,7 @@ import { useShell } from './ShellContext'
 /**
  * Tablet/desktop header. Sticky, glass, 72px. Logo + "Where Bahrain restocks." · Browse (mega-nav
  * on desktop, link on tablet) · a large search trigger with a rotating example that opens the
- * palette · Deals (only when real deals or last-chance lines are in stock; "Last chance" while there
+ * palette · Deals (only when real deals or clearing lines are in stock; "Clearing line" while there
  * is no live offer and no real price drop) · Quick order · Orders ·
  * My YQ · Restock (line count, and a thin wholesale-progress line when a minimum is set; drawer
  * below 1280, page above). A category strip rides under it on Home and Browse.
@@ -84,7 +84,7 @@ export function StickyHeader() {
   const total = quote?.total_bhd != null ? Number(quote.total_bhd) : estimate
   const hasDeals = useMemo(() => items.some((i) => i.stock_status !== 'out_of_stock' && isDeal(i)), [items])
   // the shortcut says "Deals" only when a live offer or a real price-book drop is on the shelf; with
-  // neither, the same link holds only last-chance lines and reads "Last chance" (the clearance word)
+  // neither, the same link holds only clearing lines and reads "Clearing line" (the clearance word)
   const dealsLabel = useMemo(() => (dealSets(items, data?.offers).hasRealDeals ? S.nav.deals : S.shop.clearance), [items, data])
   const dealsActive = pathname === '/shop' && (new URLSearchParams(search).get('f') || '').split(',').includes('deals')
   const showStrip = pathname === '/' || pathname === '/shop' || pathname.startsWith('/t/') || (pathname.split('/').filter(Boolean).length === 1 && !['/search', '/cart', '/checkout', '/orders', '/me', '/quick', '/about'].includes(pathname))

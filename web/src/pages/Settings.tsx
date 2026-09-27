@@ -169,7 +169,7 @@ const SHOP_FIELDS: ShopField[] = [
   { key: 'shop_allow_backorder', label: 'Allow backorder — merchants', hint: 'Let merchants (marketplace + share link) order a sold-out line as a backorder your rep confirms. Off: merchants see "Tell me when back" instead of Add, and a sold-out cart line cannot be sent.', type: 'toggle' },
   { key: 'shop_allow_backorder_staff', label: 'Allow backorder — salesman app', hint: 'Let reps add a sold-out line as a backorder for a shop (the office confirms it), whatever the merchant switch says. A rep’s confirmation re-price always keeps its backorder lines.', type: 'toggle' },
   { key: 'shop_stock_fresh_days', label: 'Stock snapshot freshness (days)', hint: 'Focus omits zero-balance items, so a SKU missing from the latest Stock Balance is sold out. Older than this many days, the marketplace keeps the status and prints the snapshot date beside "Sold out".', type: 'number' },
-  { key: 'shop_show_retail_compare', label: 'Show retail price + merchant margin', hint: 'Show the price-book retail price and the merchant’s margin per piece next to the trade price. Last-chance lines show it either way.', type: 'toggle' },
+  { key: 'shop_show_retail_compare', label: 'Show retail price + merchant margin', hint: 'Show the price-book retail price and the merchant’s margin per piece next to the trade price. Clearing lines show it either way.', type: 'toggle' },
   { key: 'shop_social_proof_min_customers', label: 'Social proof minimum', hint: 'Minimum shops ordering an item this month before showing social proof.', type: 'number' },
   { key: 'shop_default_salesman', label: 'Default salesman', hint: 'Credited for orders placed with no referral link.', type: 'select' },
   { key: 'shop_order_prefix', label: 'Order number prefix', hint: 'e.g. YQ → order numbers look like YQ-2609-0001.', type: 'text' },
@@ -279,6 +279,109 @@ function ShopSettingsCard() {
       </div>
       <Button className="mt-4" onClick={() => save.mutate()} disabled={save.isPending || !dirty}>
         {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save shop settings
+      </Button>
+    </Card>
+  )
+}
+
+/* ───────────────────────── area representatives (shop_area_reps) ─────────────────────────
+   R7d (plan §12 "direct traffic"): a merchant who reaches the marketplace with no rep link is routed
+   by the area picked at checkout — after an explicit "Already have a representative?" pick, before
+   the default salesman — and the checkout shows "Your area representative: {name}". Stored as JSON
+   {area: salesman id}; app/shop.py validate_area_reps() is the authority (400 with a readable reason). */
+
+type AreaReps = Record<string, number>
+
+function storedAreaReps(raw: string | undefined): AreaReps {
+  try {
+    const data: unknown = JSON.parse(raw || '{}')
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+    const out: AreaReps = {}
+    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+      const id = Number(v)
+      if (k.trim() && Number.isInteger(id) && id > 0) out[k.trim()] = id
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function AreaRepsCard() {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const { data } = useQuery({ queryKey: ['settings-shop'], queryFn: () => apiGet<{ settings: ShopSettings }>('/settings/shop') })
+  const { data: salesmenData } = useQuery({
+    queryKey: ['shop-salesmen-names'],
+    queryFn: () => apiGet<{ salesmen: { id: number; name: string; is_active?: boolean | null }[] }>('/shop/salesmen'),
+    staleTime: 5 * 60_000,
+  })
+  const settings = data?.settings
+  const stored = useMemo(() => storedAreaReps(settings?.shop_area_reps), [settings?.shop_area_reps])
+  const [draft, setDraft] = useState<AreaReps | null>(null)
+  const map = draft ?? stored
+
+  const save = useMutation({
+    mutationFn: (json: string) => apiSend<{ settings: ShopSettings }>('PUT', '/settings/shop', { settings: { shop_area_reps: json } }),
+    onSuccess: (r) => {
+      if (r?.settings) qc.setQueryData(['settings-shop'], { settings: r.settings })
+      setDraft(null)
+      qc.invalidateQueries({ queryKey: ['settings-shop'] })
+      toast('Area representatives saved — the marketplace uses them within a minute.', 'success')
+    },
+    onError: (e: unknown) => toast(apiErrorText(e, 'Could not save the area representatives.'), 'error'),
+  })
+
+  if (!settings) return null
+  const roster = (salesmenData?.salesmen || []).filter((s) => s.is_active !== false)
+  const areas = String(settings.shop_areas || '').split(',').map((a) => a.trim()).filter(Boolean)
+  // an area the map holds but the checkout list no longer offers stays visible, so nothing is dropped unseen
+  const rows = [...areas, ...Object.keys(map).filter((k) => !areas.some((a) => a.toLowerCase() === k.toLowerCase()))]
+  const keyOf = (area: string) => Object.keys(map).find((k) => k.toLowerCase() === area.toLowerCase())
+  const setRep = (area: string, id: number | null) => {
+    const next: AreaReps = { ...map }
+    const k = keyOf(area)
+    if (k) delete next[k]
+    if (id) next[area] = id
+    setDraft(next)
+  }
+  const mapped = Object.keys(map).length
+
+  return (
+    <Card className="mb-4 p-6">
+      <div className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+        <Truck size={18} className="text-primary" /> Area representatives
+      </div>
+      <p className="mb-4 text-sm text-muted-foreground">
+        Merchants who order with no rep link go to the rep of the area they pick at checkout — unless
+        they chose a rep themselves or the shop already has one. Areas left on “Default salesman” follow
+        the default salesman above. {mapped > 0 ? `${mapped} area${mapped === 1 ? '' : 's'} mapped.` : 'Nothing mapped yet.'}
+      </p>
+      <div className="grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-3">
+        {rows.map((area) => {
+          const id = `area-rep-${area.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+          const k = keyOf(area)
+          const current = k ? map[k] : 0
+          const known = roster.some((s) => s.id === current)
+          return (
+            <div key={area} className="flex items-center gap-2">
+              <label htmlFor={id} className="w-28 shrink-0 truncate text-[13px] font-medium">{area}</label>
+              <select
+                id={id}
+                value={current || ''}
+                onChange={(e) => setRep(area, e.target.value ? Number(e.target.value) : null)}
+                className="flex h-10 min-w-0 flex-1 rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-sm outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">Default salesman</option>
+                {roster.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {current > 0 && !known && <option value={current}>Salesman #{current} (inactive)</option>}
+              </select>
+            </div>
+          )
+        })}
+      </div>
+      <Button className="mt-4" onClick={() => save.mutate(JSON.stringify(map))} disabled={save.isPending || draft === null}>
+        {save.isPending ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />} Save area representatives
       </Button>
     </Card>
   )
@@ -819,6 +922,7 @@ export default function Settings() {
 
       {me?.role === 'admin' && <CostingCard />}
       {me?.role === 'admin' && <ShopSettingsCard />}
+      {me?.role === 'admin' && <AreaRepsCard />}
       {me?.role === 'admin' && <PromiseBarCard />}
       {me?.role === 'admin' && <AgentScopeCard />}
       {me?.role === 'admin' && <AuditCard />}

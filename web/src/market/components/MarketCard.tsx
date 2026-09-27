@@ -74,8 +74,8 @@ export interface MarketCardProps {
   /** override the remembered quantity (Order again rows) */
   presetQty?: number
   /**
-   * Badge(s) the surface already says in its own title — a shelf of "Last chance" cards does not
-   * repeat "Last chance" on all ten. The next-best badge is shown instead. Pass a single key or a
+   * Badge(s) the surface already says in its own title — a shelf of "Clearing line" cards does not
+   * repeat "Clearing line" on all ten. The next-best badge is shown instead. Pass a single key or a
    * stable array (a fresh array literal on every render would defeat the memo below).
    */
   hideBadge?: BadgeKind | readonly BadgeKind[] | null
@@ -244,7 +244,7 @@ export function WasPill({ was, pct, className }: { was: number; pct: number; cla
  * A list row is one 20 px meta line next to a 14 px price. The solid black "Best seller" pill the
  * grid wears over a 200 px photo becomes the heaviest object in that row — heavier than the price
  * it is meant to sell — so in list context it drops to the quiet grey. Every other badge keeps its
- * own tone (a "Last chance" that is not amber is not last chance).
+ * own tone (a "Clearing line" badge that is not amber is not the clearing badge).
  */
 function listBadgeTone(kind: BadgeKind): ReturnType<typeof badgeMeta>['tone'] {
   return kind === 'best_seller' ? 'grey' : badgeMeta(kind).tone
@@ -306,7 +306,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
   const mg = marginOf(item)
   /**
    * The badges this card shows. `cardBadges` already drops demand claims from a sold-out line;
-   * here a shelf that is defined by a badge ("Last chance" ten times down a clearance grid) drops
+   * here a shelf that is defined by a badge ("Clearing line" ten times down a clearance grid) drops
    * it as well — the next-best badge shows instead, or none.
    */
   const hideKey = typeof hideBadge === 'string' ? hideBadge : hideBadge ? hideBadge.join(',') : ''
@@ -492,7 +492,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           {meta && (
             // one 20px line, most decisive first; whatever does not fit wraps out of sight (whole
             // items only). State and badge lead: on a 390 px phone they are what the margin strip
-            // used to push out of the clipped box — a last-chance line that never says so is worse
+            // used to push out of the clipped box — a clearing line that never says so is worse
             // than a margin the merchant can still read on the card or the panel.
             <span className="mt-1 flex h-5 min-w-0 flex-wrap items-center gap-x-2 gap-y-1 overflow-hidden text-2xs leading-5 tnum">
               {/* sold out is a state, not an error: red is kept for things that went wrong.
@@ -501,7 +501,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
               {badges[0] && <Chip tone={listBadgeTone(badges[0])}>{badgeMeta(badges[0]).label}</Chip>}
               {mg && (
                 // the same two numbers as the card's strip, without the amber fill: a filled
-                // margin pill sitting against the amber "Last chance" chip made two lozenges of
+                // margin pill sitting against the amber "Clearing line" chip made two lozenges of
                 // different shape touch, which at 11 px reads as one smeared blob. In a text row
                 // the percentage alone carries the colour.
                 <span className="whitespace-nowrap text-ink-2">

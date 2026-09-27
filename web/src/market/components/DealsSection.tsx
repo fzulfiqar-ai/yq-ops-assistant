@@ -12,7 +12,7 @@ import { MarketCard } from './MarketCard'
 
 /**
  * Stock-Up Deals on the home page — or, while the price book has no real drop, offer or bundle,
- * simply "Last-Chance Stock". Everything in it is real: price-book drops that carry the old price,
+ * simply "Clearing lines · trade price". Everything in it is real: price-book drops that carry the old price,
  * live offer rules, bundles, and the lines we are clearing at their normal trade price (the card
  * shows the shop's margin against retail — never a markdown). The section sits on a pale amber
  * panel so a merchant scanning the page finds the opportunities at a glance; chips appear only

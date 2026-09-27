@@ -60,6 +60,19 @@ export function fmtDateTime(d?: string | null): string | null {
   return dt.toLocaleString(DATE_LOCALE, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
+/**
+ * A calendar day (YYYY-MM-DD — the order's expected_delivery_date, a Bahrain date) as "Tue, 30 Sep"
+ * in the page's language. Read as a LOCAL date: `new Date('2026-09-30')` is UTC midnight and would
+ * show the day before on a phone west of Greenwich.
+ */
+export function fmtDay(d?: string | null): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || ''))
+  if (!m) return null
+  const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  if (Number.isNaN(dt.getTime())) return null
+  return dt.toLocaleDateString(DATE_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
 /* ───────────────────────── quantities ───────────────────────── */
 
 /** Pieces added per tap — a pack size when the item ships in packs. */
@@ -101,7 +114,7 @@ export function unitAt(item: ShopItem, qty: number): number | null {
 export const BADGE_ORDER: BadgeKind[] = ['on_offer', 'price_drop', 'clearance', 'best_seller', 'selling_fast', 'new', 'trending']
 
 export const BADGE_META: Record<BadgeKind, { label: string; tone: ChipTone }> = {
-  // "Deal" is reserved for real offers; clearing lines read "Last chance" (plan D3).
+  // "Deal" is reserved for real offers; clearing lines read "Clearing line" (plan D3; R7d/D10: never "Last chance").
   on_offer: { label: S.deals.deal, tone: 'deal' },
   best_seller: { label: S.badges.best, tone: 'ink' },
   selling_fast: { label: S.badges.fast, tone: 'warn' },
@@ -500,13 +513,21 @@ export function areaLabel(area: string): string {
 }
 
 /**
+ * The stage a merchant sees for a status key (R7c, owner 27-Sep-2026): Received → Confirmed →
+ * Delivered, or Cancelled. The storekeeper's pick-list stamps (packed / out_for_delivery) read
+ * "Confirmed" — the API's status_label already says so; this is the same rule for the key.
+ */
+const VISIBLE_STATUS: Record<string, string> = { packed: 'confirmed', out_for_delivery: 'confirmed' }
+
+/**
  * An order stage in the page's language. English keeps exactly what the API sent (the API's
- * STATUS_LABELS are the English copy); Arabic maps the status key, falling back to the API's word.
+ * status_label is the English copy, three stages); Arabic maps the VISIBLE status key, falling back
+ * to the API's word.
  */
 export function statusLabel(status?: string | null, apiLabel?: string | null): string {
   const key = String(status || '')
   if (locale.lang === 'en') return apiLabel || S.status[key] || key
-  return S.status[key] || apiLabel || key
+  return S.status[VISIBLE_STATUS[key] || key] || apiLabel || key
 }
 
 /**

@@ -67,11 +67,16 @@ export const en = {
   },
   deals: {
     title: 'Stock-Up Deals',
-    lastChance: 'Last-Chance Stock',
-    line: 'Lines we’re clearing · trade price · while stock lasts',
+    /**
+     * The clearing lines' section (R7d, owner 27-Sep-2026, plan D10). They were "Last chance" /
+     * "Last-Chance Stock", but the shortest of them has years of cover: a false-scarcity claim.
+     * They are lines we are clearing, at the ordinary trade price — no markdown, no deadline.
+     */
+    lastChance: 'Clearing lines · trade price',
+    line: 'Lines we’re clearing, at the normal trade price.',
     /* the section line is picked from the sets that actually have lines — never promise a kind we have none of */
     /** real price-book drops AND lines we’re clearing */
-    dealsLine: 'Real price drops and last-chance lines, at trade price.',
+    dealsLine: 'Real price drops and clearing lines, at trade price.',
     /** real price-book drops only */
     dealsLineDrops: 'Real cuts in our price book — the old price is on every card.',
     /** live offers or bundles, plus lines we’re clearing */
@@ -80,10 +85,11 @@ export const en = {
     dealsLineOffers: 'Live offers from our price book, at trade price.',
     all: 'All',
     drops: 'Price drops',
-    last: 'Last chance',
+    last: 'Clearing lines',
     offers: 'Offers',
     bundles: 'Bundles',
-    badge: 'Last chance',
+    /** the card badge / slide sticker on one clearing line */
+    badge: 'Clearing line',
     /** card badge for a real offer or price-book drop — never a clearing line */
     deal: 'Deal',
     retail: (price: string) => `Retail ${price}`,
@@ -160,10 +166,10 @@ export const en = {
     categoryStock: (n: number, total: number) => `${n} of ${total} in stock`,
     /* Headlines for that banner — the message, never the category name: the page h1 (and, on
      * desktop, the active chip) already carry the name, so repeating it sells nothing.
-     * No hyphenated compound in the headline: at 320–390px "12 last-chance lines" broke at its own
-     * hyphen ("12 last-" / "chance lines"), so the biggest type on the shelf opened on what reads as
-     * a typesetting error. The same fact, in words that can only break between them. */
-    categoryLast: (n: number) => `Last chance on ${plural(n, 'line', 'lines')}`,
+     * No hyphenated compound in the headline: at 320–390px a hyphenated count broke at its own
+     * hyphen, so the biggest type on the shelf opened on what reads as a typesetting error. The same
+     * fact, in words that can only break between them. */
+    categoryLast: (n: number) => plural(n, 'clearing line', 'clearing lines'),
     categoryDrops: (n: number) => plural(n, 'price drop', 'price drops'),
     categoryFresh: (n: number) => plural(n, 'new line', 'new lines'),
   },
@@ -176,9 +182,9 @@ export const en = {
      * scripts/qa/market_qa.py fails the gate on a longer one. */
     againLine: (n: number) => `${plural(n, 'product', 'products')} from your last order.`,
     againCta: 'Reorder',
-    last: 'Last-Chance Stock',
-    lastLine: (n: number) => `${plural(n, 'line', 'lines')} clearing at trade price.`,
-    lastCta: 'See last-chance stock',
+    last: 'Clearing lines · trade price',
+    lastLine: (n: number) => `${plural(n, 'line', 'lines')} we’re clearing.`,
+    lastCta: 'See clearing lines',
     /* no time span: the drop window is the admin's shop_price_drop_days (30 by default), not a month */
     drops: (n: number) => `${plural(n, 'price', 'prices')} cut in our price book`,
     dropsLine: 'The old price is on every card.',
@@ -225,7 +231,7 @@ export const en = {
   spot: {
     title: 'Right now at YQ',
     popular: 'Popular right now',
-    clearance: (n: number) => `${plural(n, 'last-chance line', 'last-chance lines')} at trade price`,
+    clearance: (n: number) => `${plural(n, 'clearing line', 'clearing lines')} at trade price`,
     drops: (n: number) => `${plural(n, 'price drop', 'price drops')} on this shelf`,
     arrived: (n: number) => `${plural(n, 'new line', 'new lines')} on the shelf`,
     prev: 'Previous',
@@ -237,7 +243,8 @@ export const en = {
     add: 'Add',
     added: 'Added',
     backorder: 'Backorder',
-    soldOut: 'Sold out',
+    /** "Sold Out", capital O (owner, 27-Sep-2026) — the same casing on every surface and in the API's reasons */
+    soldOut: 'Sold Out',
     tellRep: (first: string) => `Tell ${first}`,
     askYq: 'Ask YQ',
     tellBack: 'Tell me when back',
@@ -248,9 +255,9 @@ export const en = {
     /** the secondary route on the same sheet / toast: the rep on WhatsApp */
     tellRepWa: (first: string) => `Tell ${first} on WhatsApp`,
     /** the sold-out rule at every add path: lines the shop takes no backorder for are left out, and said so */
-    leftOut: (n: number) => `${plural(n, 'sold-out line', 'sold-out lines')} left out`,
+    leftOut: (n: number) => `${plural(n, 'Sold Out line', 'Sold Out lines')} left out`,
     /** a stale stock snapshot: the state stays, the date it was read on rides beside it */
-    soldOutAsOf: (d: string) => `Sold out · stock as of ${d}`,
+    soldOutAsOf: (d: string) => `Sold Out · stock as of ${d}`,
     saveItem: 'Save',
     savedItem: 'Saved',
     zoom: 'Zoom photo',
@@ -275,8 +282,8 @@ export const en = {
     perPc: '/pc',
     stockIn: 'In stock',
     stockLow: 'Only a few left',
-    /** the owner's wording for zero stock (24-Sep-2026): "Sold out" — never "Out of stock" in the merchant UI */
-    stockOut: 'Sold out',
+    /** the owner's wording for zero stock (24-Sep-2026; capital O 27-Sep-2026): "Sold Out" — never "Out of stock" in the merchant UI */
+    stockOut: 'Sold Out',
     /** the Arabic for it, «نفدت الكمية» — the owner's wording, and i18n/ar.ts `stockOut` */
     stockOutAr: 'نفدت الكمية',
     /** narrow cards: "Retail 2.200" (S.deals.retail) then this, e.g. "41% margin" — a share of retail */
@@ -284,7 +291,7 @@ export const en = {
     pcsPlus: (n: number) => `${n}+ pcs`,
     minPcs: (n: number) => `Min ${n} pcs`,
     tellBackText: (first: string, code: string, name: string) => `Hello${first ? ` ${first}` : ''}, please tell me when ${code} (${name}) is back in stock.`,
-    backorderNote: 'Sold out — order now and your representative confirms the date.',
+    backorderNote: 'Sold Out — order now and your representative confirms the date.',
     linkCopied: 'Link copied — paste it into WhatsApp',
     breaksCaption: 'Quantity price breaks',
     colQty: 'Quantity',
@@ -311,7 +318,7 @@ export const en = {
     /** the `offers` chip: live offers only (on_offer), never a retail anchor */
     offers: 'Offers',
     new: 'New',
-    clearance: 'Last chance',
+    clearance: 'Clearing lines',
     drops: 'Price drops',
     clear: 'Clear',
     filters: 'Filters',
@@ -335,8 +342,14 @@ export const en = {
     resultsFor: (q: string, n: number) => `Results for “${q}” · ${plural(n, 'product', 'products')}`,
     /** the "ask your rep" WhatsApp text when a search finds nothing */
     askHave: (first: string, q: string) => `Hello${first ? ` ${first}` : ''}, do you have “${q}” for my shop?`,
-    notOnShelf: (q: string) => `“${q}” isn’t on our shelf`,
-    notOnShelfHint: 'Try a code or another word — or ask your representative, who knows the warehouse.',
+    /* A search that finds nothing (R7d, plan §12): an honest "we don't stock it yet" and one action
+     * that tells the rep — the tap is also logged as a demand signal (shop_events 'product_request'). */
+    notOnShelf: (q: string) => `We don’t stock “${q}” yet`,
+    notOnShelfHint: 'Try a code or another word.',
+    tellNeed: (first: string) => (first ? `Tell ${first} what you’re looking for.` : 'Tell us what you’re looking for.'),
+    /** the no-WhatsApp form of the action: the request is logged, nothing opens */
+    tellYq: 'Tell YQ',
+    noted: (q: string) => `Thanks — we noted “${q}”.`,
     removeFilter: (label: string) => `Remove filter: ${label}`,
     /** the ruled divider before the sold-out lines of a listing (home grid, shelves, search groups) — a heading, so it is read out */
     notInStock: (n: number) => `Not in stock now · ${plural(n, 'line', 'lines')}`,
@@ -382,7 +395,7 @@ export const en = {
     pastePlaceholder: '24 x C18\n12 UK15\ntws 6',
     listPlaceholder: 'Weekly cables',
     /** the typed code IS a sold-out SKU: nothing is added; the line is shown with its state and the in-stock lines are offered */
-    soldOutExact: 'Sold out — nothing was added. Pick an in-stock line below, or ask to be told when it is back.',
+    soldOutExact: 'Sold Out — nothing was added. Pick an in-stock line below, or ask to be told when it is back.',
     alternatives: 'In stock instead',
   },
   restock: {
@@ -474,10 +487,23 @@ export const en = {
     reassure: (first: string) => `No payment now — ${first} confirms price, stock and delivery.`,
     welcomeBack: (shop: string) => `Welcome back, ${shop}`,
     welcomeBackHint: 'We filled in your shop from your last order — check and place it.',
+    /**
+     * R7d "Same as last time": the details of this phone's last order in one tap. The phone number
+     * itself never reaches this page — the server takes it from that order (reuse_token).
+     */
+    sameAsLast: 'Same as last time',
+    useSame: 'Use',
+    samePhone: 'Same number as last time',
+    change: 'Change',
+    /** a visitor with no rep link, once the area is picked and the office has a rep for it (shop_area_reps) */
+    areaRep: (name: string) => `Your area representative: ${name}`,
   },
   placed: {
     title: 'Wholesale order received',
+    /** only when a channel that reaches the rep delivered the alert (the order's rep_alerted) */
     sentTo: (first: string) => `Sent to ${first}`,
+    /** until then — honest: YQ has the order; the rep has not provably been told yet */
+    receivedBy: (first: string) => `Received by YQ — ${first} will confirm`,
     unassigned: 'A YQ representative will confirm shortly.',
     number: 'Order number',
     next: ['Your representative confirms price and stock', 'Our warehouse prepares it', 'It is delivered to your shop'],
@@ -517,6 +543,30 @@ export const en = {
     copyFailed: 'Could not copy',
     sendWhatsapp: 'Send on WhatsApp',
     aboutOrder: (first: string, no: string) => `Hello ${first}, about my order ${no}:`,
+    /**
+     * R7d "What changed": one tile at the top of the tracking page, from the order's own lines —
+     * requested → confirmed (→ delivered), the PUBLIC reason, and the total as ordered → as agreed.
+     * A line the rep could not supply reads "not available", never "10 → 0".
+     */
+    whatChanged: 'What changed',
+    changeQty: (qty: number, n: number) => `${qty} requested → ${n} confirmed`,
+    changeDelivered: (n: number) => `${n} delivered`,
+    changeArrow: '→',
+    changeNone: (qty: number) => `${qty} requested · not available this time`,
+    changeReplaced: (code: string, n: number) => `Replaced with ${code} × ${n}`,
+    changeAdded: (n: number) => `Added by your representative · ${n} pcs`,
+    changeTotal: 'Order total',
+    /** the public reason chip, by its key (app/shop_heart.py PUBLIC_REASONS); zero stock reads "Sold Out" */
+    reasons: {
+      out_of_stock: 'Sold Out',
+      discontinued: 'No longer available',
+      price: 'Price change',
+      customer_changed: 'As you asked',
+      substituted: 'Replaced with a similar item',
+      damaged: 'Damaged in stock',
+    } as Record<string, string>,
+    /** opening a tracking link keeps the order on this phone (My orders) */
+    adopted: 'Added to My orders on this phone',
   },
   orders: {
     title: 'My orders',

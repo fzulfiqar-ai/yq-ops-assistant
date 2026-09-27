@@ -17,7 +17,7 @@ import { ComposedCreative } from './ComposedCreative'
  * className, e.g. `aspect-auto h-full`), is a CSS size container so its type scales with it (the
  * "v3: slider" block in market.css), and is ONE tab stop.
  *
- * Honest by construction: the sticker is a word the data backs (Last chance, New, Price drops),
+ * Honest by construction: the sticker is a word the data backs (Clearing line, New, Price drops),
  * the ends chip only appears for a real end within 7 days, a sponsored campaign always says so.
  */
 

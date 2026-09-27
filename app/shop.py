@@ -71,7 +71,12 @@ ATTRIBUTION = ("customer_admin", "focus_map", "sticky", "session_ref", "checkout
 LINE_STATUSES = ("ok", "changed", "removed", "backorder", "substituted", "added", "unavailable")
 EVENTS = ("view", "item", "add", "checkout", "order", "search", "search_zero", "remove", "qty", "cart",
           "checkout_start", "rail_click", "reco_click", "share", "install", "reorder", "cancel", "vitals",
-          "push_subscribe", "error")
+          "push_subscribe", "error", "product_request")
+# R7d (27-Sep-2026): 'product_request' = a merchant tapped "tell {rep}" on a search that found nothing
+# (meta.q = the words). The live CHECK allows it once scripts/r7d_product_request_migration.sql is
+# applied; until then record_event stores the same request as a 'search_zero' row with
+# meta.where = 'product_request', so no demand signal is lost (Market Intel reads search_zero today).
+PRODUCT_REQUEST = "product_request"
 # event meta keys we keep (short strings / numbers only — never free text that could carry PII).
 # R6 RUM (web/src/market/lib/vitals.ts): route = a template such as "/t/:category", never the raw
 # path; vp = phone/tablet/desktop/wide; catalog_ms / catalog_src = when the catalog arrived and from
@@ -111,6 +116,11 @@ SETTING_DEFAULTS: dict[str, str] = {
     "shop_free_delivery_threshold_bhd": "0",
     "shop_delivery_fee_bhd": "0",
     "shop_default_salesman": "",
+    # R7d (27-Sep-2026, plan §12 "direct traffic"): area → rep for a merchant who arrived with no rep
+    # link. A JSON object {"Riffa": 3, "Muharraq": 5} (area name → salesmen.id), edited on the portal's
+    # Settings page and validated by validate_area_reps(). resolve_salesman() uses it after an
+    # explicit checkout pick and before shop_default_salesman. Seeded empty: the owner fills it.
+    "shop_area_reps": "{}",
     "shop_order_prefix": "YQ",
     "shop_social_proof_min_customers": "5",
     "shop_show_retail_compare": "1",
@@ -349,12 +359,78 @@ def small_order_mode(vals: dict) -> str:
     return mode if mode in ("request", "allow", "block") else "request"
 
 
+AREA_REPS_MAX = 60        # far more than the 24 areas the checkout offers
+AREA_NAME_MAX = 60
+
+
+def area_reps(vals: dict) -> dict[str, int]:
+    """shop_area_reps as {area (lower-cased, trimmed): salesman id}. A bad stored value reads as
+    empty — routing then falls through to the default rep, exactly as before the setting existed."""
+    raw = vals.get("shop_area_reps") if isinstance(vals, dict) else None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or {})
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in list(data.items())[:AREA_REPS_MAX]:
+        key = str(k or "").strip().lower()
+        sid = _i(v)
+        if key and sid > 0:
+            out[key] = sid
+    return out
+
+
+def validate_area_reps(raw, salesmen: list[dict] | None = None) -> str:
+    """The area → rep map as it may be stored: a JSON object whose keys are area names (text, at
+    most AREA_NAME_MAX characters) and whose values are salesmen ids — of a salesman that exists
+    when the roster is given. An empty value or an empty object clears the map. Returns the
+    normalised JSON (trimmed names, integer ids); raises ShopError with a message the admin can act on."""
+    data = raw
+    if raw is None or isinstance(raw, (str, bytes)):
+        text = (raw or "").strip() if isinstance(raw, str) else (raw or b"").decode("utf-8", "replace").strip()
+        if not text:
+            return "{}"
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise ShopError('Area representatives must be JSON: {"Riffa": 3, "Muharraq": 5}.') from e
+    if not isinstance(data, dict):
+        raise ShopError('Area representatives must be a JSON object: {"Riffa": 3, "Muharraq": 5}.')
+    if len(data) > AREA_REPS_MAX:
+        raise ShopError(f"At most {AREA_REPS_MAX} areas.")
+    known = {int(s["id"]) for s in (salesmen or []) if s.get("id") is not None} if salesmen is not None else None
+    out: dict[str, int] = {}
+    seen: set[str] = set()
+    for k, v in data.items():
+        area = str(k or "").strip()
+        if not area or len(area) > AREA_NAME_MAX:
+            raise ShopError(f"Area names must be 1–{AREA_NAME_MAX} characters.")
+        if area.lower() in seen:
+            raise ShopError(f"'{area}' appears twice.")
+        seen.add(area.lower())
+        if v in (None, "", 0, "0"):
+            continue                       # "— default —" in the editor: no rep for this area
+        if isinstance(v, bool) or _i(v) <= 0:
+            raise ShopError(f"'{area}': pick a salesman.")
+        sid = _i(v)
+        if known is not None and sid not in known:
+            raise ShopError(f"'{area}': salesman #{sid} is not on the roster.")
+        out[area] = sid
+    return json.dumps(out, ensure_ascii=False)
+
+
 def update_shop_settings(changes: dict[str, str], by: str = "") -> dict[str, str]:
     """Upsert known shop_* keys (unknown keys are ignored). Everything is validated before the
     first write, so a bad value never leaves the settings half-saved. Raises ShopError."""
     changes = dict(changes or {})
     if "shop_market_promises" in changes:
         changes["shop_market_promises"] = validate_promises(changes["shop_market_promises"])
+    if "shop_area_reps" in changes:
+        # the roster check is skipped (ids still must be positive) when the roster cannot be read
+        changes["shop_area_reps"] = validate_area_reps(changes["shop_area_reps"],
+                                                       _load_salesmen(active_only=False) or None)
     client = get_client()
     for k, v in changes.items():
         if k not in SETTING_DEFAULTS:
@@ -1242,6 +1318,8 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "show_retail_compare": show_compare,
             "public_tiers": public_tiers,
             "areas": [a.strip() for a in str(vals.get("shop_areas") or "").split(",") if a.strip()],
+            # R7d: {area (lower-cased): the rep's first name} — the checkout's "Your area representative"
+            "area_reps": area_rep_names(ctx),
         },
         "ref": resolve_ref(ctx, referral_code),
         "rep": rep_card(ctx, referral_code),
@@ -1385,8 +1463,9 @@ def gap_fillers(ctx: dict, cart_codes: list[str], remaining: float, referral_cod
 # added it — a cart that held a backorder line when the switch flipped was sold out all along —
 # and the short form is what the cart-level reason carries. Kept as constants so the tests and the
 # UI copy cannot drift apart. A stale stock snapshot puts its date in the reason (sold_out_reason).
-SOLD_OUT_REASON = "Sold out — can't be ordered right now. Remove it to send your order."
-SOLD_OUT_SHORT = "Sold out"
+# R7d (owner, 27-Sep-2026): "Sold Out" with a capital O — the marketplace label's casing, everywhere.
+SOLD_OUT_REASON = "Sold Out — can't be ordered right now. Remove it to send your order."
+SOLD_OUT_SHORT = "Sold Out"
 
 
 def stock_snapshot(ctx: dict) -> dict:
@@ -1414,7 +1493,7 @@ def sold_out_reason(snap: dict | None = None) -> str:
     """SOLD_OUT_REASON — naming the snapshot date when the snapshot is stale, so the merchant
     reads what "sold out" is measured against."""
     if snap and not snap.get("fresh") and snap.get("label"):
-        return f"Sold out as of {snap['label']} — can't be ordered right now. Remove it to send your order."
+        return f"Sold Out as of {snap['label']} — can't be ordered right now. Remove it to send your order."
     return SOLD_OUT_REASON
 
 
@@ -1493,7 +1572,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                                   list_price_bhd=lp, stock_status=status))
             continue
         if backorder:
-            warnings.append(f"{code} is sold out — it will be backordered and confirmed by your salesman.")
+            warnings.append(f"{code} is Sold Out — it will be backordered and confirmed by your salesman.")
         # item-level rules: best non-stackable, then stackables on top
         cands = [r for r in ctx["rules"] if r["kind"] in ("qty_tier", "salesman_offer", "bundle_price")
                  and _rule_matches_item(r, it) and _rule_matches_ref(r, ref)
@@ -1676,7 +1755,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         # the sold-out line's reason already tells the merchant what to do; the cart carries its
         # short form — with the snapshot date when the snapshot is stale
         if why == sold_out_why:
-            short = SOLD_OUT_SHORT.lower() + (f" as of {snap['label']}" if not snap["fresh"] and snap["label"] else "")
+            short = SOLD_OUT_SHORT + (f" as of {snap['label']}" if not snap["fresh"] and snap["label"] else "")
         else:
             short = why.rstrip(".").lower()
         block_reason = (f"Remove {names}{more} to send this order — {short}."
@@ -1743,6 +1822,39 @@ def _salesman_by(ctx: dict, sid) -> dict | None:
     return next((s for s in ctx["salesmen"] if int(s["id"]) == _i(sid)), None)
 
 
+# The order is routed by the area step (R7d). The DB check on shop_orders.attribution_source
+# (marketplace_migration.sql) predates it, so the column stores 'default' — the office's rule, which
+# is what it is — while the 'created' event and the order's funnel event keep 'area'.
+AREA_ATTRIBUTION = "area"
+
+
+def db_attribution(attribution: str) -> str:
+    return "default" if attribution == AREA_ATTRIBUTION else attribution
+
+
+def area_rep(ctx: dict, area: str | None) -> dict | None:
+    """The active salesman shop_area_reps names for this area (case and spaces ignored), or None."""
+    key = str(area or "").strip().lower()
+    if not key:
+        return None
+    return _salesman_by(ctx, area_reps(ctx.get("settings") or {}).get(key))
+
+
+def area_rep_names(ctx: dict) -> dict[str, str]:
+    """The public checkout line "Your area representative: {name}" — {area (lower-cased): first
+    name} for every mapped area whose rep is active and keeps a public profile. First names only;
+    nothing else about a rep leaves the server."""
+    out: dict[str, str] = {}
+    for key, sid in area_reps(ctx.get("settings") or {}).items():
+        s = _salesman_by(ctx, sid)
+        if not s or s.get("public_profile") is False:
+            continue
+        first = str(s.get("name") or "").strip().split(" ")[0]
+        if first:
+            out[key] = first
+    return out
+
+
 def recognize_phone(raw_phone: str | None, device_id: str | None) -> dict | None:
     """A returning merchant: the shop name, area and first name for a number we already know —
     nothing else (no email, no history) — and ONLY when the calling device has already ordered
@@ -1786,13 +1898,14 @@ def _customer_by_phone(phone: str | None) -> dict | None:
 
 
 def resolve_salesman(ctx: dict, *, phone: str | None, session_ref: str | None, pick_id=None,
-                     customer: dict | None = None) -> tuple[dict | None, str, bool]:
+                     customer: dict | None = None, area: str | None = None) -> tuple[dict | None, str, bool]:
     """(salesman | None, attribution_source, conflict) for a merchant-placed order.
 
     Precedence (plan §M): the merchant's admin assignment → an official Focus mapping (placeholder
     column) → the sticky first-touch rep while the merchant's last order is within
     shop_sticky_days → the rep whose link / slug this session arrived with → an explicit pick at
-    checkout → the shop_default_salesman setting → unassigned (the admin queue).
+    checkout → the rep shop_area_reps names for the order's area (R7d, 'area') → the
+    shop_default_salesman setting → unassigned (the admin queue).
     `conflict` is True when the session's rep differs from the recorded one, so management sees a
     merchant being courted by two reps instead of the order switching silently."""
     cust = customer if customer is not None else _customer_by_phone(phone)
@@ -1826,6 +1939,9 @@ def resolve_salesman(ctx: dict, *, phone: str | None, session_ref: str | None, p
     pick = _salesman_by(ctx, pick_id)
     if pick and attribution.pickable(pick):     # a pick of a rep the picker never listed is ignored
         return pick, "checkout_pick", False
+    by_area = area_rep(ctx, area)
+    if by_area:
+        return by_area, AREA_ATTRIBUTION, False
     default = str(ctx["settings"].get("shop_default_salesman") or "").strip().lower()
     if default:
         d = next((s for s in ctx["salesmen"] if str(s.get("name") or "").lower() == default), None)
@@ -1846,7 +1962,7 @@ def upsert_customer_from_order(row: dict, sm: dict | None, attribution: str, dev
     must never fail because of it."""
     c = get_client()
     now = _iso()
-    proposed = sm is not None and attribution in ("session_ref", "checkout_pick", "default", "staff")
+    proposed = sm is not None and attribution in ("session_ref", "checkout_pick", AREA_ATTRIBUTION, "default", "staff")
     first_ref = row.get("session_ref") or ((sm or {}).get("referral_code") if proposed else None)
     try:
         if existing:
@@ -2145,17 +2261,54 @@ def sweep_lineless_orders(min_age_min: int = 10) -> dict:
     return out
 
 
+REUSE_FAILED_MSG = "Please enter your phone number — the one from your last order can't be used on this phone."
+
+
+def reuse_details(reuse_token: str | None, device_id: str | None) -> dict | None:
+    """"Same as last time" at checkout (R7d): the contact details of an earlier order, read on the
+    SERVER from that order's token — the merchant's phone never travels to the browser. Only for
+    the device that placed that order (its device_id is on the order row): a forwarded tracking
+    link carries the token but not the device, so it can never place an order in someone else's
+    name. None when the token is unknown, the devices differ or the order has no phone."""
+    tok = clean(reuse_token, 64)
+    dev = clean(device_id, 64)
+    if len(tok) < 16 or not dev:
+        return None
+    try:
+        rows = retry_read(lambda: (get_client().table("shop_orders")
+                                   .select("customer_name,customer_phone,customer_shop,customer_area,device_id")
+                                   .eq("token", tok).limit(1).execute().data or []), what="reuse details")
+    except Exception as e:  # noqa: BLE001 — no reuse, the merchant types the number
+        log.debug("reuse details unavailable: %s", e)
+        return None
+    if not rows:
+        return None
+    r = rows[0]
+    if not r.get("device_id") or not secrets.compare_digest(str(r["device_id"]), dev) or not r.get("customer_phone"):
+        return None
+    return {"phone": r["customer_phone"], "name": r.get("customer_name") or "", "shop": r.get("customer_shop") or "",
+            "area": r.get("customer_area") or ""}
+
+
 def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
                  staff_email: str | None = None, market: bool = False) -> dict:
     """Validate → re-price → persist. Returns the stored order (+lines) and the priced totals.
     `staff_email` = a logged-in salesman/admin placing the order FOR a shop (source 'salesman').
     `market` = the token-less marketplace (source 'market'): attribution through resolve_salesman,
     device + client_order_id idempotency, per-phone/per-device caps, and the merchant record
-    behind the order. The legacy token link goes through the same path with market=False."""
+    behind the order. The legacy token link goes through the same path with market=False.
+    R7d: a marketplace order with no phone but a `reuse_token` takes the phone (and any empty name /
+    shop / area) from that earlier order of the same device (reuse_details)."""
     staff = bool(staff_email)
     if not staff and clean(body.get("website"), 10):
         raise ShopError("Invalid submission.")
     cust = body.get("customer") or {}
+    if market and not staff and not phone_digits(cust.get("phone")) and body.get("reuse_token"):
+        prev = reuse_details(body.get("reuse_token"), body.get("device_id"))
+        if prev is None:
+            raise ShopError(REUSE_FAILED_MSG)
+        cust = {**cust, "phone": prev["phone"],
+                **{k: prev[k] for k in ("name", "shop", "area") if not clean(cust.get(k), 120) and prev[k]}}
     name = clean(cust.get("name"), 120)
     phone = phone_digits(cust.get("phone"))
     if len(name) < 2:
@@ -2216,7 +2369,8 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         conflict = staff_rep_conflict(existing_cust, sm)
     else:
         sm, attribution, conflict = resolve_salesman(ctx, phone=phone, session_ref=session_ref,
-                                                     pick_id=body.get("salesman_id"), customer=existing_cust)
+                                                     pick_id=body.get("salesman_id"), customer=existing_cust,
+                                                     area=clean(cust.get("area"), 120))
         # offers scoped to a rep follow the rep who owns the order, not the link that was clicked
         referral_code = (sm or {}).get("referral_code") if attribution in ("customer_admin", "focus_map", "sticky") \
             else session_ref
@@ -2261,7 +2415,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "items_count": quote["items"], "units_count": quote["units"],
         "has_backorder": quote["has_backorder"], "ip_hash": _ip_hash(ip), "ua": (ua or "")[:200],
         "device_id": device_id, "client_order_id": client_order_id, "session_ref": session_ref,
-        "attribution_source": attribution, "attribution_conflict": bool(conflict),
+        "attribution_source": db_attribution(attribution), "attribution_conflict": bool(conflict),
         "assigned_at": now_iso if sm else None, "assigned_by": "system" if sm else None,
         "created_at": now_iso, "updated_at": now_iso,
     }
@@ -2374,22 +2528,39 @@ def record_event(body: dict, ip: str | None = None, ua: str | None = None, *,
             log.debug("event attribution lookup failed: %s", e)
             ref = None
         sid = int(ref["salesman_id"]) if ref else None
+    row = {
+        "session_id": clean(body.get("session_id"), 64) or None, "event": ev,
+        "item_code": clean(body.get("item_code"), 64).upper() or None,
+        "referral_code": referral_code,
+        "salesman_id": sid,
+        "src": clean(body.get("src"), 80) or None,
+        "device_id": clean(body.get("device_id"), 64) or None,
+        "customer_id": _i(body.get("customer_id")) or None,
+        "meta": meta or None,
+        "ua": (ua or "")[:200], "ip_hash": _ip_hash(ip),
+    }
     try:
-        get_client().table("shop_events").insert({
-            "session_id": clean(body.get("session_id"), 64) or None, "event": ev,
-            "item_code": clean(body.get("item_code"), 64).upper() or None,
-            "referral_code": referral_code,
-            "salesman_id": sid,
-            "src": clean(body.get("src"), 80) or None,
-            "device_id": clean(body.get("device_id"), 64) or None,
-            "customer_id": _i(body.get("customer_id")) or None,
-            "meta": meta or None,
-            "ua": (ua or "")[:200], "ip_hash": _ip_hash(ip),
-        }).execute()
+        get_client().table("shop_events").insert(row).execute()
         return True
     except Exception as e:  # noqa: BLE001
+        if ev == PRODUCT_REQUEST and _check_violation(e):
+            # before r7d_product_request_migration.sql the CHECK refuses the new kind: keep the
+            # demand signal as the zero-result search it came from, marked where it came from
+            try:
+                get_client().table("shop_events").insert(
+                    {**row, "event": "search_zero", "meta": {**(meta or {}), "where": PRODUCT_REQUEST}}).execute()
+                return True
+            except Exception as e2:  # noqa: BLE001
+                log.debug("shop event fallback insert failed: %s", e2)
+                return False
         log.debug("shop event insert failed: %s", e)
         return False
+
+
+def _check_violation(e: Exception) -> bool:
+    """A CHECK constraint refused the row (Postgres 23514, as PostgREST reports it)."""
+    code, msg = str(getattr(e, "code", "") or ""), str(e)
+    return code == "23514" or "23514" in msg or "violates check constraint" in msg
 
 
 # ── reads ─────────────────────────────────────────────────────────────────────
@@ -2453,7 +2624,7 @@ def public_order_view(o: dict) -> dict:
     wa = customer_to_salesman_wa_url(o)   # falls back to the owner number when no salesman is set
     mail = customer_to_salesman_email_url(o)
     name = str(sm.get("name") or "")
-    lines = [shop_heart.line_view(ln, o, public=True) for ln in o.get("lines", [])]
+    lines = [_public_line(ln, o) for ln in o.get("lines", [])]
     return {
         "order_no": o["order_no"], "status": o["status"],
         "visible_status": shop_heart.visible_status(o["status"]),
@@ -2476,7 +2647,36 @@ def public_order_view(o: dict) -> dict:
         "order_kind": o.get("order_kind") or "standard", "minimum_gap_bhd": o.get("minimum_gap_bhd"),
         "timeline": [{"ts": e.get("ts"), "event": e.get("event"), "note": _public_note(e)}
                      for e in o.get("events", []) if _public_event(e.get("event"))],
+        # R7d: did a channel that reaches the REP deliver the new-order alert? (the placed screen says
+        # "Sent to {rep}" only then) — None while the background fan-out has not run
+        "rep_alerted": rep_alerted(o),
     }
+
+
+def _public_line(ln: dict, o: dict) -> dict:
+    """shop_heart.line_view(public=True) plus `reason_code` — the key of the PUBLIC reason (never
+    'other', never the rep's note), so the marketplace can say it in the page's language; the
+    English `reason_label` stays for older clients."""
+    view = shop_heart.line_view(ln, o, public=True)
+    code = ln.get("change_reason") or (shop_heart._event_reason(o.get("events"), ln.get("id")) if ln.get("id") else None)
+    code = str(code or "").strip().lower()
+    view["reason_code"] = code if code in shop_heart.PUBLIC_REASONS else None
+    return view
+
+
+# notify_result keys whose delivery reaches the order's REP himself (shop_notify.notify_new_order):
+# his e-mail copy and his WhatsApp Cloud message. The owner copy and Telegram are YQ's, not his.
+REP_CHANNELS: tuple[str, ...] = ("email_rep", "whatsapp")
+
+
+def rep_alerted(o: dict) -> bool | None:
+    """True when a rep channel delivered the new-order alert; False when the fan-out ran and none
+    did (or the order has no rep); None while no fan-out result is stored yet (it runs in the
+    background after the order response)."""
+    nr = o.get("notify_result")
+    if not isinstance(nr, dict):
+        return None if o.get("salesman_id") else False
+    return any(isinstance(nr.get(k), dict) and bool(nr[k].get("sent")) for k in REP_CHANNELS)
 
 
 def _public_note(e: dict) -> str | None:
@@ -2512,7 +2712,7 @@ def orders_by_tokens(tokens) -> list[dict]:
     rows = retry_read(lambda: (
         get_client().table("shop_orders")
         .select("order_no,token,status,total_bhd,total_confirmed_bhd,items_count,units_count,created_at,"
-                "updated_at,salesman_name,expected_delivery,order_kind")
+                "updated_at,salesman_name,expected_delivery,order_kind,customer_name,customer_shop,customer_area")
         .in_("token", toks).order("created_at", desc=True).execute().data or []), what="orders by tokens")
     out = []
     for r in rows:
@@ -2523,7 +2723,11 @@ def orders_by_tokens(tokens) -> list[dict]:
                     "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
                     "salesman": r.get("salesman_name"), "expected_delivery": r.get("expected_delivery"),
                     "can_cancel": r["status"] == "new",
-                    "order_kind": r.get("order_kind") or "standard"})
+                    "order_kind": r.get("order_kind") or "standard",
+                    # R7d "Same as last time" at checkout: what the status page already shows the token
+                    # holder (name · shop · area) — never the phone, which only the server reuses
+                    "customer": {"name": r.get("customer_name"), "shop": r.get("customer_shop"),
+                                 "area": r.get("customer_area")}})
     return out
 
 

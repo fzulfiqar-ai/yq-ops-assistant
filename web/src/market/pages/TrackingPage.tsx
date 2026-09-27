@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { Check, Copy, Download, Mail, MessageCircle, RotateCcw, Share2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Check, Mail, MessageCircle, PackageSearch, RotateCcw, Share2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { MarketOrderResponse, OrderStatusPayload } from '@/lib/shopApi'
 import { CheckMark } from '../components/CheckMark'
 import { SoldOutRows } from '../components/SoldOut'
 import { EmptyState } from '../components/States'
+import { WhatChanged } from '../components/WhatChanged'
 import { useMarket, useOrder } from '../MarketContext'
-import { forgetOrder } from '../lib/device'
+import { adoptOrder, forgetOrder } from '../lib/device'
 import { splitReorder } from '../lib/home'
-import { track } from '../lib/events'
-import { bhd, bhdMinus, fmtDateTime, money, statusLabel } from '../lib/format'
-import { canPromptInstall, isIos, isStandalone, onInstallChange, promptInstall } from '../lib/install'
+import { bhd, bhdMinus, fmtDateTime, fmtDay, money, statusLabel } from '../lib/format'
 import { cancelOrder, getOrder } from '../lib/marketApi'
+import { isOut, lineMoneyNow, qtyNow } from '../lib/orderChanges'
 import { usePageTitle } from '../shell/ShellContext'
 import { S } from '../strings'
 import { AnchorButton, Button, LinkButton } from '../ui/Button'
@@ -23,8 +23,19 @@ import { Skeleton } from '../ui/Skeleton'
 import { useToast } from '../ui/Toast'
 
 const POLL_MS = 30000
+/** Straight after placing, the rep's alert runs in the background: look again at these delays (ms). */
+const ALERT_RECHECK_MS = [3000, 7000, 15000]
 
-/** /o/{token} — confirmation (when just placed) and live tracking: the five stages, changes, the rep, cancel while Received, reorder. */
+/**
+ * /o/{token} — the confirmation (when just placed) and live tracking.
+ *
+ * Just placed (R7d, plan §12): the honest line — "Sent to {rep}" only when a channel that reaches the
+ * rep delivered the alert (the order's rep_alerted), else "Received by YQ — {rep} will confirm" — the
+ * order number and its total, and ONE primary action (WhatsApp {rep}) plus Track order.
+ * Tracking: "What changed" first when the rep's confirmation differs from the order, the three
+ * stages (Received → Confirmed → Delivered, or Cancelled) with the dated ETA, the rep, cancel while
+ * Received, Order again. Opening someone's tracking link keeps the order in My orders on this phone.
+ */
 export default function TrackingPage() {
   const { token = '' } = useParams()
   const location = useLocation()
@@ -38,7 +49,8 @@ export default function TrackingPage() {
   const [cancelOpen, setCancelOpen] = useState(false)
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
-  const [installable, setInstallable] = useState(() => canPromptInstall())
+  const [alertTries, setAlertTries] = useState(0)
+  const adopted = useRef(false)
   usePageTitle(data?.order_no ? S.track.order(data.order_no) : S.track.title, true, data?.order_no ? `${S.track.order(data.order_no)} · ${S.brand}` : `${S.track.title} · ${S.brand}`)
 
   const load = useCallback(() => {
@@ -64,23 +76,54 @@ export default function TrackingPage() {
       document.removeEventListener('visibilitychange', onVis)
     }
   }, [load, data])
-  useEffect(() => onInstallChange(() => setInstallable(canPromptInstall())), [])
+
+  /* The placed screen's line waits for the rep's alert (a background task after the order response):
+     a few quick looks, then the regular poll. Nothing claims "Sent" before rep_alerted says so. */
+  const alertKnown = data?.rep_alerted != null
+  useEffect(() => {
+    if (!placed || !placed.assigned || placed.duplicate || alertKnown || alertTries >= ALERT_RECHECK_MS.length) return
+    const id = window.setTimeout(() => {
+      setAlertTries((t) => t + 1)
+      load()
+    }, ALERT_RECHECK_MS[alertTries])
+    return () => window.clearTimeout(id)
+  }, [placed, alertKnown, alertTries, load])
+
+  /* Opening a tracking link keeps the order on this phone (My orders) — a rep's link, or an order placed
+     on another phone. Once per visit; an order this phone already holds is left as it is. */
+  useEffect(() => {
+    if (!data || placed || adopted.current || !token) return
+    adopted.current = true
+    if (data.cancelled) return
+    const ts = Date.parse(data.created_at || '')
+    const total = data.total_effective_bhd ?? data.total_confirmed_bhd ?? data.total_bhd ?? null
+    if (adoptOrder({ token, order_no: data.order_no, ts: Number.isNaN(ts) ? Date.now() : ts, total })) {
+      refreshMyOrders()
+      toast(S.track.adopted, 'success')
+    }
+  }, [data, placed, token, refreshMyOrders, toast])
 
   const first = data?.salesman?.first_name || placed?.salesman?.first_name || ''
   // the placed screen speaks the order's kind: a small order request is confirmed case by case
   const isSmall = (placed?.order_kind ?? data?.order_kind) === 'small'
-  const lines = data?.lines || []
-  const total = data?.total_confirmed_bhd ?? data?.total_bhd
+  const lines = useMemo(() => data?.lines || [], [data])
+  const total = data?.total_effective_bhd ?? data?.total_confirmed_bhd ?? data?.total_bhd
   /*
    * The confirmation's one figure — what was ordered and what it comes to. A shop owner wants the
    * amount straight after the order number, and on a phone the line items sit a long scroll below
-   * the steps and the share card. Every number here is the payload's: the placed response carries
-   * its own quote (there before the status call returns), the status payload replaces it.
+   * the steps. Every number here is the payload's: the placed response carries its own quote (there
+   * before the status call returns), the status payload replaces it.
    */
-  const live = lines.filter((l) => (l.line_status || 'ok') !== 'removed')
+  const live = lines.filter((l) => !isOut(l))
   const heroItems = live.length || Number(placed?.totals?.items) || 0
-  const heroUnits = live.length ? live.reduce((n, l) => n + (Number(l.qty_confirmed ?? l.qty) || 0), 0) : Number(placed?.totals?.units) || 0
+  const heroUnits = live.length ? live.reduce((n, l) => n + qtyNow(l), 0) : Number(placed?.totals?.units) || 0
   const heroTotal = total ?? placed?.totals?.total_bhd ?? null
+  /** "Sent to {rep}" only on the evidence: the status payload's rep_alerted, else the placed response's */
+  const repAlerted = data?.rep_alerted ?? placed?.rep_alerted ?? null
+  const repLine = first ? (repAlerted ? S.placed.sentTo(first) : S.placed.receivedBy(first)) : ''
+  const placedLine = placed ? (placed.duplicate ? S.placed.duplicate : isSmall ? S.small.receivedHint : placed.assigned && first ? repLine : S.placed.unassigned) : ''
+  /** the one ETA: the rep's day as a date when it resolved to one, else the words he chose */
+  const eta = fmtDay(data?.expected_delivery_date) || data?.expected_delivery || null
   /*
    * Desktop: the second column holds the items, the delivery address and the cancelled-order
    * action. When the order has none of those there is nothing to put beside the hero, so the page
@@ -105,24 +148,29 @@ export default function TrackingPage() {
   /* Order again follows the shop's backorder setting (m.addMany leaves sold-out lines out while it is
    * off, and says how many). Those lines are not dropped in silence: they are listed under the button,
    * greyed, each with "Tell me when back" — and when nothing at all could be added the page stays put
-   * instead of opening an empty restock. */
+   * instead of opening an empty restock. What is ordered again is what the order came to: the
+   * delivered (else confirmed) quantity of every line still on it, the rep's additions included. */
   const reorderSold = useMemo(() => {
-    const again = (data?.lines || []).filter((ln) => (ln.line_status || 'ok') !== 'removed').flatMap((ln) => {
+    const again = lines.filter((ln) => !isOut(ln) && qtyNow(ln) > 0).flatMap((ln) => {
       const item = m.itemsByCode.get(ln.item_code)
       return item ? [{ item, qty: 1 }] : []
     })
     return splitReorder(again, m.allowBackorder).sold.map((l) => l.item)
-  }, [data, m.itemsByCode, m.allowBackorder])
+  }, [lines, m.itemsByCode, m.allowBackorder])
   const reorder = () => {
     const entries = lines
-      .filter((ln) => (ln.line_status || 'ok') !== 'removed')
-      .map((ln) => ({ item: m.itemsByCode.get(ln.item_code)!, qty: Number(ln.qty_confirmed ?? ln.qty) || 1 }))
+      .filter((ln) => !isOut(ln) && qtyNow(ln) > 0)
+      .map((ln) => ({ item: m.itemsByCode.get(ln.item_code)!, qty: qtyNow(ln) }))
       .filter((e) => e.item)
     const added = m.addMany(entries, 'reorder')
     if (added > 0) navigate('/cart')
   }
-  const copySummary = async () => {
-    const text = [`YQ ${S.track.order(data?.order_no || '')}`, ...lines.map((l) => `${l.qty_confirmed ?? l.qty} x ${l.item_code}`), `${S.cart.total} ${bhd(total)}`, window.location.href].join('\n')
+  const share = async () => {
+    const text = [`YQ ${S.track.order(data?.order_no || '')}`, ...live.map((l) => `${qtyNow(l)} x ${l.item_code}`), `${S.cart.total} ${bhd(total)}`, window.location.href].join('\n')
+    if (navigator.share) {
+      navigator.share({ title: S.track.order(data?.order_no || ''), url: window.location.href }).catch(() => {})
+      return
+    }
     try {
       await navigator.clipboard.writeText(text)
       toast(S.placed.copied, 'success')
@@ -130,10 +178,10 @@ export default function TrackingPage() {
       toast(S.track.copyFailed, 'error')
     }
   }
-  const install = async () => {
-    const r = await promptInstall()
-    if (r === 'accepted') track('install')
-    setInstallable(canPromptInstall())
+  /** Track order: the same page without the confirmation hero — the live view, from the top */
+  const toTracking = () => {
+    navigate(location.pathname, { replace: true, state: null })
+    window.scrollTo({ top: 0 })
   }
 
   if (err || !token) {
@@ -143,6 +191,8 @@ export default function TrackingPage() {
       </div>
     )
   }
+
+  const waUrl = placed?.whatsapp_url || null
 
   return (
     <div className="px-gutter lg:px-0">
@@ -154,10 +204,10 @@ export default function TrackingPage() {
                 <CheckMark size={56} />
               </div>
               <h1 className="mt-4 text-balance font-display text-xl font-bold text-ink">{isSmall ? S.small.received : S.placed.title}</h1>
-              <p className="mx-auto mt-1 max-w-sm text-balance text-sm leading-snug text-ink-2">
-                {placed.duplicate ? S.placed.duplicate : isSmall ? S.small.receivedHint : placed.assigned && first ? S.placed.sentTo(first) : S.placed.unassigned}
+              <p className="mx-auto mt-1 max-w-sm text-balance text-sm leading-snug text-ink-2" aria-live="polite">
+                {placedLine}
               </p>
-              {isSmall && !placed.duplicate && placed.assigned && first && <p className="mt-1 text-xs font-medium text-plum-ink">{S.placed.sentTo(first)}</p>}
+              {isSmall && !placed.duplicate && placed.assigned && repLine && <p className="mt-1 text-xs font-medium text-plum-ink">{repLine}</p>}
               <div className="mt-5 rounded-md bg-plum-soft px-4 py-3">
                 <div className="text-2xs font-semibold uppercase tracking-[0.1em] text-plum">{S.placed.number}</div>
                 <div className="mt-0.5 font-display text-2xl font-extrabold tnum text-ink">
@@ -177,32 +227,20 @@ export default function TrackingPage() {
                   </li>
                 ))}
               </ol>
-              {placed.whatsapp_url && (
-                <AnchorButton href={placed.whatsapp_url} target="_blank" rel="noreferrer" variant="wa" size="lg" full className="mt-5" icon={<MessageCircle size={17} aria-hidden="true" />}>
+              {/* one primary action — the rep on WhatsApp — and Track; nothing else competes with them */}
+              {waUrl && (
+                <AnchorButton href={waUrl} target="_blank" rel="noreferrer" variant="wa" size="lg" full className="mt-5" icon={<MessageCircle size={17} aria-hidden="true" />}>
                   {first ? S.placed.whatsapp(first) : S.track.sendWhatsapp}
                 </AnchorButton>
               )}
-              <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                {placed.email_url && (
-                  <AnchorButton href={placed.email_url} variant="secondary" icon={<Mail size={15} aria-hidden="true" />}>
-                    {S.placed.email(first || 'YQ')}
-                  </AnchorButton>
-                )}
-                <Button variant="secondary" onClick={copySummary} icon={<Copy size={15} aria-hidden="true" />}>
-                  {S.placed.copy}
-                </Button>
-              </div>
-              {!isStandalone() && (installable || isIos()) && (
-                <Button variant="secondary" full className="mt-2" onClick={installable ? install : () => toast(S.me.installIos, 'info')} icon={<Download size={15} aria-hidden="true" />}>
-                  {S.placed.install}
-                </Button>
-              )}
-              <Link to={m.rep ? `/${m.rep.slug}` : '/'} className="hit relative mt-3 inline-flex h-10 items-center text-sm font-semibold text-plum hover:underline">
-                {S.placed.continue}
-              </Link>
-              <p className="mt-3 border-t border-line-2 pt-3 font-display text-xs font-semibold tracking-[-0.01em] text-ink-3">{S.tagline}</p>
+              <Button variant={waUrl ? 'secondary' : 'primary'} size="lg" full className={waUrl ? 'mt-2' : 'mt-5'} onClick={toTracking} icon={<PackageSearch size={16} aria-hidden="true" />}>
+                {S.placed.track}
+              </Button>
+              <p className="mt-4 border-t border-line-2 pt-3 font-display text-xs font-semibold tracking-[-0.01em] text-ink-3">{S.tagline}</p>
             </section>
           )}
+
+          {!placed && data && <WhatChanged data={data} className="mb-4" />}
 
           {!data ? (
             <div className={cn('space-y-3', placed && 'mt-4')}>
@@ -259,9 +297,9 @@ export default function TrackingPage() {
                       <div className="min-w-0 pb-2">
                         <div className={cn('text-sm font-semibold', s.done || s.current ? 'text-ink' : 'text-ink-3')}>{statusLabel(s.status, s.label)}</div>
                         {s.at && <div className="text-xs text-ink-2">{fmtDateTime(s.at)}</div>}
-                        {s.current && data.expected_delivery && (
+                        {s.current && data.status !== 'delivered' && eta && (
                           <div className="mt-0.5 inline-flex rounded-xs bg-plum-soft px-2 py-0.5 text-xs font-medium text-plum-ink">
-                            {S.track.expected}: {data.expected_delivery}
+                            {S.track.expected}: {eta}
                           </div>
                         )}
                       </div>
@@ -270,67 +308,57 @@ export default function TrackingPage() {
                 </ol>
               )}
 
-              {data.has_changes && (
-                <div className="mt-3 rounded-md bg-warn-soft px-3.5 py-3 text-xs text-warn">
-                  <div className="font-semibold">{S.track.changes}</div>
-                  <ul className="mt-1 space-y-0.5">
-                    {lines
-                      .filter((l) => (l.line_status || 'ok') === 'removed' || (l.qty_confirmed != null && l.qty_confirmed !== l.qty))
-                      .map((l) => (
-                        <li key={l.item_code} className="tnum">
-                          <Ltr>{l.item_code}</Ltr>: {(l.line_status || 'ok') === 'removed' ? S.track.removedLine : <Ltr>{`${l.qty} → ${l.qty_confirmed}`}</Ltr>}
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-              )}
-
-              {data.salesman && (data.salesman.whatsapp_url || data.salesman.email_url) && (
-                <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  {data.salesman.whatsapp_url && (
-                    <AnchorButton href={`${data.salesman.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.track.aboutOrder(data.salesman.first_name || '', data.order_no))}`} target="_blank" rel="noreferrer" variant="wa" icon={<MessageCircle size={16} aria-hidden="true" />}>
-                      {S.track.message(data.salesman.first_name || data.salesman.name || 'YQ')}
-                    </AnchorButton>
+              {/* straight after placing, the hero carries the actions; the live view carries these */}
+              {!placed && (
+                <>
+                  {data.salesman && (data.salesman.whatsapp_url || data.salesman.email_url) && (
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                      {data.salesman.whatsapp_url && (
+                        <AnchorButton href={`${data.salesman.whatsapp_url.split('?text=')[0]}?text=${encodeURIComponent(S.track.aboutOrder(data.salesman.first_name || '', data.order_no))}`} target="_blank" rel="noreferrer" variant="wa" icon={<MessageCircle size={16} aria-hidden="true" />}>
+                          {S.track.message(data.salesman.first_name || data.salesman.name || 'YQ')}
+                        </AnchorButton>
+                      )}
+                      {data.salesman.email_url && (
+                        <AnchorButton href={data.salesman.email_url} variant="secondary" icon={<Mail size={15} aria-hidden="true" />}>
+                          {S.placed.email(data.salesman.first_name || 'YQ')}
+                        </AnchorButton>
+                      )}
+                    </div>
                   )}
-                  {data.salesman.email_url && (
-                    <AnchorButton href={data.salesman.email_url} variant="secondary" icon={<Mail size={15} aria-hidden="true" />}>
-                      {S.placed.email(data.salesman.first_name || 'YQ')}
-                    </AnchorButton>
-                  )}
-                </div>
-              )}
 
-              <div className="mt-3 flex flex-wrap gap-2">
-                {lines.length > 0 && (
-                  <Button variant="secondary" onClick={reorder} icon={<RotateCcw size={15} aria-hidden="true" />}>
-                    {S.track.reorder}
-                  </Button>
-                )}
-                <Button variant="secondary" onClick={() => navigator.share?.({ title: S.track.order(data.order_no), url: window.location.href }).catch(() => {}) ?? copySummary()} icon={<Share2 size={15} aria-hidden="true" />}>
-                  {S.placed.share}
-                </Button>
-                {data.can_cancel && !cancelOpen && (
-                  <Button variant="ghost" className="text-bad" onClick={() => setCancelOpen(true)}>
-                    {S.track.cancel}
-                  </Button>
-                )}
-              </div>
-              {/* what Order again cannot add today (sold out, no backorder): named here, with "Tell me when
-                  back" — not on the just-placed confirmation, where reordering is not the next step */}
-              {!placed && lines.length > 0 && <SoldOutRows items={reorderSold} className="mt-4" />}
-              {cancelOpen && (
-                <div className="mt-3 rounded-md border border-bad/20 bg-bad-soft p-3.5">
-                  <p className="text-sm font-medium text-bad">{S.track.cancelConfirm}</p>
-                  <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={S.track.cancelWhy} className="mt-2" tall={false} />
-                  <div className="mt-2 flex gap-2">
-                    <Button variant="danger" disabled={busy} onClick={doCancel}>
-                      {S.track.cancel}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {live.length > 0 && (
+                      <Button variant="secondary" onClick={reorder} icon={<RotateCcw size={15} aria-hidden="true" />}>
+                        {S.track.reorder}
+                      </Button>
+                    )}
+                    <Button variant="secondary" onClick={share} icon={<Share2 size={15} aria-hidden="true" />}>
+                      {S.placed.share}
                     </Button>
-                    <Button variant="secondary" onClick={() => setCancelOpen(false)}>
-                      {S.track.keep}
-                    </Button>
+                    {data.can_cancel && !cancelOpen && (
+                      <Button variant="ghost" className="text-bad" onClick={() => setCancelOpen(true)}>
+                        {S.track.cancel}
+                      </Button>
+                    )}
                   </div>
-                </div>
+                  {/* what Order again cannot add today (sold out, no backorder): named here, with "Tell me when
+                      back" — not on the just-placed confirmation, where reordering is not the next step */}
+                  {live.length > 0 && <SoldOutRows items={reorderSold} className="mt-4" />}
+                  {cancelOpen && (
+                    <div className="mt-3 rounded-md border border-bad/20 bg-bad-soft p-3.5">
+                      <p className="text-sm font-medium text-bad">{S.track.cancelConfirm}</p>
+                      <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={S.track.cancelWhy} className="mt-2" tall={false} />
+                      <div className="mt-2 flex gap-2">
+                        <Button variant="danger" disabled={busy} onClick={doCancel}>
+                          {S.track.cancel}
+                        </Button>
+                        <Button variant="secondary" onClick={() => setCancelOpen(false)}>
+                          {S.track.keep}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </section>
           )}
@@ -341,23 +369,24 @@ export default function TrackingPage() {
             <section className="mt-4 overflow-hidden rounded-lg border border-line bg-surface lg:mt-0">
               <h2 className="border-b border-line-2 px-4 py-3 font-display text-sm font-bold">{S.track.items}</h2>
               <ul className="divide-y divide-line-2">
-                {lines.map((l) => {
-                  const removed = (l.line_status || 'ok') === 'removed'
-                  const qty = l.qty_confirmed ?? l.qty
+                {lines.map((l, i) => {
+                  const out = isOut(l)
+                  const qty = out ? Number(l.qty || 0) : qtyNow(l)
+                  const unit = l.unit_price_confirmed ?? l.unit_price_bhd
                   return (
-                    <li key={l.item_code} className={cn('flex items-baseline justify-between gap-3 px-4 py-2.5 text-sm', removed && 'opacity-50 line-through')}>
+                    <li key={`${l.item_code}-${i}`} className={cn('flex items-baseline justify-between gap-3 px-4 py-2.5 text-sm', out && 'opacity-50 line-through')}>
                       <span className="min-w-0">
                         <b className="font-display font-bold">
                           <Ltr>{l.display_name || l.item_code}</Ltr>
                         </b>
                         <span className="ms-1.5 tnum text-ink-2">
                           <Ltr>
-                            {qty} × {money(l.unit_price_bhd)}
+                            {qty} × {money(unit)}
                           </Ltr>
                         </span>
-                        {l.backorder && !removed && <span className="ms-1.5 text-xs text-warn">{S.card.backorder.toLowerCase()}</span>}
+                        {l.backorder && !out && <span className="ms-1.5 text-xs text-warn">{S.card.backorder.toLowerCase()}</span>}
                       </span>
-                      <span className="shrink-0 font-semibold tnum">{bhd(Number(l.unit_price_bhd || 0) * Number(qty || 0))}</span>
+                      <span className="shrink-0 font-semibold tnum">{bhd(out ? 0 : lineMoneyNow(l))}</span>
                     </li>
                   )
                 })}

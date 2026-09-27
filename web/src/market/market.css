@@ -99,7 +99,7 @@
     --m-focus: 273 60% 55%;
 
     /* v3 colour (wholesale redesign). Ratios are WCAG contrast, measured on these exact values. */
-    --m-deal: 39.1 87.4% 59.4%;   /* #F2B33D amber — Last chance / Deal fills; never small text on white */
+    --m-deal: 39.1 87.4% 59.4%;   /* #F2B33D amber — Clearing line / Deal fills; never small text on white */
     --m-deal-soft: 42 92% 90%;    /* #FDEFCE amber wash — the deal chip */
     --m-deal-ink: 29 90% 23%;     /* #6F3906 — 8.13:1 on deal-soft, 4.99:1 on deal, 9.28:1 on white */
     --m-fresh: 152.7 54.9% 40%;   /* #2E9E6B mint — New fills and dots; text needs fresh-ink (3.38:1 on white) */
@@ -923,7 +923,7 @@
     display: -webkit-box;
   }
 }
-/* a round word sticker, slapped on at −10° (Last chance · New · Price drops) */
+/* a round word sticker, slapped on at −10° (Clearing line · New · Price drops) */
 .slide-sticker {
   z-index: 3;
   display: grid;

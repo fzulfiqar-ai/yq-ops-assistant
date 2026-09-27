@@ -42,6 +42,8 @@ export type ShopEventKind =
   | 'cancel'
   | 'vitals'
   | 'push_subscribe'
+  /** R7d: "tell {rep}" on a search that found nothing (meta.q) — a demand signal */
+  | 'product_request'
 
 export interface Tier {
   min_qty: number
@@ -167,6 +169,8 @@ export interface ShopSettings {
   public_tiers?: boolean | null
   /** Marketplace: the area list offered at checkout (admin setting). */
   areas?: string[] | null
+  /** R7d: area (lower-cased) → the first name of the rep shop_area_reps routes a no-link order to. */
+  area_reps?: Record<string, string> | null
   /** Marketplace v3: what happens under the minimum — request = send as a small order request, allow = accept, block = refuse. */
   small_order_mode?: 'request' | 'allow' | 'block' | null
 }
@@ -358,17 +362,35 @@ export interface OrderResponse {
 
 /* ───────────────────────── order status ───────────────────────── */
 
-export type LineStatus = 'ok' | 'changed' | 'removed' | 'backorder'
+export type LineStatus = 'ok' | 'changed' | 'removed' | 'backorder' | 'substituted' | 'added' | 'unavailable'
+
+/** R7c line disposition (app/shop_heart.py disposition()). */
+export type LineDisposition = 'as_ordered' | 'reduced' | 'increased' | 'unavailable' | 'substituted' | 'added' | 'backorder'
 
 export interface OrderStatusLine {
   item_code: string
   display_name?: string | null
+  /** what the shop requested — never changed */
   qty: number
   /** Marketplace: what the salesman confirmed (null until confirmed). */
   qty_confirmed?: number | null
+  /** R7c: what was handed over (null until delivered) */
+  qty_delivered?: number | null
+  qty_unavailable?: number | null
   line_status?: LineStatus | string | null
   unit_price_bhd?: number | null
   line_total_bhd?: number | null
+  unit_price_confirmed?: number | null
+  line_total_confirmed?: number | null
+  line_total_delivered?: number | null
+  disposition?: LineDisposition | string | null
+  /** the PUBLIC reason: its key (R7d) and its English label */
+  reason_code?: string | null
+  reason_label?: string | null
+  /** on a substituted line: the code that replaced it; on the replacement: the code it replaced */
+  substitute_item_code?: string | null
+  substitute_for?: string | null
+  added_at_stage?: string | null
   stock_status?: StockStatus | null
   backorder?: boolean | null
   image_url?: string | null
@@ -400,7 +422,11 @@ export interface OrderStatusPayload {
   steps?: OrderStep[] | null
   cancelled?: boolean | null
   can_cancel?: boolean | null
+  /** R7c: new · confirmed · delivered · cancelled (packed / out_for_delivery read "confirmed") */
+  visible_status?: string | null
   expected_delivery?: string | null
+  /** R7c: the ETA as a Bahrain calendar date (YYYY-MM-DD), when the rep's ETA resolved to one */
+  expected_delivery_date?: string | null
   created_at?: string | null
   updated_at?: string | null
   salesman?: {
@@ -416,10 +442,14 @@ export interface OrderStatusPayload {
   delivery_bhd?: number | null
   total_bhd?: number | null
   total_confirmed_bhd?: number | null
+  /** R7c: confirmed ?? as ordered — the one figure every total is read with */
+  total_effective_bhd?: number | null
   has_changes?: boolean | null
   has_backorder?: boolean | null
   note?: string | null
   timeline?: OrderTimelineEntry[] | null
+  /** R7d: a channel that reaches the rep delivered the new-order alert (null: not run yet) */
+  rep_alerted?: boolean | null
 }
 
 export interface EventPing {
@@ -442,6 +472,8 @@ export interface MarketOrderRequest extends OrderRequest {
   client_order_id?: string
   /** the /{slug} or ?ref this device remembers */
   session_ref?: string
+  /** R7d "Same as last time": the token of this device's earlier order — the server reuses its phone */
+  reuse_token?: string
 }
 
 export interface MarketOrderResponse extends OrderResponse {
@@ -453,6 +485,8 @@ export interface MarketOrderResponse extends OrderResponse {
   salesman?: { name?: string | null; first_name?: string | null; phone?: string | null } | null
   /** Marketplace v3: 'small' when the order was sent under the minimum as a small order request. */
   order_kind?: 'standard' | 'small' | null
+  /** R7d: the rep's alert outcome — null while the background fan-out has not run (a new order) */
+  rep_alerted?: boolean | null
 }
 
 export interface MyOrderSummary {
@@ -470,6 +504,8 @@ export interface MyOrderSummary {
   can_cancel?: boolean | null
   /** Marketplace v3: 'small' when the order was sent under the minimum as a small order request. */
   order_kind?: 'standard' | 'small' | null
+  /** R7d: what the status page already shows the token holder — never the phone */
+  customer?: { name?: string | null; shop?: string | null; area?: string | null } | null
 }
 
 /* ───────────────────────── transport ───────────────────────── */

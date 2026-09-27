@@ -92,6 +92,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         device_id: str | None = Field(default=None, max_length=64)
         client_order_id: str | None = Field(default=None, max_length=64)   # idempotency key per device
         session_ref: str | None = Field(default=None, max_length=32)       # the /{slug} or ?ref this device remembers
+        # R7d "Same as last time": the token of this device's earlier order — the server reads the phone
+        # from it (shop.reuse_details) so the browser never holds it; used only when customer.phone is empty
+        reuse_token: str | None = Field(default=None, max_length=64)
 
     class CancelRequest(BaseModel):
         reason: str | None = Field(default=None, max_length=300)
@@ -468,6 +471,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             "totals": o["totals"], "has_backorder": bool(o.get("has_backorder")),
             # 'small' = sent under the wholesale minimum as a request the rep confirms case by case
             "order_kind": o.get("order_kind") or "standard",
+            # R7d: the new-order alert to the rep runs in the background AFTER this response, so a new
+            # order says None ("pending") and the placed screen reads "Received by YQ — {rep} will
+            # confirm" until the status payload's rep_alerted turns True; a re-submit (duplicate)
+            # carries the stored outcome.
+            "rep_alerted": shop.rep_alerted(o) if o.get("duplicate") else (None if sm else False),
         }
 
     @app.post("/public/market/event")
@@ -514,7 +522,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if ref:
             target += f"&ref={_html.escape(ref[:32])}"
         price = f"BHD {it['price_bhd']:.3f}" if it.get("price_bhd") is not None else "Ask for price"
-        labels = {"in_stock": "In stock", "low_stock": "Only a few left", "out_of_stock": "Sold out"}
+        labels = {"in_stock": "In stock", "low_stock": "Only a few left", "out_of_stock": "Sold Out"}
         schema_avail = {"in_stock": "https://schema.org/InStock", "low_stock": "https://schema.org/LimitedAvailability",
                         "out_of_stock": "https://schema.org/OutOfStock"}
         title = f"{it['item_code']} · {price} · {labels[it['stock_status']]} — YQ Bahrain trade catalog"

@@ -13,8 +13,8 @@ import { GridPage } from './GridPage'
  * /shop — Browse. The root is the whole shelf: round category tiles, then the pinned chips row and
  * every product; its chips filter in place (the page stays "Browse" and keeps its tiles, so nothing
  * jumps under the finger). A link with ?f= makes it a destination shelf with its own title and line — Deals
- * (/shop?f=deals, "Stock-Up Deals" only when a real price drop or offer exists, else "Last-Chance
- * Stock"), Last chance (f=clearance), Price drops, Restock essentials (f=best), Moving fast
+ * (/shop?f=deals, "Stock-Up Deals" only when a real price drop or offer exists, else "Clearing
+ * lines · trade price"), Clearing lines (f=clearance), Price drops, Restock essentials (f=best), Moving fast
  * (f=moving), New arrivals, Saved. The legacy f=offers link (it used to mean "deals") goes to Deals
  * while no live offer exists, so an old campaign never lands on an empty shelf.
  */

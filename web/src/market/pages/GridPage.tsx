@@ -28,7 +28,7 @@ import { CardSkeleton } from '../ui/Skeleton'
  * so a filtered shelf can be shared, refreshed and linked from rails and slides ("See all").
  *
  * Phones/tablets (under the plum search band, useSearchBand on the page): the chips row — Sort ·
- * In stock · Deals · Price drops · Last chance · Saved — pins at `--m-search-h`, Keeta-style, and a
+ * In stock · Deals · Price drops · Clearing line · Saved — pins at `--m-search-h`, Keeta-style, and a
  * category's own facets ride a second row under it (they are a shelf's real navigation, not a
  * postscript to the quick filters; on desktop both rows wrap statically in the toolbar).
  * It gains a hairline once it is stuck (a 1px sentinel sits exactly `--m-search-h` above the row,
@@ -203,7 +203,7 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
 
   /* ── the chips row scrolls: the active chip must be on screen, and the row must look scrollable ──
    * A filtered shelf that looks exactly like the whole shelf is the bug: on a phone "Essentials" or
-   * "Last chance" can sit 600px into the row. Bring the first pressed chip into view inside the
+   * "Clearing line" can sit 600px into the row. Bring the first pressed chip into view inside the
    * scroller (never the page), and fade whichever edge has more chips behind it. */
   const scrollerRef = useRef<HTMLDivElement>(null)
   const facetsRef = useRef<HTMLDivElement>(null)
@@ -242,8 +242,8 @@ export function GridPage({ title, line, items, category, breadcrumb, lead }: { t
       extra,
     )
   /* "Deals" is a promise of a real deal — a live offer or a real price-book drop (was_bhd) on this
-   * shelf. With neither, the deals filter holds exactly the last-chance lines, so the same chip reads
-   * "Last chance" (the clearance wording), and the separate Last chance chip stands down so the row
+   * shelf. With neither, the deals filter holds exactly the clearing lines, so the same chip reads
+   * "Clearing line" (the clearance wording), and the separate Clearing line chip stands down so the row
    * never shows the same word twice — unless that one is the filter the merchant arrived with. */
   const dealsReal = useMemo(() => dealSets(items, data?.offers).hasRealDeals, [items, data])
   const chips = CHIPS.filter((c) => filters.has(c.key) || ((!c.extra || !category) && (!c.test || items.some(c.test))))
