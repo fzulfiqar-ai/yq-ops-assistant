@@ -47,7 +47,9 @@ LINES_CHUNK = 100                 # order ids per lines read (each read is paged
 STARTED_STATUSES = ("confirmed", "packed", "out_for_delivery", "delivered")
 OPEN_STATUSES = ("new", "confirmed", "packed", "out_for_delivery")
 LINE_OUT = ("removed", "unavailable", "substituted")
-MONEY_BASIS = "confirmed_else_requested"
+# the stored marketplace order totals: confirmed where confirmed, else as ordered, VAT-INCLUSIVE (the Command
+# Centre shows the same orders ex-VAT, ÷ (1 + shop_vat_rate)); the portal labels every BHD figure "incl. VAT"
+MONEY_BASIS = "confirmed_else_requested_incl_vat"
 ZERO = Decimal("0.000")
 _BAHRAIN = timezone(timedelta(hours=3))
 

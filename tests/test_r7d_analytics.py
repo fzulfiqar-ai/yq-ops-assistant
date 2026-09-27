@@ -421,7 +421,7 @@ def _():
     assert a["orders"] == 4 and a["cancelled"] == 1, (a["orders"], a["cancelled"])      # 1, 2, 5, 6 (4 is a test)
     assert a["value_bhd"] == 28.5, a["value_bhd"]                                         # 10.5 + 6.0 + 7.0 + 5.0
     assert a["aov_bhd"] == 7.125
-    assert a["money_basis"] == "confirmed_else_requested"
+    assert a["money_basis"] == "confirmed_else_requested_incl_vat", "the basis names the VAT (rc review 13)"
     assert a["funnel"]["checkouts"] == 1 and a["engagement"]["checkout_start"] == 1, "checkout_start is the checkout"
     assert a["funnel"]["orders"] == 3, "the rep's own order (source salesman) is not a storefront conversion"
     assert a["funnel"]["carts"] == 1 and a["engagement"]["new_devices"] is None, "new devices need the views"
@@ -973,6 +973,21 @@ def _():
         assert needle in src, needle
     assert "Speed (LCP p75)" not in src, "the vitals tile moved to the Site speed footnote"
     assert "function errorText" not in src
+
+
+@test("rc review (13): Shop analytics and the merchant page label marketplace money incl. VAT (the Command Centre is ex-VAT)")
+def _():
+    from app import shop_analytics as sa
+    assert sa.MONEY_BASIS.endswith("_incl_vat")
+    src = _read("web/src/pages/ShopAnalytics.tsx")
+    assert "foot={`Confirmed, else as ordered · ${VAT_LABEL}`}" in src
+    assert 'label="Avg order value" value={bhd(data?.aov_bhd ?? 0, 3)} foot={VAT_LABEL}' in src
+    assert "${MONEY_NOTE}" in src and "from '@/lib/basisText'" in src
+    assert "label: 'Value'" not in src and "label: 'AOV'" not in src, "every value column names its VAT basis"
+    mp = _read("web/src/pages/MerchantProfile.tsx")
+    assert mp.count("VAT_LABEL") >= 4 and "the Command Centre shows them ex-VAT" in mp
+    helper = _read("web/src/lib/basisText.ts")
+    assert "export const VAT_LABEL = 'incl. VAT'" in helper
 
 
 @test("portal: the merchant page labels INSIGHTS with evidence and the rule; the route is gated for the office and management")

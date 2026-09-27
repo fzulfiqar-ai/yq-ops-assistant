@@ -181,6 +181,10 @@ jobs:
       # order (never a shop-A duplicate for shop B), the Change carry, "shop told" on a rep-placed order
       - name: Rep screen rules (node, no browser)
         run: node scripts/rep_ui_test.mjs
+      # portal number wording (rc review): dead stock's uncosted items named beside the at-cost value,
+      # marketplace money labelled incl. VAT (lib/basisText.ts)
+      - name: Portal number wording (node, no browser)
+        run: node scripts/numbers_ui_test.mjs
       # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
       # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
       # does not. Type errors fail it too: tsc -b runs inside `npm run build`.

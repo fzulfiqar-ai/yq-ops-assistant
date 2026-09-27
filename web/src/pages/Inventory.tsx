@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { ClipboardList, PackageCheck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { bhd, fmtDate, num } from '@/lib/format'
+import { deadUncostedNote } from '@/lib/basisText'
 import { cn } from '@/lib/utils'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
@@ -132,7 +133,7 @@ export default function Inventory() {
             <Stat label="Low stock (<30d)" value={num(alerts)} tone="amber" />
             <Stat label="Urgent out-of-stock" value={num(s.urgent_out_of_stock || 0)} tone="rose" />
             <Stat label="Dead stock (at cost)" value={sc ? bhd(sc.dead_cost_bhd, 0) : num(s.dead_stock || 0)}
-              foot={sc ? `${num(sc.dead_count)} item${sc.dead_count === 1 ? '' : 's'} · no sale in 90 days` : 'items · no sale in 90 days'} />
+              foot={sc ? `${num(sc.dead_count)} item${sc.dead_count === 1 ? '' : 's'} · no sale in 90 days${deadUncostedNote(sc.dead_count, sc.dead_uncosted)}` : 'items · no sale in 90 days'} />
           </div>
 
           {(data.recent_receipts?.length ?? 0) > 0 && (

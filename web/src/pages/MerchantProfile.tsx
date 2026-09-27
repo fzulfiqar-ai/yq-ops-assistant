@@ -4,6 +4,7 @@ import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recha
 import { ArrowLeft, Boxes, Lightbulb, ReceiptText, Tags, TrendingUp } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { bhd, num, fmtDate } from '@/lib/format'
+import { VAT_LABEL } from '@/lib/basisText'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
@@ -158,8 +159,8 @@ export default function MerchantProfile() {
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Lifetime value" value={bhd(m.value_bhd, 3)} tone="violet"
-          foot={`${num(m.orders ?? 0)} orders · AOV ${m.aov_bhd == null ? '—' : bhd(m.aov_bhd, 3)}`} />
-        <Stat label="Last 90 days" value={bhd(m.value_90d_bhd, 3)} foot={`${num(m.orders_90d ?? 0)} orders`} />
+          foot={`${num(m.orders ?? 0)} orders · AOV ${m.aov_bhd == null ? '—' : bhd(m.aov_bhd, 3)} · ${VAT_LABEL}`} />
+        <Stat label="Last 90 days" value={bhd(m.value_90d_bhd, 3)} foot={`${num(m.orders_90d ?? 0)} orders · ${VAT_LABEL}`} />
         <Stat label="Last order" value={m.last_order_at ? fmtDate(m.last_order_at) : '—'}
           foot={m.days_since_last == null ? undefined : m.days_since_last === 0 ? 'today' : `${num(m.days_since_last)} days ago`} />
         <Stat label="Rhythm" value={r.value} foot={r.foot} />
@@ -167,7 +168,8 @@ export default function MerchantProfile() {
       <p className="mt-2 text-[12px] text-muted-foreground">
         Confirmed {bhd(m.confirmed_value_bhd, 3)} · delivered {bhd(m.delivered_value_bhd, 3)} · {num(m.open_orders ?? 0)} open
         {m.cancelled_orders ? ` · ${num(m.cancelled_orders)} cancelled` : ''}. Values are confirmed where confirmed, else as
-        ordered; test orders are left out.
+        ordered, {VAT_LABEL} (the marketplace's stored totals; the Command Centre shows them ex-VAT); test orders are
+        left out.
         {m.rep_name && m.rep_source && REP_SOURCE[m.rep_source] ? ` Rep: ${REP_SOURCE[m.rep_source]}.` : ''}
       </p>
 
@@ -211,7 +213,7 @@ export default function MerchantProfile() {
                 <XAxis dataKey="month" tickFormatter={monthShort} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
                   axisLine={false} tickLine={false} />
                 <YAxis width={44} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
-                <Tooltip formatter={(v) => [bhd(Number(v), 3), 'Value']} labelFormatter={(l) => monthShort(String(l))}
+                <Tooltip formatter={(v) => [bhd(Number(v), 3), `Value (${VAT_LABEL})`]} labelFormatter={(l) => monthShort(String(l))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }}
                   cursor={{ fill: 'hsl(var(--accent) / 0.5)' }} />
                 <Bar dataKey="value_bhd" fill="#6d28d9" radius={[4, 4, 0, 0]} maxBarSize={28} />

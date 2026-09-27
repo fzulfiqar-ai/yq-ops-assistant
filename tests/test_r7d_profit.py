@@ -822,6 +822,24 @@ def _():
     assert "True gross margin · landed cost" not in dash and "at selling price" in dash
 
 
+@test("rc review (8): dead stock at cost says how many dead items have no cost (the count and the value cover the same items)")
+def _():
+    inv = _read("web/src/pages/Inventory.tsx")
+    assert "deadUncostedNote(sc.dead_count, sc.dead_uncosted)" in inv and "from '@/lib/basisText'" in inv
+    dash = _read("web/src/pages/Dashboard.tsx")
+    assert "deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted)" in dash
+    assert "from '@/lib/basisText'" in dash
+    helper = _read("web/src/lib/basisText.ts")
+    assert "without a usable cost, left out of the value" in helper
+    # the API already carries both numbers (the pure summary counts an uncosted dead item apart)
+    from app import metrics as m
+    s = m.stock_cost_summary([
+        {"item_name": "Synthetic A", "status": "dead_stock", "current_stock": 4, "sell_value_bhd": 8, "cost_bhd": 1.0},
+        {"item_name": "Synthetic B", "status": "dead_stock", "current_stock": 2, "sell_value_bhd": 6, "cost_bhd": None},
+    ])
+    assert (s["dead_count"], s["dead_uncosted"], s["dead_cost_bhd"]) == (2, 1, 4.0), s
+
+
 @test("web: Price Tracker margins say ex-VAT and flag an implausible cost; the rule editor and margin health say no floor / min markup")
 def _():
     pt = _read("web/src/pages/PriceTracker.tsx")
