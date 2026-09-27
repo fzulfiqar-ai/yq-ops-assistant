@@ -53,6 +53,10 @@ TRACK_STEPS = ("new", "confirmed", "packed", "out_for_delivery", "delivered")
 # Statuses a non-admin staff role may set. Salesmen: every transition on their own orders; the
 # storekeeper only moves goods (Preparing / On the way); admins: everything.
 ROLE_STATUSES: dict[str, tuple[str, ...]] = {"storekeeper": ("packed", "out_for_delivery")}
+# The orders a non-admin staff role may see at all when it is not scoped to one salesman (R7b):
+# the storekeeper sees the goods in motion — Confirmed (to pick), Preparing, On the way — and never
+# a Received order that nobody has confirmed, nor a closed one.
+ROLE_VISIBLE_STATUSES: dict[str, tuple[str, ...]] = {"storekeeper": ("confirmed", "packed", "out_for_delivery")}
 SOURCES = ("referral", "dropdown", "default", "salesman", "market")
 # How the salesman on an order was decided — the precedence lives in resolve_salesman().
 ATTRIBUTION = ("customer_admin", "focus_map", "sticky", "session_ref", "checkout_pick", "staff", "default",
@@ -2820,13 +2824,18 @@ def set_test_flag(order_id: int, is_test: bool, actor: str) -> dict:
     return get_order(order_id) or {}
 
 
-def assign_order(order_id: int, salesman_id, actor: str, reason: str | None, *, is_admin: bool,
-                 actor_salesman_id: int | None = None) -> dict:
-    """Assign or reassign an order. Admins may move any open order; a salesman may only take an
-    unassigned order, and only for himself. R3: assigning an order no longer touches the
+ASSIGN_ADMIN_ONLY_MSG = "Only an admin can assign or reassign an order."
+
+
+def assign_order(order_id: int, salesman_id, actor: str, reason: str | None, *, is_admin: bool) -> dict:
+    """Assign or reassign an open order — admins only. R7b (plan §25 P1): the old branch that let a
+    salesman take an unassigned order for himself is gone; a rep could claim any unassigned order
+    by its number, orders he cannot even see. R3: assigning an order no longer touches the
     merchant record — the sticky rep settles when the assigned rep confirms or delivers
     (app.attribution.settle_sticky), and an admin who wants the rep to own the SHOP says so
     explicitly (POST /shop/customers/{id}/assign, or the assign route's `also_customer`)."""
+    if not is_admin:
+        raise ShopError(ASSIGN_ADMIN_ONLY_MSG)
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
@@ -2836,9 +2845,6 @@ def assign_order(order_id: int, salesman_id, actor: str, reason: str | None, *, 
     sm = _salesman_by(ctx, salesman_id) or _salesman_by_id(salesman_id)
     if not sm or not sm.get("is_active", True):
         raise ShopError("Unknown or inactive salesman.")
-    if not is_admin:
-        if o.get("salesman_id") or not actor_salesman_id or int(actor_salesman_id) != int(sm["id"]):
-            raise ShopError("Only an admin can reassign an order.")
     now = _iso()
     client = get_client()
     client.table("shop_orders").update({
@@ -3097,6 +3103,8 @@ def upsert_salesman(payload: dict, by: str = "", salesman_id: int | None = None)
             row = client.table("salesmen").update(fields).eq("id", salesman_id).execute().data[0]
     except Exception as e:  # noqa: BLE001
         msg = str(e)
+        if "salesmen_user_email_lower_key" in msg:        # scripts/r7_salesmen_login_unique_migration.sql
+            raise ShopError("That login is already linked to another salesman.") from e
         if "salesmen_name_key" in msg or "salesmen_referral_code_key" in msg or "duplicate" in msg.lower():
             raise ShopError("A salesman with that name or referral code already exists.") from e
         raise
@@ -3135,16 +3143,25 @@ _salesman_cache: dict[str, tuple[float, dict | None]] = {}
 
 
 def salesman_for_user(email: str | None) -> dict | None:
+    """The salesmen row linked to this login. An EXACT match on the lower-cased address (R7b):
+    upsert_salesman stores user_email lower-cased and trimmed (every production row is, checked
+    27-Sep-2026) and scripts/r7_salesmen_login_unique_migration.sql makes lower(user_email) unique.
+    The old ILIKE read `_` and `%` in an address as wildcards, so 'a_b@x' also matched 'axb@x'."""
     if not email:
         return None
     key = email.strip().lower()
+    if not key:
+        return None
     hit = _salesman_cache.get(key)
     now = time.monotonic()
     if hit and hit[0] > now:
         return hit[1]
-    r = (get_client().table("salesmen").select("*").ilike("user_email", email.strip())
-         .limit(1).execute().data or [])
-    row = r[0] if r else None
+    r = (get_client().table("salesmen").select("*").eq("user_email", key)
+         .limit(2).execute().data or [])
+    # two rows can only happen before the unique index: refuse to guess whose login this is
+    row = r[0] if len(r) == 1 else None
+    if len(r) > 1:
+        log.warning("two salesmen rows share one login; linking neither until an admin fixes it")
     _salesman_cache[key] = (now + _SALESMAN_TTL, row)
     return row
 

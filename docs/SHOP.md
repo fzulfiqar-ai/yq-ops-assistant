@@ -320,7 +320,10 @@ The catalog IS the marketplace: same payload, same pricing engine, same tables. 
 `out_for_delivery` On the way → `delivered` Delivered; `cancelled`. `packed` is optional (confirmed →
 out_for_delivery is allowed). Each stage has its own timestamp column. `shop.NEXT_STATUS` is the transition
 table; `shop.ROLE_STATUSES` limits the `storekeeper` role (new role + feature **Storekeeper**) to
-`packed` / `out_for_delivery`; salesmen act on their own orders, admins on all.
+`packed` / `out_for_delivery`; salesmen act on their own orders, admins on all. R7b: the storekeeper SEES only
+Confirmed / Preparing / On the way orders (`shop.ROLE_VISIBLE_STATUSES`; any other order is a 404), never a
+merchant's phone or email (stripped, not masked — `features.CONTACT_STRIPPED_ROLES`, with the WhatsApp link, the
+order token and status link, the notify results and the device fingerprints), and cannot confirm (403).
 
 **Who owns an order** (`shop.resolve_salesman`, stored in `shop_orders.attribution_source`): the merchant's admin
 assignment (`shop_customers.salesman_id`) → a Focus mapping placeholder (`focus_salesman_name`) → the sticky
@@ -359,15 +362,16 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
 - `POST /shop/orders/{id}/confirm` `{lines:[{line_id, qty_confirmed?, line_status?: 'removed', note?}], expected_delivery?, note?}`
   → confirms with changes, re-prices at the confirmed quantities (`subtotal/total_confirmed_bhd`), returns
   `changed[]`, `removed[]`, `totals`, a prefilled WhatsApp to the merchant, `next_statuses`.
-- `POST /shop/orders/{id}/assign` `{salesman_id, reason?}` — admins reassign any open order; a salesman may only take an
-  unassigned one for himself. Notifies the rep. (R3: assigning an order no longer touches the merchant record — the
-  sticky rep settles when the assigned rep confirms or delivers; `also_customer:true` binds the shop explicitly.)
+- `POST /shop/orders/{id}/assign` `{salesman_id, reason?}` — **admins only** (R7b removed the branch that let a
+  salesman take an unassigned order for himself: he could claim any unassigned order by its number). Notifies the
+  rep. (R3: assigning an order no longer touches the merchant record — the sticky rep settles when the assigned rep
+  confirms or delivers; `also_customer:true` binds the shop explicitly.)
 - `GET /shop/assignment-queue` → unassigned open orders with `age_min` and a suggestion (rep who served the phone
   before, else most orders in the area in 90 days).
 - `GET /shop/picklist?salesman_id=` (Storekeeper or Shop Orders) → confirmed/preparing orders grouped by salesman with
   CONFIRMED quantities + `totals_by_item`.
-- `GET/POST /shop/orders/{id}[/status]` accept the storekeeper (all orders, limited statuses) and return `steps`,
-  `status_label`, role-filtered `next_statuses`.
+- `GET/POST /shop/orders/{id}[/status]` accept the storekeeper (Confirmed / Preparing / On the way orders only, no
+  merchant contact, limited statuses — R7b) and return `steps`, `status_label`, role-filtered `next_statuses`.
 - `salesmen` gains `title`, `photo_url`, `public_profile`, `public_whatsapp`; a `referral_code` that is a reserved
   marketplace address is refused.
 - Setting `shop_market_url` (the marketplace origin): when set, `shop.salesman_link()` returns `{market}/{slug}`

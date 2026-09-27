@@ -17,7 +17,7 @@ import {
  * The actions the marketplace added to an order, shared by the desk drawer, the field sheet and
  * the assignment queue (docs/SHOP.md § Marketplace):
  *   • ConfirmEditor — confirm with changes (per-line confirmed qty / remove, expected delivery)
- *   • AssignBox     — assign or reassign (admins; a salesman only takes an unassigned order);
+ *   • AssignBox     — assign or reassign (admins only: the API refuses everyone else since R7b);
  *                     admins may also make the rep the SHOP's rep (R3, audited)
  *   • AssignmentQueue — unassigned open orders with a history-based suggestion
  *   • R3 pipeline: CancelReasonPicker (a staff cancel names its reason), PaymentPill / PaymentBox
@@ -264,6 +264,7 @@ export function InvoiceBox({ orderId, current, onDone }: { orderId: number; curr
 }
 
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const STATUS_LABEL: Record<string, string> = {
   new: 'Received',
   confirmed: 'Confirmed',
@@ -272,6 +273,7 @@ export const STATUS_LABEL: Record<string, string> = {
   delivered: 'Delivered',
   cancelled: 'Cancelled',
 }
+// eslint-disable-next-line react-refresh/only-export-components
 export const STATUS_TONE: Record<string, BadgeTone> = {
   new: 'ink',
   confirmed: 'accent',
@@ -280,6 +282,7 @@ export const STATUS_TONE: Record<string, BadgeTone> = {
   delivered: 'green',
   cancelled: 'grey',
 }
+// eslint-disable-next-line react-refresh/only-export-components
 export const ACTION_LABEL: Record<string, string> = {
   confirmed: 'Confirm',
   packed: 'Mark preparing',
