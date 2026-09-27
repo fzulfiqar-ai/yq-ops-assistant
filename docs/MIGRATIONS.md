@@ -43,6 +43,7 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_top_customers`, `v_sales_by_period` | `scripts/views.sql` | baseline **is** canonical — never redefined |
 | `v_shop_orders_agent` | `shop_salesman_mode_migration.sql` (15-Sep-2026, appends `placed_by`) | not in the baseline |
 | `v_catalog_stock_rows`, `v_catalog_stock`, `v_shop_unpriced_stock`, `v_catalog_velocity`, `v_catalog_pairs`, `v_catalog_cost`, `v_shop_order_lines_agent` | `shop_migration.sql` (15-Sep-2026) | not in the baseline — YQ Shop views (stock status per catalog code, velocity, co-purchases, landed cost, PII-free order views) |
+| `v_shop_focus_recon`, `v_shop_focus_candidates` | `r7_focus_links_migration.sql` (R7a; before that the recon was `r3_pipeline_migration.sql`) | not in the baseline. Re-running the R3 file after R7a **fails loudly** (it would drop 4 appended columns) — never force it |
 
 ### The guard protects the file, not the statements
 
@@ -316,3 +317,24 @@ CI: the pure tests; locally: the replay) runs the API's own `DirectBackend` unde
 the scratch cluster, replays the 240926 drop from the `2026-09-24_pre-r0` backup and proves the result equals
 production's tables, then the per-account Ledger and single-item Stock_ledger scenarios, every undo refusal, a
 statement-timeout rollback, and the full undo back to the byte-identical start.
+
+
+## Release R7a (27-Sep-2026, not yet applied): `r7_focus_links_migration.sql` — Focus link v1
+
+Additive and idempotent, with `r7_focus_links_reverse.sql`; **not rehearsed on production** (the build session had
+read-only access only) — rehearse with `--rehearse` first, then apply, then `python -m scripts.audit_grants`.
+Adds `shop_order_focus_links` (RLS on, service role only, the identity sequence revoked too), re-creates
+`v_shop_focus_recon` with its 23 columns unchanged and 4 appended, and adds `v_shop_focus_candidates`. No row is
+written; no grant to anyone (both views carry customer names, so never `yq_readonly`).
+
+Proven read-only on production 27-Sep-2026 (the view bodies run as plain SELECTs, never CREATE): the new recon body
+yields exactly the live view's 23 column types (`numeric(12,3)` for `order_total_bhd` included), so
+`CREATE OR REPLACE` is accepted; the candidates put SI-98, SI-99 (0002 + 0003), SI-106, SI-110 (0005 + 0009), SI-113
+and SI-119 at rank 1 for their orders (~25 ms execution); with those 8 links simulated the recon reads clean except
+the two real differences (0007: lines added at the shop; 0008: one item substituted at a higher price). Replayed on a
+local scratch cluster (synthetic schema and data): apply, re-apply, reverse, reverse again, apply after reverse; the
+R3 file re-run after R7a is refused (`cannot drop columns from view`) — that is the protection, never force it.
+
+The reverse drops the candidates view and the links table (every decision is also in `audit_log` /
+`shop_admin_audit`) and re-creates the R3 recon verbatim; no dependent view exists (checked in `pg_depend`). A
+`focus_invoice_no` filled by an accept and a status moved to Delivered stay (order facts with their own events).
