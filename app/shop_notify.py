@@ -375,7 +375,7 @@ def notifications_ready(client=None) -> bool:
 
 
 def mask_recipient(to) -> str | None:
-    """'ahmed@yq.test, 39001234' → 'a***@yq.test, ***1234'. The log never holds a full address."""
+    """'rep1@example.test, 39001234' → 'r***@example.test, ***1234'. The log never holds a full address."""
     out: list[str] = []
     for a in str(to or "").split(","):
         a = a.strip()
