@@ -10,6 +10,7 @@ import { useTheme } from '@/lib/theme'
 import { navFor, NAV } from '@/lib/nav'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
+import { FreshnessChip } from './FreshnessChip'
 
 /** Pre-warm the most-clicked pages a moment after login — by the time the owner
  *  clicks Sales/Inventory/Catalog, the data is already in memory (0ms click). */
@@ -27,45 +28,19 @@ function usePrefetchPages(enabled: boolean) {
   }, [enabled, qc])
 }
 
-const HEADER_QUOTES = [
-  'Decisions made one day faster compound into a year of advantage.',
-  'Automate the predictable, so the team can focus on the exceptional.',
-  'What gets measured gets managed; what gets surfaced gets fixed.',
-  'Cash is reality. Margin is truth. Velocity is momentum.',
-  'The best inventory is the one already on its way to a customer.',
-]
-
 function greeting() {
   const h = new Date().getHours()
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
 }
 
-function HeaderMotivator({ name }: { name?: string }) {
-  const [i, setI] = useState(() => Math.floor(Math.random() * HEADER_QUOTES.length))
-  useEffect(() => {
-    const t = setInterval(() => setI((n) => (n + 1) % HEADER_QUOTES.length), 9000)
-    return () => clearInterval(t)
-  }, [])
+/** A short greeting. The rotating quotes that used to sit here said nothing about the business;
+ *  the data-freshness chip beside it now says how current every figure is (plan §8, §27). */
+function Greeting({ name }: { name?: string }) {
   return (
-    <div className="hidden min-w-0 flex-1 flex-col items-center justify-center px-4 lg:flex">
-      <div className="text-[13px] font-semibold leading-tight">
-        <span className="bg-gradient-to-r from-violet-600 to-fuchsia-500 bg-clip-text text-transparent dark:from-violet-300 dark:to-fuchsia-300">
-          {greeting()}{name ? `, ${name}` : ''}
-        </span>{' '}
-        <span aria-hidden>✦</span>
-      </div>
-      <AnimatePresence mode="wait">
-        <motion.span
-          key={i}
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -4 }}
-          transition={{ duration: 0.5 }}
-          className="max-w-full truncate text-[11px] italic text-muted-foreground/70"
-        >
-          “{HEADER_QUOTES[i]}”
-        </motion.span>
-      </AnimatePresence>
+    <div className="hidden min-w-0 flex-1 justify-center px-4 lg:flex">
+      <span className="truncate text-[13px] font-semibold text-muted-foreground">
+        {greeting()}{name ? `, ${name}` : ''}
+      </span>
     </div>
   )
 }
@@ -84,10 +59,11 @@ export function AppShell() {
   )
   const items = navFor(me)
   // Longest match wins, on segment boundaries only — otherwise /shop-orders would be
-  // labelled "Catalog" just because it starts with /shop.
-  const active = NAV
-    .filter((n) => (n.to === '/' ? loc.pathname === '/' : loc.pathname === n.to || loc.pathname.startsWith(`${n.to}/`)))
-    .sort((a, b) => b.to.length - a.to.length)[0]
+  // labelled "Catalog" just because it starts with /shop. The user's own menu first (management
+  // names its pages differently: Inventory is "Products & stock"), then every page.
+  const matches = (n: { to: string }) =>
+    n.to === '/' ? loc.pathname === '/' : loc.pathname === n.to || loc.pathname.startsWith(`${n.to}/`)
+  const active = [...items.filter(matches), ...NAV.filter(matches)].sort((a, b) => b.to.length - a.to.length)[0]
   const initials = (me?.email?.[0] || 'U').toUpperCase()
   const [menuOpen, setMenuOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -99,8 +75,12 @@ export function AppShell() {
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [])
-  // close the mobile drawer whenever the route changes
-  useEffect(() => setMobileOpen(false), [loc.pathname])
+  // close the mobile drawer whenever the route changes (adjusted during render, not in an effect)
+  const [drawerPath, setDrawerPath] = useState(loc.pathname)
+  if (drawerPath !== loc.pathname) {
+    setDrawerPath(loc.pathname)
+    setMobileOpen(false)
+  }
 
   function toggleCollapse() {
     setCollapsed((c) => {
@@ -144,12 +124,18 @@ export function AppShell() {
           {items.map((n, i) => {
             const Icon = n.icon
             const newSection = i === 0 || items[i - 1].section !== n.section
+            // a section whose only page carries the section's own name ("Receivables") needs no heading
+            const alone = newSection && items[i + 1]?.section !== n.section && n.label.toLowerCase() === n.section.toLowerCase()
             return (
               <div key={n.to}>
                 {newSection && !collapsed && (
-                  <div className={cn('px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40', i > 0 && 'pt-3')}>
-                    {n.section}
-                  </div>
+                  alone
+                    ? i > 0 && <div className="pt-2" aria-hidden="true" />
+                    : (
+                      <div className={cn('px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40', i > 0 && 'pt-3')}>
+                        {n.section}
+                      </div>
+                    )
                 )}
                 {newSection && collapsed && i > 0 && <div className="mx-2 my-2 border-t border-white/10" />}
                 <NavLink
@@ -227,11 +213,13 @@ export function AppShell() {
           >
             {collapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
           </button>
-          <div className="shrink-0">
-            <div className="font-display text-[15px] font-semibold">{active?.label ?? 'Portal'}</div>
+          <div className="min-w-0 shrink-0">
+            <div className="truncate font-display text-[15px] font-semibold">{active?.label ?? 'Portal'}</div>
           </div>
-          <HeaderMotivator name={me?.full_name?.split(' ')[0] || me?.email?.split('@')[0]} />
-          <div className="flex items-center gap-2">
+          <Greeting name={me?.full_name?.split(' ')[0] || me?.email?.split('@')[0]} />
+          <div className="ml-auto flex min-w-0 items-center gap-2 lg:ml-0">
+            {/* the Command Centre carries the same chip in its own band */}
+            {!mustReset && !loc.pathname.startsWith('/command') && <FreshnessChip className="max-w-[46vw] sm:max-w-none" />}
             <button
               onClick={() => window.dispatchEvent(new Event('yq:open-cmdk'))}
               className="hidden items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 text-xs text-muted-foreground transition hover:text-foreground md:flex"
@@ -240,9 +228,6 @@ export function AppShell() {
               <Search size={14} /> Search
               <kbd className="rounded border px-1 text-[10px]">⌘K</kbd>
             </button>
-            <span className="hidden items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-[11px] font-semibold text-muted-foreground sm:flex">
-              <span className="h-1.5 w-1.5 rounded-full bg-success" /> Live
-            </span>
             {/* User menu */}
             <div className="relative" ref={menuRef}>
               <button

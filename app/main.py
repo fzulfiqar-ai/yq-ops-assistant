@@ -2403,3 +2403,8 @@ _register_ingest_batch(app, limiter)
 from app.ai_insights import register as _register_ai_insights  # noqa: E402
 
 _register_ai_insights(app, limiter)
+
+# ── Management Command Centre (R7b) — routes live in app/command_api.py, figures in app/metrics.py ──
+from app.command_api import register as _register_command  # noqa: E402
+
+_register_command(app)
