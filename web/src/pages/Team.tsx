@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { UserPlus, Mail, KeyRound, Trash2, Check, Loader2, Copy, ShieldCheck, User as UserIcon } from 'lucide-react'
+import { UserPlus, Mail, KeyRound, Trash2, Check, Loader2, Copy, ShieldCheck, Crown, User as UserIcon } from 'lucide-react'
 import { apiGet, apiPost, apiPatch, apiDelete, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { useAuth } from '@/lib/auth'
+import { ROLE_LABELS, useAuth, type Role } from '@/lib/auth'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -14,14 +14,53 @@ import { Skeleton } from '@/components/ui/skeleton'
 // truth in app/features.py) so new pages appear here without touching this file.
 const FEATURES_FALLBACK = ['Dashboard', 'AI Agents', 'AI Assistant', 'Inventory', 'Sales', 'Margins', 'Receivables']
 
-interface Member { email: string; role: string; features: string[]; status: string; full_name?: string }
+interface Member { email: string; role: string; features: string[]; status: string; full_name?: string; is_owner?: boolean }
 interface Invite { email: string; role: string; full_name?: string; expires_at?: string }
 interface TeamData { users: Member[]; invites: Invite[] }
-interface FeatureMeta { features: string[]; roles: string[]; role_defaults: Record<string, string[]> }
+interface FeatureMeta {
+  features: string[]
+  roles: string[]
+  role_defaults: Record<string, string[]>
+  role_labels?: Record<string, string>
+  /** The only pages a role may hold (management's read pages); a role not listed has no limit. */
+  role_feature_limits?: Record<string, string[]>
+}
 
 function useFeatureMeta(): FeatureMeta {
   const { data } = useQuery({ queryKey: ['auth-features'], queryFn: () => apiGet<FeatureMeta>('/auth/features'), staleTime: 10 * 60_000 })
   return data ?? { features: FEATURES_FALLBACK, roles: ['admin', 'member'], role_defaults: { member: ['Dashboard'] } }
+}
+
+function roleLabel(meta: FeatureMeta, role: string): string {
+  return meta.role_labels?.[role] ?? ROLE_LABELS[role as Role] ?? role
+}
+
+/** The pages this role may be given (all of them unless the API names a limit). */
+function pagesFor(meta: FeatureMeta, role: string): string[] {
+  const limit = meta.role_feature_limits?.[role]
+  return limit ? meta.features.filter((f) => limit.includes(f)) : meta.features
+}
+
+/** Switching role keeps the pages the new role may hold, else starts from its defaults. */
+function pagesAfterRoleChange(meta: FeatureMeta, role: string, current: string[]): string[] {
+  const limit = meta.role_feature_limits?.[role]
+  if (!limit) return current
+  const kept = current.filter((f) => limit.includes(f))
+  return kept.length ? kept : (meta.role_defaults[role] ?? [])
+}
+
+function errorText(e: unknown, fallback: string): string {
+  if (e instanceof ApiError) {
+    try {
+      const d = (JSON.parse(e.body) as { detail?: unknown }).detail
+      if (typeof d === 'string') return d
+      if (d && typeof d === 'object' && 'message' in d) return String((d as { message: unknown }).message)
+    } catch {
+      /* not json */
+    }
+    return e.body.slice(0, 160) || fallback
+  }
+  return fallback
 }
 
 function FeatureChips({ all, selected, onToggle }: { all: string[]; selected: string[]; onToggle: (f: string) => void }) {
@@ -95,7 +134,7 @@ export default function Team() {
       setEmail('')
       refetch()
     } catch (e) {
-      setResult({ kind: 'err', msg: e instanceof ApiError ? e.body.slice(0, 160) : 'Could not create the invite.' })
+      setResult({ kind: 'err', msg: errorText(e, 'Could not create the invite.') })
     } finally {
       setBusy(false)
     }
@@ -142,19 +181,22 @@ export default function Team() {
             <button
               key={r}
               onClick={() => { setRole(r); if (r !== 'admin') setFeatures(meta.role_defaults[r] ?? ['Dashboard']) }}
-              className={cn('rounded-lg border px-3 py-1.5 text-[13px] font-medium capitalize transition', role === r ? 'border-primary bg-accent' : 'border-border')}
+              className={cn('rounded-lg border px-3 py-1.5 text-[13px] font-medium transition', role === r ? 'border-primary bg-accent' : 'border-border')}
             >
-              {r}
+              {roleLabel(meta, r)}
             </button>
           ))}
           {role === 'salesman' && (
             <span className="text-xs text-muted-foreground">— sees only the pages you grant (default: Catalog)</span>
           )}
+          {role === 'management' && (
+            <span className="text-xs text-muted-foreground">— sees every report and customer order, changes nothing. Phone numbers are hidden.</span>
+          )}
         </div>
         {role !== 'admin' && (
           <div className="mt-3">
             <div className="mb-2 text-sm text-muted-foreground">Feature access</div>
-            <FeatureChips all={meta.features} selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
+            <FeatureChips all={pagesFor(meta, role)} selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
           </div>
         )}
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -210,7 +252,7 @@ export default function Team() {
               <div key={inv.email} className="flex items-center gap-3 rounded-xl border border-dashed px-4 py-3 text-sm">
                 <Mail size={16} className="text-muted-foreground" />
                 <span className="font-medium">{inv.email}</span>
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] uppercase text-muted-foreground">pending · {inv.role}</span>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] uppercase text-muted-foreground">pending · {roleLabel(meta, inv.role)}</span>
               </div>
             ))}
           </div>
@@ -227,13 +269,19 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
   const [features, setFeatures] = useState<string[]>(member.features || [])
   const [status, setStatus] = useState(member.status || 'active')
   const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  // The owner's access is fixed (the API refuses any change); the row says so and has no Edit.
+  const owner = Boolean(member.is_owner)
 
   async function save() {
     setBusy(true)
+    setErr(null)
     try {
       await apiPatch(`/team/${encodeURIComponent(member.email)}`, { role, features: role === 'admin' ? meta.features : features, status })
       setOpen(false)
       onChanged()
+    } catch (e) {
+      setErr(errorText(e, 'Could not save the changes.'))
     } finally {
       setBusy(false)
     }
@@ -241,9 +289,12 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
   async function remove() {
     if (!confirm(`Remove ${member.email}?`)) return
     setBusy(true)
+    setErr(null)
     try {
       await apiDelete(`/team/${encodeURIComponent(member.email)}`)
       onChanged()
+    } catch (e) {
+      setErr(errorText(e, 'Could not remove this member.'))
     } finally {
       setBusy(false)
     }
@@ -253,7 +304,7 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
     <div className="rounded-xl border">
       <div className="flex items-center gap-3 px-4 py-3">
         <div className={cn('grid h-9 w-9 place-items-center rounded-full', member.role === 'admin' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')}>
-          {member.role === 'admin' ? <ShieldCheck size={16} /> : <UserIcon size={16} />}
+          {owner ? <Crown size={16} /> : member.role === 'admin' ? <ShieldCheck size={16} /> : <UserIcon size={16} />}
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">
@@ -264,15 +315,21 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
         <span className={cn('rounded-full px-2 py-0.5 text-[11px] uppercase', member.status === 'active' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' : 'bg-muted text-muted-foreground')}>
           {member.status}
         </span>
-        <span className="hidden text-[11px] uppercase tracking-wide text-muted-foreground sm:block">{member.role}</span>
-        <Button variant="outline" size="sm" onClick={() => setOpen((o) => !o)}>Edit</Button>
+        <span className="hidden text-[11px] uppercase tracking-wide text-muted-foreground sm:block">{roleLabel(meta, member.role)}</span>
+        {owner ? (
+          <span className="rounded-full bg-accent px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-accent-foreground" title="The owner's access cannot be changed">
+            Owner
+          </span>
+        ) : (
+          <Button variant="outline" size="sm" onClick={() => setOpen((o) => !o)}>Edit</Button>
+        )}
       </div>
-      {open && (
+      {open && !owner && (
         <div className="space-y-3 border-t bg-secondary/30 px-4 py-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm text-muted-foreground">Role:</span>
             {meta.roles.map((r) => (
-              <button key={r} onClick={() => setRole(r)} disabled={isSelf} className={cn('rounded-lg border px-3 py-1 text-[13px] capitalize', role === r ? 'border-primary bg-accent' : 'border-border', isSelf && 'opacity-50')}>{r}</button>
+              <button key={r} onClick={() => { setRole(r); setFeatures((s) => pagesAfterRoleChange(meta, r, s)) }} disabled={isSelf} className={cn('rounded-lg border px-3 py-1 text-[13px]', role === r ? 'border-primary bg-accent' : 'border-border', isSelf && 'opacity-50')}>{roleLabel(meta, r)}</button>
             ))}
             <span className="ml-3 text-sm text-muted-foreground">Status:</span>
             {(['active', 'disabled'] as const).map((s) => (
@@ -280,7 +337,7 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
             ))}
           </div>
           {role !== 'admin' && (
-            <FeatureChips all={meta.features} selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
+            <FeatureChips all={pagesFor(meta, role)} selected={features} onToggle={(f) => setFeatures((s) => (s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))} />
           )}
           <div className="flex items-center gap-2">
             <Button size="sm" onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />} Save</Button>
@@ -288,6 +345,9 @@ function MemberRow({ member, isSelf, onChanged }: { member: Member; isSelf: bool
               <Button size="sm" variant="destructive" onClick={remove} disabled={busy}><Trash2 size={14} /> Remove</Button>
             )}
           </div>
+          {err && (
+            <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[13px] text-destructive">{err}</p>
+          )}
         </div>
       )}
     </div>

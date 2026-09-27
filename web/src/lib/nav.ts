@@ -27,7 +27,7 @@ import {
   PackagePlus,
   type LucideIcon,
 } from 'lucide-react'
-import type { Me, Role } from './auth'
+import { isManagement, type Me, type Role } from './auth'
 
 export interface NavItem {
   label: string
@@ -74,16 +74,43 @@ export const NAV: NavItem[] = [
   { section: 'Admin', label: 'Team', to: '/team', icon: Users }, // admin-only
 ]
 
+/**
+ * Management reads the company and changes nothing: exactly these pages, in this order, under
+ * these names — nothing else, whatever features the row lists (the API holds the same limit,
+ * app/features.py ROLE_FEATURE_LIMITS). The full Command Centre comes later (Sprint 4).
+ */
+export const MANAGEMENT_NAV: { to: string; label: string; section: string }[] = [
+  { to: '/', label: 'Dashboard', section: 'Overview' },
+  { to: '/sales', label: 'Sales', section: 'Company' },
+  { to: '/margins', label: 'Profitability', section: 'Company' },
+  { to: '/receivables', label: 'Receivables', section: 'Company' },
+  { to: '/inventory', label: 'Inventory', section: 'Company' },
+  { to: '/shop-orders', label: 'Customer orders', section: 'Marketplace' },
+]
+
+/** May management open this route? Only its own pages, plus the profile / password screen. */
+export function managementMayOpen(pathname: string): boolean {
+  if (pathname === '/settings') return true
+  return MANAGEMENT_NAV.some((m) => (m.to === '/' ? pathname === '/' : pathname === m.to || pathname.startsWith(`${m.to}/`)))
+}
+
 export function canAccess(me: Me | null, item: NavItem): boolean {
   if (!me) return false
   // Role restriction is absolute — an admin does NOT get the salesman-only shell entries.
   if (item.roles && !item.roles.includes(me.role)) return false
   if (me.role === 'admin') return true
   if (!item.feature) return false // admin-only item
+  if (isManagement(me) && !MANAGEMENT_NAV.some((m) => m.to === item.to)) return false
   return (me.features || []).includes(item.feature)
 }
 
 export function navFor(me: Me | null): NavItem[] {
+  if (isManagement(me)) {
+    return MANAGEMENT_NAV.flatMap((m) => {
+      const item = NAV.find((n) => n.to === m.to && !n.roles)
+      return item && canAccess(me, item) ? [{ ...item, label: m.label, section: m.section }] : []
+    })
+  }
   return NAV.filter((n) => canAccess(me, n))
 }
 

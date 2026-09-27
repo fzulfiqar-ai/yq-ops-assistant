@@ -354,3 +354,21 @@ R3 file re-run after R7a is refused (`cannot drop columns from view`) — that i
 The reverse drops the candidates view and the links table (every decision is also in `audit_log` /
 `shop_admin_audit`) and re-creates the R3 recon verbatim; no dependent view exists (checked in `pg_depend`). A
 `focus_invoice_no` filled by an accept and a status moved to Delivered stay (order facts with their own events).
+
+## Release R7a (27-Sep-2026, not yet applied): `r7_rbac_migration.sql` — the Management role
+
+Additive and idempotent, with `r7_rbac_reverse.sql`. It drops and re-adds `user_roles_role_check` so it also
+accepts `management`, `operations`, `sales_manager` and `finance`; the six roles it accepted on production
+(admin, member, manager, viewer, salesman, storekeeper — read 27-Sep-2026) stay. Only `management` is offered by
+the API (`app/features.ROLES`); the other three are reserved for the capability layer and the team API refuses
+them until then. No grant, no row changed; the team audit (entity `user`) needs nothing because
+`shop_admin_audit` has no CHECK on entity. The closing `DO` block raises unless every role is accepted and
+`user_roles` is still not granted to `anon`/`authenticated`.
+
+Deploy order: either. Until it runs, making someone Management answers 400 naming this file: the API reads the
+live constraint through the read-only RPC (`app/user_auth.role_enabled_in_db`, cached 5 minutes) before any auth
+user or password is touched. The reverse refuses while any `user_roles` row or pending invite uses one of the
+four new roles (change those people on the Team page first). Both files were run on a throwaway local cluster:
+the migration twice, the reverse refused with a management row and with a pending finance invite, then restored
+the six roles twice.
+

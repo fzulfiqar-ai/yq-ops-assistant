@@ -8,6 +8,10 @@ SUPABASE_JWT_SECRET, then fetches the caller's role from user_roles.
   not 'active' (a disabled member keeps a valid Supabase session until it expires — the row
   is the gate), or if `must_reset` is set and the route is not one of the few needed to
   change the password (R1 security, 24-Sep-2026).
+- 403 {"code": "read_only"} for a read-only role (management, release R7a) on any request that
+  is not GET/HEAD/OPTIONS, except READ_ONLY_WRITE_ALLOWLIST, and on the AI surfaces
+  (READ_ONLY_DENIED_PREFIXES) whatever the method. This is the one central gate: a route never
+  has to remember it, and a new write route is refused to management the day it is added.
 
 Every data endpoint except /health depends on get_current_user.
 """
@@ -27,6 +31,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
 from app.database import cached_user_row
+from app.features import is_read_only, may_hold
 
 _bearer = HTTPBearer(auto_error=False)
 log = logging.getLogger(__name__)
@@ -40,6 +45,26 @@ MUST_RESET_EXEMPT: frozenset[str] = frozenset({"/me", "/auth/features", "/auth/p
 MUST_RESET_CODE = "password_change_required"
 MUST_RESET_DETAIL: dict[str, str] = {"code": MUST_RESET_CODE,
                                      "message": "Set your own password to continue."}
+
+# A read-only login (management) changes nothing: every request that is not a read is refused
+# here, except the few a person needs to use the portal at all. There is no logout or profile
+# route on the API (sign-out is Supabase's, preferences live in the browser), so the list is
+# the login's own password change. Keys are (method, route path) exactly as the request names them.
+SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+READ_ONLY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({("POST", "/auth/password")})
+# The AI surfaces run agents, free-text SQL and uploads: never a read-only login's, GET included.
+READ_ONLY_DENIED_PREFIXES: tuple[str, ...] = ("/agents", "/ask", "/orchestrate", "/assistant", "/field-notes")
+READ_ONLY_CODE = "read_only"
+READ_ONLY_DETAIL: dict[str, str] = {"code": READ_ONLY_CODE,
+                                    "message": "Your access is read-only. Ask an admin to make this change."}
+
+
+def read_only_refuses(method: str, path: str) -> bool:
+    """True when a read-only login may not make this request (see READ_ONLY_WRITE_ALLOWLIST)."""
+    method = (method or "").upper()
+    if any(path == p or path.startswith(p + "/") for p in READ_ONLY_DENIED_PREFIXES):
+        return True
+    return method not in SAFE_METHODS and (method, path) not in READ_ONLY_WRITE_ALLOWLIST
 
 # An unknown `kid` makes PyJWT refresh the JWK set over the network. Supabase rotates keys
 # rarely, so one refresh per minute per process is plenty; anything more is a token flood
@@ -157,6 +182,8 @@ def get_current_user(
     must_reset = bool(row.get("must_reset"))
     if must_reset and request.scope.get("path") not in MUST_RESET_EXEMPT:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MUST_RESET_DETAIL)
+    if is_read_only(role) and read_only_refuses(request.method, request.scope.get("path") or ""):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_DETAIL)
 
     return CurrentUser(user_id=user_id, email=email, role=role, status=user_status, must_reset=must_reset)
 
@@ -186,9 +213,13 @@ def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
 
 
 def has_feature(user: CurrentUser, feature: str) -> bool:
-    """True if the user may access a feature page (admins always may)."""
+    """True if the user may access a feature page (admins always may). A page outside the role's
+    limit (features.ROLE_FEATURE_LIMITS — management: its six read pages) is refused even when
+    the row lists it."""
     if user.role == "admin":
         return True
+    if not may_hold(user.role, feature):
+        return False
     try:
         from app.user_auth import _user_row
         feats = (_user_row(user.email) or {}).get("features") or []
@@ -215,9 +246,10 @@ def feature_set(user) -> set[str] | None:
         return set(AGENT_FEATURES)
     try:
         from app.user_auth import _user_row
-        return set((_user_row(getattr(user, "email", "")) or {}).get("features") or [])
+        feats = set((_user_row(getattr(user, "email", "")) or {}).get("features") or [])
     except Exception:  # noqa: BLE001
         return set()
+    return {f for f in feats if may_hold(role, f)}
 
 
 def require_feature(feature: str):

@@ -4,7 +4,7 @@ import type { Session } from '@supabase/supabase-js'
 import { supabase, getSessionSafe } from './supabase'
 import { apiGet, ApiError, API_BASE, PASSWORD_CHANGE_EVENT } from './api'
 
-export type Role = 'admin' | 'member' | 'salesman' | 'storekeeper'
+export type Role = 'admin' | 'member' | 'salesman' | 'storekeeper' | 'management'
 
 export interface Me {
   email: string
@@ -14,14 +14,50 @@ export interface Me {
   /** Server-owned: true = still on the temporary password; every route but /me, /auth/features
    *  and POST /auth/password answers 403 until the member sets their own (app/auth.py). */
   must_reset?: boolean
+  /** Server-owned: true = every write is refused (management); hide write controls. */
+  read_only?: boolean
+}
+
+/** What the portal calls each role (the API serves the same list as /auth/features role_labels). */
+// eslint-disable-next-line react-refresh/only-export-components
+export const ROLE_LABELS: Record<Role, string> = {
+  admin: 'Admin',
+  member: 'Member',
+  salesman: 'Salesman',
+  storekeeper: 'Storekeeper',
+  management: 'Management',
+}
+
+/** Management: reads the whole company, changes nothing. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isManagement(me: Me | null | undefined): boolean {
+  return me?.role === 'management'
+}
+
+/**
+ * True when this login may not change anything, so a page hides its write buttons (confirm,
+ * cancel, assign, edit, upload...). The API refuses every write from it anyway (app/auth.py,
+ * 403 code 'read_only'); this is only so nobody is offered a button that cannot work.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isReadOnly(me: Me | null | undefined): boolean {
+  return Boolean(me?.read_only) || isManagement(me)
+}
+
+/** Sees every customer order company-wide (admins, and management to read). A salesman sees his own. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function seesAllOrders(me: Me | null | undefined): boolean {
+  return me?.role === 'admin' || isManagement(me)
 }
 
 /** Where a login that must set its own password is sent (the shells redirect there). */
+// eslint-disable-next-line react-refresh/only-export-components
 export function passwordScreenFor(me: Me | null): string {
   return me?.role === 'salesman' ? '/account#password' : '/settings'
 }
 
 /** The server flag first (/me), the session's user_metadata copy as the fallback for an older API. */
+// eslint-disable-next-line react-refresh/only-export-components
 export function mustResetOf(me: Me | null, session: Session | null): boolean {
   if (me && typeof me.must_reset === 'boolean') return me.must_reset
   return Boolean(session?.user?.user_metadata?.must_reset)

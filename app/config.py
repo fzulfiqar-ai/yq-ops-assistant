@@ -88,6 +88,10 @@ class Settings:
         # Machine-to-machine key for schedulers / n8n agent flows (X-Agent-Key header).
         # Empty by default → agent-key auth is disabled until set in the environment.
         self.agent_api_key: str = os.getenv("AGENT_API_KEY", "")
+        # The business owner's login(s): the team API never changes their role, pages or status and
+        # never removes them (app/user_auth.check_team_change). Comma-separated; lower-cased.
+        self.owner_emails: list[str] = [e.lower() for e in _split_csv(
+            os.getenv("OWNER_EMAILS", "fzulfiqar@pie-int.com"))]
 
     def require_supabase(self) -> None:
         """Raise a clear error if Supabase config is missing (used by scripts/DB paths)."""
