@@ -25,8 +25,10 @@ export function Lightbox({ photos, start = 0, alt, onClose }: { photos: Lightbox
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
-      if (e.key === 'ArrowRight') setI((v) => (v + 1) % n)
-      if (e.key === 'ArrowLeft') setI((v) => (v - 1 + n) % n)
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+      // the arrow that points toward the reading direction's end is "next": → in English, ← in Arabic
+      const forward = (e.key === 'ArrowRight') !== (document.documentElement.dir === 'rtl')
+      setI((v) => (v + (forward ? 1 : -1) + n) % n)
     }
     document.addEventListener('keydown', onKey)
     const prev = document.body.style.overflow

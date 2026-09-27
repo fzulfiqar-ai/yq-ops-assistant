@@ -8,6 +8,7 @@ import { buildSlides, useCarousel, useClaimedSlides, useSlideClaimsActive } from
 import { useUpcoming } from '../lib/upcoming'
 import { useReducedMotion } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 import { SlideCard } from './SlideCard'
@@ -182,7 +183,9 @@ export function PopularRows({ limit = 3 }: { limit?: number }) {
               {/* two lines, as in the mini-cart's own rows: this catalog hides the distinguishing
                   part at the END of the name ("… (2USB Port)" vs "… (USB + Type-C Port)", "1Mtr"
                   vs "2Mtr"), so a single clamped line offers three identical-looking chargers */}
-              <span className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{productName(it)}</span>
+              <span {...ltrText} className="line-clamp-2 text-sm font-semibold leading-snug text-ink rtl:text-right">
+                {productName(it)}
+              </span>
               <span className="block text-xs tnum text-ink-2">{bhd(it.price_bhd)}</span>
             </span>
             <button type="button" onClick={() => add(it, undefined, 'minicart_popular')} aria-label={`${S.card.add} ${defaultQty(it)} — ${productName(it)}`} className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-line text-plum transition duration-1 ease-m hover:border-plum hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">

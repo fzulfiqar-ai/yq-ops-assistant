@@ -14,6 +14,7 @@ import { PageBar, usePageTitle, useShell } from '../shell/ShellContext'
 import { MarketCard } from '../components/MarketCard'
 import { TellBackButton } from '../components/RestockAsk'
 import { Spotlight } from '../components/Spotlight'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
@@ -23,6 +24,7 @@ import { SectionHeader } from '../ui/SectionHeader'
 import { Sheet } from '../ui/Sheet'
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
+import { Ltr } from '../ui/Ltr'
 
 /**
  * /quick — mission mode. Rows of [code or name][qty]; Enter moves to the next row; paste a
@@ -254,7 +256,7 @@ export default function QuickOrderPage() {
       )}
       {unresolved > 0 && <p className={cn('text-xs text-warn', !compact && 'mt-1')}>{S.quick.unresolved(unresolved)}</p>}
       {!compact && (
-        <Button size="lg" full className="mt-4" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" />}>
+        <Button size="lg" full className="mt-4" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />}>
           {S.quick.addAll(resolved.length)}
         </Button>
       )}
@@ -312,10 +314,12 @@ export default function QuickOrderPage() {
                         <ProductImage item={row.item} alt="" sizes={SIZES_THUMB} size={48} imgClassName="p-1" iconSize={16} showCaption={false} />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-semibold text-ink">{productName(row.item)}</div>
+                        <div {...ltrText} className="truncate text-sm font-semibold text-ink rtl:text-right">
+                          {productName(row.item)}
+                        </div>
                         <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs tnum text-ink-2">
                           <span className="truncate">
-                            {row.item.item_code} · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
+                            <Ltr>{row.item.item_code}</Ltr> · {bhd(unitAt(row.item, row.qty))} {S.cart.each}
                             {stepOf(row.item) > 1 && row.qty % stepOf(row.item) === 0 ? ` · ${S.card.packs(stepOf(row.item))}` : ''}
                           </span>
                           {/* a locked sold-out line is a backorder (only possible where the shop allows one): say so before "Add all" */}
@@ -364,9 +368,11 @@ export default function QuickOrderPage() {
                               <ProductImage item={exactOut} alt="" sizes={SIZES_THUMB} size={32} imgClassName="p-0.5 opacity-70 saturate-[.25]" iconSize={12} showCaption={false} />
                             </span>
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm font-medium text-ink-2">{productName(exactOut)}</span>
+                              <span {...ltrText} className="block truncate text-sm font-medium text-ink-2 rtl:text-right">
+                                {productName(exactOut)}
+                              </span>
                               <span className="block text-xs tnum text-ink-3">
-                                {exactOut.item_code}
+                                <Ltr>{exactOut.item_code}</Ltr>
                                 {exactOut.price_bhd != null ? ` · ${bhd(exactOut.price_bhd)}` : ''}
                               </span>
                             </span>
@@ -408,9 +414,13 @@ export default function QuickOrderPage() {
                                     <span className="h-8 w-8 shrink-0 overflow-hidden rounded-xs border border-line-2">
                                       <ProductImage item={s} alt="" sizes={SIZES_THUMB} size={32} imgClassName={cn('p-0.5', out && 'opacity-70 saturate-[.25]')} iconSize={12} showCaption={false} />
                                     </span>
-                                    <span className={cn('min-w-0 flex-1 truncate font-medium', out ? 'text-ink-2' : 'text-ink')}>{productName(s)}</span>
+                                    <span {...ltrText} className={cn('min-w-0 flex-1 truncate font-medium rtl:text-right', out ? 'text-ink-2' : 'text-ink')}>
+                                      {productName(s)}
+                                    </span>
                                     {out ? <Chip tone="grey">{m.soldOutLabel}</Chip> : s.stock_status === 'low_stock' ? <Chip tone="deal">{S.card.stockLow}</Chip> : null}
-                                    <span className="text-xs tnum text-ink-2">{s.item_code}</span>
+                                    <span className="text-xs tnum text-ink-2">
+                                      <Ltr>{s.item_code}</Ltr>
+                                    </span>
                                     <span className="whitespace-nowrap text-xs font-semibold tnum text-plum-ink">{s.price_bhd != null ? bhd(s.price_bhd) : ''}</span>
                                     {can && (out ? <Clock size={14} className="text-ink-3" aria-hidden="true" /> : <Plus size={14} className="text-plum" aria-hidden="true" />)}
                                   </button>
@@ -460,7 +470,7 @@ export default function QuickOrderPage() {
               {/* the money never wraps: at 320–390px it steps down instead */}
               <div className="whitespace-nowrap font-display text-lg font-extrabold leading-tight tnum text-ink min-[400px]:text-xl">≈ {bhd(total)}</div>
             </div>
-            <Button size="lg" className="shrink-0 px-5" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" />}>
+            <Button size="lg" className="shrink-0 px-5" onClick={addAll} icon={<ArrowRight size={16} aria-hidden="true" className="rtl:-scale-x-100" />}>
               {S.quick.addAll(resolved.length)}
             </Button>
           </div>

@@ -9,6 +9,7 @@ import { bhd, minQtyOf, normalizeQty, productName, variantOf } from '../lib/form
 import { useShell } from '../shell/ShellContext'
 import { isPhoneLike } from '../shell/useViewport'
 import { useCartCounts, useCartQty } from '../store/cart'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
@@ -517,7 +518,9 @@ function FillerRow({ f, dense }: { f: Filler; dense?: boolean }) {
         <ProductImage item={item} alt="" sizes={SIZES_THUMB} size={dense ? 40 : 48} imgClassName="p-1" iconSize={dense ? 14 : 16} showCaption={false} />
       </button>
       <div className="min-w-0 flex-1">
-        <div className={cn('truncate font-semibold text-ink', dense ? 'text-xs' : 'text-sm')}>{name}</div>
+        <div {...ltrText} className={cn('truncate font-semibold text-ink rtl:text-right', dense ? 'text-xs' : 'text-sm')}>
+          {name}
+        </div>
         {(chips.length > 0 || (closes && !dense)) && (
           <div className="mt-1 flex max-h-5 min-w-0 flex-wrap gap-1 overflow-hidden">
             {closes && (

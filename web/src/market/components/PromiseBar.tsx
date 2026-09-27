@@ -4,7 +4,7 @@ import { ChevronRight, Download } from 'lucide-react'
 import type { MarketPromise as PromiseRow } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
-import { bhd, money } from '../lib/format'
+import { bhdRound } from '../lib/format'
 import { PROMISE_ICON_FALLBACK, PROMISE_ICONS } from '../lib/icons'
 import { canPromptInstall, isStandalone, onInstallChange, promptInstall } from '../lib/install'
 import { locale, S } from '../strings'
@@ -35,9 +35,10 @@ function usePromises(): PromiseRow[] {
     const rows = (settings.promises || []).filter((p) => p && p.en)
     const min = Number(settings.min_order_bhd) || 0
     if (min <= 0 || rows.some((p) => p.key === 'minimum')) return rows
-    // a round threshold reads as a headline ("BHD 20"); prices elsewhere keep their 3 decimals
-    const amount = Number.isInteger(min) ? `BHD ${min}` : bhd(min)
-    return [{ key: 'minimum', en: S.promise.minimum(amount), ar: S.promise.minimumAr(money(min)), icon: 'package', to: '/about#trade' }, ...rows]
+    // a round threshold reads as a headline ("BHD 20" / «20 د.ب»); prices elsewhere keep their 3
+    // decimals. S is already the page's language, so the one line serves both fields.
+    const line = S.promise.minimum(bhdRound(min))
+    return [{ key: 'minimum', en: line, ar: line, icon: 'package', to: '/about#trade' }, ...rows]
   }, [settings])
 }
 

@@ -3,10 +3,11 @@ import { ChevronRight, Clock, MessageCircle, Package, RotateCcw, Tag, type Lucid
 import { cn } from '@/lib/utils'
 import type { MyOrderSummary, Offer, RepCard, ShopItem } from '@/lib/shopApi'
 import { track } from '../lib/events'
-import { categorySlug, firstName, niceCategory, useCountdown } from '../lib/format'
+import { categorySlug, firstName, niceCategory, statusLabel, useCountdown } from '../lib/format'
 import { S } from '../strings'
 import { Chip } from '../ui/Chip'
 import { ProductImage } from '../ui/ProductImage'
+import { Ltr } from '../ui/Ltr'
 
 /* ───────────────────────── wholesale actions ─────────────────────────
    What a shop owner comes to do besides browsing and pasting a list: reorder the last delivery and
@@ -57,7 +58,7 @@ export function MissionStrip({ againCount, rep, className }: { againCount: numbe
                 <span className="block truncate text-sm font-semibold">{a.label}</span>
                 <span className="block truncate text-xs text-ink-2">{a.sub}</span>
               </span>
-              <ChevronRight size={16} className="shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100" aria-hidden="true" />
+              <ChevronRight size={16} className="shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100 rtl:group-hover:-translate-x-0.5" aria-hidden="true" />
             </>
           )
           const onClick = () => track('rail_click', { meta: { rail: 'mission', code: a.key } })
@@ -172,9 +173,11 @@ export function TrackCard({ order, className }: { order: MyOrderSummary; classNa
         <Package size={18} aria-hidden="true" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2 tnum">{order.order_no}</span>
+        <span className="block text-2xs font-semibold uppercase tracking-[0.08em] text-ink-2 tnum">
+          <Ltr>{order.order_no}</Ltr>
+        </span>
         <span className="block truncate font-display text-sm font-bold text-ink">
-          {order.status_label || order.status}
+          {statusLabel(order.status, order.status_label)}
           {order.expected_delivery ? <span className="font-sans font-medium text-ink-2"> · {order.expected_delivery}</span> : null}
         </span>
       </span>

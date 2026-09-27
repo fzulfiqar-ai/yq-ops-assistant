@@ -138,6 +138,8 @@ export function ComingSoonNotifySheet({ item, open, done = false, onClose, onDon
                 type="tel"
                 inputMode="tel"
                 autoComplete="tel"
+                dir="ltr"
+                className="rtl:text-right"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 onBlur={() => setTouched(true)}

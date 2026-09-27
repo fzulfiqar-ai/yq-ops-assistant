@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { rememberViewed } from '../lib/device'
 import { track } from '../lib/events'
-import { badgeMeta, bhd, cardBadges, fmtDateShort, isOut, minQtyOf, niceCategory, priceAnchor, productDetail, productName, stepOf, stockMeta } from '../lib/format'
+import { badgeMeta, bhd, cardBadges, fmtDateShort, isOut, minQtyOf, niceCategory, priceAnchor, productDetail, productName, proofText, stepOf, stockMeta } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
@@ -13,6 +13,7 @@ import { largePhotoChain, screenPx } from '../lib/photos'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
+import { Ltr } from '../ui/Ltr'
 import { ProductImage, SIZES_HERO } from '../ui/ProductImage'
 import { Sheet } from '../ui/Sheet'
 import { Stepper } from '../ui/Stepper'
@@ -123,7 +124,7 @@ export default function ProductPanel({ code }: { code: string }) {
           <span className="font-display text-xl font-bold leading-none tnum text-ink">{item.price_bhd != null ? bhd(item.price_bhd) : S.card.priceOnRequest}</span>
           {item.price_bhd != null && <span className="text-2xs text-ink-3">{S.card.perPc}</span>}
         </div>
-        <div className="mt-1 truncate text-2xs tnum text-ink-2">{min > 1 ? S.card.minPcs(min) : item.item_code}</div>
+        <div className="mt-1 truncate text-2xs tnum text-ink-2">{min > 1 ? S.card.minPcs(min) : <Ltr>{item.item_code}</Ltr>}</div>
       </div>
       {added ? (
         <div className="flex h-12 min-w-[9rem] items-center justify-center gap-2 rounded-md bg-plum px-5 text-base font-semibold text-white">
@@ -220,9 +221,13 @@ export default function ProductPanel({ code }: { code: string }) {
             {category && <span aria-hidden="true">·</span>}
             {brand && <span className="font-semibold tracking-[0.06em]">{brand}</span>}
             {brand && <span aria-hidden="true">·</span>}
-            <span className="font-semibold tnum text-ink">{item.item_code}</span>
+            <span className="font-semibold tnum text-ink">
+              <Ltr>{item.item_code}</Ltr>
+            </span>
           </p>
-          <h2 className="mt-1 font-display text-xl font-bold leading-tight text-ink">{name}</h2>
+          <h2 className="mt-1 font-display text-xl font-bold leading-tight text-ink">
+            <Ltr>{name}</Ltr>
+          </h2>
           <VariantChips item={item} layout="wrap" className="mt-2.5" />
 
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -232,7 +237,7 @@ export default function ProductPanel({ code }: { code: string }) {
             {item.social_proof && (
               <span className="inline-flex items-center gap-1.5 text-xs text-ink-2">
                 <Store size={14} aria-hidden="true" className="shrink-0 text-ink-3" />
-                {item.social_proof}
+                {proofText(item.social_proof)}
               </span>
             )}
           </div>
@@ -299,7 +304,10 @@ export default function ProductPanel({ code }: { code: string }) {
           {detail && (
             <div className="mt-5">
               <h3 className="text-2xs font-bold uppercase tracking-[0.08em] text-ink-2">{S.card.details}</h3>
-              <p className="mt-1.5 whitespace-pre-line text-sm leading-[1.6] text-ink-2">{detail}</p>
+              {/* the supplier's spec, as written: English, an island in an Arabic page (no invented translation) */}
+              <p className="mt-1.5 whitespace-pre-line text-sm leading-[1.6] text-ink-2">
+                <Ltr>{detail}</Ltr>
+              </p>
             </div>
           )}
 

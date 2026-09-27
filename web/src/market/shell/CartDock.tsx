@@ -70,7 +70,7 @@ export function CartDock() {
             </span>
           </span>
           <span className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-sm bg-white px-3.5 text-sm font-semibold text-ink">
-            {S.cart.review} <ArrowRight size={15} aria-hidden="true" />
+            {S.cart.review} <ArrowRight size={15} aria-hidden="true" className="rtl:-scale-x-100" />
           </span>
         </span>
       </Link>

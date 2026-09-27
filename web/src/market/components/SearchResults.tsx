@@ -105,7 +105,7 @@ function CategoryGrid({ tiles, className }: { tiles: { category: string; count: 
               <span className="line-clamp-2 text-xs font-semibold leading-4 text-ink sm:text-sm sm:leading-[18px]">{niceCategory(t.category)}</span>
               <span className="block text-2xs tnum text-ink-3">{S.shop.products(t.count)}</span>
             </span>
-            <ChevronRight size={15} aria-hidden="true" className="hidden shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 sm:block rtl:-scale-x-100" />
+            <ChevronRight size={15} aria-hidden="true" className="hidden shrink-0 text-ink-3 transition-transform duration-2 ease-m group-hover:translate-x-0.5 sm:block rtl:-scale-x-100 rtl:group-hover:-translate-x-0.5" />
           </Link>
         </li>
       ))}
@@ -142,7 +142,7 @@ export function SearchGroups({ q, grouped, hints, onPick, activeCode, from = 'se
         {/* the hint above sends the merchant to their representative — so the card carries that action */}
         {askUrl && (
           <AnchorButton href={askUrl} target="_blank" rel="noreferrer" variant="wa" className="mt-4" icon={<MessageCircle size={15} aria-hidden="true" />}>
-            {S.cart.ask(rep!.first_name || 'us')}
+            {rep!.first_name ? S.cart.ask(rep!.first_name) : S.cart.askUs}
           </AnchorButton>
         )}
         {tiles.length > 0 && (

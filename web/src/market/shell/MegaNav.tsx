@@ -61,7 +61,7 @@ export function MegaNav({ onClose, onEnter, onLeave }: { onClose: () => void; on
         })}
         <li className="mt-1 border-t border-line-2 pt-1">
           <Link to="/shop" role="menuitem" onClick={onClose} className="flex h-11 items-center gap-1.5 rounded-sm px-3 text-sm font-semibold text-plum hover:bg-plum-wash">
-            {S.categories.browse} <ArrowRight size={14} aria-hidden="true" />
+            {S.categories.browse} <ArrowRight size={14} aria-hidden="true" className="rtl:-scale-x-100" />
           </Link>
         </li>
       </ul>

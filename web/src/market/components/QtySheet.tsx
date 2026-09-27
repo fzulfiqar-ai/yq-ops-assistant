@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { bhd, minQtyOf, stepOf, unitAt, productName } from '../lib/format'
+import { ltr } from '../i18n'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Sheet } from '../ui/Sheet'
@@ -36,7 +37,7 @@ export function QtySheet({ item, value, onApply, onRemove, onClose }: { item: Sh
       onClose={onClose}
       variant="dialog"
       title={S.qty.title}
-      subtitle={`${item.item_code} · ${productName(item)}${min > 1 ? ` · ${S.card.min(min)}` : ''}${step > 1 ? ` · ${S.card.packs(step)}` : ''}`}
+      subtitle={`${ltr(`${item.item_code} · ${productName(item)}`)}${min > 1 ? ` · ${S.card.min(min)}` : ''}${step > 1 ? ` · ${S.card.packs(step)}` : ''}`}
       footer={
         <div className="flex gap-2">
           {value > 0 && (

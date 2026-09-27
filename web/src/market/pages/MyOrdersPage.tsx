@@ -6,11 +6,12 @@ import { RepCard } from '../components/RepCard'
 import { EmptyState } from '../components/States'
 import { useMarket, useOrder } from '../MarketContext'
 import { rememberedOrders } from '../lib/device'
-import { bhd, fmtDate } from '../lib/format'
+import { bhd, fmtDate, statusLabel } from '../lib/format'
 import { usePageTitle } from '../shell/ShellContext'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Chip } from '../ui/Chip'
+import { Ltr } from '../ui/Ltr'
 
 /** /orders — every order this phone placed (tokens are the capability; nothing else is listed). */
 export default function MyOrdersPage() {
@@ -52,15 +53,17 @@ export default function MyOrdersPage() {
                     <Link to={`/o/${o.token}`} className="flex items-center gap-3 px-4 py-3.5 hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <span className="font-display text-sm font-bold tnum text-ink">{o.order_no}</span>
-                          <Chip tone={tone}>{o.status_label || o.status}</Chip>
+                          <span className="font-display text-sm font-bold tnum text-ink">
+                            <Ltr>{o.order_no}</Ltr>
+                          </span>
+                          <Chip tone={tone}>{statusLabel(o.status, o.status_label)}</Chip>
                           {o.order_kind === 'small' && <Chip tone="grey">{S.small.badge}</Chip>}
                         </div>
                         <div className="mt-0.5 text-xs text-ink-2">
                           {[fmtDate(o.created_at), o.total_bhd != null ? bhd(o.total_bhd) : null, o.salesman || null, o.expected_delivery || null].filter(Boolean).join(' · ')}
                         </div>
                       </div>
-                      <ChevronRight size={18} className="shrink-0 text-ink-3" aria-hidden="true" />
+                      <ChevronRight size={18} className="shrink-0 text-ink-3 rtl:-scale-x-100" aria-hidden="true" />
                     </Link>
                   </li>
                 )
