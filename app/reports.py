@@ -451,6 +451,11 @@ _dash_cache: dict = {"at": 0.0, "payload": None}
 def invalidate_dashboard_cache() -> None:
     _dash_cache.update(at=0.0, payload=None)
     _report_cache.clear()
+    try:  # the Command Centre's Focus figures are kept until the next upload too (app/metrics.py)
+        from app.metrics import invalidate as _invalidate_command
+        _invalidate_command()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def dashboard(force: bool = False) -> dict:

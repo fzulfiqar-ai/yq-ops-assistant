@@ -2374,3 +2374,8 @@ _register_shop(app, limiter)
 from app.ingest_batch_api import register as _register_ingest_batch  # noqa: E402
 
 _register_ingest_batch(app, limiter)
+
+# ── Management Command Centre (R7b) — routes live in app/command_api.py, figures in app/metrics.py ──
+from app.command_api import register as _register_command  # noqa: E402
+
+_register_command(app)
