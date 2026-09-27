@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useState, type CSSProperties } from 'react'
 import { Link, Navigate, NavLink, useLocation, useOutlet } from 'react-router-dom'
-import { Bell, BookImage, ClipboardList, CircleUserRound, House, KeyRound, Loader2, LogOut, Users, type LucideIcon } from 'lucide-react'
+import { Bell, BookImage, ClipboardList, CircleUserRound, House, KeyRound, Loader2, LogOut, PanelLeftClose, PanelLeftOpen, Users, type LucideIcon } from 'lucide-react'
 import { mustResetOf, passwordScreenFor, useAuth } from '@/lib/auth'
 import { navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
@@ -11,7 +11,10 @@ import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
  *
  * Five destinations (Today · Catalog · Orders · Customers · Me) plus whatever else an admin has
  * granted (Finds, Leads, Field notes, Coach…) under "More". Phone: a floating five-tab nav in the
- * thumb zone, safe-area aware. Tablet: the same tabs across the top. Desktop: a quiet sidebar.
+ * thumb zone, safe-area aware. Tablet: the same tabs across the top. Desktop: a sidebar FIXED to the
+ * window (Sprint 5, audit D4 — it used to scroll away with a long catalog): a 64 px icon rail from
+ * 1024 px, the full 240 px from 1280 px unless the rep collapses it to the rail (remembered on this
+ * device). The width is published as --yq-sidebar so pages can keep fixed bars clear of it.
  *
  * Colour: the salesman surfaces share the marketplace's plum identity. This wrapper re-points the
  * portal's HSL tokens (`--primary`, `--accent`, `--ring`, `--background`…) so every Tailwind
@@ -48,26 +51,41 @@ interface Tab {
   end?: boolean
 }
 
-/** Publish the bottom stack height so pages keep their own sticky furniture clear of it. */
-function useTabbarVar() {
+const RAIL_KEY = 'yq-sales-rail'
+
+function readRail(): boolean {
+  try {
+    return localStorage.getItem(RAIL_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** Publish the bottom stack height and the sidebar width so pages keep their own fixed furniture clear of them. */
+function useShellVars(collapsed: boolean) {
   useEffect(() => {
     const root = document.documentElement
     const md = window.matchMedia('(min-width: 768px)')
     const lg = window.matchMedia('(min-width: 1024px)')
+    const xl = window.matchMedia('(min-width: 1280px)')
     const apply = () => {
       root.style.setProperty('--yq-tabbar', md.matches ? '0px' : `${TABBAR_PX + 24}px`)
       root.style.setProperty('--yq-topbar', lg.matches ? '0px' : '56px')
+      root.style.setProperty('--yq-sidebar', !lg.matches ? '0px' : xl.matches && !collapsed ? '240px' : '64px')
     }
     apply()
     md.addEventListener('change', apply)
     lg.addEventListener('change', apply)
+    xl.addEventListener('change', apply)
     return () => {
       md.removeEventListener('change', apply)
       lg.removeEventListener('change', apply)
+      xl.removeEventListener('change', apply)
       root.style.removeProperty('--yq-tabbar')
       root.style.removeProperty('--yq-topbar')
+      root.style.removeProperty('--yq-sidebar')
     }
-  }, [])
+  }, [collapsed])
 }
 
 function Badge({ count, className }: { count: number; className?: string }) {
@@ -154,48 +172,76 @@ function TopTabs({ tabs }: { tabs: Tab[] }) {
   )
 }
 
-function Sidebar({ tabs, more, name, onSignOut, signingOut }: { tabs: Tab[]; more: Tab[]; name: string; onSignOut: () => void; signingOut: boolean }) {
+function Sidebar({ tabs, more, name, onSignOut, signingOut, collapsed, onToggle }: { tabs: Tab[]; more: Tab[]; name: string; onSignOut: () => void; signingOut: boolean; collapsed: boolean; onToggle: () => void }) {
+  // 1024-1279: always the icon rail; 1280+: full width unless collapsed. Labels and the wide layout
+  // are switched by CSS (xl:), so the first paint is already right — no media query in JS.
+  const full = !collapsed
+  const label = cn('flex-1 truncate', full ? 'hidden xl:inline' : 'hidden')
   const item = ({ isActive }: { isActive: boolean }) =>
-    cn('flex h-11 items-center gap-3 rounded-xl px-3 text-[14px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70', isActive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground')
+    cn(
+      'relative flex h-11 items-center justify-center gap-3 rounded-xl text-[14px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70',
+      full && 'xl:justify-start xl:px-3',
+      isActive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+    )
   return (
-    <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-border bg-card lg:flex" aria-label="Sidebar">
-      <Link to="/today" className="flex items-center gap-3 px-5 pb-4 pt-5">
-        <img src="/yq-logo-160.webp" alt="" width={36} height={36} className="h-9 w-9 rounded-xl" />
-        <span className="leading-tight">
-          <span className="block font-display text-[15px] font-bold text-foreground">YQ Sales</span>
-          <span className="block text-[11.5px] text-muted-foreground">Field app</span>
-        </span>
-      </Link>
-      <nav className="flex-1 space-y-0.5 px-3" aria-label="Main">
+    <aside className={cn('fixed inset-y-0 left-0 z-40 hidden w-16 flex-col border-r border-border bg-card lg:flex', full && 'xl:w-60')} aria-label="Sidebar">
+      <div className={cn('flex items-center gap-2 px-3 pb-3 pt-4', full && 'xl:px-4')}>
+        <Link to="/today" className={cn('flex min-w-0 flex-1 items-center justify-center gap-3', full && 'xl:justify-start')} title="YQ Sales">
+          <img src="/yq-logo-160.webp" alt="" width={36} height={36} className="h-9 w-9 shrink-0 rounded-xl" />
+          <span className={cn('leading-tight', full ? 'hidden xl:block' : 'hidden')}>
+            <span className="block font-display text-[15px] font-bold text-foreground">YQ Sales</span>
+            <span className="block text-[11.5px] text-muted-foreground">Field app</span>
+          </span>
+        </Link>
+      </div>
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5" aria-label="Main">
         {tabs.map((t) => {
           const Icon = t.icon
           return (
-            <NavLink key={t.to} to={t.to} end={t.end} className={item}>
-              <Icon size={18} strokeWidth={1.9} aria-hidden="true" />
-              <span className="flex-1">{t.label}</span>
-              {t.badge ? <Badge count={t.badge} /> : null}
+            <NavLink key={t.to} to={t.to} end={t.end} className={item} title={t.label} aria-label={t.badge ? `${t.label}, ${t.badge} new` : t.label}>
+              <Icon size={18} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
+              <span className={label}>{t.label}</span>
+              {t.badge ? (
+                <>
+                  <Badge count={t.badge} className={full ? 'hidden xl:grid' : 'hidden'} />
+                  <span aria-hidden="true" className={cn('absolute right-2 top-2 h-2 w-2 rounded-full bg-primary ring-2 ring-card', full && 'xl:hidden')} />
+                </>
+              ) : null}
             </NavLink>
           )
         })}
         {more.length > 0 && (
           <>
-            <div className="px-3 pb-1 pt-4 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">More</div>
+            <div className={cn('px-3 pb-1 pt-4 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground', full ? 'hidden xl:block' : 'hidden')}>More</div>
+            <div className={cn('mx-auto my-3 h-px w-8 bg-border', full && 'xl:hidden')} aria-hidden="true" />
             {more.map((t) => {
               const Icon = t.icon
               return (
-                <NavLink key={t.to} to={t.to} className={item}>
-                  <Icon size={18} strokeWidth={1.9} aria-hidden="true" />
-                  <span className="flex-1">{t.label}</span>
+                <NavLink key={t.to} to={t.to} className={item} title={t.label} aria-label={t.label}>
+                  <Icon size={18} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
+                  <span className={label}>{t.label}</span>
                 </NavLink>
               )
             })}
           </>
         )}
       </nav>
-      <div className="border-t border-border p-3">
-        <div className="flex items-center gap-3 rounded-xl px-2 py-2">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent font-display text-[13px] font-bold text-accent-foreground">{initials(name) || 'YQ'}</span>
-          <span className="min-w-0 flex-1">
+      <div className="border-t border-border p-2.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={collapsed ? 'Expand the sidebar' : 'Collapse the sidebar'}
+          title={collapsed ? 'Expand the sidebar' : 'Collapse to icons'}
+          className={cn('mb-1 hidden h-10 w-full items-center gap-3 rounded-xl text-[12.5px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground xl:flex', collapsed ? 'justify-center' : 'px-3')}
+        >
+          {collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
+          <span className={collapsed ? 'hidden' : ''}>Collapse</span>
+        </button>
+        <div className={cn('flex flex-col items-center gap-1 rounded-xl py-1', full && 'xl:flex-row xl:gap-3 xl:px-2 xl:py-2')}>
+          <Link to="/account" title="My account" aria-label="My account" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent font-display text-[13px] font-bold text-accent-foreground">
+            {initials(name) || 'YQ'}
+          </Link>
+          <span className={cn('min-w-0 flex-1', full ? 'hidden xl:block' : 'hidden')}>
             <span className="block truncate text-[13px] font-semibold text-foreground">{name}</span>
             <Link to="/account" className="text-[11.5px] font-medium text-primary hover:underline">
               My account
@@ -218,7 +264,18 @@ export function SalesmanShell() {
   const loc = useLocation()
   const newCount = useNewOrderCount()
   const [signingOut, setSigningOut] = useState(false)
-  useTabbarVar()
+  const [collapsed, setCollapsed] = useState(readRail)
+  useShellVars(collapsed)
+  const toggleRail = () => {
+    setCollapsed((c) => {
+      try {
+        localStorage.setItem(RAIL_KEY, c ? '0' : '1')
+      } catch {
+        /* private mode — the choice lasts this visit */
+      }
+      return !c
+    })
+  }
 
   // A temporary password: only the password screen is useful (the API refuses everything else).
   const mustReset = mustResetOf(me, session)
@@ -233,7 +290,7 @@ export function SalesmanShell() {
     { to: '/today', label: 'Today', icon: House, end: true },
     { to: '/shop', label: 'Catalog', icon: BookImage },
     { to: '/shop-orders', label: 'Orders', icon: ClipboardList, badge: newCount },
-    { to: '/customers', label: 'Customers', icon: Users },
+    { to: '/customers', label: 'Shops', icon: Users },
     { to: '/account', label: 'Me', icon: CircleUserRound },
   ]
   // everything else an admin granted this salesman (Finds, Leads, Field notes, Coach, Reports…)
@@ -250,8 +307,9 @@ export function SalesmanShell() {
   return (
     <div data-shell="sales" style={SALES_TOKENS} className="min-h-screen bg-background text-foreground">
       <div className="flex">
-        <Sidebar tabs={tabs} more={more} name={name} onSignOut={onSignOut} signingOut={signingOut} />
-        <div className="min-w-0 flex-1">
+        <Sidebar tabs={tabs} more={more} name={name} onSignOut={onSignOut} signingOut={signingOut} collapsed={collapsed} onToggle={toggleRail} />
+        {/* the sidebar is fixed: the page keeps its width clear (64 px rail, 240 px from 1280 unless collapsed) */}
+        <div className={cn('min-w-0 flex-1 lg:pl-16', !collapsed && 'xl:pl-60')}>
           {/* top bar: phone + tablet (desktop has the sidebar) */}
           <header className="sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur lg:hidden">
             <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">

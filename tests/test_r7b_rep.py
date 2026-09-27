@@ -35,7 +35,6 @@ import sys
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -687,7 +686,8 @@ def _():
             assert t["waiting_count"] == 2 and t["in_progress"] == 1 and t["sla_min"] == 120
             assert t["money"]["next_gap_bhd"] == "100.000" and t["money"]["next_gain_bhd"] == "10.000"
             assert t["due"][0]["key"] == "f:ALPHA MOBILE" and t["due"][0]["wa_text"].startswith("Hello, Rep from YQ")
-            assert t["due_count"] == 7 and t["link_week"]["orders"] == 1 and t["restock"][0]["ref"] == "rep-one"
+            assert t["due_count"] == 7 and t["due_counts"] == {"due": 7}, "the lapsed count rides along for 'N to win back'"
+            assert t["link_week"]["orders"] == 1 and t["restock"][0]["ref"] == "rep-one"
             assert t["baskets"] is None and "baskets" in t["errors"], "a failing card is named, never fatal"
             # the heavy half is cached (15 s after a failed card, 60 s otherwise); the queue is live
             fake.tables["shop_orders"][0]["status"] = "confirmed"

@@ -1101,7 +1101,8 @@ def today(sm: dict | None, email: str, *, is_admin: bool = False, force: bool = 
     now = now or datetime.now(timezone.utc)
     if not sm and not is_admin:
         return {"hint": _shop.UNLINKED_HINT, "me": None, "money": None, "waiting": [], "waiting_count": 0,
-                "in_progress": 0, "due": [], "due_count": 0, "baskets": None, "link_week": None, "restock": [],
+                "in_progress": 0, "due": [], "due_count": 0, "due_counts": {}, "baskets": None, "link_week": None,
+                "restock": [],
                 "errors": {}, "sla_min": None}
     sid = sm.get("id") if sm else None
     key = ("today", str(sid) if sm else "*")
@@ -1115,20 +1116,23 @@ def today(sm: dict | None, email: str, *, is_admin: bool = False, force: bool = 
         due_hint = None
         due: list[dict] = []
         due_count = 0
+        due_counts: dict = {}
         due_through = None
         if sm and focus:
             fu = _part(errors, "due", lambda: followups(focus), None)
             if fu:
                 first = str(sm.get("name") or "").split(" ")[0] or None
                 due = [{**r, "key": shop_key(r["shop"]), "wa_text": wa_text(r, first)} for r in fu.get("due", [])[:DUE_CARD]]
-                due_count = _i((fu.get("counts") or {}).get("due"))
+                due_counts = dict(fu.get("counts") or {})
+                due_count = _i(due_counts.get("due"))
                 due_through = fu.get("data_through")
         elif sm:
             due_hint = "Your login has no Focus name yet — ask the office to set it on the Salesmen page."
         heavy = {
             "me": me or None,
             "money": money_strip(((me or {}).get("focus") or {}).get("target")),
-            "due": due, "due_count": due_count, "due_data_through": due_through, "due_hint": due_hint,
+            "due": due, "due_count": due_count, "due_counts": due_counts, "due_data_through": due_through,
+            "due_hint": due_hint,
             "baskets": (_part(errors, "baskets", lambda: baskets_not_sent(sm), None) if sm else None),
             "link_week": (_part(errors, "link_week", lambda: link_week(sm, 7), None) if sm else None),
             "restock": _part(errors, "restock", lambda: _shop.list_restock(
