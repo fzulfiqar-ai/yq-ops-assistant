@@ -195,7 +195,7 @@ def load_from_views(db: ReadOnly, week_start: date, week_end: date) -> dict:
     ids = [o["id"] for o in orders]
     lines = db.q("""
         select order_id, upper(item_code) as code, display_name, qty, line_total_bhd,
-               coalesce(category, 'Other') as category
+               coalesce(category, 'Other') as category, added_at_stage
           from v_agent_shop_lines where order_id = any(%s)""", ids) if ids else []
     prev = db.q("""select count(*) as n, coalesce(sum(total_requested_bhd), 0) as v from v_agent_shop_orders
                     where created_at >= %s and created_at < %s and not is_test and status <> 'cancelled'""", p0, t0)[0]
