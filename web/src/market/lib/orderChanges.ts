@@ -9,10 +9,12 @@ import type { Strings } from '../i18n/en'
  *
  *   reduced / increased  "10 requested → 5 confirmed" (→ "4 delivered" when that differs)
  *   unavailable          "10 requested · not available this time" — never "10 → 0"
- *   substituted          "Replaced with UK20N × 10": the replacement line is folded into this row
+ *   substituted          "Replaced with UK20N × 10": the LIVE replacement (down a re-substitute chain)
+ *                        is folded into this row — never a dead substitute "× 0"
  *   added                a line the rep added — "Added by your representative · 6 pcs"
  *   delivered            as ordered and confirmed, but a different quantity was handed over
  *
+ * A rep line taken off again (confirmed 0) has no row: the shop never requested it.
  * A backorder line is not a change. A cancelled order has no "What changed" (it says Cancelled).
  */
 
@@ -53,8 +55,9 @@ export function dispositionOf(l: OrderStatusLine): string {
   if (l.disposition) return String(l.disposition)
   const st = String(l.line_status || 'ok')
   if (st === 'substituted' || (LINE_OUT.has(st) && l.substitute_item_code)) return 'substituted'
-  if (st === 'added' || l.added_at_stage) return 'added'
   const qc = n(l.qty_confirmed)
+  // an added line (or a substitute) taken out again is gone, not "added" (shop_heart.disposition)
+  if (st === 'added' || l.added_at_stage) return LINE_OUT.has(st) || qc === 0 ? 'unavailable' : 'added'
   if (LINE_OUT.has(st) || qc === 0) return 'unavailable'
   if (qc !== null && qc < Number(l.qty)) return 'reduced'
   if (qc !== null && qc > Number(l.qty)) return 'increased'
@@ -83,11 +86,53 @@ export function lineMoneyNow(l: OrderStatusLine): number {
   return (n(l.unit_price_bhd) ?? 0) * Number(l.qty || 0)
 }
 
+/** A line the rep put on the order (an added line or a substitute) — not one the shop requested. */
+export function fromRep(l: OrderStatusLine): boolean {
+  return Boolean(l.substitute_for || l.added_at_stage || String(l.line_status || '') === 'added')
+}
+
+/** A line still coming: not out, and a quantity above 0. */
+const live = (l: OrderStatusLine): boolean => !isOut(l) && qtyNow(l) > 0
+
+/**
+ * The item actually coming in place of a substituted line — the way app/shop_heart.py
+ * live_substitutes walks it: the substitute lines of `l` (substitute_for = its code), and where one
+ * was itself taken out (re-substituted, restored, or substituted again) down the chain to the live
+ * one. A dead substitute (confirmed 0) is never the answer. Prefers the line the order names
+ * (`substitute_item_code`), else the newest live one. `taken` = replacements already folded into
+ * another row. Older payloads without `substitute_for`: the rep's live line with that code.
+ */
+export function liveReplacement(lines: OrderStatusLine[], l: OrderStatusLine, taken: Set<OrderStatusLine> = new Set()): OrderStatusLine | null {
+  const want = l.substitute_item_code || null
+  const visited = new Set<OrderStatusLine>([l])
+  let level: OrderStatusLine[] = [l]
+  while (level.length) {
+    const kids = lines.filter((x) => !visited.has(x) && !taken.has(x) && level.some((p) => x.substitute_for === p.item_code))
+    kids.forEach((k) => visited.add(k))
+    const alive = kids.filter(live)
+    if (alive.length) return alive.find((x) => x.item_code === want) || alive[alive.length - 1]
+    level = kids
+  }
+  const named = want ? lines.filter((x) => x !== l && !taken.has(x) && x.item_code === want && fromRep(x) && live(x)) : []
+  return named.length ? named[named.length - 1] : null
+}
+
 export function orderChanges(d: OrderStatusPayload | null | undefined): OrderChanges {
   const empty: OrderChanges = { rows: [], before: null, after: null, totalChanged: false }
   if (!d || d.cancelled || d.status === 'cancelled') return empty
   const lines = d.lines || []
   const rows: ChangeRow[] = []
+  // each substituted line the shop requested -> the item really coming in its place (folded into its row)
+  const replacedBy = new Map<OrderStatusLine, OrderStatusLine>()
+  const folded = new Set<OrderStatusLine>()
+  lines.forEach((l) => {
+    if (fromRep(l) || dispositionOf(l) !== 'substituted') return
+    const rep = liveReplacement(lines, l, folded)
+    if (rep) {
+      replacedBy.set(l, rep)
+      folded.add(rep)
+    }
+  })
   lines.forEach((l, i) => {
     const disp = dispositionOf(l)
     const base = {
@@ -101,13 +146,17 @@ export function orderChanges(d: OrderStatusPayload | null | undefined): OrderCha
       reason: l.reason_code || null,
     }
     if (disp === 'added') {
-      // a replacement is shown on the row of the line it replaced
-      if (l.substitute_for) return
+      // a replacement is shown on the row of the line it replaced; a live rep line nothing folded
+      // (its line's chain went elsewhere) is still coming, so it is listed as added
+      if (folded.has(l)) return
       rows.push({ ...base, kind: 'added', confirmed: base.confirmed ?? base.requested })
       return
     }
+    // a line the rep put on and took off again (a substitute re-substituted or restored away, a
+    // door-added line after a reopen): the shop never requested it — no "requested · not available"
+    if (fromRep(l)) return
     if (disp === 'substituted') {
-      const rep = lines.find((x) => x.substitute_for === l.item_code && x !== l) || null
+      const rep = replacedBy.get(l) || null
       if (rep) {
         rows.push({ ...base, kind: 'substituted', replacement: { code: rep.item_code, name: rep.display_name || rep.item_code, qty: qtyNow(rep) } })
       } else {

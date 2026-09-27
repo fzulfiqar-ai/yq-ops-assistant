@@ -11,7 +11,8 @@
  * What it proves, on hand-made payloads (synthetic codes, no real data):
  *   * lib/orderChanges.ts — "What changed": requested → confirmed (→ delivered) rows, a line the rep
  *     could not supply reads "not available" (never "10 → 0"), a substitute folds its replacement into
- *     one row, a rep-added line, a delivery that differs, the total before → after to the fils, no
+ *     one row — the LIVE replacement down a re-substitute / restore / chain, never a dead "× 0" one, and
+ *     no "requested" row for a rep line taken off again — a rep-added line, a delivery that differs, the total before → after to the fils, no
  *     tile for an order as ordered, a backorder, or a cancelled order; older payloads without a
  *     disposition still read right;
  *   * the words: English and Arabic for each row, the reason keys ("Sold Out" for out_of_stock);
@@ -142,6 +143,66 @@ check('substituted: one row "Replaced with UK20N × 4"; the replacement line is 
   // the replacement line missing from the payload: only what is certain
   const lone = C.orderChanges(order([lines[0]]))
   eq(lone.rows[0].kind, 'unavailable', 'no replacement on the payload → not available')
+})
+
+check('re-substitute: the row names the item really coming ("Replaced with C18 × 4"), never the dead substitute "× 0"', () => {
+  const ch = C.orderChanges(order([
+    line('UK20', 4, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'C18', reason_code: 'substituted' }),
+    line('UK20N', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' }),
+    line('C18', 4, { qty_confirmed: 4, line_status: 'added', disposition: 'added', substitute_for: 'UK20', added_at_stage: 'amend' }),
+  ]))
+  eq(ch.rows.map((r) => [r.code, r.kind]), [['UK20', 'substituted']], 'one row, and none for the dead UK20N')
+  eq(ch.rows[0].replacement, { code: 'C18', name: 'Item C18', qty: 4 }, 'the live replacement')
+  eq(words(en, ch.rows[0]), 'Replaced with C18 × 4', 'English')
+  ok(ch.rows.every((r) => !words(en, r).includes('× 0') && !(r.replacement && r.replacement.qty === 0)), 'no zero-quantity replacement')
+  // the same with the older payload shape (no disposition on the lines)
+  const old = C.orderChanges(order([
+    { item_code: 'UK20', qty: 4, qty_confirmed: 0, line_status: 'substituted', substitute_item_code: 'C18' },
+    { item_code: 'UK20N', qty: 4, qty_confirmed: 0, line_status: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' },
+    { item_code: 'C18', qty: 4, qty_confirmed: 4, line_status: 'added', substitute_for: 'UK20', added_at_stage: 'amend' },
+  ]))
+  eq(old.rows.map((r) => [r.code, r.kind, r.replacement && r.replacement.code]), [['UK20', 'substituted', 'C18']], 'older payload')
+})
+
+check('restore: the line back as ordered and its old substitutes taken off → no rows at all', () => {
+  const ch = C.orderChanges(order([
+    line('UK20', 4, { qty_confirmed: 4 }),
+    line('UK20N', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' }),
+    line('C18', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'amend' }),
+  ]))
+  eq(ch.rows, [], 'the shop never requested UK20N or C18')
+  const less = C.orderChanges(order([
+    line('UK20', 4, { qty_confirmed: 3, disposition: 'reduced' }),
+    line('UK20N', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' }),
+  ]))
+  eq(less.rows.map((r) => [r.code, r.kind]), [['UK20', 'reduced']], 'restored lower: only its own numbers')
+})
+
+check('a chain A → B → C (the substitute itself substituted): "Replaced with C", B has no row', () => {
+  const ch = C.orderChanges(order([
+    line('A1', 6, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'B2' }),
+    line('B2', 6, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'C3', substitute_for: 'A1', added_at_stage: 'confirm' }),
+    line('C3', 5, { qty_confirmed: 5, line_status: 'added', disposition: 'added', substitute_for: 'B2', added_at_stage: 'amend' }),
+  ]))
+  eq(ch.rows.map((r) => [r.code, r.kind]), [['A1', 'substituted']], 'one row')
+  eq(words(en, ch.rows[0]), 'Replaced with C3 × 5', 'the end of the chain')
+  // a rep-added line (not a substitute) substituted: its live replacement is still listed as added
+  const add = C.orderChanges(order([
+    line('A1', 2),
+    line('X9', 3, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'Y8', added_at_stage: 'confirm' }),
+    line('Y8', 3, { qty_confirmed: 3, line_status: 'added', disposition: 'added', substitute_for: 'X9', added_at_stage: 'amend' }),
+  ]))
+  eq(add.rows.map((r) => [r.code, r.kind]), [['Y8', 'added']], 'the item coming is named; X9 was never requested')
+})
+
+check('reopen: a door-added line taken off again has no "requested · not available" row', () => {
+  const ch = C.orderChanges(order([
+    line('A1', 10, { qty_delivered: 10 }),
+    line('D4', 2, { qty_confirmed: 0, qty_delivered: 0, line_status: 'unavailable', disposition: 'unavailable', added_at_stage: 'delivery' }),
+  ], { status: 'confirmed' }))
+  eq(ch.rows, [], 'no row for D4')
+  // older payload: an added line at confirmed 0 is out, not "added · 0 pcs"
+  eq(C.dispositionOf({ item_code: 'D4', qty: 2, qty_confirmed: 0, line_status: 'added', added_at_stage: 'delivery' }), 'unavailable', 'derived')
 })
 
 check('added by the rep and a delivery that differs: the "→ 8 delivered" tail', () => {
