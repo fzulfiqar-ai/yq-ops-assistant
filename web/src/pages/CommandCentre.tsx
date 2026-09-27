@@ -49,6 +49,8 @@ type Row = Record<string, string | number | null>
 interface Tile {
   key: string; label: string; unit: string; basis: string; drill: Drill | null; available: boolean
   value: number | null; note?: string | null
+  /** set by the API when this login lacks the page the figure belongs to (e.g. 'Margins' for stock at cost) */
+  restricted?: string
   compare?: { value: number; label: string } | null; delta_pct?: number | null; invoices?: number
   chips?: Chip[]
   month?: string; mtd_bhd?: number; target_bhd?: number | null; projected_bhd?: number
@@ -112,11 +114,16 @@ function fmtValue(t: Tile): string {
 }
 const num = (v: string | number | null | undefined) => (typeof v === 'number' ? v : v == null ? null : Number(v))
 
-/** Drill links the viewer may open (management reads its own pages only; admins everything). */
+/** Drill links the viewer may open (management reads its own pages only, each only with its grant; admins everything). */
 function mayOpen(me: Me | null, to: string): boolean {
   if (!me) return false
   if (!isManagement(me)) return true
-  return managementMayOpen(to.split('?')[0])
+  return managementMayOpen(to.split('?')[0], me.features || [])
+}
+
+/** Tiles this login may see: a figure the API marked restricted (no grant for its page) is left out. */
+function shownTiles(tiles: Tile[]): Tile[] {
+  return tiles.filter((t) => !t.restricted)
 }
 
 /* ─────────────────────────── small pieces ─────────────────────────── */
@@ -504,7 +511,7 @@ function ModuleSection({ m, me, children }: { m: Module; me: Me | null; children
 function TileGrid({ m, me }: { m: Module; me: Me | null }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-      {m.tiles.map((t) => <TileCard key={t.key} t={t} me={me} wide={WIDE.has(t.key)} />)}
+      {shownTiles(m.tiles).map((t) => <TileCard key={t.key} t={t} me={me} wide={WIDE.has(t.key)} />)}
     </div>
   )
 }

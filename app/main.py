@@ -322,12 +322,13 @@ def report(key: str, user: CurrentUser = Depends(get_current_user)):
     """Read-only data for a portal page, gated by the matching feature."""
     from fastapi import HTTPException
     from app.auth import has_feature
-    from app.reports import REPORTS, REPORT_FEATURE, cached_report
+    from app.reports import REPORTS, REPORT_FEATURE, cached_report, report_for_viewer
     if key not in REPORTS:
         raise HTTPException(status_code=404, detail=f"Unknown report '{key}'.")
     if not has_feature(user, REPORT_FEATURE[key]):
         raise HTTPException(status_code=403, detail=f"Requires access to '{REPORT_FEATURE[key]}'.")
-    return cached_report(key)
+    # cost (per item and stock at cost) only for admins and 'Margins' holders; the cache stays whole
+    return report_for_viewer(key, cached_report(key), sees_cost=has_feature(user, "Margins"))
 
 
 @app.get("/llm/health")

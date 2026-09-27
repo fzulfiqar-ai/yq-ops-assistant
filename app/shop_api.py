@@ -311,16 +311,24 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     # and its status link, the notify results (addresses), the device and browser fingerprints.
     STRIPPED_KEYS = ("whatsapp_url", "token", "status_url", "notify_result", "ua", "ip_hash", "device_id",
                      "client_order_id")
+    # The merchant's device, the checkout's idempotency key and the browser fingerprints: only an
+    # admin ever reads them. device_id + client_order_id replayed on the public order route return
+    # that order (and its token: cancel, "Same as last time"), so no other staff role receives them.
+    DEVICE_KEYS = ("device_id", "client_order_id", "ua", "ip_hash")
 
     def _masked(user: CurrentUser, o: dict, *keys: str) -> dict:
         """Management sees a merchant's phone and email masked (+973 ••••• 456) and never the
         tap-to-WhatsApp link, the merchant's order token (it can cancel) or the notify
         recipients (plan §7 phones.full). The storekeeper gets no phone or email at all, nor
-        anything that carries one (R7b). Everyone else gets the payload unchanged."""
+        anything that carries one (R7b). No role but admin gets the device / idempotency keys
+        (DEVICE_KEYS). An admin gets the payload unchanged."""
         if strips_contacts(user.role):
             for k in (*(keys or ("customer_phone", "customer_email")), *STRIPPED_KEYS):
                 o.pop(k, None)
             return o
+        if user.role != "admin":
+            for k in DEVICE_KEYS:
+                o.pop(k, None)
         if not masks_contacts(user.role):
             return o
         for k in keys or ("customer_phone", "customer_email"):
@@ -774,7 +782,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def _staff_device(email: str) -> str:
         """The idempotency device of a logged-in rep: never sent by the client, never written to a
         merchant's device list (create_order keeps it on the order row only)."""
-        return f"staff:{(email or '').strip().lower()}"[:64]
+        return f"{shop.STAFF_DEVICE_PREFIX}{(email or '').strip().lower()}"[:64]
 
     @app.get("/shop/catalog")
     def shop_staff_catalog(user: CurrentUser = Depends(require_feature("Catalog"))) -> dict:

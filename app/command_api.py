@@ -22,6 +22,66 @@ import logging
 
 log = logging.getLogger(__name__)
 
+# ── least privilege on a shared payload ────────────────────────────────────────
+# metrics.overview()/attention() are built once per period and shared by every caller (cached), so
+# what a login may not read is taken out per request, on copies — never in the cached dicts.
+# Cost, margin, gross profit, the below-cost list and stock AT COST: admins and logins holding
+# 'Margins'. The receivables book (balances by account): admins and logins holding 'Receivables'.
+MODULE_FEATURE: dict[str, str] = {"profitability": "Margins", "receivables": "Receivables"}
+TILE_FEATURE: dict[str, str] = {"products.stock_shape": "Margins"}          # stock valued at cost
+ATTENTION_FEATURE: dict[str, str] = {"below_cost": "Margins", "unowned_ar": "Receivables"}
+GUARDED_FEATURES = frozenset(MODULE_FEATURE.values()) | frozenset(TILE_FEATURE.values()) |     frozenset(ATTENTION_FEATURE.values())
+
+
+def granted(user) -> frozenset[str] | None:
+    """The guarded features this login holds; None = everything (admin)."""
+    from app.auth import has_feature
+    if getattr(user, "role", "") == "admin":
+        return None
+    return frozenset(f for f in GUARDED_FEATURES if has_feature(user, f))
+
+
+def _restricted_tile(t: dict, feature: str) -> dict:
+    """The tile's place, with no figure: only its name and why it is empty."""
+    return {"key": t.get("key"), "label": t.get("label"), "unit": t.get("unit"), "drill": None,
+            "available": False, "value": None, "restricted": feature,
+            "basis": f"Shown to logins with the {feature} page.",
+            "note": f"Needs the {feature} page — an admin can grant it on the Team page."}
+
+
+def scope_items(items: list[dict] | None, allowed: frozenset[str] | None) -> list[dict]:
+    if allowed is None:
+        return list(items or [])
+    return [i for i in items or [] if ATTENTION_FEATURE.get(i.get("key"), "") in allowed | {""}]
+
+
+def scope_overview(payload: dict, allowed: frozenset[str] | None) -> dict:
+    """The overview a login may read: modules, tiles and attention items it lacks the page for are
+    left out (a stock-at-cost tile keeps its place, marked restricted). A new dict; the input (the
+    shared cached payload) is never changed."""
+    if allowed is None or not isinstance(payload, dict) or "modules" not in payload:
+        return payload
+    mods = []
+    for m in payload.get("modules") or []:
+        need = MODULE_FEATURE.get(m.get("key"))
+        if need and need not in allowed:
+            continue
+        m = dict(m)
+        if m.get("key") == "attention":
+            m["items"] = scope_items(m.get("items"), allowed)
+            m["all_clear"] = not m["items"]
+        m["tiles"] = [(_restricted_tile(t, TILE_FEATURE[t.get("key")])
+                       if TILE_FEATURE.get(t.get("key")) and TILE_FEATURE[t.get("key")] not in allowed else t)
+                      for t in m.get("tiles") or []]
+        mods.append(m)
+    return {**payload, "modules": mods}
+
+
+def scope_attention(payload: dict, allowed: frozenset[str] | None) -> dict:
+    if allowed is None or not isinstance(payload, dict) or "items" not in payload:
+        return payload
+    return {**payload, "items": scope_items(payload.get("items"), allowed)}
+
 
 def register(app) -> None:
     from fastapi import Depends, HTTPException
@@ -42,13 +102,13 @@ def register(app) -> None:
         if period not in metrics.PERIODS:
             raise HTTPException(status_code=400,
                                 detail=f"Unknown period '{period}'. Use one of: {', '.join(metrics.PERIODS)}.")
-        return metrics.overview(period)
+        return scope_overview(metrics.overview(period), granted(user))
 
     @app.get("/management/attention")
     def management_attention(user: CurrentUser = Depends(get_current_user)) -> dict:
         """The needs-attention exceptions (current state, not tied to a period)."""
         _require_command(user)
-        return metrics.attention()
+        return scope_attention(metrics.attention(), granted(user))
 
     @app.get("/freshness")
     def data_freshness_chip(user: CurrentUser = Depends(get_current_user)) -> dict:
