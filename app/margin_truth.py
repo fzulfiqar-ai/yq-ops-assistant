@@ -1,4 +1,5 @@
-"""Below-cost and thin-margin items on the COMPUTED margin (R2, 24-Sep-2026).
+"""Below-cost and thin-margin items on the COMPUTED margin (R2, 24-Sep-2026), plus the cost-sanity
+rule and the ex-VAT unit margin every margin screen shares (R7d, 27-Sep-2026).
 
 The Focus Product Profitability report cannot be trusted for the two columns everyone read:
 'Gross Profit' loses its minus sign on loss items (UK03 20W Charger: net 439.80, COGS 483.20,
@@ -16,8 +17,124 @@ so consumers written for the old column (agent_actions, escalation, the feed) ke
 from __future__ import annotations
 
 import time
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from app.db_read import exec_sql
+
+# ── cost sanity + the ex-VAT unit margin (R7d, 27-Sep-2026) ───────────────────
+# ONE threshold for "this cost cannot be right": a unit cost under this share of the VAT-inclusive
+# list price. app/shop.py (the margin floor, margin health), the stock valuation (app/metrics.py
+# stock_cost_sql) and the Profitability page's "Check cost" list all read it from here. On the
+# 27-Sep-2026 data it flags exactly four codes, every one under 5 %: Big Size Cardboard (0.0113
+# vs 18.000), UK20 (New) (0.0114 vs 2.800), X10 LT and X10 MK (0.0126 vs 0.400); the next-lowest
+# cost share is 24.8 % (X22-L), so the line sits in an empty gap.
+IMPLAUSIBLE_COST_SHARE = 0.10
+DEFAULT_VAT_RATE = Decimal("0.10")      # app_settings.shop_vat_rate; the price book is VAT-inclusive
+_Q1 = Decimal("0.1")
+_Q3 = Decimal("0.001")
+
+
+def _dec(x) -> Decimal | None:
+    if x is None or x == "":
+        return None
+    try:
+        return x if isinstance(x, Decimal) else Decimal(str(x).strip())
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def cost_flag(price_incl_vat, cost) -> str | None:
+    """'missing' (no usable cost), 'implausible' (a cost under IMPLAUSIBLE_COST_SHARE of the price)
+    or None (the cost can be trusted). Pure; the one rule behind every "Check cost" mark."""
+    c, p = _dec(cost), _dec(price_incl_vat)
+    if c is None or c <= 0:
+        return "missing"
+    if p is not None and p > 0 and c < Decimal(str(IMPLAUSIBLE_COST_SHARE)) * p:
+        return "implausible"
+    return None
+
+
+def ex_vat(price_incl_vat, vat=DEFAULT_VAT_RATE) -> Decimal | None:
+    """The VAT-inclusive book price without its VAT, to the fils (half-up)."""
+    p, v = _dec(price_incl_vat), _dec(vat)
+    if p is None:
+        return None
+    return (p / (1 + (v if v is not None else DEFAULT_VAT_RATE))).quantize(_Q3, rounding=ROUND_HALF_UP)
+
+
+def ex_vat_margin_pct(price_incl_vat, cost, vat=DEFAULT_VAT_RATE) -> float | None:
+    """Unit gross margin on the EX-VAT price, as a percentage to one decimal:
+    (price ÷ (1 + VAT) − cost) ÷ (price ÷ (1 + VAT)) × 100. None without a price or a cost.
+    The same formula scripts/r7d_margin_exvat_migration.sql puts in v_price_tracker and
+    v_product_economics (the VAT-inclusive price used to be divided straight into the cost, which
+    overstated every margin: a 3.000 item costing 1.870 read 37.7 % instead of 31.4 %)."""
+    p, c, v = _dec(price_incl_vat), _dec(cost), _dec(vat)
+    if p is None or p <= 0 or c is None:
+        return None
+    # (p/(1+v) - c) / (p/(1+v)) == (p - c(1+v)) / p: one division, so SQL numeric and Decimal agree
+    v = v if v is not None else DEFAULT_VAT_RATE
+    return float(((p - c * (1 + v)) / p * 100).quantize(_Q1, rounding=ROUND_HALF_UP))
+
+
+def vat_rate(q=None) -> Decimal:
+    """app_settings.shop_vat_rate (a fraction, 0.10) read through the read-only RPC; the default when
+    the row is missing, unreadable or not a number."""
+    q = q or exec_sql
+    try:
+        rows = q("SELECT value FROM app_settings WHERE key = 'shop_vat_rate' LIMIT 1") or []
+        v = _dec((rows[0] or {}).get("value")) if rows else None
+    except Exception:  # noqa: BLE001 -- no database here: the book's VAT rule
+        v = None
+    return v if v is not None and Decimal(0) <= v < 1 else DEFAULT_VAT_RATE
+
+
+def apply_ex_vat_margins(rows: list[dict], vat=DEFAULT_VAT_RATE) -> list[dict]:
+    """v_price_tracker rows with margin_now_pct / margin_before_pct recomputed on the ex-VAT price
+    (the view's own figure before r7d_margin_exvat_migration.sql divides by the VAT-inclusive price;
+    after it the two agree), plus `sell_now_ex_vat` and `cost_flag` (missing | implausible | None)."""
+    for r in rows:
+        r["margin_now_pct"] = ex_vat_margin_pct(r.get("sell_now"), r.get("cost_now"), vat)
+        r["margin_before_pct"] = ex_vat_margin_pct(r.get("sell_prev"), r.get("cost_prev"), vat)
+        sx = ex_vat(r.get("sell_now"), vat)
+        r["sell_now_ex_vat"] = float(sx) if sx is not None else None
+        r["cost_flag"] = cost_flag(r.get("sell_now"), r.get("cost_now"))
+    return rows
+
+
+# The "Check cost" list: every price-book SKU whose unit cost is missing or implausible. Read from the
+# columns v_product_economics has had since R2 (price_bhd, cost_bhd, cost_source), so it answers the
+# same before and after the r7d migration. The threshold is IMPLAUSIBLE_COST_SHARE.
+CHECK_COST_SQL = (
+    "SELECT sku_code, item_name, price_bhd, cost_bhd, cost_source, "
+    "CASE WHEN cost_bhd IS NULL OR cost_bhd <= 0 THEN 'missing' ELSE 'implausible' END AS cost_flag "
+    "FROM v_product_economics "
+    "WHERE price_bhd > 0 AND (cost_bhd IS NULL OR cost_bhd <= 0 OR cost_bhd < {share} * price_bhd) "
+    "ORDER BY (cost_bhd IS NULL OR cost_bhd <= 0), sku_code LIMIT 200"
+).format(share=IMPLAUSIBLE_COST_SHARE)
+
+
+def check_cost_rows(q=None) -> list[dict]:
+    """The price-book SKUs whose cost needs a look (implausible first, then missing), each with the
+    reason in words. [] when the view does not answer: one card never costs the page."""
+    q = q or exec_sql
+    try:
+        rows = q(CHECK_COST_SQL) or []
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for r in rows:
+        flag = cost_flag(r.get("price_bhd"), r.get("cost_bhd"))
+        if not flag:
+            continue
+        p = _dec(r.get("price_bhd"))
+        c = _dec(r.get("cost_bhd"))
+        reason = ("No cost on file: no MRN receipt and no purchase-cost row" if flag == "missing" else
+                  f"Cost BHD {c:.4f} is under {IMPLAUSIBLE_COST_SHARE:.0%} of the BHD {p:.3f} price")
+        out.append({"sku_code": r.get("sku_code"), "item_name": r.get("item_name"),
+                    "price_bhd": float(p) if p is not None else None, "cost_bhd": float(c) if c is not None else None,
+                    "cost_source": r.get("cost_source") if flag != "missing" else None,
+                    "cost_flag": flag, "reason": reason})
+    return out
 
 # the columns the migration appends; selected first, computed inline when the view predates it
 _COLS = ("item_name, sku_code, product_name, category_name, list_price_bhd, net_amount_bhd, cogs_bhd, "

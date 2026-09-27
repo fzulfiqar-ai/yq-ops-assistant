@@ -82,7 +82,8 @@ v_price_list_by_book  Selling price per SKU split by price book (for channel-spe
 
 v_product_economics   Per-SKU PRICE vs COST = unit margin (use for "margin on X", "price vs
   cost", "thin/loss-making at current price"). cost_bhd null if no purchase cost on file.
-  sku_code, item_name, price_bhd, cost_bhd[landed cost], margin_bhd, margin_pct
+  sku_code, item_name, price_bhd[VAT-inclusive], cost_bhd[landed cost], margin_bhd[ex-VAT],
+  margin_pct[on the ex-VAT price]
 
 v_price_history       Prices CHANGE over time — full dated history per SKU/book (use for "did
   X's price change", "old/previous price", "price trend"). Newest = current.
@@ -137,7 +138,7 @@ v_price_tracker       Price MOVEMENT per SKU — selling price AND purchase cost
   "price before and after", "did cost go up on X", "margin now vs before", "VFAN price changes".
   sku_code, item_name, brand('VFAN'|'Other'), division, category, sell_now, sell_prev,
   sell_changed_on, sell_change_pct, cost_now, cost_prev, cost_change_pct,
-  margin_now_pct, margin_before_pct
+  margin_now_pct, margin_before_pct[both on the ex-VAT selling price; sell_* are VAT-inclusive]
 
 v_catalog             The CUSTOMER-FACING CATALOG / item master (with photos, shared with
   salesmen). Use for "is X in the catalog", "catalog price tiers", "items without a

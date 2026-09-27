@@ -15,6 +15,12 @@ Definitions (owner rules, 21-Sep and 24-Sep-2026):
     calendar: a Monday upload of Thursday's export compares Thursday with Thursday. Marketplace
     order figures are live and anchored on today in Bahrain.
   * Money is summed in SQL (ROUND(... , 3)) or as Decimals here, and leaves as 3-dp floats.
+  * Margin (R7d): the OFFICIAL margin is ex-VAT sales against Focus COGS (100 % of items costed);
+    the landed (MRN) margin is secondary and always carries its coverage. official_margin() and
+    landed_margin() are the one definition; app.reports (Profitability page, Dashboard) calls
+    profitability(), never its own SQL.
+  * Stock value (R7d): at COST — the Focus average cost, else the latest landed cost
+    (stock_cost_sql); a selling-price figure is always labelled "at selling price".
 
 Reads: everything goes through the read-only RPC as yq_readonly (app.db_read exec_sql /
 exec_sql_params) over views that role is already granted, plus v_command_orders
@@ -381,23 +387,105 @@ MOVERS_SQL = (
     "AND sale_date > $1::date - 60 AND sale_date <= $1::date GROUP BY 1"
 )
 
-# the latest stock snapshot per item with its unit cost (v_product_economics: the MRN receipt cost
-# first, the last purchase cost otherwise — one row per item)
-STOCK_SQL = (
-    "SELECT h.item_name, h.current_stock, h.sold_90d, h.days_cover, e.cost_bhd, e.cost_source "
-    "FROM v_stock_health h LEFT JOIN v_product_economics e ON e.item_name = h.item_name "
-    "WHERE h.division = 'Accessories'"
-)
+# ── stock at COST (R7d, plan §17): one definition for every stock-value tile ──────────────────────
+# The Focus stock balance is valued at the SELLING rate (stock_balance.selling_rate_bhd x qty), so
+# v_stock_health.stock_value is money the stock would fetch, not capital tied up in it. At cost, per
+# item: the Focus average cost first (the latest profitability report's COGS ÷ the units the day book
+# sold of it, trusted only where the day book reconciles to that report: ex_vat_source = 'day_book'),
+# else the latest landed cost (v_product_economics: MRN receipt, else purchase_costs). A cost under
+# margin_truth.IMPLAUSIBLE_COST_SHARE of the book price is never used (Big Size Cardboard at 0.0113
+# against 18.000 would value its stock at nothing): that item counts as uncosted instead.
+# Subqueries, not CTEs: the RPC's relation check reads every FROM / JOIN name as a view.
+STOCK_COST_BASIS = ("at cost: Focus average cost (COGS ÷ units sold), else the latest landed cost; "
+                    "a cost under 10 % of the price is not used")
 
-# landed margin: ex-VAT sales against the MRN landed cost, 12 months to $1, with its coverage
-LANDED_SQL = (
-    "SELECT ROUND(COALESCE(SUM(s.net_bhd) FILTER (WHERE e.cost_bhd IS NOT NULL), 0)::numeric, 3) AS costed_net_bhd, "
-    "ROUND(COALESCE(SUM(s.net_bhd - s.quantity * e.cost_bhd) FILTER (WHERE e.cost_bhd IS NOT NULL), 0)::numeric, 3) "
-    "AS gp_bhd, ROUND(COALESCE(SUM(s.net_bhd), 0)::numeric, 3) AS acc_net_bhd "
-    "FROM v_sales s LEFT JOIN v_product_economics e ON e.item_name = s.item_name AND e.cost_source = 'mrn' "
-    "WHERE s.division = 'Accessories' AND NOT s.is_giveaway AND s.item_name IS NOT NULL "
-    "AND s.sale_date > $1::date - 365 AND s.sale_date <= $1::date"
-)
+
+def stock_cost_sql(where: str) -> str:
+    """The latest stock snapshot per item with its unit cost at cost (see the note above), filtered
+    by `where` (a fixed SQL condition on `h`, never user input)."""
+    from app.margin_truth import IMPLAUSIBLE_COST_SHARE as lim
+    ok_avg = f"f.avg_cost > 0 AND NOT (COALESCE(e.price_bhd, 0) > 0 AND f.avg_cost < {lim} * e.price_bhd)"
+    ok_landed = f"e.cost_bhd > 0 AND NOT (COALESCE(e.price_bhd, 0) > 0 AND e.cost_bhd < {lim} * e.price_bhd)"
+    return (
+        "SELECT h.item_name, h.division, h.status, h.current_stock, h.stock_value AS sell_value_bhd, h.sold_90d, "
+        f"h.days_cover, CASE WHEN {ok_avg} THEN f.avg_cost WHEN {ok_landed} THEN e.cost_bhd END AS cost_bhd, "
+        f"CASE WHEN {ok_avg} THEN 'focus_avg' WHEN {ok_landed} THEN e.cost_source END AS cost_source "
+        "FROM v_stock_health h LEFT JOIN v_product_economics e ON e.item_name = h.item_name "
+        "LEFT JOIN (SELECT pm.item_name, ROUND((pm.cogs_bhd / u.units)::numeric, 4) AS avg_cost "
+        "FROM v_product_margin pm JOIN (SELECT item_name, SUM(quantity) AS units FROM v_sales "
+        "WHERE item_name IS NOT NULL GROUP BY item_name) u ON u.item_name = pm.item_name "
+        "WHERE pm.cogs_bhd > 0 AND u.units > 0 AND pm.ex_vat_source = 'day_book') f ON f.item_name = h.item_name "
+        f"WHERE {where}"
+    )
+
+
+# the latest stock snapshot per Accessories item with its unit cost at cost (one row per item)
+STOCK_SQL = stock_cost_sql("h.division = 'Accessories'")
+# every item held (any division) — the Inventory page's and the Dashboard's stock tiles
+STOCK_HELD_SQL = stock_cost_sql("h.current_stock > 0")
+
+
+def stock_cost_summary(rows: list[dict] | None) -> dict:
+    """Pure: stock rows (stock_cost_sql) → the stock tiles at cost. Items with nothing on hand are
+    left out; an item with no usable cost is counted apart (its selling value too), never valued at 0."""
+    cost = sell = dead_cost = dead_sell = uncosted_sell = Decimal(0)
+    held = costed = dead_n = dead_uncosted = 0
+    by_source: dict[str, int] = {}
+    for s in rows or []:
+        qty = dec(s.get("current_stock"))
+        if qty <= 0:
+            continue
+        held += 1
+        sv = dec(s.get("sell_value_bhd"))
+        sell += sv
+        is_dead = str(s.get("status") or "") == "dead_stock"
+        dead_n += 1 if is_dead else 0
+        dead_sell += sv if is_dead else 0
+        if s.get("cost_bhd") is None or dec(s.get("cost_bhd")) <= 0:
+            uncosted_sell += sv
+            dead_uncosted += 1 if is_dead else 0
+            continue
+        costed += 1
+        v = qty * dec(s.get("cost_bhd"))
+        cost += v
+        dead_cost += v if is_dead else 0
+        src = str(s.get("cost_source") or "landed")
+        by_source[src] = by_source.get(src, 0) + 1
+    return {"cost_value_bhd": money(cost), "sell_value_bhd": money(sell), "items_held": held, "items_costed": costed,
+            "items_uncosted": held - costed, "uncosted_sell_value_bhd": money(uncosted_sell),
+            "cost_coverage_pct": share(costed, held), "by_source": by_source,
+            "dead_cost_bhd": money(dead_cost), "dead_sell_bhd": money(dead_sell), "dead_count": dead_n,
+            "dead_uncosted": dead_uncosted, "basis": STOCK_COST_BASIS}
+
+
+def stock_cost_by_item(rows: list[dict] | None) -> dict[str, dict]:
+    """Pure: item_name → {unit_cost_bhd, cost_value_bhd, cost_source} for every costed item held."""
+    out: dict[str, dict] = {}
+    for s in rows or []:
+        qty, c = dec(s.get("current_stock")), s.get("cost_bhd")
+        if qty <= 0 or c is None or dec(c) <= 0:
+            continue
+        out[str(s.get("item_name"))] = {"unit_cost_bhd": money(c), "cost_value_bhd": money(qty * dec(c)),
+                                        "cost_source": s.get("cost_source")}
+    return out
+
+
+def _landed_sql(anchor: str) -> str:
+    """Landed margin: ex-VAT sales against the MRN landed cost, the 12 months to `anchor` (a fixed
+    SQL date expression), with its coverage of Accessories sales."""
+    return (
+        "SELECT ROUND(COALESCE(SUM(s.net_bhd) FILTER (WHERE e.cost_bhd IS NOT NULL), 0)::numeric, 3) AS costed_net_bhd, "
+        "ROUND(COALESCE(SUM(s.net_bhd - s.quantity * e.cost_bhd) FILTER (WHERE e.cost_bhd IS NOT NULL), 0)::numeric, 3) "
+        "AS gp_bhd, ROUND(COALESCE(SUM(s.net_bhd), 0)::numeric, 3) AS acc_net_bhd "
+        "FROM v_sales s LEFT JOIN v_product_economics e ON e.item_name = s.item_name AND e.cost_source = 'mrn' "
+        "WHERE s.division = 'Accessories' AND NOT s.is_giveaway AND s.item_name IS NOT NULL "
+        f"AND s.sale_date > {anchor} - 365 AND s.sale_date <= {anchor}"
+    )
+
+
+# landed margin, 12 months to $1 (the Command Centre's anchor) / to the latest loaded sale (the portal)
+LANDED_SQL = _landed_sql("$1::date")
+LANDED_LATEST_SQL = _landed_sql("(SELECT MAX(sale_date) FROM v_sales)")
 
 RECEIVABLES_SQL = (
     "SELECT account, outstanding_bhd, overdue_bhd, over_90_bhd, last_receipt_date::text AS last_receipt_date "
@@ -975,7 +1063,7 @@ def _products_sold_out(ctx: Ctx) -> dict | None:
 
 
 @metric("products.stock_shape", "Stock shape", "products",
-        "Accessories stock at cost (latest MRN landed cost, else last purchase) · snapshot {stock_as_of} · "
+        "Accessories stock at cost (Focus average cost, else the latest landed cost) · snapshot {stock_as_of} · "
         "cover = stock ÷ the last 90 days' daily sales", "bhd", ("/inventory", "Inventory"))
 def _products_stock_shape(ctx: Ctx) -> dict | None:
     rows = ctx.r.get("stock")
@@ -1006,28 +1094,78 @@ def _products_stock_shape(ctx: Ctx) -> dict | None:
 
 
 # ══ Profitability ═════════════════════════════════════════════════════════════
+# ONE margin (R7d, plan §17). The official figure, shown first everywhere (the Command Centre, the
+# Profitability page, the Dashboard tile): gross margin on EX-VAT sales against Focus COGS, from the
+# latest Product Profitability report — every item carries a COGS, so its coverage is 100 %. The
+# landed margin (ex-VAT sales against the latest MRN landed cost) is the secondary figure and always
+# travels with its coverage: it only covers items that have a receipt. Returns are not deducted from
+# either until the Sales Return register is loaded.
 
-@metric("profit.official", "Gross margin (official)", "profitability",
-        "Ex-VAT sales vs Focus COGS · profitability report of {margin_date} · every item costed", "pct",
-        ("/margins", "Margins by item"))
-def _profit_official(ctx: Ctx) -> dict | None:
-    tot = ctx.r.get("margin_totals")
+OFFICIAL_MARGIN_LABEL = "Gross margin (official)"
+OFFICIAL_MARGIN_BASIS = "Ex-VAT sales vs Focus COGS · every item costed"
+LANDED_MARGIN_LABEL = "Landed margin"
+LANDED_MARGIN_BASIS = "Ex-VAT sales vs landed cost (latest MRN receipt per item) · 12 months · items with a receipt only"
+RETURNS_NOTE = "Returns not yet deducted (the Sales Return register is not loaded)"
+
+
+def official_margin(tot: dict | None) -> dict | None:
+    """Pure: margin_truth.margin_totals() → the official margin (None when the totals are missing)."""
     if tot is None:
         return None
-    return {"value": share(tot.get("gp_ex"), tot.get("net_ex")), "gp_bhd": money(tot.get("gp_ex")),
-            "net_ex_vat_bhd": money(tot.get("net_ex")), "items": _int(tot.get("n")), "below_cost": _int(tot.get("below"))}
+    n = _int(tot.get("n"))
+    return {"pct": share(tot.get("gp_ex"), tot.get("net_ex")), "gp_bhd": money(tot.get("gp_ex")),
+            "net_ex_vat_bhd": money(tot.get("net_ex")), "items": n, "below_cost": _int(tot.get("below")),
+            "coverage_pct": 100.0 if n else None, "basis": "focus_cogs_ex_vat", "label": OFFICIAL_MARGIN_LABEL}
 
 
-@metric("profit.landed", "Landed margin", "profitability",
-        "Ex-VAT sales vs landed cost (latest MRN receipt per item) · 12 months to {focus_to} · items with a receipt only",
-        "pct", ("/prices", "Price tracker"))
-def _profit_landed(ctx: Ctx) -> dict | None:
-    row = ctx.r.get("landed")
+def landed_margin(row: dict | None) -> dict | None:
+    """Pure: one LANDED_SQL row → the landed margin with its coverage of Accessories ex-VAT sales."""
     if not row:
         return None
     net, gp, all_net = dec(row.get("costed_net_bhd")), dec(row.get("gp_bhd")), dec(row.get("acc_net_bhd"))
-    return {"value": share(gp, net), "gp_bhd": money(gp), "costed_net_bhd": money(net),
-            "coverage_pct": share(net, all_net)}
+    return {"pct": share(gp, net), "gp_bhd": money(gp), "costed_net_bhd": money(net),
+            "coverage_pct": share(net, all_net), "basis": "landed_mrn_ex_vat", "label": LANDED_MARGIN_LABEL}
+
+
+def profitability(q=None) -> dict:
+    """The official and the landed margin for the portal (Profitability page, Dashboard), read the
+    same way the Command Centre reads them; either is None when its source does not answer."""
+    from app import margin_truth
+    q = q or exec_sql
+    try:
+        official = official_margin(margin_truth.margin_totals(q=q)[0])
+    except Exception as e:  # noqa: BLE001 -- one figure never costs the page
+        log.warning("profitability: official margin unavailable: %s", e)
+        official = None
+    try:
+        landed = landed_margin((q(LANDED_LATEST_SQL) or [None])[0])
+    except Exception as e:  # noqa: BLE001
+        log.warning("profitability: landed margin unavailable: %s", e)
+        landed = None
+    return {"official": official, "landed": landed, "returns_note": RETURNS_NOTE,
+            "definition": {"official": OFFICIAL_MARGIN_BASIS, "landed": LANDED_MARGIN_BASIS}}
+
+
+@metric("profit.official", OFFICIAL_MARGIN_LABEL, "profitability",
+        "Ex-VAT sales vs Focus COGS · profitability report of {margin_date} · every item costed", "pct",
+        ("/margins", "Margins by item"))
+def _profit_official(ctx: Ctx) -> dict | None:
+    om = official_margin(ctx.r.get("margin_totals"))
+    if om is None:
+        return None
+    return {"value": om["pct"], "gp_bhd": om["gp_bhd"], "net_ex_vat_bhd": om["net_ex_vat_bhd"],
+            "items": om["items"], "below_cost": om["below_cost"], "coverage_pct": om["coverage_pct"]}
+
+
+@metric("profit.landed", LANDED_MARGIN_LABEL, "profitability",
+        "Ex-VAT sales vs landed cost (latest MRN receipt per item) · 12 months to {focus_to} · items with a receipt only",
+        "pct", ("/prices", "Price tracker"))
+def _profit_landed(ctx: Ctx) -> dict | None:
+    lm = landed_margin(ctx.r.get("landed"))
+    if lm is None:
+        return None
+    return {"value": lm["pct"], "gp_bhd": lm["gp_bhd"], "costed_net_bhd": lm["costed_net_bhd"],
+            "coverage_pct": lm["coverage_pct"]}
 
 
 @metric("profit.below_cost", "Selling below cost", "profitability",
