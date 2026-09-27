@@ -459,7 +459,7 @@ export default function Dashboard() {
             value={data.health.stock_basis === 'cost' && data.health.dead_stock_bhd != null ? bhd(data.health.dead_stock_bhd, 0)
               : data.health.cost_hidden && data.health.dead_stock_sell_bhd != null ? bhd(data.health.dead_stock_sell_bhd, 0) : '—'}
             sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash
-              {data.health.stock_basis === 'cost' && deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted ?? 0)}
+              {data.health.stock_basis === 'cost' && deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted)}
               {data.health.dead_stock_sell_bhd != null && <> · {bhd(data.health.dead_stock_sell_bhd, 0)} at selling price</>}</>} to="/inventory" />
         </div>
       )}
