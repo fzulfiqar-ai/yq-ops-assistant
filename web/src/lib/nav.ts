@@ -9,13 +9,12 @@ import {
   CreditCard,
   Users,
   Database,
-  NotebookPen,
   ShoppingCart,
   ShoppingBag,
   Target,
   MessageSquareQuote,
   BookImage,
-  Sparkles,
+  Radar,
   ArrowLeftRight,
   LineChart,
   Megaphone,
@@ -45,7 +44,6 @@ export const NAV: NavItem[] = [
   { section: 'Overview', label: 'Live Feed', to: '/feed', icon: Activity, feature: 'Live Feed' },
   { section: 'AI Team', label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents' },
   { section: 'AI Team', label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
-  { section: 'AI Team', label: 'Field Notes', to: '/field-notes', icon: NotebookPen, feature: 'AI Assistant' },
   { section: 'Sell', label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
   // A salesman's "Catalog" IS the shop they sell from — same page the customer sees,
   // in salesman mode. Admins/members keep the internal catalog editor at /catalog.
@@ -54,7 +52,8 @@ export const NAV: NavItem[] = [
   { section: 'Sell', label: 'Order for a shop', to: '/shop', icon: ShoppingBag, feature: 'Catalog', roles: ['admin', 'member'] },
   // The "Coming soon" desk: publish the announced range, set the month, link catalog codes on arrival.
   { section: 'Sell', label: 'Coming soon', to: '/upcoming', icon: PackagePlus, feature: 'Catalog', roles: ['admin', 'member'] },
-  { section: 'Sell', label: 'Product Finds', to: '/finds', icon: Sparkles, feature: 'Product Finds' },
+  // R7b: Market Intel replaces Product Finds and Field Notes here (/finds and /field-notes still open)
+  { section: 'Sell', label: 'Market Intel', to: '/market-intel', icon: Radar, feature: 'Market Intel' },
   { section: 'Sell', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads' },
   { section: 'Sell', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing' },
   { section: 'Sell', label: 'Shop Orders', to: '/shop-orders', icon: ClipboardList, feature: 'Shop Orders' },
@@ -86,6 +85,7 @@ export const MANAGEMENT_NAV: { to: string; label: string; section: string }[] = 
   { to: '/receivables', label: 'Receivables', section: 'Company' },
   { to: '/inventory', label: 'Inventory', section: 'Company' },
   { to: '/shop-orders', label: 'Customer orders', section: 'Marketplace' },
+  { to: '/market-intel', label: 'Market Intel', section: 'Marketplace' },
 ]
 
 /** May management open this route? Only its own pages, plus the profile / password screen. */
