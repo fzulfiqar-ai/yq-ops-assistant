@@ -105,10 +105,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   function warmDashboard() {
     // A salesman never sees the Dashboard: skip the chunk + the 403 (role remembered from the last /me).
+    let role: string | null = null
     try {
-      if (localStorage.getItem('yq-role') === 'salesman') return
+      role = localStorage.getItem('yq-role')
     } catch {
       /* storage unavailable */
+    }
+    if (role === 'salesman') return
+    // Management lands on the Command Centre (R7b): warm that page and its default period instead.
+    if (role === 'management') {
+      void import('@/pages/CommandCentre')
+      void queryClient.prefetchQuery({
+        queryKey: ['management', 'overview', 'mtd'],
+        queryFn: () => apiGet<unknown>('/management/overview?period=mtd'),
+      })
+      return
     }
     void import('@/pages/Dashboard')
     void queryClient.prefetchQuery({

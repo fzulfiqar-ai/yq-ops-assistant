@@ -25,6 +25,9 @@ import {
   BarChart3,
   PackageCheck,
   PackagePlus,
+  Gauge,
+  Trophy,
+  Store,
   type LucideIcon,
 } from 'lucide-react'
 import { isManagement, type Me, type Role } from './auth'
@@ -40,58 +43,69 @@ export interface NavItem {
 }
 
 // `feature` strings must match app/features.py exactly (served via GET /auth/features).
+// Grouped as plan §33 lists them (Sprint 4, R7b): the Command Centre first, the day's work next, the
+// money pages, then the reports and admin. The dormant AI surfaces (Live Feed, AI Agents, Leads,
+// Marketing, Coach) are shown to admins only, under "AI tools / Archive"; their routes still exist.
 export const NAV: NavItem[] = [
-  { section: 'Overview', label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
-  { section: 'Overview', label: 'Live Feed', to: '/feed', icon: Activity, feature: 'Live Feed' },
-  { section: 'AI Team', label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents' },
-  { section: 'AI Team', label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
-  { section: 'AI Team', label: 'Field Notes', to: '/field-notes', icon: NotebookPen, feature: 'AI Assistant' },
-  { section: 'Sell', label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
+  { section: 'Command Centre', label: 'Command Centre', to: '/command', icon: Gauge }, // admin (management: MANAGEMENT_NAV)
+  { section: 'Customer orders', label: 'Customer orders', to: '/shop-orders', icon: ClipboardList, feature: 'Shop Orders' },
+  // The storekeeper's one page: confirmed marketplace orders to pick, grouped by salesman.
+  { section: 'Customer orders', label: 'Pick list', to: '/picklist', icon: PackageCheck, feature: 'Storekeeper' },
+  { section: 'Order for a shop', label: 'Order for a shop', to: '/shop', icon: ShoppingBag, feature: 'Catalog', roles: ['admin', 'member'] },
   // A salesman's "Catalog" IS the shop they sell from — same page the customer sees,
   // in salesman mode. Admins/members keep the internal catalog editor at /catalog.
-  { section: 'Sell', label: 'Catalog', to: '/shop', icon: BookImage, feature: 'Catalog', roles: ['salesman'] },
-  { section: 'Sell', label: 'Catalog', to: '/catalog', icon: BookImage, feature: 'Catalog', roles: ['admin', 'member'] },
-  { section: 'Sell', label: 'Order for a shop', to: '/shop', icon: ShoppingBag, feature: 'Catalog', roles: ['admin', 'member'] },
+  { section: 'Catalog', label: 'Catalog', to: '/shop', icon: BookImage, feature: 'Catalog', roles: ['salesman'] },
+  { section: 'Catalog', label: 'Catalog', to: '/catalog', icon: BookImage, feature: 'Catalog', roles: ['admin', 'member'] },
   // The "Coming soon" desk: publish the announced range, set the month, link catalog codes on arrival.
-  { section: 'Sell', label: 'Coming soon', to: '/upcoming', icon: PackagePlus, feature: 'Catalog', roles: ['admin', 'member'] },
-  { section: 'Sell', label: 'Product Finds', to: '/finds', icon: Sparkles, feature: 'Product Finds' },
-  { section: 'Sell', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads' },
-  { section: 'Sell', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing' },
-  { section: 'Sell', label: 'Shop Orders', to: '/shop-orders', icon: ClipboardList, feature: 'Shop Orders' },
-  { section: 'Sell', label: 'Coach', to: '/coaching', icon: MessageSquareQuote, feature: 'Sales' },
-  // The storekeeper's one page: confirmed marketplace orders to pick, grouped by salesman.
-  { section: 'Supply', label: 'Pick list', to: '/picklist', icon: PackageCheck, feature: 'Storekeeper' },
-  { section: 'Supply', label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
-  { section: 'Supply', label: 'Stock Moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },
-  { section: 'Supply', label: 'Orders', to: '/orders', icon: ShoppingCart, feature: 'Orders' },
-  { section: 'Money', label: 'Profitability', to: '/margins', icon: Percent, feature: 'Margins' },
-  { section: 'Money', label: 'Price Tracker', to: '/prices', icon: LineChart, feature: 'Margins' },
-  { section: 'Money', label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
-  { section: 'Admin', label: 'Salesmen', to: '/salesmen', icon: UserRoundCheck, feature: 'Shop Admin' },
-  { section: 'Admin', label: 'Offers & Rules', to: '/shop-rules', icon: BadgePercent, feature: 'Shop Admin' },
-  { section: 'Admin', label: 'Shop Analytics', to: '/shop-analytics', icon: BarChart3, feature: 'Shop Admin' },
-  { section: 'Admin', label: 'Data', to: '/data', icon: Database }, // admin-only
-  { section: 'Admin', label: 'Team', to: '/team', icon: Users }, // admin-only
+  { section: 'Catalog', label: 'Coming soon', to: '/upcoming', icon: PackagePlus, feature: 'Catalog', roles: ['admin', 'member'] },
+  { section: 'Catalog', label: 'Product Finds', to: '/finds', icon: Sparkles, feature: 'Product Finds' },
+  { section: 'Inventory & stock moves', label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
+  { section: 'Inventory & stock moves', label: 'Stock moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },
+  { section: 'Purchasing', label: 'Purchase orders', to: '/orders', icon: ShoppingCart, feature: 'Orders' },
+  { section: 'Profitability', label: 'Profitability', to: '/margins', icon: Percent, feature: 'Margins' },
+  { section: 'Profitability', label: 'Price tracker', to: '/prices', icon: LineChart, feature: 'Margins' },
+  { section: 'Receivables', label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
+  { section: 'Team performance', label: 'Rep performance', to: '/command/team', icon: Trophy }, // admin (management: MANAGEMENT_NAV)
+  { section: 'Team performance', label: 'Reps & statements', to: '/salesmen', icon: UserRoundCheck, feature: 'Shop Admin' },
+  { section: 'Offers & campaigns', label: 'Offers & rules', to: '/shop-rules', icon: BadgePercent, feature: 'Shop Admin' },
+  { section: 'Reports', label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
+  { section: 'Reports', label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
+  { section: 'Reports', label: 'Shop analytics', to: '/shop-analytics', icon: BarChart3, feature: 'Shop Admin' },
+  { section: 'Admin', label: 'Data upload', to: '/data', icon: Database }, // admin-only
+  { section: 'Admin', label: 'Team & access', to: '/team', icon: Users }, // admin-only
+  { section: 'AI tools / Archive', label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
+  { section: 'AI tools / Archive', label: 'Field Notes', to: '/field-notes', icon: NotebookPen, feature: 'AI Assistant' },
+  { section: 'AI tools / Archive', label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents', roles: ['admin'] },
+  { section: 'AI tools / Archive', label: 'Live Feed', to: '/feed', icon: Activity, feature: 'Live Feed', roles: ['admin'] },
+  { section: 'AI tools / Archive', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads', roles: ['admin'] },
+  { section: 'AI tools / Archive', label: 'Marketing', to: '/marketing', icon: Megaphone, feature: 'Marketing', roles: ['admin'] },
+  { section: 'AI tools / Archive', label: 'Coach', to: '/coaching', icon: MessageSquareQuote, feature: 'Sales', roles: ['admin'] },
 ]
 
 /**
  * Management reads the company and changes nothing: exactly these pages, in this order, under
  * these names — nothing else, whatever features the row lists (the API holds the same limit,
- * app/features.py ROLE_FEATURE_LIMITS). The full Command Centre comes later (Sprint 4).
+ * app/features.py ROLE_FEATURE_LIMITS). The Command Centre pages are the role's own (no feature);
+ * the others need the matching read page.
  */
-export const MANAGEMENT_NAV: { to: string; label: string; section: string }[] = [
-  { to: '/', label: 'Dashboard', section: 'Overview' },
-  { to: '/sales', label: 'Sales', section: 'Company' },
-  { to: '/margins', label: 'Profitability', section: 'Company' },
-  { to: '/receivables', label: 'Receivables', section: 'Company' },
-  { to: '/inventory', label: 'Inventory', section: 'Company' },
-  { to: '/shop-orders', label: 'Customer orders', section: 'Marketplace' },
+export const MANAGEMENT_NAV: { to: string; label: string; section: string; icon: LucideIcon; feature?: string }[] = [
+  { to: '/command', label: 'Command Centre', section: 'Overview', icon: Gauge },
+  { to: '/shop-orders', label: 'Customer orders', section: 'Marketplace', icon: ClipboardList, feature: 'Shop Orders' },
+  { to: '/command/team', label: 'Team', section: 'Company', icon: Trophy },
+  { to: '/command/customers', label: 'Customers', section: 'Company', icon: Store },
+  { to: '/inventory', label: 'Products & stock', section: 'Company', icon: Boxes, feature: 'Inventory' },
+  { to: '/margins', label: 'Profitability', section: 'Company', icon: Percent, feature: 'Margins' },
+  { to: '/receivables', label: 'Receivables', section: 'Company', icon: CreditCard, feature: 'Receivables' },
 ]
 
-/** May management open this route? Only its own pages, plus the profile / password screen. */
+/** Pages the Command Centre's tiles open for management although they are not in its menu. */
+const MANAGEMENT_DRILLS = ['/sales', '/prices']
+
+/** May management open this route? Only its own pages and the tiles' drill-downs, plus the profile screen. */
 export function managementMayOpen(pathname: string): boolean {
-  if (pathname === '/settings') return true
-  return MANAGEMENT_NAV.some((m) => (m.to === '/' ? pathname === '/' : pathname === m.to || pathname.startsWith(`${m.to}/`)))
+  if (pathname === '/settings' || pathname === '/') return true
+  const allowed = [...MANAGEMENT_NAV.map((m) => m.to), ...MANAGEMENT_DRILLS]
+  return allowed.some((to) => pathname === to || pathname.startsWith(`${to}/`))
 }
 
 export function canAccess(me: Me | null, item: NavItem): boolean {
@@ -106,18 +120,20 @@ export function canAccess(me: Me | null, item: NavItem): boolean {
 
 export function navFor(me: Me | null): NavItem[] {
   if (isManagement(me)) {
-    return MANAGEMENT_NAV.flatMap((m) => {
-      const item = NAV.find((n) => n.to === m.to && !n.roles)
-      return item && canAccess(me, item) ? [{ ...item, label: m.label, section: m.section }] : []
-    })
+    const feats = me?.features || []
+    return MANAGEMENT_NAV
+      .filter((m) => !m.feature || feats.includes(m.feature))
+      .map((m) => ({ label: m.label, to: m.to, icon: m.icon, feature: m.feature, section: m.section }))
   }
   return NAV.filter((n) => canAccess(me, n))
 }
 
 /** Where to land after login — the first page this user can actually see. */
 export function homeFor(me: Me | null): string {
-  const items = navFor(me)
   // A salesman lands on Today (his orders, link and numbers), whatever else he can see.
   if (me?.role === 'salesman') return '/today'
+  // Management lands on the Command Centre (Sprint 4, plan §8).
+  if (isManagement(me)) return '/command'
+  const items = navFor(me)
   return items.length ? items[0].to : '/settings'
 }

@@ -1,7 +1,7 @@
 import { lazy } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { ProtectedRoute, Gate } from '@/components/guards'
-import { useAuth } from '@/lib/auth'
+import { isManagement, useAuth } from '@/lib/auth'
 import { homeFor } from '@/lib/nav'
 import Login from '@/pages/Login'
 import AcceptInvite from '@/pages/AcceptInvite'
@@ -44,6 +44,8 @@ const PickList = lazy(() => import('@/pages/PickList'))
 const SalesToday = lazy(() => import('@/pages/sales/Today'))
 const SalesCustomers = lazy(() => import('@/pages/sales/Customers'))
 const SalesAccount = lazy(() => import('@/pages/sales/Account'))
+// The Management Command Centre (R7b): the whole company on one page, plus its team and customer views.
+const CommandCentre = lazy(() => import('@/pages/CommandCentre'))
 
 /** Land on the first page this user can see (a salesman goes straight to Catalog). */
 function Home() {
@@ -52,6 +54,8 @@ function Home() {
   const canDashboard = isAdmin || (me?.features || []).includes('Dashboard')
   // A salesman never wants the office dashboard — send them to the catalog they sell from.
   if (me?.role === 'salesman') return <Navigate to={homeFor(me)} replace />
+  // Management's home is the Command Centre (plan §8).
+  if (isManagement(me)) return <Navigate to={homeFor(me)} replace />
   if (!canDashboard) return <Navigate to={homeFor(me)} replace />
   return <Gate feature="Dashboard"><Dashboard /></Gate>
 }
@@ -69,6 +73,9 @@ export default function App() {
 
         <Route element={<ProtectedRoute />}>
           <Route index element={<Home />} />
+          <Route path="command" element={<Gate roles={['admin', 'management']}><CommandCentre view="all" /></Gate>} />
+          <Route path="command/team" element={<Gate roles={['admin', 'management']}><CommandCentre view="team" /></Gate>} />
+          <Route path="command/customers" element={<Gate roles={['admin', 'management']}><CommandCentre view="customers" /></Gate>} />
           <Route path="feed" element={<Gate feature="Live Feed"><Feed /></Gate>} />
           <Route path="agents" element={<Gate feature="AI Agents"><Agents /></Gate>} />
           <Route path="assistant" element={<Gate feature="AI Assistant"><Assistant /></Gate>} />
