@@ -2247,7 +2247,11 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "assigned_at": _iso() if sm else None, "assigned_by": "system" if sm else None,
         "created_at": _iso(), "updated_at": _iso(),
     }
-    row["customer_id"] = upsert_customer_from_order(row, sm, attribution, device_id, existing_cust)
+    # A staff order's device is the rep's login (staff:<email>, the idempotency key of the
+    # salesman checkout): it stays on the order row and never joins the merchant's device list,
+    # which is what lets a device be recognised as that merchant (recognize_phone).
+    row["customer_id"] = upsert_customer_from_order(row, sm, attribution, None if staff else device_id,
+                                                    existing_cust)
     order = client.table("shop_orders").insert(row).execute().data[0]
     lines = [{
         "order_id": order["id"], "item_code": ln["item_code"], "display_name": ln["display_name"],
@@ -2292,7 +2296,7 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     # rep has no referral code to derive it from
     record_event({"event": "order", "session_id": body.get("session_id"),
                   "referral_code": row["referral_code"],
-                  "src": row["src"], "device_id": device_id, "customer_id": row.get("customer_id"),
+                  "src": row["src"], "device_id": None if staff else device_id, "customer_id": row.get("customer_id"),
                   "meta": {"attribution": attribution}}, ip=ip, ua=ua, salesman_id=row["salesman_id"])
     order["lines"] = quote["lines"]
     order["salesman"] = sm

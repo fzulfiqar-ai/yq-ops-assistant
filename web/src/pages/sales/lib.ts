@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { apiGet, apiPost } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
@@ -179,6 +180,219 @@ export function logFollowupTap(shop: string, kind: 'due' | 'lapsed', channel: 'w
 export function bhdStr(v?: string | number | null): string {
   const n = Number(v ?? 0)
   return `BHD ${(Number.isFinite(n) ? n : 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}`
+}
+
+/* ───────────────────────── Sprint 5: the book, the usual basket, Today ───────────────────────── */
+
+/** An over-90 receivable on the shop's Focus account (only accounts that have one carry it). */
+export interface CreditChip {
+  over_90_bhd: string
+  outstanding_bhd: string
+  as_of?: string | null
+}
+
+/** One shop of the rep's merged book (app/followups.py merge_book). */
+export interface BookShop {
+  key: string                       // 'f:<Focus name>' | 'm:<phone digits>'
+  name: string
+  focus_name: string | null
+  contact_name: string | null
+  phone: string | null              // digits, 973… for Bahrain
+  area: string | null
+  email: string | null
+  sources: ('focus' | 'app')[]
+  last_focus_date: string | null
+  last_app_order_at: string | null
+  last_order_date: string | null    // YYYY-MM-DD, the later of the two
+  app_orders: number
+  days_since: number | null
+  status: 'due' | 'lapsed' | 'ok'
+  due: boolean
+  why: string | null
+  monthly_value_bhd: string | null
+  credit: CreditChip | null
+  rank: number | null
+  holdout?: boolean                 // admin view only
+}
+
+export interface Book {
+  shops: BookShop[]
+  count: number
+  counts?: { due?: number; focus?: number; app?: number; credit?: number } | null
+  data_through?: string | null
+  hint?: string | null
+  error?: string | null
+}
+
+export function useShopBook(enabled = true) {
+  return useQuery({ queryKey: ['shop-book'], queryFn: () => apiGet<Book>('/shop/me/book'), staleTime: 2 * 60_000, enabled, retry: 1 })
+}
+
+export interface BasketItem {
+  item_code: string
+  display_name: string
+  qty: number
+  in_catalog: boolean
+  sold_out: boolean
+  price_bhd: string | null
+  times_bought?: number
+  due?: boolean
+  cadence_days?: number | null
+  days_since?: number
+}
+
+export interface ShopBasket {
+  shop: Pick<BookShop, 'key' | 'name' | 'focus_name' | 'contact_name' | 'phone' | 'area' | 'email' | 'last_order_date' | 'status' | 'due' | 'why' | 'credit'>
+  usual: BasketItem[]
+  last_order: { order_no: string; created_at: string; status: string; lines: BasketItem[] } | null
+  suggested: BasketItem[]
+  suggested_from: 'last_order' | 'due_regulars' | 'regulars' | null
+  available: BasketItem[]
+  sold_out: BasketItem[]
+  value_bhd: string
+  restock_link: string | null
+}
+
+export const basketQuery = (key: string) => ({
+  queryKey: ['shop-basket', key],
+  queryFn: () => apiGet<ShopBasket>(`/shop/me/basket?shop=${encodeURIComponent(key)}`),
+  staleTime: 2 * 60_000,
+})
+
+export function useShopBasket(key?: string | null) {
+  return useQuery({ ...basketQuery(key || ''), enabled: Boolean(key), retry: 1 })
+}
+
+/** Fill a blank phone for a Focus shop of the rep's book. Never replaces a number on file. */
+export function saveShopPhone(shop: string, phone: string): Promise<{ ok: boolean; saved: boolean; reason?: string }> {
+  return apiPost('/shop/me/book/phone', { shop, phone })
+}
+
+/** A book row as the shop the catalog orders for. */
+export function customerOf(s: Pick<BookShop, 'key' | 'name' | 'focus_name' | 'contact_name' | 'phone' | 'area' | 'email'>): StaffCustomer {
+  return {
+    key: s.key,
+    focus_name: s.focus_name,
+    name: s.contact_name || s.name,
+    shop: s.name,
+    phone: s.phone,
+    area: s.area,
+    email: s.email,
+  }
+}
+
+/** The cart / book key of the shop being ordered for ('' = none picked). */
+export function shopKeyOf(c?: StaffCustomer | null): string {
+  if (!c) return ''
+  if (c.key) return c.key
+  const digits = String(c.phone || '').replace(/\D/g, '')
+  if (digits) return `m:${digits.length === 8 ? `973${digits}` : digits}`
+  return c.shop || c.name ? `n:${(c.shop || c.name || '').trim().toLowerCase()}` : ''
+}
+
+/** "97333001122" → "+973 3300 1122"; any other number keeps its digits after a "+". */
+export function phoneLabel(p?: string | null): string {
+  const d = String(p || '').replace(/\D/g, '')
+  if (!d) return ''
+  if (d.length === 11 && d.startsWith('973')) return `+973 ${d.slice(3, 7)} ${d.slice(7)}`
+  if (d.length === 8) return `${d.slice(0, 4)} ${d.slice(4)}`
+  return `+${d}`
+}
+
+/** The WhatsApp text that carries a restock link. Plain words, the shop's own name when known. */
+export function restockText(link: string, contact?: string | null): string {
+  const first = firstName(contact)
+  return `${first ? `Hello ${first}` : 'Hello'}, your usual restock is ready — open the link, check the quantities and tap Place order:\n${link}`
+}
+
+/** "Stock as of 24 Sep (3 days old)"; stale = the server's stock_fresh flag said no (shop_stock_fresh_days,
+ *  the same rule the marketplace dates "Sold out" by); an older API without the flag: over 3 days. */
+export function stockAge(asOf?: string | null, fresh?: boolean | null): { label: string; stale: boolean } | null {
+  if (!asOf) return null
+  const d = new Date(`${asOf.slice(0, 10)}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return null
+  const today = new Date()
+  today.setHours(12, 0, 0, 0)
+  const days = Math.max(0, Math.round((today.getTime() - d.getTime()) / 86_400_000))
+  const age = days === 0 ? 'today' : `${days} day${days === 1 ? '' : 's'} old`
+  return { label: `Stock as of ${dayLabel(asOf)} (${age})`, stale: fresh === false || (fresh == null && days > 3) }
+}
+
+/** Today in one call (GET /shop/me/today). */
+export interface WaitingOrder {
+  id: number
+  order_no: string
+  created_at: string
+  customer_name?: string | null
+  customer_shop?: string | null
+  customer_area?: string | null
+  total_bhd: string
+  items: number
+  units: number
+  order_kind?: 'standard' | 'small' | string
+  is_test?: boolean
+  age_min: number | null
+  overdue: boolean
+}
+
+export interface MoneyStrip {
+  month: string | null
+  mtd_bhd: string
+  tier: number
+  rate: number
+  kickback_bhd: string
+  next_tier: number | null
+  next_gap_bhd: string | null
+  next_gain_bhd: string | null
+  days_left: number | null
+  data_through: string | null
+  data_age_days: number | null
+  stale: boolean
+  basis?: string | null
+  is_estimate: boolean
+  returns_deducted: boolean
+}
+
+export interface TodayData {
+  hint?: string | null
+  me: ShopMe | null
+  money: MoneyStrip | null
+  waiting: WaitingOrder[]
+  waiting_count: number
+  in_progress: number | null
+  sla_min: number | null
+  due: (FollowupShop & { key: string })[]
+  due_count: number
+  due_counts?: Followups['counts']
+  due_data_through?: string | null
+  due_hint?: string | null
+  baskets: Baskets | null
+  link_week: LinkWeek | null
+  restock: { item_code: string; display_name: string; count: number; phones: string[]; first_at: string; ids: number[]; stock_qty?: number | null; back_in_stock: boolean }[]
+  errors: Record<string, string>
+  generated_at?: string
+}
+
+export function useToday() {
+  return useQuery({ queryKey: ['shop-today'], queryFn: () => apiGet<TodayData>('/shop/me/today'), staleTime: 30_000, refetchInterval: 60_000, retry: 1 })
+}
+
+/** "95" → "1 h 35 min"; the age of an order waiting to be confirmed. */
+export function ageLabel(min?: number | null): string {
+  if (min == null) return ''
+  if (min < 60) return `${Math.max(1, min)} min`
+  const h = Math.floor(min / 60)
+  if (h < 48) return `${h} h`
+  return `${Math.floor(h / 24)} d`
+}
+
+/** Go to the catalog for this shop with its usual basket in the cart ("Order again", from any page). */
+export function useOrderAgain() {
+  const navigate = useNavigate()
+  return (shop: StaffCustomer) => {
+    setSelectedCustomer(shop)
+    navigate('/shop', { state: { again: shop.key } })
+  }
 }
 
 export function useCustomers(enabled = true) {

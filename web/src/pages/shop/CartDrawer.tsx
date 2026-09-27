@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { AlertTriangle, Loader2, MessageCircle, ShieldCheck, Tag, Trash2, UserRound } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
+import { AlertTriangle, ArrowLeftRight, Loader2, MessageCircle, ShieldCheck, Store, Tag, Trash2, UserRound } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { Stepper } from '@/components/ui/stepper'
 import { cn } from '@/lib/utils'
 import type { Cart } from '@/lib/cart'
 import {
-  getMyCustomers,
   postOrder,
   postStaffOrder,
   ShopApiError,
@@ -16,10 +16,20 @@ import {
   type ShopItem,
   type StaffCustomer,
 } from '@/lib/shopApi'
-import { getSelectedCustomer, setSelectedCustomer, useSelectedCustomer, useShopMe } from '@/pages/sales/lib'
+import { getSelectedCustomer, initials, saveShopPhone, setSelectedCustomer, useSelectedCustomer, useShopMe } from '@/pages/sales/lib'
 import { ProductImage } from './ProductImage'
 import { Select } from './Select'
 import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, stepOf } from './shared'
+
+/** The staff checkout's idempotency key: made when the drawer opens, kept until the order is placed. */
+function newClientOrderId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  } catch {
+    /* an old browser: fall through */
+  }
+  return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
 
 const FORM_ID = 'yq-shop-order-form'
 const CUSTOMER_KEY = 'yq-shop-customer'
@@ -36,13 +46,19 @@ interface CustomerDraft {
 
 const EMPTY: CustomerDraft = { name: '', phone: '', shop: '', area: '', email: '' }
 
-/** The shop picked at the top of the salesman catalog (CustomerBar), as a checkout draft. */
+/** A stored 11-digit Bahrain number ("97333001122") as a rep types it ("33001122"). */
+function localPhone(p?: string | null): string {
+  const d = String(p || '').replace(/\D/g, '')
+  return d.length === 11 && d.startsWith('973') ? d.slice(3) : String(p || '')
+}
+
+/** The shop picked in the salesman catalog (the shop picker), as a checkout draft. */
 function fromSelected(c: StaffCustomer | null): CustomerDraft {
   if (!c) return EMPTY
-  return { name: String(c.name || ''), phone: String(c.phone || ''), shop: String(c.shop || ''), area: String(c.area || ''), email: String(c.email || '') }
+  return { name: String(c.name || ''), phone: localPhone(c.phone), shop: String(c.shop || ''), area: String(c.area || ''), email: String(c.email || '') }
 }
 function selectedKey(c: StaffCustomer | null): string {
-  return c ? [c.phone, c.name, c.shop].map((v) => v || '').join('|') : ''
+  return c ? [c.key, c.phone, c.name, c.shop].map((v) => v || '').join('|') : ''
 }
 
 function readCustomer(): CustomerDraft {
@@ -78,6 +94,8 @@ export interface CartDrawerProps {
   src: string
   sessionId: string
   onSuccess: (order: OrderResponse, customer: { name: string; shop: string }) => void
+  /** Salesman: open the shop picker (the drawer closes and comes back once a shop is picked). */
+  onChangeShop?: () => void
 }
 
 /**
@@ -106,8 +124,10 @@ export function CartDrawer({
   src,
   sessionId,
   onSuccess,
+  onChangeShop,
 }: CartDrawerProps) {
   const staff = mode === 'salesman'
+  const qc = useQueryClient()
   const [customer, setCustomer] = useState<CustomerDraft>(() => (staff ? fromSelected(getSelectedCustomer()) : readCustomer()))
   const [note, setNote] = useState('')
   const [website, setWebsite] = useState('') // honeypot — a human never fills this
@@ -117,7 +137,13 @@ export function CartDrawer({
   const [touched, setTouched] = useState<Record<string, boolean>>({})
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
-  const [recent, setRecent] = useState<StaffCustomer[]>([])
+  // Salesman: the full form only when asked for — a shop from the book arrives filled in
+  const [editing, setEditing] = useState(false)
+  const [couponOpen, setCouponOpen] = useState(!staff || Boolean(coupon))
+  // Salesman: one id per checkout, made when the drawer opens and kept until the order is placed, so
+  // a second tap after a timeout returns the order the first one created (POST /shop/order)
+  const [clientOrderId, setClientOrderId] = useState('')
+  if (staff && open && !clientOrderId) setClientOrderId(newClientOrderId())
   // Salesman: the storefront link, so a built cart can be sent to the shop as a ready order.
   const meQ = useShopMe(staff)
   const readyLink = staff && meQ.data?.link && cart.lines.length ? `${meQ.data.link}${meQ.data.link.includes('?') ? '&' : '?'}order=${cart.lines.map((l) => `${encodeURIComponent(l.item_code)}:${l.qty}`).join(',')}` : null
@@ -128,7 +154,7 @@ export function CartDrawer({
     const digits = cleanPhone(customer.phone)
     window.open(`https://wa.me/${digits ? (digits.length === 8 ? `973${digits}` : digits) : ''}?text=${encodeURIComponent(text)}`, '_blank', 'noreferrer')
   }
-  // Salesman: follow the shop picked in the CustomerBar (render-phase derived state, no effect).
+  // Salesman: follow the shop picked in the catalog (render-phase derived state, no effect).
   const selected = useSelectedCustomer()
   const selKey = staff ? selectedKey(selected) : ''
   const [selSeen, setSelSeen] = useState(selKey)
@@ -136,7 +162,10 @@ export function CartDrawer({
     setSelSeen(selKey)
     setCustomer(fromSelected(staff ? selected : null))
     setTouched({})
+    setEditing(false)
   }
+  // a Focus shop with no number on file: the phone is asked here, once, and saved for next time
+  const phoneMissing = staff && Boolean(selected) && !String(selected?.phone || '').replace(/\D/g, '')
 
   const salesmen = data.salesmen || []
   const resolvedRef = data.ref || null
@@ -163,22 +192,6 @@ export function CartDrawer({
     }
   }, [customer, staff])
 
-  // His own book of shops, fetched when the drawer opens so it is never stale.
-  useEffect(() => {
-    if (!staff || !open) return
-    let alive = true
-    getMyCustomers()
-      .then((rows) => {
-        if (alive) setRecent(rows)
-      })
-      .catch(() => {
-        /* the quick-pick is a shortcut, not a dependency */
-      })
-    return () => {
-      alive = false
-    }
-  }, [staff, open])
-
   const quoteLines = useMemo(() => {
     const m = new Map<string, NonNullable<Quote['lines']>[number]>()
     for (const l of quote?.lines || []) m.set(l.item_code, l)
@@ -201,24 +214,16 @@ export function CartDrawer({
 
   const set = (k: keyof CustomerDraft, v: string) => setCustomer((c) => ({ ...c, [k]: v }))
   const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }))
-
-  const pick = (c: StaffCustomer) => {
-    setSelectedCustomer(c)
-    setCustomer({
-      name: String(c.name || ''),
-      phone: String(c.phone || ''),
-      shop: String(c.shop || ''),
-      area: String(c.area || ''),
-      email: String(c.email || ''),
-    })
-    setTouched({})
-    setSubmitError('')
-  }
+  // a picked shop shows as one card; the fields open when something is missing or the rep asks
+  const compact = staff && Boolean(selected) && !editing && nameOk && emailOk
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setTouched({ name: true, phone: true, email: true, salesman: true })
-    if (!canSubmit) return
+    if (!canSubmit) {
+      if (!nameOk || !emailOk) setEditing(true)
+      return
+    }
     setSubmitting(true)
     setSubmitError('')
     const who = {
@@ -237,6 +242,7 @@ export function CartDrawer({
             ...(needsSalesman && salesmanId !== '' ? { salesman_id: Number(salesmanId) } : {}),
             customer: who,
             note: note.trim(),
+            client_order_id: clientOrderId || undefined,
           })
         : await postOrder(token, {
             lines: cart.lines,
@@ -252,6 +258,14 @@ export function CartDrawer({
       setNote('')
       setCouponDraft('')
       if (staff) {
+        // the number a rep typed for a Focus shop that had none: saved for next time (fill-blank
+        // only on the server; a failure costs nothing — the order already carries the phone)
+        if (phoneMissing && selected?.focus_name && who.phone) {
+          saveShopPhone(selected.focus_name, who.phone)
+            .then(() => qc.invalidateQueries({ queryKey: ['shop-book'] }))
+            .catch(() => {})
+        }
+        setClientOrderId('')
         setSelectedCustomer(null)
         setCustomer(EMPTY)
         setTouched({})
@@ -296,6 +310,9 @@ export function CartDrawer({
       footer={
         <div>
           {blockedReason && <p className="mb-2 text-[11.5px] font-medium text-[#9f1239]">{blockedReason}</p>}
+          {staff && !blockedReason && cart.lines.length > 0 && !phoneOk && (
+            <p className="mb-2 text-[11.5px] font-medium text-[#96600d]">Add the shop's phone above to place the order.</p>
+          )}
           {submitError && (
             <p role="alert" className="mb-2 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] font-medium text-[#9f1239]">
               {submitError}
@@ -359,6 +376,64 @@ export function CartDrawer({
           </div>
         ) : (
           <>
+            {/* the shop first: a rep must see whose order this is before anything else */}
+          {/* ── the shop (salesman): picked in the catalog, shown as one card ── */}
+          {staff && (
+            <div className="mb-3 rounded-2xl border border-[#E9E4EF] bg-[#FBF9FD] p-3">
+              <div className="flex items-center gap-3">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#6D4091] font-display text-[12px] font-bold text-white">
+                  {selected ? initials(customer.shop || customer.name) || 'YQ' : <Store size={15} aria-hidden="true" />}
+                </span>
+                <span className="min-w-0 flex-1 leading-tight">
+                  <span className="block truncate text-[13.5px] font-semibold text-[#1A1428]">{selected ? customer.shop || customer.name : 'No shop picked'}</span>
+                  <span className="block truncate text-[11.5px] text-[#6b6480]">
+                    {selected
+                      ? [customer.shop && customer.name.trim().toLowerCase() !== customer.shop.trim().toLowerCase() ? customer.name : null, customer.area, customer.phone || 'no phone on file'].filter(Boolean).join(' · ')
+                      : 'Pick one from your book, or type a new shop below'}
+                  </span>
+                </span>
+                {onChangeShop && (
+                  <button type="button" onClick={onChangeShop} className={cn('inline-flex h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-[12px] font-semibold text-[#6D4091] hover:bg-[#EEE8F4]', RING)}>
+                    <ArrowLeftRight size={13} aria-hidden="true" /> {selected ? 'Change' : 'Pick'}
+                  </button>
+                )}
+              </div>
+              {compact && (
+                <button type="button" onClick={() => setEditing(true)} className={cn('mt-1.5 rounded text-[11.5px] font-semibold text-[#6D4091] underline-offset-2 hover:underline', RING)}>
+                  Edit details
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* a picked shop with no number on file: only the phone is asked, and it is kept for next time */}
+          {compact && (phoneMissing || !phoneOk) && (
+            <div className="mt-3">
+              <label htmlFor="yq-phone-quick" className={LABEL}>
+                Phone for this shop <span className="text-[#9f1239]">*</span>
+              </label>
+              <input
+                id="yq-phone-quick"
+                type="tel"
+                inputMode="tel"
+                value={customer.phone}
+                onChange={(e) => set('phone', e.target.value)}
+                onBlur={() => blur('phone')}
+                placeholder="33001122"
+                autoComplete="off"
+                aria-invalid={touched.phone && !phoneOk}
+                className={FIELD}
+              />
+              <p className={cn('mt-1 text-[11px]', touched.phone && !phoneOk ? 'font-medium text-[#9f1239]' : 'text-[#6b6480]')}>
+                {touched.phone && !phoneOk
+                  ? 'Enter an 8-digit Bahrain number, or an international number starting with +.'
+                  : phoneMissing
+                    ? 'Not on file yet — it is saved for this shop once the order is placed.'
+                    : '8-digit Bahrain number, or international with +'}
+              </p>
+            </div>
+          )}
+
             {/* ── lines ── */}
             <ul className="divide-y divide-[#F3F0F6]">
               {cart.lines.map((line) => {
@@ -472,7 +547,12 @@ export function CartDrawer({
               </div>
             )}
 
-            {/* ── coupon ── */}
+            {/* ── coupon (a rep rarely has one: a link until he does) ── */}
+            {!couponOpen ? (
+              <button type="button" onClick={() => setCouponOpen(true)} className={cn('mt-4 inline-flex h-10 items-center gap-1.5 rounded-lg px-1 text-[12.5px] font-semibold text-[#6D4091] hover:underline', RING)}>
+                <Tag size={13} aria-hidden="true" /> Add a coupon
+              </button>
+            ) : (
             <div className="mt-5">
               <label htmlFor="yq-coupon" className={LABEL}>
                 Coupon code
@@ -510,6 +590,7 @@ export function CartDrawer({
                 </p>
               )}
             </div>
+            )}
 
             {/* ── server warnings ── */}
             {(quote?.warnings || []).length > 0 && (
@@ -569,7 +650,7 @@ export function CartDrawer({
             {/* ── who is ordering ── */}
             <form id={FORM_ID} onSubmit={submit} className="mt-6" noValidate>
               <h3 className="font-display text-[13px] font-bold tracking-[-0.005em] text-[#1A1428]">
-                {staff ? 'Customer details' : 'Your details'}
+                {staff ? 'Order details' : 'Your details'}
               </h3>
 
               {/* Salesman mode: he IS the salesman, so this is a fact, not a field. */}
@@ -653,40 +734,21 @@ export function CartDrawer({
                   </div>
                 ) : null)}
 
-              {/* ── recent customers quick-pick (salesman only) ── */}
-              {staff && recent.length > 0 && (
-                <div className="mt-4">
-                  <div className={LABEL}>Recent customers</div>
-                  <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1.5 sm:-mx-5 sm:px-5">
-                    {recent.map((c, i) => {
-                      const on = cleanPhone(customer.phone) !== '' && cleanPhone(c.phone || '') === cleanPhone(customer.phone)
-                      return (
-                        <button
-                          key={`${c.phone || c.name}-${i}`}
-                          type="button"
-                          onClick={() => pick(c)}
-                          aria-pressed={on}
-                          className={cn(
-                            'w-[9.5rem] shrink-0 rounded-[14px] border px-3 py-2 text-left transition duration-150 ease-out',
-                            RING,
-                            on
-                              ? 'border-[#6D4091] bg-[#EEE8F4]'
-                              : 'border-[#E2DCEA] bg-white hover:border-[#CFC3DE] hover:bg-[#f9f8fc]',
-                          )}
-                        >
-                          <span className="block truncate text-[12.5px] font-semibold leading-tight text-[#1A1428]">
-                            {c.shop || c.name}
-                          </span>
-                          <span className="mt-0.5 block truncate text-[11px] leading-tight text-[#6b6480]">
-                            {c.area || c.phone || c.name}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
+              {compact ? (
+                <div className="mt-3">
+                  <label htmlFor="yq-note" className={LABEL}>
+                    Note on this order <span className="font-normal text-[#6b6480]">(optional)</span>
+                  </label>
+                  <textarea
+                    id="yq-note"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    rows={2}
+                    placeholder="Delivery day, packing, anything else"
+                    className={cn(FIELD, 'h-auto resize-none py-2.5 leading-snug')}
+                  />
                 </div>
-              )}
-
+              ) : (
               <div className="mt-3 grid gap-3.5 sm:grid-cols-2">
                 <div className="sm:col-span-2">
                   <label htmlFor="yq-name" className={LABEL}>
@@ -796,6 +858,7 @@ export function CartDrawer({
                   />
                 </div>
               </div>
+              )}
 
               {/* Honeypot: invisible to people, irresistible to bots. Must be sent
                   empty. Public only — a logged-in salesman is already proof of life. */}

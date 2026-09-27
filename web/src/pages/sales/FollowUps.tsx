@@ -1,84 +1,95 @@
-import { useNavigate } from 'react-router-dom'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CalendarClock, ChevronRight, Link2, MessageCircle, Phone, ShoppingBag, ShoppingCart } from 'lucide-react'
+import { CalendarClock, ChevronRight, Link2, MessageCircle, Phone, RotateCcw, Send, ShoppingCart } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { errorText } from '@/lib/errorText'
 import { Badge } from '@/components/ui/badge'
-import { bhdStr, dayLabel, logFollowupTap, relTime, setSelectedCustomer, telLink, useBaskets, useFollowups, useLinkWeek, waLink, type FollowupShop } from './lib'
+import { ShopSheet } from '@/pages/shop/ShopSheet'
+import { bhdStr, dayLabel, logFollowupTap, relTime, telLink, useOrderAgain, waLink, type Baskets, type FollowupShop, type Followups, type LinkWeek } from './lib'
 
 /**
- * The rep's follow-up cards (release R3a): "Due this week" (the top of his ranked Focus book),
- * "Baskets from your link not sent" (adds on his link with no order) and "My link this week".
- * Everything is computed server-side from Focus history and the marketplace funnel — the copy
- * shows a cadence and an age, never a promised date. Taps are logged for measurement only.
+ * The rep's follow-up cards (release R3a; Sprint 5 fed from GET /shop/me/today): "Due this week"
+ * (the top of his ranked Focus book), "Baskets from your link not sent" (adds on his link with no
+ * order) and "My link this week". Everything is computed server-side from Focus history and the
+ * marketplace funnel — the copy shows a cadence and an age, never a promised date. Taps are logged
+ * for measurement only.
+ *
+ * Sprint 5: every due shop has "Order again" (the catalog opens for that shop with its usual order
+ * in the cart) and "Send restock link" (the shop's usual order as a ready cart on the rep's link,
+ * sent on WhatsApp after he has seen what it carries).
  */
 
 const ICON = 'grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border bg-card hover:bg-muted'
 
 /** One shop row, shared by the Today card and the Customers Due / Lapsed views. */
 export function FollowupRow({ r, kind, compact = false }: { r: FollowupShop; kind: 'due' | 'lapsed'; compact?: boolean }) {
-  const navigate = useNavigate()
+  const orderAgain = useOrderAgain()
+  const [sheet, setSheet] = useState(false)
+  const key = `f:${r.shop}`
   const wa = waLink(r.phone, r.wa_text || `Hello, YQ here. Shall I bring your usual order on my next round?`)
   const tel = telLink(r.phone)
-  const orderFor = () => {
+  const again = () => {
     logFollowupTap(r.shop, kind, 'order', r.rank)
-    setSelectedCustomer({ name: r.shop, shop: r.shop, phone: r.phone || null })
-    navigate('/shop')
+    orderAgain({ key, focus_name: r.shop, name: r.shop, shop: r.shop, phone: r.phone || null })
+  }
+  const restock = () => {
+    logFollowupTap(r.shop, kind, 'view', r.rank)
+    setSheet(true)
   }
   return (
     <li className={cn('px-4', compact ? 'py-2.5' : 'py-3')}>
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-[14px] font-semibold leading-tight">{r.shop}</span>
-            {kind === 'lapsed' ? <Badge tone="grey">Win back</Badge> : r.overdue_ratio >= 1.5 ? <Badge tone="amber">Overdue</Badge> : <Badge tone="accent">Due</Badge>}
-            {r.holdout ? <Badge tone="rose">Holdout</Badge> : null}
-          </div>
-          <div className="mt-0.5 text-[12px] text-muted-foreground">{r.why}</div>
-          <div className="mt-0.5 text-[11.5px] tabular-nums text-muted-foreground">
-            {Number(r.monthly_value_bhd) > 0 ? `~${bhdStr(r.monthly_value_bhd)}/month` : 'No sales in 180 days'}
-            {r.gap_source === 'own' ? '' : ' · cadence not known yet'}
-          </div>
-          {r.top_skus.length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {r.top_skus.map((s) => (
-                <span key={s.item_code} title={`${s.display_name} · bought ${s.times_bought} times · usual qty ${s.median_qty}`} className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] tabular-nums">
-                  {s.item_code} <span className="text-muted-foreground">×{s.median_qty}</span>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="flex shrink-0 gap-1.5">
-          <button type="button" onClick={orderFor} aria-label={`New order for ${r.shop}`} title="New order" className={cn(ICON, 'text-primary')}>
-            <ShoppingBag size={16} aria-hidden="true" />
-          </button>
-          <a href={wa || '#'} target="_blank" rel="noreferrer" onClick={() => wa && logFollowupTap(r.shop, kind, 'wa', r.rank)} aria-label={wa ? `WhatsApp ${r.shop}` : 'No WhatsApp number on file'} title={wa ? 'WhatsApp' : 'No number on file'} className={cn(ICON, 'text-[#1d9e50]', !wa && 'pointer-events-none opacity-40')}>
-            <MessageCircle size={16} aria-hidden="true" />
-          </a>
-          <a href={tel || '#'} onClick={() => tel && logFollowupTap(r.shop, kind, 'call', r.rank)} aria-label={tel ? `Call ${r.shop}` : 'No phone number on file'} title={tel ? 'Call' : 'No number on file'} className={cn(ICON, !tel && 'pointer-events-none opacity-40')}>
-            <Phone size={16} aria-hidden="true" />
-          </a>
-        </div>
+      <div className="flex items-center gap-2">
+        <span className="truncate text-[14px] font-semibold leading-tight">{r.shop}</span>
+        {kind === 'lapsed' ? <Badge tone="grey">Win back</Badge> : r.overdue_ratio >= 1.5 ? <Badge tone="amber">Overdue</Badge> : <Badge tone="accent">Due</Badge>}
+        {r.holdout ? <Badge tone="rose">Holdout</Badge> : null}
       </div>
+      <div className="mt-0.5 text-[12px] text-muted-foreground">{r.why}</div>
+      <div className="mt-0.5 text-[11.5px] tabular-nums text-muted-foreground">
+        {Number(r.monthly_value_bhd) > 0 ? `~${bhdStr(r.monthly_value_bhd)}/month` : 'No sales in 180 days'}
+        {r.gap_source === 'own' ? '' : ' · cadence not known yet'}
+      </div>
+      {r.top_skus.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {r.top_skus.map((s) => (
+            <span key={s.item_code} title={`${s.display_name} · bought ${s.times_bought} times · usual qty ${s.median_qty}`} className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] tabular-nums">
+              {s.item_code} <span className="text-muted-foreground">×{s.median_qty}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="mt-2.5 grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-1.5">
+        <button type="button" onClick={again} className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-primary px-3 text-[12.5px] font-semibold text-primary-foreground">
+          <RotateCcw size={14} aria-hidden="true" /> Order again
+        </button>
+        <button type="button" onClick={restock} aria-label={`Send ${r.shop} a restock link`} title="Send restock link" className={cn(ICON, 'text-[#137a48]')}>
+          <Send size={16} aria-hidden="true" />
+        </button>
+        <a href={wa || '#'} target="_blank" rel="noreferrer" onClick={() => wa && logFollowupTap(r.shop, kind, 'wa', r.rank)} aria-label={wa ? `WhatsApp ${r.shop}` : 'No WhatsApp number on file'} title={wa ? 'WhatsApp' : 'No number on file'} className={cn(ICON, 'text-[#1d9e50]', !wa && 'pointer-events-none opacity-40')}>
+          <MessageCircle size={16} aria-hidden="true" />
+        </a>
+        <a href={tel || '#'} onClick={() => tel && logFollowupTap(r.shop, kind, 'call', r.rank)} aria-label={tel ? `Call ${r.shop}` : 'No phone number on file'} title={tel ? 'Call' : 'No number on file'} className={cn(ICON, !tel && 'pointer-events-none opacity-40')}>
+          <Phone size={16} aria-hidden="true" />
+        </a>
+      </div>
+      <ShopSheet
+        shop={{ key, name: r.shop, focus_name: r.shop, phone: r.phone || null, status: kind === 'lapsed' ? 'lapsed' : 'due', due: kind === 'due', why: r.why, last_order_date: r.last_date || null }}
+        open={sheet}
+        onClose={() => setSheet(false)}
+      />
     </li>
   )
 }
 
-/** Today: the top 5 due shops. Hidden until the rep's login carries a Focus name. */
-export function DueThisWeek() {
-  const q = useFollowups()
-  const data = q.data
-  if (q.isLoading) return null
-  if (!data || data.hint) return null
-  const due = data.due.slice(0, 5)
+/** Today: the top 5 due shops (from GET /shop/me/today). Hidden until the rep's login carries a Focus name. */
+export function DueThisWeek({ due, counts, dataThrough, hint }: { due: FollowupShop[]; counts?: Followups['counts']; dataThrough?: string | null; hint?: string | null }) {
+  if (hint) return null
   return (
     <section className="overflow-hidden rounded-2xl border border-border bg-card" aria-label="Due this week">
       <div className="flex items-center gap-2 px-4 py-3">
         <CalendarClock size={16} className="text-primary" aria-hidden="true" />
         <h2 className="font-display text-[15px] font-bold">Due this week</h2>
-        <span className="text-[12px] text-muted-foreground">
-          {data.counts?.due ? `${data.counts.due} shop${data.counts.due === 1 ? '' : 's'} by their usual rhythm` : 'from your Focus sales'}
+        <span className="hidden text-[12px] text-muted-foreground sm:inline">
+          {counts?.due ? `${counts.due} shop${counts.due === 1 ? '' : 's'} by their usual rhythm` : 'from your Focus sales'}
         </span>
         <Link to="/customers?view=due" className="-mr-2 ml-auto inline-flex h-10 items-center gap-1 rounded-lg px-2 text-[12.5px] font-semibold text-primary hover:bg-muted">
           All due <ChevronRight size={14} aria-hidden="true" />
@@ -86,7 +97,7 @@ export function DueThisWeek() {
       </div>
       {due.length === 0 ? (
         <p className="border-t border-border px-4 py-5 text-[13px] text-muted-foreground">
-          Nothing due right now. {data.counts?.lapsed ? <Link to="/customers?view=lapsed" className="font-semibold text-primary">{data.counts.lapsed} to win back</Link> : null}
+          Nothing due right now. {counts?.lapsed ? <Link to="/customers?view=lapsed" className="font-semibold text-primary">{counts.lapsed} to win back</Link> : null}
         </p>
       ) : (
         <ul className="divide-y divide-border border-t border-border">
@@ -95,16 +106,14 @@ export function DueThisWeek() {
       )}
       <p className="border-t border-border bg-muted/60 px-4 py-2 text-[11px] text-muted-foreground">
         Ranked by how overdue a shop is against its own rhythm and what it usually buys per month
-        {data.data_through ? ` · Focus sales to ${dayLabel(data.data_through)}` : ''}. Suggestions, not promises — nobody knows when a shop reorders.
+        {dataThrough ? ` · Focus sales to ${dayLabel(dataThrough)}` : ''}. Suggestions, not promises — nobody knows when a shop reorders.
       </p>
     </section>
   )
 }
 
 /** Today: baskets started on the rep's link and never sent (7 days). Codes and value only. */
-export function BasketsNotSent() {
-  const q = useBaskets()
-  const data = q.data
+export function BasketsNotSent({ data }: { data: Baskets | null | undefined }) {
   if (!data || data.hint || !data.baskets.length) return null
   return (
     <section className="overflow-hidden rounded-2xl border border-border bg-card" aria-label="Baskets from your link not sent">
@@ -143,9 +152,8 @@ export function BasketsNotSent() {
  * Today (right column): the rep's own funnel over 7 days. A failed load shows a small retry line
  * (R7a) — returning nothing made a server error look like "no card for you".
  */
-export function LinkThisWeek() {
-  const q = useLinkWeek()
-  const d = q.data
+export function LinkThisWeek({ data, error, onRetry, retrying }: { data: LinkWeek | null | undefined; error?: unknown; onRetry?: () => void; retrying?: boolean }) {
+  const d = data
   const head = (
     <div className="flex items-center gap-2">
       <Link2 size={16} className="text-primary" aria-hidden="true" />
@@ -153,15 +161,15 @@ export function LinkThisWeek() {
       {d ? <span className="text-[12px] text-muted-foreground">{d.days} days</span> : null}
     </div>
   )
-  if (q.isError && !d) {
+  if (error && !d) {
     return (
       <section className="rounded-2xl border border-border bg-card p-4" aria-label="My link this week">
         {head}
-        <p className="mt-1 flex items-center text-[12.5px] text-muted-foreground" title={errorText(q.error, 'Could not load this card.')}>
+        <p className="mt-1 flex items-center text-[12.5px] text-muted-foreground" title={typeof error === 'string' ? error : errorText(error, 'Could not load this card.')}>
           Couldn't load —
-          <button type="button" onClick={() => void q.refetch()} disabled={q.isFetching}
+          <button type="button" onClick={onRetry} disabled={retrying}
             className="-my-2 inline-flex h-10 items-center rounded-lg px-1.5 font-semibold text-primary hover:bg-muted disabled:opacity-50">
-            {q.isFetching ? 'retrying…' : 'retry'}
+            {retrying ? 'retrying…' : 'retry'}
           </button>
         </p>
       </section>

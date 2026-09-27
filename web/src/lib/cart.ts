@@ -12,7 +12,8 @@ import type { CartLine } from '@/lib/shopApi'
  * The logged-in salesman shop passes the reserved key `staff`. That keeps the
  * order he is building for a shop separate from whatever a customer's share link
  * left behind in the same browser — the two must never merge, because one of them
- * would be billed to the wrong person.
+ * would be billed to the wrong person. Since Sprint 5 each shop he orders for has its
+ * own cart (`staff:<book key>`), and `staff` alone is the cart of "no shop picked yet".
  */
 
 const PREFIX = 'yq-shop-cart:'
@@ -42,6 +43,16 @@ function write(key: string, lines: CartLine[]) {
   } catch {
     /* private mode / quota — the cart just won't survive a reload */
   }
+}
+
+/** The saved lines of another cart, without mounting it (the salesman's per-shop carts). */
+export function peekCart(token: string): CartLine[] {
+  return read(storageKey(token))
+}
+
+/** Write another cart's lines — used to carry a cart started before the shop was picked into that shop's cart. */
+export function writeCart(token: string, lines: CartLine[]): void {
+  write(storageKey(token), lines)
 }
 
 export interface Cart {

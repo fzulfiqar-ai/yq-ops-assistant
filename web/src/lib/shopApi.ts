@@ -352,6 +352,8 @@ export interface OrderResponse {
   has_backorder?: boolean | null
   /** "salesman" when the order was placed from inside the portal */
   source?: string | null
+  /** salesman mode: true when this was a re-submit of a checkout that had already placed the order */
+  duplicate?: boolean | null
 }
 
 /* ───────────────────────── order status ───────────────────────── */
@@ -602,7 +604,7 @@ export function pingEvent(token: string, body: EventPing): void {
    lib/api throws ApiError with the raw body; re-shape it to ShopApiError so every
    form in this folder keeps showing the server's own `detail` line. */
 
-/** A shop the salesman has already sold to — the quick-pick above the form. */
+/** A shop the salesman is ordering for — a row of his book (GET /shop/me/book) or one typed at checkout. */
 export interface StaffCustomer {
   name: string
   phone?: string | null
@@ -611,6 +613,10 @@ export interface StaffCustomer {
   email?: string | null
   orders?: number | null
   last_order_at?: string | null
+  /** Sprint 5: the book's id for the shop ('f:<Focus name>' | 'm:<phone>'); carts are kept per key */
+  key?: string | null
+  /** the Focus customer name when the shop is in the rep's Focus book (a blank phone can be saved for it) */
+  focus_name?: string | null
 }
 
 export interface StaffOrderRequest {
@@ -620,6 +626,8 @@ export interface StaffOrderRequest {
   salesman_id?: number | null
   customer: OrderCustomer
   note?: string
+  /** made when the checkout opens, kept until the order is placed: a retry returns the same order */
+  client_order_id?: string
 }
 
 type BearerApi = typeof import('@/lib/api')

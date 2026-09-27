@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { Clock, Search, ShoppingBag, X } from 'lucide-react'
 import { Logo } from '@/components/Logo'
@@ -20,7 +20,6 @@ import {
   type ShopItem,
 } from '@/lib/shopApi'
 import { CartDrawer } from './CartDrawer'
-import { CustomerBar } from './CustomerBar'
 import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
 import { ProductSheet } from './ProductSheet'
@@ -146,7 +145,24 @@ export interface ShopPageProps {
   mode?: 'public' | 'salesman'
 }
 
+// The salesman catalog is its own screen since Sprint 5 (StaffCatalog: the merged shop book, list
+// mode, quick add, the desktop order slip). Loaded on its own, so a merchant's public link never
+// downloads the rep's search index or order tools.
+const StaffCatalog = lazy(() => import('./StaffCatalog'))
+
 export function ShopPage({ mode = 'public' }: ShopPageProps) {
+  if (mode === 'salesman') {
+    return (
+      <Suspense fallback={<div className="grid h-[60vh] place-items-center text-[13px] text-[#6b6480]">Loading the catalog…</div>}>
+        <StaffCatalog />
+      </Suspense>
+    )
+  }
+  return <LegacyShop mode={mode} />
+}
+
+/** The public catalog behind /c/{token} — the legacy share link (the marketplace replaced it). */
+function LegacyShop({ mode = 'public' }: ShopPageProps) {
   const staff = mode === 'salesman'
   const { token = '' } = useParams()
   const [params] = useSearchParams()
@@ -463,7 +479,6 @@ export function ShopPage({ mode = 'public' }: ShopPageProps) {
              Either way it scrolls away — only the tools below stay pinned. ── */}
       {staff ? (
         <>
-          <CustomerBar />
           <div className="mx-auto max-w-6xl px-4 pb-1">
             <p className="text-[12px] leading-snug text-[#6b6480]">
               Trade prices · live stock
