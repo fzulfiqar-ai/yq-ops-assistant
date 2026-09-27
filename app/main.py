@@ -1653,14 +1653,19 @@ def agents_run(name: str, email: bool = False, caller: CurrentUser = Depends(get
 def auth_features(_user: CurrentUser = Depends(get_current_user)) -> dict:
     """The grantable feature pages + roles — single source (app/features.py) so the
     Team page chips can never drift from what the API actually enforces."""
-    from app.features import FEATURES, ROLE_DEFAULT_FEATURES, ROLES
-    return {"features": FEATURES, "roles": ROLES, "role_defaults": ROLE_DEFAULT_FEATURES}
+    from app.features import FEATURES, ROLE_DEFAULT_FEATURES, ROLE_FEATURE_LIMITS, ROLE_LABELS, ROLES
+    return {"features": FEATURES, "roles": ROLES, "role_defaults": ROLE_DEFAULT_FEATURES,
+            "role_labels": ROLE_LABELS,
+            # the only pages a role may hold (management's six read pages); a role not listed has no limit
+            "role_feature_limits": {r: [f for f in FEATURES if f in lim] for r, lim in ROLE_FEATURE_LIMITS.items()}}
 
 
 @app.get("/me")
 def me(user: CurrentUser = Depends(get_current_user)) -> dict:
     """Identity + access for the SPA: role + granted feature pages. `must_reset` is the
-    server-owned flag: while it is set every other route answers 403 (see app.auth)."""
+    server-owned flag: while it is set every other route answers 403 (see app.auth).
+    `read_only` (management): every write is refused, so the SPA hides its write controls."""
+    from app.features import is_read_only, may_hold
     role, features, full_name = user.role, [], ""
     try:
         from app.user_auth import _user_row
@@ -1671,8 +1676,8 @@ def me(user: CurrentUser = Depends(get_current_user)) -> dict:
             full_name = row.get("full_name") or ""
     except Exception:  # columns may predate the team migration
         pass
-    return {"email": user.email, "role": role, "features": features, "full_name": full_name,
-            "must_reset": bool(user.must_reset)}
+    return {"email": user.email, "role": role, "features": [f for f in features if may_hold(role, f)],
+            "full_name": full_name, "must_reset": bool(user.must_reset), "read_only": is_read_only(role)}
 
 
 class PasswordChangeRequest(BaseModel):

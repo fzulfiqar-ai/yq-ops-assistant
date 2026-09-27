@@ -24,6 +24,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from app.auth import CurrentUser, get_current_user, has_feature, require_admin, require_feature
     from app.catalog import share_token
     from app.config import settings as cfg
+    from app.features import is_read_only, mask_email, mask_phone, masks_contacts
     from app.shop import ShopError
 
     def require_any_feature(*features: str):
@@ -234,11 +235,29 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return (request.headers.get("user-agent") or "")[:200]
 
     def _scope(user: CurrentUser) -> tuple[int | None, bool]:
-        """(salesman_id filter, is_admin). Non-admins only ever see their own orders."""
+        """(salesman_id filter, is_admin). A salesman only ever sees his own orders; management
+        reads every order (None) but is never an admin — app.auth refuses all of its writes."""
         if user.role == "admin":
             return None, True
+        if is_read_only(user.role):
+            return None, False
         sm = shop.salesman_for_user(user.email)
         return (sm["id"] if sm else -1), False
+
+    def _masked(user: CurrentUser, o: dict, *keys: str) -> dict:
+        """Management sees a merchant's phone and email masked (+973 ••••• 456) and never the
+        tap-to-WhatsApp link, the merchant's order token (it can cancel) or the notify
+        recipients (plan §7 phones.full). Everyone else gets the payload unchanged."""
+        if not masks_contacts(user.role):
+            return o
+        for k in keys or ("customer_phone", "customer_email"):
+            if k in o:
+                o[k] = (mask_email if "email" in k else mask_phone)(o[k])
+        for k in ("whatsapp_url", "token", "status_url"):
+            o.pop(k, None)
+        if isinstance(o.get("notify_result"), dict):
+            o["notify_result"] = {k: v for k, v in o["notify_result"].items() if k != "recipients"}
+        return o
 
     def _owner_contact() -> dict | None:
         from app.customer_contacts import wa_digits
@@ -645,7 +664,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         sid, _admin = _scope(user)
         if sid == -1:
             return {"customers": []}
-        return {"customers": shop.recent_customers(sid)}
+        return {"customers": [_masked(user, c, "phone", "email") for c in shop.recent_customers(sid)]}
 
     # ── portal: orders ────────────────────────────────────────────────────────
     @app.get("/shop/orders")
@@ -655,15 +674,19 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if sid == -1:
             return {"orders": [], "count": 0,
                     "hint": "Your login is not linked to a salesman yet — an admin can link it on the Salesmen page."}
-        return shop.list_orders(status, q, limit, offset, salesman_id=sid)
+        out = shop.list_orders(status, q, limit, offset, salesman_id=sid)
+        out["orders"] = [_masked(user, o) for o in out.get("orders") or []]
+        return out
 
-    def _visible(user: CurrentUser, o: dict | None) -> bool:
-        """May this staff user see/act on this order? Admins and the storekeeper: every order;
-        a salesman: his own."""
+    def _visible(user: CurrentUser, o: dict | None, write: bool = False) -> bool:
+        """May this staff user see (or, with write=True, act on) this order? Admins and the
+        storekeeper: every order; management: every order, to read only; a salesman: his own."""
         if not o:
             return False
         if user.role in ("admin", "storekeeper"):
             return True
+        if is_read_only(user.role):
+            return not write
         sid, _admin = _scope(user)
         return o.get("salesman_id") == sid
 
@@ -686,13 +709,15 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if user.role == "admin":     # the shop's recorded rep (admin assignment / sticky) for the drawer
             o["customer"] = attribution.customer_rep(o.get("customer_id"))
         o.pop("ip_hash", None)
-        return o
+        if is_read_only(user.role):
+            o["next_statuses"] = []      # nothing to move: management reads only
+        return _masked(user, o)
 
     @app.post("/shop/orders/{order_id}/status")
     def shop_order_set_status(order_id: int, body: StatusRequest, background: BackgroundTasks,
                               user: CurrentUser = Depends(require_any_feature("Shop Orders", "Storekeeper"))) -> dict:
         cur = shop.get_order(order_id)
-        if not _visible(user, cur):
+        if not _visible(user, cur, write=True):
             raise HTTPException(status_code=404, detail="Order not found.")
         allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
         try:
@@ -721,7 +746,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                            user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
         """Confirm with changes: confirmed quantities / removed lines, expected delivery, re-price."""
         cur = shop.get_order(order_id)
-        if not _visible(user, cur):
+        if not _visible(user, cur, write=True):
             raise HTTPException(status_code=404, detail="Order not found.")
         try:
             o = shop.confirm_order(order_id, [ln.model_dump() for ln in body.lines], body.expected_delivery,
@@ -871,8 +896,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.get("/shop/analytics")
     def shop_analytics(days: int = 30, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Funnel, AOV, top products, salesman leaderboard, attribution. Salesmen see their own slice."""
-        if user.role == "admin":
+        """Funnel, AOV, top products, salesman leaderboard, attribution. Salesmen see their own slice;
+        management the company's (counts and values only — no phone leaves this payload)."""
+        if user.role == "admin" or is_read_only(user.role):
             return shop.analytics(days)
         sm = shop.salesman_for_user(user.email)
         if not sm:
