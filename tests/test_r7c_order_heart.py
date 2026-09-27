@@ -1549,6 +1549,24 @@ def _():
     assert "db_backup" in REVERSE.read_text(encoding="utf-8"), "the header asks for a backup first"
 
 
+@test("review: the reverse REFUSES while any line / order holds an R7c value, unless yq.r7c_drop = 'yes' is set in the session")
+def _():
+    rev = _code(REVERSE.read_text(encoding="utf-8"))
+    assert "current_setting('yq.r7c_drop', true)" in rev
+    guard_at = rev.index("current_setting('yq.r7c_drop'")
+    assert guard_at < rev.index("drop column") and guard_at < rev.index("drop constraint"), \
+        "the refusal runs before the first DROP"
+    guard = rev[:rev.index("drop constraint")]
+    assert "raise exception" in guard and "scripts.db_backup" in guard     # (_code cuts the message at its "--tables")
+    raw = REVERSE.read_text(encoding="utf-8")
+    assert "db_backup --tables shop_orders,shop_order_lines) and run SET yq.r7c_drop = ''yes''" in raw
+    for col in R7C_LINE + R7C_ORDER:                       # every R7c column is counted
+        assert f"'{col}'" in guard, col
+    # read column by column through information_schema + format(%I), so a half-reversed schema still runs
+    assert "information_schema.columns" in guard and "format('select count(*) from public.shop_order_lines where %i is not null'" in guard
+    assert "format('select count(*) from public.shop_orders where %i is not null'" in guard
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 12. a local Postgres replay (SKIPs cleanly without a local cluster — never production)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1640,7 +1658,17 @@ def _():
                         "and table_name in ('shop_orders', 'shop_order_lines') "
                         "and grantee in ('anon', 'authenticated')")
             assert cur.fetchone()[0] == 0
-            # the reverse: rows written with R7c values stay (NOT VALID), new writes held to the old lists
+            # the reverse REFUSES while a line / order holds an R7c value …
+            cur.execute("savepoint s")
+            try:
+                cur.execute(rev)
+                raise AssertionError("the reverse dropped R7c order history without the switch")
+            except psycopg.errors.RaiseException as e:
+                assert "yq.r7c_drop" in str(e)
+                cur.execute("rollback to savepoint s")
+            # … and runs once the session says so: rows written with R7c values stay (NOT VALID), new writes
+            # held to the old lists
+            cur.execute("set local yq.r7c_drop = 'yes'")
             cur.execute(rev)
             cur.execute("select line_status from shop_order_lines where item_code = 'UK21'")
             assert cur.fetchone()[0] == "added", "an existing row is never rewritten"
@@ -1654,7 +1682,11 @@ def _():
             except psycopg.errors.CheckViolation:
                 cur.execute("rollback to savepoint s")
             cur.execute(mig)                                       # and forward again after a reverse
-        print("  replay: migration x2, reverse, migration again — all inside one rolled-back transaction")
+            # every R7c column is empty again: the reverse needs no switch
+            cur.execute("set local yq.r7c_drop = 'no'")
+            cur.execute(rev)
+            cur.execute(mig)
+        print("  replay: migration x2, reverse guard, reverse, migration, empty reverse, migration — one rolled-back transaction")
     finally:
         conn.rollback()
         conn.close()

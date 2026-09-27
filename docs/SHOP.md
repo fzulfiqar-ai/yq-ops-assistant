@@ -190,8 +190,9 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
   included (1..365). The events are counted by the analytics views (`scripts/r7d_analytics_views_migration.sql`,
   read through the read-only RPC with the window and the rep bound as parameters; before the migration the raw events
   are read PAGED and counted by the same rules in `app/shop_analytics.py`). Money is `money_basis:
-  "confirmed_else_requested"` (an order's `total_confirmed_bhd ?? total_bhd`, a line's confirmed total else its
-  ordered total pro rata); test orders never count. `funnel.sessions` = visits (a session counted once per Bahrain
+  "confirmed_else_requested_incl_vat"` (an order's `total_confirmed_bhd ?? total_bhd`, a line's confirmed total else
+  its ordered total pro rata — the stored totals, VAT-inclusive; the Command Centre shows the same orders ex-VAT, so
+  Shop analytics and the merchant page label every BHD figure "incl. VAT"); test orders never count. `funnel.sessions` = visits (a session counted once per Bahrain
   day), `funnel.checkouts` = `checkout_start` sessions, `funnel.orders` = orders placed on the marketplace (not the
   ones a rep entered); `search` counts final typed searches only (typing within 30 s and chip / facet taps left out)
   and its rows carry `sessions, devices, last_seen`; `rails[]` gains `adds`; `daily[]` rows gain `sessions`. New keys:

@@ -627,6 +627,16 @@ def _():
     assert "REOPEN_DAYS = 7" in srv
 
 
+@test("rc review (21): the rep's Today card names only Received / Confirmed / Delivered — never the storekeeper's stamps")
+def _():
+    src = _read("web/src/pages/sales/Today.tsx")
+    low = src.lower()
+    for word in ("preparing", "on the way", "out for delivery", "packed", "in progress"):
+        assert word not in low, f"Today.tsx names a hidden stage: {word!r}"
+    assert "confirmed, not yet delivered" in src
+    assert 'to="/shop-orders?bucket=confirmed"' in src and "bucket=progress" not in src
+
+
 @test("contract: the CAS message and the new routes exist on the API the page calls")
 def _():
     srv = _server()

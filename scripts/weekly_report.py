@@ -126,7 +126,8 @@ def load(week_start: date, week_end: date) -> dict:
         ids = [o["id"] for o in orders]
         lines = q("""
             select l.order_id, upper(l.item_code) as code, l.display_name, l.qty, l.line_total_bhd,
-                   coalesce(ci.category, 'Other') as category
+                   coalesce(ci.category, 'Other') as category,
+                   to_jsonb(l) ->> 'added_at_stage' as added_at_stage   -- R7c; NULL before its migration
               from shop_order_lines l left join catalog_items ci on upper(ci.item_code) = upper(l.item_code)
              where l.order_id = any(%s)""", ids) if ids else []
         prev = q("""select count(*) as n, coalesce(sum(total_bhd), 0) as v from shop_orders
@@ -270,6 +271,10 @@ def compute(d: dict, week_start: date, week_end: date, now: datetime) -> dict:
     live_ids = {o["id"] for o in live}
     for ln in lines:
         if ln["order_id"] not in live_ids:
+            continue
+        if ln.get("added_at_stage"):
+            # what the SHOP asked for: a line the rep added or substituted in (R7c) is not the shop's order —
+            # counting it would list both the original and its substitute and add both to the category value
             continue
         p = prod[ln["code"]]
         p["name"] = p["name"] or ln["display_name"]

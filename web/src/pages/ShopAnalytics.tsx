@@ -9,6 +9,7 @@ import {
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, pct, fmtDate } from '@/lib/format'
+import { MONEY_NOTE, VAT_LABEL } from '@/lib/basisText'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
@@ -412,7 +413,7 @@ function AttributionTable({
               <tr>
                 <th className="px-2.5 py-1.5 text-left">{keyHeader}</th>
                 <th className="px-2.5 py-1.5 text-right">Orders</th>
-                <th className="px-2.5 py-1.5 text-right">Value</th>
+                <th className="px-2.5 py-1.5 text-right">Value <span className="normal-case">({VAT_LABEL})</span></th>
               </tr>
             </thead>
             <tbody>
@@ -550,7 +551,7 @@ export default function ShopAnalytics() {
       ) },
     { key: 'units', label: 'Units', align: 'right', render: (_, r) => num(r.units) },
     { key: 'orders', label: 'Orders', align: 'right', render: (_, r) => num(r.orders) },
-    { key: 'value_bhd', label: 'Value', align: 'right', render: (_, r) => <span className="font-semibold">{bhd(r.value_bhd, 3)}</span> },
+    { key: 'value_bhd', label: `Value (${VAT_LABEL})`, align: 'right', render: (_, r) => <span className="font-semibold">{bhd(r.value_bhd, 3)}</span> },
   ]
 
   const leaderCols: Column<LeaderboardDisplayRow>[] = [
@@ -562,8 +563,8 @@ export default function ShopAnalytics() {
       ) },
     { key: 'orders', label: 'Orders', align: 'right', render: (_, r) => num(r.orders) },
     { key: 'customers', label: 'Customers', align: 'right', render: (_, r) => num(r.customers) },
-    { key: 'aov_bhd', label: 'AOV', align: 'right', render: (_, r) => bhd(r.aov_bhd, 3) },
-    { key: 'value_bhd', label: 'Value', align: 'right', render: (_, r) => {
+    { key: 'aov_bhd', label: `AOV (${VAT_LABEL})`, align: 'right', render: (_, r) => bhd(r.aov_bhd, 3) },
+    { key: 'value_bhd', label: `Value (${VAT_LABEL})`, align: 'right', render: (_, r) => {
         const w = Math.max(4, Math.round(((Number(r.value_bhd) || 0) / maxLeaderboardValue) * 100))
         return (
           <div className="flex flex-col items-end gap-1">
@@ -584,7 +585,7 @@ export default function ShopAnalytics() {
     <div>
       <PageHeader
         title="Shop Analytics"
-        subtitle="What merchants did on the marketplace: visits, searches, orders and who is due"
+        subtitle={`What merchants did on the marketplace: visits, searches, orders and who is due · ${MONEY_NOTE}`}
         actions={
           <div className="flex flex-wrap gap-1.5">
             {chips.map((c) => (
@@ -626,8 +627,8 @@ export default function ShopAnalytics() {
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <Stat label="Orders" value={num(data?.orders ?? 0)} foot={(data?.cancelled ?? 0) > 0 ? `${num(data?.cancelled)} cancelled` : undefined} />
-            <Stat label="Order value" value={bhd(data?.value_bhd ?? 0, 3)} tone="violet" foot="Confirmed, else as ordered" />
-            <Stat label="Avg order value" value={bhd(data?.aov_bhd ?? 0, 3)} />
+            <Stat label="Order value" value={bhd(data?.value_bhd ?? 0, 3)} tone="violet" foot={`Confirmed, else as ordered · ${VAT_LABEL}`} />
+            <Stat label="Avg order value" value={bhd(data?.aov_bhd ?? 0, 3)} foot={VAT_LABEL} />
             <Stat label="Merchants ordering" value={num(data?.customers ?? 0)} foot={identity.repeat_customers ? `${num(identity.repeat_customers)} ordered twice or more` : undefined} />
             <Stat label="Visits" value={num(data?.funnel?.sessions ?? 0)} foot={engagement.new_devices != null ? `${num(engagement.new_devices)} new phones` : undefined} />
             <Stat label="Visits that ordered" value={pctOrDash(data?.funnel?.conversion_pct)} />
@@ -682,7 +683,7 @@ export default function ShopAnalytics() {
               { label: 'Link', render: (r) => linkLabel(r) },
               { label: 'Visits', align: 'right', render: (r) => num(r.sessions ?? 0) },
               { label: 'Orders', align: 'right', render: (r) => num(r.orders ?? 0) },
-              { label: 'Value', align: 'right', render: (r) => bhd(r.value_bhd, 3) },
+              { label: `Value (${VAT_LABEL})`, align: 'right', render: (r) => bhd(r.value_bhd, 3) },
               { label: 'Ordered', align: 'right', render: (r) => pctOrDash(r.conversion_pct) },
             ]}
             empty="No visits or orders in this period."
@@ -706,7 +707,7 @@ export default function ShopAnalytics() {
                 { label: 'Shop', render: (r) => <MerchantLink m={r} /> },
                 { label: 'Rep', render: (r) => r.rep || '—' },
                 { label: 'Orders', align: 'right', render: (r) => num(r.orders ?? 0) },
-                { label: 'Value', align: 'right', render: (r) => bhd(r.value_bhd, 3) },
+                { label: `Value (${VAT_LABEL})`, align: 'right', render: (r) => bhd(r.value_bhd, 3) },
                 { label: '', render: (r) => <MerchantFlags m={r} /> },
               ]}
               empty="No merchant ordered in this period." />

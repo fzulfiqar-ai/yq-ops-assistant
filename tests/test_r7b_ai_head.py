@@ -246,6 +246,36 @@ def _():
     assert after["confirmed_n"] == before["confirmed_n"], "a born-Confirmed order is not a confirmation"
 
 
+@test("rc review (10): the weekly email's products and categories count what the SHOP ordered (substitutes / rep-added out)")
+def _():
+    from scripts import weekly_report as wr
+    ws, we = date(2026, 9, 20), date(2026, 9, 26)
+    base = {"prev": {"n": 0, "v": 0}, "open_now": [], "events": [], "reps": {}, "focus_max": date(2026, 9, 24),
+            "focus": [], "t0": datetime(2026, 9, 20, tzinfo=BH), "t1": datetime(2026, 9, 27, tzinfo=BH)}
+    order = {"id": 501, "order_no": "YQ-2609-9501", "status": "confirmed", "total_bhd": Decimal("30.000"),
+             "total_confirmed_bhd": Decimal("32.000"), "order_kind": "shop", "customer_id": None,
+             "customer_shop": "Synthetic Shop", "customer_name": None, "customer_area": "Area", "source": "market",
+             "created_at": _ts("2026-09-22"), "confirmed_at": _ts("2026-09-22"), "delivered_at": None,
+             "cancelled_at": None, "salesman_id": 1, "rep": "Rep K", "focus_name": "REP K"}
+    lines = [
+        # the shop asked for 10 x SKU-X; the rep substituted 10 x SKU-Y (an added line, R7c)
+        {"order_id": 501, "code": "SKU-X", "display_name": "Item X", "qty": 10, "line_total_bhd": Decimal("30.000"),
+         "category": "Cables", "added_at_stage": None},
+        {"order_id": 501, "code": "SKU-Y", "display_name": "Item Y", "qty": 10, "line_total_bhd": Decimal("32.000"),
+         "category": "Cables", "added_at_stage": "confirm"},
+    ]
+    now = datetime(2026, 9, 27, 6, 0, tzinfo=timezone.utc)
+    m = wr.compute({**base, "orders": [order], "lines": lines}, ws, we, now)
+    assert [p[0] for p in m["products"]] == ["SKU-X"], m["products"]
+    assert m["products"][0][2] == 10 and m["products"][0][4] == Decimal("30.000")
+    assert m["categories"] == [("Cables", Decimal("30.000"))], m["categories"]
+    # the loaders read the R7c column: base tables through to_jsonb (works before r7c too), the view by name
+    src = (ROOT / "scripts" / "weekly_report.py").read_text(encoding="utf-8")
+    assert "to_jsonb(l) ->> 'added_at_stage' as added_at_stage" in src
+    pk = (ROOT / "scripts" / "ai_head" / "pack.py").read_text(encoding="utf-8")
+    assert "coalesce(category, 'Other') as category, added_at_stage\n          from v_agent_shop_lines" in pk
+
+
 @test("review: the trust gate prices the requested subtotal as list price x qty of the shop's lines (added lines out)")
 def _():
     from scripts.ai_head import pack
@@ -382,7 +412,8 @@ class _FakeConn:
                      "rep": r["rep"], "focus_name": r["rep_focus_name"]} for r in rows if not r["is_test"]]
         elif key == "v_agent_shop_lines" and "upper(item_code) as code" in low:
             rows = [{"order_id": r["order_id"], "code": r["item_code"].upper(), "display_name": r["display_name"],
-                     "qty": r["qty"], "line_total_bhd": r["line_total_bhd"], "category": r["category"] or "Other"}
+                     "qty": r["qty"], "line_total_bhd": r["line_total_bhd"], "category": r["category"] or "Other",
+                     "added_at_stage": r.get("added_at_stage")}
                     for r in rows]
         elif key == "v_agent_shop_events" and "device_key as device_id" in low:
             rows = [{"ts": r["ts"], "session_id": r["session_key"], "device_id": r["device_key"], "event": r["event"],

@@ -30,6 +30,14 @@
 -- missing key is NULL), so the same definition answers before r7c (every line is requested,
 -- delivered = confirmed), after it, and after r7c's reverse — and neither file has to touch the
 -- other (the whole-row reference does not pin a column, so r7c's reverse can drop them).
+-- Each requested line counts at most what the shop asked for: a rep who confirms 20 on a line of 10
+-- (the editor allows it) adds 10 to units_confirmed and the other 10 to units_raised, so the
+-- accepted rate can never read above 100 % or hide a cut on another line; units_delivered is capped
+-- the same way.
+--
+-- reopened_at (appended; R7c, read through to_jsonb(o) so it is NULL before r7c and pins nothing):
+-- an order reopened from Cancelled is Received again, and its confirm / waiting clocks run from the
+-- reopen, not from the original created_at (app/metrics.py).
 --
 -- has_suggestion: v_shop_focus_candidates has a rank-1 row for the order — a Focus invoice was
 -- FOUND for it and waits for a person to accept or reject it. The Command Centre tells "awaiting
@@ -78,17 +86,25 @@ select o.id,
        -- appended (R7b review): rep-added lines apart, the delivered quantity, a found-but-unaccepted invoice
        coalesce(l.units_added, 0)                                       as units_added,
        l.units_delivered                                                as units_delivered,
-       (c.order_id is not null)                                         as has_suggestion
+       (c.order_id is not null)                                         as has_suggestion,
+       -- appended (R7b review, round 2): units confirmed beyond the request; the reopen time (R7c)
+       coalesce(l.units_raised, 0)                                      as units_raised,
+       (to_jsonb(o) ->> 'reopened_at')::timestamptz                     as reopened_at
 from shop_orders o
 left join (select l.order_id,
-                  -- the shop's request only: a line the rep added (added_at_stage set, R7c) is counted apart
+                  -- the shop's request only: a line the rep added (added_at_stage set, R7c) is counted apart;
+                  -- each requested line counts at most its requested qty (the surplus is units_raised)
                   sum(l.qty) filter (where r.j ->> 'added_at_stage' is null)            as units_ordered,
-                  sum(l.qty_confirmed) filter (where r.j ->> 'added_at_stage' is null)  as units_confirmed,  -- NULL until confirmed
+                  sum(case when l.qty_confirmed is null then null else least(l.qty_confirmed, l.qty) end)
+                    filter (where r.j ->> 'added_at_stage' is null)                     as units_confirmed,  -- NULL until confirmed
                   count(*)                                                              as lines_n,
                   sum(coalesce(l.qty_confirmed, l.qty))
                     filter (where r.j ->> 'added_at_stage' is not null)                 as units_added,
-                  sum(coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed))
-                    filter (where r.j ->> 'added_at_stage' is null)                     as units_delivered
+                  sum(case when coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed) is null then null
+                           else least(coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed), l.qty) end)
+                    filter (where r.j ->> 'added_at_stage' is null)                     as units_delivered,
+                  sum(greatest(coalesce(l.qty_confirmed, 0) - l.qty, 0))
+                    filter (where r.j ->> 'added_at_stage' is null)                     as units_raised
            from shop_order_lines l
            -- to_jsonb(l): the R7c columns read as NULL until r7c_order_lines_qty_migration.sql adds them
            cross join lateral (select to_jsonb(l) as j) r
@@ -111,15 +127,19 @@ comment on view v_command_orders is
 comment on column v_command_orders.units_ordered is
   'Sum of shop_order_lines.qty over the lines the shop asked for (added_at_stage NULL); a line the rep added or substituted is in units_added.';
 comment on column v_command_orders.units_confirmed is
-  'Sum of shop_order_lines.qty_confirmed over the lines the shop asked for: NULL until the order is confirmed; a removed or substituted line counts 0.';
+  'Sum of shop_order_lines.qty_confirmed over the lines the shop asked for, each line capped at its requested qty (the surplus is units_raised): NULL until the order is confirmed; a removed or substituted line counts 0.';
 comment on column v_command_orders.focus_links_n is
   'Confirmed rows in shop_order_focus_links for this order (a person accepted the Focus invoice).';
 comment on column v_command_orders.units_added is
   'Units on lines the rep added or substituted (added_at_stage set, R7c), at their confirmed quantity; 0 before r7c.';
 comment on column v_command_orders.units_delivered is
-  'Delivered units of the lines the shop asked for: qty_delivered, else qty_confirmed (plain Delivered, or before r7c). Read it on a delivered order.';
+  'Delivered units of the lines the shop asked for: qty_delivered, else qty_confirmed (plain Delivered, or before r7c), each line capped at its requested qty. Read it on a delivered order.';
 comment on column v_command_orders.has_suggestion is
   'v_shop_focus_candidates has a rank-1 row for the order: a Focus invoice was found and awaits a person''s accept / reject. False once a link is confirmed (the candidates view stops suggesting).';
+comment on column v_command_orders.units_raised is
+  'Units a rep confirmed BEYOND what the shop asked for on its own lines (qty_confirmed above qty); kept out of units_confirmed so the accepted rate never passes 100 %.';
+comment on column v_command_orders.reopened_at is
+  'When an admin last reopened the order (R7c shop_orders.reopened_at, read through to_jsonb; NULL before r7c). The confirm and waiting clocks of a reopened order start here.';
 
 -- ── self-check ─────────────────────────────────────────────────────────────────
 do $$
@@ -133,7 +153,7 @@ begin
                            'has_customer', 'is_test', 'created_at', 'assigned_at', 'confirmed_at', 'delivered_at',
                            'cancelled_at', 'total_bhd', 'total_confirmed_bhd', 'units_ordered', 'units_confirmed',
                            'lines_n', 'has_invoice_no', 'focus_links_n', 'first_linked_at', 'units_added',
-                           'units_delivered', 'has_suggestion'] loop
+                           'units_delivered', 'has_suggestion', 'units_raised', 'reopened_at'] loop
     if not exists (select 1 from information_schema.columns
                    where table_schema = 'public' and table_name = 'v_command_orders' and column_name = c) then
       raise exception 'r7b_command_views: v_command_orders.% missing', c;
@@ -163,5 +183,5 @@ begin
   if (select count(*) from v_command_orders) <> (select count(*) from shop_orders) then
     raise exception 'r7b_command_views: v_command_orders does not have one row per shop order';
   end if;
-  raise notice 'r7b_command_views: ok (v_command_orders, 25 columns, nothing personal, yq_readonly only)';
+  raise notice 'r7b_command_views: ok (v_command_orders, 27 columns, nothing personal, yq_readonly only)';
 end $$;

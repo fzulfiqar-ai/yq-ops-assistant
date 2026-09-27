@@ -12,6 +12,7 @@ import { apiGet } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
+import { deadUncostedNote } from '@/lib/basisText'
 import { CountUp } from '@/components/CountUp'
 import { DataBanner } from '@/components/DataBanner'
 import { PageHeader } from '@/components/PageHeader'
@@ -453,6 +454,7 @@ export default function Dashboard() {
           <HealthStat icon={Snowflake} label="Capital frozen in dead stock · at cost" tone="red"
             value={data.health.stock_basis === 'cost' ? bhd(data.health.dead_stock_bhd, 0) : '—'}
             sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash
+              {data.health.stock_basis === 'cost' && deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted)}
               {data.health.dead_stock_sell_bhd != null && <> · {bhd(data.health.dead_stock_sell_bhd, 0)} at selling price</>}</>} to="/inventory" />
         </div>
       )}

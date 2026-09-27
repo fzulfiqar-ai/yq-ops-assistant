@@ -279,13 +279,23 @@ def windows(period: str, anchor: date) -> tuple[Window, Window | None]:
         n = max(1, business_days(q0, anchor))
         p0 = add_months(q0, -3)
         p1 = nth_business_day(p0, n, q0 - timedelta(days=1))
-        return Window(q0, anchor), Window(p0, p1, f"the same {n} business days last quarter")
+        return Window(q0, anchor), Window(p0, p1, _same_days_basis(n, business_days(p0, p1), "last quarter"))
     # mtd (the default)
     m0 = month_start(anchor)
     n = max(1, business_days(m0, anchor))
     p0 = add_months(anchor, -1)
     p1 = nth_business_day(p0, n, month_end(p0))
-    return Window(m0, anchor), Window(p0, p1, f"the same {n} business days last month")
+    return Window(m0, anchor), Window(p0, p1, _same_days_basis(n, business_days(p0, p1), "last month", f"{p0:%B}"))
+
+
+def _same_days_basis(n: int, k: int, prev: str, prev_name: str | None = None) -> str:
+    """The comparison basis in words. When the previous period runs out before `n` business days (a
+    23-day March against a 20-day February) the window is the WHOLE previous period, and the text says
+    so with its real length and the gap — never "the same 23 business days"."""
+    if k >= n:
+        return f"the same {n} business days {prev}"
+    this = prev.replace("last ", "this ", 1)             # "last month" → "this month's 23"
+    return f"all {k} business days of {prev_name or prev} ({n - k} fewer than {this}'s {n})"
 
 
 def month_pace(mtd, anchor: date, target) -> dict:
@@ -523,7 +533,8 @@ AR_OWNER_SQL = (
 _ORDER_COLS = ("id, order_no, status, source, salesman_id, salesman_name, is_test, created_at::text AS created_at, "
                "confirmed_at::text AS confirmed_at, delivered_at::text AS delivered_at, "
                "cancelled_at::text AS cancelled_at, total_bhd, total_confirmed_bhd, units_ordered, units_confirmed, "
-               "has_invoice_no, focus_links_n, units_added, units_delivered")
+               "has_invoice_no, focus_links_n, units_added, units_delivered, units_raised, "
+               "reopened_at::text AS reopened_at")
 _ORDER_WHERE = ("WHERE created_at >= $1::timestamptz "
                 "OR status IN ('new', 'confirmed', 'packed', 'out_for_delivery')")
 ORDERS_SQL = f"SELECT {_ORDER_COLS} FROM v_command_orders {_ORDER_WHERE}"
@@ -734,10 +745,17 @@ def _born_confirmed(o: dict) -> bool:
 
 
 def _order_age_business_h(o: dict, now: datetime, until_field: str | None = None) -> float | None:
+    """Business hours from the order's clock start to `until_field` (else now). The clock starts at
+    created_at, or at reopened_at when an admin reopened the order before that end: an order reopened
+    from Cancelled is Received again and waits from the reopen, not from the day it was first placed.
+    A reopen AFTER the end (a delivered order reopened to Confirmed) leaves the original confirm time."""
     start = parse_ts(o.get("created_at"))
     end = parse_ts(o.get(until_field)) if until_field else now
     if not start or not end:
         return None
+    reopened = parse_ts(o.get("reopened_at"))
+    if reopened and start < reopened <= end:
+        start = reopened
     return round(business_minutes(start, end) / 60, 1)
 
 
@@ -850,9 +868,12 @@ def _orders_accepted(ctx: Ctx) -> dict | None:
                  and o.get("units_confirmed") is not None]
     got = [o for o in confirmed if not _born_confirmed(o)]
     ordered = sum(_int(o.get("units_ordered")) for o in got)
-    accepted = sum(_int(o.get("units_confirmed")) for o in got)
+    # the view caps each requested line at its requested qty (units_raised holds the surplus); the order-level
+    # min() keeps the rate a share even on a row from an older view definition — never above 100 %
+    accepted = sum(min(_int(o.get("units_confirmed")), _int(o.get("units_ordered"))) for o in got)
     return {"value": share(accepted, ordered), "units_ordered": ordered, "units_accepted": accepted, "orders": len(got),
             "units_added": sum(_int(o.get("units_added")) for o in got),
+            "units_raised": sum(_int(o.get("units_raised")) for o in got),
             "staff_orders_left_out": len(confirmed) - len(got)}
 
 
@@ -866,11 +887,13 @@ def _orders_confirm_time(ctx: Ctx) -> dict | None:
     for o in _live_orders(ctx):
         if _born_confirmed(o):
             continue          # a rep's own order is born Confirmed: it never waited in Received
-        if o.get("confirmed_at"):
-            h = _order_age_business_h(o, ctx.r.now, "confirmed_at")
-        elif o.get("status") == "new":
+        if o.get("status") == "new":
+            # Received decides first: an order reopened from Cancelled keeps its old confirmed_at, but it is
+            # open again and counts at its age since the reopen
             h = _order_age_business_h(o, ctx.r.now)
             open_n += 1
+        elif o.get("confirmed_at"):
+            h = _order_age_business_h(o, ctx.r.now, "confirmed_at")
         else:
             continue          # cancelled before anyone confirmed it: no confirm time
         if h is not None:
@@ -1084,7 +1107,9 @@ def _customers_dormant(ctx: Ctx) -> dict | None:
                             "days": (ctx.focus_to - d).days, "net_12m_bhd": money(r.get("net_12m"))})
     dormant.sort(key=lambda x: (-x["net_12m_bhd"], x["account"] or ""))
     return {"value": len(dormant), "bhd": money(sum((dec(x["net_12m_bhd"]) for x in dormant), Decimal(0))),
-            "items": dormant[:TOP_N], "all": dormant[:50]}
+            # "all" is EVERY dormant account: the page heads it "Every dormant account" under a tile that counts
+            # them all (the list is already in memory, bounded by the named accounts on the ledger)
+            "items": dormant[:TOP_N], "all": dormant}
 
 
 @metric("customers.concentration", "Top-10 concentration", "customers",
