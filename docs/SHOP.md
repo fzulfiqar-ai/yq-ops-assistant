@@ -20,7 +20,7 @@ Code: `app/shop.py` (payload, pricing engine, orders, salesmen, rules, margins),
   / `out_of_stock`. Never a number. A `selling_fast` badge appears when days of cover (90-day velocity)
   drop below `shop_low_stock_days_cover`.
 - **The sold-out rule (release R1, 24-Sep-2026).** A sold-out line stays on the shelf — same URL, same
-  record, labelled **"Sold out"** (never "Out of stock"; Arabic «نفدت الكمية») — and sits after every
+  record, labelled **"Sold Out"** (never "Out of stock"; Arabic «نفدت الكمية») — and sits after every
   available line on every listing (`app/shop.py _load_items` server-side, `web/src/market/lib/facets.ts`
   client-side, one comparator). Two switches decide whether it can still be ordered as a **backorder**:
   `shop_allow_backorder` for **merchants (marketplace + share link)** and `shop_allow_backorder_staff`
@@ -28,14 +28,14 @@ Code: `app/shop.py` (payload, pricing engine, orders, salesmen, rules, margins),
   **"Tell me when back"** (a restock request the rep sees; it is never sent without a phone number),
   nothing sold out reaches the cart from any path (cards, panel, palette ⇧Enter, Order again, Quick
   order — Enter never substitutes another SKU for a typed sold-out code), and a sold-out cart line is
-  blocked at the quote with `Sold out — can't be ordered right now. Remove it to send your order.`
+  blocked at the quote with `Sold Out — can't be ordered right now. Remove it to send your order.`
   A rep's confirmation re-price always keeps its backorder lines whatever either switch says.
   The shop never mutates stock; Focus stays the system of record and the salesman confirms every order.
-- **"Sold out" is a verified zero.** The Focus *Stock balance by warehouse* report omits zero-balance items
+- **"Sold Out" is a verified zero.** The Focus *Stock balance by warehouse* report omits zero-balance items
   (checked read-only 24-Sep-2026: 0 rows with `net_qty <= 0` across the 13 `stock_balance` snapshots since
   June), so a catalog SKU absent from the latest snapshot has none. That reading is only as good as the
   snapshot is recent: older than `shop_stock_fresh_days` (default 3) the status still shows, with the
-  snapshot date beside it ("Sold out · stock as of 21 Sep", the blocked reason "Sold out as of 21 Sep — …",
+  snapshot date beside it ("Sold Out · stock as of 21 Sep", the blocked reason "Sold Out as of 21 Sep — …",
   `stock_fresh: false` in the payload). There is no "unknown" state.
 - All prices/discounts are computed server-side (`app/shop.py::price_cart`); client totals are ignored.
 - **Margin floor:** no rule/coupon/tier may price a unit below
@@ -263,8 +263,8 @@ Salesman default features are `Catalog` + `Shop Orders`; logins are created from
   order and share lookups go through `shop.resolve_code()`. Before this, 23 mixed-case SKUs could not be ordered.
 - **A line that cannot be ordered no longer fails the whole quote.** `POST …/quote` returns it in `lines[]` with
   `unavailable: true`, `blocked_reason` (`No longer in the catalog.`, `Price on request — ask your salesman.`,
-  `Sold out — can't be ordered right now. Remove it to send your order.` when backorders are off (dated
-  `Sold out as of 21 Sep — …` once the stock snapshot is stale), `Minimum order is N.`) and zero prices. Totals, `items` and `units`
+  `Sold Out — can't be ordered right now. Remove it to send your order.` when backorders are off (dated
+  `Sold Out as of 21 Sep — …` once the stock snapshot is stale), `Minimum order is N.`) and zero prices. Totals, `items` and `units`
   cover the orderable lines only. `can_submit` is false and `block_reason` says what to do next, in this order:
   remove the dead line(s), then reach the minimum order. `POST …/order` refuses with that same `block_reason`.
   An empty cart is still a 400.
@@ -357,6 +357,32 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
   `can_cancel`, `expected_delivery`, `total_confirmed_bhd`, `has_changes`, per line `qty_confirmed` + `line_status`.
 - `POST /public/shop/order/{token}/cancel` `{reason?}` — while `new` only; 3/hour.
 - `POST /public/shop/my-orders` `{tokens: [≤20]}` → summaries for the tokens a device holds ("My orders" without an account).
+
+#### Release R7d — merchant ordering (27-Sep-2026, plan §12 / §23 items 7 and 9)
+- **Placed screen honesty.** `POST /public/market/order` also answers `rep_alerted`: `None` for a new assigned order
+  (the new-order alert runs in the background AFTER the response), `False` with no rep, the stored outcome on a
+  re-submit. The status page carries the same `rep_alerted` (`app/shop.py rep_alerted()`: True only when a channel that
+  reaches the REP delivered — `email_rep` or `whatsapp` in `notify_result`; the owner copy and Telegram do not count).
+  The market says "Sent to {rep}" only then, else "Received by YQ — {rep} will confirm", with one primary action
+  (WhatsApp the rep) and Track order.
+- **"What changed"** on the tracking page, from the R7c public lines; each line now also carries `reason_code` (the
+  PUBLIC reason key, never `other`, never the rep's note) so the market words it in the page's language
+  (`out_of_stock` reads "Sold Out"). The ETA shows as a date when `expected_delivery_date` is set.
+- **"Same as last time"** at checkout: `reuse_token` (the token of this device's earlier order) with an empty
+  `customer.phone` → the server takes the phone, and any empty name / shop / area, from that order
+  (`reuse_details()`), only when the order's `device_id` is the caller's; otherwise 400 "Please enter your phone
+  number — …". The phone never reaches the browser; the daily phone cap still applies. `my-orders` summaries carry
+  `customer {name, shop, area}` (what the status page already shows the token holder) — never the phone.
+- **Area → rep** (`shop_area_reps`, JSON `{"Riffa": 3}`, Settings → Area representatives): a `resolve_salesman`
+  step after the session link and the checkout pick, before `shop_default_salesman`. Stored as
+  `attribution_source = 'default'` (the live CHECK), `area` on the order's events. The catalog's `settings.area_reps`
+  is `{area (lower-cased): rep first name}` for the checkout line "Your area representative: {name}".
+- **Demand signal:** `event = 'product_request'` (meta `q`) when a merchant taps "tell {rep}" on a search that found
+  nothing; before `scripts/r7d_product_request_migration.sql` it is stored as `search_zero` with `meta.where =
+  'product_request'`.
+- **Wording:** "Sold Out" with a capital O in the API's reasons and the market; clearing lines read "Clearing line" /
+  "Clearing lines · trade price" («تصفية»), never "Last chance".
+- Tests: `python -m tests.test_r7d_merchant` (no database) and `node web/scripts/merchant_test.mjs`.
 
 ### Portal additions (bearer + feature)
 - `POST /shop/orders/{id}/confirm` `{lines:[{line_id, qty_confirmed?, line_status?: 'removed', note?}], expected_delivery?, note?}`

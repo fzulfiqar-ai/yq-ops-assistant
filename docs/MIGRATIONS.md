@@ -525,3 +525,24 @@ hit for 10 minutes). Replayed on a throwaway local cluster (synthetic tables): a
 work, bad values are refused, reverse with R7c rows present, apply again — all rolled back
 (`tests/test_r7c_order_heart.py`, SKIPs without a cluster).
 
+## Release R7d (27-Sep-2026, not yet applied): `r7d_product_request_migration.sql` — the "tell {rep}" demand signal
+
+Additive and idempotent, with `r7d_product_request_reverse.sql`. A marketplace search that finds nothing now says
+"We don't stock “q” yet — tell {rep}", and the tap is logged as `shop_events.event = 'product_request'` (meta.q =
+the words; no phone, no free text beyond the query). The only change is `shop_events_event_check`, WIDENED from the
+live 20 values (read read-only on 27-Sep-2026: the marketplace 19 + `error`) to those 20 + `product_request`;
+`tests/test_r7d_merchant.py` holds that list equal to `app.shop.EVENTS`. No object is created, nothing is granted;
+the closing `DO` block raises unless the new value and the old ones are allowed and `shop_events` is still not
+granted to `anon`/`authenticated`.
+
+Deploy order: either. Before the migration the CHECK refuses the new kind and `app/shop.py record_event` stores the
+same request as a `search_zero` row with `meta.where = 'product_request'` (Market Intel's `roll_demand_signals`
+reads `search_zero` today; it does not read `product_request` rows yet). The reverse narrows the CHECK back to the 20
+values `NOT VALID` — no row is deleted or rewritten; new `product_request` inserts fall back as above. Order with
+R6: to reverse `shop_events_error_migration.sql` after this one, reverse this file first.
+
+No migration for the rest of R7d: `shop_area_reps` (area → rep for merchants with no rep link, JSON
+`{"Riffa": 3}`) is an `app_settings` key with a code default of `{}` — nothing is seeded; the owner fills it on
+Settings → Area representatives. An order routed by it is stored with `attribution_source = 'default'` (the live
+`shop_orders_attribution_source_check` has no `area`), while its `created` event and its funnel event say `area`.
+

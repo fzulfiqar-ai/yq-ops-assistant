@@ -123,8 +123,9 @@ def _():
 @test("price_cart: merchant, backorder off — a sold-out line is unavailable with the owner wording and blocks the send")
 def _():
     from app.shop import SOLD_OUT_REASON, SOLD_OUT_SHORT, price_cart
-    assert SOLD_OUT_REASON == "Sold out — can't be ordered right now. Remove it to send your order."
-    assert SOLD_OUT_SHORT == "Sold out"
+    # R7d (owner, 27-Sep-2026): "Sold Out" with a capital O, the marketplace label's casing
+    assert SOLD_OUT_REASON == "Sold Out — can't be ordered right now. Remove it to send your order."
+    assert SOLD_OUT_SHORT == "Sold Out"
     ctx = _ctx([_item("C01", 0.5, stock=0), _item("X01", 1.0)], shop_allow_backorder="0")
     q = price_cart([{"item_code": "C01", "qty": 12}, {"item_code": "X01", "qty": 2}], ctx=ctx)
     c01 = next(ln for ln in q["lines"] if ln["item_code"] == "C01")
@@ -135,7 +136,7 @@ def _():
     assert [ln["item_code"] for ln in q["lines"]] == ["C01", "X01"]
     assert q["total_bhd"] == 2.0 and q["items"] == 1 and q["units"] == 2, q
     assert q["can_submit"] is False and not q["has_backorder"]
-    assert q["block_reason"] == "Remove C01 to send this order — sold out.", q["block_reason"]
+    assert q["block_reason"] == "Remove C01 to send this order — Sold Out.", q["block_reason"]
     assert "since you added it" not in q["block_reason"] and "since you added it" not in c01["blocked_reason"]
     assert "sold out" not in " ".join(q["warnings"]).lower()
 
@@ -161,9 +162,9 @@ def _():
     ctx = _ctx([_item("C01", 0.5, stock=0, as_of=old.isoformat()), _item("X01", 1.0, as_of=old.isoformat())], shop_allow_backorder="0")
     q = price_cart([{"item_code": "C01", "qty": 1}, {"item_code": "X01", "qty": 1}], ctx=ctx)
     c01 = next(ln for ln in q["lines"] if ln["item_code"] == "C01")
-    want = f"Sold out as of {_label(old)} — can't be ordered right now. Remove it to send your order."
+    want = f"Sold Out as of {_label(old)} — can't be ordered right now. Remove it to send your order."
     assert c01["unavailable"] and c01["blocked_reason"] == want, c01["blocked_reason"]
-    assert q["block_reason"] == f"Remove C01 to send this order — sold out as of {_label(old)}.", q["block_reason"]
+    assert q["block_reason"] == f"Remove C01 to send this order — Sold Out as of {_label(old)}.", q["block_reason"]
     assert q["can_submit"] is False
     # a wider freshness window makes the same snapshot fresh again: the plain reason
     ctx2 = _ctx([_item("C01", 0.5, stock=0, as_of=old.isoformat()), _item("X01", 1.0, as_of=old.isoformat())], shop_allow_backorder="0", shop_stock_fresh_days="30")
@@ -183,7 +184,7 @@ def _():
     assert c01["backorder"] and not c01["unavailable"] and c01["blocked_reason"] is None, c01
     assert c01["line_total_bhd"] == 6.0 and q["total_bhd"] == 8.0 and q["items"] == 2, q
     assert q["can_submit"] and q["has_backorder"] and q["block_reason"] is None
-    assert any("C01" in w and "sold out" in w for w in q["warnings"]), q["warnings"]
+    assert any("C01" in w and "sold out" in w.lower() for w in q["warnings"]), q["warnings"]
 
 
 @test("price_cart: several blocked lines — the cart-level reason names them and stays short")
@@ -294,12 +295,12 @@ def _():
 def _():
     # R5: the English copy lives in i18n/en.ts (strings.ts re-exports it), the Arabic in i18n/ar.ts
     strings = _read("web/src/market/i18n/en.ts")
-    assert "stockOut: 'Sold out'" in strings and "soldOut: 'Sold out'" in strings
+    assert "stockOut: 'Sold Out'" in strings and "soldOut: 'Sold Out'" in strings
     assert "stockOutAr: 'نفدت الكمية'" in strings
     ar = _read("web/src/market/i18n/ar.ts")
     assert "stockOut: 'نفدت الكمية'" in ar and "soldOut: 'نفدت الكمية'" in ar
-    assert "backorderNote: 'Sold out —" in strings
-    assert "soldOutAsOf: (d: string) => `Sold out · stock as of ${d}`" in strings
+    assert "backorderNote: 'Sold Out —" in strings
+    assert "soldOutAsOf: (d: string) => `Sold Out · stock as of ${d}`" in strings
     assert "leftOut: (n: number) =>" in strings
     market = ROOT / "web" / "src" / "market"
     for f in list(market.rglob("*.ts")) + list(market.rglob("*.tsx")):
@@ -395,7 +396,7 @@ def _():
 @test("docs + CI: SHOP.md describes both switches, the verified zero and the freshness window; ci.yml runs this suite and the node test")
 def _():
     doc = _read("docs/SHOP.md")
-    for needle in ("shop_allow_backorder_staff", "shop_stock_fresh_days", "Sold out — can't be ordered right now. Remove it to send your order.", "verified zero", "Tell me when back"):
+    for needle in ("shop_allow_backorder_staff", "shop_stock_fresh_days", "Sold Out — can't be ordered right now. Remove it to send your order.", "verified zero", "Tell me when back"):
         assert needle in doc, needle
     ci = _read(".github/workflows/ci.yml")
     assert "run: python -m tests.test_r1_soldout" in ci
@@ -419,7 +420,7 @@ def _():
     assert body.index("slider_timing(run, page)") < body.index("soldout_order_check(run, fresh"), "last of all"
     assert body.index('shot(run, page, out, "full", full=True)') < body.index("soldout_order_check(run, fresh"), "after the full-page shot"
     assert "fresh = ctx.new_page()" in body and "install_mocks(fresh, st.order_kind)" in body and "fresh.close()" in body
-    assert '"card.soldOut": "Sold out"' in qa and '"card.tellBack": "Tell me when back"' in qa
+    assert '"card.soldOut": "Sold Out"' in qa and '"card.tellBack": "Tell me when back"' in qa
 
 
 # ── the migration (written, never applied here) ────────────────────────────────

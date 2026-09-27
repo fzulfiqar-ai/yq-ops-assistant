@@ -330,9 +330,12 @@ def _():
         return re.findall(r"'([a-z_]+)'", m.group(1))
     mig = _read("scripts/shop_events_error_migration.sql")
     rev = _read("scripts/shop_events_error_reverse.sql")
-    assert values(mig) == list(EVENTS), (values(mig), EVENTS)
+    # R7d widened the list again ('product_request', scripts/r7d_product_request_migration.sql —
+    # tests/test_r7d_merchant.py holds THAT file equal to EVENTS); this file stays the R6 step
+    r6 = [e for e in EVENTS if e != "product_request"]
+    assert values(mig) == r6, (values(mig), EVENTS)
     assert "error" in values(mig) and len(values(mig)) == 20
-    assert values(rev) == [e for e in EVENTS if e != "error"] and len(values(rev)) == 19
+    assert values(rev) == [e for e in r6 if e != "error"] and len(values(rev)) == 19
     for name in ("view", "vitals", "push_subscribe", "reorder", "cancel"):
         assert name in values(mig) and name in values(rev), f"{name} kept"
     assert not re.search(r"^\s*(commit|end)\s*;", mig, re.I | re.M), "no COMMIT: apply_sql --rehearse must be able to roll it back"
