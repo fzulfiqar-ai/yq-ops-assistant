@@ -697,7 +697,11 @@ def _():
     assert r == {"order_id": 7, "kind": "reminder", "channel": "email", "recipient_role": "rep",
                  "recipient_masked": "r***@example.test", "status": "sent", "provider": "resend", "error": None,
                  "level": "rep", "attempt": 2, "detail": {"age_min": 130}, "created_at": iso(NOW)}, r
-    assert "created_at" not in sn.notification_row("stale_data", "telegram", "owner", {"sent": True}), "the DB default"
+    # every row carries created_at (a bulk insert fills a missing key with NULL, which NOT NULL refuses)
+    keys = {tuple(sorted(sn.notification_row(k, "email", "rep", {"sent": True}, **kw))) for k, kw in
+            (("reminder", {"at": iso(NOW)}), ("stale_data", {}), ("new_order", {"order_id": 1, "to": "a@b.test"}))}
+    assert len(keys) == 1 and "created_at" in next(iter(keys)), keys
+    assert sn.notification_row("stale_data", "telegram", "owner", {"sent": True})["created_at"] > iso(NOW)
     assert sn.notification_row("x", "email", "owner", {"sent": False, "results": [{"tried": ["resend", "brevo"]}]})["provider"] == "resend/brevo"
     assert sn.notification_row("x", "whatsapp", "rep", {"sent": True})["provider"] == "whatsapp_cloud"
 

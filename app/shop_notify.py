@@ -430,16 +430,15 @@ def notification_row(kind: str, channel: str, role: str | None, res, *, order_id
                      to=None, level: str | None = None, attempt: int | None = None,
                      detail: dict | None = None, at: str | None = None) -> dict:
     """One shop_notifications row from a channel result ({"sent": bool, "reason"?, ...}).
-    `at` pins created_at (the jobs pass their clock, so every row of one attempt shares it)."""
+    `at` pins created_at (the jobs pass their clock, so every row of one attempt shares it). Every
+    row carries created_at: postgrest-py sends a bulk insert's columns as the union of its keys and
+    fills a missing one with NULL, which the NOT NULL column would refuse."""
     res = res if isinstance(res, dict) else {}
     status = "sent" if res.get("sent") else ("skipped" if _skipped(channel, res) else "failed")
-    row = {"order_id": order_id, "kind": kind, "channel": channel, "recipient_role": role,
-           "recipient_masked": mask_recipient(to), "status": status, "provider": _provider(channel, res),
-           "error": scrub(res.get("reason") or res.get("error")), "level": level, "attempt": attempt,
-           "detail": detail or None}
-    if at:
-        row["created_at"] = at
-    return row
+    return {"order_id": order_id, "kind": kind, "channel": channel, "recipient_role": role,
+            "recipient_masked": mask_recipient(to), "status": status, "provider": _provider(channel, res),
+            "error": scrub(res.get("reason") or res.get("error")), "level": level, "attempt": attempt,
+            "detail": detail or None, "created_at": at or datetime.now(timezone.utc).isoformat()}
 
 
 def log_notifications(rows: list[dict], client=None) -> bool:
