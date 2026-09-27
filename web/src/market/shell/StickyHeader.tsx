@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ChevronDown, CircleUserRound, Search, Tag, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { LangSwitch } from '../components/LangSwitch'
 import { SearchHints } from '../components/SearchField'
 import { useMarket, useOrder } from '../MarketContext'
 import { isDeal } from '../lib/facets'
@@ -213,6 +214,8 @@ export function StickyHeader() {
               <span className="hidden xl:inline">{S.nav.me}</span>
             </NavLink>
           </nav>
+          {/* EN / عربي: the other language, named in its own script (~48 px of the search trigger's share at 1024) */}
+          <LangSwitch where="header" />
 
           <button
             type="button"

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ChevronRight, ClipboardList, Download, Globe, Heart, Info, ListChecks, MessageCircle, Package, Phone, RotateCcw, ShieldCheck, Tag, Trash2, Truck, UserRound, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { LangSwitch } from '../components/LangSwitch'
 import { MarketCard } from '../components/MarketCard'
 import { Rail } from '../components/Rail'
 import { RepCard } from '../components/RepCard'
@@ -11,13 +12,14 @@ import { useSaved } from '../store/saved'
 import { useMarket, useOrder } from '../MarketContext'
 import { EMPTY_CUSTOMER, readCustomer, rememberedOrders, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, fmtDate, initials } from '../lib/format'
+import { bhd, fmtDate, initials, statusLabel } from '../lib/format'
 import { canPromptInstall, isIos, isStandalone, onInstallChange, promptInstall } from '../lib/install'
 import { usePageTitle } from '../shell/ShellContext'
 import { S } from '../strings'
 import { Button, LinkButton } from '../ui/Button'
 import { Chip } from '../ui/Chip'
 import { Input, Label } from '../ui/Field'
+import { Ltr } from '../ui/Ltr'
 import { useToast } from '../ui/Toast'
 
 declare const __BUILD_ID__: string
@@ -200,14 +202,16 @@ export default function MyYQPage() {
                     <Link to={`/o/${o.token}`} className={row}>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-2">
-                          <span className="tnum">{o.order_no}</span>
-                          <Chip tone={o.status === 'cancelled' ? 'bad' : o.status === 'delivered' ? 'ok' : 'plum'}>{o.status_label || o.status}</Chip>
+                          <span className="tnum">
+                            <Ltr>{o.order_no}</Ltr>
+                          </span>
+                          <Chip tone={o.status === 'cancelled' ? 'bad' : o.status === 'delivered' ? 'ok' : 'plum'}>{statusLabel(o.status, o.status_label)}</Chip>
                           {/* a small order is a state, not a promotion — the amber deal tone is reserved for deals */}
                           {o.order_kind === 'small' && <Chip tone="grey">{S.small.badge}</Chip>}
                         </span>
                         <span className="mt-0.5 block text-xs font-normal text-ink-2">{[fmtDate(o.created_at), o.total_bhd != null ? bhd(o.total_bhd) : null].filter(Boolean).join(' · ')}</span>
                       </span>
-                      <ChevronRight size={18} className="text-ink-3" aria-hidden="true" />
+                      <ChevronRight size={18} className="text-ink-3 rtl:-scale-x-100" aria-hidden="true" />
                     </Link>
                   </li>
                 ))}
@@ -238,7 +242,7 @@ export default function MyYQPage() {
                 ).map(([k, label]) => (
                   <div key={k}>
                     <Label htmlFor={`me-${k}`}>{label}</Label>
-                    <Input id={`me-${k}`} value={customer[k]} onChange={(e) => setCustomer((c) => ({ ...c, [k]: e.target.value }))} tall={false} />
+                    <Input id={`me-${k}`} value={customer[k]} onChange={(e) => setCustomer((c) => ({ ...c, [k]: e.target.value }))} tall={false} {...(k === 'phone' || k === 'email' ? { dir: 'ltr', className: 'rtl:text-right' } : {})} />
                   </div>
                 ))}
               </div>
@@ -257,7 +261,9 @@ export default function MyYQPage() {
                   .map(([k, v]) => (
                     <div key={k} className="contents">
                       <dt className="text-ink-2">{k}</dt>
-                      <dd className="truncate font-medium text-ink">{v}</dd>
+                      <dd className="truncate font-medium text-ink">
+                        <Ltr>{v}</Ltr>
+                      </dd>
                     </div>
                   ))}
                 {!customer.phone && !customer.name && (
@@ -288,7 +294,7 @@ export default function MyYQPage() {
                 <div className="text-xs text-ink-2">{S.me.installHint}</div>
               </div>
               <Button size="sm" onClick={installable ? install : () => toast(S.me.installIos, 'info')}>
-                {S.me.install.split(' ')[0]}
+                {S.me.installShort}
               </Button>
             </section>
           )}
@@ -325,12 +331,7 @@ export default function MyYQPage() {
               <div className={cn(row, 'cursor-default border-t border-line-2 hover:bg-transparent')}>
                 <Globe size={18} className="text-plum" aria-hidden="true" />
                 <span className="flex-1">{S.me.language}</span>
-                <span className="inline-flex rounded-sm border border-line p-0.5 text-xs">
-                  <span className="rounded-xs bg-ink px-2 py-1 text-white">EN</span>
-                  <span className="px-2 py-1 text-ink-3" title={S.me.soon}>
-                    AR
-                  </span>
-                </span>
+                <LangSwitch variant="segmented" where="me" />
               </div>
               {/* the build id belongs with help, not as the merchant's closing line */}
               <div className="flex items-center justify-end border-t border-line-2 px-4 py-2 text-2xs tnum text-ink-3">
