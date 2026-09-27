@@ -492,7 +492,7 @@ def _():
     assert sm["id"] == 1 and how == "focus_map"
 
 
-@test("lifecycle: five merchant stages, storekeeper limited, every transition table entry is a real status")
+@test("lifecycle: three visible stages (R7c), storekeeper limited, every transition table entry is a real status")
 def _():
     from app.shop import NEXT_STATUS, ROLE_STATUSES, STATUSES, STATUS_LABELS, TRACK_STEPS, order_steps
     assert set(STATUS_LABELS) == set(STATUSES)
@@ -501,11 +501,12 @@ def _():
     assert NEXT_STATUS["out_for_delivery"] == ("delivered", "cancelled")
     assert NEXT_STATUS["delivered"] == () and NEXT_STATUS["cancelled"] == ()
     assert ROLE_STATUSES["storekeeper"] == ("packed", "out_for_delivery")
-    assert TRACK_STEPS == ("new", "confirmed", "packed", "out_for_delivery", "delivered")
+    # R7c (owner, 27-Sep-2026): Received → Confirmed → Delivered; a Preparing / On the way stamp is "Confirmed"
+    assert TRACK_STEPS == ("new", "confirmed", "delivered")
     steps = order_steps({"status": "packed", "created_at": "a", "confirmed_at": "b", "packed_at": "c"})
-    assert [s["done"] for s in steps] == [True, True, False, False, False]
-    assert [s["current"] for s in steps] == [False, False, True, False, False]
-    assert steps[2]["at"] == "c" and steps[3]["at"] is None
+    assert [s["done"] for s in steps] == [True, False, False]
+    assert [s["current"] for s in steps] == [False, True, False]
+    assert steps[1]["at"] == "b" and steps[2]["at"] is None
     delivered = order_steps({"status": "delivered", "created_at": "a", "delivered_at": "z"})
     assert all(s["done"] for s in delivered) and delivered[-1]["current"] and delivered[-1]["at"] == "z"
     cancelled = order_steps({"status": "cancelled", "created_at": "a"})

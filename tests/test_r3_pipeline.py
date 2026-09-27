@@ -412,7 +412,8 @@ def _events(fake, order_id=None):
 @test("cancel: a staff cancel needs a reason code from the fixed list; 'other' needs a note; the merchant's is customer_request")
 def _():
     from app.shop_pipeline import CANCEL_REASONS, validate_cancel
-    assert list(CANCEL_REASONS) == ["out_of_stock", "customer_request", "duplicate", "test", "price_issue", "other"]
+    assert list(CANCEL_REASONS) == ["out_of_stock", "customer_request", "duplicate", "test", "price_issue",
+                                    "below_minimum", "other"]       # R7c: below_minimum
     _raises(lambda: validate_cancel(None, None), "reason")
     _raises(lambda: validate_cancel("bogus", "x"), "reason")
     _raises(lambda: validate_cancel("other", None), "note")
@@ -833,17 +834,20 @@ def _():
         o = create_order(body, staff_email="rep@example.com")       # rep 1 orders for rep 2's shop
         assert o["salesman_id"] == 1 and o["attribution_source"] == "staff" and o["attribution_conflict"] is True
         evs = _events(fake, o["id"])
-        assert [e["event"] for e in evs] == ["created", "conflict"], evs
+        # R7c: a rep-placed order is born Confirmed — its status:confirmed rides in the same insert
+        assert [e["event"] for e in evs] == ["created", "conflict", "status:confirmed"], evs
         assert evs[0]["detail"]["conflict"] is True
         assert evs[1]["detail"] == {"recorded_salesman_id": 2, "placed_for_salesman_id": 1, "placed_by": "rep@example.com"}
         assert fake.rows("shop_customers")[0]["sticky_salesman_id"] == 2, "the shop's record is untouched"
         ins = [c for c in fake.writes("shop_order_events") if c[0] == "insert"]
-        assert len(ins) == 1 and isinstance(ins[0][2], list) and [x["event"] for x in ins[0][2]] == ["created", "conflict"], \
+        assert len(ins) == 1 and isinstance(ins[0][2], list) and \
+            [x["event"] for x in ins[0][2]] == ["created", "conflict", "status:confirmed"], \
             "created + conflict go in ONE insert: an informational row can never discard a complete order on its own"
         # the same rep for his own shop: no flag, no extra event
         fake.rows("shop_customers")[0]["sticky_salesman_id"] = 1
         o = create_order({**body, "customer": {"name": "Test Shop", "phone": "33001122"}}, staff_email="rep@example.com")
-        assert o["attribution_conflict"] is False and [e["event"] for e in _events(fake, o["id"])] == ["created"]
+        assert o["attribution_conflict"] is False and \
+            [e["event"] for e in _events(fake, o["id"])] == ["created", "status:confirmed"]
 
 
 @test("matrix: reassigning an order never touches the merchant; the explicit customer assignment does, with a reason and two audit rows")
@@ -1087,7 +1091,8 @@ def _():
             assert r.status_code == 200, r.text[:200]
             r = c.post("/shop/orders/2/status", json={"status": "cancelled", "reason_code": "other", "note": "price too low for this shop"})
             assert r.status_code == 200, r.text[:200]
-            r = c.post("/shop/orders/3/status", json={"status": "confirmed", "note": "Thursday with Furqan"})
+            # R7c: Confirmed goes through POST …/confirm (the status route refuses it)
+            r = c.post("/shop/orders/3/confirm", json={"note": "Thursday with Furqan"})
             assert r.status_code == 200, r.text[:200]
         assert sent == [(1, "cancelled", "Duplicate order"), (2, "cancelled", None), (3, "confirmed", "Thursday with Furqan")], sent
         # the note itself is the record — cancel_reason and the event — and never the email

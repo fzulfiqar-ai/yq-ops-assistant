@@ -229,8 +229,10 @@ def _():
     c01 = next(ln for ln in q["lines"] if ln["item_code"] == "C01")
     assert q["can_submit"] and c01["backorder"] and not c01["unavailable"], q
     assert q["subtotal_bhd"] == 8.0 and q["total_bhd"] == 8.0 and q["items"] == 2, "the confirmed totals must not be understated"
-    src = _read("app/shop.py")
-    assert 'o.get("referral_code"), staff=True, force_backorder=True)' in src, "confirm_order's re-price must always allow backorder"
+    # R7c: confirmed lines keep their ORDERED price (the price lock, no re-price); a line the rep adds or
+    # substitutes is priced by the engine and must price a sold-out item as a backorder (his decision)
+    src = _read("app/shop_heart.py")
+    assert "staff=True, force_backorder=True)" in src, "a line the rep adds must always allow backorder"
 
 
 @test("catalog_payload: the staff catalog's allow_backorder follows the staff switch (the UI must agree with the quote)")

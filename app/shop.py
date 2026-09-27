@@ -27,7 +27,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from app import attribution, shop_pipeline
+from app import attribution, shop_heart, shop_pipeline
 from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
@@ -47,11 +47,16 @@ NEXT_STATUS: dict[str, tuple[str, ...]] = {
     "delivered": (),
     "cancelled": (),
 }
+# The storekeeper's pick list keeps its own stamp words (Preparing / On the way). What a rep or a
+# shop reads is the owner's three stages (27-Sep-2026, R7c): Received → Confirmed → Delivered, or
+# Cancelled — packed / out_for_delivery show as "Confirmed" (shop_heart.status_label).
 STATUS_LABELS = {"new": "Received", "confirmed": "Confirmed", "packed": "Preparing",
                  "out_for_delivery": "On the way", "delivered": "Delivered", "cancelled": "Cancelled"}
-TRACK_STEPS = ("new", "confirmed", "packed", "out_for_delivery", "delivered")
+TRACK_STEPS = ("new", "confirmed", "delivered")
 # Statuses a non-admin staff role may set. Salesmen: every transition on their own orders; the
-# storekeeper only moves goods (Preparing / On the way); admins: everything.
+# storekeeper only moves goods (Preparing / On the way); admins: everything. The status ROUTE
+# narrows this further (shop_heart.next_statuses): Confirmed only through POST …/confirm, and the
+# two stamps for the storekeeper alone.
 ROLE_STATUSES: dict[str, tuple[str, ...]] = {"storekeeper": ("packed", "out_for_delivery")}
 # The orders a non-admin staff role may see at all when it is not scoped to one salesman (R7b):
 # the storekeeper sees the goods in motion — Confirmed (to pick), Preparing, On the way — and never
@@ -61,7 +66,9 @@ SOURCES = ("referral", "dropdown", "default", "salesman", "market")
 # How the salesman on an order was decided — the precedence lives in resolve_salesman().
 ATTRIBUTION = ("customer_admin", "focus_map", "sticky", "session_ref", "checkout_pick", "staff", "default",
                "unassigned")
-LINE_STATUSES = ("ok", "changed", "removed", "backorder")
+# 'substituted' / 'added' / 'unavailable' arrive with scripts/r7c_order_lines_qty_migration.sql;
+# before it they are written as removed / ok (shop_heart.db_line_status)
+LINE_STATUSES = ("ok", "changed", "removed", "backorder", "substituted", "added", "unavailable")
 EVENTS = ("view", "item", "add", "checkout", "order", "search", "search_zero", "remove", "qty", "cart",
           "checkout_start", "rail_click", "reco_click", "share", "install", "reorder", "cancel", "vitals",
           "push_subscribe", "error")
@@ -1881,6 +1888,12 @@ def staff_recorded_rep(cust: dict | None) -> int | None:
     return attribution.recorded_rep_id(cust)
 
 
+def staff_settle_sticky(client, order: dict) -> bool:
+    """A rep-placed order is born Confirmed: the merchant's first-touch rep settles as at any
+    confirmation (never over a value on file). Named for the same shadowing reason as above."""
+    return attribution.settle_sticky(client, order, "confirmed")
+
+
 def _recent_order_count(field: str, value: str | None, hours: int = 24) -> int:
     if not value:
         return 0
@@ -2225,8 +2238,13 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     if isinstance(order_no, (list, dict)):
         order_no = json.dumps(order_no)
     token = secrets.token_urlsafe(24)
+    # R7c (owner, 27-Sep-2026): an order a rep places IN the shop is his confirmation too — it is
+    # born Confirmed at the prices just quoted, and no reminder ever chases it (shop_jobs skips
+    # source 'salesman' anyway; it never sits in Received).
+    born_confirmed = staff
+    now_iso = _iso()
     row = {
-        "order_no": str(order_no), "token": token, "status": "new",
+        "order_no": str(order_no), "token": token, "status": "confirmed" if born_confirmed else "new",
         "order_kind": order_kind,
         "minimum_gap_bhd": money(minimum.get("remaining_bhd")) if order_kind == "small" else None,
         "customer_name": name, "customer_phone": phone,
@@ -2244,24 +2262,40 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "has_backorder": quote["has_backorder"], "ip_hash": _ip_hash(ip), "ua": (ua or "")[:200],
         "device_id": device_id, "client_order_id": client_order_id, "session_ref": session_ref,
         "attribution_source": attribution, "attribution_conflict": bool(conflict),
-        "assigned_at": _iso() if sm else None, "assigned_by": "system" if sm else None,
-        "created_at": _iso(), "updated_at": _iso(),
+        "assigned_at": now_iso if sm else None, "assigned_by": "system" if sm else None,
+        "created_at": now_iso, "updated_at": now_iso,
     }
+    if born_confirmed:
+        row.update(confirmed_at=now_iso, subtotal_confirmed_bhd=quote["subtotal_bhd"],
+                   total_confirmed_bhd=quote["total_bhd"])
     # A staff order's device is the rep's login (staff:<email>, the idempotency key of the
     # salesman checkout): it stays on the order row and never joins the merchant's device list,
     # which is what lets a device be recognised as that merchant (recognize_phone).
     row["customer_id"] = upsert_customer_from_order(row, sm, attribution, None if staff else device_id,
                                                     existing_cust)
     order = client.table("shop_orders").insert(row).execute().data[0]
-    lines = [{
-        "order_id": order["id"], "item_code": ln["item_code"], "display_name": ln["display_name"],
-        "spec": ln.get("spec"), "image_url": ln.get("image_url"), "qty": ln["qty"],
-        "list_price_bhd": ln["list_price_bhd"], "unit_price_bhd": ln["unit_price_bhd"],
-        "discount_bhd": ln["discount_bhd"], "line_total_bhd": ln["line_total_bhd"],
-        "stock_status": ln["stock_status"], "backorder": ln["backorder"],
-        "line_status": "backorder" if ln["backorder"] else "ok",
-        "rule_ids": [a["rule_id"] for a in ln["applied"]] or None,
-    } for ln in quote["lines"]]
+    # R7c: each line snapshots the landed cost the pricing engine floored it with (margin later, on
+    # the cost as it was); a rep-placed line is confirmed at its quoted price. Columns probed.
+    with_cost = has_column("shop_order_lines", "unit_cost_bhd")
+    with_priced = born_confirmed and has_column("shop_order_lines", "unit_price_confirmed")
+    lines = []
+    for ln in quote["lines"]:
+        lr = {
+            "order_id": order["id"], "item_code": ln["item_code"], "display_name": ln["display_name"],
+            "spec": ln.get("spec"), "image_url": ln.get("image_url"), "qty": ln["qty"],
+            "list_price_bhd": ln["list_price_bhd"], "unit_price_bhd": ln["unit_price_bhd"],
+            "discount_bhd": ln["discount_bhd"], "line_total_bhd": ln["line_total_bhd"],
+            "stock_status": ln["stock_status"], "backorder": ln["backorder"],
+            "line_status": "backorder" if ln["backorder"] else "ok",
+            "rule_ids": [a["rule_id"] for a in ln["applied"]] or None,
+        }
+        if born_confirmed:
+            lr["qty_confirmed"] = ln["qty"]
+        if with_priced:
+            lr.update(unit_price_confirmed=ln["unit_price_bhd"], line_total_confirmed=ln["line_total_bhd"])
+        if with_cost:
+            lr.update(shop_heart._cost_fields(ctx, ln["item_code"]))
+        lines.append(lr)
     # Header, lines and the events are three PostgREST writes, not one transaction (the
     # plpgsql shop_place_order comes in a later release). Until then: if anything after the
     # header fails, take the header back out (lines/events cascade) and re-raise, so a
@@ -2278,12 +2312,19 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
             "order_id": order["id"], "actor": staff_email, "event": "conflict",
             "detail": {"recorded_salesman_id": staff_recorded_rep(existing_cust),
                        "placed_for_salesman_id": sm["id"] if sm else None, "placed_by": staff_email}})
+    if born_confirmed:
+        events.append({
+            "order_id": order["id"], "actor": staff_email, "event": "status:confirmed",
+            "detail": {"note": None, "from": "new", "born_confirmed": True, "changed": [], "removed": [],
+                       "total_after": quote["total_bhd"]}})
     try:
-        client.table("shop_order_lines").insert(lines).execute()
+        shop_heart._insert_lines(client, lines)
         client.table("shop_order_events").insert(events).execute()
     except Exception as e:  # noqa: BLE001 — whatever it was, the header must not outlive it
         _discard_lineless_order(client, order["id"], f"lines/event insert failed: {e}")
         raise
+    if born_confirmed:
+        staff_settle_sticky(client, order)
     if quote.get("_coupon_rule_id"):
         try:
             r = client.table("discount_rules").select("uses").eq("id", quote["_coupon_rule_id"]).execute().data
@@ -2393,55 +2434,44 @@ def _salesman_by_id(sid) -> dict | None:
     return r[0] if r else None
 
 
-_STAGE_TS = {"new": "created_at", "confirmed": "confirmed_at", "packed": "packed_at",
-             "out_for_delivery": "out_for_delivery_at", "delivered": "delivered_at"}
-
-
 def order_steps(o: dict) -> list[dict]:
-    """The five merchant-facing stages with done/current flags and timestamps. A cancelled order
-    keeps the stages it reached and carries `cancelled` on the order itself."""
-    status = o.get("status")
-    reached = TRACK_STEPS.index(status) if status in TRACK_STEPS else (-1 if status == "cancelled" else 0)
-    last = len(TRACK_STEPS) - 1
-    # 'packed' is optional: an order that went straight to On the way counts Preparing as passed;
-    # Delivered is both the current and a completed step.
-    steps = []
-    for i, s in enumerate(TRACK_STEPS):
-        steps.append({"status": s, "label": STATUS_LABELS[s],
-                      "done": reached > i or (reached == last and i == last),
-                      "current": reached == i,
-                      "at": o.get(_STAGE_TS[s]) if reached >= i else None})
-    return steps
+    """The three stages a shop and a rep see — Received → Confirmed → Delivered — with done /
+    current flags and timestamps (R7c, owner 27-Sep-2026). An order the storekeeper stamped
+    Preparing / On the way is still "Confirmed" here. A cancelled order keeps nothing current and
+    carries `cancelled` on the order itself."""
+    return shop_heart.order_steps(o)
 
 
 def public_order_view(o: dict) -> dict:
     """What the customer's status page may see (no phone/email/ip of anyone). The customer only
-    holds this order's token, so nothing here reaches beyond this one order."""
+    holds this order's token, so nothing here reaches beyond this one order. Per line: the three
+    numbers (requested / confirmed / delivered), the confirmed money and the PUBLIC reason label
+    (never the rep's internal note, never a cost); per order: the total as ordered, the confirmed
+    total and the effective one (shop_heart.effective_money)."""
     from app.shop_notify import customer_to_salesman_email_url, customer_to_salesman_wa_url
     sm = o.get("salesman") or {}
     wa = customer_to_salesman_wa_url(o)   # falls back to the owner number when no salesman is set
     mail = customer_to_salesman_email_url(o)
-    confirmed_total = o.get("total_confirmed_bhd")
     name = str(sm.get("name") or "")
+    lines = [shop_heart.line_view(ln, o, public=True) for ln in o.get("lines", [])]
     return {
         "order_no": o["order_no"], "status": o["status"],
-        "status_label": STATUS_LABELS.get(o["status"], o["status"]),
+        "visible_status": shop_heart.visible_status(o["status"]),
+        "status_label": shop_heart.status_label(o["status"]),
         "steps": order_steps(o), "cancelled": o["status"] == "cancelled",
         "can_cancel": o["status"] == "new",
         "expected_delivery": o.get("expected_delivery"),
+        "expected_delivery_date": o.get("expected_delivery_date"),
         "created_at": o.get("created_at"), "updated_at": o.get("updated_at"),
         "salesman": ({"name": name or "YQ Bahrain", "first_name": (name.split(" ")[0] if name else "YQ Bahrain"),
                       "whatsapp_url": wa, "email_url": mail} if (sm or wa) else None),
         "customer": {"name": o.get("customer_name"), "shop": o.get("customer_shop"), "area": o.get("customer_area")},
-        "lines": [{"item_code": ln["item_code"], "display_name": ln.get("display_name"), "qty": ln["qty"],
-                   "qty_confirmed": ln.get("qty_confirmed"), "line_status": ln.get("line_status") or "ok",
-                   "unit_price_bhd": money(ln["unit_price_bhd"]), "line_total_bhd": money(ln["line_total_bhd"]),
-                   "stock_status": ln.get("stock_status"), "backorder": bool(ln.get("backorder")),
-                   "image_url": ln.get("image_url")} for ln in o.get("lines", [])],
+        "lines": lines,
         "subtotal_bhd": money(o.get("subtotal_bhd")), "discount_bhd": money(o.get("discount_bhd")),
-        "delivery_bhd": money(o.get("delivery_bhd")), "total_bhd": money(o.get("total_bhd")),
-        "total_confirmed_bhd": money(confirmed_total) if confirmed_total is not None else None,
-        "has_changes": any((ln.get("line_status") or "ok") in ("changed", "removed") for ln in o.get("lines", [])),
+        "delivery_bhd": money(o.get("delivery_bhd")), **shop_heart.order_money(o),
+        "has_changes": any(ln["disposition"] not in ("as_ordered", "backorder")
+                           or (ln["qty_delivered"] is not None and ln["qty_delivered"] != ln["qty_confirmed"])
+                           for ln in lines),
         "has_backorder": bool(o.get("has_backorder")), "note": o.get("note"),
         "order_kind": o.get("order_kind") or "standard", "minimum_gap_bhd": o.get("minimum_gap_bhd"),
         "timeline": [{"ts": e.get("ts"), "event": e.get("event"), "note": _public_note(e)}
@@ -2462,11 +2492,15 @@ def _public_note(e: dict) -> str | None:
 
 
 def _public_event(event) -> bool:
-    """Only the order's own lifecycle reaches the merchant's status page: 'created' and the
-    status moves. Everything else on shop_order_events is staff business — test_flag,
-    assigned (with its reason), and whatever the alerts jobs add — and stays internal."""
+    """Only the order's own lifecycle reaches the merchant's status page: 'created', the status
+    moves the shop can see (Received / Confirmed / Delivered / Cancelled — never the storekeeper's
+    Preparing / On the way stamps) and 'amended' (its note is the rep's note for the shop).
+    Everything else on shop_order_events is staff business — test_flag, assigned (with its
+    reason), reopened, customer_notified and whatever the alerts jobs add — and stays internal."""
     ev = str(event or "")
-    return ev == "created" or ev.startswith("status:")
+    if ev in ("status:packed", "status:out_for_delivery"):
+        return False
+    return ev in ("created", "amended") or ev.startswith("status:")
 
 
 def orders_by_tokens(tokens) -> list[dict]:
@@ -2482,9 +2516,9 @@ def orders_by_tokens(tokens) -> list[dict]:
         .in_("token", toks).order("created_at", desc=True).execute().data or []), what="orders by tokens")
     out = []
     for r in rows:
-        total = r.get("total_confirmed_bhd") if r.get("total_confirmed_bhd") is not None else r.get("total_bhd")
         out.append({"order_no": r["order_no"], "token": r["token"], "status": r["status"],
-                    "status_label": STATUS_LABELS.get(r["status"], r["status"]), "total_bhd": money(total),
+                    "status_label": shop_heart.status_label(r["status"]),
+                    "total_bhd": shop_heart.order_total(r),
                     "items": _i(r.get("items_count")), "units": _i(r.get("units_count")),
                     "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
                     "salesman": r.get("salesman_name"), "expected_delivery": r.get("expected_delivery"),
@@ -2541,6 +2575,7 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         nr = r.pop("notify_result", None)
         r["notify_failed"] = notify_failed(nr, r.get("created_at"), now)
         r["notify_attempts"] = attempt_count(nr)
+        r["status_label"] = shop_heart.status_label(r.get("status"))     # packed / on the way read "Confirmed"
     return {"orders": rows, "count": res.count if res.count is not None else len(rows),
             "counts": status_counts(salesman_id),
             # the wholesale minimum the small-order gap on a rep's card is measured against
@@ -2595,7 +2630,9 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
                allowed: tuple[str, ...] | None = None, cancelled_by: str = "staff",
                expected_status: str | None = None, reason_code: str | None = None,
                focus_invoice_no: str | None = None, keep_totals: bool = False,
-               detail_extra: dict | None = None) -> dict:
+               detail_extra: dict | None = None, pin_updated: bool = False,
+               expected_updated_at: str | None = None, extra_upd: dict | None = None,
+               after_swap=None) -> dict:
     """Move an order along the lifecycle. `allowed` narrows the statuses this actor's role may set
     (the storekeeper only moves goods). Each stage stamps its own timestamp; Preparing records
     which salesman the storekeeper issued the goods to.
@@ -2603,7 +2640,9 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
     The write is a compare-and-swap on the status just read: the UPDATE also filters on it and
     zero changed rows means someone else moved the order first — nothing is stamped, no event is
     written, the caller sees CAS_CONFLICT_MSG. `expected_status` lets a caller that already
-    decided on an earlier read (the merchant's cancel: only while Received) pin that read too.
+    decided on an earlier read (the merchant's cancel: only while Received) pin that read too;
+    `pin_updated` + `expected_updated_at` pin that read's updated_at as well (R7c: any write in
+    between — an amendment, an assignment — makes this move lose).
 
     R3 pipeline: a staff cancel needs `reason_code` (shop_pipeline.CANCEL_REASONS; 'other' needs
     the note), Delivered may carry the optional Focus invoice number, and Confirmed / Delivered
@@ -2613,11 +2652,18 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
 
     R7a Focus link (shop_pipeline.decide_focus_link): `keep_totals` leaves the confirmed-total
     columns as they are at Confirmed (an accept never writes money — every reader falls back to
-    total_bhd), and `detail_extra` adds keys to the status event's detail (never 'from'/'note')."""
+    total_bhd), and `detail_extra` adds keys to the status event's detail (never 'from'/'note').
+
+    R7c: Delivered records qty_delivered = qty_confirmed on the lines (best effort), unless
+    `after_swap(client) -> undo` writes the lines itself (shop_heart.deliver_with_changes) — then
+    a failure in it or in the event puts the lines and the header back and re-raises. `extra_upd`
+    adds header columns to the same compare-and-swap (the delivered value)."""
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
     if expected_status and o["status"] != expected_status:
+        raise ShopError(CAS_CONFLICT_MSG)
+    if pin_updated and o.get("updated_at") != expected_updated_at:
         raise ShopError(CAS_CONFLICT_MSG)
     status = str(status or "").strip().lower()
     if status not in STATUSES:
@@ -2647,19 +2693,43 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
         upd["cancel_reason"] = text
         detail["reason_code"] = code
         if has_column("shop_orders", "cancel_reason_code"):
-            upd["cancel_reason_code"] = code
+            # 'below_minimum' needs the widened check (r7c migration); until then the column says
+            # 'other' and the event keeps the real code
+            upd["cancel_reason_code"] = (code if code not in shop_pipeline.R7C_CANCEL_REASONS
+                                         or shop_heart.orders_ready() else "other")
     if status == "delivered":
         inv = shop_pipeline.clean_invoice_no(focus_invoice_no)
         if inv:
             upd["focus_invoice_no"] = inv
             detail["focus_invoice_no"] = inv
+    for k, v in (extra_upd or {}).items():
+        upd.setdefault(k, v)
     client = get_client()
-    swapped = _update_optional("shop_orders", upd, ("cancel_reason_code",),
-                               lambda q: q.eq("id", order_id).eq("status", o["status"]).execute().data or [])
+
+    def _cas(q):
+        q = q.eq("id", order_id).eq("status", o["status"])
+        if pin_updated:
+            q = shop_heart.pin_updated(q, o.get("updated_at"))
+        return q.execute().data or []
+    swapped = _update_optional("shop_orders", upd, ("cancel_reason_code",) + shop_heart.ORDER_R7C_COLS, _cas)
     if not swapped:
         raise ShopError(CAS_CONFLICT_MSG)
-    client.table("shop_order_events").insert({
-        "order_id": order_id, "actor": actor, "event": f"status:{status}", "detail": detail}).execute()
+    event = {"order_id": order_id, "actor": actor, "event": f"status:{status}", "detail": detail}
+    if after_swap is not None:
+        undo = None
+        try:
+            undo = after_swap(client)
+            client.table("shop_order_events").insert(event).execute()
+        except Exception as e:  # noqa: BLE001 — lines and header go back, then the error
+            if undo:
+                undo()
+            shop_heart._revert_header(order_id, {k: o.get(k) for k in upd}, status=status, updated_at=now,
+                                      order_no=o.get("order_no"), err=e)
+            raise
+    else:
+        client.table("shop_order_events").insert(event).execute()
+        if status == "delivered":
+            shop_heart.fill_delivered(client, o)
     if status in attribution.STICKY_SETTLE_STATUSES:
         attribution.settle_sticky(client, o, status)
     return get_order(order_id) or {}
@@ -2679,126 +2749,41 @@ def cancel_by_customer(order_token: str, reason: str | None) -> dict:
                       expected_status="new")
 
 
-def confirm_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str) -> dict:
-    """Confirm with changes: per-line confirmed quantities (or removal), an expected-delivery
-    text, then a re-price at the confirmed quantities so tiers move with them and the margin
-    floor still applies. Untouched lines are confirmed as ordered."""
-    o = get_order(order_id)
-    if not o:
-        raise ShopError("Order not found.")
-    if "confirmed" not in NEXT_STATUS.get(o["status"], ()):
-        raise ShopError(f"Cannot confirm an order that is {o['status']}.")
-    client = get_client()
-    by_id = {int(ln["id"]): ln for ln in o["lines"]}
-    changed: list[dict] = []
-    removed: list[str] = []
-    # Everything is decided in memory first; the database is not touched until the header
-    # compare-and-swap below has won, so a losing confirm leaves the lines exactly as they were.
-    line_updates: dict[int, dict] = {}
-    for ch in (changes or []):
-        ln = by_id.get(_i((ch or {}).get("line_id")))
-        if not ln:
-            raise ShopError("Unknown order line.")
-        st = str((ch or {}).get("line_status") or "").strip().lower()
-        upd: dict = {"note": clean((ch or {}).get("note"), 200) or None}
-        if st == "removed":
-            upd.update(line_status="removed", qty_confirmed=0)
-            removed.append(ln["item_code"])
-        else:
-            qc = _i((ch or {}).get("qty_confirmed"), _i(ln["qty"]))
-            if qc <= 0:
-                raise ShopError(f"Confirmed quantity for {ln['item_code']} must be positive — or remove the line.")
-            if qc > MAX_QTY:
-                raise ShopError(f"Confirmed quantity for {ln['item_code']} is too large.")
-            upd.update(qty_confirmed=qc,
-                       line_status=("changed" if qc != _i(ln["qty"]) else ("backorder" if ln.get("backorder") else "ok")))
-            if qc != _i(ln["qty"]):
-                changed.append({"item_code": ln["item_code"], "from": _i(ln["qty"]), "to": qc})
-        line_updates.setdefault(int(ln["id"]), {}).update(upd)
-        ln.update(upd)
-    for ln in o["lines"]:
-        if ln.get("qty_confirmed") is None:
-            line_updates.setdefault(int(ln["id"]), {})["qty_confirmed"] = ln["qty"]
-            ln["qty_confirmed"] = ln["qty"]
-    live = [{"item_code": ln["item_code"], "qty": _i(ln.get("qty_confirmed"))}
-            for ln in o["lines"] if (ln.get("line_status") or "ok") != "removed" and _i(ln.get("qty_confirmed")) > 0]
-    if not live:
-        raise ShopError("Every line was removed — cancel the order instead.")
-    totals = None
-    try:
-        # a rep confirming is the staff path, and his confirmation IS the decision: a line that sold
-        # out after the order was placed stays a priced backorder here whatever either backorder
-        # switch says — never a zeroed "unavailable" line understating the confirmed totals
-        q = price_cart(live, o.get("coupon_code"), o.get("referral_code"), staff=True, force_backorder=True)
-        totals = {k: v for k, v in q.items() if not k.startswith("_")}
-    except ShopError as e:
-        log.info("confirm re-price skipped for %s: %s", o.get("order_no"), e)
-    priced_cols = ("unit_price_confirmed", "line_total_confirmed")
-    if totals and has_column("shop_order_lines", priced_cols[0]):
-        # the confirmed price per line (tiers move with confirmed quantities) — R4's confirmed
-        # email and tracking read these; until the migration lands the totals alone are stored
-        priced = {str(pl["item_code"]).upper(): pl for pl in totals.get("lines", [])}
-        for ln in o["lines"]:
-            pl = priced.get(str(ln["item_code"]).upper())
-            if pl and (ln.get("line_status") or "ok") != "removed":
-                line_updates.setdefault(int(ln["id"]), {}).update(
-                    unit_price_confirmed=money(pl["unit_price_bhd"]), line_total_confirmed=money(pl["line_total_bhd"]))
-    now = _iso()
-    upd_o: dict = {"status": "confirmed", "confirmed_at": now, "updated_at": now,
-                   "expected_delivery": clean(expected_delivery, 120) or None,
-                   "subtotal_confirmed_bhd": totals["subtotal_bhd"] if totals else o.get("subtotal_bhd"),
-                   "total_confirmed_bhd": totals["total_bhd"] if totals else o.get("total_bhd")}
-    swapped = (client.table("shop_orders").update(upd_o).eq("id", order_id)
-               .eq("status", o["status"]).execute().data or [])
-    if not swapped:
-        raise ShopError(CAS_CONFLICT_MSG)
-    # The header is confirmed; the lines and the event are separate writes. If any of them
-    # fails part-way the order must not stay 'confirmed' with half its lines unconfirmed and no
-    # event (the rep could not confirm again), so the header is swapped back to what was read —
-    # pinned to the confirmed_at just written, so nobody else's later move is undone — and the
-    # error re-raised for a clean retry.
-    try:
-        strip_priced = False
-        for line_id, upd in line_updates.items():
-            if strip_priced:
-                upd = {k: v for k, v in upd.items() if k not in priced_cols}
-            try:
-                if upd:
-                    client.table("shop_order_lines").update(upd).eq("id", line_id).execute()
-            except Exception as e:  # noqa: BLE001
-                if strip_priced or not any(k in upd for k in priced_cols) or not _missing_column(e):
-                    raise
-                # the *_confirmed columns went away under a cached hit (reverse script):
-                # forget the probe and confirm without them, totals alone, like pre-migration
-                for c in priced_cols:
-                    _forget_column("shop_order_lines", c)
-                log.warning("shop_order_lines.%s vanished after a cached hit — confirming totals only: %s",
-                            priced_cols[0], e)
-                strip_priced = True
-                upd = {k: v for k, v in upd.items() if k not in priced_cols}
-                if upd:
-                    client.table("shop_order_lines").update(upd).eq("id", line_id).execute()
-        client.table("shop_order_events").insert({
-            "order_id": order_id, "actor": actor, "event": "status:confirmed",
-            "detail": {"note": clean(note, 500) or None, "from": o["status"], "changed": changed, "removed": removed,
-                       "expected_delivery": upd_o["expected_delivery"]}}).execute()
-    except Exception as e:  # noqa: BLE001 — whatever it was, the header goes back first
-        revert = {k: o.get(k) for k in ("status", "confirmed_at", "updated_at", "expected_delivery",
-                                        "subtotal_confirmed_bhd", "total_confirmed_bhd")}
-        try:
-            back = (client.table("shop_orders").update(revert).eq("id", order_id)
-                    .eq("status", "confirmed").eq("confirmed_at", now).execute().data or [])
-            log.error("confirm of %s failed after the header swap (%s) — header %s", o.get("order_no"), e,
-                      "reverted" if back else "NOT reverted (moved again already)")
-        except Exception as e2:  # noqa: BLE001
-            log.error("confirm of %s failed (%s) and the header revert failed too: %s", o.get("order_no"), e, e2)
-        raise
-    attribution.settle_sticky(client, o, "confirmed")     # the assigned rep confirmed: the merchant's first-touch rep settles
-    out = get_order(order_id) or {}
-    out["totals"] = totals
-    out["changed"] = changed
-    out["removed"] = removed
-    return out
+def confirm_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
+                  added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
+    """Received → Confirmed with the editor — the only confirm path for a rep or the desk (POST
+    /status 'confirmed' is refused). Per line: a confirmed quantity (0 = unavailable), a
+    substitute, a backorder mark and a reason chip for every change; lines may be added. Price
+    lock: quantities re-price at the ORDERED unit price (+ the order's own cart discount, pro
+    rata), never today's book, never a silent zero. An adverse change needs `shop_agreed` =
+    {'via': whatsapp | phone | visit}. Untouched lines are confirmed as ordered. See
+    app/shop_heart.py."""
+    return shop_heart.confirm_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
+                                    shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+
+
+def amend_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
+                added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
+    """The same editor after confirming (confirmed / packed / out_for_delivery): an 'amended' event."""
+    return shop_heart.amend_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
+                                  shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+
+
+def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None, actor: str = "",
+                         note: str | None = None, focus_invoice_no: str | None = None) -> dict:
+    """Delivered in one tap (no lines / added) or with what was really handed over."""
+    return shop_heart.deliver_with_changes(order_id, lines, added, shop_agreed, actor, note=note,
+                                           focus_invoice_no=focus_invoice_no)
+
+
+def reopen_order(order_id: int, reason: str | None, actor: str) -> dict:
+    """Admin: Delivered → Confirmed or Cancelled → Received, within 7 days, with a reason."""
+    return shop_heart.reopen_order(order_id, reason, actor)
+
+
+def record_customer_notified(order_id: int, channel: str | None, actor: str) -> dict:
+    """The rep told the shop (his WhatsApp tap, a call or a visit) — logged on the order."""
+    return shop_heart.record_customer_notified(order_id, channel, actor)
 
 
 def set_test_flag(order_id: int, is_test: bool, actor: str) -> dict:
@@ -2920,9 +2905,9 @@ def picklist(salesman_id: int | None = None) -> dict:
     by_order: dict[int, list] = {}
     totals: dict[str, dict] = {}
     for ln in lines:
-        if (ln.get("line_status") or "ok") == "removed":
+        qty = shop_heart.qty_confirmed_eff(ln)
+        if qty <= 0:                  # removed / unavailable / substituted: nothing to pick
             continue
-        qty = _i(ln.get("qty_confirmed"), _i(ln.get("qty")))
         by_order.setdefault(ln["order_id"], []).append({"item_code": ln["item_code"], "display_name": ln.get("display_name"), "qty": qty})
         t = totals.setdefault(ln["item_code"], {"item_code": ln["item_code"], "display_name": ln.get("display_name"),
                                                 "qty": 0, "orders": 0})

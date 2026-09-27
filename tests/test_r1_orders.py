@@ -462,7 +462,8 @@ def _():
     fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
     fake.after_select["shop_orders"] = lambda n: fake.rows("shop_orders")[0].update(status="cancelled") if n == 1 else None
     with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
-        _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 2}], "Tomorrow", None, actor="rep@example.com"),
+        _raises(lambda: confirm_order(1, [{"line_id": 11, "qty_confirmed": 2, "reason": "out_of_stock"}], "Tomorrow", None,
+                                      actor="rep@example.com"),
                 CAS_CONFLICT_MSG)
         assert fake.writes("shop_order_lines") == [] and fake.writes("shop_order_events") == []
         assert all(ln["qty_confirmed"] is None for ln in fake.rows("shop_order_lines"))
@@ -475,14 +476,16 @@ def _():
     from app.shop import confirm_order
     fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
     with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
-        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 2}, {"line_id": 12, "line_status": "removed"}],
+        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 2, "reason": "out_of_stock"},
+                                {"line_id": 12, "line_status": "removed", "reason": "out_of_stock"}],
                             "Tomorrow", "trimmed", actor="rep@example.com")
         assert out["status"] == "confirmed" and out["removed"] == ["X05"]
         assert out["changed"] == [{"item_code": "T02", "from": 3, "to": 2}]
         assert out["total_confirmed_bhd"] == 5.9, out["total_confirmed_bhd"]
         by = {ln["id"]: ln for ln in fake.rows("shop_order_lines")}
         assert by[11]["qty_confirmed"] == 2 and by[11]["unit_price_confirmed"] == 2.95 and by[11]["line_total_confirmed"] == 5.9
-        assert by[12]["line_status"] == "removed" and by[12]["qty_confirmed"] == 0 and "unit_price_confirmed" not in by[12]
+        # R7c: a line confirmed at 0 is 'unavailable' ('removed' before the migration) with confirmed money 0
+        assert by[12]["line_status"] == "unavailable" and by[12]["qty_confirmed"] == 0 and by[12]["line_total_confirmed"] == 0.0
         assert [e["event"] for e in fake.rows("shop_order_events")] == ["status:confirmed"]
         # the header update was filtered on the status that was read
         upd = [c for c in fake.writes("shop_orders") if c[0] == "update"]
@@ -504,7 +507,8 @@ def _():
 @test("cas: a confirm that fails after the header swap puts the header back — no event, and the retry goes through")
 def _():
     from app.shop import confirm_order
-    changes = [{"line_id": 11, "qty_confirmed": 2}, {"line_id": 12, "qty_confirmed": 1}]
+    changes = [{"line_id": 11, "qty_confirmed": 2, "reason": "out_of_stock"},
+               {"line_id": 12, "qty_confirmed": 1, "reason": "out_of_stock"}]
     fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
     fake.fail[("update", "shop_order_lines")] = lambda n: RuntimeError("line update blip") if n == 2 else None
     with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
@@ -756,7 +760,8 @@ def _():
     with _patched(fake, _ctx([_item("T02", 2.95), _item("X05", 2.0)])):
         assert has_column("shop_order_lines", "unit_price_confirmed") is True
         fake.columns["shop_order_lines"] = set(_lines(1)[0]) | {"note"}
-        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 2}], "Tomorrow", None, actor="rep@example.com")
+        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 2, "reason": "out_of_stock"}], "Tomorrow", None,
+                            actor="rep@example.com")
         assert out["status"] == "confirmed" and out["total_confirmed_bhd"] == 9.9, out["total_confirmed_bhd"]
         by = {ln["id"]: ln for ln in fake.rows("shop_order_lines")}
         assert by[11]["qty_confirmed"] == 2 and by[12]["qty_confirmed"] == 2
@@ -862,9 +867,10 @@ def _():
     try:
         fake = _db(shop_orders=[_order(1)], shop_order_lines=_lines(1))
         # the route reads once for visibility, set_status reads again — flip after that second read
-        fake.after_select["shop_orders"] = lambda n: fake.rows("shop_orders")[0].update(status="cancelled") if n == 2 else None
+        fake.after_select["shop_orders"] = lambda n: fake.rows("shop_orders")[0].update(status="confirmed") if n == 2 else None
         with _patched(fake):
-            r = TestClient(m.app).post("/shop/orders/1/status", json={"status": "confirmed"})
+            # R7c: Confirmed is reached through POST …/confirm only — the race is shown on a cancel
+            r = TestClient(m.app).post("/shop/orders/1/status", json={"status": "cancelled", "reason_code": "duplicate"})
             assert r.status_code == 409 and "refresh" in r.json()["detail"], (r.status_code, r.text[:200])
             assert fake.rows("shop_order_events") == []
     finally:
