@@ -5,7 +5,8 @@
 --   Reverse:  scripts/r7d_offer_ledger_reverse.sql
 --   Order:    AFTER scripts/r7c_order_lines_qty_migration.sql — v_offer_performance reads the line cost
 --             snapshot (shop_order_lines.unit_cost_bhd) and the delivered quantity; the first block
---             stops with a clear message if they are missing.
+--             stops with a clear message if they are missing. It reads both through to_jsonb(l), so
+--             the r7c reverse still runs with this view in place (tests/test_r7c_order_heart guard).
 --
 -- Why: offers must be measurable BEFORE any offer runs (0 rules and 0 campaigns on 27-Sep-2026, read
 -- only). Nothing here changes a price, an order, a line, an event, a customer or a statement.
@@ -180,11 +181,15 @@ ln as (
   select l.id, l.order_id,
          coalesce(l.list_price_bhd, l.unit_price_bhd, 0)       as list_price,
          coalesce(l.unit_price_confirmed, l.unit_price_bhd, 0)  as unit_price,
-         l.unit_cost_bhd                                        as unit_cost,
-         case when o.status = 'delivered' then coalesce(l.qty_delivered, l.qty_confirmed, l.qty)
+         (r.j ->> 'unit_cost_bhd')::numeric                     as unit_cost,
+         case when o.status = 'delivered' then coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed, l.qty)
               when o.status = 'new' then l.qty
               else coalesce(l.qty_confirmed, l.qty) end         as qty_eff
   from shop_order_lines l join live o on o.id = l.order_id
+  -- the R7c columns through to_jsonb(l), as v_command_orders does: a whole-row reference pins no
+  -- column, so r7c_order_lines_qty_reverse.sql's DROP COLUMN never meets this view (the lines then
+  -- read as uncosted and as confirmed, instead of the reverse failing)
+  cross join lateral (select to_jsonb(l) as j) r
 ),
 ord as (
   select ln.order_id,
