@@ -670,7 +670,9 @@ message otherwise). Nothing here changes a price, an order, a line, an event, a 
   it archives it and filters archived rows out of every read; a rule any order used is never deleted).
 - `shop_order_discounts` — the offer ledger: one row per (order line, rule) and per (order, cart-level rule) with the
   rule snapshot (and the hold-out arm), kind, level, amount placed, amount confirmed, clamped, stage. `rule_id`
-  references `discount_rules` with NO ACTION, so the database also refuses to delete a used rule.
+  references `discount_rules` with NO ACTION, so the database also refuses to delete a used rule. A line the rep adds
+  or substitutes (Confirm, Amend, delivery with changes) gets its own rows too, born confirmed at its discount when
+  added; an admin reopen re-values the confirmed amounts (a cancel undone goes back to the placed amounts).
 - `shop_coupon_reserve(rule, force)` / `shop_coupon_release(rule)` — the coupon counter as one conditional UPDATE each,
   SECURITY DEFINER, `service_role` only.
 - `shop_badge_log` (one row per item per Bahrain day, written by the `badge_log` shop job) and `followup_exposures`

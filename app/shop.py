@@ -976,6 +976,15 @@ def _discounted_unit(rule: dict, list_price) -> Decimal:
     return lp
 
 
+def is_hold_out(rule: dict) -> bool:
+    """A rule with a hold-out bucket (scope.bucket, app/offers.py). It is priced only for the
+    merchants in its 'offer' arm, and a rep's order is held back, so it is never advertised on
+    anything shared — the cached catalogue's tiers, its offer list or an item's 'offer' badge. It
+    shows only in the shop's own quote, which is priced for that shop (R7d review: a held-back shop
+    must never see a price it is not given)."""
+    return offers.rule_bucket(rule) is not None
+
+
 def item_tiers(ctx: dict, item: dict) -> list[dict]:
     """Quantity tiers that apply to an item (public — no salesman-scoped rules). The unit price
     is the fils figure price_cart books when that tier is the best rule on the line — the same
@@ -992,7 +1001,7 @@ def item_tiers(ctx: dict, item: dict) -> list[dict]:
     for r in ctx["rules"]:
         if r["kind"] != "qty_tier" or not r.get("min_qty") or not _rule_matches_item(r, item):
             continue
-        if r["scope"]["referral_codes"]:
+        if r["scope"]["referral_codes"] or is_hold_out(r):
             continue
         unit = dmoney(max(D0, _discounted_unit(r, lp)))
         if floor is not None and unit < floor:
@@ -1131,7 +1140,7 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
     cutoff = _now() - timedelta(days=new_days)
     offer_codes = {c for c in ctx["order"]
                    if any(r["kind"] in ("qty_tier", "cart_value") and not r["scope"]["referral_codes"]
-                          and _rule_matches_item(r, ctx["items"][c]) and r["scope"]["item_codes"]
+                          and not is_hold_out(r) and _rule_matches_item(r, ctx["items"][c]) and r["scope"]["item_codes"]
                           for r in ctx["rules"])}
     for code in ctx["order"]:
         it = ctx["items"][code]
@@ -1296,7 +1305,7 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
     snap = stock_snapshot(ctx)           # the market shows the snapshot date beside "Sold out" once it is stale
     offers = []
     for r in ctx["rules"]:
-        if r["kind"] not in ("cart_value", "qty_tier") or r["scope"]["referral_codes"]:
+        if r["kind"] not in ("cart_value", "qty_tier") or r["scope"]["referral_codes"] or is_hold_out(r):
             continue
         offers.append({
             "id": r["id"], "name": r["name"], "kind": r["kind"], "summary": rule_summary(r),
@@ -2513,7 +2522,10 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
         "source": source, "referral_code": clean(referral_code, 32).lower() or None,
         "src": "salesman" if staff else (clean(body.get("src"), 80) or None),
         "placed_by": staff_email if staff else None,
-        "coupon_code": (quote["coupon"] or {}).get("code") if (quote["coupon"] or {}).get("valid") else None,
+        # only a code that was APPLIED (it took money off; its use is reserved): "code not needed" is
+        # a valid answer that gave nothing, and an order carrying it would give a use back on cancel
+        # that was never taken (R7d review)
+        "coupon_code": (quote["coupon"] or {}).get("code") if quote.get("_coupon_rule_id") else None,
         "subtotal_bhd": quote["subtotal_bhd"], "discount_bhd": quote["discount_bhd"],
         "delivery_bhd": quote["delivery_bhd"], "total_bhd": quote["total_bhd"],
         "items_count": quote["items"], "units_count": quote["units"],
@@ -3120,6 +3132,10 @@ def reopen_order(order_id: int, reason: str | None, actor: str) -> dict:
     # only a cancelled order reopens to Received (shop_heart.REOPEN_TO), so 'new' here = it was cancelled
     if (out or {}).get("status") == "new" and out.get("coupon_code"):
         offers.retake_for_order(get_client(), out)
+    # the ledger's confirmed amounts follow the reopen: a delivery undone reads the confirmed
+    # quantities again (a line added at the door counts 0); a cancel undone goes back to the placed
+    # amounts until the rep confirms again (best effort, never raises)
+    offers.refresh_confirmed(order_id)
     return out
 
 
