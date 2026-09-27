@@ -348,7 +348,8 @@ def _():
 @test("auth: read_only_refuses — reads pass, writes are refused, the own password is allowed, the AI surfaces never")
 def _():
     from app.auth import READ_ONLY_WRITE_ALLOWLIST, read_only_refuses
-    assert READ_ONLY_WRITE_ALLOWLIST == {("POST", "/auth/password")}
+    # R7b: management approves a Market Intel action (plan §7) — the one decision it makes
+    assert READ_ONLY_WRITE_ALLOWLIST == {("POST", "/auth/password"), ("POST", "/market-intel/items/{item_id}/approve")}
     for meth in ("GET", "HEAD", "OPTIONS", "get"):
         assert not read_only_refuses(meth, "/shop/orders"), meth
     for meth in ("POST", "PUT", "PATCH", "DELETE"):
@@ -603,7 +604,8 @@ def _():
         assert r.status_code == 403 and r.json()["detail"]["code"] == "read_only"
         feats = c.get("/auth/features", headers=_h("mgmt")).json()
         assert feats["role_labels"]["management"] == "Management"
-        assert feats["role_feature_limits"] == {"management": [f for f in feats["features"] if f in SIX]}
+        # R7b: Market Intel is grantable to management (not a default)
+        assert feats["role_feature_limits"] == {"management": [f for f in feats["features"] if f in SIX + ["Market Intel"]]}
         assert feats["role_defaults"]["management"] == SIX
 
 
@@ -762,11 +764,12 @@ def _():
         assert r.status_code == 200, r.text[:200]
         row = next(u for u in fake.rows("user_roles") if u["email"] == "clerk@example.com")
         assert row["role"] == "management" and row["features"] == ["Dashboard", "Sales"]
-        # admin -> management without a page list: the six, never the admin's whole list
+        # admin -> management without a page list: the pages management may hold (the six + Market
+        # Intel, R7b), never the admin's whole list
         r = _client().patch("/team/boss@example.com", headers=_h("owner"), json={"role": "management"})
         assert r.status_code == 200
         row = next(u for u in fake.rows("user_roles") if u["email"] == "boss@example.com")
-        assert row["role"] == "management" and sorted(row["features"]) == sorted(SIX)
+        assert row["role"] == "management" and sorted(row["features"]) == sorted(SIX + ["Market Intel"])
     assert user_auth.role_enabled_in_db("salesman") is True
 
 

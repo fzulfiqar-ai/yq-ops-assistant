@@ -473,3 +473,27 @@ rolled-back transaction: `python -m tests.test_r7b_command` with `YQ_LOCAL_PG_R7
 Command Centre's own order and match SQL run as `yq_readonly`, anon/authenticated refused, reverse twice,
 re-applied, refused without the links table. The reverse drops the view only (no CASCADE; nothing depends on it).
 
+## Release R7b (27-Sep-2026, not yet applied): `r7b_market_intel_migration.sql` — Market Intelligence v1
+
+Additive and idempotent, with `r7b_market_intel_reverse.sql` (drops the two views and the four tables; take
+`python -m scripts.db_backup --tables market_items market_observations market_photos market_item_decisions` first if
+the sightings are wanted). Creates `market_items` (statuses new / researching / opportunity / approved / rejected /
+merged; Approved needs an action; cached distinct counts; `ai_suggestion` + `ai_confidence` + `verified`),
+`market_observations` (`client_uuid` UNIQUE = capture idempotency; source rep / import / system), `market_photos`
+(private-bucket path, width / height / bytes, 64-bit dHash, `has_people_flag`) and the append-only
+`market_item_decisions` (row + TRUNCATE triggers). `v_market_clusters` counts DISTINCT shops and reps from the
+sightings (service role only: it names photo paths); `v_market_signals_agent` carries no rep, shop, note, login or
+path and is the only object granted to `yq_readonly`. RLS on every table, everything revoked from anon /
+authenticated (tables, views, identity sequences), no CASCADE, no security_invoker; the closing `DO` block asserts it.
+`product_finds` and `field_notes` are not touched.
+
+Order: any time; the API probes `market_observations` (hit cached 10 min, miss 1 min). Before it runs the board says
+"not set up yet" and a capture is saved to the legacy Product Finds / Field Notes tables (`source_file`
+`mi:<client_uuid>:<n>`). After it runs: `python -m scripts.audit_grants`, then copy the old boards in with
+`python -m scripts.market_intel_import` (dry run) and `--apply` (optionally `--with-phash`); a second run writes
+nothing. Optional rollout: `r7b_market_intel_grants.sql` gives every existing salesman login the 'Market Intel' page
+(reverse: `r7b_market_intel_grants_reverse.sql`). Replayed on a throwaway local Postgres 17 with Supabase-style default
+grants: applied twice, self-check on seeded data, duplicate `client_uuid` / Approved-without-action refused, the
+decision history refuses UPDATE / DELETE / TRUNCATE, `yq_readonly` reads the agent view only, reverse twice, re-applied.
+Contract: `docs/MARKET_INTEL.md`; tests: `python -m tests.test_r7b_market_intel` (set `YQ_LOCAL_PG_R7B` for the replay).
+

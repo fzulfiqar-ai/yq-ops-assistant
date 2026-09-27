@@ -1650,13 +1650,10 @@ def finds_promote(find_id: int, body: FindPromoteRequest,
 @app.get("/public/finds/{token}")
 @limiter.limit("30/minute")
 def finds_public(request: Request, token: str) -> dict:
-    """No-auth product-finds gallery. Token-gated, rate-limited; internal fields stripped."""
+    """Retired in R7b (plan §18.8: public share boards are skipped). The finds now live on the
+    Market Intel board behind a login; every old /f/{token} link answers "no longer valid"."""
     from fastapi import HTTPException
-    from app.product_finds import public_finds
-    r = public_finds(token)
-    if r is None:
-        raise HTTPException(status_code=404, detail="Invalid link.")
-    return r
+    raise HTTPException(status_code=404, detail="This link is no longer valid.")
 
 
 @app.get("/coaching/accounts")
@@ -2408,3 +2405,7 @@ _register_ai_insights(app, limiter)
 from app.command_api import register as _register_command  # noqa: E402
 
 _register_command(app)
+# ── Market Intelligence (release R7b) — routes live in app/market_intel_api.py ──
+from app.market_intel_api import register as _register_market_intel  # noqa: E402
+
+_register_market_intel(app, limiter)

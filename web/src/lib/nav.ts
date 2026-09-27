@@ -9,13 +9,12 @@ import {
   CreditCard,
   Users,
   Database,
-  NotebookPen,
   ShoppingCart,
   ShoppingBag,
   Target,
   MessageSquareQuote,
   BookImage,
-  Sparkles,
+  Radar,
   ArrowLeftRight,
   LineChart,
   Megaphone,
@@ -58,7 +57,6 @@ export const NAV: NavItem[] = [
   { section: 'Catalog', label: 'Catalog', to: '/catalog', icon: BookImage, feature: 'Catalog', roles: ['admin', 'member'] },
   // The "Coming soon" desk: publish the announced range, set the month, link catalog codes on arrival.
   { section: 'Catalog', label: 'Coming soon', to: '/upcoming', icon: PackagePlus, feature: 'Catalog', roles: ['admin', 'member'] },
-  { section: 'Catalog', label: 'Product Finds', to: '/finds', icon: Sparkles, feature: 'Product Finds' },
   { section: 'Inventory & stock moves', label: 'Inventory', to: '/inventory', icon: Boxes, feature: 'Inventory' },
   { section: 'Inventory & stock moves', label: 'Stock moves', to: '/stock', icon: ArrowLeftRight, feature: 'Stock Movement' },
   { section: 'Purchasing', label: 'Purchase orders', to: '/orders', icon: ShoppingCart, feature: 'Orders' },
@@ -67,6 +65,8 @@ export const NAV: NavItem[] = [
   { section: 'Receivables', label: 'Receivables', to: '/receivables', icon: CreditCard, feature: 'Receivables' },
   { section: 'Team performance', label: 'Rep performance', to: '/command/team', icon: Trophy }, // admin (management: MANAGEMENT_NAV)
   { section: 'Team performance', label: 'Reps & statements', to: '/salesmen', icon: UserRoundCheck, feature: 'Shop Admin' },
+  // R7b: Market Intel replaces Product Finds and Field Notes (/finds and /field-notes still open)
+  { section: 'Market Intel', label: 'Market Intel', to: '/market-intel', icon: Radar, feature: 'Market Intel' },
   { section: 'Offers & campaigns', label: 'Offers & rules', to: '/shop-rules', icon: BadgePercent, feature: 'Shop Admin' },
   { section: 'Reports', label: 'Dashboard', to: '/', icon: LayoutGrid, feature: 'Dashboard' },
   { section: 'Reports', label: 'Sales', to: '/sales', icon: TrendingUp, feature: 'Sales' },
@@ -74,7 +74,6 @@ export const NAV: NavItem[] = [
   { section: 'Admin', label: 'Data upload', to: '/data', icon: Database }, // admin-only
   { section: 'Admin', label: 'Team & access', to: '/team', icon: Users }, // admin-only
   { section: 'AI tools / Archive', label: 'AI Assistant', to: '/assistant', icon: MessageSquare, feature: 'AI Assistant' },
-  { section: 'AI tools / Archive', label: 'Field Notes', to: '/field-notes', icon: NotebookPen, feature: 'AI Assistant' },
   { section: 'AI tools / Archive', label: 'AI Agents', to: '/agents', icon: Cpu, feature: 'AI Agents', roles: ['admin'] },
   { section: 'AI tools / Archive', label: 'Live Feed', to: '/feed', icon: Activity, feature: 'Live Feed', roles: ['admin'] },
   { section: 'AI tools / Archive', label: 'Leads', to: '/leads', icon: Target, feature: 'Leads', roles: ['admin'] },
@@ -96,6 +95,7 @@ export const MANAGEMENT_NAV: { to: string; label: string; section: string; icon:
   { to: '/inventory', label: 'Products & stock', section: 'Company', icon: Boxes, feature: 'Inventory' },
   { to: '/margins', label: 'Profitability', section: 'Company', icon: Percent, feature: 'Margins' },
   { to: '/receivables', label: 'Receivables', section: 'Company', icon: CreditCard, feature: 'Receivables' },
+  { to: '/market-intel', label: 'Market Intel', section: 'Company', icon: Radar, feature: 'Market Intel' },
 ]
 
 /** Pages the Command Centre's tiles open for management although they are not in its menu. */

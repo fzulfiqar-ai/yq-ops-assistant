@@ -29,6 +29,9 @@ FEATURES: list[str] = [
     "Shop Orders",
     "Shop Admin",
     "Storekeeper",     # the warehouse pick list: confirmed marketplace orders grouped by salesman
+    # R7b: capture ("Spotted") + My signals for a rep; the board, review queue and statuses for the office.
+    # Decoupled from "AI Assistant": granting it never opens /ask.
+    "Market Intel",
 ]
 
 ROLES: list[str] = ["admin", "member", "salesman", "storekeeper", "management"]
@@ -47,7 +50,7 @@ RESERVED_ROLES: tuple[str, ...] = ("operations", "sales_manager", "finance")
 # Default grants offered at invite time (admin implicitly has everything).
 ROLE_DEFAULT_FEATURES: dict[str, list[str]] = {
     "member": ["Dashboard", "Sales", "Inventory", "Receivables"],
-    "salesman": ["Catalog", "Shop Orders"],   # the two-tab salesman app; Product Finds stays grantable
+    "salesman": ["Catalog", "Shop Orders", "Market Intel"],   # the salesman app + Spotted; Product Finds stays grantable
     "storekeeper": ["Storekeeper"],           # marks orders Preparing / On the way, nothing else
     # company-wide reports and every marketplace order, read only (release R7a, stream B5)
     "management": ["Dashboard", "Sales", "Margins", "Receivables", "Inventory", "Shop Orders"],
@@ -61,8 +64,10 @@ READ_ONLY_ROLES: frozenset[str] = frozenset({"management"})
 # no limit). Management reads the company's reports and marketplace orders: never the AI tools
 # (agents, free-text SQL), Shop Admin (offers, reps, settings), Marketing or Leads (unmasked
 # customer phones), and Team / Data / Settings / statements are admin-only already.
+# R7b: management may also be granted Market Intel (read the board, approve an action: plan §7). It is
+# not in the defaults, so an admin grants it on the Team page.
 ROLE_FEATURE_LIMITS: dict[str, frozenset[str]] = {
-    "management": frozenset(ROLE_DEFAULT_FEATURES["management"]),
+    "management": frozenset(ROLE_DEFAULT_FEATURES["management"]) | {"Market Intel"},
 }
 # Roles that see a merchant's phone and email masked in order payloads (plan §7 phones.full).
 CONTACT_MASKED_ROLES: frozenset[str] = frozenset({"management"})

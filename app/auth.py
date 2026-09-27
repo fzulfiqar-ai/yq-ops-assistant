@@ -29,6 +29,7 @@ from __future__ import annotations
 import hmac
 import logging
 import threading
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -62,7 +63,13 @@ MUST_RESET_DETAIL: dict[str, str] = {"code": MUST_RESET_CODE,
 # route on the API (sign-out is Supabase's, preferences live in the browser), so the list is
 # the login's own password change. Keys are (method, route path) exactly as the request names them.
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
-READ_ONLY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({("POST", "/auth/password")})
+# A path may be a route template: "{name}" matches one path segment. The Market Intel approval
+# (R7b, plan §7 "read + approve actions") is the one decision management makes; the route itself
+# only moves an Opportunity to Approved with an action (app/market_intel.approve_item).
+READ_ONLY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
+    ("POST", "/auth/password"),
+    ("POST", "/market-intel/items/{item_id}/approve"),
+})
 # The AI surfaces run agents, free-text SQL and uploads: never a read-only login's, GET included.
 READ_ONLY_DENIED_PREFIXES: tuple[str, ...] = ("/agents", "/ask", "/orchestrate", "/assistant", "/field-notes",
                                               "/coaching")   # the brief recalls field notes from the AI knowledge base
@@ -71,12 +78,23 @@ READ_ONLY_DETAIL: dict[str, str] = {"code": READ_ONLY_CODE,
                                     "message": "Your access is read-only. Ask an admin to make this change."}
 
 
+def _allowlisted(method: str, path: str) -> bool:
+    for m, p in READ_ONLY_WRITE_ALLOWLIST:
+        if m != method:
+            continue
+        if p == path:
+            return True
+        if "{" in p and re.fullmatch(re.sub(r"\\\{[^}]+\\\}", "[^/]+", re.escape(p)), path or ""):
+            return True
+    return False
+
+
 def read_only_refuses(method: str, path: str) -> bool:
     """True when a read-only login may not make this request (see READ_ONLY_WRITE_ALLOWLIST)."""
     method = (method or "").upper()
     if any(path == p or path.startswith(p + "/") for p in READ_ONLY_DENIED_PREFIXES):
         return True
-    return method not in SAFE_METHODS and (method, path) not in READ_ONLY_WRITE_ALLOWLIST
+    return method not in SAFE_METHODS and not _allowlisted(method, path)
 
 # An unknown `kid` makes PyJWT refresh the JWK set over the network. Supabase rotates keys
 # rarely, so one refresh per minute per process is plenty; anything more is a token flood
