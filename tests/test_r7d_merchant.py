@@ -834,6 +834,9 @@ def _():
     assert "if (key.length < 2 || requested.has(key)) return" in src
     assert "onClick={() => logRequest(query)}" in src and "S.shop.askHave(first, query)" in src
     assert "{S.shop.notOnShelf(query)}" in src and "S.shop.noted(query)" in src
+    # with no public WhatsApp the button only records a product_request for YQ: it never names the rep
+    assert "S.card.tellRep(" not in src, "'Tell {rep}' would promise a message nobody sends"
+    assert "{S.shop.tellNeed(askUrl ? first : '')}" in src and "{S.shop.tellYq}" in src
     en = _read("web/src/market/i18n/en.ts")
     assert "notOnShelf: (q: string) => `We don’t stock “${q}” yet`," in en
 
