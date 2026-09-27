@@ -551,8 +551,10 @@ Deploy order: either. The API probes the columns (`shop_heart.lines_ready` / `or
 confirm / amend with reductions and removals, plain Delivered, cancel, reopen and "shop told" all work — a line
 confirmed at 0 is written `removed`, a `below_minimum` cancel writes `other` to the column (the event keeps the real
 code), reasons live on the events; adding / substituting a line and delivering with changes answer 400 naming this
-file. The reverse drops the 11 columns (take `python -m scripts.db_backup --tables shop_orders,shop_order_lines`
-first) and puts both checks back to their old lists `NOT VALID`, so rows already written with an R7c value are never
+file. The reverse REFUSES while any line or order holds an R7c value (delivered qty, reasons, substitute links,
+cost snapshots, reopen who / why, expected delivery): back them up with
+`python -m scripts.db_backup --tables shop_orders,shop_order_lines`, then `SET yq.r7c_drop = 'yes';` in the same
+session. On empty columns it runs without the switch. It drops the 11 columns and puts both checks back to their old lists `NOT VALID`, so rows already written with an R7c value are never
 rewritten while new writes are held to the old lists — restart the API after reversing (the column probes cache a
 hit for 10 minutes). Replayed on a throwaway local cluster (synthetic tables): apply twice, the new values and the FK
 work, bad values are refused, reverse with R7c rows present, apply again — all rolled back

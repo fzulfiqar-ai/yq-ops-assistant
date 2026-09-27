@@ -1,9 +1,13 @@
 -- Reverse of scripts/r7c_order_lines_qty_migration.sql (R7c order heart). Idempotent.
 --   python -m scripts.apply_sql scripts/r7c_order_lines_qty_reverse.sql
 --
--- Take a backup FIRST — the dropped columns hold what was delivered, why each line changed, which
--- line replaced which and the cost snapshots:
+-- The dropped columns hold what was delivered, why each line changed, which line replaced which, the
+-- cost snapshots and who reopened an order and why: live order history. While ANY line or order holds
+-- an R7c value this file REFUSES, so a routine reverse can never lose it. To drop them anyway, back
+-- them up first and say so in the same session:
 --   python -m scripts.db_backup --tables shop_orders,shop_order_lines
+--   set yq.r7c_drop = 'yes';   -- then run this file in that same session
+-- On tables where every R7c column is still empty the file runs without the switch.
 -- No row is written or deleted. The two widened checks are put back to their pre-R7c lists
 -- NOT VALID: lines already written as 'substituted' / 'added' / 'unavailable' and cancels coded
 -- 'below_minimum' stay exactly as they are (never rewritten); only NEW writes are held to the old
@@ -12,6 +16,33 @@
 -- No view pins the dropped columns: v_command_orders and v_agent_shop_lines (R7b) read
 -- added_at_stage / qty_delivered through to_jsonb(l), so they keep answering (every line then
 -- reads as requested again, delivered = confirmed) and nothing has to be restored first.
+
+do $$
+declare
+  n bigint := 0;
+  m bigint;
+  c text;
+begin
+  -- dynamic SQL, one column at a time: after a partial reverse a column may already be gone
+  foreach c in array array['qty_delivered', 'change_reason', 'substitute_item_code', 'substitute_for_line',
+                           'added_at_stage', 'unit_cost_bhd', 'cost_source'] loop
+    if exists (select 1 from information_schema.columns where table_schema = 'public'
+               and table_name = 'shop_order_lines' and column_name = c) then
+      execute format('select count(*) from public.shop_order_lines where %I is not null', c) into m;
+      n := n + m;
+    end if;
+  end loop;
+  foreach c in array array['expected_delivery_date', 'reopened_at', 'reopened_by', 'reopen_reason'] loop
+    if exists (select 1 from information_schema.columns where table_schema = 'public'
+               and table_name = 'shop_orders' and column_name = c) then
+      execute format('select count(*) from public.shop_orders where %I is not null', c) into m;
+      n := n + m;
+    end if;
+  end loop;
+  if n > 0 and coalesce(current_setting('yq.r7c_drop', true), '') <> 'yes' then
+    raise exception 'r7c_order_lines_qty reverse: % R7c value(s) on order lines / orders (delivered qty, change reasons, substitute links, cost snapshots, added-at stage, reopen who / why, expected delivery) would be lost. Back them up (python -m scripts.db_backup --tables shop_orders,shop_order_lines) and run SET yq.r7c_drop = ''yes'' in this session to drop them.', n;
+  end if;
+end $$;
 
 alter table shop_order_lines drop constraint if exists shop_order_lines_substitute_for_line_fkey;
 alter table shop_order_lines drop constraint if exists shop_order_lines_unit_cost_bhd_check;

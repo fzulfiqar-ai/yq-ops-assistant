@@ -1159,7 +1159,9 @@ def _():
         o2 = next(r for r in got_ro["orders"] if r["id"] == 2)
         assert (o2["units_ordered"], o2["units_confirmed"], o2["units_added"], o2["units_delivered"]) == (8, 6, 3, 6)
 
-        # r7c's REVERSE drops the columns with this view in place (to_jsonb pins no column); the view answers
+        # r7c's REVERSE drops the columns with this view in place (to_jsonb pins no column); the view answers.
+        # The lines above hold R7c values, so the reverse needs its explicit session switch.
+        cur.execute("set local yq.r7c_drop = 'yes'")
         cur.execute(R7C_REVERSE.read_text(encoding="utf-8"))
         cur.execute(view_sql)
         got = {r[0]: r for r in cur.fetchall()}
