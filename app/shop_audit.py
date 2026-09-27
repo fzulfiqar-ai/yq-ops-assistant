@@ -1,5 +1,5 @@
 """Admin audit (trust plan M12, release R3): every admin write to shop settings, discount rules,
-campaigns, salesmen, target imports, upcoming items and merchant attribution leaves one
+campaigns, salesmen, target imports, upcoming items, merchant attribution and (R7a) the team leaves one
 append-only row in `shop_admin_audit` — who, when, which entity, what it looked like before
 and after. Nothing here ever blocks the write it describes: a missing table (the migration
 lands after the API) or a failed insert is logged and swallowed, the way app.audit.log_event
@@ -26,7 +26,10 @@ from app import database
 log = logging.getLogger(__name__)
 
 TABLE = "shop_admin_audit"
-ENTITIES = ("settings", "discount_rule", "campaign", "salesman", "target", "upcoming", "shop_customer", "order")
+# "user" (release R7a): a team change — invite, role / pages / status, removal (app/user_auth.py).
+# The table has no CHECK on entity, so nothing had to be migrated for it.
+ENTITIES = ("settings", "discount_rule", "campaign", "salesman", "target", "upcoming", "shop_customer", "order",
+            "user")
 ACTIONS = ("create", "update", "delete", "import", "assign")
 # never worth a second copy (volatile, or already elsewhere): timestamps the row itself moves,
 # derived fields the API decorates rows with, and browser fingerprints

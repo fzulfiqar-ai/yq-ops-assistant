@@ -1738,6 +1738,13 @@ class AcceptRequest(BaseModel):
     full_name: str | None = None
 
 
+# The rules (valid role and pages, the owner, the last active admin, the before/after audit) live
+# in app/user_auth.py; these routes only translate a refusal into its status code.
+def _team_refused(e: Exception):
+    from fastapi import HTTPException
+    return HTTPException(status_code=getattr(e, "status", 400), detail=str(e))
+
+
 @app.get("/team")
 def team_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
     from app.user_auth import list_members
@@ -1746,34 +1753,33 @@ def team_list(_admin: CurrentUser = Depends(require_admin)) -> dict:
 
 @app.post("/team/invite")
 def team_invite(body: InviteRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
-    from app.user_auth import FEATURES, create_email_invite, create_member, generate_temp_password
-    # Admins implicitly get everything; members AND salesmen get exactly what was picked.
-    grant = list(FEATURES) if body.role == "admin" else body.features
-    if body.method == "email":
-        res = create_email_invite(body.email, body.full_name, body.role, grant, invited_by=admin.email)
-        log_event(admin.email, "team.invite", detail={"email": body.email, "mode": "email"})
-        return {"mode": "email", **res}
-    tmp = generate_temp_password()
-    create_member(body.email, body.full_name, body.role, grant, tmp, invited_by=admin.email, must_reset=True)
-    log_event(admin.email, "team.invite", detail={"email": body.email, "mode": "temp"})
-    return {"mode": "temp", "email": body.email, "temp_password": tmp}
+    from app.user_auth import TeamChangeRefused, invite_member
+    try:
+        res = invite_member(admin.email, body.email, body.full_name, body.role, body.features, body.method)
+    except TeamChangeRefused as e:
+        raise _team_refused(e) from e
+    log_event(admin.email, "team.invite", detail={"email": body.email, "mode": res["mode"]})
+    return res
 
 
 @app.patch("/team/{email}")
 def team_update(email: str, body: UpdateAccessRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
-    from app.user_auth import update_access
-    update_access(email, role=body.role, features=body.features, status=body.status)
+    from app.user_auth import TeamChangeRefused, change_access
+    try:
+        change_access(admin.email, email, role=body.role, features=body.features, status=body.status)
+    except TeamChangeRefused as e:
+        raise _team_refused(e) from e
     log_event(admin.email, "team.update", detail={"email": email})
     return {"ok": True}
 
 
 @app.delete("/team/{email}")
 def team_remove(email: str, admin: CurrentUser = Depends(require_admin)) -> dict:
-    from fastapi import HTTPException
-    from app.user_auth import remove_user
-    if email.strip().lower() == admin.email:
-        raise HTTPException(status_code=400, detail="You cannot remove your own account.")
-    remove_user(email)
+    from app.user_auth import TeamChangeRefused, remove_member
+    try:
+        remove_member(admin.email, email)
+    except TeamChangeRefused as e:
+        raise _team_refused(e) from e
     log_event(admin.email, "team.remove", detail={"email": email})
     return {"ok": True}
 
@@ -1791,8 +1797,11 @@ def team_invite_info(token: str) -> dict:
 @app.post("/team/accept")
 def team_accept(body: AcceptRequest) -> dict:
     from fastapi import HTTPException
-    from app.user_auth import accept_invite
-    res = accept_invite(body.token, body.password, body.full_name)
+    from app.user_auth import TeamChangeRefused, accept_invite
+    try:
+        res = accept_invite(body.token, body.password, body.full_name)
+    except TeamChangeRefused as e:
+        raise _team_refused(e) from e
     if not res:
         raise HTTPException(status_code=400, detail="Invalid or expired invite.")
     return res

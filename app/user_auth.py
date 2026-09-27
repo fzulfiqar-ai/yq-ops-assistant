@@ -21,6 +21,19 @@ login cannot mint fresh tokens while the user_roles row already refuses the old 
 
 A FRESH client is used for sign-in so the cached service-role client
 (`app.database.get_client`) is never re-authenticated as the signing-in user.
+
+Team rules (release R7a, 27-Sep-2026) — invite_member / change_access / remove_member are what the
+/team routes call, and accept_invite applies the same guards:
+  • the role must be one of features.ROLES and every page one of features.FEATURES, inside the
+    role's limit (features.ROLE_FEATURE_LIMITS) — 400 otherwise;
+  • an owner (settings.owner_emails) keeps their role, pages and status and is never removed or
+    re-invited — 409;
+  • the last active admin is never demoted, disabled or removed — 409;
+  • a role the database's user_roles_role_check does not accept yet (management before
+    scripts/r7_rbac_migration.sql) is refused up front with a message naming the migration, before
+    any auth user or password is touched — 400;
+  • every change leaves a before/after row in shop_admin_audit (entity 'user'), or on audit_log when
+    that table cannot take it.
 """
 from __future__ import annotations
 
@@ -28,6 +41,7 @@ import logging
 import os
 import secrets
 import string
+import time
 from datetime import datetime, timezone
 
 from supabase import create_client
@@ -39,7 +53,8 @@ from app.database import (cached_user_row, get_client, invalidate_user_cache, mi
 log = logging.getLogger(__name__)
 
 # Single source of truth lives in app.features (backend + SPA via GET /auth/features).
-from app.features import FEATURES, ROLES  # noqa: F401  (re-exported for existing imports)
+from app.features import (FEATURES, ROLE_DEFAULT_FEATURES, ROLE_FEATURE_LIMITS, ROLE_LABELS,  # noqa: F401,E402
+                          ROLES, may_hold)
 
 
 # ── clients / helpers ────────────────────────────────────────────────────────
@@ -77,6 +92,227 @@ def generate_temp_password() -> str:
     """A readable, strong temporary password (e.g. 'Yq-7fK2bQ9x')."""
     alphabet = string.ascii_letters + string.digits
     return "Yq-" + "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+# ── team rules: validation, owner protection, the last admin (release R7a) ──────
+
+class TeamChangeRefused(Exception):
+    """A team change the rules refuse; `status` is what the route answers: 400 for bad input
+    (unknown role or page, a role the database does not accept yet), 404 for nobody by that
+    email, 409 for a protected account (an owner, the last active admin)."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+STATUSES = ("active", "disabled")
+OWNER_LOCKED_MSG = ("This is the owner's account. Its role, pages and status cannot be changed, "
+                    "and it cannot be removed or re-invited.")
+LAST_ADMIN_MSG = "At least one active admin must remain. Make someone else an admin first."
+ROLE_NOT_ENABLED_MSG = ("The {label} role is not switched on in the database yet. "
+                        "Apply scripts/r7_rbac_migration.sql, then try again.")
+
+# The roles user_roles_role_check accepted before scripts/r7_rbac_migration.sql (production,
+# 27-Sep-2026) — these never need the probe below.
+_LEGACY_DB_ROLES = frozenset({"admin", "member", "manager", "viewer", "salesman", "storekeeper"})
+_ROLE_CHECK_SQL = ("select pg_get_constraintdef(oid) as def from pg_constraint "
+                   "where conrelid = 'public.user_roles'::regclass and conname = 'user_roles_role_check'")
+_ROLE_CHECK_TTL_S = 300.0
+_role_check: dict = {"at": float("-inf"), "definition": None}
+
+
+def _norm(email: str | None) -> str:
+    return (email or "").strip().lower()
+
+
+def owner_emails() -> frozenset[str]:
+    return frozenset(_norm(e) for e in settings.owner_emails if _norm(e))
+
+
+def is_owner(email: str | None) -> bool:
+    return bool(_norm(email)) and _norm(email) in owner_emails()
+
+
+def validate_role(role: str | None) -> None:
+    if role is not None and role not in ROLES:
+        raise TeamChangeRefused(f"Unknown role '{role}'. Choose one of: {', '.join(ROLES)}.")
+
+
+def validate_features(role: str | None, features) -> list[str]:
+    """The page list as stored: every entry one of FEATURES and inside the role's limit."""
+    if not isinstance(features, list) or not all(isinstance(f, str) for f in features):
+        raise TeamChangeRefused("Pages must be a list of page names.")
+    unknown = sorted({f for f in features if f not in FEATURES})
+    if unknown:
+        raise TeamChangeRefused(f"Unknown page(s): {', '.join(unknown)}.")
+    outside = sorted({f for f in features if not may_hold(role, f)})
+    if outside:
+        allowed = ", ".join(f for f in FEATURES if may_hold(role, f))
+        raise TeamChangeRefused(f"{ROLE_LABELS.get(role or '', role)} cannot be given: {', '.join(outside)}. "
+                                f"Allowed: {allowed}.")
+    return list(dict.fromkeys(features))
+
+
+def role_enabled_in_db(role: str) -> bool | None:
+    """Does user_roles_role_check accept `role`? Read from the live constraint through the
+    read-only RPC (yq_readonly may read pg_constraint) and cached for five minutes; None when it
+    cannot be read — the write then goes ahead and a CHECK violation is translated instead."""
+    if role in _LEGACY_DB_ROLES:
+        return True
+    now = time.monotonic()
+    definition = _role_check["definition"]
+    if definition is None or now - _role_check["at"] >= _ROLE_CHECK_TTL_S:
+        try:
+            from app.db_read import exec_sql
+            rows = exec_sql(_ROLE_CHECK_SQL)
+        except Exception as e:  # noqa: BLE001 — the RPC is down or not deployed: let the write decide
+            log.info("role check probe failed: %s", e)
+            return None
+        definition = str((rows[0] or {}).get("def") or "") if rows else ""
+        _role_check.update(at=now, definition=definition)
+    return not definition or f"'{role}'" in definition     # no CHECK at all accepts every role
+
+
+def ensure_role_enabled(role: str) -> None:
+    if role_enabled_in_db(role) is False:
+        raise TeamChangeRefused(ROLE_NOT_ENABLED_MSG.format(label=ROLE_LABELS.get(role, role)))
+
+
+def _role_check_violation(exc: Exception) -> bool:
+    text = f"{getattr(exc, 'code', '')} {getattr(exc, 'message', '')} {exc}"
+    return "user_roles_role_check" in text
+
+
+def _not_enabled(role: str | None) -> TeamChangeRefused:
+    _role_check.update(at=float("-inf"), definition=None)      # re-read the constraint next time
+    return TeamChangeRefused(ROLE_NOT_ENABLED_MSG.format(label=ROLE_LABELS.get(role or "", role)))
+
+
+def _fresh_row(email: str) -> dict | None:
+    """The user_roles row as it is now (the 60 s cache dropped first)."""
+    invalidate_user_cache(email)
+    return _user_row(email)
+
+
+def _active_admins() -> set[str]:
+    rows = (get_client().table("user_roles").select("email").eq("role", "admin").eq("status", "active")
+            .execute().data or [])
+    return {_norm(r.get("email")) for r in rows}
+
+
+def _is_active_admin(row: dict | None) -> bool:
+    return bool(row) and row.get("role") == "admin" and (row.get("status") or "active") == "active"
+
+
+def _moves(before: dict, role=None, features=None, status=None) -> bool:
+    if role is not None and role != before.get("role"):
+        return True
+    if features is not None and sorted(set(features)) != sorted(set(before.get("features") or [])):
+        return True
+    return status is not None and status != (before.get("status") or "active")
+
+
+def check_team_change(email: str, before: dict | None, *, role: str | None = None,
+                      features: list[str] | None = None, status: str | None = None,
+                      remove: bool = False) -> None:
+    """Refuse (409) any change to an owner's access, removing an owner, and anything that would
+    leave no active admin. `before` is the member's user_roles row as it is now (None = no row)."""
+    email = _norm(email)
+    if is_owner(email) and (remove or (before is not None and _moves(before, role, features, status))):
+        raise TeamChangeRefused(OWNER_LOCKED_MSG, 409)
+    if not _is_active_admin(before):
+        return
+    stays = (not remove and (role if role is not None else before.get("role")) == "admin"
+             and (status if status is not None else before.get("status") or "active") == "active")
+    if not stays and not (_active_admins() - {email}):
+        raise TeamChangeRefused(LAST_ADMIN_MSG, 409)
+
+
+_AUDIT_KEYS = ("email", "role", "features", "status", "full_name", "must_reset")
+
+
+def _audit_view(row: dict | None) -> dict | None:
+    return {k: row.get(k) for k in _AUDIT_KEYS if k in row} if row else None
+
+
+def audit_team(actor: str, email: str, action: str, before: dict | None, after: dict | None) -> None:
+    """One before/after row per team change in shop_admin_audit (entity 'user'); when that table
+    cannot take it (not migrated, down) the same facts go to audit_log. Never raises. A password,
+    a temporary password or an invite token is never part of either side."""
+    b, a = _audit_view(before), _audit_view(after)
+    if action == "update" and b == a:
+        return
+    from app import shop_audit
+    if shop_audit.record(actor, "user", _norm(email), action, b, a):
+        return
+    from app.audit import log_event
+    log_event(actor, "team.audit", detail={"email": _norm(email), "action": action, "before": b, "after": a})
+
+
+def invite_member(actor: str, email: str, full_name: str, role: str, features: list[str],
+                  method: str = "temp") -> dict:
+    """POST /team/invite. Admins implicitly get every page; everyone else exactly what was picked,
+    inside their role's limit. Guards run before any auth user, password or invite is touched."""
+    email = _norm(email)
+    if "@" not in email:
+        raise TeamChangeRefused("Enter a valid email.")
+    if method not in ("temp", "email"):
+        raise TeamChangeRefused("Choose a temporary password or an email invite.")
+    validate_role(role)
+    grant = list(FEATURES) if role == "admin" else validate_features(role, features)
+    before = _fresh_row(email)
+    if before is not None and is_owner(email):
+        raise TeamChangeRefused(OWNER_LOCKED_MSG, 409)        # an invite resets the password
+    check_team_change(email, before, role=role, features=grant, status="active")
+    ensure_role_enabled(role)
+    action = "update" if before else "create"
+    if method == "email":
+        res = create_email_invite(email, full_name, role, grant, invited_by=actor)
+        audit_team(actor, email, action, before, {"email": email, "role": role, "features": grant,
+                                                  "status": "invited", "full_name": full_name})
+        return {"mode": "email", **res}
+    tmp = generate_temp_password()
+    create_member(email, full_name, role, grant, tmp, invited_by=actor, must_reset=True)
+    audit_team(actor, email, action, before, _fresh_row(email))
+    return {"mode": "temp", "email": email, "temp_password": tmp}
+
+
+def change_access(actor: str, email: str, role: str | None = None, features: list[str] | None = None,
+                  status: str | None = None) -> dict | None:
+    """PATCH /team/{email}. A new role without a page list keeps the pages it may hold (the
+    role's defaults when none are left). Returns the row after the change."""
+    email = _norm(email)
+    validate_role(role)
+    if status is not None and status not in STATUSES:
+        raise TeamChangeRefused(f"Unknown status '{status}'. Choose active or disabled.")
+    before = _fresh_row(email)
+    if before is None:
+        raise TeamChangeRefused("No team member with that email.", 404)
+    new_role = role if role is not None else before.get("role")
+    if features is not None:
+        features = validate_features(new_role, features)
+    elif role is not None and role != before.get("role") and role in ROLE_FEATURE_LIMITS:
+        kept = [f for f in (before.get("features") or []) if may_hold(role, f)]
+        features = kept or list(ROLE_DEFAULT_FEATURES.get(role, []))
+    check_team_change(email, before, role=role, features=features, status=status)
+    if role is not None and role != before.get("role"):
+        ensure_role_enabled(role)
+    update_access(email, role=role, features=features, status=status)
+    after = _fresh_row(email)
+    audit_team(actor, email, "update", before, after)
+    return after
+
+
+def remove_member(actor: str, email: str) -> None:
+    """DELETE /team/{email}: never yourself, never an owner, never the last active admin."""
+    email = _norm(email)
+    if email == _norm(actor):
+        raise TeamChangeRefused("You cannot remove your own account.")
+    before = _fresh_row(email)
+    check_team_change(email, before, remove=True)
+    remove_user(email)
+    audit_team(actor, email, "delete", before, None)
 
 
 # ── sign in ──────────────────────────────────────────────────────────────────
@@ -156,7 +392,12 @@ def _upsert_role(email: str, role: str, features: list[str],
         row["invited_by"] = invited_by
     if must_reset is not None:
         row["must_reset"] = bool(must_reset)
-    _write_role_row(row, insert=not _user_row(email))
+    try:
+        _write_role_row(row, insert=not _user_row(email))
+    except Exception as exc:  # noqa: BLE001
+        if _role_check_violation(exc):
+            raise _not_enabled(role) from exc
+        raise
     invalidate_user_cache(email)
 
 
@@ -254,7 +495,12 @@ def update_access(email: str, role: str | None = None,
     if status is not None:
         upd["status"] = status
     if upd:
-        get_client().table("user_roles").update(upd).eq("email", email.strip().lower()).execute()
+        try:
+            get_client().table("user_roles").update(upd).eq("email", email.strip().lower()).execute()
+        except Exception as exc:  # noqa: BLE001
+            if _role_check_violation(exc):
+                raise _not_enabled(role) from exc
+            raise
         invalidate_user_cache(email)
     if status is not None:
         set_auth_ban(email, banned=(status != "active"))
@@ -279,6 +525,8 @@ def list_members() -> dict:
     users = client.table("user_roles").select(
         "email,role,features,status,full_name"
     ).order("role").execute().data or []
+    for u in users:
+        u["is_owner"] = is_owner(u.get("email"))     # the Team page shows "Owner" and no Edit
     try:
         invites = client.table("app_invites").select(
             "email,role,features,full_name,status,expires_at,token"
@@ -329,18 +577,27 @@ def get_invite(token: str) -> dict | None:
 
 
 def accept_invite(token: str, password: str, full_name: str | None = None) -> dict | None:
-    """Member sets their password → create the account + mark invite accepted."""
+    """Member sets their password → create the account + mark invite accepted. The team rules
+    apply here too (an owner's row, the last active admin, a role the database does not accept
+    yet): TeamChangeRefused, and the invite stays pending."""
     inv = get_invite(token)
     if not inv:
         return None
     email = inv["email"].strip().lower()
     name = full_name or inv.get("full_name") or ""
-    create_member(email, name, inv["role"], inv.get("features") or [],
-                  password, invited_by=inv.get("invited_by", ""), must_reset=False)
+    role = inv["role"] if inv.get("role") in ROLES else "member"      # create_member's own fallback
+    features = inv.get("features") or []
+    before = _fresh_row(email)
+    if before is not None and is_owner(email):
+        raise TeamChangeRefused(OWNER_LOCKED_MSG, 409)
+    check_team_change(email, before, role=role, features=features, status="active")
+    ensure_role_enabled(role)
+    create_member(email, name, role, features, password, invited_by=inv.get("invited_by", ""), must_reset=False)
     get_client().table("app_invites").update({
         "status": "accepted", "accepted_at": datetime.now(timezone.utc).isoformat()
     }).eq("token", token).execute()
-    return {"email": email, "role": inv["role"], "features": inv.get("features") or [], "full_name": name}
+    audit_team(email, email, "update" if before else "create", before, _fresh_row(email))
+    return {"email": email, "role": role, "features": features, "full_name": name}
 
 
 def revoke_invite(token: str) -> None:
