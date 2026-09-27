@@ -1518,6 +1518,23 @@ def _():
     assert "to_jsonb(l)" in REVERSE.read_text(encoding="utf-8").split("alter table", 1)[0]
 
 
+@test("review: no view selects * from shop_orders / shop_order_lines (a re-run after r7c would pin the R7c columns)")
+def _():
+    # CREATE OR REPLACE VIEW expands `*` at create time: a view re-created after this migration would depend on
+    # reopen_reason / qty_delivered & co., and the reverse's DROP COLUMN (no CASCADE, ever) would fail. The
+    # combined rehearsal on the production schema caught v_agent_rep_governance doing this (27-Sep-2026).
+    for path in sorted((ROOT / "scripts").glob("*.sql")):
+        if path.name.startswith("r7c_order_lines_qty_") or path.name == "views.sql":
+            continue
+        for name, body in re.findall(r"create or replace view (\w+) as\n(.*?);\n", _code(path.read_text(encoding="utf-8")),
+                                     re.S):
+            assert not re.search(r"select\s+(\w+\.)?\*\s+from\s+(public\.)?shop_order(s|_lines)\b", body), \
+                f"{path.name}: {name} selects * from an order table"
+            for col in R7C_ORDER:
+                bare = re.sub(rf"->> '{col}'|\bas {col}\b", "", body)
+                assert not re.search(rf"\b{col}\b", bare), f"{path.name}: {name} reads shop_orders.{col} directly"
+
+
 @test("reverse: drops the 11 columns, restores both checks NOT VALID (no row rewritten), never CASCADE / row deletes")
 def _():
     rev = _code(REVERSE.read_text(encoding="utf-8"))

@@ -397,7 +397,11 @@ comment on view v_agent_search_demand is
 -- 3f. rep governance (marketplace data only; live windows anchor to now())
 create or replace view v_agent_rep_governance as
 with o as (
-  select * from shop_orders where not coalesce(is_test, false) and salesman_id is not null
+  -- the columns this view reads, named: `select *` would be expanded at CREATE time, so re-running
+  -- this file after r7c_order_lines_qty_migration.sql would pin reopen_reason & co. and the r7c
+  -- reverse's DROP COLUMN would fail (found by the combined rehearsal, 27-Sep-2026)
+  select salesman_id, status, source, created_at, confirmed_at, delivered_at, cancelled_at
+  from shop_orders where not coalesce(is_test, false) and salesman_id is not null
 ),
 per as (
   select o.salesman_id,
