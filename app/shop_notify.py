@@ -15,12 +15,20 @@ channel → {"sent": bool, "reason"?: str, ...} plus a little metadata:
   at · attempts[] (ISO timestamps, one per fan-out — shop_jobs.notify_retry stops at 3) · recipients[]
 Rows written before 24-Sep carry a single `email` key; all_channels_failed() reads both shapes, and
 notify_failed() is the one "nobody was told" rule shared by notify_retry, shop.list_orders and the badge.
+
+Notifications log (R7a, scripts/r7_notifications_migration.sql): every fan-out also writes one
+shop_notifications row per channel (kind new_order, or retry for a notify_retry re-send), and
+app/shop_jobs.py logs its reminders, escalations, digests and stale-data alerts the same way
+through log_notifications(). Recipients are masked and provider errors scrubbed before they are
+stored. The table is probed once and the answer cached, so nothing changes until it exists.
 """
 from __future__ import annotations
 
 import html
 import logging
 import os
+import re
+import time
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -322,6 +330,159 @@ def owner_addresses(exclude: str | None = None) -> list[str]:
     return out
 
 
+# ── notifications log (R7a) ───────────────────────────────────────────────────
+
+NOTIFICATIONS_TABLE = "shop_notifications"
+# The migration is applied by hand, so the API may run before (or after a reverse of) it. The
+# table is probed once: a hit is remembered for 10 minutes, a miss for one, and a write or read
+# that meets a missing table forgets the hit at once.
+_LOG_TTL_HIT, _LOG_TTL_MISS = 600.0, 60.0
+_log_probe: dict = {"until": 0.0, "ok": False}
+# A channel that is not set up or has nobody to send to is 'skipped', not 'failed'.
+_SKIP_REASONS = ("no_recipient", "not_configured", "not configured", "no_email_provider", "unset",
+                 "no email or phone")
+_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+_NUMBER_RE = re.compile(r"\+?\d[\d \-]{6,}\d")
+
+
+def _missing_table(e: Exception) -> bool:
+    code, msg = str(getattr(e, "code", "") or ""), str(e)
+    return code in ("42P01", "PGRST205") or "42P01" in msg or "PGRST205" in msg or \
+        ("relation" in msg and "does not exist" in msg) or "Could not find the table" in msg
+
+
+def forget_notifications_probe() -> None:
+    _log_probe.update(until=0.0, ok=False)
+
+
+def notifications_ready(client=None) -> bool:
+    """True when shop_notifications exists (cached, see _LOG_TTL_*). A failed probe reads as "not
+    yet": the callers then keep their pre-R7a audit trail, which is always the safe side."""
+    now = time.monotonic()
+    if _log_probe["until"] > now:
+        return bool(_log_probe["ok"])
+    try:
+        if client is None:
+            from app.database import get_client
+            client = get_client()
+        client.table(NOTIFICATIONS_TABLE).select("id").limit(1).execute()
+        ok = True
+    except Exception as e:  # noqa: BLE001 — a missing table (or a blip) means "not yet"
+        log.debug("notifications probe failed: %s", e)
+        ok = False
+    _log_probe.update(until=now + (_LOG_TTL_HIT if ok else _LOG_TTL_MISS), ok=ok)
+    return ok
+
+
+def mask_recipient(to) -> str | None:
+    """'ahmed@yq.test, 39001234' → 'a***@yq.test, ***1234'. The log never holds a full address."""
+    out: list[str] = []
+    for a in str(to or "").split(","):
+        a = a.strip()
+        if not a:
+            continue
+        if "@" in a:
+            user, _, domain = a.partition("@")
+            out.append(f"{user[:1]}***@{domain}")
+        else:
+            digits = re.sub(r"\D", "", a)
+            out.append(f"***{digits[-4:]}" if digits else "***")
+    return ", ".join(out) or None
+
+
+def scrub(text, limit: int = 240) -> str | None:
+    """A provider's reason with every address and phone-like number masked (Resend's testing-mode
+    403 names the account's own address), cut to `limit`."""
+    if not text:
+        return None
+
+    def number(m: re.Match) -> str:
+        digits = re.sub(r"\D", "", m.group(0))
+        return f"***{digits[-4:]}" if len(digits) >= 8 else m.group(0)
+    t = _EMAIL_RE.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", str(text))
+    return _NUMBER_RE.sub(number, t)[:limit]
+
+
+def _skipped(channel: str, res: dict) -> bool:
+    reason = str(res.get("reason") or "").lower()
+    if any(s in reason for s in _SKIP_REASONS):
+        return True
+    if channel == "telegram" and not reason:
+        try:        # send_telegram answers a bare False when no bot token / chat id is set
+            from app.notify import telegram_enabled
+            return not telegram_enabled()
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
+def _provider(channel: str, res: dict) -> str | None:
+    if channel == "email":
+        if res.get("via"):
+            return str(res["via"])
+        tried = res.get("tried") or next((r.get("tried") for r in res.get("results") or []
+                                          if isinstance(r, dict) and r.get("tried")), None)
+        return "/".join(tried) if tried else None
+    return {"telegram": "telegram", "whatsapp": "whatsapp_cloud", "push": "webpush"}.get(channel)
+
+
+def notification_row(kind: str, channel: str, role: str | None, res, *, order_id: int | None = None,
+                     to=None, level: str | None = None, attempt: int | None = None,
+                     detail: dict | None = None, at: str | None = None) -> dict:
+    """One shop_notifications row from a channel result ({"sent": bool, "reason"?, ...}).
+    `at` pins created_at (the jobs pass their clock, so every row of one attempt shares it)."""
+    res = res if isinstance(res, dict) else {}
+    status = "sent" if res.get("sent") else ("skipped" if _skipped(channel, res) else "failed")
+    row = {"order_id": order_id, "kind": kind, "channel": channel, "recipient_role": role,
+           "recipient_masked": mask_recipient(to), "status": status, "provider": _provider(channel, res),
+           "error": scrub(res.get("reason") or res.get("error")), "level": level, "attempt": attempt,
+           "detail": detail or None}
+    if at:
+        row["created_at"] = at
+    return row
+
+
+def log_notifications(rows: list[dict], client=None) -> bool:
+    """Best-effort insert into shop_notifications. True when the rows landed; False when there is
+    nothing to write, the table is not there yet, or the insert failed — never raises."""
+    if not rows or not notifications_ready(client):
+        return False
+    try:
+        if client is None:
+            from app.database import get_client
+            client = get_client()
+        client.table(NOTIFICATIONS_TABLE).insert(rows).execute()
+        return True
+    except Exception as e:  # noqa: BLE001
+        if _missing_table(e):
+            _log_probe.update(until=time.monotonic() + _LOG_TTL_MISS, ok=False)   # reversed under a cached hit
+        log.warning("notifications log: %d row(s) not written: %s", len(rows), scrub(str(e)))
+        return False
+
+
+# notify_result key → (channel, recipient role) for the fan-out's log rows
+_FANOUT_LOG = {"email_rep": ("email", "rep"), "email_owner": ("email", "owner"), "email": ("email", "owner"),
+               "customer_email": ("email", "merchant"), "telegram": ("telegram", "owner"),
+               "whatsapp": ("whatsapp", "rep")}
+
+
+def _log_fanout(order_id: int, result: dict, to: dict, retry: bool) -> None:
+    """One row per channel this attempt tried. A channel carried over from an earlier attempt
+    (kept) was not sent again and gets no row; an error that stopped the fan-out gets one."""
+    try:
+        kind, at, attempt = ("retry" if retry else "new_order"), result.get("at"), result.get("attempt")
+        rows = [notification_row(kind, channel, role, result[key], order_id=order_id, to=to.get(key),
+                                 attempt=attempt, at=at, detail={"key": key})
+                for key, (channel, role) in _FANOUT_LOG.items()
+                if isinstance(result.get(key), dict) and not result[key].get("kept")]
+        if result.get("error"):
+            rows.append(notification_row(kind, "none", None, {"sent": False, "reason": result["error"]},
+                                         order_id=order_id, attempt=attempt, at=at, detail={"key": "error"}))
+        log_notifications(rows)
+    except Exception as e:  # noqa: BLE001 — the log must never cost the alert
+        log.debug("notify_new_order(%s): log rows failed: %s", order_id, e)
+
+
 def notify_new_order(order_id: int, retry: bool = False) -> dict:
     """Fan out a new order: a copy to the rep, a separate copy to the owner addresses, the
     customer's confirmation, Telegram and (when Cloud API is set) WhatsApp. Every channel is
@@ -336,6 +497,7 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
     # retry counter and notify_retry stops at MAX_NOTIFY_ATTEMPTS.
     result: dict = {"at": now, "attempts": [now], "attempt": 1}
     prev: dict | None = None
+    to: dict[str, str | None] = {}      # notify_result key → address, for the (masked) log rows only
     try:
         o = get_order(order_id)
         if not o:
@@ -359,6 +521,8 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
         rep_to = sm.get("email") if (sm.get("email") and sm.get("notify_email", True) and not placed_by_staff) else None
         owners = owner_addresses(exclude=rep_to)
         result["recipients"] = ([rep_to] if rep_to else []) + owners
+        to.update(email_rep=rep_to, email_owner=",".join(owners), customer_email=o.get("customer_email"),
+                  whatsapp=sm.get("whatsapp") or sm.get("phone"))
         if rep_to:
             body = order_html(o, f"New order {o['order_no']}",
                               (f"{resent}. " if resent else "")
@@ -408,6 +572,7 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("notify_new_order(%s): could not store notify_result: %s", order_id, e)
         result.setdefault("error", f"store: {type(e).__name__}: {e}"[:200])
+    _log_fanout(order_id, result, to, retry)
     return result
 
 
