@@ -979,14 +979,19 @@ def _():
     # after its reverse, and pins no column); a found-but-unaccepted invoice as a flag
     assert "cross join lateral (select to_jsonb(l) as j) r" in body
     assert "sum(l.qty) filter (where r.j ->> 'added_at_stage' is null)            as units_ordered" in body
-    assert "sum(l.qty_confirmed) filter (where r.j ->> 'added_at_stage' is null)  as units_confirmed" in body
+    # each requested line counts at most what the shop asked for (review round 2): never above 100 %
+    assert ("sum(case when l.qty_confirmed is null then null else least(l.qty_confirmed, l.qty) end)\n"
+            "                    filter (where r.j ->> 'added_at_stage' is null)                     as units_confirmed") in body
+    assert "sum(greatest(coalesce(l.qty_confirmed, 0) - l.qty, 0))" in body and "as units_raised" in body
+    assert "least(coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed), l.qty)" in body
     assert "coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed)" in body
     assert "filter (where r.j ->> 'added_at_stage' is not null)" in body
     assert not re.search(r"\bl\.(added_at_stage|qty_delivered)\b", body), "never a direct column reference"
     assert "from v_shop_focus_candidates" in body and "where rank = 1" in body and "as has_suggestion" in body
     # appended after the 22 original columns (CREATE OR REPLACE VIEW can only append)
     cols = re.findall(r"\bas (\w+),?\s*$", body.split("from shop_orders o", 1)[0], re.M)
-    assert cols[-3:] == ["units_added", "units_delivered", "has_suggestion"], cols
+    assert cols[-5:] == ["units_added", "units_delivered", "has_suggestion", "units_raised", "reopened_at"], cols
+    assert "(to_jsonb(o) ->> 'reopened_at')::timestamptz" in body, "the R7c column through to_jsonb, pinning nothing"
     assert len(re.findall(r"^\s*grant\s", sql, re.M)) == 1, "one GRANT, to yq_readonly, nothing else"
     assert "r7_focus_links_migration.sql first" in MIGRATION.read_text(encoding="utf-8")
     raw = MIGRATION.read_text(encoding="utf-8")
@@ -1158,6 +1163,13 @@ def _():
         got_ro = as_readonly()
         o2 = next(r for r in got_ro["orders"] if r["id"] == 2)
         assert (o2["units_ordered"], o2["units_confirmed"], o2["units_added"], o2["units_delivered"]) == (8, 6, 3, 6)
+        # review round 2: a rep confirming 8 on a line of 4 counts 4 accepted + 4 raised (never above the request);
+        # a reopen time travels through to_jsonb(o)
+        cur.execute("update shop_order_lines set qty_confirmed = 8 where order_id = 4")
+        cur.execute("update shop_orders set reopened_at = '2026-09-25 09:00+03' where id = 6")
+        cur.execute("select units_ordered, units_confirmed, units_raised, units_delivered, reopened_at is not null "
+                    "from v_command_orders where id in (4, 6) order by id")
+        assert [tuple(r) for r in cur.fetchall()] == [(4, 4, 4, 4, False), (2, None, 0, None, True)]
 
         # r7c's REVERSE drops the columns with this view in place (to_jsonb pins no column); the view answers.
         # The lines above hold R7c values, so the reverse needs its explicit session switch.
@@ -1297,6 +1309,75 @@ def _():
     doc = (ROOT / "docs" / "MIGRATIONS.md").read_text(encoding="utf-8")
     sec = doc.split("**`r7_narration_mask_data_migration.sql`", 1)[1].split("\n- **", 1)[0]
     assert "BEFORE THE R7b CODE DEPLOY" in sec and "whether or not this file is ever applied" in sec
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. release-candidate review, stream NUMBERS: one regression test per fix
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("rc review (9): MTD / quarter vs a SHORTER previous period says what it really compares")
+def _():
+    from app import metrics as m
+    cur, cmp = m.windows("mtd", date(2026, 3, 31))                # 23 business days of March vs all of February
+    assert (cmp.start, cmp.end) == (date(2026, 2, 1), date(2026, 2, 28)) and cmp.business_days == 20
+    assert cur.business_days == 23
+    assert "23" not in cmp.basis.split("(")[0] and "all 20 business days of February" in cmp.basis, cmp.basis
+    assert "the same 23" not in cmp.basis and "3 fewer than this month's 23" in cmp.basis
+    cur, cmp = m.windows("mtd", date(2026, 3, 20))                # February still has 15 business days
+    assert cmp.basis == "the same 15 business days last month" and cmp.business_days == 15
+    cur, cmp = m.windows("quarter", date(2026, 9, 30))            # Q3 66 business days vs Q2's 65
+    assert cmp.business_days == 65 and cmp.basis.startswith("all 65 business days of last quarter"), cmp.basis
+    cur, cmp = m.windows("quarter", date(2026, 9, 24))
+    assert cmp.basis == f"the same {cur.business_days} business days last quarter"
+
+
+@test("rc review (11): the accepted rate never reads above 100 % when a rep confirms more than the shop asked for")
+def _():
+    from app import metrics as m
+    # the view's rows: each requested line capped at its request, the surplus in units_raised
+    capped = [{**_o(70, "confirmed", "2026-09-22T07:00:00+00:00", 1, 10.0, 10, 10, "2026-09-22T08:00:00+00:00",
+                    total_c=20.0), "units_raised": 10},
+              _o(71, "confirmed", "2026-09-22T07:00:00+00:00", 1, 20.0, 20, 10, "2026-09-22T08:00:00+00:00", total_c=10.0)]
+    acc = _tile(_overview(FakeRPC(orders=capped)), "orders.accepted")
+    assert acc["value"] == 66.7 and (acc["units_accepted"], acc["units_ordered"], acc["units_raised"]) == (20, 30, 10), acc
+    # an uncapped row (20 confirmed on 10 asked) still cannot lift the rate: before the fix this read 100 % / 200 %
+    raw = [_o(72, "confirmed", "2026-09-22T07:00:00+00:00", 1, 10.0, 10, 20, "2026-09-22T08:00:00+00:00", total_c=20.0)]
+    acc = _tile(_overview(FakeRPC(orders=raw)), "orders.accepted")
+    assert acc["value"] == 100.0 and acc["units_accepted"] == 10, acc
+    acc = _tile(_overview(FakeRPC(orders=raw + [capped[1]])), "orders.accepted")
+    assert acc["value"] == 66.7, acc
+    assert "units_raised" in m.ORDERS_SQL
+
+
+@test("rc review (12): an order reopened from Cancelled is open again, and its clocks start at the reopen")
+def _():
+    from app import metrics as m
+    # placed Mon 10:00 Bahrain, confirmed Mon 13:00, cancelled, reopened Sun 09:00 (NOW = Sun 10:00)
+    reopened = {**_o(80, "new", "2026-09-21T07:00:00+00:00", 1, 10.0, 5, 5, "2026-09-21T10:00:00+00:00", total_c=10.0),
+                "reopened_at": "2026-09-27T06:00:00+00:00"}
+    ov = _overview(FakeRPC(orders=[reopened]))
+    ct = _tile(ov, "orders.confirm_time")
+    assert (ct["open_included"], ct["orders"], ct["p50_hours"]) == (1, 1, 1.0), "open, 1 h since the reopen — not 3 h"
+    assert _tile(ov, "orders.waiting")["value"] == 0 and "orders_waiting" not in _items(ov), "not waiting for days"
+    # confirmed again after the reopen: the confirm time runs reopen → new confirmation (Sun 09:00 → 09:30)
+    again = {**reopened, "status": "confirmed", "confirmed_at": "2026-09-27T06:30:00+00:00"}
+    ct = _tile(_overview(FakeRPC(orders=[again])), "orders.confirm_time")
+    assert (ct["open_included"], ct["p50_hours"]) == (0, 0.5), ct
+    # a delivered order reopened to Confirmed keeps its original confirm time (the reopen came after it)
+    back = {**_o(81, "confirmed", "2026-09-21T07:00:00+00:00", 1, 10.0, 5, 5, "2026-09-21T10:00:00+00:00",
+                 total_c=10.0), "reopened_at": "2026-09-24T06:00:00+00:00"}
+    ct = _tile(_overview(FakeRPC(orders=[back])), "orders.confirm_time")
+    assert ct["p50_hours"] == 3.0, ct
+    assert "reopened_at" in m.ORDERS_SQL
+
+
+@test("rc review (14): the dormant table lists EVERY dormant account the tile counts (no silent cut at 50)")
+def _():
+    custs = [{"customer_name": f"Shop {i:02d}", "first_invoice": "2025-01-01", "last_invoice": "2026-07-01",
+              "net_12m": 100 + i} for i in range(63)]
+    d = _tile(_overview(FakeRPC(customers=custs)), "customers.dormant")
+    assert d["value"] == 63 and len(d["all"]) == 63, (d["value"], len(d["all"]))
+    assert d["all"][0]["account"] == "Shop 62" and len(d["items"]) < 63
 
 
 def main() -> int:

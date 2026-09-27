@@ -480,9 +480,15 @@ Creates one view, `v_command_orders`: one row per marketplace order with status,
 `has_customer` (a flag, never the id), `is_test`, the lifecycle timestamps, the order and confirmed totals, units
 ordered vs units confirmed and the line count (one `GROUP BY` over `shop_order_lines`), `has_invoice_no` (a flag,
 never the number), the confirmed Focus links (count + first decision time), and — appended after the review —
-`units_added`, `units_delivered` and `has_suggestion`. No shop or merchant name, phone, email, token, IP or invoice
+`units_added`, `units_delivered` and `has_suggestion`, then (release-candidate review) `units_raised` and
+`reopened_at`. No shop or merchant name, phone, email, token, IP or invoice
 number. `REVOKE ALL ... FROM anon, authenticated`; `GRANT SELECT` to `yq_readonly` only (the Command Centre's read
-path, `app/metrics.py`); not `security_invoker`. No row is written. The closing `DO` block asserts the 25 columns,
+path, `app/metrics.py`); not `security_invoker`. No row is written. Each requested line counts at most its requested
+qty in `units_confirmed` / `units_delivered` (a rep who confirms 20 on a line of 10 puts the other 10 in
+`units_raised`), so the accepted rate can never pass 100 %. `reopened_at` is R7c's column read through `to_jsonb(o)`
+(NULL before R7c, pins nothing): a reopened order's confirm and waiting clocks start at the reopen. The API selects
+both columns, so apply this file as it is now (a copy applied from an older draft must be re-run before the API
+deploys). The closing `DO` block asserts the 27 columns,
 that none of the personal columns is present, the grants, and one row per order.
 
 Units are the shop's request (review, 27-Sep-2026): `units_ordered` / `units_confirmed` / `units_delivered` count only
