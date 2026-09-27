@@ -11,6 +11,8 @@ import { en } from '../i18n/en'
 import { areaRepName as areaRepFor } from '../lib/areaRep'
 import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName, sessionId } from '../lib/format'
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
+import { errorText } from '../lib/serverWords'
+import { useServerWords } from '../lib/useServerWords'
 import { clearSmallAck } from '../lib/smallOrder'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { useReducedMotion } from '../shell/useViewport'
@@ -41,6 +43,7 @@ export default function CheckoutPage() {
   const m = useMarket()
   const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
   const { rep, data, itemsByCode, recognized } = m
+  const words = useServerWords()
   const { viewport } = useShell()
   const reduced = useReducedMotion()
   const lines = useCartLines()
@@ -192,7 +195,9 @@ export default function CheckoutPage() {
       navigate(`/o/${res.token}`, { replace: true, state: { placed: res } })
     } catch (err: unknown) {
       const detail = err instanceof ShopApiError ? err.detail || err.message : ''
-      setError(detail || S.checkout.failed)
+      // the server's refusal in the page's language (lib/serverWords.ts); the raw English still
+      // drives the reuse fallback below
+      setError(errorText(words, detail, quote) || S.checkout.failed)
       // the server could not reuse the last order's phone (another phone's order, or gone): ask for it
       if (reuse && /phone/i.test(detail)) changePhone()
       setSubmitting(false)

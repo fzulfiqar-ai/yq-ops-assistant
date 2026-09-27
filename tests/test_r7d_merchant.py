@@ -827,6 +827,58 @@ def _():
         assert want in api, want
 
 
+@test("quote: stable keys beside the English — blocked_code, block_code + block_items, warning_codes, coupon.reason")
+def _():
+    from app.shop import SOLD_OUT_SHORT, price_cart
+    ctx = _ctx(shop_allow_backorder="false")
+    for it in (_item("Z00", 1.0, stock=0), _item("M06", 1.0, moq=6)):
+        ctx["items"][it["item_code"]] = it
+        ctx["by_upper"][it["item_code"]] = it["item_code"]
+    q = price_cart([{"item_code": "Z00", "qty": 2}, {"item_code": "T02", "qty": 1}], ctx=ctx)
+    z = next(ln for ln in q["lines"] if ln["item_code"] == "Z00")
+    assert z["blocked_code"] == "sold_out" and z["blocked_reason"].startswith("Sold Out"), z
+    assert q["block_code"] == "dead_lines" and q["block_items"] == ["Z00"], q
+    assert q["block_reason"].startswith("Remove Z00 to send this order — " + SOLD_OUT_SHORT), "the English is unchanged"
+    t = next(ln for ln in q["lines"] if ln["item_code"] == "T02")
+    assert t.get("blocked_code") is None and t["blocked_reason"] is None
+    q = price_cart([{"item_code": "M06", "qty": 2}, {"item_code": "nope-1", "qty": 1}], ctx=ctx)
+    assert [ln["blocked_code"] for ln in q["lines"]] == ["moq", "not_in_catalog"], q["lines"]
+    assert q["lines"][0]["blocked_reason"] == "Minimum order is 6." and q["block_items"] == ["M06", "nope-1"]
+    ok = price_cart([{"item_code": "T02", "qty": 1}], ctx=ctx)
+    assert ok["block_code"] is None and ok["block_items"] == [] and ok["warning_codes"] == []
+    bo = price_cart([{"item_code": "Z00", "qty": 2}], ctx=_ctx(shop_allow_backorder="true") | {
+        "items": {**ctx["items"]}, "by_upper": {**ctx["by_upper"]}})
+    assert bo["warnings"] == ["Z00 is Sold Out — it will be backordered and confirmed by your salesman."], bo["warnings"]
+    assert bo["warning_codes"] == [{"code": "backorder", "item_code": "Z00"}], "index for index with the warnings"
+    cq = price_cart([{"item_code": "T02", "qty": 1}], coupon_code="NOPE", ctx=ctx)
+    assert cq["coupon"]["reason"] == "invalid" and cq["coupon"]["message"] == "This code is not valid or has expired."
+    mq = price_cart([{"item_code": "T02", "qty": 1}], ctx=_ctx(shop_min_order_bhd="20", shop_small_order_mode="block"))
+    assert mq["block_code"] == "minimum" and mq["block_reason"].startswith("Minimum order is BHD 20.000"), mq["block_reason"]
+    assert mq["minimum"]["remaining_bhd"] > 0
+
+
+@test("quote words: the market words the keys (lib/serverWords.ts); every fixed refusal it maps is still the server's sentence")
+def _():
+    sw = _read("web/src/market/lib/serverWords.ts")
+    server = _read("app/shop.py") + _read("app/offers.py") + _read("app/shop_api.py")
+    fixed = re.findall(r"^  (['\"])(.+?)\1: \(t\) =>", sw, re.M)
+    assert len(fixed) >= 10, fixed
+    for _q, sentence in fixed:
+        assert sentence in server, f"the server no longer says {sentence!r} — serverWords.ts FIXED is stale"
+    from app.offers import COUPON_GONE_MSG
+    from app.shop import IN_FLIGHT_MSG, REUSE_FAILED_MSG
+    for const in (REUSE_FAILED_MSG, IN_FLIGHT_MSG, COUPON_GONE_MSG):
+        assert any(s == const for _q, s in fixed), const
+    cart = _read("web/src/market/pages/CartPage.tsx")
+    for want in ("blockText(words, quote)", "lineBlockedText(words, q)", "couponText(words, quote.coupon)",
+                 "warningTexts(words, quote).map(", "errorText(words, quoteError, quote)"):
+        assert want in cart, want
+    assert "{q.blocked_reason}" not in cart and "{quote.coupon.message}" not in cart
+    assert "lineBlockedText(words, q) || S.card.soldOut" in _read("web/src/market/shell/MiniCart.tsx")
+    assert "setError(errorText(words, detail, quote) || S.checkout.failed)" in _read("web/src/market/pages/CheckoutPage.tsx")
+    assert "progressText(useServerWords(), progress)" in _read("web/src/market/components/ProgressBar.tsx")
+
+
 @test("search: zero results say 'We don't stock “q” yet', offer ONE tell-the-rep action and log a product_request once per query")
 def _():
     src = _read("web/src/market/components/SearchResults.tsx")

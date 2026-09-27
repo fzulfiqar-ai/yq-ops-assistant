@@ -450,6 +450,31 @@ export const en = {
     blocked: 'This order cannot be sent yet.',
     discount: 'Discount',
     askMessage: (first: string) => `Hello ${first}, a question about my order:`,
+    /*
+     * The quote's own sentences, worded from its stable keys (lib/serverWords.ts). An English page
+     * shows the server's sentence itself; these English twins are the fallback and the shape the
+     * Arabic follows (app/shop.py price_cart: blocked_code, block_code, warning_codes, coupon.reason).
+     */
+    lineSoldOut: (asOf: string | null) => (asOf ? `Sold Out as of ${asOf} — can’t be ordered right now. Remove it to send your order.` : 'Sold Out — can’t be ordered right now. Remove it to send your order.'),
+    lineMin: (n: number) => `Minimum order is ${n}.`,
+    lineGone: 'No longer in the catalog.',
+    linePriceAsk: 'Price on request — ask your salesman.',
+    removeOne: (names: string, why: string) => `Remove ${names} to send this order — ${why}.`,
+    removeMany: (names: string, more: number) => `Remove ${names}${more > 0 ? ` and ${more} more` : ''} to send this order.`,
+    orderEmpty: 'Your order is empty.',
+    minimumBlock: (min: string, gap: string) => `Minimum order is ${min} — add ${gap} more.`,
+    backorderWarn: (code: string) => `${code} is Sold Out — it will be backordered and confirmed by your salesman.`,
+    couponInvalid: 'This code is not valid or has expired.',
+    couponOtherRep: 'This code is for a different salesman’s customers.',
+    couponAddMore: (gap: string) => `Add ${gap} more to use this code.`,
+    couponNotThese: 'This code does not apply to these items.',
+    couponBetter: (name: string) => `${name} already gives you more — code not needed.`,
+    couponAtFloor: 'This code cannot lower these items further — they are already at the lowest price we can offer.',
+    couponCapped: (amount: string) => `Code applied — capped at ${amount} to keep these items above cost.`,
+    couponApplied: (code: string) => `Code ${code} applied`,
+    freeDeliveryGap: (gap: string) => `Add ${gap} more for free delivery`,
+    unlockGap: (gap: string, name: string) => `Add ${gap} more to unlock ${name}`,
+    offerApplied: (name: string) => `${name} applied`,
   },
   checkout: {
     title: 'Your details',
@@ -497,6 +522,14 @@ export const en = {
     change: 'Change',
     /** a visitor with no rep link, once the area is picked and the office has a rep for it (shop_area_reps) */
     areaRep: (name: string) => `New shops here are looked after by ${name}`,
+    /** the order endpoint's refusals, worded from the server's fixed sentences (lib/serverWords.ts) */
+    reuseFailed: 'Please enter your phone number — the one from your last order can’t be used on this phone.',
+    inFlight: 'Your order is still being placed — tap Place order again in a minute.',
+    phoneCap: 'This phone number has placed many orders today — please contact your salesman.',
+    deviceCap: 'Too many orders from this device today — please contact your salesman.',
+    unavailableNow: 'Ordering is temporarily unavailable — please try again in a minute.',
+    couponGone: 'This code is no longer available — it has run out or ended. Remove it to place your order.',
+    closed: 'The marketplace is not open.',
   },
   placed: {
     title: 'Wholesale order received',

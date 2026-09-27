@@ -9,6 +9,8 @@ import { useMarket, useOrder } from '../MarketContext'
 import { rememberedOrders } from '../lib/device'
 import { bhd, minQtyOf, money, stepOf, productName } from '../lib/format'
 import { NAV_ICONS } from '../lib/icons'
+import { lineBlockedText } from '../lib/serverWords'
+import { useServerWords } from '../lib/useServerWords'
 import { useCartCounts, useCartLines } from '../store/cart'
 import { ltrText } from '../i18n'
 import { S } from '../strings'
@@ -28,6 +30,7 @@ import { useShell } from './ShellContext'
  */
 export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
   const { itemsByCode, setQty, remove } = useMarket()
+  const words = useServerWords()
   const { quote, quoting } = useOrder()
   const lines = useCartLines()
   const { items, units } = useCartCounts()
@@ -113,7 +116,7 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                         {name}
                       </div>
                       {/* a line that can no longer be ordered is a state, not an error: grey, never red */}
-                      <div className="text-xs tnum text-ink-2">{dead ? q?.blocked_reason || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : <Ltr>{line.item_code}</Ltr>}</div>
+                      <div className="text-xs tnum text-ink-2">{dead ? lineBlockedText(words, q) || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : <Ltr>{line.item_code}</Ltr>}</div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <span className="text-sm font-semibold tnum text-ink">{dead ? '—' : bhd(q?.line_total_bhd ?? (Number(item?.price_bhd) || 0) * line.qty)}</span>

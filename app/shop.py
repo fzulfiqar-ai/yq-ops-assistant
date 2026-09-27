@@ -1585,18 +1585,22 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     lines: list[dict] = []      # every line the customer can see, in cart order
     good: list[dict] = []       # the priced ones — all the arithmetic below uses these
     warnings: list[str] = []
+    warning_codes: list[dict] = []   # the same warnings as stable keys, index for index
     clamped: list[str] = []
     subtotal = D0
 
-    def _blocked(code: str, qty: int, reason: str, **extra) -> dict:
+    def _blocked(code: str, qty: int, reason: str, why: str, **extra) -> dict:
         """A line that cannot be ordered as it stands. It stays visible with its
         reason and a price of zero — one dead line must never zero the whole cart,
-        which is what a customer reads as 'the site is broken'."""
+        which is what a customer reads as 'the site is broken'. `why` is the stable key
+        ('sold_out' · 'moq' · 'not_in_catalog' · 'price_on_request') a client in another
+        language words the reason from (web/src/market/lib/serverWords.ts); blocked_reason
+        stays the English sentence for older clients and the portal."""
         ln = {"item_code": code, "display_name": code, "spec": None, "image_url": None,
               "qty": qty, "moq": 1, "list_price_bhd": D0, "unit_price_bhd": D0,
               "discount_bhd": D0, "line_total_bhd": D0, "stock_status": STOCK_OUT,
               "backorder": False, "applied": [], "warning": None,
-              "unavailable": True, "blocked_reason": reason, "_floor": None}
+              "unavailable": True, "blocked_reason": reason, "blocked_code": why, "_floor": None}
         ln.update(extra)
         return ln
 
@@ -1604,11 +1608,11 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         code = resolve_code(ctx, raw_code)
         it = ctx["items"].get(code) if code else None
         if not it:
-            lines.append(_blocked(raw_code, qty, "No longer in the catalog."))
+            lines.append(_blocked(raw_code, qty, "No longer in the catalog.", "not_in_catalog"))
             continue
         lp = it.get("standard_rate")
         if lp is None or _d(lp) <= 0:
-            lines.append(_blocked(code, qty, "Price on request — ask your salesman.",
+            lines.append(_blocked(code, qty, "Price on request — ask your salesman.", "price_on_request",
                                   display_name=it.get("display_name") or code, spec=it.get("spec"),
                                   image_url=it.get("product_image_url")))
             continue
@@ -1621,13 +1625,14 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
             # backorder off the line is never silently dropped or zeroed: it stays in the cart,
             # unavailable, with the reason spelled out — and the order cannot be sent until it goes.
             reason = (f"Minimum order is {moq}." if qty < moq else sold_out_why)
-            lines.append(_blocked(code, qty, reason,
+            lines.append(_blocked(code, qty, reason, ("moq" if qty < moq else "sold_out"),
                                   display_name=it.get("display_name") or code, spec=it.get("spec"),
                                   image_url=it.get("product_image_url"), moq=moq,
                                   list_price_bhd=lp, stock_status=status))
             continue
         if backorder:
             warnings.append(f"{code} is Sold Out — it will be backordered and confirmed by your salesman.")
+            warning_codes.append({"code": "backorder", "item_code": code})
         # item-level rules: best non-stackable, then stackables on top
         cands = [r for r in rules_live if r["kind"] in ("qty_tier", "salesman_offer", "bundle_price")
                  and _rule_matches_item(r, it) and _rule_matches_ref(r, ref)
@@ -1722,16 +1727,20 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         match = next((r for r in ctx["rules"] if r["kind"] == "coupon"
                       and str(r.get("coupon_code") or "").upper() == cc), None)
         if not match:
-            coupon_out = {"code": cc, "valid": False, "message": "This code is not valid or has expired."}
+            coupon_out = {"code": cc, "valid": False, "message": "This code is not valid or has expired.",
+                          "reason": "invalid"}
         elif not _rule_matches_ref(match, ref):
-            coupon_out = {"code": cc, "valid": False, "message": "This code is for a different salesman's customers."}
+            coupon_out = {"code": cc, "valid": False, "message": "This code is for a different salesman's customers.",
+                          "reason": "other_rep"}
         else:
             amt = _cart_amount(match)
             if amt <= 0:
                 mv = _d(match.get("min_value_bhd"))
                 msg = (f"Add BHD {dmoney(mv - net):.3f} more to use this code." if mv > net
                        else "This code does not apply to these items.")
-                coupon_out = {"code": cc, "valid": False, "message": msg}
+                coupon_out = {"code": cc, "valid": False, "message": msg,
+                              **({"reason": "add_more", "amount_bhd": dmoney(mv - net)} if mv > net
+                                 else {"reason": "not_these_items"})}
             else:
                 coupon_rule, coupon_amt = match, amt
 
@@ -1744,7 +1753,8 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         else:
             cart_discounts.append((best_auto, best_amt))
             coupon_out = {"code": cc, "valid": True,
-                          "message": f"{best_auto['name']} already gives you more — code not needed."}
+                          "message": f"{best_auto['name']} already gives you more — code not needed.",
+                          "reason": "better_offer", "rule_name": best_auto["name"]}
             coupon_rule = None
     elif coupon_rule:
         cart_discounts.append((coupon_rule, coupon_amt))
@@ -1774,14 +1784,15 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         if given <= 0:
             coupon_out = {"code": cc, "valid": False,
                           "message": ("This code cannot lower these items further - they are already "
-                                      "at the lowest price we can offer.")}
+                                      "at the lowest price we can offer."), "reason": "at_floor"}
             coupon_rule = None
         elif given < dmoney(coupon_amt):
             coupon_out = {"code": cc, "valid": True,
                           "message": (f"{rule_summary(coupon_rule)} applied - capped at BHD {given:.3f} "
-                                      f"to keep these items above cost.")}
+                                      f"to keep these items above cost."), "reason": "capped", "amount_bhd": given}
         else:
-            coupon_out = {"code": cc, "valid": True, "message": f"{rule_summary(coupon_rule)} applied"}
+            coupon_out = {"code": cc, "valid": True, "message": f"{rule_summary(coupon_rule)} applied",
+                          "reason": "applied", "amount_bhd": given}
 
     discount_total = dmoney(item_discount + cart_total)
     net_after = dmoney(subtotal - discount_total)
@@ -1804,11 +1815,12 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
             r = nxt[0]
             remaining = dmoney(_d(r["min_value_bhd"]) - net_after)
             progress = {"kind": "cart_value", "threshold_bhd": dmoney(r["min_value_bhd"]),
-                        "remaining_bhd": remaining, "unlocked": False,
+                        "remaining_bhd": remaining, "unlocked": False, "rule_name": r["name"],
                         "label": f"Add BHD {remaining:.3f} more to unlock {r['name']}"}
         elif best_auto:
             progress = {"kind": "cart_value", "threshold_bhd": dmoney(best_auto.get("min_value_bhd")),
-                        "remaining_bhd": D0, "unlocked": True, "label": f"{best_auto['name']} applied"}
+                        "remaining_bhd": D0, "unlocked": True, "rule_name": best_auto["name"],
+                        "label": f"{best_auto['name']} applied"}
 
     min_order = dmoney(vals.get("shop_min_order_bhd"))
     small_mode = small_order_mode(vals)
@@ -1817,7 +1829,13 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     # what IS orderable, so the number on the button stays true either way.
     blocked = [ln for ln in lines if ln.get("unavailable")]
     block_reason = None
+    # block_code: the same block as a stable key ('dead_lines' — block_items names them, the first
+    # line's blocked_code says why; 'empty'; 'minimum' — minimum.remaining_bhd is the gap), so a
+    # client in another language words it itself. block_reason stays the English sentence.
+    block_code = None
+    block_items = [ln["item_code"] for ln in blocked]
     if blocked:
+        block_code = "dead_lines"
         names = ", ".join(ln["item_code"] for ln in blocked[:3])
         more = f" and {len(blocked) - 3} more" if len(blocked) > 3 else ""
         why = blocked[0]["blocked_reason"]
@@ -1831,9 +1849,10 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                         if len(blocked) == 1 else
                         f"Remove {names}{more} to send this order.")
     elif not good:
-        block_reason = "Your order is empty."
+        block_reason, block_code = "Your order is empty.", "empty"
     elif net_after < min_order and small_mode == "block":
         block_reason = f"Minimum order is BHD {min_order:.3f} — add BHD {dmoney(min_order - net_after):.3f} more."
+        block_code = "minimum"
     can_submit = block_reason is None
     # The wholesale minimum as a sales engine: how far to go, and what would close the gap.
     minimum = None
@@ -1867,8 +1886,8 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         "subtotal_bhd": subtotal, "discount_bhd": discount_total, "delivery_bhd": delivery,
         "total_bhd": total, "units": sum(ln["qty"] for ln in good), "items": len(good),
         "discounts": discounts, "coupon": coupon_out, "progress": progress,
-        "warnings": warnings, "can_submit": can_submit, "min_order_bhd": min_order,
-        "block_reason": block_reason, "minimum": minimum, "gap_suggestions": gap_suggestions,
+        "warnings": warnings, "warning_codes": warning_codes, "can_submit": can_submit, "min_order_bhd": min_order,
+        "block_reason": block_reason, "block_code": block_code, "block_items": block_items, "minimum": minimum, "gap_suggestions": gap_suggestions,
         "has_backorder": any(ln["backorder"] for ln in good),
         "experiments": experiments,
         "_coupon_rule_id": coupon_rule["id"] if coupon_rule else None,
