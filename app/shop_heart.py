@@ -446,7 +446,13 @@ def public_reason(code) -> str | None:
 # ── pricing a line the rep adds (current book) ────────────────────────────────
 
 def _cost_fields(ctx: dict, code: str) -> dict:
+    """The landed cost snapshotted on a new order line. Only a TRUSTED cost (shop.floor_state
+    'ok'): a missing, zero or implausible one (cost_flags — e.g. 0.0126 against a 0.400 price)
+    is stored as no cost, so the line counts as uncosted in every margin read (v_offer_performance's
+    uncosted_lines) instead of a ~96 % margin — the same rule the margin floor follows (C3)."""
     shop = _shop()
+    if shop.floor_state(ctx, code) != "ok":
+        return {"unit_cost_bhd": None, "cost_source": None}
     cost = shop.cost_for(ctx, code)
     if cost is None:
         return {"unit_cost_bhd": None, "cost_source": None}
@@ -469,6 +475,9 @@ def price_new_line(o: dict, code: str, qty: int, ctx: dict) -> dict:
     if pl.get("unavailable") or not pl.get("unit_price_bhd"):
         raise shop.ShopError(f"{pl.get('item_code') or code}: {pl.get('blocked_reason') or 'no trade price'} "
                              f"It can't be added.")
+    # the line's discount split over the rules that made it (R7d ledger): the offer ledger records
+    # an added / substitute line like a placed one (offers.write_added_ledger). Never sent out.
+    pl["_ledger"] = [e for e in q.get("_ledger") or [] if e.get("level") == "line" and e.get("line_index") == 0]
     return pl
 
 
@@ -714,7 +723,8 @@ def plan_edit(o: dict, changes, added_lines, *, stage: str, ctx: dict, ready: bo
     added_event = [{"item_code": r["item_code"], "qty": r["qty"], "unit_price_bhd": r["unit_price_bhd"],
                     "line_total_bhd": r["line_total_bhd"], "reason": r["change_reason"],
                     "substitute_for_line": r.get("substitute_for_line")} for r in new_rows]
-    return {"line_updates": line_updates, "new_rows": new_rows, "totals": totals, "adverse": adverse,
+    return {"line_updates": line_updates, "new_rows": new_rows, "new_priced": [r["_pl"] for r in news],
+            "totals": totals, "adverse": adverse,
             "agreed": agreed, "event_lines": event_lines, "added": added_event, "changed": changed_legacy,
             "removed": removed_legacy, "before_total": before_total,
             "legacy": legacy and bool(event_lines)}
@@ -885,6 +895,10 @@ def _edit(order_id: int, changes, expected_delivery, note, actor: str, *, stage:
                        order_no=o.get("order_no"), err=e,
                        pins={"confirmed_at": now} if stage == "confirm" else None)
         raise
+    # R7d: the offer ledger records the added / substitute lines' discounts (best effort, after the
+    # lines and the event stand — measurement never fails or undoes the rep's change)
+    from app import offers
+    offers.write_added_ledger(client, o, _got, plan.get("new_priced") or [], ctx)
     if stage == "confirm":
         from app import attribution
         attribution.settle_sticky(client, o, "confirmed")     # the assigned rep confirmed: first-touch rep settles
@@ -992,6 +1006,7 @@ def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None
         raise shop.ShopError(MIGRATION_MSG.format(what="Delivering with changes"))
     ctx = shop.context()
     news: list[dict] = []
+    priced: list[dict] = []        # the price_cart line of each added row (its ledger split), same order
     for a in added:
         a = a or {}
         code = shop.clean(a.get("item_code"), 64)
@@ -1005,6 +1020,7 @@ def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None
         pl = price_new_line(o, code, qty, ctx)
         news.append(_new_row(o, pl, qty, stage="delivery", reason=reason, note=n, ctx=ctx, substitute_for=None,
                              delivered=True))
+        priced.append(pl)
     all_lines = [{**ln, "qty_delivered": qd[lid]} for lid, ln in by_id.items()] + news
     if not any(shop._i(x.get("qty_delivered")) > 0 for x in all_lines):
         raise shop.ShopError("Nothing was handed over — cancel the order instead.")
@@ -1045,13 +1061,18 @@ def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None
               "adverse": [a["kind"] for a in adverse], "shop_agreed": agreed_ev,
               "total_before": float(before_total), "total_after": float(now_total), "with_changes": True}
     before_lines = dict(by_id)
+    got_rows: list[dict] = []
 
     def after_swap(client):
-        undo, _got = write_lines(client, before_lines, line_updates, news)
+        undo, got = write_lines(client, before_lines, line_updates, news)
+        got_rows[:] = got or []
         return undo
     out = shop.set_status(order_id, "delivered", note, actor, expected_status=st, focus_invoice_no=focus_invoice_no,
                           pin_updated=True, expected_updated_at=o.get("updated_at"), detail_extra=detail,
                           extra_upd=extra_upd, after_swap=after_swap)
+    if got_rows:      # R7d: the lines added at the door carry their offers into the ledger (best effort)
+        from app import offers
+        offers.write_added_ledger(shop.get_client(), o, got_rows, priced, ctx)
     out["totals"] = _totals_out(totals)
     out["adverse"], out["shop_agreed"] = adverse, agreed_ev
     return out

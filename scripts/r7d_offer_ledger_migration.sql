@@ -79,7 +79,7 @@ create index if not exists shop_order_discounts_rule_idx on shop_order_discounts
 alter table shop_order_discounts enable row level security;
 revoke all on shop_order_discounts from anon, authenticated;
 comment on table shop_order_discounts is
-  'R7d offer ledger: one row per (order line, rule) and per (order, cart-level rule). amount_bhd as placed; amount_confirmed_bhd at the agreed quantities (confirm / amend / delivery with changes). Written by app.shop.create_order; service role only.';
+  'R7d offer ledger: one row per (order line, rule) and per (order, cart-level rule). amount_bhd as placed; amount_confirmed_bhd at the agreed quantities (confirm / amend / delivery with changes). Written by app.shop.create_order, and by app.shop_heart for a line the rep adds or substitutes (born confirmed at its discount when added); service role only.';
 
 -- ── 3. the coupon counter ───────────────────────────────────────────────────────
 create or replace function shop_coupon_reserve(p_rule_id bigint, p_force boolean default false)

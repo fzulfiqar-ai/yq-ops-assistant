@@ -7,7 +7,9 @@ What it adds (scripts/r7d_offer_ledger_migration.sql creates the storage; every 
 works before it and degrades to the old behaviour):
 
   * shop_order_discounts — ONE row per (order line, rule) and per (order, cart-level rule), written
-    by app.shop.create_order in one insert right after the lines: the rule as it stood when the
+    by app.shop.create_order in one insert right after the lines (and, for a line the rep adds or
+    substitutes at Confirm / Amend / delivery, by app.shop_heart right after it is inserted —
+    write_added_ledger, born confirmed at its discount when added): the rule as it stood when the
     shop ordered (rule_snapshot), line or cart level, the amount placed, the amount after the rep's
     confirmation (amount_confirmed_bhd, refreshed by confirm / amend / deliver-with-changes), and
     whether the margin floor cut it (clamped). price_cart splits a line's discount over the rules
@@ -27,6 +29,10 @@ works before it and degrades to the old behaviour):
     the device) mod `mod`; buckets in `hold` never get the offer. The quote and the order resolve
     the merchant the same way (the device's customer, else the device), so a shop never sees a price
     it is not charged. Automatic offers only: a coupon is typed by the shop, so it never has one.
+    A rep's order (and a line he adds) has no merchant key, so it is held back — on purpose: the
+    rep cannot see which arm a shop is in. So a bucketed rule is never advertised on anything
+    shared (the catalogue's tiers, its offer list, an item's 'offer' badge: shop.is_hold_out); it
+    shows only in the shop's own quote.
     The arm travels as exp/var: `experiments` on the quote, meta.exp/meta.var on the 'order' event
     and the arm inside every ledger row's snapshot.
   * shop_badge_log — the badges merchants saw, one row per item per Bahrain day (a shop_jobs job),
@@ -295,6 +301,56 @@ def write_ledger(client, order: dict, quote: dict, line_rows: list[dict], ctx: d
         return 0
 
 
+def added_ledger_rows(order_id: int, inserted: list[dict], priced: list[dict], rules: dict) -> list[dict]:
+    """Pure: the shop_order_discounts rows for lines the rep added or substituted after the order
+    was placed (Confirm, Amend, delivery with changes). `inserted` = the shop_order_lines rows as
+    inserted (with their ids), `priced` = the price_cart line each was priced from, in the same
+    order — its `_ledger` carries the line's discount split over the rules that made it, exactly as
+    create_order's rows are. Such a line was never placed by the shop: its "placed" amount is the
+    discount when the rep added it (at the quantity added), and it is born confirmed at that amount;
+    refresh_confirmed then re-values it at the agreed quantity like every other line row."""
+    out = []
+    for row, pl in zip(inserted or [], priced or []):
+        lid = (row or {}).get("id")
+        if lid is None or str(row.get("item_code") or "").upper() != str((pl or {}).get("item_code") or "").upper():
+            continue
+        for e in (pl or {}).get("_ledger") or []:
+            rid = e.get("rule_id")
+            if rid is None or e.get("level") != "line":
+                continue
+            amt = float(_shop().dmoney(e.get("amount_bhd")))
+            out.append({
+                "order_id": order_id, "line_id": lid, "item_code": row.get("item_code"), "rule_id": rid,
+                "rule_snapshot": snapshot(rules.get(rid) or {"id": rid, "kind": e.get("kind"), "name": e.get("name")}),
+                "kind": e.get("kind"), "level": "line", "amount_bhd": amt, "amount_confirmed_bhd": amt,
+                "clamped": bool(e.get("clamped")), "stage": "confirmed",
+            })
+    return out
+
+
+def write_added_ledger(client, order: dict, inserted: list[dict], priced: list[dict], ctx: dict) -> int:
+    """One insert with the ledger rows of the lines a rep just added / substituted (see
+    added_ledger_rows). Best effort, like write_ledger: the lines are the real thing and are never
+    failed or rolled back for their measurement rows; a failure is logged loudly."""
+    if not inserted:
+        return 0
+    try:
+        if not table_ready("shop_order_discounts"):
+            return 0
+        rules = {r.get("id"): r for r in (ctx.get("rules") or [])}
+        rows = added_ledger_rows(int(order["id"]), inserted, priced, rules)
+        if not rows:
+            return 0
+        client.table("shop_order_discounts").insert(rows).execute()
+        return len(rows)
+    except Exception as e:  # noqa: BLE001
+        if _missing_relation(e):
+            _shop()._forget_column("shop_order_discounts", "id")
+        log.warning("offer ledger: lines added to order %s but their discount rows were NOT recorded: %s",
+                    order.get("order_no") or order.get("id"), e)
+        return 0
+
+
 # ── confirmed amounts (after the rep's confirm / amend / delivery with changes) ──
 
 def confirmed_amounts(order: dict, lines: list[dict], ledger: list[dict]) -> dict[int, float]:
@@ -350,7 +406,11 @@ def confirmed_amounts(order: dict, lines: list[dict], ledger: list[dict]) -> dic
 
 def refresh_confirmed(order_id: int) -> int:
     """Rewrite amount_confirmed_bhd / stage on an order's ledger rows. Best effort, never raises:
-    called after the order heart has already committed the rep's change."""
+    called after the order heart has already committed the rep's change, and after an admin
+    reopen. A Received order (a cancel undone) goes back to its placed amounts: every row
+    amount_confirmed_bhd NULL, stage 'placed' — v_offer_performance then reads the placed amount
+    against the ordered quantity until the rep confirms again. A cancelled order is left as it is
+    (the view does not count it)."""
     shop = _shop()
     if not table_ready("shop_order_discounts"):
         return 0
@@ -361,10 +421,14 @@ def refresh_confirmed(order_id: int) -> int:
         if not ledger:
             return 0
         o = shop.get_order(order_id)
-        if not o or o.get("status") in ("new", "cancelled"):
+        if not o or o.get("status") == "cancelled":
             return 0
-        amounts = confirmed_amounts(o, o.get("lines") or [], ledger)
         now = shop._iso()
+        if o.get("status") == "new":
+            client.table("shop_order_discounts").update(
+                {"amount_confirmed_bhd": None, "stage": "placed", "updated_at": now}).eq("order_id", order_id).execute()
+            return len(ledger)
+        amounts = confirmed_amounts(o, o.get("lines") or [], ledger)
         n = 0
         for rid, amt in amounts.items():
             client.table("shop_order_discounts").update(
@@ -421,15 +485,21 @@ def release_coupon(client, rule_id) -> bool:
 
 
 def coupon_rule_for_order(client, order: dict) -> int | None:
-    """The coupon rule an order used: its ledger row, else the rule holding its code."""
+    """The coupon rule an order used: its ledger's coupon row. An order whose ledger has rows but
+    no coupon row never spent a use (the code was "not needed" — an automatic offer gave more), so
+    there is nothing to give back or take again: None. Only an order with no ledger rows at all
+    (placed before the ledger, or its ledger write failed) falls back to the rule holding its code."""
     if not order.get("coupon_code"):
         return None
     if table_ready("shop_order_discounts"):
         try:
-            rows = (client.table("shop_order_discounts").select("rule_id").eq("order_id", order["id"])
-                    .eq("kind", "coupon").limit(1).execute().data or [])
-            if rows and rows[0].get("rule_id") is not None:
-                return int(rows[0]["rule_id"])
+            rows = (client.table("shop_order_discounts").select("rule_id,kind").eq("order_id", order["id"])
+                    .execute().data or [])
+            coupon = [r for r in rows if r.get("kind") == "coupon" and r.get("rule_id") is not None]
+            if coupon:
+                return int(coupon[0]["rule_id"])
+            if rows:
+                return None
         except Exception as e:  # noqa: BLE001
             log.debug("coupon ledger lookup failed: %s", e)
     try:

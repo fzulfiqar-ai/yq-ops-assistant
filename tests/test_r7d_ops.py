@@ -882,6 +882,175 @@ def _():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 5b. review fixes (R7d money stream): the coupon use, hold-outs on shared surfaces, reopen,
+#     added / substitute lines in the ledger, a flagged cost never snapshotted
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("coupon 'code not needed': the order does not carry the code, nothing is reserved, and its cancel gives no use back")
+def _():
+    from app.shop import create_order, price_cart, set_status
+    # a non-stackable automatic 20 % beats the BHD 2 code; the code has no uses left (5 of 5)
+    rules = [_rule(3, "cart_value", pct=20, min_value=5),
+             _rule(4, "coupon", amount=2, min_value=10, coupon="SAVE2", max_uses=5, uses=5)]
+    fake = _db(discount_rules=rules)
+    with _patched(fake, _ctx(rules)):
+        q = price_cart([{"item_code": "T02", "qty": 10}], "SAVE2", ctx=_ctx(rules))
+        assert q["coupon"]["valid"] is True and "not needed" in q["coupon"]["message"] and q["_coupon_rule_id"] is None
+        o = create_order(_market_body([("T02", 10)], coupon="SAVE2"), market=True)
+        assert fake.rows("shop_orders")[0]["coupon_code"] is None, "a code that gave nothing is not the order's code"
+        assert [r["kind"] for r in fake.rows("shop_order_discounts")] == ["cart_value"]
+        set_status(o["id"], "cancelled", "Duplicate", actor=ADMIN, reason_code="duplicate")
+    assert [n for n, _p in fake.rpc_calls if "coupon" in n] == [], fake.rpc_calls
+    assert fake.rows("discount_rules")[1]["uses"] == 5, "no phantom use handed back"
+
+
+@test("coupon_rule_for_order: a ledger without a coupon row = no use to give back; no ledger rows at all = the code's rule")
+def _():
+    from app import offers
+    rules = [_rule(3, "cart_value", pct=20, min_value=5), _rule(4, "coupon", amount=2, min_value=10, coupon="SAVE2")]
+    # an order written before the fix: it carries the code, but the ledger shows only the automatic offer
+    fake = _db(discount_rules=rules, shop_order_discounts=[
+        {"id": 1, "order_id": 9, "rule_id": 3, "kind": "cart_value", "level": "cart", "amount_bhd": 5.9}])
+    with _patched(fake):
+        assert offers.coupon_rule_for_order(fake, {"id": 9, "coupon_code": "SAVE2"}) is None
+        assert offers.release_for_order(fake, {"id": 9, "coupon_code": "SAVE2"}) is False
+        assert offers.retake_for_order(fake, {"id": 9, "coupon_code": "SAVE2"}) is False
+        # a coupon row → its rule; no ledger rows at all (before the ledger) → the rule holding the code
+        fake.rows("shop_order_discounts").append({"id": 2, "order_id": 10, "rule_id": 4, "kind": "coupon", "level": "cart"})
+        assert offers.coupon_rule_for_order(fake, {"id": 10, "coupon_code": "SAVE2"}) == 4
+        assert offers.coupon_rule_for_order(fake, {"id": 11, "coupon_code": "save2"}) == 4
+    assert [n for n, _p in fake.rpc_calls if "coupon" in n] == []
+
+
+@test("hold-out rules stay off every shared surface: no catalogue tier, no offer-list entry, no 'on_offer' badge (staff too); a plain rule still shows")
+def _():
+    from app.shop import catalog_payload, is_hold_out, item_tiers
+    held = _rule(7, "qty_tier", pct=10, min_qty=2, items=["T02"], bucket={"mod": 2, "hold": [0]})
+    plain = _rule(7, "qty_tier", pct=10, min_qty=2, items=["T02"])
+    assert is_hold_out(held) and not is_hold_out(plain)
+    ctx = _ctx([held])
+    assert item_tiers(ctx, ctx["items"]["T02"]) == []
+    with _patched(_db(), ctx):
+        for staff in (False, True):
+            p = (catalog_payload(None, staff_email=REP) if staff else catalog_payload("tok-test-token-value"))
+            t02 = next(i for i in p["items"] if i["item_code"] == "T02")
+            assert [o["id"] for o in p["offers"]] == [], (staff, p["offers"])
+            assert t02["has_tiers"] is False and t02["tiers"] == [] and "on_offer" not in t02["badges"], (staff, t02)
+    ctx = _ctx([plain])                                  # the control: the same rule without a bucket
+    assert [t["min_qty"] for t in item_tiers(ctx, ctx["items"]["T02"])] == [2]
+    with _patched(_db(), ctx):
+        p = catalog_payload("tok-test-token-value")
+        t02 = next(i for i in p["items"] if i["item_code"] == "T02")
+        assert [o["id"] for o in p["offers"]] == [7] and t02["has_tiers"] is True and "on_offer" in t02["badges"]
+
+
+@test("reopen refreshes the ledger: a delivery undone reads the confirmed quantities again; a cancel undone goes back to the placed amounts")
+def _():
+    from app.shop import confirm_order, create_order, deliver_with_changes, reopen_order, set_status
+    rules = [_rule(1, "qty_tier", pct=10, min_qty=10, items=["T02"])]
+    fake = _db(discount_rules=rules)
+    with _patched(fake, _ctx(rules)):
+        o = create_order(_market_body([("T02", 10)]), market=True)
+        lid = fake.rows("shop_order_lines")[0]["id"]
+        confirm_order(o["id"], [], None, None, actor=ADMIN)
+        deliver_with_changes(o["id"], [{"line_id": lid, "qty_delivered": 5, "reason": "damaged"}], actor=ADMIN)
+        assert [r["amount_confirmed_bhd"] for r in fake.rows("shop_order_discounts")] == [1.475]
+        out = reopen_order(o["id"], "delivered by mistake", ADMIN)
+        assert out["status"] == "confirmed"
+        led = fake.rows("shop_order_discounts")
+        assert [(r["amount_confirmed_bhd"], r["stage"]) for r in led] == [(2.95, "confirmed")], led
+        # a confirmed order cancelled, then reopened to Received: the placed amounts until confirmed again
+        o2 = create_order(_market_body([("T02", 10)], cid="c-2"), market=True)
+        lid2 = next(r["id"] for r in fake.rows("shop_order_lines") if r["order_id"] == o2["id"])
+        confirm_order(o2["id"], [{"line_id": lid2, "qty_confirmed": 6, "reason": "out_of_stock"}], None, None,
+                      actor=ADMIN)
+        row2 = next(r for r in fake.rows("shop_order_discounts") if r["order_id"] == o2["id"])
+        assert row2["amount_confirmed_bhd"] == 1.77 and row2["stage"] == "confirmed"
+        set_status(o2["id"], "cancelled", "Duplicate", actor=ADMIN, reason_code="duplicate")
+        assert reopen_order(o2["id"], "cancelled by mistake", ADMIN)["status"] == "new"
+        row2 = next(r for r in fake.rows("shop_order_discounts") if r["order_id"] == o2["id"])
+        assert row2["amount_confirmed_bhd"] is None and row2["stage"] == "placed", row2
+        assert row2["amount_bhd"] == 2.95, "the placed amount never moves"
+
+
+@test("ledger: a substitute (Confirm), an added line (Amend) and a line added at the door each get their offer's row; reopen zeroes the door line")
+def _():
+    from app.shop import amend_order, confirm_order, create_order, deliver_with_changes, reopen_order
+    rules = [_rule(1, "qty_tier", pct=10, min_qty=10, items=["T02", "X05", "C18", "UK21"])]
+    fake = _db(discount_rules=rules)
+    with _patched(fake, _ctx(rules)):
+        o = create_order(_market_body([("T02", 10)]), market=True)
+        t02 = fake.rows("shop_order_lines")[0]["id"]
+        confirm_order(o["id"], [{"line_id": t02, "substitute_item_code": "X05", "substitute_qty": 10,
+                                 "reason": "out_of_stock"}], None, None, actor=ADMIN, shop_agreed={"via": "whatsapp"})
+        by_code = {ln["item_code"]: ln["id"] for ln in fake.rows("shop_order_lines")}
+        led = {r["line_id"]: r for r in fake.rows("shop_order_discounts")}
+        assert led[t02]["amount_confirmed_bhd"] == 0.0, "the substituted line gives nothing now"
+        sub = led[by_code["X05"]]                        # 10 × (2.000 − 1.800)
+        assert (sub["rule_id"], sub["kind"], sub["level"], sub["amount_bhd"], sub["amount_confirmed_bhd"],
+                sub["stage"], sub["item_code"]) == (1, "qty_tier", "line", 2.0, 2.0, "confirmed", "X05"), sub
+        assert sub["rule_snapshot"]["pct_off"] == 10 and sub["order_id"] == o["id"]
+        amend_order(o["id"], [], None, None, actor=ADMIN, added_lines=[{"item_code": "C18", "qty": 10}])
+        by_code = {ln["item_code"]: ln["id"] for ln in fake.rows("shop_order_lines")}
+        led = {r["line_id"]: r for r in fake.rows("shop_order_discounts")}
+        assert led[by_code["C18"]]["amount_confirmed_bhd"] == 1.25        # 10 × (1.250 − 1.125)
+        deliver_with_changes(o["id"], added=[{"item_code": "UK21", "qty": 10}], actor=ADMIN)
+        by_code = {ln["item_code"]: ln["id"] for ln in fake.rows("shop_order_lines")}
+        led = {r["line_id"]: r for r in fake.rows("shop_order_discounts")}
+        assert led[by_code["UK21"]]["amount_confirmed_bhd"] == 5.25       # 10 × (5.250 − 4.725)
+        assert len(fake.rows("shop_order_discounts")) == 4
+        # the performance view sums these rows: the rule's discount now = what the order really gives
+        assert round(sum(r["amount_confirmed_bhd"] for r in fake.rows("shop_order_discounts")), 3) == 8.5
+        reopen_order(o["id"], "delivered by mistake", ADMIN)             # the door line goes out again
+        led = {r["line_id"]: r for r in fake.rows("shop_order_discounts")}
+        assert led[by_code["UK21"]]["amount_confirmed_bhd"] == 0.0 and led[by_code["X05"]]["amount_confirmed_bhd"] == 2.0
+    # before the migration nothing is written for an added line, and the edit still goes through
+    fake = _db(missing={"shop_order_discounts"}, discount_rules=rules)
+    with _patched(fake, _ctx(rules)):
+        o = create_order(_market_body([("T02", 10)]), market=True)
+        confirm_order(o["id"], [], None, None, actor=ADMIN, added_lines=[{"item_code": "C18", "qty": 10}])
+    assert not [c for c in fake.writes() if c[1] == "shop_order_discounts"]
+    assert len(fake.rows("shop_order_lines")) == 2
+
+
+@test("added-line ledger rows (pure): mapped by position and item code, line-level only, born confirmed; a mismatch is skipped")
+def _():
+    from app.offers import added_ledger_rows
+    pl = {"item_code": "X05", "_ledger": [
+        {"level": "line", "line_index": 0, "item_code": "X05", "rule_id": 1, "name": "Rule 1", "kind": "qty_tier",
+         "amount_bhd": 1.2, "clamped": False},
+        {"level": "line", "line_index": 0, "item_code": "X05", "rule_id": 2, "name": "Rule 2", "kind": "salesman_offer",
+         "amount_bhd": 0.8, "clamped": True}]}
+    rows = added_ledger_rows(5, [{"id": 41, "item_code": "X05"}], [pl], {1: _rule(1, "qty_tier", pct=10)})
+    assert [(r["line_id"], r["rule_id"], r["amount_bhd"], r["amount_confirmed_bhd"], r["stage"], r["clamped"])
+            for r in rows] == [(41, 1, 1.2, 1.2, "confirmed", False), (41, 2, 0.8, 0.8, "confirmed", True)]
+    assert rows[0]["rule_snapshot"]["pct_off"] == 10 and rows[1]["rule_snapshot"]["name"] == "Rule 2"
+    assert added_ledger_rows(5, [{"id": 41, "item_code": "C18"}], [pl], {}) == []
+    assert added_ledger_rows(5, [{"id": None, "item_code": "X05"}], [pl], {}) == []
+    assert added_ledger_rows(5, [{"id": 41, "item_code": "X05"}], [{"item_code": "X05"}], {}) == []
+
+
+@test("a cost flagged implausible (or zero) is never snapshotted as real cost: the line is uncosted, like a missing cost")
+def _():
+    from app import shop
+    from app.shop import create_order
+    from app.shop_heart import _cost_fields
+    ctx = _ctx([])
+    ctx["costs"].update(T02=0.0126, C18=0.0)          # 0.0126 against a 2.950 price: a per-carton / typo row
+    ctx["cost_flags"] = shop.cost_flags(ctx)
+    assert "T02" in ctx["cost_flags"]
+    assert _cost_fields(ctx, "T02") == {"unit_cost_bhd": None, "cost_source": None}
+    assert _cost_fields(ctx, "C18") == {"unit_cost_bhd": None, "cost_source": None}
+    assert _cost_fields(ctx, "NOPE") == {"unit_cost_bhd": None, "cost_source": None}
+    assert _cost_fields(ctx, "X05") == {"unit_cost_bhd": 0.8, "cost_source": "mrn"}   # a trusted cost stands
+    fake = _db()
+    with _patched(fake, ctx):
+        create_order(_market_body([("T02", 3), ("X05", 3)]), market=True)
+    got = {ln["item_code"]: (ln.get("unit_cost_bhd"), ln.get("cost_source")) for ln in fake.rows("shop_order_lines")}
+    assert got == {"T02": (None, None), "X05": (0.8, "mrn")}, got
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 6. soft delete
 # ═══════════════════════════════════════════════════════════════════════════════
 
