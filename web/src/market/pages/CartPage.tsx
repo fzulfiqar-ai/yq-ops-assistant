@@ -17,6 +17,8 @@ import { track } from '../lib/events'
 import { bhd, bhdMinus, fmtDateShort, minQtyOf, money, nextTier, productName, stepOf, unitAt, variantOf } from '../lib/format'
 import { bestSellers, orderLines, regularStock, splitReorder, type RegularLine } from '../lib/home'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
+import { blockText, couponText, errorText, lineBlockedText, warningTexts } from '../lib/serverWords'
+import { useServerWords } from '../lib/useServerWords'
 import { useCartCounts, useCartLines } from '../store/cart'
 import { useSaved } from '../store/saved'
 import { ltrText } from '../i18n'
@@ -107,7 +109,9 @@ export default function CartPage() {
   // block → nothing, only the reason.
   const requestSmall = under && minimum?.mode === 'request'
   const allowUnder = under && minimum?.mode === 'allow'
-  const blocked = quote?.can_submit === false ? quote.block_reason || S.cart.blocked : ''
+  // the server's sentences in the page's language (lib/serverWords.ts — English pages keep the server's own)
+  const words = useServerWords()
+  const blocked = quote?.can_submit === false ? blockText(words, quote) : ''
   const canCheckout = lines.length > 0 && !quoting && quote?.can_submit !== false
   const first = rep?.first_name || ''
   const askUrl = useMemo(() => {
@@ -308,7 +312,7 @@ export default function CartPage() {
                       </div>
                       {/* a line that can no longer be ordered is a state, not an error: grey, never red —
                           red stays for real errors (the quote failing, a refused coupon, the blocked order) */}
-                      {dead && q?.blocked_reason && <p className="mt-1.5 text-xs text-ink-2">{q.blocked_reason}</p>}
+                      {dead && q?.blocked_reason && <p className="mt-1.5 text-xs text-ink-2">{lineBlockedText(words, q)}</p>}
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         {dead && !(item && Number(q?.moq || 1) > line.qty) ? (
                           <Button variant="secondary" size="sm" className="text-ink-2" icon={<Trash2 size={13} aria-hidden="true" />} onClick={() => removeWithUndo(item, line.item_code, line.qty)}>
@@ -368,13 +372,13 @@ export default function CartPage() {
                 </Button>
               </div>
             )}
-            {quote?.coupon?.message && <p className={cn('mt-1.5 text-xs font-medium', quote.coupon.valid === false ? 'text-bad' : 'text-ok')}>{quote.coupon.message}</p>}
+            {quote?.coupon?.message && <p className={cn('mt-1.5 text-xs font-medium', quote.coupon.valid === false ? 'text-bad' : 'text-ok')}>{couponText(words, quote.coupon)}</p>}
           </div>
           )}
 
           {(quote?.warnings || []).length > 0 && (
             <ul className="mt-4 space-y-1.5">
-              {(quote?.warnings || []).map((w, i) => (
+              {warningTexts(words, quote).map((w, i) => (
                 <li key={i} className="flex gap-2 rounded-sm bg-warn-soft px-3 py-2 text-xs leading-snug text-warn">
                   <AlertTriangle size={13} className="mt-0.5 shrink-0" aria-hidden="true" />
                   <span>{w}</span>
@@ -382,7 +386,7 @@ export default function CartPage() {
               ))}
             </ul>
           )}
-          {quoteError && <p className="mt-4 rounded-sm bg-bad-soft px-3 py-2 text-xs text-bad">{quoteError}</p>}
+          {quoteError && <p className="mt-4 rounded-sm bg-bad-soft px-3 py-2 text-xs text-bad">{errorText(words, quoteError, quote)}</p>}
 
           {!desktop && <div className="mt-4 rounded-lg border border-line bg-surface p-4">{totals}</div>}
 

@@ -141,7 +141,7 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
     <div className={cn('rounded-lg border border-line bg-surface p-5 text-start lg:p-6', className)}>
       <p className="font-display text-base font-bold text-ink">{S.shop.notOnShelf(query)}</p>
       <p className="mt-1 text-sm text-ink-2">
-        {S.shop.tellNeed(first)} {S.shop.notOnShelfHint}
+        {S.shop.tellNeed(askUrl ? first : '')} {S.shop.notOnShelfHint}
       </p>
       {hints.length > 0 && (
         <div className="mt-4 flex flex-wrap items-center gap-1.5">
@@ -153,7 +153,9 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
           ))}
         </div>
       )}
-      {/* one action: the rep on WhatsApp with the words prefilled — or, with no WhatsApp to open, the request itself */}
+      {/* one action: the rep on WhatsApp with the words prefilled — or, with no WhatsApp to open, the request
+          itself. That only records a product_request for YQ (Market Intel): nothing reaches the rep, so
+          it never names him ("Tell YQ", "we noted") */}
       {askUrl ? (
         <AnchorButton href={askUrl} target="_blank" rel="noreferrer" variant="wa" className="mt-4" onClick={() => logRequest(query)} icon={<MessageCircle size={15} aria-hidden="true" />}>
           {first ? S.card.tellRepWa(first) : S.cart.askUs}
@@ -173,7 +175,7 @@ function NotStocked({ q, hints, onPick, className }: { q: string; hints: string[
             }}
             icon={<MessageCircle size={15} aria-hidden="true" />}
           >
-            {first ? S.card.tellRep(first) : S.shop.tellYq}
+            {S.shop.tellYq}
           </Button>
         )
       )}

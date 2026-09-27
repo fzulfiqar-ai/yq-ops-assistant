@@ -8,8 +8,11 @@ import { useMarket, useOrder } from '../MarketContext'
 import { clientOrderId, deviceId, EMPTY_CUSTOMER, lastPlacedOrder, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
 import { en } from '../i18n/en'
+import { areaRepName as areaRepFor } from '../lib/areaRep'
 import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName, sessionId } from '../lib/format'
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
+import { errorText } from '../lib/serverWords'
+import { useServerWords } from '../lib/useServerWords'
 import { clearSmallAck } from '../lib/smallOrder'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { useReducedMotion } from '../shell/useViewport'
@@ -31,14 +34,16 @@ const FORM_ID = 'yq-market-checkout'
  *
  * R7d: a returning merchant gets "Same as last time: {shop} · {area}" — one tap fills the details
  * of this phone's last order, and the phone number is reused ON THE SERVER through that order's
- * token (reuse_token), so it never reaches this page. A visitor with no rep link sees "Your area
- * representative: {name}" once the area is picked and the office has a rep for it (shop_area_reps).
+ * token (reuse_token), so it never reaches this page. A visitor with no rep link, unknown to this
+ * device, sees "New shops here are looked after by {name}" once the area is picked and the office
+ * has a rep for it (shop_area_reps) — only when the area is what the server will route by.
  */
 export default function CheckoutPage() {
   const navigate = useNavigate()
   const m = useMarket()
   const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
   const { rep, data, itemsByCode, recognized } = m
+  const words = useServerWords()
   const { viewport } = useShell()
   const reduced = useReducedMotion()
   const lines = useCartLines()
@@ -131,9 +136,8 @@ export default function CheckoutPage() {
     setReuse(null)
     window.requestAnimationFrame(() => document.getElementById('yq-phone')?.focus())
   }
-  /** a visitor with no rep link, before any order from this phone and with no pick: the office's rep for the area */
-  const areaReps = data?.settings?.area_reps || {}
-  const areaRepName = !rep && pick === '' && !recognized && customer.area.trim() ? areaReps[customer.area.trim().toLowerCase()] || null : null
+  /** the office's rep for the area — only when the area is what will route this order (lib/areaRep.ts) */
+  const areaRepName = areaRepFor({ hasRepCard: Boolean(rep), ref: m.ref, pick, recognized, known: Boolean(known), reuse: Boolean(reuse), area: customer.area, areaReps: data?.settings?.area_reps })
 
   /** Take the merchant to the field that is holding the send up, instead of greying the button out. */
   const focusMissing = () => {
@@ -191,7 +195,9 @@ export default function CheckoutPage() {
       navigate(`/o/${res.token}`, { replace: true, state: { placed: res } })
     } catch (err: unknown) {
       const detail = err instanceof ShopApiError ? err.detail || err.message : ''
-      setError(detail || S.checkout.failed)
+      // the server's refusal in the page's language (lib/serverWords.ts); the raw English still
+      // drives the reuse fallback below
+      setError(errorText(words, detail, quote) || S.checkout.failed)
       // the server could not reuse the last order's phone (another phone's order, or gone): ask for it
       if (reuse && /phone/i.test(detail)) changePhone()
       setSubmitting(false)

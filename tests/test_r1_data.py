@@ -555,10 +555,12 @@ def _():
     q = price_cart([{"item_code": "A", "qty": 2}, {"item_code": "B", "qty": 2}], coupon_code="HALF", ctx=ctx)
     assert q["discount_bhd"] == 3.2 and q["coupon"]["valid"] is True and q["_coupon_rule_id"] == 8, q["coupon"]
     assert "capped at BHD 3.200" in q["coupon"]["message"] and "applied" in q["coupon"]["message"]
-    # no cap: the plain 'applied'
+    assert q["coupon"]["reason"] == "capped" and q["coupon"]["amount_bhd"] == 3.2, "the stable key (R7d, serverWords.ts)"
+    # no cap: the plain 'applied' (+ R7d's stable key beside the English message)
     ctx = _ctx([_item("A", 10.0)], rules=[coupon], costs={"A": 1.0}, shop_min_margin_pct="0.20", shop_vat_rate="0")
     q = price_cart([{"item_code": "A", "qty": 2}], coupon_code="HALF", ctx=ctx)
-    assert q["discount_bhd"] == 10.0 and q["coupon"] == {"code": "HALF", "valid": True, "message": "50% off applied"}, q["coupon"]
+    assert q["discount_bhd"] == 10.0 and q["coupon"] == {"code": "HALF", "valid": True, "message": "50% off applied",
+                                                         "reason": "applied", "amount_bhd": 10.0}, q["coupon"]
 
 
 class _FakeQuery:

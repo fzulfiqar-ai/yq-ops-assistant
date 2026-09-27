@@ -1,7 +1,8 @@
 import { Check, Tag, Truck } from 'lucide-react'
 import type { QuoteProgress } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
-import { S } from '../strings'
+import { progressText } from '../lib/serverWords'
+import { useServerWords } from '../lib/useServerWords'
 
 /**
  * Progress to a REAL rule (free delivery / next cart offer) from the server quote — never invented.
@@ -12,7 +13,8 @@ export function ProgressBar({ progress, compact }: { progress: QuoteProgress; co
   const pct = threshold > 0 ? Math.max(0, Math.min(100, ((threshold - (Number(progress.remaining_bhd) || 0)) / threshold) * 100)) : 0
   const value = progress.unlocked ? 100 : pct
   const Icon = progress.kind === 'free_delivery' ? Truck : Tag
-  const label = progress.unlocked && progress.kind === 'free_delivery' ? S.cart.unlocked : progress.label || S.cart.delivery
+  // the server's label in the page's language (lib/serverWords.ts)
+  const label = progressText(useServerWords(), progress)
   return (
     <div className={cn(!compact && 'rounded-lg border border-line bg-surface px-4 py-3')}>
       <div className="flex items-center gap-2">

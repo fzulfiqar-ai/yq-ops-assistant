@@ -11,10 +11,14 @@
  * What it proves, on hand-made payloads (synthetic codes, no real data):
  *   * lib/orderChanges.ts — "What changed": requested → confirmed (→ delivered) rows, a line the rep
  *     could not supply reads "not available" (never "10 → 0"), a substitute folds its replacement into
- *     one row, a rep-added line, a delivery that differs, the total before → after to the fils, no
+ *     one row — the LIVE replacement down a re-substitute / restore / chain, never a dead "× 0" one, and
+ *     no "requested" row for a rep line taken off again — a rep-added line, a delivery that differs, the total before → after to the fils, no
  *     tile for an order as ordered, a backorder, or a cancelled order; older payloads without a
  *     disposition still read right;
  *   * the words: English and Arabic for each row, the reason keys ("Sold Out" for out_of_stock);
+ *   * lib/serverWords.ts — the quote's sentences (a sold-out line, the block, the warnings, the coupon,
+ *     the progress line, the order's refusals) in Arabic from the stable keys, the English page
+ *     unchanged, an older API's English sentences still worded;
  *   * lib/format.ts fmtDay — the ETA date read as a local calendar day;
  *   * lib/device.ts — opening a tracking link adopts the order (newest placed stays first, a placed
  *     order is never re-marked adopted) and "Same as last time" only ever uses an order placed here.
@@ -65,6 +69,8 @@ const mod = (p) => import(pathToFileURL(path.join(SRC, p)).href)
 const C = await mod('market/lib/orderChanges.ts')
 const F = await mod('market/lib/format.ts')
 const D = await mod('market/lib/device.ts')
+const AR = await mod('market/lib/areaRep.ts')
+const SW = await mod('market/lib/serverWords.ts')
 const { en } = await mod('market/i18n/en.ts')
 const { ar } = await mod('market/i18n/ar.ts')
 
@@ -144,6 +150,66 @@ check('substituted: one row "Replaced with UK20N × 4"; the replacement line is 
   eq(lone.rows[0].kind, 'unavailable', 'no replacement on the payload → not available')
 })
 
+check('re-substitute: the row names the item really coming ("Replaced with C18 × 4"), never the dead substitute "× 0"', () => {
+  const ch = C.orderChanges(order([
+    line('UK20', 4, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'C18', reason_code: 'substituted' }),
+    line('UK20N', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' }),
+    line('C18', 4, { qty_confirmed: 4, line_status: 'added', disposition: 'added', substitute_for: 'UK20', added_at_stage: 'amend' }),
+  ]))
+  eq(ch.rows.map((r) => [r.code, r.kind]), [['UK20', 'substituted']], 'one row, and none for the dead UK20N')
+  eq(ch.rows[0].replacement, { code: 'C18', name: 'Item C18', qty: 4 }, 'the live replacement')
+  eq(words(en, ch.rows[0]), 'Replaced with C18 × 4', 'English')
+  ok(ch.rows.every((r) => !words(en, r).includes('× 0') && !(r.replacement && r.replacement.qty === 0)), 'no zero-quantity replacement')
+  // the same with the older payload shape (no disposition on the lines)
+  const old = C.orderChanges(order([
+    { item_code: 'UK20', qty: 4, qty_confirmed: 0, line_status: 'substituted', substitute_item_code: 'C18' },
+    { item_code: 'UK20N', qty: 4, qty_confirmed: 0, line_status: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' },
+    { item_code: 'C18', qty: 4, qty_confirmed: 4, line_status: 'added', substitute_for: 'UK20', added_at_stage: 'amend' },
+  ]))
+  eq(old.rows.map((r) => [r.code, r.kind, r.replacement && r.replacement.code]), [['UK20', 'substituted', 'C18']], 'older payload')
+})
+
+check('restore: the line back as ordered and its old substitutes taken off → no rows at all', () => {
+  const ch = C.orderChanges(order([
+    line('UK20', 4, { qty_confirmed: 4 }),
+    line('UK20N', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' }),
+    line('C18', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'amend' }),
+  ]))
+  eq(ch.rows, [], 'the shop never requested UK20N or C18')
+  const less = C.orderChanges(order([
+    line('UK20', 4, { qty_confirmed: 3, disposition: 'reduced' }),
+    line('UK20N', 4, { qty_confirmed: 0, line_status: 'unavailable', disposition: 'unavailable', substitute_for: 'UK20', added_at_stage: 'confirm' }),
+  ]))
+  eq(less.rows.map((r) => [r.code, r.kind]), [['UK20', 'reduced']], 'restored lower: only its own numbers')
+})
+
+check('a chain A → B → C (the substitute itself substituted): "Replaced with C", B has no row', () => {
+  const ch = C.orderChanges(order([
+    line('A1', 6, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'B2' }),
+    line('B2', 6, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'C3', substitute_for: 'A1', added_at_stage: 'confirm' }),
+    line('C3', 5, { qty_confirmed: 5, line_status: 'added', disposition: 'added', substitute_for: 'B2', added_at_stage: 'amend' }),
+  ]))
+  eq(ch.rows.map((r) => [r.code, r.kind]), [['A1', 'substituted']], 'one row')
+  eq(words(en, ch.rows[0]), 'Replaced with C3 × 5', 'the end of the chain')
+  // a rep-added line (not a substitute) substituted: its live replacement is still listed as added
+  const add = C.orderChanges(order([
+    line('A1', 2),
+    line('X9', 3, { qty_confirmed: 0, line_status: 'substituted', disposition: 'substituted', substitute_item_code: 'Y8', added_at_stage: 'confirm' }),
+    line('Y8', 3, { qty_confirmed: 3, line_status: 'added', disposition: 'added', substitute_for: 'X9', added_at_stage: 'amend' }),
+  ]))
+  eq(add.rows.map((r) => [r.code, r.kind]), [['Y8', 'added']], 'the item coming is named; X9 was never requested')
+})
+
+check('reopen: a door-added line taken off again has no "requested · not available" row', () => {
+  const ch = C.orderChanges(order([
+    line('A1', 10, { qty_delivered: 10 }),
+    line('D4', 2, { qty_confirmed: 0, qty_delivered: 0, line_status: 'unavailable', disposition: 'unavailable', added_at_stage: 'delivery' }),
+  ], { status: 'confirmed' }))
+  eq(ch.rows, [], 'no row for D4')
+  // older payload: an added line at confirmed 0 is out, not "added · 0 pcs"
+  eq(C.dispositionOf({ item_code: 'D4', qty: 2, qty_confirmed: 0, line_status: 'added', added_at_stage: 'delivery' }), 'unavailable', 'derived')
+})
+
 check('added by the rep and a delivery that differs: the "→ 8 delivered" tail', () => {
   const ch = C.orderChanges(order([
     line('A1', 10, { qty_delivered: 8 }),
@@ -198,11 +264,105 @@ check('device: a tracking link adopts the order; a placed order stays placed; "S
   ok(D.isRemembered('adopted-token-000001') && !D.isRemembered('nope-nope-nope-nope'), 'isRemembered')
 })
 
+check('area line: only when the area routes the order — never with a rep link (even a hidden-profile one), a pick or a known merchant', () => {
+  const base = { hasRepCard: false, ref: null, pick: '', recognized: false, known: false, reuse: false, area: ' Riffa ', areaReps: { riffa: 'Bob' } }
+  eq(AR.areaRepName(base), 'Bob', 'a new visitor, no link, area mapped')
+  eq(AR.areaRepName({ ...base, ref: 'ali' }), null, '?ref=ali with no public profile (no card): the server routes to Ali — say nothing')
+  eq(AR.areaRepName({ ...base, hasRepCard: true }), null, 'a rep card')
+  eq(AR.areaRepName({ ...base, pick: 7 }), null, 'a pick')
+  eq(AR.areaRepName({ ...base, recognized: true }), null, 'ordered from this device before')
+  eq(AR.areaRepName({ ...base, known: true }), null, 'a recognised phone: the shop may have its own rep')
+  eq(AR.areaRepName({ ...base, reuse: true }), null, 'Same as last time')
+  eq(AR.areaRepName({ ...base, area: 'Sitra' }), null, 'an unmapped area')
+  eq(AR.areaRepName({ ...base, areaReps: null }), null, 'no map')
+})
+
+/* ── the server's sentences in the page's language (lib/serverWords.ts) ── */
+const money3 = (n) => `BHD ${Number(n).toFixed(3)}`
+const W = (t, lang, asOf = null) => ({ t, lang, bhd: money3, asOf })
+const hasArabic = (s) => /[؀-ۿ]/.test(String(s))
+const SOLD = "Sold Out — can't be ordered right now. Remove it to send your order."
+const soldQuote = (extra = {}) => ({
+  lines: [
+    { item_code: 'UK15', qty: 2, unavailable: true, blocked_reason: SOLD, blocked_code: 'sold_out', moq: 1 },
+    { item_code: 'T02', qty: 1, unavailable: false, blocked_reason: null },
+  ],
+  can_submit: false, block_reason: 'Remove UK15 to send this order — Sold Out.', block_code: 'dead_lines', block_items: ['UK15'],
+  warnings: ['X05 is Sold Out — it will be backordered and confirmed by your salesman.'], warning_codes: [{ code: 'backorder', item_code: 'X05' }],
+  coupon: { code: 'NOPE', valid: false, message: 'This code is not valid or has expired.', reason: 'invalid' },
+  ...extra,
+})
+
+check('Arabic cart: a sold-out line, the block, the backorder warning and the coupon answer read Arabic («نفدت الكمية»), never the English', () => {
+  const q = soldQuote()
+  const w = W(ar, 'ar')
+  const line = SW.lineBlockedText(w, q.lines[0])
+  ok(line.includes('نفدت الكمية') && !/Sold Out|Remove it/.test(line), `line: ${line}`)
+  const block = SW.blockText(w, q)
+  ok(hasArabic(block) && block.includes('⁦UK15⁩') && block.includes('نفدت الكمية') && !/Remove|send this order/.test(block), `block: ${block}`)
+  const warn = SW.warningTexts(w, q)
+  eq(warn.length, 1, 'one warning per server warning')
+  ok(warn[0].includes('⁦X05⁩') && warn[0].includes('نفدت الكمية') && !/backordered/.test(warn[0]), `warning: ${warn[0]}`)
+  const coupon = SW.couponText(w, q.coupon)
+  ok(hasArabic(coupon) && !/not valid/.test(coupon), `coupon: ${coupon}`)
+  // a stale snapshot puts its date on the line
+  ok(SW.lineBlockedText(W(ar, 'ar', '21 سبتمبر'), q.lines[0]).includes('21 سبتمبر'), 'as-of date')
+})
+
+check('English page: the server sentence itself, unchanged', () => {
+  const q = soldQuote()
+  const w = W(en, 'en')
+  eq(SW.lineBlockedText(w, q.lines[0]), SOLD, 'line')
+  eq(SW.blockText(w, q), 'Remove UK15 to send this order — Sold Out.', 'block')
+  eq(SW.warningTexts(w, q), q.warnings, 'warnings')
+  eq(SW.couponText(w, q.coupon), 'This code is not valid or has expired.', 'coupon')
+  eq(SW.errorText(w, 'Anything the server said'), 'Anything the server said', 'error')
+})
+
+check('an older API (no keys): the Arabic page still words the known English sentences', () => {
+  const q = soldQuote({ block_code: undefined, block_items: undefined, warning_codes: undefined })
+  q.lines[0] = { item_code: 'UK15', qty: 2, unavailable: true, blocked_reason: SOLD }
+  const w = W(ar, 'ar')
+  ok(SW.lineBlockedText(w, q.lines[0]).includes('نفدت الكمية'), 'line from prose')
+  ok(SW.blockText(w, q).includes('⁦UK15⁩'), 'block from the dead lines')
+  ok(SW.warningTexts(w, q)[0].includes('⁦X05⁩'), 'warning from prose')
+  eq(SW.lineBlockedText(w, { item_code: 'M06', qty: 2, unavailable: true, blocked_reason: 'Minimum order is 6.' }), 'الحد الأدنى للطلب 6 قطع.', 'moq from prose')
+})
+
+check('Arabic: the other blocks, coupon answers, progress and the order refusals', () => {
+  const w = W(ar, 'ar')
+  const many = SW.blockText(w, { lines: ['A1', 'B2', 'C3', 'D4', 'E5'].map((c) => ({ item_code: c, unavailable: true, blocked_code: 'sold_out' })), block_code: 'dead_lines', block_items: ['A1', 'B2', 'C3', 'D4', 'E5'], block_reason: 'Remove A1, B2, C3 and 2 more to send this order.' })
+  ok(many.includes('⁦A1, B2, C3⁩') && hasArabic(many) && !/Remove/.test(many), `many: ${many}`)
+  eq(SW.blockText(w, { lines: [], block_code: 'empty', block_reason: 'Your order is empty.' }), ar.cart.orderEmpty, 'empty')
+  const min = SW.blockText(w, { lines: [], block_code: 'minimum', block_reason: 'Minimum order is BHD 20.000 — add BHD 5.050 more.', min_order_bhd: 20, minimum: { value_bhd: 20, remaining_bhd: 5.05, met: false, mode: 'block', kind: 'standard' } })
+  ok(min.includes('BHD 20.000') && min.includes('BHD 5.050') && hasArabic(min), `minimum: ${min}`)
+  eq(SW.blockText(w, { lines: [], block_reason: 'Something new.' }), ar.cart.blocked, 'an unknown block: the Arabic generic, not English')
+  for (const [c, want] of [
+    [{ message: 'x', reason: 'add_more', amount_bhd: 3 }, 'BHD 3.000'],
+    [{ message: 'x', reason: 'better_offer', rule_name: 'Bulk 5%' }, '⁦Bulk 5%⁩'],
+    [{ message: 'x', reason: 'capped', amount_bhd: 1.5, valid: true }, 'BHD 1.500'],
+    [{ message: 'x', reason: 'applied', code: 'SAVE5', valid: true }, '⁦SAVE5⁩'],
+  ]) {
+    const text = SW.couponText(w, c)
+    ok(text.includes(want) && hasArabic(text), `${c.reason}: ${text}`)
+  }
+  ok(hasArabic(SW.progressText(w, { kind: 'free_delivery', remaining_bhd: 2, unlocked: false, label: 'Add BHD 2.000 more for free delivery' })), 'free delivery gap')
+  ok(SW.progressText(w, { kind: 'cart_value', remaining_bhd: 4, unlocked: false, label: 'Add BHD 4.000 more to unlock Big Box' }).includes('⁦Big Box⁩'), 'cart offer from an older label')
+  eq(SW.progressText(W(en, 'en'), { kind: 'free_delivery', remaining_bhd: 2, unlocked: false, label: 'Add BHD 2.000 more for free delivery' }), 'Add BHD 2.000 more for free delivery', 'English progress = the server label')
+  eq(SW.errorText(w, "Please enter your phone number — the one from your last order can't be used on this phone."), ar.checkout.reuseFailed, 'reuse failed')
+  eq(SW.errorText(w, 'This code is no longer available — it has run out or ended. Remove it to place your order.'), ar.checkout.couponGone, 'coupon gone')
+  const q = soldQuote()
+  eq(SW.errorText(w, q.block_reason, q), SW.blockText(w, q), 'a refusal that repeats the block is worded like the block')
+  ok(SW.FIXED_SENTENCES.every((k) => typeof k === 'string' && k.length > 5), 'fixed sentences listed')
+  // every fixed refusal has an Arabic answer
+  for (const k of SW.FIXED_SENTENCES) ok(hasArabic(SW.errorText(w, k)), `Arabic for ${k}`)
+})
+
 check('words: the placed line, the checkout card and the search card exist in both languages', () => {
   eq(en.placed.sentTo('Harsh'), 'Sent to Harsh', 'sentTo')
   eq(en.placed.receivedBy('Harsh'), 'Received by YQ — Harsh will confirm', 'receivedBy')
   eq(en.checkout.sameAsLast, 'Same as last time', 'sameAsLast')
-  eq(en.checkout.areaRep('Harsh'), 'Your area representative: Harsh', 'areaRep')
+  eq(en.checkout.areaRep('Harsh'), 'New shops here are looked after by Harsh', 'areaRep (new shops, never "your" rep)')
   eq(en.shop.notOnShelf('memory card'), 'We don’t stock “memory card” yet', 'notOnShelf')
   ok(ar.placed.receivedBy('Harsh').includes('Harsh') && /[؀-ۿ]/.test(ar.placed.receivedBy('Harsh')), 'Arabic receivedBy')
   ok(/[؀-ۿ]/.test(ar.checkout.areaRep('Harsh')), 'Arabic areaRep')

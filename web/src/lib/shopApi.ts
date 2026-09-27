@@ -247,8 +247,10 @@ export interface QuoteLine {
   warning?: string | null
   /** The line cannot be ordered as it stands; it is priced at zero and left out of every total. */
   unavailable?: boolean | null
-  /** Why — "No longer in the catalog.", "Sold out.", "Minimum order is 6." */
+  /** Why — "No longer in the catalog.", "Sold out.", "Minimum order is 6." (English, for older clients) */
   blocked_reason?: string | null
+  /** The same reason as a stable key the marketplace words in its own language (R7d). */
+  blocked_code?: 'sold_out' | 'moq' | 'not_in_catalog' | 'price_on_request' | string | null
 }
 
 export interface QuoteDiscount {
@@ -262,6 +264,10 @@ export interface QuoteCoupon {
   code?: string | null
   valid?: boolean | null
   message?: string | null
+  /** R7d: the message as a stable key (+ its amount or offer name) — see market/lib/serverWords.ts */
+  reason?: 'invalid' | 'other_rep' | 'add_more' | 'not_these_items' | 'better_offer' | 'at_floor' | 'capped' | 'applied' | string | null
+  amount_bhd?: number | null
+  rule_name?: string | null
 }
 
 /** Wholesale minimum (marketplace v2.1): how far to go and what the order is if sent now. */
@@ -289,6 +295,8 @@ export interface QuoteProgress {
   remaining_bhd?: number | null
   unlocked?: boolean | null
   label?: string | null
+  /** R7d: the cart offer the label names (cart_value), so another language can word it */
+  rule_name?: string | null
 }
 
 export interface Quote {
@@ -306,10 +314,15 @@ export interface Quote {
   minimum?: QuoteMinimum | null
   gap_suggestions?: GapSuggestion[] | null
   warnings?: string[] | null
+  /** R7d: the same warnings as stable keys, index for index ({ code: 'backorder', item_code }) */
+  warning_codes?: { code: string; item_code?: string | null }[] | null
   can_submit?: boolean | null
   min_order_bhd?: number | null
   /** When can_submit is false: the one thing the customer has to do next, in plain words. */
   block_reason?: string | null
+  /** R7d: the block as a stable key — 'dead_lines' (block_items names them), 'empty', 'minimum' */
+  block_code?: 'dead_lines' | 'empty' | 'minimum' | string | null
+  block_items?: string[] | null
 }
 
 export interface QuoteRequest {
