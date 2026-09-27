@@ -2,9 +2,10 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { AlertTriangle, LayoutList, Link2, Loader2, RefreshCw, Search, Share2, Ticket, UserRoundCheck, type LucideIcon } from 'lucide-react'
-import { apiGet, ApiError } from '@/lib/api'
+import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, pct, fmtDate } from '@/lib/format'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -152,19 +153,6 @@ function fmtDayMonth(d?: string | null): string {
 function pctOrDash(n: number | null | undefined, dp = 1): string {
   return n == null ? '—' : pct(n, dp)
 }
-function errorText(e: unknown, fallback: string): string {
-  if (e instanceof ApiError) {
-    try {
-      const parsed = JSON.parse(e.body) as { detail?: unknown }
-      if (parsed && typeof parsed.detail === 'string') return parsed.detail
-    } catch {
-      /* body wasn't JSON — fall through to the raw text below */
-    }
-    return e.body ? e.body.slice(0, 200) : e.message
-  }
-  if (e instanceof Error) return e.message
-  return fallback
-}
 // docs/SHOP.md names these mappings explicitly for by_referral / by_src; by_coupon
 // isn't spelled out field-by-field so its rows are shown as-is (see report).
 function labelForReferral(key?: string | null): string {
@@ -204,18 +192,6 @@ function labelForRail(key?: string | null): string {
 }
 
 // ── small local atoms ───────────────────────────────────────────────────────
-
-function ErrorPanel({ onRetry, isRetrying, message }: { onRetry: () => void; isRetrying: boolean; message?: string }) {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-10 text-center text-sm text-rose-700">
-      <AlertTriangle size={20} className="shrink-0" />
-      <span className="max-w-sm">{message || 'Could not load shop analytics from the server.'}</span>
-      <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={isRetrying}>
-        {isRetrying ? <Loader2 className="animate-spin" size={14} /> : <RefreshCw size={14} />} Retry
-      </Button>
-    </div>
-  )
-}
 
 function StaleBanner({ onRetry, isRetrying }: { onRetry: () => void; isRetrying: boolean }) {
   return (
@@ -485,8 +461,8 @@ export default function ShopAnalytics() {
           <Skeleton className="h-[200px]" />
         </div>
       ) : showHardError ? (
-        <ErrorPanel onRetry={() => refetch()} isRetrying={isFetching}
-          message={errorText(error, 'Could not load shop analytics from the server.')} />
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching}
+          fallback="Could not load shop analytics from the server." />
       ) : (
         <div className={cn(isFetching && !isLoading && 'opacity-60 transition-opacity duration-200')}>
           {/* KPI row */}

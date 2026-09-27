@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Trash2, X, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes, Megaphone } from 'lucide-react'
 import { CampaignsSection } from '@/pages/shop-ops/CampaignsSection'
-import { apiGet, apiPost, apiPatch, apiDelete, ApiError } from '@/lib/api'
+import { apiGet, apiPost, apiPatch, apiDelete } from '@/lib/api'
+import { errorText } from '@/lib/errorText'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd, num } from '@/lib/format'
@@ -163,20 +164,6 @@ function localInputToIso(local: string): string {
   if (!local) return ''
   const d = new Date(local)
   return Number.isNaN(d.getTime()) ? '' : d.toISOString()
-}
-
-function errorText(e: unknown, fallback: string): string {
-  if (e instanceof ApiError) {
-    try {
-      const parsed = JSON.parse(e.body) as { detail?: unknown }
-      if (parsed && typeof parsed.detail === 'string') return parsed.detail
-    } catch {
-      /* body wasn't JSON — fall through to the raw text below */
-    }
-    return e.body ? e.body.slice(0, 200) : e.message
-  }
-  if (e instanceof Error) return e.message
-  return fallback
 }
 
 // item codes: users type "T02, X24 CC  UK04" — split on comma OR whitespace.

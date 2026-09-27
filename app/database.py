@@ -21,6 +21,17 @@ def get_client() -> Client:
     return create_client(settings.supabase_url, settings.supabase_key)
 
 
+def reset_client() -> None:
+    """Forget the cached client so the next get_client() builds a new one, with a new HTTP/2
+    connection pool. Called by app.db_read.retry_read after Supabase dropped a connection
+    (GOAWAY / ConnectionTerminated): the old client is not closed, because another thread may
+    still be mid-request on it; it is garbage once nobody holds it. A no-op when a test has
+    swapped get_client for a plain function."""
+    clear = getattr(get_client, "cache_clear", None)
+    if clear is not None:
+        clear()
+
+
 # user_roles is read on EVERY authenticated request — once by get_current_user (fetch_role)
 # and again by has_feature (_user_row) for non-admins. That was 1-2 uncached PostgREST
 # round-trips before any business logic ran, which is expensive on a 0.1-CPU container.

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '@/lib/api'
 import { bhd, num, pct } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -53,12 +54,14 @@ const cols: Column<Row>[] = [
 ]
 
 export default function Margins() {
-  const { data, isLoading } = useQuery({ queryKey: ['report', 'margins'], queryFn: () => apiGet<Data>('/report/margins') })
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'margins'], queryFn: () => apiGet<Data>('/report/margins') })
   return (
     <div>
       <PageHeader title="Profitability" subtitle="Gross margin by product — ex-VAT sales against Focus COGS, computed here (not the report's own GP % column)" />
       <PriceSimulator />
-      {isLoading || !data ? (
+      {isError && !data ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load profitability." />
+      ) : isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
         <>

@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
 import { Link } from 'react-router-dom'
 import { CalendarClock, ChevronRight, Link2, MessageCircle, Phone, ShoppingBag, ShoppingCart } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { errorText } from '@/lib/errorText'
 import { Badge } from '@/components/ui/badge'
 import { bhdStr, dayLabel, logFollowupTap, relTime, setSelectedCustomer, telLink, useBaskets, useFollowups, useLinkWeek, waLink, type FollowupShop } from './lib'
 
@@ -138,10 +139,34 @@ export function BasketsNotSent() {
   )
 }
 
-/** Today (right column): the rep's own funnel over 7 days. */
+/**
+ * Today (right column): the rep's own funnel over 7 days. A failed load shows a small retry line
+ * (R7a) — returning nothing made a server error look like "no card for you".
+ */
 export function LinkThisWeek() {
   const q = useLinkWeek()
   const d = q.data
+  const head = (
+    <div className="flex items-center gap-2">
+      <Link2 size={16} className="text-primary" aria-hidden="true" />
+      <h2 className="font-display text-[15px] font-bold">My link this week</h2>
+      {d ? <span className="text-[12px] text-muted-foreground">{d.days} days</span> : null}
+    </div>
+  )
+  if (q.isError && !d) {
+    return (
+      <section className="rounded-2xl border border-border bg-card p-4" aria-label="My link this week">
+        {head}
+        <p className="mt-1 flex items-center text-[12.5px] text-muted-foreground" title={errorText(q.error, 'Could not load this card.')}>
+          Couldn't load —
+          <button type="button" onClick={() => void q.refetch()} disabled={q.isFetching}
+            className="-my-2 inline-flex h-10 items-center rounded-lg px-1.5 font-semibold text-primary hover:bg-muted disabled:opacity-50">
+            {q.isFetching ? 'retrying…' : 'retry'}
+          </button>
+        </p>
+      </section>
+    )
+  }
   if (!d || d.hint) return null
   const stats = [
     { k: 'Visits', v: d.sessions ?? 0 },
@@ -151,11 +176,7 @@ export function LinkThisWeek() {
   ]
   return (
     <section className="rounded-2xl border border-border bg-card p-4" aria-label="My link this week">
-      <div className="flex items-center gap-2">
-        <Link2 size={16} className="text-primary" aria-hidden="true" />
-        <h2 className="font-display text-[15px] font-bold">My link this week</h2>
-        <span className="text-[12px] text-muted-foreground">{d.days} days</span>
-      </div>
+      {head}
       <div className="mt-3 grid grid-cols-2 gap-2">
         {stats.map((s) => (
           <div key={s.k} className="rounded-xl bg-muted px-3 py-2.5">

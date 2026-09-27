@@ -4,6 +4,7 @@ import { ClipboardList, PackageCheck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { bhd, fmtDate, num } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import { Card } from '@/components/ui/card'
@@ -78,13 +79,15 @@ const cols: Column<Row>[] = [
 
 export default function Inventory() {
   const [params] = useSearchParams()
-  const { data, isLoading } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
   const s = data?.by_status || {}
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
   return (
     <div>
       <PageHeader title="Inventory" subtitle="Velocity-aware stock health — what to reorder, what's stuck" />
-      {isLoading || !data ? (
+      {isError && !data ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load inventory." />
+      ) : isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
         <>

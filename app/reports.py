@@ -564,16 +564,6 @@ def inventory() -> dict:
         "  ORDER BY sb.ctid, LENGTH(c.nkey) DESC) "
         "SELECT COALESCE(SUM(net_qty * landed_cost_bhd),0) AS v FROM item_cost"
     )
-    # New arrivals: Material Receipt Notes posted in the last 14 days (one row per MRN voucher),
-    # so the team can see a shipment landed (LC1716_196 = MRN:YQ-26-09-2, 20-Sep-2026) without
-    # opening Stock Moves. Quantities come from the Focus ledger, never from the shop.
-    arrivals = exec_sql(
-        "SELECT voucher, MIN(move_date)::text AS received_on, COUNT(DISTINCT item_name) AS items, "
-        "COALESCE(SUM(received_qty),0) AS units, ROUND(COALESCE(SUM(received_value_bhd),0)::numeric, 2) AS value_bhd "
-        "FROM stock_movements WHERE voucher_type = 'Material Receipt Note' "
-        "AND move_date >= (SELECT MAX(move_date) FROM stock_movements) - 14 "
-        "GROUP BY voucher ORDER BY received_on DESC LIMIT 6"
-    ) or []
     return {
         "rows": rows,
         "by_status": dict(Counter(r["status"] for r in rows)),
@@ -581,9 +571,36 @@ def inventory() -> dict:
         "stock_value_cost": float((cv or [{}])[0].get("v", 0)),
         "stock_qty": float(t.get("q", 0)),
         "by_warehouse": stock_by_warehouse(),
-        "recent_receipts": arrivals,
+        "recent_receipts": recent_receipts(),
         "reserved": reserved_stock(),
     }
+
+
+# New arrivals: Material Receipt Notes posted in the ledger's last 14 days (one row per MRN
+# voucher), so the team can see a shipment landed (LC1716_196 = MRN:YQ-26-09-2, 20-Sep-2026)
+# without opening Stock Moves. Quantities come from the Focus ledger, never from the shop.
+#
+# exec_sql runs as yq_readonly, which may read the GRANTED views only: `shipments` (the MRN rows of
+# stock_movements) and v_stock_daily_movement (the ledger's days, for "the last 14 days" measured
+# from the ledger's newest date, as before). The first version read the base table stock_movements,
+# which yq_readonly has no grant on, and the whole Inventory page answered 500 from 21-Sep (R7a).
+RECENT_RECEIPTS_SQL = (
+    "SELECT mrn_no AS voucher, MIN(received_date)::text AS received_on, COUNT(DISTINCT item_name) AS items, "
+    "COALESCE(SUM(received_qty),0) AS units, ROUND(COALESCE(SUM(received_value_bhd),0)::numeric, 2) AS value_bhd "
+    "FROM shipments "
+    "WHERE received_date >= (SELECT MAX(move_date) FROM v_stock_daily_movement) - 14 "
+    "GROUP BY mrn_no ORDER BY received_on DESC LIMIT 6"
+)
+
+
+def recent_receipts() -> list[dict]:
+    """The Inventory page's "New arrivals" card. Optional like reserved_stock(): a failure here
+    hides the card ([] — the page shows it only when there are rows) instead of failing the page."""
+    try:
+        return exec_sql(RECENT_RECEIPTS_SQL) or []
+    except Exception as e:  # noqa: BLE001 -- one card never costs the whole page
+        log.warning("inventory: recent receipts unavailable: %s", e)
+        return []
 
 
 def reserved_stock() -> dict:

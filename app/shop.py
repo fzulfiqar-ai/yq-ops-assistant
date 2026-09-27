@@ -31,7 +31,7 @@ from app import attribution, shop_pipeline
 from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
-from app.db_read import exec_sql, exec_sql_params
+from app.db_read import exec_sql, exec_sql_params, retry_read
 
 log = logging.getLogger(__name__)
 
@@ -2367,12 +2367,15 @@ def get_order(order_id: int) -> dict | None:
 
 
 def get_order_by_token(token: str) -> dict | None:
+    """The merchant's status page read (and the first step of their cancel). Reads only, so the
+    whole order — row, lines, events, rep — is read once more on a dropped connection (R7a)."""
     if not token or len(token) < 16:
         return None
-    r = get_client().table("shop_orders").select("*").eq("token", token).limit(1).execute().data
-    if not r:
-        return None
-    return get_order(r[0]["id"])
+
+    def _read() -> dict | None:
+        r = get_client().table("shop_orders").select("*").eq("token", token).limit(1).execute().data
+        return get_order(r[0]["id"]) if r else None
+    return retry_read(_read, what="order by token")
 
 
 def _salesman_by_id(sid) -> dict | None:
@@ -2464,10 +2467,11 @@ def orders_by_tokens(tokens) -> list[dict]:
     toks = [clean(t, 64) for t in (tokens or []) if isinstance(t, str) and len(clean(t, 64)) >= 16][:20]
     if not toks:
         return []
-    rows = (get_client().table("shop_orders")
-            .select("order_no,token,status,total_bhd,total_confirmed_bhd,items_count,units_count,created_at,"
-                    "updated_at,salesman_name,expected_delivery,order_kind")
-            .in_("token", toks).order("created_at", desc=True).execute().data or [])
+    rows = retry_read(lambda: (
+        get_client().table("shop_orders")
+        .select("order_no,token,status,total_bhd,total_confirmed_bhd,items_count,units_count,created_at,"
+                "updated_at,salesman_name,expected_delivery,order_kind")
+        .in_("token", toks).order("created_at", desc=True).execute().data or []), what="orders by tokens")
     out = []
     for r in rows:
         total = r.get("total_confirmed_bhd") if r.get("total_confirmed_bhd") is not None else r.get("total_bhd")
@@ -2508,15 +2512,16 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
                               f"customer_phone.ilike.%{s}%")
         return qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
 
+    # a dropped connection (Supabase HTTP/2 GOAWAY) is read once more on a fresh client (R7a)
     try:
-        res = _query(",".join([base_cols, *r3_cols]))
+        res = retry_read(lambda: _query(",".join([base_cols, *r3_cols])), what="shop orders")
     except Exception as e:  # noqa: BLE001 — only the vanished-column case is retried
         if not r3_cols or not _missing_column(e):
             raise
         for c in r3_cols:
             _forget_column("shop_orders", c)
         log.warning("shop_orders R3 columns vanished after a cached hit — listing without them: %s", e)
-        res = _query(base_cols)
+        res = retry_read(lambda: _query(base_cols), what="shop orders")
     rows = res.data or []
     # 24-Sep-2026: the list carries two small flags for the "Not notified" badge, never the whole
     # notify_result (1-1.5 KB per row of addresses and provider error text — the detail endpoint
@@ -2536,11 +2541,14 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
 def status_counts(salesman_id: int | None = None) -> dict[str, int]:
     """Orders per status for the scope — feeds the New / In progress / Done buckets and the tab badge."""
     counts = {s: 0 for s in STATUSES}
-    try:
+
+    def _read() -> list[dict]:
         qry = get_client().table("shop_orders").select("status")
         if salesman_id is not None:
             qry = qry.eq("salesman_id", salesman_id)
-        for r in qry.limit(10000).execute().data or []:
+        return qry.limit(10000).execute().data or []
+    try:
+        for r in retry_read(_read, what="status counts"):
             if r.get("status") in counts:
                 counts[r["status"]] += 1
     except Exception as e:  # noqa: BLE001
@@ -3868,16 +3876,19 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
     # phases say where the time went (docs/RELEASE.md, the watch) — the portal card shows the three
     # core numbers, the rest is read from this JSON or in SQL
     with_metric = [e for e in beacons if any(_meta(e).get(k) is not None for k in ("lcp", "inp", "cls"))]
-    by_src: dict[str, int] = {}
+    # its own name: `by_src` above is the order attribution the return reads (R7a — reusing the
+    # name for these int counts made every /shop/analytics and /shop/me/link-week call a 500)
+    vitals_by_src: dict[str, int] = {}
     for e in beacons:
         src = str(_meta(e).get("catalog_src") or "none")[:24]
-        by_src[src] = by_src.get(src, 0) + 1
+        vitals_by_src[src] = vitals_by_src.get(src, 0) + 1
     vitals = {"samples": len(with_metric), "visits": len(beacons),
               "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls"),
               "lcp_ttfb_ms_p75": _p75("lcp_ttfb"), "lcp_delay_ms_p75": _p75("lcp_delay"),
               "lcp_load_ms_p75": _p75("lcp_load"), "lcp_render_ms_p75": _p75("lcp_render"),
               "catalog_ms_p75": _p75("catalog_ms"),
-              "catalog_src": sorted(({"src": k, "visits": v} for k, v in by_src.items()), key=lambda r: -r["visits"])}
+              "catalog_src": sorted(({"src": k, "visits": v} for k, v in vitals_by_src.items()),
+                                    key=lambda r: -r["visits"])}
     return {
         "search": search, "rails": rail_perf, "engagement": engagement, "ops": ops, "identity": identity, "vitals": vitals,
         "days": days, "since": since[:10],
