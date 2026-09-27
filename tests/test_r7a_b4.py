@@ -84,13 +84,18 @@ def _():
 def _():
     src = _read(SHOP)
     assert "actions.filter((a) => a !== 'confirmed' || unassigned)" not in src, "the old bug: dropped Confirm for an assigned order"
-    footer = src.split("{data && actions.length > 0 && !confirming && !readOnly && (", 1)[1]
-    footer = footer.split("\n        )}\n      </div>\n    </div>\n  )\n}", 1)[0]
-    assert "data.status === 'new' && (" in footer and "Confirm order" in footer
-    assert "actions.filter((a) => a !== 'confirmed' && a !== 'cancelled')" in footer
-    assert "actions.includes('cancelled')" in footer and "Cancel order" in footer
+    # R7c (27-Sep-2026): the footer is driven by the server's `actions` (heart.actionsOf) — the
+    # forward step only: Received -> Confirm order, Confirmed -> Delivered; never a stamp button
+    drawer = src.split("function OrderDrawer(", 1)[1].split("\nfunction ", 1)[0]
+    assert "const hasFooter = Boolean(data) && !readOnly && !editing && (flow.actions.some((a) => a !== 'tell_shop') || flow.tellFirst)" in drawer
+    footer = drawer.split("{data && hasFooter && (", 1)[1]
+    assert "can('confirm') && (" in footer and "Confirm order" in footer
+    assert "can('cancel') && (" in footer and "Cancel order" in footer
     # Confirm comes before Cancel in source order (primary, then secondary)
     assert footer.index("Confirm order") < footer.index("Cancel order")
+    # the old per-status buttons (Preparing / On the way) are gone with the generic action list
+    assert "actions.filter((a) => a !== 'confirmed' && a !== 'cancelled')" not in src
+    assert "actionLabel(" not in src
 
 
 @test("the footer's 'note to the shop' field is gone (0 merchants have an email — it was never sent)")
@@ -145,9 +150,10 @@ def _():
     assert "'needs_action'" in src and "type StatusFilter" in src
     assert "Needs action" in src and "needsActionCount" in src
     assert "function ageCompact(" in src and "function oldestAgeMin(" in src
-    chips = src.split("(['all', ...STATUSES] as const).map((s) => {", 1)[1].split("})", 1)[0]
+    # R7c: the four visible stages; Confirmed counts confirmed + the two pick-list stamps
+    chips = src.split("(['all', ...VISIBLE_STATUSES] as const).map((s) => {", 1)[1].split("})", 1)[0]
     assert "`Received ${n}" in chips and "oldest ${ageCompact(oldestReceivedMin)}" in chips
-    assert "counts[s] ?? 0" in chips
+    assert "visibleCount(counts, s)" in chips
 
 
 @test("the Needs-action count and its filter share one rule (late Received or open with no rep), each order once")
@@ -278,7 +284,7 @@ def _():
     assert "{!readOnly && <AssignmentQueue" in shop
     assert "!readOnly && !unassigned && !reassigning" in shop, "the Reassign link"
     assert "!readOnly && (unassigned || reassigning)" in shop, "the AssignBox form itself"
-    assert "{data && actions.length > 0 && !confirming && !readOnly && (" in shop, "the whole action footer"
+    assert "const hasFooter = Boolean(data) && !readOnly && !editing && (flow.actions.some((a) => a !== 'tell_shop') || flow.tellFirst)" in shop, "the whole action footer"
     actions_src = _read(ACTIONS)
     assert "readOnly?: boolean" in actions_src
     assert "{!readOnly && (\n        <div className=\"flex gap-1.5 sm:w-[17rem]\">" in actions_src, "Accept/Not-this-one"

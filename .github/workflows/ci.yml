@@ -112,6 +112,13 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r2_money
+      # R7c order heart, the page (Sprint 3, S3b): the order desk and the rep's field sheet on the
+      # three stages — one forward button, the one editor, the adverse tick, Tell the shop (source
+      # checks; the node half SKIPs here — the web job runs it for real)
+      - name: R7c order desk + field sheet (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r7c_ui
 
   web:
     runs-on: ubuntu-latest
@@ -136,6 +143,10 @@ jobs:
       # non-200 never stored, missing chunks → 404
       - name: Edge Worker behaviour (node, no network)
         run: node scripts/market_worker_test.mjs
+      # R7c order heart (web/src/pages/shop-ops/heart.ts) on hand-worked orders: which change needs a
+      # reason, when the "Shop agreed" tick is required, the pro-rata cart share to the fils
+      - name: Order heart rules (node, no browser)
+        run: node scripts/order_heart_ui_test.mjs
       # Advisory until the design-system pass clears the 18 pre-existing portal findings
       # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
       # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.
