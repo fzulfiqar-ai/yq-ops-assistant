@@ -14,28 +14,36 @@ Jobs (in run order):
   * notify_retry — an order younger than 48 h whose new-order alert reached nobody (every internal
     channel in notify_result failed, the fan-out raised before any send, or no result was written
     within NOTIFY_GRACE_MIN) gets notify_new_order again, at most MAX_NOTIFY_ATTEMPTS times in all;
-    channels that already delivered are kept. Not gated by the send window: it is the first alert.
+    channels that already delivered are kept. Not gated by the send window or the weekend: it is
+    the first alert. Each re-send is logged as kind 'retry' in shop_notifications (shop_notify).
   * unassigned_reminder — an order nobody owns after shop_assign_sla_min minutes is re-alerted
     to the owner channel (Telegram + owner email) at most every two hours until someone assigns it.
   * unconfirmed_reminder — an order a rep DOES own but has left in 'new' past shop_confirm_sla_min
     minutes from ASSIGNMENT: the rep is reminded (email + WhatsApp Cloud when configured), at most
     every shop_confirm_renotify_hours; past twice the SLA the owner channel is told as well. Every
-    attempt is a shop_order_events row event='reminded' — detail.rep/owner say who was reached,
-    detail.attempted who was tried — so a channel that did not deliver is tried again at most every
-    REP_RETRY_MIN, not every run. Rows older than the order's assigned_at are ignored, so a
-    reassigned order starts its cadence over. After ESCALATION_MAX_DAYS from assignment or
-    ESCALATION_MAX_REMINDERS delivered nudges the per-order chasing stops and the order becomes one
-    line in a single daily owner digest. sla_notified_at is stamped only when someone was reached.
+    attempt is logged, one row per channel, in shop_notifications (R7a) — so a channel that did not
+    deliver is tried again at most every REP_RETRY_MIN, not every run — and the order's timeline
+    gets a shop_order_events row event='reminded' (detail.rep/owner = who was reached,
+    detail.attempted = who was tried) only when someone was reached or the chase moved up a level
+    (the first rep try, the first owner escalation). Until that table exists every attempt is an
+    event, as before R7a; the back-off reads both, so the counters carry across the switch. Rows
+    older than the order's assigned_at are ignored, so a reassigned order starts its cadence over.
+    After ESCALATION_MAX_DAYS from assignment or ESCALATION_MAX_REMINDERS delivered nudges the
+    per-order chasing stops and the order becomes one line in a single daily owner digest.
+    sla_notified_at is stamped only when someone was reached.
   * cleanup — expired or revoked merchant sessions and stale access links are removed.
   * stale_data_alert — when the stock snapshot merchants see is older than shop_stale_days, the
     owner channel gets one Telegram (owner email when Telegram is not configured) a day asking for
     the Focus report. The "alerted today" marker is written only when a channel really delivered.
 
-Nudges (unassigned, unconfirmed, digest) go out only between SEND_FROM_H and SEND_UNTIL_H Bahrain;
-outside that window the jobs answer skipped and try again on the next tick. A reminder is stamped
-only when at least one channel delivered: with every channel dead the job keeps trying (hourly)
-instead of pretending someone was told (D-13). Cron drifts by minutes, so all of this is an internal
-nudge, never a merchant-facing promise.
+Nudges (unassigned, unconfirmed, digest, stale data) go out only between SEND_FROM_H and SEND_UNTIL_H
+Bahrain and never on the Bahrain weekend (Friday, Saturday); outside those hours the jobs answer
+skipped and try again on the next tick. The SLA age that makes an order overdue leaves Friday and
+Saturday out (business_minutes), so a weekend never counts against a rep. Staff-placed orders
+(source 'salesman') and test orders are never chased. A reminder is stamped only when at least one
+channel delivered: with every channel dead the job keeps trying (hourly) instead of pretending
+someone was told (D-13). Cron drifts by minutes, so all of this is an internal nudge, never a
+merchant-facing promise.
 """
 from __future__ import annotations
 
@@ -61,9 +69,14 @@ ESCALATION_MAX_REMINDERS = 10   # ... or after this many delivered nudges; then 
 DIGEST_RENOTIFY_HOURS = 20   # the daily digest settles on the first tick after SEND_FROM_H each day
 DIGEST_MARKER = "shop_unconfirmed_digest_at"
 
-# nudges only in waking hours (Bahrain, UTC+3): 07:00 ≤ local time < 22:00
+# nudges only in waking hours (Bahrain, UTC+3): 07:00 ≤ local time < 22:00, and not on the weekend
 _BAHRAIN = timezone(timedelta(hours=3))
 SEND_FROM_H, SEND_UNTIL_H = 7, 22
+WEEKEND_DAYS = (4, 5)        # Friday, Saturday (datetime.weekday()) — the Bahrain weekend
+
+# the reminder back-off reads these shop_notifications kinds (the unassigned nudge is a 'reminder'
+# with level 'unassigned' and is left out: it is about the queue, not about the rep)
+REMINDER_KINDS = ("reminder", "escalation")
 
 LOCK_KEY = "shop_jobs_lock"
 LOCK_TTL_MIN = 10
@@ -124,6 +137,43 @@ def in_send_window(now: datetime | None = None) -> bool:
 def _outside_window(now: datetime) -> dict:
     return {"skipped": f"outside {SEND_FROM_H:02d}:00-{SEND_UNTIL_H:02d}:00 Bahrain "
                        f"(now {now.astimezone(_BAHRAIN):%H:%M})"}
+
+
+def is_weekend(now: datetime | None = None) -> bool:
+    """True on Friday and Saturday, Bahrain time: no rep or owner reminder goes out then."""
+    return (now or _now()).astimezone(_BAHRAIN).weekday() in WEEKEND_DAYS
+
+
+def business_minutes(start: datetime | None, end: datetime | None) -> int:
+    """Whole minutes from start to end with Friday and Saturday (Bahrain dates) left out — the age
+    an SLA is measured on, so the weekend never counts against a rep: an order assigned at 20:00
+    on Thursday is 4 h old at midnight on Sunday, not 52 h. Nights on working days do count; the
+    send window, not this clock, keeps nudges out of them."""
+    if not start or not end or end <= start:
+        return 0
+    cur, stop = start.astimezone(_BAHRAIN), end.astimezone(_BAHRAIN)
+    seconds = 0.0
+    while cur < stop:
+        nxt = min(stop, datetime(cur.year, cur.month, cur.day, tzinfo=_BAHRAIN) + timedelta(days=1))
+        if cur.weekday() not in WEEKEND_DAYS:
+            seconds += (nxt - cur).total_seconds()
+        cur = nxt
+    return int(seconds // 60)
+
+
+def _sla_age(row: dict, now: datetime, since: str = "created_at") -> int:
+    """business_minutes from `since` (created_at when that is empty) to now."""
+    start = _parse(row.get(since)) or _parse(row.get("created_at"))
+    return business_minutes(start, now) if start else 0
+
+
+def _quiet(now: datetime) -> dict | None:
+    """Why a nudge has to wait (outside the send window, or the Bahrain weekend), else None."""
+    if not in_send_window(now):
+        return _outside_window(now)
+    if is_weekend(now):
+        return {"skipped": f"Bahrain weekend ({now.astimezone(_BAHRAIN):%A}): no reminders on Friday or Saturday"}
+    return None
 
 
 # ── lease (one run at a time) ─────────────────────────────────────────────────
@@ -201,6 +251,64 @@ def _rep_alert(sm: dict, subject: str, text: str) -> dict:
     return out
 
 
+# ── notifications log rows (R7a; shop_notify.log_notifications writes them) ────
+
+def _owner_rows(kind: str, level: str, res: dict, order_ids: list, now: datetime,
+                attempts: dict | None = None, detail: dict | None = None) -> list[dict]:
+    """One row per owner channel _owner_alert tried, for each order (None = not about one order).
+    Every row of one attempt carries the job's clock, which is how the back-off groups them."""
+    from app import shop_notify
+    rows: list[dict] = []
+    for oid in order_ids:
+        n = (attempts or {}).get(oid)
+        rows.append(shop_notify.notification_row(kind, "telegram", "owner", res.get("telegram"), order_id=oid,
+                                                 level=level, attempt=n, detail=detail, at=now.isoformat()))
+        if "email" in res:
+            rows.append(shop_notify.notification_row(kind, "email", "owner", res["email"], order_id=oid,
+                                                     to=os.getenv("ALERT_EMAIL_TO", ""), level=level, attempt=n,
+                                                     detail=detail, at=now.isoformat()))
+    return rows
+
+
+def _rep_rows(sm: dict, res: dict, order_id: int, now: datetime, attempt: int, detail: dict) -> list[dict]:
+    """One row per rep channel _rep_alert tried; a rep with nothing on file is one 'none' row."""
+    from app import shop_notify
+    kw = dict(order_id=order_id, level="rep", attempt=attempt, detail=detail, at=now.isoformat())
+    rows: list[dict] = []
+    if "email" in res:
+        rows.append(shop_notify.notification_row("reminder", "email", "rep", res["email"], to=sm.get("email"), **kw))
+    if "whatsapp" in res:
+        rows.append(shop_notify.notification_row("reminder", "whatsapp", "rep", res["whatsapp"],
+                                                 to=sm.get("whatsapp") or sm.get("phone"), **kw))
+    if not rows:
+        rows.append(shop_notify.notification_row("reminder", "none", "rep",
+                                                 {"sent": False, "reason": res.get("reason") or "no channel"}, **kw))
+    return rows
+
+
+def _read_orders(client, cols: str, build) -> list[dict]:
+    """shop_orders rows for `cols` plus is_test; `build(query)` adds the filters. A database
+    without shop_orders.is_test (scripts/shop_orders_ops_migration.sql) is read without it."""
+    try:
+        return build(client.table("shop_orders").select(cols + ",is_test")).execute().data or []
+    except Exception as e:  # noqa: BLE001 — only the missing-column case is retried
+        from app import shop
+        if not shop._missing_column(e):
+            raise
+        return build(client.table("shop_orders").select(cols)).execute().data or []
+
+
+def _not_chased(rows: list[dict]) -> tuple[list[dict], dict]:
+    """Leave out the orders nobody is reminded about: staff-placed ones (source 'salesman' — the
+    rep or the office placed it for the shop, so a reminder tells them nothing) and test orders.
+    Filtered here, not in the query: a NULL source must stay in."""
+    staff = [r for r in rows if r.get("source") == "salesman"]
+    test = [r for r in rows if r.get("is_test") and r.get("source") != "salesman"]
+    keep = [r for r in rows if r.get("source") != "salesman" and not r.get("is_test")]
+    excluded = {k: len(v) for k, v in (("staff", staff), ("test", test)) if v}
+    return keep, excluded
+
+
 def _stamp(client, order_ids: list[int], when: datetime) -> None:
     for oid in order_ids:
         try:
@@ -210,9 +318,9 @@ def _stamp(client, order_ids: list[int], when: datetime) -> None:
 
 
 def _event(client, order_id: int, event: str, detail: dict) -> bool:
-    """One audit row per nudge or attempt. shop_order_events.event has no CHECK constraint (verified
-    live, 24-Sep-2026), so 'reminded' needs no migration. The detail never carries a provider's
-    error text (it names accounts); the notify panel on the order has that."""
+    """One timeline row. shop_order_events.event has no CHECK constraint (verified live,
+    24-Sep-2026), so 'reminded' needs no migration. The detail never carries a provider's error
+    text (it names accounts); the notify panel on the order and shop_notifications (scrubbed) do."""
     try:
         client.table("shop_order_events").insert({
             "order_id": order_id, "actor": "shop_jobs", "event": event, "detail": detail}).execute()
@@ -269,29 +377,35 @@ def notify_retry() -> dict:
 
 def unassigned_reminder() -> dict:
     """Re-alert admins about orders still without a salesman past the SLA."""
-    from app import shop
+    from app import shop, shop_notify
     sla = shop._i(shop.shop_settings().get("shop_assign_sla_min"), 30)
     if sla <= 0:
         return {"skipped": "shop_assign_sla_min is 0"}
     now = _now()
-    if not in_send_window(now):
-        return _outside_window(now)
+    quiet = _quiet(now)
+    if quiet:
+        return quiet
     cutoff = (now - timedelta(minutes=sla)).isoformat()
     renotify_before = now - timedelta(hours=RENOTIFY_HOURS)
     client = get_client()
-    rows = (client.table("shop_orders")
-            .select("id,order_no,customer_shop,customer_area,total_bhd,created_at,sla_notified_at")
-            .is_("salesman_id", "null").in_("status", ["new", "confirmed"]).lt("created_at", cutoff)
-            .order("created_at").limit(50).execute().data or [])
+    rows = _read_orders(client, "id,order_no,customer_shop,customer_area,total_bhd,created_at,sla_notified_at,source",
+                        lambda q: q.is_("salesman_id", "null").in_("status", ["new", "confirmed"])
+                        .lt("created_at", cutoff).order("created_at").limit(50))
+    rows, excluded = _not_chased(rows)
+    rows = [r for r in rows if _sla_age(r, now) >= sla]         # Friday and Saturday do not count
     due = [r for r in rows if not r.get("sla_notified_at") or (_parse(r["sla_notified_at"]) or now) < renotify_before]
+    result: dict = {"checked": len(rows), "notified": 0}
+    if excluded:
+        result["excluded"] = excluded
     if not due:
-        return {"checked": len(rows), "notified": 0}
+        return result
     text = (f"{len(due)} marketplace order(s) still UNASSIGNED after {sla} minutes:\n"
             + "\n".join(_order_line(r, now) for r in due))
     if _base():
         text += f"\nAssign: {_base()}/shop-orders?queue=1"
-    result: dict = {"checked": len(rows), "notified": len(due), "orders": [r["order_no"] for r in due]}
+    result.update(notified=len(due), orders=[r["order_no"] for r in due])
     sent = _owner_alert(f"YQ Marketplace · {len(due)} unassigned order(s)", text)
+    shop_notify.log_notifications(_owner_rows("reminder", "unassigned", sent, [r["id"] for r in due], now), client)
     result["telegram"] = bool((sent.get("telegram") or {}).get("sent"))
     result["email"] = bool((sent.get("email") or {}).get("sent"))
     result["sent"] = sent["sent"]
@@ -304,13 +418,20 @@ def unassigned_reminder() -> dict:
 
 
 def _reminder_history(client, rows: list[dict]) -> dict[int, dict] | None:
-    """Per order, from the 'reminded' audit rows written since its CURRENT assignment (older rows
-    belong to the previous rep and are ignored): "rep"/"owner" = last delivered nudge,
-    "rep_try"/"owner_try" = last attempt whether or not it delivered, "count" = delivered nudges.
-    None when the read failed (the caller then falls back to sla_notified_at)."""
+    """Per order, since its CURRENT assignment (older tries belong to the previous rep and are
+    ignored): "rep"/"owner" = last delivered nudge, "rep_try"/"owner_try" = last attempt whether or
+    not it delivered, "rep_tries"/"owner_tries" = attempts, "count" = delivered nudges.
+
+    Two sources, read together so the counters carry across the R7a switch: shop_notifications
+    (one row per channel; every row of one attempt carries the job's clock) when the table exists,
+    and the 'reminded' events. Before R7a every attempt was an event; since, an event is written
+    only when someone was reached or the chase moved up a level, and it repeats an attempt the log
+    already holds, so an event whose detail.attempted_at matches a logged attempt is skipped.
+    None when a read failed (the caller then falls back to sla_notified_at)."""
+    from app import shop_notify
     ids = [r["id"] for r in rows]
     since = {r["id"]: _parse(r.get("assigned_at")) for r in rows}
-    out: dict[int, dict] = {i: {"count": 0} for i in ids}
+    out: dict[int, dict] = {i: {"count": 0, "rep_tries": 0, "owner_tries": 0} for i in ids}
     if not ids:
         return out
     # Only the window that can matter (since the oldest current assignment, capped at 8 days),
@@ -318,6 +439,26 @@ def _reminder_history(client, rows: list[dict]) -> dict[int, dict] | None:
     # OLDEST rows, never the newest ones the back-off and the cadence depend on.
     starts = [t for t in since.values() if t]
     floor = max(min(starts) if starts else _now() - timedelta(days=8), _now() - timedelta(days=8))
+    tries: dict[tuple[int, datetime], dict] = {}    # (order, attempt time) → {"rep"|"owner": delivered?} (present = tried)
+    if shop_notify.notifications_ready(client):
+        try:
+            notes = (client.table(shop_notify.NOTIFICATIONS_TABLE)
+                     .select("order_id,created_at,kind,recipient_role,status,level")
+                     .in_("order_id", ids).in_("kind", list(REMINDER_KINDS)).gte("created_at", floor.isoformat())
+                     .order("id", desc=True).limit(5000).execute().data or [])
+        except Exception as e:  # noqa: BLE001
+            if not shop_notify._missing_table(e):
+                log.debug("notifications read failed: %s", e)
+                return None
+            shop_notify.forget_notifications_probe()   # reversed under a cached hit: the events alone, as before R7a
+            notes = []
+        for n in notes:
+            ts, oid, who = _parse(n.get("created_at")), int(n.get("order_id") or 0), n.get("recipient_role")
+            if not ts or oid not in out or who not in ("rep", "owner") or n.get("level") == "unassigned":
+                continue
+            t = tries.setdefault((oid, ts), {})
+            t[who] = bool(t.get(who)) or n.get("status") == "sent"
+    logged = set(tries)
     try:
         evs = (client.table("shop_order_events").select("order_id,ts,detail")
                .eq("event", "reminded").in_("order_id", ids).gte("ts", floor.isoformat())
@@ -330,45 +471,56 @@ def _reminder_history(client, rows: list[dict]) -> dict[int, dict] | None:
         oid = int(e.get("order_id") or 0)
         if not ts or oid not in out:
             continue
+        d = e.get("detail") if isinstance(e.get("detail"), dict) else {}
+        if (oid, _parse(d.get("attempted_at"))) in logged:
+            continue                                   # the same attempt, already read from the log
+        attempted = d.get("attempted") if isinstance(d.get("attempted"), dict) else {}
+        for who in ("rep", "owner"):
+            if d.get(who) or attempted.get(who):
+                t = tries.setdefault((oid, ts), {})
+                t[who] = bool(t.get(who)) or bool(d.get(who))
+    for (oid, ts), who_sent in tries.items():
         if since.get(oid) and ts < since[oid]:
             continue                                   # before this rep got the order
-        d = e.get("detail") if isinstance(e.get("detail"), dict) else {}
-        tried = d.get("attempted") if isinstance(d.get("attempted"), dict) else {}
         slot = out[oid]
-        for who in ("rep", "owner"):            # keep the NEWEST stamp whatever the row order
-            if d.get(who) and (slot.get(who) is None or ts > slot[who]):
+        for who, sent in who_sent.items():             # keep the NEWEST stamp whatever the row order
+            if sent and (slot.get(who) is None or ts > slot[who]):
                 slot[who] = ts
-            if (d.get(who) or tried.get(who)) and (slot.get(who + "_try") is None or ts > slot[who + "_try"]):
+            if slot.get(who + "_try") is None or ts > slot[who + "_try"]:
                 slot[who + "_try"] = ts
-        if d.get("rep") or d.get("owner"):
+            slot[who + "_tries"] += 1
+        if any(who_sent.values()):
             slot["count"] += 1
     return out
 
 
 def unconfirmed_reminder() -> dict:
     """Chase orders a rep owns but has left in 'new' past shop_confirm_sla_min (from assignment)."""
-    from app import shop
+    from app import shop, shop_notify
     vals = shop.shop_settings()
     sla = shop._i(vals.get("shop_confirm_sla_min"), 120)
     if sla <= 0:
         return {"skipped": "shop_confirm_sla_min is 0"}
     renotify_h = max(1, shop._i(vals.get("shop_confirm_renotify_hours"), 12))
     now = _now()
-    if not in_send_window(now):
-        return _outside_window(now)
+    quiet = _quiet(now)
+    if quiet:
+        return quiet
     cutoff = (now - timedelta(minutes=sla)).isoformat()
     renotify_before = now - timedelta(hours=renotify_h)
     retry_before = now - timedelta(minutes=REP_RETRY_MIN)
     client = get_client()
-    rows = (client.table("shop_orders")
-            .select("id,order_no,customer_shop,customer_area,total_bhd,created_at,assigned_at,sla_notified_at,"
-                    "salesman_id,salesman_name,source")
-            .eq("status", "new").not_.is_("salesman_id", "null").lt("created_at", cutoff)
-            .order("created_at").limit(100).execute().data or [])
+    rows = _read_orders(client, "id,order_no,customer_shop,customer_area,total_bhd,created_at,assigned_at,"
+                                "sla_notified_at,salesman_id,salesman_name,source",
+                        lambda q: q.eq("status", "new").not_.is_("salesman_id", "null").lt("created_at", cutoff)
+                        .order("created_at").limit(100))
+    rows, excluded = _not_chased(rows)
     # The clock starts when the rep GOT the order: one assigned from the admin queue ten minutes
-    # ago is not late, however old the order itself is.
-    rows = [r for r in rows if _age_min(r, now, since="assigned_at") >= sla]
+    # ago is not late, however old the order itself is. Friday and Saturday do not count.
+    rows = [r for r in rows if _sla_age(r, now, since="assigned_at") >= sla]
     out: dict = {"checked": len(rows), "reminded": [], "escalated": [], "reps": {}, "sla_min": sla}
+    if excluded:
+        out["excluded"] = excluded
     if not rows:
         return out
     hist = _reminder_history(client, rows)
@@ -390,6 +542,7 @@ def unconfirmed_reminder() -> dict:
         return True
 
     def _capped(r: dict) -> bool:
+        # calendar days here, weekend included: this is how long the order has waited, not an SLA
         return (_age_min(r, now, since="assigned_at") >= ESCALATION_MAX_DAYS * 1440
                 or slot(r).get("count", 0) >= ESCALATION_MAX_REMINDERS)
 
@@ -402,7 +555,7 @@ def unconfirmed_reminder() -> dict:
         rep_ok = _due(r, "rep")
         if rep_ok:
             rep_due.setdefault(int(r["salesman_id"]), []).append(r)
-        esc = _age_min(r, now, since="assigned_at") >= 2 * sla
+        esc = _sla_age(r, now, since="assigned_at") >= 2 * sla
         owner_ok = esc and _due(r, "owner")
         if owner_ok:
             owner_due.append(r)
@@ -420,6 +573,8 @@ def unconfirmed_reminder() -> dict:
         return out
 
     tried: dict[int, dict] = {}           # order id → {"rep": delivered?, "owner": delivered?} (present = attempted)
+    rep_res: dict[int, tuple[dict, dict]] = {}     # order id → (salesman, what _rep_alert answered)
+    owner_res: dict = {}
     portal = _base()
     for sid, orders in rep_due.items():
         sm = shop._salesman_by_id(sid) or {}
@@ -432,30 +587,47 @@ def unconfirmed_reminder() -> dict:
         out["reps"][sm.get("name") or str(sid)] = res
         for r in orders:
             tried.setdefault(r["id"], {})["rep"] = bool(res["sent"])
+            rep_res[r["id"]] = (sm, res)
     if owner_due:
         text = (f"{len(owner_due)} marketplace order(s) unconfirmed for over {_fmt_wait(2 * sla)} — the rep was reminded:\n"
                 + "\n".join(_order_line(r, now, rep=True, since="assigned_at") for r in owner_due))
         if portal:
             text += f"\nOrders: {portal}/shop-orders"
-        res = _owner_alert(f"YQ Marketplace · {len(owner_due)} order(s) unconfirmed past {_fmt_wait(2 * sla)}", text)
-        out["owner"] = {"telegram": bool((res.get("telegram") or {}).get("sent")),
-                        "email": bool((res.get("email") or {}).get("sent")), "sent": res["sent"]}
+        owner_res = _owner_alert(f"YQ Marketplace · {len(owner_due)} order(s) unconfirmed past {_fmt_wait(2 * sla)}", text)
+        out["owner"] = {"telegram": bool((owner_res.get("telegram") or {}).get("sent")),
+                        "email": bool((owner_res.get("email") or {}).get("sent")), "sent": owner_res["sent"]}
         for r in owner_due:
-            tried.setdefault(r["id"], {})["owner"] = bool(res["sent"])
+            tried.setdefault(r["id"], {})["owner"] = bool(owner_res["sent"])
+
+    attempted = [r for r in active if r["id"] in tried]
+    notes: list[dict] = []
+    for r in attempted:
+        d, s, age = tried[r["id"]], slot(r), _sla_age(r, now, since="assigned_at")
+        if "rep" in d:
+            sm, res = rep_res[r["id"]]
+            notes += _rep_rows(sm, res, r["id"], now, s.get("rep_tries", 0) + 1, {"age_min": age, "sla_min": sla})
+        if "owner" in d:
+            notes += _owner_rows("escalation", "owner", owner_res, [r["id"]], now,
+                                 {r["id"]: s.get("owner_tries", 0) + 1}, {"age_min": age, "sla_min": sla})
+    logged = shop_notify.log_notifications(notes, client)       # one insert for the whole run
 
     stamped: list[int] = []
-    for r in active:
-        d = tried.get(r["id"])
-        if not d:
-            continue
+    for r in attempted:
+        d, s, age = tried[r["id"]], slot(r), _sla_age(r, now, since="assigned_at")
         got_rep, got_owner = bool(d.get("rep")), bool(d.get("owner"))
-        # Every attempt is recorded — a failed one too, so the next run backs off for an hour
-        # instead of hammering a dead channel; only a delivered one stamps sla_notified_at.
-        _event(client, r["id"], "reminded", {
-            "rep": got_rep, "owner": got_owner,
-            "attempted": {"rep": "rep" in d, "owner": "owner" in d}, "attempted_at": now.isoformat(),
-            "level": "owner" if got_owner else ("rep" if got_rep else "attempt"),
-            "age_min": _age_min(r, now, since="assigned_at"), "sla_min": sla})
+        # Every attempt, a failed one too, is in the log, so the next run backs off for an hour
+        # instead of hammering a dead channel. The order's timeline gets a 'reminded' event only
+        # when someone was reached or the chase moved up a level (the first rep try, the first
+        # owner escalation) — not one row an hour for a channel that never delivers. Without the
+        # log (no table yet, or the insert failed) every attempt is an event, as before R7a: the
+        # back-off reads it from there. Only a delivered nudge stamps sla_notified_at.
+        moved_up = ("rep" in d and not s.get("rep_try")) or ("owner" in d and not s.get("owner_try"))
+        if got_rep or got_owner or moved_up or not logged or hist is None:
+            _event(client, r["id"], "reminded", {
+                "rep": got_rep, "owner": got_owner,
+                "attempted": {"rep": "rep" in d, "owner": "owner" in d}, "attempted_at": now.isoformat(),
+                "level": "owner" if got_owner else ("rep" if got_rep else "attempt"),
+                "age_min": age, "sla_min": sla})
         if got_rep:
             out["reminded"].append(r["order_no"])
         if got_owner:
@@ -472,7 +644,10 @@ def unconfirmed_reminder() -> dict:
 def _stale_digest(client, stale: list[dict], now: datetime, sla: int) -> dict:
     """Orders past ESCALATION_MAX_DAYS or ESCALATION_MAX_REMINDERS: no more per-order nudges, one
     owner digest a day (marker DIGEST_MARKER in app_settings, written only when it delivered).
-    Each order in a delivered digest gets a 'reminded' row with level 'digest' for its timeline."""
+    Each order in a delivered digest gets a 'reminded' row with level 'digest' for its timeline;
+    every attempt is one owner_digest row per channel in shop_notifications (not per order: the
+    digest is one message, and the back-off never reads it — these orders are no longer chased)."""
+    from app import shop_notify
     out: dict = {"orders": [r["order_no"] for r in stale], "sent": False}
     last = _marker(client, DIGEST_MARKER)
     if last and last > now - timedelta(hours=DIGEST_RENOTIFY_HOURS):
@@ -485,6 +660,8 @@ def _stale_digest(client, stale: list[dict], now: datetime, sla: int) -> dict:
     if _base():
         text += f"\nOrders: {_base()}/shop-orders?bucket=new"
     res = _owner_alert(f"YQ Marketplace · daily digest: {len(stale)} order(s) still unconfirmed", text)
+    shop_notify.log_notifications(_owner_rows("owner_digest", "digest", res, [None], now,
+                                              detail={"order_ids": [r["id"] for r in stale]}), client)
     out["telegram"] = bool((res.get("telegram") or {}).get("sent"))
     out["email"] = bool((res.get("email") or {}).get("sent"))
     out["sent"] = res["sent"]
@@ -497,7 +674,7 @@ def _stale_digest(client, stale: list[dict], now: datetime, sla: int) -> dict:
     for r in stale:
         _event(client, r["id"], "reminded", {"rep": False, "owner": True, "level": "digest",
                                               "attempted": {"rep": False, "owner": True}, "attempted_at": now.isoformat(),
-                                              "age_min": _age_min(r, now, since="assigned_at"), "sla_min": sla})
+                                              "age_min": _sla_age(r, now, since="assigned_at"), "sla_min": sla})
     return out
 
 
@@ -521,7 +698,9 @@ def cleanup() -> dict:
 def stale_data_alert() -> dict:
     """One owner alert a day while the stock snapshot on the marketplace is older than shop_stale_days.
     Telegram first; the owner email only when Telegram did not deliver. Marked as alerted ONLY when
-    a channel really delivered, so a dead channel never silences the alert for 24 h."""
+    a channel really delivered, so a dead channel never silences the alert for 24 h. Like every
+    nudge it waits for the send window and for the end of the weekend (it once emailed the owner
+    at 03:01, and nobody can upload a Focus report on a Friday)."""
     from app import shop, shop_notify
     days = shop._i(shop.shop_settings().get("shop_stale_days"), 3)
     if days <= 0:
@@ -533,6 +712,10 @@ def stale_data_alert() -> dict:
     out: dict = {"as_of": as_of.date().isoformat() if as_of else None, "age_days": age, "alerted": False}
     if age is None or age < days:
         return out
+    quiet = _quiet(now)
+    if quiet:
+        out.update(quiet)
+        return out
     client = get_client()
     last = _marker(client, "shop_stale_alerted_at")
     if last and last > now - timedelta(hours=STALE_RENOTIFY_HOURS):
@@ -543,13 +726,18 @@ def stale_data_alert() -> dict:
             + (f": {_base()}/data" if _base() else "."))
     tg = shop_notify._telegram(text)
     out["telegram"] = bool(tg.get("sent"))
+    notes = [shop_notify.notification_row("stale_data", "telegram", "owner", tg, detail={"age_days": age},
+                                          at=now.isoformat())]
     if not tg.get("sent"):
         owner = os.getenv("ALERT_EMAIL_TO", "")
         em = (shop_notify._email(f"YQ Marketplace · stock data is {age} days old", _text_html(text), owner)
               if owner else {"sent": False, "reason": "ALERT_EMAIL_TO unset"})
         out["email"] = bool(em.get("sent"))
+        notes.append(shop_notify.notification_row("stale_data", "email", "owner", em, to=owner,
+                                                  detail={"age_days": age}, at=now.isoformat()))
         if not em.get("sent"):
             out["reason"] = f"telegram: {tg.get('reason') or 'not delivered'}; email: {em.get('reason') or 'not delivered'}"[:240]
+    shop_notify.log_notifications(notes, client)
     if not (out.get("telegram") or out.get("email")):
         return out                        # nobody heard it: leave the marker alone and try next run
     err = _set_marker(client, "shop_stale_alerted_at", now)
