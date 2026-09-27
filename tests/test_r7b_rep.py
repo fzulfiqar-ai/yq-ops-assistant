@@ -476,6 +476,34 @@ def _():
     assert basket_payload(row, [], {**last, "lines": last["lines"][2:3]}, ITEMS, "https://m.example/r")["restock_link"] is None
 
 
+@test("basket (R7c review F1.8): order-again repeats what the shop GOT — delivered, else confirmed, else asked; lines out of the order skipped")
+def _():
+    from app.followups import basket_payload
+    row = {"key": "f:ALPHA", "name": "ALPHA", "focus_name": "ALPHA", "last_focus_date": "2026-09-10"}
+    last = {"order_no": "YQ-2", "created_at": "2026-09-20T09:00:00+00:00", "status": "delivered",
+            "lines": [
+                # delivered 8 of 10 confirmed of 12 asked: 8
+                {"item_code": "C18", "qty": 12, "qty_confirmed": 10, "qty_delivered": 8, "line_status": "changed"},
+                # confirmed 0 = unavailable (an R7c line): never 12 again
+                {"item_code": "T02", "qty": 12, "qty_confirmed": 0, "qty_delivered": 0, "line_status": "unavailable"},
+                # substituted: its substitute is a line of its own (the UK15 row below)
+                {"item_code": "X05", "qty": 3, "qty_confirmed": 0, "line_status": "substituted",
+                 "substitute_item_code": "UK15"},
+                {"item_code": "UK15", "qty": 6, "qty_confirmed": 6, "qty_delivered": 6, "line_status": "added",
+                 "added_at_stage": "confirm", "substitute_for_line": 3},
+                # confirmed but not handed over at the door: 0 → dropped
+                {"item_code": "P04", "qty": 4, "qty_confirmed": 4, "qty_delivered": 0, "line_status": "ok"},
+                # an older line with no confirmed figure: what was asked
+                {"item_code": "GONE1", "qty": 3, "qty_confirmed": None, "line_status": "ok"}]}
+    out = basket_payload(row, [], last, ITEMS, "https://market.example/rep-one")
+    assert out["suggested_from"] == "last_order"
+    assert [(ln["item_code"], ln["qty"]) for ln in out["last_order"]["lines"]] == [("C18", 8), ("UK15", 6), ("GONE1", 3)]
+    assert out["restock_link"] == "https://market.example/rep-one?order=C18:8,UK15:6", out["restock_link"]
+    # an unavailable line with a stale qty_confirmed never comes back either (status alone decides)
+    stale = {**last, "lines": [{"item_code": "T02", "qty": 5, "qty_confirmed": 5, "line_status": "unavailable"}]}
+    assert basket_payload(row, [], stale, ITEMS, None)["last_order"]["lines"] == []
+
+
 @test("restock_link: codes are URL-encoded (a space, a slash) the way the checkout's ready order does it")
 def _():
     from app.followups import restock_link
