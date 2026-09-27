@@ -678,6 +678,12 @@ def _():
         assert set(new) <= {"orders", "match"} and "orders" in new, f"only the live half is re-read: {new}"
         reports.invalidate_dashboard_cache()
         assert not metrics._focus_cache and not metrics._live_cache
+    # a build that missed a source (the database blinked) is kept a minute, not until the next upload
+    fake.fail["movers"] = RuntimeError("statement timeout")
+    with _Patched((metrics, "Reader", reader_factory)):
+        metrics.overview("mtd")
+        age = metrics.time.time() - metrics._focus_cache["mtd"][0]
+        assert metrics.FOCUS_TTL_S - metrics.ERROR_TTL_S - 2 <= age <= metrics.FOCUS_TTL_S - metrics.ERROR_TTL_S + 2, age
     metrics.invalidate()
 
 

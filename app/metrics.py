@@ -1420,12 +1420,18 @@ def invalidate() -> None:
     _view_probe.update(at=0.0, ok=None)
 
 
+ERROR_TTL_S = 60                 # a build that missed a source is kept a minute, not until the next upload
+
+
 def _cached(cache: dict, key: str, ttl: float, build: Callable[[], dict]) -> dict:
     hit = cache.get(key)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
     out = build()
-    cache[key] = (time.time(), out)
+    # a half-read payload (the database blinked) must not stick for the whole TTL: age it so it
+    # expires ERROR_TTL_S from now
+    stamp = time.time() - max(0.0, ttl - ERROR_TTL_S) if out.get("errors") else time.time()
+    cache[key] = (stamp, out)
     return out
 
 
