@@ -24,7 +24,8 @@ export const en = {
    * The VAT disclosure: the MA selling price book is VAT-inclusive, so every BHD figure on the
    * marketplace already includes it. A static fact printed beside the prices (the shelf and grid
    * footers, the restock totals, the order's totals) — it never changes a price, a total or the
-   * quote. The Arabic is set down now for the AR pass.
+   * quote. `noteAr` is the Arabic sentence (i18n/ar.ts `vat.note` says the same), kept for callers
+   * that print both.
    */
   vat: { note: 'Prices include 10% VAT', noteAr: 'الأسعار شاملة ضريبة القيمة المضافة 10%' },
   home: {
@@ -213,7 +214,8 @@ export const en = {
     /**
      * The wholesale minimum, stated up front — before the first add, in the promise band and the
      * phone strip. The amount is settings.min_order_bhd formatted (bhd()), never typed here. The
-     * Arabic for the AR pass puts the amount before «د.ب», as every Arabic price does.
+     * Arabic (i18n/ar.ts) puts the amount before «د.ب», as every Arabic price does; `minimumAr`
+     * predates the locale files and stays for callers that print both languages.
      */
     minimum: (amount: string) => `Wholesale orders from ${amount}`,
     /** the phone strip opens the full list on About · How ordering works */
@@ -275,7 +277,7 @@ export const en = {
     stockLow: 'Only a few left',
     /** the owner's wording for zero stock (24-Sep-2026): "Sold out" — never "Out of stock" in the merchant UI */
     stockOut: 'Sold out',
-    /** the Arabic for it, set down now for the AR pass: «نفدت الكمية» */
+    /** the Arabic for it, «نفدت الكمية» — the owner's wording, and i18n/ar.ts `stockOut` */
     stockOutAr: 'نفدت الكمية',
     /** narrow cards: "Retail 2.200" (S.deals.retail) then this, e.g. "41% margin" — a share of retail */
     marginPct: (pct: number) => `${pct}% margin`,
