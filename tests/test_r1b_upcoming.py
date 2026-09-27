@@ -610,9 +610,11 @@ def _():
     body = lit.group(1)
     assert "canvas: 'plum'" in body and "night" not in body
     assert "t.headline(soon.brand)" in body and "line: t.stageLineShort" in body and "cta: t.seeAll" in body and "products: stageArt(soon.items)" in body
-    assert "kicker: when || t.kicker" in body and "expected_label_en" in slides and "expected_label_ar" in slides
+    assert "kicker: when || null" in body and "expected_label_en" in slides and "expected_label_ar" in slides
+    # the green "Coming soon" sticker, as on the WEKOME page's stage (owner, 27-Sep); the month is the kicker
+    assert "sticker: { label: t.kicker, tone: 'fresh' }" in body
     # never a price, a BHD figure, a count or the tier word on it
-    for bad in ("price", "bhd", "count", "plural", "length", "premium", "sticker"):
+    for bad in ("price", "bhd", "count", "plural", "length", "premium"):
         assert bad not in body.lower(), f"the d:soon slide carries {bad!r}"
     # only for a switched-on payload with cards, and only into a deck that already has a slide 1
     block = slides[slides.index("/* 4 · \"Coming soon\""):slides.index("  return out\n}", slides.index("/* 4 · \"Coming soon\""))]

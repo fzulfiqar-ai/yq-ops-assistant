@@ -201,7 +201,7 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
   if (soon && soon.enabled && soon.items.length > 0 && out.length > 0 && allowed(SOON_SLIDE_ID, 'data')) {
     const t = locale.lang === 'ar' ? S.upcoming.ar : S.upcoming.en
     const when = ((locale.lang === 'ar' ? soon.expected_label_ar : soon.expected_label_en) || '').trim()
-    const slide: Slide = { id: SOON_SLIDE_ID, kind: 'data', kicker: when || t.kicker, title: t.headline(soon.brand), line: t.stageLineShort, cta: t.seeAll, to: `/brands/${encodeURIComponent(soon.brand.toLowerCase())}`, canvas: 'plum', products: stageArt(soon.items) }
+    const slide: Slide = { id: SOON_SLIDE_ID, kind: 'data', kicker: when || null, title: t.headline(soon.brand), line: t.stageLineShort, cta: t.seeAll, to: `/brands/${encodeURIComponent(soon.brand.toLowerCase())}`, canvas: 'plum', products: stageArt(soon.items), sticker: { label: t.kicker, tone: 'fresh' } }
     // never slide 1: second, or third when Order again holds the second place
     const at = out[1]?.id === 'd:again' ? 2 : 1
     out.splice(Math.min(at, out.length), 0, slide)
