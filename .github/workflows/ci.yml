@@ -177,6 +177,10 @@ jobs:
       # R7d merchant ordering helpers (market/lib/orderChanges.ts and friends) on hand-worked orders
       - name: Merchant ordering rules (node, no browser)
         run: node scripts/merchant_test.mjs
+      # the rep's screens (R7b/R7c review): quick-add only for an explicit list, one checkout id per
+      # order (never a shop-A duplicate for shop B), the Change carry, "shop told" on a rep-placed order
+      - name: Rep screen rules (node, no browser)
+        run: node scripts/rep_ui_test.mjs
       # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
       # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
       # does not. Type errors fail it too: tsc -b runs inside `npm run build`.

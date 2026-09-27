@@ -62,6 +62,14 @@ export interface HeartOrder extends EditOrder {
   order_no?: string | null
   expected_delivery?: string | null
   change_reasons?: Record<string, string> | null
+  /** the version the editor opened on — sent back as expected_updated_at (a newer one = 409) */
+  updated_at?: string | null
+}
+
+/** The order version this edit was made on: the server refuses (409) when the order moved since,
+ *  so a save never lands on quantities the rep did not see. Omitted for a payload without one. */
+function versionOf(order: HeartOrder): { expected_updated_at?: string } {
+  return order.updated_at ? { expected_updated_at: order.updated_at } : {}
 }
 
 function priceDiff(d: number | null): { text: string; cls: string } | null {
@@ -618,7 +626,7 @@ export function OrderEditor({
     if (!ready) return
     setBusy(true)
     try {
-      const body: Record<string, unknown> = { lines: plan.lines }
+      const body: Record<string, unknown> = { lines: plan.lines, ...versionOf(order) }
       if (plan.added_lines.length) body.added_lines = plan.added_lines
       if (eta.trim()) body.expected_delivery = eta.trim()
       if (note.trim()) body.note = note.trim()
@@ -755,7 +763,7 @@ export function DeliverEditor({
     if (!ready) return
     setBusy(true)
     try {
-      const body: Record<string, unknown> = {}
+      const body: Record<string, unknown> = { ...versionOf(order) }
       if (plan.lines.length) body.lines = plan.lines
       if (plan.added.length) body.added = plan.added
       if (note.trim()) body.note = note.trim()

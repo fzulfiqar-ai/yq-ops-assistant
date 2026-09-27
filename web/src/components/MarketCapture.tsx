@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Camera, CheckCircle2, CircleDot, Copy, ImagePlus, Loader2, MapPin, PackageCheck, RefreshCw, Sparkles, Store, WifiOff, X } from 'lucide-react'
 import { Sheet } from '@/components/ui/sheet'
@@ -51,6 +51,20 @@ const RESULT: Record<MiCard['result'], { title: string; icon: ReactNode; tone: s
   new_find: { title: 'New market find', icon: <Sparkles size={22} aria-hidden="true" />, tone: 'bg-[#6D4091] text-white' },
   saved_for_review: { title: 'Saved: office will identify', icon: <CheckCircle2 size={22} aria-hidden="true" />, tone: 'bg-[#f4f3f8] text-[#4B2C66]' },
 }
+
+/**
+ * Where the floating button sits: above the phone tab bar, and clear of whatever fixed furniture
+ * the page publishes (the catalog's StaffCatalog.useDockRoom) — above its order bar only while that
+ * bar shows (--yq-dock-bottom), and left of its docked order slip from 1280 px (--yq-dock-right),
+ * so it never covers Total / Place order. Every other page publishes nothing: 16 px from the edge
+ * on a phone, 32 px from 1024 px (--yq-capture-edge, set by the button's classes).
+ */
+const CAPTURE_POSITION: CSSProperties = {
+  bottom: 'calc(var(--yq-tabbar, 88px) + env(safe-area-inset-bottom, 0px) + var(--yq-dock-bottom, 0px) + 14px)',
+  right: 'max(var(--yq-dock-right, 0px), var(--yq-capture-edge, 16px))',
+}
+/** What the button covers at the foot of a page (52 px + 14 px): the shell pads its main by it. */
+const CAPTURE_ROOM = '66px'
 
 const CHIP = 'inline-flex h-10 items-center rounded-full px-3.5 text-[13px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60'
 const FIELD = 'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[14px] text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25'
@@ -105,6 +119,16 @@ export function MarketCapture() {
     photosRef.current = photos
   }, [photos])
   useEffect(() => () => photosRef.current.forEach((p) => URL.revokeObjectURL(p.url)), [])
+
+  // while the button floats, the page's last lines can still scroll out from under it (SalesmanShell)
+  useEffect(() => {
+    if (!visible) return
+    const root = document.documentElement
+    root.style.setProperty('--yq-capture-room', CAPTURE_ROOM)
+    return () => {
+      root.style.removeProperty('--yq-capture-room')
+    }
+  }, [visible])
 
   if (!visible && !open) return null
 
@@ -235,8 +259,8 @@ export function MarketCapture() {
           type="button"
           onClick={start}
           aria-label={waiting ? `Spotted: ${waiting} waiting to send` : 'Spotted: capture what you saw in the market'}
-          className="fixed right-4 z-30 flex h-[52px] items-center gap-2 rounded-full bg-gradient-to-br from-[#824FAB] to-[#6D4091] pl-4 pr-5 text-[14px] font-bold text-white shadow-[0_12px_28px_-10px_rgba(109,64,145,.75)] ring-1 ring-white/20 transition active:scale-[.97] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#824FAB]/40 lg:right-8"
-          style={{ bottom: `calc(var(--yq-tabbar, 88px) + env(safe-area-inset-bottom, 0px) + ${pathname.startsWith('/shop') ? 84 : 14}px)` }}
+          className="fixed z-30 flex h-[52px] items-center gap-2 rounded-full bg-gradient-to-br from-[#824FAB] to-[#6D4091] pl-4 pr-5 text-[14px] font-bold text-white shadow-[0_12px_28px_-10px_rgba(109,64,145,.75)] ring-1 ring-white/20 transition active:scale-[.97] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#824FAB]/40 [--yq-capture-edge:16px] lg:[--yq-capture-edge:32px]"
+          style={CAPTURE_POSITION}
         >
           <Camera size={20} strokeWidth={2.2} aria-hidden="true" />
           Spotted

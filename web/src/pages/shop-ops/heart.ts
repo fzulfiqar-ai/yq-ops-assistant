@@ -63,6 +63,11 @@ export const STATUS_TONE: Record<string, Tone> = {
 /** The storekeeper's own stamp words — shown only as a quiet "Pick list: …" note on the desk. */
 export const STAMP_LABEL: Record<string, string> = { packed: 'Preparing', out_for_delivery: 'On the way' }
 
+/** The rep's field sheet never shows the stamp words (its timeline leaves those two events out). */
+export function isStampEvent(event?: string | null): boolean {
+  return event === 'status:packed' || event === 'status:out_for_delivery'
+}
+
 /** One status filter = the stored statuses behind it (the list API takes a comma list). */
 export const FILTER_PARAM: Record<VisibleStatus, string> = {
   new: 'new',
@@ -632,7 +637,34 @@ export function reopenTarget(status?: string | null): VisibleStatus | null {
   return status === 'delivered' ? 'confirmed' : status === 'cancelled' ? 'new' : null
 }
 
-/** The "Shop not told yet" chip: a step was taken (anything past Received) and no tap logged since. */
-export function shopNotTold(o: { status?: string | null; shop_told?: boolean | null }): boolean {
-  return o.shop_told === false && visibleStatus(o.status) !== 'new'
+export interface NotifyEvent { event?: string | null; detail?: Record<string, unknown> | null }
+
+/**
+ * Was the shop told after the latest step, read from the order's own events (oldest first, as
+ * app/shop.py returns them)? shop_heart.notify_state's rule — a status move, an amendment, a reopen
+ * or the order's creation is a step; a logged WhatsApp / call / visit ('customer_notified') tells —
+ * with the owner's R7c rule for an order a rep places IN the shop: it is born Confirmed (the
+ * 'status:confirmed' event carries born_confirmed) and the shop agreed there, so that counts as
+ * told. The pick-list stamps are not steps: nothing the shop sees changes. null = no step on
+ * record (the server's flag decides).
+ */
+export function shopToldFrom(events?: NotifyEvent[] | null): boolean | null {
+  if (!Array.isArray(events)) return null
+  let told: boolean | null = null
+  for (const e of events) {
+    const ev = String(e?.event || '')
+    if (ev === 'customer_notified' || (ev === 'status:confirmed' && e?.detail?.born_confirmed === true)) told = true
+    else if (isStampEvent(ev)) continue
+    else if (ev.startsWith('status:') || ev === 'amended' || ev === 'created' || ev === 'reopened') told = false
+  }
+  return told
+}
+
+/** The "Shop not told yet" chip (and "Tell the shop" as the first action): a step was taken
+ *  (anything past Received) and no tap logged since. Never on a rep-placed order he has not
+ *  changed since (shopToldFrom); the server's shop_told when the events say nothing. */
+export function shopNotTold(o: { status?: string | null; shop_told?: boolean | null; events?: NotifyEvent[] | null }): boolean {
+  if (visibleStatus(o.status) === 'new') return false
+  const own = shopToldFrom(o.events)
+  return own == null ? o.shop_told === false : !own
 }

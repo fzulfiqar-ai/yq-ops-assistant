@@ -20,16 +20,7 @@ import { getSelectedCustomer, initials, saveShopPhone, setSelectedCustomer, useS
 import { ProductImage } from './ProductImage'
 import { Select } from './Select'
 import { bhd, cleanPhone, FIELD, isEmail, isPhone, LABEL, minQtyOf, money, RING, stepOf } from './shared'
-
-/** The staff checkout's idempotency key: made when the drawer opens, kept until the order is placed. */
-function newClientOrderId(): string {
-  try {
-    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
-  } catch {
-    /* an old browser: fall through */
-  }
-  return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
-}
+import { attemptKey, clientIdFor, newClientOrderId } from './staffOrder'
 
 const FORM_ID = 'yq-shop-order-form'
 const CUSTOMER_KEY = 'yq-shop-customer'
@@ -140,9 +131,12 @@ export function CartDrawer({
   // Salesman: the full form only when asked for — a shop from the book arrives filled in
   const [editing, setEditing] = useState(false)
   const [couponOpen, setCouponOpen] = useState(!staff || Boolean(coupon))
-  // Salesman: one id per checkout, made when the drawer opens and kept until the order is placed, so
-  // a second tap after a timeout returns the order the first one created (POST /shop/order)
+  // Salesman: one id per order, made when the drawer opens, so a second tap after a timeout returns
+  // the order the first one created (POST /shop/order). An id only ever names ONE order: another
+  // shop gets a new one (below), and so does a changed basket or shop after a failed attempt
+  // (`tried`: each failed attempt → its id; staffOrder.clientIdFor).
   const [clientOrderId, setClientOrderId] = useState('')
+  const [tried, setTried] = useState<Record<string, string>>({})
   if (staff && open && !clientOrderId) setClientOrderId(newClientOrderId())
   // Salesman: the storefront link, so a built cart can be sent to the shop as a ready order.
   const meQ = useShopMe(staff)
@@ -163,6 +157,8 @@ export function CartDrawer({
     setCustomer(fromSelected(staff ? selected : null))
     setTouched({})
     setEditing(false)
+    // another shop is another order: never the id an attempt for the previous shop went out with
+    if (staff) setClientOrderId(newClientOrderId())
   }
   // a Focus shop with no number on file: the phone is asked here, once, and saved for next time
   const phoneMissing = staff && Boolean(selected) && !String(selected?.phone || '').replace(/\D/g, '')
@@ -233,6 +229,9 @@ export function CartDrawer({
       area: customer.area.trim(),
       email: customer.email.trim(),
     }
+    // what this attempt is for, and the id it goes with (the same order again: the same id)
+    const attempt = attemptKey(cart.lines, who)
+    const orderId = staff ? clientIdFor(clientOrderId, tried, attempt) : ''
     try {
       const res = staff
         ? await postStaffOrder({
@@ -242,7 +241,7 @@ export function CartDrawer({
             ...(needsSalesman && salesmanId !== '' ? { salesman_id: Number(salesmanId) } : {}),
             customer: who,
             note: note.trim(),
-            client_order_id: clientOrderId || undefined,
+            client_order_id: orderId || undefined,
           })
         : await postOrder(token, {
             lines: cart.lines,
@@ -266,12 +265,15 @@ export function CartDrawer({
             .catch(() => {})
         }
         setClientOrderId('')
+        setTried({})
         setSelectedCustomer(null)
         setCustomer(EMPTY)
         setTouched({})
       }
       onSuccess(res, { name: who.name, shop: who.shop })
     } catch (err: unknown) {
+      // the order may exist all the same (a lost response): remember which id THIS order went with
+      if (staff && orderId) setTried((t) => ({ ...t, [attempt]: orderId }))
       setSubmitError(
         err instanceof ShopApiError
           ? err.detail || err.message
