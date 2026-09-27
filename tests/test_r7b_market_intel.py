@@ -1452,6 +1452,135 @@ def _():
         conn.close()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. the R7b+R7c review, stream F1: photo safety and management's masked free text
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _Spy:
+    """Record the calls (and the image size at the call) of one PIL method made BY app/market_intel.py
+    — Pillow's own internal calls (resize premultiplies RGBA through convert) are not ours — passing
+    every call through. refuse=True fails the test on a call from market_intel."""
+
+    def __init__(self, cls, name, refuse: bool = False):
+        self.cls, self.name, self.refuse, self.calls = cls, name, refuse, []
+
+    def __enter__(self):
+        orig = self.orig = getattr(self.cls, self.name)
+        spy = self
+
+        def wrapper(img, *a, **k):
+            if sys._getframe(1).f_code.co_filename.replace("\\", "/").endswith("app/market_intel.py"):
+                spy.calls.append((tuple(img.size), a, k))
+                if spy.refuse:
+                    raise AssertionError(f"{spy.name}() must not be used here")
+            return orig(img, *a, **k)
+        setattr(self.cls, self.name, wrapper)
+        return self
+
+    def __exit__(self, *exc):
+        setattr(self.cls, self.name, self.orig)
+        return False
+
+
+def _flat(mode: str, size, color, fmt: str) -> bytes:
+    """A flat synthetic picture (fast at any size) with a block drawn on it."""
+    from PIL import Image, ImageDraw
+    img = Image.new(mode, size, color)
+    if mode != "1":
+        w, h = size
+        ImageDraw.Draw(img).rectangle([w // 4, h // 4, w // 2, h // 2],
+                                      fill=(20, 40, 200, 255)[:len(img.getbands())] if len(img.getbands()) > 1 else 90)
+    buf = io.BytesIO()
+    img.save(buf, format=fmt)
+    return buf.getvalue()
+
+
+@test("photos (review F1.10): over 16 MP is refused from the header alone, before anything is decoded")
+def _():
+    from PIL import ImageFile
+    from app import market_intel as mi
+    assert mi.MAX_PIXELS == 16_000_000
+    big = _flat("1", (5000, 3300), 1, "PNG")                   # 16.5 MP, a few KB on the wire
+    with _Spy(ImageFile.ImageFile, "load", refuse=True):
+        _raises(lambda: mi.process_photo(big, "big.png"), "too large")
+    assert mi.process_photo(_flat("RGB", (4000, 3000), (200, 180, 90), "PNG"), "ok.png")["width"] == 1600
+
+
+@test("photos (review F1.10): a JPEG is decoded at a reduced scale (draft before load); every mode conversion runs after the cut to 1600 px")
+def _():
+    from PIL import Image, JpegImagePlugin
+    from app import market_intel as mi
+    raw = _flat("RGB", (4000, 3000), (120, 60, 30), "JPEG")
+    with _Spy(JpegImagePlugin.JpegImageFile, "draft") as draft, _Spy(Image.Image, "convert") as conv:
+        p = mi.process_photo(raw, "IMG_4000.jpg")
+    assert draft.calls and draft.calls[0][1] == ("RGB", (mi.MAX_EDGE, mi.MAX_EDGE)), draft.calls
+    assert (p["width"], p["height"]) == (1600, 1200)
+    assert all(max(size) <= mi.MAX_EDGE for size, _a, _k in conv.calls), conv.calls
+    # a large RGBA PNG: cut first, no convert('RGBA') of an RGBA image, alpha via getchannel (never split)
+    rgba = _flat("RGBA", (3200, 2400), (0, 0, 0, 0), "PNG")               # transparent, one opaque block
+    with _Spy(Image.Image, "convert") as conv, _Spy(Image.Image, "split", refuse=True), \
+            _Spy(Image.Image, "getchannel") as chan:
+        p = mi.process_photo(rgba, "shelf.png")
+    assert not any(a[:1] == ("RGBA",) for _s, a, _k in conv.calls), "an RGBA image is never converted to RGBA"
+    assert all(max(size) <= mi.MAX_EDGE for size, _a, _k in conv.calls), conv.calls
+    assert chan.calls and all(max(size) <= mi.MAX_EDGE for size, _a, _k in chan.calls)
+    out = Image.open(io.BytesIO(p["data"])).convert("RGB")
+    assert (p["width"], p["height"]) == (1600, 1200)
+    assert min(out.getpixel((40, 40))) >= 245, "transparent = white paper, not black"
+    assert out.getpixel((600, 450))[2] > 150, "the opaque block survives"
+    # grey + alpha (LA) and a palette image go the same way
+    for mode, color in (("LA", (0, 0)), ("P", 3)):
+        q = mi.process_photo(_flat(mode, (2000, 1000), color, "PNG"), f"x-{mode}.png")
+        assert (q["width"], q["height"]) == (1600, 800), mode
+
+
+@test("masking (review F1.10): management reads notes, titles, shop names and competitors with phones and emails masked; the office reads them as typed")
+def _():
+    fake = _db()
+    phone, mail = "+973 3900 1234", "owner@shop.example"
+    with _env(fake):
+        a = _cap("rep1@example.com", [], kind="competitor_price", title="Stock via 33001122", brand="Anker",
+                 competitor=f"Seller {phone}", shop_name="Shop 39001234", area="Manama",
+                 note=f"Owner mobile {phone}, mail {mail}")
+        _cap("rep2@example.com", [], kind="shop_asked", note=f"Ask for Ali on {phone}")       # no title: office sees the note
+        fake.tables["market_observations"].append(
+            {"id": 901, "client_uuid": _u(), "source": "import", "kind": "new_product", "item_id": None,
+             "observed_at": "2026-07-12T13:42:11+00:00", "legacy_ref": "field_notes:4",
+             "note": f"Imported: call {phone}", "shop_name": "Shop 33112233", "competitor": f"Rival {mail}",
+             "title": "Seen at 38001234"})
+        c = _client()
+        iid = a["item"]["id"]
+        # a reviewer's edit: the decision history keeps the before / after and the reason as typed
+        r = c.patch(f"/market-intel/items/{iid}", headers=_h("clerk"),
+                    json={"title": "Stock via 36001234", "reason": "shop said 37001234"})
+        assert r.status_code == 200, r.text[:200]
+        mg = [c.get("/market-intel/items", headers=_h("mgmt")), c.get(f"/market-intel/items/{iid}", headers=_h("mgmt")),
+              c.get("/market-intel/review", headers=_h("mgmt")), c.get("/market-intel/review?library=1", headers=_h("mgmt"))]
+        for r in mg:
+            assert r.status_code == 200, (r.request.url, r.status_code, r.text[:200])
+            text = r.text
+            for raw in ("3900 1234", "33001122", "39001234", "33112233", "38001234", "36001234", "37001234", mail):
+                assert raw not in text, (str(r.request.url), raw)
+        board, detail, review, library = (r.json() for r in mg)
+        item = next(i for i in board["items"] if i["item_id"] == iid)
+        assert item["title"] == "Stock via [number]" and item["competitor"] == "Seller [number]"
+        assert any(i["title"] == "Ask for Ali on [number]" for i in board["items"]), "the note-as-title too"
+        obs = detail["observations"][0]
+        assert obs["note"] == "Owner mobile [number], mail [email]" and obs["shop_name"] == "Shop [number]"
+        assert detail["item"]["title"] == "Stock via [number]" and detail["shops"][0]["shop"] == "Shop [number]"
+        assert detail["decisions"][0]["reason"] == "shop said [number]", detail["decisions"][0]
+        assert any(n["title"] == "Ask for Ali on [number]" for n in review["new_items"])
+        lib = library["unassigned"][0]
+        assert (lib["note"], lib["shop_name"], lib["competitor"], lib["title"]) == \
+            ("Imported: call [number]", "Shop [number]", "Rival [email]", "Seen at [number]")
+        # the office (an admin, a reviewer) reads what the rep typed
+        for tok in ("boss", "clerk"):
+            d = c.get(f"/market-intel/items/{iid}", headers=_h(tok)).json()
+            assert d["observations"][0]["note"] == f"Owner mobile {phone}, mail {mail}", tok
+            assert d["decisions"][0]["reason"] == "shop said 37001234" and "36001234" in json.dumps(d["decisions"])
+            assert c.get("/market-intel/review?library=1", headers=_h(tok)).json()["unassigned"][0]["shop_name"] == "Shop 33112233"
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:
