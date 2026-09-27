@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { BadgeKind, ShopItem, StockStatus } from '@/lib/shopApi'
+import { DATE_LOCALE, locale, ltr, moneyText, withCurrency } from '../i18n'
 import { S } from '../strings'
 import type { ChipTone } from '../ui/Chip'
 
@@ -11,34 +12,52 @@ import type { ChipTone } from '../ui/Chip'
 
 /* ───────────────────────── money & dates ───────────────────────── */
 
-/** Bahrain prices are quoted to 3 decimals — always, even for a round number. */
+/**
+ * Bahrain prices are quoted to 3 decimals — always, even for a round number — in Western digits in
+ * both languages (i18n/index.ts moneyText: Intl with numberingSystem 'latn', never grouped).
+ */
 export function money(n?: number | null): string {
-  return Number(n || 0).toFixed(3)
+  return moneyText(Number(n || 0))
 }
 
+/** "BHD 1.000", or «1.000 د.ب» in Arabic: the amount first, the currency after it. */
 export function bhd(n?: number | null): string {
-  return `BHD ${money(n)}`
+  return withCurrency(money(n))
 }
 
+/**
+ * A round threshold as a headline ("BHD 20" / «20 د.ب»); anything else keeps its 3 decimals. For
+ * the wholesale minimum in the promise band — prices elsewhere always read bhd().
+ */
+export function bhdRound(n: number): string {
+  return Number.isInteger(n) ? withCurrency(String(n)) : bhd(n)
+}
+
+/** A discount line: the minus stays on the amount's left in Arabic too ("−1.000 د.ب"). */
+export function bhdMinus(n?: number | null): string {
+  return locale.lang === 'ar' ? withCurrency(ltr(`−${money(n)}`)) : `−${bhd(n)}`
+}
+
+/* Dates in the page's language: "12 Sep 2026" / «12 سبتمبر 2026» (Arabic months, Western digits). */
 export function fmtDate(d?: string | null): string | null {
   if (!d) return null
   const dt = new Date(d)
   if (Number.isNaN(dt.getTime())) return null
-  return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  return dt.toLocaleDateString(DATE_LOCALE, { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
 export function fmtDateShort(d?: string | null): string | null {
   if (!d) return null
   const dt = new Date(d)
   if (Number.isNaN(dt.getTime())) return null
-  return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+  return dt.toLocaleDateString(DATE_LOCALE, { day: 'numeric', month: 'short' })
 }
 
 export function fmtDateTime(d?: string | null): string | null {
   if (!d) return null
   const dt = new Date(d)
   if (Number.isNaN(dt.getTime())) return null
-  return dt.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+  return dt.toLocaleString(DATE_LOCALE, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
 /* ───────────────────────── quantities ───────────────────────── */
@@ -463,10 +482,43 @@ export function initials(name?: string | null): string {
     .join('')
 }
 
-/** Title-case a shouting category ("BLUETOOTH HEADSET" → "Bluetooth headset"). */
+/**
+ * A category's label: its name in the page's language (S.categoryNames), else the ERP's shouting
+ * name title-cased ("BLUETOOTH HEADSET" → "Bluetooth headset"). URLs keep the English slug.
+ */
 export function niceCategory(cat?: string | null): string {
-  const s = String(cat || '').trim().toLowerCase()
+  const raw = String(cat || '').trim()
+  const named = S.categoryNames[raw.toUpperCase()]
+  if (named) return named
+  const s = raw.toLowerCase()
   return s ? s[0].toUpperCase() + s.slice(1) : ''
+}
+
+/** A checkout area chip's label (S.areaNames); the value the order carries stays the English name. */
+export function areaLabel(area: string): string {
+  return S.areaNames[area] || area
+}
+
+/**
+ * An order stage in the page's language. English keeps exactly what the API sent (the API's
+ * STATUS_LABELS are the English copy); Arabic maps the status key, falling back to the API's word.
+ */
+export function statusLabel(status?: string | null, apiLabel?: string | null): string {
+  const key = String(status || '')
+  if (locale.lang === 'en') return apiLabel || S.status[key] || key
+  return S.status[key] || apiLabel || key
+}
+
+/**
+ * The card's social proof. The API writes it in English ("Ordered by 12 shops in the last 30
+ * days", app/shop.py social_proof_text); another language rebuilds the same sentence from the count
+ * and shows the API's text untouched when it does not recognise it.
+ */
+export function proofText(text?: string | null): string {
+  const t = String(text || '')
+  if (locale.lang === 'en') return t
+  const m = t.match(/^Ordered by (\d+) shops in the last 30 days$/)
+  return m ? S.proof.shops(Number(m[1])) : t
 }
 
 export function categorySlug(cat: string): string {
@@ -506,9 +558,9 @@ export function countdownLabel(endsAt?: string | null): string | null {
   const mins = Math.floor(ms / 60000)
   const days = Math.floor(mins / 1440)
   const hours = Math.floor((mins % 1440) / 60)
-  if (days > 0) return `${days}d ${hours}h`
-  if (hours > 0) return `${hours}h`
-  return `${Math.max(1, mins)} min`
+  if (days > 0) return S.countdown.daysHours(days, hours)
+  if (hours > 0) return S.countdown.hours(hours)
+  return S.countdown.minutes(Math.max(1, mins))
 }
 
 /** Live "3d 4h" that ticks once a minute — real offers only, never a fake timer. */
@@ -544,9 +596,14 @@ export function isEmail(raw: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v)
 }
 
-/** Normalise an item code for matching: "uk 15" / "UK-15" → "UK15". */
+/**
+ * Normalise an item code for matching: "uk 15" / "UK-15" → "UK15". An Arabic keyboard's digits
+ * («UK١٥») and the invisible direction marks a WhatsApp copy carries read as the same code.
+ */
 export function codeKey(s: string): string {
   return String(s || '')
+    .replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - (d.charCodeAt(0) >= 0x06f0 ? 0x06f0 : 0x0660)))
+    .replace(/[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g, '')
     .toUpperCase()
     .replace(/[\s\-_.]/g, '')
 }

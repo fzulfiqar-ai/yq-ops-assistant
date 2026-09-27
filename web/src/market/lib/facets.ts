@@ -1,13 +1,17 @@
 import type { ShopItem } from '@/lib/shopApi'
 import { savedStore } from '../store/saved'
+import { S } from '../strings'
 import { hasBadge, marginOf, priceAnchor } from './format'
 
 /**
  * Sub-facets inferred from the product text — no attribute model in the backend, and the
  * merchant's language is "type c 100W" not "connector=USB-C". A facet is only shown when it
  * splits the list into at least two groups of two, so a category never grows a useless row.
- * All state lives in the URL (?conn=typec&watt=100).
+ * All state lives in the URL (?conn=typec&watt=100). The labels are the page's language
+ * (S.facets); the keys in the URL are the same in every language.
  */
+
+const F = S.facets
 
 export interface FacetValue {
   key: string
@@ -36,104 +40,104 @@ const mah = (t: string): number | null => {
 
 const CONNECTOR: FacetDef = {
   key: 'conn',
-  label: 'Connector',
+  label: F.conn,
   values: [
-    { key: 'typec', label: 'Type-C', test: re(/type[\s-]?c|usb[\s-]?c|\bc to c\b|\bc-c\b|\bpd\b/i) },
-    { key: 'lightning', label: 'Lightning', test: re(/lightning|iphone|\bios\b|ipad/i) },
-    { key: 'micro', label: 'Micro USB', test: re(/micro|\bv8\b/i) },
-    { key: 'usba', label: 'USB-A', test: re(/usb[\s-]?a\b|\busb\b(?![\s-]?c)/i) },
+    { key: 'typec', label: F.typec, test: re(/type[\s-]?c|usb[\s-]?c|\bc to c\b|\bc-c\b|\bpd\b/i) },
+    { key: 'lightning', label: F.lightning, test: re(/lightning|iphone|\bios\b|ipad/i) },
+    { key: 'micro', label: F.micro, test: re(/micro|\bv8\b/i) },
+    { key: 'usba', label: F.usba, test: re(/usb[\s-]?a\b|\busb\b(?![\s-]?c)/i) },
   ],
 }
 const PAIRING: FacetDef = {
   key: 'pair',
-  label: 'Cable type',
+  label: F.pair,
   values: [
-    { key: 'ctoc', label: 'C to C', test: re(/\bc to c\b|c-c|type[\s-]?c to type[\s-]?c|c2c/i) },
-    { key: 'ctol', label: 'C to Lightning', test: re(/(c|type[\s-]?c) to (l|lightning|iphone)|c-l\b|\bcl\b/i) },
-    { key: 'utoc', label: 'USB to C', test: re(/usb to (c|type)|\busb-c\b(?! to)/i) },
-    { key: 'utol', label: 'USB to Lightning', test: re(/usb to (l|lightning|iphone)/i) },
-    { key: '3in1', label: '3-in-1', test: re(/3[\s-]?in[\s-]?1|three in one/i) },
+    { key: 'ctoc', label: F.ctoc, test: re(/\bc to c\b|c-c|type[\s-]?c to type[\s-]?c|c2c/i) },
+    { key: 'ctol', label: F.ctol, test: re(/(c|type[\s-]?c) to (l|lightning|iphone)|c-l\b|\bcl\b/i) },
+    { key: 'utoc', label: F.utoc, test: re(/usb to (c|type)|\busb-c\b(?! to)/i) },
+    { key: 'utol', label: F.utol, test: re(/usb to (l|lightning|iphone)/i) },
+    { key: '3in1', label: F.threeIn1, test: re(/3[\s-]?in[\s-]?1|three in one/i) },
   ],
 }
 const LENGTH: FacetDef = {
   key: 'len',
-  label: 'Length',
+  label: F.len,
   values: [
-    { key: '1m', label: '1 m', test: re(/\b1(\.0)?\s?(m|mtr|meter)\b/i) },
-    { key: '2m', label: '2 m', test: re(/\b2(\.0)?\s?(m|mtr|meter)\b/i) },
-    { key: '3m', label: '3 m+', test: re(/\b[3-9](\.0)?\s?(m|mtr|meter)\b/i) },
+    { key: '1m', label: F.m1, test: re(/\b1(\.0)?\s?(m|mtr|meter)\b/i) },
+    { key: '2m', label: F.m2, test: re(/\b2(\.0)?\s?(m|mtr|meter)\b/i) },
+    { key: '3m', label: F.m3, test: re(/\b[3-9](\.0)?\s?(m|mtr|meter)\b/i) },
   ],
 }
 const WATT: FacetDef = {
   key: 'watt',
-  label: 'Power',
+  label: F.watt,
   values: [
-    { key: 'w20', label: 'Up to 20W', test: (t) => (watt(t) ?? -1) > 0 && (watt(t) as number) <= 20 },
-    { key: 'w65', label: '25–65W', test: (t) => (watt(t) ?? -1) > 20 && (watt(t) as number) <= 65 },
-    { key: 'w100', label: '100W+', test: (t) => (watt(t) ?? -1) > 65 },
+    { key: 'w20', label: F.w20, test: (t) => (watt(t) ?? -1) > 0 && (watt(t) as number) <= 20 },
+    { key: 'w65', label: F.w65, test: (t) => (watt(t) ?? -1) > 20 && (watt(t) as number) <= 65 },
+    { key: 'w100', label: F.w100, test: (t) => (watt(t) ?? -1) > 65 },
   ],
 }
 const PORTS: FacetDef = {
   key: 'ports',
-  label: 'Ports',
+  label: F.ports,
   values: [
-    { key: 'dual', label: 'Dual port', test: re(/dual|2 ?port|\+|twin|double/i) },
-    { key: 'typec', label: 'Type-C port', test: re(/type[\s-]?c|usb[\s-]?c|\bpd\b/i) },
-    { key: 'usba', label: 'USB-A port', test: re(/\busb\b(?![\s-]?c)|usb[\s-]?a\b|\bqc\b/i) },
+    { key: 'dual', label: F.dual, test: re(/dual|2 ?port|\+|twin|double/i) },
+    { key: 'typec', label: F.typecPort, test: re(/type[\s-]?c|usb[\s-]?c|\bpd\b/i) },
+    { key: 'usba', label: F.usbaPort, test: re(/\busb\b(?![\s-]?c)|usb[\s-]?a\b|\bqc\b/i) },
   ],
 }
 const WIRELESS: FacetDef = {
   key: 'wl',
-  label: 'Type',
+  label: F.wl,
   values: [
-    { key: 'wireless', label: 'Wireless', test: re(/wireless|\bqi\b|magsafe|magnetic/i) },
-    { key: 'wired', label: 'Wired', test: (t) => !/wireless|\bqi\b|magsafe|magnetic/i.test(t) },
+    { key: 'wireless', label: F.wireless, test: re(/wireless|\bqi\b|magsafe|magnetic/i) },
+    { key: 'wired', label: F.wired, test: (t) => !/wireless|\bqi\b|magsafe|magnetic/i.test(t) },
   ],
 }
 const PLUG: FacetDef = {
   key: 'plug',
-  label: 'Plug',
+  label: F.plug,
   values: [
-    { key: 'uk', label: 'UK plug', test: re(/\buk\b|3[\s-]?pin/i) },
-    { key: 'eu', label: 'EU plug', test: re(/\beu\b|2[\s-]?pin/i) },
+    { key: 'uk', label: F.uk, test: re(/\buk\b|3[\s-]?pin/i) },
+    { key: 'eu', label: F.eu, test: re(/\beu\b|2[\s-]?pin/i) },
   ],
 }
 const CAPACITY: FacetDef = {
   key: 'mah',
-  label: 'Capacity',
+  label: F.mah,
   values: [
-    { key: 'c5', label: 'Up to 5,000 mAh', test: (t) => (mah(t) ?? -1) > 0 && (mah(t) as number) <= 5000 },
-    { key: 'c10', label: '10,000 mAh', test: (t) => (mah(t) ?? -1) > 5000 && (mah(t) as number) <= 12000 },
-    { key: 'c20', label: '20,000 mAh+', test: (t) => (mah(t) ?? -1) > 12000 },
+    { key: 'c5', label: F.c5, test: (t) => (mah(t) ?? -1) > 0 && (mah(t) as number) <= 5000 },
+    { key: 'c10', label: F.c10, test: (t) => (mah(t) ?? -1) > 5000 && (mah(t) as number) <= 12000 },
+    { key: 'c20', label: F.c20, test: (t) => (mah(t) ?? -1) > 12000 },
   ],
 }
 const AUDIO_CONN: FacetDef = {
   key: 'conn',
-  label: 'Connector',
+  label: F.conn,
   values: [
-    { key: 'typec', label: 'Type-C', test: re(/type[\s-]?c|usb[\s-]?c/i) },
-    { key: 'jack', label: '3.5 mm', test: re(/3\.5|aux|jack/i) },
-    { key: 'lightning', label: 'Lightning', test: re(/lightning|iphone/i) },
+    { key: 'typec', label: F.typec, test: re(/type[\s-]?c|usb[\s-]?c/i) },
+    { key: 'jack', label: F.jack, test: re(/3\.5|aux|jack/i) },
+    { key: 'lightning', label: F.lightning, test: re(/lightning|iphone/i) },
   ],
 }
 const BT_STYLE: FacetDef = {
   key: 'style',
-  label: 'Style',
+  label: F.style,
   values: [
-    { key: 'tws', label: 'TWS earbuds', test: re(/tws|earbud|\bpods?\b|airpod|true wireless/i) },
-    { key: 'neck', label: 'Neckband', test: re(/neck|sport|band/i) },
-    { key: 'mono', label: 'Mono / handsfree', test: re(/mono|single|hands ?free|\bhfs?\b|earpiece/i) },
-    { key: 'over', label: 'Headphones', test: re(/headphone|over[\s-]?ear|on[\s-]?ear/i) },
+    { key: 'tws', label: F.tws, test: re(/tws|earbud|\bpods?\b|airpod|true wireless/i) },
+    { key: 'neck', label: F.neck, test: re(/neck|sport|band/i) },
+    { key: 'mono', label: F.mono, test: re(/mono|single|hands ?free|\bhfs?\b|earpiece/i) },
+    { key: 'over', label: F.over, test: re(/headphone|over[\s-]?ear|on[\s-]?ear/i) },
   ],
 }
 const FEATURES: FacetDef = {
   key: 'feat',
-  label: 'Features',
+  label: F.feat,
   values: [
-    { key: 'mic', label: 'With mic', test: re(/\bmic\b|microphone/i) },
-    { key: 'fm', label: 'FM', test: re(/\bfm\b|radio/i) },
-    { key: 'holder', label: 'Holder / mount', test: re(/holder|mount|stand/i) },
-    { key: 'aux', label: 'AUX', test: re(/\baux\b|3\.5/i) },
+    { key: 'mic', label: F.mic, test: re(/\bmic\b|microphone/i) },
+    { key: 'fm', label: F.fm, test: re(/\bfm\b|radio/i) },
+    { key: 'holder', label: F.holder, test: re(/holder|mount|stand/i) },
+    { key: 'aux', label: F.aux, test: re(/\baux\b|3\.5/i) },
   ],
 }
 
