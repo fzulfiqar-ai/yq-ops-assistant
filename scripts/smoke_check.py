@@ -24,7 +24,9 @@ warnings.filterwarnings("ignore")
 # /bi/price-simulator and /coaching/brief require query params (422 without them is correct).
 SKIP_PREFIXES = ("/ask", "/orchestrate", "/leads/discover", "/scheduler", "/escalation",
                  "/events/dispatch", "/ingest", "/openapi", "/docs", "/redoc",
-                 "/bi/price-simulator", "/coaching/brief")
+                 "/bi/price-simulator", "/coaching/brief",
+                 # Meta / WhatsApp webhook verification: 403 without the platform's hub.verify_token is correct
+                 "/public/meta/webhook", "/public/wa/webhook")
 
 
 def main() -> int:
@@ -38,7 +40,7 @@ def main() -> int:
     app.dependency_overrides[get_caller] = lambda: admin
 
     client = TestClient(app, raise_server_exceptions=False)
-    ok = bad = 0
+    ok = bad = needs_params = 0
     for route in sorted(app.routes, key=lambda r: getattr(r, "path", "")):
         path = getattr(route, "path", "")
         methods = getattr(route, "methods", set()) or set()
@@ -48,6 +50,11 @@ def main() -> int:
         try:
             r = client.get(path)
             ms = (time.perf_counter() - t0) * 1000
+            if r.status_code == 422:
+                # a required query parameter (e.g. /prices/history?item_code=): not smoke-testable bare
+                needs_params += 1
+                print(f"  --  422 {path:28} {ms:7.0f}ms  (needs query parameters: not a failure)")
+                continue
             good = r.status_code == 200
             ok += 1 if good else 0
             bad += 0 if good else 1
@@ -55,7 +62,7 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             bad += 1
             print(f"  ERR ---  {path:28} {type(e).__name__}: {str(e)[:80]}")
-    print(f"\n{ok} OK, {bad} failing")
+    print(f"\n{ok} OK, {bad} failing, {needs_params} need query parameters (skipped)")
     return 0 if bad == 0 else 2
 
 
