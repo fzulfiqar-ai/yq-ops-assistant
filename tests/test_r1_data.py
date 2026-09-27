@@ -645,7 +645,9 @@ def _():
         shop.context = real
     rows = {r["item_code"]: r for r in mh["rows"]}
     assert rows["X10 LT"]["cost_flag"] == flags["X10 LT"] and rows["X10 LT"]["cost_source"] == "purchase_costs"
-    assert rows["X10 LT"]["landed_cost_bhd"] == 0.013 and rows["X10 LT"]["status"] == "ok"   # the number is shown, the flag says why not to trust it
+    # the number is shown, the flag says why not to trust it; R7d: a flagged cost has no floor ("check_cost")
+    assert rows["X10 LT"]["landed_cost_bhd"] == 0.013 and rows["X10 LT"]["status"] == "check_cost"
+    assert rows["X10 LT"]["floor_bhd"] is None
     assert rows["OK"]["cost_flag"] is None and rows["OK"]["cost_source"] == "mrn"
     assert rows["NOCOST"]["status"] == "no_cost" and rows["NOCOST"]["cost_source"] is None
     assert mh["summary"]["flagged_costs"] == 2 and mh["summary"]["with_cost"] == 3

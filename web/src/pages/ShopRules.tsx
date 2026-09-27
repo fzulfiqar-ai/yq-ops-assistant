@@ -50,7 +50,9 @@ interface DiscountRule {
 interface RulesResp { rules: DiscountRule[] }
 
 interface RuleBreach { item_code: string; unit_bhd: number; floor_bhd: number }
-interface RuleImpact { items: number; breach_count: number; breaches: RuleBreach[] }
+/** R7d: a touched item whose cost is missing or flagged implausible has NO floor — never clamped */
+interface RuleNoFloor { item_code: string; reason: 'no_cost' | 'check_cost'; label: string }
+interface RuleImpact { items: number; breach_count: number; breaches: RuleBreach[]; no_floor?: RuleNoFloor[]; no_floor_count?: number }
 interface RuleSaveResp extends DiscountRule { impact?: RuleImpact | null }
 interface RulePreviewResp { rule?: Partial<DiscountRule>; summary?: string; impact: RuleImpact }
 
@@ -67,9 +69,15 @@ interface MarginRow {
   floor_bhd?: number | null
   stock_status?: string | null
   sold_90d?: number | null
-  status?: string | null // ok | below_floor | no_cost | no_price
+  status?: string | null // ok | below_floor | check_cost | no_cost | no_price
+  cost_flag?: string | null
 }
-interface MarginSummary { items: number; with_cost: number; below_floor: number; vat_rate: number; min_margin_pct: number }
+/** R7d: the floor is a MARKUP on landed cost (cost × (1 + min markup) × (1 + VAT)); below_floor is
+ *  tested against that same floor, so this table and the discount engine agree. */
+interface MarginSummary {
+  items: number; with_cost: number; below_floor: number; vat_rate: number; min_margin_pct: number
+  min_markup_pct?: number; check_cost?: number; no_cost?: number; floor_label?: string
+}
 interface MarginsResp { rows: MarginRow[]; summary: MarginSummary }
 
 interface UnpricedRow {
@@ -115,8 +123,8 @@ const STOCK_STYLE: Record<string, string> = {
   out_of_stock: 'bg-rose-100 text-rose-700',
 }
 
-const MARGIN_STATUS_LABEL: Record<string, string> = { ok: 'OK', below_floor: 'Below floor', no_cost: 'No cost', no_price: 'No price' }
-const MARGIN_STATUS_TONE: Record<string, BadgeTone> = { ok: 'green', below_floor: 'amber', no_cost: 'grey', no_price: 'grey' }
+const MARGIN_STATUS_LABEL: Record<string, string> = { ok: 'OK', below_floor: 'Below floor', check_cost: 'Check cost', no_cost: 'No cost', no_price: 'No price' }
+const MARGIN_STATUS_TONE: Record<string, BadgeTone> = { ok: 'green', below_floor: 'amber', check_cost: 'amber', no_cost: 'grey', no_price: 'grey' }
 
 // ── small pure helpers ────────────────────────────────────────────────────────
 
@@ -373,7 +381,7 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
     setBusy('preview'); setFormError(null)
     try {
       const res = await apiPost<RulePreviewResp>('/shop/rules/preview', buildPayload(f))
-      setPreview(res?.impact || { items: 0, breach_count: 0, breaches: [] })
+      setPreview(res?.impact || { items: 0, breach_count: 0, breaches: [], no_floor: [], no_floor_count: 0 })
     } catch (e) {
       setFormError(errorText(e, 'Could not preview this rule.'))
     } finally {
@@ -392,11 +400,13 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
         : await apiPatch<RuleSaveResp>(`/shop/rules/${f.id}`, payload)
       const n = saved?.impact?.items ?? 0
       const breaches = saved?.impact?.breach_count ?? 0
+      const noFloor = saved?.impact?.no_floor_count ?? 0
+      const tail = noFloor > 0 ? ` ${noFloor} ha${noFloor === 1 ? 's' : 've'} no floor — needs a cost.` : ''
       toast(
         breaches > 0
-          ? `Rule saved — touches ${n} item${n === 1 ? '' : 's'}, ${breaches} clamped at the margin floor.`
-          : `Rule saved — touches ${n} item${n === 1 ? '' : 's'}.`,
-        breaches > 0 ? 'info' : 'success',
+          ? `Rule saved — touches ${n} item${n === 1 ? '' : 's'}, ${breaches} clamped at the margin floor.${tail}`
+          : `Rule saved — touches ${n} item${n === 1 ? '' : 's'}.${tail}`,
+        breaches > 0 || noFloor > 0 ? 'info' : 'success',
       )
       onSaved()
     } catch (e) {
@@ -563,6 +573,15 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
                     ))}
                   </ul>
                 )}
+                {(preview.no_floor_count ?? 0) > 0 && (
+                  <div className="text-[12.5px] text-amber-800">
+                    <b>{preview.no_floor_count} item{preview.no_floor_count === 1 ? '' : 's'} with no floor — needs a cost.</b>{' '}
+                    Nothing stops this rule pricing {preview.no_floor_count === 1 ? 'it' : 'them'} below cost until the cost is fixed:{' '}
+                    {(preview.no_floor || []).map((x, i) => (
+                      <span key={x.item_code}>{i > 0 && ', '}<b>{x.item_code}</b> ({x.label})</span>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -668,7 +687,7 @@ function RulesSection() {
 
 function MarginsSection() {
   const { data, isLoading, isError, error } = useQuery({ queryKey: ['shop-margins'], queryFn: () => apiGet<MarginsResp>('/shop/margins') })
-  const [filter, setFilter] = useState<'all' | 'below_floor' | 'no_cost'>('all')
+  const [filter, setFilter] = useState<'all' | 'below_floor' | 'check_cost' | 'no_cost'>('all')
 
   const filtered = useMemo(() => {
     const rows = data?.rows || []
@@ -676,8 +695,9 @@ function MarginsSection() {
   }, [data, filter])
   const emptyMsg =
     filter === 'below_floor' ? 'Nothing below the margin floor right now.'
-      : filter === 'no_cost' ? 'Every priced item has a landed cost on file.'
-        : 'No priced items yet.'
+      : filter === 'check_cost' ? 'No cost on file looks implausible.'
+        : filter === 'no_cost' ? 'Every priced item has a landed cost on file.'
+          : 'No priced items yet.'
 
   const cols: Column<MarginRow>[] = [
     { key: 'item_code', label: 'Code', render: (_, r) => <span className="font-semibold">{r.item_code}</span> },
@@ -696,7 +716,9 @@ function MarginsSection() {
         </span>
       ) },
     { key: 'markup_pct', label: 'Markup %', align: 'right', render: (_, r) => pctFrac(r.markup_pct) },
-    { key: 'floor_bhd', label: 'Floor', align: 'right', render: (_, r) => money3(r.floor_bhd) },
+    { key: 'floor_bhd', label: 'Floor', align: 'right', render: (_, r) => (r.status === 'check_cost' || r.status === 'no_cost'
+        ? <span className="text-[11.5px] text-amber-700" title="No margin floor until the cost is fixed">no floor — needs a cost</span>
+        : money3(r.floor_bhd)) },
     { key: 'stock_status', label: 'Stock', render: (_, r) => <StockPill status={r.stock_status} /> },
     { key: 'sold_90d', label: 'Sold 90d', align: 'right', render: (_, r) => num(r.sold_90d) },
     { key: 'status', label: 'Status', render: (_, r) => (
@@ -709,15 +731,24 @@ function MarginsSection() {
       {data?.summary && (
         <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
           <Stat label="Items" value={num(data.summary.items)} />
-          <Stat label="With cost" value={num(data.summary.with_cost)} />
+          <Stat label="With cost" value={num(data.summary.with_cost)}
+            foot={(data.summary.check_cost ?? 0) > 0 ? `${num(data.summary.check_cost ?? 0)} to check — no floor until fixed` : undefined} />
           <Stat label="Below floor" value={num(data.summary.below_floor)} tone={data.summary.below_floor > 0 ? 'amber' : undefined} />
           <Stat label="VAT rate" value={pctFrac(data.summary.vat_rate, 0)} />
-          <Stat label="Min margin" value={pctFrac(data.summary.min_margin_pct, 0)} tone="violet" />
+          <Stat label="Min markup" value={pctFrac(data.summary.min_markup_pct ?? data.summary.min_margin_pct, 0)} tone="violet"
+            foot="on landed cost — the floor every rule is clamped to" />
         </div>
+      )}
+      {data?.summary && (
+        <p className="-mt-2 mb-3 text-[12px] text-muted-foreground">
+          <b className="text-foreground">{data.summary.floor_label || `Min markup ${Math.round((data.summary.min_markup_pct ?? data.summary.min_margin_pct) * 100)}% on landed cost`}</b>
+          {' '}· floor = landed cost × (1 + markup) × (1 + VAT) · &ldquo;Below floor&rdquo; means the book price itself is under that floor ·
+          an item whose cost is missing or looks wrong has no floor until it is fixed
+        </p>
       )}
 
       <div className="mb-3 flex gap-1.5 overflow-x-auto pb-1">
-        {(['all', 'below_floor', 'no_cost'] as const).map((k) => (
+        {(['all', 'below_floor', 'check_cost', 'no_cost'] as const).map((k) => (
           <button
             key={k}
             onClick={() => setFilter(k)}
@@ -726,7 +757,7 @@ function MarginsSection() {
               filter === k ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:border-primary/40',
             )}
           >
-            {k === 'all' ? 'All' : k === 'below_floor' ? 'Below floor' : 'No cost'}
+            {k === 'all' ? 'All' : k === 'below_floor' ? 'Below floor' : k === 'check_cost' ? 'Check cost' : 'No cost'}
           </button>
         ))}
       </div>

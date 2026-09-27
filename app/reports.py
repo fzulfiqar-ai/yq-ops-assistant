@@ -211,21 +211,17 @@ def agents_status() -> list[dict]:
 
 
 def business_health() -> dict:
-    """CEO-grade health metrics the totals don't show: TRUE (landed-cost) margin, cash efficiency,
-    and capital frozen in dead stock. Read-only.
+    """CEO-grade health metrics the totals don't show: the margin, cash efficiency, and capital
+    frozen in dead stock. Read-only.
 
-    Margin is on a LANDED-COST basis (supplier + freight + customs + clearing) via v_landed_margin,
-    ex-VAT — the real margin, not the Focus-GP illusion. cost_coverage_pct says how much of revenue
-    is costed (grows as MRN receipts are ingested); below_cost_count is the real below-cost count."""
-    # TRUE gross margin — revenue minus landed cost (ex-VAT)
-    lm = (exec_sql("SELECT COALESCE(SUM(net_revenue_bhd),0) AS net, COALESCE(SUM(gross_profit_bhd),0) AS gp, "
-                   "COUNT(*) FILTER (WHERE gross_profit_bhd < 0) AS below FROM v_landed_margin LIMIT 1") or [{}])[0]
-    net, gp = float(lm.get("net") or 0), float(lm.get("gp") or 0)
-    gp_pct = (gp / net * 100) if net else 0.0
-    below_cost = int(lm.get("below") or 0)
-    total_net = float((exec_sql("SELECT COALESCE(SUM(net_bhd),0) AS net FROM v_sales WHERE item_name IS NOT NULL")
-                       or [{}])[0].get("net") or 0)
-    coverage_pct = (net / total_net * 100) if total_net else 0.0
+    Margin (R7d, one definition — app.metrics.profitability): the OFFICIAL figure is gross margin on
+    ex-VAT sales against Focus COGS (every item costed); the landed (MRN) margin is the secondary
+    figure with its coverage of Accessories sales. Dead stock is valued at COST (the Focus average
+    cost, else the latest landed cost — app.metrics.stock_cost_sql), not at the selling rate the
+    Focus stock balance carries; the selling value travels beside it, labelled."""
+    from app import metrics
+    prof = metrics.profitability(q=exec_sql)
+    om, lm = prof.get("official") or {}, prof.get("landed") or {}
     # Cash efficiency: how much AR is overdue, and crude DSO (AR ÷ avg daily gross over last 90d)
     ar = (exec_sql("SELECT COALESCE(SUM(outstanding_bhd),0) AS total, COALESCE(SUM(overdue_bhd),0) AS overdue "
                    "FROM v_receivables LIMIT 1") or [{}])[0]
@@ -235,14 +231,27 @@ def business_health() -> dict:
                           "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 LIMIT 1")
                  or [{}])[0].get("d") or 0)
     dso = (ar_total / dpr) if dpr else 0.0
-    # Capital frozen in dead stock (no sale in the velocity window)
-    dead = (exec_sql("SELECT COALESCE(SUM(stock_value),0) AS v, COUNT(*) AS n "
-                     "FROM v_stock_health WHERE status='dead_stock' LIMIT 1") or [{}])[0]
+    # Capital frozen in dead stock (no sale in the velocity window), at COST
+    try:
+        stock = metrics.stock_cost_summary(exec_sql(metrics.STOCK_HELD_SQL) or [])
+    except Exception as e:  # noqa: BLE001 -- the tile says "not available", never a selling-price stand-in
+        log.warning("business health: stock at cost unavailable: %s", e)
+        stock = None
     return {
-        "gp_bhd": gp, "gp_pct": gp_pct,
-        "margin_basis": "landed", "cost_coverage_pct": coverage_pct, "below_cost_count": below_cost,
+        # the official margin (ex-VAT sales vs Focus COGS, every item costed)
+        "gp_bhd": om.get("gp_bhd") or 0.0, "gp_pct": om.get("pct") if om.get("pct") is not None else 0.0,
+        "margin_basis": "focus_cogs_ex_vat", "margin_available": bool(om),
+        "below_cost_count": int(om.get("below_cost") or 0),
+        # the landed (MRN) margin, secondary, with its coverage of Accessories ex-VAT sales
+        "landed_gp_pct": lm.get("pct"), "landed_gp_bhd": lm.get("gp_bhd"),
+        "landed_coverage_pct": lm.get("coverage_pct"), "cost_coverage_pct": lm.get("coverage_pct"),
+        "returns_note": prof.get("returns_note"),
         "ar_overdue_pct": overdue_pct, "dso_days": dso,
-        "dead_stock_bhd": float(dead.get("v") or 0), "dead_stock_count": int(dead.get("n") or 0),
+        "dead_stock_bhd": stock["dead_cost_bhd"] if stock else 0.0,
+        "dead_stock_count": stock["dead_count"] if stock else 0,
+        "dead_stock_uncosted": stock["dead_uncosted"] if stock else 0,
+        "dead_stock_sell_bhd": stock["dead_sell_bhd"] if stock else None,
+        "stock_basis": "cost" if stock else None,
     }
 
 
@@ -554,26 +563,29 @@ def inventory() -> dict:
         "FROM stock_balance WHERE as_of_date=(SELECT MAX(as_of_date) FROM stock_balance) LIMIT 1"
     )
     t = (tv or [{}])[0]
-    # Inventory at landed COST (capital invested) — from the real MRN costs (mrn_landed_costs),
-    # matched by NORMALISED ProdCode prefix (longest wins) so variants don't collide. Partial
-    # coverage is fine. (Same cost source as v_landed_margin — kept consistent on purpose.)
-    cv = exec_sql(
-        "WITH cost AS ("
-        "  SELECT landed_cost_bhd, REPLACE(REPLACE(REPLACE(UPPER(sku_code),' ',''),'-',''),'.','') AS nkey "
-        "  FROM mrn_landed_costs WHERE landed_cost_bhd IS NOT NULL), "
-        "item_cost AS ("
-        "  SELECT DISTINCT ON (sb.ctid) sb.net_qty, c.landed_cost_bhd "
-        "  FROM stock_balance sb JOIN cost c "
-        "  ON REPLACE(REPLACE(REPLACE(UPPER(sb.item_name),' ',''),'-',''),'.','') LIKE c.nkey || '%' "
-        "  WHERE sb.as_of_date=(SELECT MAX(as_of_date) FROM stock_balance) "
-        "  ORDER BY sb.ctid, LENGTH(c.nkey) DESC) "
-        "SELECT COALESCE(SUM(net_qty * landed_cost_bhd),0) AS v FROM item_cost"
-    )
+    # Inventory at COST (capital invested, R7d): the one stock-at-cost definition in app.metrics —
+    # the Focus average cost per item, else the latest landed cost; an implausible cost is never
+    # used. Optional like the arrivals card: without it the page shows the selling value alone.
+    from app import metrics
+    try:
+        cost_rows = exec_sql(metrics.STOCK_HELD_SQL) or []
+        at_cost = metrics.stock_cost_summary(cost_rows)
+        per_item = metrics.stock_cost_by_item(cost_rows)
+    except Exception as e:  # noqa: BLE001 -- one tile never costs the page
+        log.warning("inventory: stock at cost unavailable: %s", e)
+        at_cost, per_item = None, {}
+    for r in rows or []:
+        c = per_item.get(str(r.get("item_name")))
+        r["cost_value_bhd"] = c["cost_value_bhd"] if c else None
+        r["cost_source"] = c["cost_source"] if c else None
     return {
         "rows": rows,
         "by_status": dict(Counter(r["status"] for r in rows)),
+        # the Focus stock balance is valued at the SELLING rate: labelled "at selling price" on screen
         "stock_value": float(t.get("v", 0)),
-        "stock_value_cost": float((cv or [{}])[0].get("v", 0)),
+        "stock_value_basis": "selling_price",
+        "stock_value_cost": at_cost["cost_value_bhd"] if at_cost else 0.0,
+        "stock_cost": at_cost,
         "stock_qty": float(t.get("q", 0)),
         "by_warehouse": stock_by_warehouse(),
         "recent_receipts": recent_receipts(),
@@ -659,20 +671,36 @@ def margins() -> dict:
     """Profitability on the COMPUTED margin (app/margin_truth.py): ex-VAT sales vs Focus COGS.
     The report's own GP % is not a percentage and its GP loses the sign on loss items, so the
     Margins page and 'Selling below cost' tile used to be quietly wrong. `basis` says whether the
-    figures came from the migrated view ('view') or were computed inline ('inline')."""
-    from app.margin_truth import margin_rows, margin_totals
+    figures came from the migrated view ('view') or were computed inline ('inline').
+
+    R7d: `gp_pct` is THE official margin (app.metrics.official_margin — the same figure the Command
+    Centre and the Dashboard show); `landed` is the secondary landed (MRN) margin with its coverage;
+    `check_cost` lists the price-book SKUs whose unit cost is missing or implausible. Both extras are
+    optional: a failure leaves them empty instead of failing the page."""
+    from app import metrics
+    from app.margin_truth import check_cost_rows, margin_rows, margin_totals
     rows, basis = margin_rows(limit=200)
     # The totals are one SUM over the whole view, never over the (limited, margin-ascending) rows:
     # once the report passes the row cap the best margins would be the ones cut off.
     tot, _ = margin_totals()
     net, net_ex = round(tot["net"], 3), round(tot["net_ex"], 3)
     gp_ex, gp_rep = round(tot["gp_ex"], 3), round(tot["gp_rep"], 3)
+    try:
+        landed = metrics.landed_margin((exec_sql(metrics.LANDED_LATEST_SQL) or [None])[0])
+    except Exception as e:  # noqa: BLE001 -- the secondary figure never costs the page
+        log.warning("margins: landed margin unavailable: %s", e)
+        landed = None
     return {
         "rows": rows, "count": tot["n"], "negative_count": tot["below"],
         "total_net_bhd": net, "total_net_ex_vat_bhd": net_ex,
         "total_gp_bhd": gp_ex, "total_gp_report_basis_bhd": gp_rep,
         "gp_pct": (gp_ex / net_ex * 100) if net_ex else 0.0,
         "basis": basis,
+        "official": metrics.official_margin(tot),
+        "landed": landed,
+        "check_cost": check_cost_rows(exec_sql),
+        "returns_note": metrics.RETURNS_NOTE,
+        "definition": {"official": metrics.OFFICIAL_MARGIN_BASIS, "landed": metrics.LANDED_MARGIN_BASIS},
     }
 
 

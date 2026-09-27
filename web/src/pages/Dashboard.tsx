@@ -35,10 +35,14 @@ interface SalesmanRow { salesman: string; orders: number; qty: number | null; re
 interface SalesmanScope { division?: string; basis?: string; period?: string | null; data_through?: string | null; error?: string | null }
 interface AgentRow { agent: string; last_run: string; summary: string }
 interface ActionItem { action: string; to: string; bhd: number; urgency: number }
+/** R7d: gp_pct is THE official margin (ex-VAT sales vs Focus COGS, every item costed — app/metrics.py);
+ *  landed_* is the secondary MRN margin with its coverage; dead stock is valued at COST. */
 interface Health {
   gp_bhd: number; gp_pct: number; ar_overdue_pct: number
   dso_days: number; dead_stock_bhd: number; dead_stock_count: number
-  margin_basis?: string; cost_coverage_pct?: number; below_cost_count?: number
+  margin_basis?: string; margin_available?: boolean; cost_coverage_pct?: number | null; below_cost_count?: number
+  landed_gp_pct?: number | null; landed_coverage_pct?: number | null
+  dead_stock_uncosted?: number; dead_stock_sell_bhd?: number | null; stock_basis?: string | null
 }
 interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
 /** acc_bhd = Mobile Accessories only — the basis for every target (SIM never counts) */
@@ -405,17 +409,19 @@ export default function Dashboard() {
       {/* Business health — the CEO truth the totals hide: margin, cash speed, frozen capital */}
       {data?.health && (
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <HealthStat icon={Percent} label="True gross margin · landed cost" tone={data.health.gp_pct < 20 ? 'amber' : 'green'}
-            value={`${data.health.gp_pct.toFixed(1)}%`}
-            sub={<>{bhd(data.health.gp_bhd, 0)} GP · {Math.round(data.health.cost_coverage_pct ?? 0)}% of revenue costed
+          <HealthStat icon={Percent} label="Gross margin · ex-VAT on Focus COGS" tone={data.health.gp_pct < 20 ? 'amber' : 'green'}
+            value={data.health.margin_available === false ? '—' : `${data.health.gp_pct.toFixed(1)}%`}
+            sub={<>{bhd(data.health.gp_bhd, 0)} GP · every item costed
+              {data.health.landed_gp_pct != null && <> · landed {data.health.landed_gp_pct.toFixed(1)}% on {Math.round(data.health.landed_coverage_pct ?? 0)}% of sales</>}
               {(data.health.below_cost_count ?? 0) > 0 && <> · <span className="font-semibold text-rose-600">{data.health.below_cost_count} below cost</span></>}</>}
             to="/margins" />
           <HealthStat icon={Clock} label="Collection speed · DSO" tone={data.health.ar_overdue_pct > 40 ? 'red' : 'amber'}
             value={`${Math.round(data.health.dso_days)} days`}
             sub={<><span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
-          <HealthStat icon={Snowflake} label="Capital frozen in dead stock" tone="red"
-            value={bhd(data.health.dead_stock_bhd, 0)}
-            sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash</>} to="/inventory" />
+          <HealthStat icon={Snowflake} label="Capital frozen in dead stock · at cost" tone="red"
+            value={data.health.stock_basis === 'cost' ? bhd(data.health.dead_stock_bhd, 0) : '—'}
+            sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash
+              {data.health.dead_stock_sell_bhd != null && <> · {bhd(data.health.dead_stock_sell_bhd, 0)} at selling price</>}</>} to="/inventory" />
         </div>
       )}
 

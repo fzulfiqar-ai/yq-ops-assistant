@@ -32,6 +32,7 @@ from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_t
 from app.config import settings as cfg
 from app.database import get_client
 from app.db_read import exec_sql, exec_sql_params, retry_read
+from app.margin_truth import IMPLAUSIBLE_COST_SHARE
 
 log = logging.getLogger(__name__)
 
@@ -573,15 +574,19 @@ def cost_source_for(ctx: dict, code: str) -> str | None:
     return sources.get(code) or sources.get(str(code).upper())
 
 
-COST_SANITY_SHARE = 0.10   # a cost under this share of the list price is flagged, never trusted quietly
+# a cost under this share of the list price is flagged, never trusted quietly. The one threshold
+# lives in app/margin_truth.py (the stock valuation and the Check cost list read it too).
+COST_SANITY_SHARE = IMPLAUSIBLE_COST_SHARE
 
 
 def cost_flags(ctx: dict) -> dict[str, str]:
     """Pure: catalog codes whose cost on file is implausibly low -- under COST_SANITY_SHARE of the
     list price. A purchase_costs fallback row can be a typo or a per-carton figure (24-Sep-2026:
     X10 LT / X10 MK carry 0.0126 against a 0.400 price), and such a cost floors nothing while
-    margin health would show it as a 96 % margin. The cost stays in use (the floor is still better
-    than none); the flag travels with margin_health() so the owner sees which rows to fix."""
+    margin health would show it as a 96 % margin. R7d (27-Sep-2026): a flagged cost is no longer
+    used as a floor -- the context's cost_flags make _floor_d() answer None for the code, so the
+    line is "no floor -- needs a cost" exactly like a missing cost (no clamp, and no headroom for a
+    cart-level discount), and margin_health() / rule_impact() say so instead of clamping silently."""
     out: dict[str, str] = {}
     for code in ctx.get("order") or []:
         it = (ctx.get("items") or {}).get(code) or {}
@@ -1348,12 +1353,29 @@ def rule_summary(r: dict) -> str:
 
 # ── pricing engine ────────────────────────────────────────────────────────────
 
-def _floor_d(ctx: dict, code: str) -> Decimal | None:
-    """Lowest VAT-inclusive unit price allowed: landed cost x (1 + margin) x (1 + VAT), to the
-    fils. The price book is VAT-inclusive (owner's workbook), so the floor must be too."""
+def floor_state(ctx: dict, code: str) -> str:
+    """Why a code has (or has no) margin floor: 'ok' (a trusted cost), 'no_cost' (none on file) or
+    'check_cost' (the cost is flagged implausible in the context's cost_flags -- see cost_flags()).
+    A code in either of the last two has NO floor: nothing clamps it, and it is listed as
+    "no floor -- needs a cost" wherever a floor is shown (rule preview, margin health)."""
     cost = cost_for(ctx, code)
     if cost is None or _d(cost) <= 0:
+        return "no_cost"
+    flags = ctx.get("cost_flags") or {}
+    if code in flags or str(code).upper() in {str(k).upper() for k in flags}:
+        return "check_cost"
+    return "ok"
+
+
+def _floor_d(ctx: dict, code: str) -> Decimal | None:
+    """Lowest VAT-inclusive unit price allowed: landed cost x (1 + min markup) x (1 + VAT), to the
+    fils. The price book is VAT-inclusive (owner's workbook), so the floor must be too.
+    shop_min_margin_pct is applied as a MARKUP on landed cost (20 % -> cost x 1.2; owner decision
+    pending on markup vs margin) and margin_health() tests against this same figure.
+    None -- no floor -- when the cost is missing or flagged implausible (floor_state)."""
+    if floor_state(ctx, code) != "ok":
         return None
+    cost = cost_for(ctx, code)
     vals = ctx["settings"]
     margin = _d(vals.get("shop_min_margin_pct"), Decimal("0.2"))
     vat = _d(vals.get("shop_vat_rate"), D0)
@@ -3640,12 +3662,17 @@ def validate_rule(payload: dict, existing: dict | None = None) -> dict:
     return row
 
 
+NO_FLOOR_REASON = {"no_cost": "no cost on file", "check_cost": "cost flagged: check it"}
+
+
 def rule_impact(row: dict, ctx: dict | None = None) -> dict:
-    """How many items a rule touches and which would be clamped by the margin floor."""
+    """How many items a rule touches, which would be clamped by the margin floor, and which have NO
+    floor at all (R7d): a touched item whose cost is missing or flagged implausible is never clamped,
+    so the rule editor lists it as "no floor -- needs a cost" instead of saying nothing."""
     ctx = ctx or context()
     r = dict(row)
     r["scope"] = _norm_scope(r.get("scope"))
-    touched, breaches = [], []
+    touched, breaches, no_floor = [], [], []
     for code in ctx["order"]:
         it = ctx["items"][code]
         if r["kind"] in ("qty_tier", "bundle_price", "salesman_offer", "cart_value") and _rule_matches_item(r, it):
@@ -3653,11 +3680,16 @@ def rule_impact(row: dict, ctx: dict | None = None) -> dict:
             lp = _d(it.get("standard_rate"))
             if lp <= 0:
                 continue
+            state = floor_state(ctx, code)
+            if state != "ok":
+                no_floor.append({"item_code": code, "reason": state, "label": NO_FLOOR_REASON[state]})
+                continue
             unit = _discounted_unit(r, lp)
             floor = _floor_d(ctx, code)
             if floor is not None and unit < floor:
                 breaches.append({"item_code": code, "unit_bhd": money(unit), "floor_bhd": float(floor)})
-    return {"items": len(touched), "breaches": breaches[:50], "breach_count": len(breaches)}
+    return {"items": len(touched), "breaches": breaches[:50], "breach_count": len(breaches),
+            "no_floor": no_floor[:50], "no_floor_count": len(no_floor)}
 
 
 def upsert_rule(payload: dict, by: str = "", rule_id: int | None = None) -> dict:
@@ -3884,11 +3916,22 @@ def share_item(item_code: str) -> dict | None:
 
 # ── margin & price health (replaces the hand-built landed-cost workbook) ─────
 
+MARGIN_HEALTH_ORDER = {"below_floor": 0, "check_cost": 1, "no_cost": 2, "no_price": 3, "ok": 4}
+
+
 def margin_health() -> dict:
+    """Every priced catalog item against the margin floor.
+
+    R7d: the floor is a MARKUP on landed cost -- shop_min_margin_pct 0.20 means cost x 1.2 (owner
+    decision on markup vs margin pending) -- and "below floor" is now tested against that SAME
+    figure (_floor_d: the VAT-inclusive price under cost x (1 + markup) x (1 + VAT)), so this table
+    and the discount engine can never disagree. (It used to compare the ex-VAT MARGIN with 20 %: an
+    item at a 22 % markup read "below floor" here while the engine let it sell.) A flagged cost is
+    'check_cost' and a missing one 'no_cost': neither has a floor."""
     ctx = context()
     vals = ctx["settings"]
     vat = _f(vals.get("shop_vat_rate"), 0.0)
-    min_margin = _f(vals.get("shop_min_margin_pct"), 0.2)
+    min_markup = _f(vals.get("shop_min_margin_pct"), 0.2)
     low_units = _i(vals.get("shop_low_stock_units"), 10)
     rows = []
     flags = ctx.get("cost_flags") or {}
@@ -3900,24 +3943,34 @@ def margin_health() -> dict:
         profit = money(ex_vat - cost) if (ex_vat is not None and cost) else None
         margin = round(profit / ex_vat, 4) if (profit is not None and ex_vat) else None
         markup = round(profit / cost, 4) if (profit is not None and cost) else None
+        floor = _floor_d(ctx, code)
+        state = floor_state(ctx, code)
         rows.append({
             "item_code": code, "spec": it.get("spec"), "category": it.get("category"),
             "price_incl_vat_bhd": money(lp) if lp is not None else None, "price_ex_vat_bhd": ex_vat,
             "landed_cost_bhd": money(cost) if cost else None, "profit_bhd": profit,
             "cost_source": cost_source_for(ctx, code) if cost else None,
             "cost_flag": flags.get(code),   # an implausibly low cost (see cost_flags): the margin shown is not trusted
-            "margin_pct": margin, "markup_pct": markup, "floor_bhd": _floor_for(ctx, code),
+            "margin_pct": margin, "markup_pct": markup, "floor_bhd": float(floor) if floor is not None else None,
             "stock_status": stock_status_for(it.get("stock_qty"), low_units),
             "sold_90d": _i(it.get("sold_90d")),
-            "status": ("no_cost" if not cost else "no_price" if lp is None else
-                       "below_floor" if (margin is not None and margin < min_margin) else "ok"),
+            "status": ("no_cost" if state == "no_cost" else "no_price" if lp is None else
+                       "check_cost" if state == "check_cost" else
+                       "below_floor" if (floor is not None and _d(lp) < floor) else "ok"),
         })
-    rows.sort(key=lambda r: (r["status"] != "below_floor", r["margin_pct"] if r["margin_pct"] is not None else 9))
+    rows.sort(key=lambda r: (MARGIN_HEALTH_ORDER.get(r["status"], 9),
+                             r["markup_pct"] if r["markup_pct"] is not None else 9))
     return {"rows": rows, "summary": {
         "items": len(rows), "with_cost": sum(1 for r in rows if r["landed_cost_bhd"]),
         "below_floor": sum(1 for r in rows if r["status"] == "below_floor"),
         "flagged_costs": sum(1 for r in rows if r["cost_flag"]),
-        "vat_rate": vat, "min_margin_pct": min_margin}}
+        "check_cost": sum(1 for r in rows if r["status"] == "check_cost"),
+        "no_cost": sum(1 for r in rows if r["status"] == "no_cost"),
+        "vat_rate": vat,
+        # the setting is shop_min_margin_pct, but it is applied as a MARKUP on landed cost
+        "min_markup_pct": min_markup, "min_margin_pct": min_markup,
+        "floor_basis": "markup_on_landed",
+        "floor_label": f"Min markup {min_markup * 100:.0f}% on landed cost"}}
 
 
 # ── analytics (funnel, AOV, top products, salesman leaderboard, attribution) ──
