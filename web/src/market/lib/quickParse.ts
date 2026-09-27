@@ -1,7 +1,7 @@
 import type { ShopItem } from '@/lib/shopApi'
 import { partitionByAvailability } from './facets'
 import { codeKey, isOut } from './format'
-import type { SearchIndex } from './search'
+import { queryText, westernDigits, type SearchIndex } from './search'
 
 /**
  * Turns a pasted WhatsApp-style list into order rows:
@@ -10,6 +10,11 @@ import type { SearchIndex } from './search'
  * `C18 24`, or a bare code/name (default quantity). Resolution: exact code (space/dash/case
  * insensitive) → the index's top hit when it clearly wins (≥1.5× the runner-up) → otherwise
  * "pick one" with the top three.
+ *
+ * Arabic lists (R5) read the same way: Arabic-Indic digits (٢٤ → 24), the Arabic comma «،» and
+ * semicolon «؛» between lines, the direction marks WhatsApp adds dropped, and the unit words the
+ * trade texts — «حبة» and «قطعة» are pieces, «درزن» is a dozen (×12): "٢ درزن C18" is 24 × C18.
+ * A name typed in Arabic is read into the catalog's English by lib/search.ts queryText().
  *
  * The sold-out rule: a sold-out line is NEVER resolved on its own — not from an exact code, not as
  * the clear winner. It is offered as a candidate, after the in-stock alternatives, so the merchant
@@ -57,35 +62,46 @@ export interface QuickResolution {
   candidates: ShopItem[]
 }
 
-const QTY_FIRST = /^(\d{1,4})\s*(?:x|×|\*|pcs?|pieces?)?\s+(.+)$/i
-const QTY_LAST = /^(.+?)\s*(?:x|×|\*|-)?\s*(\d{1,4})\s*(?:pcs?|pieces?)?$/i
+/** unit words for pieces (English, and the Arabic «حبة» / «قطعة» with their plurals and ه spellings) */
+const PIECES = String.raw`pcs?|pieces?|حب(?:ة|ه|ات)|قطع(?:ة|ه)?`
+/** a dozen: «درزن» (and «دزن», «دزينة») — the quantity is ×12 */
+const DOZEN = String.raw`درزن|دزن|دزين(?:ة|ه)`
+const DOZEN_RE = new RegExp(`^(?:${DOZEN})$`)
+const QTY_FIRST = new RegExp(String.raw`^(\d{1,4})\s*(x|×|\*|${PIECES}|${DOZEN})?\s+(.+)$`, 'i')
+/** query · the separator (kept, see parseToken) · quantity · unit */
+const QTY_LAST = new RegExp(String.raw`^(.+?)(\s*(?:x|×|\*|-)?\s*)(\d{1,4})\s*(${PIECES}|${DOZEN})?$`, 'i')
 /** how many index hits a Quick-order row lists under the input */
 const SUGGEST_MAX = 6
+/** the direction marks and isolates a line copied out of an Arabic WhatsApp chat carries */
+const MARKS = /[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g
 
 export function splitList(text: string): string[] {
-  return text
-    .split(/[\n,;]+/)
+  return westernDigits(text.replace(MARKS, ''))
+    .split(/[\n,;\u060c\u061b]+/)
     .map((s) => s.trim().replace(/^[-•*\d]+[.)]\s+/, ''))
     .filter(Boolean)
 }
 
+const qtyOf = (n: string, unit: string | undefined) => Number(n) * (unit && DOZEN_RE.test(unit) ? 12 : 1)
+
 export function parseToken(raw: string): { query: string; qty: number | null } {
-  const t = raw.trim()
+  const t = westernDigits(raw.replace(MARKS, '')).trim()
   let m = t.match(QTY_FIRST)
-  if (m) return { query: m[2].trim(), qty: Number(m[1]) }
+  if (m) return { query: m[3].trim(), qty: qtyOf(m[1], m[2]) }
   m = t.match(QTY_LAST)
   if (m && !/^\d+$/.test(m[1].trim())) {
     // "X26-C" must not be read as "X26 -" qty C; only treat a trailing number as qty when separated by space/x
-    const sep = t.slice(m[1].length, t.length - m[2].length)
-    if (/[\sx×*]/i.test(sep)) return { query: m[1].trim(), qty: Number(m[2]) }
+    if (/[\sx×*]/i.test(m[2])) return { query: m[1].trim(), qty: qtyOf(m[3], m[4]) }
   }
   return { query: t, qty: null }
 }
 
 /** The index hits for a query, best first (AND, then a looser OR pass), as catalog items. */
 function rankedHits(query: string, items: ShopItem[], index: SearchIndex): { it: ShopItem; score: number }[] {
-  const hits = index.mini.search(query, { prefix: true, fuzzy: 0.2, combineWith: 'AND' })
-  const alt = hits.length ? hits : index.mini.search(query, { prefix: true, fuzzy: 0.3, combineWith: 'OR' })
+  const q = queryText(query)
+  if (!q.trim()) return []
+  const hits = index.mini.search(q, { prefix: true, fuzzy: 0.2, combineWith: 'AND' })
+  const alt = hits.length ? hits : index.mini.search(q, { prefix: true, fuzzy: 0.3, combineWith: 'OR' })
   const byCode = new Map(items.map((i) => [i.item_code, i]))
   return alt.map((h) => ({ it: byCode.get(String(h.id)), score: h.score })).filter((x): x is { it: ShopItem; score: number } => Boolean(x.it))
 }
@@ -124,7 +140,8 @@ export function resolveQuick(query: string, items: ShopItem[], index: SearchInde
   if (exact && !isOut(exact)) return { lock: exact, best: exact, exactOut: null, suggestions: [], candidates: [] }
   const exactOut = exact && isOut(exact) ? exact : null
   const byCode = new Map(items.map((i) => [i.item_code, i]))
-  const hits = index ? index.mini.search(query, { prefix: true, fuzzy: 0.2 }).slice(0, SUGGEST_MAX).map((h) => byCode.get(String(h.id))).filter((x): x is ShopItem => Boolean(x)) : []
+  const asked = queryText(query)
+  const hits = index && asked.trim() ? index.mini.search(asked, { prefix: true, fuzzy: 0.2 }).slice(0, SUGGEST_MAX).map((h) => byCode.get(String(h.id))).filter((x): x is ShopItem => Boolean(x)) : []
   const pool = hits.length ? hits : candidates
   const suggestions = partitionByAvailability(exactOut ? pool.filter((x) => x.item_code !== exactOut.item_code) : pool)
   // Enter's target is the query's best match BEFORE the partition (what the merchant sees first

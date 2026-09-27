@@ -39,6 +39,129 @@ const EXPAND: Map<string, string[]> = (() => {
   return m
 })()
 
+/* ───────────────────────── Arabic queries (R5) ─────────────────────────
+   The catalog is English (names, specs, codes), so an Arabic query is READ into the English words
+   the index knows before it is searched: Arabic-Indic digits → Western, the letter variants a phone
+   keyboard mixes (أ/إ/آ, ة/ه, ى/ي) folded, "20 واط" → 20w, then the trade's Arabic words →
+   their English terms. Arabic that means nothing to the catalog is dropped, so a query of unknown
+   Arabic finds nothing — and the page offers the representative, as for any miss. A query with no
+   Arabic in it passes through untouched. Works on either language's page. */
+
+/** Arabic-Indic (٠-٩) and Extended Arabic-Indic (۰-۹, Urdu/Persian keyboards) digits → 0-9. */
+export function westernDigits(s: string): string {
+  return s.replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - (d.charCodeAt(0) >= 0x06f0 ? 0x06f0 : 0x0660)))
+}
+
+/** Bidi marks and isolates a copy from WhatsApp carries, and the Arabic tatweel. */
+const INVISIBLE = /[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069\u0640]/g
+
+function foldArabic(s: string): string {
+  return s
+    .replace(/[\u064b-\u065f\u0670]/g, '') // harakat
+    .replace(/[\u0623\u0625\u0622\u0671]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+}
+
+/**
+ * Arabic → the catalog's English. Phrases (more than one word) are read first, then single words
+ * (with or without «ال» / a leading «و»). Keys are folded (foldArabic) when the table is built.
+ */
+const ARABIC_PHRASES: [string, string][] = [
+  ['\u0634\u0627\u062d\u0646 \u0633\u064a\u0627\u0631\u0647', 'car charger'],
+  ['\u0634\u0627\u062d\u0646 \u0633\u064a\u0627\u0631\u0629', 'car charger'],
+  ['\u0628\u0627\u0648\u0631 \u0628\u0627\u0646\u0643', 'power bank'],
+  ['\u0628\u0637\u0627\u0631\u064a\u0647 \u0645\u062a\u0646\u0642\u0644\u0647', 'power bank'],
+  ['\u0633\u0645\u0627\u0639\u0627\u062a \u0628\u0644\u0648\u062a\u0648\u062b', 'earbuds'],
+  ['\u0633\u0645\u0627\u0639\u0647 \u0628\u0644\u0648\u062a\u0648\u062b', 'earbuds'],
+  ['\u0633\u0645\u0627\u0639\u0627\u062a \u0644\u0627\u0633\u0644\u0643\u064a\u0647', 'earbuds'],
+  ['\u0627\u064a\u0631 \u0628\u0648\u062f\u0632', 'earbuds'],
+  ['\u0633\u0645\u0627\u0639\u0647 \u0633\u0644\u0643\u064a\u0647', 'earphone'],
+  ['\u0633\u0645\u0627\u0639\u0627\u062a \u0633\u0644\u0643\u064a\u0647', 'earphone'],
+  ['\u0645\u0643\u0628\u0631 \u0635\u0648\u062a', 'speaker'],
+  ['\u0633\u0645\u0627\u0639\u0647 \u062e\u0627\u0631\u062c\u064a\u0647', 'speaker'],
+  ['\u0634\u062d\u0646 \u0633\u0631\u064a\u0639', 'fast charge'],
+  ['\u062a\u0627\u064a\u0628 \u0633\u064a', 'type c'],
+  ['\u0645\u0627\u063a \u0633\u064a\u0641', 'magsafe'],
+  ['\u0631\u0627\u0633 \u0634\u0627\u062d\u0646', 'charger'],
+]
+const ARABIC_WORDS: Record<string, string> = {
+  كيبل: 'cable',
+  كابل: 'cable',
+  كيبلات: 'cable',
+  كابلات: 'cable',
+  كيابل: 'cable',
+  سلك: 'cable',
+  اسلاك: 'cable',
+  وصله: 'cable',
+  شاحن: 'charger',
+  شواحن: 'charger',
+  ادابتر: 'charger',
+  سياره: 'car',
+  سيارات: 'car',
+  باوربانك: 'power bank',
+  بطاريه: 'power bank',
+  سماعه: 'earphone',
+  سماعات: 'earphone',
+  ايربودز: 'earbuds',
+  بلوتوث: 'bluetooth',
+  سبيكر: 'speaker',
+  لاسلكي: 'wireless',
+  لاسلكيه: 'wireless',
+  وايرلس: 'wireless',
+  مغناطيسي: 'magnetic',
+  ماجسيف: 'magsafe',
+  حامل: 'holder',
+  ستاند: 'holder',
+  ايفون: 'iphone',
+  ايباد: 'ipad',
+  ابل: 'apple',
+  تايبسي: 'type c',
+  لايتننق: 'lightning',
+  لايتنينغ: 'lightning',
+  لايتنينج: 'lightning',
+  مايكرو: 'micro',
+  اوكس: 'aux',
+  سريع: 'fast charge',
+  جداري: 'wall charger',
+}
+const AR_LETTER = '\\u0600-\\u06ff'
+const PHRASES: [RegExp, string][] = ARABIC_PHRASES.map(([ar, en]) => [new RegExp(`(?<![${AR_LETTER}])${foldArabic(ar)}(?![${AR_LETTER}])`, 'g'), en])
+const WORDS: Map<string, string> = new Map(Object.entries(ARABIC_WORDS).map(([ar, en]) => [foldArabic(ar), en]))
+
+function arabicWord(w: string): string | null {
+  const direct = WORDS.get(w)
+  if (direct) return direct
+  // «الشاحن», «والشاحن», «بالشاحن», «للشاحن» → «شاحن»
+  for (const lead of ['\u0648\u0627\u0644', '\u0628\u0627\u0644', '\u0644\u0644', '\u0627\u0644', '\u0648']) {
+    if (w.length > lead.length + 2 && w.startsWith(lead)) {
+      const hit = WORDS.get(w.slice(lead.length))
+      if (hit) return hit
+    }
+  }
+  return null
+}
+
+/**
+ * What the index is asked for: the query itself when it has no Arabic in it; otherwise the query
+ * read into the catalog's words (see above). Quick order and the search box both go through here.
+ */
+export function queryText(q: string): string {
+  const raw = String(q || '')
+  if (!/[\u0600-\u06ff\u06f0-\u06f9\u200e\u200f\u2066-\u2069]/.test(raw)) return raw
+  let t = foldArabic(westernDigits(raw).replace(INVISIBLE, '')).toLowerCase()
+  t = t.replace(/(\d+(?:\.\d+)?)\s*واط/g, '$1w').replace(/(\d+(?:\.\d+)?)\s*متر/g, '$1m')
+  for (const [re, en] of PHRASES) t = t.replace(re, ` ${en} `)
+  return t
+    .split(/\s+/)
+    .map((w) => (/[\u0600-\u06ff]/.test(w) ? arabicWord(w.replace(/[^\u0600-\u06ff]/g, '')) || '' : w))
+    .filter(Boolean)
+    .join(' ')
+    .trim()
+}
+
 const CATEGORY_WORDS: Record<string, string> = {
   CABLE: 'cable wire lead',
   CHARGER: 'charger adapter plug fast charge',
@@ -121,7 +244,7 @@ function expandQuery(q: string): string {
 }
 
 export function searchItems(index: SearchIndex, items: ShopItem[], q: string, limit = 50): ShopItem[] {
-  const query = q.trim()
+  const query = queryText(q).trim()
   if (query.length < 1) return []
   const byCode = new Map(items.map((i) => [i.item_code, i]))
   let hits = index.mini.search(expandQuery(query))
@@ -149,8 +272,10 @@ export function searchItems(index: SearchIndex, items: ShopItem[], q: string, li
 
 export function suggest(index: SearchIndex, q: string): string[] {
   try {
+    const query = queryText(q).trim()
+    if (!query) return []
     return index.mini
-      .autoSuggest(q.trim(), { fuzzy: 0.3, prefix: true })
+      .autoSuggest(query, { fuzzy: 0.3, prefix: true })
       .slice(0, 5)
       .map((s) => s.suggestion)
   } catch {
