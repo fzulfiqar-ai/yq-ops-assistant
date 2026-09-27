@@ -448,7 +448,7 @@ export const ar: Strings = {
     useSame: 'استخدمها',
     samePhone: 'نفس رقم المرة السابقة',
     change: 'تغيير',
-    areaRep: (name: string) => `مندوب منطقتك: ${name}`,
+    areaRep: (name: string) => `يتابع ${name} المتاجر الجديدة في هذه المنطقة`,
   },
   placed: {
     title: 'استلمنا طلب الجملة',

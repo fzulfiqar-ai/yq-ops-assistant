@@ -66,6 +66,7 @@ const mod = (p) => import(pathToFileURL(path.join(SRC, p)).href)
 const C = await mod('market/lib/orderChanges.ts')
 const F = await mod('market/lib/format.ts')
 const D = await mod('market/lib/device.ts')
+const AR = await mod('market/lib/areaRep.ts')
 const { en } = await mod('market/i18n/en.ts')
 const { ar } = await mod('market/i18n/ar.ts')
 
@@ -259,11 +260,24 @@ check('device: a tracking link adopts the order; a placed order stays placed; "S
   ok(D.isRemembered('adopted-token-000001') && !D.isRemembered('nope-nope-nope-nope'), 'isRemembered')
 })
 
+check('area line: only when the area routes the order — never with a rep link (even a hidden-profile one), a pick or a known merchant', () => {
+  const base = { hasRepCard: false, ref: null, pick: '', recognized: false, known: false, reuse: false, area: ' Riffa ', areaReps: { riffa: 'Bob' } }
+  eq(AR.areaRepName(base), 'Bob', 'a new visitor, no link, area mapped')
+  eq(AR.areaRepName({ ...base, ref: 'ali' }), null, '?ref=ali with no public profile (no card): the server routes to Ali — say nothing')
+  eq(AR.areaRepName({ ...base, hasRepCard: true }), null, 'a rep card')
+  eq(AR.areaRepName({ ...base, pick: 7 }), null, 'a pick')
+  eq(AR.areaRepName({ ...base, recognized: true }), null, 'ordered from this device before')
+  eq(AR.areaRepName({ ...base, known: true }), null, 'a recognised phone: the shop may have its own rep')
+  eq(AR.areaRepName({ ...base, reuse: true }), null, 'Same as last time')
+  eq(AR.areaRepName({ ...base, area: 'Sitra' }), null, 'an unmapped area')
+  eq(AR.areaRepName({ ...base, areaReps: null }), null, 'no map')
+})
+
 check('words: the placed line, the checkout card and the search card exist in both languages', () => {
   eq(en.placed.sentTo('Harsh'), 'Sent to Harsh', 'sentTo')
   eq(en.placed.receivedBy('Harsh'), 'Received by YQ — Harsh will confirm', 'receivedBy')
   eq(en.checkout.sameAsLast, 'Same as last time', 'sameAsLast')
-  eq(en.checkout.areaRep('Harsh'), 'Your area representative: Harsh', 'areaRep')
+  eq(en.checkout.areaRep('Harsh'), 'New shops here are looked after by Harsh', 'areaRep (new shops, never "your" rep)')
   eq(en.shop.notOnShelf('memory card'), 'We don’t stock “memory card” yet', 'notOnShelf')
   ok(ar.placed.receivedBy('Harsh').includes('Harsh') && /[؀-ۿ]/.test(ar.placed.receivedBy('Harsh')), 'Arabic receivedBy')
   ok(/[؀-ۿ]/.test(ar.checkout.areaRep('Harsh')), 'Arabic areaRep')

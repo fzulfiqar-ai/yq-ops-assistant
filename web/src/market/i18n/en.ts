@@ -496,7 +496,7 @@ export const en = {
     samePhone: 'Same number as last time',
     change: 'Change',
     /** a visitor with no rep link, once the area is picked and the office has a rep for it (shop_area_reps) */
-    areaRep: (name: string) => `Your area representative: ${name}`,
+    areaRep: (name: string) => `New shops here are looked after by ${name}`,
   },
   placed: {
     title: 'Wholesale order received',

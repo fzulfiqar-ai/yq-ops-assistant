@@ -8,6 +8,7 @@ import { useMarket, useOrder } from '../MarketContext'
 import { clientOrderId, deviceId, EMPTY_CUSTOMER, lastPlacedOrder, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
 import { en } from '../i18n/en'
+import { areaRepName as areaRepFor } from '../lib/areaRep'
 import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName, sessionId } from '../lib/format'
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { clearSmallAck } from '../lib/smallOrder'
@@ -31,8 +32,9 @@ const FORM_ID = 'yq-market-checkout'
  *
  * R7d: a returning merchant gets "Same as last time: {shop} · {area}" — one tap fills the details
  * of this phone's last order, and the phone number is reused ON THE SERVER through that order's
- * token (reuse_token), so it never reaches this page. A visitor with no rep link sees "Your area
- * representative: {name}" once the area is picked and the office has a rep for it (shop_area_reps).
+ * token (reuse_token), so it never reaches this page. A visitor with no rep link, unknown to this
+ * device, sees "New shops here are looked after by {name}" once the area is picked and the office
+ * has a rep for it (shop_area_reps) — only when the area is what the server will route by.
  */
 export default function CheckoutPage() {
   const navigate = useNavigate()
@@ -131,9 +133,8 @@ export default function CheckoutPage() {
     setReuse(null)
     window.requestAnimationFrame(() => document.getElementById('yq-phone')?.focus())
   }
-  /** a visitor with no rep link, before any order from this phone and with no pick: the office's rep for the area */
-  const areaReps = data?.settings?.area_reps || {}
-  const areaRepName = !rep && pick === '' && !recognized && customer.area.trim() ? areaReps[customer.area.trim().toLowerCase()] || null : null
+  /** the office's rep for the area — only when the area is what will route this order (lib/areaRep.ts) */
+  const areaRepName = areaRepFor({ hasRepCard: Boolean(rep), ref: m.ref, pick, recognized, known: Boolean(known), reuse: Boolean(reuse), area: customer.area, areaReps: data?.settings?.area_reps })
 
   /** Take the merchant to the field that is holding the send up, instead of greying the button out. */
   const focusMissing = () => {

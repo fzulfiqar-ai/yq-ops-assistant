@@ -587,6 +587,10 @@ def _():
     assert sm["id"] == 2 and how == "area", (sm, how)
     sm, how, _c = resolve_salesman(ctx, phone=None, session_ref="rep-one", area="Riffa")
     assert sm["id"] == 1 and how == "session_ref", "a rep link beats the area"
+    # a link from a rep with NO public profile (no rep card on the page) still beats the area — so the
+    # checkout must not name the area's rep while any ref is set (web/src/market/lib/areaRep.ts)
+    sm, how, _c = resolve_salesman(ctx, phone=None, session_ref="quiet", area="Riffa")
+    assert sm["id"] == 3 and how == "session_ref", "a hidden-profile rep link beats the area"
     sm, how, _c = resolve_salesman(ctx, phone=None, session_ref=None, pick_id=1, area="Riffa")
     assert sm["id"] == 1 and how == "checkout_pick", "the merchant's own pick beats the area"
     sm, how, _c = resolve_salesman(ctx, phone=None, session_ref=None, area="Manama")
@@ -809,7 +813,12 @@ def _():
     assert "phone: reuse ? '' : cleanPhone(customer.phone)" in src and "reuse_token: reuse || undefined," in src
     assert "{S.checkout.sameAsLast}" in src and "{S.checkout.samePhone}" in src
     assert "S.checkout.areaRep(areaRepName)" in src
-    assert "!rep && pick === '' && !recognized && customer.area.trim()" in src
+    # the area line only when the area is what resolve_salesman routes by: never with a rep link
+    # (m.ref - a hidden-profile rep has no card but still wins), a pick, or a merchant this device knows
+    assert "areaRepFor({ hasRepCard: Boolean(rep), ref: m.ref, pick, recognized, known: Boolean(known), reuse: Boolean(reuse)," in src
+    arl = _read("web/src/market/lib/areaRep.ts")
+    assert "i.hasRepCard || (i.ref || '').trim() || i.pick !== '' || i.recognized || i.known || i.reuse" in arl
+    assert "Your area representative" not in _read("web/src/market/i18n/en.ts"), "never promise 'your' rep from the area"
     assert 'id="yq-phone" type="tel" inputMode="tel" autoComplete="tel" dir="ltr"' in src
     assert "{areaLabel(a)}" in src and "set('area', a)" in src and "s.referral_code" not in src
     api = _read("web/src/lib/shopApi.ts")
