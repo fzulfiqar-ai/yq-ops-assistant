@@ -13,7 +13,7 @@ import { en, plural, type Strings } from './en'
  * module-level tables built from `S` (nav tabs, badge and stock labels, facets), so a live swap
  * would leave half the page in the old language.
  *
- * MIRRORS public/market-lang.js pickLang() — change both together.
+ * MIRRORS public/market-lang.js (the same rule and key, in ES5) — change both together.
  */
 
 export type Lang = 'en' | 'ar'

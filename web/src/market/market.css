@@ -361,9 +361,13 @@
     transform: translate3d(0, 6px, 0) scale(0.985);
   }
 }
+/* The side drawer (ui/Sheet variant="drawer") sits at the inline END — the left edge in Arabic — so
+ * it slides in from, and back out to, that edge: --m-dir (the "Arabic" block at the end) turns the
+ * physical translate round. (The old .m-drawer-in override never matched: Sheet names the keyframes
+ * in an arbitrary animation utility, not through a class.) */
 @keyframes m-drawer-in {
   from {
-    transform: translate3d(100%, 0, 0);
+    transform: translate3d(calc(100% * var(--m-dir, 1)), 0, 0);
   }
   to {
     transform: translate3d(0, 0, 0);
@@ -374,18 +378,7 @@
     transform: translate3d(0, 0, 0);
   }
   to {
-    transform: translate3d(100%, 0, 0);
-  }
-}
-[dir='rtl'] .m-drawer-in {
-  animation-name: m-drawer-in-rtl;
-}
-@keyframes m-drawer-in-rtl {
-  from {
-    transform: translate3d(-100%, 0, 0);
-  }
-  to {
-    transform: translate3d(0, 0, 0);
+    transform: translate3d(calc(100% * var(--m-dir, 1)), 0, 0);
   }
 }
 @keyframes m-bump {

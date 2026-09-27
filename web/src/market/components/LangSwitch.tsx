@@ -8,8 +8,9 @@ import { locale, S } from '../strings'
  * back is readable (and read out correctly) by someone who cannot read the page's language. The
  * choice is kept on this phone and the page reloads in it (i18n/index.ts switchLang).
  *
- * - `pill`: one button naming the OTHER language — the desktop header (`tone="light"`) and the
- *   phone's plum brand row (`tone="plum"`).
+ * - `pill`: one button naming the OTHER language — the desktop header's utility bar (`tone="bar"`,
+ *   components/PromiseBar), the phone's plum brand row (`tone="plum"`) and the plain phone header
+ *   (`tone="light"`).
  * - `segmented`: both languages, the current one pressed — the Language row in My YQ.
  *
  * On an English page «عربي» renders in the system's Arabic face: the page's own Arabic font is
@@ -24,7 +25,7 @@ function go(next: Lang, where: string) {
   switchLang(next)
 }
 
-export function LangSwitch({ variant = 'pill', tone = 'light', where, className }: { variant?: 'pill' | 'segmented'; tone?: 'light' | 'plum'; /** analytics: which surface */ where: string; className?: string }) {
+export function LangSwitch({ variant = 'pill', tone = 'light', where, className }: { variant?: 'pill' | 'segmented'; tone?: 'light' | 'plum' | 'bar'; /** analytics: which surface */ where: string; className?: string }) {
   const other: Lang = locale.lang === 'ar' ? 'en' : 'ar'
 
   if (variant === 'segmented') {
@@ -60,7 +61,12 @@ export function LangSwitch({ variant = 'pill', tone = 'light', where, className 
       // the visible word IS the name: «عربي» / "English" (WCAG 2.5.3 — the accessible name contains it)
       className={cn(
         'hit relative inline-flex h-10 shrink-0 items-center justify-center rounded-sm px-3 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2',
-        tone === 'plum' ? 'h-11 rounded-full bg-white/15 px-3.5 text-white ring-1 ring-inset ring-white/25 hover:bg-white/25 focus-visible:ring-white/90' : 'text-ink-2 hover:bg-plum-wash hover:text-ink focus-visible:ring-focus/70',
+        tone === 'plum'
+          ? 'h-11 rounded-full bg-white/15 px-3.5 text-white ring-1 ring-inset ring-white/25 hover:bg-white/25 focus-visible:ring-white/90'
+          : tone === 'bar'
+            ? // the dark utility bar: the same 36 px pill as "Add YQ app" beside it, 44 px on a touch screen
+              'h-9 rounded-full bg-white/10 px-3.5 text-xs text-white hover:bg-white/20 focus-visible:ring-white/80 focus-visible:ring-offset-2 focus-visible:ring-offset-plum-ink [@media(pointer:coarse)]:h-11'
+            : 'text-ink-2 hover:bg-plum-wash hover:text-ink focus-visible:ring-focus/70',
         className,
       )}
     >

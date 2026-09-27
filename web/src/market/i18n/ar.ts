@@ -318,10 +318,11 @@ export const ar: Strings = {
     products: 'المنتجات',
     categories: 'الفئات',
     palette: 'ابحث عن المنتجات',
-    keys: 'Enter يفتح · ⇧Enter يضيف · ↑↓ للتنقل',
+    /* the key names are islands: a bare "⇧Enter" in an Arabic line renders as "Enter⇧" */
+    keys: `${iso('Enter')} يفتح · ${iso('⇧Enter')} يضيف · ${iso('↑↓')} للتنقل`,
     shortcut: '⌘K',
     preparing: 'جارٍ تجهيز البحث…',
-    /* every hint must find something: lib/search.ts reads these Arabic words (ARABIC_TERMS) */
+    /* every hint must find something: lib/search.ts queryText() reads these words (ARABIC_WORDS / ARABIC_PHRASES) */
     hints: ['كيبل Type-C', 'شاحن 20W', 'سماعات TWS', 'كيبل آيفون', 'شاحن سيارة', 'باور بانك'],
     hintLead: 'ابحث',
     band: 'ابحث عن منتج أو كود',
@@ -514,7 +515,7 @@ export const ar: Strings = {
     contact: 'تواصل',
     clear: 'امسح ذاكرة هذا الهاتف',
     clearConfirm: 'حذف البيانات والكميات وعمليات البحث المحفوظة على هذا الهاتف؟',
-    cleared: 'مسح هذا الهاتف كل شيء.',
+    cleared: 'مُسح كل شيء من هذا الهاتف.',
     version: 'الإصدار',
     track: 'تتبّع الطلب',
     saved: 'المحفوظات',
