@@ -119,6 +119,12 @@ export interface RememberedOrder {
   order_no: string
   ts: number
   total?: number | null
+  /**
+   * R7d: kept because this phone OPENED the order's tracking link (a rep sent it, or it was placed
+   * on another phone) — not placed here. "Same as last time" never reuses such an order: the server
+   * reuses a phone only for the device that placed the order.
+   */
+  adopted?: boolean
 }
 
 export function rememberOrder(o: RememberedOrder): void {
@@ -128,6 +134,28 @@ export function rememberOrder(o: RememberedOrder): void {
 
 export function rememberedOrders(): RememberedOrder[] {
   return read<RememberedOrder[]>(KEYS.orders, []).filter((x) => x && typeof x.token === 'string' && x.token.length >= 16)
+}
+
+export function isRemembered(token: string): boolean {
+  return rememberedOrders().some((o) => o.token === token)
+}
+
+/**
+ * Opening a tracking link keeps that order in My orders on this phone (R7d). Returns true when it
+ * was new here; an order this phone already holds is left exactly as it is (placed stays placed).
+ * The list is newest first by when the order was PLACED, so an old order adopted today does not
+ * jump ahead of this phone's own last order.
+ */
+export function adoptOrder(o: Omit<RememberedOrder, 'adopted'>): boolean {
+  if (!o.token || o.token.length < 16 || isRemembered(o.token)) return false
+  const list = [...rememberedOrders(), { ...o, adopted: true }].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
+  write(KEYS.orders, list.slice(0, MAX_ORDERS))
+  return true
+}
+
+/** The newest order this phone PLACED (not adopted) — what "Same as last time" is built from. */
+export function lastPlacedOrder(): RememberedOrder | null {
+  return rememberedOrders().find((o) => !o.adopted) || null
 }
 
 export function forgetOrder(token: string): void {

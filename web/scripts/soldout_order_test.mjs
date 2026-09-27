@@ -101,14 +101,14 @@ const assert = (cond, msg) => {
 }
 const eq = (a, b, msg) => assert(JSON.stringify(a) === JSON.stringify(b), `${msg}: got ${JSON.stringify(a)}, want ${JSON.stringify(b)}`)
 
-test('strings: zero stock reads "Sold out", never "Out of stock"; the Arabic sits beside it; the dated form', () => {
-  eq(S.card.stockOut, 'Sold out', 'S.card.stockOut')
-  eq(S.card.soldOut, 'Sold out', 'S.card.soldOut')
+test('strings: zero stock reads "Sold Out" (capital O, owner 27-Sep), never "Out of stock"; the Arabic sits beside it; the dated form', () => {
+  eq(S.card.stockOut, 'Sold Out', 'S.card.stockOut')
+  eq(S.card.soldOut, 'Sold Out', 'S.card.soldOut')
   eq(S.card.stockOutAr, 'نفدت الكمية', 'S.card.stockOutAr')
   assert(!/out of stock/i.test(S.card.backorderNote), 'backorderNote still says "Out of stock"')
-  eq(S.card.soldOutAsOf('21 Sep'), 'Sold out · stock as of 21 Sep', 'the stale-snapshot label')
-  eq(S.card.leftOut(1), '1 sold-out line left out', 'leftOut singular')
-  eq(S.card.leftOut(3), '3 sold-out lines left out', 'leftOut plural')
+  eq(S.card.soldOutAsOf('21 Sep'), 'Sold Out · stock as of 21 Sep', 'the stale-snapshot label')
+  eq(S.card.leftOut(1), '1 Sold Out line left out', 'leftOut singular')
+  eq(S.card.leftOut(3), '3 Sold Out lines left out', 'leftOut plural')
 })
 
 test('partitionByAvailability: stable — each group keeps its incoming order', () => {
@@ -269,14 +269,14 @@ test('splitReorder: Order again adds what can be ordered today — backorder res
   eq(on.sold, [], 'backorder on: nothing left out')
 })
 
-test('"Deals" only for a live offer or a real price-book drop; clearance alone is "Last chance"', () => {
+test('"Deals" only for a live offer or a real price-book drop; clearance alone is "Clearing lines" (never "Last chance", R7d)', () => {
   const clearing = [item('L1', 'in_stock', { badges: ['clearance'] }), item('L2', 'in_stock', { badges: ['clearance'] })]
   eq(home.dealSets(clearing, []).hasRealDeals, false, 'clearance only')
   eq(home.dealSets([...clearing, { ...item('D1', 'in_stock', { price: 1.5 }), was_bhd: 2 }], []).hasRealDeals, true, 'a real was_bhd drop')
   eq(home.dealSets([...clearing, { ...item('D2', 'in_stock', { price: 1.5 }), was_bhd: 1.5 }], []).hasRealDeals, false, 'was_bhd not above the price is no drop')
   eq(home.dealSets([...clearing, item('O1', 'in_stock', { badges: ['on_offer'] })], []).hasRealDeals, true, 'a live offer line')
   eq(home.dealSets([...clearing, { ...item('D3', 'out_of_stock', { price: 1.5 }), was_bhd: 2 }], []).hasRealDeals, false, 'a sold-out drop is no deal on the shelf')
-  eq(S.shop.clearance, 'Last chance', 'the clearance wording the entry falls back to')
+  eq(S.shop.clearance, 'Clearing lines', 'the clearance wording the entry falls back to')
   eq(S.nav.deals, 'Deals', 'the deals wording')
 })
 

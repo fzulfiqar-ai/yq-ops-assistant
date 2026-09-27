@@ -1,11 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronDown, Lock, MessageCircle, ReceiptText } from 'lucide-react'
+import { Check, ChevronDown, History, Lock, MessageCircle, ReceiptText } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ShopApiError } from '@/lib/shopApi'
 import { RepCard } from '../components/RepCard'
 import { useMarket, useOrder } from '../MarketContext'
-import { clientOrderId, deviceId, EMPTY_CUSTOMER, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
+import { clientOrderId, deviceId, EMPTY_CUSTOMER, lastPlacedOrder, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
 import { en } from '../i18n/en'
 import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/format'
@@ -28,11 +28,16 @@ const FORM_ID = 'yq-market-checkout'
  * time; Email under "More"; "Already have a representative?" only when unattributed. The nav
  * hides here — one job. Submitting is idempotent (client_order_id) and never clears the form on
  * an error.
+ *
+ * R7d: a returning merchant gets "Same as last time: {shop} · {area}" — one tap fills the details
+ * of this phone's last order, and the phone number is reused ON THE SERVER through that order's
+ * token (reuse_token), so it never reaches this page. A visitor with no rep link sees "Your area
+ * representative: {name}" once the area is picked and the office has a rep for it (shop_area_reps).
  */
 export default function CheckoutPage() {
   const navigate = useNavigate()
   const m = useMarket()
-  const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders } = useOrder()
+  const { quote, quoting, coupon, setCoupon, note, setNote, refreshMyOrders, myOrders } = useOrder()
   const { rep, data, itemsByCode, recognized } = m
   const { viewport } = useShell()
   const reduced = useReducedMotion()
@@ -68,8 +73,13 @@ export default function CheckoutPage() {
     if (lines.length === 0 && !submitting) navigate('/cart', { replace: true })
   }, [lines.length, submitting, navigate])
 
+  /** the token of this phone's last order while "Same as last time" is in use (its phone is reused server-side) */
+  const [reuse, setReuse] = useState<string | null>(null)
+  const [lastMine] = useState(() => lastPlacedOrder())
+  const lastSummary = lastMine ? myOrders.find((o) => o.token === lastMine.token) : undefined
+  const lastDetails = lastSummary?.customer && (lastSummary.customer.name || lastSummary.customer.shop) ? lastSummary.customer : null
   const nameOk = customer.name.trim().length > 1
-  const phoneOk = isPhone(customer.phone)
+  const phoneOk = Boolean(reuse) || isPhone(customer.phone)
   const emailOk = !customer.email.trim() || isEmail(customer.email)
   const formOk = nameOk && phoneOk && emailOk
   const canSubmit = lines.length > 0 && formOk && !quoting && !submitting && quote?.can_submit !== false
@@ -103,6 +113,28 @@ export default function CheckoutPage() {
       .catch(() => undefined)
   }
 
+  /** "Same as last time": fill what is still empty from the last order and reuse its phone on the server. */
+  const applyLast = () => {
+    if (!lastMine || !lastDetails) return
+    const area = String(lastDetails.area || '').trim()
+    setCustomer((c) => ({
+      ...c,
+      name: c.name.trim() ? c.name : String(lastDetails.name || ''),
+      shop: c.shop.trim() ? c.shop : String(lastDetails.shop || ''),
+      area: c.area.trim() ? c.area : area,
+    }))
+    if (!customer.area.trim() && area) setOtherArea(!areas.includes(area))
+    setReuse(lastMine.token)
+    track('rail_click', { meta: { rail: 'same_as_last' } })
+  }
+  const changePhone = () => {
+    setReuse(null)
+    window.requestAnimationFrame(() => document.getElementById('yq-phone')?.focus())
+  }
+  /** a visitor with no rep link, before any order from this phone and with no pick: the office's rep for the area */
+  const areaReps = data?.settings?.area_reps || {}
+  const areaRepName = !rep && pick === '' && !recognized && customer.area.trim() ? areaReps[customer.area.trim().toLowerCase()] || null : null
+
   /** Take the merchant to the field that is holding the send up, instead of greying the button out. */
   const focusMissing = () => {
     const id = !phoneOk ? 'yq-phone' : !nameOk ? 'yq-name' : !emailOk ? 'yq-email' : ''
@@ -132,7 +164,9 @@ export default function CheckoutPage() {
         coupon_code: coupon || '',
         session_ref: rep?.slug || m.ref || undefined,
         salesman_id: !rep && pick !== '' ? Number(pick) : null,
-        customer: { name: customer.name.trim(), phone: cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() },
+        // with "Same as last time" the phone stays empty here: the server takes it from reuse_token's order
+        customer: { name: customer.name.trim(), phone: reuse ? '' : cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() },
+        reuse_token: reuse || undefined,
         // the representative reads the note in the portal: the chosen delivery option goes in English
         // whatever language the merchant ordered in (their own note is sent as they typed it)
         note: [deliveryPref != null ? `${en.checkout.deliveryLabel}: ${en.checkout.deliveryOptions[deliveryPref] ?? S.checkout.deliveryOptions[deliveryPref]}` : null, note.trim()].filter(Boolean).join(' · '),
@@ -149,11 +183,15 @@ export default function CheckoutPage() {
       setNote('')
       // kept only now — after the order went through, and only if the box is ticked (never per keystroke)
       setSaveDetails(save)
-      if (save) writeCustomer({ name: customer.name.trim(), phone: cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() })
+      // a reused phone was never on this page: keep whatever number was saved before (if any)
+      if (save) writeCustomer({ name: customer.name.trim(), phone: reuse ? readCustomer().phone : cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() })
       refreshMyOrders()
       navigate(`/o/${res.token}`, { replace: true, state: { placed: res } })
     } catch (err: unknown) {
-      setError(err instanceof ShopApiError ? err.detail || err.message : S.checkout.failed)
+      const detail = err instanceof ShopApiError ? err.detail || err.message : ''
+      setError(detail || S.checkout.failed)
+      // the server could not reuse the last order's phone (another phone's order, or gone): ask for it
+      if (reuse && /phone/i.test(detail)) changePhone()
       setSubmitting(false)
     } finally {
       window.clearTimeout(slowTimer)
@@ -223,14 +261,45 @@ export default function CheckoutPage() {
           {rep && <RepCard rep={rep} compact className="mt-3 lg:hidden" />}
 
           <form id={FORM_ID} onSubmit={submit} noValidate className="mt-4 grid gap-4 lg:grid-cols-2 lg:gap-x-5">
+            {/* "Same as last time": one tap instead of retyping — only while the phone is still empty */}
+            {lastDetails && !reuse && !customer.phone.trim() && (
+              <button
+                type="button"
+                onClick={applyLast}
+                className="flex w-full items-center gap-3 rounded-md border border-plum/20 bg-plum-wash px-3.5 py-3 text-start transition duration-1 ease-m hover:border-plum/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 lg:col-span-2"
+              >
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-surface text-plum shadow-1 ring-1 ring-inset ring-plum/10" aria-hidden="true">
+                  <History size={17} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-semibold text-plum-ink">{S.checkout.sameAsLast}</span>
+                  <span className="block truncate text-xs text-ink-2">{[lastDetails.shop, lastDetails.area ? areaLabel(lastDetails.area) : null].filter(Boolean).join(' · ') || lastDetails.name}</span>
+                </span>
+                <span className="shrink-0 rounded-full bg-plum px-3.5 py-1.5 text-xs font-semibold text-white">{S.checkout.useSame}</span>
+              </button>
+            )}
             <div>
-              <Label htmlFor="yq-phone">
+              <Label htmlFor={reuse ? undefined : 'yq-phone'}>
                 {S.checkout.phone} <span className="text-bad">*</span>
               </Label>
-              <Input id="yq-phone" type="tel" inputMode="tel" autoComplete="tel" dir="ltr" className="rtl:text-right" value={customer.phone} onChange={(e) => set('phone', e.target.value)} onBlur={() => blur('phone')} placeholder="33001122" required aria-invalid={touched.phone && !phoneOk} aria-describedby="yq-phone-hint" />
-              <Hint id="yq-phone-hint" error={touched.phone && !phoneOk}>
-                {touched.phone && !phoneOk ? S.checkout.phoneBad : S.checkout.phoneHint}
-              </Hint>
+              {reuse ? (
+                <div className="flex h-12 items-center justify-between gap-3 rounded-md border border-plum/20 bg-plum-wash px-3.5 text-sm">
+                  <span className="flex min-w-0 items-center gap-2 font-medium text-plum-ink">
+                    <Check size={15} className="shrink-0" aria-hidden="true" />
+                    <span className="truncate">{S.checkout.samePhone}</span>
+                  </span>
+                  <button type="button" onClick={changePhone} className="hit relative shrink-0 font-semibold text-plum hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
+                    {S.checkout.change}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <Input id="yq-phone" type="tel" inputMode="tel" autoComplete="tel" dir="ltr" className="rtl:text-right" value={customer.phone} onChange={(e) => set('phone', e.target.value)} onBlur={() => blur('phone')} placeholder="33001122" required aria-invalid={touched.phone && !phoneOk} aria-describedby="yq-phone-hint" />
+                  <Hint id="yq-phone-hint" error={touched.phone && !phoneOk}>
+                    {touched.phone && !phoneOk ? S.checkout.phoneBad : S.checkout.phoneHint}
+                  </Hint>
+                </>
+              )}
             </div>
             <div>
               <Label htmlFor="yq-shop">{S.checkout.shop}</Label>
@@ -282,6 +351,7 @@ export default function CheckoutPage() {
               ) : (
                 <Input id="yq-area" autoComplete="address-level2" value={customer.area} onChange={(e) => set('area', e.target.value)} placeholder={S.checkout.areaPlaceholder} />
               )}
+              {areaRepName && <p className="mt-2 text-sm font-medium text-plum-ink">{S.checkout.areaRep(areaRepName)}</p>}
             </div>
 
             <div className="lg:col-span-2">

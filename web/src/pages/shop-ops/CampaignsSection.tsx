@@ -82,7 +82,7 @@ const AUDIENCES: { key: Audience; label: string }[] = [
 /** Real Browse filters (web/src/market/lib/facets.ts) and routes — wholesale destinations first. */
 const CTA_PRESETS: { label: string; to: string }[] = [
   { label: 'Stock-Up Deals', to: '/shop?f=deals' },
-  { label: 'Last-chance stock', to: '/shop?f=clearance' },
+  { label: 'Clearing lines', to: '/shop?f=clearance' },
   { label: 'Price drops', to: '/shop?f=drops' },
   { label: 'Restock essentials', to: '/shop?f=best' },
   { label: 'Moving fast', to: '/shop?f=moving' },
@@ -101,7 +101,7 @@ interface CanvasDef { key: CampaignCanvas; label: string; hint: string; bg: stri
 const NIGHT_GRADIENT = 'linear-gradient(135deg, #2a1259, #140f24)'
 const CANVASES: CanvasDef[] = [
   { key: 'lilac', label: 'Lilac', hint: 'Everyday promotions — soft lilac, ink text.', bg: '#EADCF9', rgb: '234,220,249', dark: false },
-  { key: 'apricot', label: 'Apricot', hint: 'Deals and last-chance stock — warm apricot, ink text.', bg: '#FDE1C3', rgb: '253,225,195', dark: false },
+  { key: 'apricot', label: 'Apricot', hint: 'Deals and clearing lines — warm apricot, ink text.', bg: '#FDE1C3', rgb: '253,225,195', dark: false },
   { key: 'mint', label: 'Mint', hint: 'Restock essentials and new lines — fresh mint, ink text.', bg: '#C9EDDD', rgb: '201,237,221', dark: false },
   { key: 'plum', label: 'Plum', hint: 'Brand moments — YQ plum with white text.', bg: '#6D4091', rgb: '109,64,145', dark: true },
   { key: 'night', label: 'Night', hint: 'Statement hero — the YQ night horizon with white text.', bg: NIGHT_GRADIENT, rgb: '20,15,36', dark: true },
@@ -415,7 +415,7 @@ function CreativeThumb({ c, byUpper }: { c: Campaign; byUpper: Map<string, ShopI
 /* ───────────────────────── product picker (compose) ───────────────────────── */
 
 const QUICK_PICKS: { key: string; label: string; test: (i: ShopItem) => boolean }[] = [
-  { key: 'clearance', label: 'Last-chance lines', test: (i) => hasBadge(i, 'clearance') },
+  { key: 'clearance', label: 'Clearing lines', test: (i) => hasBadge(i, 'clearance') },
   { key: 'best', label: 'Restock essentials', test: (i) => hasBadge(i, 'best_seller') },
   { key: 'drops', label: 'Price drops', test: realDrop },
   { key: 'new', label: 'New arrivals', test: (i) => hasBadge(i, 'new') },
@@ -423,7 +423,7 @@ const QUICK_PICKS: { key: string; label: string; test: (i: ShopItem) => boolean 
 ]
 
 const BADGE_LABEL: Partial<Record<BadgeKind, { label: string; tone: BadgeTone }>> = {
-  clearance: { label: 'Last chance', tone: 'amber' },
+  clearance: { label: 'Clearing line', tone: 'amber' },
   price_drop: { label: 'Price drop', tone: 'rose' },
   best_seller: { label: 'Best seller', tone: 'ink' },
   new: { label: 'New', tone: 'green' },
@@ -801,7 +801,7 @@ function CampaignDialog({ campaign, rules, catalog, catalogStatus, onClose, onSa
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="block">
                 <span className={LABEL}>Title *</span>
-                <Input value={f.title} onChange={(e) => set('title', e.target.value)} placeholder="Last-chance cables at trade price" maxLength={80} />
+                <Input value={f.title} onChange={(e) => set('title', e.target.value)} placeholder="Clearing cables at trade price" maxLength={80} />
               </label>
               <label className="block" dir="rtl">
                 <span className={cn(LABEL, 'text-right')}>العنوان (عربي)</span>
@@ -1146,7 +1146,7 @@ export function CampaignsSection() {
         <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center">
           <Megaphone size={26} className="mx-auto text-muted-foreground" />
           <p className="mt-3 font-display text-[15px] font-bold">No campaigns yet</p>
-          <p className="mx-auto mt-1 max-w-md text-[12.5px] text-muted-foreground">Start with last-chance stock or restock essentials — compose it from three products, no design work needed. The marketplace shows it within a minute.</p>
+          <p className="mx-auto mt-1 max-w-md text-[12.5px] text-muted-foreground">Start with clearing lines or restock essentials — compose it from three products, no design work needed. The marketplace shows it within a minute.</p>
         </div>
       ) : (
         <DataTable rows={rows} cols={cols} />

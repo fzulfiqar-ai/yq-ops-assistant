@@ -36,7 +36,7 @@ export function hasPhoto(i: Pick<ShopItem, 'thumb_urls' | 'thumb_url' | 'product
 }
 
 /**
- * Last-Chance Stock: clearing lines still on the shelf (low stock included), the best real
+ * Clearing lines: clearing lines still on the shelf (low stock included), the best real
  * retail margin first (lines without a public retail price after), then shelf order. No cap.
  */
 export function lastChance(items: ShopItem[]): ShopItem[] {
@@ -107,8 +107,8 @@ function isLiveOffer(o: Offer): boolean {
 
 /**
  * The Stock-Up Deals section, from real data only: price-book drops that carry the old price
- * (`hasRealDrop`), live offers, bundle rules, and last-chance lines. Every set is in stock. A code
- * sits in one of drops/offers/bundles first (drops and offers may share a code), and last-chance
+ * (`hasRealDrop`), live offers, bundle rules, and clearing lines. Every set is in stock. A code
+ * sits in one of drops/offers/bundles first (drops and offers may share a code), and clearing
  * never repeats one of them. Every set — and the combined All — is then de-clustered
  * (`spreadFamilies`) so two variants of one model never land side by side.
  */
@@ -225,7 +225,7 @@ export function brandTiles(items: ShopItem[]): BrandTile[] {
  *
  * The stage keeps two slides before a second tile is cut from it. A stage of one is a static
  * board with no dots and no reason to look twice, and the deck is short on purpose — with this
- * catalog it is three (Last-Chance Stock · price drops · the brand slide), so taking two tiles
+ * catalog it is three (Clearing lines · price drops · the brand slide), so taking two tiles
  * left the largest box on the page holding a single frame. Tiles are therefore rationed by what
  * the deck can spare: 4+ slides → two tiles, 3 → one, fewer → none.
  */

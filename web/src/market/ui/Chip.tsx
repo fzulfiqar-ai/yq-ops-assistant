@@ -6,7 +6,7 @@ export type ChipTone = 'plum' | 'ok' | 'warn' | 'bad' | 'ink' | 'grey' | 'deal' 
 /**
  * Small status chip. A tint and a hairline ring — a footnote, not a headline.
  * `ink` is the one solid chip (Best seller): it has to read on a white photo tile.
- * `deal` (Last chance, Deal) is the amber wash with an amber hairline; `fresh` (New) the mint one.
+ * `deal` (Clearing line, Deal) is the amber wash with an amber hairline; `fresh` (New) the mint one.
  * Both keep AA text: deal-ink 8.1:1 on deal-soft, fresh-ink 6.9:1 on fresh-soft.
  * `spec` is a product fact, not a status (the card's variant chips: "Type-C → Type-C", "60W"):
  * the palest plum wash with plum-ink text and a plum hairline, so a row of them stays quiet.

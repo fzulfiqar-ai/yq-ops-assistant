@@ -257,10 +257,10 @@ export function homeGridOrder(items: readonly ShopItem[], railCodes: ReadonlySet
 export type SortMode = 'shelf' | 'popular' | 'price_asc' | 'price_desc'
 /**
  * The Browse quick filters (?f=a,b — AND across them). Destinations link straight to one:
- *   deals     Stock-Up Deals: a real price-book drop, a live offer, or a last-chance line
+ *   deals     Stock-Up Deals: a real price-book drop, a live offer, or a clearing line
  *   drops     a real price-book drop — the card prints the old trade price (priceAnchor)
  *   offers    a live offer (the `on_offer` badge) — never a retail anchor
- *   clearance last-chance (clearing) lines
+ *   clearance clearing lines
  *   best      Restock essentials (best sellers) · moving: Moving fast (trending / selling fast)
  *   new · saved · instock
  */
@@ -278,7 +278,7 @@ export function isOffer(it: ShopItem): boolean {
   return hasBadge(it, 'on_offer')
 }
 
-/** Stock-Up Deals: a real price drop, a live offer, or a last-chance (clearing) line — never a markdown. */
+/** Stock-Up Deals: a real price drop, a live offer, or a clearing line — never a markdown. */
 export function isDeal(it: ShopItem): boolean {
   return isRealDrop(it) || isOffer(it) || hasBadge(it, 'clearance')
 }
@@ -322,7 +322,7 @@ const DESTINATIONS: readonly QuickFilter[] = ['deals', 'clearance', 'drops', 'of
 
 /**
  * Shelf order on a destination shelf: lines in stock first ("while stock lasts"); on a deals or
- * last-chance shelf the real price drops and offers lead, then clearing lines by the merchant's real
+ * clearing shelf the real price drops and offers lead, then clearing lines by the merchant's real
  * margin (marginOf, highest first), then the shelf order. Anything else keeps the shelf order —
  * sold-out lines last, as everywhere.
  */

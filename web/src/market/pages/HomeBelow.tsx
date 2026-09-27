@@ -103,7 +103,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
   const [visible, setVisible] = useState(FIRST)
   const hasDeals = useMemo(() => applyQuickFilters(items, DEALS).length > 0, [items])
   // "Deals" only when a live offer or a real price-book drop exists; otherwise the same pill holds
-  // exactly the last-chance lines and says so (the clearance wording)
+  // exactly the clearing lines and says so (the clearance wording)
   const dealsLabel = useMemo(() => (dealSets(items, offerRules).hasRealDeals ? S.nav.deals : S.shop.clearance), [items, offerRules])
   const filtering = inStockOnly || dealsOnly
   const grid = useMemo(() => {
@@ -201,7 +201,7 @@ export default function HomeBelow({ recent, lastLines, lastCodes, desktop, conti
           This rail sits AFTER every in-stock rail (regulars, deals, essentials, fresh, brands,
           moving, viewed) and BEFORE the continue card and the grid: what a shop can order today
           always outranks what it cannot order yet, and nothing sold out or unavailable may render
-          above it. A workstream that adds rails to this file (e.g. sold-out / last-chance) must
+          above it. A workstream that adds rails to this file (e.g. sold-out / clearing) must
           place them above this block only if they are in-stock rails, otherwise below the grid. */}
       <Sect>
         <Suspense fallback={null}>

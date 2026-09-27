@@ -41,7 +41,7 @@ export interface Slide {
   sponsored?: string | null
   endsAt?: string | null
   campaignId?: number | null
-  /** a round word sticker the data backs (never a number): Last chance, New, Price drops */
+  /** a round word sticker the data backs (never a number): New, Price drops, Coming soon. The clearing slides carry none (R7d): their title says it, and "Clearing" does not fit the 54 px disc */
   sticker?: { label: string; tone: 'deal' | 'fresh' | 'drop' } | null
 }
 
@@ -85,7 +85,7 @@ const ART = 3
 
 /**
  * The slides, in order: campaigns (by placement priority, hero before strip) → data slides, each
- * only when the data backs it (last chance ≥3, price drops ≥2, restock essentials ≥3, new ≥3,
+ * only when the data backs it (clearing line ≥3, price drops ≥2, restock essentials ≥3, new ≥3,
  * moving ≥3) → the brand slide → paste-a-list (always). Order again (a recognised merchant) goes
  * SECOND, so slide 1 depends on the catalog payload alone — public/catalog-prefetch.js preloads its
  * image before the app has even downloaded (mirror any change to the slide-1 rules there).
@@ -113,7 +113,7 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
 
   // Composed art keeps the pool's order but prefers photos no earlier slide used and, within a
   // slide, different categories — three look-alike chargers make a dull creative. `strict` takes
-  // the pool's top photos as they are (last chance: the best margins).
+  // the pool's top photos as they are (clearing line: the best margins).
   const usedArt = new Set<string>()
   const art = (pool: ShopItem[], strict = false): ShopItem[] => {
     const photos = pool.filter(hasPhoto)
@@ -160,7 +160,7 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
   const best = live.filter((i) => hasBadge(i, 'best_seller'))
 
   if (deals.lastChance.length >= MIN_DATA && wants('d:last', 'data')) {
-    push({ id: 'd:last', kind: 'data', kicker: deals.hasRealDeals ? S.deals.title : null, title: S.slides.last, line: S.slides.lastLine(deals.lastChance.length), cta: S.slides.lastCta, to: '/shop?f=clearance', canvas: 'apricot', products: art(deals.lastChance, true), sticker: { label: S.deals.badge, tone: 'deal' } })
+    push({ id: 'd:last', kind: 'data', kicker: deals.hasRealDeals ? S.deals.title : null, title: S.slides.last, line: S.slides.lastLine(deals.lastChance.length), cta: S.slides.lastCta, to: '/shop?f=clearance', canvas: 'apricot', products: art(deals.lastChance, true), sticker: null })
   }
   if (deals.drops.length >= 2 && wants('d:drops', 'data')) {
     push({ id: 'd:drops', kind: 'data', kicker: S.deals.title, title: S.slides.drops(deals.drops.length), line: S.slides.dropsLine, cta: S.slides.dropsCta, to: '/shop?f=drops', canvas: 'lilac', products: art(deals.drops), sticker: { label: S.deals.drops, tone: 'drop' } })
@@ -220,7 +220,7 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
 export const SECTION_SLIDE_IDS: readonly string[] = ['d:essentials', 'd:moving', 'd:quick']
 
 /**
- * The two slides the Stock-Up Deals section states again in its own chips ("Last chance 24",
+ * The two slides the Stock-Up Deals section states again in its own chips ("Clearing line 24",
  * "Price drops 4") a screen and a half below the hero. One of them is a promotion; both of them
  * are the section's table of contents.
  */
@@ -238,7 +238,7 @@ const DEALS_SLIDE_IDS: readonly string[] = ['d:last', 'd:drops']
  *
  * `deals` caps how many of the deck's cards may come from the Stock-Up Deals section. A phone deck
  * is a stack of equals, one after the other, so it passes 1: with this catalog both survivors were
- * that section ("Last-Chance Stock · 24 lines" then "4 prices cut in our price book"), which made
+ * that section ("Clearing lines · 24 lines" then "4 prices cut in our price book"), which made
  * the app's first impression "we are clearing stock", said twice, and no positioning at all. The
  * desktop composition reads as one frame — a stage beside two smaller tiles — where the second
  * deals card is a tile, not a repeat, so it leaves the cap open.
@@ -300,7 +300,7 @@ function campaignSlide(c: Campaign, fallbackCanvas: SlideCanvas, byCode: Map<str
 /**
  * The header creative of one category's shelf (CampaignStrip.tsx CategoryBanner): the campaign an
  * admin placed on that category; else, when the shelf's `items` are given, a banner composed from
- * them — the one message its data backs as the headline (last-chance lines → price drops → new
+ * them — the one message its data backs as the headline (clearing lines → price drops → new
  * arrivals; the CTA filters this shelf), the shelf's stock as a kicker, and three of those photos.
  * With no such message the banner is not a link and falls back to the category name.
  * Null when there is nothing to show.
@@ -323,7 +323,7 @@ export function categorySlide(campaigns: Campaign[], category: string, items?: S
   const base = { kind: 'data' as const, kicker: S.campaign.categoryStock(live.length, pool.length) }
   let slide: Slide
   if (deals.lastChance.length) {
-    slide = { ...base, id: 'k:last', title: S.campaign.categoryLast(deals.lastChance.length), line: S.deals.line, cta: S.slides.lastCta, to: `${shelf}?f=clearance`, canvas: 'apricot', products: deals.lastChance, sticker: { label: S.deals.badge, tone: 'deal' } }
+    slide = { ...base, id: 'k:last', title: S.campaign.categoryLast(deals.lastChance.length), line: S.deals.line, cta: S.slides.lastCta, to: `${shelf}?f=clearance`, canvas: 'apricot', products: deals.lastChance, sticker: null }
   } else if (deals.drops.length) {
     slide = { ...base, id: 'k:drops', title: S.campaign.categoryDrops(deals.drops.length), line: S.slides.dropsLine, cta: S.slides.dropsCta, to: `${shelf}?f=drops`, canvas: 'lilac', products: deals.drops, sticker: { label: S.deals.drops, tone: 'drop' } }
   } else if (fresh.length) {

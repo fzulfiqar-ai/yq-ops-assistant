@@ -49,7 +49,7 @@ marks anything down. No invented anchors, timers or scarcity. A struck-through p
 real previous trade price after a cut in the price book (`was_bhd`, rendered as the "Was … ↓x%"
 pill); **retail is never struck through** — it is shown as the merchant's own maths instead
 (`marginOf()`: `Retail BHD 1.500 · Your margin BHD 1.100/pc · 73%`). "Only a few left" comes from
-stock. "Deal" is reserved for a real drop, offer or bundle; a clearing line reads "Last chance".
+stock. "Deal" is reserved for a real drop, offer or bundle; a clearing line reads "Clearing line" (R7d, 27-Sep-2026: never "Last chance" — the clearing lines have years of cover).
 
 ## One codebase, two builds
 
@@ -82,7 +82,7 @@ stay equal: `web/src/MarketApp.tsx` (`RESERVED`), `web/public/catalog-prefetch.j
   `--m-content-max: 1600px`, `--m-safe-b` (every safe-area read goes through it), `--m-bottom-stack`
   (measured by the shell). Light only (`color-scheme: only light`).
   **v3 additions** (mirrored into `tailwind.market.config.js` as `deal`, `fresh`, `sash`, `tile.*`,
-  `night`, `arc.*`): `--m-deal` amber `#F2B33D` + `-soft`/`-ink` (Last chance / Deal), `--m-fresh`
+  `night`, `arc.*`): `--m-deal` amber `#F2B33D` + `-soft`/`-ink` (Clearing line / Deal), `--m-fresh`
   mint `#2E9E6B` + `-soft`/`-ink` (New), `--m-sash` `#824FAB` (the header diagonal), the pastel promo
   canvases `--m-tile-lilac / -apricot / -mint`, and the portal's night set `--m-night` `#140F24`,
   `--m-night-2` `#2A1259`, arcs `--m-arc-1/2/3` (`#1C0B3F`, `#4922E5`, `#A558FB`) with
@@ -155,7 +155,7 @@ wide ≥1280` synchronously from `matchMedia`.
   promise bar** (`PromiseBar`, with "Add YQ app" at its end), then a sticky 72px glass
   **`StickyHeader`**: logo + "Where Bahrain restocks." · **Browse** mega-nav (category preview, facet
   chips, four best sellers with Add) · a large search trigger carrying the same rotating hint that
-  opens the ⌘K palette · **Deals** (only when real deals or last-chance lines are in stock; it
+  opens the ⌘K palette · **Deals** (only when real deals or clearing lines are in stock; it
   replaced the old New / Offers / Clearance links) · Quick order · Orders · My YQ · **Restock** (line
   count and a thin wholesale-progress line). A category strip rides under it on Home and Browse,
   which makes the sticky block taller than the header row — everything that must sit below it pins to
@@ -206,7 +206,7 @@ wide ≥1280` synchronously from `matchMedia`.
   (one slider now), the separate product hero and its `useTilt` hook.
 - `pages/` — `Home` (two-phase render; the below-the-fold half is its own chunk, **`HomeBelow`**),
   `ShopPage` (tiles + entries; with `?f=` it is the "See all" shelf), `CategoryPage` → `GridPage`
-  (facets, sort, sticky chips **In stock · Deals · Price drops · Last chance · Saved**, grid/list,
+  (facets, sort, sticky chips **In stock · Deals · Price drops · Clearing lines · Saved**, grid/list,
   all in the URL), `SearchPage` (instant grouped results; empty state = Recent → Popular restocks →
   categories), `QuickOrderPage`, `CartPage` ("Your restock"), `CheckoutPage`, `TrackingPage`,
   `MyOrdersPage`, `MyYQPage`, `AboutPage` (`#how`, `#trade`, `#delivery`, `#privacy`).
@@ -227,7 +227,7 @@ control, 5.5s auto-advance that pauses on touch/scroll/focus/hidden tab and for 
 **category tiles** (`HomeBlocks.CategoryTiles`) → what to do next (**`ContinueRestock`** — the
 wholesale gap with one-tap fillers, or Order again, or the paste card — the track card, the live
 offer strip, the three wholesale actions, the rep card) → *[phase 2, `HomeBelow`]* Your regular stock
-(recognised) → **Restock essentials** → **Stock-Up Deals / Last-Chance Stock** (`DealsSection`) →
+(recognised) → **Restock essentials** → **Stock-Up Deals / Clearing lines · trade price** (`DealsSection`) →
 **New arrivals** → **`BrandTiles`** → **Moving fast in Bahrain** (the one tinted block in the middle
 of the page) → Picked up again → the paste card (first visits) → **All products** (In stock / Deals
 chips, grid or list, 12 cards then a page on idle) → **`CtaBand`** "Ready to restock?" on the night
@@ -282,7 +282,7 @@ a box the page cannot scroll).
 `MarketOrderResponse` → the placed screen; and `orders_by_tokens()` selects it → `MyOrderSummary` →
 the badge on `/orders`, `/me` and the tracking page.
 
-## Stock-Up Deals / Last-Chance Stock
+## Stock-Up Deals / Clearing lines
 
 Owner decision (17-Sep-2026): **no markdown of any kind** — every price shown is the price book's.
 The section sells *availability + margin*. `dealSets()` (`lib/home.ts`) builds four real sets, all in
@@ -297,15 +297,15 @@ by side:
 | `lastChance` | the `clearance` badge, best real retail margin first, no cap |
 
 `DealsSection` is titled **Stock-Up Deals** only when at least one *real* deal exists
-(`hasRealDeals`); otherwise it is simply **Last-Chance Stock**, kicker *"Lines we're clearing · trade
-price · while stock lasts"*. Chips (All · Price drops · Offers · Bundles · Last chance) appear only
+(`hasRealDeals`); otherwise it is simply **Clearing lines · trade price**, kicker *"Lines we’re clearing, at the
+normal trade price."* (R7d: no "Last chance", no "while stock lasts" — false scarcity). Chips (All · Price drops · Offers · Bundles · Clearing lines) appear only
 for sets that have lines, and only when there is more than one kind. Phone: a swipe rail with a
 See-all tile. Desktop: two full rows of grid cards that rise in.
 
 **The merchant's maths is on the card**, not a discount: `MarginStrip` prints `Retail BHD 1.500` over
 `Your margin BHD 1.100/pc · 73%` (one line on narrow cards), from `marginOf()` — the payload's own
 `compare_at_bhd`/`b2c_bhd` against `price_bhd`. A solid amber **"High margin"** tag appears only at
-≥ 50 % of retail. The badge on a clearing line is **"Last chance"** (amber); "Deal" is reserved for a
+≥ 50 % of retail. The badge on a clearing line is **"Clearing line"** (amber; the clearing slides carry no sticker); "Deal" is reserved for a
 real offer or drop; a genuine cut also gets the **"Was 2.000 · ↓5%"** pill in its own slot. Elsewhere
 the same lines are surfaced as a data slide, the desktop Spotlight, the Browse `Deals` chip, the
 category-page composed banner, and the gap-filler tie-break above.

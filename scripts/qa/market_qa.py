@@ -74,7 +74,7 @@ STR = {
     "spot.title": "Right now at YQ",
     "cart.mini": "Your restock",
     "home.all": "All products",
-    "card.soldOut": "Sold out",
+    "card.soldOut": "Sold Out",
     "card.tellBack": "Tell me when back",
     "states.showMore": "Show more (",
     "shop.notInStock": "Not in stock now",
@@ -132,11 +132,14 @@ LANG = "en"
 # sold-out rule (24-Sep-2026) — zero stock reads "Sold out" (Arabic «نفدت الكمية»), never "Out of
 # stock" — and the WEKOME rule (27-Sep-2026): never the internal tier word, never a count of designs
 # ("34 designs"). Plural only: a live catalog name carries "(Airpord 1 Design)" and the probe matches
-# case-insensitively. Keep it on ONE line: tests/test_r1_soldout.py reads it with a single-line regex.
-BANNED = r"slow mover|no minimum|Save \d+%|out of stock|sub-?premium|\b\d+ designs\b"
-# --lang ar adds these: "out of stock" said literally (the rule is «نفدت الكمية»), and the tier or
-# luxury words the WEKOME copy may never use (tests/test_r1b_upcoming.py bans the same four)
-BANNED_AR = r"غير متوفر في المخزون|نفد من المخزون|بريميوم|أرقى|فاخر|ممتاز"
+# case-insensitively. R7d (27-Sep-2026): "Last chance" too — the clearing lines have years of cover
+# (false scarcity); they read "Clearing line(s)". Keep it on ONE line: tests/test_r1_soldout.py reads
+# it with a single-line regex.
+BANNED = r"slow mover|no minimum|Save \d+%|out of stock|sub-?premium|\b\d+ designs\b|last.chance"
+# --lang ar adds these: "out of stock" said literally (the rule is «نفدت الكمية»), the tier or
+# luxury words the WEKOME copy may never use (tests/test_r1b_upcoming.py bans the same four), and
+# the "last chance" wording (R7d: the clearing lines read «تصفية»)
+BANNED_AR = r"غير متوفر في المخزون|نفد من المخزون|بريميوم|أرقى|فاخر|ممتاز|فرصة أخيرة|الفرصة الأخيرة"
 
 CART_KEY = "yq-shop-cart:market"
 SPLASH_KEY = "yq-splash-session"
@@ -205,7 +208,7 @@ def states(slug: str | None) -> list[State]:
         State("home", "/", "Home, first visit", ready="main", full_page=True),
         State("shop", "/shop", "Browse", ready="main", full_page=True),
         State("shop_deals", "/shop?f=deals", "Browse · Deals", ready="main"),
-        State("shop_clearance", "/shop?f=clearance", "Browse · Last chance", ready="main"),
+        State("shop_clearance", "/shop?f=clearance", "Browse · Clearing lines", ready="main"),
         State("shop_best", "/shop?f=best", "Browse · Essentials", ready="main"),
         State("shop_moving", "/shop?f=moving", "Browse · Moving fast", ready="main"),
         State("category", "/t/cable", "Category · Cable", ready="main"),
