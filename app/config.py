@@ -91,6 +91,13 @@ class Settings:
             self.trusted_proxy_hops: int = max(0, int(os.getenv("TRUSTED_PROXY_HOPS", _hops_default) or 0))
         except ValueError:
             self.trusted_proxy_hops = int(_hops_default)
+        # R7d (audit SEC-11): Render is fronted by Cloudflare, which OVERWRITES CF-Connecting-IP
+        # with the address it saw, so behind a trusted proxy that header is the real client (the
+        # right-most X-Forwarded-For entry is a Cloudflare edge: 3 addresses a day for 225 devices,
+        # read-only check 27-Sep-2026). On by default wherever the proxy hops are trusted; set
+        # TRUST_CF_CONNECTING_IP=0 if the API ever stops sitting behind Cloudflare.
+        self.trust_cf_connecting_ip: bool = (os.getenv("TRUST_CF_CONNECTING_IP", "1").strip().lower()
+                                             not in ("0", "false", "no", "off"))
         # Machine-to-machine key for schedulers / n8n agent flows (X-Agent-Key header).
         # Empty by default → agent-key auth is disabled until set in the environment.
         self.agent_api_key: str = os.getenv("AGENT_API_KEY", "")

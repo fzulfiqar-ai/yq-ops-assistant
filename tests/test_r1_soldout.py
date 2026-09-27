@@ -250,10 +250,13 @@ def _():
     api = _read("app/shop_api.py")
     src = _read("app/shop.py")
     staff_call = "shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, (sm or {}).get(\"referral_code\"), staff=True)"
-    merchant_call = "shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code)\n"
+    # R7d: the merchant routes also pass the hold-out key (bucket_key=…) — never a staff flag
+    merchant_call = "shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code"
     assert api.count(staff_call) == 1, "/shop/quote must price as staff"
     assert api.count(merchant_call) == 2, "the two merchant quote routes (/public/market/quote, /public/shop/{token}/quote) stay on the merchant switch"
-    assert "referral_code, ctx=ctx, staff=staff)" in src, "create_order must pass its staff flag"
+    for part in api.split(merchant_call)[1:]:
+        assert "staff" not in part[:part.index(")\n")], "a merchant quote route must never pass a staff flag"
+    assert "referral_code, ctx=ctx, staff=staff" in src, "create_order must pass its staff flag"
 
 
 # ── the payload order: sold out last, shelf order inside each half ─────────────
