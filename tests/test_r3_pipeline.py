@@ -1349,15 +1349,20 @@ def _():
         rows = {r[0]: r[1:] for r in cur.fetchall()}
         assert set(rows) == {"YQ-R3-1", "YQ-R3-2", "YQ-R3-3", "YQ-R3-4", "YQ-R3-6"}, "delivered orders only"
         r1, r2, r3, r4, r6 = rows["YQ-R3-1"], rows["YQ-R3-2"], rows["YQ-R3-3"], rows["YQ-R3-4"], rows["YQ-R3-6"]
+        # R7a (scripts/r7_focus_links_migration.sql) compares an invoice with the SUM of the orders on it:
+        # on a schema copy taken after that release, SI-9 (10.000) typed on two 10.000 orders is a -10.000 gap
+        cur.execute("select to_regclass('public.shop_order_focus_links') is not null")
+        r7 = bool(cur.fetchone()[0])
         assert r1[:4] == (True, False, False, False) and r1[4] is None and r1[8] is False, r1
-        assert r2[:4] == (False, False, False, False) and float(r2[4]) == 10.0 and r2[5] == "REP A" and float(r2[6]) == 0, r2
+        assert r2[:4] == (False, False, False, r7) and float(r2[4]) == 10.0 and r2[5] == "REP A" \
+            and float(r2[6]) == (-10.0 if r7 else 0), r2
         # ' si-10 ' joins SI-10 (case / whitespace insensitive); Focus says REP B and 9.500 vs the CONFIRMED 10.000
         assert r3[:4] == (False, False, True, True) and float(r3[4]) == 9.5 and r3[5] == "REP B" and float(r3[6]) == -0.5, r3
         assert float(r3[7]) == 10.0, "the confirmed total is what Focus is compared with"
         assert r4[:4] == (False, True, False, False) and r4[4] is None and float(r4[7]) == 5.0 and r4[8] is False, r4
         # SI-9 sits on two DELIVERED orders (9002 and 9006, ' si-9 ' normalised): both read invoice_reused;
         # the confirmed 9005 with the same number does not count, and neither order is otherwise flagged
-        assert r2[8] is True and r6[8] is True and r6[:4] == (False, False, False, False), (r2, r6)
+        assert r2[8] is True and r6[8] is True and r6[:4] == (False, False, False, r7), (r2, r6)
         assert r3[8] is False, "one order per invoice reads clean"
         # the audit is append-only even for the owner of the table — rows, and the table as a whole
         cur.execute("insert into shop_admin_audit (actor, entity, entity_id, action, before, after) "
