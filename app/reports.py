@@ -814,10 +814,39 @@ def inventory_for_viewer(out: dict, sees_cost: bool) -> dict:
     return shown
 
 
+# the Dashboard's business-health fields that are cost, margin or gross profit (Margins only). They are
+# kept as null, not dropped, so a page built before this change renders "—" instead of crashing.
+DASHBOARD_HEALTH_COST_KEYS = ("gp_bhd", "gp_pct", "landed_gp_pct", "landed_gp_bhd", "landed_coverage_pct",
+                              "cost_coverage_pct", "below_cost_count", "dead_stock_bhd", "dead_stock_uncosted")
+
+
+def dashboard_for_viewer(out: dict, sees_cost: bool) -> dict:
+    """The Dashboard a login without 'Margins' may read (the final review's follow-up to finding 6: the
+    Command Centre hid them, /report/dashboard still sent them): no gross profit, margin, below-cost
+    list or count, no dead stock at cost. A NEW dict — the cached report is shared by every caller."""
+    if sees_cost or not isinstance(out, dict):
+        return out
+    shown = dict(out)
+    health = out.get("health")
+    if isinstance(health, dict):
+        shown["health"] = {**{k: v for k, v in health.items() if k not in DASHBOARD_HEALTH_COST_KEYS},
+                           **{k: None for k in DASHBOARD_HEALTH_COST_KEYS},
+                           "margin_available": False, "stock_basis": None, "cost_hidden": True}
+    alerts = out.get("alerts")
+    if isinstance(alerts, dict):
+        shown["alerts"] = {**{k: v for k, v in alerts.items() if k != "negative_margins"},
+                           "negative_margins": [], "negative_margin_count": None}
+    shown["actions"] = [a for a in out.get("actions") or [] if not (isinstance(a, dict) and a.get("to") == "/margins")]
+    shown["cost_hidden"] = True
+    return shown
+
+
 def report_for_viewer(key: str, out, sees_cost: bool):
     """GET /report/{key}: the cached report cut to what this login may read."""
     if key == "inventory":
         return inventory_for_viewer(out, sees_cost)
+    if key == "dashboard":
+        return dashboard_for_viewer(out, sees_cost)
     return out
 
 

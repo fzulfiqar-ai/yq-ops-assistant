@@ -39,8 +39,9 @@ interface ActionItem { action: string; to: string; bhd: number; urgency: number 
 /** R7d: gp_pct is THE official margin (ex-VAT sales vs Focus COGS, every item costed — app/metrics.py);
  *  landed_* is the secondary MRN margin with its coverage; dead stock is valued at COST. */
 interface Health {
-  gp_bhd: number; gp_pct: number; ar_overdue_pct: number
-  dso_days: number; dead_stock_bhd: number; dead_stock_count: number
+  /** null (with cost_hidden) for a login without 'Margins' — app/reports.dashboard_for_viewer */
+  gp_bhd: number | null; gp_pct: number | null; ar_overdue_pct: number
+  dso_days: number; dead_stock_bhd: number | null; dead_stock_count: number; cost_hidden?: boolean
   margin_basis?: string; margin_available?: boolean; cost_coverage_pct?: number | null; below_cost_count?: number
   landed_gp_pct?: number | null; landed_coverage_pct?: number | null
   dead_stock_uncosted?: number; dead_stock_sell_bhd?: number | null; stock_basis?: string | null
@@ -91,7 +92,7 @@ interface DashboardData {
   by_salesman: SalesmanRow[]
   by_salesman_scope?: SalesmanScope | null
   agents: AgentRow[]
-  alerts: { negative_margin_count: number }
+  alerts: { negative_margin_count: number | null }
   daily_mtd?: DailyRow[]
   by_payment?: PaymentRow[]
   by_division?: DivisionRow[]
@@ -441,20 +442,24 @@ export default function Dashboard() {
 
       {/* Business health — the CEO truth the totals hide: margin, cash speed, frozen capital */}
       {data?.health && (
-        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <HealthStat icon={Percent} label="Gross margin · ex-VAT on Focus COGS" tone={data.health.gp_pct < 20 ? 'amber' : 'green'}
-            value={data.health.margin_available === false ? '—' : `${data.health.gp_pct.toFixed(1)}%`}
+        <div className={cn('mt-4 grid grid-cols-1 gap-4', data.health.cost_hidden ? 'sm:grid-cols-2' : 'sm:grid-cols-3')}>
+          {/* margin and gross profit are for admins and 'Margins' logins only (the API sends null otherwise) */}
+          {!data.health.cost_hidden && (
+          <HealthStat icon={Percent} label="Gross margin · ex-VAT on Focus COGS" tone={(data.health.gp_pct ?? 0) < 20 ? 'amber' : 'green'}
+            value={data.health.margin_available === false || data.health.gp_pct == null ? '—' : `${data.health.gp_pct.toFixed(1)}%`}
             sub={<>{bhd(data.health.gp_bhd, 0)} GP · every item costed
               {data.health.landed_gp_pct != null && <> · landed {data.health.landed_gp_pct.toFixed(1)}% on {Math.round(data.health.landed_coverage_pct ?? 0)}% of sales</>}
               {(data.health.below_cost_count ?? 0) > 0 && <> · <span className="font-semibold text-rose-600">{data.health.below_cost_count} below cost</span></>}</>}
             to="/margins" />
+          )}
           <HealthStat icon={Clock} label="Collection speed · DSO" tone={data.health.ar_overdue_pct > 40 ? 'red' : 'amber'}
             value={`${Math.round(data.health.dso_days)} days`}
             sub={<><span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
-          <HealthStat icon={Snowflake} label="Capital frozen in dead stock · at cost" tone="red"
-            value={data.health.stock_basis === 'cost' ? bhd(data.health.dead_stock_bhd, 0) : '—'}
+          <HealthStat icon={Snowflake} label={data.health.cost_hidden ? 'Dead stock · at selling price' : 'Capital frozen in dead stock · at cost'} tone="red"
+            value={data.health.stock_basis === 'cost' && data.health.dead_stock_bhd != null ? bhd(data.health.dead_stock_bhd, 0)
+              : data.health.cost_hidden && data.health.dead_stock_sell_bhd != null ? bhd(data.health.dead_stock_sell_bhd, 0) : '—'}
             sub={<>{data.health.dead_stock_count} items not selling — liquidate to release cash
-              {data.health.stock_basis === 'cost' && deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted)}
+              {data.health.stock_basis === 'cost' && deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted ?? 0)}
               {data.health.dead_stock_sell_bhd != null && <> · {bhd(data.health.dead_stock_sell_bhd, 0)} at selling price</>}</>} to="/inventory" />
         </div>
       )}
@@ -634,11 +639,13 @@ export default function Dashboard() {
             <span className="font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
             <span className="text-muted-foreground">overdue across {k.overdue_count} accounts</span>
           </div>
+          {data?.alerts?.negative_margin_count != null && (
           <div className="flex items-center gap-2 text-sm">
             <TrendingDown size={16} className="text-violet-500" />
-            <span className="font-semibold">{num(data?.alerts?.negative_margin_count ?? 0)}</span>
+            <span className="font-semibold">{num(data.alerts.negative_margin_count)}</span>
             <span className="text-muted-foreground">products below cost</span>
           </div>
+          )}
           <div className="ml-auto text-[11px] text-muted-foreground">Data as of {fmtDate(data?.data_as_of)}</div>
         </Card>
       )}

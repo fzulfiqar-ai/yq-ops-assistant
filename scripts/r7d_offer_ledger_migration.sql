@@ -17,7 +17,7 @@
 --   2. shop_order_discounts: one row per (order line, rule) and per (order, cart-level rule) —
 --      rule_snapshot (the rule as the shop was offered it, with the hold-out arm), kind, level
 --      line|cart, amount_bhd placed, amount_confirmed_bhd after the rep's confirmation, clamped (the
---      margin floor cut it), stage placed|confirmed. Written by app.shop.create_order in one insert.
+--      margin floor cut it), stage placed|confirmed. Written by app.shop.create_order in one insert, plus app.shop_heart for lines a rep adds or substitutes.
 --   3. shop_coupon_reserve(rule, force) / shop_coupon_release(rule): the coupon counter as ONE
 --      conditional UPDATE each (uses < max_uses, live window, active, not archived). SECURITY DEFINER,
 --      service_role only.

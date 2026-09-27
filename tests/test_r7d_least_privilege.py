@@ -338,11 +338,55 @@ def _():
     assert json.dumps(cached, sort_keys=True) == before, "the shared cached report was changed"
 
 
+def _dashboard_payload() -> dict:
+    return {"kpis": {"rev_mtd": 100.0},
+            "health": {"gp_bhd": 40.0, "gp_pct": 37.6, "margin_basis": "focus_cogs_ex_vat", "margin_available": True,
+                       "below_cost_count": 2, "landed_gp_pct": 34.1, "landed_gp_bhd": 30.0, "landed_coverage_pct": 94.4,
+                       "cost_coverage_pct": 94.4, "returns_note": "x", "ar_overdue_pct": 50.0, "dso_days": 60.0,
+                       "dead_stock_bhd": 5.0, "dead_stock_count": 3, "dead_stock_uncosted": 1, "dead_stock_sell_bhd": 9.0,
+                       "stock_basis": "cost"},
+            "alerts": {"low_stock_count": 4, "negative_margins": [{"item_name": "Item A", "gp_margin_pct": -5.0}],
+                       "negative_margin_count": 1},
+            "actions": [{"action": "Fix pricing on 1 items selling below cost", "to": "/margins", "bhd": 0, "urgency": 3},
+                        {"action": "Reorder 4 low / out-of-stock items", "to": "/orders", "bhd": 0, "urgency": 3}]}
+
+
+@test("dashboard report: a login without 'Margins' gets no gross profit, margin, below-cost list or dead stock at cost; the cache stays whole")
+def _():
+    from app import reports
+    cached = _dashboard_payload()
+    before = json.dumps(cached, sort_keys=True)
+    rows = {"member@example.com": _user("member@example.com", "member", ["Dashboard", "Sales", "Inventory", "Receivables"]),
+            "nomargin@example.com": _user("nomargin@example.com", "management", MGMT_NO_MARGINS),
+            "full@example.com": _user("full@example.com", "management", MGMT_ALL),
+            "admin@example.com": _user("admin@example.com", "admin", [])}
+    client, p = _as(rows)
+    with p, C._Patched((reports, "cached_report", lambda key: cached)):
+        for who in ("member", "nomargin"):
+            r = client.get("/report/dashboard", headers={"Authorization": f"Bearer {who}"})
+            assert r.status_code == 200, (who, r.text[:200])
+            body = r.json()
+            h = body["health"]
+            assert body["cost_hidden"] is True and h["cost_hidden"] is True and h["margin_available"] is False, who
+            for k in reports.DASHBOARD_HEALTH_COST_KEYS:
+                assert h[k] is None, (who, k)      # kept as null: an older page renders a dash, never crashes
+            assert h["stock_basis"] is None and h["dead_stock_sell_bhd"] == 9.0 and h["dso_days"] == 60.0, who
+            assert body["alerts"]["negative_margins"] == [] and body["alerts"]["negative_margin_count"] is None, who
+            assert body["alerts"]["low_stock_count"] == 4, "the rest of the alerts stay"
+            assert [a["to"] for a in body["actions"]] == ["/orders"], who
+        for who in ("full", "admin"):
+            body = client.get("/report/dashboard", headers={"Authorization": f"Bearer {who}"}).json()
+            assert body["health"]["gp_pct"] == 37.6 and body["health"]["dead_stock_bhd"] == 5.0, who
+            assert body["alerts"]["negative_margin_count"] == 1 and not body.get("cost_hidden"), who
+    assert json.dumps(cached, sort_keys=True) == before, "the shared cached report was changed"
+
+
 @test("inventory report: other reports pass through unchanged; report_for_viewer on a non-dict is a no-op")
 def _():
     from app import reports
     x = {"rows": [{"cost_value_bhd": 1}]}
     assert reports.report_for_viewer("sales", x, sees_cost=False) is x
+    assert reports.report_for_viewer("dashboard", x, sees_cost=True) is x
     assert reports.report_for_viewer("inventory", x, sees_cost=True) is x
     assert reports.report_for_viewer("inventory", None, sees_cost=False) is None
 
