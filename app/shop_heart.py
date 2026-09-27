@@ -26,7 +26,8 @@ A plain stock reduction needs no tick.
 Price lock — the shop pays the price it ordered at. A quantity change re-prices the line at the
 ORDERED unit price (never today's book, never a silent zero for an item that has since become
 unlisted or unpriced); the order's own cart-level discount (coupon / cart rule, as placed) is
-shared pro rata over the original lines; delivery stays as ordered. Lines added or substituted
+shared pro rata over the original lines — a substitute takes the share of the line it replaced —
+and never grows past the discount as placed; delivery stays as ordered. Lines added or substituted
 by the rep are priced at the current book through shop.price_cart — and refused outright when
 the book has no price for them.
 
@@ -269,15 +270,40 @@ def qty_delivered_eff(ln: dict, order_status: str | None) -> int | None:
     return None
 
 
+def carries_share(ln: dict, by_id: dict, _hops: int = 0) -> bool:
+    """Does this line share the order's cart-level discount? A requested line does; a substitute
+    (substitute_for_line set) inherits the share of the line it replaced — so a substitute of a
+    requested line does, a substitute of a plain added line does not; any other added line never."""
+    if not is_added(ln):
+        return True
+    sf = ln.get("substitute_for_line")
+    if sf is None or _hops > 20:
+        return False
+    try:
+        parent = by_id.get(int(sf))
+    except (TypeError, ValueError):
+        return False
+    return parent is not None and carries_share(parent, by_id, _hops + 1)
+
+
 def compute_totals(order: dict, lines: list[dict], qty_of) -> dict:
     """Pure: the order's money at the quantities `qty_of(line)` gives. Every line at its locked unit
-    price; the ORIGINAL lines share the order's own cart-level discount (as placed) pro rata; added
-    lines carry none; delivery stays as ordered. Decimal, 3 dp:
+    price; the ORIGINAL lines — and a substitute in the place of one (carries_share) — share the
+    order's own cart-level discount (as placed) pro rata, never more than the discount as placed nor
+    more than those lines' value; other added lines carry none; delivery stays as ordered.
+    Decimal, 3 dp:
         total_bhd == items_bhd − cart_discount_bhd + delivery_bhd       (exactly)."""
     shop = _shop()
     D0 = shop.D0
     dm = shop.dmoney
     orig = [ln for ln in lines if not is_added(ln)]
+    by_id: dict = {}
+    for ln in lines:
+        if ln.get("id") is not None:
+            try:
+                by_id[int(ln["id"])] = ln
+            except (TypeError, ValueError):
+                pass
     s0 = sum((dm(ln.get("line_total_bhd")) for ln in orig), D0)
     line_disc0 = sum((dm(ln.get("discount_bhd")) for ln in orig), D0)
     cart0 = max(D0, dm(shop._d(order.get("discount_bhd")) - line_disc0))
@@ -291,7 +317,7 @@ def compute_totals(order: dict, lines: list[dict], qty_of) -> dict:
         lp = dm(ln["list_price_bhd"]) if ln.get("list_price_bhd") is not None else unit
         subtotal += dm(lp * q)
         items_total += lt
-        if not is_added(ln):
+        if carries_share(ln, by_id):
             s1_orig += lt
         if q > 0:
             units += q
@@ -299,7 +325,8 @@ def compute_totals(order: dict, lines: list[dict], qty_of) -> dict:
         per.append({"line": ln, "qty": q, "unit": unit, "total": lt})
     cart = D0
     if cart0 > 0 and s0 > 0:
-        cart = min(dm(cart0 * s1_orig / s0), s1_orig)
+        # a pricier substitute or a raised quantity never grows the discount past what was placed
+        cart = min(dm(cart0 * s1_orig / s0), cart0, s1_orig)
     delivery = dm(order.get("delivery_bhd"))
     total = dm(items_total - cart + delivery)
     return {"lines": per, "items_bhd": dm(items_total), "cart_discount_bhd": cart, "delivery_bhd": delivery,
@@ -369,6 +396,36 @@ def _reason(raw, code: str, note: str | None, default: str | None = None) -> str
     if r == "other" and len(note or "") < REASON_NOTE_MIN:
         raise shop.ShopError(REASON_NOTE_MSG.format(code=code))
     return r
+
+
+LEGACY_NOTE = "pre-R7c client"
+
+
+def is_legacy_confirm(changes, added_lines, stage: str) -> bool:
+    """A Confirm from an order desk that predates R7c (the deploy window: the API is new, a phone
+    still holds the old page): changed lines, not one reason chip, no added line, no substitute.
+    Such a request is accepted with reason 'other' and the note LEGACY_NOTE instead of refused —
+    an adverse change still needs "Shop agreed". Amend did not exist before R7c: never legacy."""
+    if stage != "confirm" or added_lines:
+        return False
+    chs = [c or {} for c in (changes or [])]
+    if not chs:
+        return False
+    return not any(c.get("reason") or c.get("change_reason") or c.get("substitute_item_code") for c in chs)
+
+
+def is_stale(o: dict, expected_updated_at) -> bool:
+    """The client's compare-and-swap (R7c review): it sends the order's updated_at as it read it
+    (`expected_updated_at`); a different value on the order now means someone else wrote in between
+    and the edit must lose (CAS_CONFLICT_MSG, 409). None / '' = an older client: not checked."""
+    if expected_updated_at in (None, ""):
+        return False
+    shop = _shop()
+    cur = o.get("updated_at")
+    a, b = shop._parse_ts(expected_updated_at), shop._parse_ts(cur)
+    if a is not None and b is not None:
+        return a != b
+    return str(expected_updated_at).strip() != str(cur or "").strip()
 
 
 def clean_agreed(raw) -> dict | None:
@@ -470,6 +527,7 @@ def plan_edit(o: dict, changes, added_lines, *, stage: str, ctx: dict, ready: bo
              for lid, ln in by_id.items()}
     seen: set[int] = set()
     subs: list[tuple[int, str, int, str | None]] = []       # (line_id, code, qty, note)
+    legacy = is_legacy_confirm(changes, added_lines, stage)
     for ch in (changes or []):
         ch = ch or {}
         lid = shop._i(ch.get("line_id"))
@@ -508,11 +566,47 @@ def plan_edit(o: dict, changes, added_lines, *, stage: str, ctx: dict, ready: bo
         status_after = _derive_status(ln, qc, substituted=bool(sub_code), mark_backorder=mark_bo)
         changed = (qc != cur["qty_confirmed"] or status_after != cur["line_status"] or bool(sub_code)
                    or (not sub_code and cur["substitute_item_code"] and qc > 0))
-        if changed:
+        if changed and legacy:
+            # an order desk from before R7c sends no reason chip: 'other', and the note says so
+            note = (LEGACY_NOTE + (f": {note}" if note else ""))[:200]
+            cur["reason"] = _reason("other", code, note)
+        elif changed:
             cur["reason"] = _reason(ch.get("reason") or ch.get("change_reason"), code, note,
                                     default=("substituted" if sub_code else None))
         cur.update(qty_confirmed=qc, line_status=status_after, note=note, mark_backorder=mark_bo,
                    sub=sub_code, changed=changed)
+    # a line re-substituted or restored: the substitute it had goes (confirmed 0, 'unavailable') in
+    # the same plan — never two live lines in the place of one
+    kids: dict[int, list[int]] = {}
+    for kid_id, kl in by_id.items():
+        if kl.get("substitute_for_line") is not None:
+            kids.setdefault(shop._i(kl.get("substitute_for_line")), []).append(kid_id)
+
+    def live_substitutes(lid: int) -> list[int]:
+        """The lines standing in the place of `lid` now: its substitutes, and — where a substitute was
+        itself substituted — that one's, down the chain."""
+        out, stack, visited = [], list(kids.get(lid, [])), {lid}
+        while stack:
+            k = stack.pop()
+            if k in visited:
+                continue
+            visited.add(k)
+            if state[k]["qty_confirmed"] > 0:
+                out.append(k)
+            else:
+                stack.extend(kids.get(k, []))
+        return sorted(out)
+    for lid in sorted(seen):
+        cur = state[lid]
+        if not cur.get("changed") or not (cur["sub"] or cur["qty_confirmed"] > 0):
+            continue
+        for kid_id in live_substitutes(lid):
+            k = state[kid_id]
+            if kid_id in seen and k.get("changed"):      # sent unchanged = not a choice; changed = one
+                raise shop.ShopError(f"{by_id[kid_id]['item_code']} replaces {by_id[lid]['item_code']} — "
+                                     f"keep one of them, not both.")
+            k.update(qty_confirmed=0, line_status="unavailable", reason=cur["reason"], note=cur["note"],
+                     mark_backorder=False, sub=None, changed=True)
     # added lines (a new request, priced at today's book)
     news: list[dict] = []
     for sub_lid, sub_code, sq, note in subs:
@@ -622,7 +716,8 @@ def plan_edit(o: dict, changes, added_lines, *, stage: str, ctx: dict, ready: bo
                     "substitute_for_line": r.get("substitute_for_line")} for r in new_rows]
     return {"line_updates": line_updates, "new_rows": new_rows, "totals": totals, "adverse": adverse,
             "agreed": agreed, "event_lines": event_lines, "added": added_event, "changed": changed_legacy,
-            "removed": removed_legacy, "before_total": before_total}
+            "removed": removed_legacy, "before_total": before_total,
+            "legacy": legacy and bool(event_lines)}
 
 
 # ── writes: header compare-and-swap, then lines, then the event (reverted on failure) ──
@@ -724,11 +819,13 @@ def _revert_header(order_id: int, back: dict, *, status: str, updated_at: str, o
 
 
 def _edit(order_id: int, changes, expected_delivery, note, actor: str, *, stage: str, added_lines=None,
-          shop_agreed=None, expected_delivery_date=None) -> dict:
+          shop_agreed=None, expected_delivery_date=None, expected_updated_at=None) -> dict:
     shop = _shop()
     o = shop.get_order(order_id)
     if not o:
         raise shop.ShopError("Order not found.")
+    if is_stale(o, expected_updated_at):          # the editor was opened on an older read
+        raise shop.ShopError(shop.CAS_CONFLICT_MSG)
     st = o["status"]
     if stage == "confirm" and st != "new":
         if st in OPEN_CONFIRMED:
@@ -771,6 +868,8 @@ def _edit(order_id: int, changes, expected_delivery, note, actor: str, *, stage:
               "total_before": float(plan["before_total"]), "total_after": float(totals["total_bhd"]),
               "expected_delivery": upd_o.get("expected_delivery", o.get("expected_delivery")),
               "expected_delivery_date": eta_date.isoformat() if eta_date else None}
+    if plan.get("legacy"):
+        detail["legacy_client"] = True          # reasons defaulted to 'other' (is_legacy_confirm)
     before_lines = {int(ln["id"]): ln for ln in o.get("lines") or []}
     undo = None
     try:
@@ -797,20 +896,25 @@ def _edit(order_id: int, changes, expected_delivery, note, actor: str, *, stage:
 
 
 def confirm_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
-                  added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
+                  added_lines=None, shop_agreed=None, expected_delivery_date=None,
+                  expected_updated_at=None) -> dict:
     """Received → Confirmed with the editor (reduce, remove, substitute, backorder, add a line).
-    Compare-and-swap on the status and updated_at read; lines and the 'status:confirmed' event
-    follow, and any failure puts the header and every touched line back."""
+    Compare-and-swap on the status and updated_at read (and on the client's own read, when it sends
+    `expected_updated_at`); lines and the 'status:confirmed' event follow, and any failure puts the
+    header and every touched line back."""
     return _edit(order_id, changes, expected_delivery, note, actor, stage="confirm", added_lines=added_lines,
-                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date,
+                 expected_updated_at=expected_updated_at)
 
 
 def amend_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
-                added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
+                added_lines=None, shop_agreed=None, expected_delivery_date=None,
+                expected_updated_at=None) -> dict:
     """The same editor on a confirmed order (confirmed / packed / out_for_delivery): the status
     stays, the confirmed figures move, an 'amended' event carries the per-line before/after."""
     return _edit(order_id, changes, expected_delivery, note, actor, stage="amend", added_lines=added_lines,
-                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date,
+                 expected_updated_at=expected_updated_at)
 
 
 # ── Delivered ─────────────────────────────────────────────────────────────────
@@ -838,7 +942,8 @@ def fill_delivered(client, o: dict) -> int:
 
 
 def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None, actor: str = "",
-                         note: str | None = None, focus_invoice_no: str | None = None) -> dict:
+                         note: str | None = None, focus_invoice_no: str | None = None,
+                         expected_updated_at=None) -> dict:
     """Confirmed → Delivered, recording what was really handed over. `lines` = [{line_id,
     qty_delivered, reason?, note?}] (a line not named is delivered as confirmed; any difference
     needs a reason); `added` = [{item_code, qty, reason?}] lines added at the shop (current book).
@@ -848,6 +953,8 @@ def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None
     o = shop.get_order(order_id)
     if not o:
         raise shop.ShopError("Order not found.")
+    if is_stale(o, expected_updated_at):          # the sheet was opened on an older read
+        raise shop.ShopError(shop.CAS_CONFLICT_MSG)
     st = o["status"]
     if st == "new":
         raise shop.ShopError("Confirm the order first — then deliver it.")
@@ -986,15 +1093,28 @@ def reopen_order(order_id: int, reason: str | None, actor: str, now: datetime | 
             keep_keys.append("cancel_reason_code")
     if orders_ready():
         upd.update(reopened_at=iso, reopened_by=actor, reopen_reason=why)
-    # a delivery undone: the lines go back to "not delivered yet", the money to the confirmed state
+    # a delivery undone: the lines go back to "not delivered yet", the money to the confirmed state.
+    # A line added AT the door was never confirmed: it goes out (confirmed 0, 'unavailable', reason
+    # 'other' with the reopen reason) — re-add it with Amend if the shop still wants it.
     line_updates: dict[int, dict] = {}
     before_lines = {int(ln["id"]): ln for ln in o.get("lines") or []}
     if st == "delivered" and lines_ready():
+        has_priced = shop.has_column("shop_order_lines", LINE_PRICED_COLS[1])
         for lid, ln in before_lines.items():
+            lu: dict = {}
             if ln.get("qty_delivered") is not None:
-                line_updates[lid] = {"qty_delivered": None}
+                lu["qty_delivered"] = None
+            if ln.get("added_at_stage") == "delivery" and (
+                    qty_confirmed_eff(ln) > 0 or (ln.get("line_status") or "ok") != "unavailable"):
+                lu.update(qty_confirmed=0, line_status="unavailable", change_reason="other",
+                          note=f"Reopened: {why}"[:200])
+                if has_priced:
+                    lu["line_total_confirmed"] = 0.0
+            if lu:
+                line_updates[lid] = lu
+        after_lines = [{**ln, **line_updates.get(lid, {})} for lid, ln in before_lines.items()]
         try:
-            t2 = compute_totals(o, list(before_lines.values()), qty_confirmed_eff)
+            t2 = compute_totals(o, after_lines, qty_confirmed_eff)
             if o.get("total_confirmed_bhd") is not None and shop.dmoney(o["total_confirmed_bhd"]) != t2["total_bhd"]:
                 upd.update(total_confirmed_bhd=float(t2["total_bhd"]), subtotal_confirmed_bhd=float(t2["subtotal_bhd"]))
         except shop.ShopError as e:          # a line without any price: keep the total as it stands
@@ -1014,7 +1134,8 @@ def reopen_order(order_id: int, reason: str | None, actor: str, now: datetime | 
         client.table("shop_order_events").insert({
             "order_id": order_id, "actor": actor, "event": "reopened",
             "detail": {"from": st, "to": to, "reason": why, "before": before,
-                       "lines": [{"line_id": lid, "qty_delivered": before_lines[lid].get("qty_delivered")}
+                       "lines": [{"line_id": lid, "item_code": before_lines[lid].get("item_code"),
+                                  **{k: before_lines[lid].get(k) for k in line_updates[lid]}}
                                  for lid in line_updates]}}).execute()
     except Exception as e:  # noqa: BLE001
         if undo:
@@ -1059,18 +1180,39 @@ def record_customer_notified(order_id: int, channel: str | None, actor: str) -> 
     return {"ok": True, "order_id": order_id, "channel": ch, "notified_at": now, "logged": bool(logged)}
 
 
-def notify_state(events) -> dict:
+def _born_event(e: dict) -> bool:
+    d = (e or {}).get("detail") if isinstance((e or {}).get("detail"), dict) else {}
+    return str((e or {}).get("event") or "") == "status:confirmed" and bool(d.get("born_confirmed"))
+
+
+def born_confirmed(o: dict | None, events=None) -> bool:
+    """An order the rep placed IN the shop (source 'salesman' — born Confirmed since R7c, its
+    'status:confirmed' event says born_confirmed): the shop was there when it was placed."""
+    if (o or {}).get("source") == "salesman":
+        return True
+    evs = events if events is not None else (o or {}).get("events")
+    return any(_born_event(e) for e in evs or [])
+
+
+def notify_state(events, order: dict | None = None) -> dict:
     """{customer_notified_at, shop_told}: was the shop told AFTER the latest step (a status move or
-    an amendment)? Drives the drawer's "Shop not told yet" chip."""
+    an amendment)? Drives the drawer's "Shop not told yet" chip. A born-confirmed staff order
+    (born_confirmed) starts as told: its 'created' and born 'status:confirmed' happened in front of
+    the shop, so only a later step (an amendment, Delivered, a cancel) asks for a tap."""
+    born = born_confirmed(order, events)
     last_step = last_told = None
     for e in events or []:
         ev = str((e or {}).get("event") or "")
         ts = (e or {}).get("ts")
         if ev == "customer_notified":
             last_told = ts or last_told
+        elif born and (ev == "created" or _born_event(e)):
+            continue
         elif ev.startswith("status:") or ev in ("amended", "created", "reopened"):
             last_step = ts or last_step
     shop = _shop()
+    if born and not last_step:
+        return {"customer_notified_at": last_told, "shop_told": True}
     told = bool(last_told) and (not last_step or (shop._parse_ts(last_told) or datetime.min.replace(tzinfo=timezone.utc))
                                 >= (shop._parse_ts(last_step) or datetime.min.replace(tzinfo=timezone.utc)))
     return {"customer_notified_at": last_told, "shop_told": told}
@@ -1095,7 +1237,9 @@ def disposition(ln: dict) -> str:
     if st == "substituted" or (st in LINE_OUT and ln.get("substitute_item_code")):
         return "substituted"
     if is_added(ln):
-        return "added"
+        # an added line (or a substitute) taken out again — its line restored, re-substituted, or a
+        # delivery-added line after a reopen — is gone, not "added"
+        return "unavailable" if st in LINE_OUT or qty_confirmed_eff(ln) <= 0 else "added"
     qc = qty_confirmed_eff(ln)
     if qc <= 0:
         return "unavailable"

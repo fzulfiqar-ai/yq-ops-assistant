@@ -3074,7 +3074,8 @@ def cancel_by_customer(order_token: str, reason: str | None) -> dict:
 
 
 def confirm_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
-                  added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
+                  added_lines=None, shop_agreed=None, expected_delivery_date=None,
+                  expected_updated_at=None) -> dict:
     """Received → Confirmed with the editor — the only confirm path for a rep or the desk (POST
     /status 'confirmed' is refused). Per line: a confirmed quantity (0 = unavailable), a
     substitute, a backorder mark and a reason chip for every change; lines may be added. Price
@@ -3083,25 +3084,30 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
     {'via': whatsapp | phone | visit}. Untouched lines are confirmed as ordered. See
     app/shop_heart.py."""
     out = shop_heart.confirm_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
-                                   shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+                                   shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date,
+                                   expected_updated_at=expected_updated_at)
     offers.refresh_confirmed(order_id)      # R7d: the ledger's confirmed amounts (best effort)
     return out
 
 
 def amend_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
-                added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
+                added_lines=None, shop_agreed=None, expected_delivery_date=None,
+                expected_updated_at=None) -> dict:
     """The same editor after confirming (confirmed / packed / out_for_delivery): an 'amended' event."""
     out = shop_heart.amend_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
-                                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+                                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date,
+                                 expected_updated_at=expected_updated_at)
     offers.refresh_confirmed(order_id)
     return out
 
 
 def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None, actor: str = "",
-                         note: str | None = None, focus_invoice_no: str | None = None) -> dict:
+                         note: str | None = None, focus_invoice_no: str | None = None,
+                         expected_updated_at=None) -> dict:
     """Delivered in one tap (no lines / added) or with what was really handed over."""
     out = shop_heart.deliver_with_changes(order_id, lines, added, shop_agreed, actor, note=note,
-                                          focus_invoice_no=focus_invoice_no)
+                                          focus_invoice_no=focus_invoice_no,
+                                          expected_updated_at=expected_updated_at)
     if lines or added:          # a plain Delivered changes no quantity: the confirmed amounts stand
         offers.refresh_confirmed(order_id)
     return out

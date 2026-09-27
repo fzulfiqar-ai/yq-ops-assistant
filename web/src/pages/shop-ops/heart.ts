@@ -429,12 +429,22 @@ export interface EditPlan {
   allOut: boolean
 }
 
-interface Priced { line: HeartLine | null; qtyF: number; unitF: number; original: boolean }
+/** `subOf` = the line a NEW substitute (not saved yet) stands in for. */
+interface Priced { line: HeartLine | null; qtyF: number; unitF: number; original: boolean; subOf?: HeartLine }
 
-/** compute_totals in fils: every line at its locked unit, the ORIGINAL lines share the order's own
- *  cart discount pro rata, added lines carry none, delivery as ordered. */
+/** compute_totals in fils: every line at its locked unit; the ORIGINAL lines — and a substitute in
+ *  the place of one (shop_heart.carries_share) — share the order's own cart discount pro rata, never
+ *  more than the discount as placed nor more than their value; other added lines carry none;
+ *  delivery as ordered. */
 function totalFils(order: EditOrder, priced: Priced[]): number {
   const orig = order.lines.filter((l) => !isAddedLine(l))
+  const byId = new Map(order.lines.map((l) => [l.id, l] as const))
+  const carries = (l: HeartLine | undefined, hops = 0): boolean => {
+    if (!l) return false
+    if (!isAddedLine(l)) return true
+    if (l.substitute_for_line == null || hops > 20) return false
+    return carries(byId.get(l.substitute_for_line), hops + 1)
+  }
   const s0 = orig.reduce((s, l) => s + fils(l.line_total_bhd), 0)
   const lineDisc0 = orig.reduce((s, l) => s + fils(l.discount_bhd), 0)
   const cart0 = Math.max(0, fils(order.discount_bhd) - lineDisc0)
@@ -443,9 +453,9 @@ function totalFils(order: EditOrder, priced: Priced[]): number {
   for (const p of priced) {
     const lt = p.unitF * p.qtyF
     items += lt
-    if (p.original) s1 += lt
+    if (p.line ? carries(p.line) : carries(p.subOf)) s1 += lt
   }
-  const cart = cart0 > 0 && s0 > 0 ? Math.min(Math.round((cart0 * s1) / s0), s1) : 0
+  const cart = cart0 > 0 && s0 > 0 ? Math.min(Math.round((cart0 * s1) / s0), cart0, s1) : 0
   return items - cart + fils(order.delivery_bhd)
 }
 
@@ -491,7 +501,7 @@ export function planEdit(
       priced.push({ line: l, qtyF: 0, unitF, original: !isAddedLine(l) })
       const it = itemOf(catalog, d.sub.code)
       const u = unitAt(it, d.sub.qty)
-      priced.push({ line: null, qtyF: d.sub.qty, unitF: fils(u), original: false })
+      priced.push({ line: null, qtyF: d.sub.qty, unitF: fils(u), original: false, subOf: l })
       if (u != null && lockUnit(l) != null && fils(u) !== fils(lockUnit(l))) {
         adverse.push({ kind: 'substitute_price', item_code: l.item_code, substitute: d.sub.code })
       }

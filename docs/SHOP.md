@@ -413,6 +413,12 @@ orders per 24 h; the per-IP limit is 10/minute on a proxy-aware key (`app/rateli
 - `POST /shop/orders/{id}/confirm` `{lines:[{line_id, qty_confirmed?, line_status?: 'removed', note?}], expected_delivery?, note?}`
   → confirms with changes, re-prices at the confirmed quantities (`subtotal/total_confirmed_bhd`), returns
   `changed[]`, `removed[]`, `totals`, a prefilled WhatsApp to the merchant, `next_statuses`.
+  R7c (app/shop_heart.py): the same body drives `POST …/amend`; `POST …/deliver` takes `{lines:[{line_id,
+  qty_delivered, reason?}], added?, shop_agreed?}`. All three accept an optional `expected_updated_at` (the order
+  payload's `updated_at` as the editor read it): a newer write in between answers 409 with the CAS message; a client
+  that leaves it out is not checked. A confirm with changed lines and no reason anywhere (a pre-R7c desk) is kept as
+  reason 'other' / note 'pre-R7c client'. A line's landed-cost snapshot (`unit_cost_bhd`, `cost_source`) is in an
+  order payload only for admins and roles holding 'Margins'.
 - `POST /shop/orders/{id}/assign` `{salesman_id, reason?}` — **admins only** (R7b removed the branch that let a
   salesman take an unassigned order for himself: he could claim any unassigned order by its number). Notifies the
   rep. (R3: assigning an order no longer touches the merchant record — the sticky rep settles when the assigned rep

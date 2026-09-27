@@ -40,7 +40,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from app import market_intel as mi
     from app.audit import log_event
     from app.auth import CurrentUser, require_feature
-    from app.features import is_read_only
+    from app.features import is_read_only, masks_contacts
     from app.uploads import MAX_PHOTO_BYTES, UploadTooLarge, read_capped
 
     gate = require_feature(FEATURE)
@@ -155,7 +155,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if office:                     # a rep never filters by another rep (or learns who saw what)
             filters.update(rep=rep, area=area)
         try:
-            out = mi.board(office=office, actor=_me(user), filters=filters, limit=limit)
+            out = mi.board(office=office, actor=_me(user), filters=filters, limit=limit,
+                           mask=masks_contacts(user.role))
         except mi.MarketIntelError as e:
             _fail(e)
         return {**out, "capabilities": _caps(user)}
@@ -163,7 +164,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.get("/market-intel/items/{item_id}")
     def market_intel_item(item_id: int, user: CurrentUser = Depends(gate)) -> dict:
         try:
-            out = mi.item_detail(item_id, office=_office(user), actor=_me(user))
+            out = mi.item_detail(item_id, office=_office(user), actor=_me(user), mask=masks_contacts(user.role))
         except mi.MarketIntelError as e:
             _fail(e)
         return {**out, "capabilities": _caps(user)}
@@ -173,7 +174,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                             user: CurrentUser = Depends(gate)) -> dict:
         if not _office(user):
             raise HTTPException(status_code=403, detail="The review queue is for the office.")
-        return {**mi.review_queue(library=library, limit=limit, offset=offset), "capabilities": _caps(user)}
+        return {**mi.review_queue(library=library, limit=limit, offset=offset, mask=masks_contacts(user.role)),
+                "capabilities": _caps(user)}
 
     # ── deciding ──────────────────────────────────────────────────────────────
     @app.patch("/market-intel/items/{item_id}")

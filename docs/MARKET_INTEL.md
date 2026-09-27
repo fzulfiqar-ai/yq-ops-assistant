@@ -27,9 +27,12 @@ resized on the phone (1600 px, WebP q0.75). Then an optional one-line note, a ki
 the staff catalog keeps (`sessionStorage['yq-staff-customer']`); its phone is used once to find the merchant record and
 is never stored on the sighting. Salesman, time and shop attach automatically. No AI runs, no photo leaves Supabase.
 
-Server side (`capture`): the extension and magic bytes are checked (`app.uploads.content_matches`), Pillow decodes,
-turns the photo upright, cuts it to 1600 px and re-encodes it from pixels only (no EXIF, so no GPS), takes a 64-bit
-dHash, and stores it in the PRIVATE `finds` bucket under `market/YYYY/MM/`. Reads hand out 1-hour signed URLs.
+Server side (`capture`): the extension and magic bytes are checked (`app.uploads.content_matches`), a photo over 16 MP
+(read from the header) is refused before anything is decoded, Pillow decodes (a JPEG at a reduced scale, `draft`),
+turns the photo upright, cuts it to 1600 px BEFORE any mode conversion and re-encodes it from pixels only (no EXIF, so
+no GPS), takes a 64-bit dHash, and stores it in the PRIVATE `finds` bucket under `market/YYYY/MM/`. Reads hand out
+1-hour signed URLs. Management reads every note, title, shop name and competitor with phones and emails masked
+(`app.ai_insights.mask_text`).
 
 The result card, decided in this order (nothing ever merges on fuzzy evidence):
 

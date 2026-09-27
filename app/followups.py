@@ -891,11 +891,15 @@ def basket_payload(row: dict, regulars: list[dict], last: dict | None, items: di
                            for r in usual_rows if r.get("item_code")) if ln["in_catalog"]][:BASKET_MAX]
     last_out = None
     if last:
+        from app.shop_heart import LINE_OUT
         lines = []
         for ln in last.get("lines") or []:
-            if str(ln.get("line_status") or "") == "removed":
+            # a line out of the order (removed / unavailable / substituted — its substitute is a line
+            # of its own) is not part of the repeat
+            if str(ln.get("line_status") or "") in LINE_OUT:
                 continue
-            q = ln.get("qty_confirmed") if _i(ln.get("qty_confirmed")) > 0 else ln.get("qty")
+            # what the shop really got: delivered, else confirmed, else what it asked for
+            q = next((ln.get(k) for k in ("qty_delivered", "qty_confirmed", "qty") if ln.get(k) is not None), None)
             if _i(q) <= 0 or not ln.get("item_code"):
                 continue
             lines.append(_basket_line(str(ln["item_code"]), q, items))

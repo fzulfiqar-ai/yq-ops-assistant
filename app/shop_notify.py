@@ -138,6 +138,8 @@ def _changes_text(o: dict, delivered: bool = False) -> str:
         if kind == "substituted":
             sub = ln.get("substitute_item_code")
             out.append(f"- {code}: replaced by {sub}{tail}" if sub else f"- {code}: not available this time{tail}")
+        elif kind == "unavailable" and shop_heart.is_added(ln):
+            out.append(f"- {code}: taken off the order{tail}")     # an added line / substitute gone again
         elif kind == "unavailable":
             out.append(f"- {code}: not available this time{tail}")
         elif kind == "added":
@@ -181,16 +183,79 @@ def salesman_to_customer_wa_url(o: dict, status: str | None = None) -> str | Non
 
 # ── HTML email ────────────────────────────────────────────────────────────────
 
+def email_lines(o: dict) -> list[dict]:
+    """The email's item rows, read through shop_heart.line_view (public: no cost, no internal note)
+    — the one line rule every payload uses. Before Confirm: what was requested; once confirmed: the
+    confirmed quantity and its locked money; once delivered: what was handed over. A line that is
+    not as the shop asked says so (ordered N, replaced by X, not available, added) with the public
+    reason. Each row: item_code, display_name, qty, unit (float | None), total (float), tags."""
+    from app import shop_heart
+    delivered = o.get("status") == "delivered"
+    out = []
+    for ln in _lines(o):
+        v = shop_heart.line_view(ln, o, public=True)
+        qc, qd = v.get("qty_confirmed"), v.get("qty_delivered")
+        if delivered and qd is not None:
+            qty, total = qd, v.get("line_total_delivered")
+        elif qc is not None:
+            qty, total = qc, v.get("line_total_confirmed")
+        else:
+            qty, total = v.get("qty"), v.get("line_total_bhd")
+        unit = (v.get("unit_price_confirmed") if qc is not None and v.get("unit_price_confirmed") is not None
+                else v.get("unit_price_bhd"))
+        kind = v.get("disposition")
+        tags: list[str] = []
+        if kind == "substituted":
+            tags.append(f"replaced by {v['substitute_item_code']}" if v.get("substitute_item_code") else "not available")
+        elif kind == "unavailable":
+            tags.append("taken off the order" if shop_heart.is_added(ln) else "not available")
+        elif kind == "added":
+            tags.append(f"replaces {v['substitute_for']}" if v.get("substitute_for") else "added")
+        elif kind in ("reduced", "increased"):
+            tags.append(f"ordered {v.get('qty')}")
+        if delivered and qd is not None and qc is not None and qd != qc:
+            tags.append(f"confirmed {qc}")
+        if v.get("backorder") or kind == "backorder":
+            tags.append("backorder")
+        if v.get("reason_label") and kind not in ("as_ordered", "backorder"):
+            tags.append(str(v["reason_label"]))
+        out.append({"item_code": v.get("item_code"), "display_name": v.get("display_name"), "qty": int(qty or 0),
+                    "unit": unit, "total": float(total) if total is not None else 0.0, "tags": tags})
+    return out
+
+
+def email_totals(o: dict) -> dict:
+    """The money an email shows: the EFFECTIVE total (shop_heart.order_total — confirmed ?? as
+    ordered; the delivered value once delivered with changes), its subtotal / discount / delivery
+    (discount = subtotal − (total − delivery), exact to the fils), and the total as ordered only as a
+    reference when it differs. Decimal inside, floats out."""
+    from app import shop_heart
+    from app.shop import dmoney
+    eff = dmoney(shop_heart.order_total(o))
+    placed = dmoney(o.get("total_bhd"))
+    delivery = dmoney(o.get("delivery_bhd"))
+    confirmed = o.get("total_confirmed_bhd") is not None
+    sub_raw = o.get("subtotal_confirmed_bhd") if confirmed else o.get("subtotal_bhd")
+    sub = dmoney(sub_raw) if sub_raw is not None else None
+    disc = (sub - (eff - delivery)) if sub is not None else None
+    return {"total": float(eff), "subtotal": float(sub) if sub is not None else None,
+            "discount": float(disc) if disc is not None and disc > 0 else None,
+            "delivery": float(delivery) if delivery > 0 else None,
+            "as_ordered": float(placed) if placed != eff else None}
+
+
 def order_html(o: dict, heading: str, intro: str, show_contact: bool = True) -> str:
     e = html.escape
-    rows = "".join(
-        f"<tr><td style='padding:6px 8px;border-bottom:1px solid #eee'>{e(str(ln.get('item_code') or ''))}"
-        f"<div style='color:{MUTED};font-size:12px'>{e(str(ln.get('display_name') or ''))}"
-        f"{' · <b>backorder</b>' if ln.get('backorder') else ''}</div></td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>{int(ln.get('qty') or 0)}</td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>{float(ln.get('unit_price_bhd') or 0):.3f}</td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>{float(ln.get('line_total_bhd') or 0):.3f}</td></tr>"
-        for ln in _lines(o))
+    cell = "padding:6px 8px;border-bottom:1px solid #eee;text-align:right"
+    parts = []
+    for r in email_lines(o):
+        unit = f"{float(r['unit']):.3f}" if r["unit"] is not None else "—"
+        tags = "".join(f" · <b>{e(t)}</b>" for t in r["tags"])
+        parts.append(f"<tr><td style='padding:6px 8px;border-bottom:1px solid #eee'>{e(str(r['item_code'] or ''))}"
+                     f"<div style='color:{MUTED};font-size:12px'>{e(str(r['display_name'] or ''))}{tags}</div></td>"
+                     f"<td style='{cell}'>{r['qty']}</td><td style='{cell}'>{unit}</td>"
+                     f"<td style='{cell}'>{r['total']:.3f}</td></tr>")
+    rows = "".join(parts)
     contact = ""
     if show_contact:
         contact = (f"<p style='margin:0 0 14px'><b>{e(str(o.get('customer_name') or ''))}</b>"
@@ -199,11 +264,20 @@ def order_html(o: dict, heading: str, intro: str, show_contact: bool = True) -> 
                    f"<a href='tel:{e(str(o.get('customer_phone') or ''))}'>{e(str(o.get('customer_phone') or ''))}</a>"
                    f"{' · ' + e(str(o.get('customer_email'))) if o.get('customer_email') else ''}</p>")
     note = f"<p style='margin:0 0 14px;color:{MUTED}'>Note: {e(str(o.get('note')))}</p>" if o.get("note") else ""
+    t = email_totals(o)
+    label = f"padding:2px 8px;color:{MUTED}"
     totals = (f"<table style='margin-top:10px;margin-left:auto;font-size:14px'>"
-              f"<tr><td style='padding:2px 8px;color:{MUTED}'>Subtotal</td><td style='text-align:right'>{_money(o.get('subtotal_bhd'))}</td></tr>"
-              + (f"<tr><td style='padding:2px 8px;color:{MUTED}'>Discount</td><td style='text-align:right'>-{_money(o.get('discount_bhd'))}</td></tr>" if float(o.get('discount_bhd') or 0) > 0 else "")
-              + (f"<tr><td style='padding:2px 8px;color:{MUTED}'>Delivery</td><td style='text-align:right'>{_money(o.get('delivery_bhd'))}</td></tr>" if float(o.get('delivery_bhd') or 0) > 0 else "")
-              + f"<tr><td style='padding:6px 8px;font-weight:700'>Total</td><td style='text-align:right;font-weight:700;color:{PURPLE}'>{_money(o.get('total_bhd'))}</td></tr></table>")
+              + (f"<tr><td style='{label}'>Subtotal</td><td style='text-align:right'>{_money(t['subtotal'])}</td></tr>"
+                 if t["subtotal"] is not None else "")
+              + (f"<tr><td style='{label}'>Discount</td><td style='text-align:right'>-{_money(t['discount'])}</td></tr>"
+                 if t["discount"] is not None else "")
+              + (f"<tr><td style='{label}'>Delivery</td><td style='text-align:right'>{_money(t['delivery'])}</td></tr>"
+                 if t["delivery"] is not None else "")
+              + f"<tr><td style='padding:6px 8px;font-weight:700'>Total</td><td style='text-align:right;font-weight:700;color:{PURPLE}'>{_money(t['total'])}</td></tr>"
+              # the total as ordered, only as a struck-through reference when the order changed
+              + (f"<tr><td style='{label};font-size:12px'>As ordered</td><td style='text-align:right;color:{MUTED};font-size:12px'>"
+                 f"<s>{_money(t['as_ordered'])}</s></td></tr>" if t["as_ordered"] is not None else "")
+              + "</table>")
     sm = o.get("salesman") or {}
     sm_line = f"<p style='margin:0 0 14px;color:{MUTED}'>Salesman: <b style='color:{INK}'>{e(str(sm.get('name') or o.get('salesman_name') or 'YQ Bahrain'))}</b></p>" if (sm or o.get("salesman_name")) else ""
     return f"""<!doctype html><html><body style="margin:0;background:#faf9fc;font-family:Inter,Segoe UI,Arial,sans-serif;color:{INK}">
@@ -560,13 +634,21 @@ def notify_new_order(order_id: int, retry: bool = False) -> dict:
             result["email_owner"] = kept("email_owner") or _email(subject, body, ",".join(owners))
         if not rep_to and not owners:
             result["email"] = {"sent": False, "emailed": False, "reason": "no_recipient (rep has no email; ALERT_EMAIL_TO unset)"}
-        # customer confirmation
+        # customer confirmation — a rep's order placed IN the shop is born Confirmed (R7c): the shop
+        # is told it is confirmed, never "your salesman will confirm shortly"
         if o.get("customer_email"):
-            cbody = order_html(o, f"Thank you — order {o['order_no']} received",
-                               "We have your order. Your salesman will confirm availability and delivery shortly.",
-                               show_contact=False)
-            result["customer_email"] = kept("customer_email") or \
-                _email(f"YQ Bahrain · Order {o['order_no']} received", cbody, o["customer_email"])
+            from app import shop_heart
+            if shop_heart.born_confirmed(o) and shop_heart.visible_status(o.get("status")) == "confirmed":
+                eta = f" Expected delivery: {o['expected_delivery']}." if o.get("expected_delivery") else ""
+                cbody = order_html(o, f"Your order is confirmed · {o['order_no']}",
+                                   f"Your order is confirmed.{eta} Your salesman will deliver it.", show_contact=False)
+                csubject = f"YQ Bahrain · Order {o['order_no']} confirmed"
+            else:
+                cbody = order_html(o, f"Thank you — order {o['order_no']} received",
+                                   "We have your order. Your salesman will confirm availability and delivery shortly.",
+                                   show_contact=False)
+                csubject = f"YQ Bahrain · Order {o['order_no']} received"
+            result["customer_email"] = kept("customer_email") or _email(csubject, cbody, o["customer_email"])
         if not sm:
             # Nobody owns this order yet: the admins must assign it (portal → Shop Orders → queue).
             text = "UNASSIGNED marketplace order — assign it in the portal.\n" + text
@@ -611,7 +693,9 @@ def notify_assigned(order_id: int) -> dict:
         if sm.get("email") and sm.get("notify_email", True):
             body = order_html(o, f"Order {o['order_no']} is yours",
                               "This marketplace order has been assigned to you. Please confirm availability and delivery.")
-            result["email"] = _email(f"YQ Shop · Order {o['order_no']} assigned to you — {_money(o.get('total_bhd'))}", body, sm["email"])
+            from app import shop_heart
+            result["email"] = _email(f"YQ Shop · Order {o['order_no']} assigned to you — {_money(shop_heart.order_total(o))}",
+                                     body, sm["email"])
         result["telegram"] = _telegram(text)
     except Exception as e:  # noqa: BLE001
         result["error"] = f"{type(e).__name__}: {e}"[:200]

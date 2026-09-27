@@ -81,7 +81,7 @@ DEFAULT_BRANDS = ("Anker", "Apple", "Baseus", "Borofone", "Earldom", "Green Lion
 
 MAX_PHOTOS = 4
 MAX_EDGE = 1600                 # px, longest side (the client already resizes; this is the guard)
-MAX_PIXELS = 40_000_000         # a decoded photo larger than this is refused (decompression bomb)
+MAX_PIXELS = 16_000_000         # a photo larger than this is refused before decoding (decompression bomb)
 PHASH_NEAR = 8                  # Hamming distance: at or below = near-duplicate photo
 PHASH_SCAN = 5000               # newest stored hashes compared per capture
 SEEN_WINDOW_DAYS = 30
@@ -282,24 +282,33 @@ def process_photo(data: bytes, filename: str) -> dict:
     from PIL import Image, ImageOps
     try:
         img = Image.open(io.BytesIO(data))
-        w0, h0 = img.size
+        w0, h0 = img.size                       # read from the header: nothing decoded yet
         if w0 * h0 > MAX_PIXELS:
             raise MarketIntelError("That photo is too large. Take it again with the camera.")
+        if img.format == "JPEG":
+            # decode at 1/2, 1/4 or 1/8 scale straight to about the size kept: a 16 MP phone photo
+            # never becomes a full-size bitmap in memory (draft must come before load)
+            img.draft("RGB", (MAX_EDGE, MAX_EDGE))
         img.load()
     except MarketIntelError:
         raise
     except Exception:  # noqa: BLE001 — truncated / corrupt / an unsupported codec
         raise MarketIntelError("That photo could not be read. Take it again with the camera.") from None
     img = ImageOps.exif_transpose(img)          # upright, as the rep saw it
-    if img.mode in ("RGBA", "LA", "P"):
-        rgba = img.convert("RGBA")
+    if max(img.size) > MAX_EDGE:
+        # cut to size BEFORE any mode conversion, so every conversion below runs on 1600 px
+        try:
+            img.thumbnail((MAX_EDGE, MAX_EDGE), Image.Resampling.LANCZOS)
+        except ValueError:                      # a mode the resampler has no kernel for (16-bit, …)
+            img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+            img.thumbnail((MAX_EDGE, MAX_EDGE), Image.Resampling.LANCZOS)
+    if img.mode in ("RGBA", "LA", "P", "PA"):
+        rgba = img if img.mode == "RGBA" else img.convert("RGBA")
         base = Image.new("RGB", rgba.size, (255, 255, 255))
-        base.paste(rgba, mask=rgba.split()[-1])
+        base.paste(rgba, mask=rgba.getchannel("A"))
         img = base
     elif img.mode != "RGB":
         img = img.convert("RGB")
-    if max(img.size) > MAX_EDGE:
-        img.thumbnail((MAX_EDGE, MAX_EDGE), Image.Resampling.LANCZOS)
     img.info = {}                               # nothing from the original file rides along
     out = io.BytesIO()
     if _webp_ok():
@@ -780,13 +789,27 @@ def legacy_capture(actor: str, f: dict, processed: list[dict], cu: str) -> dict:
 
 # ── reading: the board, the item, the review queue, my signals ───────────────
 
-def _cluster_out(r: dict, signed: dict, *, office: bool) -> dict:
+def _m(v, mask: bool):
+    """Management reads free text with every phone and email masked (app.ai_insights.mask_text —
+    the one mask the AI Head pack and the SQL views share): a rep may type a shop's number into a
+    note, a title or a shop name. Everyone else reads it as typed."""
+    if not mask:
+        return v
+    from app.ai_insights import mask_text
+    if isinstance(v, dict):                     # a decision's detail (an edit's before / after)
+        return {k: _m(x, mask) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_m(x, mask) for x in v]
+    return mask_text(v)
+
+
+def _cluster_out(r: dict, signed: dict, *, office: bool, mask: bool = False) -> dict:
     pmin, pmax = money_out(r.get("price_min")), money_out(r.get("price_max"))
     cover = signed.get((r.get("cover_bucket") or "", r.get("cover_path") or "")) if r.get("cover_path") else None
     # an item without a typed name shows the office its first note; a rep only ever sees a typed name
-    title = r.get("title") or ((clean_text(r.get("first_note"), 80) if office else None))
+    title = _m(r.get("title") or ((clean_text(r.get("first_note"), 80) if office else None)), mask)
     out = {"item_id": r.get("item_id"), "kind": r.get("kind"), "kind_label": KIND_LABELS.get(r.get("kind"), "Other"),
-           "title": title, "brand": r.get("brand"), "competitor": r.get("competitor"),
+           "title": title, "brand": r.get("brand"), "competitor": _m(r.get("competitor"), mask),
            "category": r.get("category"), "barcode": r.get("barcode"), "yq_item_code": r.get("yq_item_code"),
            "status": r.get("status"),
            "status_label": (STATUS_LABELS if office else REP_STATUS_LABELS).get(r.get("status"), ""),
@@ -830,9 +853,11 @@ def _unavailable(extra: dict | None = None) -> dict:
     return {"available": False, "hint": MISSING_HINT, **(extra or {})}
 
 
-def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: int = 300) -> dict:
+def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: int = 300,
+          mask: bool = False) -> dict:
     """The Market Intel board: clusters (one per item), newest sighting first, with filters
-    kind / status / brand / category / rep / area / since / q (text, barcode, code)."""
+    kind / status / brand / category / rep / area / since / q (text, barcode, code). `mask`
+    (management: features.masks_contacts) masks phones and emails in the free text."""
     f = filters or {}
     if not available():
         return _unavailable({"items": [], "facets": {}, "queue": {"new_items": 0, "unassigned": 0}})
@@ -886,7 +911,7 @@ def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: 
     signed = sign_many([(r.get("cover_bucket"), r.get("cover_path")) for r in rows if r.get("cover_path")])
     items = []
     for r in rows:
-        it = _cluster_out(r, signed, office=office)
+        it = _cluster_out(r, signed, office=office, mask=mask)
         if not office:
             it["mine"] = int(r["item_id"]) in mine_ids
         items.append(it)
@@ -959,15 +984,17 @@ def _photo_out(p: dict, signed: dict, *, office: bool) -> dict | None:
             "height": p.get("height"), "has_people": bool(p.get("has_people_flag"))}
 
 
-def _obs_out(o: dict, photos: list[dict], signed: dict, names: dict[int, str], *, office: bool, actor: str) -> dict:
+def _obs_out(o: dict, photos: list[dict], signed: dict, names: dict[int, str], *, office: bool, actor: str,
+            mask: bool = False) -> dict:
     mine = bool(actor) and _ci(o.get("created_by")) == _ci(actor)
     out = {"id": o.get("id"), "kind": o.get("kind"), "kind_label": KIND_LABELS.get(o.get("kind"), "Other"),
-           "source": o.get("source"), "signal": o.get("signal"), "title": o.get("title"), "note": o.get("note"),
-           "brand": o.get("brand"), "competitor": o.get("competitor"), "category": o.get("category"),
+           "source": o.get("source"), "signal": o.get("signal"), "title": _m(o.get("title"), mask),
+           "note": _m(o.get("note"), mask),
+           "brand": o.get("brand"), "competitor": _m(o.get("competitor"), mask), "category": o.get("category"),
            "price_bhd": money_out(o.get("price_bhd")), "demand_level": o.get("demand_level"),
            "demand_qty": o.get("demand_qty"), "barcode": o.get("barcode_raw"), "yq_item_code": o.get("yq_item_code"),
            "result": o.get("result"), "observed_at": o.get("observed_at"), "area": o.get("area"),
-           "shop_name": o.get("shop_name"), "item_id": o.get("item_id"), "mine": mine,
+           "shop_name": _m(o.get("shop_name"), mask), "item_id": o.get("item_id"), "mine": mine,
            "near_duplicate_of": o.get("near_duplicate_of") if office else None,
            "photos": [x for x in (_photo_out(p, signed, office=office) for p in photos) if x]}
     if office:
@@ -982,7 +1009,7 @@ def _obs_out(o: dict, photos: list[dict], signed: dict, names: dict[int, str], *
     return out
 
 
-def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
+def item_detail(item_id: int, *, office: bool, actor: str = "", mask: bool = False) -> dict:
     """One item: the cluster, the photo strip, the sightings (a rep: only his own), the shops seen at,
     the linked YQ SKU or "gap", the AI suggestion (Unverified) and the decision history (office)."""
     if not available():
@@ -1001,12 +1028,13 @@ def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
                         if office or not p.get("has_people_flag")] +
                        ([(cl[0].get("cover_bucket"), cl[0].get("cover_path"))] if cl and cl[0].get("cover_path") else []))
     names = _salesmen_names() if office else {}
-    cluster = _cluster_out(cl[0], signed, office=office) if cl else None
+    cluster = _cluster_out(cl[0], signed, office=office, mask=mask) if cl else None
     ctx_items = (_catalog_ctx() or {}).get("items") or {}
     out = {"available": True, "item": {
                "id": item["id"], "kind": item.get("kind"), "kind_label": KIND_LABELS.get(item.get("kind"), "Other"),
-               "title": item.get("title") or (clean_text((cl[0] if cl else {}).get("first_note"), 80) if office else None),
-               "brand": item.get("brand"), "competitor": item.get("competitor"),
+               "title": _m(item.get("title") or (clean_text((cl[0] if cl else {}).get("first_note"), 80)
+                                                  if office else None), mask),
+               "brand": item.get("brand"), "competitor": _m(item.get("competitor"), mask),
                "category": item.get("category"), "barcode": item.get("barcode"),
                "yq_item_code": item.get("yq_item_code"), "status": item.get("status"),
                "status_label": (STATUS_LABELS if office else REP_STATUS_LABELS).get(item.get("status"), ""),
@@ -1015,7 +1043,8 @@ def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
            "cluster": cluster,
            "yq_item": yq_card(ctx_items.get(item.get("yq_item_code") or "")) if item.get("yq_item_code") else None,
            "gap": not item.get("yq_item_code"),
-           "observations": [_obs_out(o, photos.get(int(o["id"]), []), signed, names, office=office, actor=actor) for o in obs]}
+           "observations": [_obs_out(o, photos.get(int(o["id"]), []), signed, names, office=office, actor=actor,
+                                     mask=mask) for o in obs]}
     if office:
         shops: dict[str, dict] = {}
         for o in obs:
@@ -1023,7 +1052,7 @@ def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
             if not name and not o.get("shop_customer_id"):
                 continue
             k = f"c{o['shop_customer_id']}" if o.get("shop_customer_id") else f"n{_ci(name)}"
-            s = shops.setdefault(k, {"shop": name or "Shop", "area": o.get("area"), "sightings": 0})
+            s = shops.setdefault(k, {"shop": _m(name, mask) or "Shop", "area": o.get("area"), "sightings": 0})
             s["sightings"] += 1
         out["shops"] = sorted(shops.values(), key=lambda s: -s["sightings"])
         ai = item.get("ai_suggestion")
@@ -1038,13 +1067,14 @@ def item_detail(item_id: int, *, office: bool, actor: str = "") -> dict:
         out["decisions"] = [{"id": d.get("id"), "event": d.get("event"), "from_status": d.get("from_status"),
                              "to_status": d.get("to_status"), "action": d.get("action"),
                              "action_label": ACTION_LABELS.get(d.get("action")) if d.get("action") else None,
-                             "reason": d.get("reason"), "actor": str(d.get("actor") or "").split("@")[0],
-                             "actor_role": d.get("actor_role"), "detail": d.get("detail"),
+                             "reason": _m(d.get("reason"), mask), "actor": str(d.get("actor") or "").split("@")[0],
+                             # an edit's before / after carries the title and competitor as typed
+                             "actor_role": d.get("actor_role"), "detail": _m(d.get("detail"), mask),
                              "created_at": d.get("created_at")} for d in dec]
     return out
 
 
-def review_queue(*, library: bool = False, limit: int = 60, offset: int = 0) -> dict:
+def review_queue(*, library: bool = False, limit: int = 60, offset: int = 0, mask: bool = False) -> dict:
     """Office: the new items and the un-identified sightings (photo only). library=True browses the
     imported baseline (the old Finds board) instead."""
     if not available():
@@ -1064,8 +1094,9 @@ def review_queue(*, library: bool = False, limit: int = 60, offset: int = 0) -> 
                        [(r.get("cover_bucket"), r.get("cover_path")) for r in new_rows if r.get("cover_path")])
     names = _salesmen_names()
     return {"available": True,
-            "new_items": [_cluster_out(r, signed, office=True) for r in new_rows],
-            "unassigned": [_obs_out(o, photos.get(int(o["id"]), []), signed, names, office=True, actor="") for o in page],
+            "new_items": [_cluster_out(r, signed, office=True, mask=mask) for r in new_rows],
+            "unassigned": [_obs_out(o, photos.get(int(o["id"]), []), signed, names, office=True, actor="", mask=mask)
+                           for o in page],
             "count": total, "offset": off, "limit": lim}
 
 

@@ -141,6 +141,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         expected_delivery_date: str | None = Field(default=None, max_length=10)   # YYYY-MM-DD (a date picker)
         note: str | None = Field(default=None, max_length=500)                # the note for the shop
         shop_agreed: ShopAgreed | None = None      # required when a change is adverse (shop_heart.ADVERSE_MSG)
+        # the order's updated_at as the editor read it (the order payload's `updated_at`): a newer
+        # write in between is a 409 CAS_CONFLICT_MSG. Optional — an older client is not checked.
+        expected_updated_at: str | None = Field(default=None, max_length=64)
 
     class DeliverLine(BaseModel):
         line_id: int
@@ -154,6 +157,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         note: str | None = Field(default=None, max_length=500)
         shop_agreed: ShopAgreed | None = None
         focus_invoice_no: str | None = Field(default=None, max_length=shop_pipeline.INVOICE_MAX)
+        expected_updated_at: str | None = Field(default=None, max_length=64)   # as ConfirmRequest
 
     class ReopenRequest(BaseModel):
         reason: str = Field(max_length=300)
@@ -866,6 +870,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         sid, _admin = _scope(user)
         return o.get("salesman_id") == sid
 
+    # a line's landed-cost snapshot (R7c): only admins and a role holding 'Margins' ever read it
+    LINE_COST_KEYS = ("unit_cost_bhd", "cost_source")
+
+    def _sees_cost(user: CurrentUser) -> bool:
+        return user.role == "admin" or has_feature(user, "Margins")
+
     def _decorate(user: CurrentUser, o: dict, wa_status: str | None = None) -> dict:
         """The staff order payload (R7c): the owner's three visible stages, what this role is
         offered next (next_statuses / actions), every line with its three numbers and the public
@@ -883,8 +893,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         o["stamp_label"] = (shop.STATUS_LABELS.get(o["status"])
                             if o["status"] in ("packed", "out_for_delivery") else None)   # the pick-list word
         o["lines"] = [{**ln, **shop_heart.line_view(ln, o)} for ln in o.get("lines") or []]
+        if not _sees_cost(user):
+            # R7c snapshots each line's landed cost: margin data, not a rep's or the store's business
+            for ln in o["lines"]:
+                for k in LINE_COST_KEYS:
+                    ln.pop(k, None)
         o.update(shop_heart.order_money(o))
-        o.update(shop_heart.notify_state(o.get("events")))
+        o.update(shop_heart.notify_state(o.get("events"), o))
         until = shop_heart.reopen_deadline(o)
         o["reopen_until"] = until.isoformat() if until and user.role == "admin" else None
         o["payment_label"] = shop_pipeline.PAYMENT_LABELS.get(o.get("payment_status") or "unpaid", "Unpaid")
@@ -978,7 +993,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                                    body.note, actor=user.email,
                                    added_lines=[a.model_dump() for a in body.added_lines],
                                    shop_agreed=body.shop_agreed.model_dump() if body.shop_agreed else None,
-                                   expected_delivery_date=body.expected_delivery_date)
+                                   expected_delivery_date=body.expected_delivery_date,
+                                   expected_updated_at=body.expected_updated_at)
         except ShopError as e:
             raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_status, order_id, "confirmed", body.note)
@@ -999,7 +1015,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                                  body.note, actor=user.email,
                                  added_lines=[a.model_dump() for a in body.added_lines],
                                  shop_agreed=body.shop_agreed.model_dump() if body.shop_agreed else None,
-                                 expected_delivery_date=body.expected_delivery_date)
+                                 expected_delivery_date=body.expected_delivery_date,
+                                 expected_updated_at=body.expected_updated_at)
         except ShopError as e:
             raise _conflict_or_400(e) from e
         log_event(user.email, "shop.order_amend",
@@ -1020,7 +1037,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             o = shop.deliver_with_changes(order_id, [ln.model_dump() for ln in body.lines],
                                           [a.model_dump() for a in body.added],
                                           body.shop_agreed.model_dump() if body.shop_agreed else None,
-                                          actor=user.email, note=body.note, focus_invoice_no=body.focus_invoice_no)
+                                          actor=user.email, note=body.note, focus_invoice_no=body.focus_invoice_no,
+                                          expected_updated_at=body.expected_updated_at)
         except ShopError as e:
             raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_status, order_id, "delivered", body.note)
