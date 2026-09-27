@@ -1493,6 +1493,31 @@ def _():
     assert "on delete set null" in low, "a substitute never blocks (or takes) another line"
 
 
+@test("review: every view that counts R7c line columns reads them through to_jsonb, so this reverse never meets a dependent view")
+def _():
+    # v_command_orders (units the shop asked for vs rep-added, delivered units) and v_agent_shop_lines read
+    # added_at_stage / qty_delivered. A direct column reference would pin the column: the reverse's DROP COLUMN
+    # would then fail (no CASCADE, ever), and a view created before this migration could not read them at all.
+    readers = set()
+    for path in sorted((ROOT / "scripts").glob("*.sql")):
+        if path.name.startswith("r7c_order_lines_qty_"):
+            continue
+        for name, body in re.findall(r"create or replace view (\w+) as\n(.*?);\n", _code(path.read_text(encoding="utf-8")),
+                                     re.S):
+            if "shop_order_lines" not in body:
+                continue            # e.g. v_product_economics has its own cost_source, unrelated to the order lines
+            for col in R7C_LINE:
+                if col not in body:
+                    continue
+                readers.add(name)
+                bare = re.sub(rf"->> '{col}'|\bas {col}\b", "", body)       # the jsonb key and the output alias
+                assert not re.search(rf"\b{col}\b", bare), f"{path.name}: {name} reads {col} directly"
+    assert {"v_command_orders", "v_agent_shop_lines"} <= readers, readers
+    head = MIGRATION.read_text(encoding="utf-8").split("alter table", 1)[0]
+    assert "to_jsonb(l)" in head and "v_command_orders" in head and "v_agent_shop_lines" in head
+    assert "to_jsonb(l)" in REVERSE.read_text(encoding="utf-8").split("alter table", 1)[0]
+
+
 @test("reverse: drops the 11 columns, restores both checks NOT VALID (no row rewritten), never CASCADE / row deletes")
 def _():
     rev = _code(REVERSE.read_text(encoding="utf-8"))

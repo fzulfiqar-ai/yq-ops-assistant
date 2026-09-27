@@ -20,7 +20,9 @@
 --      (the digit rule is app/ai_insights.PHONE_PATTERN, which the pack applies again on the way out).
 --        v_agent_shop_orders       order header facts: status timestamps, requested vs confirmed totals,
 --                                  rep, area, source, is_test, the Focus invoice link state
---        v_agent_shop_lines        order lines: qty vs qty_confirmed, line totals, line_status
+--        v_agent_shop_lines        order lines: qty vs qty_confirmed vs qty_delivered, line totals, line_status,
+--                                  added_at_stage (a rep-added / substitute line, R7c; read through to_jsonb
+--                                  so the view works before and after r7c_order_lines_qty_migration.sql)
 --        v_agent_shop_events       the merchant funnel stream with md5 device / session keys (lets the pack
 --                                  reuse scripts/weekly_report.py compute() unchanged)
 --        v_agent_funnel_daily      per Bahrain day x referral_code: visitors, item views, adds, checkouts, orders
@@ -246,7 +248,9 @@ select o.id                                                           as order_i
        o.cancel_reason_code,
        o.paid_at,
        o.updated_at,
-       round((extract(epoch from (o.confirmed_at - o.created_at)) / 3600)::numeric, 2) as confirm_hours,
+       -- Received -> Confirmed; NULL on an order a rep placed himself (source 'salesman': born Confirmed, R7c)
+       case when o.source is distinct from 'salesman'
+            then round((extract(epoch from (o.confirmed_at - o.created_at)) / 3600)::numeric, 2) end as confirm_hours,
        round((extract(epoch from (o.delivered_at - o.created_at)) / 3600)::numeric, 2) as deliver_hours,
        o.items_count,
        o.units_count,
@@ -273,7 +277,7 @@ left join (select order_id, count(*) as confirmed_n
              from shop_order_focus_links where state = 'confirmed' group by order_id) fl on fl.order_id = o.id;
 
 comment on view v_agent_shop_orders is
-  'AI Head (R7b): one row per marketplace order, no contact details (no name, phone, email, note, token, IP, device). total_requested_bhd = as the shop asked; *_confirmed_bhd = after the rep confirmed. focus_link_state: linked (a confirmed shop_order_focus_links row) | typed (focus_invoice_no only) | none. ai_head_ro + yq_readonly.';
+  'AI Head (R7b): one row per marketplace order, no contact details (no name, phone, email, note, token, IP, device). total_requested_bhd = as the shop asked; *_confirmed_bhd = after the rep confirmed. confirm_hours is NULL for source ''salesman'' (a rep''s own order is born Confirmed: no Received -> Confirmed wait). focus_link_state: linked (a confirmed shop_order_focus_links row) | typed (focus_invoice_no only) | none. ai_head_ro + yq_readonly.';
 
 -- 3b. order lines
 create or replace view v_agent_shop_lines as
@@ -299,7 +303,11 @@ select l.id                                   as line_id,
        l.line_status,
        l.stock_status,
        l.backorder,
-       l.rule_ids
+       l.rule_ids,
+       -- appended (R7b review): R7c's columns through to_jsonb(l) -- NULL before
+       -- r7c_order_lines_qty_migration.sql, and r7c's reverse can still drop them (no column is pinned)
+       to_jsonb(l) ->> 'added_at_stage'               as added_at_stage,
+       (to_jsonb(l) ->> 'qty_delivered')::integer     as qty_delivered
 from shop_order_lines l
 join shop_orders o on o.id = l.order_id
 left join lateral (select c.category, c.division from catalog_items c
@@ -307,7 +315,7 @@ left join lateral (select c.category, c.division from catalog_items c
                     order by (c.item_code = l.item_code) desc, c.id limit 1) ci on true;
 
 comment on view v_agent_shop_lines is
-  'AI Head (R7b): marketplace order lines, requested (qty, line_total_bhd) and confirmed (qty_confirmed, line_total_confirmed), line_status, the catalog category. ai_head_ro + yq_readonly.';
+  'AI Head (R7b): marketplace order lines, requested (qty, line_total_bhd), confirmed (qty_confirmed, line_total_confirmed) and delivered (qty_delivered), line_status, the catalog category. added_at_stage set = a line the rep added or substituted (R7c), NOT something the shop asked for: leave it out of demand and of the requested subtotal. ai_head_ro + yq_readonly.';
 
 -- 3c. the funnel stream, pseudonymous
 create or replace view v_agent_shop_events as
@@ -402,10 +410,13 @@ per as (
          count(*) filter (where o.confirmed_at >= now() - interval '30 days')                        as confirmed_30d,
          count(*) filter (where o.delivered_at >= now() - interval '30 days')                        as delivered_30d,
          count(*) filter (where o.cancelled_at >= now() - interval '30 days')                        as cancelled_30d,
+         -- Received -> Confirmed only: a rep's own order (source 'salesman') is born Confirmed and never waited
          percentile_cont(0.5) within group (order by extract(epoch from (o.confirmed_at - o.created_at)) / 3600)
-           filter (where o.confirmed_at >= now() - interval '30 days')                               as median_confirm_hours_30d,
+           filter (where o.confirmed_at >= now() - interval '30 days'
+                     and o.source is distinct from 'salesman')                                      as median_confirm_hours_30d,
          max(extract(epoch from (o.confirmed_at - o.created_at)) / 3600)
-           filter (where o.confirmed_at >= now() - interval '30 days')                               as max_confirm_hours_30d,
+           filter (where o.confirmed_at >= now() - interval '30 days'
+                     and o.source is distinct from 'salesman')                                      as max_confirm_hours_30d,
          max(o.created_at)                                                                           as last_order_at
   from o
   group by o.salesman_id
@@ -467,7 +478,7 @@ left join link l on l.referral_code = s.referral_code
 left join taps t on t.salesman_id = s.id;
 
 comment on view v_agent_rep_governance is
-  'AI Head (R7b): per rep, from shop data only: orders waiting (and over 24 h), confirm times over 30 days, the last time his login moved an order (last_order_action_at: the nearest thing to a last sign-in the shop records), rep-link visitors and follow-up taps. No phone or email (has_login is a flag). ai_head_ro + yq_readonly.';
+  'AI Head (R7b): per rep, from shop data only: orders waiting (and over 24 h), confirm times over 30 days (Received -> Confirmed; his own born-Confirmed orders, source ''salesman'', left out), the last time his login moved an order (last_order_action_at: the nearest thing to a last sign-in the shop records), rep-link visitors and follow-up taps. No phone or email (has_login is a flag). ai_head_ro + yq_readonly.';
 
 -- 3g. kickback statements without personal details
 create or replace view v_agent_statements as

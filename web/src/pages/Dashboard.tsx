@@ -45,13 +45,36 @@ interface Health {
   dead_stock_uncosted?: number; dead_stock_sell_bhd?: number | null; stock_basis?: string | null
 }
 interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
-/** acc_bhd = Mobile Accessories only — the basis for every target (SIM never counts) */
-interface DailyRow { day: string; gross_bhd: number; acc_bhd?: number; net_bhd: number; orders: number }
+/** acc_bhd = Mobile Accessories only, VAT-incl (SIM never counts); acc_net_bhd = the same ex-VAT, giveaways
+ *  out — the basis the company target is read on, so the bars and the target lines compare like with like */
+interface DailyRow { day: string; gross_bhd: number; acc_bhd?: number; acc_net_bhd?: number; net_bhd: number; orders: number }
 interface PaymentRow { sale_type: string; orders: number; revenue_bhd: number }
 interface DivisionRow { division: string; orders: number; revenue_bhd: number; giveaway_qty: number }
+/** The Command Centre's pace (app.metrics.month_pace): mtd_bhd is Accessories ex-VAT; the target is read as
+ *  ex-VAT, Accessories, business days (Sun–Thu) — basis_text says so on the card */
 interface Pace {
   target_bhd: number; mtd_bhd: number; prev_month_bhd: number
   projected_bhd: number | null; target_pct: number | null; on_track: boolean | null
+  business_days_done?: number | null; business_days_total?: number | null; basis_text?: string; vat?: string
+}
+
+/** Sunday–Thursday: the Bahrain business week (Friday and Saturday off), as the API counts it */
+function isBusinessDay(iso: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso)
+  if (!m) return false
+  const dow = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay()
+  return dow !== 5 && dow !== 6
+}
+
+/** Business days from the 1st of `iso`'s month up to and including `iso` */
+function businessDaysTo(iso: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso)
+  if (!m) return 0
+  let n = 0
+  for (let d = 1; d <= Number(m[3]); d++) {
+    if (isBusinessDay(`${m[1]}-${m[2]}-${String(d).padStart(2, '0')}`)) n++
+  }
+  return n
 }
 interface DashboardData {
   data_as_of?: string | null
@@ -189,21 +212,27 @@ export default function Dashboard() {
     queryFn: () => apiGet<DashboardData>('/report/dashboard'),
   })
 
-  // daily target = monthly target ÷ all days in the month (owner's rule)
+  // ONE basis with the pace and the Command Centre (R7b review): the target is read as ex-VAT,
+  // Accessories, business days — so the daily target is the monthly target ÷ the month's business days
+  // (Sun–Thu), the bars are Accessories ex-VAT, and the cumulative target only steps on business days
   // eslint-disable-next-line react-hooks/preserve-manual-memoization -- pre-existing memo; the compiler hint is advisory here
   const daysInMonth = useMemo(() => {
     const d = data?.data_as_of ? new Date(data.data_as_of) : new Date()
     return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
   }, [data?.data_as_of])
-  const dailyTarget = (data?.pace?.target_bhd ?? 0) > 0 ? data!.pace!.target_bhd / daysInMonth : null
+  const targetDays = data?.pace?.business_days_total || daysInMonth
+  const dailyTarget = (data?.pace?.target_bhd ?? 0) > 0 ? data!.pace!.target_bhd / targetDays : null
+  const exVat = (data?.daily_mtd || []).some((r) => r.acc_net_bhd != null)
+  const barKey = exVat ? 'acc_net_bhd' : 'acc_bhd'
   const cumSeries = useMemo(() => {
     let run = 0
     return (data?.daily_mtd || []).map((r, i) => {
       // eslint-disable-next-line react-hooks/immutability -- a local running total inside map(), not render state
-      run += Number(r.acc_bhd ?? r.gross_bhd ?? 0)
-      return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * (i + 1)) : null }
+      run += Number(r.acc_net_bhd ?? r.acc_bhd ?? r.gross_bhd ?? 0)
+      const steps = data?.pace?.business_days_total ? businessDaysTo(r.day) : i + 1
+      return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * steps) : null }
     })
-  }, [data?.daily_mtd, dailyTarget])
+  }, [data?.daily_mtd, data?.pace?.business_days_total, dailyTarget])
 
   const k = data?.kpis
   // Compare MTD against the SAME slice of last month, not the whole of it. MTD only covers
@@ -306,11 +335,14 @@ export default function Dashboard() {
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <div>
               <div className="font-display text-base font-semibold">This month, day by day</div>
-              <div className="text-xs text-muted-foreground">Mobile Accessories gross per day (VAT-incl, SIM excluded) · {monthLabel(data.data_as_of || '')}</div>
+              <div className="text-xs text-muted-foreground">
+                {exVat ? 'Mobile Accessories ex-VAT per day (SIM and giveaways excluded)' : 'Mobile Accessories gross per day (VAT-incl, SIM excluded)'} · {monthLabel(data.data_as_of || '')}
+              </div>
+              {data.pace?.basis_text && <div className="text-[11px] text-muted-foreground">{data.pace.basis_text}</div>}
             </div>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
               {data.pace && (<>
-                <span className="text-muted-foreground">Accessories MTD <b className="text-foreground tabular-nums">{bhd(data.pace.mtd_bhd, 0)}</b></span>
+                <span className="text-muted-foreground">Accessories MTD{data.pace.vat ? ` ${data.pace.vat}` : ''} <b className="text-foreground tabular-nums">{bhd(data.pace.mtd_bhd, 0)}</b></span>
                 {data.pace.projected_bhd != null && (
                   <span className="text-muted-foreground">Projected <b className="text-foreground tabular-nums">{bhd(data.pace.projected_bhd, 0)}</b></span>
                 )}
@@ -343,16 +375,16 @@ export default function Dashboard() {
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
                   width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
                 <Tooltip
-                  formatter={(v, name) => (name === 'acc_bhd' ? [bhd(Number(v)), 'Accessories'] : [String(v), String(name)])}
+                  formatter={(v, name) => (name === barKey ? [bhd(Number(v)), exVat ? 'Accessories ex-VAT' : 'Accessories'] : [String(v), String(name)])}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 {dailyTarget && (
                   <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4"
-                    label={{ value: `daily target ${bhd(dailyTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+                    label={{ value: `target per business day ${bhd(dailyTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
                 )}
-                <Bar dataKey="acc_bhd" radius={[4, 4, 0, 0]} maxBarSize={26}>
+                <Bar dataKey={barKey} radius={[4, 4, 0, 0]} maxBarSize={26}>
                   {data.daily_mtd.map((r, i) => (
-                    <Cell key={i} fill={dailyTarget && Number(r.acc_bhd ?? r.gross_bhd) >= dailyTarget ? '#059669' : '#7c3aed'} />
+                    <Cell key={i} fill={dailyTarget && Number(r.acc_net_bhd ?? r.acc_bhd ?? r.gross_bhd) >= dailyTarget ? '#059669' : '#7c3aed'} />
                   ))}
                 </Bar>
               </BarChart>
@@ -371,7 +403,7 @@ export default function Dashboard() {
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
                   width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
                 <Tooltip
-                  formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? 'Accessories MTD' : 'Target to date']}
+                  formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? (exVat ? 'Accessories MTD ex-VAT' : 'Accessories MTD') : 'Target to date (business days)']}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 <Area type="monotone" dataKey="cum_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#cumFill)" />

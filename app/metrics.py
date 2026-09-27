@@ -14,6 +14,13 @@ Definitions (owner rules, 21-Sep and 24-Sep-2026):
   * Focus figures are anchored on the last loaded sale day ("data to 24 Sep"), never on the
     calendar: a Monday upload of Thursday's export compares Thursday with Thursday. Marketplace
     order figures are live and anchored on today in Bahrain.
+  * The company target (app_settings.monthly_sales_target_bhd) is read as ex-VAT, Accessories,
+    paced on business days — here and on the Dashboard (app.reports._pace calls month_pace).
+  * Marketplace order money is VAT-inclusive (the price book is): every marketplace BHD figure on
+    this page is shown ex-VAT, ÷ (1 + app_settings.shop_vat_rate), so it sits beside ex-VAT sales.
+  * Marketplace units are what the SHOP asked for: a line the rep added or substituted (R7c) is
+    counted apart (units_added); an order a rep placed himself (source 'salesman') is born
+    Confirmed, so it never enters a Received → Confirmed time or the accepted rate.
   * Money is summed in SQL (ROUND(... , 3)) or as Decimals here, and leaves as 3-dp floats.
   * Margin (R7d): the OFFICIAL margin is ex-VAT sales against Focus COGS (100 % of items costed);
     the landed (MRN) margin is secondary and always carries its coverage. official_margin() and
@@ -70,6 +77,10 @@ SLA_BUSINESS_HOURS = 24          # an order Received for longer than this needs 
 MATCH_AFTER_DAYS = 3             # a delivered order has this long to get its Focus invoice
 SILENT_AFTER_BUSINESS_DAYS = 7   # a rep with no Accessories invoice for longer is flagged
 DORMANT_AFTER_DAYS = 45
+DORMANT_MIN_BHD = Decimal("100")  # a dormant account is "high-value" from BHD 100 ex-VAT in 12 months
+DEFAULT_VAT_RATE = Decimal("0.10")   # = app.shop.SETTING_DEFAULTS['shop_vat_rate']; the setting wins
+STAFF_SOURCE = "salesman"        # shop_orders.source of an order a rep placed himself: born Confirmed (R7c)
+PACE_BASIS = "target read as ex-VAT, Accessories, business days (Sun–Thu; Fri, Sat off)"
 STALE_AFTER_DAYS = 3             # app.reports.STALE_AFTER_DAYS: the same lenient rule
 TOP_N = 5
 
@@ -279,7 +290,9 @@ def windows(period: str, anchor: date) -> tuple[Window, Window | None]:
 
 def month_pace(mtd, anchor: date, target) -> dict:
     """Month-to-date pace on business days: projected = MTD ÷ business days so far × business days in
-    the month; against the company target when one is set."""
+    the month; against the company target when one is set. THE one pace rule: `mtd` must be the
+    Accessories ex-VAT month to date (the target is read as ex-VAT, Accessories, business days —
+    PACE_BASIS); the Command Centre and the Dashboard (app.reports._pace) both call this."""
     m0, m1 = month_start(anchor), month_end(anchor)
     done, total = business_days(m0, anchor), business_days(m0, m1)
     mtd_d, tgt = dec(mtd), dec(target)
@@ -293,6 +306,7 @@ def month_pace(mtd, anchor: date, target) -> dict:
         "projected_pct_of_target": share(projected, tgt) if tgt > 0 else None,
         "on_track": (projected >= tgt) if tgt > 0 else None,
         "needed_per_business_day_bhd": money(need) if tgt > 0 else None,
+        "target_basis": PACE_BASIS,
     }
 
 
@@ -329,10 +343,12 @@ def short(text, n: int = 32) -> str:
 
 ANCHOR_SQL = (
     "SELECT (SELECT MAX(sale_date) FROM v_sales)::text AS focus_to, "
+    "(SELECT MIN(sale_date) FROM v_sales)::text AS focus_from, "
     "(SELECT MAX(as_of_date) FROM stock_balance)::text AS stock_as_of, "
     "(SELECT MAX(as_of_date) FROM v_receivables)::text AS ar_as_of, "
     "(SELECT MAX(report_date) FROM v_product_margin)::text AS margin_report_date, "
-    "(SELECT value FROM app_settings WHERE key = 'monthly_sales_target_bhd' LIMIT 1) AS target_bhd"
+    "(SELECT value FROM app_settings WHERE key = 'monthly_sales_target_bhd' LIMIT 1) AS target_bhd, "
+    "(SELECT value FROM app_settings WHERE key = 'shop_vat_rate' LIMIT 1) AS shop_vat_rate"
 )
 
 # $1 = the windows as JSON [{"k": "cur", "s": "2026-09-01", "e": "2026-09-24"}, ...]; a line counts in
@@ -507,7 +523,7 @@ AR_OWNER_SQL = (
 _ORDER_COLS = ("id, order_no, status, source, salesman_id, salesman_name, is_test, created_at::text AS created_at, "
                "confirmed_at::text AS confirmed_at, delivered_at::text AS delivered_at, "
                "cancelled_at::text AS cancelled_at, total_bhd, total_confirmed_bhd, units_ordered, units_confirmed, "
-               "has_invoice_no, focus_links_n")
+               "has_invoice_no, focus_links_n, units_added, units_delivered")
 _ORDER_WHERE = ("WHERE created_at >= $1::timestamptz "
                 "OR status IN ('new', 'confirmed', 'packed', 'out_for_delivery')")
 ORDERS_SQL = f"SELECT {_ORDER_COLS} FROM v_command_orders {_ORDER_WHERE}"
@@ -517,11 +533,16 @@ ORDERS_FALLBACK_SQL = (
     "confirmed_at::text AS confirmed_at, delivered_at::text AS delivered_at, cancelled_at::text AS cancelled_at, "
     f"total_bhd, units_count AS units_ordered FROM v_shop_orders_agent {_ORDER_WHERE}"
 )
-# $1 = now: delivered orders older than MATCH_AFTER_DAYS and how many carry a confirmed Focus link
+# $1 = now: delivered orders older than MATCH_AFTER_DAYS; matched = a person ACCEPTED a Focus invoice
+# link (focus_links_n); of the rest, awaiting = a Focus invoice was found and waits for acceptance
+# (has_suggestion), the others have no Focus invoice found yet. Money VAT-inclusive (converted in Python).
 MATCH_SQL = (
     "SELECT COUNT(*) FILTER (WHERE d) AS eligible, COUNT(*) FILTER (WHERE d AND focus_links_n > 0) AS matched, "
     "ROUND(COALESCE(SUM(COALESCE(total_confirmed_bhd, total_bhd)) FILTER (WHERE d AND focus_links_n = 0), 0)::numeric, 3) "
-    "AS unmatched_bhd, COUNT(*) FILTER (WHERE status IN ('new', 'confirmed', 'packed', 'out_for_delivery') "
+    "AS unmatched_bhd, COUNT(*) FILTER (WHERE d AND focus_links_n = 0 AND has_suggestion) AS awaiting, "
+    "ROUND(COALESCE(SUM(COALESCE(total_confirmed_bhd, total_bhd)) FILTER (WHERE d AND focus_links_n = 0 "
+    "AND has_suggestion), 0)::numeric, 3) AS awaiting_bhd, "
+    "COUNT(*) FILTER (WHERE status IN ('new', 'confirmed', 'packed', 'out_for_delivery') "
     "AND (focus_links_n > 0 OR has_invoice_no)) AS invoiced_open, MAX(created_at)::text AS last_order_at "
     "FROM (SELECT *, (status = 'delivered' AND COALESCE(delivered_at, created_at) < $1::timestamptz - interval "
     f"'{MATCH_AFTER_DAYS} days') AS d FROM v_command_orders WHERE NOT is_test) o"
@@ -633,9 +654,26 @@ class Ctx:
     live: Window
     anchors: dict
 
+    @property
+    def vat_rate(self) -> Decimal:
+        """app_settings.shop_vat_rate (0.10 when unset or unreadable): marketplace money ÷ (1 + this)."""
+        try:
+            v = Decimal(str(self.anchors.get("shop_vat_rate")).strip())
+        except Exception:  # noqa: BLE001 -- unset (None) or junk: the default
+            return DEFAULT_VAT_RATE
+        return v if v.is_finite() and Decimal(0) <= v < 1 else DEFAULT_VAT_RATE
+
+    def ex_vat(self, x) -> Decimal:
+        """A VAT-inclusive marketplace amount ex-VAT (unrounded: money() rounds at the edge)."""
+        return dec(x) / (1 + self.vat_rate)
+
     def fields(self) -> dict:
+        f_from = parse_day(self.anchors.get("focus_from"))
         return {
             "focus_to": day_label(self.focus_to) or "no data",
+            "history": (span_label(f_from, self.focus_to) if f_from and self.focus_to and f_from <= self.focus_to
+                        else "every loaded day"),
+            "vat": f"ex-VAT (order totals ÷ {1 + self.vat_rate:.2f})",
             "window": self.cur.label if self.cur else "no data",
             "compare": (self.cmp.basis or self.cmp.label) if self.cmp else "",
             "compare_span": self.cmp.label if self.cmp else "",
@@ -684,8 +722,15 @@ def _live_orders(ctx: Ctx) -> list[dict]:
 
 
 def _order_value(o: dict) -> Decimal:
+    """The order's money as it stands (confirmed, else as placed) — VAT-inclusive, as stored."""
     v = o.get("total_confirmed_bhd")
     return dec(v if v is not None else o.get("total_bhd"))
+
+
+def _born_confirmed(o: dict) -> bool:
+    """An order a rep placed himself (source 'salesman'): born Confirmed at the prices just quoted
+    (app.shop, R7c), so it never waited in Received and its quantities were never 'accepted'."""
+    return (o.get("source") or "") == STAFF_SOURCE
 
 
 def _order_age_business_h(o: dict, now: datetime, until_field: str | None = None) -> float | None:
@@ -712,8 +757,7 @@ def _sales_accessories(ctx: Ctx) -> dict | None:
 
 
 @metric("sales.pace", "Month pace", "sales",
-        "Accessories · ex-VAT · {month} on business days (Fri, Sat off) · company target from settings · "
-        "data to {focus_to}", "bhd")
+        "Accessories · ex-VAT · {month} · company target " + PACE_BASIS + " · data to {focus_to}", "bhd")
 def _sales_pace(ctx: Ctx) -> dict | None:
     if _sales_rows(ctx) is None or not ctx.focus_to:
         return None
@@ -761,23 +805,31 @@ def _sales_trend(ctx: Ctx) -> dict | None:
 
 # ══ Order health (live) ════════════════════════════════════════════════════════
 
-_ORDERS_BASIS = "Marketplace orders placed {live} · {tests}"
-
-
-@metric("orders.funnel", "Placed → Confirmed → Delivered", "orders", _ORDERS_BASIS, "funnel")
+@metric("orders.funnel", "Placed → Confirmed → Delivered", "orders",
+        "Marketplace orders placed {live} · money {vat} · units = what the shop asked for (lines a rep added "
+        "counted apart) · {tests}", "funnel")
 def _orders_funnel(ctx: Ctx) -> dict | None:
     if ctx.r.get("orders") is None:
         return None
     rows = _live_orders(ctx)
 
-    def stage(sel: Callable[[dict], bool], units_field: str, value: Callable[[dict], Decimal]) -> dict:
+    def stage(sel: Callable[[dict], bool], units_fields: tuple[str, ...], value: Callable[[dict], Decimal]) -> dict:
         got = [o for o in rows if sel(o)]
-        units = sum(_int(o.get(units_field) if o.get(units_field) is not None else o.get("units_ordered")) for o in got)
-        return {"orders": len(got), "units": units, "bhd": money(sum((value(o) for o in got), Decimal(0)))}
+        units = 0
+        for o in got:
+            # the stage's own quantity, else the stage before it (the older view has only the placed units)
+            f = next((f for f in units_fields if o.get(f) is not None), units_fields[-1])
+            units += _int(o.get(f))
+        return {"orders": len(got), "units": units,
+                "bhd": money(ctx.ex_vat(sum((value(o) for o in got), Decimal(0)))),
+                "units_added": sum(_int(o.get("units_added")) for o in got)}
 
-    submitted = stage(lambda o: True, "units_ordered", lambda o: dec(o.get("total_bhd")))
-    confirmed = stage(lambda o: o.get("status") in CONFIRMED_STATUSES, "units_confirmed", _order_value)
-    delivered = stage(lambda o: o.get("status") == "delivered", "units_confirmed", _order_value)
+    submitted = stage(lambda o: True, ("units_ordered",), lambda o: dec(o.get("total_bhd")))
+    submitted.pop("units_added")        # nothing is added at placement; the rep adds at confirm / delivery
+    confirmed = stage(lambda o: o.get("status") in CONFIRMED_STATUSES, ("units_confirmed", "units_ordered"),
+                      _order_value)
+    delivered = stage(lambda o: o.get("status") == "delivered", ("units_delivered", "units_confirmed", "units_ordered"),
+                      _order_value)
     return {"value": submitted["orders"], "stages": [
         {"key": "submitted", "label": "Placed", **submitted},
         {"key": "confirmed", "label": "Confirmed", **confirmed},
@@ -787,26 +839,33 @@ def _orders_funnel(ctx: Ctx) -> dict | None:
 
 
 @metric("orders.accepted", "Accepted rate", "orders",
-        "Units accepted at confirmation ÷ units ordered · orders placed {live} and confirmed", "pct")
+        "Units confirmed ÷ units the shop asked for · orders placed {live} and confirmed by a rep · lines a rep added "
+        "and orders a rep placed himself (born Confirmed) left out", "pct")
 def _orders_accepted(ctx: Ctx) -> dict | None:
     if ctx.r.get("orders") is None:
         return None
     if not _orders_view(ctx):
         return {"available": False, "note": "Needs the Command Centre view (r7b migration) to read confirmed quantities."}
-    got = [o for o in _live_orders(ctx) if o.get("status") in CONFIRMED_STATUSES and o.get("units_confirmed") is not None]
+    confirmed = [o for o in _live_orders(ctx) if o.get("status") in CONFIRMED_STATUSES
+                 and o.get("units_confirmed") is not None]
+    got = [o for o in confirmed if not _born_confirmed(o)]
     ordered = sum(_int(o.get("units_ordered")) for o in got)
     accepted = sum(_int(o.get("units_confirmed")) for o in got)
-    return {"value": share(accepted, ordered), "units_ordered": ordered, "units_accepted": accepted, "orders": len(got)}
+    return {"value": share(accepted, ordered), "units_ordered": ordered, "units_accepted": accepted, "orders": len(got),
+            "units_added": sum(_int(o.get("units_added")) for o in got),
+            "staff_orders_left_out": len(confirmed) - len(got)}
 
 
 @metric("orders.confirm_time", "Time to confirm", "orders",
-        "Received → Confirmed · business hours (Fri, Sat off) · orders placed {live} · still-open orders at their age now",
-        "hours")
+        "Received → Confirmed · business hours (Fri, Sat off) · orders placed {live} · still-open orders at their age now "
+        "· orders a rep placed himself (born Confirmed) left out", "hours")
 def _orders_confirm_time(ctx: Ctx) -> dict | None:
     if ctx.r.get("orders") is None:
         return None
     hours, open_n = [], 0
     for o in _live_orders(ctx):
+        if _born_confirmed(o):
+            continue          # a rep's own order is born Confirmed: it never waited in Received
         if o.get("confirmed_at"):
             h = _order_age_business_h(o, ctx.r.now, "confirmed_at")
         elif o.get("status") == "new":
@@ -821,7 +880,8 @@ def _orders_confirm_time(ctx: Ctx) -> dict | None:
 
 
 def waiting_orders(ctx: Ctx) -> list[dict]:
-    """Every Received order older than SLA_BUSINESS_HOURS business hours (any date), oldest first."""
+    """Every Received order older than SLA_BUSINESS_HOURS business hours (any date), oldest first.
+    `bhd` is ex-VAT; `bhd_incl` the stored VAT-inclusive total the sums are taken from."""
     out = []
     for o in _orders(ctx):
         if o.get("status") != "new":
@@ -829,36 +889,42 @@ def waiting_orders(ctx: Ctx) -> list[dict]:
         h = _order_age_business_h(o, ctx.r.now)
         if h is not None and h > SLA_BUSINESS_HOURS:
             out.append({"id": o.get("id"), "order_no": o.get("order_no"), "rep": o.get("salesman_name") or "Unassigned",
-                        "hours": h, "bhd": money(o.get("total_bhd"))})
+                        "hours": h, "bhd": money(ctx.ex_vat(o.get("total_bhd"))), "bhd_incl": money(o.get("total_bhd"))})
     return sorted(out, key=lambda x: -x["hours"])
 
 
+def _sum_ex_vat(ctx: Ctx, rows: list[dict], key: str = "bhd_incl") -> float:
+    """Sum the VAT-inclusive amounts first, then take the VAT out once (no per-row rounding drift)."""
+    return money(ctx.ex_vat(sum((dec(x.get(key)) for x in rows), Decimal(0))))
+
+
 @metric("orders.waiting", "Waiting over 24 business hours", "orders",
-        "Received and not yet confirmed for over 24 business hours · as of now", "count",
+        "Received and not yet confirmed for over 24 business hours · as of now · money {vat}", "count",
         ("/shop-orders", "Open the order desk"))
 def _orders_waiting(ctx: Ctx) -> dict | None:
     if ctx.r.get("orders") is None:
         return None
     w = waiting_orders(ctx)
-    by_rep: dict[str, dict] = {}
+    by_rep: dict[str, list[dict]] = {}
     for x in w:
-        g = by_rep.setdefault(x["rep"], {"rep": x["rep"], "orders": 0, "bhd": Decimal(0)})
-        g["orders"] += 1
-        g["bhd"] += dec(x["bhd"])
-    reps = sorted(({"rep": g["rep"], "orders": g["orders"], "bhd": money(g["bhd"])} for g in by_rep.values()),
+        by_rep.setdefault(x["rep"], []).append(x)
+    reps = sorted(({"rep": rep, "orders": len(xs), "bhd": _sum_ex_vat(ctx, xs)} for rep, xs in by_rep.items()),
                   key=lambda g: (-g["orders"], g["rep"]))
-    return {"value": len(w), "bhd": money(sum((dec(x["bhd"]) for x in w), Decimal(0))),
+    return {"value": len(w), "bhd": _sum_ex_vat(ctx, w),
             "oldest_hours": w[0]["hours"] if w else None, "by_rep": reps, "waiting": w[:10]}
 
 
-@metric("orders.match_rate", "Invoice match", "orders",
-        "Delivered orders over 3 days old with a confirmed Focus invoice link · all time", "pct",
+@metric("orders.match_rate", "Invoice links confirmed", "orders",
+        "Delivered orders over 3 days old whose Focus invoice link a person accepted · a suggested invoice not yet "
+        "accepted does not count · all time · money {vat}", "pct",
         ("/shop-orders", "Focus links"))
 def _orders_match(ctx: Ctx) -> dict | None:
-    m = match_summary(ctx.r)
+    m = match_summary(ctx.r, ctx.vat_rate)
     if not m["available"]:
         return {"available": False, "value": None, "note": m["note"]}
-    return {"value": m["pct"], "matched": m["matched"], "eligible": m["eligible"], "unmatched_bhd": m["unmatched_bhd"]}
+    return {"value": m["pct"], "matched": m["matched"], "eligible": m["eligible"], "unmatched_bhd": m["unmatched_bhd"],
+            "awaiting": m["awaiting"], "awaiting_bhd": m["awaiting_bhd"],
+            "no_invoice": m["no_invoice"], "no_invoice_bhd": m["no_invoice_bhd"]}
 
 
 @metric("orders.self_order", "Ordered by the shop itself", "orders",
@@ -867,19 +933,28 @@ def _orders_self(ctx: Ctx) -> dict | None:
     if ctx.r.get("orders") is None:
         return None
     rows = _live_orders(ctx)
-    own = sum(1 for o in rows if (o.get("source") or "") != "salesman")
+    own = sum(1 for o in rows if not _born_confirmed(o))
     return {"value": share(own, len(rows)), "orders": len(rows), "by_shop": own}
 
 
-def match_summary(r: Reader) -> dict:
-    """The invoice match rate (freshness chip + order health): 0 / empty before the r7b view."""
+def match_summary(r: Reader, vat_rate: Decimal | None = None) -> dict:
+    """Invoice links confirmed (freshness chip + order health): 0 / empty before the r7b view.
+    matched = a person ACCEPTED the Focus invoice link; the rest split into awaiting (a Focus invoice
+    was found and waits for acceptance) and no_invoice (none found yet). Money ex-VAT at `vat_rate`."""
     row = r.get("match")
     if r.get("orders_source") != "v_command_orders" or not row:
         return {"available": False, "pct": None, "matched": 0, "eligible": 0, "unmatched_bhd": 0.0,
+                "awaiting": 0, "awaiting_bhd": 0.0, "no_invoice": 0, "no_invoice_bhd": 0.0,
                 "invoiced_open": 0, "note": "Invoice matching shows once the Command Centre view (r7b migration) is applied."}
+    div = 1 + (vat_rate if vat_rate is not None else DEFAULT_VAT_RATE)
     eligible, matched = _int(row.get("eligible")), _int(row.get("matched"))
+    unmatched, awaiting_incl = dec(row.get("unmatched_bhd")), dec(row.get("awaiting_bhd"))
+    awaiting = min(_int(row.get("awaiting")), max(0, eligible - matched))
     return {"available": True, "pct": share(matched, eligible), "matched": matched, "eligible": eligible,
-            "unmatched_bhd": money(row.get("unmatched_bhd")), "invoiced_open": _int(row.get("invoiced_open")),
+            "unmatched_bhd": money(unmatched / div),
+            "awaiting": awaiting, "awaiting_bhd": money(awaiting_incl / div),
+            "no_invoice": max(0, eligible - matched - awaiting), "no_invoice_bhd": money((unmatched - awaiting_incl) / div),
+            "invoiced_open": _int(row.get("invoiced_open")),
             "note": None if eligible else "No delivered order is old enough to need an invoice yet."}
 
 
@@ -906,8 +981,8 @@ def _silence_days(ctx: Ctx, last: date | None) -> int | None:
 
 
 @metric("team.reps", "Rep table", "team",
-        "Accessories · ex-VAT · {month} to {focus_to} · tiers from the target sheet · marketplace orders placed in {month}",
-        "table", ("/command/team", "Every rep"))
+        "Accessories · ex-VAT · {month} to {focus_to} · tiers from the target sheet · marketplace orders placed in "
+        "{month}, money {vat}", "table", ("/command/team", "Every rep"))
 def _team_reps(ctx: Ctx) -> dict | None:
     att = ctx.r.get("attainment")
     if att is None:
@@ -933,7 +1008,7 @@ def _team_reps(ctx: Ctx) -> dict | None:
             "last_invoice": last.isoformat() if last else None,
             "business_days_since_invoice": _silence_days(ctx, last),
             "marketplace_orders": len(mine),
-            "marketplace_bhd": money(sum((_order_value(o) for o in mine), Decimal(0))),
+            "marketplace_bhd": money(ctx.ex_vat(sum((_order_value(o) for o in mine), Decimal(0)))),    # ex-VAT
         })
     rows.sort(key=lambda x: (-x["net_bhd"], str(x["salesman"])))
     return {"value": len(rows), "rows": rows,
@@ -941,13 +1016,28 @@ def _team_reps(ctx: Ctx) -> dict | None:
                        "marketplace_orders": sum(x["marketplace_orders"] for x in rows)}}
 
 
+def _has_accessories_target(ctx: Ctx, s: dict) -> bool:
+    """The rep has a row on the (Accessories-only) target sheet for the data month: the attainment
+    row that is his (by id, else by name) says no_target False. A SIM-only rep has none."""
+    fn = str(s.get("focus_name") or "").strip()
+    for a in ctx.r.get("attainment") or []:
+        if a.get("no_target"):
+            continue
+        if s.get("id") is not None and a.get("salesman_id") == s.get("id"):
+            return True
+        if rep_matches(fn, a.get("salesman")) or rep_matches(a.get("salesman"), fn):
+            return True
+    return False
+
+
 def silent_reps(ctx: Ctx) -> list[dict]:
-    """Active reps whose last Accessories invoice is more than SILENT_AFTER_BUSINESS_DAYS business
-    days before the data date (or who have none on record)."""
+    """Active reps with an Accessories target whose last Accessories invoice is more than
+    SILENT_AFTER_BUSINESS_DAYS business days before the data date (or who have none on record).
+    A rep with no Accessories target row (a SIM-only rep) is never flagged: SIM never counts."""
     out = []
     for s in ctx.r.get("salesmen") or []:
         fn = str(s.get("focus_name") or "").strip()
-        if not s.get("is_active") or not fn:
+        if not s.get("is_active") or not fn or not _has_accessories_target(ctx, s):
             continue
         last, _n, _m = _rep_last_invoice(ctx, fn)
         days = _silence_days(ctx, last)
@@ -979,8 +1069,9 @@ def _customers_active(ctx: Ctx) -> dict | None:
 
 
 @metric("customers.dormant", "Dormant high-value accounts", "customers",
-        "Named B2B accounts with no Accessories invoice for over 45 days, by their last 12 months' ex-VAT sales · "
-        "data to {focus_to}", "list", ("/command/customers", "Every dormant account"))
+        "Named B2B accounts with no Accessories invoice for over 45 days and at least BHD 100 ex-VAT of Accessories "
+        "in the last 12 months, by those sales · data to {focus_to}", "list",
+        ("/command/customers", "Every dormant account"))
 def _customers_dormant(ctx: Ctx) -> dict | None:
     rows = _customers(ctx)
     if rows is None or not ctx.focus_to:
@@ -988,7 +1079,7 @@ def _customers_dormant(ctx: Ctx) -> dict | None:
     dormant = []
     for r in rows:
         d = parse_day(r.get("last_invoice"))
-        if d and (ctx.focus_to - d).days > DORMANT_AFTER_DAYS and dec(r.get("net_12m")) > 0:
+        if d and (ctx.focus_to - d).days > DORMANT_AFTER_DAYS and dec(r.get("net_12m")) >= DORMANT_MIN_BHD:
             dormant.append({"account": r.get("customer_name"), "last_invoice": d.isoformat(),
                             "days": (ctx.focus_to - d).days, "net_12m_bhd": money(r.get("net_12m"))})
     dormant.sort(key=lambda x: (-x["net_12m_bhd"], x["account"] or ""))
@@ -1147,14 +1238,19 @@ def profitability(q=None) -> dict:
 
 
 @metric("profit.official", OFFICIAL_MARGIN_LABEL, "profitability",
-        "Ex-VAT sales vs Focus COGS · profitability report of {margin_date} · every item costed", "pct",
+        "Ex-VAT sales vs Focus COGS · all sales {history} in the Focus profitability report of {margin_date} — "
+        "every loaded day, not the period chosen above · every item costed", "pct",
         ("/margins", "Margins by item"))
 def _profit_official(ctx: Ctx) -> dict | None:
     om = official_margin(ctx.r.get("margin_totals"))
     if om is None:
         return None
+    f_from = parse_day(ctx.anchors.get("focus_from"))
     return {"value": om["pct"], "gp_bhd": om["gp_bhd"], "net_ex_vat_bhd": om["net_ex_vat_bhd"],
-            "items": om["items"], "below_cost": om["below_cost"], "coverage_pct": om["coverage_pct"]}
+            "items": om["items"], "below_cost": om["below_cost"], "coverage_pct": om["coverage_pct"],
+            # the report covers every loaded sale, whatever period the page shows: the tile says which days
+            "covers": {"from": f_from.isoformat() if f_from else None,
+                       "to": ctx.focus_to.isoformat() if ctx.focus_to else None, "period_bound": False}}
 
 
 @metric("profit.landed", LANDED_MARGIN_LABEL, "profitability",
@@ -1169,7 +1265,8 @@ def _profit_landed(ctx: Ctx) -> dict | None:
 
 
 @metric("profit.below_cost", "Selling below cost", "profitability",
-        "Items whose ex-VAT sales are under their Focus COGS · profitability report of {margin_date}", "list",
+        "Items whose ex-VAT sales are under their Focus COGS · all sales {history} in the profitability report of "
+        "{margin_date}, not the period chosen above", "list",
         ("/margins", "Margins by item"))
 def _profit_below(ctx: Ctx) -> dict | None:
     rows = ctx.r.get("below_cost")
@@ -1307,20 +1404,30 @@ def attention_live(ctx: Ctx) -> list[dict]:
             who = ", ".join(f"{k} {v}" for k, v in sorted(reps.items(), key=lambda kv: (-kv[1], kv[0]))[:4])
             out.append(_item("orders_waiting", "alert", f"{len(w)} order{'s' if len(w) != 1 else ''} waiting to be confirmed",
                              f"Oldest {_hours_text(w[0]['hours'])} · {who}",
-                             "Received and not confirmed for over 24 business hours (Fri, Sat off) · now",
-                             ("/shop-orders", "Open the order desk"), len(w),
-                             money(sum((dec(x["bhd"]) for x in w), Decimal(0))),
+                             "Received and not confirmed for over 24 business hours (Fri, Sat off) · now · money "
+                             + ctx.fields()["vat"],
+                             ("/shop-orders", "Open the order desk"), len(w), _sum_ex_vat(ctx, w),
                              [{"label": x["order_no"], "sub": f"{x['rep']} · {_hours_text(x['hours'])}", "bhd": x["bhd"],
                                "to": f"/shop-orders?open={x['id']}"} for x in w[:6]]))
-    m = match_summary(ctx.r)
+    m = match_summary(ctx.r, ctx.vat_rate)
     if m["available"]:
-        miss = m["eligible"] - m["matched"]
-        if miss > 0:
+        # only an ACCEPTED link counts as matched; a found invoice awaiting acceptance is not "no invoice"
+        a = m["awaiting"]
+        if a > 0:
+            out.append(_item("invoice_awaiting_acceptance", "warn",
+                             f"{a} delivered order{'s' if a != 1 else ''} not yet matched to a Focus invoice",
+                             f"A Focus invoice was found for {'each' if a != 1 else 'it'} and waits to be accepted or "
+                             f"rejected · BHD {m['awaiting_bhd']:,.3f} ex-VAT delivered over {MATCH_AFTER_DAYS} days ago",
+                             "Delivered more than 3 days ago · a suggested Focus invoice, not yet accepted",
+                             ("/shop-orders", "Accept or reject"), a, m["awaiting_bhd"]))
+        n0 = m["no_invoice"]
+        if n0 > 0:
             out.append(_item("delivered_no_invoice", "warn",
-                             f"{miss} delivered order{'s' if miss != 1 else ''} without a Focus invoice",
-                             f"BHD {m['unmatched_bhd']:,.3f} delivered over {MATCH_AFTER_DAYS} days ago with no confirmed invoice link",
-                             "Delivered more than 3 days ago · no confirmed Focus link", ("/shop-orders", "Match invoices"),
-                             miss, m["unmatched_bhd"]))
+                             f"{n0} delivered order{'s' if n0 != 1 else ''} with no Focus invoice found",
+                             f"BHD {m['no_invoice_bhd']:,.3f} ex-VAT delivered over {MATCH_AFTER_DAYS} days ago; no "
+                             "Focus invoice names or matches them yet",
+                             "Delivered more than 3 days ago · no accepted link and no suggested Focus invoice",
+                             ("/shop-orders", "Match invoices"), n0, m["no_invoice_bhd"]))
         if m["invoiced_open"] > 0:
             n = m["invoiced_open"]
             out.append(_item("invoiced_open", "warn", f"{n} invoiced order{'s' if n != 1 else ''} still open",
@@ -1344,9 +1451,10 @@ def attention_focus(ctx: Ctx) -> list[dict]:
     if silent:
         names = ", ".join(f"{s['rep']} (since {day_label(parse_day(s['last_invoice']))})" if s["last_invoice"]
                           else f"{s['rep']} (none on record)" for s in silent[:4])
-        out.append(_item("rep_silence", "warn", f"{len(silent)} rep{'s' if len(silent) != 1 else ''} with no invoice for "
-                         f"over {SILENT_AFTER_BUSINESS_DAYS} business days", names,
-                         f"Active reps · last Accessories invoice in Focus · business days to {day_label(ctx.focus_to)}",
+        out.append(_item("rep_silence", "warn", f"{len(silent)} rep{'s' if len(silent) != 1 else ''} with no Accessories "
+                         f"invoice for over {SILENT_AFTER_BUSINESS_DAYS} business days", names,
+                         "Active reps with an Accessories target (SIM-only reps left out) · last Accessories invoice "
+                         f"in Focus · business days to {day_label(ctx.focus_to)}",
                          ("/command/team", "Rep table"), len(silent),
                          rows=[{"label": s["rep"], "sub": (f"last invoice {day_label(parse_day(s['last_invoice']))}"
                                                            if s["last_invoice"] else "no invoice on record")}
@@ -1472,7 +1580,9 @@ def _load_orders(r: Reader, since: date) -> None:
         rows = r.qp(ORDERS_FALLBACK_SQL, [since_ts]) or []
         r.memo["orders_source"] = "v_shop_orders_agent"
         r.notes.append("Order health reads the older order view until the Command Centre view (r7b migration) is "
-                       "applied: test orders are not left out and the accepted rate and invoice match are not shown.")
+                       "applied: test orders are not left out, the Confirmed and Delivered stages show the placed "
+                       "quantities and values (not the confirmed or delivered ones), and the accepted rate and "
+                       "invoice links are not shown.")
         return rows
 
     r.run("orders", run)

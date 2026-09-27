@@ -43,6 +43,7 @@ import re
 import sys
 import traceback
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -107,8 +108,8 @@ NOW = datetime(2026, 9, 27, 7, 0, tzinfo=timezone.utc)
 FOCUS_TO = "2026-09-24"
 MISSING = RuntimeError('{"code": "42P01", "message": "relation \\"public.v_command_orders\\" does not exist"}')
 
-ANCHOR = {"focus_to": FOCUS_TO, "stock_as_of": FOCUS_TO, "ar_as_of": FOCUS_TO, "margin_report_date": FOCUS_TO,
-          "target_bhd": "10000.0"}
+ANCHOR = {"focus_to": FOCUS_TO, "focus_from": "2025-01-01", "stock_as_of": FOCUS_TO, "ar_as_of": FOCUS_TO,
+          "margin_report_date": FOCUS_TO, "target_bhd": "10000.0", "shop_vat_rate": "0.10"}
 
 SALES = [
     {"k": "cur", "channel": "B2B", "division": "Accessories", "net_bhd": 900, "invoices": 40, "cash_invoices": 10, "cash_net_bhd": 50},
@@ -128,6 +129,7 @@ SALESMEN = [
     {"id": 3, "name": "Rep Idle", "focus_name": "Rep Idle", "is_active": True},     # never invoiced
     {"id": 4, "name": "Rep Old", "focus_name": "Rep Old", "is_active": False},      # switched off: never flagged
     {"id": 5, "name": "No Focus", "focus_name": None, "is_active": True},           # no Focus name: never flagged
+    {"id": 6, "name": "Rep Sim", "focus_name": "Rep Sim", "is_active": True},       # SIM only: no Accessories target row
 ]
 REPS = [
     {"rep": "Rep One - Acc WH", "last_invoice": "2026-09-24", "month_net_bhd": 300, "month_named_bhd": 240},
@@ -147,7 +149,8 @@ def _att(name, net, target=None, tiers=(None, None), kick=(0.01, 0.02, 0.03), in
 
 
 ATTAINMENT = [_att("Rep One", 300, 100, (200, 300)), _att("Rep Two", 100, 500, (None, None)),
-              _att("Counter B2C", 20, None, invoices=2, shops=0)]
+              _att("Counter B2C", 20, None, invoices=2, shops=0),
+              _att("Rep Idle", 0, 150, invoices=0, shops=0)]      # a target row and no sale yet
 
 CUSTOMERS = ([
     {"customer_name": "Shop A", "first_invoice": "2025-10-01", "last_invoice": "2026-09-20", "net_12m": 1000},
@@ -189,19 +192,22 @@ AR_TOTALS = {"as_of_date": FOCUS_TO, "focus_total_bhd": 800, "focus_over90_bhd":
 
 
 def _o(id, status, created, rep=1, total=10.0, units=5, units_c=None, confirmed=None, delivered=None,
-       source="market", test=False, links=0, typed=False, total_c=None):
+       source="market", test=False, links=0, typed=False, total_c=None, added=0, units_d=None):
     names = {1: "Rep One", 2: "Rep Two"}
     return {"id": id, "order_no": f"YQ-2609-{9000 + id}", "status": status, "source": source, "salesman_id": rep,
             "salesman_name": names.get(rep), "is_test": test, "created_at": created, "confirmed_at": confirmed,
             "delivered_at": delivered, "cancelled_at": None, "total_bhd": total, "total_confirmed_bhd": total_c,
-            "units_ordered": units, "units_confirmed": units_c, "has_invoice_no": typed, "focus_links_n": links}
+            "units_ordered": units, "units_confirmed": units_c, "has_invoice_no": typed, "focus_links_n": links,
+            # the view: units_delivered = qty_delivered, else qty_confirmed, over the shop's own lines
+            "units_added": added, "units_delivered": units_d if units_d is not None else units_c}
 
 
 ORDERS = [
     _o(1, "delivered", "2026-09-21T07:00:00+00:00", 1, 12.5, 10, 10, "2026-09-21T09:00:00+00:00",
        "2026-09-22T07:00:00+00:00", links=1, total_c=12.5),
+    # the shop asked for 8, the rep confirmed 6 and ADDED 3 of something else, 5 of the 6 were handed over
     _o(2, "delivered", "2026-09-22T07:00:00+00:00", 2, 9.0, 8, 6, "2026-09-22T13:00:00+00:00",
-       "2026-09-23T06:00:00+00:00", total_c=7.2),
+       "2026-09-23T06:00:00+00:00", total_c=7.2, added=3, units_d=5),
     _o(3, "new", "2026-09-23T06:00:00+00:00", 1, 20.0, 5),         # Wed 09:00 → Sun 10:00 = 49 business hours
     _o(4, "new", "2026-09-24 17:00:00+00", 2, 3.0, 2),             # Thu 20:00 → Sun 10:00 = 14 business hours
     _o(5, "cancelled", "2026-09-22T08:00:00+00:00", 1, 2.0, 3),
@@ -210,7 +216,8 @@ ORDERS = [
     _o(7, "confirmed", "2026-09-24T06:00:00+00:00", 2, 4.0, 4, 4, "2026-09-24T08:00:00+00:00",
        source="salesman", typed=True, total_c=4.0),
 ]
-MATCH = {"eligible": 2, "matched": 1, "unmatched_bhd": 7.2, "invoiced_open": 1, "last_order_at": "2026-09-24 17:00:00+00"}
+MATCH = {"eligible": 2, "matched": 1, "unmatched_bhd": 7.2, "awaiting": 0, "awaiting_bhd": 0, "invoiced_open": 1,
+         "last_order_at": "2026-09-24 17:00:00+00"}
 
 
 class FakeRPC:
@@ -433,6 +440,8 @@ def _():
     assert "NOT v.is_giveaway" in m.SALES_SQL and "v.division = 'Accessories'" in m.TREND_SQL
     pace = _tile(ov, "sales.pace")
     assert pace["value"] == 1136.667 and pace["target_bhd"] == 10000.0 and pace["on_track"] is False
+    assert "target read as ex-VAT, Accessories, business days" in pace["basis"], pace["basis"]
+    assert pace["target_basis"] == m.PACE_BASIS
     trend = _tile(ov, "sales.trend")["series"]
     assert len(trend) == 13 and trend[-1]["week_start"] == "2026-09-20" and trend[-1]["partial"] is True
     assert trend[-1]["value"] == 500.0 and trend[-2]["value"] == 400.0 and trend[0]["value"] == 0.0
@@ -458,20 +467,30 @@ def _():
     ov = _overview()
     f = _tile(ov, "orders.funnel")
     st = {s["key"]: s for s in f["stages"]}
-    assert (st["submitted"]["orders"], st["submitted"]["units"], st["submitted"]["bhd"]) == (6, 32, 50.5)
-    assert (st["confirmed"]["orders"], st["confirmed"]["units"], st["confirmed"]["bhd"]) == (3, 20, 23.7)
-    assert (st["delivered"]["orders"], st["delivered"]["units"], st["delivered"]["bhd"]) == (2, 16, 19.7)
+    # money ex-VAT (VAT-inclusive order totals ÷ 1.10): 50.5 → 45.909, 23.7 → 21.545, 19.7 → 17.909
+    assert (st["submitted"]["orders"], st["submitted"]["units"], st["submitted"]["bhd"]) == (6, 32, 45.909)
+    assert (st["confirmed"]["orders"], st["confirmed"]["units"], st["confirmed"]["bhd"]) == (3, 20, 21.545)
+    # Delivered reads the DELIVERED units of the shop's lines (10 + 5), not the confirmed ones (10 + 6)
+    assert (st["delivered"]["orders"], st["delivered"]["units"], st["delivered"]["bhd"]) == (2, 15, 17.909)
+    assert st["confirmed"]["units_added"] == 3 and "units_added" not in st["submitted"], "the rep's 3 counted apart"
     assert f["cancelled"] == 1 and f["open"] == 2 and [s["label"] for s in f["stages"]] == ["Placed", "Confirmed", "Delivered"]
-    assert "test orders left out" in f["basis"]
+    assert "test orders left out" in f["basis"] and "ex-VAT (order totals ÷ 1.10)" in f["basis"]
+    assert "lines a rep added counted apart" in f["basis"]
     acc = _tile(ov, "orders.accepted")
-    assert acc["value"] == 90.9 and (acc["units_accepted"], acc["units_ordered"]) == (20, 22)
+    # order 7 was placed by the rep himself (born Confirmed): not an acceptance; order 2's added 3 are not the shop's
+    assert acc["value"] == 88.9 and (acc["units_accepted"], acc["units_ordered"]) == (16, 18), acc
+    assert acc["staff_orders_left_out"] == 1 and acc["units_added"] == 3 and acc["orders"] == 2
     ct = _tile(ov, "orders.confirm_time")
-    assert (ct["p50_hours"], ct["p90_hours"], ct["orders"], ct["open_included"]) == (6.0, 49.0, 5, 2)
+    assert (ct["p50_hours"], ct["p90_hours"], ct["orders"], ct["open_included"]) == (6.0, 49.0, 4, 2), ct
+    assert "born Confirmed) left out" in ct["basis"]
     w = _tile(ov, "orders.waiting")
-    assert w["value"] == 1 and w["bhd"] == 20.0 and w["oldest_hours"] == 49.0
-    assert w["by_rep"] == [{"rep": "Rep One", "orders": 1, "bhd": 20.0}]
+    assert w["value"] == 1 and w["bhd"] == 18.182 and w["oldest_hours"] == 49.0
+    assert w["by_rep"] == [{"rep": "Rep One", "orders": 1, "bhd": 18.182}]
+    assert "ex-VAT" in w["basis"]
     mr = _tile(ov, "orders.match_rate")
     assert mr["value"] == 50.0 and mr["matched"] == 1 and mr["eligible"] == 2
+    assert mr["label"] == "Invoice links confirmed" and "a person accepted" in mr["basis"]
+    assert (mr["awaiting"], mr["no_invoice"], mr["no_invoice_bhd"], mr["unmatched_bhd"]) == (0, 1, 6.545, 6.545)
     so = _tile(ov, "orders.self_order")
     assert so["value"] == 83.3 and so["orders"] == 6
     assert ov["freshness"]["match_rate"] == {"available": True, "pct": 50.0, "matched": 1, "eligible": 2}
@@ -490,18 +509,139 @@ def _():
     assert m.SLA_BUSINESS_HOURS == 24
 
 
+@test("review: an order a rep placed himself (born Confirmed) is out of the confirm time and the accepted rate")
+def _():
+    orders = [
+        # the shop's order: Mon 10:00 → 20:00 = 10 business hours, 5 of 10 units accepted
+        _o(50, "confirmed", "2026-09-21T07:00:00+00:00", 1, 10.0, 10, 5, "2026-09-21T17:00:00+00:00", total_c=5.0),
+        # two orders the reps placed in the shop: Confirmed the moment they were created, all units "accepted"
+        _o(51, "confirmed", "2026-09-22T07:00:00+00:00", 1, 8.0, 4, 4, "2026-09-22T07:00:00+00:00",
+           source="salesman", total_c=8.0),
+        _o(52, "delivered", "2026-09-23T07:00:00+00:00", 2, 6.0, 6, 6, "2026-09-23T07:00:00+00:00",
+           "2026-09-23T09:00:00+00:00", source="salesman", total_c=6.0),
+    ]
+    ov = _overview(FakeRPC(orders=orders))
+    ct = _tile(ov, "orders.confirm_time")
+    assert (ct["p50_hours"], ct["p90_hours"], ct["orders"]) == (10.0, 10.0, 1), "with them the median read 0 h"
+    acc = _tile(ov, "orders.accepted")
+    assert acc["value"] == 50.0 and (acc["units_accepted"], acc["units_ordered"]) == (5, 10), "with them 75.0 %"
+    assert acc["staff_orders_left_out"] == 2 and acc["orders"] == 1
+    assert _tile(ov, "orders.self_order")["by_shop"] == 1
+    # they still count as orders, confirmed and delivered (the funnel is about what happened, not about waiting)
+    st = {s["key"]: s for s in _tile(ov, "orders.funnel")["stages"]}
+    assert (st["submitted"]["orders"], st["confirmed"]["orders"], st["delivered"]["orders"]) == (3, 3, 1)
+
+
+@test("review: lines a rep added never lift the accepted rate above what the shop asked for")
+def _():
+    # the shop asked for 4 and got 4; the rep added 6 of something else (the view keeps them in units_added)
+    ov = _overview(FakeRPC(orders=[_o(60, "confirmed", "2026-09-24T06:00:00+00:00", 1, 20.0, 4, 4,
+                                      "2026-09-24T07:00:00+00:00", total_c=20.0, added=6)]))
+    acc = _tile(ov, "orders.accepted")
+    assert acc["value"] == 100.0 and (acc["units_accepted"], acc["units_ordered"], acc["units_added"]) == (4, 4, 6)
+    st = {s["key"]: s for s in _tile(ov, "orders.funnel")["stages"]}
+    assert (st["confirmed"]["units"], st["confirmed"]["units_added"]) == (4, 6)
+    from app import metrics as m
+    assert "units_added" in m.ORDERS_SQL and "units_delivered" in m.ORDERS_SQL
+
+
+@test("review: invoice links — only an ACCEPTED link is matched; awaiting acceptance vs no Focus invoice found")
+def _():
+    fake = FakeRPC(match={"eligible": 3, "matched": 1, "unmatched_bhd": 11.6, "awaiting": 1, "awaiting_bhd": 4.4,
+                          "invoiced_open": 0, "last_order_at": None})
+    ov = _overview(fake)
+    by = _items(ov)
+    aw, ni = by["invoice_awaiting_acceptance"], by["delivered_no_invoice"]
+    assert aw["count"] == 1 and aw["bhd"] == 4.0 and aw["title"] == "1 delivered order not yet matched to a Focus invoice"
+    assert "no Focus invoice" not in aw["title"] + aw["detail"] + aw["basis"], "a found invoice is not 'no invoice'"
+    assert ni["count"] == 1 and ni["bhd"] == 6.545 and ni["title"] == "1 delivered order with no Focus invoice found"
+    mr = _tile(ov, "orders.match_rate")
+    assert (mr["value"], mr["matched"], mr["eligible"], mr["awaiting"], mr["no_invoice"]) == (33.3, 1, 3, 1, 1)
+    assert (mr["awaiting_bhd"], mr["no_invoice_bhd"], mr["unmatched_bhd"]) == (4.0, 6.545, 10.545)
+    assert ov["freshness"]["match_rate"] == {"available": True, "pct": 33.3, "matched": 1, "eligible": 3}
+    from app import metrics as m
+    assert "has_suggestion) AS awaiting" in m.MATCH_SQL and "focus_links_n > 0) AS matched" in m.MATCH_SQL
+
+
+@test("review: marketplace money is shown ex-VAT at app_settings.shop_vat_rate (0.10 when unset or junk)")
+def _():
+    from app import metrics as m
+    assert "key = 'shop_vat_rate'" in m.ANCHOR_SQL and m.DEFAULT_VAT_RATE == Decimal("0.10")
+
+    def placed(anchor):
+        ov = _overview(FakeRPC(anchor=anchor))
+        f = _tile(ov, "orders.funnel")
+        return f["stages"][0]["bhd"], f["basis"]
+    bhd, basis = placed({**ANCHOR, "shop_vat_rate": "0.05"})
+    assert bhd == 48.095 and "÷ 1.05" in basis, (bhd, basis)
+    assert placed({**ANCHOR, "shop_vat_rate": "junk"})[0] == 45.909
+    assert placed({k: v for k, v in ANCHOR.items() if k != "shop_vat_rate"})[0] == 45.909
+    assert placed({**ANCHOR, "shop_vat_rate": "1.5"})[0] == 45.909, "an impossible rate falls back"
+    # Focus sales stay as they are (already ex-VAT): only marketplace order money is converted
+    assert _tile(_overview(FakeRPC(anchor={**ANCHOR, "shop_vat_rate": "0.05"})), "sales.accessories")["value"] == 930.0
+
+
+@test("review: dormant high-value accounts start at BHD 100 ex-VAT in 12 months")
+def _():
+    from app import metrics as m
+    custs = [{"customer_name": "Shop Big", "first_invoice": "2025-01-01", "last_invoice": "2026-07-01", "net_12m": 100},
+             {"customer_name": "Shop Small", "first_invoice": "2025-01-01", "last_invoice": "2026-07-01",
+              "net_12m": 99.999},
+             {"customer_name": "Shop Live", "first_invoice": "2025-01-01", "last_invoice": "2026-09-20", "net_12m": 900}]
+    d = _tile(_overview(FakeRPC(customers=custs)), "customers.dormant")
+    assert [x["account"] for x in d["items"]] == ["Shop Big"] and d["bhd"] == 100.0, d
+    assert "at least BHD 100" in d["basis"] and m.DORMANT_MIN_BHD == Decimal("100")
+
+
+@test("review: the Dashboard's pace is the Command Centre's (ex-VAT Accessories, business days) and says so")
+def _():
+    from app import metrics as m
+    from app import reports
+    from app import settings as app_settings
+    with _Patched((app_settings, "setting", lambda key: 10000.0 if key == "monthly_sales_target_bhd" else 0.0)):
+        p = reports._pace({"acc_mtd_ex_vat": Decimal("930"), "rev_prev_month": 0}, FOCUS_TO)
+        cc = m.month_pace(930, date(2026, 9, 24), "10000.0")
+        assert p["mtd_bhd"] == 930.0 and p["projected_bhd"] == cc["projected_bhd"] == 1136.667, p
+        assert p["target_pct"] == cc["pct_of_target"] == 9.3 and p["on_track"] is False
+        assert (p["business_days_done"], p["business_days_total"]) == (18, 22)
+        assert "target read as ex-VAT, Accessories, business days" in p["basis_text"] and p["vat"] == "ex-VAT"
+        # the Dashboard feeds it the Accessories ex-VAT month (giveaways out), not the VAT-inclusive revenue
+        s = {"rev_today": 0, "net_today": 0, "orders_today": 0, "rev_yesterday": 0, "orders_yesterday": 0,
+             "rev_mtd": 0, "net_mtd": 0, "orders_mtd": 0, "rev_prev_month": 0, "total_receivables": 0,
+             "overdue_accounts": 0, "overdue_receivables_bhd": 0, "current_receivables_bhd": 0, "top_customers": [],
+             "data_date": FOCUS_TO}
+        base = {"s": s, "a": {"low_stock_count": 0, "negative_margin_count": 0}, "health": {}, "movers": {},
+                "trend": [], "channel": [], "agents": [], "fresh": {"stale": False, "days_behind": 0}, "daily_mtd": [],
+                "attainment": {"rows": [], "error": None},
+                "split": {"by_payment": [], "by_division": [
+                    {"division": "Accessories", "revenue_bhd": 1023.0, "net_ex_vat_bhd": 930.0},
+                    {"division": "SIM", "revenue_bhd": 550.0, "net_ex_vat_bhd": 500.0}]}}
+        out = reports._assemble_dashboard(base)
+    assert out["pace"]["mtd_bhd"] == 930.0 and out["pace"]["projected_bhd"] == 1136.667, out["pace"]
+    import inspect
+    split = inspect.getsource(reports.sales_split_mtd)
+    assert "SUM(net_bhd) FILTER (WHERE NOT is_giveaway)" in split and "AS net_ex_vat_bhd" in split
+    daily = inspect.getsource(reports.daily_sales_mtd)
+    assert "division = 'Accessories' AND NOT is_giveaway THEN net_bhd" in daily and "AS acc_net_bhd" in daily
+    dash = (WEB / "pages" / "Dashboard.tsx").read_text(encoding="utf-8")
+    assert "pace.basis_text" in dash and "acc_net_bhd" in dash and "business_days_total" in dash, \
+        "the Dashboard shows the basis and draws its target lines on the same basis"
+
+
 @test("team: attainment rows with named-shop share, last invoice, silence and marketplace orders per rep")
 def _():
     ov = _overview()
     t = _tile(ov, "team.reps")
     rows = {r["salesman"]: r for r in t["rows"]}
     one, two, counter = rows["Rep One"], rows["Rep Two"], rows["Counter B2C"]
-    assert [r["salesman"] for r in t["rows"]] == ["Rep One", "Rep Two", "Counter B2C"], "by ex-VAT sales"
+    assert [r["salesman"] for r in t["rows"]] == ["Rep One", "Rep Two", "Counter B2C", "Rep Idle"], "by ex-VAT sales"
     assert one["tier_reached"] == 3 and one["next_tier"] is None and one["named_share_pct"] == 80.0
-    assert one["marketplace_orders"] == 2 and one["marketplace_bhd"] == 32.5, "orders 1 and 3; the test order is out"
+    # marketplace money beside the ex-VAT sales is ex-VAT too: (12.5 + 20.0) ÷ 1.10, (7.2 + 3.0 + 4.0) ÷ 1.10
+    assert one["marketplace_orders"] == 2 and one["marketplace_bhd"] == 29.545, "orders 1 and 3; the test order is out"
     assert one["last_invoice"] == "2026-09-24" and one["business_days_since_invoice"] == 0
     assert two["tier_reached"] == 0 and two["next_tier"] == 1 and two["gap_to_next_bhd"] == 400.0
-    assert two["marketplace_orders"] == 3 and two["marketplace_bhd"] == 14.2
+    assert two["marketplace_orders"] == 3 and two["marketplace_bhd"] == 12.909
+    assert "money ex-VAT (order totals ÷ 1.10)" in t["basis"]
     assert two["business_days_since_invoice"] == 10 and two["named_share_pct"] == 100.0
     assert counter["no_target"] is True and counter["marketplace_orders"] == 0
     assert t["totals"] == {"net_bhd": 420.0, "marketplace_orders": 5}
@@ -542,6 +682,10 @@ def _():
     ov = _overview()
     off = _tile(ov, "profit.official")
     assert off["value"] == 37.6 and off["below_cost"] == 1 and "Focus COGS" in off["basis"]
+    # the report covers every loaded sale, never just the period on the page header ("1–24 Sep")
+    assert "all sales 1 Jan 2025 – 24 Sep 2026" in off["basis"] and "not the period chosen above" in off["basis"]
+    assert off["covers"] == {"from": "2025-01-01", "to": FOCUS_TO, "period_bound": False}
+    assert "not the period chosen above" in _tile(ov, "profit.below_cost")["basis"]
     land = _tile(ov, "profit.landed")
     assert land["value"] == 34.0 and land["coverage_pct"] == 80.0 and "MRN" in land["basis"]
     below = _tile(ov, "profit.below_cost")
@@ -581,11 +725,16 @@ def _():
     assert "60.0 % of the over-90 book" in un["detail"], "the B2C counter's account and the active rep's are owned"
     w = by["orders_waiting"]
     assert w["count"] == 1 and w["rows"][0]["to"] == "/shop-orders?open=3" and w["drill"]["to"] == "/shop-orders"
-    assert by["delivered_no_invoice"]["count"] == 1 and by["delivered_no_invoice"]["bhd"] == 7.2
+    assert by["delivered_no_invoice"]["count"] == 1 and by["delivered_no_invoice"]["bhd"] == 6.545, "ex-VAT"
+    assert by["delivered_no_invoice"]["title"] == "1 delivered order with no Focus invoice found"
+    assert "invoice_awaiting_acceptance" not in by, "nothing was suggested for it"
+    assert by["orders_waiting"]["bhd"] == 18.182 and by["orders_waiting"]["rows"][0]["bhd"] == 18.182
     assert by["invoiced_open"]["count"] == 1
     rs = by["rep_silence"]
     assert rs["count"] == 2 and [r["label"] for r in rs["rows"]] == ["Rep Idle", "Rep Two"], rs
     assert "Rep Old" not in json.dumps(rs) and "No Focus" not in json.dumps(rs)
+    assert "Rep Sim" not in json.dumps(rs), "a SIM-only rep (no Accessories target row) is never flagged"
+    assert rs["title"] == "2 reps with no Accessories invoice for over 7 business days", rs["title"]
     so = by["sold_out"]
     assert so["count"] == 1 and so["rows"][0]["to"] == "/inventory?q=Item%20Gone"
     assert by["below_cost"]["count"] == 1
@@ -634,6 +783,10 @@ def _():
     ov = metrics.overview("mtd", reader=_reader(fake), use_cache=False)
     assert "orders_fallback" in fake.names() and ov["unavailable"] == []
     assert any("r7b migration" in n for n in ov["notes"])
+    assert any("Confirmed and Delivered stages show the placed quantities and values" in n for n in ov["notes"]), \
+        "the older view has no confirmed or delivered figures: the note says what those stages show"
+    st = {s["key"]: s for s in _tile(ov, "orders.funnel")["stages"]}
+    assert st["delivered"]["units"] == 68, "placed units (10 + 8 + the test order's 50): all the older view has"
     f = _tile(ov, "orders.funnel")
     assert f["stages"][0]["orders"] == 7, "the test order is counted: the older view cannot tell"
     assert "not yet told apart" in f["basis"]
@@ -822,6 +975,18 @@ def _():
         assert col not in body, f"{col} must not be in the view"
     assert "o.focus_invoice_no" in body and "is not null) as has_invoice_no" in body, "only a flag for the invoice"
     assert "state = 'confirmed'" in body and "group by order_id" in body
+    # review: the shop's request only; the R7c columns through to_jsonb (works before r7c, after it and
+    # after its reverse, and pins no column); a found-but-unaccepted invoice as a flag
+    assert "cross join lateral (select to_jsonb(l) as j) r" in body
+    assert "sum(l.qty) filter (where r.j ->> 'added_at_stage' is null)            as units_ordered" in body
+    assert "sum(l.qty_confirmed) filter (where r.j ->> 'added_at_stage' is null)  as units_confirmed" in body
+    assert "coalesce((r.j ->> 'qty_delivered')::integer, l.qty_confirmed)" in body
+    assert "filter (where r.j ->> 'added_at_stage' is not null)" in body
+    assert not re.search(r"\bl\.(added_at_stage|qty_delivered)\b", body), "never a direct column reference"
+    assert "from v_shop_focus_candidates" in body and "where rank = 1" in body and "as has_suggestion" in body
+    # appended after the 22 original columns (CREATE OR REPLACE VIEW can only append)
+    cols = re.findall(r"\bas (\w+),?\s*$", body.split("from shop_orders o", 1)[0], re.M)
+    assert cols[-3:] == ["units_added", "units_delivered", "has_suggestion"], cols
     assert len(re.findall(r"^\s*grant\s", sql, re.M)) == 1, "one GRANT, to yq_readonly, nothing else"
     assert "r7_focus_links_migration.sql first" in MIGRATION.read_text(encoding="utf-8")
     raw = MIGRATION.read_text(encoding="utf-8")
@@ -871,14 +1036,26 @@ create table shop_orders (id bigint primary key, order_no text not null, token t
   customer_phone text, customer_shop text, customer_area text, customer_email text, note text, ip_hash text, ua text,
   device_id text, is_test boolean not null default false, created_at timestamptz not null default now(),
   assigned_at timestamptz, confirmed_at timestamptz, delivered_at timestamptz, cancelled_at timestamptz,
-  total_bhd numeric(12,3) not null default 0, total_confirmed_bhd numeric(12,3), focus_invoice_no text);
+  total_bhd numeric(12,3) not null default 0, total_confirmed_bhd numeric(12,3), focus_invoice_no text,
+  cancel_reason_code text);
+alter table shop_orders add constraint shop_orders_cancel_reason_code_check
+  check (cancel_reason_code is null or cancel_reason_code in
+         ('out_of_stock','customer_request','duplicate','test','price_issue','other'));
 alter table shop_orders enable row level security;
 create table shop_order_lines (id bigint generated by default as identity primary key, order_id bigint not null
-  references shop_orders(id), qty integer not null, qty_confirmed integer);
+  references shop_orders(id), qty integer not null, qty_confirmed integer, line_status text not null default 'ok');
+alter table shop_order_lines add constraint shop_order_lines_line_status_check
+  check (line_status in ('ok','changed','removed','backorder'));
 create table shop_order_focus_links (id bigint generated by default as identity primary key,
   order_id bigint not null references shop_orders(id), invoice_key text not null, state text not null default 'suggested',
   created_at timestamptz not null default now(), decided_at timestamptz);
+-- a stand-in for R7a's suggestion view: one row per (order, invoice), rank 1 = the best
+create view v_shop_focus_candidates as
+  select * from (values (2::bigint, 'SI-T-2X'::text, 1), (2, 'SI-T-2Y', 2), (3, 'SI-T-3X', 1),
+                        (5, 'SI-T-5X', 1)) v(order_id, invoice_key, rank);
 """
+R7C_MIGRATION = ROOT / "scripts" / "r7c_order_lines_qty_migration.sql"
+R7C_REVERSE = ROOT / "scripts" / "r7c_order_lines_qty_reverse.sql"
 
 
 def _local():
@@ -932,30 +1109,64 @@ def _():
         sql = MIGRATION.read_text(encoding="utf-8")
         cur.execute(sql)
         cur.execute(sql)                                          # idempotent
-        cur.execute("select id, units_ordered, units_confirmed, lines_n, has_invoice_no, focus_links_n, is_test, "
-                    "has_customer from v_command_orders order by id")
+        view_sql = ("select id, units_ordered, units_confirmed, lines_n, has_invoice_no, focus_links_n, is_test, "
+                    "has_customer, units_added, units_delivered, has_suggestion from v_command_orders order by id")
+        cur.execute(view_sql)
         got = [tuple(r) for r in cur.fetchall()]
-        assert got == [(1, 10, 10, 2, False, 2, False, True), (2, 8, 6, 2, False, 0, False, True),
-                       (3, 5, None, 1, False, 0, False, False), (4, 4, 4, 1, True, 0, False, True),
-                       (5, 50, 50, 1, False, 0, True, True), (6, 2, None, 2, False, 0, False, False)], got
+        # BEFORE r7c: every line is the shop's, delivered = confirmed; order 2 has a found invoice (rank 1)
+        assert got == [(1, 10, 10, 2, False, 2, False, True, 0, 10, False),
+                       (2, 8, 6, 2, False, 0, False, True, 0, 6, True),
+                       (3, 5, None, 1, False, 0, False, False, 0, None, True),
+                       (4, 4, 4, 1, True, 0, False, True, 0, 4, False),
+                       (5, 50, 50, 1, False, 0, True, True, 0, 50, True),
+                       (6, 2, None, 2, False, 0, False, False, 0, None, False)], got
         cur.execute("select has_table_privilege('yq_readonly', 'public.v_command_orders', 'SELECT'), "
                     "has_table_privilege('anon', 'public.v_command_orders', 'SELECT'), "
                     "has_table_privilege('authenticated', 'public.v_command_orders', 'SELECT')")
         assert cur.fetchone() == (True, False, False)
-        # the Command Centre's own SQL, as the RPC runs it: wrapped, as yq_readonly
-        cur.execute("set local role yq_readonly")
-        for s, params in ((m.ORDERS_SQL, ["2026-09-01T00:00:00+03:00"]), (m.MATCH_SQL, ["2026-09-27T10:00:00+03:00"])):
-            q = s
-            for i in range(len(params), 0, -1):
-                q = q.replace(f"${i}", "%s")
-            cur.execute(f"select coalesce(json_agg(t), '[]'::json) from ({q}) t", params)
-            rows = cur.fetchone()[0]
-            if s is m.MATCH_SQL:
-                assert rows[0]["eligible"] == 2 and rows[0]["matched"] == 1 and rows[0]["invoiced_open"] == 1, rows
-                assert float(rows[0]["unmatched_bhd"]) == 7.2
-            else:
-                assert sorted(r["id"] for r in rows) == [1, 2, 3, 4, 5, 6]
-        cur.execute("reset role")
+
+        def as_readonly():
+            """The Command Centre's own SQL, as the RPC runs it: wrapped, as yq_readonly."""
+            cur.execute("set local role yq_readonly")
+            out = {}
+            for s, params in ((m.ORDERS_SQL, ["2026-09-01T00:00:00+03:00"]),
+                              (m.MATCH_SQL, ["2026-09-27T10:00:00+03:00"])):
+                q = s
+                for i in range(len(params), 0, -1):
+                    q = q.replace(f"${i}", "%s")
+                cur.execute(f"select coalesce(json_agg(t), '[]'::json) from ({q}) t", params)
+                out["match" if s is m.MATCH_SQL else "orders"] = cur.fetchone()[0]
+            cur.execute("reset role")
+            return out
+        got_ro = as_readonly()
+        mt = got_ro["match"][0]
+        assert mt["eligible"] == 2 and mt["matched"] == 1 and mt["invoiced_open"] == 1, mt
+        # order 2 (delivered, no accepted link) has a suggested invoice: awaiting acceptance, not "no invoice"
+        assert mt["awaiting"] == 1 and float(mt["awaiting_bhd"]) == 7.2 and float(mt["unmatched_bhd"]) == 7.2, mt
+        assert sorted(r["id"] for r in got_ro["orders"]) == [1, 2, 3, 4, 5, 6]
+
+        # AFTER r7c (the real migration, same transaction): the rep adds 3 of a new item to order 2 at confirm, and
+        # order 1 is delivered one short on its 6-line — the view now tells the shop's request from the rep's lines
+        cur.execute(R7C_MIGRATION.read_text(encoding="utf-8"))
+        cur.execute("insert into shop_order_lines (order_id, qty, qty_confirmed, line_status, added_at_stage) "
+                    "values (2, 3, 3, 'added', 'confirm')")
+        cur.execute("update shop_order_lines set qty_delivered = 5 where order_id = 1 and qty = 6")
+        cur.execute(view_sql)
+        got = {r[0]: r for r in cur.fetchall()}
+        assert got[1][1:4] == (10, 10, 2) and got[1][8:10] == (0, 9), got[1]
+        assert got[2][1:4] == (8, 6, 3) and got[2][8:10] == (3, 6), "the added 3 are units_added, never ordered"
+        got_ro = as_readonly()
+        o2 = next(r for r in got_ro["orders"] if r["id"] == 2)
+        assert (o2["units_ordered"], o2["units_confirmed"], o2["units_added"], o2["units_delivered"]) == (8, 6, 3, 6)
+
+        # r7c's REVERSE drops the columns with this view in place (to_jsonb pins no column); the view answers
+        cur.execute(R7C_REVERSE.read_text(encoding="utf-8"))
+        cur.execute(view_sql)
+        got = {r[0]: r for r in cur.fetchall()}
+        assert len(got) == 6 and got[1][8:10] == (0, 10), got[1]
+        cur.execute(R7C_MIGRATION.read_text(encoding="utf-8"))     # and forward again
+        cur.execute(view_sql)
+        assert len(cur.fetchall()) == 6
         cur.execute(REVERSE.read_text(encoding="utf-8"))
         cur.execute(REVERSE.read_text(encoding="utf-8"))           # idempotent
         cur.execute("select to_regclass('public.v_command_orders')")
@@ -1033,7 +1244,9 @@ def _():
     assert "> Live\n" not in shell and "bg-success\" /> Live" not in shell
     assert "FreshnessChip" in shell and "'/freshness'" in _web("components/FreshnessChip.tsx")
     chip = _web("components/FreshnessChip.tsx")
-    assert "Focus data to" in chip and "Marketplace live" in chip and "Invoice match" in chip
+    assert "Focus data to" in chip and "Marketplace live" in chip
+    # review: only an ACCEPTED link counts, so the chip says "confirmed x of y", never "Invoice match 0 %"
+    assert "Invoice links confirmed ${m.matched} of ${m.eligible}" in chip and "Invoice match" not in chip
 
 
 @test("web page: the Command Centre reads the overview, labels every tile with its basis, Needs attention first")
@@ -1041,8 +1254,47 @@ def _():
     page = _web("pages/CommandCentre.tsx")
     assert "/management/overview?period=" in page and "t.basis" in page
     assert "#6D4091" in page, "the plum marketplace look, not the grey one"
+    # review: marketplace money is labelled ex-VAT beside the ex-VAT sales; the match tile splits its rest
+    assert "Marketplace orders (ex-VAT)" in page and "ex-VAT</span>" in page
+    assert "awaiting acceptance" in page and "no Focus invoice found" in page and "added by the rep" in page
     for s in ("today", "7d", "mtd", "last_month", "quarter"):
         assert s in _web("pages/CommandCentre.tsx")
+
+
+@test("review: CI's web Lint step is a hard gate (lint is at 0 errors), its comment says so")
+def _():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    web = ci.split("\n  web:\n", 1)[1]
+    step = re.search(r"\n      - name: Lint\n        run: npm run lint\n", web)
+    assert step, "a plain Lint step running npm run lint"
+    lint_block = web.split("- name: Lint", 1)[1].split("- name:", 1)[0]
+    assert "continue-on-error" not in lint_block and "advisory" not in web.lower().split("- name: lint", 1)[0][-400:]
+    assert "hard gate" in web.split("- name: Lint", 1)[0][-500:]
+
+
+@test("review: the must_reset file and MIGRATIONS.md say who gets locked today (18: 15 salesmen + 3 management, 0 admins, never the owner) and to tell management")
+def _():
+    mig = (ROOT / "scripts" / "user_roles_must_reset_migration.sql").read_text(encoding="utf-8")
+    head = mig.split("alter table user_roles", 1)[0]
+    for needle in ("18 logins", "15 salesmen", "3 management", "0 admins", "never the owner", "RE-COUNT",
+                   "three management logins"):
+        assert needle in head, needle
+    assert "16 rows would be flagged" not in mig, "the stale count is gone"
+    doc = (ROOT / "docs" / "MIGRATIONS.md").read_text(encoding="utf-8")
+    sec = doc.split("**`user_roles_must_reset_migration.sql`**", 1)[1].split("\n- **", 1)[0]
+    for needle in ("18 logins", "15 salesmen", "3 management", "0 admins", "never the owner", "management is locked too",
+                   "the three management logins"):
+        assert needle in sec, needle
+
+
+@test("review: the narration data step and MIGRATIONS.md say the backup must come BEFORE the code deploy")
+def _():
+    mig = (ROOT / "scripts" / "r7_narration_mask_data_migration.sql").read_text(encoding="utf-8")
+    head = mig.split("update order_lines", 1)[0]
+    assert "BEFORE THE R7b CODE DEPLOY" in head and "masks the" in head and "whether or not this file is ever applied" in head
+    doc = (ROOT / "docs" / "MIGRATIONS.md").read_text(encoding="utf-8")
+    sec = doc.split("**`r7_narration_mask_data_migration.sql`", 1)[1].split("\n- **", 1)[0]
+    assert "BEFORE THE R7b CODE DEPLOY" in sec and "whether or not this file is ever applied" in sec
 
 
 def main() -> int:

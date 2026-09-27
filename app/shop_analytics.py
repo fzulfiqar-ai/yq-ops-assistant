@@ -593,8 +593,11 @@ def order_sections(orders: list[dict], lines: list[dict], *, sla_min: int, now: 
             continue  # attributed at creation: nobody waited
         if ((assigned or now) - created).total_seconds() / 60 > sla_min:
             breaches += 1
+    # Received -> Confirmed only: an order a rep placed himself (source 'salesman') is born Confirmed
+    # (R7c) and never waited, so it would pull the median to zero
     confirm_mins = sorted((s._parse_ts(o["confirmed_at"]) - s._parse_ts(o["created_at"])).total_seconds() / 60
-                          for o in live if s._parse_ts(o.get("confirmed_at")) and s._parse_ts(o.get("created_at")))
+                          for o in live if s._parse_ts(o.get("confirmed_at")) and s._parse_ts(o.get("created_at"))
+                          and o.get("source") != "salesman")
     ops = {"by_attribution": by_attr,
            "unassigned_now": sum(1 for o in live if not o.get("salesman_id") and o.get("status") in ("new", "confirmed")),
            "conflicts": sum(1 for o in live if o.get("attribution_conflict")),

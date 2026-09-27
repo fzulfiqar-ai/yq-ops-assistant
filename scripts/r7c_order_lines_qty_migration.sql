@@ -16,6 +16,13 @@
 -- rewritten: every new column is nullable with no default, so existing orders, lines and events
 -- are untouched. The code runs before this file (app/shop_heart.py probes the columns and maps the
 -- new line statuses to the old ones), so the API may deploy first.
+--
+-- The two R7b read views that count units (v_command_orders, r7b_command_views_migration.sql, and
+-- v_agent_shop_lines, r7b_ai_head_migration.sql) read added_at_stage and qty_delivered through
+-- to_jsonb(l): nothing here recreates them. Before this file every line reads as requested and
+-- delivered = confirmed; after it a rep-added / substitute line is counted apart from the shop's
+-- request. Either file may run first, and the reverse below can drop the columns without touching
+-- either view (a whole-row reference pins no column).
 
 -- ── shop_order_lines: delivered quantity, the change's reason, substitutes, added lines, cost ──
 alter table shop_order_lines add column if not exists qty_delivered        integer;

@@ -186,7 +186,9 @@ def compute(d: dict, week_start: date, week_end: date, now: datetime) -> dict:
     groups = {"Delivered": ("delivered",), "Confirmed / on the way": ("confirmed", "packed", "out_for_delivery"),
               "Waiting for confirmation": ("new",), "Cancelled": ("cancelled",)}
     m["status"] = [(k, [o for o in orders if o["status"] in v]) for k, v in groups.items()]
-    conf = [hours(o["created_at"], o["confirmed_at"]) for o in orders if o["confirmed_at"]]
+    # Received -> Confirmed only: a rep's own order (source 'salesman') is born Confirmed and never waited
+    conf = [hours(o["created_at"], o["confirmed_at"]) for o in orders
+            if o["confirmed_at"] and o.get("source") != "salesman"]
     m["confirm_median_h"] = statistics.median(conf) if conf else None
     m["confirmed_n"] = len(conf)
     m["small"] = [o for o in live if o["order_kind"] == "small"]

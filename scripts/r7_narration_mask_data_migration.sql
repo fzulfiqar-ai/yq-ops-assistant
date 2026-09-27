@@ -13,6 +13,14 @@
 --   That backup holds the numbers in clear: keep it out of OneDrive and the repo, and delete it once
 --   the owner is satisfied. Without it the digits are gone for good — the Focus exports still carry
 --   them, but scripts/ingest.py masks them again on every load.
+--
+-- THE BACKUP MUST BE TAKEN BEFORE THE R7b CODE DEPLOY, NOT JUST BEFORE THIS FILE, if the raw digits
+-- are wanted at all: from the deploy on, the parser (scripts/ingest.py mask_personal_ids) masks the
+-- narration of every Sales Day Book it loads, and an upload writes its lines over the stored ones
+-- (scripts/load_supabase.py: upsert on invoice_no + line_no) — so each upload after the deploy masks
+-- the stored narration of every invoice line it carries, whether or not this file is ever applied.
+-- Skipping this file does not keep the digits; only a backup taken before the deploy does. (If
+-- nobody will ever need the digits, the backup can be skipped altogether.)
 -- Rehearse: python -m scripts.apply_sql scripts/r7_narration_mask_data_migration.sql --rehearse
 -- Apply:    python -m scripts.apply_sql scripts/r7_narration_mask_data_migration.sql
 -- Reverse:  scripts/r7_narration_mask_data_reverse.sql explains why there is none in SQL.

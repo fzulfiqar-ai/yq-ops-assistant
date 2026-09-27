@@ -5,13 +5,22 @@
 --   Reverse:  scripts/user_roles_must_reset_reverse.sql
 --
 -- THE OWNER SCHEDULES THIS FILE. The backfill below flags every login still on the temporary
--- password handed out at invite time — salesmen AND admins (and any other role), never an owner.
--- Read-only on production 27-Sep-2026: 16 rows would be flagged (15 of the 16 salesmen and 1 of
--- the 3 admins); the owner's own row says false and would never be flagged anyway. From the moment
--- it runs, each of those people gets "Set your own password to continue" on their next request and
--- can do nothing else until they set one (the app sends them straight to the password screen).
--- Run it at a quiet hour the owner picked and announced to the reps and the office — not silently
--- with the code deploy.
+-- password handed out at invite time — salesmen, management AND admins (any role), never an owner.
+-- WHO GETS LOCKED TODAY — re-counted read-only on production 27-Sep-2026 (user_roles joined to
+-- auth.users, the same rule as the UPDATE below): 18 logins —
+--     15 salesmen    (15 of the 16 salesman rows)
+--      3 management  (all 3 management rows: the read-only Command Centre logins)
+--      0 admins      (2 admin rows: neither is on a temporary password; one of them is the owner)
+-- and never the owner (skipped by name below; his metadata says false anyway). RE-COUNT right before
+-- the apply — anyone invited since changes the list:
+--   select r.role, count(*) from user_roles r join auth.users u on lower(u.email) = lower(r.email)
+--    where coalesce(u.raw_user_meta_data ->> 'must_reset', 'false') = 'true'
+--      and lower(r.email) <> all (array['fzulfiqar@pie-int.com']) group by 1;
+-- From the moment it runs, each of those people gets "Set your own password to continue" on their
+-- next request and can do nothing else until they set one (the app sends them straight to the
+-- password screen). Run it at a quiet hour the owner picked and announced to the reps, the office
+-- AND the three management logins (they are locked too, so tell them as well) — not silently with
+-- the code deploy.
 --
 -- The owner is never forced (the break-glass login, plan §32): this file skips the addresses below
 -- and its closing check refuses to finish if one of them is flagged; app/auth.py lets an owner

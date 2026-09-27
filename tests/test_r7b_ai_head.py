@@ -67,6 +67,7 @@ def test(name):
 
 MIGRATION = ROOT / "scripts" / "r7b_ai_head_migration.sql"
 REVERSE = ROOT / "scripts" / "r7b_ai_head_reverse.sql"
+R7C_MIGRATION = ROOT / "scripts" / "r7c_order_lines_qty_migration.sql"
 VIEWS = ["v_agent_shop_orders", "v_agent_shop_lines", "v_agent_shop_events", "v_agent_funnel_daily",
          "v_agent_search_demand", "v_agent_rep_governance", "v_agent_statements", "v_agent_focus_links",
          "v_agent_customer_regulars", "v_agent_focus_sales", "v_agent_items", "v_agent_market_signals",
@@ -199,6 +200,90 @@ def _():
     assert "regexp_replace(t, '[A-Za-z0-9._%+-]+@" in fn, "the email mask runs first, on the raw text"
     assert "immutable" in fn and "security definer" not in fn
     assert "ai_agent_mask does not mask as documented" in code
+
+
+@test("review: lines expose added_at_stage / qty_delivered through to_jsonb (appended); a rep's own order never enters a confirm time")
+def _():
+    code = _sql_code(MIGRATION)
+    bodies = dict(re.findall(r"create or replace view (v_agent_\w+) as\n(.*?);\n", code, re.S))
+    lines = bodies["v_agent_shop_lines"]
+    sel = lines.split("\nfrom shop_order_lines l", 1)[0]
+    # appended after rule_ids (CREATE OR REPLACE VIEW only appends), read so the view works before and after r7c
+    assert re.search(r"l\.rule_ids,\s*to_jsonb\(l\) ->> 'added_at_stage'\s+as added_at_stage,\s*"
+                     r"\(to_jsonb\(l\) ->> 'qty_delivered'\)::integer\s+as qty_delivered\s*$", sel), sel[-300:]
+    assert not re.search(r"\bl\.(added_at_stage|qty_delivered)\b", lines), "never a direct column reference"
+    gov = bodies["v_agent_rep_governance"]
+    for agg in ("as median_confirm_hours_30d", "as max_confirm_hours_30d"):
+        part = gov.split(agg, 1)[0].rsplit("filter (", 1)[1]
+        assert "o.source is distinct from 'salesman'" in part, (agg, part)
+    orders = bodies["v_agent_shop_orders"]
+    assert re.search(r"case when o\.source is distinct from 'salesman'\s+then round\(\(extract\(epoch from "
+                     r"\(o\.confirmed_at - o\.created_at\)\) / 3600\)::numeric, 2\) end as confirm_hours", orders)
+    assert "added_at_stage" in MIGRATION.read_text(encoding="utf-8").split("comment on view v_agent_shop_lines", 1)[1][:600]
+
+
+@test("review: weekly_report's median time to confirm leaves out the orders reps placed themselves")
+def _():
+    from scripts import weekly_report as wr
+    ws, we = date(2026, 9, 20), date(2026, 9, 26)
+    v = _synthetic_views()
+    base = {"prev": {"n": 0, "v": 0}, "open_now": [], "events": [], "reps": {}, "focus_max": date(2026, 9, 24),
+            "focus": [], "lines": [], "t0": datetime(2026, 9, 20, tzinfo=BH), "t1": datetime(2026, 9, 27, tzinfo=BH)}
+    shop_orders = [{"id": o["order_id"], "order_no": o["order_no"], "status": o["status"],
+                    "total_bhd": o["total_requested_bhd"], "total_confirmed_bhd": o["total_confirmed_bhd"],
+                    "order_kind": o["order_kind"], "customer_id": o["customer_id"], "customer_shop": o["customer_shop"],
+                    "customer_name": None, "customer_area": o["customer_area"], "created_at": o["created_at"],
+                    "confirmed_at": o["confirmed_at"], "delivered_at": o["delivered_at"],
+                    "cancelled_at": o["cancelled_at"], "source": o["source"], "salesman_id": o["salesman_id"],
+                    "rep": o["rep"], "focus_name": o["rep_focus_name"]} for o in v["v_agent_shop_orders"]]
+    now = datetime(2026, 9, 27, 6, 0, tzinfo=timezone.utc)
+    before = wr.compute({**base, "orders": shop_orders}, ws, we, now)
+    staff = dict(shop_orders[0], id=77, order_no="YQ-2609-9077", source="salesman", status="confirmed",
+                 created_at=_ts("2026-09-25"), confirmed_at=_ts("2026-09-25"), delivered_at=None)
+    after = wr.compute({**base, "orders": shop_orders + [staff, dict(staff, id=78, order_no="YQ-2609-9078")]}, ws, we, now)
+    assert before["confirm_median_h"] is not None and after["confirm_median_h"] == before["confirm_median_h"], \
+        (before["confirm_median_h"], after["confirm_median_h"])
+    assert after["confirmed_n"] == before["confirmed_n"], "a born-Confirmed order is not a confirmation"
+
+
+@test("review: the trust gate prices the requested subtotal as list price x qty of the shop's lines (added lines out)")
+def _():
+    from scripts.ai_head import pack
+    src = _synthetic_views()["v_agent_data_trust"]
+
+    def order(oid, sub, sub_c=None):
+        return {"order_id": oid, "order_no": f"YQ-2609-{oid}", "status": "confirmed", "is_test": False,
+                "subtotal_bhd": Decimal(sub), "discount_bhd": Decimal("0.500"), "delivery_bhd": Decimal(0),
+                "small_order_fee_bhd": None, "total_requested_bhd": Decimal(sub) - Decimal("0.500"),
+                "subtotal_confirmed_bhd": None if sub_c is None else Decimal(sub_c), "delivered_at": None,
+                "focus_link_state": "none"}
+
+    def line(oid, qty, lp, unit, qc=None, added=None):
+        return {"order_id": oid, "qty": qty, "qty_confirmed": qc, "list_price_bhd": Decimal(lp),
+                "unit_price_bhd": Decimal(unit), "unit_price_confirmed": Decimal(unit) if qc is not None else None,
+                "line_total_bhd": (Decimal(unit) * qty).quantize(Decimal("0.001")),
+                "line_total_confirmed": (Decimal(unit) * qc).quantize(Decimal("0.001")) if qc is not None else None,
+                "added_at_stage": added}
+    # order 1: a line discounted 0.25 a unit (the subtotal is before discounts: 3 x 2.000 = 6.000, not 5.250),
+    # confirmed 2 of 3, then the rep ADDED 4 x 1.500 at confirm: the requested subtotal stays 6.000; the
+    # confirmed subtotal (compute_totals) = 2 x 2.000 + 4 x 1.500 = 10.000
+    orders = [order(1, "6.000", "10.000")]
+    lines = [line(1, 3, "2.000", "1.750", qc=2), line(1, 4, "1.500", "1.500", qc=4, added="confirm")]
+    by = {c["check"]: c for c in pack.trust_gate(src, date(2026, 9, 27), orders=orders, lines=lines)["checks"]}
+    assert by["order_lines_sum"]["status"] == "ok", by["order_lines_sum"]
+    assert by["confirmed_lines_sum"]["status"] == "ok", by["confirmed_lines_sum"]
+    # the old rule (sum of every line's discounted total) would have failed a correct order twice over
+    assert sum(ln["line_total_bhd"] for ln in lines) != orders[0]["subtotal_bhd"]
+    # a real mismatch still fails
+    bad = pack.trust_gate(src, date(2026, 9, 27), orders=[order(1, "6.500", "10.000")], lines=lines)
+    assert {c["check"]: c["status"] for c in bad["checks"]}["order_lines_sum"] == "fail"
+    # item demand: what the shops asked for, not what the rep added
+    items = [{"item_code": "SKU-Z", "display_name": "Z", "is_active": True, "hidden": False, "stock_qty": Decimal(0),
+              "sold_90d": Decimal(0), "restock_requests_30d": 0, "trade_price_bhd": None, "landed_cost_bhd": None}]
+    added_only = [{"item_code": "SKU-Z", "qty": 9, "is_test": False, "order_status": "confirmed", "added_at_stage": "confirm"}]
+    assert pack.item_signals(items, added_only, [])["sold_out_with_demand"] == []
+    asked = [dict(added_only[0], added_at_stage=None)]
+    assert pack.item_signals(items, asked, [])["sold_out_with_demand"][0]["marketplace_units_asked_in_pack"] == 9
 
 
 @test("reverse: drops only what the migration made, refuses while ai_insights holds decisions, no CASCADE")
@@ -1437,6 +1522,37 @@ def _():
         assert not diff, diff
         assert sa["matches"] == [("YQ-2609-0101", "SI : SI-T-900")], sa["matches"]
         assert sa["n_orders"] == 4 and sa["visitors"] == 3
+
+        # review (rolled back): a rep's own born-Confirmed order never enters his confirm times, and the lines view
+        # carries added_at_stage before r7c (NULL) and after the real r7c migration (the trust gate leaves it out)
+        with psycopg.connect(db_dsn, row_factory=dict_row) as own:
+            gov0 = {r["rep"]: r for r in own.execute("select * from v_agent_rep_governance").fetchall()}
+            own.execute("""insert into shop_orders (id, order_no, token, status, customer_name, customer_phone, salesman_id,
+                             salesman_name, source, subtotal_bhd, total_bhd, created_at, confirmed_at, order_kind)
+                           values (190, 'YQ-2609-0190', 'tok-190-xxxxxxxxxxxxxxxx', 'confirmed', 'P', '+973 3300 0000', 1,
+                                   'Rep K', 'salesman', 5, 5, now() - interval '1 day', now() - interval '1 day',
+                                   'standard')""")
+            gov1 = {r["rep"]: r for r in own.execute("select * from v_agent_rep_governance").fetchall()}
+            for k in ("median_confirm_hours_30d", "max_confirm_hours_30d"):
+                assert gov1["Rep K"][k] == gov0["Rep K"][k], (k, gov0["Rep K"][k], gov1["Rep K"][k])
+            assert gov1["Rep K"]["confirmed_30d"] == gov0["Rep K"]["confirmed_30d"] + 1, "still an order, confirmed"
+            assert own.execute("select confirm_hours from v_agent_shop_orders where order_id = 190").fetchone() == \
+                {"confirm_hours": None}
+            assert own.execute("select count(*) as n from v_agent_shop_lines "
+                               "where added_at_stage is not null or qty_delivered is not null").fetchone()["n"] == 0
+            own.execute(R7C_MIGRATION.read_text(encoding="utf-8"))
+            own.execute("""insert into shop_order_lines (order_id, item_code, display_name, qty, qty_confirmed, unit_price_bhd,
+                             list_price_bhd, line_total_bhd, line_status, added_at_stage)
+                           values (104, 'SKU-A', 'SKU-A item', 2, 2, 3.0, 3.0, 6.0, 'added', 'confirm')""")
+            got = own.execute("select added_at_stage, qty_delivered from v_agent_shop_lines where order_id = 104 "
+                              "order by line_id").fetchall()
+            assert got == [{"added_at_stage": None, "qty_delivered": None},
+                           {"added_at_stage": "confirm", "qty_delivered": None}], got
+            t = pack.trust_gate([], date(2026, 9, 27),
+                                orders=own.execute("select * from v_agent_shop_orders where order_id = 104").fetchall(),
+                                lines=own.execute("select * from v_agent_shop_lines where order_id = 104").fetchall())
+            assert {c["check"]: c["status"] for c in t["checks"]}["order_lines_sum"] == "ok", t["checks"]
+            own.rollback()
 
         # ai_insights: load, idempotent, a status move, the words immutable, a final status stays final
         doc = li.decide(li.validate(_doc()), approve={"A1"}, reject={"A2"}, approve_report=True, by="owner@example.com")

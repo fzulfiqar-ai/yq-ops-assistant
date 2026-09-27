@@ -306,6 +306,23 @@ def _():
     assert a["engagement"]["checkout_start"] == 1 and a["engagement"]["share"] == 1
 
 
+@test("analytics: the median time to confirm leaves out orders a rep placed himself (born Confirmed, R7b review)")
+def _():
+    from app import shop
+    db = _analytics_db()
+    with _patched_shop(db):
+        a0 = shop.analytics(30)
+    assert a0["ops"]["median_time_to_confirm_min"] == 90.0, a0["ops"]      # order 2: created 2 h ago, confirmed 30 min ago
+    db2 = _analytics_db()
+    staff = [_order(5, source="salesman", status="confirmed", created_at=_ago(hours=1), confirmed_at=_ago(hours=1)),
+             _order(6, source="salesman", status="confirmed", created_at=_ago(minutes=40), confirmed_at=_ago(minutes=40))]
+    db2.tables["shop_orders"] = db2.tables["shop_orders"] + staff
+    with _patched_shop(db2):
+        a1 = shop.analytics(30)
+    assert a1["ops"]["median_time_to_confirm_min"] == 90.0, "with them the median read 0 min"
+    assert a1["identity"]["staff_orders"] == 2 and a1["orders"] == a0["orders"] + 2, "still counted as orders"
+
+
 @test("analytics: a rep's scope — his orders and his link's events only, same shape")
 def _():
     from app import shop
