@@ -2398,3 +2398,8 @@ _register_shop(app, limiter)
 from app.ingest_batch_api import register as _register_ingest_batch  # noqa: E402
 
 _register_ingest_batch(app, limiter)
+
+# ── Weekly AI Head: what the owner approved (GET only, admin + management) — app/ai_insights.py ──
+from app.ai_insights import register as _register_ai_insights  # noqa: E402
+
+_register_ai_insights(app, limiter)
