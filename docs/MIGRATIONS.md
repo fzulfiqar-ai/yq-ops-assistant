@@ -34,7 +34,8 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_current_stock` | `stock_migration.sql` | **SILENTLY WRONG** — identical columns, different source. Baseline reads the `stock_movements` ledger; canonical reads the `stock_balance` snapshot at `MAX(as_of_date)`. The ledger basis measured **~8.6× overstated** |
 | `v_product_margin` | `economics_v2_migration.sql` (R2, 24-Sep-2026; before that `selling_prices_void_migration.sql` → `stock_migration.sql`) | **SILENTLY WRONG** — identical first 15 columns. Canonical filters to `report_date = MAX(report_date)`, skips voided price rows and appends the computed ex-VAT margin (`gp_computed_bhd`, `net_ex_vat_bhd`, `gp_ex_vat_bhd`, `margin_ex_vat_pct`, `is_below_cost`, `ex_vat_source`) from one `GROUP BY` over `order_lines` (+ `order_lines_item_name_idx`); the baseline sums **every loaded period** and has none of them |
 | `mrn_landed_costs.effective_date` (data) | `mrn_dates_migration.sql` (R2) | not a view: re-dates the pre-R2 rows from the 1st of the month to the ledger's MRN move date (reverse: `mrn_dates_reverse.sql`) |
-| `v_product_economics` | `economics_v2_migration.sql` (R2; before that `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no` |
+| `v_product_economics` | `r7d_margin_exvat_migration.sql` (R7d, 27-Sep-2026: `margin_bhd` / `margin_pct` on the EX-VAT price, the other 7 columns verbatim; before that `economics_v2_migration.sql` → `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no`. Re-running `economics_v2_migration.sql` after R7d **silently puts the VAT-inclusive margin back** (same 9 columns) — never do it |
+| `v_price_tracker` | `r7d_margin_exvat_migration.sql` (R7d: `margin_now_pct` / `margin_before_pct` on the EX-VAT price; before that `price_tracker_migration.sql`) | not in the baseline. `price_tracker_migration.sql` DROPs and re-creates the view — re-running it after R7d loses the ex-VAT margin **and the grants**; never do it |
 | `v_catalog_reserved`, `ar_ageing_totals` | `economics_v2_migration.sql` (R2) | not in the baseline — staff reserved-stock view (M10) and Focus's own AR Grand Total per snapshot |
 | `v_sales` | `r7_narration_mask_migration.sql` (R7b, 27-Sep-2026: `narration` masked, the other 30 columns verbatim; before that `division_payment_migration.sql`) | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway`. Re-running `division_payment_migration.sql` after R7b **silently unmasks** the narration (same 31 columns) — never do it |
 | `v_receivables` | `receivables_consolidation_migration.sql` | **STALE, different source table** — baseline is ledger-based, canonical reads `ar_ageing`. Lacks the 15 ageing columns; also carries 4 the canonical does *not* have (`last_entry_date`, `salesman`, `last_narration`, `days_outstanding`). Only `account` overlaps cleanly — `outstanding_bhd` changes meaning |
@@ -524,4 +525,42 @@ rewritten while new writes are held to the old lists — restart the API after r
 hit for 10 minutes). Replayed on a throwaway local cluster (synthetic tables): apply twice, the new values and the FK
 work, bad values are refused, reverse with R7c rows present, apply again — all rolled back
 (`tests/test_r7c_order_heart.py`, SKIPs without a cluster).
+
+## Release R7d (27-Sep-2026, not yet applied): profitability + master data
+
+Three additive, idempotent files, each with a `_reverse.sql`; syntax-checked with libpg_query, every SELECT body run
+READ ONLY against production (no DDL was run anywhere). Deploy order: any — the API needs none of them (see each).
+
+**`r7d_margin_exvat_migration.sql`** — `v_product_economics.margin_bhd` / `margin_pct` and
+`v_price_tracker.margin_now_pct` / `margin_before_pct` are taken on the ex-VAT price
+(`(price − cost × (1 + VAT)) ÷ price`, VAT = `app_settings.shop_vat_rate`, guarded cast, default 0.10). The price book
+is VAT-inclusive; the old formula overstated every unit margin (T06 3.000 / 1.983: 33.9 % → 27.3 %). Column names,
+types and order are exactly the live ones (checked against `pg_attribute` read-only: 9 and 16 columns; every
+non-margin cell identical to live on 186 rows), so the reverse is a plain `CREATE OR REPLACE` of the pre-R7d bodies
+(verified identical to live, row for row). Adds column COMMENTs (ex-VAT / at selling price / "not a percentage") on
+`v_product_economics`, `v_price_tracker`, `v_product_margin`, `v_landed_margin`, `v_stock_health`,
+`v_inventory_aging`, `v_division_summary`; grants restated (yq_readonly only). The API recomputes the Price
+Tracker's margins with the same formula (`app/margin_truth.py`), so the page is ex-VAT before this runs; the agents
+and the SQL assistant read the view and change with it (their `margin_pct` thresholds now meet ex-VAT figures).
+
+**`r7d_category_master_migration.sql`** — analytics categories follow the marketplace list. New `category_master`
+(catalog category → `categories` row, 9 rows) and `category_master_log` (every re-point, old and new category),
+RLS on, no grants. Re-points `products.category_id` for every catalog code where the two differ — Accessories only,
+never a SIM / Devices / Giveaway product: 58 products today (the 40 uncategorised + 18 in the wrong Focus group;
+the list is in the file). No division moves (the 40 already counted as Accessories). `scripts/category_backfill.py`
+now applies the master after its Focus item-group pass (and leaves master-governed products out of that pass), so the
+next Multi_level report cannot undo it; before the migration the master is absent and nothing changes. Reverse:
+restores each product's first-logged category while it still holds the master's, then drops both tables.
+
+**`r7d_master_data_migration.sql`** — `customers.segment` seeded from the AR ageing Group Name (101 customers:
+Retail 89, Key Account 9, Cash Customer Group 2, MT 1; 2 AR accounts unmatched), `customers.area` from linked
+marketplace merchants (0 today: no merchant is linked yet), both only where NULL and logged in
+`master_data_seed_log`; `salesmen.territory` (text) and `salesmen.focus_aliases` (text[]), both nullable and empty;
+`salesman_targets.salesman_id` (nullable, FK `on delete set null`, index on `(salesman_id, period)`) backfilled by
+`focus_name` then `name` (15 of 15 rows) and kept filled by the trigger `salesman_targets_fill_salesman_id` on insert
+and rename, so no writer changes. The kickback math still keys on `salesman`. Dry-run SELECTs are in the file header.
+Reverse: clears only the seeded values still equal to what was written, drops the log, trigger, function, index, FK
+and the three columns (export `salesmen.territory` / `focus_aliases` first if anyone has typed into them).
+
+After each: `python -m scripts.audit_grants`. Tests: `python -m tests.test_r7d_profit`.
 
