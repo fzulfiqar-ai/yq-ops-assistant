@@ -2,6 +2,7 @@ import { Suspense, useEffect, useState, type CSSProperties } from 'react'
 import { Link, Navigate, NavLink, useLocation, useOutlet } from 'react-router-dom'
 import { Bell, BookImage, ClipboardList, CircleUserRound, House, KeyRound, Loader2, LogOut, Users, type LucideIcon } from 'lucide-react'
 import { mustResetOf, passwordScreenFor, useAuth } from '@/lib/auth'
+import { MarketCapture } from '@/components/MarketCapture'
 import { navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 import { firstName, initials, useNewOrderCount } from '@/pages/sales/lib'
@@ -289,6 +290,7 @@ export function SalesmanShell() {
         </div>
       </div>
       <FloatingTabs tabs={tabs} />
+      <MarketCapture />
     </div>
   )
 }
