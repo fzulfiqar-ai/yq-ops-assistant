@@ -186,6 +186,7 @@ export default function Dashboard() {
   })
 
   // daily target = monthly target ÷ all days in the month (owner's rule)
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- pre-existing memo; the compiler hint is advisory here
   const daysInMonth = useMemo(() => {
     const d = data?.data_as_of ? new Date(data.data_as_of) : new Date()
     return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
@@ -194,6 +195,7 @@ export default function Dashboard() {
   const cumSeries = useMemo(() => {
     let run = 0
     return (data?.daily_mtd || []).map((r, i) => {
+      // eslint-disable-next-line react-hooks/immutability -- a local running total inside map(), not render state
       run += Number(r.acc_bhd ?? r.gross_bhd ?? 0)
       return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * (i + 1)) : null }
     })

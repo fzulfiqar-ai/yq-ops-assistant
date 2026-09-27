@@ -95,6 +95,12 @@ jobs:
           python -m tests.test_r7a_focus
           python -m tests.test_r7a_rbac
           python -m tests.test_r7a_b4
+          python -m tests.test_r7b_security
+          python -m tests.test_r7b_command
+          python -m tests.test_r7b_rep
+          python -m tests.test_r7b_ai_head
+          python -m tests.test_r7b_market_intel
+          python -m tests.test_r7b_arabic
           python -m py_compile scripts/weekly_report.py   # owner tool: must parse on the pinned 3.11
       # R2a batch importer: the pure tests; the local-Postgres replay SKIPs here. Its own step — it
       # used to sit on a folded second line of the step above, which YAML read as extra arguments to
@@ -132,6 +138,8 @@ jobs:
       # with the project's own typescript — Enter never substitutes a sold-out code, sold out last
       - name: Sold-out ordering (node, no browser)
         run: node scripts/soldout_order_test.mjs
+      - name: Arabic strings — every English key has an Arabic twin (R7b)
+        run: node scripts/arabic_test.mjs
       # R6 edge catalog Worker (web/workers/market.js) on fakes: cache states, the 3 s soft timeout,
       # non-200 never stored, missing chunks → 404
       - name: Edge Worker behaviour (node, no network)

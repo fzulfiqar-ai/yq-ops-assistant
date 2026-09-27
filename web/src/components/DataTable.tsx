@@ -44,7 +44,9 @@ export function DataTable<T extends object>({
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null)
   const [limit, setLimit] = useState(PAGE)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
   useEffect(() => { if (initialQuery !== undefined) setQuery(initialQuery) }, [initialQuery])
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
   useEffect(() => { setLimit(PAGE); scrollRef.current?.scrollTo({ top: 0 }) }, [query, sort, rows])
 
   function onScroll(e: UIEvent<HTMLDivElement>) {

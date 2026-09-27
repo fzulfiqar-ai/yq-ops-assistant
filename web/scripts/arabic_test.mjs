@@ -124,7 +124,7 @@ test('ar mirrors en: every key, the same shape, Arabic text, Western digits only
 test('tsc: an English key the Arabic lacks is a type error (ar is declared `Strings`)', () => {
   const arPath = path.join(SRC, 'market', 'i18n', 'ar.ts')
   const original = readFileSync(arPath, 'utf8')
-  const broken = original.replace(/^ {2}searchLabel: '[^']*',\n/m, '')
+  const broken = original.replace(/^ {2}searchLabel: '[^']*',\r?\n/m, '')   // CRLF on a Windows checkout
   assert(broken !== original, 'could not take searchLabel out of ar.ts')
   const opts = { noEmit: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, lib: ['lib.es2023.d.ts', 'lib.dom.d.ts'], types: [] }
   const check = (text) => {

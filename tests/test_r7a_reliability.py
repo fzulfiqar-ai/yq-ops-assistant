@@ -670,8 +670,9 @@ def _():
 def _():
     src = _read("web/src/pages/sales/FollowUps.tsx")
     body = src[src.index("export function LinkThisWeek"):]
-    assert "q.isError && !d" in body and "Couldn't load" in body and "q.refetch()" in body, body[:600]
-    assert body.index("q.isError && !d") < body.index("if (!d || d.hint) return null")
+    # R7b: the card reads Today's one /shop/me/today call and gets its error + retry as props
+    assert "error && !d" in body and "Couldn't load" in body and "onClick={onRetry}" in body, body[:600]
+    assert body.index("error && !d") < body.index("if (!d || d.hint) return null")
 
 
 def main() -> int:

@@ -999,7 +999,7 @@ def _():
         if s not in sections:
             sections.append(s)
     assert sections == ["Command Centre", "Customer orders", "Order for a shop", "Catalog", "Inventory & stock moves",
-                        "Purchasing", "Profitability", "Receivables", "Team performance", "Offers & campaigns",
+                        "Purchasing", "Profitability", "Receivables", "Team performance", "Market Intel", "Offers & campaigns",
                         "Reports", "Admin", "AI tools / Archive"], sections
     first = re.search(r"\{[^}]*\}", body).group(0)
     assert "to: '/command'" in first and "label: 'Command Centre'" in first
@@ -1008,14 +1008,16 @@ def _():
         assert "section: 'AI tools / Archive'" in line and "roles: ['admin']" in line, line
 
 
-@test("web nav: management sees exactly its seven pages and lands on the Command Centre")
+@test("web nav: management sees its seven pages (+ Market Intel when granted) and lands on the Command Centre")
 def _():
     nav = _web("lib/nav.ts")
     block = nav.split("export const MANAGEMENT_NAV", 1)[1].split("]\n", 1)[0]
     assert re.findall(r"to: '([^']+)'", block) == ["/command", "/shop-orders", "/command/team", "/command/customers",
-                                                   "/inventory", "/margins", "/receivables"]
+                                                   "/inventory", "/margins", "/receivables", "/market-intel"]
     assert re.findall(r"label: '([^']+)'", block) == ["Command Centre", "Customer orders", "Team", "Customers",
-                                                      "Products & stock", "Profitability", "Receivables"]
+                                                      "Products & stock", "Profitability", "Receivables", "Market Intel"]
+    # Market Intel is feature-gated: management sees it only when an admin grants the page (R7b market intel)
+    assert "feature: 'Market Intel'" in block.split("'/market-intel'", 1)[1].split("}", 1)[0]
     assert "if (isManagement(me)) return '/command'" in nav
     app = _web("App.tsx")
     assert 'path="command"' in app and 'path="command/team"' in app and 'path="command/customers"' in app

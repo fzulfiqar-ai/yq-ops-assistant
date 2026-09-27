@@ -24,6 +24,7 @@ export default function AcceptInvite() {
 
   useEffect(() => {
     if (!token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
       setLoadErr('This invite link is missing its token.')
       return
     }

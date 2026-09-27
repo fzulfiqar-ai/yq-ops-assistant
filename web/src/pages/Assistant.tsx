@@ -94,9 +94,11 @@ export default function Assistant() {
   }
   const { data: agents } = useQuery({ queryKey: ['agents'], queryFn: () => apiGet<{ name: string }[]>('/agents') })
   const scrollRef = useRef<HTMLDivElement>(null)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- browser speech-recognition API has no bundled types
   const recogRef = useRef<any>(null)
 
   const active = chats.find((c) => c.id === activeId) || chats[0]
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
   useEffect(() => { if (!activeId && chats[0]) setActiveId(chats[0].id) }, [activeId, chats])
   useEffect(() => { saveChats(chats) }, [chats])
   function scrollDown() {
@@ -175,12 +177,15 @@ export default function Assistant() {
   }
 
   function toggleMic() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- browser speech-recognition API has no bundled types
     const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
     if (!SR) { alert('Voice dictation is not supported in this browser. Try Chrome or Edge.'); return }
     if (listening) { recogRef.current?.stop(); setListening(false); return }
     const rec = new SR()
     rec.lang = lang; rec.interimResults = true; rec.continuous = false
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- browser speech-recognition API has no bundled types
     rec.onresult = (ev: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- browser speech-recognition API has no bundled types
       const text = Array.from(ev.results).map((r: any) => r[0].transcript).join('')
       setInput(text)
     }

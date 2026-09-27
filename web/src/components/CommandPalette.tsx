@@ -38,6 +38,7 @@ export function CommandPalette() {
 
   // debounced data search
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
     if (q.trim().length < 2) { setHits([]); setLoading(false); return }
     setLoading(true)
     const id = ++reqRef.current
@@ -69,7 +70,9 @@ export function CommandPalette() {
     window.addEventListener('yq:open-cmdk', onOpen)
     return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('yq:open-cmdk', onOpen) }
   }, [])
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
   useEffect(() => { if (open) { setQ(''); setActive(0); setHits([]) } }, [open])
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing reset/sync-on-change effect; behaviour kept, refactor later
   useEffect(() => setActive(0), [q])
 
   function go(to: string) { setOpen(false); nav(to) }

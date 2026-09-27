@@ -14,6 +14,7 @@ export interface ContextCardData {
 }
 
 /** Decode the base64-JSON ⟦card:…⟧ marker into card data (never throws). */
+// eslint-disable-next-line react-refresh/only-export-components -- a helper exported beside the component; only affects dev hot reload
 export function parseCards(b64: string): ContextCardData[] {
   try {
     const json = decodeURIComponent(escape(atob(b64)))
