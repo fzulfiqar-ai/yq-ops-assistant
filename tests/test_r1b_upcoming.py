@@ -520,6 +520,54 @@ def _():
     assert not [c for c in fake.calls if c[1] == "is_" and c[2][:1] == ("upcoming_id",)], fake.calls
 
 
+# ── the brand page's public face (27-Sep-2026 owner review) ───────────────────
+
+def _web(rel: str) -> str:
+    return (ROOT / "web" / "src" / "market" / rel).read_text(encoding="utf-8")
+
+
+@test("brand page: no counts, never the tier word, cards without commerce hooks, the sheet carries the rep, no Spotlight, no #hash links")
+def _():
+    page = _web("pages/BrandPage.tsx")
+    strings = _web("strings.ts")
+    block = strings[strings.index("  upcoming: {"):strings.index("  states: {")]
+    # no count of models anywhere: the "N designs" helper and the counted hero sentence are gone
+    for src, where in ((page, "BrandPage.tsx"), (block, "strings.ts upcoming")):
+        assert "designs(" not in src, where + " still counts designs"
+        assert "subline" not in src, where + " still has the counted hero sentence"
+    assert "arDesigns" not in strings and "categoryPhrase" not in _web("components/ComingSoonShared.ts")
+    # never the internal tier word, in either language block (comments included)
+    assert not re.search(r"premium", block, re.I), "the upcoming copy names the tier"
+    for key in ("stageLine", "tileTitle", "askRange", "askRangeText", "notifyAny", "rangeNav", "sections", "notifiedShort", "showBox", "showProduct"):
+        assert block.count(f"      {key}:") == 2, f"{key} must exist in both upcoming.en and upcoming.ar"
+    assert "Price on arrival" in block and "A step up for your shelf, in retail-ready boxes." in block
+    # the card mirrors MarketCard but can never be ordered, saved, opened as a product or read as stock
+    card = _web("components/ComingSoonCard.tsx")
+    for hook in ("savedStore", "useCartQty", "openProduct", "data-stock", "BHD"):
+        assert hook not in card, f"ComingSoonCard touches {hook}"
+    assert card.count("bg-plum text-white") == 1, "exactly one plum action on the card"
+    assert "CardKicker" in card and "mirror MarketCard" in card
+    # the variant choice and "Ask your rep" moved into the sheet; the POST body is unchanged
+    sheet = _web("components/ComingSoonNotifySheet.tsx")
+    assert "askRepUrl" in sheet and "variantAny" in sheet
+    post = re.search(r"postUpcomingInterest\(\{(.*?)\}\)", sheet, re.S)
+    assert post, "the notify POST is not where it was"
+    assert set(re.findall(r"^\s*(\w+):", post.group(1), re.M)) == {"upcoming_id", "phone", "qty_interest", "device_id", "ref"}, post.group(1)
+    # the rotating Spotlight ad is off the brand pages (the restock aside stays)
+    shell = _web("shell/DesktopShell.tsx")
+    assert "{!/^\\/brands\\//.test(pathname) && <Spotlight />}" in shell and "<MiniCart />" in shell
+    # every jump is a button: a #hash link would rewrite the URL a rep shared (?ref=)
+    hero = _web("components/ComingSoonHero.tsx")
+    for src, where in ((page, "BrandPage.tsx"), (hero, "ComingSoonHero.tsx")):
+        assert not re.search(r"""(href|to)=\{?\s*["'`]#""", src), where + " has a #hash link"
+    assert "scrollIntoView" in _web("components/ComingSoonShared.ts") and "scrollMotion()" in _web("components/ComingSoonShared.ts")
+    # the harness bans the tier word and a count of designs on every page it walks (one line)
+    qa = (ROOT / "scripts" / "qa" / "market_qa.py").read_text(encoding="utf-8")
+    banned = re.search(r'^BANNED = r"(.+)"$', qa, re.M).group(1)
+    assert re.search(banned, "the Sub-Premium range", re.I) and re.search(banned, "34 designs in earbuds", re.I)
+    assert not re.search(banned, "Price on arrival", re.I) and not re.search(banned, "Aipord Lightning Port (Airpord 1 Design)", re.I)
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

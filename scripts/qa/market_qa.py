@@ -75,11 +75,17 @@ STR = {
     "shop.notInStock": "Not in stock now",
     "avail.few": "Few left",
     "head.list": "YQ Trade List",
+    "upcoming.price": "Price on arrival",
+    "upcoming.rangeNav": "In the range",
+    "upcoming.send": "Notify me",
 }
 
-# Text that must never reach a merchant's screen: the owner's honest-merchandising rule, and the
-# sold-out rule (24-Sep-2026) — zero stock reads "Sold out" (Arabic «نفدت الكمية»), never "Out of stock".
-BANNED = r"slow mover|no minimum|Save \d+%|out of stock"
+# Text that must never reach a merchant's screen: the owner's honest-merchandising rule, the
+# sold-out rule (24-Sep-2026) — zero stock reads "Sold out" (Arabic «نفدت الكمية»), never "Out of
+# stock" — and the WEKOME rule (27-Sep-2026): never the internal tier word, never a count of designs
+# ("34 designs"). Plural only: a live catalog name carries "(Airpord 1 Design)" and the probe matches
+# case-insensitively. Keep it on ONE line: tests/test_r1_soldout.py reads it with a single-line regex.
+BANNED = r"slow mover|no minimum|Save \d+%|out of stock|sub-?premium|\b\d+ designs\b"
 
 CART_KEY = "yq-shop-cart:market"
 SPLASH_KEY = "yq-splash-session"
@@ -191,7 +197,7 @@ def states(slug: str | None) -> list[State]:
         State("about", "/about", "About & help", ready="main"),
         State("about_trade", "/about#trade", "About · trade prices", ready="main"),
         State("product", "/p/UK04-C", "Product · UK04-C (the page on desktop, the sheet on phones)", ready="main"),
-        State("brand", "/brands/wekome", "Brand · WEKOME (Coming soon)", ready="main"),
+        State("brand", "/brands/wekome", "Brand · WEKOME (Coming soon)", ready="main", needles=(STR["upcoming.price"],), full_page=True),
         State("tracking", "/o/qa-token", "Tracking · a mocked order", ready="main"),
         State("campaign", "/", "Home with an injected campaign", kind="campaign", ready="main", lead_only=True),
         State("reduced_home", "/", "Home, reduced motion", ready="main", reduced=True, lead_only=True),
@@ -208,6 +214,9 @@ def states(slug: str | None) -> list[State]:
     ]
     if slug:
         out.insert(1, State("storefront", "/" + slug, "Rep storefront /" + slug, ready="main"))
+        # a rep's WEKOME link: the same page, and the ?ref= must survive every jump on it
+        i = next(k for k, s in enumerate(out) if s.key == "brand")
+        out.insert(i + 1, State("brand_ref", "/brands/wekome?ref=" + slug, "Brand · WEKOME via a rep link", ready="main", needles=(STR["upcoming.price"],)))
     return out
 
 
@@ -1394,6 +1403,70 @@ QA_CAMPAIGN = {
 # ── one state at one viewport ──────────────────────────────────────────────────────────────────
 
 
+def brand_checks(run: Run, page: Page, vp: Viewport, out: Path, lead: bool) -> None:
+    """
+    The WEKOME page (27-Sep-2026): one h1; no #hash links (a rep's ?ref= must survive); a category
+    circle's jump lands its heading clear of the pinned header and leaves the URL exactly as it
+    was; a card's "Notify me" opens the sheet (the context's no-prod-writes net answers any POST,
+    and nothing is submitted here anyway).
+    """
+    heads = page.evaluate(
+        "() => [...document.querySelectorAll('h1')].filter((h) => { const r = h.getBoundingClientRect();"
+        " const cs = getComputedStyle(h); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; })"
+        ".map((h) => (h.innerText || '').trim().slice(0, 60))"
+    )
+    if len(heads) != 1:
+        finding(run, "fail", "brand-h1", str(len(heads)) + " visible h1 elements (expected exactly one): " + str(heads))
+    hashes = page.evaluate("() => [...document.querySelectorAll('main a[href^=\"#\"]')].map((a) => a.getAttribute('href'))")
+    if hashes:
+        finding(run, "fail", "brand-hash-link", "hash links on the page (they would rewrite the URL a rep shared): " + str(hashes[:5]))
+
+    before = page.url
+    nav = page.locator('nav[aria-label="' + STR["upcoming.rangeNav"] + '"] button')
+    n = nav.count()
+    if n < 2:
+        finding(run, "warn", "brand-circles", "fewer than two category circles (" + str(n) + ")")
+    else:
+        target = nav.nth(n - 1)
+        target.click()
+        page.wait_for_timeout(1400)
+        landed = page.evaluate(
+            "() => { const root = getComputedStyle(document.documentElement);"
+            " const px = (v) => parseFloat(root.getPropertyValue(v)) || 0;"
+            " const pinned = Math.max(px('--m-search-h'), window.innerWidth >= 1024 ? (px('--m-sticky-h') || px('--m-header-h')) : 0);"
+            " const secs = [...document.querySelectorAll('main section[id^=\"wk-\"]')]; const last = secs[secs.length - 1];"
+            " if (!last) return null; const h = last.querySelector('h2'); const r = (h || last).getBoundingClientRect();"
+            " return { top: Math.round(r.top), pinned: Math.round(pinned), id: last.id, focused: document.activeElement === h }; }"
+        )
+        if not landed:
+            finding(run, "fail", "brand-jump", "no wk-* sections on the page")
+        elif landed["top"] < landed["pinned"] or landed["top"] > vp.height * 0.6:
+            finding(run, "fail", "brand-jump", "the last circle's jump left its heading at " + str(landed["top"]) + "px (pinned header " + str(landed["pinned"]) + "px)", landed)
+        else:
+            run.notes.append("circle jump: " + landed["id"] + " heading at " + str(landed["top"]) + "px, pinned " + str(landed["pinned"]) + "px, focused " + str(landed["focused"]))
+        if lead:
+            shot(run, page, out, "jump")
+    if page.url != before:
+        finding(run, "fail", "brand-url", "a jump changed the URL: " + before + " → " + page.url)
+
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(300)
+    btn = page.locator("main article button:has-text(\"" + STR["upcoming.send"] + "\")")
+    if btn.count() == 0:
+        finding(run, "fail", "brand-notify", "no “" + STR["upcoming.send"] + "” button on a card")
+        return
+    btn.first.scroll_into_view_if_needed()
+    btn.first.click()
+    page.wait_for_timeout(700)
+    dialog = page.locator('[role="dialog"]')
+    if dialog.count() == 0 or not dialog.first.is_visible():
+        finding(run, "fail", "brand-notify", "“" + STR["upcoming.send"] + "” did not open the notify sheet")
+    elif lead:
+        shot(run, page, out, "notify-sheet")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+
+
 def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Report, lead: bool) -> None:
     run = Run(state=st.key, route=st.route, viewport=vp.name, label=st.label)
     ctx = new_context(browser, vp, st)
@@ -1456,6 +1529,9 @@ def run_state(browser, vp: Viewport, st: State, base: str, out: Path, report: Re
                 page.evaluate("() => window.scrollTo(0, 0)")
         if lead and vp.klass == "phone" and st.key == "cart_under":
             crop(run, page, out, "wholesale-card", "section[aria-labelledby]:has-text(\"" + STR["wholesale.away"] + "\")", 0)
+        # after the shots: the jumps scroll the page and the notify sheet covers it
+        if st.key in ("brand", "brand_ref"):
+            brand_checks(run, page, vp, out, lead)
 
         # last: it holds the track and could follow a slide link
         if st.key == "home" and vp.name == LEAD_PHONE:
