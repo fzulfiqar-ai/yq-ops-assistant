@@ -1,27 +1,34 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { AlertTriangle, LayoutList, Link2, Loader2, RefreshCw, Search, Share2, Ticket, UserRoundCheck, type LucideIcon } from 'lucide-react'
+import {
+  AlertTriangle, ChevronRight, Gauge, LayoutList, Link2, Loader2, RefreshCw, Search, SearchX, Share2, Store, Ticket,
+  UserRoundCheck, type LucideIcon,
+} from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, pct, fmtDate } from '@/lib/format'
 import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
+import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 
-// ── types (kept close to docs/SHOP.md's GET /shop/analytics — every field is
-// treated as possibly missing; the backend may not even be reachable) ──────────
+// ── types (docs/SHOP.md GET /shop/analytics — every field may be missing: an older API, a rep's
+// slice, or the analytics views not set up yet) ─────────────────────────────────
 
 interface FunnelData {
   sessions?: number | null
   item_views?: number | null
   adds?: number | null
+  carts?: number | null
   checkouts?: number | null
   orders?: number | null
   conversion_pct?: number | null
+  devices?: number | null
 }
 interface TopProductRow {
   item_code: string
@@ -47,12 +54,14 @@ interface DailyRow {
   date: string
   orders?: number | null
   value_bhd?: number | null
+  sessions?: number | null
 }
-// marketplace learning loop (16-Sep-2026): search terms, rails, attribution sources, SLA, identity, vitals
 interface SearchTermRow {
   term: string
   searches?: number | null
   zero?: number | null
+  devices?: number | null
+  last_seen?: string | null
 }
 interface SearchData {
   searches?: number | null
@@ -64,6 +73,7 @@ interface SearchData {
 interface RailRow {
   rail: string
   clicks?: number | null
+  adds?: number | null
   sessions?: number | null
 }
 interface EngagementData {
@@ -74,6 +84,7 @@ interface EngagementData {
   cancel?: number | null
   checkout_start?: number | null
   devices?: number | null
+  new_devices?: number | null
 }
 interface OpsData {
   by_attribution?: AttributionRow[] | null
@@ -95,9 +106,57 @@ interface IdentityData {
 }
 interface VitalsData {
   samples?: number | null
+  visits?: number | null
   lcp_ms_p75?: number | null
   inp_ms_p75?: number | null
   cls_p75?: number | null
+}
+interface WindowData {
+  start?: string | null
+  end?: string | null
+  days?: number | null
+  events_since?: string | null
+  before_history?: boolean | null
+}
+interface LinkRow {
+  key: string
+  rep?: string | null
+  sessions?: number | null
+  devices?: number | null
+  orders?: number | null
+  value_bhd?: number | null
+  conversion_pct?: number | null
+}
+interface MerchantRow {
+  customer_id: number
+  shop?: string | null
+  area?: string | null
+  rep?: string | null
+  rep_name?: string | null
+  orders?: number | null
+  value_bhd?: number | null
+  value_90d_bhd?: number | null
+  last_order_at?: string | null
+  days_since_last?: number | null
+  cadence_days?: number | null
+  cadence_basis?: string | null
+  due_status?: string | null
+  dormant?: boolean | null
+  is_new?: boolean | null
+}
+interface MerchantCounts {
+  merchants?: number | null
+  new?: number | null
+  returning?: number | null
+  due?: number | null
+  overdue?: number | null
+  dormant?: number | null
+}
+interface MerchantsData {
+  available?: boolean | null
+  counts?: MerchantCounts | null
+  active?: MerchantRow[] | null
+  watch?: MerchantRow[] | null
 }
 interface ShopAnalyticsResp {
   search?: SearchData | null
@@ -124,37 +183,69 @@ interface ShopAnalyticsResp {
     by_coupon?: AttributionRow[] | null
   } | null
   daily?: DailyRow[] | null
+  window?: WindowData | null
+  source?: 'views' | 'events' | null
+  notes?: string[] | null
+  links?: LinkRow[] | null
+  merchants?: MerchantsData | null
 }
 
-const PERIODS = [7, 30, 90] as const
+// ── periods that mean something: the storefront's event history starts on one day, so a window
+// longer than that history is "since <that day>", shown once ─────────────────────
 
-// Ordinal ramp for the funnel steps (sessions -> orders): one hue — the brand
-// purple — monotone light-to-dark, the darkest step landing exactly on the
-// primary (#6d28d9). Validated with the dataviz skill's ordinal checks against
-// this app's white card surface:
-//   node scripts/validate_palette.js "#c797ff,#af7dff,#9862ff,#8247f4,#6d28d9" \
-//     --ordinal --surface "#ffffff"   ->   ALL CHECKS PASS
+const CHIP_DAYS = [1, 7, 30, 90] as const
+
+function isoAddDays(iso: string, delta: number): string {
+  const d = new Date(`${iso}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + delta)
+  return d.toISOString().slice(0, 10)
+}
+function bahrainToday(): string {
+  return new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 10)
+}
+function dayMonth(iso?: string | null): string {
+  if (!iso) return ''
+  const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+}
+function periodChips(end: string, since?: string | null): { days: number; label: string; since: boolean }[] {
+  const out: { days: number; label: string; since: boolean }[] = []
+  let sinceShown = false
+  for (const d of CHIP_DAYS) {
+    const start = isoAddDays(end, -(d - 1))
+    if (since && start < since) {
+      if (sinceShown) continue          // a longer window holds nothing more than "since" already does
+      sinceShown = true
+      out.push({ days: d, label: `Since ${dayMonth(since)}`, since: true })
+    } else {
+      out.push({ days: d, label: d === 1 ? 'Today' : `${d} days`, since: false })
+    }
+  }
+  return out
+}
+function windowLabel(days: number, win?: WindowData | null): string {
+  if (win?.before_history && win.events_since) return `Since ${dayMonth(win.events_since)} — all the history there is`
+  return days === 1 ? 'Today' : `Last ${days} days`
+}
+
+// Ordinal ramp for the funnel steps (visits -> orders): one hue — the brand purple — monotone
+// light-to-dark, the darkest step on the primary (#6d28d9). Checked with the dataviz skill's ordinal
+// validator against the white card surface.
 const FUNNEL_STEPS: { key: keyof FunnelData; label: string; color: string }[] = [
-  { key: 'sessions', label: 'Sessions', color: '#c797ff' },
-  { key: 'item_views', label: 'Item views', color: '#af7dff' },
-  { key: 'adds', label: 'Added to cart', color: '#9862ff' },
-  { key: 'checkouts', label: 'Checkouts', color: '#8247f4' },
-  { key: 'orders', label: 'Orders', color: '#6d28d9' },
+  { key: 'sessions', label: 'Visits', color: '#d4b3ff' },
+  { key: 'item_views', label: 'Viewed a product', color: '#c797ff' },
+  { key: 'adds', label: 'Added to cart', color: '#af7dff' },
+  { key: 'carts', label: 'Opened the cart', color: '#9862ff' },
+  { key: 'checkouts', label: 'Started checkout', color: '#8247f4' },
+  { key: 'orders', label: 'Ordered', color: '#6d28d9' },
 ]
 
 function fmtDayMonth(d?: string | null): string {
-  if (!d) return ''
-  try {
-    return new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
-  } catch {
-    return String(d)
-  }
+  return dayMonth(d)
 }
 function pctOrDash(n: number | null | undefined, dp = 1): string {
   return n == null ? '—' : pct(n, dp)
 }
-// docs/SHOP.md names these mappings explicitly for by_referral / by_src; by_coupon
-// isn't spelled out field-by-field so its rows are shown as-is (see report).
 function labelForReferral(key?: string | null): string {
   if (!key || key === 'direct') return 'Direct link'
   if (key === 'dropdown') return 'Chosen in checkout'
@@ -181,14 +272,40 @@ function labelForAttribution(key?: string | null): string {
 const RAIL_LABEL: Record<string, string> = {
   best: 'Best sellers',
   arrived: 'Just arrived',
+  fresh: 'Just arrived',
   offers: 'On offer',
+  deals: 'Deals',
   regulars: 'Order again',
   together: 'Bought together',
   complete: 'Complete your order',
   reorder: 'Reorder button',
+  tile: 'Category tiles',
+  grid: 'Product grid',
+  search_row: 'Search results',
+  panel: 'Product panel',
+  essentials: 'Essentials',
+  category: 'Category page',
+  slider: 'Promo slider',
 }
 function labelForRail(key?: string | null): string {
   return (key && RAIL_LABEL[key]) || key || '—'
+}
+function linkLabel(r: LinkRow): string {
+  if (r.key === 'direct') return 'No rep link'
+  return r.rep ? `${r.rep}` : `ref: ${r.key}`
+}
+const STATUS_BADGE: Record<string, { tone: BadgeTone; label: string }> = {
+  due: { tone: 'amber', label: 'Due' },
+  overdue: { tone: 'rose', label: 'Overdue' },
+}
+function MerchantFlags({ m }: { m: MerchantRow }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {m.dormant && <Badge tone="rose">Dormant</Badge>}
+      {m.due_status && STATUS_BADGE[m.due_status] && <Badge tone={STATUS_BADGE[m.due_status].tone}>{STATUS_BADGE[m.due_status].label}</Badge>}
+      {m.is_new && <Badge tone="accent">New</Badge>}
+    </span>
+  )
 }
 
 // ── small local atoms ───────────────────────────────────────────────────────
@@ -206,50 +323,63 @@ function StaleBanner({ onRetry, isRetrying }: { onRetry: () => void; isRetrying:
   )
 }
 
-function FunnelCard({ funnel, days }: { funnel: FunnelData | null | undefined; days: number }) {
+function SectionTitle({ title, sub }: { title: string; sub?: string }) {
+  return (
+    <div className="mb-3 mt-7">
+      <div className="font-display text-base font-semibold">{title}</div>
+      {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+    </div>
+  )
+}
+
+function FunnelCard({ funnel, label }: { funnel: FunnelData | null | undefined; label: string }) {
   const steps = FUNNEL_STEPS.map((s) => ({ ...s, count: Number(funnel?.[s.key] ?? 0) }))
   const allZero = steps.every((s) => s.count === 0)
-  const sessions = steps[0].count
-  const denom = sessions > 0 ? sessions : Math.max(1, ...steps.map((s) => s.count))
+  const visits = steps[0].count
+  const denom = visits > 0 ? visits : Math.max(1, ...steps.map((s) => s.count))
 
   return (
     <Card className="p-5">
       <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <div className="font-display text-base font-semibold">Funnel</div>
-          <div className="text-xs text-muted-foreground">Sessions to orders · last {days} days</div>
+          <div className="text-xs text-muted-foreground">Visits to orders · {label}</div>
         </div>
         {!allZero && (
           <div className="text-[13px] text-muted-foreground">
-            Overall conversion <span className="font-semibold text-foreground">{pctOrDash(funnel?.conversion_pct)}</span>
+            Visits that ordered <span className="font-semibold text-foreground">{pctOrDash(funnel?.conversion_pct)}</span>
           </div>
         )}
       </div>
 
       {allZero ? (
         <div className="rounded-xl border border-dashed py-10 text-center text-sm text-muted-foreground">
-          No shop visits yet — share the catalog link to start collecting data.
+          No shop visits in this period — share a rep's link to start collecting data.
         </div>
       ) : (
         <div className="space-y-2.5">
           {steps.map((s) => {
             const w = s.count > 0 ? Math.min(100, Math.max(3, Math.round((s.count / denom) * 100))) : 0
-            const ofSessions = sessions > 0 ? (s.count / sessions) * 100 : 0
+            const ofVisits = visits > 0 ? (s.count / visits) * 100 : 0
             return (
               <div key={s.key} className="flex items-center gap-3 rounded-lg px-1 py-1 transition-colors hover:bg-accent/30">
-                <span className="w-24 shrink-0 text-[13px] font-medium text-muted-foreground sm:w-32">{s.label}</span>
+                <span className="w-28 shrink-0 text-[13px] font-medium text-muted-foreground sm:w-36">{s.label}</span>
                 <span className="h-6 flex-1 overflow-hidden rounded-r bg-secondary">
                   <span className="block h-full rounded-r transition-[width]" style={{ width: `${w}%`, background: s.color }} />
                 </span>
                 <span className="w-24 shrink-0 text-right text-[13px] tabular-nums sm:w-32">
                   <span className="font-semibold">{num(s.count)}</span>
-                  {s.key !== 'sessions' && <span className="ml-1 text-muted-foreground">· {ofSessions.toFixed(0)}%</span>}
+                  {s.key !== 'sessions' && <span className="ml-1 text-muted-foreground">· {ofVisits.toFixed(0)}%</span>}
                 </span>
               </div>
             )
           })}
         </div>
       )}
+      <p className="mt-3 text-[12px] text-muted-foreground">
+        A visit is one phone's session on one day. "Ordered" counts the orders placed on the marketplace itself — orders a
+        rep entered for a shop are in the totals above, not here.
+      </p>
     </Card>
   )
 }
@@ -302,7 +432,7 @@ function AttributionTable({
 }
 
 function MiniTable<T>({
-  title, icon: Icon, rows, cols, empty, foot,
+  title, icon: Icon, rows, cols, empty, foot, max = 10,
 }: {
   title: string
   icon: LucideIcon
@@ -310,6 +440,7 @@ function MiniTable<T>({
   cols: { label: string; align?: 'right'; render: (r: T) => React.ReactNode }[]
   empty: string
   foot?: React.ReactNode
+  max?: number
 }) {
   return (
     <Card className="p-5">
@@ -319,7 +450,7 @@ function MiniTable<T>({
       {!rows.length ? (
         <p className="py-6 text-center text-sm text-muted-foreground">{empty}</p>
       ) : (
-        <div className="overflow-hidden rounded-xl border">
+        <div className="overflow-x-auto rounded-xl border">
           <table className="w-full text-[13px]">
             <thead className="bg-secondary/50 text-[11px] uppercase text-muted-foreground">
               <tr>
@@ -327,9 +458,9 @@ function MiniTable<T>({
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, 10).map((r, i) => (
+              {rows.slice(0, max).map((r, i) => (
                 <tr key={i} className="border-t">
-                  {cols.map((c) => <td key={c.label} className={cn('max-w-[160px] truncate px-2.5 py-1.5 tabular-nums', c.align === 'right' ? 'text-right' : 'font-medium')}>{c.render(r)}</td>)}
+                  {cols.map((c) => <td key={c.label} className={cn('max-w-[180px] truncate px-2.5 py-1.5 tabular-nums', c.align === 'right' ? 'text-right' : 'font-medium')}>{c.render(r)}</td>)}
                 </tr>
               ))}
             </tbody>
@@ -341,6 +472,31 @@ function MiniTable<T>({
   )
 }
 
+function MerchantLink({ m }: { m: MerchantRow }) {
+  return (
+    <Link to={`/shop-analytics/merchant/${m.customer_id}`}
+      className="inline-flex max-w-full items-center gap-1 text-primary hover:underline">
+      <span className="truncate">{m.shop || `Merchant #${m.customer_id}`}</span>
+      <ChevronRight size={13} className="shrink-0" />
+    </Link>
+  )
+}
+
+function SiteSpeed({ vitals }: { vitals: VitalsData }) {
+  if (!vitals.samples) return null
+  const lcp = vitals.lcp_ms_p75 == null ? '—' : `${(vitals.lcp_ms_p75 / 1000).toFixed(1)} s`
+  return (
+    <p className="mt-8 flex flex-wrap items-center gap-1.5 border-t pt-3 text-[12px] text-muted-foreground">
+      <Gauge size={13} className="shrink-0" />
+      <span className="font-semibold">Site speed</span>
+      <span>
+        (p75 of {num(vitals.visits ?? vitals.samples)} visits): loads in {lcp} · responds in {num(vitals.inp_ms_p75 ?? 0)} ms ·
+        layout shift {vitals.cls_p75 ?? '—'}. For the engineering watch — a load over 2.5 s is slow on a phone.
+      </span>
+    </p>
+  )
+}
+
 // ── page ─────────────────────────────────────────────────────────────────────
 
 export default function ShopAnalytics() {
@@ -348,10 +504,14 @@ export default function ShopAnalytics() {
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['shop-analytics', days],
     queryFn: () => apiGet<ShopAnalyticsResp>(`/shop/analytics?days=${days}`),
-    // Keep the previous period's figures on screen while the new one loads —
-    // no skeleton flash when switching 7d / 30d / 90d.
+    // Keep the previous period's figures on screen while the new one loads — no skeleton flash.
     placeholderData: (prev) => prev,
   })
+
+  const win = data?.window
+  const chips = useMemo(() => periodChips(win?.end || bahrainToday(), win?.events_since), [win?.end, win?.events_since])
+  const activeDays = chips.some((c) => c.days === days) ? days : (chips.find((c) => c.since)?.days ?? days)
+  const label = windowLabel(days, win)
 
   const topProducts = data?.top_products || []
   const daily = data?.daily || []
@@ -364,11 +524,12 @@ export default function ShopAnalytics() {
   const ops = data?.ops || {}
   const identity = data?.identity || {}
   const vitals = data?.vitals || {}
+  const links = data?.links || []
+  const merchants = data?.merchants
+  const counts = merchants?.counts
+  const notes = data?.notes || []
   const cancelledTotal = (ops.cancelled_by_customer ?? 0) + (ops.cancelled_by_staff ?? 0)
 
-  // react-query keeps a stable array reference across renders when the underlying
-  // data hasn't changed, so depending on `data?.leaderboard` directly (rather than
-  // an intermediate `|| []` local, a fresh reference every render) lets this memoize.
   const leaderboard: LeaderboardDisplayRow[] = useMemo(
     () => (data?.leaderboard || []).map((r, i) => ({ ...r, rank: i + 1 })),
     [data?.leaderboard],
@@ -415,17 +576,6 @@ export default function ShopAnalytics() {
       } },
   ]
 
-  const kpis = {
-    orders: data?.orders ?? 0,
-    cancelled: data?.cancelled ?? 0,
-    value_bhd: data?.value_bhd ?? 0,
-    aov_bhd: data?.aov_bhd ?? 0,
-    units: data?.units ?? 0,
-    customers: data?.customers ?? 0,
-    backorder_rate_pct: data?.backorder_rate_pct ?? 0,
-    conversion_pct: data?.funnel?.conversion_pct ?? null,
-  }
-
   const showInitialSkeleton = isLoading && !data
   const showHardError = isError && !data
   const showStaleWarning = isError && !!data
@@ -434,14 +584,14 @@ export default function ShopAnalytics() {
     <div>
       <PageHeader
         title="Shop Analytics"
-        subtitle="Orders, funnel, attribution and the marketplace learning loop"
+        subtitle="What merchants did on the marketplace: visits, searches, orders and who is due"
         actions={
-          <div className="flex gap-1.5">
-            {PERIODS.map((d) => (
-              <button key={d} type="button" onClick={() => setDays(d)}
+          <div className="flex flex-wrap gap-1.5">
+            {chips.map((c) => (
+              <button key={c.days} type="button" onClick={() => setDays(c.days)}
                 className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition',
-                  days === d ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
-                {d}d
+                  activeDays === c.days ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
+                {c.label}
               </button>
             ))}
           </div>
@@ -452,12 +602,11 @@ export default function ShopAnalytics() {
 
       {showInitialSkeleton ? (
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-            {Array.from({ length: 7 }).map((_, i) => <Skeleton key={i} className="h-[72px]" />)}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-[72px]" />)}
           </div>
+          <Skeleton className="h-[260px]" />
           <Skeleton className="h-[220px]" />
-          <Skeleton className="h-[220px]" />
-          <Skeleton className="h-[200px]" />
           <Skeleton className="h-[200px]" />
         </div>
       ) : showHardError ? (
@@ -465,32 +614,37 @@ export default function ShopAnalytics() {
           fallback="Could not load shop analytics from the server." />
       ) : (
         <div className={cn(isFetching && !isLoading && 'opacity-60 transition-opacity duration-200')}>
+          {notes.length > 0 && (
+            <div className="mb-4 space-y-1 rounded-xl border border-amber-200 bg-amber-50/60 px-4 py-2.5 text-[12.5px] text-amber-800">
+              {notes.map((n, i) => <div key={i}>{n}</div>)}
+            </div>
+          )}
+
           {/* KPI row */}
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Overview · last {days} days
+            Overview · {label}
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-            <Stat label="Orders" value={num(kpis.orders)} foot={kpis.cancelled > 0 ? `${num(kpis.cancelled)} cancelled` : undefined} />
-            <Stat label="Order value" value={bhd(kpis.value_bhd, 3)} tone="violet" />
-            <Stat label="Avg order value" value={bhd(kpis.aov_bhd, 3)} />
-            <Stat label="Units" value={num(kpis.units)} />
-            <Stat label="Customers" value={num(kpis.customers)} />
-            <Stat label="Backorder rate" value={pct(kpis.backorder_rate_pct, 1)} tone={kpis.backorder_rate_pct > 0 ? 'amber' : undefined} />
-            <Stat label="Conversion" value={pctOrDash(kpis.conversion_pct)} />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <Stat label="Orders" value={num(data?.orders ?? 0)} foot={(data?.cancelled ?? 0) > 0 ? `${num(data?.cancelled)} cancelled` : undefined} />
+            <Stat label="Order value" value={bhd(data?.value_bhd ?? 0, 3)} tone="violet" foot="Confirmed, else as ordered" />
+            <Stat label="Avg order value" value={bhd(data?.aov_bhd ?? 0, 3)} />
+            <Stat label="Merchants ordering" value={num(data?.customers ?? 0)} foot={identity.repeat_customers ? `${num(identity.repeat_customers)} ordered twice or more` : undefined} />
+            <Stat label="Visits" value={num(data?.funnel?.sessions ?? 0)} foot={engagement.new_devices != null ? `${num(engagement.new_devices)} new phones` : undefined} />
+            <Stat label="Visits that ordered" value={pctOrDash(data?.funnel?.conversion_pct)} />
           </div>
 
           {/* Funnel */}
           <div className="mt-5">
-            <FunnelCard funnel={data?.funnel} days={days} />
+            <FunnelCard funnel={data?.funnel} label={label} />
           </div>
 
           {/* Daily orders */}
           <Card className="mt-5 p-5">
             <div className="mb-1 font-display text-base font-semibold">Orders per day</div>
-            <div className="mb-4 text-xs text-muted-foreground">Orders placed · last {days} days</div>
-            {!daily.length ? (
+            <div className="mb-4 text-xs text-muted-foreground">Orders placed (Bahrain days) · {label}</div>
+            {!daily.some((d) => (d.orders ?? 0) > 0) ? (
               <div className="rounded-xl border border-dashed py-10 text-center text-sm text-muted-foreground">
-                No orders yet in this period.
+                No orders in this period.
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={220}>
@@ -508,6 +662,7 @@ export default function ShopAnalytics() {
                           <div className="font-medium text-foreground">{fmtDate(row.date)}</div>
                           <div className="mt-0.5 text-muted-foreground">
                             Value <span className="font-semibold text-foreground">{bhd(row.value_bhd, 3)}</span>
+                            {row.sessions != null && <> · Visits <span className="font-semibold text-foreground">{num(row.sessions)}</span></>}
                           </div>
                         </>
                       ) : ''
@@ -520,80 +675,132 @@ export default function ShopAnalytics() {
             )}
           </Card>
 
-          {/* Top products */}
-          <div className="mb-3 mt-6">
-            <div className="font-display text-base font-semibold">Top products</div>
-            <div className="text-xs text-muted-foreground">By order value · last {days} days</div>
+          {/* Rep links */}
+          <SectionTitle title="By rep link" sub={`Visits that came through each rep's link, and the orders placed from them · ${label}`} />
+          <MiniTable<LinkRow> title="Rep links" icon={Link2} rows={links} max={14}
+            cols={[
+              { label: 'Link', render: (r) => linkLabel(r) },
+              { label: 'Visits', align: 'right', render: (r) => num(r.sessions ?? 0) },
+              { label: 'Orders', align: 'right', render: (r) => num(r.orders ?? 0) },
+              { label: 'Value', align: 'right', render: (r) => bhd(r.value_bhd, 3) },
+              { label: 'Ordered', align: 'right', render: (r) => pctOrDash(r.conversion_pct) },
+            ]}
+            empty="No visits or orders in this period."
+            foot="A phone's day counts for the first rep link it came through that day; 'No rep link' is everyone else." />
+
+          {/* Merchants */}
+          <SectionTitle title="Merchants" sub="Who ordered in this period, and who is due or has gone quiet (rules, not predictions)" />
+          {counts && (
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <Stat label="Merchants" value={num(counts.merchants ?? 0)} foot="Ever ordered" />
+              <Stat label="New" value={num(counts.new ?? 0)} foot="First order in 30 days" />
+              <Stat label="Came back" value={num(counts.returning ?? 0)} foot="Ordered on 2+ days" />
+              <Stat label="Due" value={num(counts.due ?? 0)} tone={counts.due ? 'amber' : undefined} />
+              <Stat label="Overdue" value={num(counts.overdue ?? 0)} tone={counts.overdue ? 'rose' : undefined} />
+              <Stat label="Dormant" value={num(counts.dormant ?? 0)} tone={counts.dormant ? 'rose' : undefined} />
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <MiniTable<MerchantRow> title="Ordered in this period" icon={Store} rows={merchants?.active || []} max={12}
+              cols={[
+                { label: 'Shop', render: (r) => <MerchantLink m={r} /> },
+                { label: 'Rep', render: (r) => r.rep || '—' },
+                { label: 'Orders', align: 'right', render: (r) => num(r.orders ?? 0) },
+                { label: 'Value', align: 'right', render: (r) => bhd(r.value_bhd, 3) },
+                { label: '', render: (r) => <MerchantFlags m={r} /> },
+              ]}
+              empty="No merchant ordered in this period." />
+            <MiniTable<MerchantRow> title="Worth a call" icon={UserRoundCheck} rows={merchants?.watch || []} max={12}
+              cols={[
+                { label: 'Shop', render: (r) => <MerchantLink m={r} /> },
+                { label: 'Rep', render: (r) => r.rep_name || '—' },
+                { label: 'Last order', align: 'right', render: (r) => (r.days_since_last == null ? '—' : `${num(r.days_since_last)} d ago`) },
+                { label: '', render: (r) => <MerchantFlags m={r} /> },
+              ]}
+              empty={merchants?.available === false
+                ? 'Due and dormant flags arrive with the analytics views.'
+                : 'Nobody is due or dormant — a rhythm needs 4 order days, so this fills in over the coming weeks.'}
+              foot="Due = more than 1.5 x its usual gap since the last order; overdue = 2 x; dormant = 2 of 3 warning signs." />
           </div>
+
+          {/* Search */}
+          <SectionTitle title="Search" sub={`What merchants typed, and what they asked for that we could not show · ${label}`} />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <MiniTable<SearchTermRow> title="Top searches" icon={Search} rows={search.terms || []}
+              cols={[
+                { label: 'Search', render: (r) => r.term },
+                { label: 'Times', align: 'right', render: (r) => num(r.searches ?? 0) },
+                { label: 'No result', align: 'right', render: (r) => (r.zero ? <span className="font-semibold text-amber-600">{num(r.zero)}</span> : '—') },
+              ]}
+              empty="No searches in this period."
+              foot={search.searches
+                ? <>{num(search.searches)} searches · {pctOrDash(search.zero_rate_pct)} found nothing. Counted once per finished search — typing and filter taps are left out.</>
+                : undefined} />
+            <MiniTable<SearchTermRow> title="Asked for, not found" icon={SearchX} rows={search.zero_terms || []}
+              cols={[
+                { label: 'Search', render: (r) => r.term },
+                { label: 'Times', align: 'right', render: (r) => num(r.zero ?? 0) },
+                { label: 'Phones', align: 'right', render: (r) => num(r.devices ?? 0) },
+                { label: 'Last', align: 'right', render: (r) => fmtDayMonth(r.last_seen) },
+              ]}
+              empty="Every search found something."
+              foot="Demand we did not meet: add the product, a synonym, or tell the rep." />
+          </div>
+
+          {/* Rails */}
+          <SectionTitle title="Home rails" sub={`Which parts of the storefront merchants tap and add from · ${label}`} />
+          <MiniTable<RailRow> title="Rails & recommendations" icon={LayoutList} rows={rails} max={14}
+            cols={[
+              { label: 'Rail', render: (r) => labelForRail(r.rail) },
+              { label: 'Taps', align: 'right', render: (r) => num(r.clicks ?? 0) },
+              { label: 'Adds', align: 'right', render: (r) => num(r.adds ?? 0) },
+              { label: 'Visits', align: 'right', render: (r) => num(r.sessions ?? 0) },
+            ]}
+            empty="No rail taps in this period." foot="A rail nobody taps after four weeks comes off the home page." />
+
+          {/* Top products */}
+          <SectionTitle title="Top products" sub={`By order value · ${label}`} />
           <DataTable rows={topProducts} cols={productCols} exportName="yq-shop-top-products"
-            empty="No product sales yet in this period." />
+            empty="No product sales in this period." />
 
           {/* Salesman leaderboard */}
-          <div className="mb-3 mt-6">
-            <div className="font-display text-base font-semibold">Salesman leaderboard</div>
-            <div className="text-xs text-muted-foreground">By order value · last {days} days</div>
-          </div>
+          <SectionTitle title="Salesman leaderboard" sub={`By order value · ${label}`} />
           <DataTable rows={leaderboard} cols={leaderCols} exportName="yq-shop-leaderboard"
-            empty="No salesman activity yet in this period." />
+            empty="No salesman activity in this period." />
 
           {/* Attribution */}
-          <div className="mb-3 mt-6">
-            <div className="font-display text-base font-semibold">Attribution</div>
-            <div className="text-xs text-muted-foreground">Where orders came from · last {days} days</div>
-          </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <SectionTitle title="Attribution" sub={`Where orders came from · ${label}`} />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <AttributionTable title="By referral link" icon={Link2} rows={byReferral} labelFor={labelForReferral}
               keyHeader="Link" empty="No orders yet." />
             <AttributionTable title="By source" icon={Share2} rows={bySrc} labelFor={labelForSrc}
               keyHeader="Source" empty="No orders yet." />
             <AttributionTable title="By coupon" icon={Ticket} rows={byCoupon} labelFor={(k) => k || '—'}
               keyHeader="Coupon" empty="No coupons used yet." />
+            <AttributionTable title="How the rep was chosen" icon={UserRoundCheck} rows={ops.by_attribution || []} labelFor={labelForAttribution}
+              keyHeader="Rule" empty="No orders yet." />
           </div>
 
-          {/* Marketplace learning loop */}
-          <div className="mb-3 mt-6">
-            <div className="font-display text-base font-semibold">Marketplace</div>
-            <div className="text-xs text-muted-foreground">How fast orders are taken, what merchants search for, which rails they use · last {days} days</div>
-          </div>
+          {/* Order desk */}
+          <SectionTitle title="Order desk" sub={`How fast orders are taken · ${label}`} />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <Stat label="Unassigned now" value={num(ops.unassigned_now ?? 0)} tone={ops.unassigned_now ? 'amber' : undefined} />
             <Stat label={`Waited past ${num(ops.sla_min ?? 30)} min`} value={num(ops.sla_breaches ?? 0)} tone={ops.sla_breaches ? 'amber' : undefined} />
-            <Stat label="Attribution conflicts" value={num(ops.conflicts ?? 0)} tone={ops.conflicts ? 'amber' : undefined} />
             <Stat label="Median time to confirm" value={ops.median_time_to_confirm_min == null ? '—' : `${num(ops.median_time_to_confirm_min)} min`} />
-            <Stat label="Repeat customers" value={pctOrDash(identity.repeat_rate_pct)} foot={`${num(identity.repeat_customers ?? 0)} of ${num(identity.customers ?? 0)}`} />
             <Stat label="Cancelled" value={num(cancelledTotal)} foot={cancelledTotal ? `${num(ops.cancelled_by_customer ?? 0)} by merchants` : undefined} />
+            <Stat label="Backorder rate" value={pct(data?.backorder_rate_pct ?? 0, 1)} tone={(data?.backorder_rate_pct ?? 0) > 0 ? 'amber' : undefined} />
+            <Stat label="Marketplace orders" value={num(identity.market_orders ?? 0)} foot={`${num(identity.staff_orders ?? 0)} by reps · ${num(identity.legacy_orders ?? 0)} legacy link`} />
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-            <MiniTable<SearchTermRow> title="Search terms" icon={Search} rows={search.terms || []}
-              cols={[
-                { label: 'Term', render: (r) => r.term },
-                { label: 'Searches', align: 'right', render: (r) => num(r.searches ?? 0) },
-                { label: 'No result', align: 'right', render: (r) => (r.zero ? <span className="font-semibold text-amber-600">{num(r.zero)}</span> : '—') },
-              ]}
-              empty="No searches yet."
-              foot={search.searches ? <>{num(search.searches)} searches · {pctOrDash(search.zero_rate_pct)} found nothing — add synonyms or products for those terms</> : undefined} />
-            <MiniTable<RailRow> title="Rails & recommendations" icon={LayoutList} rows={rails}
-              cols={[
-                { label: 'Rail', render: (r) => labelForRail(r.rail) },
-                { label: 'Taps', align: 'right', render: (r) => num(r.clicks ?? 0) },
-                { label: 'Sessions', align: 'right', render: (r) => num(r.sessions ?? 0) },
-              ]}
-              empty="No rail taps yet." foot="A rail nobody taps after four weeks comes off the home page." />
-            <AttributionTable title="By attribution" icon={UserRoundCheck} rows={ops.by_attribution || []} labelFor={labelForAttribution}
-              keyHeader="How the rep was chosen" empty="No orders yet." />
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-            <Stat label="Devices" value={num(engagement.devices ?? 0)} />
-            <Stat label="Searched" value={num(engagement.search ?? 0)} foot="sessions" />
-            <Stat label="Checkout started" value={num(engagement.checkout_start ?? 0)} foot="sessions" />
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            <Stat label="Searched" value={num(engagement.search ?? 0)} foot="visits" />
+            <Stat label="Started checkout" value={num(engagement.checkout_start ?? 0)} foot="visits" />
             <Stat label="Reorders" value={num(engagement.reorder ?? 0)} />
             <Stat label="Shares" value={num(engagement.share ?? 0)} />
             <Stat label="Installs" value={num(engagement.install ?? 0)} />
-            <Stat label="Marketplace orders" value={num(identity.market_orders ?? 0)} foot={`${num(identity.staff_orders ?? 0)} by staff · ${num(identity.legacy_orders ?? 0)} legacy link`} />
-            <Stat label="Speed (LCP p75)" value={vitals.lcp_ms_p75 == null ? '—' : `${(vitals.lcp_ms_p75 / 1000).toFixed(1)} s`}
-              tone={vitals.lcp_ms_p75 != null && vitals.lcp_ms_p75 > 2500 ? 'amber' : undefined}
-              foot={vitals.samples ? `INP ${num(vitals.inp_ms_p75 ?? 0)} ms · CLS ${vitals.cls_p75 ?? '—'} · ${num(vitals.samples)} visits` : 'No field data yet'} />
+            <Stat label="Attribution conflicts" value={num(ops.conflicts ?? 0)} tone={ops.conflicts ? 'amber' : undefined} />
           </div>
+
+          <SiteSpeed vitals={vitals} />
         </div>
       )}
     </div>

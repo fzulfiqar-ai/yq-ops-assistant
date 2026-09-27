@@ -3921,205 +3921,151 @@ def margin_health() -> dict:
 
 
 # ── analytics (funnel, AOV, top products, salesman leaderboard, attribution) ──
+# R7d (27-Sep-2026, plan §13): built from app/shop_analytics.py. The storefront events are counted by
+# SQL views (scripts/r7d_analytics_views_migration.sql) read through the read-only RPC; until they exist
+# the raw events are read here — paged past PostgREST's 1,000 rows — and counted by the same rules.
+# Money: confirmed ?? requested; test orders never count; checkout = checkout_start.
+
+ANALYTICS_ORDER_COLS = ("id,status,total_bhd,total_confirmed_bhd,units_count,salesman_id,salesman_name,referral_code,"
+                        "src,coupon_code,customer_phone,customer_shop,customer_area,created_at,has_backorder,source,"
+                        "attribution_source,attribution_conflict,assigned_at,confirmed_at,cancelled_by,customer_id,"
+                        "device_id")
+ANALYTICS_EVENT_COLS = "id,ts,event,session_id,item_code,referral_code,salesman_id,src,device_id,meta"
+
+
+def _analytics_orders(since: str, salesman_id) -> list[dict]:
+    """The window's orders, paged past PostgREST's 1,000 rows and rep-scoped by the database (eq
+    salesman_id); test orders left out. is_test is probed like every reader (_select_optional)."""
+    from app import shop_analytics as sa
+
+    def read(cols: str) -> list[dict]:
+        def page(a: int) -> list[dict]:
+            q = get_client().table("shop_orders").select(cols).gte("created_at", since)
+            if salesman_id is not None:
+                q = q.eq("salesman_id", salesman_id)
+            return q.order("id").range(a, a + sa.PAGE - 1).execute().data or []
+        return sa.paged(page, sa.ORDERS_MAX_PAGES)[0]
+    with_test = has_column("shop_orders", "is_test")
+    try:
+        rows = read(ANALYTICS_ORDER_COLS + (",is_test" if with_test else ""))
+    except Exception as e:  # noqa: BLE001 — only the missing-column case is retried
+        if with_test and _missing_column(e):
+            _forget_column("shop_orders", "is_test")
+            log.warning("shop_orders.is_test vanished after a cached hit — reading without it: %s", e)
+            rows = read(ANALYTICS_ORDER_COLS)
+        else:
+            raise
+    return [o for o in rows if not _is_test(o)]
+
+
+def _analytics_lines(order_ids: list) -> list[dict]:
+    from app import shop_analytics as sa
+    out: list[dict] = []
+    for i in range(0, len(order_ids), sa.LINES_CHUNK):
+        chunk = order_ids[i:i + sa.LINES_CHUNK]
+        out += sa.paged(lambda a, chunk=chunk: (get_client().table("shop_order_lines").select("*")
+                                                 .in_("order_id", chunk).order("id")
+                                                 .range(a, a + sa.PAGE - 1).execute().data or []), 50)[0]
+    return out
+
+
+def _analytics_events(since: str) -> tuple[list[dict], bool]:
+    """Before the views: every event of the window, paged (the old read stopped at 1,000)."""
+    from app import shop_analytics as sa
+    return sa.paged(lambda a: (get_client().table("shop_events").select(ANALYTICS_EVENT_COLS).gte("ts", since)
+                               .order("id").range(a, a + sa.PAGE - 1).execute().data or []), sa.EVENTS_MAX_PAGES)
+
 
 def analytics(days: int = 30, salesman: dict | None = None) -> dict:
-    """Shop analytics for the last N days. When `salesman` is given, scope to that salesman
-    (orders by salesman_id, funnel events by their referral code)."""
-    days = max(1, min(_i(days, 30), 365))
-    since = (_now() - timedelta(days=days)).isoformat()
+    """Shop analytics for the last N Bahrain days, today included. When `salesman` is given, scope to
+    that salesman (orders by salesman_id, funnel events by his link). The keys ShopAnalytics.tsx and
+    followups.link_week read are kept; R7d adds window, source, notes, money_basis, links, merchants."""
+    from app import shop_analytics as sa
+    days, start, end = sa.window(days)
+    since = sa.bahrain_midnight(start)
     client = get_client()
-    ev = (client.table("shop_events").select("ts,event,session_id,item_code,referral_code,salesman_id,src,device_id,meta")
-          .gte("ts", since).limit(20000).execute().data or [])
-    orders = _select_optional(
-        "shop_orders",
-        "id,status,total_bhd,units_count,salesman_id,salesman_name,referral_code,src,coupon_code,"
-        "customer_phone,created_at,has_backorder,source,attribution_source,attribution_conflict,"
-        "assigned_at,confirmed_at,cancelled_by,customer_id,device_id",
-        "is_test", lambda q: q.gte("created_at", since).limit(5000).execute().data or [])
-    orders = [o for o in orders if not _is_test(o)]     # test orders never count here, cancelled or not
-    if salesman:
-        code = str(salesman.get("referral_code") or "").lower()
-        ev = [e for e in ev if (e.get("salesman_id") == salesman["id"]) or
-              (code and str(e.get("referral_code") or "").lower() == code)]
-        orders = [o for o in orders if o.get("salesman_id") == salesman["id"]]
-    live = [o for o in orders if o.get("status") != "cancelled"]
-    lines: list[dict] = []
-    ids = [o["id"] for o in live]
-    for i in range(0, len(ids), 200):
-        lines += (client.table("shop_order_lines").select("order_id,item_code,display_name,qty,line_total_bhd")
-                  .in_("order_id", ids[i:i + 200]).execute().data or [])
+    notes: list[str] = []
+    code = str((salesman or {}).get("referral_code") or "").strip().lower()
+    digest = sa.digest_from_views(start, end, salesman, notes)
+    source = "views"
+    if digest is None:
+        # before scripts/r7d_analytics_views_migration.sql: the raw events, counted by the same rules
+        source = "events"
+        notes.append("Counted from the raw events: the analytics views are not set up yet "
+                     "(scripts/r7d_analytics_views_migration.sql). New devices are not shown until they are.")
+        ev, capped = _analytics_events(since)
+        if capped:
+            notes.append(f"Only the first {sa.PAGE * sa.EVENTS_MAX_PAGES:,} events of this window were read.")
+        mine = ev
+        if salesman:
+            mine = [e for e in ev if (e.get("salesman_id") == salesman["id"]) or
+                    (code and str(e.get("referral_code") or "").lower() == code)]
 
-    def _sessions(kind: str) -> int:
-        return len({e.get("session_id") or f"anon-{e.get('ts')}" for e in ev if e.get("event") == kind})
+        def _meta(e: dict) -> dict:
+            m = e.get("meta")
+            return m if isinstance(m, dict) else {}
 
-    sessions = _sessions("view")
-    n = len(live)
-    value = money(sum(_f(o.get("total_bhd")) for o in live))
-    funnel = {"sessions": sessions, "item_views": _sessions("item"), "adds": _sessions("add"),
-              "checkouts": _sessions("checkout"), "orders": n,
-              "conversion_pct": round(n / sessions * 100, 1) if sessions else None}
-    prod: dict[str, dict] = {}
-    for ln in lines:
-        p = prod.setdefault(ln["item_code"], {"item_code": ln["item_code"], "display_name": ln.get("display_name"),
-                                              "units": 0, "value_bhd": 0.0, "orders": 0})
-        p["units"] += _i(ln.get("qty"))
-        p["value_bhd"] = money(p["value_bhd"] + _f(ln.get("line_total_bhd")))
-        p["orders"] += 1
-    top_products = sorted(prod.values(), key=lambda p: (-p["value_bhd"], -p["units"]))[:15]
-    reps: dict[str, dict] = {}
-    for o in live:
-        r = reps.setdefault(o.get("salesman_name") or "Unassigned",
-                            {"salesman": o.get("salesman_name") or "Unassigned", "orders": 0, "value_bhd": 0.0,
-                             "customers": set()})
-        r["orders"] += 1
-        r["value_bhd"] = money(r["value_bhd"] + _f(o.get("total_bhd")))
-        r["customers"].add(o.get("customer_phone"))
-    leaderboard = sorted(({**r, "customers": len(r["customers"]),
-                           "aov_bhd": money(r["value_bhd"] / r["orders"]) if r["orders"] else 0.0}
-                          for r in reps.values()), key=lambda r: -r["value_bhd"])
-    by_ref: dict[str, dict] = {}
-    for o in live:
-        key = (f"salesman:{o.get('salesman_name') or 'staff'}" if o.get("source") == "salesman"
-               else o.get("referral_code") or ("dropdown" if o.get("source") == "dropdown" else "direct"))
-        a = by_ref.setdefault(key, {"key": key, "orders": 0, "value_bhd": 0.0})
-        a["orders"] += 1
-        a["value_bhd"] = money(a["value_bhd"] + _f(o.get("total_bhd")))
-    by_src: dict[str, dict] = {}
-    for o in live:
-        key = o.get("src") or "direct"
-        a = by_src.setdefault(key, {"key": key, "orders": 0, "value_bhd": 0.0})
-        a["orders"] += 1
-        a["value_bhd"] = money(a["value_bhd"] + _f(o.get("total_bhd")))
-    coupons: dict[str, dict] = {}
-    for o in live:
-        if o.get("coupon_code"):
-            c = coupons.setdefault(o["coupon_code"], {"key": o["coupon_code"], "orders": 0, "value_bhd": 0.0})
-            c["orders"] += 1
-            c["value_bhd"] = money(c["value_bhd"] + _f(o.get("total_bhd")))
-    daily: dict[str, dict] = {}
-    for o in live:
-        d = str(o.get("created_at") or "")[:10]
-        x = daily.setdefault(d, {"date": d, "orders": 0, "value_bhd": 0.0})
-        x["orders"] += 1
-        x["value_bhd"] = money(x["value_bhd"] + _f(o.get("total_bhd")))
+        def _p75(key: str):
+            return sa.p75([_f(_meta(e).get(key)) for e in beacons if _meta(e).get(key) is not None])
+        beacons = [e for e in mine if e.get("event") == "vitals"]
+        # R6: one beacon per visit on pagehide, even with no metric (an abandoned cold visit), so `samples`
+        # is the beacons that carry a metric and `visits` all of them; the catalog source and the LCP
+        # phases say where the time went (docs/RELEASE.md, the watch)
+        with_metric = [e for e in beacons if any(_meta(e).get(k) is not None for k in ("lcp", "inp", "cls"))]
+        # its own name: `by_src` is the order attribution the return reads (R7a — reusing the name for
+        # these int counts made every /shop/analytics and /shop/me/link-week call a 500)
+        vitals_by_src: dict[str, int] = {}
+        for e in beacons:
+            src = str(_meta(e).get("catalog_src") or "none")[:24]
+            vitals_by_src[src] = vitals_by_src.get(src, 0) + 1
+        vitals = {"samples": len(with_metric), "visits": len(beacons),
+                  "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls"),
+                  "lcp_ttfb_ms_p75": _p75("lcp_ttfb"), "lcp_delay_ms_p75": _p75("lcp_delay"),
+                  "lcp_load_ms_p75": _p75("lcp_load"), "lcp_render_ms_p75": _p75("lcp_render"),
+                  "catalog_ms_p75": _p75("catalog_ms"),
+                  "catalog_src": sorted(({"src": k, "visits": v} for k, v in vitals_by_src.items()),
+                                        key=lambda r: (-r["visits"], r["src"]))}
+        digest = {"funnel": sa.funnel_from_events(ev, None, (salesman["id"], code) if salesman else None),
+                  "search": {"rows": sa.search_rows_from_events(mine), "total": None, "zero": None},
+                  "rails": sa.rail_rows_from_events(mine), "vitals": vitals}
 
-    # ── the marketplace learning loop (plan §R): what merchants search for, which rails they use,
-    # where orders are attributed, how fast they are taken, who comes back, how the site performs.
-    def _meta(e: dict) -> dict:
-        m = e.get("meta")
-        return m if isinstance(m, dict) else {}
-
-    def _ts(v) -> datetime | None:
-        if not v:
-            return None
-        try:
-            d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-
-    terms: dict[str, dict] = {}
-    for e in ev:
-        if e.get("event") in ("search", "search_zero"):
-            q = str(_meta(e).get("q") or "").strip().lower()[:60]
-            if q:
-                t = terms.setdefault(q, {"term": q, "searches": 0, "zero": 0})
-                t["searches"] += 1
-                t["zero"] += 1 if e.get("event") == "search_zero" else 0
-    n_search = sum(t["searches"] for t in terms.values())
-    n_zero = sum(t["zero"] for t in terms.values())
-    search = {"searches": n_search, "zero_results": n_zero,
-              "zero_rate_pct": round(n_zero / n_search * 100, 1) if n_search else None,
-              "terms": sorted(terms.values(), key=lambda t: (-t["searches"], -t["zero"]))[:20],
-              "zero_terms": sorted((t for t in terms.values() if t["zero"]), key=lambda t: -t["zero"])[:10]}
-
-    rails: dict[str, dict] = {}
-    for e in ev:
-        if e.get("event") in ("rail_click", "reco_click", "reorder"):
-            rail = str(_meta(e).get("rail") or ("reorder" if e.get("event") == "reorder" else "unknown"))[:40]
-            r = rails.setdefault(rail, {"rail": rail, "clicks": 0, "sessions": set()})
-            r["clicks"] += 1
-            r["sessions"].add(e.get("session_id"))
-    rail_perf = sorted(({**r, "sessions": len(r["sessions"])} for r in rails.values()), key=lambda r: -r["clicks"])
-    engagement = {k: _sessions(k) for k in ("search", "share", "install", "reorder", "cancel", "checkout_start")}
-    engagement["devices"] = len({e.get("device_id") for e in ev if e.get("device_id")})
-
-    by_attr: dict[str, dict] = {}
-    for o in live:
-        key = o.get("attribution_source") or ("staff" if o.get("source") == "salesman" else "legacy")
-        a = by_attr.setdefault(key, {"key": key, "orders": 0, "value_bhd": 0.0})
-        a["orders"] += 1
-        a["value_bhd"] = money(a["value_bhd"] + _f(o.get("total_bhd")))
-    sla_min = _i(shop_settings().get("shop_assign_sla_min"), 30)
-    now = _now()
-    breaches = 0
-    for o in live:
-        created = _ts(o.get("created_at"))
-        if not created:
-            continue
-        assigned = _ts(o.get("assigned_at"))
-        if o.get("salesman_id") and not assigned:
-            continue  # attributed at creation: nobody waited
-        waited_min = ((assigned or now) - created).total_seconds() / 60
-        if waited_min > sla_min:
-            breaches += 1
-    confirm_mins = sorted((_ts(o["confirmed_at"]) - _ts(o["created_at"])).total_seconds() / 60
-                          for o in live if _ts(o.get("confirmed_at")) and _ts(o.get("created_at")))
-    cancelled = [o for o in orders if o.get("status") == "cancelled"]
-    ops = {"by_attribution": sorted(by_attr.values(), key=lambda a: -a["value_bhd"]),
-           "unassigned_now": sum(1 for o in live if not o.get("salesman_id") and o.get("status") in ("new", "confirmed")),
-           "conflicts": sum(1 for o in live if o.get("attribution_conflict")),
-           "sla_min": sla_min, "sla_breaches": breaches,
-           "median_time_to_confirm_min": round(confirm_mins[len(confirm_mins) // 2], 1) if confirm_mins else None,
-           "cancelled_by_customer": sum(1 for o in cancelled if o.get("cancelled_by") == "customer"),
-           "cancelled_by_staff": sum(1 for o in cancelled if o.get("cancelled_by") != "customer")}
-
-    per_customer: dict = {}
-    for o in live:
-        k = o.get("customer_id") or o.get("customer_phone")
-        per_customer[k] = per_customer.get(k, 0) + 1
-    repeat = sum(1 for c in per_customer.values() if c >= 2)
-    identity = {"customers": len(per_customer), "repeat_customers": repeat,
-                "repeat_rate_pct": round(repeat / len(per_customer) * 100, 1) if per_customer else None,
-                "market_orders": sum(1 for o in live if o.get("source") in ("market", "slug")),
-                "staff_orders": sum(1 for o in live if o.get("source") == "salesman"),
-                "legacy_orders": sum(1 for o in live if o.get("source") not in ("market", "slug", "salesman"))}
-
-    def _p75(key: str):
-        vals = sorted(_f(_meta(e).get(key)) for e in ev if e.get("event") == "vitals" and _meta(e).get(key) is not None)
-        return round(vals[min(len(vals) - 1, int(len(vals) * 0.75))], 3) if vals else None
-    beacons = [e for e in ev if e.get("event") == "vitals"]
-    # R6: one beacon per visit on pagehide, even with no metric (an abandoned cold visit), so `samples`
-    # is the beacons that carry a metric and `visits` all of them; the catalog source and the LCP
-    # phases say where the time went (docs/RELEASE.md, the watch) — the portal card shows the three
-    # core numbers, the rest is read from this JSON or in SQL
-    with_metric = [e for e in beacons if any(_meta(e).get(k) is not None for k in ("lcp", "inp", "cls"))]
-    # its own name: `by_src` above is the order attribution the return reads (R7a — reusing the
-    # name for these int counts made every /shop/analytics and /shop/me/link-week call a 500)
-    vitals_by_src: dict[str, int] = {}
-    for e in beacons:
-        src = str(_meta(e).get("catalog_src") or "none")[:24]
-        vitals_by_src[src] = vitals_by_src.get(src, 0) + 1
-    vitals = {"samples": len(with_metric), "visits": len(beacons),
-              "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls"),
-              "lcp_ttfb_ms_p75": _p75("lcp_ttfb"), "lcp_delay_ms_p75": _p75("lcp_delay"),
-              "lcp_load_ms_p75": _p75("lcp_load"), "lcp_render_ms_p75": _p75("lcp_render"),
-              "catalog_ms_p75": _p75("catalog_ms"),
-              "catalog_src": sorted(({"src": k, "visits": v} for k, v in vitals_by_src.items()),
-                                    key=lambda r: -r["visits"])}
-    return {
-        "search": search, "rails": rail_perf, "engagement": engagement, "ops": ops, "identity": identity, "vitals": vitals,
-        "days": days, "since": since[:10],
-        "funnel": funnel,
-        "orders": n, "cancelled": len(orders) - n, "value_bhd": value,
-        "aov_bhd": money(value / n) if n else 0.0,
-        "units": sum(_i(o.get("units_count")) for o in live),
-        "customers": len({o.get("customer_phone") for o in live}),
-        "backorder_rate_pct": round(sum(1 for o in live if o.get("has_backorder")) / n * 100, 1) if n else 0.0,
-        "top_products": top_products,
-        "leaderboard": leaderboard,
-        "attribution": {"by_referral": sorted(by_ref.values(), key=lambda a: -a["value_bhd"]),
-                        "by_src": sorted(by_src.values(), key=lambda a: -a["value_bhd"]),
-                        "by_coupon": sorted(coupons.values(), key=lambda a: -a["value_bhd"])},
-        "daily": sorted(daily.values(), key=lambda x: x["date"]),
+    orders = _analytics_orders(since, salesman["id"] if salesman else None)
+    lines = _analytics_lines([o["id"] for o in orders if o.get("status") != "cancelled"])
+    sec = sa.order_sections(orders, lines, sla_min=_i(shop_settings().get("shop_assign_sla_min"), 30), now=_now())
+    live = sec.pop("_live")
+    val = sec.pop("_val")
+    daily = sec.pop("_daily")
+    f = digest["funnel"]["total"]
+    sessions = f["view_sessions"]
+    store_orders = sum(1 for o in live if o.get("source") != "salesman")     # a rep's own order is not a visit
+    search = digest.get("search") or {"rows": [], "total": 0, "zero": 0}
+    empty_vitals = {"samples": 0, "visits": 0, **{k: None for k, _ in sa._VITAL_COLS}, "catalog_src": []}
+    first_day = sa.events_since(client)
+    out = {
+        "search": sa.search_payload(search["rows"], search["total"], search["zero"]),
+        "rails": sa.rails_payload(digest.get("rails") or []),
+        "engagement": {"search": f["search_sessions"], "share": f["share_sessions"], "install": f["install_sessions"],
+                       "reorder": f["reorder_sessions"], "cancel": f["cancel_sessions"],
+                       "checkout_start": f["checkout_sessions"], "devices": f["devices"],
+                       "new_devices": f["new_devices"] if source == "views" else None},
+        "ops": sec.pop("ops"), "identity": sec.pop("identity"),
+        "vitals": digest.get("vitals") or empty_vitals,
+        "days": days, "since": start.isoformat(),
+        "funnel": {"sessions": sessions, "item_views": f["item_sessions"], "adds": f["add_sessions"],
+                   "carts": f["cart_sessions"], "checkouts": f["checkout_sessions"], "orders": store_orders,
+                   "conversion_pct": round(store_orders / sessions * 100, 1) if sessions else None,
+                   "devices": f["devices"], "order_sessions": f["order_sessions"],
+                   "unit": "sessions a day (one phone that keeps the shop open for a week is one session each day)"},
+        **sec,
+        "daily": sa.daily_rows(daily, digest["funnel"]["by_day"]),
+        "window": {"start": start.isoformat(), "end": end.isoformat(), "days": days, "events_since": first_day,
+                   "before_history": bool(first_day and start.isoformat() < first_day)},
+        "source": source, "notes": notes, "money_basis": sa.MONEY_BASIS,
     }
+    if salesman is None:
+        names = {str(r.get("referral_code") or "").strip().lower(): r.get("name")
+                 for r in (client.table("salesmen").select("name,referral_code").execute().data or [])
+                 if r.get("referral_code")}
+        out["links"] = sa.link_rows(digest["funnel"]["by_ref"], live, val, names)
+        out["merchants"] = sa.merchants_payload(live, val, digest.get("merchants"), digest.get("merchant_counts"))
+    return out

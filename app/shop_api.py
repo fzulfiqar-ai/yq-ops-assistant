@@ -1148,14 +1148,31 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.get("/shop/analytics")
     def shop_analytics(days: int = 30, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Funnel, AOV, top products, salesman leaderboard, attribution. Salesmen see their own slice;
-        management the company's (counts and values only — no phone leaves this payload)."""
+        """Funnel, AOV, top products, salesman leaderboard, attribution, searches, rails, rep links and
+        (company scope) merchants. Salesmen see their own slice; admin and management the company's —
+        no phone or email leaves this payload (merchants by shop name and area only). R7d: the events
+        are counted by the analytics views when they exist (app/shop_analytics.py)."""
         if user.role == "admin" or is_read_only(user.role):
             return shop.analytics(days)
         sm = shop.salesman_for_user(user.email)
         if not sm:
             return {"days": days, "orders": 0, "hint": "Your login is not linked to a salesman yet."}
         return shop.analytics(days, salesman=sm)
+
+    @app.get("/shop/analytics/merchant/{customer_id}")
+    def shop_analytics_merchant(customer_id: int,
+                                user: CurrentUser = Depends(require_any_feature("Shop Admin", "Shop Orders"))) -> dict:
+        """One marketplace merchant (R7d, plan §13): lifetime and 90-day value, orders, AOV, cadence and
+        due status, top categories and SKUs, rep, area, the Focus link, the trend against its own usual
+        and INSIGHTS (rules with their evidence). Admin and management read; a member with Shop Admin
+        too. Shop name and area only — no phone, email or person's name."""
+        if not (user.role == "admin" or is_read_only(user.role) or has_feature(user, "Shop Admin")):
+            raise HTTPException(status_code=403, detail="Merchant profiles are for the office and management.")
+        from app import shop_analytics
+        out = shop_analytics.merchant_profile(customer_id)
+        if out is None:
+            raise HTTPException(status_code=404, detail="No such merchant.")
+        return out
 
     @app.get("/shop/me")
     def shop_me(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:

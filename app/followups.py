@@ -483,14 +483,15 @@ def baskets_not_sent(sm: dict, days: int = BASKET_DAYS, now: datetime | None = N
 
 # ── "My link this week" (a rep-scoped analytics summary) ──────────────────────
 
-LINK_TTL = 180.0           # shop.analytics reads every event of the window; once per rep per few minutes
+LINK_TTL = 180.0           # the Today screen mounts the card on every visit; once per rep per few minutes
 
 
 def link_week(sm: dict, days: int = 7, *, force: bool = False) -> dict:
     """The small card: the funnel from the rep's link over `days`, orders and value. Built on
-    shop.analytics(days, salesman=sm) — the same scoping the admin analytics page uses — and
-    cached per rep for LINK_TTL seconds, because that call replays the whole company's events
-    and the Today screen mounts it on every visit."""
+    shop.analytics(days, salesman=sm) — the same scoping and the same rules the admin analytics page
+    uses (R7d: the rep's link counted in SQL by v_shop_funnel_daily with his id / code bound as
+    parameters, checkout = checkout_start, value = confirmed ?? requested, test orders out; before
+    that view exists the raw events are read, paged) — and cached per rep for LINK_TTL seconds."""
     from app import shop
     key = ("link", str((sm or {}).get("id")), int(days))
     now = time.monotonic()
@@ -513,6 +514,7 @@ def _link_summary(a: dict, days: int) -> dict:
             "value_bhd": format(d3(a.get("value_bhd")), "f"), "aov_bhd": format(d3(a.get("aov_bhd")), "f"),
             "customers": _i(a.get("customers")), "conversion_pct": f.get("conversion_pct"),
             "shares": _i((a.get("engagement") or {}).get("share")),
+            "carts": _i(f.get("carts")), "source": a.get("source"),
             "top_products": [{"item_code": p.get("item_code"), "display_name": p.get("display_name"),
                               "units": _i(p.get("units")), "value_bhd": format(d3(p.get("value_bhd")), "f")}
                              for p in (a.get("top_products") or [])[:3]]}

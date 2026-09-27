@@ -44,6 +44,7 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_shop_orders_agent` | `shop_salesman_mode_migration.sql` (15-Sep-2026, appends `placed_by`) | not in the baseline |
 | `v_catalog_stock_rows`, `v_catalog_stock`, `v_shop_unpriced_stock`, `v_catalog_velocity`, `v_catalog_pairs`, `v_catalog_cost`, `v_shop_order_lines_agent` | `shop_migration.sql` (15-Sep-2026) | not in the baseline — YQ Shop views (stock status per catalog code, velocity, co-purchases, landed cost, PII-free order views) |
 | `v_shop_focus_recon`, `v_shop_focus_candidates` | `r7_focus_links_migration.sql` (R7a; before that the recon was `r3_pipeline_migration.sql`) | not in the baseline. Re-running the R3 file after R7a **fails loudly** (it would drop 4 appended columns) — never force it |
+| `v_shop_search_terms`, `v_shop_rail_perf` | `r7d_analytics_views_migration.sql` (R7d, 27-Sep-2026; before that `marketplace_migration.sql` 9c / 9d) | not in the baseline. Re-running the marketplace file after R7d: `v_shop_search_terms` **silently** goes back to counting every keystroke (same five columns); `v_shop_rail_perf` **fails loudly** (it would drop 4 appended columns) — never force it |
 
 ### The guard protects the file, not the statements
 
@@ -545,4 +546,42 @@ No migration for the rest of R7d: `shop_area_reps` (area → rep for merchants w
 `{"Riffa": 3}`) is an `app_settings` key with a code default of `{}` — nothing is seeded; the owner fills it on
 Settings → Area representatives. An order routed by it is stored with `attribution_source = 'default'` (the live
 `shop_orders_attribution_source_check` has no `area`), while its `created` event and its funnel event say `area`.
+
+## Release R7d (27-Sep-2026, not yet applied): `r7d_analytics_views_migration.sql` — shop analytics done properly
+
+Additive and idempotent, with `r7d_analytics_views_reverse.sql`; **not rehearsed on production** (the build session
+had read-only access only) — rehearse with `--rehearse`, apply, then `python -m scripts.audit_grants`. Order: any
+time (it reads tables that exist since the marketplace migration); the API may deploy first.
+
+Why: `GET /shop/analytics` pulled every `shop_events` row of the window through PostgREST, which answers 1,000 rows
+at most — the page saw about a third of the week (3,315 events on 27-Sep-2026). It also counted a `checkout` event
+the storefront never sends, every keystroke of a search, and requested (not confirmed) order values.
+
+- New `v_shop_funnel_daily`: per Bahrain day x rep link (`referral_code`, `salesman_id`) x `src` — devices and
+  sessions, and the sessions / devices that reached view, item, add, cart, checkout (`checkout_start`), order;
+  search / share / install / reorder / cancel sessions; `new_devices`. A session or device counts once per day and all
+  of one device's events of a day land on ONE row (the day's first rep link), so the columns add up across rows.
+- New `v_shop_search_daily`: final typed searches per day x rep link x term (a search followed within 30 s on the same
+  device by a query that starts with it is typing; `meta.rail` chip / facet / quick-order pings are left out).
+- **Replaced** `v_shop_search_terms`: the same five columns (names, types, order checked in the `DO` block), over the
+  final typed searches. **Replaced** `v_shop_rail_perf`: the same six columns first (`day` now the Bahrain day), then
+  `referral_code`, `salesman_id`, `reorders`, `devices` APPENDED; only rail taps / reco taps / adds / reorders count.
+- New `v_shop_vitals`: one row per speed beacon (day, rep link, route template, viewport, catalog source, numbers).
+- New `v_merchant_360`: one row per `shop_customers` row — orders, value on the effective money rule (confirmed ??
+  requested), confirmed / delivered value, AOV, first / last order, 30 / 60 / 90-day windows, cadence from distinct
+  order days (own median with >= 4 days, else the all-shops median once >= 10 gaps), `due_status`, the dormant rule
+  (>= 2 of: overdue > 2x cadence, 60-day value < 60 % of the 60 days before, SKU range < 70 %), top categories / SKUs,
+  the rep (assigned > sticky > last order), area, the Focus customer when `focus_customer_id` is set. Test orders never
+  count. Shop name and area only — no phone, email, person's name or device.
+
+Every view: owned by postgres, not `security_invoker`, `REVOKE ALL ... FROM anon, authenticated`, `GRANT SELECT` to
+`yq_readonly` only; the closing `DO` block asserts that, the two replaced shapes, one device per day on one funnel row,
+`new_devices` = the devices ever seen, and one merchant row per customer. No row is written. Before it runs the API
+reads the raw events (paged) and counts them with Python twins of the same rules (`app/shop_analytics.py`); a missing
+view is remembered 5 minutes. The view bodies were run read-only on production 27-Sep-2026 as plain SELECTs (CTEs,
+nothing created) and agree with the Python twins on every event, search, rail and merchant; replayed on a throwaway
+local Postgres 17 (synthetic tables, one rolled-back transaction: `python -m tests.test_r7d_analytics` with
+`YQ_LOCAL_PG_R7D` set): applied twice, views == twins, the API SQL run as `yq_readonly`, anon refused, reverse twice,
+re-applied. The reverse restores the 16-Sep bodies of the two replaced views (search terms first; the rail view is
+dropped and re-created with its grant, nothing depends on it) and drops the four new views — no CASCADE.
 

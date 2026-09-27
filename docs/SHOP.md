@@ -186,6 +186,31 @@ HTML page with Open Graph + JSON-LD `Product` (title = code · price · availabi
   cancelled_by_customer, cancelled_by_staff }, identity: { customers, repeat_customers, repeat_rate_pct,
   market_orders, staff_orders, legacy_orders }, vitals: { samples, lcp_ms_p75, inp_ms_p75, cls_p75 } }`
   (the marketplace learning loop, 16-Sep-2026; the market build posts one `vitals` event per visit).
+  **R7d (27-Sep-2026, plan §13)** — the keys above are kept; the window is `days` Bahrain calendar days, today
+  included (1..365). The events are counted by the analytics views (`scripts/r7d_analytics_views_migration.sql`,
+  read through the read-only RPC with the window and the rep bound as parameters; before the migration the raw events
+  are read PAGED and counted by the same rules in `app/shop_analytics.py`). Money is `money_basis:
+  "confirmed_else_requested"` (an order's `total_confirmed_bhd ?? total_bhd`, a line's confirmed total else its
+  ordered total pro rata); test orders never count. `funnel.sessions` = visits (a session counted once per Bahrain
+  day), `funnel.checkouts` = `checkout_start` sessions, `funnel.orders` = orders placed on the marketplace (not the
+  ones a rep entered); `search` counts final typed searches only (typing within 30 s and chip / facet taps left out)
+  and its rows carry `sessions, devices, last_seen`; `rails[]` gains `adds`; `daily[]` rows gain `sessions`. New keys:
+  `funnel.{carts, devices, order_sessions, unit}`, `engagement.new_devices` (null before the views), `window: { start,
+  end, days, events_since, before_history }` (the event history starts 21-Sep-2026: "since 21 Sep" when the window is
+  longer), `source: "views" | "events"`, `notes[]`, `money_basis`; company scope only: `links[{ key, rep, sessions,
+  devices, orders, value_bhd, conversion_pct }]` (visits and storefront orders per rep link) and `merchants: {
+  available, counts: { merchants, new, returning, due, overdue, dormant, with_cadence }, active[] (ordered in the
+  window), watch[] (due / overdue / dormant, from v_merchant_360) }` — shop name and area, never a phone or e-mail.
+- `GET /shop/analytics/merchant/{id}` (R7d; admin, management, or a member with Shop Admin — a rep is refused) → `{
+  merchant: <one v_merchant_360 row: shop, area, rep_name, rep_source, focus_customer_id / _name, orders, open_orders,
+  cancelled_orders, value_bhd, confirmed_value_bhd, delivered_value_bhd, aov_bhd, first_order_at, last_order_at,
+  days_since_last, order_days, orders_30d / 90d, value_30d / 60d / 90d / prev_60d / prev_90d _bhd, units, skus_n,
+  median_gap_days, cadence_days, cadence_basis (own | all_shops), due_status (unknown | ok | due | overdue), sig_*,
+  dormant_signals, dormant, is_new, top_categories[], top_skus[]>, source: "views" | "orders", notes[], money_basis,
+  as_of, trend: { value_30d_bhd, baseline_30d_bhd, change_pct, enough_history, history_days, text }, insights[{ kind,
+  level (act | watch | info), title, evidence, rule }], monthly[{ month, orders, value_bhd }] (six months),
+  orders[{ id, order_no, status, status_label, created_at, value_bhd, requested_bhd, units, items, rep }] (20 newest) }`;
+  404 for an unknown merchant. Insights are rules with their evidence, shown as INSIGHT — never as fact.
 - `GET /shop/margins` (Shop Admin) → `{ "rows": [{ item_code, spec, category, price_incl_vat_bhd, price_ex_vat_bhd,
   landed_cost_bhd, profit_bhd, margin_pct, markup_pct, floor_bhd, stock_status, sold_90d,
   status: ok|below_floor|no_cost|no_price }], "summary": { items, with_cost, below_floor, vat_rate, min_margin_pct } }`

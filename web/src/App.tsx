@@ -1,4 +1,4 @@
-import { lazy } from 'react'
+import { lazy, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { ProtectedRoute, Gate } from '@/components/guards'
 import { isManagement, useAuth } from '@/lib/auth'
@@ -38,6 +38,8 @@ const ShopOrders = lazy(() => import('@/pages/ShopOrders'))
 const Salesmen = lazy(() => import('@/pages/Salesmen'))
 const ShopRules = lazy(() => import('@/pages/ShopRules'))
 const ShopAnalytics = lazy(() => import('@/pages/ShopAnalytics'))
+// R7d: one marketplace merchant — facts, trend against its own usual, INSIGHTS with their evidence.
+const MerchantProfile = lazy(() => import('@/pages/MerchantProfile'))
 // The customer-facing shop, reused inside the portal so a salesman can order for a shop.
 const ShopPage = lazy(() => import('@/pages/shop/ShopPage'))
 const PickList = lazy(() => import('@/pages/PickList'))
@@ -47,6 +49,13 @@ const SalesCustomers = lazy(() => import('@/pages/sales/Customers'))
 const SalesAccount = lazy(() => import('@/pages/sales/Account'))
 // The Management Command Centre (R7b): the whole company on one page, plus its team and customer views.
 const CommandCentre = lazy(() => import('@/pages/CommandCentre'))
+
+/** Shop analytics and the merchant profile: the office (Shop Admin) and management, which reads them
+ * through its Customer orders page ('Shop Orders'; lib/nav MANAGEMENT_NAV decides what it may open). */
+function ShopAnalyticsGate({ children }: { children: ReactNode }) {
+  const { me } = useAuth()
+  return <Gate feature={isManagement(me) ? 'Shop Orders' : 'Shop Admin'}>{children}</Gate>
+}
 
 /** Land on the first page this user can see (a salesman goes straight to Catalog). */
 function Home() {
@@ -99,7 +108,8 @@ export default function App() {
           <Route path="picklist" element={<Gate feature="Storekeeper"><PickList /></Gate>} />
           <Route path="salesmen" element={<Gate feature="Shop Admin"><Salesmen /></Gate>} />
           <Route path="shop-rules" element={<Gate feature="Shop Admin"><ShopRules /></Gate>} />
-          <Route path="shop-analytics" element={<Gate feature="Shop Admin"><ShopAnalytics /></Gate>} />
+          <Route path="shop-analytics" element={<ShopAnalyticsGate><ShopAnalytics /></ShopAnalyticsGate>} />
+          <Route path="shop-analytics/merchant/:id" element={<ShopAnalyticsGate><MerchantProfile /></ShopAnalyticsGate>} />
           <Route path="coaching" element={<Gate feature="Sales"><Coaching /></Gate>} />
           <Route path="sales" element={<Gate feature="Sales"><Sales /></Gate>} />
           <Route path="margins" element={<Gate feature="Margins"><Margins /></Gate>} />
