@@ -27,7 +27,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from app import attribution, shop_heart, shop_pipeline
+from app import attribution, offers, shop_heart, shop_pipeline
 from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
@@ -82,7 +82,10 @@ EVENTS = ("view", "item", "add", "checkout", "order", "search", "search_zero", "
 _META_KEYS = frozenset({"q", "rail", "pos", "results", "count", "value", "lcp", "inp", "cls", "reason",
                         "from", "to", "code", "attribution", "where",
                         "route", "vp", "catalog_ms", "catalog_src",
-                        "lcp_el", "lcp_ttfb", "lcp_delay", "lcp_load", "lcp_render", "build"})
+                        "lcp_el", "lcp_ttfb", "lcp_delay", "lcp_load", "lcp_render", "build",
+                        # R7d hold-outs: which bucketed offers the cart met ('r12,r15') and the arm of each
+                        # ('offer,hold') — app/offers.py experiment_meta
+                        "exp", "var"})
 MAX_LINES = 60
 MAX_QTY = 9999
 
@@ -528,7 +531,7 @@ def _load_rules() -> list[dict]:
         return []
     now = _now()
     out = []
-    for r in rows:
+    for r in offers.live_rows(rows):          # R7d: an archived rule never prices anything
         st, en = _parse_ts(r.get("starts_at")), _parse_ts(r.get("ends_at"))
         if st and st > now:
             continue
@@ -547,6 +550,12 @@ def _load_rules() -> list[dict]:
             "categories": [str(c).strip().upper() for c in (scope.get("categories") or [])],
             "referral_codes": [str(c).strip().lower() for c in (scope.get("referral_codes") or [])],
         }
+        try:        # R7d hold-out: {mod, hold} — a malformed one is dropped, never guessed at
+            bucket = offers.norm_bucket(scope.get("bucket")) if r.get("kind") in offers.AUTO_KINDS else None
+        except ValueError:
+            bucket = None
+        if bucket:
+            r["scope"]["bucket"] = bucket
         out.append(r)
     return out
 
@@ -602,8 +611,8 @@ def _load_campaigns() -> list[dict]:
     """Active campaign rows (the window is applied per request so a 60 s cache never shows a
     campaign a minute late or early)."""
     try:
-        return (get_client().table("shop_campaigns").select("*").eq("is_active", True)
-                .order("sort_order").order("id").execute().data or [])
+        return offers.live_rows(get_client().table("shop_campaigns").select("*").eq("is_active", True)
+                                .order("sort_order").order("id").execute().data or [])
     except Exception as e:  # noqa: BLE001 — the market works without the table
         log.warning("shop_campaigns unavailable: %s", e)
         return []
@@ -1242,6 +1251,10 @@ def catalog_payload(token: str | None, referral_code: str | None = None, *,
             "show_retail_compare": show_compare,
             "public_tiers": public_tiers,
             "areas": [a.strip() for a in str(vals.get("shop_areas") or "").split(",") if a.strip()],
+            # R7d: a coupon a shop on this storefront could use is live right now. The cart's
+            # "Have a coupon?" field has nothing to accept while this is false (no dead field).
+            "has_coupons": any(r["kind"] == "coupon" and _rule_matches_ref(r, (referral_code or "").strip().lower() or None)
+                               for r in ctx["rules"]),
         },
         "ref": resolve_ref(ctx, referral_code),
         "rep": rep_card(ctx, referral_code),
@@ -1425,12 +1438,21 @@ def allow_backorder(vals: dict, staff: bool = False) -> bool:
 
 
 def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | None = None,
-               ctx: dict | None = None, *, staff: bool = False, force_backorder: bool = False) -> dict:
+               ctx: dict | None = None, *, staff: bool = False, force_backorder: bool = False,
+               bucket_key: str | None = None) -> dict:
     """Price a cart server-side. Raises ShopError for anything the customer must fix.
     `staff` = the salesman/staff path (a rep quoting or placing for a shop): its own backorder
     setting, so the office can keep ordering sold-out lines in while merchants cannot.
     `force_backorder` = a sold-out line is priced as a backorder whatever either switch says —
     the rep's confirmation re-price, where his explicit confirmation is the decision.
+    `bucket_key` = the merchant's hold-out key (app/offers.py: the device's customer, else the
+    device). A rule with scope.bucket applies only when the key lands outside its held-back buckets;
+    no key = held back. Every bucketed rule the cart meets is listed in `experiments` (exp/var).
+
+    R7d ledger: a line's discount is split over the rules that made it, in proportion to what each
+    took off (offers.allocate — the shares add up to the line's discount exactly), so a stackable
+    rule on top of a tier is never shown or booked with the whole line's discount. `_ledger` (never
+    sent to a client) is what create_order writes to shop_order_discounts.
 
     Money (R2c, 24-Sep-2026): every figure is a Decimal from the list price to the total, rounded
     to the fils (dmoney, ROUND_HALF_UP) at exactly the business steps where a number is booked —
@@ -1447,6 +1469,17 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     sold_out_why = sold_out_reason(snap)
     ref = (referral_code or "").strip().lower() or None
     lines_in = normalize_lines(raw_lines)
+    # R7d hold-outs: a bucketed rule is priced only in the 'offer' arm; the others never existed
+    # for this merchant. `arms` remembers every bucketed rule for the exposure log below.
+    arms: dict = {}
+    rules_live: list[dict] = []
+    for r in ctx["rules"]:
+        arm = offers.rule_arm(r, bucket_key)
+        if arm is not None:
+            arms[r["id"]] = arm
+            if arm != offers.ARM_OFFER:
+                continue
+        rules_live.append(r)
 
     lines: list[dict] = []      # every line the customer can see, in cart order
     good: list[dict] = []       # the priced ones — all the arithmetic below uses these
@@ -1495,12 +1528,13 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         if backorder:
             warnings.append(f"{code} is sold out — it will be backordered and confirmed by your salesman.")
         # item-level rules: best non-stackable, then stackables on top
-        cands = [r for r in ctx["rules"] if r["kind"] in ("qty_tier", "salesman_offer", "bundle_price")
+        cands = [r for r in rules_live if r["kind"] in ("qty_tier", "salesman_offer", "bundle_price")
                  and _rule_matches_item(r, it) and _rule_matches_ref(r, ref)
                  and (r["kind"] != "qty_tier" or qty >= _i(r.get("min_qty"), 1))
                  and (r["kind"] != "salesman_offer" or (ref and r["scope"]["referral_codes"]))]
         unit = lp
         applied: list[dict] = []
+        took: list[Decimal] = []    # what each applied rule took off the unit, in applied order
         best = None
         for r in cands:
             if r.get("stackable"):
@@ -1510,26 +1544,32 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                 unit, best = u, r
         if best:
             applied.append({"rule_id": best["id"], "name": best["name"], "kind": best["kind"]})
+            took.append(lp - unit)
         for r in cands:
             if r.get("stackable"):
                 u = _discounted_unit(r, unit)
                 if u < unit:
+                    took.append(unit - u)
                     unit = u
                     applied.append({"rule_id": r["id"], "name": r["name"], "kind": r["kind"]})
         unit = dmoney(max(unit, D0))
         floor = _floor_d(ctx, code)
+        line_clamped = False
         if floor is not None and unit < floor:
             unit = min(lp, floor)
             clamped.append(code)
+            line_clamped = True
         line_total = dmoney(unit * qty)
         subtotal += dmoney(lp * qty)
+        line_discount = dmoney((lp - unit) * qty)
         line = {
             "item_code": code, "display_name": it.get("display_name") or code, "spec": it.get("spec"),
             "image_url": it.get("product_image_url"), "qty": qty, "moq": moq,
-            "list_price_bhd": lp, "unit_price_bhd": unit, "discount_bhd": dmoney((lp - unit) * qty),
+            "list_price_bhd": lp, "unit_price_bhd": unit, "discount_bhd": line_discount,
             "line_total_bhd": line_total, "stock_status": status, "backorder": backorder,
             "applied": applied, "warning": None, "unavailable": False, "blocked_reason": None,
-            "_floor": floor,
+            "_floor": floor, "_shares": offers.allocate(line_discount, took), "_clamped": line_clamped,
+            "_index": len(lines),
         }
         lines.append(line)
         good.append(line)
@@ -1538,9 +1578,12 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     net = dmoney(subtotal - item_discount)
 
     # cart-level: automatic cart_value rules vs coupon — customer gets the better unless stackable
-    discounts = [{"rule_id": a["rule_id"], "name": a["name"], "kind": a["kind"],
-                  "amount_bhd": ln["discount_bhd"]}
-                 for ln in good for a in ln["applied"]]
+    discounts = [{"rule_id": a["rule_id"], "name": a["name"], "kind": a["kind"], "amount_bhd": share,
+                  "level": "line", "item_code": ln["item_code"]}
+                 for ln in good for a, share in zip(ln["applied"], ln["_shares"])]
+    ledger = [{"level": "line", "line_index": ln["_index"], "item_code": ln["item_code"], "rule_id": a["rule_id"],
+               "name": a["name"], "kind": a["kind"], "amount_bhd": share, "clamped": ln["_clamped"]}
+              for ln in good for a, share in zip(ln["applied"], ln["_shares"])]
     # The cart-level cap is the headroom above the floor on COVERED lines only. A line with no
     # cost on file contributes nothing — it used to lift the cap entirely (`unlimited`), so one
     # floorless SKU let a coupon price every other line below its floor (D3, 24-Sep-2026).
@@ -1559,7 +1602,7 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
             return min(eligible, _d(rule["amount_off_bhd"]))
         return D0
 
-    auto = [r for r in ctx["rules"] if r["kind"] == "cart_value" and _rule_matches_ref(r, ref)]
+    auto = [r for r in rules_live if r["kind"] == "cart_value" and _rule_matches_ref(r, ref)]
     best_auto, best_amt = None, D0
     stack_auto: list[tuple[dict, Decimal]] = []
     for r in auto:
@@ -1611,12 +1654,16 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
     cart_total = D0
     for r, amt in cart_discounts:
         amt = dmoney(min(amt, max(D0, cap - cart_total)))
-        if amt < dmoney(_cart_amount(r)):
+        cut = amt < dmoney(_cart_amount(r))
+        if cut:
             clamped.append(f"cart:{r['id']}")
         if amt <= 0:
             continue
         cart_total += amt
-        discounts.append({"rule_id": r["id"], "name": r["name"], "kind": r["kind"], "amount_bhd": amt})
+        discounts.append({"rule_id": r["id"], "name": r["name"], "kind": r["kind"], "amount_bhd": amt,
+                          "level": "cart"})
+        ledger.append({"level": "cart", "line_index": None, "item_code": None, "rule_id": r["id"], "name": r["name"],
+                       "kind": r["kind"], "amount_bhd": amt, "clamped": cut})
     if coupon_rule and coupon_out is None:
         # What the code actually took off after the margin-floor cap — never claim more. A code
         # that could take nothing off is not "applied": say so, and do not spend it (no
@@ -1701,8 +1748,19 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
                                           limit=_i(vals.get("shop_gap_suggestions"), 6))
     if clamped:
         log.info("shop margin floor clamped: %s", ", ".join(clamped))
+    # the hold-out exposure (exp/var): every bucketed rule this cart met, whichever arm it fell in
+    experiments = []
+    by_id = {r["id"]: r for r in ctx["rules"]}
+    for rid, arm in sorted(arms.items(), key=lambda kv: str(kv[0])):
+        r = by_id[rid]
+        if not _rule_matches_ref(r, ref):
+            continue
+        if r["kind"] != "cart_value" and not any(_rule_matches_item(r, ctx["items"][ln["item_code"]]) for ln in good):
+            continue
+        experiments.append({"rule_id": rid, "var": arm})
     for ln in lines:
-        ln.pop("_floor", None)
+        for k in ("_floor", "_shares", "_clamped", "_index"):
+            ln.pop(k, None)
     return edge_floats({
         "ok": True, "lines": lines,
         "subtotal_bhd": subtotal, "discount_bhd": discount_total, "delivery_bhd": delivery,
@@ -1711,8 +1769,10 @@ def price_cart(raw_lines, coupon_code: str | None = None, referral_code: str | N
         "warnings": warnings, "can_submit": can_submit, "min_order_bhd": min_order,
         "block_reason": block_reason, "minimum": minimum, "gap_suggestions": gap_suggestions,
         "has_backorder": any(ln["backorder"] for ln in good),
+        "experiments": experiments,
         "_coupon_rule_id": coupon_rule["id"] if coupon_rule else None,
         "_clamped": clamped,
+        "_ledger": ledger,
     })
 
 
@@ -2224,16 +2284,38 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
             source = "market"
         else:   # the legacy token link keeps its coarse channel values
             source = {"session_ref": "referral", "checkout_pick": "dropdown"}.get(attribution, "default")
-    quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx, staff=staff)
+    # R7d hold-outs: the merchant's key, resolved exactly as the quote resolved it (the device's
+    # customer, else the device); a rep's order is outside every experiment (no key → held back)
+    bucket = None if staff else offers.key_for_device(ctx, device_id)
+    quote = price_cart(body.get("lines"), body.get("coupon_code"), referral_code, ctx=ctx, staff=staff,
+                       bucket_key=bucket)
     if not quote["can_submit"]:
         raise ShopError(quote["block_reason"] or " ".join(quote["warnings"]) or "Order cannot be submitted.")
     minimum = quote.get("minimum") or {}
     order_kind = "small" if minimum and not minimum.get("met") else "standard"
+    # R7d (OFF-3): the coupon's use is taken atomically BEFORE anything is written — none left means
+    # the order is refused with a plain sentence, never placed over the cap. None = the RPC is not
+    # installed yet: the old counter runs after the order, as before. Any failure below gives it back.
+    coupon_rid = quote.get("_coupon_rule_id")
+    try:
+        reserved = offers.reserve_coupon(client, coupon_rid) if coupon_rid else None
+    except Exception as e:  # noqa: BLE001
+        log.error("coupon reservation failed: %s", e)
+        raise ShopError("Ordering is temporarily unavailable — please try again in a minute.") from e
+    if reserved is False:
+        invalidate()
+        raise ShopError(offers.COUPON_GONE_MSG)
+
+    def _give_back(why: str) -> None:
+        if reserved:
+            log.warning("order failed after its coupon was reserved (%s) — giving the use back", why)
+            offers.release_coupon(client, coupon_rid)
     prefix = str(vals.get("shop_order_prefix") or "YQ")
     try:
         order_no = client.rpc("shop_next_order_no", {"p_prefix": prefix}).execute().data
     except Exception as e:  # noqa: BLE001
         log.error("order number RPC failed: %s", e)
+        _give_back("order number")
         raise ShopError("Ordering is temporarily unavailable — please try again in a minute.") from e
     if isinstance(order_no, (list, dict)):
         order_no = json.dumps(order_no)
@@ -2271,9 +2353,13 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     # A staff order's device is the rep's login (staff:<email>, the idempotency key of the
     # salesman checkout): it stays on the order row and never joins the merchant's device list,
     # which is what lets a device be recognised as that merchant (recognize_phone).
-    row["customer_id"] = upsert_customer_from_order(row, sm, attribution, None if staff else device_id,
-                                                    existing_cust)
-    order = client.table("shop_orders").insert(row).execute().data[0]
+    try:
+        row["customer_id"] = upsert_customer_from_order(row, sm, attribution, None if staff else device_id,
+                                                        existing_cust)
+        order = client.table("shop_orders").insert(row).execute().data[0]
+    except Exception:
+        _give_back("order header")
+        raise
     # R7c: each line snapshots the landed cost the pricing engine floored it with (margin later, on
     # the cost as it was); a rep-placed line is confirmed at its quoted price. Columns probed.
     with_cost = has_column("shop_order_lines", "unit_cost_bhd")
@@ -2318,14 +2404,18 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
             "detail": {"note": None, "from": "new", "born_confirmed": True, "changed": [], "removed": [],
                        "total_after": quote["total_bhd"]}})
     try:
-        shop_heart._insert_lines(client, lines)
+        line_rows = shop_heart._insert_lines(client, lines)
         client.table("shop_order_events").insert(events).execute()
     except Exception as e:  # noqa: BLE001 — whatever it was, the header must not outlive it
         _discard_lineless_order(client, order["id"], f"lines/event insert failed: {e}")
+        _give_back("lines / events")
         raise
+    # R7d (OFF-2): the offer ledger — one insert, every discount the order carries, as placed (a
+    # rep-placed order is confirmed at those amounts). Measurement only: never fails the order.
+    offers.write_ledger(client, order, quote, line_rows or [], ctx, confirmed=born_confirmed)
     if born_confirmed:
         staff_settle_sticky(client, order)
-    if quote.get("_coupon_rule_id"):
+    if quote.get("_coupon_rule_id") and reserved is None:     # pre-RPC fallback: the old counter
         try:
             r = client.table("discount_rules").select("uses").eq("id", quote["_coupon_rule_id"]).execute().data
             client.table("discount_rules").update({"uses": _i((r or [{}])[0].get("uses")) + 1}) \
@@ -2338,7 +2428,8 @@ def create_order(body: dict, ip: str | None = None, ua: str | None = None, *,
     record_event({"event": "order", "session_id": body.get("session_id"),
                   "referral_code": row["referral_code"],
                   "src": row["src"], "device_id": None if staff else device_id, "customer_id": row.get("customer_id"),
-                  "meta": {"attribution": attribution}}, ip=ip, ua=ua, salesman_id=row["salesman_id"])
+                  "meta": {"attribution": attribution, **offers.experiment_meta(quote.get("experiments"))}},
+                 ip=ip, ua=ua, salesman_id=row["salesman_id"])
     order["lines"] = quote["lines"]
     order["salesman"] = sm
     order["status_url"] = f"{market_base()}/o/{token}" if market_base() else f"/o/{token}"
@@ -2732,6 +2823,13 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
             shop_heart.fill_delivered(client, o)
     if status in attribution.STICKY_SETTLE_STATUSES:
         attribution.settle_sticky(client, o, status)
+    if status == "cancelled" and o.get("coupon_code"):
+        # R7d (OFF-3): a cancelled order gives its coupon use back (the RPC; best effort — the
+        # cancel itself is done and is never undone for the counter)
+        try:
+            offers.release_for_order(client, o)
+        except Exception as e:  # noqa: BLE001
+            log.warning("order %s cancelled; its coupon use was not given back: %s", o.get("order_no"), e)
     return get_order(order_id) or {}
 
 
@@ -2758,27 +2856,39 @@ def confirm_order(order_id: int, changes, expected_delivery: str | None, note: s
     rata), never today's book, never a silent zero. An adverse change needs `shop_agreed` =
     {'via': whatsapp | phone | visit}. Untouched lines are confirmed as ordered. See
     app/shop_heart.py."""
-    return shop_heart.confirm_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
-                                    shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+    out = shop_heart.confirm_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
+                                   shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+    offers.refresh_confirmed(order_id)      # R7d: the ledger's confirmed amounts (best effort)
+    return out
 
 
 def amend_order(order_id: int, changes, expected_delivery: str | None, note: str | None, actor: str, *,
                 added_lines=None, shop_agreed=None, expected_delivery_date=None) -> dict:
     """The same editor after confirming (confirmed / packed / out_for_delivery): an 'amended' event."""
-    return shop_heart.amend_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
-                                  shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+    out = shop_heart.amend_order(order_id, changes, expected_delivery, note, actor, added_lines=added_lines,
+                                 shop_agreed=shop_agreed, expected_delivery_date=expected_delivery_date)
+    offers.refresh_confirmed(order_id)
+    return out
 
 
 def deliver_with_changes(order_id: int, lines=None, added=None, shop_agreed=None, actor: str = "",
                          note: str | None = None, focus_invoice_no: str | None = None) -> dict:
     """Delivered in one tap (no lines / added) or with what was really handed over."""
-    return shop_heart.deliver_with_changes(order_id, lines, added, shop_agreed, actor, note=note,
-                                           focus_invoice_no=focus_invoice_no)
+    out = shop_heart.deliver_with_changes(order_id, lines, added, shop_agreed, actor, note=note,
+                                          focus_invoice_no=focus_invoice_no)
+    if lines or added:          # a plain Delivered changes no quantity: the confirmed amounts stand
+        offers.refresh_confirmed(order_id)
+    return out
 
 
 def reopen_order(order_id: int, reason: str | None, actor: str) -> dict:
-    """Admin: Delivered → Confirmed or Cancelled → Received, within 7 days, with a reason."""
-    return shop_heart.reopen_order(order_id, reason, actor)
+    """Admin: Delivered → Confirmed or Cancelled → Received, within 7 days, with a reason. A
+    cancelled order that used a coupon takes its use again (R7d: the cancel gave it back)."""
+    out = shop_heart.reopen_order(order_id, reason, actor)
+    # only a cancelled order reopens to Received (shop_heart.REOPEN_TO), so 'new' here = it was cancelled
+    if (out or {}).get("status") == "new" and out.get("coupon_code"):
+        offers.retake_for_order(get_client(), out)
+    return out
 
 
 def record_customer_notified(order_id: int, channel: str | None, actor: str) -> dict:
@@ -3335,6 +3445,8 @@ _COUPON = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,31}$")
 
 def _rule_status(r: dict) -> str:
     now = _now()
+    if r.get("archived_at"):
+        return "archived"
     if not r.get("is_active"):
         return "inactive"
     st, en = _parse_ts(r.get("starts_at")), _parse_ts(r.get("ends_at"))
@@ -3354,21 +3466,46 @@ def _norm_scope(scope) -> dict:
         except ValueError:
             scope = {}
     scope = scope or {}
-    return {
+    out = {
         "item_codes": sorted({clean(c, 64).upper() for c in (scope.get("item_codes") or []) if clean(c, 64)}),
         "categories": sorted({clean(c, 64).upper() for c in (scope.get("categories") or []) if clean(c, 64)}),
         "referral_codes": sorted({clean(c, 32).lower() for c in (scope.get("referral_codes") or []) if clean(c, 32)}),
     }
+    try:        # R7d hold-out (validate_rule reports a bad one; a list read just leaves it out)
+        bucket = offers.norm_bucket(scope.get("bucket"))
+    except ValueError:
+        bucket = None
+    if bucket:
+        out["bucket"] = bucket
+    return out
 
 
-def list_rules() -> list[dict]:
+def list_rules(include_archived: bool = False) -> list[dict]:
+    """The Offers & Rules list (rules_payload adds the archived count)."""
+    return rules_payload(include_archived)["rules"]
+
+
+def rules_payload(include_archived: bool = False) -> dict:
+    """{rules, archived}. Archived rules (R7d) only when asked; each row says whether any order used
+    it (`referenced` — such a rule is archived, never deleted) and on how many orders (`orders`)."""
     rows = (get_client().table("discount_rules").select("*").order("priority").order("id")
             .execute().data or [])
+    archived = sum(1 for r in rows if r.get("archived_at"))
+    if not include_archived:
+        rows = offers.live_rows(rows)
+    try:
+        refs = offers.rule_references([int(r["id"]) for r in rows]) if rows else {}
+    except Exception as e:  # noqa: BLE001 — unknown = referenced: no Delete button is offered
+        log.warning("rule references unreadable: %s", e)
+        refs = None
     for r in rows:
         r["scope"] = _norm_scope(r.get("scope"))
         r["summary"] = rule_summary(r)
         r["status"] = _rule_status(r)
-    return rows
+        r["orders"] = (refs or {}).get(int(r["id"]), 0) if refs is not None else None
+        r["referenced"] = offers.referenced(r, refs) if refs is not None else True
+    return {"rules": rows, "archived": archived,
+            "can_archive": offers.table_ready("discount_rules", "archived_at")}
 
 
 # fields an edit may clear by sending null explicitly (the API passes explicitly-set keys through)
@@ -3397,7 +3534,23 @@ def validate_rule(payload: dict, existing: dict | None = None) -> dict:
         raise ShopError("BHD off must be positive.")
     if fixed not in blank and _f(fixed) <= 0:
         raise ShopError("Fixed price must be positive.")
-    scope = _norm_scope(cur.get("scope"))
+    raw_scope = cur.get("scope")
+    if isinstance(raw_scope, str):
+        try:
+            raw_scope = json.loads(raw_scope)
+        except ValueError:
+            raw_scope = {}
+    raw_bucket = (raw_scope or {}).get("bucket") if isinstance(raw_scope, dict) else None
+    if raw_bucket not in (None, "", {}, []):
+        # R7d hold-outs are for automatic offers: a coupon is typed by the shop — holding it back
+        # would refuse a code the shop was given
+        if kind not in offers.AUTO_KINDS:
+            raise ShopError("A hold-out is for automatic offers — a coupon cannot have one.")
+        try:
+            offers.norm_bucket(raw_bucket)
+        except ValueError as e:
+            raise ShopError(str(e)) from e
+    scope = _norm_scope(raw_scope)
     row: dict = {
         "name": name, "kind": kind, "scope": scope,
         "pct_off": money(pct) if pct not in blank else None,
@@ -3486,14 +3639,16 @@ def upsert_rule(payload: dict, by: str = "", rule_id: int | None = None) -> dict
 
 # ── campaigns (admin) ─────────────────────────────────────────────────────────
 
-def list_campaigns() -> list[dict]:
+def list_campaigns(include_archived: bool = False) -> list[dict]:
     rows = (get_client().table("shop_campaigns").select("*").order("sort_order").order("id")
             .execute().data or [])
+    if not include_archived:
+        rows = offers.live_rows(rows)       # R7d: an archived campaign is history, not a row to manage
     now = _now()
     for r in rows:
         st, en = _parse_ts(r.get("starts_at")), _parse_ts(r.get("ends_at"))
-        r["status"] = ("paused" if not r.get("is_active") else "scheduled" if st and st > now
-                       else "ended" if en and en < now else "live")
+        r["status"] = ("archived" if r.get("archived_at") else "paused" if not r.get("is_active")
+                       else "scheduled" if st and st > now else "ended" if en and en < now else "live")
     return rows
 
 
@@ -3591,9 +3746,22 @@ def upsert_campaign(payload: dict, by: str = "", campaign_id: int | None = None)
     return out
 
 
-def delete_campaign(campaign_id: int) -> None:
+def delete_campaign(campaign_id: int, by: str = "") -> dict:
+    """R7d (OFF-4): a campaign is archived (switched off, kept with its window, creative and offer
+    for the record) once the archive column exists — never deleted. Before the migration: refused
+    when the offer behind it was used by an order, else deleted as before."""
+    if offers.table_ready("shop_campaigns", "archived_at"):
+        offers.archive("shop_campaigns", campaign_id, by)
+        return {"archived": True}
+    got = get_client().table("shop_campaigns").select("*").eq("id", campaign_id).limit(1).execute().data
+    rid = (got or [{}])[0].get("rule_id")
+    if rid is not None:
+        rule = (get_client().table("discount_rules").select("*").eq("id", rid).limit(1).execute().data or [None])[0]
+        if rule and offers.referenced(rule):
+            raise ShopError("Orders used the offer behind this campaign — switch it off instead, so its history stays.")
     get_client().table("shop_campaigns").delete().eq("id", campaign_id).execute()
     invalidate()
+    return {"archived": False}
 
 
 # ── restock requests ("tell me when back") ────────────────────────────────────
@@ -3659,6 +3827,14 @@ def resolve_restock(ids: list[int], referral_code: str | None = None) -> int:
 
 
 def delete_rule(rule_id: int) -> None:
+    """Only a rule no order ever used is deleted (a draft, a typo). One that any order used is
+    refused with RULE_REFERENCED_MSG (409): archive it instead (R7d, OFF-4) — its orders keep the
+    rule id, and the ledger keeps its snapshot."""
+    got = get_client().table("discount_rules").select("*").eq("id", rule_id).limit(1).execute().data
+    if not got:
+        raise ShopError("Offer not found.")
+    if offers.referenced(got[0]):
+        raise ShopError(offers.RULE_REFERENCED_MSG)
     get_client().table("discount_rules").delete().eq("id", rule_id).execute()
     invalidate()
 

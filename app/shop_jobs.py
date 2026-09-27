@@ -32,6 +32,8 @@ Jobs (in run order):
     per-order chasing stops and the order becomes one line in a single daily owner digest.
     sla_notified_at is stamped only when someone was reached.
   * cleanup — expired or revoked merchant sessions and stale access links are removed.
+  * badge_log (R7d) — once per Bahrain day, every catalog item's badges, stock and 90-day sales in
+    shop_badge_log (skipped until scripts/r7d_offer_ledger_migration.sql adds the table).
   * stale_data_alert — when the stock snapshot merchants see is older than shop_stale_days, the
     owner channel gets one Telegram (owner email when Telegram is not configured) a day asking for
     the Focus report. The "alerted today" marker is written only when a channel really delivered.
@@ -754,9 +756,17 @@ def sweep_lineless() -> dict:
     return shop.sweep_lineless_orders(10)
 
 
+def badge_log() -> dict:
+    """R7d (audit OFF-6): once per Bahrain day, the badges merchants saw on every item, so a
+    clearance or badge effect can be measured later (app/offers.py log_badges_daily)."""
+    from app import offers
+    return offers.log_badges_daily()
+
+
 JOBS = (("notify_retry", notify_retry), ("unassigned_reminder", unassigned_reminder),
         ("unconfirmed_reminder", unconfirmed_reminder), ("cleanup", cleanup),
-        ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless))
+        ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless),
+        ("badge_log", badge_log))
 
 
 def run_shop_jobs() -> dict:
