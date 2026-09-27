@@ -3868,16 +3868,19 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
     # phases say where the time went (docs/RELEASE.md, the watch) — the portal card shows the three
     # core numbers, the rest is read from this JSON or in SQL
     with_metric = [e for e in beacons if any(_meta(e).get(k) is not None for k in ("lcp", "inp", "cls"))]
-    by_src: dict[str, int] = {}
+    # its own name: `by_src` above is the order attribution the return reads (R7a — reusing the
+    # name for these int counts made every /shop/analytics and /shop/me/link-week call a 500)
+    vitals_by_src: dict[str, int] = {}
     for e in beacons:
         src = str(_meta(e).get("catalog_src") or "none")[:24]
-        by_src[src] = by_src.get(src, 0) + 1
+        vitals_by_src[src] = vitals_by_src.get(src, 0) + 1
     vitals = {"samples": len(with_metric), "visits": len(beacons),
               "lcp_ms_p75": _p75("lcp"), "inp_ms_p75": _p75("inp"), "cls_p75": _p75("cls"),
               "lcp_ttfb_ms_p75": _p75("lcp_ttfb"), "lcp_delay_ms_p75": _p75("lcp_delay"),
               "lcp_load_ms_p75": _p75("lcp_load"), "lcp_render_ms_p75": _p75("lcp_render"),
               "catalog_ms_p75": _p75("catalog_ms"),
-              "catalog_src": sorted(({"src": k, "visits": v} for k, v in by_src.items()), key=lambda r: -r["visits"])}
+              "catalog_src": sorted(({"src": k, "visits": v} for k, v in vitals_by_src.items()),
+                                    key=lambda r: -r["visits"])}
     return {
         "search": search, "rails": rail_perf, "engagement": engagement, "ops": ops, "identity": identity, "vitals": vitals,
         "days": days, "since": since[:10],
