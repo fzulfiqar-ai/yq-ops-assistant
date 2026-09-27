@@ -1213,7 +1213,7 @@ def _():
         m.app.dependency_overrides.pop(get_current_user, None)
 
 
-@test("routes: assign with also_customer — an admin binds the shop (audited); a rep taking an order cannot")
+@test("routes: assign with also_customer — an admin binds the shop (audited); a rep cannot assign at all (R7b)")
 def _():
     from fastapi.testclient import TestClient
     import app.main as m
@@ -1229,8 +1229,10 @@ def _():
             r = c.post("/shop/orders/1/assign", json={"salesman_id": 1, "also_customer": True})
             assert r.status_code == 403, r.text[:200]
             assert fake.rows("shop_orders")[0]["salesman_id"] is None
+            # R7b removed the claim branch: a rep can no longer take an unassigned order for himself
             r = c.post("/shop/orders/1/assign", json={"salesman_id": 1})
-            assert r.status_code == 200 and r.json()["customer_assign"] is None
+            assert r.status_code == 403, r.text[:200]
+            assert fake.rows("shop_orders")[0]["salesman_id"] is None
             assert fake.rows("shop_customers")[0]["salesman_id"] is None and fake.rows("shop_customers")[0]["sticky_salesman_id"] is None
     finally:
         m.app.dependency_overrides.pop(get_current_user, None)

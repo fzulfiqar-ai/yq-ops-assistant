@@ -13,13 +13,24 @@ SUPABASE_JWT_SECRET, then fetches the caller's role from user_roles.
   (READ_ONLY_DENIED_PREFIXES) whatever the method. This is the one central gate: a route never
   has to remember it, and a new write route is refused to management the day it is added.
 
+Release R7b "Safe access" (27-Sep-2026):
+- must_reset never locks out an owner (settings.owner_emails): the break-glass login always gets in.
+- 401 for a token of a session that a password change signed out (end_other_sessions): Supabase
+  stops the refresh (POST /auth/password asks it to sign the other sessions out), this closes the
+  window of the access tokens already issued, in this process (the API runs one worker).
+- A login trail: the first request of every Supabase session (the `session_id` claim) seen by this
+  process leaves one audit_log row 'auth.session_seen' (session id, role, sign-in method, hashed
+  client address, browser) — never the token.
+
 Every data endpoint except /health depends on get_current_user.
 """
 from __future__ import annotations
 
 import hmac
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -134,6 +145,101 @@ class CurrentUser:
     role: str
     status: str = "active"
     must_reset: bool = False
+    # the Supabase session behind the token (`session_id` claim) and when the token was issued;
+    # None for a machine caller or a token without the claims
+    session_id: str | None = None
+    issued_at: int | None = None
+
+
+def _is_owner(email: str | None) -> bool:
+    e = (email or "").strip().lower()
+    return bool(e) and e in {o.strip().lower() for o in settings.owner_emails}
+
+
+def _session_id(payload: dict) -> str:
+    """Supabase names it `session_id`; `sid` is the OIDC spelling. Empty when the token has neither."""
+    return str(payload.get("session_id") or payload.get("sid") or "")[:64]
+
+
+# ── sessions a password change signed out (release R7b) ──────────────────────────
+# POST /auth/password asks Supabase to sign every OTHER session of the login out (their refresh
+# tokens die), and records here that tokens issued before the change, from any session but the one
+# that changed the password, are no longer accepted. Access tokens live up to an hour, so an entry
+# is kept for a day. In memory: one uvicorn worker (Dockerfile); after a restart Supabase's own
+# sign-out still holds and the old access tokens simply expire.
+SESSION_CUTOFF_KEEP_S = 24 * 3600
+# Tokens issued this close to the change are let through: the API's clock and Supabase's may
+# differ by a few seconds, and a fresh sign-in right after the change must never be refused.
+SESSION_CUTOFF_SKEW_S = 30
+SESSION_ENDED_DETAIL = "This session was signed out after a password change. Sign in again."
+_ended_sessions: dict[str, tuple[float, str]] = {}     # user id -> (cut-off epoch, the session kept)
+_ended_lock = threading.Lock()
+
+
+def end_other_sessions(user_id: str, keep_session_id: str, at: float | None = None) -> None:
+    """From now on refuse the login's tokens issued before `at` by any session but `keep_session_id`."""
+    if not user_id or not keep_session_id:
+        return
+    now = time.time() if at is None else at
+    with _ended_lock:
+        for uid in [u for u, (cut, _k) in _ended_sessions.items() if now - cut > SESSION_CUTOFF_KEEP_S]:
+            _ended_sessions.pop(uid, None)
+        _ended_sessions[user_id] = (now, keep_session_id)
+
+
+def session_ended(user_id: str, session_id: str, issued_at) -> bool:
+    hit = _ended_sessions.get(user_id or "")
+    if not hit:
+        return False
+    cut, keep = hit
+    if time.time() - cut > SESSION_CUTOFF_KEEP_S or (session_id and session_id == keep):
+        return False
+    try:
+        iat = float(issued_at)
+    except (TypeError, ValueError):
+        return True                    # a token that does not say when it was issued predates nothing
+    return iat < cut - SESSION_CUTOFF_SKEW_S
+
+
+# ── the login trail (release R7b) ────────────────────────────────────────────────
+SESSION_SEEN_EVENT = "auth.session_seen"
+SESSION_SEEN_MAX = 4096                # session ids remembered per process (oldest forgotten first)
+_seen_sessions: OrderedDict[str, None] = OrderedDict()
+_seen_lock = threading.Lock()
+
+
+def _first_sight(session_id: str) -> bool:
+    with _seen_lock:
+        if session_id in _seen_sessions:
+            return False
+        _seen_sessions[session_id] = None
+        while len(_seen_sessions) > SESSION_SEEN_MAX:
+            _seen_sessions.popitem(last=False)
+        return True
+
+
+def note_session(request: Request, payload: dict, email: str, role: str, user_status: str) -> None:
+    """One audit_log row the first time this process sees a session: who, which session, how they
+    signed in, from which (hashed) address and browser. Never the token, never a raw IP. A token
+    without a session id is not recorded (there is nothing to tell its requests apart by)."""
+    sid = _session_id(payload)
+    if not sid or not _first_sight(sid):
+        return
+    try:
+        from app.ratelimit import client_ip
+        from app.shop import _ip_hash
+        ip_hash = _ip_hash(client_ip(request))
+    except Exception:  # noqa: BLE001 — the trail never breaks a request
+        ip_hash = None
+    amr = payload.get("amr") if isinstance(payload.get("amr"), list) else []
+    detail = {
+        "session_id": sid, "role": role, "status": user_status, "aal": payload.get("aal"),
+        "methods": [str(m.get("method"))[:20] for m in amr if isinstance(m, dict) and m.get("method")][:4],
+        "issued_at": payload.get("iat"), "method": request.method, "path": (request.scope.get("path") or "")[:120],
+        "ip_hash": ip_hash, "ua": (request.headers.get("user-agent") or "")[:160],
+    }
+    from app.audit import log_event
+    log_event(email, SESSION_SEEN_EVENT, detail=detail)
 
 
 def get_current_user(
@@ -156,13 +262,20 @@ def get_current_user(
             detail="Invalid or expired token.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+    email = payload.get("email") or ""
+    user_id = payload.get("sub") or ""
+    session_id = _session_id(payload)
+    if session_ended(user_id, session_id, payload.get("iat")):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=SESSION_ENDED_DETAIL,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     # The ONLY place a token earns a per-user rate-limit bucket: here, in the threadpool, after
     # it verified. app.ratelimit.rate_limit_key never decodes anything itself.
     from app.ratelimit import remember_verified
     remember_verified(creds.credentials)
-
-    email = payload.get("email") or ""
-    user_id = payload.get("sub") or ""
 
     row = cached_user_row(email)
     role = row.get("role") if row else None
@@ -172,6 +285,8 @@ def get_current_user(
             detail="User has no assigned role for this tool.",
         )
     user_status = str(row.get("status") or "active")
+    # provisioned logins only: a token from a stray sign-up must not be able to fill audit_log
+    note_session(request, payload, email, role, user_status)
     if user_status != "active":
         # verify_login already refuses a disabled member; this closes the window for a token
         # minted before the switch (and update_access also bans the auth user).
@@ -180,13 +295,16 @@ def get_current_user(
             detail="This account is disabled.",
         )
     # The column may not exist until user_roles_must_reset_migration.sql runs: absent = False.
-    must_reset = bool(row.get("must_reset"))
+    # An owner is never held at the password screen (the break-glass login, plan §32).
+    must_reset = bool(row.get("must_reset")) and not _is_owner(email)
     if must_reset and request.scope.get("path") not in MUST_RESET_EXEMPT:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MUST_RESET_DETAIL)
     if is_read_only(role) and read_only_refuses(request.method, request.scope.get("path") or ""):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=READ_ONLY_DETAIL)
 
-    return CurrentUser(user_id=user_id, email=email, role=role, status=user_status, must_reset=must_reset)
+    iat = payload.get("iat")
+    return CurrentUser(user_id=user_id, email=email, role=role, status=user_status, must_reset=must_reset,
+                       session_id=session_id or None, issued_at=int(iat) if isinstance(iat, (int, float)) else None)
 
 
 def require_roles(*allowed: str):

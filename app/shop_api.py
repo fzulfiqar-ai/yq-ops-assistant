@@ -24,7 +24,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from app.auth import CurrentUser, get_current_user, has_feature, require_admin, require_feature
     from app.catalog import share_token
     from app.config import settings as cfg
-    from app.features import is_read_only, mask_email, mask_phone, masks_contacts
+    from app.features import is_read_only, mask_email, mask_phone, masks_contacts, strips_contacts
     from app.shop import ShopError
 
     def require_any_feature(*features: str):
@@ -242,7 +242,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     def _scope(user: CurrentUser) -> tuple[int | None, bool]:
         """(salesman_id filter, is_admin). A salesman only ever sees his own orders; management
-        reads every order (None) but is never an admin — app.auth refuses all of its writes."""
+        reads every order (None) but is never an admin — app.auth refuses all of its writes.
+        The storekeeper is nobody's salesman (-1: no shops, no rep cards); the orders it may see
+        are every rep's goods in motion, by status (_staff_statuses) — never a salesman slice."""
         if user.role == "admin":
             return None, True
         if is_read_only(user.role):
@@ -250,10 +252,26 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         sm = shop.salesman_for_user(user.email)
         return (sm["id"] if sm else -1), False
 
+    def _staff_statuses(user: CurrentUser) -> tuple[str, ...] | None:
+        """The only order statuses this role may see (R7b: the storekeeper — Confirmed, Preparing,
+        On the way); None = no status limit (admin, management, a salesman on his own orders)."""
+        return shop.ROLE_VISIBLE_STATUSES.get(user.role)
+
+    # What the storekeeper never receives (R7b): the merchant's phone and email, and everything that
+    # carries or unlocks them — the tap-to-WhatsApp link, the order token (the merchant's cancel)
+    # and its status link, the notify results (addresses), the device and browser fingerprints.
+    STRIPPED_KEYS = ("whatsapp_url", "token", "status_url", "notify_result", "ua", "ip_hash", "device_id",
+                     "client_order_id")
+
     def _masked(user: CurrentUser, o: dict, *keys: str) -> dict:
         """Management sees a merchant's phone and email masked (+973 ••••• 456) and never the
         tap-to-WhatsApp link, the merchant's order token (it can cancel) or the notify
-        recipients (plan §7 phones.full). Everyone else gets the payload unchanged."""
+        recipients (plan §7 phones.full). The storekeeper gets no phone or email at all, nor
+        anything that carries one (R7b). Everyone else gets the payload unchanged."""
+        if strips_contacts(user.role):
+            for k in (*(keys or ("customer_phone", "customer_email")), *STRIPPED_KEYS):
+                o.pop(k, None)
+            return o
         if not masks_contacts(user.role):
             return o
         for k in keys or ("customer_phone", "customer_email"):
@@ -681,22 +699,38 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.get("/shop/orders")
     def shop_orders_list(status: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0,
                          user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        shown = _staff_statuses(user)
+        if shown is not None:
+            # R7b storekeeper (should it ever hold Shop Orders): every rep's goods in motion, only
+            # the statuses it may see, never a phone — neither in the rows nor as a search key
+            asked = [s.strip().lower() for s in str(status or "").split(",") if s.strip()]
+            wanted = [s for s in (asked or shown) if s in shown]
+            if not wanted:
+                return {"orders": [], "count": 0, "counts": {s: 0 for s in shop.STATUSES}}
+            out = shop.list_orders(",".join(wanted), q, limit, offset, salesman_id=None, search_phone=False)
+            out["orders"] = [_masked(user, o) for o in out.get("orders") or [] if o.get("status") in shown]
+            out["counts"] = {s: (n if s in shown else 0) for s, n in (out.get("counts") or {}).items()}
+            return out
         sid, _admin = _scope(user)
         if sid == -1:
             return {"orders": [], "count": 0,
                     "hint": "Your login is not linked to a salesman yet — an admin can link it on the Salesmen page."}
         out = shop.list_orders(status, q, limit, offset, salesman_id=sid,
-                               search_phone=not masks_contacts(user.role))
+                               search_phone=not (masks_contacts(user.role) or strips_contacts(user.role)))
         out["orders"] = [_masked(user, o) for o in out.get("orders") or []]
         return out
 
     def _visible(user: CurrentUser, o: dict | None, write: bool = False) -> bool:
-        """May this staff user see (or, with write=True, act on) this order? Admins and the
-        storekeeper: every order; management: every order, to read only; a salesman: his own."""
+        """May this staff user see (or, with write=True, act on) this order? Admins: every order;
+        management: every order, to read only; the storekeeper: only an order that is Confirmed,
+        Preparing or On the way (R7b — never a Received or a closed one); a salesman: his own."""
         if not o:
             return False
-        if user.role in ("admin", "storekeeper"):
+        if user.role == "admin":
             return True
+        shown = _staff_statuses(user)
+        if shown is not None:
+            return o.get("status") in shown
         if is_read_only(user.role):
             return not write
         sid, _admin = _scope(user)
@@ -751,12 +785,17 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
         o["steps"] = shop.order_steps(o)
         o.pop("ip_hash", None)
-        return {"ok": True, "order": o}
+        return {"ok": True, "order": _masked(user, o)}      # the storekeeper's answer carries no phone either
 
     @app.post("/shop/orders/{order_id}/confirm")
     def shop_order_confirm(order_id: int, body: ConfirmRequest, background: BackgroundTasks,
                            user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Confirm with changes: confirmed quantities / removed lines, expected delivery, re-price."""
+        """Confirm with changes: confirmed quantities / removed lines, expected delivery, re-price.
+        A role whose status list leaves Confirmed out (the storekeeper only moves goods) cannot
+        confirm, even holding Shop Orders — R7b."""
+        allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
+        if allowed is not None and "confirmed" not in allowed:
+            raise HTTPException(status_code=403, detail="Your role cannot confirm orders.")
         cur = shop.get_order(order_id)
         if not _visible(user, cur, write=True):
             raise HTTPException(status_code=404, detail="Order not found.")
@@ -794,16 +833,14 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.post("/shop/orders/{order_id}/assign")
     def shop_order_assign(order_id: int, body: AssignRequest, background: BackgroundTasks,
-                          user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Admins assign or reassign; a salesman may only take an unassigned order for himself.
-        R3: `also_customer` (admins) makes the rep the SHOP's rep too — the same audited write as
-        POST /shop/customers/{id}/assign, with the order as the reason when none was typed."""
-        sid, is_admin = _scope(user)
-        if body.also_customer and not is_admin:
-            raise HTTPException(status_code=403, detail="Only an admin can change a shop's rep.")
+                          user: CurrentUser = Depends(require_admin)) -> dict:
+        """Admins assign or reassign (R7b: the salesman's 'take an unassigned order for myself'
+        branch is gone — shop.assign_order refuses anyone else too). R3: `also_customer` makes the
+        rep the SHOP's rep too — the same audited write as POST /shop/customers/{id}/assign, with
+        the order as the reason when none was typed."""
         try:
             o = shop.assign_order(order_id, body.salesman_id, actor=user.email, reason=body.reason,
-                                  is_admin=is_admin, actor_salesman_id=(sid if sid and sid > 0 else None))
+                                  is_admin=user.role == "admin")
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         background.add_task(shop_notify.notify_assigned, order_id)

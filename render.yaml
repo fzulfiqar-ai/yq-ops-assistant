@@ -21,7 +21,11 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    autoDeploy: true
+    # R7b (plan §25 P1): never deploy on push. Every API deploy is a deliberate, gated step —
+    # `python -m scripts.render_deploy deploy --commit <sha> --wait` (docs/RELEASE.md) — so a push to
+    # main (or the Render GitHub app, once installed) can never ship an un-gated build. The live
+    # service's own "Auto-Deploy" setting must say No as well (Render dashboard -> Settings).
+    autoDeploy: false
     envVars:
       # --- Supabase ---
       - key: SUPABASE_URL

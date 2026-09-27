@@ -66,6 +66,9 @@ ROLE_FEATURE_LIMITS: dict[str, frozenset[str]] = {
 }
 # Roles that see a merchant's phone and email masked in order payloads (plan §7 phones.full).
 CONTACT_MASKED_ROLES: frozenset[str] = frozenset({"management"})
+# Roles that never receive a merchant's phone or email at all, not even masked (release R7b): the
+# storekeeper packs and hands over goods, so the order's lines and shop name are all it needs.
+CONTACT_STRIPPED_ROLES: frozenset[str] = frozenset({"storekeeper"})
 
 
 def is_read_only(role: str | None) -> bool:
@@ -80,6 +83,10 @@ def may_hold(role: str | None, feature: str) -> bool:
 
 def masks_contacts(role: str | None) -> bool:
     return (role or "") in CONTACT_MASKED_ROLES
+
+
+def strips_contacts(role: str | None) -> bool:
+    return (role or "") in CONTACT_STRIPPED_ROLES
 
 
 MASK = "•••••"

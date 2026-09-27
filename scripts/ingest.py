@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sys
 import warnings
 from datetime import date, datetime
@@ -189,6 +190,31 @@ def txt(v) -> str | None:
     return s
 
 
+# ── personal ID numbers in the Sales Day Book narration (release R7b, plan §25 P1 / §28) ──────
+# Staff type customers' CPR numbers (Bahrain personal ID: 9 digits) and card / account numbers
+# (15 digits and more) into the invoice Narration; 646 of them reached v_sales and, through it,
+# the AI. Masked at parse time, keeping the last 3 digits so a person can still tell two apart:
+#     850512345         -> ******345        (a 9-digit run keeps its length)
+#     4111111111111111  -> ************111  (15+ digits: always 12 stars + 3, the length is not kept)
+# A "run" is digits with no digit on either side, so the order number the storekeeper types
+# (YQ-2609-0019, YQ 2609 0019, YQ26090019: 4- and 8-digit runs) and invoice / voucher numbers pass
+# untouched, and masked text never matches again (masking twice changes nothing). The SQL twin of
+# these two patterns lives in scripts/r7_narration_mask_migration.sql (v_sales.narration) and
+# scripts/r7_narration_mask_data_migration.sql; tests/test_r7b_security.py holds them equal.
+# [0-9], never \d: Python's \d also matches Arabic-Indic digits, Postgres's [0-9] does not.
+PERSONAL_ID_LONG = re.compile(r"(?<![0-9])[0-9]{12,}([0-9]{3})(?![0-9])")
+PERSONAL_ID_CPR = re.compile(r"(?<![0-9])[0-9]{6}([0-9]{3})(?![0-9])")
+MASK_LONG, MASK_CPR = "*" * 12, "*" * 6
+
+
+def mask_personal_ids(text: str | None) -> str | None:
+    """Narration with every 9-digit run and every run of 15+ digits masked (last 3 kept)."""
+    if not text:
+        return text
+    text = PERSONAL_ID_LONG.sub(lambda m: MASK_LONG + m.group(1), text)
+    return PERSONAL_ID_CPR.sub(lambda m: MASK_CPR + m.group(1), text)
+
+
 def is_total(first_cell) -> bool:
     if first_cell is None:
         return False
@@ -269,7 +295,8 @@ def parse_order_lines(grid: pd.DataFrame, src: str) -> list[dict]:
             "taxable_bhd": norm_num(r[8]),
             "vat_amount_bhd": norm_num(r[9]),
             "total_amount_bhd": norm_num(r[10]),
-            "narration": txt(r[11]) if len(r) > 11 else None,
+            # personal ID numbers never leave the parser (R7b); order numbers survive (see above)
+            "narration": mask_personal_ids(txt(r[11])) if len(r) > 11 else None,
             "warehouse_name": txt(r[12]) if len(r) > 12 else None,
             "source_file": src,
         })

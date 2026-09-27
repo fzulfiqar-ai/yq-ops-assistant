@@ -36,7 +36,7 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `mrn_landed_costs.effective_date` (data) | `mrn_dates_migration.sql` (R2) | not a view: re-dates the pre-R2 rows from the 1st of the month to the ledger's MRN move date (reverse: `mrn_dates_reverse.sql`) |
 | `v_product_economics` | `economics_v2_migration.sql` (R2; before that `price_list_migration.sql`) | baseline lacks the view; the R2 version costs from `mrn_landed_costs` first, `purchase_costs` as the fallback, and appends `cost_source`, `cost_effective_date`, `cost_doc_no` |
 | `v_catalog_reserved`, `ar_ageing_totals` | `economics_v2_migration.sql` (R2) | not in the baseline — staff reserved-stock view (M10) and Focus's own AR Grand Total per snapshot |
-| `v_sales` | `division_payment_migration.sql` | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway` |
+| `v_sales` | `r7_narration_mask_migration.sql` (R7b, 27-Sep-2026: `narration` masked, the other 30 columns verbatim; before that `division_payment_migration.sql`) | **STALE** (24 cols → 31) — lacks `revenue_bhd`, `net_bhd`, `channel`, `is_cash_customer`, `division`, `sale_type`, `is_giveaway`. Re-running `division_payment_migration.sql` after R7b **silently unmasks** the narration (same 31 columns) — never do it |
 | `v_receivables` | `receivables_consolidation_migration.sql` | **STALE, different source table** — baseline is ledger-based, canonical reads `ar_ageing`. Lacks the 15 ageing columns; also carries 4 the canonical does *not* have (`last_entry_date`, `salesman`, `last_narration`, `days_outstanding`). Only `account` overlaps cleanly — `outstanding_bhd` changes meaning |
 | `v_low_stock` | `lowstock_unification_migration.sql` | **STALE, diverges both ways** — lacks `sold_90d`, `days_cover`, `suggested_reorder_qty`, `status`; carries `product_name`, `sku_code`, `category_name`, `warehouse_name`, `balance_value_bhd`, `as_of_date` which the canonical drops |
 | `v_sales_by_payment`, `v_sales_by_division` | `division_payment_migration.sql` | not present in the baseline at all |
@@ -53,8 +53,9 @@ copy one view's block out of the file and run just that. For `v_sales`, `v_recei
 `v_product_margin` **nothing stops you** — the statement succeeds and the numbers quietly go
 wrong. If you need one view refreshed, take it from its canonical migration file, never from here.
 
-`v_sales` has been redefined three times: `channel_migration.sql` → `revenue_channel_migration.sql`
-→ `division_payment_migration.sql`. Only the last one matters; the earlier two are history.
+`v_sales` has been redefined four times: `channel_migration.sql` → `revenue_channel_migration.sql`
+→ `division_payment_migration.sql` → `r7_narration_mask_migration.sql` (R7b). Only the last one matters; the
+earlier three are history.
 
 ### Revenue basis — do not "reconcile" these
 
@@ -371,4 +372,41 @@ user or password is touched. The reverse refuses while any `user_roles` row or p
 four new roles (change those people on the Team page first). Both files were run on a throwaway local cluster:
 the migration twice, the reverse refused with a management row and with a pending finance invite, then restored
 the six roles twice.
+
+## Release R7b "Safe access" (27-Sep-2026, none applied yet)
+
+Four files, each additive and idempotent with its own reverse. None is needed by the code: the API deploys first
+and works before and after each one. Verified on a throwaway local Postgres 17.6 cluster with a synthetic slice of
+the schema (Supabase-style `anon` / `authenticated` / `yq_readonly` roles, a fake `auth.users`): every migration
+applied twice, every reverse twice, re-applied after the reverse, and every refusal below provoked once.
+
+- **`user_roles_must_reset_migration.sql`** (R1's file, never applied, widened): the backfill now flags every role
+  whose auth metadata says `must_reset` — salesmen AND admins — except the owner addresses listed in the file (keep
+  them equal to `OWNER_EMAILS`); the closing check refuses to finish if an owner row is flagged. Production read
+  27-Sep-2026: 16 rows would be flagged (15 of 16 salesmen, 1 of 3 admins); the owner's row is not among them.
+  **Scheduled by the owner at an announced quiet hour** — from that moment each flagged person is held at the
+  password screen until they set their own. Reverse: `user_roles_must_reset_reverse.sql` (drops the column).
+- **`r7_narration_mask_migration.sql`** — now the canonical owner of `v_sales`: `CREATE OR REPLACE` with the 31
+  columns of `division_payment_migration.sql`'s definition verbatim except `narration`, which masks every 9-digit
+  run (CPR) and every run of 15+ digits (cards, accounts), keeping the last 3 digits. `v_sales_agent` (`select *`)
+  and the 20 other views on `v_sales` follow without being touched; grants are kept (`anon` / `authenticated`
+  revoked again). The same patterns mask the narration at parse time (`scripts/ingest.py mask_personal_ids`).
+  Proven read-only on production: the new body yields the live view's 31 names and types, every other column is
+  identical on all 11,956 rows, the SQL mask equals the parser's on all 1,796 narrations (217 changed, none left with
+  a 9- or 15+-digit run), ~8 ms for the whole table; order numbers (`YQ-2609-0019`) survive and the Focus matcher's
+  regex still finds them. Reverse: `r7_narration_mask_reverse.sql` (the division_payment body verbatim).
+- **`r7_narration_mask_data_migration.sql` — OPTIONAL, the owner decides**: masks the STORED
+  `order_lines.narration` (and the batch importer's copies in `ingest_stage` / `ingest_replaced`, empty today) with
+  the same patterns. It cannot be undone from SQL: take `python -m scripts.db_backup --tables order_lines` first
+  and keep that backup (it holds the numbers in clear) out of OneDrive. `r7_narration_mask_data_reverse.sql`
+  changes nothing and raises with the instructions, so running it can never be mistaken for a restore.
+- **`r7_salesmen_login_unique_migration.sql`** — `salesmen_user_email_lower_key`, a unique index on
+  `lower(user_email) where user_email is not null`; a duplicate guard runs first and names the problem instead of
+  failing half way (production: 17 logins, 17 distinct). `app/shop.salesman_for_user` now matches the lower-cased
+  address exactly (the ILIKE read `_` / `%` as wildcards) and links neither row if two share a login. Reverse:
+  `r7_salesmen_login_unique_reverse.sql`.
+
+Not a migration: session revocation on a password change uses Supabase Auth's own sign-out with scope `others`
+(`app/user_auth.revoke_other_sessions`), not a SECURITY DEFINER function over `auth.sessions` — the documented API,
+no grant on the auth schema, nothing for `service_role` to guard. `docs/SECURITY_ROTATION.md` § Sessions.
 
