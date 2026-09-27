@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, X, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes, Megaphone } from 'lucide-react'
+import { Plus, Pencil, Trash2, X, Check, Loader2, Eye, AlertTriangle, Tag, Percent, Boxes, Megaphone, Archive, ArchiveRestore, BarChart3, Info } from 'lucide-react'
 import { CampaignsSection } from '@/pages/shop-ops/CampaignsSection'
 import { apiGet, apiPost, apiPatch, apiDelete } from '@/lib/api'
 import { errorText } from '@/lib/errorText'
@@ -20,10 +20,14 @@ import { DataTable, Stat, type Column } from '@/components/DataTable'
 type RuleKind = 'qty_tier' | 'cart_value' | 'coupon' | 'bundle_price' | 'salesman_offer'
 type DiscountType = 'pct' | 'amount' | 'fixed'
 
+interface RuleBucket { mod: number; hold: number[] }
 interface RuleScope {
   item_codes?: string[] | null
   categories?: string[] | null
   referral_codes?: string[] | null
+  /** R7d hold-out: merchants whose bucket (sha1 of the customer, else the device, mod `mod`) is in
+   *  `hold` never get the offer — the comparison group. Automatic offers only, never a coupon. */
+  bucket?: RuleBucket | null
 }
 
 interface DiscountRule {
@@ -46,8 +50,36 @@ interface DiscountRule {
   is_active: boolean
   summary?: string | null
   status?: string | null
+  /** R7d: archived = switched off and kept for its orders (never deleted once used) */
+  archived_at?: string | null
+  /** R7d: some order used it (coupon uses, the ledger, a line) — Archive, never Delete */
+  referenced?: boolean | null
+  orders?: number | null
 }
-interface RulesResp { rules: DiscountRule[] }
+interface RulesResp { rules: DiscountRule[]; archived?: number; can_archive?: boolean }
+
+/** v_offer_performance, one row per rule (R7d). Money is BHD; GM is ex-VAT against the landed cost. */
+interface OfferPerf {
+  rule_id: number
+  name: string
+  kind: string
+  level: 'line' | 'cart'
+  archived_at?: string | null
+  orders: number
+  units: number
+  merchants: number
+  reps: number
+  list_value_bhd: number | string
+  discount_bhd: number | string
+  revenue_ex_vat_bhd?: number | string | null
+  cost_bhd?: number | string | null
+  gm_bhd?: number | string | null
+  gm_pct?: number | string | null
+  uncosted_lines: number
+  clamp_count: number
+  last_order_at?: string | null
+}
+interface OfferPerfResp { available: boolean; ran: boolean; rows: OfferPerf[]; note?: string }
 
 interface RuleBreach { item_code: string; unit_bhd: number; floor_bhd: number }
 interface RuleImpact { items: number; breach_count: number; breaches: RuleBreach[] }
@@ -106,6 +138,21 @@ const RULE_STATUS_STYLE: Record<string, string> = {
   expired: 'bg-secondary text-muted-foreground',
   exhausted: 'bg-secondary text-muted-foreground',
   inactive: 'bg-muted text-muted-foreground/70',
+  archived: 'bg-muted text-muted-foreground/60 line-through decoration-1',
+}
+
+/** The hold-out presets (R7d). Custom = a bucket set some other way; it is kept as it is. */
+type HoldOut = 'off' | '10' | '20' | '50' | 'custom'
+const HOLDOUTS: { value: Exclude<HoldOut, 'custom'>; label: string; bucket: RuleBucket | null }[] = [
+  { value: 'off', label: 'Everyone gets it', bucket: null },
+  { value: '10', label: 'Hold back 1 in 10 shops', bucket: { mod: 10, hold: [0] } },
+  { value: '20', label: 'Hold back 1 in 5 shops', bucket: { mod: 5, hold: [0] } },
+  { value: '50', label: 'Hold back half the shops', bucket: { mod: 2, hold: [0] } },
+]
+function holdOutOf(b?: RuleBucket | null): HoldOut {
+  if (!b) return 'off'
+  const hit = HOLDOUTS.find((h) => h.bucket && h.bucket.mod === b.mod && h.bucket.hold.join() === [...b.hold].sort((x, y) => x - y).join())
+  return hit ? hit.value : 'custom'
 }
 
 const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Sold out' }
@@ -268,6 +315,8 @@ interface RuleForm {
   maxUses: string
   priority: string
   isActive: boolean
+  holdOut: HoldOut
+  bucketRaw: RuleBucket | null
 }
 
 function emptyForm(): RuleForm {
@@ -277,6 +326,7 @@ function emptyForm(): RuleForm {
     minQty: '', minValue: '', couponCode: '',
     itemCodes: '', categories: '', referralCodes: '',
     stackable: false, startsAt: '', endsAt: '', maxUses: '', priority: '100', isActive: true,
+    holdOut: 'off', bucketRaw: null,
   }
 }
 
@@ -303,7 +353,16 @@ function formFromRule(r: DiscountRule): RuleForm {
     maxUses: r.max_uses ? String(r.max_uses) : '',
     priority: r.priority != null ? String(r.priority) : '100',
     isActive: r.is_active !== false,
+    holdOut: holdOutOf(r.scope?.bucket),
+    bucketRaw: r.scope?.bucket || null,
   }
+}
+
+/** The bucket to save: a preset, the rule's own custom one, or none (and never on a coupon). */
+function bucketFor(f: RuleForm): RuleBucket | null {
+  if (f.kind === 'coupon' || f.holdOut === 'off') return null
+  if (f.holdOut === 'custom') return f.bucketRaw
+  return HOLDOUTS.find((h) => h.value === f.holdOut)?.bucket || null
 }
 
 /**
@@ -325,6 +384,7 @@ function buildPayload(f: RuleForm) {
       item_codes: splitCodes(f.itemCodes),
       categories: splitCategories(f.categories),
       referral_codes: splitReferrals(f.referralCodes),
+      ...(bucketFor(f) ? { bucket: bucketFor(f) } : {}),
     },
     pct_off: f.discountType === 'pct' ? numOr0(f.pctOff) : 0,
     amount_off_bhd: f.discountType === 'amount' ? numOr0(f.amountOff) : 0,
@@ -519,6 +579,23 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
               <p className="text-[11px] text-muted-foreground">Comma-separated. Leave all three blank to apply to every item and every customer.</p>
             </div>
 
+            {f.kind !== 'coupon' && (
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold text-muted-foreground">Hold-out (to measure the offer)</span>
+                <select
+                  value={f.holdOut}
+                  onChange={(e) => set('holdOut', e.target.value as HoldOut)}
+                  className="flex h-11 w-full rounded-lg border border-input bg-card px-3.5 text-sm text-foreground shadow-sm outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {HOLDOUTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                  {f.holdOut === 'custom' && <option value="custom">Custom split (kept as saved)</option>}
+                </select>
+                <span className="mt-1 block text-[11px] text-muted-foreground">
+                  Held-back shops see the normal price, always the same shops, so the Performance tab can compare like with like.
+                </span>
+              </label>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <label className="block">
                 <span className="mb-1 block text-xs font-semibold text-muted-foreground">Starts</span>
@@ -587,7 +664,11 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
 function RulesSection() {
   const qc = useQueryClient()
   const toast = useToast()
-  const { data, isLoading, isError, error } = useQuery({ queryKey: ['shop-rules'], queryFn: () => apiGet<RulesResp>('/shop/rules') })
+  const [showArchived, setShowArchived] = useState(false)
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['shop-rules', showArchived],
+    queryFn: () => apiGet<RulesResp>(showArchived ? '/shop/rules?archived=1' : '/shop/rules'),
+  })
   const [editing, setEditing] = useState<DiscountRule | 'new' | null>(null)
 
   const refresh = () => qc.invalidateQueries({ queryKey: ['shop-rules'] })
@@ -599,13 +680,28 @@ function RulesSection() {
   })
 
   async function remove(r: DiscountRule) {
-    if (!window.confirm(`Delete "${r.name}"? This can't be undone.`)) return
+    if (!window.confirm(`Delete "${r.name}"? No order has used it. This can't be undone.`)) return
     try {
       await apiDelete(`/shop/rules/${r.id}`)
       toast('Rule deleted.', 'success')
       refresh()
     } catch (e) {
       toast(errorText(e, 'Delete failed.'), 'error')
+      refresh()
+    }
+  }
+
+  // R7d (audit OFF-4): a rule an order used is archived — switched off, out of this list, kept with
+  // its orders and the ledger's snapshot — never deleted. Restore brings it back switched off.
+  async function archive(r: DiscountRule, restore = false) {
+    if (!restore && !window.confirm(`Archive "${r.name}"? It is switched off and leaves this list; the orders that used it keep it.`)) return
+    try {
+      await apiPost(`/shop/rules/${r.id}/${restore ? 'restore' : 'archive'}`, {})
+      toast(restore ? 'Rule restored — switched off until you turn it on.' : 'Rule archived.', 'success')
+      refresh()
+      qc.invalidateQueries({ queryKey: ['shop-offer-performance'] })
+    } catch (e) {
+      toast(errorText(e, restore ? 'Restore failed.' : 'Archive failed.'), 'error')
     }
   }
 
@@ -622,17 +718,34 @@ function RulesSection() {
     { key: 'scope', label: 'Scope', render: (_, r) => <ScopeChips scope={r.scope} /> },
     { key: 'starts_at', label: 'Window', render: (_, r) => windowLabel(r.starts_at, r.ends_at) },
     { key: 'uses', label: 'Uses', align: 'right', render: (_, r) => usesLabel(r) },
+    { key: 'orders', label: 'Orders', align: 'right', render: (_, r) => (r.orders == null ? '—' : num(r.orders)) },
     { key: 'status', label: 'Status', render: (_, r) => <RuleStatusPill status={r.status} /> },
     { key: 'is_active', label: 'Active', render: (_, r) => (
-        <Toggle checked={r.is_active} onChange={() => toggleActive.mutate(r)} label={r.is_active ? 'On' : 'Off'} />
+        r.archived_at ? <span className="text-[12px] text-muted-foreground">Archived</span>
+          : <Toggle checked={r.is_active} onChange={() => toggleActive.mutate(r)} label={r.is_active ? 'On' : 'Off'} />
       ) },
     { key: 'id', label: '', align: 'right', render: (_, r) => (
         <div className="flex justify-end gap-1.5">
-          <Button type="button" variant="outline" size="sm" onClick={() => setEditing(r)}><Pencil size={13} /></Button>
-          <Button type="button" variant="destructive" size="sm" onClick={() => remove(r)}><Trash2 size={13} /></Button>
+          {r.archived_at ? (
+            <Button type="button" variant="outline" size="sm" onClick={() => archive(r, true)} title="Restore to the list (switched off)">
+              <ArchiveRestore size={13} /> Restore
+            </Button>
+          ) : (
+            <>
+              <Button type="button" variant="outline" size="sm" onClick={() => setEditing(r)} aria-label={`Edit ${r.name}`}><Pencil size={13} /></Button>
+              {r.referenced ? (
+                <Button type="button" variant="outline" size="sm" onClick={() => archive(r)} title="Orders used this offer — archive keeps its history">
+                  <Archive size={13} /> Archive
+                </Button>
+              ) : (
+                <Button type="button" variant="destructive" size="sm" onClick={() => remove(r)} aria-label={`Delete ${r.name}`} title="No order used it"><Trash2 size={13} /></Button>
+              )}
+            </>
+          )}
         </div>
       ) },
   ]
+  const archivedCount = data?.archived ?? 0
 
   return (
     <div>
@@ -641,7 +754,12 @@ function RulesSection() {
           Quantity tiers, cart-value discounts, coupons, bundle prices and salesman-only offers — every
           discount is clamped to the margin floor automatically.
         </p>
-        <Button size="sm" onClick={() => setEditing('new')} className="shrink-0"><Plus size={15} /> New rule</Button>
+        <div className="flex shrink-0 items-center gap-3">
+          {(archivedCount > 0 || showArchived) && (
+            <Toggle checked={showArchived} onChange={setShowArchived} label={`Show archived${archivedCount ? ` (${archivedCount})` : ''}`} />
+          )}
+          <Button size="sm" onClick={() => setEditing('new')} className="shrink-0"><Plus size={15} /> New rule</Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -792,10 +910,91 @@ function UnpricedSection() {
   )
 }
 
+// ── section: Performance (v_offer_performance, R7d) ───────────────────────────
+
+function fmtDay(iso?: string | null): string {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  } catch {
+    return String(iso)
+  }
+}
+const n3 = (v?: number | string | null) => (v == null || v === '' ? null : Number(v))
+
+function PerformanceSection() {
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['shop-offer-performance'],
+    queryFn: () => apiGet<OfferPerfResp>('/shop/offers/performance'),
+  })
+  const rows = (data?.rows || []).filter((r) => r.orders > 0 || r.clamp_count > 0)
+  const totals = useMemo(() => rows.reduce(
+    (t, r) => ({ orders: t.orders + r.orders, discount: t.discount + (n3(r.discount_bhd) || 0), gm: t.gm + (n3(r.gm_bhd) || 0) }),
+    { orders: 0, discount: 0, gm: 0 }), [rows])
+  const cols: Column<OfferPerf>[] = [
+    { key: 'name', label: 'Offer', render: (_, r) => (
+        <div>
+          <div className={cn('font-semibold', r.archived_at && 'text-muted-foreground')}>{r.name}{r.archived_at ? ' · archived' : ''}</div>
+          <div className="text-[11px] text-muted-foreground">{KIND_LABEL[r.kind] || r.kind} · {r.level === 'cart' ? 'whole order' : 'per line'}</div>
+        </div>
+      ) },
+    { key: 'orders', label: 'Orders', align: 'right', render: (_, r) => num(r.orders) },
+    { key: 'units', label: 'Units', align: 'right', render: (_, r) => num(r.units) },
+    { key: 'merchants', label: 'Shops', align: 'right', render: (_, r) => num(r.merchants) },
+    { key: 'reps', label: 'Reps', align: 'right', render: (_, r) => num(r.reps) },
+    { key: 'list_value_bhd', label: 'List value', align: 'right', render: (_, r) => money3(n3(r.list_value_bhd)) },
+    { key: 'discount_bhd', label: 'Discount cost', align: 'right', render: (_, r) => money3(n3(r.discount_bhd)) },
+    { key: 'gm_bhd', label: 'GM after discount', align: 'right', render: (_, r) => (
+        <span title={r.uncosted_lines ? `${r.uncosted_lines} line(s) without a landed cost are left out` : undefined}>
+          {money3(n3(r.gm_bhd))}{r.gm_pct != null ? <span className="ml-1 text-muted-foreground">({Number(r.gm_pct).toFixed(1)}%)</span> : null}
+          {r.uncosted_lines ? <span className="ml-1 text-amber-600">*</span> : null}
+        </span>
+      ) },
+    { key: 'clamp_count', label: 'Floor-capped', align: 'right', render: (_, r) => num(r.clamp_count) },
+    { key: 'last_order_at', label: 'Last used', render: (_, r) => fmtDay(r.last_order_at) },
+  ]
+  if (isLoading) return <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
+  if (isError) return <ErrorPanel error={error} />
+  return (
+    <div>
+      <p className="mb-4 max-w-2xl text-sm text-muted-foreground">
+        What each offer really did: the orders and shops that used it, what it cost in discount, and the gross margin left
+        after it (ex-VAT, against the landed cost saved on each order line). Cancelled and test orders are left out.
+      </p>
+      {!data?.ran || rows.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center">
+          <BarChart3 size={26} className="mx-auto text-muted-foreground" />
+          <p className="mt-3 font-display text-[15px] font-bold">No offer has run yet</p>
+          <p className="mx-auto mt-1 max-w-md text-[12.5px] text-muted-foreground">
+            {data?.available === false
+              ? 'Offer measurement switches on with the next update. From then on every order that uses an offer is recorded here.'
+              : 'When an order uses an offer, it shows here: orders, shops, discount cost and the margin left after it.'}
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-3 sm:w-fit sm:grid-cols-3">
+            <Stat label="Orders with an offer" value={num(totals.orders)} />
+            <Stat label="Discount cost" value={bhd(totals.discount, 3)} tone="amber" />
+            <Stat label="GM after discount" value={bhd(totals.gm, 3)} tone="emerald" />
+          </div>
+          <DataTable rows={rows} cols={cols} exportName="yq-offer-performance" empty="No offer has run yet." />
+        </>
+      )}
+      {data?.note && (
+        <p className="mt-3 flex items-start gap-1.5 text-[11.5px] text-muted-foreground">
+          <Info size={12} className="mt-[1px] shrink-0" aria-hidden="true" />{data.note}
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── page ───────────────────────────────────────────────────────────────────────
 
 const SECTIONS = [
   { key: 'rules', label: 'Rules & coupons', icon: Tag },
+  { key: 'performance', label: 'Performance', icon: BarChart3 },
   { key: 'campaigns', label: 'Campaigns', icon: Megaphone },
   { key: 'margins', label: 'Margin health', icon: Percent },
   { key: 'unpriced', label: 'Unpriced stock', icon: Boxes },
@@ -825,6 +1024,7 @@ export default function ShopRules() {
       </div>
 
       {tab === 'rules' && <RulesSection />}
+      {tab === 'performance' && <PerformanceSection />}
       {tab === 'campaigns' && <CampaignsSection />}
       {tab === 'margins' && <MarginsSection />}
       {tab === 'unpriced' && <UnpricedSection />}

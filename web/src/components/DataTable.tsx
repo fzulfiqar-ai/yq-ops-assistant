@@ -30,6 +30,7 @@ export function DataTable<T extends object>({
   searchable = true,
   exportName,
   initialQuery,
+  pinLast = false,
 }: {
   rows: T[]
   cols: Column<T>[]
@@ -39,7 +40,13 @@ export function DataTable<T extends object>({
   searchable?: boolean
   exportName?: string
   initialQuery?: string
+  /** Keep the last column (row actions) pinned to the right edge while the table scrolls sideways,
+   *  so a wide table never pushes its buttons off-screen (R7d, audit UX-10). */
+  pinLast?: boolean
 }) {
+  const lastKey = cols[cols.length - 1]?.key
+  const pinTh = 'sticky right-0 z-20 bg-secondary shadow-[-10px_0_12px_-12px_rgba(0,0,0,0.35)]'
+  const pinTd = 'sticky right-0 z-[1] bg-card shadow-[-10px_0_12px_-12px_rgba(0,0,0,0.35)]'
   const [query, setQuery] = useState(initialQuery || '')
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null)
   const [limit, setLimit] = useState(PAGE)
@@ -178,6 +185,7 @@ export function DataTable<T extends object>({
                         className={cn(
                           'cursor-pointer select-none whitespace-nowrap px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
                           c.align === 'right' ? 'text-right' : 'text-left',
+                          pinLast && c.key === lastKey && pinTh,
                         )}
                       >
                         <span className={cn('inline-flex items-center gap-1', c.align === 'right' && 'flex-row-reverse')}>
@@ -196,7 +204,7 @@ export function DataTable<T extends object>({
                     {cols.map((c) => {
                       const v = (row as Record<string, unknown>)[c.key]
                       return (
-                        <td key={c.key} className={cn('whitespace-nowrap px-4 py-2.5', c.align === 'right' ? 'text-right tabular-nums' : 'text-left')}>
+                        <td key={c.key} className={cn('whitespace-nowrap px-4 py-2.5', c.align === 'right' ? 'text-right tabular-nums' : 'text-left', pinLast && c.key === lastKey && pinTd)}>
                           {c.render ? c.render(v, row) : c.money ? bhd(Number(v ?? 0)) : v == null ? '—' : String(v)}
                         </td>
                       )
