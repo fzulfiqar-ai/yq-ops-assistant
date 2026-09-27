@@ -2585,7 +2585,8 @@ def recent_customers(salesman_id: int | None = None, limit: int = 20) -> list[di
 def set_status(order_id: int, status: str, note: str | None, actor: str, *,
                allowed: tuple[str, ...] | None = None, cancelled_by: str = "staff",
                expected_status: str | None = None, reason_code: str | None = None,
-               focus_invoice_no: str | None = None) -> dict:
+               focus_invoice_no: str | None = None, keep_totals: bool = False,
+               detail_extra: dict | None = None) -> dict:
     """Move an order along the lifecycle. `allowed` narrows the statuses this actor's role may set
     (the storekeeper only moves goods). Each stage stamps its own timestamp; Preparing records
     which salesman the storekeeper issued the goods to.
@@ -2599,7 +2600,11 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
     the note), Delivered may carry the optional Focus invoice number, and Confirmed / Delivered
     settle the merchant's sticky rep (app.attribution.settle_sticky) once, never overwriting.
     cancel_reason_code is written through _update_optional, so a cancel still lands after the
-    reverse script drops the column under a cached probe."""
+    reverse script drops the column under a cached probe.
+
+    R7a Focus link (shop_pipeline.decide_focus_link): `keep_totals` leaves the confirmed-total
+    columns as they are at Confirmed (an accept never writes money — every reader falls back to
+    total_bhd), and `detail_extra` adds keys to the status event's detail (never 'from'/'note')."""
     o = get_order(order_id)
     if not o:
         raise ShopError("Order not found.")
@@ -2615,6 +2620,8 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
     now = _iso()
     upd: dict = {"status": status, "updated_at": now}
     detail: dict = {"note": clean(note, 500) or None, "from": o["status"]}
+    for k, v in (detail_extra or {}).items():
+        detail.setdefault(k, v)
     stamp = {"confirmed": "confirmed_at", "packed": "packed_at", "out_for_delivery": "out_for_delivery_at",
              "delivered": "delivered_at", "cancelled": "cancelled_at"}.get(status)
     if stamp:
@@ -2622,7 +2629,7 @@ def set_status(order_id: int, status: str, note: str | None, actor: str, *,
     if status == "packed" and o.get("salesman_id"):
         upd["issued_to_salesman_id"] = o["salesman_id"]      # who holds the goods from here on
         upd["issued_at"] = now
-    if status == "confirmed" and o.get("total_confirmed_bhd") is None:
+    if status == "confirmed" and o.get("total_confirmed_bhd") is None and not keep_totals:
         upd["subtotal_confirmed_bhd"] = o.get("subtotal_bhd")
         upd["total_confirmed_bhd"] = o.get("total_bhd")
     if status == "cancelled":

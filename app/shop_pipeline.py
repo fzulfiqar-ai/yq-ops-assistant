@@ -20,6 +20,13 @@ B-08, SEC-10, TXN-08).
     v_shop_focus_recon: delivered orders without an invoice, whose invoice is not in the
     uploaded ledger (v_sales), whose invoice's salesman or amount disagrees with the order, or
     whose invoice number sits on more than one delivered order.
+  * Focus link (R7a, scripts/r7_focus_links_migration.sql) — v_shop_focus_candidates suggests
+    which Focus invoice covers which open order (Narration naming the order, a Stock Issue
+    Voucher naming it, or the same rep's invoice with the same lines); the office accepts or
+    rejects each pair (shop_order_focus_links). An accept records the link, fills an empty
+    focus_invoice_no and moves an order that is still open to Delivered through shop.set_status
+    — never a money column, never a cancelled order. Invoice numbers are compared in ONE
+    normalised form everywhere (clean_invoice_no = the views' SQL).
 
 Money is Decimal end to end here; floats appear only at the JSON edge (shop.money).
 """
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -263,9 +271,18 @@ def record_return(order_id: int, lines, reason: str | None, actor: str) -> dict:
 
 # ── Focus invoice ─────────────────────────────────────────────────────────────
 
+# Focus writes 'SI : SI-YQ-26-09-119' (the voucher prefix), the stock ledger 'SI:SI-YQ-26-09-119',
+# staff type 'SI-YQ-26-09-119' or 'si-yq-26-09-119 '. The views compare
+# upper(regexp_replace(trim(x), '^SI\s*:\s*', '', 'i')) — this is the same rule in Python.
+_SI_PREFIX = re.compile(r"^SI\s*:\s*", re.I)
+
+
 def clean_invoice_no(raw) -> str | None:
+    """The invoice number in the one form every comparison uses: trimmed, the 'SI :' voucher
+    prefix removed, upper case — SI-YQ-26-09-119. None when nothing is left."""
     from app.shop import clean
-    return clean(raw, INVOICE_MAX).strip() or None
+    s = _SI_PREFIX.sub("", clean(raw, INVOICE_MAX + 10).strip()).upper()
+    return s[:INVOICE_MAX] or None
 
 
 def set_invoice(order_id: int, focus_invoice_no, actor: str) -> dict:
@@ -342,5 +359,280 @@ def focus_recon(limit: int = 300) -> dict:
             "invoice_date": r.get("invoice_date"), "focus_salesman": r.get("focus_salesman"),
             "amount_diff_bhd": money(r["amount_diff_bhd"]) if r.get("amount_diff_bhd") is not None else None,
             "flags": flags, "is_test": bool(r.get("is_test")),
+            # R7a (absent before scripts/r7_focus_links_migration.sql): every invoice the order is
+            # compared with, how it got them (confirmed link / typed number) and the orders sharing them
+            "invoice_keys": r.get("invoice_keys"), "link_state": r.get("link_state"),
+            "linked_orders_n": _i(r.get("linked_orders_n")),
+            "linked_orders_total_bhd": (money(r["linked_orders_total_bhd"])
+                                        if r.get("linked_orders_total_bhd") is not None else None),
         })
     return {"rows": out, "count": len(out), "issues": issues, "ledger_as_of": ledger_as_of()}
+
+
+# ── Focus link (R7a): suggestions, accept / reject ────────────────────────────
+
+LINKS_TABLE = "shop_order_focus_links"
+CANDIDATES_VIEW = "v_shop_focus_candidates"
+LINKS_HINT = "Focus suggestions not available yet — apply scripts/r7_focus_links_migration.sql."
+LINK_ACTIONS = ("accept", "reject")
+LINK_METHODS = ("narration_ref", "sio_ref", "auto_items", "manual")
+# plain words for the drawer / list (what the office reads next to a suggestion)
+LINK_METHOD_LABELS = {"narration_ref": "Order number in the invoice note",
+                      "sio_ref": "Order number on the stock issue",
+                      "auto_items": "Same rep, same items", "manual": "Entered by hand"}
+# an accept moves an order that is still open to Delivered; delivered stays, cancelled is refused
+ADVANCE_FROM = ("new", "confirmed", "packed", "out_for_delivery")
+CANDIDATES_PER_ORDER = 5
+FOCUS_ACTOR = "focus-recon:"
+CANCELLED_LINK_MSG = "This order was cancelled — it can't be linked to a Focus invoice."
+NOT_IN_LEDGER_MSG = ("{key} is not in the uploaded Focus sales yet — check the number, or upload the "
+                     "latest day book and try again.")
+LEDGER_CHECK_MSG = "Couldn't check the Focus sales just now — try again in a minute."
+
+
+def _missing_table(e: Exception) -> bool:
+    """PostgREST's answer for a table / view the migration has not created yet."""
+    code = str(getattr(e, "code", "") or "")
+    msg = str(e)
+    return code in ("42P01", "PGRST205") or "42P01" in msg or "PGRST205" in msg or \
+        ("relation" in msg and "does not exist" in msg) or "Could not find the table" in msg
+
+
+def _unique_violation(e: Exception) -> bool:
+    code = str(getattr(e, "code", "") or "")
+    return code == "23505" or "23505" in str(e) or "duplicate key" in str(e)
+
+
+def _f3(x) -> float | None:
+    return None if x is None or x == "" else float(q3(x))
+
+
+def _candidate_out(r: dict) -> dict:
+    """One suggestion as the API emits it: the invoice, how it was found, and the line diff."""
+    from app.shop import money
+    lines = {"order": _i(r.get("lines_order")), "invoice": _i(r.get("lines_invoice")),
+             "matched": _i(r.get("lines_matched")), "qty_diff": _i(r.get("lines_qty_diff")),
+             "price_diff": _i(r.get("lines_price_diff")),
+             "missing_on_invoice": _i(r.get("lines_missing_on_invoice")),
+             "extra_on_invoice": _i(r.get("lines_extra_on_invoice"))}
+    amount_diff = money(r.get("amount_diff_bhd"))
+    method = r.get("method")
+    return {
+        "invoice_key": r.get("invoice_key"), "invoice_date": (str(r["invoice_date"])[:10] if r.get("invoice_date") else None),
+        "focus_salesman": r.get("focus_salesman"), "focus_customer": r.get("focus_customer"),
+        "invoice_total_bhd": money(r.get("invoice_total_bhd")),
+        "invoice_open_bhd": money(r.get("invoice_open_bhd")),
+        "invoice_linked_n": _i(r.get("invoice_linked_n")),
+        "invoice_orders_n": _i(r.get("invoice_orders_n"), 1),
+        "amount_diff_bhd": amount_diff,
+        "method": method, "method_label": LINK_METHOD_LABELS.get(method, method),
+        "confidence": _f3(r.get("confidence")), "overlap_share": _f3(r.get("overlap_share")),
+        "sio_key": r.get("sio_key"), "rank": _i(r.get("rank"), 1),
+        "lines": lines,
+        # every line on both sides at the same quantity and price, and the same money
+        "exact": (lines["order"] > 0 and lines["matched"] == lines["order"] == lines["invoice"]
+                  and abs(amount_diff) < 0.0005),
+    }
+
+
+def list_focus_candidates(limit: int = 300, per_order: int = CANDIDATES_PER_ORDER) -> dict:
+    """Open orders without a confirmed Focus link, each with its suggested invoices (best first,
+    at most `per_order`). Reads v_shop_focus_candidates (service role only — it carries shop and
+    Focus customer names, which leave only through this admin route). Newest order first; `limit`
+    caps the view rows read. Empty + hint before the migration."""
+    from app.shop import STATUS_LABELS, money
+    lim = max(1, min(int(limit or 300), 1000))
+    keep = max(1, min(int(per_order or CANDIDATES_PER_ORDER), 20))
+    try:
+        rows = (database.get_client().table(CANDIDATES_VIEW).select("*")
+                .order("order_created_at", desc=True).limit(lim).execute().data or [])
+    except Exception as e:  # noqa: BLE001 — the view arrives with the migration
+        log.info("focus candidates unavailable: %s", e)
+        return {"orders": [], "count": 0, "candidates": 0, "hint": LINKS_HINT}
+    by_order: dict[int, dict] = {}
+    for r in rows:
+        oid = _i(r.get("order_id"))
+        o = by_order.get(oid)
+        if o is None:
+            status = r.get("order_status")
+            o = by_order[oid] = {
+                "order_id": oid, "order_no": r.get("order_no"), "status": status,
+                "status_label": STATUS_LABELS.get(status, status), "created_at": r.get("order_created_at"),
+                "customer_shop": r.get("customer_shop"), "salesman_id": r.get("salesman_id"),
+                "salesman_name": r.get("salesman_name"), "order_total_bhd": money(r.get("order_total_bhd")),
+                "typed_invoice_key": r.get("typed_invoice_key"), "candidates": [],
+            }
+        o["candidates"].append(_candidate_out(r))
+    out = []
+    shown = 0
+    for o in by_order.values():               # insertion order = newest order first
+        o["candidates"].sort(key=lambda c: (c["rank"], c["invoice_key"] or ""))
+        o["candidates"] = o["candidates"][:keep]
+        shown += len(o["candidates"])
+        out.append(o)
+    return {"orders": out, "count": len(out), "candidates": shown, "ledger_as_of": ledger_as_of()}
+
+
+def _link_row(order_id: int, key: str) -> dict | None:
+    """The decision already on file for this pair, or None. ShopError(LINKS_HINT) before the
+    migration (the table is missing); any other failure propagates."""
+    from app.shop import ShopError
+    try:
+        got = (database.get_client().table(LINKS_TABLE).select("*").eq("order_id", order_id)
+               .eq("invoice_key", key).limit(1).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        if _missing_table(e):
+            raise ShopError(LINKS_HINT) from e
+        raise
+    return got[0] if got else None
+
+
+def _candidate(order_id: int, key: str) -> dict:
+    """This pair's row in v_shop_focus_candidates ({} when the view does not suggest it)."""
+    try:
+        got = (database.get_client().table(CANDIDATES_VIEW).select("*").eq("order_id", order_id)
+               .eq("invoice_key", key).limit(1).execute().data or [])
+    except Exception as e:  # noqa: BLE001 — a missing suggestion is a manual decision, not an error
+        log.info("focus candidate lookup failed for %s/%s: %s", order_id, key, e)
+        return {}
+    return got[0] if got else {}
+
+
+def _in_ledger(key: str) -> bool:
+    """Is this invoice in the uploaded Focus sales (v_sales)? Focus stores 'SI : <key>', so the
+    lookup is a suffix match narrowed to the exact normalised key in Python (an '_' in the key
+    is a LIKE wildcard; the Python comparison removes anything it lets through)."""
+    from app.shop import ShopError
+    try:
+        got = (database.get_client().table("v_sales").select("invoice_no").ilike("invoice_no", f"%{key}")
+               .limit(50).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("ledger lookup for %s failed: %s", key, e)
+        raise ShopError(LEDGER_CHECK_MSG) from e
+    return any(clean_invoice_no(r.get("invoice_no")) == key for r in got)
+
+
+def _save_link(existing: dict | None, order_id: int, key: str, *, state: str, method: str,
+               confidence, sio_key, allocated, note: str | None, actor: str) -> dict:
+    """Insert or update the pair's row. A concurrent first decision (unique violation on
+    (order_id, invoice_key)) is re-read and updated, so the last decision stands and nothing
+    is lost from the audit (both calls write their own audit rows)."""
+    client = database.get_client()
+    row = {"state": state, "method": method, "confidence": _f3(confidence), "sio_key": sio_key or None,
+           "allocated_bhd": _f3(allocated), "note": note or None, "decided_by": actor, "decided_at": _iso()}
+    if existing is None:
+        try:
+            got = client.table(LINKS_TABLE).insert({"order_id": order_id, "invoice_key": key,
+                                                    "created_by": actor, **row}).execute().data or []
+            return got[0] if got else {"order_id": order_id, "invoice_key": key, **row}
+        except Exception as e:  # noqa: BLE001 — only the lost race is retried as an update
+            if not _unique_violation(e):
+                raise
+            existing = _link_row(order_id, key) or {}
+    got = (client.table(LINKS_TABLE).update(row).eq("order_id", order_id).eq("invoice_key", key)
+           .execute().data or [])
+    return got[0] if got else {**(existing or {}), **row}
+
+
+def _fill_invoice_if_empty(o: dict, key: str, actor: str, extra: dict) -> bool:
+    """An order already Delivered: put the invoice number on it only while the field is still
+    empty (compare-and-set on what was read), with the same 'invoice' event set_invoice writes."""
+    prev = o.get("focus_invoice_no")
+    q = database.get_client().table("shop_orders").update({"focus_invoice_no": key, "updated_at": _iso()}) \
+        .eq("id", o["id"])
+    q = q.is_("focus_invoice_no", "null") if prev is None else q.eq("focus_invoice_no", prev)
+    if not (q.execute().data or []):
+        return False                     # someone recorded a number meanwhile: theirs stays
+    database.get_client().table("shop_order_events").insert({
+        "order_id": o["id"], "actor": actor, "event": "invoice",
+        "detail": {"from": prev, "to": key, **extra}}).execute()
+    return True
+
+
+def decide_focus_link(order_id: int, invoice_key, action: str, actor: str, note: str | None = None) -> dict:
+    """The office's answer to a suggestion (or a pair typed by hand): accept | reject.
+
+    accept — stores a confirmed link (method and confidence from the suggestion, else 'manual';
+    a manual pair must be in the uploaded Focus sales), puts the invoice number on the order when
+    its field is empty, and moves an order that is still Received / Confirmed / Preparing / On the
+    way to Delivered through shop.set_status — a compare-and-swap on the status read here, actor
+    'focus-recon:<email>', the status event carrying {invoice_key, method, confidence}. A Received
+    order passes Confirmed on the way (the lifecycle has no direct step) without the confirmed
+    totals being written. No money column is ever written, the merchant is not notified (the goods
+    left long ago) and a cancelled order is refused, never reopened.
+
+    reject — stores the pair as rejected, so v_shop_focus_candidates never suggests it again and a
+    typed number equal to it stops counting in v_shop_focus_recon. The order row is not touched.
+
+    Every decision leaves an audit_log row ('shop.focus_link') and a shop_admin_audit row (entity
+    'focus_link', before/after = the link row). ShopError on bad input, an unknown order (the
+    route's 404), a lost race (CAS_CONFLICT_MSG, the route's 409) or before the migration."""
+    from app import shop, shop_audit
+    from app.audit import log_event
+    act = str(action or "").strip().lower()
+    if act not in LINK_ACTIONS:
+        raise shop.ShopError("Action must be accept or reject.")
+    key = clean_invoice_no(invoice_key)
+    if not key:
+        raise shop.ShopError("Enter the Focus invoice number.")
+    o = shop.get_order(order_id)
+    if not o:
+        raise shop.ShopError("Order not found.")
+    existing = _link_row(order_id, key)                # LINKS_HINT before the migration
+    cand = _candidate(order_id, key)
+    method = cand.get("method") or (existing or {}).get("method") or "manual"
+    if method not in LINK_METHODS:
+        method = "manual"
+    confidence = cand.get("confidence") if cand else (existing or {}).get("confidence")
+    sio_key = cand.get("sio_key") or (existing or {}).get("sio_key")
+    tag = f"{FOCUS_ACTOR}{actor}"
+    extra = {"invoice_key": key, "method": method, "confidence": _f3(confidence)}
+    status_from = o.get("status")
+    status_to = status_from
+    why = shop.clean(note, 300) or None
+    was = (existing or {}).get("state")
+    empty = not str(o.get("focus_invoice_no") or "").strip()
+
+    if act == "accept" and status_from == "cancelled":
+        raise shop.ShopError(CANCELLED_LINK_MSG)
+    # the same decision again (a double tap, a retry after a timeout) writes nothing
+    if (act == "reject" and was == "rejected") or \
+            (act == "accept" and was == "confirmed" and status_from not in ADVANCE_FROM and not empty):
+        return _decision_out(o, o, key, act, existing or {}, method, confidence, sio_key)
+
+    if act == "accept":
+        if not cand and was != "confirmed" and not _in_ledger(key):
+            raise shop.ShopError(NOT_IN_LEDGER_MSG.format(key=key))
+        if status_from in ADVANCE_FROM:
+            cur = status_from
+            if cur == "new":
+                shop.set_status(order_id, "confirmed", None, actor=tag, expected_status="new",
+                                keep_totals=True, detail_extra=extra)
+                cur = "confirmed"
+            done = shop.set_status(order_id, "delivered", None, actor=tag, expected_status=cur,
+                                   focus_invoice_no=(key if empty else None), detail_extra=extra)
+            status_to = done.get("status") or "delivered"
+        elif empty:
+            _fill_invoice_if_empty(o, key, tag, extra)
+        total = o.get("total_confirmed_bhd") if o.get("total_confirmed_bhd") is not None else o.get("total_bhd")
+        link = _save_link(existing, order_id, key, state="confirmed", method=method, confidence=confidence,
+                          sio_key=sio_key, allocated=total, note=why, actor=actor)
+    else:
+        link = _save_link(existing, order_id, key, state="rejected", method=method, confidence=confidence,
+                          sio_key=sio_key, allocated=None, note=why, actor=actor)
+
+    detail = {"order_id": order_id, "order_no": o.get("order_no"), "action": act, **extra,
+              "state": link.get("state"), "sio_key": sio_key, "from_status": status_from, "to_status": status_to}
+    log_event(actor, "shop.focus_link", detail=detail)
+    shop_audit.record(actor, "focus_link", f"{order_id}:{key}", act, existing, link)
+    return _decision_out(o, shop.get_order(order_id) or o, key, act, link, method, confidence, sio_key)
+
+
+def _decision_out(before: dict, after: dict, key: str, act: str, link: dict, method: str, confidence, sio_key) -> dict:
+    from app.shop import STATUS_LABELS
+    st = after.get("status")
+    return {"ok": True, "order_id": before.get("id"), "order_no": before.get("order_no"), "invoice_key": key,
+            "action": act, "state": link.get("state"), "method": method,
+            "method_label": LINK_METHOD_LABELS.get(method, method), "confidence": _f3(confidence),
+            "sio_key": sio_key or None, "status": st, "status_label": STATUS_LABELS.get(st, st),
+            "advanced": st != before.get("status"), "focus_invoice_no": after.get("focus_invoice_no")}

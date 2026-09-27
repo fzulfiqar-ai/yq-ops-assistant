@@ -26,8 +26,10 @@ from app import database
 log = logging.getLogger(__name__)
 
 TABLE = "shop_admin_audit"
-ENTITIES = ("settings", "discount_rule", "campaign", "salesman", "target", "upcoming", "shop_customer", "order")
-ACTIONS = ("create", "update", "delete", "import", "assign")
+ENTITIES = ("settings", "discount_rule", "campaign", "salesman", "target", "upcoming", "shop_customer", "order",
+            "focus_link")
+# accept / reject: the office's answer to a suggested Focus invoice (R7a, shop_pipeline.decide_focus_link)
+ACTIONS = ("create", "update", "delete", "import", "assign", "accept", "reject")
 # never worth a second copy (volatile, or already elsewhere): timestamps the row itself moves,
 # derived fields the API decorates rows with, and browser fingerprints
 STRIP = frozenset({"updated_at", "link", "orders_30d", "references", "impact", "summary", "status_label",

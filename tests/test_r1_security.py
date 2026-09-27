@@ -182,6 +182,10 @@ EXPECTED_GATES = {
     ("POST", "/shop/me/followups/tap"): ["feature:Shop Orders"],
     ("GET", "/shop/me/baskets"): ["feature:Shop Orders"],
     ("GET", "/shop/me/link-week"): ["feature:Shop Orders"],
+    # R7a Focus link: gated exactly like GET /shop/focus-recon (it lists shop and Focus customer names,
+    # and an accept moves an order to Delivered)
+    ("GET", "/shop/focus/candidates"): ["admin"],
+    ("POST", "/shop/orders/{order_id}/focus-link"): ["admin"],
 }
 
 
