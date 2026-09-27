@@ -484,6 +484,24 @@ def _():
     assert fake.rows("audit_log")[-1]["detail"]["to_status"] == "delivered"
 
 
+@test("accept (Received order, partial invoice): the link is stored and the number filled, but the status stays for the rep")
+def _():
+    from app.shop_pipeline import decide_focus_link
+    # 13 lines ordered, 6 on the invoice (production's 0005 on SI-110): not exact, so no jump to Delivered
+    fake = _db(shop_orders=[_order(5, status="new")], shop_order_lines=_lines(5),
+               v_shop_focus_candidates=[_cand(5, "SI-T-9", confidence=0.65, order_status="new", lines_order=13,
+                                              lines_invoice=6, lines_matched=6, lines_missing_on_invoice=7)])
+    before = _money(fake.rows("shop_orders")[0])
+    with _patched(fake):
+        out = decide_focus_link(5, "SI-T-9", "accept", ADMIN)
+    assert out["status"] == "new" and out["advanced"] is False
+    row = fake.rows("shop_orders")[0]
+    assert row["status"] == "new" and not row.get("confirmed_at") and not row.get("delivered_at")
+    assert _money(row) == before
+    assert fake.rows("shop_order_focus_links")[0]["state"] == "confirmed"
+    assert not [e for e in _events(fake, 5) if str(e["event"]).startswith("status:")], "no status event"
+
+
 @test("accept (On the way, number already typed): Delivered, the typed number is never overwritten; Preparing goes straight to Delivered")
 def _():
     from app.shop_pipeline import decide_focus_link
@@ -842,7 +860,11 @@ def _():
     low = _view_body(MIGRATION.read_text(encoding="utf-8"), "v_shop_focus_candidates").lower()
     assert "o.status in ('new', 'confirmed', 'packed', 'out_for_delivery', 'delivered')" in low
     assert "not coalesce(o.is_test, false)" in low and "l.state = 'confirmed'" in low
-    assert "when 'narration_ref' then 1.000 when 'sio_ref' then 0.950" in low and "least(0.900, t.overlap_share)" in low
+    assert "when 'narration_ref' then 1.000 when 'sio_ref' then 0.950" in low
+    # review R7a: SKU presence discounted by exact lines; a 1-2 line order only on exact lines
+    assert "least(0.900, t.overlap_share * (0.5 + 0.5 * t.lines_matched::numeric" in low
+    assert "(sc.lines_order > 2 or sc.lines_matched = sc.lines_order)" in low
+    assert "(k.method <> 'auto_items') desc, k.lines_matched desc" in low
     assert "sc.overlap_share >= 0.6" in low and ">= 0.6 * s.skus" in low
     assert "between o.created_day - 1 and o.created_day + 7" in low
     assert "between s.sio_date and s.sio_date + 2" in low

@@ -554,8 +554,8 @@ def decide_focus_link(order_id: int, invoice_key, action: str, actor: str, note:
 
     accept — stores a confirmed link (method and confidence from the suggestion, else 'manual';
     a manual pair must be in the uploaded Focus sales), puts the invoice number on the order when
-    its field is empty, and moves an order that is still Received / Confirmed / Preparing / On the
-    way to Delivered through shop.set_status — a compare-and-swap on the status read here, actor
+    its field is empty, and moves an order that is still Confirmed / Preparing / On the way — or
+    Received when the invoice matches it exactly — to Delivered through shop.set_status — a compare-and-swap on the status read here, actor
     'focus-recon:<email>', the status event carrying {invoice_key, method, confidence}. A Received
     order passes Confirmed on the way (the lifecycle has no direct step) without the confirmed
     totals being written. No money column is ever written, the merchant is not notified (the goods
@@ -603,7 +603,11 @@ def decide_focus_link(order_id: int, invoice_key, action: str, actor: str, note:
     if act == "accept":
         if not cand and was != "confirmed" and not _in_ledger(key):
             raise shop.ShopError(NOT_IN_LEDGER_MSG.format(key=key))
-        if status_from in ADVANCE_FROM:
+        # a Received order skips the rep's confirmation only when the invoice IS the order (every line
+        # the same SKU, qty and price, same money); a partial match links it and leaves the status to
+        # the rep, who confirms what was really supplied (review R7a: 0005 had 13 lines, 6 invoiced)
+        exact = bool(cand) and _candidate_out(cand)["exact"]
+        if status_from in ADVANCE_FROM and (status_from != "new" or exact):
             cur = status_from
             if cur == "new":
                 shop.set_status(order_id, "confirmed", None, actor=tag, expected_status="new",

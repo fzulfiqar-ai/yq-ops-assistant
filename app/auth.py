@@ -53,7 +53,8 @@ MUST_RESET_DETAIL: dict[str, str] = {"code": MUST_RESET_CODE,
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 READ_ONLY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({("POST", "/auth/password")})
 # The AI surfaces run agents, free-text SQL and uploads: never a read-only login's, GET included.
-READ_ONLY_DENIED_PREFIXES: tuple[str, ...] = ("/agents", "/ask", "/orchestrate", "/assistant", "/field-notes")
+READ_ONLY_DENIED_PREFIXES: tuple[str, ...] = ("/agents", "/ask", "/orchestrate", "/assistant", "/field-notes",
+                                              "/coaching")   # the brief recalls field notes from the AI knowledge base
 READ_ONLY_CODE = "read_only"
 READ_ONLY_DETAIL: dict[str, str] = {"code": READ_ONLY_CODE,
                                     "message": "Your access is read-only. Ask an admin to make this change."}

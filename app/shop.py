@@ -2486,7 +2486,7 @@ def orders_by_tokens(tokens) -> list[dict]:
 
 
 def list_orders(status: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0,
-                salesman_id: int | None = None) -> dict:
+                salesman_id: int | None = None, search_phone: bool = True) -> dict:
     base_cols = ("id,order_no,status,customer_name,customer_phone,customer_shop,customer_area,salesman_id,"
                  "salesman_name,total_bhd,items_count,units_count,has_backorder,created_at,updated_at,source,"
                  "referral_code,coupon_code,placed_by,customer_id,attribution_source,attribution_conflict,"
@@ -2508,8 +2508,9 @@ def list_orders(status: str | None = None, q: str | None = None, limit: int = 50
         if q:
             s = clean(q, 60).replace("%", "").replace(",", " ")
             if s:
-                qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%,"
-                              f"customer_phone.ilike.%{s}%")
+                # a masked role never searches phones: digit-by-digit probing would unmask them
+                phone = f",customer_phone.ilike.%{s}%" if search_phone else ""
+                qry = qry.or_(f"order_no.ilike.%{s}%,customer_name.ilike.%{s}%,customer_shop.ilike.%{s}%{phone}")
         return qry.order("created_at", desc=True).range(offset, offset + max(1, min(limit, 200)) - 1).execute()
 
     # a dropped connection (Supabase HTTP/2 GOAWAY) is read once more on a fresh client (R7a)

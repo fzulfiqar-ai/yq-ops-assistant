@@ -32,7 +32,8 @@
 --                                 rep raised an SI with those lines within 0-2 days;
 --        auto_items    (≤ 0.900) — same rep, invoice dated order day -1 … +7, and at least 60 %
 --                                 of the order's SKUs (alias-resolved) on the invoice;
---                                 confidence = that share, capped at 0.9.
+--                                 a 1-2 line order only on exact lines; confidence = that share x
+--                                 (0.5 + 0.5 x exact-line share), capped at 0.9.
 --      Each row carries line-level diff counts (matched, qty / price differences, missing on the
 --      invoice, extra on the invoice) and a rank per order. A rejected pair is never suggested
 --      again; an invoice already fully covered by confirmed links is not auto-suggested again.
@@ -390,13 +391,17 @@ tiered as (
   select sc.*,
          case when sc.by_narration then 'narration_ref'
               when sc.sio_key is not null then 'sio_ref'
-              when sc.same_rep_window and sc.overlap_share >= 0.6 then 'auto_items' end  as method
+              -- a 1-2 product order proves little by SKU presence: its lines must match exactly
+              when sc.same_rep_window and sc.overlap_share >= 0.6
+                   and (sc.lines_order > 2 or sc.lines_matched = sc.lines_order) then 'auto_items' end  as method
   from scored sc
 ),
 kept as (
   select t.*,
          case t.method when 'narration_ref' then 1.000 when 'sio_ref' then 0.950
-                       else least(0.900, t.overlap_share) end::numeric(4,3)       as confidence,
+                       -- SKU presence, discounted by how many lines match exactly (qty and price)
+                       else least(0.900, t.overlap_share * (0.5 + 0.5 * t.lines_matched::numeric
+                                                             / greatest(t.lines_order, 1))) end::numeric(4,3)  as confidence,
          o.order_no, o.order_status, o.order_created_at, o.customer_shop, o.salesman_id, o.salesman_name,
          o.order_total_bhd, o.typed_invoice_key, o.created_day,
          i.invoice_date, i.focus_salesman, i.focus_customer, i.invoice_total_bhd,
@@ -446,15 +451,15 @@ select k.order_id,
        count(*) over (partition by k.invoice_key)::integer            as invoice_orders_n,
        row_number() over (partition by k.order_id
                           order by coalesce(k.invoice_key = k.typed_invoice_key, false) desc,
-                                   k.confidence desc, k.lines_matched desc,
-                                   abs(k.invoice_total_bhd - k.order_total_bhd),
+                                   (k.method <> 'auto_items') desc, k.lines_matched desc,
+                                   abs(k.invoice_total_bhd - k.order_total_bhd), k.confidence desc,
                                    abs(k.invoice_date - k.created_day), k.invoice_key)::integer  as rank
 from kept k;
 
 revoke all on v_shop_focus_candidates from anon, authenticated;
 
 comment on view v_shop_focus_candidates is
-  'Suggested Focus invoices for live marketplace orders without a confirmed shop_order_focus_links row (R7a). One row per (order, invoice): method narration_ref (1.000, the invoice Narration names the order number) | sio_ref (0.950, a Stock Issue Voucher Narration names it and the same rep''s SI with those lines follows within 2 days) | auto_items (same rep, invoice dated order day -1..+7, >= 60 % of the order''s SKUs on the invoice; confidence = that share, capped 0.9). Line diff counts, rank per order (1 = best), invoice_orders_n = orders this invoice is suggested for. Rejected pairs never return; an invoice fully covered by confirmed links is not auto-suggested again. Carries customer names: service role only.';
+  'Suggested Focus invoices for live marketplace orders without a confirmed shop_order_focus_links row (R7a). One row per (order, invoice): method narration_ref (1.000, the invoice Narration names the order number) | sio_ref (0.950, a Stock Issue Voucher Narration names it and the same rep''s SI with those lines follows within 2 days) | auto_items (same rep, invoice dated order day -1..+7, >= 60 % of the order''s SKUs on the invoice, a 1-2 line order only on exact lines; confidence = that share x (0.5 + 0.5 x exact-line share), capped 0.9). Line diff counts, rank per order (1 = best), invoice_orders_n = orders this invoice is suggested for. Rejected pairs never return; an invoice fully covered by confirmed links is not auto-suggested again. Carries customer names: service role only.';
 
 -- ── self-check ─────────────────────────────────────────────────────────────────
 do $$

@@ -355,7 +355,8 @@ def _():
         assert read_only_refuses(meth, "/shop/orders/1/status"), meth
     assert not read_only_refuses("POST", "/auth/password")
     assert read_only_refuses("PUT", "/auth/password") and read_only_refuses("POST", "/auth/password/x")
-    for p in ("/agents", "/agents/collections", "/ask", "/ask/stream", "/orchestrate", "/assistant/upload", "/field-notes"):
+    for p in ("/agents", "/agents/collections", "/ask", "/ask/stream", "/orchestrate", "/assistant/upload", "/field-notes",
+              "/coaching", "/coaching/brief"):
         assert read_only_refuses("GET", p), p
     assert not read_only_refuses("GET", "/agentsx"), "a prefix only matches on a segment boundary"
 
@@ -455,7 +456,13 @@ def _orders():
     return [
         {**base, "id": 11, "order_no": "YQ-2609-0011", "salesman_id": 1, "customer_name": "Shop One",
          "customer_shop": "Shop One", "customer_phone": "+97333000111", "customer_email": "one@example.com",
-         "notify_result": {"email_rep": {"sent": True}, "recipients": ["rep@example.com", "owner@example.com"]}},
+         # emailer.send_html's real answer shape: addresses in to / results / failed / reason (review R7a)
+         "notify_result": {"email_rep": {"sent": True, "to": "rep@example.com", "results": [{"to": "rep@example.com"}]},
+                           "customer_email": {"emailed": False, "to": "one@example.com",
+                                              "results": [{"to": "one@example.com", "error": "403"}],
+                                              "failed": ["one@example.com"],
+                                              "reason": "one@example.com: resend_error 403 testing mode"},
+                           "recipients": ["rep@example.com", "owner@example.com"]}},
         {**base, "id": 12, "order_no": "YQ-2609-0012", "salesman_id": 2, "customer_name": "Shop Two",
          "customer_shop": "Shop Two", "customer_phone": "33000222", "status": "confirmed"},
         {**base, "id": 13, "order_no": "YQ-2609-0013", "salesman_id": None, "customer_name": "Shop Three",
@@ -468,6 +475,7 @@ class _shop_stubs:
 
     def __init__(self):
         self.list_scopes: list = []
+        self.search_phone: list = []
 
     def __enter__(self):
         import copy
@@ -475,8 +483,9 @@ class _shop_stubs:
         rows = _orders()
         by_id = {o["id"]: o for o in rows}
 
-        def list_orders(status=None, q=None, limit=50, offset=0, salesman_id=None):
+        def list_orders(status=None, q=None, limit=50, offset=0, salesman_id=None, search_phone=True):
             self.list_scopes.append(salesman_id)
+            self.search_phone.append(search_phone)
             out = [{k: v for k, v in o.items() if k not in ("lines", "events", "token", "customer_email", "notify_result")}
                    for o in rows if salesman_id is None or o["salesman_id"] == salesman_id]
             return {"orders": out, "count": len(out), "counts": {}, "min_order_bhd": 20.0}
@@ -510,6 +519,7 @@ def _():
         assert r.status_code == 200, r.text[:200]
         body = r.json()
         assert st.list_scopes[-1] is None, "management reads company-wide (no salesman filter)"
+        assert st.search_phone[-1] is False, "a masked role never searches phones (digit probing would unmask them)"
         assert [o["id"] for o in body["orders"]] == [11, 12, 13]
         assert [o["customer_phone"] for o in body["orders"]] == ["+973 ••••• 111", "••••• 222", "+973 ••••• 333"]
         assert not raw_digits.search(r.text), "no raw phone in the list payload"
@@ -523,12 +533,18 @@ def _():
             assert o["next_statuses"] == [], "management has nothing to move"
         o = c.get("/shop/orders/11", headers=_h("mgmt")).json()
         assert o["customer_email"] == "o•••••@example.com"
-        assert o["notify_result"] == {"email_rep": {"sent": True}}, "the notify recipients are not management's"
+        nr = o["notify_result"]
+        assert "recipients" not in nr, "the notify recipients are not management's"
+        assert nr["email_rep"] == {"sent": True, "kept": None, "reason": None}
+        assert nr["customer_email"]["sent"] is False and "***@example.com" in nr["customer_email"]["reason"]
+        raw = c.get("/shop/orders/11", headers=_h("mgmt")).text
+        assert "one@example.com" not in raw and "rep@example.com" not in raw, "no address survives anywhere"
         assert "customer" not in o, "the admin-only shop-rep drawer stays admin-only"
         # an admin still sees everything unmasked; a rep still sees only his own orders
         a = c.get("/shop/orders/12", headers=_h("boss")).json()
         assert a["customer_phone"] == "33000222" and a["whatsapp_url"].startswith("https://wa.me/") and a["token"]
         assert c.get("/shop/orders", headers=_h("boss")).json()["orders"][1]["customer_phone"] == "33000222"
+        assert st.search_phone[-1] is True, "an admin still finds an order by phone"
         rep = c.get("/shop/orders", headers=_h("rep")).json()
         assert st.list_scopes[-1] == 1 and [x["id"] for x in rep["orders"]] == [11]
         assert rep["orders"][0]["customer_phone"] == "+97333000111", "a rep's own shops are not masked"

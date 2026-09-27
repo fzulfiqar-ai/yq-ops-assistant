@@ -589,6 +589,41 @@ export function CustomerWhatsApp({ url, first }: { url?: string | null; first?: 
   )
 }
 
+/** A delivered order the matcher did not suggest anything for (another warehouse name, a partial
+ *  invoice): the office types the Focus invoice number and it is linked by hand. The server checks
+ *  the number is in the uploaded Focus sales before it accepts it (decide_focus_link, method 'manual'). */
+export function FocusLinkBox({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const [val, setVal] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function link() {
+    if (!val.trim()) return
+    setBusy(true)
+    try {
+      const res = await apiPost<FocusLinkResp>(`/shop/orders/${orderId}/focus-link`, { invoice_key: val.trim(), action: 'accept' })
+      toast(`Linked to ${res.invoice_key}.`, 'success')
+      setVal('')
+      qc.invalidateQueries({ queryKey: ['shop-focus-candidates'] })
+      onDone()
+    } catch (e) {
+      toast(apiDetail(e, 'Could not link the invoice.'), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="flex gap-1.5">
+      <input value={val} onChange={(e) => setVal(e.target.value)} placeholder="Focus invoice no, e.g. SI-YQ-26-09-119"
+        aria-label="Focus invoice number" className="h-10 min-w-0 flex-1 rounded-xl border px-3 text-[13px]" />
+      <button type="button" onClick={link} disabled={busy || !val.trim()}
+        className="flex h-10 items-center gap-1 rounded-xl bg-primary px-3 text-[12.5px] font-semibold text-primary-foreground disabled:opacity-50">
+        {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Link invoice
+      </button>
+    </div>
+  )
+}
+
 /* ───────────────────────── R7a: Focus exceptions (item 6) ───────────────────────── */
 
 function FocusOrderCandidates({
@@ -614,7 +649,9 @@ function FocusOrderCandidates({
     try {
       const res = await apiPost<FocusLinkResp>(`/shop/orders/${row.order_id}/focus-link`, { invoice_key: c.invoice_key, action })
       if (action === 'accept') {
-        toast(`${row.order_no} linked to ${res.invoice_key}.`, 'success')
+        toast(res.advanced
+          ? `${row.order_no} linked to ${res.invoice_key} and marked ${res.status_label}.`
+          : `${row.order_no} linked to ${res.invoice_key}. Status unchanged: the rep confirms what was supplied.`, 'success')
         onChanged()
       } else {
         setTurnedDown((s) => new Set(s).add(c.invoice_key))
@@ -637,11 +674,17 @@ function FocusOrderCandidates({
     )
   }
 
+  // the server moves Confirmed / Preparing / On the way to Delivered, and a Received order only
+  // when the invoice matches it exactly (app/shop_pipeline.decide_focus_link) — say which it will be
+  const willDeliver = ['confirmed', 'packed', 'out_for_delivery'].includes(row.status) || (row.status === 'new' && best.exact)
+  const others = Math.max(0, best.invoice_orders_n - 1)
+
   return (
     <li className="grid gap-2 p-3 text-[12.5px] sm:grid-cols-[1fr_auto] sm:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-1.5">
           <button type="button" onClick={() => onOpenOrder(row.order_id)} className="font-semibold text-foreground hover:text-primary hover:underline">{row.order_no}</button>
+          <Badge tone="grey">{row.status_label}</Badge>
           <Badge tone={best.exact ? 'green' : 'amber'}>{best.invoice_key}</Badge>
           <Badge tone="grey">{best.method_label} · {confidencePct(best.confidence)}</Badge>
           {row.candidates.length > 1 && <span className="text-muted-foreground">+{row.candidates.length - 1} more</span>}
@@ -651,13 +694,21 @@ function FocusOrderCandidates({
           {best.invoice_date ? ` · invoice ${fmtDate(best.invoice_date)}` : ''}
           {best.amount_diff_bhd ? ` · diff ${bhd(best.amount_diff_bhd, 3)}` : ''}
         </div>
-        <div className="mt-0.5 text-muted-foreground">{lineDiffSummary(best.lines)}</div>
+        <div className="mt-0.5 text-muted-foreground">
+          {lineDiffSummary(best.lines)} · invoice {bhd(best.invoice_total_bhd, 3)}
+          {best.focus_customer ? <> to <b className="font-semibold text-foreground">{best.focus_customer}</b></> : null}
+        </div>
+        {others > 0 && (
+          <div className="mt-0.5 font-medium text-amber-700">
+            This invoice is also suggested for {others} other order{others === 1 ? '' : 's'}: check it is this shop's.
+          </div>
+        )}
       </div>
       {!readOnly && (
-        <div className="flex gap-1.5 sm:w-[13rem]">
+        <div className="flex gap-1.5 sm:w-[17rem]">
           <button type="button" onClick={() => decide(best, 'accept')} disabled={busy !== null}
             className="flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-[#137a48] px-2.5 text-[12px] font-semibold text-white disabled:opacity-50">
-            {busy === `accept:${best.invoice_key}` ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Accept
+            {busy === `accept:${best.invoice_key}` ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} {willDeliver ? 'Accept & mark delivered' : 'Link invoice'}
           </button>
           <button type="button" onClick={() => decide(best, 'reject')} disabled={busy !== null}
             className="flex h-9 flex-1 items-center justify-center gap-1 rounded-lg border border-[#E2DCEA] bg-white px-2.5 text-[12px] font-semibold text-[#1A1428] disabled:opacity-50">

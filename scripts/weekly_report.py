@@ -2,8 +2,9 @@
 
     python -m scripts.weekly_report                          # last completed Sun-Sat week (Bahrain); files only
     python -m scripts.weekly_report --week-ending 2026-09-26
-    python -m scripts.weekly_report --send --to you@x.com --preview    # owner preview copy
+    python -m scripts.weekly_report --send --to you@x.com --preview    # owner preview copy (brief edition)
     python -m scripts.weekly_report --send --to a@x.com,b@x.com        # after the owner approves
+    python -m scripts.weekly_report --style full --attach ...           # every section + the PDF
 
 What it reads (one read-only session, conn.read_only = True; nothing is ever written):
   shop_orders / shop_order_lines   marketplace orders placed in the week and their status now
@@ -43,12 +44,14 @@ BH = timezone(timedelta(hours=3))          # Bahrain, no DST
 MATCH_MIN_OVERLAP = 0.6
 MATCH_DAYS_BEFORE, MATCH_DAYS_AFTER = 1, 7
 CHIP_QUERIES = {"instock", "deals", "offer", "offers", "new", "clearance", "best", "bestsellers"}
-SENDER = "YQ Marketplace Reports <reports@mail.yqmarketplace.com>"
+SENDER = "YQ Bahrain <orders@mail.yqmarketplace.com>"   # the address already proven to reach pie-int.com inboxes
 REPLY_TO = "fzulfiqar@pie-int.com"
 ORDER_NO = re.compile(r"YQ-\d{4}-\d{4}", re.I)
 
 # marketplace look (web/src/market/market.css): plum + ink on white, email-safe hexes
 PLUM, PLUM_DEEP, PLUM_SOFT = "#6D4091", "#58337A", "#F0EAF6"
+SASH, LILAC = "#824FAB", "#E3D2F5"                  # the header diagonal (--m-sash) and the kicker on plum
+DISPLAY = "Sora, Segoe UI, Arial, Helvetica, sans-serif"   # the market's display face; email falls back to Segoe
 INK, MUTED, RULE, PAPER = "#1B1522", "#6B6478", "#E6E0EC", "#F7F5FA"
 OK, WARN, BAD = "#2A7954", "#904F0E", "#A8243A"
 FONT = "Segoe UI, Arial, Helvetica, sans-serif"
@@ -338,25 +341,35 @@ def sales_impact(d: dict, live: list, by_order: dict, week_start: date, week_end
             codes = {c for c in want if left[no][c] > 0}
             for c in codes:
                 left[no][c] -= min(want[c], left[no][c])
-            matches[o["id"]] = {"order": o, "invoice": no, "overlap": best[3], "how": best[2], "codes": codes}
+            matches[o["id"]] = {"order": o, "invoice": no, "overlap": best[3], "how": best[2], "codes": codes,
+                                "want": {c: want[c] for c in codes}}
 
-    # matched value = the invoice lines whose SKU the linked orders asked for (conservative)
-    per_inv_codes = defaultdict(set)
+    # matched value = the invoice lines whose SKU the linked orders asked for, each capped at the
+    # quantity ordered, and only invoices dated inside the week's covered days — the same window as
+    # the denominator below, so the share never mixes periods (review R7a)
+    cover_end = min(week_end, fmax) if fmax else None
+    per_inv_want = defaultdict(Counter)
     for mt in matches.values():
-        per_inv_codes[mt["invoice"]] |= mt["codes"]
+        per_inv_want[mt["invoice"]].update(mt["want"])
     matched_taxable = Decimal(0)
     matched_gross = Decimal(0)
     customers = {}
-    for no, codes in per_inv_codes.items():
+    for no, want in per_inv_want.items():
         i = inv[no]
+        if not (cover_end and week_start <= i["date"] <= cover_end):
+            continue
+        left_q = Counter(want)
         for ln in i["lines"]:
-            if ln["code"] in codes:
-                matched_taxable += D(ln["taxable_bhd"])
-                matched_gross += D(ln["gross_bhd"])
+            q = int(ln["quantity"] or 0)
+            take = min(q, left_q[ln["code"]]) if q > 0 else 0
+            if take <= 0:
+                continue
+            left_q[ln["code"]] -= take
+            matched_taxable += D(ln["taxable_bhd"]) * take / q
+            matched_gross += D(ln["gross_bhd"]) * take / q
         customers[no] = (i["customer"], i["cash"], i["date"])
 
     # the week's B2B accessory sales on the days Focus covers, and the same weekdays in the 4 weeks before
-    cover_end = min(week_end, fmax) if fmax else None
     week_taxable = Decimal(0)
     week_invoices = set()
     base = []
@@ -376,7 +389,7 @@ def sales_impact(d: dict, live: list, by_order: dict, week_start: date, week_end
     new_named = sum(1 for (cust, cash, _) in customers.values() if not cash and cust not in seen_before)
     walk_in = sum(1 for (_, cash, _) in customers.values() if cash)
     orders_after_cover = sum(1 for o in live if fmax and day_bh(o["created_at"]) > fmax)
-    return {"focus_max": fmax, "cover_end": cover_end, "matches": matches, "invoices": len(per_inv_codes),
+    return {"focus_max": fmax, "cover_end": cover_end, "matches": matches, "invoices": len(customers),
             "matched_taxable": matched_taxable, "matched_gross": matched_gross, "week_taxable": week_taxable,
             "week_invoices": len(week_invoices), "base": base, "base_avg": base_avg, "existing": existing,
             "new_named": new_named, "walk_in": walk_in, "orders_after_cover": orders_after_cover,
@@ -438,9 +451,9 @@ def actions(m: dict) -> list[str]:
 
 # ── HTML (Outlook-safe: tables + inline styles, no images) ──────────────────
 
-def _tile(label: str, value: str, sub: str = "") -> str:
-    return (f'<td width="33%" valign="top" style="padding:6px;"><table width="100%" cellpadding="0" cellspacing="0" '
-            f'style="background:{PAPER};border:1px solid {RULE};border-radius:8px;"><tr><td style="padding:12px 14px;">'
+def _tile(label: str, value: str, sub: str = "", width: str = "33%") -> str:
+    return (f'<td width="{width}" valign="top" style="padding:6px;"><table width="100%" cellpadding="0" cellspacing="0" '
+            f'style="background:{PLUM_SOFT};border-radius:12px;"><tr><td style="padding:12px 14px;">'
             f'<div style="font:600 11px {FONT};letter-spacing:.4px;color:{MUTED};text-transform:uppercase;">{esc(label)}</div>'
             f'<div style="font:700 21px {FONT};color:{INK};padding-top:4px;">{value}</div>'
             f'<div style="font:400 12px {FONT};color:{MUTED};padding-top:2px;">{sub}</div></td></tr></table></td>')
@@ -461,7 +474,8 @@ def _h2(t: str, sub: str = "") -> str:
 
 
 def _table(head: list[str], rows: list[list[str]], align: list[str]) -> str:
-    th = "".join(f'<td align="{a}"{' width="150"' if not h else ""} style="padding:6px 8px;font:600 11px {FONT};color:{MUTED};text-transform:uppercase;'
+    bar_w = ' width="150"'                      # a header-less column holds a bar: give it room
+    th = "".join(f'<td align="{a}"{"" if h else bar_w} style="padding:6px 8px;font:600 11px {FONT};color:{MUTED};text-transform:uppercase;'
                  f'border-bottom:1px solid {RULE};">{esc(h)}</td>' for h, a in zip(head, align))
     tr = "".join("<tr>" + "".join(f'<td align="{a}" valign="middle" style="padding:7px 8px;font:400 13px {FONT};color:{INK};'
                                   f'border-bottom:1px solid {RULE};">{c}</td>' for c, a in zip(r, align)) + "</tr>" for r in rows)
@@ -643,6 +657,142 @@ def render(m: dict, preview: bool) -> str:
             f'border:1px solid {RULE};">{body}</table></td></tr></table></body></html>')
 
 
+# ── the brief edition (the email management reads: about 30 seconds) ─────────
+
+def _share(m: dict) -> str | None:
+    imp = m["impact"]
+    return pct(imp["matched_taxable"], imp["week_taxable"]) if imp["matched_taxable"] and imp["week_taxable"] else None
+
+
+def subject_line(m: dict, preview: bool) -> str:
+    ws, we = m["week_start"], m["week_end"]
+    bits = [f"{m['n_live']} orders", bhd(m["value"])]
+    if _share(m):
+        bits.append(f"~{_share(m)} of B2B sales")
+    return f"{'[Preview] ' if preview else ''}YQ Marketplace weekly · {ws:%d}–{we:%d %b}: " + " · ".join(bits)
+
+
+def brief_summary(m: dict) -> str:
+    s = (f"{'Launch week: ' if m['prev_n'] == 0 else ''}<b>{m['n_live']} orders</b> worth <b>{bhd(m['value'])}</b> "
+         f"from <b>{m['merchants']} shops</b>")
+    if _share(m):
+        s += f", about <b>{_share(m)} of B2B accessory sales</b> in Focus"
+    if m["waiting"]:
+        s += f". <b>{len(m['waiting'])} orders</b> still wait for a salesman to confirm"
+    return s + "."
+
+
+def brief_working(m: dict) -> list[str]:
+    imp, out = m["impact"], []
+    if _share(m):
+        out.append(f"<b>{len(imp['matches'])} marketplace orders</b> reached <b>{imp['invoices']} Focus invoices</b> "
+                   f"({bhd(imp['matched_taxable'])} ex-VAT): about {_share(m)} of B2B accessory sales "
+                   f"{m['week_start']:%d}–{imp['cover_end']:%d %b}.")
+    if imp["base"] and imp["week_taxable"]:
+        rank = 1 + sum(1 for b in imp["base"] if b > imp["week_taxable"])
+        place = "the highest" if rank == 1 else f"number {rank}"
+        out.append(f"B2B accessory sales on those days were {place} of the last {len(imp['base']) + 1} weeks "
+                   f"(context, not proof; a fair verdict needs 4–6 weeks).")
+    if m["visitors"]:
+        trend = ""
+        if m["traffic_first"] and m["traffic_last"] < m["traffic_first"] * 0.5:
+            trend = f"; daily visitors fell from {m['traffic_first']} at launch to {m['traffic_last']}"
+        out.append(f"{m['visitors']} visitors, {pct(m['funnel'][-1][1], m['visitors'], 1)} placed an order{trend}.")
+    return out[:3]
+
+
+def brief_attention(m: dict) -> list[str]:
+    out = []
+    if m["waiting"]:
+        by = Counter((w["rep"] or "Unassigned").split()[0] for w in m["waiting"])
+        who = ", ".join(f"{k} {v}" if v > 1 else k for k, v in by.most_common())
+        done = [w for w in m["waiting"] if w.get("focus")]
+        tail = f"; {len(done)} already look invoiced in Focus and only need closing" if done else ""
+        out.append(f"<b>Salesmen:</b> confirm or cancel the {len(m['waiting'])} orders waiting over 24 hours ({who}){tail}.")
+    if m["traffic_first"] and m["traffic_last"] < m["traffic_first"] * 0.5:
+        out.append("<b>Salesmen:</b> re-share your marketplace link with your shops this week.")
+    if m["small"] and len(m["small"]) / max(m["n_live"], 1) >= 0.3:
+        out.append(f"<b>Management:</b> decide the small-order rule; {len(m['small'])} of {m['n_live']} orders were "
+                   f"under the BHD 20 minimum.")
+    return out[:3]
+
+
+def render_brief(m: dict, preview: bool) -> str:
+    ws, we = m["week_start"], m["week_end"]
+    gen = m["now"].astimezone(BH)
+    imp = m["impact"]
+    rows = []
+    if preview:
+        rows.append(f'<tr><td style="background:#FFF4E5;padding:8px 24px;font:600 12px {FONT};color:{WARN};">'
+                    f'PREVIEW for approval — not yet sent to management.</td></tr>')
+    # the marketplace banner: plum with the lighter sash on the diagonal (market.css .slide-sash),
+    # Sora extra-bold title, lilac kicker, white pill. A hard-stop gradient draws the diagonal;
+    # clients without gradients (Outlook desktop) keep the solid plum.
+    kicker = f"Weekly report · {ws:%d}–{we:%d %b %Y}" + (" · launch week" if m["prev_n"] == 0 else "")
+    rows.append(f'<tr><td style="padding:14px 14px 0;"><table width="100%" cellpadding="0" cellspacing="0"><tr>'
+                f'<td bgcolor="{PLUM}" style="background-color:{PLUM};background-image:linear-gradient(104deg,{PLUM} 0%,{PLUM} 57%,'
+                f'{SASH} 57%,{SASH} 100%);border-radius:18px;padding:26px 26px 24px;">'
+                f'<div style="font:700 11px {FONT};letter-spacing:1.2px;color:{LILAC};text-transform:uppercase;">{esc(kicker)}</div>'
+                f'<div style="font:800 28px/1.15 {DISPLAY};color:#FFFFFF;padding-top:8px;">YQ Marketplace</div>'
+                f'<div style="font:400 14px {FONT};color:#EFE6F8;padding-top:6px;">Orders, traffic and sales impact in one minute.</div>'
+                f'<table cellpadding="0" cellspacing="0" style="margin-top:16px;"><tr><td bgcolor="#FFFFFF" '
+                f'style="background:#FFFFFF;border-radius:999px;padding:9px 18px;"><a href="https://yqmarketplace.com" '
+                f'style="font:600 13px {FONT};color:{INK};text-decoration:none;">Open the marketplace &rarr;</a></td></tr></table>'
+                f'</td></tr></table></td></tr>')
+    rows.append(f'<tr><td style="padding:18px 24px 4px;font:400 15px/1.55 {FONT};color:{INK};">{brief_summary(m)}</td></tr>')
+
+    share = _share(m)
+    w4 = "25%" if share else "33%"
+    rows.append('<tr><td style="padding:10px 18px 2px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>'
+                + _tile("Orders", str(m["n_live"]), bhd(m["value"]), w4)
+                + _tile("Shops", str(m["merchants"]), f"{m['repeat_merchants']} ordered twice", w4)
+                + _tile("Visitors", str(m["visitors"]), f"{pct(m['funnel'][-1][1], m['visitors'], 1)} ordered", w4)
+                + (_tile("B2B sales share", f"~{share}", "estimate from Focus", w4) if share else "")
+                + '</tr></table></td></tr>')
+
+    rows.append(_h2("Is it working?"))
+    rows.append(_para(brief_working(m)))
+    att = brief_attention(m)
+    if att:
+        rows.append(_h2("Needs attention"))
+        rows.append(_para(att, bullet="→"))
+
+    reps = [r for r in m["reps"] if r[1] or r[4]]
+    if reps:
+        rows.append(_h2("By salesman"))
+        rows.append(_table(["Salesman", "Orders", "Value", "Waiting"],
+                           [[esc(r[0]), str(r[1]), bhd(r[2]) if r[1] else "–", str(r[4]) if r[4] else "–"] for r in reps],
+                           ["left", "right", "right", "right"]))
+
+    noted = []
+    if m["products"]:
+        noted.append("Top sellers: " + ", ".join(f"<b>{esc(c)}</b>" for c, *_ in m["products"][:5]) + ".")
+    wanted = [t for t, n in m["zero_searches"] if n >= 2]
+    if wanted:
+        noted.append("Shops searched for items we don't list: " + ", ".join(esc(t) for t in wanted[:4]) + ".")
+    if m["test_like"]:
+        nt = len(m["test_like"])
+        noted.append(f"{nt} order{'s' if nt != 1 else ''} with 'test' in the shop name ({bhd(sum((D(o['total_bhd']) for o in m['test_like']), Decimal(0)))}) "
+                     f"{'are' if nt != 1 else 'is'} included until the salesmen confirm.")
+    if noted:
+        rows.append(_h2("Also noted"))
+        rows.append(_para(noted))
+
+    focus_to = f" Focus data runs to {imp['focus_max']:%a %d %b}." if imp["focus_max"] else ""
+    rows.append(f'<tr><td style="padding:20px 24px 18px;"><table width="100%" cellpadding="0" cellspacing="0" '
+                f'style="border-top:1px solid {RULE};"><tr><td style="padding-top:10px;font:400 11px/1.6 {FONT};color:{MUTED};">'
+                f'Auto-generated from YQ Marketplace and Focus ERP data. Please cross-check key figures before acting on them '
+                f'or sharing them. Sales share is an estimate from automatic order-to-invoice matching.{focus_to} '
+                f'Order values include VAT. Reply to this email for the full breakdown.<br>'
+                f'Generated {gen:%a %d %b %Y, %H:%M} Bahrain · internal to YQ Bahrain W.L.L.</td></tr></table></td></tr>')
+    return (f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+            f'<title>YQ Marketplace weekly {ws:%d}–{we:%d %b %Y}</title></head>'
+            f'<body style="margin:0;padding:0;background:#EFEBF3;">'
+            f'<table width="100%" cellpadding="0" cellspacing="0" style="background:#EFEBF3;"><tr><td align="center" style="padding:16px 8px;">'
+            f'<table width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#FFFFFF;'
+            f'border:1px solid {RULE};">{"".join(rows)}</table></td></tr></table></body></html>')
+
+
 # ── output + send ────────────────────────────────────────────────────────────
 
 def to_pdf(html_text: str, path: Path) -> None:
@@ -668,11 +818,12 @@ def resend_key() -> str:
     return r.json()["value"]
 
 
-def send(html_text: str, pdf: Path, subject: str, to: list[str]) -> dict:
+def send(html_text: str, pdf: Path | None, subject: str, to: list[str]) -> dict:
     import httpx
 
-    body = {"from": SENDER, "to": to, "reply_to": REPLY_TO, "subject": subject, "html": html_text,
-            "attachments": [{"filename": pdf.name, "content": base64.b64encode(pdf.read_bytes()).decode()}]}
+    body = {"from": SENDER, "to": to, "reply_to": REPLY_TO, "subject": subject, "html": html_text}
+    if pdf:
+        body["attachments"] = [{"filename": pdf.name, "content": base64.b64encode(pdf.read_bytes()).decode()}]
     r = httpx.post("https://api.resend.com/emails", headers={"Authorization": "Bearer " + resend_key()}, json=body, timeout=60)
     return {"status": r.status_code, "body": r.json() if r.content else {}}
 
@@ -683,20 +834,27 @@ def main() -> int:
     ap.add_argument("--send", action="store_true", help="email the report (otherwise files only)")
     ap.add_argument("--to", default="", help="comma-separated recipients (required with --send)")
     ap.add_argument("--preview", action="store_true", help="mark the edition as a preview for approval")
+    ap.add_argument("--style", choices=("brief", "full"), default="brief",
+                    help="brief = the 30-second management email (default); full = every section")
+    ap.add_argument("--attach", action="store_true",
+                    help="attach the full PDF (off by default: company mail filters may hold attachments)")
     a = ap.parse_args()
 
     now = datetime.now(timezone.utc)
     we = date.fromisoformat(a.week_ending) if a.week_ending else last_week_ending(now.astimezone(BH).date())
     ws = we - timedelta(days=6)
     m = compute(load(ws, we), ws, we, now)
-    html_text = render(m, a.preview)
+    full = render(m, a.preview)
+    brief = render_brief(m, a.preview)
+    html_text = brief if a.style == "brief" else full
 
     out = ROOT / "exports" / "weekly" / we.isoformat()
     out.mkdir(parents=True, exist_ok=True)
-    (out / "report.html").write_text(html_text, encoding="utf-8")
+    (out / "report.html").write_text(full, encoding="utf-8")
+    (out / "brief.html").write_text(brief, encoding="utf-8")
     pdf = out / f"YQ_Marketplace_Weekly_{ws:%Y-%m-%d}_to_{we:%Y-%m-%d}.pdf"
-    to_pdf(html_text, pdf)
-    print(f"wrote {out / 'report.html'} and {pdf.name}")
+    to_pdf(full, pdf)
+    print(f"wrote brief.html, report.html and {pdf.name} in {out}")
     print(f"orders {m['n_live']} (+{m['n_orders'] - m['n_live']} cancelled)  value {bhd(m['value'])}  shops {m['merchants']}  "
           f"visitors {m['visitors']}  matched {len(m['impact']['matches'])} orders / {m['impact']['invoices']} invoices "
           f"{bhd(m['impact']['matched_taxable'])} ex-VAT of {bhd(m['impact']['week_taxable'])}")
@@ -706,8 +864,8 @@ def main() -> int:
         if not to:
             print("--send needs --to", file=sys.stderr)
             return 2
-        subject = f"{'[Preview] ' if a.preview else ''}YQ Marketplace weekly report · {ws:%d %b} – {we:%d %b %Y}"
-        res = send(html_text, pdf, subject, to)
+        subject = subject_line(m, a.preview) if a.style == "brief" else             f"{'[Preview] ' if a.preview else ''}YQ Marketplace weekly report · {ws:%d %b} – {we:%d %b %Y}"
+        res = send(html_text, pdf if a.attach else None, subject, to)
         print("send:", res)
         return 0 if res["status"] in (200, 201) else 1
     return 0

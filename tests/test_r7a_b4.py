@@ -150,14 +150,13 @@ def _():
     assert "counts[s] ?? 0" in chips
 
 
-@test("the Needs-action count is Received-past-SLA + unassigned + Focus exceptions, SLA falls back to 120")
+@test("the Needs-action count and its filter share one rule (late Received or open with no rep), each order once")
 def _():
     src = _read(SHOP)
     assert "const slaMin = queueQuery.data?.sla_min ?? 120" in src
-    assert "const lateReceivedCount = receivedRows.filter((r) => isLateReceived(r, slaMin)).length" in src
-    assert "const unassignedCount = queueQuery.data?.count ?? 0" in src
-    assert "const focusExceptionsCount = focusQuery.data?.count ?? 0" in src
-    assert "const needsActionCount = lateReceivedCount + unassignedCount + focusExceptionsCount" in src
+    assert "const needsActionIds = new Set<number>([" in src and "const needsActionCount = needsActionIds.size" in src
+    assert "isLateReceived(r, slaMin) || (OPEN_STATUSES.has(r.status) && !r.salesman_id && !r.salesman_name)" in src
+    assert "focusExceptionsCount" not in src, "Focus exceptions keep their own count in the panel (review R7a)"
 
 
 @test("isLateReceived / oldestAgeMin agree with a hand-checked scenario (SLA=120min)")
@@ -282,7 +281,7 @@ def _():
     assert "{data && actions.length > 0 && !confirming && !readOnly && (" in shop, "the whole action footer"
     actions_src = _read(ACTIONS)
     assert "readOnly?: boolean" in actions_src
-    assert "{!readOnly && (\n        <div className=\"flex gap-1.5 sm:w-[13rem]\">" in actions_src, "Accept/Not-this-one"
+    assert "{!readOnly && (\n        <div className=\"flex gap-1.5 sm:w-[17rem]\">" in actions_src, "Accept/Not-this-one"
 
 
 @test("phones are rendered exactly as the API sends them — no new client-side masking was added")

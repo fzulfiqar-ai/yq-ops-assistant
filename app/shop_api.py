@@ -262,7 +262,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         for k in ("whatsapp_url", "token", "status_url"):
             o.pop(k, None)
         if isinstance(o.get("notify_result"), dict):
-            o["notify_result"] = {k: v for k, v in o["notify_result"].items() if k != "recipients"}
+            # each channel entry is emailer.send_html's raw answer: to / results[].to / failed[] and a
+            # reason of "<address>: <provider error>". Keep the outcome only, reason scrubbed.
+            o["notify_result"] = {
+                k: ({"sent": bool(v.get("sent") or v.get("emailed")), "kept": v.get("kept"),
+                     "reason": shop_notify.scrub(v.get("reason"))} if isinstance(v, dict) else v)
+                for k, v in o["notify_result"].items() if k != "recipients"}
         return o
 
     def _owner_contact() -> dict | None:
@@ -680,7 +685,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if sid == -1:
             return {"orders": [], "count": 0,
                     "hint": "Your login is not linked to a salesman yet — an admin can link it on the Salesmen page."}
-        out = shop.list_orders(status, q, limit, offset, salesman_id=sid)
+        out = shop.list_orders(status, q, limit, offset, salesman_id=sid,
+                               search_phone=not masks_contacts(user.role))
         out["orders"] = [_masked(user, o) for o in out.get("orders") or []]
         return out
 

@@ -22,11 +22,11 @@ import { DataTable, Stat, type Column } from '@/components/DataTable'
 import {
   ACTION_LABEL, AssignBox, AssignmentQueue, ConfirmEditor, CustomerWhatsApp, STATUS_LABEL,
   STATUS_TONE as MARKET_STATUS_TONE,
-  CancelReasonPicker, FocusExceptionsPanel, ReturnBox,
+  CancelReasonPicker, FocusExceptionsPanel, FocusLinkBox, ReturnBox,
 } from '@/pages/shop-ops/OrderActions'
 import {
   apiDetail, attributionLabel, cancelReady, cancelReasonLabel, minimumGapText, PAYMENT_LABEL,
-  shopRepLine, useFocusCandidates,
+  shopRepLine,
 } from '@/pages/shop-ops/pipeline'
 
 // ── types (kept close to docs/SHOP.md — fields we're not certain about stay optional) ──
@@ -710,6 +710,9 @@ function OrderDrawer({
             {data.status === 'delivered' && (returning || !readOnly || !!data.returned_bhd) && (
               <section className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">After delivery</div>
+                {!readOnly && !data.focus_invoice_no && (
+                  <FocusLinkBox orderId={id} onDone={refetchOrder} />
+                )}
                 {returning ? (
                   <ReturnBox orderId={id} lines={data.lines || []} onCancel={() => setReturning(false)} onDone={() => { setReturning(false); refetchOrder() }} />
                 ) : !readOnly ? (
@@ -834,10 +837,9 @@ function DeskOrders({
   })
   const queueQuery = useQuery({
     queryKey: ['shop-assignment-queue'],
-    queryFn: () => apiGet<{ orders: unknown[]; count: number; sla_min?: number }>('/shop/assignment-queue'),
+    queryFn: () => apiGet<{ orders: { id: number }[]; count: number; sla_min?: number }>('/shop/assignment-queue'),
     staleTime: 30_000,
   })
-  const focusQuery = useFocusCandidates()
 
   // shop_assign_sla_min (the only SLA any query on this page already reads — AssignmentQueue's
   // own `sla_min`, shared here via the same query key); shop_confirm_sla_min isn't exposed to the
@@ -845,14 +847,18 @@ function DeskOrders({
   const slaMin = queueQuery.data?.sla_min ?? 120
   const receivedRows = receivedScan.data?.orders || []
   const oldestReceivedMin = oldestAgeMin(receivedRows)
-  const lateReceivedCount = receivedRows.filter((r) => isLateReceived(r, slaMin)).length
-  const unassignedCount = queueQuery.data?.count ?? 0
-  const focusExceptionsCount = focusQuery.data?.count ?? 0
-  const needsActionCount = lateReceivedCount + unassignedCount + focusExceptionsCount
+  // one rule for the chip's number and the rows it filters to: a Received order past the SLA, or an
+  // open order with no rep — each order counted once. Focus exceptions keep their own count in the
+  // panel above the table (they are a different job: linking invoices, not chasing reps).
+  const needsActionIds = new Set<number>([
+    ...receivedRows.filter((r) => isLateReceived(r, slaMin)).map((r) => r.id),
+    ...(queueQuery.data?.orders || []).map((o) => o.id),
+  ])
+  const needsActionCount = needsActionIds.size
   const totalCount = Object.values(counts).reduce((s, n) => s + (n || 0), 0)
 
   const displayRows = status === 'needs_action'
-    ? rows.filter((r) => isLateReceived(r, slaMin) || (!r.salesman_id && !r.salesman_name))
+    ? rows.filter((r) => isLateReceived(r, slaMin) || (OPEN_STATUSES.has(r.status) && !r.salesman_id && !r.salesman_name))
     : rows
 
   const cols: Column<ShopOrderRow>[] = [
@@ -1407,6 +1413,8 @@ function FieldOrders({
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+
+const OPEN_STATUSES = new Set(['new', 'confirmed', 'packed', 'out_for_delivery'])
 
 export default function ShopOrders() {
   const { me } = useAuth()
