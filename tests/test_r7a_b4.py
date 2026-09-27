@@ -262,14 +262,14 @@ def _():
 
 # ── item 7: a read-only 'management' role, hides every write action ────────────
 
-@test("a local, type-safe management-role check with a TODO naming the real helper to swap in")
+@test("the desk uses the shared auth helpers: management sees every order, read-only")
 def _():
     src = _read(SHOP)
-    assert "TODO(management-stream)" in src
-    assert "const role: string | undefined = me?.role" in src, "widened to string on purpose (Role has no 'management')"
-    assert "const isManagementRole = role === 'management'" in src
-    assert "const showDesk = isAdmin || isManagementRole" in src
-    assert "readOnly={isManagementRole}" in src
+    assert "import { useAuth, isReadOnly, seesAllOrders } from '@/lib/auth'" in src
+    assert "const readOnly = isReadOnly(me)" in src
+    assert "const showDesk = seesAllOrders(me)" in src
+    assert "readOnly={readOnly}" in src
+    assert "TODO(management-stream)" not in src and "isManagementRole" not in src
 
 
 @test("readOnly hides confirm/cancel/assign/status/focus-accept everywhere it's threaded")

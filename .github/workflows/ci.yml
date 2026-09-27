@@ -83,6 +83,18 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r3_pipeline
+      # R7a "Make it true": reliability (analytics crash, JSON 500 inside CORS, retry once,
+      # inventory grants), reminder hygiene + notifications log, Focus link v1, the read-only
+      # management role, and the order desk (source checks). All in-memory; replays SKIP here.
+      - name: R7a suites (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: |
+          python -m tests.test_r7a_reliability
+          python -m tests.test_r7a_reminders
+          python -m tests.test_r7a_focus
+          python -m tests.test_r7a_rbac
+          python -m tests.test_r7a_b4
       # R2a batch importer: the pure tests; the local-Postgres replay SKIPs here. Its own step — it
       # used to sit on a folded second line of the step above, which YAML read as extra arguments to
       # test_r3_pipeline, so it never ran.

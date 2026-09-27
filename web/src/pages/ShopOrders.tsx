@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { apiGet, apiPost, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
-import { useAuth } from '@/lib/auth'
+import { useAuth, isReadOnly, seesAllOrders } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd, num } from '@/lib/format'
@@ -1411,15 +1411,9 @@ function FieldOrders({
 export default function ShopOrders() {
   const { me } = useAuth()
   const qc = useQueryClient()
-  const isAdmin = me?.role === 'admin'
-  // The management stream is adding a read-only 'management' role (web/src/lib/auth.tsx) — its
-  // helper isn't in this worktree yet, so this is a local, type-safe stand-in (`role` is widened
-  // to `string` on purpose: `me.role` is a Role union that doesn't include 'management', and
-  // comparing a literal union to a value outside it is a TS2367 build error).
-  // TODO(management-stream): replace with the real `isManagement(me)` / readOnly helper once it lands.
-  const role: string | undefined = me?.role
-  const isManagementRole = role === 'management'
-  const showDesk = isAdmin || isManagementRole
+  // Management reads the whole desk but changes nothing (the API refuses its writes anyway).
+  const readOnly = isReadOnly(me)
+  const showDesk = seesAllOrders(me)
   // Deep links: the Telegram "UNASSIGNED" alert opens the queue (?queue=1); Today and Customers
   // open one order (?open=id), a stage (?bucket=progress) or a search (?q=phone).
   const [sp] = useSearchParams()
@@ -1494,7 +1488,7 @@ export default function ShopOrders() {
       setQRaw={setQRaw}
       onRefresh={refreshList}
       queueFocus={queueFocus}
-      readOnly={isManagementRole}
+      readOnly={readOnly}
     />
   )
 }
