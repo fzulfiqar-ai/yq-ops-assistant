@@ -53,6 +53,7 @@ HEART = "web/src/pages/shop-ops/heart.ts"
 ACTIONS = "web/src/pages/shop-ops/OrderActions.tsx"
 PIPELINE = "web/src/pages/shop-ops/pipeline.ts"
 NODE_TEST = "web/scripts/order_heart_ui_test.mjs"
+REP_NODE_TEST = "web/scripts/rep_ui_test.mjs"
 
 
 def _fn(src: str, head: str) -> str:
@@ -192,7 +193,7 @@ def _():
     ed = _fn(ui, "export function OrderEditor(")
     assert "`/shop/orders/${order.id}/${mode === 'confirm' ? 'confirm' : 'amend'}`" in ed
     for key in ("body.added_lines = plan.added_lines", "body.expected_delivery = eta.trim()", "body.note = note.trim()",
-                "body.shop_agreed = { via: agreed.via }", "{ lines: plan.lines }"):
+                "body.shop_agreed = { via: agreed.via }", "{ lines: plan.lines, ...versionOf(order) }"):
         assert key in ed, key
     heart = _read(HEART)
     plan = heart.split("export function planEdit(", 1)[1].split("\n}\n", 1)[0]
@@ -339,7 +340,63 @@ def _():
     assert "Shop not told yet" in src
     assert src.count("<NotToldChip o={data} />") == 2
     heart = _read(HEART)
-    assert "return o.shop_told === false && visibleStatus(o.status) !== 'new'" in heart
+    fn = heart.split("export function shopNotTold(", 1)[1].split("\n}\n", 1)[0]
+    assert "if (visibleStatus(o.status) === 'new') return false" in fn
+    assert "return own == null ? o.shop_told === false : !own" in fn, "the events decide; the server flag when they say nothing"
+
+
+@test("review F3-6: a rep-placed order (born Confirmed in the shop) is already told — no chip, 'Tell the shop' is not the first nag")
+def _():
+    heart = _read(HEART)
+    told = heart.split("export function shopToldFrom(", 1)[1].split("\n}\n", 1)[0]
+    assert "ev === 'customer_notified' || (ev === 'status:confirmed' && e?.detail?.born_confirmed === true)) told = true" in told
+    assert "ev.startsWith('status:') || ev === 'amended' || ev === 'created' || ev === 'reopened') told = false" in told, \
+        "the same steps as shop_heart.notify_state"
+    assert "else if (isStampEvent(ev)) continue" in told, "a pick-list stamp changes nothing the shop sees"
+    src = _read(SHOP)
+    # the chip and the flow read the order WITH its events (the detail payload)
+    assert "function NotToldChip({ o }: { o: Parameters<typeof shopNotTold>[0] })" in src
+    flow = _fn(src, "function useOrderFlow(")
+    assert "(step != null || (data ? shopNotTold(data) : false))" in flow
+    assert "events: OrderEvent[]" in src.split("interface OrderDetail extends ShopOrderRow {", 1)[1].split("\n}", 1)[0]
+    # the server's own marker for such an order (app/shop.py place_order), when this tree has it
+    shop_py = ROOT / "app" / "shop.py"
+    if shop_py.exists():
+        assert '"born_confirmed": True' in shop_py.read_text(encoding="utf-8")
+
+
+@test("review F3-6: the rep's field sheet reads three stages only — no pick-list stamp words in its timeline")
+def _():
+    src = _read(SHOP)
+    sheet = _fn(src, "function FieldOrderSheet(")
+    assert "collapseReminders(data.events).map((e, i) => (isStampEvent(e.event) ? null : (" in sheet
+    assert "STAMP_LABEL" not in sheet and "Pick list" not in sheet
+    # StatusPill / StageTrack / the four tabs all go through heart's three visible stages
+    assert "<StatusPill status={data.status} />" in sheet and "<StageTrack order={data} />" in sheet
+    heart = _read(HEART)
+    assert "return event === 'status:packed' || event === 'status:out_for_delivery'" in heart
+    # the desk keeps the quiet stamp note (the office runs the pick list)
+    assert "`Pick list: ${STAMP_LABEL[event.slice(7)]}`" in _fn(src, "function eventLabel(")
+
+
+@test("review F3-1: Confirm / Amend / Deliver with changes send expected_updated_at = the payload's updated_at")
+def _():
+    ui = _read(HEART_UI)
+    order = ui.split("export interface HeartOrder extends EditOrder {", 1)[1].split("\n}", 1)[0]
+    assert "updated_at?: string | null" in order
+    ver = ui.split("function versionOf(order: HeartOrder)", 1)[1].split("\n}", 1)[0]
+    assert "return order.updated_at ? { expected_updated_at: order.updated_at } : {}" in ver
+    ed = _fn(ui, "export function OrderEditor(")
+    assert "const body: Record<string, unknown> = { lines: plan.lines, ...versionOf(order) }" in ed
+    dv = _fn(ui, "export function DeliverEditor(")
+    assert "const body: Record<string, unknown> = { ...versionOf(order) }" in dv
+    # a newer version answers 409 → the existing refresh (onConflict), never a toast of the raw error
+    for body in (ed, dv):
+        assert "if (e instanceof ApiError && e.status === 409) {\n        onConflict()" in body
+    # the editors remount on a fresh payload, so the version sent is always the one on screen
+    src = _read(SHOP)
+    assert src.count("key={`${mode}-${data.updated_at || ''}`}") == 2
+    assert src.count("key={`deliver-${data.updated_at || ''}`}") == 2
 
 
 # ── 7. management reads everything, taps nothing; phones get 44 px ────────────
@@ -442,12 +499,14 @@ def _():
         assert field in detail, field
 
 
-@test("ci.yml runs this suite (api job) and the node half after npm ci (web job)")
+@test("ci.yml runs this suite (api job) and the node halves after npm ci (web job)")
 def _():
     ci = _read(".github/workflows/ci.yml")
     assert "python -m tests.test_r7c_ui" in ci
     assert "run: node scripts/order_heart_ui_test.mjs" in ci
     assert ci.index("run: npm ci") < ci.index("run: node scripts/order_heart_ui_test.mjs")
+    assert "run: node scripts/rep_ui_test.mjs" in ci
+    assert ci.index("run: npm ci") < ci.index("run: node scripts/rep_ui_test.mjs")
 
 
 # ── 9. the pure rules, in plain node ───────────────────────────────────────────
@@ -465,6 +524,81 @@ def _():
     tail = "\n".join(out.strip().splitlines()[-4:])
     print("        " + tail.replace("\n", "\n        "))
     assert r.returncode == 0, "node order-heart tests failed:\n" + out[-2000:]
+
+
+@test("node: the rep's screens — quick-add, the checkout id, the Change carry, shop told (web/scripts/rep_ui_test.mjs)")
+def _():
+    node = shutil.which("node")
+    script = ROOT / REP_NODE_TEST
+    assert script.exists(), REP_NODE_TEST
+    if not node or not (ROOT / "web" / "node_modules" / "typescript").exists():
+        print("        SKIP: node or web/node_modules not available (ci.yml runs it in the web job)")
+        return
+    r = subprocess.run([node, str(script)], cwd=str(ROOT / "web"), capture_output=True, text=True, encoding="utf-8", timeout=180)
+    out = (r.stdout or "") + (r.stderr or "")
+    tail = "\n".join(out.strip().splitlines()[-4:])
+    print("        " + tail.replace("\n", "\n        "))
+    assert r.returncode == 0, "node rep-screen tests failed:\n" + out[-2000:]
+
+
+# ── 9b. the rep's catalog and the floating Spotted button (review stream F3) ──
+
+CAPTURE = "web/src/components/MarketCapture.tsx"
+STAFF = "web/src/pages/shop/StaffCatalog.tsx"
+QUICK = "web/src/pages/shop/quickAdd.ts"
+
+
+@test("review F3-2: from 1280 px Spotted stops left of the docked order slip (Total / Place order); the +84 px only above a showing order bar")
+def _():
+    cap = _read(CAPTURE)
+    assert "pathname.startsWith('/shop') ? 84 : 14" not in cap, "no fixed /shop offset: the page says what to clear"
+    pos = cap.split("const CAPTURE_POSITION: CSSProperties = {", 1)[1].split("\n}", 1)[0]
+    assert "bottom: 'calc(var(--yq-tabbar, 88px) + env(safe-area-inset-bottom, 0px) + var(--yq-dock-bottom, 0px) + 14px)'" in pos
+    assert "right: 'max(var(--yq-dock-right, 0px), var(--yq-capture-edge, 16px))'" in pos
+    assert "style={CAPTURE_POSITION}" in cap
+    assert "[--yq-capture-edge:16px] lg:[--yq-capture-edge:32px]" in cap, "16 px on a phone, 32 px from lg (was right-4 lg:right-8)"
+    assert "right-4" not in cap.split("style={CAPTURE_POSITION}", 1)[0].rsplit("<button", 1)[1]
+    staff = _read(STAFF)
+    dock = staff.split("function useDockRoom(", 1)[1].split("\n}\n", 1)[0]
+    assert "root.style.setProperty('--yq-dock-bottom', `${bar ? bar.offsetHeight : 0}px`)" in dock, "the bar's real height, 0 without it"
+    assert "root.style.setProperty('--yq-dock-right', slip && xl.matches ? SLIP_ROOM : '0px')" in dock
+    assert "new ResizeObserver(apply)" in dock and "root.style.removeProperty('--yq-dock-bottom')" in dock
+    assert "<div ref={setOrderBar} className=\"fixed right-0 z-30" in staff and "xl:hidden\"" in staff.split("ref={setOrderBar}", 1)[1][:200]
+    assert "useDockRoom(orderBar, !order && !(catalogQ.isError && !data))" in staff
+    # SLIP_ROOM is the layout's own numbers: 1600 max, 24 px sides, a 360 px slip, a 24 px gap
+    assert "const SLIP_ROOM = 'calc(max(0px, (100vw - var(--yq-sidebar, 0px) - 1600px) / 2) + 408px)'" in staff
+    assert "max-w-[1600px] px-4 lg:px-6 xl:grid xl:grid-cols-[minmax(0,1fr)_360px] xl:gap-6" in staff
+    assert 24 + 360 + 24 == 408
+
+
+@test("review F3-2: on /today, Customers and Market Intel the page can scroll its last line out from under Spotted")
+def _():
+    cap = _read(CAPTURE)
+    assert "const SHOW_ON = ['/today', '/shop', '/customers', '/market-intel']" in cap
+    eff = cap.split("// while the button floats", 1)[1].split("}, [visible])", 1)[0]
+    assert "if (!visible) return" in eff and "root.style.setProperty('--yq-capture-room', CAPTURE_ROOM)" in eff
+    assert "root.style.removeProperty('--yq-capture-room')" in eff
+    assert "const CAPTURE_ROOM = '66px'" in cap, "52 px button + 14 px"
+    # the hook runs before the early return (the rules of hooks)
+    assert cap.index("// while the button floats") < cap.index("if (!visible && !open) return null")
+    shell = _read("web/src/components/SalesmanShell.tsx")
+    assert "pb-[calc(var(--yq-tabbar,88px)+env(safe-area-inset-bottom)+var(--yq-capture-room,0px))]" in shell
+    assert "md:pb-[calc(2.5rem+var(--yq-capture-room,0px))]" in shell
+
+
+@test("review F3-5: quick-add only for an explicit list (separator, x / ×, or one 'code qty' whose word IS a code)")
+def _():
+    q = _read(QUICK)
+    fn = q.split("export function isQuickList(", 1)[1].split("\n}", 1)[0]
+    assert "text: string, isCode: (word: string) => boolean" in fn, "the caller says what is a code"
+    assert "if (SEPARATOR.test(s)) return true" in fn and "if (TIMES_FIRST.test(s) || TIMES_LAST.test(s)) return true" in fn
+    assert "if (isCode(s)) return false" in fn
+    assert "if (last && isCode(last[1])) return true" in fn and "return Boolean(first && isCode(first[2]))" in fn
+    # the old catch-all "word number" (it turned "iphone 15" into a list) is gone
+    assert "/\\S\\s+(?:x|×|\\*)?\\s*\\d{1,4}$/i.test(s)" not in q
+    staff = _read(STAFF)
+    assert "const codeKeys = useMemo(() => new Set(items.map((i) => codeKey(i.item_code))), [items])" in staff
+    assert "const quick = isQuickList(q, (word) => codeKeys.has(codeKey(word)))" in staff
 
 
 # ── 10. the page's copies of the server's words (after the streams are merged) ─

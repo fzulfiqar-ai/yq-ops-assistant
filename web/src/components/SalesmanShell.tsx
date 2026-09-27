@@ -334,7 +334,9 @@ export function SalesmanShell() {
 
           <TempPasswordBanner mustReset={mustReset} />
 
-          <main className="pb-[calc(var(--yq-tabbar,88px)+env(safe-area-inset-bottom))] md:pb-10">
+          {/* --yq-capture-room: the floating "Spotted" button's height while it shows (MarketCapture),
+             so the last line of a page can scroll out from under it */}
+          <main className="pb-[calc(var(--yq-tabbar,88px)+env(safe-area-inset-bottom)+var(--yq-capture-room,0px))] md:pb-[calc(2.5rem+var(--yq-capture-room,0px))]">
             <Suspense
               fallback={
                 <div className="grid h-[60vh] place-items-center text-muted-foreground">

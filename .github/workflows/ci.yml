@@ -162,6 +162,10 @@ jobs:
       # reason, when the "Shop agreed" tick is required, the pro-rata cart share to the fils
       - name: Order heart rules (node, no browser)
         run: node scripts/order_heart_ui_test.mjs
+      # the rep's screens (R7b/R7c review): quick-add only for an explicit list, one checkout id per
+      # order (never a shop-A duplicate for shop B), the Change carry, "shop told" on a rep-placed order
+      - name: Rep screen rules (node, no browser)
+        run: node scripts/rep_ui_test.mjs
       # Advisory until the design-system pass clears the 18 pre-existing portal findings
       # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
       # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.

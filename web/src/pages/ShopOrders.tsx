@@ -29,7 +29,7 @@ import {
 import {
   CAS_MSG, FILTER_PARAM, STAMP_LABEL, STATUS_LABEL, STATUS_TONE as HEART_STATUS_TONE, VISIBLE_LABEL,
   VISIBLE_STATUSES, actionsOf, bucketFromParam, confirmedQty, effectiveTotal, fils, fromFils,
-  isAddedLine, lineMoney, lockUnit, shopNotTold, totalChanged, visibleCount, visibleStatus,
+  isAddedLine, isStampEvent, lineMoney, lockUnit, shopNotTold, totalChanged, visibleCount, visibleStatus,
   type HeartLine, type OrderAction, type StageStep, type VisibleStatus,
 } from '@/pages/shop-ops/heart'
 import {
@@ -156,8 +156,9 @@ function StatusPill({ status }: { status: string }) {
   return <Badge tone={STATUS_TONE[status] || 'grey'}>{STATUS_LABEL[status] || status}</Badge>
 }
 
-/** After a step, until a WhatsApp / call / visit is logged (POST …/customer-notified). */
-function NotToldChip({ o }: { o: { status?: string | null; shop_told?: boolean | null } }) {
+/** After a step, until a WhatsApp / call / visit is logged (POST …/customer-notified). Never on
+ *  an order the rep placed in the shop and has not changed since (heart.shopToldFrom). */
+function NotToldChip({ o }: { o: Parameters<typeof shopNotTold>[0] }) {
   if (!shopNotTold(o)) return null
   return <Badge tone="amber" title="No WhatsApp, call or visit has been logged since the last step.">Shop not told yet</Badge>
 }
@@ -1428,7 +1429,8 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             <section>
               <h3 className={cn('mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide', MUTED)}>Timeline</h3>
               <ul className="space-y-2.5">
-                {collapseReminders(data.events).map((e, i) => (
+                {/* the rep reads three stages only: the storekeeper's pick-list stamps stay on the desk */}
+                {collapseReminders(data.events).map((e, i) => (isStampEvent(e.event) ? null : (
                   <li key={i} className="flex gap-2.5">
                     <span className="mt-[0.4rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6D4091]" aria-hidden="true" />
                     <div className="min-w-0">
@@ -1436,7 +1438,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
                       <div className={cn('text-[11.5px]', MUTED)}>{fmtDateTime(e.ts)}{eventNote(e) ? ` · ${eventNote(e)}` : ''}</div>
                     </div>
                   </li>
-                ))}
+                )))}
               </ul>
             </section>
           )}

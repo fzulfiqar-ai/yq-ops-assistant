@@ -26,6 +26,7 @@ import { CartDrawer } from './CartDrawer'
 import { FiltersSheet } from './FiltersSheet'
 import { isQuickList } from './quickAdd'
 import { NO_FILTERS, type StaffFilters, type StaffSort } from './staffFilters'
+import { carryCart } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
 import { OrderSuccess } from './OrderSuccess'
 import { ProductCard } from './ProductCard'
@@ -46,14 +47,17 @@ import { useQuote, type QuoteFetcher } from './useQuote'
  *  • one chip row — the categories that have matches, then "Filters" (In stock, Clearance, Best
  *    sellers, Sort) — and search through the marketplace's index (codes with spaces work);
  *  • a quick-add in the same field: "C18 3, UK15 6" + Enter adds the exact codes (a sold-out line is
- *    never added on its own; anything that is not a code stays in the field to pick from the list);
+ *    never added on its own; anything that is not a code stays in the field to pick from the list).
+ *    Only an explicit list turns quick — a separator, an "x" / "×", or one "C18 3" whose word is a
+ *    code; "iphone 15" stays a search (quickAdd.isQuickList);
  *  • list mode by default (72 px rows, stock bands, a keypad quantity and "+"), a grid to show a
  *    customer; sold-out lines last, under "Sold Out · N lines";
  *  • from 1280 px a dense order-entry table ("/" to search, arrows to move, Enter to add) beside a
  *    docked order slip with the shop, the lines, the BHD minimum ruler and Place order.
  *
  * Carts are kept per shop (`staff:<book key>`): switching shops never mixes two orders, and a cart
- * started before the shop was picked moves into that shop's cart when it is picked.
+ * started before the shop was picked moves into that shop's cart when it is picked — as does the
+ * checkout's cart when its "Change" picks another shop whose cart is empty (staffOrder.carryCart).
  */
 
 const TOPBAR = 'var(--yq-topbar, 56px)'
@@ -83,6 +87,43 @@ interface Notice {
   tone: 'ok' | 'warn'
   text: string
   soldOut?: string[]
+}
+
+/**
+ * From 1280 px the order slip is docked on the right: the page is max 1600 px, centred in what the
+ * sidebar leaves, with 24 px sides, a 360 px slip and a 24 px gap (the grid classes below). This is
+ * the distance from the window's right edge to the list column's right edge — where a floating
+ * button must stop so it never covers the slip's Total and Place order. (100vw counts the
+ * scrollbar, which only moves the button further left.)
+ */
+const SLIP_ROOM = 'calc(max(0px, (100vw - var(--yq-sidebar, 0px) - 1600px) / 2) + 408px)'
+
+/**
+ * Publish the room this page's own fixed furniture takes, the way the shell publishes
+ * --yq-tabbar, so the shell's floating "Spotted" button (components/MarketCapture) stays clear of
+ * it: --yq-dock-bottom = the phone / tablet order bar's height while it shows (0 when there is no
+ * cart, and from 1280 px where the bar is hidden), --yq-dock-right = SLIP_ROOM from 1280 px while
+ * the slip is on screen (`slip`: not on the order-placed or the did-not-load screen).
+ */
+function useDockRoom(bar: HTMLElement | null, slip: boolean) {
+  useEffect(() => {
+    const root = document.documentElement
+    const xl = window.matchMedia('(min-width: 1280px)')
+    const apply = () => {
+      root.style.setProperty('--yq-dock-bottom', `${bar ? bar.offsetHeight : 0}px`)
+      root.style.setProperty('--yq-dock-right', slip && xl.matches ? SLIP_ROOM : '0px')
+    }
+    apply()
+    const ro = bar && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(apply) : null
+    if (bar && ro) ro.observe(bar)
+    xl.addEventListener('change', apply)
+    return () => {
+      ro?.disconnect()
+      xl.removeEventListener('change', apply)
+      root.style.removeProperty('--yq-dock-bottom')
+      root.style.removeProperty('--yq-dock-right')
+    }
+  }, [bar, slip])
 }
 
 const byPrice = (dir: 1 | -1) => (a: ShopItem, b: ShopItem) => {
@@ -135,6 +176,10 @@ export function StaffCatalog() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [order, setOrder] = useState<{ res: OrderResponse; customer: { name: string; shop: string } } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  // the fixed order bar (under 1280 px), measured so the Spotted button sits above it, not on it;
+  // the docked slip (1280 px and up) is on screen unless the order-placed / did-not-load screen is
+  const [orderBar, setOrderBar] = useState<HTMLDivElement | null>(null)
+  useDockRoom(orderBar, !order && !(catalogQ.isError && !data))
 
   const setView = (v: View) => {
     setViewState(v)
@@ -145,13 +190,18 @@ export function StaffCatalog() {
     }
   }
 
-  /* ── pick a shop: carry a cart started before the pick into that shop's own cart ── */
+  /* ── pick a shop: carry a cart started before the pick — or the one on the checkout, when its
+     "Change" says the order is for another shop — into that shop's own (empty) cart ── */
   const pickShop = useCallback(
     (c: StaffCustomer | null) => {
       const next = c ? `staff:${shopKeyOf(c)}` : 'staff'
-      if (cartKey === 'staff' && next !== 'staff' && cart.lines.length && !peekCart(next).length) {
+      const waiting = peekCart(next).length
+      if (carryCart(cartKey, next, cart.lines.length, waiting, returnToCart)) {
         writeCart(next, cart.lines)
         cart.clear()
+      } else if (returnToCart && next !== cartKey && cart.lines.length && waiting) {
+        // never merged: that shop's own order in progress is what the checkout shows now
+        toast('That shop already has an order in progress, shown now. The lines you had stay with the other shop.', 'info')
       }
       setSelectedCustomer(c)
       setNotice(null)
@@ -160,7 +210,7 @@ export function StaffCatalog() {
         setCartOpen(true)
       }
     },
-    [cart, cartKey, returnToCart],
+    [cart, cartKey, returnToCart, toast],
   )
 
   /* ── Order again: the shop's suggested repeat into its cart; sold-out lines left out and named ── */
@@ -204,7 +254,10 @@ export function StaffCatalog() {
   }, [againKey, data, shopKey, qc, preload, navigate, location.pathname])
 
   /* ── search → category → filters → sort (sold-out last, always) ── */
-  const quick = isQuickList(q)
+  // a list only when the rep says so (a separator, an explicit ×, or "C18 3" where C18 is a code);
+  // "iphone 15" or "tws 4" stay a search on the whole text (quickAdd.isQuickList)
+  const codeKeys = useMemo(() => new Set(items.map((i) => codeKey(i.item_code))), [items])
+  const quick = isQuickList(q, (word) => codeKeys.has(codeKey(word)))
   const quickRows = useMemo<QuickRow[]>(() => {
     if (!quick || !index) return []
     return splitList(q).map((raw) => {
@@ -692,7 +745,7 @@ export function StaffCatalog() {
 
       {/* ── the order bar, in the thumb zone (under 1280 px) ── */}
       {hasCart && (
-        <div className="fixed right-0 z-30 border-t border-[#E9E4EF] bg-white/95 px-4 pb-2.5 pt-2 backdrop-blur-md xl:hidden" style={{ bottom: TABBAR, left: 'var(--yq-sidebar, 0px)' }}>
+        <div ref={setOrderBar} className="fixed right-0 z-30 border-t border-[#E9E4EF] bg-white/95 px-4 pb-2.5 pt-2 backdrop-blur-md xl:hidden" style={{ bottom: TABBAR, left: 'var(--yq-sidebar, 0px)' }}>
           <div className="mx-auto max-w-[1600px]">
             <MinimumRuler total={total} minBhd={minBhd} quote={quote} className="mb-2" />
             <div className="flex items-center gap-3">

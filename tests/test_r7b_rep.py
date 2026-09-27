@@ -760,6 +760,52 @@ def _():
             m.app.dependency_overrides.clear()
 
 
+def _web(rel: str) -> str:
+    return (ROOT / "web" / "src" / rel).read_text(encoding="utf-8")
+
+
+@test("staff checkout (UI, review F3-3): the client_order_id names ONE order — a new one for another shop, and for a changed basket after a failed attempt")
+def _():
+    rules = _web("pages/shop/staffOrder.ts")
+    key = rules.split("export function attemptKey(", 1)[1].split("\n}\n", 1)[0]
+    assert ".sort()" in key and "who.phone" in key and "norm(who.name)" in key and "norm(who.shop)" in key, \
+        "the lines (any order) AND who the order is for"
+    pick = rules.split("export function clientIdFor(", 1)[1].split("\n}\n", 1)[0]
+    assert "if (tried[key]) return tried[key]" in pick, "the same order again: its own id (the safe retry)"
+    assert "if (!current || Object.keys(tried).length > 0) return mint()" in pick, "a different order after a failure: a new id"
+    drawer = _web("pages/shop/CartDrawer.tsx")
+    assert "function newClientOrderId(" not in drawer, "one copy, in staffOrder.ts"
+    sel = drawer.split("if (selKey !== selSeen) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (staff) setClientOrderId(newClientOrderId())" in sel, "another shop is another order"
+    sub = drawer.split("const submit = async (e: FormEvent) => {", 1)[1].split("\n  }\n", 1)[0]
+    assert "const attempt = attemptKey(cart.lines, who)" in sub
+    assert "const orderId = staff ? clientIdFor(clientOrderId, tried, attempt) : ''" in sub
+    assert "client_order_id: orderId || undefined" in sub and "client_order_id: clientOrderId" not in sub
+    fail = sub.split("} catch (err: unknown) {", 1)[1]
+    assert "if (staff && orderId) setTried((t) => ({ ...t, [attempt]: orderId }))" in fail, "a lost response: remember the id"
+    ok = sub.split("} catch (err: unknown) {", 1)[0]
+    assert "setClientOrderId('')" in ok and "setTried({})" in ok, "placed: the next order starts clean"
+
+
+@test("staff catalog (UI, review F3-4): the checkout's Change carries the lines to the new shop when its cart is empty")
+def _():
+    rules = _web("pages/shop/staffOrder.ts")
+    carry = rules.split("export function carryCart(", 1)[1].split("\n}\n", 1)[0]
+    assert "toKey !== fromKey && toKey !== 'staff' && lines > 0 && targetLines === 0 && (fromKey === 'staff' || fromCheckout)" in carry
+    cat = _web("pages/shop/StaffCatalog.tsx")
+    pick = cat.split("const pickShop = useCallback(", 1)[1].split("\n  )\n", 1)[0]
+    assert "const waiting = peekCart(next).length" in pick
+    assert "if (carryCart(cartKey, next, cart.lines.length, waiting, returnToCart)) {" in pick
+    assert "writeCart(next, cart.lines)" in pick and "cart.clear()" in pick, "the same writeCart / clear carry as 'staff'"
+    # a shop with its own order in progress is never merged into: the rep is told what he sees
+    assert "} else if (returnToCart && next !== cartKey && cart.lines.length && waiting) {" in pick
+    assert "That shop already has an order in progress" in pick
+    assert "[cart, cartKey, returnToCart, toast]" in pick
+    # the Change on the checkout's shop card is what sets returnToCart
+    change = cat.split("onChangeShop={() => {\n            setCartOpen(false)", 1)[1].split("}}", 1)[0]
+    assert "setReturnToCart(true)" in change and "setPickerOpen(true)" in change
+
+
 @test("cache: an order or a saved phone drops that rep's book and Today only")
 def _():
     from app import followups
