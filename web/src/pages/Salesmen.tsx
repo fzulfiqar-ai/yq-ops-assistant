@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Copy, ExternalLink, QrCode, X, Check, Loader2, UserX } from 'lucide-react'
+import { Plus, Pencil, Trash2, Copy, ExternalLink, QrCode, X, Check, Loader2, UserX, ChevronDown } from 'lucide-react'
 import { apiGet, apiPost, apiPatch, apiDelete, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import { useToast } from '@/components/Toast'
@@ -11,8 +11,10 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { DataTable, type Column } from '@/components/DataTable'
 import { AttainmentTab, StatementsTab } from './SalesmenRollups'
+import { FollowupLiftCard } from './SalesmenLift'
 import { useAuth } from '@/lib/auth'
 
 interface Salesman {
@@ -121,6 +123,24 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
       {label}
     </button>
   )
+}
+
+/** R7d (audit UX-10): the row says what the rep IS — Active, Inactive, or Not linked (active, but no
+ *  login is linked, so nobody can open his Today or order under his name). Changing it is a
+ *  deliberate act in the edit dialog (or Deactivate, with its confirm), never a toggle in the table. */
+type RepStatus = 'active' | 'inactive' | 'unlinked'
+const STATUS: Record<RepStatus, { label: string; tone: BadgeTone; hint: string }> = {
+  active: { label: 'Active', tone: 'green', hint: 'Link, storefront and login all work.' },
+  inactive: { label: 'Inactive', tone: 'grey', hint: 'Link and storefront are off; orders and merchants keep the name. Reactivate in Edit.' },
+  unlinked: { label: 'Not linked', tone: 'amber', hint: 'No login is linked — set "Linked login" in Edit so the rep can use the app.' },
+}
+function repStatus(r: Salesman): RepStatus {
+  if (!r.is_active) return 'inactive'
+  return r.user_email ? 'active' : 'unlinked'
+}
+function StatusPill({ r }: { r: Salesman }) {
+  const st = STATUS[repStatus(r)]
+  return <span title={st.hint}><Badge tone={st.tone} dot>{st.label}</Badge></span>
 }
 
 /** first-name slug, lowercase [a-z0-9-] — used to seed referral_code from name on create only */
@@ -320,11 +340,16 @@ export default function Salesmen() {
   const emailOptions = (teamData?.users || []).map((u) => u.email)
   const rows = data?.salesmen || []
 
+  // R7d (audit UX-10): name and code share one cell, phone and email live in the edit dialog, the
+  // status is a pill (no one-click deactivate), and the actions column is pinned so it never falls
+  // off the right edge of a wide screen.
   const cols: Column<Salesman>[] = [
-    { key: 'name', label: 'Name', render: (_, r) => <span className="font-semibold">{r.name}</span> },
-    { key: 'phone', label: 'Phone', render: (_, r) => r.phone || '—' },
-    { key: 'email', label: 'Email', render: (_, r) => r.email || '—' },
-    { key: 'referral_code', label: 'Code', render: (_, r) => <code className="rounded bg-secondary px-1.5 py-0.5 text-[12px]">{r.referral_code}</code> },
+    { key: 'name', label: 'Rep', render: (_, r) => (
+        <div className="min-w-0">
+          <div className="font-semibold">{r.name}</div>
+          <code className="rounded bg-secondary px-1.5 py-0.5 text-[11.5px] text-muted-foreground">{r.referral_code}</code>
+        </div>
+      ) },
     { key: 'link', label: 'Link', render: (_, r) => (
         <div className="flex items-center gap-1">
           <button type="button" title="Copy link"
@@ -340,17 +365,15 @@ export default function Salesmen() {
           </button>
         </div>
       ) },
-    { key: 'user_email', label: 'Linked login', render: (_, r) => r.user_email || <span className="text-muted-foreground">Not linked</span> },
+    { key: 'user_email', label: 'Linked login', render: (_, r) => r.user_email || <span className="text-muted-foreground">—</span> },
     { key: 'focus_name', label: 'Focus name', render: (_, r) => r.focus_name || '—' },
-    { key: 'is_active', label: 'Active', render: (_, r) => (
-        <Toggle checked={r.is_active} onChange={() => toggleActive.mutate(r)} label={r.is_active ? 'Active' : 'Inactive'} />
-      ) },
+    { key: 'is_active', label: 'Status', render: (_, r) => <StatusPill r={r} /> },
     { key: 'orders_30d', label: 'Orders (30d)', align: 'right', render: (_, r) => num(r.orders_30d) },
-    { key: 'id', label: '', align: 'right', render: (_, r) => {
+    { key: 'id', label: 'Actions', align: 'right', render: (_, r) => {
         const keep = keepReason(r)
         return (
           <div className="flex justify-end gap-1.5">
-            <Button type="button" variant="outline" size="sm" onClick={() => setEdit(r)}><Pencil size={13} /></Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => setEdit(r)} aria-label={`Edit ${r.name}`} title="Edit — contacts, login, status"><Pencil size={13} /></Button>
             {keep === null ? (
               <Button type="button" variant="destructive" size="sm" title="Remove this rep (nothing references them)" onClick={() => remove(r)}>
                 <Trash2 size={13} />
@@ -392,20 +415,28 @@ export default function Salesmen() {
 
       {tab === 'attainment' ? <AttainmentTab /> : tab === 'statements' ? <StatementsTab /> : (
         <>
-          <p className="mb-4 text-sm text-muted-foreground">
-            Each salesman gets a personal storefront link and QR code — orders placed through it are credited
-            to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
-            Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
-            marketplace instead of the token link. Contact details are stored in the database only. A rep with
-            orders, merchants or a kickback statement can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
-          </p>
+          <details className="group mb-4 rounded-xl border bg-card px-4 py-2.5 text-sm text-muted-foreground">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 font-semibold text-foreground">
+              <ChevronDown size={15} className="transition-transform group-open:rotate-180" aria-hidden="true" />
+              How rep links work
+            </summary>
+            <p className="mt-2 max-w-3xl">
+              Each salesman gets a personal storefront link and QR code — orders placed through it are credited
+              to them automatically, and they see their own orders under Shop Orders. Set the marketplace URL in
+              Settings → Shop (<code>shop_market_url</code>) so links and QR codes point at <code>/{'{code}'}</code> on the
+              marketplace instead of the token link. Contact details are stored in the database only. A rep with
+              orders, merchants or a kickback statement can only be <strong>deactivated</strong> — their orders keep their name for kickback and returns.
+            </p>
+          </details>
 
           {isLoading ? (
             <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
           ) : (
-            <DataTable rows={rows} cols={cols} exportName="yq-salesmen"
+            <DataTable rows={rows} cols={cols} exportName="yq-salesmen" pinLast
               empty="No salesmen yet — add your first one to generate a referral link and QR code." />
           )}
+
+          <FollowupLiftCard />
         </>
       )}
 

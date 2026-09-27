@@ -19,12 +19,13 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from fastapi import BackgroundTasks, Depends, File, HTTPException, Query, Request, Response, UploadFile
     from pydantic import BaseModel, Field
 
-    from app import attribution, shop, shop_audit, shop_heart, shop_notify, shop_pipeline
+    from app import attribution, followup_lift, offers, shop, shop_audit, shop_heart, shop_notify, shop_pipeline
     from app.audit import log_event
     from app.auth import CurrentUser, get_current_user, has_feature, require_admin, require_feature
     from app.catalog import share_token
     from app.config import settings as cfg
     from app.features import is_read_only, mask_email, mask_phone, masks_contacts, strips_contacts
+    from app.ratelimit import device_key, order_token_key
     from app.shop import ShopError
 
     def require_any_feature(*features: str):
@@ -61,6 +62,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         lines: list[QuoteLine] = Field(max_length=shop.MAX_LINES)
         coupon_code: str | None = Field(default=None, max_length=40)
         referral_code: str | None = Field(default=None, max_length=32)
+        # R7d: the device, so a hold-out offer (scope.bucket) prices the quote exactly as the order
+        # will be priced. Optional: without it a bucketed offer is simply held back.
+        device_id: str | None = Field(default=None, max_length=64)
 
     class Customer(BaseModel):
         name: str = Field(max_length=120)
@@ -349,13 +353,15 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         """Price a cart server-side (tiers, cart rules, coupon, margin floor, stock status)."""
         _check_token(token)
         try:
-            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code)
+            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code,
+                                bucket_key=offers.key_for_device(shop.context(), body.device_id))
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {k: v for k, v in q.items() if not k.startswith("_")}
 
     @app.post("/public/shop/{token}/order")
-    @limiter.limit("5/minute")
+    @limiter.limit("20/minute")                              # per address: the net (a carrier NAT is many shops)
+    @limiter.limit("5/minute", key_func=device_key)          # per address + device: the real limit
     def shop_order(request: Request, token: str, body: OrderRequest, background: BackgroundTasks) -> dict:
         """Submit an order: validate → re-price → persist → notify (background)."""
         _check_token(token)
@@ -440,13 +446,15 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         if not shop.market_enabled():
             raise HTTPException(status_code=404, detail="The marketplace is not open.")
         try:
-            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code)
+            q = shop.price_cart([ln.model_dump() for ln in body.lines], body.coupon_code, body.referral_code,
+                                bucket_key=offers.key_for_device(shop.context(), body.device_id))
         except ShopError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {k: v for k, v in q.items() if not k.startswith("_")}
 
     @app.post("/public/market/order")
-    @limiter.limit("10/minute")
+    @limiter.limit("30/minute")                              # per address: the net
+    @limiter.limit("10/minute", key_func=device_key)         # per address + device (R7d, audit SEC-11)
     def market_order(request: Request, body: MarketOrderRequest, background: BackgroundTasks) -> dict:
         """Place a marketplace order: attribution via resolve_salesman, idempotent per
         (device_id, client_order_id), per-phone/per-device daily caps, merchant record upserted."""
@@ -486,7 +494,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return {"ok": shop.record_event(body.model_dump(), ip=_ip(request), ua=_ua(request))}
 
     @app.post("/public/shop/order/{order_token}/cancel")
-    @limiter.limit("3/hour")
+    @limiter.limit("20/hour")                                # per address: the net
+    @limiter.limit("3/hour", key_func=order_token_key)       # per address + this order
     def shop_order_cancel(request: Request, order_token: str, background: BackgroundTasks,
                           body: CancelRequest | None = None) -> dict:
         """The merchant cancels while the order is still Received (token-gated, like the status page)."""
@@ -561,15 +570,16 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     # ── public: "tell me when back" ─────────────────────────────────────────
     @app.post("/public/market/restock")
-    @limiter.limit("20/minute")
+    @limiter.limit("60/minute")                              # per address: the net
+    @limiter.limit("20/minute", key_func=device_key)         # per address + device
     def market_restock(request: Request, body: RestockRequest) -> dict:
         ok = shop.add_restock(body.item_code, body.phone, body.device_id, body.referral_code)
         return {"ok": ok}
 
     # ── portal: campaigns (Shop Admin) + restock list (Shop Orders) ──────────
     @app.get("/shop/campaigns")
-    def shop_campaigns_list(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
-        return {"campaigns": shop.list_campaigns()}
+    def shop_campaigns_list(archived: bool = False, _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        return {"campaigns": shop.list_campaigns(include_archived=archived)}
 
     @app.post("/shop/campaigns")
     def shop_campaigns_create(body: CampaignIn, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
@@ -594,11 +604,30 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.delete("/shop/campaigns/{campaign_id}")
     def shop_campaigns_delete(campaign_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """R7d (OFF-4): archived — switched off and kept for the record — once the archive column
+        exists; before it, deleted unless an order used the offer behind it (409)."""
         before = shop_audit.snapshot("shop_campaigns", campaign_id)
-        shop.delete_campaign(campaign_id)
-        log_event(user.email, "shop.campaign_delete", detail={"id": campaign_id})
-        shop_audit.record(user.email, "campaign", campaign_id, "delete", before, None)
-        return {"ok": True}
+        try:
+            out = shop.delete_campaign(campaign_id, by=user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=409 if "instead" in str(e) else 400, detail=str(e)) from e
+        action = "archive" if out.get("archived") else "delete"
+        log_event(user.email, f"shop.campaign_{action}", detail={"id": campaign_id})
+        shop_audit.record(user.email, "campaign", campaign_id, action, before,
+                          shop_audit.snapshot("shop_campaigns", campaign_id) if out.get("archived") else None)
+        return {"ok": True, "archived": bool(out.get("archived"))}
+
+    @app.post("/shop/campaigns/{campaign_id}/restore")
+    def shop_campaigns_restore(campaign_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """Bring an archived campaign back to the list — switched off, for the admin to review."""
+        before = shop_audit.snapshot("shop_campaigns", campaign_id)
+        try:
+            row = offers.archive("shop_campaigns", campaign_id, user.email, restore=True)
+        except ShopError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log_event(user.email, "shop.campaign_restore", detail={"id": campaign_id})
+        shop_audit.record(user.email, "campaign", campaign_id, "restore", before, row)
+        return row
 
     @app.post("/shop/campaigns/image")
     async def shop_campaigns_image(file: UploadFile = File(...), user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
@@ -645,8 +674,16 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     # ── portal: rules (Shop Admin) ────────────────────────────────────────────
     @app.get("/shop/rules")
-    def shop_rules_list(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
-        return {"rules": shop.list_rules()}
+    def shop_rules_list(archived: bool = False, _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """The rules (archived ones with ?archived=1), each with `referenced` / `orders` (R7d), plus
+        how many are archived and whether archiving is possible yet (the migration)."""
+        return shop.rules_payload(include_archived=archived)
+
+    @app.get("/shop/offers/performance")
+    def shop_offers_performance(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """v_offer_performance per rule (R7d): orders, units, merchants, reps, list value, discount
+        cost, GM after discount, clamps. available False until the offer-ledger migration."""
+        return offers.performance()
 
     @app.post("/shop/rules")
     def shop_rules_create(body: RuleIn, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
@@ -671,11 +708,41 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.delete("/shop/rules/{rule_id}")
     def shop_rules_delete(rule_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """Only a rule no order used is deleted; one that any order used answers 409 — archive it
+        (R7d, OFF-4)."""
         before = shop_audit.snapshot("discount_rules", rule_id)
-        shop.delete_rule(rule_id)
+        try:
+            shop.delete_rule(rule_id)
+        except ShopError as e:
+            code = 409 if str(e) == offers.RULE_REFERENCED_MSG else 404 if "not found" in str(e) else 400
+            raise HTTPException(status_code=code, detail=str(e)) from e
         log_event(user.email, "shop.rule_delete", detail={"id": rule_id})
         shop_audit.record(user.email, "discount_rule", rule_id, "delete", before, None)
         return {"ok": True}
+
+    @app.post("/shop/rules/{rule_id}/archive")
+    def shop_rules_archive(rule_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """Archive: switched off, out of every list and price, kept with its orders and snapshot."""
+        before = shop_audit.snapshot("discount_rules", rule_id)
+        try:
+            row = offers.archive("discount_rules", rule_id, user.email)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if "not found" in str(e) else 400, detail=str(e)) from e
+        log_event(user.email, "shop.rule_archive", detail={"id": rule_id})
+        shop_audit.record(user.email, "discount_rule", rule_id, "archive", before, row)
+        return row
+
+    @app.post("/shop/rules/{rule_id}/restore")
+    def shop_rules_restore(rule_id: int, user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """Back to the list, still switched off — the admin decides whether it runs again."""
+        before = shop_audit.snapshot("discount_rules", rule_id)
+        try:
+            row = offers.archive("discount_rules", rule_id, user.email, restore=True)
+        except ShopError as e:
+            raise HTTPException(status_code=404 if "not found" in str(e) else 400, detail=str(e)) from e
+        log_event(user.email, "shop.rule_restore", detail={"id": rule_id})
+        shop_audit.record(user.email, "discount_rule", rule_id, "restore", before, row)
+        return row
 
     @app.post("/shop/rules/preview")
     def shop_rules_preview(body: RuleIn, _user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
@@ -1279,7 +1346,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return None, {"hint": shop.UNLINKED_HINT}
 
     @app.get("/shop/me/followups")
-    def shop_me_followups(rep: str | None = None, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+    def shop_me_followups(background: BackgroundTasks, rep: str | None = None,
+                          user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
         """Due and lapsed shops for the caller's own Focus book. A rep sees only shops whose
         Focus sales are his, holdout shops left out; an admin may pass ?rep= (a Focus name or a
         salesman id) or nothing for every shop with its owner, holdout shops flagged."""
@@ -1302,6 +1370,8 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             return {"hint": "Your login has no Focus name yet — ask the office to set it on the Salesmen page.",
                     "rep": None, "due": [], "lapsed": [], "counts": {}, "scope": "rep"}
         out = followups.followups(focus)
+        # R7d (OFF-16): the rep's own first read of the day records who was served and who held back
+        background.add_task(followup_lift.log_exposures, sm)
         first = str(sm.get("name") or "").split(" ")[0] or None
         return {**out, "scope": "rep",
                 "due": [{**r, "wa_text": followups.wa_text(r, first)} for r in out["due"]],
@@ -1401,7 +1471,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return out
 
     @app.get("/shop/me/today")
-    def shop_me_today(user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+    def shop_me_today(background: BackgroundTasks, user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
         """Today in one call: the rep card and money strip, "To confirm" (oldest first, age, over
         the confirm SLA), in progress, due top 5, baskets not sent, link week, restock. The heavy
         half is cached 60 s per rep; the order queue is read live. A login with no salesman row
@@ -1409,7 +1479,17 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         not a rep and reads orders on its own pages."""
         if is_read_only(user.role):
             return followups.today(None, user.email, is_admin=False)
-        return followups.today(shop.salesman_for_user(user.email), user.email, is_admin=user.role == "admin")
+        sm = shop.salesman_for_user(user.email)
+        out = followups.today(sm, user.email, is_admin=user.role == "admin")
+        if sm and not (out.get("errors") or {}).get("due") and str(sm.get("focus_name") or "").strip():
+            background.add_task(followup_lift.log_exposures, sm)     # R7d: the Due card is a Due read too
+        return out
+
+    @app.get("/shop/followups/lift")
+    def shop_followups_lift(_user: CurrentUser = Depends(require_feature("Shop Admin"))) -> dict:
+        """The follow-up hold-out readout (R7d, OFF-16): per week and rep, served vs held-back
+        shops — bought within 14 days, BHD, taps. Read-only; available False until the migration."""
+        return followup_lift.lift()
 
     # ── portal: salesmen (Shop Admin) ─────────────────────────────────────────
     @app.get("/shop/salesmen")
@@ -1537,7 +1617,9 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                         headers={"Cache-Control": UPCOMING_CACHE, "X-Robots-Tag": "noindex, nofollow"})
 
     @app.post("/public/market/upcoming/interest")
-    @limiter.limit("20/minute")      # the restock endpoint's limit: it is the same request, for a card that has no stock yet
+    # the restock endpoint's limits: it is the same request, for a card that has no stock yet
+    @limiter.limit("60/minute")
+    @limiter.limit("20/minute", key_func=device_key)
     def market_upcoming_interest(request: Request, body: UpcomingInterestRequest) -> dict:
         if not shop.market_enabled():
             raise HTTPException(status_code=404, detail="The marketplace is not open.")

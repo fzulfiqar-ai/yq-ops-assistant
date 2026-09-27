@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type KeyboardEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, ArrowRight, Check, Clock, ImagePlus, Layers, Loader2, Megaphone, Monitor, Pencil, Plus, Search,
-  Smartphone, Trash2, X,
+  AlertTriangle, Archive, ArrowRight, Check, Clock, ImagePlus, Layers, Loader2, Megaphone, Monitor, Pencil, Plus, Search,
+  Smartphone, X,
 } from 'lucide-react'
 import { apiDelete, apiGet, apiPatch, apiPost, apiUpload, ApiError } from '@/lib/api'
 import type { BadgeKind, CampaignCanvas, CatalogPayload, ShopItem } from '@/lib/shopApi'
@@ -57,7 +57,7 @@ interface Campaign {
   ends_at?: string | null
   is_active: boolean
   sort_order: number
-  status?: 'live' | 'scheduled' | 'ended' | 'paused'
+  status?: 'live' | 'scheduled' | 'ended' | 'paused' | 'archived'
 }
 interface CampaignsResp { campaigns: Campaign[] }
 interface RuleLite { id: number; name: string; kind: string; is_active: boolean; ends_at?: string | null }
@@ -94,7 +94,7 @@ const CTA_PRESETS: { label: string; to: string }[] = [
 ]
 const CATEGORIES = ['CABLE', 'CHARGER', 'CAR CHARGER', 'POWER BANK', 'EARPHONE', 'BLUETOOTH HEADSET', 'BLUETOOTH SPEAKER', 'CAR ACCESSORIES']
 
-const STATUS_TONE: Record<string, BadgeTone> = { live: 'green', scheduled: 'accent', ended: 'grey', paused: 'amber' }
+const STATUS_TONE: Record<string, BadgeTone> = { live: 'green', scheduled: 'accent', ended: 'grey', paused: 'amber', archived: 'grey' }
 
 /* The market's canvases (web/src/market/market.css tokens --m-tile-*, --m-plum, --m-grad-night), hard-coded. */
 interface CanvasDef { key: CampaignCanvas; label: string; hint: string; bg: string; rgb: string; dark: boolean }
@@ -1087,14 +1087,16 @@ export function CampaignsSection() {
     onError: (e) => toast(errorText(e, 'Could not update the campaign.'), 'error'),
   })
 
+  // R7d (audit OFF-4): a campaign is archived — off the marketplace and out of this list, kept for the
+  // record with its window, creative and offer — never deleted (the API archives on DELETE).
   async function remove(c: Campaign) {
-    if (!window.confirm(`Delete "${c.title}"? This can't be undone.`)) return
+    if (!window.confirm(`Archive "${c.title}"? It leaves the marketplace and this list; its record is kept.`)) return
     try {
-      await apiDelete(`/shop/campaigns/${c.id}`)
-      toast('Campaign deleted.', 'success')
+      const res = await apiDelete<{ archived?: boolean }>(`/shop/campaigns/${c.id}`)
+      toast(res?.archived === false ? 'Campaign deleted.' : 'Campaign archived.', 'success')
       refresh()
     } catch (e) {
-      toast(errorText(e, 'Delete failed.'), 'error')
+      toast(errorText(e, 'Archive failed.'), 'error')
     }
   }
 
@@ -1125,7 +1127,7 @@ export function CampaignsSection() {
     { key: 'id', label: '', align: 'right', render: (_, c) => (
         <div className="flex justify-end gap-1">
           <button type="button" onClick={() => setEditing(c)} aria-label="Edit" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"><Pencil size={15} /></button>
-          <button type="button" onClick={() => remove(c)} aria-label="Delete" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-rose-50 hover:text-rose-700"><Trash2 size={15} /></button>
+          <button type="button" onClick={() => remove(c)} aria-label="Archive" title="Archive" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-rose-50 hover:text-rose-700"><Archive size={15} /></button>
         </div>
       ) },
   ]

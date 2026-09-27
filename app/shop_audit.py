@@ -31,7 +31,8 @@ TABLE = "shop_admin_audit"
 ENTITIES = ("settings", "discount_rule", "campaign", "salesman", "target", "upcoming", "shop_customer", "order",
             "focus_link", "user")
 # accept / reject: the office's answer to a suggested Focus invoice (R7a, shop_pipeline.decide_focus_link)
-ACTIONS = ("create", "update", "delete", "import", "assign", "accept", "reject")
+ACTIONS = ("create", "update", "delete", "import", "assign", "accept", "reject",
+           "archive", "restore")      # R7d: offers and campaigns are archived, never deleted once used
 # never worth a second copy (volatile, or already elsewhere): timestamps the row itself moves,
 # derived fields the API decorates rows with, and browser fingerprints
 STRIP = frozenset({"updated_at", "link", "orders_30d", "references", "impact", "summary", "status_label",

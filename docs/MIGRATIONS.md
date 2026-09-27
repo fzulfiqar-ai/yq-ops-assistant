@@ -624,3 +624,33 @@ and the three columns (export `salesmen.territory` / `focus_aliases` first if an
 
 After each: `python -m scripts.audit_grants`. Tests: `python -m tests.test_r7d_profit`.
 
+
+
+## Release R7d (27-Sep-2026, not yet applied): `r7d_offer_ledger_migration.sql` — offers measurable before any runs
+
+Additive and idempotent, with `r7d_offer_ledger_reverse.sql`. **Order: after `r7c_order_lines_qty_migration.sql`**
+(`v_offer_performance` reads the line cost snapshot and the delivered quantity; the first block stops with a clear
+message otherwise). Nothing here changes a price, an order, a line, an event, a customer or a statement (0 rules and
+0 campaigns existed on 27-Sep-2026, read only).
+
+- `discount_rules` / `shop_campaigns` gain `archived_at`, `archived_by` (soft delete: the API switches a row off when
+  it archives it and filters archived rows out of every read; a rule any order used is never deleted).
+- `shop_order_discounts` — the offer ledger: one row per (order line, rule) and per (order, cart-level rule) with the
+  rule snapshot (and the hold-out arm), kind, level, amount placed, amount confirmed, clamped, stage. `rule_id`
+  references `discount_rules` with NO ACTION, so the database also refuses to delete a used rule.
+- `shop_coupon_reserve(rule, force)` / `shop_coupon_release(rule)` — the coupon counter as one conditional UPDATE each,
+  SECURITY DEFINER, `service_role` only.
+- `shop_badge_log` (one row per item per Bahrain day, written by the `badge_log` shop job) and `followup_exposures`
+  (the shops each rep was served and held back, once per rep per day).
+- `v_offer_performance` (per rule) and `v_followup_lift` (per week, rep and arm) — aggregates only, `yq_readonly`
+  only, not `security_invoker`.
+
+Every new table: RLS on, no policy, revoked from `anon`/`authenticated`; the closing `DO` block checks all of it.
+Deploy order for the API: either — every object is probed and the old behaviour runs until it exists (the coupon
+counter falls back to the read-then-write, the ledger / badge log / exposures are skipped, the two readouts say
+"not switched on yet", archiving answers 400 naming this file). The reverse refuses while any ledger, badge or
+exposure row or any archived rule / campaign exists, unless `SET yq.offer_ledger_drop = 'yes'` in the same session
+(back them up first); it never touches a base table. Restart the API after reversing (probes cache 10 minutes).
+Replayed on a throwaway local cluster (synthetic tables): apply twice, the per-rule and follow-up numbers, the RPCs,
+the FK and checks, the reverse guard, reverse, apply again — all rolled back (`tests/test_r7d_ops.py`, SKIPs without
+a cluster). Run `python -m scripts.audit_grants` after applying.
