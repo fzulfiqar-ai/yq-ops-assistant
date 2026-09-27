@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { Lock, Loader2, CloudOff, RefreshCw, ServerCrash } from 'lucide-react'
-import { useAuth } from '@/lib/auth'
+import { isManagement, useAuth } from '@/lib/auth'
+import { managementMayOpen } from '@/lib/nav'
 import { Logo } from './Logo'
 import { Button } from './ui/button'
 import { AppShell } from './AppShell'
@@ -129,10 +130,15 @@ export function ProtectedRoute() {
   return <AppShell />
 }
 
-/** Per-page feature gate (admins pass; members need the feature). */
+/**
+ * Per-page feature gate (admins pass; members need the feature). Management opens only its own
+ * pages (lib/nav MANAGEMENT_NAV) even where a feature would let it in, e.g. Coach under Sales.
+ */
 export function Gate({ feature, children }: { feature?: string; children: ReactNode }) {
   const { me } = useAuth()
+  const { pathname } = useLocation()
   const ok = !!me && (me.role === 'admin' || (feature ? (me.features || []).includes(feature) : false))
+    && (!isManagement(me) || managementMayOpen(pathname))
   if (!ok) {
     return (
       <div className="grid min-h-[60vh] place-items-center">
