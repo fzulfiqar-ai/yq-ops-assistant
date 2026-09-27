@@ -48,7 +48,21 @@ export function ArcRevealHero({
   children,
 }: ArcRevealHeroProps) {
   const prefersReducedMotion = useReducedMotion()
-  const [phase, setPhase] = React.useState<Phase>('intro')
+  // Lazy initial state (not an effect): a salesman never sees the greeting at all, and a viewer
+  // who already finished it this session doesn't get a one-frame flash of it before it's swapped
+  // out. `yq-role` is the same remembered-role key AuthProvider.warmDashboard() reads (auth.tsx) —
+  // set the moment /me last answered, so it is there before the session even resolves this time.
+  const [phase, setPhase] = React.useState<Phase>(() => {
+    if (prefersReducedMotion) return 'done'
+    if (typeof window === 'undefined') return 'intro'
+    try {
+      if (storageKey && window.localStorage.getItem(storageKey) === 'done') return 'done'
+      if (window.localStorage.getItem('yq-role') === 'salesman') return 'done'
+    } catch {
+      /* private mode */
+    }
+    return 'intro'
+  })
   const [index, setIndex] = React.useState(0)
 
   const progress = useMotionValue(0)
@@ -58,19 +72,10 @@ export function ArcRevealHero({
     return `M 0 ${edge} Q 50 ${control} 100 ${edge} L 100 110 L 0 110 Z`
   })
 
-  React.useEffect(() => {
-    if (prefersReducedMotion) {
-      setPhase('done')
-      return
-    }
-    if (storageKey && typeof window !== 'undefined') {
-      try {
-        if (window.localStorage.getItem(storageKey) === 'done') setPhase('done')
-      } catch {
-        /* private mode */
-      }
-    }
-  }, [prefersReducedMotion, storageKey])
+  // (No live-update effect for a mid-session reduced-motion toggle: the initializer's one-time
+  // snapshot already covers it in practice — this intro is on screen for well under a second —
+  // and syncing a changing external value into state from inside an effect is exactly the
+  // "setState in an effect" pattern react-hooks/set-state-in-effect flags.)
 
   React.useEffect(() => {
     if (phase !== 'intro') return
@@ -108,7 +113,13 @@ export function ArcRevealHero({
   return (
     <section
       aria-label="Intro"
-      className={cn('relative isolate min-h-screen w-full overflow-hidden bg-background text-foreground', className)}
+      // overflow-CLIP, not -hidden: `hidden` makes this section a scroll container, which becomes
+      // the nearest positioning ancestor for every `position: sticky` element inside `children`
+      // (the desktop sidebar, the phone header, the catalog search bar) — since this section
+      // itself never scrolls, they never stick, they just sit still while the real page scrolls
+      // past them. `clip` still clips the arc-reveal overlay's transforms but, per spec, does not
+      // establish a scroll container, so sticky descendants keep sticking to the viewport.
+      className={cn('relative isolate min-h-screen w-full overflow-clip bg-background text-foreground', className)}
     >
       <div className={cn('relative z-0', revealClassName)}>{children}</div>
 
