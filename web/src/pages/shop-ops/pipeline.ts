@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiGet, ApiError } from '@/lib/api'
 import { bhd } from '@/lib/format'
+import type { CatalogPayload } from '@/lib/shopApi'
 import type { BadgeTone } from '@/components/ui/badge'
 
 /**
@@ -29,6 +30,8 @@ export const CANCEL_REASONS: { code: string; label: string }[] = [
   { code: 'duplicate', label: 'Duplicate' },
   { code: 'test', label: 'Test order' },
   { code: 'price_issue', label: 'Price issue' },
+  // R7c: an order that fell below the wholesale minimum (the shop is told "Below the minimum order value")
+  { code: 'below_minimum', label: 'Below the minimum' },
   { code: 'other', label: 'Other' },
 ]
 
@@ -194,5 +197,20 @@ export function useFocusCandidates() {
     queryKey: ['shop-focus-candidates'],
     queryFn: () => apiGet<FocusCandidatesResp>('/shop/focus/candidates?limit=300&per_order=5'),
     staleTime: 60_000,
+  })
+}
+
+/* ───────────────────────── R7c: live stock for the order editor ─────────────────────────
+ * The staff catalog (exact stock units, category, today's book price and tiers) — the same query
+ * key CampaignsSection reads, so the desk never fetches it twice. Only the editors mount it: the
+ * drawer itself never needs it. A login without the Catalog page gets 403 and the editor falls
+ * back to the stock wording stored on the line (no substitute / add picker without it). */
+export function useStaffCatalog(enabled = true) {
+  return useQuery({
+    queryKey: ['shop-staff-catalog'],
+    queryFn: () => apiGet<CatalogPayload>('/shop/catalog'),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: 1,
   })
 }

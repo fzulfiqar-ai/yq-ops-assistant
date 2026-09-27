@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, ChevronDown, Loader2, MessageCircle, UserRoundCheck, X } from 'lucide-react'
-import { apiGet, apiPost, ApiError } from '@/lib/api'
+import { AlertTriangle, Check, ChevronDown, Loader2, UserRoundCheck, X } from 'lucide-react'
+import { apiGet, apiPost } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd, fmtDate } from '@/lib/format'
-import { Badge, type BadgeTone } from '@/components/ui/badge'
+import { Badge } from '@/components/ui/badge'
 import { Stepper } from '@/components/ui/stepper'
 import {
   apiDetail, CANCEL_REASONS, confidencePct, lineDiffSummary, PAYMENT_LABEL, PAYMENT_METHODS,
@@ -15,8 +15,8 @@ import {
 
 /**
  * The actions the marketplace added to an order, shared by the desk drawer, the field sheet and
- * the assignment queue (docs/SHOP.md § Marketplace):
- *   • ConfirmEditor — confirm with changes (per-line confirmed qty / remove, expected delivery)
+ * the assignment queue (docs/SHOP.md § Marketplace). The order heart itself (R7c — Confirm / Amend
+ * editor, Deliver with changes, Reopen, Tell the shop) lives in ./OrderHeart.tsx.
  *   • AssignBox     — assign or reassign (admins only: the API refuses everyone else since R7b);
  *                     admins may also make the rep the SHOP's rep (R3, audited)
  *   • AssignmentQueue — unassigned open orders with a history-based suggestion
@@ -168,6 +168,8 @@ export interface ReturnableLine {
   display_name?: string | null
   qty: number
   qty_confirmed?: number | null
+  /** R7c: what was handed over (null on an order delivered before the column existed) */
+  qty_delivered?: number | null
   line_status?: string | null
   unit_price_bhd?: number | null
   unit_price_confirmed?: number | null
@@ -175,8 +177,12 @@ export interface ReturnableLine {
 
 export function ReturnBox({ orderId, lines, onDone, onCancel }: { orderId: number; lines: ReturnableLine[]; onDone: () => void; onCancel?: () => void }) {
   const toast = useToast()
-  const live = lines.filter((l) => (l.line_status || 'ok') !== 'removed')
-  const cap = (l: ReturnableLine) => (l.qty_confirmed != null ? l.qty_confirmed : l.qty)
+  // R7c: only what was handed over can come back (qty_delivered; else the confirmed quantity, which
+  // is 0 for a line that was unavailable or substituted) — the server refuses the rest
+  const cap = (l: ReturnableLine) => (l.qty_delivered != null ? l.qty_delivered
+    : l.qty_confirmed != null ? l.qty_confirmed
+      : ['removed', 'unavailable', 'substituted'].includes(l.line_status || 'ok') ? 0 : l.qty)
+  const live = lines.filter((l) => cap(l) > 0)
   const price = (l: ReturnableLine) => Number(l.unit_price_confirmed ?? l.unit_price_bhd ?? 0)
   const [qty, setQty] = useState<Record<number, number>>({})
   const [reason, setReason] = useState('')
@@ -264,178 +270,16 @@ export function InvoiceBox({ orderId, current, onDone }: { orderId: number; curr
 }
 
 
-// eslint-disable-next-line react-refresh/only-export-components
-export const STATUS_LABEL: Record<string, string> = {
-  new: 'Received',
-  confirmed: 'Confirmed',
-  packed: 'Preparing',
-  out_for_delivery: 'On the way',
-  delivered: 'Delivered',
-  cancelled: 'Cancelled',
-}
-// eslint-disable-next-line react-refresh/only-export-components
-export const STATUS_TONE: Record<string, BadgeTone> = {
-  new: 'ink',
-  confirmed: 'accent',
-  packed: 'amber',
-  out_for_delivery: 'amber',
-  delivered: 'green',
-  cancelled: 'grey',
-}
-// eslint-disable-next-line react-refresh/only-export-components
-export const ACTION_LABEL: Record<string, string> = {
-  confirmed: 'Confirm',
-  packed: 'Mark preparing',
-  out_for_delivery: 'On the way',
-  delivered: 'Delivered',
-  cancelled: 'Cancel order',
-}
-
-export interface EditableLine {
-  id: number
-  item_code: string
-  display_name?: string | null
-  qty: number
-  qty_confirmed?: number | null
-  line_status?: string | null
-  unit_price_bhd?: number | null
-  backorder?: boolean
-}
-
-export interface ConfirmResponse {
-  ok: boolean
-  order: { status: string; expected_delivery?: string | null; total_confirmed_bhd?: number | null }
-  totals?: { total_bhd?: number | null } | null
-  changed?: { item_code: string; from: number; to: number }[]
-  removed?: string[]
-  whatsapp_url?: string | null
-}
+/* ───────────────────────── labels (R7c: three visible stages) ─────────────────────────
+ * The words live in ./heart.ts (Preparing / On the way read "Confirmed" for a rep and the desk; the
+ * storekeeper's pick list keeps its own stamp words from the API's status_label). Re-exported here
+ * because PickList.tsx and sales/Today.tsx import them from this file. */
+export { STATUS_LABEL, STATUS_TONE } from './heart'
 
 interface SalesmanOpt { id: number; name: string; is_active?: boolean }
 
-/** What a salesman actually says in the shop — one tap instead of typing on the road. */
-const ETA_CHIPS = ['Today', 'Tomorrow', 'Day after tomorrow', 'With my next visit'] as const
-
-export function ConfirmEditor({
-  orderId, lines, onDone, onCancel,
-}: {
-  orderId: number
-  lines: EditableLine[]
-  onDone: (res: ConfirmResponse) => void
-  onCancel?: () => void
-}) {
-  const toast = useToast()
-  const [draft, setDraft] = useState<Record<number, { qty: string; removed: boolean }>>(() =>
-    Object.fromEntries(lines.map((l) => [l.id, { qty: String(l.qty_confirmed ?? l.qty), removed: (l.line_status || 'ok') === 'removed' }])),
-  )
-  const [eta, setEta] = useState('')
-  const [note, setNote] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const changes = useMemo(() => {
-    const out: { line_id: number; qty_confirmed?: number; line_status?: string }[] = []
-    for (const l of lines) {
-      const d = draft[l.id]
-      if (!d) continue
-      if (d.removed) out.push({ line_id: l.id, line_status: 'removed' })
-      else {
-        const n = Math.max(0, Math.floor(Number(d.qty) || 0))
-        if (n !== l.qty) out.push({ line_id: l.id, qty_confirmed: n })
-      }
-    }
-    return out
-  }, [draft, lines])
-  const live = lines.filter((l) => !draft[l.id]?.removed && Math.floor(Number(draft[l.id]?.qty) || 0) > 0)
-  const invalid = lines.some((l) => !draft[l.id]?.removed && Math.floor(Number(draft[l.id]?.qty) || 0) <= 0)
-  const total = live.reduce((s, l) => s + Number(l.unit_price_bhd || 0) * Math.floor(Number(draft[l.id]?.qty) || 0), 0)
-
-  async function submit() {
-    if (invalid || !live.length) return
-    setBusy(true)
-    try {
-      const res = await apiPost<ConfirmResponse>(`/shop/orders/${orderId}/confirm`, {
-        lines: changes,
-        expected_delivery: eta.trim() || undefined,
-        note: note.trim() || undefined,
-      })
-      const n = (res.changed?.length || 0) + (res.removed?.length || 0)
-      toast(n ? `Confirmed with ${n} change${n === 1 ? '' : 's'}.` : 'Order confirmed.', 'success')
-      onDone(res)
-    } catch (e) {
-      toast(e instanceof ApiError ? e.body.slice(0, 160) : 'Could not confirm the order.', 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="space-y-3 rounded-xl border border-[#E3DAEC] bg-[#F6F3F8] p-3.5">
-      <div className="text-[12px] font-semibold text-[#1A1428]">Confirm quantities</div>
-      <ul className="divide-y divide-[#E9E4EF] overflow-hidden rounded-xl border border-[#E9E4EF] bg-white">
-        {lines.map((l) => {
-          const d = draft[l.id] || { qty: String(l.qty), removed: false }
-          const n = Math.floor(Number(d.qty) || 0)
-          return (
-            <li key={l.id} className={cn('flex items-center gap-3 p-2.5', d.removed && 'opacity-60')}>
-              <div className="min-w-0 flex-1">
-                <div className={cn('truncate text-[13px] font-semibold text-[#1A1428]', d.removed && 'line-through')}>{l.display_name || l.item_code}</div>
-                <div className="text-[11px] tabular-nums text-[#6b6480]">{l.item_code} · ordered {l.qty}{l.backorder ? ' · backorder' : ''}</div>
-              </div>
-              {!d.removed && (
-                <Stepper
-                  size="sm"
-                  value={n}
-                  min={1}
-                  max={9999}
-                  label={l.item_code}
-                  onChange={(v) => setDraft((s) => ({ ...s, [l.id]: { ...d, qty: String(v) } }))}
-                  onRemove={() => setDraft((s) => ({ ...s, [l.id]: { ...d, removed: true } }))}
-                  className={cn(n !== l.qty && 'border-[#6D4091] [&_span]:text-[#6D4091]')}
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => setDraft((s) => ({ ...s, [l.id]: { ...d, removed: !d.removed } }))}
-                className={cn('h-10 shrink-0 rounded-lg border px-2.5 text-[12px] font-semibold', d.removed ? 'border-[#6D4091] bg-[#EEE8F4] text-[#6D4091]' : 'border-[#E2DCEA] bg-white text-[#9f1239]')}
-              >
-                {d.removed ? 'Keep' : 'Remove'}
-              </button>
-            </li>
-          )
-        })}
-      </ul>
-      <div>
-        <div className="mb-1.5 text-[11.5px] font-semibold text-[#6b6480]">When will it reach the shop?</div>
-        <div className="flex flex-wrap gap-1.5">
-          {ETA_CHIPS.map((c) => (
-            <button key={c} type="button" onClick={() => setEta(eta === c ? '' : c)} aria-pressed={eta === c} className={cn('h-9 rounded-full border px-3 text-[12.5px] font-semibold transition-colors duration-150', eta === c ? 'border-[#6D4091] bg-[#6D4091] text-white' : 'border-[#E2DCEA] bg-white text-[#1A1428] hover:border-[#6D4091]')}>
-              {c}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-2">
-        <input value={eta} onChange={(e) => setEta(e.target.value)} placeholder="Or type it (e.g. Thursday morning)" aria-label="Expected delivery" className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />
-        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note for the shop (optional)" aria-label="Note" className="h-10 rounded-lg border border-[#E2DCEA] bg-white px-3 text-[13px] outline-none focus:border-[#6D4091]" />
-      </div>
-      <div className="flex items-center justify-between gap-2 text-[12px] text-[#6b6480]">
-        <span>{changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'}` : 'As ordered'} · est. {bhd(total, 3)}</span>
-        {!live.length && <span className="inline-flex items-center gap-1 font-medium text-[#9f1239]"><AlertTriangle size={12} /> Remove every line? Cancel the order instead.</span>}
-      </div>
-      <div className="flex gap-2">
-        {onCancel && <button type="button" onClick={onCancel} className="h-11 flex-1 rounded-xl border border-[#E2DCEA] bg-white text-[13px] font-semibold text-[#1A1428]">Back</button>}
-        <button type="button" onClick={submit} disabled={busy || invalid || !live.length} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[14px] font-semibold text-white disabled:opacity-50">
-          {busy ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} {changes.length ? 'Confirm with changes' : 'Confirm order'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
 // Not exported: nothing outside this file uses it (react-refresh/only-export-components wants a
-// components-only file, and this file already has three pre-existing constant exports it
-// violates for — STATUS_LABEL/STATUS_TONE/ACTION_LABEL, consumed by PickList.tsx and
-// sales/Today.tsx — out of this stream's file scope to relocate).
+// components-only file; the one constant re-export above is for PickList.tsx and sales/Today.tsx).
 function useSalesmenOptions(enabled: boolean) {
   return useQuery({
     queryKey: ['shop-salesmen-options'],
@@ -579,16 +423,6 @@ export function AssignmentQueue({ onChanged, highlight }: { onChanged: () => voi
         ))}
       </ul>
     </section>
-  )
-}
-
-/** The rep's one-tap WhatsApp to the merchant for the order's current stage. */
-export function CustomerWhatsApp({ url, first }: { url?: string | null; first?: string | null }) {
-  if (!url) return null
-  return (
-    <a href={url} target="_blank" rel="noreferrer" className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#25d366] text-[13.5px] font-semibold text-[#08331b] hover:opacity-90">
-      <MessageCircle size={16} aria-hidden="true" /> WhatsApp {first || 'the shop'} the update
-    </a>
   )
 }
 

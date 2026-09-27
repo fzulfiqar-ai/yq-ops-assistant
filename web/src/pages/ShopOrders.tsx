@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Copy, ExternalLink, Link2, MessageCircle, X, Check, Loader2,
-  Phone, Mail, PackageX, ChevronRight,
+  Phone, Mail, PackageX, ChevronRight, RotateCcw, Truck,
 } from 'lucide-react'
 import { apiGet, apiPost, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
@@ -20,10 +20,18 @@ import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import {
-  ACTION_LABEL, AssignBox, AssignmentQueue, ConfirmEditor, CustomerWhatsApp, STATUS_LABEL,
-  STATUS_TONE as MARKET_STATUS_TONE,
-  CancelReasonPicker, FocusExceptionsPanel, FocusLinkBox, ReturnBox,
+  AssignBox, AssignmentQueue, CancelReasonPicker, FocusExceptionsPanel, FocusLinkBox, ReturnBox,
 } from '@/pages/shop-ops/OrderActions'
+import {
+  DeliverEditor, EffectiveTotal, LineChips, OrderEditor, ReopenBox, StageTrack, TellShopButton,
+  type HeartResponse,
+} from '@/pages/shop-ops/OrderHeart'
+import {
+  CAS_MSG, FILTER_PARAM, STAMP_LABEL, STATUS_LABEL, STATUS_TONE as HEART_STATUS_TONE, VISIBLE_LABEL,
+  VISIBLE_STATUSES, actionsOf, bucketFromParam, confirmedQty, effectiveTotal, fils, fromFils,
+  isAddedLine, lineMoney, lockUnit, shopNotTold, totalChanged, visibleCount, visibleStatus,
+  type HeartLine, type OrderAction, type StageStep, type VisibleStatus,
+} from '@/pages/shop-ops/heart'
 import {
   apiDetail, attributionLabel, cancelReady, cancelReasonLabel, minimumGapText, PAYMENT_LABEL,
   shopRepLine,
@@ -47,6 +55,7 @@ interface ShopOrderRow {
   order_kind?: 'standard' | 'small' | null
   minimum_gap_bhd?: number | null
   created_at?: string | null
+  updated_at?: string | null
   source?: string | null
   referral_code?: string | null
   placed_by?: string | null
@@ -68,24 +77,15 @@ interface ShopOrderRow {
   cancel_reason?: string | null
   cancel_reason_code?: string | null
   returned_bhd?: number | null
+  // R7c order heart (27-Sep-2026): Received / Confirmed / Delivered / Cancelled (packed and
+  // out_for_delivery read "Confirmed"), and the confirmed-else-original money
+  status_label?: string | null
+  total_effective_bhd?: number | null
 }
 type StatusCounts = Partial<Record<'new' | 'confirmed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled', number>>
 // min_order_bhd also arrives on the list; it is not read here — a stored gap is never paired with today's minimum (pipeline.ts)
 interface ShopOrdersResp { orders: ShopOrderRow[]; count: number; counts?: StatusCounts }
 
-interface OrderLine {
-  id: number
-  item_code: string
-  display_name?: string | null
-  qty: number
-  qty_confirmed?: number | null
-  line_status?: string | null
-  unit_price_bhd?: number | null
-  unit_price_confirmed?: number | null
-  line_total_bhd?: number | null
-  stock_status?: 'in_stock' | 'low_stock' | 'out_of_stock' | null
-  backorder?: boolean
-}
 interface OrderEvent { ts: string; event: string; note?: string | null; detail?: Record<string, unknown> | null }
 /** R3: the shop's recorded rep (admin assignment, else the settled first-touch rep) — admins only. */
 interface OrderCustomerRep {
@@ -97,6 +97,8 @@ interface OrderCustomerRep {
   sticky_name?: string | null
   first_ref?: string | null
 }
+/** GET /shop/orders/{id} — the StaffOrder (app/shop_api._decorate). Every R7c field is optional:
+ *  an API from before it answers without them and the page falls back (heart.actionsOf). */
 interface OrderDetail extends ShopOrderRow {
   customer_email?: string | null
   note?: string | null
@@ -105,7 +107,7 @@ interface OrderDetail extends ShopOrderRow {
   delivery_bhd?: number | null
   coupon_code?: string | null
   coupon?: { code?: string | null; message?: string | null } | null
-  lines: OrderLine[]
+  lines: HeartLine[]
   events: OrderEvent[]
   whatsapp_url?: string | null
   next_statuses?: string[] | null
@@ -113,6 +115,20 @@ interface OrderDetail extends ShopOrderRow {
   payment_label?: string | null
   payment_method?: string | null
   customer?: OrderCustomerRep | null
+  // R7c
+  visible_status?: VisibleStatus | null
+  stamp_label?: string | null
+  steps?: StageStep[] | null
+  actions?: string[] | null
+  subtotal_confirmed_bhd?: number | null
+  confirmed_at?: string | null
+  delivered_at?: string | null
+  customer_notified_at?: string | null
+  shop_told?: boolean | null
+  reopen_until?: string | null
+  change_reasons?: Record<string, string> | null
+  min_order_bhd?: number | null
+  expected_delivery_date?: string | null
 }
 
 interface ShopMeSalesman {
@@ -128,29 +144,22 @@ interface ShopMe {
   focus?: { revenue_90d_bhd?: number } | null
 }
 
-const STATUSES = ['new', 'confirmed', 'packed', 'out_for_delivery', 'delivered', 'cancelled'] as const
 // 'needs_action' is a computed view (item 4, R7a), not a real status: it maps to no `status`
-// filter on the API call and is client-filtered afterwards (see DeskOrders).
-type StatusFilter = 'all' | 'unassigned' | 'needs_action' | (typeof STATUSES)[number]
+// filter on the API call and is client-filtered afterwards (see DeskOrders). The four stages are
+// the owner's (R7c): Received · Confirmed · Delivered · Cancelled — Confirmed also fetches the
+// orders the storekeeper stamped Preparing / On the way (heart.FILTER_PARAM).
+type StatusFilter = 'all' | 'unassigned' | 'needs_action' | VisibleStatus
 
-/**
- * Three buckets, not six statuses. Standing in a shop the only questions are
- * "what is waiting for me", "what am I working on", "what is finished".
- */
-const BUCKETS = [
-  { key: 'new', label: 'New', param: 'new', of: (c: StatusCounts) => c.new },
-  { key: 'progress', label: 'In progress', param: 'confirmed,packed,out_for_delivery', of: (c: StatusCounts) => (c.confirmed ?? 0) + (c.packed ?? 0) + (c.out_for_delivery ?? 0) },
-  { key: 'done', label: 'Done', param: 'delivered,cancelled', of: (c: StatusCounts) => (c.delivered ?? 0) + (c.cancelled ?? 0) },
-] as const
-type BucketKey = (typeof BUCKETS)[number]['key']
-
-const STATUS_TONE: Record<string, BadgeTone> = MARKET_STATUS_TONE
-/** The merchant's words for each stage (Received / Confirmed / Preparing / On the way / Delivered). */
+const STATUS_TONE: Record<string, BadgeTone> = HEART_STATUS_TONE
+/** The owner's words for each stage — Received / Confirmed / Delivered / Cancelled. */
 function StatusPill({ status }: { status: string }) {
   return <Badge tone={STATUS_TONE[status] || 'grey'}>{STATUS_LABEL[status] || status}</Badge>
 }
-function actionLabel(s: string): string {
-  return ACTION_LABEL[s] || `Mark ${STATUS_LABEL[s] || s}`
+
+/** After a step, until a WhatsApp / call / visit is logged (POST …/customer-notified). */
+function NotToldChip({ o }: { o: { status?: string | null; shop_told?: boolean | null } }) {
+  if (!shopNotTold(o)) return null
+  return <Badge tone="amber" title="No WhatsApp, call or visit has been logged since the last step.">Shop not told yet</Badge>
 }
 
 const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: 'Only a few left', out_of_stock: 'Sold out' }
@@ -224,6 +233,31 @@ function relTime(iso?: string | null): string {
   }
 }
 
+const VIA_WORD: Record<string, string> = { whatsapp: 'on WhatsApp', phone: 'by phone', visit: 'at a visit', email: 'by email' }
+
+/** " · shop agreed by phone" when the rep ticked "Shop agreed" on an adverse change (R7c). */
+function agreedText(detail?: Record<string, unknown> | null): string {
+  const a = detail?.shop_agreed
+  if (!a || typeof a !== 'object') return ''
+  const via = String((a as Record<string, unknown>).via || '')
+  return ` · shop agreed${VIA_WORD[via] ? ` ${VIA_WORD[via]}` : ''}`
+}
+
+/** How many lines a confirm / amend / delivery changed (R7c detail.lines + added; else the older changed/removed). */
+function changeCount(detail?: Record<string, unknown> | null): number {
+  const len = (k: string) => (Array.isArray(detail?.[k]) ? (detail?.[k] as unknown[]).length : 0)
+  const n = len('lines') + len('added') + len('delivered')
+  return n || len('changed') + len('removed')
+}
+
+/** " · BHD 24.000 → BHD 18.500" when the step moved the total. */
+function totalMove(detail?: Record<string, unknown> | null): string {
+  const a = detail?.total_before
+  const b = detail?.total_after
+  if (typeof a !== 'number' || typeof b !== 'number' || fils(a) === fils(b)) return ''
+  return ` · ${bhd(a, 3)} → ${bhd(b, 3)}`
+}
+
 function eventLabel(event: string, detail?: Record<string, unknown> | null): string {
   if (event === 'created') return 'Order created'
   if (event === 'assigned') return 'Assigned'
@@ -256,8 +290,37 @@ function eventLabel(event: string, detail?: Record<string, unknown> | null): str
     const code = detail?.reason_code ? cancelReasonLabel(String(detail.reason_code)) : ''
     return code ? `Cancelled · ${code}` : 'Marked Cancelled'
   }
+  // R7c order heart
+  if (event === 'status:confirmed') {
+    if (detail?.born_confirmed) return 'Placed and confirmed by the rep'
+    const n = changeCount(detail)
+    return `Confirmed${n ? ` with ${n} change${n === 1 ? '' : 's'}` : ''}${totalMove(detail)}${agreedText(detail)}`
+  }
+  if (event === 'amended') {
+    const n = changeCount(detail)
+    return `Amended${n ? ` · ${n} change${n === 1 ? '' : 's'}` : ''}${totalMove(detail)}${agreedText(detail)}`
+  }
+  if (event === 'status:delivered') {
+    return `Delivered${detail?.with_changes ? ' with changes' : ''}${totalMove(detail)}${agreedText(detail)}`
+  }
+  if (event === 'status:packed' || event === 'status:out_for_delivery') return `Pick list: ${STAMP_LABEL[event.slice(7)]}`
+  if (event === 'reopened') {
+    const to = String(detail?.to || '')
+    return `Reopened — back to ${STATUS_LABEL[to] || to}${detail?.reason ? ` · ${String(detail.reason)}` : ''}`
+  }
+  if (event === 'customer_notified') {
+    const via = String(detail?.channel || 'whatsapp')
+    return `Shop told ${VIA_WORD[via] || via}`
+  }
   if (event.startsWith('status:')) return `Marked ${STATUS_LABEL[event.slice(7)] || event.slice(7)}`
   return event.replace(/[_:]/g, ' ')
+}
+
+/** The small line under an event: its note (the rep's note for the shop on a confirm / amend / delivery). */
+function eventNote(e: OrderEvent): string {
+  if (e.note) return e.note
+  const n = e.detail?.note
+  return typeof n === 'string' && e.event !== 'reopened' ? n : ''
 }
 
 /** "Cancelled · Out of stock · the note" for a cancelled row (the code, else the free text). */
@@ -340,24 +403,95 @@ function NotNotifiedBadge({ status, failed, attempts }: { status: string; failed
   )
 }
 
-function nextStatuses(status: string): string[] {
-  switch (status) {
-    case 'new': return ['confirmed', 'cancelled']
-    case 'confirmed': return ['packed', 'out_for_delivery', 'delivered', 'cancelled']
-    case 'packed': return ['out_for_delivery', 'delivered', 'cancelled']
-    case 'out_for_delivery': return ['delivered', 'cancelled']
-    default: return []
-  }
+// ── the three numbers per line (R7c): Requested · Confirmed · Delivered ─────────
+
+/** Confirmed quantity to show: none while the order is still Received (or was cancelled from there). */
+function shownConfirmed(l: HeartLine, status: string): number | null {
+  const vis = visibleStatus(status)
+  if (l.qty_confirmed == null && (vis === 'new' || vis === 'cancelled')) return null
+  return confirmedQty(l)
 }
 
-/** ordered → confirmed quantity, struck through when the salesman changed or removed it */
-function QtyCell({ l }: { l: OrderLine }) {
-  const st = l.line_status || 'ok'
-  if (st === 'removed') return <span className="text-[#9f1239] line-through">{l.qty}</span>
-  if (l.qty_confirmed != null && l.qty_confirmed !== l.qty) {
-    return <span><span className="text-muted-foreground line-through">{l.qty}</span> <b className="text-[#6D4091]">{l.qty_confirmed}</b></span>
+/** The order's money as it stands: confirmed-else-original, the as-ordered total when it differs,
+ *  and the subtotal / discount behind it (subtotal + delivery − total = discount, to the fils). */
+function orderMoney(o: OrderDetail) {
+  const now = effectiveTotal(o)
+  const changed = totalChanged(o)
+  const delivery = Number(o.delivery_bhd ?? 0)
+  if (!changed) {
+    return { now, was: null, subtotal: Number(o.subtotal_bhd ?? 0), discount: Number(o.discount_bhd ?? 0), delivery, breakdown: true }
   }
-  return <>{l.qty}</>
+  const sub = o.subtotal_confirmed_bhd
+  const discount = sub == null ? 0 : fromFils(Math.max(0, fils(sub) + fils(delivery) - fils(now)))
+  return { now, was: Number(o.total_bhd ?? 0), subtotal: Number(sub ?? 0), discount, delivery, breakdown: sub != null }
+}
+
+/** The desk drawer's items table. */
+function LinesTable({ lines, status }: { lines: HeartLine[]; status: string }) {
+  const delivered = status === 'delivered'
+  const received = visibleStatus(status) === 'new'
+  return (
+    <div className="overflow-x-auto rounded-xl border">
+      <table className="w-full text-[13px]">
+        <thead className="bg-secondary/50 text-[10.5px] uppercase text-muted-foreground">
+          <tr>
+            <th className="px-2.5 py-1.5 text-left">Item</th>
+            <th className="px-1.5 py-1.5 text-right">Requested</th>
+            <th className="px-1.5 py-1.5 text-right">Confirmed</th>
+            {delivered && <th className="px-1.5 py-1.5 text-right">Delivered</th>}
+            <th className="px-2.5 py-1.5 text-right">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((l) => {
+            const qc = shownConfirmed(l, status)
+            const qd = l.qty_delivered ?? qc
+            const m = lineMoney(l, status)
+            return (
+              <tr key={l.id} className="border-t align-top">
+                <td className="px-2.5 py-1.5">
+                  <div className="font-medium">{l.item_code}</div>
+                  {l.display_name && l.display_name !== l.item_code && (
+                    <div className="text-[11px] text-muted-foreground">{l.display_name}</div>
+                  )}
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    {received && l.stock_status && <StockPill status={l.stock_status} />}
+                    {received && l.backorder && <span className="text-[10px] font-semibold uppercase text-amber-600">Backorder</span>}
+                    <LineChips line={l} showNote />
+                  </div>
+                </td>
+                <td className="px-1.5 py-1.5 text-right tabular-nums">{isAddedLine(l) ? '—' : l.qty}</td>
+                <td className={cn('px-1.5 py-1.5 text-right tabular-nums', qc != null && qc !== l.qty && !isAddedLine(l) && 'font-semibold text-[#6D4091]')}>
+                  {qc ?? '—'}
+                </td>
+                {delivered && (
+                  <td className={cn('px-1.5 py-1.5 text-right tabular-nums', qd != null && qd !== qc && 'font-semibold text-[#6D4091]')}>{qd ?? '—'}</td>
+                )}
+                <td className="px-2.5 py-1.5 text-right font-medium"><EffectiveTotal now={m.now} was={m.was} /></td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** One order's figures (the effective total, with the as-ordered one struck through when different). */
+function MoneyBlock({ o, coupon, className, totalClass }: { o: OrderDetail; coupon: string | null; className?: string; totalClass?: string }) {
+  const m = orderMoney(o)
+  return (
+    <section className={className}>
+      {m.breakdown && <Row label="Subtotal" value={bhd(m.subtotal, 3)} />}
+      {m.breakdown && m.discount > 0 && <Row label="Discount" value={`− ${bhd(m.discount, 3)}`} />}
+      <Row label="Delivery" value={bhd(m.delivery, 3)} />
+      {coupon && <Row label="Coupon" value={coupon} />}
+      <div className="mt-1 flex items-baseline justify-between gap-3 border-t pt-1.5">
+        <span className="font-display text-[14px] font-bold">{m.was != null ? (o.status === 'delivered' ? 'Delivered total' : 'Confirmed total') : 'Total'}</span>
+        <EffectiveTotal now={m.now} was={m.was} className={totalClass} />
+      </div>
+    </section>
+  )
 }
 
 /** Fetch a protected binary endpoint (the QR PNG needs the bearer token) and hand back an
@@ -525,72 +659,134 @@ function MyLinkCard({
   )
 }
 
-function OrderDrawer({
-  id, onClose, onChanged, readOnly,
-}: { id: number; onClose: () => void; onChanged: () => void; readOnly?: boolean }) {
+// ── one order's flow, shared by the desk drawer and the rep's field sheet (R7c) ──
+//
+//   Received  → "Confirm order" (the editor)                        · Cancel
+//   Confirmed → "Delivered" (one tap) · Deliver with changes · Amend · Cancel
+//   Delivered / Cancelled → Reopen (admins, within 7 days)
+//   after every step → "Tell the shop on WhatsApp" is the primary action until a tap is logged
+//
+// No Preparing / On the way anywhere here: those are the storekeeper's pick-list stamps.
+
+type FlowMode = 'view' | 'confirm' | 'amend' | 'deliver' | 'cancel' | 'reopen'
+
+function useOrderFlow(id: number, onChanged: () => void, readOnly: boolean) {
   const toast = useToast()
   const qc = useQueryClient()
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
+  const [mode, setMode] = useState<FlowMode>('view')
   const [busy, setBusy] = useState<string | null>(null)
-  const [confirming, setConfirming] = useState(false)
-  const [reassigning, setReassigning] = useState(false)
-  // R3: a staff cancel names its reason; returns are recorded on delivered orders
-  const [cancelling, setCancelling] = useState(false)
   const [cancel, setCancel] = useState({ reason_code: '', note: '' })
-  const [returning, setReturning] = useState(false)
+  // The step just taken on this screen: its WhatsApp text (an amend's "your order was updated …"
+  // is only in that response) and the flag that makes "Tell the shop" the primary action.
+  const [step, setStep] = useState<{ url: string | null } | null>(null)
+  const { list: actions, legacy } = actionsOf(data, readOnly)
 
-  const refetchOrder = () => {
+  const refetch = () => {
     qc.invalidateQueries({ queryKey: ['shop-order', id] })
     qc.invalidateQueries({ queryKey: ['shop-assignment-queue'] })
     qc.invalidateQueries({ queryKey: ['shop-focus-candidates'] })
     onChanged()
   }
 
-  async function setStatus(next: string) {
-    setBusy(next)
+  function done(res: HeartResponse | null, message: string) {
+    setMode('view')
+    setCancel({ reason_code: '', note: '' })
+    setStep({ url: res?.whatsapp_url || res?.order?.whatsapp_url || null })
+    toast(can('tell_shop') ? `${message} Now tell the shop.` : message, 'success')
+    refetch()
+  }
+
+  /** 409: someone else moved the order first — close whatever was open and show the fresh one. */
+  function conflict() {
+    toast(CAS_MSG, 'error')
+    setMode('view')
+    refetch()
+  }
+
+  function failed(e: unknown, fallback: string) {
+    if (e instanceof ApiError && e.status === 409) conflict()
+    else toast(apiDetail(e, fallback), 'error')
+  }
+
+  /** Delivered is ONE tap: delivered = confirmed (an API from before R7c: the status route). */
+  async function deliverNow() {
+    setBusy('deliver')
     try {
-      const body: Record<string, unknown> = { status: next }
-      if (next === 'cancelled') {
-        body.reason_code = cancel.reason_code
-        body.note = cancel.note.trim() || undefined
-      }
-      await apiPost(`/shop/orders/${id}/status`, body)
-      toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
-      setCancelling(false); setCancel({ reason_code: '', note: '' })
-      refetchOrder()
+      const res = legacy
+        ? await apiPost<HeartResponse>(`/shop/orders/${id}/status`, { status: 'delivered' })
+        : await apiPost<HeartResponse>(`/shop/orders/${id}/deliver`, {})
+      done(res, 'Delivered.')
     } catch (e) {
-      toast(apiDetail(e, 'Could not update the order.'), 'error')
+      failed(e, 'Could not mark the order delivered.')
     } finally {
       setBusy(null)
     }
   }
 
-  const actions = data ? (data.next_statuses?.length ? data.next_statuses : nextStatuses(data.status)) : []
+  async function cancelNow() {
+    setBusy('cancel')
+    try {
+      const res = await apiPost<HeartResponse>(`/shop/orders/${id}/status`, {
+        status: 'cancelled', reason_code: cancel.reason_code, note: cancel.note.trim() || undefined,
+      })
+      done(res, 'Order cancelled.')
+    } catch (e) {
+      failed(e, 'Could not cancel the order.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const can = (a: OrderAction) => actions.includes(a)
+  const tellUrl = step?.url || data?.whatsapp_url || null
+  const tellFirst = Boolean(tellUrl) && can('tell_shop') && (step != null || (data ? shopNotTold(data) : false))
+  return {
+    data, isLoading, mode, setMode, busy, cancel, setCancel, actions, can, legacy,
+    refetch, done, conflict, deliverNow, cancelNow, tellUrl, tellFirst, clearStep: () => setStep(null),
+  }
+}
+
+function OrderDrawer({
+  id, onClose, onChanged, readOnly,
+}: { id: number; onClose: () => void; onChanged: () => void; readOnly?: boolean }) {
+  const flow = useOrderFlow(id, onChanged, Boolean(readOnly))
+  const { data, isLoading, mode, busy, can } = flow
+  const [reassigning, setReassigning] = useState(false)
+  // R3: returns are recorded on delivered orders
+  const [returning, setReturning] = useState(false)
+
   const coupon = data?.coupon_code || data?.coupon?.code || null
   const unassigned = Boolean(data && !data.salesman_id && !data.salesman_name)
   const gap = data ? minimumGapText(data) : null
   const cancelled = data ? cancelSummary(data) : null
   const shopRep = data?.customer
   const shopRepName = shopRep?.salesman_name || shopRep?.sticky_name || null
+  const editing = mode === 'confirm' || mode === 'amend' || mode === 'deliver'
+  const stamp = data?.stamp_label || (data ? STAMP_LABEL[data.status] : null)
+  const hasFooter = Boolean(data) && !readOnly && !editing && (flow.actions.some((a) => a !== 'tell_shop') || flow.tellFirst)
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex h-full w-full flex-col overflow-y-auto bg-card shadow-lift sm:max-w-md" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b px-5 py-4">
-          <div>
+      <div className="flex h-full w-full flex-col overflow-y-auto bg-card shadow-lift sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b px-5 py-4">
+          <div className="min-w-0 flex-1">
             <div className="font-display text-base font-semibold">{data?.order_no || 'Order'}</div>
             {data && (
               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 <StatusPill status={data.status} />
+                {stamp && <Badge tone="grey" title="The storekeeper's pick-list stamp — the order reads Confirmed">Pick list: {stamp}</Badge>}
+                <NotToldChip o={data} />
                 <InvoicedBadge invoiceNo={data.focus_invoice_no} />
                 {!!data.returned_bhd && <Badge tone="rose">Returned {bhd(data.returned_bhd, 3)}</Badge>}
                 <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
               </div>
             )}
+            {data && <div className="mt-3"><StageTrack order={data} /></div>}
             {cancelled && data?.status === 'cancelled' && <div className="mt-1 text-[12px] text-muted-foreground">Cancelled · {cancelled}</div>}
             {gap && <div className="mt-1 text-[12px] font-medium text-amber-700">{gap}</div>}
           </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-accent"><X size={18} /></button>
+          <button onClick={onClose} aria-label="Close" className="grid h-11 w-11 shrink-0 place-items-center rounded-lg hover:bg-accent sm:h-9 sm:w-9"><X size={18} /></button>
         </div>
 
         {isLoading || !data ? (
@@ -606,7 +802,7 @@ function OrderDrawer({
               </div>
               {!readOnly && (unassigned || reassigning) ? (
                 <AssignBox orderId={id} currentSalesmanId={data.salesman_id ?? null} canBindShop={Boolean(data.customer_id)} shopName={data.customer_shop}
-                  onDone={() => { setReassigning(false); refetchOrder() }} />
+                  onDone={() => { setReassigning(false); flow.refetch() }} />
               ) : (
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border p-3 text-sm">
                   <span className="font-semibold">{data.salesman_name || 'Unassigned'}</span>
@@ -633,90 +829,50 @@ function OrderDrawer({
                 <div className="mt-2 flex flex-wrap gap-2">
                   {data.customer_phone && (
                     <a href={`tel:${data.customer_phone}`}
-                      className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition hover:border-primary/40">
+                      className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition hover:border-primary/40 sm:min-h-0">
                       <Phone size={12} /> {data.customer_phone}
                     </a>
                   )}
                   {data.customer_email && (
                     <a href={`mailto:${data.customer_email}`}
-                      className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition hover:border-primary/40">
+                      className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition hover:border-primary/40 sm:min-h-0">
                       <Mail size={12} /> {data.customer_email}
                     </a>
                   )}
-                  {data.whatsapp_url && (
-                    <a href={data.whatsapp_url} target="_blank" rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:bg-emerald-700">
-                      <MessageCircle size={12} /> WhatsApp customer
-                    </a>
+                  {data.whatsapp_url && !readOnly && !flow.tellFirst && (
+                    <TellShopButton orderId={id} url={data.whatsapp_url} variant="pill" legacy={flow.legacy} onTapped={flow.clearStep} />
                   )}
                 </div>
               </div>
             </section>
 
-            <section>
-              <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Items</div>
-              <div className="overflow-hidden rounded-xl border">
-                <table className="w-full text-[13px]">
-                  <thead className="bg-secondary/50 text-[11px] uppercase text-muted-foreground">
-                    <tr>
-                      <th className="px-2.5 py-1.5 text-left">Item</th>
-                      <th className="px-2.5 py-1.5 text-right">Qty</th>
-                      <th className="px-2.5 py-1.5 text-right">Unit</th>
-                      <th className="px-2.5 py-1.5 text-right">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data.lines || []).map((l, i) => (
-                      <tr key={i} className="border-t align-top">
-                        <td className="px-2.5 py-1.5">
-                          <div className="font-medium">{l.item_code}</div>
-                          {l.display_name && l.display_name !== l.item_code && (
-                            <div className="text-[11px] text-muted-foreground">{l.display_name}</div>
-                          )}
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                            {l.stock_status && <StockPill status={l.stock_status} />}
-                            {l.backorder && <span className="text-[10px] font-semibold uppercase text-amber-600">Backorder</span>}
-                          </div>
-                        </td>
-                        <td className="px-2.5 py-1.5 text-right tabular-nums"><QtyCell l={l} /></td>
-                        <td className="px-2.5 py-1.5 text-right tabular-nums">{bhd(l.unit_price_bhd, 3)}</td>
-                        <td className="px-2.5 py-1.5 text-right tabular-nums font-medium">{bhd(l.line_total_bhd, 3)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-
-            <section className="space-y-1 rounded-xl border p-3 text-sm">
-              <Row label="Subtotal" value={bhd(data.subtotal_bhd, 3)} />
-              {!!data.discount_bhd && <Row label="Discount" value={`− ${bhd(data.discount_bhd, 3)}`} />}
-              <Row label="Delivery" value={bhd(data.delivery_bhd, 3)} />
-              {coupon && <Row label="Coupon" value={coupon} />}
-              <div className="mt-1 flex items-baseline justify-between border-t pt-1.5 text-base font-bold">
-                <span>{data.total_confirmed_bhd != null && data.total_confirmed_bhd !== data.total_bhd ? 'Confirmed total' : 'Total'}</span>
-                <span className="tabular-nums text-primary">{bhd(data.total_confirmed_bhd ?? data.total_bhd, 3)}</span>
-              </div>
-              {data.total_confirmed_bhd != null && data.total_confirmed_bhd !== data.total_bhd && (
-                <Row label="As ordered" value={bhd(data.total_bhd, 3)} />
-              )}
-            </section>
-
-            {data.status === 'new' && !unassigned && confirming && (
-              <ConfirmEditor orderId={id} lines={data.lines || []} onCancel={() => setConfirming(false)} onDone={() => { setConfirming(false); refetchOrder() }} />
+            {mode === 'confirm' || mode === 'amend' ? (
+              <OrderEditor key={`${mode}-${data.updated_at || ''}`} order={data} mode={mode} legacy={flow.legacy}
+                onCancel={() => flow.setMode('view')} onConflict={flow.conflict}
+                onDone={(res) => flow.done(res, mode === 'confirm' ? 'Order confirmed.' : 'Changes saved.')} />
+            ) : mode === 'deliver' ? (
+              <DeliverEditor key={`deliver-${data.updated_at || ''}`} order={data}
+                onCancel={() => flow.setMode('view')} onConflict={flow.conflict}
+                onDone={(res) => flow.done(res, 'Delivered.')} />
+            ) : (
+              <section>
+                <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Items</div>
+                <LinesTable lines={data.lines || []} status={data.status} />
+              </section>
             )}
-            {data.whatsapp_url && data.status !== 'new' && <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />}
+
+            <MoneyBlock o={data} coupon={coupon} className="space-y-1 rounded-xl border p-3 text-sm" totalClass="font-display text-base font-bold text-primary" />
 
             {data.status === 'delivered' && (returning || !readOnly || !!data.returned_bhd) && (
               <section className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">After delivery</div>
                 {!readOnly && !data.focus_invoice_no && (
-                  <FocusLinkBox orderId={id} onDone={refetchOrder} />
+                  <FocusLinkBox orderId={id} onDone={flow.refetch} />
                 )}
                 {returning ? (
-                  <ReturnBox orderId={id} lines={data.lines || []} onCancel={() => setReturning(false)} onDone={() => { setReturning(false); refetchOrder() }} />
+                  <ReturnBox orderId={id} lines={data.lines || []} onCancel={() => setReturning(false)} onDone={() => { setReturning(false); flow.refetch() }} />
                 ) : !readOnly ? (
-                  <button type="button" onClick={() => setReturning(true)} className="h-10 w-full rounded-xl border border-[#f3c9d2] text-[12.5px] font-semibold text-[#9f1239] hover:bg-[#fff7f8]">
+                  <button type="button" onClick={() => setReturning(true)} className="h-11 w-full rounded-xl border border-[#f3c9d2] text-[12.5px] font-semibold text-[#9f1239] hover:bg-[#fff7f8]">
                     Record a return{data.returned_bhd ? ` (so far ${bhd(data.returned_bhd, 3)})` : ''}
                   </button>
                 ) : (
@@ -741,7 +897,7 @@ function OrderDrawer({
                       <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
                       <div>
                         <div className="font-medium">{eventLabel(e.event, e.detail)}</div>
-                        <div className="text-muted-foreground">{fmtDateTime(e.ts)}{e.note ? ` · ${e.note}` : ''}</div>
+                        <div className="text-muted-foreground">{fmtDateTime(e.ts)}{eventNote(e) ? ` · ${eventNote(e)}` : ''}</div>
                       </div>
                     </li>
                   ))}
@@ -758,41 +914,59 @@ function OrderDrawer({
           </div>
         )}
 
-        {data && actions.length > 0 && !confirming && !readOnly && (
+        {data && hasFooter && (
           <div className="sticky bottom-0 space-y-2 border-t bg-card p-4">
-            {cancelling ? (
+            {mode === 'cancel' ? (
               <div className="space-y-2 rounded-xl border border-[#f3c9d2] bg-[#fff7f8] p-3">
-                <CancelReasonPicker value={cancel.reason_code} note={cancel.note} onChange={setCancel} />
+                <CancelReasonPicker value={flow.cancel.reason_code} note={flow.cancel.note} onChange={flow.setCancel} />
                 <div className="flex gap-2">
-                  <Button type="button" size="sm" variant="outline" onClick={() => { setCancelling(false); setCancel({ reason_code: '', note: '' }) }} disabled={busy !== null}>Keep it</Button>
-                  <Button type="button" size="sm" variant="destructive" onClick={() => setStatus('cancelled')} disabled={busy !== null || !cancelReady(cancel.reason_code, cancel.note)}>
-                    {busy === 'cancelled' ? <Loader2 className="animate-spin" size={14} /> : <X size={14} />} Yes, cancel {data.order_no}
+                  <Button type="button" size="sm" variant="outline" className="h-11 flex-1 sm:h-9" onClick={() => { flow.setMode('view'); flow.setCancel({ reason_code: '', note: '' }) }} disabled={busy !== null}>Keep it</Button>
+                  <Button type="button" size="sm" variant="destructive" className="h-11 flex-1 sm:h-9" onClick={flow.cancelNow} disabled={busy !== null || !cancelReady(flow.cancel.reason_code, flow.cancel.note)}>
+                    {busy === 'cancel' ? <Loader2 className="animate-spin" size={14} /> : <X size={14} />} Yes, cancel {data.order_no}
                   </Button>
                 </div>
               </div>
+            ) : mode === 'reopen' ? (
+              <ReopenBox orderId={id} status={data.status} until={data.reopen_until}
+                onCancel={() => flow.setMode('view')} onDone={() => { flow.setMode('view'); flow.refetch() }} />
             ) : (
               <>
-                {/* Received always shows Confirm first (it opens the quantity editor above) and
-                   Cancel second — never just Cancel on its own (item 2, R7a). Every other next
-                   status (packed / on the way / delivered) is a plain forward step. */}
+                {flow.tellFirst && <TellShopButton orderId={id} url={flow.tellUrl} variant="primary" legacy={flow.legacy} onTapped={flow.clearStep} />}
+                {/* The forward step only (R7c). Received: Confirm first (it opens the editor), Cancel
+                   second — never just Cancel on its own (item 2, R7a). Confirmed: Delivered is one tap. */}
                 <div className="flex flex-wrap gap-2">
-                  {data.status === 'new' && (
-                    <Button type="button" onClick={() => setConfirming(true)} disabled={unassigned || busy !== null} className="flex-1">
+                  {can('confirm') && (
+                    <Button type="button" onClick={() => flow.setMode('confirm')} disabled={unassigned || busy !== null} className="h-11 flex-1 sm:h-10">
                       <Check size={14} /> Confirm order
                     </Button>
                   )}
-                  {actions.filter((a) => a !== 'confirmed' && a !== 'cancelled').map((a) => (
-                    <Button key={a} size="sm" onClick={() => setStatus(a)} disabled={busy !== null}>
-                      {busy === a ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
-                      {actionLabel(a)}
+                  {can('deliver') && (
+                    <Button type="button" variant={flow.tellFirst ? 'outline' : 'default'} onClick={flow.deliverNow} disabled={busy !== null} className="h-11 flex-1 sm:h-10">
+                      {busy === 'deliver' ? <Loader2 className="animate-spin" size={14} /> : <Truck size={14} />} Delivered
                     </Button>
-                  ))}
-                  {actions.includes('cancelled') && (
-                    <Button type="button" size="sm" variant="destructive" onClick={() => setCancelling(true)} disabled={busy !== null}>
+                  )}
+                  {can('reopen') && (
+                    <Button type="button" variant="outline" onClick={() => flow.setMode('reopen')} disabled={busy !== null} className="h-11 sm:h-10">
+                      <RotateCcw size={14} /> Reopen
+                    </Button>
+                  )}
+                  {can('cancel') && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => flow.setMode('cancel')} disabled={busy !== null}
+                      className="h-11 border-[#f3c9d2] text-[#9f1239] hover:bg-[#fff7f8] hover:text-[#9f1239] sm:h-10">
                       <X size={14} /> Cancel order
                     </Button>
                   )}
                 </div>
+                {can('deliver') && (
+                  <div className="flex flex-wrap gap-x-4 text-[12.5px]">
+                    {!flow.legacy && (
+                      <button type="button" onClick={() => flow.setMode('deliver')} className="min-h-11 font-semibold text-primary hover:underline sm:min-h-0">Deliver with changes</button>
+                    )}
+                    {can('amend') && (
+                      <button type="button" onClick={() => flow.setMode('amend')} className="min-h-11 font-semibold text-primary hover:underline sm:min-h-0">Amend</button>
+                    )}
+                  </div>
+                )}
                 {unassigned && data.status === 'new' && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
               </>
             )}
@@ -860,6 +1034,8 @@ function DeskOrders({
   const displayRows = status === 'needs_action'
     ? rows.filter((r) => isLateReceived(r, slaMin) || (OPEN_STATUSES.has(r.status) && !r.salesman_id && !r.salesman_name))
     : rows
+  // R7c: the Total column sorts and exports the confirmed-else-original money it shows
+  const tableRows = displayRows.map((r) => ({ ...r, total_effective_bhd: effectiveTotal(r) }))
 
   const cols: Column<ShopOrderRow>[] = [
     { key: 'order_no', label: 'Order', render: (_, r) => (
@@ -881,7 +1057,7 @@ function DeskOrders({
           : <Badge tone="rose">Unassigned</Badge>
       ) },
     { key: 'items_count', label: 'Items / Units', align: 'right', render: (_, r) => `${num(r.items_count)} / ${num(r.units_count)}` },
-    { key: 'total_bhd', label: 'Total', align: 'right', render: (_, r) => bhd(r.total_bhd, 3) },
+    { key: 'total_effective_bhd', label: 'Total', align: 'right', render: (_, r) => <EffectiveTotal now={effectiveTotal(r)} was={totalChanged(r) ? r.total_bhd ?? 0 : null} /> },
     { key: 'status', label: 'Status', render: (_, r) => (
         <span className="inline-flex flex-wrap items-center gap-1.5">
           <StatusPill status={r.status} />
@@ -923,12 +1099,12 @@ function DeskOrders({
                 : needsActionCount > 0 ? 'border-[#f3c9d2] bg-[#fff7f8] text-[#9f1239] hover:border-[#9f1239]/50' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
             Needs action{needsActionCount > 0 ? ` ${needsActionCount}` : ''}
           </button>
-          {(['all', ...STATUSES] as const).map((s) => {
-            const n = s === 'all' ? totalCount : (counts[s] ?? 0)
+          {(['all', ...VISIBLE_STATUSES] as const).map((s) => {
+            const n = s === 'all' ? totalCount : visibleCount(counts, s)
             const late = s === 'new' && oldestReceivedMin != null && oldestReceivedMin > slaMin
             const label = s === 'all' ? `All ${n}`
               : s === 'new' ? `Received ${n}${oldestReceivedMin != null ? ` · oldest ${ageCompact(oldestReceivedMin)}` : ''}`
-                : `${STATUS_LABEL[s] || s} ${n}`
+                : `${VISIBLE_LABEL[s]} ${n}`
             return (
               <button key={s} onClick={() => setStatus(s)}
                 className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium tabular-nums transition duration-150 motion-reduce:transition-none',
@@ -949,7 +1125,7 @@ function DeskOrders({
       {isLoading ? (
         <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
       ) : (
-        <DataTable rows={displayRows} cols={cols} searchable={false} exportName="yq-shop-orders"
+        <DataTable rows={tableRows} cols={cols} searchable={false} exportName="yq-shop-orders"
           empty={status === 'needs_action'
             ? 'Nothing needs action right now.'
             : 'No orders yet — customers order from your shared catalog link (see “My link” above) and orders will appear here automatically.'} />
@@ -969,6 +1145,8 @@ function DeskOrders({
 const INK = 'text-[#1A1428]'
 const MUTED = 'text-[#6b6480]'
 const HAIRLINE = 'border-[#E9E4EF]'
+/** A quiet action on the phone sheet: a text link, still a 44 px target. */
+const FIELD_LINK = 'inline-flex min-h-11 items-center rounded-lg px-2.5 text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F3F0F6] disabled:opacity-60 motion-reduce:transition-none'
 
 function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
   const title = row.customer_shop || row.customer_name || 'Order'
@@ -992,7 +1170,7 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
           {sub && <div className={cn('mt-0.5 truncate text-[12px]', MUTED)}>{sub}</div>}
         </div>
         <div className="shrink-0 text-right">
-          <div className={cn('font-display text-[15px] font-bold tabular-nums', INK)}>{bhd(row.total_bhd, 3)}</div>
+          <EffectiveTotal now={effectiveTotal(row)} was={totalChanged(row) ? row.total_bhd ?? 0 : null} className={cn('font-display text-[15px] font-bold', INK)} />
           <div className={cn('mt-0.5 text-[11px] tabular-nums', MUTED)}>
             {num(row.items_count)} items · {num(row.units_count)} units
           </div>
@@ -1016,118 +1194,137 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
   )
 }
 
+/** The phone list of lines: Requested · Confirmed · Delivered, the chips, the confirmed-else-original money. */
+function FieldLines({ lines, status }: { lines: HeartLine[]; status: string }) {
+  const received = visibleStatus(status) === 'new'
+  return (
+    <ul className={cn('divide-y overflow-hidden rounded-xl border', HAIRLINE)}>
+      {lines.map((l) => {
+        const qc = shownConfirmed(l, status)
+        const unit = lockUnit(l)
+        const m = lineMoney(l, status)
+        const nums = [
+          isAddedLine(l) ? null : `Requested ${l.qty}`,
+          qc != null ? `Confirmed ${qc}` : null,
+          status === 'delivered' ? `Delivered ${l.qty_delivered ?? qc ?? 0}` : null,
+        ].filter(Boolean).join(' · ')
+        return (
+          <li key={l.id} className="flex items-start justify-between gap-3 p-3">
+            <div className="min-w-0">
+              <div className={cn('text-[13px] font-semibold', INK)}>{l.item_code}</div>
+              {l.display_name && l.display_name !== l.item_code && (
+                <div className={cn('truncate text-[11.5px]', MUTED)}>{l.display_name}</div>
+              )}
+              <div className={cn('mt-0.5 text-[11.5px] tabular-nums', MUTED)}>
+                {nums}{unit != null ? ` · ${bhd(unit, 3)} each` : ''}
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                {received && l.stock_status && <StockPill status={l.stock_status} />}
+                {received && l.backorder && <Badge tone="amber">Backorder</Badge>}
+                <LineChips line={l} showNote />
+              </div>
+            </div>
+            <EffectiveTotal now={m.now} was={m.was} className={cn('shrink-0 font-display text-[13.5px] font-bold', INK)} />
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () => void; onChanged: () => void }) {
-  const toast = useToast()
-  const qc = useQueryClient()
-  const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
-  const [busy, setBusy] = useState<string | null>(null)
-  const [confirmCancel, setConfirmCancel] = useState(false)
-  // R3: the cancel names its reason (chips). The old free-text Focus invoice number at Delivered
-  // is gone (item 6, R7a) — invoices are matched from the Focus exceptions panel on the desk now.
-  const [cancel, setCancel] = useState({ reason_code: '', note: '' })
-
-  async function setStatus(next: string) {
-    setBusy(next)
-    try {
-      const body: Record<string, unknown> = { status: next }
-      if (next === 'cancelled') {
-        body.reason_code = cancel.reason_code
-        body.note = cancel.note.trim() || undefined
-      }
-      await apiPost(`/shop/orders/${id}/status`, body)
-      toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
-      setConfirmCancel(false)
-      setCancel({ reason_code: '', note: '' })
-      qc.invalidateQueries({ queryKey: ['shop-order', id] })
-      onChanged()
-    } catch (e) {
-      toast(e instanceof ApiError ? apiDetail(e, 'Could not update the order.') : 'Could not update the order.', 'error')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const allowed = data ? (data.next_statuses?.length ? data.next_statuses : nextStatuses(data.status)) : []
-  // The forward step. From Received it is "Confirm" (with the quantity editor); afterwards the
-  // next physical stage — Preparing is optional, so from Confirmed the button reads "On the way".
-  const forward = data?.status === 'new'
-    ? (allowed.includes('confirmed') ? 'confirmed' : null)
-    : data?.status === 'confirmed'
-      ? (allowed.includes('out_for_delivery') ? 'out_for_delivery' : allowed.find((s) => s !== 'cancelled') || null)
-      : allowed.find((s) => s !== 'cancelled') || null
-  const canCancel = allowed.includes('cancelled')
+  const flow = useOrderFlow(id, onChanged, false)
+  const { data, isLoading, mode, busy, can } = flow
   const coupon = data?.coupon_code || data?.coupon?.code || null
-  const [confirming, setConfirming] = useState(false)
   const gap = data ? minimumGapText(data) : null
   const cancelledWhy = data?.status === 'cancelled' ? cancelSummary(data) : null
+  const editing = mode === 'confirm' || mode === 'amend' || mode === 'deliver'
+  const nothingLeft = !flow.actions.some((a) => a !== 'tell_shop')
 
-  const footer = !data || confirming ? null : (
-    <div className="space-y-2">
-      {data.whatsapp_url && data.status !== 'new' && (
-        <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />
-      )}
-      {forward === 'confirmed' ? (
+  // One forward button (R7c): Received → "Confirm order" (the editor), Confirmed → "Delivered"
+  // (one tap). "Deliver with changes" and "Amend" are small links; Cancel is secondary. After a
+  // step, "Tell the shop on WhatsApp" is the primary action until the tap is logged.
+  const footer = !data || editing ? null : mode === 'cancel' ? (
+    <div className={cn('rounded-xl border p-3', HAIRLINE)}>
+      <p className={cn('text-[12.5px] leading-snug', INK)}>Cancel {data.order_no}? The shop is told it is cancelled, and the reason you pick. Say why:</p>
+      <div className="mt-2.5">
+        <CancelReasonPicker value={flow.cancel.reason_code} note={flow.cancel.note} onChange={flow.setCancel} compact />
+      </div>
+      <div className="mt-2.5 flex gap-2">
         <button
           type="button"
-          onClick={() => setConfirming(true)}
+          onClick={() => { flow.setMode('view'); flow.setCancel({ reason_code: '', note: '' }) }}
+          className={cn('h-11 flex-1 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}
+        >
+          Keep it
+        </button>
+        <button
+          type="button"
+          onClick={flow.cancelNow}
+          disabled={busy !== null || !cancelReady(flow.cancel.reason_code, flow.cancel.note)}
+          className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#9f1239] text-[13px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
+        >
+          {busy === 'cancel' ? <Loader2 className="animate-spin" size={15} /> : null}
+          Yes, cancel
+        </button>
+      </div>
+    </div>
+  ) : mode === 'reopen' ? (
+    <ReopenBox orderId={id} status={data.status} until={data.reopen_until}
+      onCancel={() => flow.setMode('view')} onDone={() => { flow.setMode('view'); flow.refetch() }} />
+  ) : (
+    <div className="space-y-2">
+      {flow.tellFirst && <TellShopButton orderId={id} url={flow.tellUrl} variant="primary" legacy={flow.legacy} onTapped={flow.clearStep} />}
+      {can('confirm') && (
+        <button
+          type="button"
+          onClick={() => flow.setMode('confirm')}
           className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 motion-reduce:transition-none"
         >
           <Check size={17} aria-hidden="true" /> Confirm order
         </button>
-      ) : forward ? (
+      )}
+      {can('deliver') && (
         <button
           type="button"
-          onClick={() => setStatus(forward)}
+          onClick={flow.deliverNow}
           disabled={busy !== null}
-          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#6D4091] text-[15px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
+          className={cn(
+            'flex w-full items-center justify-center gap-2 rounded-xl font-semibold transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none',
+            flow.tellFirst ? cn('h-11 border text-[13.5px]', HAIRLINE, INK) : 'h-12 bg-[#6D4091] text-[15px] text-white',
+          )}
         >
-          {busy === forward ? <Loader2 className="animate-spin" size={17} /> : <Check size={17} aria-hidden="true" />}
-          {actionLabel(forward)}
-        </button>
-      ) : null}
-      {data.status === 'confirmed' && allowed.includes('packed') && (
-        <button type="button" onClick={() => setStatus('packed')} disabled={busy !== null}
-          className={cn('h-11 w-full rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}>
-          {busy === 'packed' ? <Loader2 className="mx-auto animate-spin" size={15} /> : 'Mark preparing (goods with me)'}
+          {busy === 'deliver' ? <Loader2 className="animate-spin" size={17} /> : <Truck size={17} aria-hidden="true" />}
+          Delivered
         </button>
       )}
-      {canCancel && !confirmCancel && (
-        <button
-          type="button"
-          onClick={() => setConfirmCancel(true)}
-          disabled={busy !== null}
-          className={cn('h-11 w-full rounded-xl text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F3F0F6] motion-reduce:transition-none', MUTED)}
-        >
-          Cancel this order
+      {can('reopen') && (
+        <button type="button" onClick={() => flow.setMode('reopen')}
+          className={cn('flex h-11 w-full items-center justify-center gap-1.5 rounded-xl border text-[13px] font-semibold', HAIRLINE, INK)}>
+          <RotateCcw size={15} aria-hidden="true" /> Reopen
         </button>
       )}
-      {canCancel && confirmCancel && (
-        <div className={cn('rounded-xl border p-3', HAIRLINE)}>
-          <p className={cn('text-[12.5px] leading-snug', INK)}>Cancel {data.order_no}? The shop is told it is cancelled, and the reason you pick. Say why:</p>
-          <div className="mt-2.5">
-            <CancelReasonPicker value={cancel.reason_code} note={cancel.note} onChange={setCancel} compact />
-          </div>
-          <div className="mt-2.5 flex gap-2">
-            <button
-              type="button"
-              onClick={() => { setConfirmCancel(false); setCancel({ reason_code: '', note: '' }) }}
-              className={cn('h-11 flex-1 rounded-xl border text-[13px] font-semibold transition-colors duration-150 hover:bg-[#F9F7F3] motion-reduce:transition-none', HAIRLINE, INK)}
-            >
-              Keep it
+      {/* the quieter actions share one row of 44 px text links, so the sheet keeps its room */}
+      {(can('deliver') || can('cancel')) && (
+        <div className="flex flex-wrap items-center justify-center gap-x-1">
+          {can('deliver') && !flow.legacy && (
+            <button type="button" onClick={() => flow.setMode('deliver')} className={cn(FIELD_LINK, 'text-[#6D4091]')}>
+              Deliver with changes
             </button>
-            <button
-              type="button"
-              onClick={() => setStatus('cancelled')}
-              disabled={busy !== null || !cancelReady(cancel.reason_code, cancel.note)}
-              className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#9f1239] text-[13px] font-semibold text-white transition-opacity duration-150 hover:opacity-95 disabled:opacity-60 motion-reduce:transition-none"
-            >
-              {busy === 'cancelled' ? <Loader2 className="animate-spin" size={15} /> : null}
-              Yes, cancel
+          )}
+          {can('amend') && (
+            <button type="button" onClick={() => flow.setMode('amend')} className={cn(FIELD_LINK, 'text-[#6D4091]')}>
+              Amend
             </button>
-          </div>
+          )}
+          {can('cancel') && (
+            <button type="button" onClick={() => flow.setMode('cancel')} disabled={busy !== null} className={cn(FIELD_LINK, MUTED)}>
+              {can('confirm') ? 'Cancel this order' : 'Cancel'}
+            </button>
+          )}
         </div>
       )}
-      {!forward && !canCancel && (
+      {nothingLeft && !flow.tellFirst && (
         <p className={cn('py-1 text-center text-[12.5px]', MUTED)}>This order is closed — nothing left to do.</p>
       )}
     </div>
@@ -1147,6 +1344,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
         <div className="space-y-4 p-4">
           <div className="flex flex-wrap items-center gap-1.5">
             <StatusPill status={data.status} />
+            <NotToldChip o={data} />
             <InvoicedBadge invoiceNo={data.focus_invoice_no} />
             {data.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
             {data.source === 'market' && <Badge tone="accent">Marketplace</Badge>}
@@ -1156,6 +1354,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
             {data.expected_delivery && <span className={cn('text-[11.5px]', MUTED)}>Expected: {data.expected_delivery}</span>}
           </div>
+          <StageTrack order={data} />
           {gap && (
             <p className="rounded-xl bg-[#fdf3e3] px-3 py-2 text-[12.5px] font-medium text-[#96600d]">
               Small order · {gap}. Confirm it as it is, or add to it with the shop.
@@ -1163,12 +1362,24 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
           )}
           {cancelledWhy && <p className={cn('text-[12.5px]', MUTED)}>Cancelled · {cancelledWhy}</p>}
 
-          {confirming && (
-            <ConfirmEditor
-              orderId={id}
-              lines={data.lines || []}
-              onCancel={() => setConfirming(false)}
-              onDone={() => { setConfirming(false); qc.invalidateQueries({ queryKey: ['shop-order', id] }); onChanged() }}
+          {(mode === 'confirm' || mode === 'amend') && (
+            <OrderEditor
+              key={`${mode}-${data.updated_at || ''}`}
+              order={data}
+              mode={mode}
+              legacy={flow.legacy}
+              onCancel={() => flow.setMode('view')}
+              onConflict={flow.conflict}
+              onDone={(res) => flow.done(res, mode === 'confirm' ? 'Order confirmed.' : 'Changes saved.')}
+            />
+          )}
+          {mode === 'deliver' && (
+            <DeliverEditor
+              key={`deliver-${data.updated_at || ''}`}
+              order={data}
+              onCancel={() => flow.setMode('view')}
+              onConflict={flow.conflict}
+              onDone={(res) => flow.done(res, 'Delivered.')}
             />
           )}
 
@@ -1188,73 +1399,23 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
                   <Phone size={15} aria-hidden="true" /> Call
                 </a>
               )}
-              {data.whatsapp_url && (
-                <a
-                  href={data.whatsapp_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#25d366] text-[13px] font-semibold text-[#08331b] transition-opacity duration-150 hover:opacity-90 motion-reduce:transition-none"
-                >
-                  <MessageCircle size={15} aria-hidden="true" /> WhatsApp
-                </a>
+              {data.whatsapp_url && !flow.tellFirst && (
+                <div className="flex-1">
+                  <TellShopButton orderId={id} url={data.whatsapp_url} variant="secondary" legacy={flow.legacy} onTapped={flow.clearStep} />
+                </div>
               )}
             </div>
           </section>
 
-          <section>
-            <h3 className={cn('mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide', MUTED)}>Items</h3>
-            <ul className={cn('divide-y overflow-hidden rounded-xl border', HAIRLINE)}>
-              {(data.lines || []).map((l, i) => (
-                <li key={i} className="flex items-start justify-between gap-3 p-3">
-                  <div className="min-w-0">
-                    <div className={cn('text-[13px] font-semibold', INK)}>{l.item_code}</div>
-                    {l.display_name && l.display_name !== l.item_code && (
-                      <div className={cn('truncate text-[11.5px]', MUTED)}>{l.display_name}</div>
-                    )}
-                    <div className={cn('mt-0.5 text-[11.5px] tabular-nums', MUTED)}>
-                      <QtyCell l={l} /> × {bhd(l.unit_price_bhd, 3)}
-                    </div>
-                    {(l.stock_status || l.backorder) && (
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        {l.stock_status && <StockPill status={l.stock_status} />}
-                        {l.backorder && <Badge tone="amber">Backorder</Badge>}
-                      </div>
-                    )}
-                  </div>
-                  <div className={cn('shrink-0 font-display text-[13.5px] font-bold tabular-nums', INK)}>
-                    {bhd(l.line_total_bhd, 3)}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
+          {!editing && (
+            <section>
+              <h3 className={cn('mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide', MUTED)}>Items</h3>
+              <FieldLines lines={data.lines || []} status={data.status} />
+            </section>
+          )}
 
-          <section className={cn('space-y-1.5 rounded-xl border p-3.5 text-[12.5px]', HAIRLINE)}>
-            <div className="flex items-baseline justify-between">
-              <span className={MUTED}>Subtotal</span>
-              <span className={cn('font-medium tabular-nums', INK)}>{bhd(data.subtotal_bhd, 3)}</span>
-            </div>
-            {!!data.discount_bhd && (
-              <div className="flex items-baseline justify-between">
-                <span className={MUTED}>Discount</span>
-                <span className="font-medium tabular-nums text-[#137a48]">− {bhd(data.discount_bhd, 3)}</span>
-              </div>
-            )}
-            <div className="flex items-baseline justify-between">
-              <span className={MUTED}>Delivery</span>
-              <span className={cn('font-medium tabular-nums', INK)}>{bhd(data.delivery_bhd, 3)}</span>
-            </div>
-            {coupon && (
-              <div className="flex items-baseline justify-between">
-                <span className={MUTED}>Coupon</span>
-                <span className={cn('font-medium', INK)}>{coupon}</span>
-              </div>
-            )}
-            <div className={cn('mt-1 flex items-baseline justify-between border-t pt-2', HAIRLINE)}>
-              <span className={cn('font-display text-[14px] font-bold', INK)}>Total</span>
-              <span className={cn('font-display text-[17px] font-bold tabular-nums', INK)}>{bhd(data.total_bhd, 3)}</span>
-            </div>
-          </section>
+          <MoneyBlock o={data} coupon={coupon} className={cn('space-y-1.5 rounded-xl border p-3.5 text-[12.5px]', HAIRLINE)}
+            totalClass={cn('font-display text-[17px] font-bold', INK)} />
 
           {data.note && (
             <section>
@@ -1272,7 +1433,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
                     <span className="mt-[0.4rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6D4091]" aria-hidden="true" />
                     <div className="min-w-0">
                       <div className={cn('text-[12.5px] font-semibold', INK)}>{eventLabel(e.event, e.detail)}</div>
-                      <div className={cn('text-[11.5px]', MUTED)}>{fmtDateTime(e.ts)}{e.note ? ` · ${e.note}` : ''}</div>
+                      <div className={cn('text-[11.5px]', MUTED)}>{fmtDateTime(e.ts)}{eventNote(e) ? ` · ${eventNote(e)}` : ''}</div>
                     </div>
                   </li>
                 ))}
@@ -1294,8 +1455,8 @@ function FieldOrders({
   isLoading: boolean
   isError: boolean
   counts: StatusCounts
-  bucket: BucketKey
-  setBucket: (b: BucketKey) => void
+  bucket: VisibleStatus
+  setBucket: (b: VisibleStatus) => void
   qRaw: string
   setQRaw: (v: string) => void
   onRefresh: () => void
@@ -1330,24 +1491,26 @@ function FieldOrders({
         )}
       </div>
 
-      <div role="tablist" aria-label="Order stage" className={cn('flex gap-1 rounded-2xl border bg-white p-1 lg:w-[26rem]', HAIRLINE)}>
-        {BUCKETS.map((b) => {
-          const on = bucket === b.key
-          const n = b.of(counts)
+      {/* The owner's four stages (R7c): Received · Confirmed · Delivered · Cancelled. On a phone
+         the count sits under the word so four tabs fit a 360 px screen at 44 px tall. */}
+      <div role="tablist" aria-label="Order stage" className={cn('grid grid-cols-4 gap-1 rounded-2xl border bg-white p-1 lg:w-[34rem]', HAIRLINE)}>
+        {VISIBLE_STATUSES.map((v) => {
+          const on = bucket === v
+          const n = visibleCount(counts, v)
           return (
             <button
-              key={b.key}
+              key={v}
               role="tab"
               aria-selected={on}
               type="button"
-              onClick={() => setBucket(b.key)}
+              onClick={() => setBucket(v)}
               className={cn(
-                'flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition-colors duration-150 motion-reduce:transition-none',
+                'flex min-h-11 min-w-0 flex-col items-center justify-center rounded-xl px-1 text-[12.5px] font-semibold leading-tight transition-colors duration-150 motion-reduce:transition-none sm:flex-row sm:gap-1.5',
                 on ? 'bg-[#6D4091] text-white' : cn(MUTED, 'hover:bg-[#F9F7F3]'),
               )}
             >
-              {b.label}
-              {n != null && <span className={cn('tabular-nums', on ? 'text-white/70' : 'text-[#9a93ad]')}>{n}</span>}
+              <span className="truncate">{VISIBLE_LABEL[v]}</span>
+              <span className={cn('text-[11px] tabular-nums sm:text-[12.5px]', on ? 'text-white/70' : 'text-[#9a93ad]')}>{n}</span>
             </button>
           )
         })}
@@ -1423,14 +1586,15 @@ export default function ShopOrders() {
   const readOnly = isReadOnly(me)
   const showDesk = seesAllOrders(me)
   // Deep links: the Telegram "UNASSIGNED" alert opens the queue (?queue=1); Today and Customers
-  // open one order (?open=id), a stage (?bucket=progress) or a search (?q=phone).
+  // open one order (?open=id), a stage (?bucket=received|confirmed|delivered|cancelled — the old
+  // new|progress|done still work) or a search (?q=phone).
   const [sp] = useSearchParams()
   const queueFocus = sp.get('queue') === '1'
-  const initialBucket = (BUCKETS.find((b) => b.key === sp.get('bucket'))?.key ?? 'new') as BucketKey
+  const initialBucket = bucketFromParam(sp.get('bucket'))
   const initialQ = (sp.get('q') || '').trim()
   const initialOpen = Number(sp.get('open')) || null
   const [status, setStatus] = useState<StatusFilter>('all')
-  const [bucket, setBucket] = useState<BucketKey>(initialBucket)
+  const [bucket, setBucket] = useState<VisibleStatus>(initialBucket)
   const [qRaw, setQRaw] = useState(initialQ)
   const [q, setQ] = useState(initialQ)
 
@@ -1441,13 +1605,12 @@ export default function ShopOrders() {
 
   const meQuery = useQuery({ queryKey: ['shop-me'], queryFn: () => apiGet<ShopMe>('/shop/me') })
 
-  // The desk filters by one status, the field by a bucket of statuses (the API takes a
-  // comma list) — both collapse to a single `status` query param. 'needs_action' (item 4, R7a)
-  // is a computed view, not a real status, so it fetches the same as 'all' and is filtered
-  // client-side (DeskOrders).
+  // The desk and the field both filter by one of the four stages; Confirmed is a comma list of
+  // stored statuses (heart.FILTER_PARAM). 'needs_action' (item 4, R7a) is a computed view, not a
+  // real status, so it fetches the same as 'all' and is filtered client-side (DeskOrders).
   const statusParam = showDesk
-    ? (status === 'all' || status === 'unassigned' || status === 'needs_action' ? '' : status)
-    : (BUCKETS.find((b) => b.key === bucket)?.param ?? 'new')
+    ? (status === 'all' || status === 'unassigned' || status === 'needs_action' ? '' : FILTER_PARAM[status])
+    : FILTER_PARAM[bucket]
 
   const ordersQuery = useQuery({
     queryKey: ['shop-orders', statusParam, q],
