@@ -676,8 +676,7 @@ def _sales_trend(ctx: Ctx) -> dict | None:
 _ORDERS_BASIS = "Marketplace orders placed {live} · {tests}"
 
 
-@metric("orders.funnel", "Placed → Confirmed → Delivered", "orders", _ORDERS_BASIS, "funnel",
-        ("/shop-orders", "Customer orders"))
+@metric("orders.funnel", "Placed → Confirmed → Delivered", "orders", _ORDERS_BASIS, "funnel")
 def _orders_funnel(ctx: Ctx) -> dict | None:
     if ctx.r.get("orders") is None:
         return None
@@ -761,7 +760,7 @@ def _orders_waiting(ctx: Ctx) -> dict | None:
     reps = sorted(({"rep": g["rep"], "orders": g["orders"], "bhd": money(g["bhd"])} for g in by_rep.values()),
                   key=lambda g: (-g["orders"], g["rep"]))
     return {"value": len(w), "bhd": money(sum((dec(x["bhd"]) for x in w), Decimal(0))),
-            "oldest_hours": w[0]["hours"] if w else None, "by_rep": reps, "orders": w[:10]}
+            "oldest_hours": w[0]["hours"] if w else None, "by_rep": reps, "waiting": w[:10]}
 
 
 @metric("orders.match_rate", "Invoice match", "orders",
