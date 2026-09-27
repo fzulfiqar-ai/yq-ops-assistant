@@ -15,7 +15,9 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import logging
+import secrets
 
 from fastapi import Depends, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +47,58 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Added before CORS so CORS stays outermost and a 429 still carries the allow-origin header;
 # otherwise the browser reports a CORS failure instead of the rate limit.
 app.add_middleware(SlowAPIMiddleware)
+
+
+class ServerErrorJSON:
+    """Turn an unhandled exception into JSON 500 {"detail": "Server error", "ref": "<id>"} INSIDE
+    the CORS layer (R7a).
+
+    Starlette's own ServerErrorMiddleware sits outside every user middleware, so its plain-text
+    500 never passed through CORSMiddleware: no Access-Control-Allow-Origin, and the browser
+    showed every server error as "Failed to fetch". This answers first, from inside CORS, and
+    logs the traceback under a short ref the error screen shows, so a report can be matched to
+    the log line.
+
+    Pure ASGI (not BaseHTTPMiddleware), so a streaming body passes through untouched. Only
+    exceptions reach it: an HTTPException is already a response by then (FastAPI's
+    ExceptionMiddleware sits inside every user middleware). Once the response has started — a
+    stream that failed half way, a background task after the body — there is nothing left to
+    replace, and the exception goes on up exactly as before."""
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception:
+            if started:
+                raise
+            ref = secrets.token_hex(3)
+            logging.getLogger("app.errors").exception(
+                "unhandled error ref=%s %s %s", ref, scope.get("method"), scope.get("path"))
+            body = json.dumps({"detail": "Server error", "ref": ref}).encode()
+            await send({"type": "http.response.start", "status": 500,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"content-length", str(len(body)).encode()),
+                                    (b"cache-control", b"no-store")]})
+            await send({"type": "http.response.body", "body": body})
+
+
+# Added before CORS (Starlette: the last middleware added is the outermost), so this 500 carries
+# the allow-origin header like any other answer.
+app.add_middleware(ServerErrorJSON)
 
 # Local dev origins are always allowed; production origins come from ALLOWED_ORIGINS.
 # Include Vite's fallback ports (5174/5175) so a busy 5173 doesn't break CORS for /me.
