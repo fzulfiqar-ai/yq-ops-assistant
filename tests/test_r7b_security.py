@@ -687,6 +687,8 @@ class _shop:
             (shop, "confirm_order", lambda oid, *a, **k: self.confirmed.append(oid) or
              {**copy.deepcopy(rows[int(oid)]), "status": "confirmed", "totals": {}, "changed": [], "removed": []}),
             (shop, "market_base", lambda: "https://market.example.com"),
+            # R7c: the staff payload also reads the minimum-order setting for the editor's adverse check
+            (shop, "context", lambda force=False: {"settings": {"shop_min_order_bhd": "20"}, "items": []}),
             (shop, "salesman_for_user", lambda e: {"id": 1, "referral_code": "one"} if e == "rep@example.com" else None),
             (shop, "recent_customers", lambda sid=None, limit=20: [
                 {"name": o["customer_name"], "phone": o["customer_phone"], "email": o["customer_email"]}
