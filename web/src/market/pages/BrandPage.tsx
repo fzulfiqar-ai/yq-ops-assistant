@@ -89,7 +89,9 @@ export default function BrandPage() {
   )
 
   return (
-    <div className="px-gutter lg:px-0 lg:pt-5">
+    // pt-3 below lg: the stage sits 12 px under the phone / tablet header, as /shop's content does —
+    // flush against it, the two rounded panels read as one (the loading frame shares this wrapper)
+    <div className="px-gutter pt-3 lg:px-0 lg:pt-5">
       {upcoming.length > 0 &&
         (desktop ? (
           // Home's one-tile hero grid: the stage keeps 1.6 of the row, the tile stretches to its height

@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { BellRing, Check, Package } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UpcomingItem } from '../lib/marketApi'
+import { useMarket } from '../MarketContext'
 import { Chip } from '../ui/Chip'
 import { ProductImage, SIZES_GRID, SIZES_RAIL } from '../ui/ProductImage'
 import { ComingSoonNotifySheet } from './ComingSoonNotifySheet'
@@ -16,10 +17,13 @@ import { CardKicker } from './MarketCard'
  *            top-end, in the exact place and style of the live card's round button
  *   → kicker "WEKOME · WS-55"         brand first, then the model code (CardKicker itself)
  *   → name   2 lines, EN or AR by locale
- *   → pills  ONE row of facts: the supplier spec, then the variants (only whole pills that fit)
+ *   → pills  ONE row of whole short facts: the name's differentiator, the supplier spec, then the
+ *            variants (specPills: only whole pills that fit, never an ellipsis)
  *   → price  "Price on arrival" where the live card prints its price
  *   → facts  the arrival month from the payload ("Arriving October")
- *   → action ONE full-width plum "Notify me" → after asking, the check: "We will tell you"
+ *   → action ONE full-width plum "Notify me" → after asking, the check: "We will tell you" — which
+ *            still opens the sheet when the shop has a rep, so the per-model WhatsApp ask stays one
+ *            tap away (phones and tablets have no tile); with no rep there is nothing left to do
  *
  * `compact` (the home rail) mirrors the live compact card: the fixed rail width, a round bell in
  * the price row instead of the full-width bar, no facts row.
@@ -37,11 +41,14 @@ export interface ComingSoonCardProps {
 
 /** the one plum action — the same ink as the live card's add */
 const PLUM = 'bg-plum text-white shadow-1 hover:bg-plum-deep'
-/** after asking: the live card's "asked" (ok) state */
-const ASKED = 'cursor-default border border-ok/30 bg-ok-soft text-ok'
+/** after asking: the live card's "asked" (ok) state — still a door to the sheet when a rep can be asked */
+const ASKED = 'border border-ok/30 bg-ok-soft text-ok'
+const ASKED_OPEN = 'hover:border-ok/60'
+const ASKED_DONE = 'cursor-default'
 
 export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'grid', className }: ComingSoonCardProps) {
   const t = upcomingCopy()
+  const { rep } = useMarket()
   const compact = variant === 'compact'
   const [view, setView] = useState<'product' | 'box'>('product')
   const [open, setOpen] = useState(false)
@@ -55,8 +62,12 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
   const photo = box
     ? { item: { thumb_urls: item.box_thumb_urls, product_image_url: item.box_url, package_image_url: null } }
     : { item: { thumb_urls: item.photo_thumb_urls, product_image_url: item.photo_url, package_image_url: item.box_url } }
-  const label = `${done ? t.notified : t.notify} — ${item.model_code} ${name}`
+  // once asked, the button only reopens the sheet for its WhatsApp ask — so only when there is a rep to ask
+  const canAsk = Boolean(rep?.whatsapp_url)
+  const locked = done && !canAsk
+  const label = `${done ? (canAsk ? `${t.notified} · ${t.askRange(rep?.first_name || '')}` : t.notified) : t.notify} — ${item.model_code} ${name}`
   const ask = () => setOpen(true)
+  const asked = cn(ASKED, locked ? ASKED_DONE : ASKED_OPEN)
 
   return (
     <article
@@ -120,11 +131,11 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
               <button
                 type="button"
                 onClick={ask}
-                disabled={done}
+                disabled={locked}
                 aria-label={label}
                 className={cn(
                   'relative grid h-10 w-10 shrink-0 place-items-center rounded-full transition duration-1 ease-m after:absolute after:-inset-1 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
-                  done ? ASKED : PLUM,
+                  done ? asked : PLUM,
                 )}
               >
                 {done ? <Check size={18} aria-hidden="true" /> : <BellRing size={17} aria-hidden="true" />}
@@ -140,11 +151,11 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
               <button
                 type="button"
                 onClick={ask}
-                disabled={done}
+                disabled={locked}
                 aria-label={label}
                 className={cn(
                   'hit relative flex h-11 w-full items-center justify-center gap-1.5 rounded-sm text-sm font-semibold transition duration-1 ease-m active:scale-[.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70 focus-visible:ring-offset-2',
-                  done ? ASKED : PLUM,
+                  done ? asked : PLUM,
                 )}
               >
                 {done ? <Check size={15} aria-hidden="true" /> : <BellRing size={15} aria-hidden="true" />}
@@ -155,7 +166,7 @@ export const ComingSoonCard = memo(function ComingSoonCard({ item, variant = 'gr
         )}
       </div>
 
-      {open && <ComingSoonNotifySheet item={item} open={open} onClose={() => setOpen(false)} onDone={() => setDone(true)} />}
+      {open && <ComingSoonNotifySheet item={item} open={open} done={done} onClose={() => setOpen(false)} onDone={() => setDone(true)} />}
     </article>
   )
 })

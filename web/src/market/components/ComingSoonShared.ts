@@ -57,17 +57,35 @@ export function jumpTo(id: string): void {
 }
 
 /**
- * The card's one row of fact pills: the supplier spec split at its "·" ("Bluetooth 5.3", "230 mAh
- * case"), then the variant labels (colours, connectors, sizes). The row is clipped to one line, so
- * only the pills that fit show; the full spec and the variant picker live in the notify sheet.
+ * The longest pill the narrowest card row holds whole (~134 px of row at a 360 px phone, ~6 px a
+ * character at the chip's 2xs semibold): a longer fact never becomes a pill — it would end in an
+ * ellipsis — and stays in the notify sheet's full spec line instead.
+ */
+const PILL_MAX = 18
+
+/**
+ * The card's one row of fact pills, each a whole short fact:
+ *   1. the name's own differentiator, when it ends in one — "(Gen 7)", "(USB-A to USB-C)",
+ *      "(Privacy)" — so four earbuds whose clamped names read alike still tell apart at 360;
+ *   2. the supplier spec, split at its "·" and at " + " ("Braided + TPE + aluminium alloy" is three
+ *      facts, each true alone) — never at "/", which would split "USB-A / USB-C to USB-C / Lightning"
+ *      into halves that misstate the cable;
+ *   3. the variant labels (colours, connectors, sizes).
+ * The row is clipped to one line, so only the pills that fit show; nothing longer than PILL_MAX is
+ * offered, so not even the first pill can ellipsize.
  */
 export function specPills(it: UpcomingItem): string[] {
   const out: string[] = []
   const push = (s: string) => {
     const v = s.trim()
-    if (v && !out.includes(v)) out.push(v)
+    if (v && v.length <= PILL_MAX && !out.includes(v)) out.push(v)
   }
-  upcomingSpec(it).split('·').forEach(push)
+  const tail = /\(([^()]+)\)\s*$/.exec(upcomingName(it))
+  if (tail) push(tail[1])
+  upcomingSpec(it)
+    .split('·')
+    .flatMap((part) => part.split(' + '))
+    .forEach(push)
   it.variants.forEach((v) => push(variantLabel(v)))
   return out
 }

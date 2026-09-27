@@ -23,7 +23,8 @@ const TABS = [
 /**
  * Which tab a path belongs to, by its FIRST segment exactly — so a storefront slug that merely
  * starts like a route ("/shopfront", "/mearaj") is a storefront (Home), never a false match.
- * /, /p/{code} and /{slug} → Home.
+ * /, /p/{code} and /{slug} → Home. /brands/{brand} is a brand's range → Browse, the tab a live
+ * brand lands on too (/brands/vfan redirects to /shop?brand=VFAN).
  */
 function activeIndex(pathname: string): number {
   const first = pathname.split('/').filter(Boolean)[0] || ''
@@ -31,6 +32,7 @@ function activeIndex(pathname: string): number {
     case 'shop':
     case 't':
     case 'search':
+    case 'brands':
       return 1
     case 'cart':
     case 'checkout':

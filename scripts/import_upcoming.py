@@ -12,7 +12,8 @@ What it does (trust plan §6b, release R1b):
      WK price list because the invoice cell points at the C34i box);
   3. builds the rows for shop_upcoming_items — brand, code, category, names and specs in EN/AR,
      variant chips, shipment ref, expected month — and refuses to build a row that carries any
-     price, cost or quantity key (app.upcoming.assert_no_money);
+     price, cost or quantity key (app.upcoming.assert_no_money), or the internal tier word in
+     any public field (assert_public_copy: WEKOME is shown as the step-up range beside VFAN);
   4. writes the OWNER REVIEW SHEET, a self-contained HTML page (cleaned photo, box photo, code,
      category, name EN/AR, spec, variant chips, expected label; every Arabic line flagged for
      native review), plus the cleaned photos and 160/320/512 WebP thumbs, under
@@ -39,6 +40,7 @@ import base64
 import hashlib
 import html
 import json
+import re
 import subprocess
 import sys
 from datetime import date
@@ -221,7 +223,22 @@ def build_rows(products: list[dict], ships: list[dict], month: str | None = DEFA
             "status": "draft", "sort_order": i,
         })
     assert_no_money(rows, "rows")
+    assert_public_copy(rows)
     return rows
+
+
+PUBLIC_TEXT = ("name_en", "name_ar", "spec_en", "spec_ar", "category", "category_ar", "variants")
+TIER_WORD = re.compile(r"premium", re.I)
+
+
+def assert_public_copy(rows: list[dict]) -> None:
+    """The owner's rule: the marketplace never names WEKOME's internal tier. A row whose public
+    text (names, specs, category, variant labels) carries it is refused before any review sheet or
+    upload — the supplier sheets are condensed by hand, so this is the net under that step."""
+    bad = [r.get("model_code") for r in rows
+           if TIER_WORD.search(json.dumps([r.get(k) for k in PUBLIC_TEXT], ensure_ascii=False))]
+    if bad:
+        raise SystemExit("the internal tier word is in the public copy of: " + ", ".join(map(str, bad)))
 
 
 def row_labels(row: dict) -> tuple[str, str]:

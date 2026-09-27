@@ -1407,9 +1407,33 @@ def brand_checks(run: Run, page: Page, vp: Viewport, out: Path, lead: bool) -> N
     """
     The WEKOME page (27-Sep-2026): one h1; no #hash links (a rep's ?ref= must survive); a category
     circle's jump lands its heading clear of the pinned header and leaves the URL exactly as it
-    was; a card's "Notify me" opens the sheet (the context's no-prod-writes net answers any POST,
-    and nothing is submitted here anyway).
+    was; a card's "Notify me" opens the sheet (the context's no-prod-writes net answers any POST).
+
+    Beyond BANNED (site-wide and kept narrow: a live catalog name reads "Airpord 1 Design"), this
+    page may never show the tier word at all, nor count its range ("34 models", "12 products") —
+    read from textContent, so a card that content-visibility has not painted yet is read too.
+
+    brand_ref runs on a clean profile (nothing remembered): the rep link's ?ref= must be the
+    session's ref on this FIRST visit — no catalog request goes out without it, and a submitted
+    notify carries it (answered by the no-prod-writes net; nothing reaches any API).
     """
+    text = page.evaluate("() => (document.querySelector('main') || document.body).textContent || ''")
+    for pat, what in ((r"\bpremium\b", "the tier word"), (r"\b\d+\s+(?:models?|products?|skus?|designs?)\b", "a count of the range")):
+        hit = re.search(pat, text, re.I)
+        if hit:
+            finding(run, "fail", "brand-copy", what + " on the brand page: “" + hit.group(0) + "”")
+    ref = ""
+    if run.state == "brand_ref":
+        m = re.search(r"[?&]ref=([^&#]+)", run.route)
+        ref = m.group(1) if m else ""
+        bare = page.evaluate(
+            "(s) => performance.getEntriesByType('resource').map((e) => e.name)"
+            ".filter((u) => /[/](api|public)[/]market([?]|$)/.test(u) && !u.includes('ref=' + s))",
+            ref,
+        )
+        if bare:
+            finding(run, "fail", "brand-ref", "a catalog request went out without the rep link's ref on a first visit: " + str(bare[:3]))
+
     heads = page.evaluate(
         "() => [...document.querySelectorAll('h1')].filter((h) => { const r = h.getBoundingClientRect();"
         " const cs = getComputedStyle(h); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; })"
@@ -1461,8 +1485,24 @@ def brand_checks(run: Run, page: Page, vp: Viewport, out: Path, lead: bool) -> N
     dialog = page.locator('[role="dialog"]')
     if dialog.count() == 0 or not dialog.first.is_visible():
         finding(run, "fail", "brand-notify", "“" + STR["upcoming.send"] + "” did not open the notify sheet")
-    elif lead:
+        page.keyboard.press("Escape")
+        return
+    if lead:
         shot(run, page, out, "notify-sheet")
+    if ref:
+        # submit on the rep link: the body must carry the ref (the net answers it; nothing is sent)
+        try:
+            dialog.first.locator("#upcoming-phone").fill("33001122")
+            with page.expect_request(lambda r: r.method == "POST" and "/upcoming/interest" in r.url, timeout=5000) as sent:
+                dialog.first.locator('button[type="submit"]').click()
+            body = sent.value.post_data_json or {}
+            if body.get("ref") != ref:
+                finding(run, "fail", "brand-ref", "the notify POST on a rep link carried ref=" + json.dumps(body.get("ref")) + " (expected " + json.dumps(ref) + ")")
+            else:
+                run.notes.append("notify on the rep link carried ref=" + ref + " (answered locally, not sent)")
+        except PWError as exc:
+            finding(run, "fail", "brand-ref", "could not submit the notify sheet: " + str(exc)[:200])
+        page.wait_for_timeout(600)
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
 

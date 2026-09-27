@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react'
-import { MessageCircle } from 'lucide-react'
+import { Check, MessageCircle } from 'lucide-react'
 import type { UpcomingItem } from '../lib/marketApi'
 import { postUpcomingInterest } from '../lib/marketApi'
-import { deviceId, readCustomer } from '../lib/device'
+import { currentRef, deviceId, readCustomer } from '../lib/device'
 import { cleanPhone, isPhone } from '../lib/format'
 import { useMarket } from '../MarketContext'
 import { AnchorButton, Button } from '../ui/Button'
@@ -25,8 +25,12 @@ import { askRepUrl, rememberNotified, upcomingCopy, upcomingName, upcomingSpec, 
  * me" — "Ask your rep" on WhatsApp, prefilled with the model and the picked variant, when the shop
  * came through a rep. The picked variant only names the model in the message and the subtitle;
  * the notify POST is unchanged (card, phone, quantity, device, ref).
+ *
+ * `done` (this phone already asked): the card's "We will tell you" still opens the sheet when the
+ * shop has a rep, so the per-model WhatsApp ask stays one tap away — the form is replaced by the
+ * confirmation and nothing can be sent twice.
  */
-export function ComingSoonNotifySheet({ item, open, onClose, onDone }: { item: UpcomingItem; open: boolean; onClose: () => void; onDone: () => void }) {
+export function ComingSoonNotifySheet({ item, open, done = false, onClose, onDone }: { item: UpcomingItem; open: boolean; done?: boolean; onClose: () => void; onDone: () => void }) {
   const t = upcomingCopy()
   const toast = useToast()
   const { rep, ref } = useMarket()
@@ -44,7 +48,7 @@ export function ComingSoonNotifySheet({ item, open, onClose, onDone }: { item: U
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (busy) return
+    if (busy || done) return
     if (!phoneOk) {
       setTouched(true)
       return
@@ -57,7 +61,8 @@ export function ComingSoonNotifySheet({ item, open, onClose, onDone }: { item: U
         phone: cleanPhone(phone),
         qty_interest: Number.isFinite(n) && n > 0 ? n : null,
         device_id: deviceId(),
-        ref: ref || rep?.slug || null,
+        // the session's ref, else the rep link this phone remembers (a first visit's ?ref=)
+        ref: ref || rep?.slug || currentRef() || null,
       })
       if (!r.ok) throw new Error('not saved')
       rememberNotified(item.id)
@@ -81,12 +86,14 @@ export function ComingSoonNotifySheet({ item, open, onClose, onDone }: { item: U
       subtitle={picked ? `${name} · ${picked}` : name}
       footer={
         <div className="flex flex-col gap-2">
-          <Button type="submit" form="upcoming-notify" full size="lg" loading={busy}>
-            {t.send}
-          </Button>
+          {!done && (
+            <Button type="submit" form="upcoming-notify" full size="lg" loading={busy}>
+              {t.send}
+            </Button>
+          )}
           {askUrl && (
             <AnchorButton href={askUrl} target="_blank" rel="noreferrer" variant="wa" size="lg" full icon={<MessageCircle size={16} aria-hidden="true" />}>
-              {rep?.first_name ? t.ask : t.askYq}
+              {t.askRange(rep?.first_name || '')}
             </AnchorButton>
           )}
         </div>
@@ -114,38 +121,47 @@ export function ComingSoonNotifySheet({ item, open, onClose, onDone }: { item: U
             </div>
           </div>
         )}
-        <p className="text-sm leading-snug text-ink-2">{t.notifyLine}</p>
-        <div>
-          <Label htmlFor="upcoming-phone" hint={t.phoneHint}>
-            {t.phone}
-          </Label>
-          <Input
-            id="upcoming-phone"
-            type="tel"
-            inputMode="tel"
-            autoComplete="tel"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            onBlur={() => setTouched(true)}
-            maxLength={32}
-            placeholder="33001122"
-            required
-            aria-invalid={phoneBad}
-            aria-describedby={phoneBad ? 'upcoming-phone-hint' : undefined}
-          />
-          {phoneBad && (
-            <Hint id="upcoming-phone-hint" error>
-              {t.phoneBad}
-            </Hint>
-          )}
-        </div>
-        <div>
-          <Label htmlFor="upcoming-qty" hint={t.qtyHint}>
-            {t.qty}
-          </Label>
-          <Input id="upcoming-qty" type="number" inputMode="numeric" min={1} max={9999} step={1} value={qty} onChange={(e) => setQty(e.target.value)} aria-describedby="upcoming-qty-hint" />
-          <Hint id="upcoming-qty-hint">{t.qtyHint}</Hint>
-        </div>
+        {done ? (
+          <p className="flex items-start gap-2 rounded-md border border-ok/30 bg-ok-soft px-3 py-2.5 text-sm font-semibold leading-snug text-ok">
+            <Check size={16} aria-hidden="true" className="mt-0.5 shrink-0" />
+            {t.notified}
+          </p>
+        ) : (
+          <>
+            <p className="text-sm leading-snug text-ink-2">{t.notifyLine}</p>
+            <div>
+              <Label htmlFor="upcoming-phone" hint={t.phoneHint}>
+                {t.phone}
+              </Label>
+              <Input
+                id="upcoming-phone"
+                type="tel"
+                inputMode="tel"
+                autoComplete="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                onBlur={() => setTouched(true)}
+                maxLength={32}
+                placeholder="33001122"
+                required
+                aria-invalid={phoneBad}
+                aria-describedby={phoneBad ? 'upcoming-phone-hint' : undefined}
+              />
+              {phoneBad && (
+                <Hint id="upcoming-phone-hint" error>
+                  {t.phoneBad}
+                </Hint>
+              )}
+            </div>
+            <div>
+              {/* the hint once, beside the label (the phone field's pattern) — not again under the input */}
+              <Label htmlFor="upcoming-qty" hint={t.qtyHint}>
+                {t.qty}
+              </Label>
+              <Input id="upcoming-qty" type="number" inputMode="numeric" min={1} max={9999} step={1} value={qty} onChange={(e) => setQty(e.target.value)} />
+            </div>
+          </>
+        )}
       </form>
     </Sheet>
   )

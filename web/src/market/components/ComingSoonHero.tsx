@@ -17,9 +17,11 @@ import { ComposedCreative } from './ComposedCreative'
  *   ComingSoonTile    the lilac tile beside it on desktop-like widths: "Price on arrival", the
  *                     step-up line, one box-photo disc; the whole tile is one target — "Ask {rep}
  *                     on WhatsApp" when the shop came through a rep link, otherwise a scroll to
- *                     the range ("Notify me on any model")
+ *                     the range, labelled as the navigation it is ("Pick a model to be notified":
+ *                     the tile itself requests nothing)
  *   ComingSoonCircles the home page's colourful category circles, one per section, no counts —
- *                     each a button that scrolls to its section
+ *                     each a button that scrolls to its section; from md the row has exactly as
+ *                     many columns as sections (up to 8), so seven fill the width like home's eight
  *
  * These reuse SlideCard's classes (slide-card, canvas-*, horizon, slide-*, creative) and copy its
  * hero / phone / tile geometry, but are not SlideCard: that component drives the home page's first
@@ -99,7 +101,11 @@ export function ComingSoonStage({ brand, when, items, size, heading, onSeeRange,
         <Title id="brand-hero" className="slide-title line-clamp-2 shrink-0 pb-[0.1em] font-display font-extrabold text-white">
           {t.headline(brand)}
         </Title>
-        <p className={cn('slide-line mt-1 line-clamp-2 shrink-0 text-[12.5px] leading-4 text-white/80', size === 'hero' && 'mt-3 max-w-[34ch] leading-snug [@container(max-width:700px)]:mt-2')}>{t.stageLine}</p>
+        {/* balanced lines: the greedy break left "boxes." alone on line 2 (430, 1366), and "pretty"
+            broke at the hyphen instead ("retail-" / "ready boxes.") */}
+        <p className={cn('slide-line mt-1 line-clamp-2 shrink-0 text-[12.5px] leading-4 text-white/80', size === 'hero' && 'mt-3 max-w-[34ch] leading-snug [@container(max-width:700px)]:mt-2')} style={{ textWrap: 'balance' }}>
+          {t.stageLine}
+        </p>
         <button
           type="button"
           onClick={onSeeRange}
@@ -155,7 +161,15 @@ export function ComingSoonTile({ brand, items, onNotifyAny, className }: ComingS
         </span>
         <span className="slide-cta mt-2 inline-flex w-fit max-w-full shrink-0 items-center gap-1 whitespace-nowrap text-[13px] font-semibold text-ink underline-offset-4 transition-colors duration-2 ease-m group-hover:underline lg:text-sm">
           {askUrl && <MessageCircle size={14} aria-hidden="true" className="shrink-0 text-wa" />}
-          <span className="truncate">{askUrl ? t.askRange(rep?.first_name || '') : t.notifyAny}</span>
+          {askUrl ? (
+            // "Ask Ahmed" + the WhatsApp icon: the full "Ask Ahmed on WhatsApp" did not fit the copy column at 1366
+            <span className="truncate">
+              {t.askShort(rep?.first_name || '')}
+              <span className="sr-only"> {t.onWhatsApp}</span>
+            </span>
+          ) : (
+            <span className="truncate">{t.pickModel}</span>
+          )}
           {askUrl ? (
             <ArrowRight size={14} aria-hidden="true" className="shrink-0 transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100 rtl:group-hover:-translate-x-0.5" />
           ) : (
@@ -191,7 +205,7 @@ export function ComingSoonCircles({ sections, onJump, className }: ComingSoonCir
   if (sections.length < 2) return null
   return (
     <nav aria-label={t.rangeNav} className={className}>
-      <ul className="grid grid-cols-4 gap-x-1.5 gap-y-3.5 md:grid-cols-8 lg:gap-x-3">
+      <ul className="grid grid-cols-4 gap-x-1.5 gap-y-3.5 md:grid-cols-[repeat(var(--wk-cols),minmax(0,1fr))] lg:gap-x-3" style={{ ['--wk-cols' as string]: Math.min(sections.length, 8) }}>
         {sections.map((s, i) => (
           <li key={s.id} className="min-w-0">
             <button

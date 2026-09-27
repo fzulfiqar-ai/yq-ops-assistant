@@ -157,7 +157,7 @@ export function StickyHeader() {
                 onClick={() => setMega((v) => !v)}
                 className={cn(
                   'inline-flex h-11 items-center gap-1.5 rounded-sm px-3.5 text-sm font-semibold transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70',
-                  mega || pathname.startsWith('/shop') || pathname.startsWith('/t/') ? 'bg-plum-soft text-plum-ink' : 'text-ink hover:bg-plum-wash',
+                  mega || pathname.startsWith('/shop') || pathname.startsWith('/t/') || pathname.startsWith('/brands/') ? 'bg-plum-soft text-plum-ink' : 'text-ink hover:bg-plum-wash',
                 )}
               >
                 {S.nav.browse} <ChevronDown size={15} className={cn('transition-transform duration-2', mega && 'rotate-180')} aria-hidden="true" />

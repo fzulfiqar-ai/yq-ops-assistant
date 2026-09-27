@@ -622,8 +622,12 @@ export const S = {
       /** the lilac tile beside the stage (desktop) */
       tileTitle: 'The step-up range beside VFAN',
       askRange: (first: string) => (first ? `Ask ${first} on WhatsApp` : 'Ask your rep on WhatsApp'),
+      /** the tile's visible label (its green WhatsApp icon says the rest; `onWhatsApp` is read to screen readers) — the full line cut off at 1366 */
+      askShort: (first: string) => (first ? `Ask ${first}` : 'Ask your rep'),
+      onWhatsApp: 'on WhatsApp',
       askRangeText: (first: string, brand: string) => `Hello${first ? ` ${first}` : ''}, I am interested in the ${brand} range when it arrives. Can you tell me more?`,
-      notifyAny: 'Notify me on any model',
+      /** the tile's no-rep target: it scrolls to the range, it requests nothing — so it says where it goes */
+      pickModel: 'Pick a model to be notified',
       /** the category circles under the stage */
       rangeNav: 'In the range',
       /** category → the section's heading and circle label (no counts) */
@@ -634,8 +638,6 @@ export const S = {
       notified: 'We will tell you when it lands',
       /** the card's button once this phone has asked */
       notifiedShort: 'We will tell you',
-      ask: 'Ask your rep',
-      askYq: 'Ask YQ',
       seeAll: 'See the range',
       /** the card's round box-photo toggle */
       showBox: 'Show the box',
@@ -658,25 +660,29 @@ export const S = {
       liveNow: (brand: string) => `${brand} on the shelf now`,
       browseBrand: (brand: string) => `Browse ${brand}`,
     },
-    /* DRAFT Arabic — needs a native speaker's review before the AR pass ships */
+    /* DRAFT Arabic — needs a native speaker's review before the AR pass ships.
+     * NATIVE REVIEW (27-Sep): stageLine, tileTitle and tagline render "a step up" literally
+     * ("خطوة للأعلى") — no elative or superlative, no tier or quality word. The first draft's
+     * superlative ("the most refined range") read as a tier / quality claim; ask the reviewer for a
+     * natural, non-superlative way to say "the step-up range beside VFAN". */
     ar: {
       kicker: 'قريبًا',
       rail: (brand: string) => `قريبًا · ${brand}`,
       headline: (brand: string) => (brand === 'WEKOME' ? 'ويكوم قادمة إلى YQ' : `${brand} قادمة إلى YQ`),
-      stageLine: 'خطوة أرقى لرفوف محلك، في علب جاهزة للعرض.',
-      tileTitle: 'التشكيلة الأرقى بجانب VFAN',
+      stageLine: 'خطوة للأعلى لرفوف محلك، في علب جاهزة للعرض.',
+      tileTitle: 'خطوة للأعلى بجانب VFAN',
       askRange: (first: string) => (first ? `اسأل ${first} على واتساب` : 'اسأل مندوبك على واتساب'),
+      askShort: (first: string) => (first ? `اسأل ${first}` : 'اسأل مندوبك'),
+      onWhatsApp: 'على واتساب',
       askRangeText: (first: string, brand: string) => `مرحبًا${first ? ` ${first}` : ''}، أنا مهتم بتشكيلة ${brand} عند وصولها. هل يمكنك إخباري بالمزيد؟`,
-      notifyAny: 'أخبروني عن أي موديل',
+      pickModel: 'اختر موديلًا ليصلك إشعار',
       rangeNav: 'في التشكيلة',
       sections: { 'Wireless Audio': 'سماعات لاسلكية', 'Wired Earphones': 'سماعات سلكية', Speakers: 'مكبرات صوت', 'Data Cables': 'كيابل', 'Wall Chargers': 'شواحن جدارية', 'Car Chargers': 'شواحن سيارة', 'Screen Protectors': 'حمايات شاشة' } as Record<string, string>,
-      tagline: 'خطوة أرقى لرفوف محلك',
+      tagline: 'خطوة للأعلى لرفوف محلك',
       price: 'السعر عند الوصول',
       notify: 'أخبروني عند الوصول',
       notified: 'سنخبرك عند الوصول',
       notifiedShort: 'سنخبرك',
-      ask: 'اسأل مندوبك',
-      askYq: 'اسأل YQ',
       seeAll: 'شاهد التشكيلة',
       showBox: 'اعرض العلبة',
       showProduct: 'اعرض المنتج',

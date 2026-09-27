@@ -538,9 +538,15 @@ def _():
     assert "arDesigns" not in strings and "categoryPhrase" not in _web("components/ComingSoonShared.ts")
     # never the internal tier word, in either language block (comments included)
     assert not re.search(r"premium", block, re.I), "the upcoming copy names the tier"
-    for key in ("stageLine", "tileTitle", "askRange", "askRangeText", "notifyAny", "rangeNav", "sections", "notifiedShort", "showBox", "showProduct"):
+    for key in ("stageLine", "tileTitle", "askRange", "askRangeText", "pickModel", "rangeNav", "sections", "notifiedShort", "showBox", "showProduct"):
         assert block.count(f"      {key}:") == 2, f"{key} must exist in both upcoming.en and upcoming.ar"
     assert "Price on arrival" in block and "A step up for your shelf, in retail-ready boxes." in block
+    # the Arabic draft says "a step up" plainly: no elative / superlative ("more / most refined"), no luxury or tier word
+    ar_block = block[block.index("    ar: {"):]
+    for word in ("أرقى", "فاخر", "بريميوم", "ممتاز"):
+        assert word not in ar_block, f"the Arabic draft uses {word!r} — a tier / quality claim"
+    # the tile's no-rep target scrolls; its label must not promise a request it does not make
+    assert "Notify me on any model" not in block and "t.pickModel" in _web("components/ComingSoonHero.tsx")
     # the card mirrors MarketCard but can never be ordered, saved, opened as a product or read as stock
     card = _web("components/ComingSoonCard.tsx")
     for hook in ("savedStore", "useCartQty", "openProduct", "data-stock", "BHD"):
@@ -553,6 +559,22 @@ def _():
     post = re.search(r"postUpcomingInterest\(\{(.*?)\}\)", sheet, re.S)
     assert post, "the notify POST is not where it was"
     assert set(re.findall(r"^\s*(\w+):", post.group(1), re.M)) == {"upcoming_id", "phone", "qty_interest", "device_id", "ref"}, post.group(1)
+    # the ref falls back to the rep link this phone remembers, and the WhatsApp button names the rep
+    assert "ref: ref || rep?.slug || currentRef() || null" in post.group(1)
+    assert "t.askRange(rep?.first_name || '')" in sheet and "t.askYq" not in sheet
+    # once asked, the card still opens the sheet when a rep can be asked; the sheet then sends nothing
+    assert "disabled={locked}" in card and "const locked = done && !canAsk" in card and "done={done}" in card
+    assert "if (busy || done) return" in sheet and "{!done && (" in sheet
+    # the quantity hint is printed once (beside its label), not again under the input
+    assert sheet.count("t.qtyHint") == 1
+    # a rep link's ?ref= is the session's ref from the first render (and on a later in-app visit)
+    app = (ROOT / "web" / "src" / "MarketApp.tsx").read_text(encoding="utf-8")
+    assert "<MarketProvider initialRef={initialRef()}>" in app and "if (!storefrontSlug(location.pathname)) setRef(ref)" in app
+    # pills are whole: nothing longer than the narrowest row holds, never split at "/"
+    shared = _web("components/ComingSoonShared.ts")
+    assert "const PILL_MAX = 18" in shared and "v.length <= PILL_MAX" in shared and ".split(' + ')" in shared and ".split(' / ')" not in shared
+    # a brand page is part of Browse in both navs
+    assert "case 'brands':" in _web("shell/FloatingNav.tsx") and "pathname.startsWith('/brands/')" in _web("shell/StickyHeader.tsx")
     # the rotating Spotlight ad is off the brand pages (the restock aside stays)
     shell = _web("shell/DesktopShell.tsx")
     assert "{!/^\\/brands\\//.test(pathname) && <Spotlight />}" in shell and "<MiniCart />" in shell
@@ -566,6 +588,12 @@ def _():
     banned = re.search(r'^BANNED = r"(.+)"$', qa, re.M).group(1)
     assert re.search(banned, "the Sub-Premium range", re.I) and re.search(banned, "34 designs in earbuds", re.I)
     assert not re.search(banned, "Price on arrival", re.I) and not re.search(banned, "Aipord Lightning Port (Airpord 1 Design)", re.I)
+    # ...and on the brand page alone: the bare tier word and any count of the range; the rep link
+    # is checked on a clean profile (ref on the first catalog request and on a submitted notify)
+    assert '"brand-copy"' in qa and r"(?:models?|products?|skus?|designs?)" in qa and '"brand-ref"' in qa
+    # the importer refuses a row whose public text names the tier
+    importer = (ROOT / "scripts" / "import_upcoming.py").read_text(encoding="utf-8")
+    assert "assert_public_copy(rows)" in importer and 'TIER_WORD = re.compile(r"premium", re.I)' in importer
 
 
 def main() -> int:
