@@ -1919,6 +1919,14 @@ def _():
     assert shop_heart.notify_state([created], {"source": "salesman"})["shop_told"] is True, "the source alone"
     assert shop_heart.notify_state([created, later], {"source": "market"})["shop_told"] is False
     assert shop_heart.notify_state([created, later])["shop_told"] is False, "an older caller (events only)"
+    # the pick list's internal stamps are not steps the shop sees (heart.ts shopToldFrom agrees, F3)
+    told = {"event": "customer_notified", "ts": "2026-09-27T06:00:09+00:00", "detail": {}}
+    packed = {"event": "status:packed", "ts": "2026-09-27T07:00:00+00:00", "detail": {}}
+    otw = {"event": "status:out_for_delivery", "ts": "2026-09-27T08:00:00+00:00", "detail": {}}
+    delivered = {"event": "status:delivered", "ts": "2026-09-27T09:00:00+00:00", "detail": {}}
+    assert shop_heart.notify_state([created, later, told, packed, otw], {"source": "market"})["shop_told"] is True
+    assert shop_heart.notify_state([created, born, packed, otw], {"source": "salesman"})["shop_told"] is True
+    assert shop_heart.notify_state([created, later, told, packed, delivered], {"source": "market"})["shop_told"] is False
 
 
 @test("F1.9 legacy: a confirm from a pre-R7c desk (changed lines, no reason anywhere, nothing added) is accepted as 'other' — adverse still needs the tick")

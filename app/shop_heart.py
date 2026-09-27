@@ -1198,7 +1198,8 @@ def notify_state(events, order: dict | None = None) -> dict:
     """{customer_notified_at, shop_told}: was the shop told AFTER the latest step (a status move or
     an amendment)? Drives the drawer's "Shop not told yet" chip. A born-confirmed staff order
     (born_confirmed) starts as told: its 'created' and born 'status:confirmed' happened in front of
-    the shop, so only a later step (an amendment, Delivered, a cancel) asks for a tap."""
+    the shop, so only a later step (an amendment, Delivered, a cancel) asks for a tap. The internal
+    packed / out_for_delivery stamps are not steps: the shop's three stages do not move."""
     born = born_confirmed(order, events)
     last_step = last_told = None
     for e in events or []:
@@ -1208,6 +1209,8 @@ def notify_state(events, order: dict | None = None) -> dict:
             last_told = ts or last_told
         elif born and (ev == "created" or _born_event(e)):
             continue
+        elif ev in ("status:packed", "status:out_for_delivery"):
+            continue        # the pick list's internal stamps: nothing the shop sees changed (the UI agrees, heart.ts)
         elif ev.startswith("status:") or ev in ("amended", "created", "reopened"):
             last_step = ts or last_step
     shop = _shop()
