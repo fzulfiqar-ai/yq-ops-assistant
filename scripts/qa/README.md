@@ -19,7 +19,19 @@ python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/
 
 # production
 python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
+
+# R5: the same walk in Arabic, at any widths (here the brief's 390 phone and 1366 desktop)
+python scripts/qa/market_qa.py --base http://localhost:5174 --api http://127.0.0.1:8002 --out scratchpad/qa/ar --lang ar --widths 390,1366
 ```
+
+`--lang ar` stores «عربي» as the phone's choice before the first script (`localStorage['yq-lang']`,
+which `public/market-lang.js` reads), uses an `ar-BH` browser locale, and checks the Arabic copy
+(`STR_AR`, mirrored from `web/src/market/i18n/ar.ts`) instead of the English. It adds three hard
+rules: `<html lang="ar" dir="rtl">`, the Arabic face (IBM Plex Sans Arabic) loaded, and
+`BANNED_AR` (a literal "out of stock" in Arabic, the WEKOME tier and luxury words). Every English
+run asserts the opposite: an English page never downloads the Arabic font. `--widths` takes any
+list of widths: a design viewport of that width, else a touch phone under 768, a tablet under
+1024, a desktop; the first phone and desktop carry the lead-only extras.
 
 In Git Bash prefix with `MSYS_NO_PATHCONV=1` so the URLs survive. The exit code is **1** when a hard
 check fails, 0 otherwise (warnings never fail the run). `--api` is only used to find a real rep slug
@@ -94,15 +106,16 @@ pre-stamp `sessionStorage['yq-splash-session']`.
 tap targets between 36 and 44px · `slider-autoplay` / `slider-hold` (timing can be flaky on a loaded
 machine) · `gap-filler-mix` (every gap-filler row tagged "completes your order" — the basket should
 mix lines, not push one SKU) · `paste-repeat` (home sends the merchant to `/quick` more than twice) · `copy-drift` (a literal this harness checks is no longer in
-`web/src/market/strings.ts`) · a missing rep slug.
+`web/src/market/i18n/en.ts`, or `ar.ts` under `--lang ar`) · a missing rep slug.
 
 ## How it measures
 
 - **Sweep, not one screen.** Geometry and text checks run at the top of the page and then one screen
   at a time (up to 6), and the results are merged — otherwise only the first viewport's worth of
   controls would ever be checked, and `content-visibility: auto` sections would have no text.
-- **Copy comes from the app.** Every literal is mirrored from `web/src/market/strings.ts` in the
-  `STR` table at the top of the script, and `verify_strings()` warns when one has drifted. Nothing
+- **Copy comes from the app.** Every literal is mirrored from `web/src/market/i18n/en.ts` (which
+  `strings.ts` re-exports) in the `STR` table at the top of the script — and from `i18n/ar.ts` in
+  `STR_AR` — and `verify_strings()` warns when one has drifted. Nothing
   was added to the app for testability: the harness uses roles, `aria-label`s and copy.
 - **Product identity** on home comes from the thumbnail URL (`…/thumbs/<CODE>-product-320.webp`), so
   a product with no photo is invisible to the duplicate-rail check.
@@ -121,7 +134,7 @@ production except GET requests and the quote**:
 | `readonly_api.py` | A local stand-in for the API on 127.0.0.1:8002. It records production GETs once and replays them, replays the quote POST per body, and answers every other write itself (logged to `writes.log`; `upstream.log` proves nothing else went out). `--upcoming <review folder>` serves pending "Coming soon" rows as preview cards. |
 | `review_run.py` | Serves one built `dist-market` with `vite preview --strictPort` and takes lab Lighthouse (mobile and desktop, median of 3). It runs the harness on the 8 review screens with `--reduced-motion`, which gives stable frames, and with `--full-check` also runs every state with motion on. It also writes `meta.json` and `bundle.json`. It refuses a build that is not pointed at the stub. |
 | `review_pack.py` | Makes before\|after composites per screen × viewport (side by side for portrait, stacked for landscape, in CSS pixels, ≤ 1560 px) and pairs long pages tile by tile, plus `findings.json` per screen. |
-| `bundle_sizes.py` | The first-load script / stylesheet gzip and the market's fonts against `.github/lighthouserc.json`. A font counts only when a file of the build names it (CSS `@font-face`, the HTML, a script or the service worker); the portal's fonts, copied by the shared `public/`, are listed as not loaded. `--gate` exits 1 on a broken budget (CI's web job). |
+| `bundle_sizes.py` | The first-load script / stylesheet gzip and the market's fonts against `.github/lighthouserc.json`. A font counts only when a file of the build names it (CSS `@font-face`, the HTML, a script or the service worker); the portal's fonts, copied by the shared `public/`, are listed as not loaded. `--gate` exits 1 on a broken budget (CI's web job). The Arabic faces (R5) load on an Arabic page only, so they are held to their own budget (`FONT_ARABIC_BUDGET`, 90 KB) and the lighthouserc font budget stays the English page's. |
 | `design_review.py` | Builds one self-contained `index.html` of the two runs, with WebP data URIs, the harness counts (BEFORE failures that come from rules new in R4 are labelled "expected"), Lighthouse and bundle budgets. |
 
 ```bash

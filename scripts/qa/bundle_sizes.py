@@ -14,11 +14,17 @@ the initial script as `home_script_gz` (the initial script plus those chunks).
 
 The fonts figure is the market's own fonts — every woff2 under fonts/ that a file of the build
 names: a stylesheet's @font-face url, the HTML's preloads, a script (a lazy FontFace, the service
-worker's precache list, catalog-prefetch.js). That is the most any market session can load, the
-Arabic faces included once they ship. The build copies the portal's fonts too (web/public is shared:
-inter, space-grotesk), but nothing in the market names them, so they are listed as "not loaded by
-the market" and never counted (review F77). `font_refs` is the proof: for each counted file, the
-built files that name it. Pure: no network, no build.
+worker's precache list, catalog-prefetch.js). The build copies the portal's fonts too (web/public is
+shared: inter, space-grotesk), but nothing in the market names them, so they are listed as "not
+loaded by the market" and never counted (review F77). `font_refs` is the proof: for each counted
+file, the built files that name it. Pure: no network, no build.
+
+R5 (Arabic): the Arabic faces (fonts/ibm-plex-sans-arabic-*) load on an ARABIC page only — they are
+named only in the Arabic font stack and their unicode-range is Arabic script — so the fonts figure
+is per session: `font_market_bytes` is what an English page can load (the page Lighthouse audits,
+held to the lighthouserc font budget as before), `font_arabic_bytes` is what an Arabic page adds on
+top, held to its own budget (FONT_ARABIC_BUDGET: the two Google Fonts Arabic subsets, 400 + 600 —
+IBM Plex's Reserved Font Name rules out subsetting them further ourselves).
 
 --gate (CI, .github/workflows/ci.yml) exits 1 when a budget is broken. The budgets are READ from
 .github/lighthouserc.json (resource-summary:script|stylesheet|font:size), so the two cannot drift,
@@ -39,6 +45,10 @@ import sys
 from pathlib import Path
 
 BUDGET = {"script": 184320, "stylesheet": 35840, "font": 97280}
+# what an Arabic page adds to the English fonts (R5): IBM Plex Sans Arabic 400 + 600, the Arabic-script
+# subsets as Google Fonts serves them (42.8 + 45.7 KB). 90 KB, so a third weight cannot slip in unseen.
+FONT_ARABIC_BUDGET = 92160
+ARABIC_FONT = re.compile(r"^ibm-plex-sans-arabic-")
 LHR = Path(__file__).resolve().parents[2] / ".github" / "lighthouserc.json"
 
 
@@ -96,7 +106,10 @@ def measure(dist: Path) -> dict:
     refs = font_references(dist, fonts)
     market_fonts = sorted(f for f, where in refs.items() if where)
     unused = sorted(f for f, where in refs.items() if not where)
-    font_market = sum(fonts[f] for f in market_fonts)
+    # an English session never loads the Arabic faces (R5): they are counted on their own
+    arabic_fonts = [f for f in market_fonts if ARABIC_FONT.match(f)]
+    font_market = sum(fonts[f] for f in market_fonts if f not in arabic_fonts)
+    font_arabic = sum(fonts[f] for f in arabic_fonts)
     budget = budgets()
     home_gz = sum(scripts.values()) + sum(home_chunks.values())
     return {
@@ -110,6 +123,8 @@ def measure(dist: Path) -> dict:
         "font_folder_bytes": sum(fonts.values()),
         "font_preloaded_bytes": sum(fonts.get(f, 0) for f in preloaded),
         "font_market_bytes": font_market,
+        "font_arabic_bytes": font_arabic,
+        "arabic_fonts": arabic_fonts,
         "market_fonts": market_fonts,
         "font_refs": {f: refs[f] for f in market_fonts},
         "fonts_not_loaded": {f: fonts[f] for f in unused},
@@ -122,6 +137,7 @@ def measure(dist: Path) -> dict:
             "script": sum(scripts.values()) <= BUDGET["script"],
             "stylesheet": sum(styles.values()) <= BUDGET["stylesheet"],
             "font": font_market <= BUDGET["font"],
+            "font_arabic": font_arabic <= FONT_ARABIC_BUDGET,
         },
         # what --gate enforces, against the lighthouserc budgets
         "gate_budget": budget,
@@ -129,6 +145,7 @@ def measure(dist: Path) -> dict:
             "script": home_gz <= budget["script"],
             "stylesheet": sum(styles.values()) <= budget["stylesheet"],
             "font": font_market <= budget["font"],
+            "font_arabic": font_arabic <= FONT_ARABIC_BUDGET,
         },
     }
 
@@ -146,9 +163,9 @@ def main() -> int:
     m = measure(dist)
     if args.gate:
         b = m["gate_budget"]
-        rows = (("home scripts gz", m["home_script_gz"], "script"), ("stylesheet gz", m["stylesheet_gz"], "stylesheet"), ("market fonts", m["font_market_bytes"], "font"))
-        for label, value, kind in rows:
-            print(("ok    " if m["gate"][kind] else "OVER  ") + label.ljust(16) + str(value).rjust(8) + " B  (budget " + str(b[kind]) + ")")
+        rows = (("home scripts gz", m["home_script_gz"], "script", b["script"]), ("stylesheet gz", m["stylesheet_gz"], "stylesheet", b["stylesheet"]), ("market fonts", m["font_market_bytes"], "font", b["font"]), ("+ arabic fonts", m["font_arabic_bytes"], "font_arabic", FONT_ARABIC_BUDGET))
+        for label, value, kind, limit in rows:
+            print(("ok    " if m["gate"][kind] else "OVER  ") + label.ljust(16) + str(value).rjust(8) + " B  (budget " + str(limit) + ")")
         print("market fonts: " + ", ".join(m["market_fonts"]))
         return 0 if all(m["gate"].values()) else 1
     if args.json:
@@ -164,7 +181,9 @@ def main() -> int:
     print("stylesheet gz      " + str(m["stylesheet_gz"]).rjust(7) + " B  (budget " + str(BUDGET["stylesheet"]) + ")")
     for p, n in m["stylesheets"].items():
         print("    " + str(n).rjust(7) + "  " + p)
-    print("fonts (woff2)      " + str(m["font_bytes"]).rjust(7) + " B  (budget " + str(BUDGET["font"]) + ")  preloaded " + str(m["font_preloaded_bytes"]) + " B  — the market's own")
+    print("fonts (woff2)      " + str(m["font_bytes"]).rjust(7) + " B  (budget " + str(BUDGET["font"]) + ")  preloaded " + str(m["font_preloaded_bytes"]) + " B  — the market's own, an English page")
+    if m["arabic_fonts"]:
+        print("arabic page adds   " + str(m["font_arabic_bytes"]).rjust(7) + " B  (budget " + str(FONT_ARABIC_BUDGET) + ")  — " + ", ".join(m["arabic_fonts"]))
     for p, n in m["fonts"].items():
         print("    " + str(n).rjust(7) + "  " + p + ("  [preload]" if p in m["preloaded_fonts"] else "") + "  named by " + ", ".join(m["font_refs"][p]))
     if m["fonts_not_loaded"]:

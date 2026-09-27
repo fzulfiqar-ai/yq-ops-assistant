@@ -12,8 +12,13 @@ wholesale-minimum wording and the small-order flow, reveals under reduced motion
 merchandising words, and the sold-out rule ("Sold out" never "Out of stock"; no available card
 after the first sold-out card on the home grid, Browse and a category shelf).
 
-Run:  python scripts/qa/market_qa.py --base http://localhost:5174 --out <dir> [--only home,cart_under] [--quick]
+Run:  python scripts/qa/market_qa.py --base http://localhost:5174 --out <dir> [--only home,cart_under] [--quick] [--lang ar]
 Exit: 1 when a hard check fails (warnings never fail the run). See scripts/qa/README.md.
+
+--lang ar (R5) walks the same states in Arabic: the phone's saved choice is set to «عربي» before the
+first script (the boot script public/market-lang.js reads it), the needles are the Arabic copy
+(STR_AR), and it adds the Arabic rules — <html lang="ar" dir="rtl">, the Arabic face loaded, the
+Arabic banned words. An English run asserts the opposite: the Arabic font is never downloaded.
 
 Safety: an order is NEVER placed. POST /public/market/order is intercepted and answered with a
 mocked receipt, and so are the order-status read and the phone-recognition lookup behind it.
@@ -43,9 +48,9 @@ except ImportError:  # imported as scripts.qa.market_qa
     from scripts.qa.readonly_api import qa_receipt
 
 # ── copy under test ────────────────────────────────────────────────────────────────────────────
-# Literals mirrored from web/src/market/strings.ts. verify_strings() re-reads that file and warns
-# when a literal has drifted, so this harness fails loudly on copy changes instead of silently
-# checking nothing.
+# Literals mirrored from web/src/market/i18n/en.ts (strings.ts re-exports it). verify_strings()
+# re-reads that file and warns when a literal has drifted, so this harness fails loudly on copy
+# changes instead of silently checking nothing.
 STR = {
     "search.band": "Search products or codes",
     "nav.home": "Home",
@@ -80,12 +85,58 @@ STR = {
     "upcoming.send": "Notify me",
 }
 
+# --lang ar: the same keys in Arabic, mirrored from web/src/market/i18n/ar.ts (verify_strings checks
+# them against it). A function's literal is the part that never changes ("… لتكمل طلب الجملة").
+# The WEKOME copy lives in en.ts `upcoming.ar` (one bilingual block).
+STR_AR = {
+    "search.band": "ابحث عن منتج أو كود",
+    "nav.home": "الرئيسية",
+    "nav.browse": "تصفّح",
+    "nav.restock": "الطلبية",
+    "nav.orders": "الطلبات",
+    "nav.me": "صفحتي",
+    "nav.main": "التنقل الرئيسي",
+    "wholesale.away": "لتكمل طلب الجملة",
+    "wholesale.keep": "واصل التزويد",
+    "wholesale.small": "أرسل طلبًا صغيرًا",
+    "wholesale.ready": "طلب الجملة جاهز",
+    "wholesale.fill": "أكمل طلبيتك بهذه",
+    "wholesale.closes": "يكمل طلبك",
+    "small.title": "طلب صغير",
+    "small.send": "أرسل الطلب",
+    "small.received": "استلمنا طلبك الصغير",
+    "placed.title": "استلمنا طلب الجملة",
+    "checkout.place": "أرسل طلب الجملة",
+    "slides.label": "العروض الترويجية",
+    "spot.title": "الآن في YQ",
+    "cart.mini": "طلبيتك",
+    "home.all": "كل المنتجات",
+    "card.soldOut": "نفدت الكمية",
+    "card.tellBack": "أبلغني عند التوفر",
+    "states.showMore": "اعرض المزيد (",
+    "shop.notInStock": "غير متوفر حاليًا",
+    "upcoming.price": "السعر عند الوصول",
+    "upcoming.rangeNav": "في التشكيلة",
+    "upcoming.send": "أخبروني",
+    # not UI copy keys: what the harness types or clicks in Arabic
+    "slides.dotPrefix": "الشريحة ",
+    "area.manama": "المنامة",
+}
+# the English run's values for the two harness-only keys above
+STR.update({"slides.dotPrefix": "Slide ", "area.manama": "Manama"})
+
+# the page language under test (--lang); main() swaps STR to STR_AR for an Arabic run
+LANG = "en"
+
 # Text that must never reach a merchant's screen: the owner's honest-merchandising rule, the
 # sold-out rule (24-Sep-2026) — zero stock reads "Sold out" (Arabic «نفدت الكمية»), never "Out of
 # stock" — and the WEKOME rule (27-Sep-2026): never the internal tier word, never a count of designs
 # ("34 designs"). Plural only: a live catalog name carries "(Airpord 1 Design)" and the probe matches
 # case-insensitively. Keep it on ONE line: tests/test_r1_soldout.py reads it with a single-line regex.
 BANNED = r"slow mover|no minimum|Save \d+%|out of stock|sub-?premium|\b\d+ designs\b"
+# --lang ar adds these: "out of stock" said literally (the rule is «نفدت الكمية»), and the tier or
+# luxury words the WEKOME copy may never use (tests/test_r1b_upcoming.py bans the same four)
+BANNED_AR = r"غير متوفر في المخزون|نفد من المخزون|بريميوم|أرقى|فاخر|ممتاز"
 
 CART_KEY = "yq-shop-cart:market"
 SPLASH_KEY = "yq-splash-session"
@@ -476,7 +527,12 @@ PROBE = r"""
   out.sliders = [];
   for (const sc of document.querySelectorAll('[aria-roledescription="carousel"]')) {
     const slides = sc.querySelectorAll('[aria-roledescription="slide"]').length;
-    let dots = sc.querySelectorAll('button[aria-label^="Slide "]').length;
+    /* a dot is "Slide 2 of 3" / «الشريحة 2 من 3»: the prefix AND a number — the Arabic prev / next
+       («الشريحة السابقة» / «الشريحة التالية») share the prefix */
+    let dots = [...sc.querySelectorAll('button[aria-label]')].filter((b) => {
+      const al = b.getAttribute('aria-label') || '';
+      return al.startsWith(opts.dotPrefix) && /^\d/.test(al.slice(opts.dotPrefix.length));
+    }).length;
     if (!dots) dots = sc.querySelectorAll('span[aria-hidden="true"] > span').length;
     const active = [...sc.querySelectorAll('[data-slide-state]')].findIndex((e) => e.getAttribute('data-slide-state') === 'active');
     out.sliders.push({ label: sc.getAttribute('aria-label') || '', slides, dots, active });
@@ -527,6 +583,12 @@ async () => {
     mono: loaded('IBM Plex Mono'),
     monoDeclared: declared('IBM Plex Mono').length > 0,
     sora: declared('Sora').length > 0,
+    /* R5: an Arabic page loads the Arabic face; an English page never does (unicode-range + the
+       Arabic-only font stack) — "unloaded" is the only acceptable state there */
+    arabic: declared('IBM Plex Sans Arabic').some((f) => f.status === 'loaded'),
+    arabicTouched: declared('IBM Plex Sans Arabic').some((f) => f.status !== 'unloaded'),
+    htmlLang: document.documentElement.getAttribute('lang'),
+    htmlDir: document.documentElement.getAttribute('dir'),
     errored,
   };
 }
@@ -664,6 +726,7 @@ class Net:
         self.errors: list[str] = []
         self.failed: list[str] = []
         self.google_fonts: list[str] = []
+        self.arabic_font: list[str] = []
 
     def attach(self, page: Page) -> None:
         def on_console(msg) -> None:
@@ -692,6 +755,8 @@ class Net:
         def on_request(req) -> None:
             if "fonts.googleapis.com" in req.url or "fonts.gstatic.com" in req.url:
                 self.google_fonts.append(req.url)
+            if "/fonts/ibm-plex-sans-arabic-" in req.url:
+                self.arabic_font.append(req.url)
 
         page.on("console", on_console)
         page.on("pageerror", on_pageerror)
@@ -753,7 +818,10 @@ def init_script(st: State) -> str:
         else "localStorage.removeItem(" + json.dumps(CART_KEY) + ");"
     )
     splash = "" if st.kind == "opening" else "sessionStorage.setItem(" + json.dumps(SPLASH_KEY) + ", '1');"
-    return "(() => { try { " + cart + " } catch (e) {} try { " + splash + " } catch (e) {} })();"
+    # R5: the language this run walks, as the phone's saved choice (public/market-lang.js reads it
+    # before the app); an English run clears it, so a stale Arabic choice can never leak in
+    lang = "localStorage.setItem('yq-lang', " + json.dumps(LANG) + ");"
+    return "(() => { try { " + cart + " } catch (e) {} try { " + splash + " } catch (e) {} try { " + lang + " } catch (e) {} })();"
 
 
 def new_context(browser, vp: Viewport, st: State):
@@ -764,7 +832,7 @@ def new_context(browser, vp: Viewport, st: State):
         has_touch=vp.touch,
         service_workers="block",
         reduced_motion="reduce" if (st.reduced or REDUCE_ALL) else "no-preference",
-        locale="en-GB",
+        locale="ar-BH" if LANG == "ar" else "en-GB",
     )
     ctx.add_init_script(init_script(st))
 
@@ -809,6 +877,7 @@ def probe(page: Page, vp: Viewport, needles: tuple[str, ...]) -> dict:
             "needles": list(needles),
             "bandLabel": STR["search.band"],
             "navLabel": STR["nav.main"],
+            "dotPrefix": STR["slides.dotPrefix"],
         },
     )
 
@@ -882,7 +951,18 @@ def common_checks(run: Run, page: Page, vp: Viewport, st: State, net: Net, p: di
     # the previous design — reported, never failed, so a BEFORE run can be compared with an AFTER run
     if fonts.get("sora"):
         finding(run, "warn", "fonts", "Sora is still declared (retired by R4: the display face is Instrument Sans)")
-    run.notes.append("fonts: instrument=" + str(bool(fonts.get("instrument"))) + " plex-mono=" + str(bool(fonts.get("mono"))) + " sora-declared=" + str(bool(fonts.get("sora"))))
+    run.notes.append("fonts: instrument=" + str(bool(fonts.get("instrument"))) + " plex-mono=" + str(bool(fonts.get("mono"))) + " sora-declared=" + str(bool(fonts.get("sora"))) + " arabic=" + str(bool(fonts.get("arabic"))))
+    # R5: the language is on <html> before anything renders, and the Arabic face follows it
+    if LANG == "ar":
+        if fonts.get("htmlLang") != "ar" or fonts.get("htmlDir") != "rtl":
+            finding(run, "fail", "rtl", "an Arabic run rendered <html lang=" + str(fonts.get("htmlLang")) + " dir=" + str(fonts.get("htmlDir")) + ">")
+        if not fonts.get("arabic"):
+            finding(run, "fail", "fonts", "IBM Plex Sans Arabic did not load on an Arabic page (document.fonts)")
+    else:
+        if fonts.get("htmlDir") == "rtl":
+            finding(run, "fail", "rtl", "an English run rendered right-to-left")
+        if fonts.get("arabicTouched") or net.arabic_font:
+            finding(run, "fail", "fonts", "an English page downloaded the Arabic font: " + ", ".join(net.arabic_font[:2]))
 
     # one row per control shape and height — a rail of 12 cards, or 22 area chips, is one finding
     groups: dict[tuple[str, int], list[dict]] = {}
@@ -920,6 +1000,11 @@ def common_checks(run: Run, page: Page, vp: Viewport, st: State, net: Net, p: di
 
     for b in p["banned"]:
         finding(run, "fail", "banned-copy", "“" + b["match"] + "” in: …" + b["around"] + "…", b)
+    if LANG == "ar":
+        body = str(p.get("mainText") or "")
+        for m in re.finditer(BANNED_AR, body):
+            finding(run, "fail", "banned-copy", "“" + m.group(0) + "” in: …" + body[max(0, m.start() - 40): m.end() + 40].replace("\n", " ") + "…")
+            break
 
     for t in p["missing"]:
         finding(run, "fail", "missing-copy", "expected text not on the page: “" + t + "”")
@@ -1333,9 +1418,9 @@ def checkout_flow(run: Run, page: Page, st: State, out: Path) -> None:
     if page.locator("#yq-shop").count():
         page.fill("#yq-shop", "QA Test Shop")
     if page.locator("#yq-area").count():
-        page.fill("#yq-area", "Manama")
+        page.fill("#yq-area", STR["area.manama"])
     else:
-        area = page.get_by_role("button", name="Manama", exact=True)
+        area = page.get_by_role("button", name=STR["area.manama"], exact=True)
         if area.count():
             area.first.click()
     page.wait_for_timeout(400)
@@ -1674,17 +1759,27 @@ def run_opening(browser, vp: Viewport, base: str, out: Path, report: Report) -> 
 # ── setup helpers ──────────────────────────────────────────────────────────────────────────────
 
 
+def locale_file(repo: Path, lang: str) -> Path:
+    """The copy of the language under test (R5: strings.ts only re-exports i18n/en.ts or i18n/ar.ts)."""
+    return repo / "web" / "src" / "market" / "i18n" / (lang + ".ts")
+
+
 def verify_strings(repo: Path) -> list[str]:
     """The harness checks copy; this checks the harness's copy of that copy."""
-    f = repo / "web" / "src" / "market" / "strings.ts"
+    f = locale_file(repo, LANG)
     if not f.exists():
-        return ["strings.ts not found at " + str(f) + " — copy literals were not verified"]
+        return [f.name + " not found at " + str(f) + " — copy literals were not verified"]
     src = f.read_text(encoding="utf-8")
+    if LANG != "en":
+        # the bilingual WEKOME block lives in en.ts (ar.ts shares it)
+        src += locale_file(repo, "en").read_text(encoding="utf-8")
     drift = []
     for key, value in STR.items():
+        if key in ("slides.dotPrefix", "area.manama"):
+            continue
         needle = value.replace("'", "’") if "'" in value else value
         if value not in src and needle not in src:
-            drift.append("strings.ts no longer contains “" + value + "” (" + key + ")")
+            drift.append(f.name + " no longer contains “" + value + "” (" + key + ")")
     return drift
 
 
@@ -1696,21 +1791,40 @@ SLIDE_LINE_N = 179
 
 
 def verify_copy_length(repo: Path) -> list[str]:
-    """Slide subheads must fit the card at 320 px without being cut mid-sentence."""
-    f = repo / "web" / "src" / "market" / "strings.ts"
-    if not f.exists():
-        return []
-    block = re.search(r"\n  slides: \{(.+?)\n  \},", f.read_text(encoding="utf-8"), re.S)
-    if not block:
-        return ["strings.ts: the slides namespace was not found — slide copy length was not checked"]
+    """Slide subheads must fit the card at 320 px without being cut mid-sentence — in either language."""
     long: list[str] = []
-    for key, raw in re.findall(r"^\s*(\w*Line)\s*:\s*(.+?),\s*$", block.group(1), re.M):
-        text = re.sub(r"^\([^)]*\)\s*=>\s*", "", raw.strip()).strip("`'\"")
-        text = re.sub(r"\$\{plural\(n, '[^']*', '([^']*)'\)\}", str(SLIDE_LINE_N) + r" \1", text)
-        text = re.sub(r"\$\{[^}]*\}", str(SLIDE_LINE_N), text)
-        if len(text) > SLIDE_LINE_MAX:
-            long.append("strings.ts slides." + key + " is " + str(len(text)) + " characters (max " + str(SLIDE_LINE_MAX) + "): “" + text + "” — it would ellipse mid-sentence on a phone slide")
+    for lang in ("en", "ar"):
+        f = locale_file(repo, lang)
+        if not f.exists():
+            continue
+        block = re.search(r"\n  slides: \{(.+?)\n  \},", f.read_text(encoding="utf-8"), re.S)
+        if not block:
+            long.append(f.name + ": the slides namespace was not found — slide copy length was not checked")
+            continue
+        for key, raw in re.findall(r"^\s*(\w*Line)\s*:\s*(.+?),\s*$", block.group(1), re.M):
+            text = re.sub(r"^\([^)]*\)\s*=>\s*", "", raw.strip()).strip("`'\"")
+            text = re.sub(r"\$\{plural\(n, '[^']*', '([^']*)'\)\}", str(SLIDE_LINE_N) + r" \1", text)
+            # ar.ts counts with pa(n, one, few, many?) and its products()/lines() shorthands; 179 takes the `many` form
+            text = re.sub(r"\$\{pa\(n, '[^']*', '[^']*', '([^']*)'\)\}", str(SLIDE_LINE_N) + r" \1", text)
+            text = re.sub(r"\$\{pa\(n, '([^']*)', '[^']*'\)\}", str(SLIDE_LINE_N) + r" \1", text)
+            text = re.sub(r"\$\{products\(n\)\}", str(SLIDE_LINE_N) + " منتجًا", text)
+            text = re.sub(r"\$\{lines\(n\)\}", str(SLIDE_LINE_N) + " صنفًا", text)
+            text = re.sub(r"\$\{[^}]*\}", str(SLIDE_LINE_N), text)
+            if len(text) > SLIDE_LINE_MAX:
+                long.append(f.name + " slides." + key + " is " + str(len(text)) + " characters (max " + str(SLIDE_LINE_MAX) + "): “" + text + "” — it would ellipse mid-sentence on a phone slide")
     return long
+
+
+def width_viewport(width: int) -> Viewport:
+    """--widths: the design viewport of that width, else a DPR-2 touch phone under 768, a tablet under 1024, a desktop."""
+    for v in VIEWPORTS:
+        if v.width == width:
+            return v
+    if width < 768:
+        return Viewport(str(width) + "x844", width, 844, "phone", 2, True, True)
+    if width < 1024:
+        return Viewport(str(width) + "x1024", width, 1024, "tablet", 1, False, True)
+    return Viewport(str(width) + "x800", width, 800, "desktop")
 
 
 def find_slug(api: str) -> str | None:
@@ -1746,9 +1860,14 @@ def main() -> int:
     ap.add_argument("--quick", action="store_true", help="only the lead viewports, 430x932 and 1366x768")
     ap.add_argument("--list", action="store_true", help="print the states and exit")
     ap.add_argument("--reduced-motion", action="store_true", help="run every state under prefers-reduced-motion (stable frames for before/after reviews)")
+    ap.add_argument("--widths", default="", help="comma-separated widths instead of the six design viewports (e.g. 390,1366): a design viewport of that width, else a touch phone (< 768) or a desktop; the first phone and desktop carry the lead-only extras")
+    ap.add_argument("--lang", choices=("en", "ar"), default="en", help="the page language to walk (R5): ar sets the phone's saved choice to Arabic and checks the Arabic copy and RTL")
     args = ap.parse_args()
-    global REDUCE_ALL
+    global REDUCE_ALL, LANG
     REDUCE_ALL = args.reduced_motion
+    LANG = args.lang
+    if LANG == "ar":
+        STR.update(STR_AR)
 
     base = args.base.rstrip("/")
     out = Path(args.out)
@@ -1770,6 +1889,11 @@ def main() -> int:
             print("unknown state(s): " + ", ".join(sorted(unknown)), file=sys.stderr)
             return 2
     viewports = [v for v in VIEWPORTS if not args.quick or v.name in QUICK_VIEWPORTS]
+    if args.widths:
+        global LEAD_PHONE, LEAD_DESKTOP
+        viewports = [width_viewport(int(w)) for w in args.widths.split(",") if w.strip()]
+        LEAD_PHONE = next((v.name for v in viewports if v.klass == "phone"), LEAD_PHONE)
+        LEAD_DESKTOP = next((v.name for v in viewports if v.klass == "desktop"), LEAD_DESKTOP)
 
     report = Report(out, base)
     setup = Run(state="setup", route="-", viewport="-", label="harness setup")
