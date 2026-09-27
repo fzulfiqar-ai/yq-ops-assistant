@@ -234,7 +234,7 @@ const DEALS_SLIDE_IDS: readonly string[] = ['d:last', 'd:drops']
  *
  * The "Coming soon" teaser joins only a deck that already turns — two slides or more without it —
  * so its payload landing after the first paint never adds the dots row under a one-slide hero (and
- * never shifts the page). It keeps its place (2nd or 3rd), so a full deck gives up its last slide.
+ * never shifts the page). It keeps its place (2nd or 3rd) and adds one to the cap, so no slide gives up its place.
  *
  * `deals` caps how many of the deck's cards may come from the Stock-Up Deals section. A phone deck
  * is a stack of equals, one after the other, so it passes 1: with this catalog both survivors were
@@ -248,7 +248,9 @@ const DEALS_SLIDE_IDS: readonly string[] = ['d:last', 'd:drops']
 export function heroDeck(slides: Slide[], max = 3, deals = slides.length): Slide[] {
   const rest = slides.filter((s) => s.id !== SOON_SLIDE_ID)
   const deck = trimDeck(rest, max, deals)
-  return rest.length === slides.length || deck.length < 2 ? deck : trimDeck(slides, max, deals)
+  // the teaser rides on top of the cap: it never pushes a slide the shop already knows (the owner's
+  // "Restock faster" on phones) off the deck
+  return rest.length === slides.length || deck.length < 2 ? deck : trimDeck(slides, max + 1, deals)
 }
 
 function trimDeck(slides: Slide[], max: number, deals: number): Slide[] {

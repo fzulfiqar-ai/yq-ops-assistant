@@ -627,7 +627,8 @@ def _():
     assert "d:soon" not in sections and "SOON" not in sections, sections
     # heroDeck: joins only a deck that already turns (>= 2 without it) — the dots row never appears late
     deck = slides[slides.index("export function heroDeck("):slides.index("function trimDeck(")]
-    assert "slides.filter((s) => s.id !== SOON_SLIDE_ID)" in deck and "deck.length < 2 ? deck : trimDeck(slides, max, deals)" in deck
+    # ... and rides on top of the cap, so it never pushes a known slide ("Restock faster") off a phone
+    assert "slides.filter((s) => s.id !== SOON_SLIDE_ID)" in deck and "deck.length < 2 ? deck : trimDeck(slides, max + 1, deals)" in deck
     # a stage slide only: heroSplit never tiles it, and Home keeps it out of the split's arithmetic
     assert "s.id !== 'd:again' && s.id !== 'd:soon'" in home_ts
     assert "heroSplit(deck.filter((s) => s.id !== 'd:again' && s.id !== SOON_SLIDE_ID))" in home
