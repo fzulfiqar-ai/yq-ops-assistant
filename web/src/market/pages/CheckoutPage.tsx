@@ -7,15 +7,18 @@ import { RepCard } from '../components/RepCard'
 import { useMarket, useOrder } from '../MarketContext'
 import { clientOrderId, deviceId, EMPTY_CUSTOMER, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/format'
+import { en } from '../i18n/en'
+import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/format'
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { clearSmallAck } from '../lib/smallOrder'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { useReducedMotion } from '../shell/useViewport'
 import { cartStore, useCartCounts, useCartLines } from '../store/cart'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { Button } from '../ui/Button'
 import { Hint, Input, Label, Select } from '../ui/Field'
+import { Ltr } from '../ui/Ltr'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 
 const FORM_ID = 'yq-market-checkout'
@@ -83,7 +86,8 @@ export default function CheckoutPage() {
   const desktop = viewport === 'desktop' || viewport === 'wide'
   const areaIsOther = customer.area.trim() !== '' && !areas.includes(customer.area.trim())
   const [otherArea, setOtherArea] = useState(areaIsOther)
-  const [deliveryPref, setDeliveryPref] = useState<string | null>(null)
+  /** the index into S.checkout.deliveryOptions — the note carries the English option (see submit) */
+  const [deliveryPref, setDeliveryPref] = useState<number | null>(null)
   const [known, setKnown] = useState<{ shop?: string | null; area?: string | null; first_name?: string | null } | null>(null)
   const [askedPhone, setAskedPhone] = useState('')
   // a complete number we have not asked about yet → one recognise call; prefill only what is empty
@@ -129,7 +133,9 @@ export default function CheckoutPage() {
         session_ref: rep?.slug || m.ref || undefined,
         salesman_id: !rep && pick !== '' ? Number(pick) : null,
         customer: { name: customer.name.trim(), phone: cleanPhone(customer.phone), shop: customer.shop.trim(), area: customer.area.trim(), email: customer.email.trim() },
-        note: [deliveryPref ? `${S.checkout.deliveryLabel}: ${deliveryPref}` : null, note.trim()].filter(Boolean).join(' · '),
+        // the representative reads the note in the portal: the chosen delivery option goes in English
+        // whatever language the merchant ordered in (their own note is sent as they typed it)
+        note: [deliveryPref != null ? `${en.checkout.deliveryLabel}: ${en.checkout.deliveryOptions[deliveryPref] ?? S.checkout.deliveryOptions[deliveryPref]}` : null, note.trim()].filter(Boolean).join(' · '),
         website,
         device_id: deviceId(),
         client_order_id: clientOrderId(),
@@ -221,7 +227,7 @@ export default function CheckoutPage() {
               <Label htmlFor="yq-phone">
                 {S.checkout.phone} <span className="text-bad">*</span>
               </Label>
-              <Input id="yq-phone" type="tel" inputMode="tel" autoComplete="tel" value={customer.phone} onChange={(e) => set('phone', e.target.value)} onBlur={() => blur('phone')} placeholder="33001122" required aria-invalid={touched.phone && !phoneOk} aria-describedby="yq-phone-hint" />
+              <Input id="yq-phone" type="tel" inputMode="tel" autoComplete="tel" dir="ltr" className="rtl:text-right" value={customer.phone} onChange={(e) => set('phone', e.target.value)} onBlur={() => blur('phone')} placeholder="33001122" required aria-invalid={touched.phone && !phoneOk} aria-describedby="yq-phone-hint" />
               <Hint id="yq-phone-hint" error={touched.phone && !phoneOk}>
                 {touched.phone && !phoneOk ? S.checkout.phoneBad : S.checkout.phoneHint}
               </Hint>
@@ -255,7 +261,7 @@ export default function CheckoutPage() {
                           }}
                           className={cn('hit relative h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}
                         >
-                          {a}
+                          {areaLabel(a)}
                         </button>
                       )
                     })}
@@ -281,10 +287,10 @@ export default function CheckoutPage() {
             <div className="lg:col-span-2">
               <Label>{S.checkout.deliveryLabel}</Label>
               <div className="flex flex-wrap gap-1.5" role="group" aria-label={S.checkout.deliveryLabel}>
-                {S.checkout.deliveryOptions.map((o) => {
-                  const on = deliveryPref === o
+                {S.checkout.deliveryOptions.map((o, i) => {
+                  const on = deliveryPref === i
                   return (
-                    <button key={o} type="button" aria-pressed={on} onClick={() => setDeliveryPref(on ? null : o)} className={cn('hit relative h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}>
+                    <button key={o} type="button" aria-pressed={on} onClick={() => setDeliveryPref(on ? null : i)} className={cn('hit relative h-10 rounded-full border px-3.5 text-sm font-medium transition duration-1 ease-m focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', on ? 'border-plum bg-plum-soft text-plum-ink' : 'border-line bg-surface text-ink-2 hover:bg-plum-wash')}>
                       {o}
                     </button>
                   )
@@ -308,7 +314,7 @@ export default function CheckoutPage() {
               ) : (
                 <div className="px-3.5 py-3">
                   <Label htmlFor="yq-email">{S.checkout.email}</Label>
-                  <Input id="yq-email" type="email" autoComplete="email" value={customer.email} onChange={(e) => set('email', e.target.value)} onBlur={() => blur('email')} aria-invalid={touched.email && !emailOk} />
+                  <Input id="yq-email" type="email" autoComplete="email" dir="ltr" className="rtl:text-right" value={customer.email} onChange={(e) => set('email', e.target.value)} onBlur={() => blur('email')} aria-invalid={touched.email && !emailOk} />
                   {touched.email && !emailOk && <Hint error>{S.checkout.emailBad}</Hint>}
                 </div>
               )}
@@ -377,9 +383,13 @@ export default function CheckoutPage() {
                       <ProductImage item={it} alt="" sizes={SIZES_THUMB} size={40} imgClassName="p-0.5" iconSize={14} showCaption={false} />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-semibold text-ink">{it ? productName(it) : l.item_code}</span>
+                      <span {...ltrText} className="block truncate text-sm font-semibold text-ink rtl:text-right">
+                        {it ? productName(it) : l.item_code}
+                      </span>
                       <span className="block text-xs tnum text-ink-2">
-                        {l.qty} × {money(q?.unit_price_bhd ?? it?.price_bhd)}
+                        <Ltr>
+                          {l.qty} × {money(q?.unit_price_bhd ?? it?.price_bhd)}
+                        </Ltr>
                       </span>
                     </span>
                     <span className="text-sm font-semibold tnum text-ink">{bhd(q?.line_total_bhd ?? (Number(it?.price_bhd) || 0) * l.qty)}</span>

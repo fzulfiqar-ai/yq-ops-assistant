@@ -529,10 +529,13 @@ def _web(rel: str) -> str:
 @test("brand page: no counts, never the tier word, cards without commerce hooks, the sheet carries the rep, no Spotlight, no #hash links")
 def _():
     page = _web("pages/BrandPage.tsx")
-    strings = _web("strings.ts")
+    # R5: the copy moved to i18n/en.ts (strings.ts re-exports it); the bilingual upcoming block stays
+    # one block there, and i18n/ar.ts shares it (`upcoming: en.upcoming`)
+    strings = _web("i18n/en.ts")
+    assert "upcoming: en.upcoming," in _web("i18n/ar.ts")
     block = strings[strings.index("  upcoming: {"):strings.index("  states: {")]
     # no count of models anywhere: the "N designs" helper and the counted hero sentence are gone
-    for src, where in ((page, "BrandPage.tsx"), (block, "strings.ts upcoming")):
+    for src, where in ((page, "BrandPage.tsx"), (block, "i18n/en.ts upcoming")):
         assert "designs(" not in src, where + " still counts designs"
         assert "subline" not in src, where + " still has the counted hero sentence"
     assert "arDesigns" not in strings and "categoryPhrase" not in _web("components/ComingSoonShared.ts")
@@ -652,7 +655,7 @@ def _():
     assert set(re.findall(r"^\s{4}(\w+):", ac, re.M)) == {"item_code", "thumb_urls", "product_image_url"}, ac
     assert "export { asCreative, stageArt } from '../lib/upcoming'" in _web("components/ComingSoonShared.ts")
     # the slide's line: one clause of at most 34 characters (the S.slides *Line rule), in both languages, no tier word
-    strings = _web("strings.ts")
+    strings = _web("i18n/en.ts")
     lines = re.findall(r"^      stageLineShort: '([^']*)',$", strings, re.M)
     assert len(lines) == 2, lines
     for text in lines:

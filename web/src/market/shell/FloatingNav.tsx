@@ -69,11 +69,12 @@ export function FloatingNav() {
   return (
     <nav aria-label={S.nav.main} className="mx-3 mb-3">
       <ul className="glass relative grid h-nav grid-cols-5 items-stretch rounded-xl shadow-nav" style={{ ['--i' as string]: active }}>
-        {/* the sliding active pill */}
+        {/* the sliding active pill: it starts at the inline start and slides toward the end, which is
+            to the LEFT in Arabic — translateX is physical, so --m-dir (market.css) turns it round */}
         <li
           aria-hidden="true"
           className="pointer-events-none absolute inset-y-1.5 start-1.5 w-[calc((100%-0.75rem)/5)] rounded-lg bg-plum-soft transition-transform duration-3 ease-spring"
-          style={{ transform: 'translateX(calc(var(--i) * 100%))' }}
+          style={{ transform: 'translateX(calc(var(--i) * 100% * var(--m-dir, 1)))' }}
         />
         {TABS.map(({ to, label, icon: Icon, ...rest }, i) => {
           const isActive = i === active

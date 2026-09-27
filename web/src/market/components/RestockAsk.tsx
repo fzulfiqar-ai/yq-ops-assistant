@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { deviceId, readCustomer, saveDetailsEnabled, writeCustomer } from '../lib/device'
 import { cleanPhone, isPhone, productName } from '../lib/format'
+import { ltr } from '../i18n'
 import { postRestock } from '../lib/marketApi'
 import { S } from '../strings'
 import { AnchorButton, Button } from '../ui/Button'
@@ -90,7 +91,7 @@ function TellBackSheet({ item, waUrl, first, onClose, onSend }: { item: ShopItem
       onClose={onClose}
       variant="dialog"
       title={S.card.tellBack}
-      subtitle={`${item.item_code} · ${productName(item)}`}
+      subtitle={ltr(`${item.item_code} · ${productName(item)}`)}
       footer={
         <div className="flex flex-col gap-2">
           <Button size="lg" full onClick={submit} icon={<Check size={16} aria-hidden="true" />}>
@@ -114,6 +115,8 @@ function TellBackSheet({ item, waUrl, first, onClose, onSend }: { item: ShopItem
           type="tel"
           inputMode="tel"
           autoComplete="tel"
+          dir="ltr"
+          className="rtl:text-right"
           autoFocus
           value={phone}
           onChange={(e) => setPhone(e.target.value)}

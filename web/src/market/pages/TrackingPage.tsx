@@ -10,7 +10,7 @@ import { useMarket, useOrder } from '../MarketContext'
 import { forgetOrder } from '../lib/device'
 import { splitReorder } from '../lib/home'
 import { track } from '../lib/events'
-import { bhd, fmtDateTime, money } from '../lib/format'
+import { bhd, bhdMinus, fmtDateTime, money, statusLabel } from '../lib/format'
 import { canPromptInstall, isIos, isStandalone, onInstallChange, promptInstall } from '../lib/install'
 import { cancelOrder, getOrder } from '../lib/marketApi'
 import { usePageTitle } from '../shell/ShellContext'
@@ -18,6 +18,7 @@ import { S } from '../strings'
 import { AnchorButton, Button, LinkButton } from '../ui/Button'
 import { Chip } from '../ui/Chip'
 import { Input } from '../ui/Field'
+import { Ltr } from '../ui/Ltr'
 import { Skeleton } from '../ui/Skeleton'
 import { useToast } from '../ui/Toast'
 
@@ -159,7 +160,9 @@ export default function TrackingPage() {
               {isSmall && !placed.duplicate && placed.assigned && first && <p className="mt-1 text-xs font-medium text-plum-ink">{S.placed.sentTo(first)}</p>}
               <div className="mt-5 rounded-md bg-plum-soft px-4 py-3">
                 <div className="text-2xs font-semibold uppercase tracking-[0.1em] text-plum">{S.placed.number}</div>
-                <div className="mt-0.5 font-display text-2xl font-extrabold tnum text-ink">{placed.order_no}</div>
+                <div className="mt-0.5 font-display text-2xl font-extrabold tnum text-ink">
+                  <Ltr>{placed.order_no}</Ltr>
+                </div>
                 {heroItems > 0 && heroTotal != null && (
                   <div className="mt-1 border-t border-plum/10 pt-1.5 text-xs tnum text-plum-ink">
                     {S.cart.summary(heroItems, heroUnits)} <span aria-hidden="true">·</span> <b className="font-semibold">{bhd(heroTotal)}</b>
@@ -215,7 +218,9 @@ export default function TrackingPage() {
                   {!placed && (
                     <>
                       <div className="text-2xs font-semibold uppercase tracking-wide text-ink-2">{S.placed.number}</div>
-                      <h2 className="font-display text-xl font-extrabold tnum text-ink">{data.order_no}</h2>
+                      <h2 className="font-display text-xl font-extrabold tnum text-ink">
+                        <Ltr>{data.order_no}</Ltr>
+                      </h2>
                     </>
                   )}
                   {data.created_at && (
@@ -232,7 +237,7 @@ export default function TrackingPage() {
                     </Chip>
                   )}
                   <Chip tone={data.cancelled ? 'bad' : data.status === 'delivered' ? 'ok' : 'plum'} size="md">
-                    {data.status_label || data.status}
+                    {statusLabel(data.status, data.status_label)}
                   </Chip>
                 </div>
               </div>
@@ -252,7 +257,7 @@ export default function TrackingPage() {
                         {i < arr.length - 1 && <span className={cn('my-1 h-6 w-0.5', s.done ? 'bg-plum' : 'bg-line')} />}
                       </div>
                       <div className="min-w-0 pb-2">
-                        <div className={cn('text-sm font-semibold', s.done || s.current ? 'text-ink' : 'text-ink-3')}>{s.label}</div>
+                        <div className={cn('text-sm font-semibold', s.done || s.current ? 'text-ink' : 'text-ink-3')}>{statusLabel(s.status, s.label)}</div>
                         {s.at && <div className="text-xs text-ink-2">{fmtDateTime(s.at)}</div>}
                         {s.current && data.expected_delivery && (
                           <div className="mt-0.5 inline-flex rounded-xs bg-plum-soft px-2 py-0.5 text-xs font-medium text-plum-ink">
@@ -273,7 +278,7 @@ export default function TrackingPage() {
                       .filter((l) => (l.line_status || 'ok') === 'removed' || (l.qty_confirmed != null && l.qty_confirmed !== l.qty))
                       .map((l) => (
                         <li key={l.item_code} className="tnum">
-                          {l.item_code}: {(l.line_status || 'ok') === 'removed' ? S.track.removedLine : `${l.qty} → ${l.qty_confirmed}`}
+                          <Ltr>{l.item_code}</Ltr>: {(l.line_status || 'ok') === 'removed' ? S.track.removedLine : <Ltr>{`${l.qty} → ${l.qty_confirmed}`}</Ltr>}
                         </li>
                       ))}
                   </ul>
@@ -342,9 +347,13 @@ export default function TrackingPage() {
                   return (
                     <li key={l.item_code} className={cn('flex items-baseline justify-between gap-3 px-4 py-2.5 text-sm', removed && 'opacity-50 line-through')}>
                       <span className="min-w-0">
-                        <b className="font-display font-bold">{l.display_name || l.item_code}</b>
+                        <b className="font-display font-bold">
+                          <Ltr>{l.display_name || l.item_code}</Ltr>
+                        </b>
                         <span className="ms-1.5 tnum text-ink-2">
-                          {qty} × {money(l.unit_price_bhd)}
+                          <Ltr>
+                            {qty} × {money(l.unit_price_bhd)}
+                          </Ltr>
                         </span>
                         {l.backorder && !removed && <span className="ms-1.5 text-xs text-warn">{S.card.backorder.toLowerCase()}</span>}
                       </span>
@@ -358,7 +367,7 @@ export default function TrackingPage() {
                   {Number(data.discount_bhd) > 0 && (
                     <div className="flex justify-between">
                       <dt className="text-ok">{S.cart.discount}</dt>
-                      <dd className="tnum text-ok">−{bhd(data.discount_bhd)}</dd>
+                      <dd className="tnum text-ok">{bhdMinus(data.discount_bhd)}</dd>
                     </div>
                   )}
                   <div className="flex justify-between">

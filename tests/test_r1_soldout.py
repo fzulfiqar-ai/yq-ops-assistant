@@ -290,9 +290,12 @@ def _():
 
 @test("copy: 'Sold out' (+ «نفدت الكمية») everywhere in the market build, never 'Out of stock', never 'since you added it'")
 def _():
-    strings = _read("web/src/market/strings.ts")
+    # R5: the English copy lives in i18n/en.ts (strings.ts re-exports it), the Arabic in i18n/ar.ts
+    strings = _read("web/src/market/i18n/en.ts")
     assert "stockOut: 'Sold out'" in strings and "soldOut: 'Sold out'" in strings
     assert "stockOutAr: 'نفدت الكمية'" in strings
+    ar = _read("web/src/market/i18n/ar.ts")
+    assert "stockOut: 'نفدت الكمية'" in ar and "soldOut: 'نفدت الكمية'" in ar
     assert "backorderNote: 'Sold out —" in strings
     assert "soldOutAsOf: (d: string) => `Sold out · stock as of ${d}`" in strings
     assert "leftOut: (n: number) =>" in strings
@@ -307,7 +310,7 @@ def _():
             assert in_comment, f"{f.relative_to(ROOT)}:{n} renders the banned phrase: {stripped[:100]}"
     fmt = _read("web/src/market/lib/format.ts")
     assert "out_of_stock: { label: S.card.stockOut, tone: 'grey' }" in fmt, "sold out is grey, never red"
-    for rel in ("app/shop.py", "web/src/market/strings.ts", "docs/SHOP.md"):
+    for rel in ("app/shop.py", "web/src/market/i18n/en.ts", "web/src/market/i18n/ar.ts", "docs/SHOP.md"):
         assert "since you added it" not in _read(rel), f"{rel}: the old, sometimes-false wording is back"
 
 

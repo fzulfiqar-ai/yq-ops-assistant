@@ -65,7 +65,11 @@ function PhoneSlider({ slides, className }: { slides: Slide[]; className?: strin
     const cell = track?.children[i] as HTMLElement | undefined
     if (!track || !cell) return
     const max = track.scrollWidth - track.clientWidth
-    const left = Math.max(0, Math.min(max, cell.offsetLeft - (track.clientWidth - cell.offsetWidth) / 2))
+    // scrollLeft runs from 0 to -max in RTL (the start edge is on the right), and offsetLeft is on
+    // the same axis, so the centring sum holds in both directions — only the clamp turns round
+    const rtl = getComputedStyle(track).direction === 'rtl'
+    const want = cell.offsetLeft - (track.clientWidth - cell.offsetWidth) / 2
+    const left = rtl ? Math.min(0, Math.max(-max, want)) : Math.max(0, Math.min(max, want))
     if (Math.abs(track.scrollLeft - left) < 2) return
     programmatic.current = true
     window.clearTimeout(settle.current)

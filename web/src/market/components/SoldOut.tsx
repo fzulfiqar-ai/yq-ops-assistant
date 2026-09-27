@@ -2,8 +2,10 @@ import type { ShopItem } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
 import { productName } from '../lib/format'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
+import { Ltr } from '../ui/Ltr'
 import { TellBackButton } from './RestockAsk'
 
 /**
@@ -35,9 +37,11 @@ export function SoldOutRows({ items, className }: { items: ShopItem[]; className
               <ProductImage item={it} alt="" sizes={SIZES_THUMB} size={40} imgClassName="p-0.5 opacity-45 saturate-50" iconSize={14} showCaption={false} />
             </span>
             <span className="min-w-[8rem] flex-1">
-              <span className="block truncate text-sm font-semibold text-ink-2">{productName(it)}</span>
+              <span {...ltrText} className="block truncate text-sm font-semibold text-ink-2 rtl:text-right">
+                {productName(it)}
+              </span>
               <span className="block text-xs tnum text-ink-2">
-                {it.item_code} · {soldOutLabel}
+                <Ltr>{it.item_code}</Ltr> · {soldOutLabel}
               </span>
             </span>
             <TellBackButton item={it} />

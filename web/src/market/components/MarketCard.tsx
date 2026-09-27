@@ -4,12 +4,14 @@ import { cn } from '@/lib/utils'
 import type { BadgeKind, ShopItem } from '@/lib/shopApi'
 import { useMarket } from '../MarketContext'
 import { track } from '../lib/events'
-import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, stepOf, unitAt, variantOf } from '../lib/format'
+import { badgeMeta, bhd, cardBadges, isOut, marginOf, minQtyOf, money, nextTier, priceAnchor, productName, proofText, stepOf, unitAt, variantOf } from '../lib/format'
 import { useShell } from '../shell/ShellContext'
 import { useCartQty } from '../store/cart'
 import { savedStore, useIsSaved } from '../store/saved'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { Chip } from '../ui/Chip'
+import { Ltr } from '../ui/Ltr'
 import { ProductImage, SIZES_GRID, SIZES_RAIL, SIZES_THUMB } from '../ui/ProductImage'
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
@@ -149,14 +151,17 @@ function orderedChips(item: ShopItem, items: readonly ShopItem[]): string[] {
 export function CardKicker({ item, className }: { item: Pick<ShopItem, 'brand' | 'item_code'>; className?: string }) {
   const brand = (item.brand || '').trim()
   return (
-    <span className={cn('flex min-w-0 items-baseline gap-1 text-2xs leading-[14px] text-ink-3', className)}>
+    // dir="ltr" in either language: "VFAN · UK04-C" is one English run, it must not read "UK04-C · VFAN"
+    <span dir="ltr" className={cn('flex min-w-0 items-baseline gap-1 text-2xs leading-[14px] text-ink-3 rtl:justify-end', className)}>
       {brand && (
         <>
           <span className="shrink-0 font-semibold uppercase tracking-[0.06em]">{brand}</span>
           <span aria-hidden="true">·</span>
         </>
       )}
-      <span className="min-w-0 truncate font-semibold tnum text-ink-2">{item.item_code}</span>
+      <span className="min-w-0 truncate font-semibold tnum text-ink-2">
+        <Ltr>{item.item_code}</Ltr>
+      </span>
     </span>
   )
 }
@@ -173,7 +178,7 @@ export function VariantChips({ item, layout = 'line', reserve = true, className 
     <span className={cn('flex flex-wrap', layout === 'line' ? 'h-5 gap-1 overflow-hidden' : 'gap-1.5', className)}>
       {chips.map((c) => (
         <Chip key={c} tone="spec" size={layout === 'wrap' ? 'md' : 'sm'} className={layout === 'line' ? 'px-1.5' : undefined}>
-          {c}
+          <Ltr>{c}</Ltr>
         </Chip>
       ))}
     </span>
@@ -480,7 +485,9 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           {/* two lines: the tail of a cable name ("… (Type-C to Type-C)") is what tells two rows apart.
               NO `block` here — it would win over line-clamp-2's `display:-webkit-box` in the cascade
               and the clamp would be inert, which is what made this shelf ragged (rows 96–138 px). */}
-          <span className={cn('mt-px text-sm font-semibold leading-snug line-clamp-2', out ? 'text-ink-2' : 'text-ink')}>{name}</span>
+          <span {...ltrText} className={cn('mt-px text-sm font-semibold leading-snug line-clamp-2 rtl:text-right', out ? 'text-ink-2' : 'text-ink')}>
+            {name}
+          </span>
           <VariantChips item={item} reserve={false} className="mt-1" />
           {meta && (
             // one 20px line, most decisive first; whatever does not fit wraps out of sight (whole
@@ -616,7 +623,9 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
         <CardKicker item={item} />
         <h3 className={cn('mt-0.5 font-sans font-semibold tracking-normal text-ink', compact ? 'text-[13px] leading-[17px]' : 'text-sm md:text-[14px] md:leading-[19px]')}>
           <button type="button" onClick={open} className={cn('hit relative block w-full rounded-xs text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70', compact ? 'min-h-[36px]' : 'min-h-[36px] md:min-h-[38px]')}>
-            <span className="line-clamp-2">{name}</span>
+            <span {...ltrText} className="line-clamp-2 rtl:text-right">
+              {name}
+            </span>
           </button>
         </h3>
         <VariantChips item={item} className={compact ? 'mt-1.5' : 'mt-2'} />
@@ -656,7 +665,7 @@ export const MarketCard = memo(function MarketCard({ item, variant = 'grid', fro
           ) : !compact && item.social_proof ? (
             <p className="flex items-start gap-1 text-2xs leading-[14px] text-ink-2">
               <Store size={12} aria-hidden="true" className="mt-px shrink-0 text-ink-3" />
-              <span className="line-clamp-2">{item.social_proof}</span>
+              <span className="line-clamp-2">{proofText(item.social_proof)}</span>
             </p>
           ) : !compact && firstTier ? (
             <p className="text-2xs leading-4 tnum text-ink-2">

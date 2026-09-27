@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Search } from 'lucide-react'
+import { LangSwitch } from '../components/LangSwitch'
 import { SearchHints } from '../components/SearchField'
 import { useMarket } from '../MarketContext'
 import { readCustomer } from '../lib/device'
@@ -35,7 +36,7 @@ export function PhoneHeader() {
       <header className="flex h-14 items-center gap-1 px-2">
         {title.back ? (
           <IconButton label={S.states.back} onClick={back}>
-            <ArrowLeft size={20} aria-hidden="true" />
+            <ArrowLeft size={20} aria-hidden="true" className="rtl:-scale-x-100" />
           </IconButton>
         ) : (
           <span className="w-2" />
@@ -55,6 +56,7 @@ export function PhoneHeader() {
         </span>
       </Link>
       <span className="flex-1" />
+      <LangSwitch where="phone" />
       <Link
         to="/me"
         aria-label={rep ? `${S.rep.yours}: ${rep.name}` : S.nav.me}
@@ -114,7 +116,7 @@ function BandHeader({ title, onBack }: { title: PageTitle | null; onBack: () => 
         <div ref={rowRef} className="flex h-[60px] items-center gap-1 px-2 pt-1">
           {title.back ? (
             <button type="button" onClick={onBack} aria-label={S.states.back} title={S.states.back} className={`grid h-11 w-11 shrink-0 place-items-center rounded-sm text-white transition duration-1 ease-m hover:bg-white/10 active:scale-95 ${ringOnPlum}`}>
-              <ArrowLeft size={21} strokeWidth={2} aria-hidden="true" />
+              <ArrowLeft size={21} strokeWidth={2} aria-hidden="true" className="rtl:-scale-x-100" />
             </button>
           ) : (
             <span className="w-[calc(var(--m-gutter)-0.5rem)] shrink-0" />
@@ -133,6 +135,8 @@ function BandHeader({ title, onBack }: { title: PageTitle | null; onBack: () => 
             </span>
           </Link>
           <span className="flex-1" />
+          {/* EN / عربي on the brand row: it scrolls away with it, so the pinned search strip stays one control */}
+          <LangSwitch where="band" tone="plum" />
           <Link to="/me" aria-label={rep ? `${S.rep.yours}: ${rep.name}` : S.nav.me} className={`grid h-11 w-11 shrink-0 place-items-center rounded-full ${ringOnPlum}`}>
             <span className="grid h-10 w-10 place-items-center overflow-hidden rounded-full bg-white/15 text-xs font-bold text-white ring-1 ring-white/30">
               {rep?.photo_url ? <img src={rep.photo_url} alt="" width={40} height={40} className="h-full w-full object-cover" /> : rep ? initials(rep.name) : <MeIcon size={19} strokeWidth={1.9} aria-hidden="true" />}

@@ -14,11 +14,12 @@ import { useRecentOrders } from '../hooks/useRecentOrders'
 import { useMarket, useOrder } from '../MarketContext'
 import { rememberedOrders } from '../lib/device'
 import { track } from '../lib/events'
-import { bhd, fmtDateShort, minQtyOf, money, nextTier, productName, stepOf, unitAt, variantOf } from '../lib/format'
+import { bhd, bhdMinus, fmtDateShort, minQtyOf, money, nextTier, productName, stepOf, unitAt, variantOf } from '../lib/format'
 import { bestSellers, orderLines, regularStock, splitReorder, type RegularLine } from '../lib/home'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
 import { useCartCounts, useCartLines } from '../store/cart'
 import { useSaved } from '../store/saved'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { AnchorButton, Button, LinkButton } from '../ui/Button'
 import { Chip } from '../ui/Chip'
@@ -26,6 +27,7 @@ import { Input, Label, Textarea } from '../ui/Field'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 import { Stepper } from '../ui/Stepper'
 import { useToast } from '../ui/Toast'
+import { Ltr } from '../ui/Ltr'
 
 type QLine = NonNullable<Quote['lines']>[number]
 
@@ -202,7 +204,7 @@ export default function CartPage() {
         {(quote?.discounts || []).map((d, i) => (
           <div key={d.rule_id ?? i} className="flex justify-between gap-3">
             <dt className="truncate text-ok">{d.name || S.cart.discount}</dt>
-            <dd className="shrink-0 tnum text-ok">−{bhd(d.amount_bhd)}</dd>
+            <dd className="shrink-0 tnum text-ok">{bhdMinus(d.amount_bhd)}</dd>
           </div>
         ))}
         <div className="flex justify-between gap-3">
@@ -277,18 +279,20 @@ export default function CartPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="line-clamp-2 font-display text-sm font-bold leading-tight text-ink">{name}</div>
+                          <div {...ltrText} className="line-clamp-2 font-display text-sm font-bold leading-tight text-ink rtl:text-right">
+                            {name}
+                          </div>
                           {chips.length > 0 && (
                             <div className="mt-1 flex max-h-5 flex-wrap gap-1 overflow-hidden">
                               {chips.map((c) => (
                                 <Chip key={c} tone="spec">
-                                  {c}
+                                  <Ltr>{c}</Ltr>
                                 </Chip>
                               ))}
                             </div>
                           )}
                           <div className="mt-1 text-xs tnum text-ink-2">
-                            {line.item_code}
+                            <Ltr>{line.item_code}</Ltr>
                             {q && !dead ? (
                               <>
                                 {' '}
@@ -567,7 +571,7 @@ function PasteCard() {
         <span className="block font-display text-sm font-bold text-ink">{S.restock.paste}</span>
         <span className="block text-xs leading-snug text-ink-2">{S.restock.pasteHint}</span>
       </span>
-      <ArrowRight size={17} className="shrink-0 text-plum transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100" aria-hidden="true" />
+      <ArrowRight size={17} className="shrink-0 text-plum transition-transform duration-2 ease-m group-hover:translate-x-0.5 rtl:-scale-x-100 rtl:group-hover:-translate-x-0.5" aria-hidden="true" />
     </Link>
   )
 }

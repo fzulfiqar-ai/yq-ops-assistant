@@ -122,6 +122,9 @@ function marketHtml(): Plugin {
           .replace(/\s*<!-- portal-fonts[\s\S]*?<!-- \/portal-fonts -->/, `\n    <link rel="preconnect" href="${MARKET.imageOrigin}" />\n    ${fontLinks}\n    <link rel="preload" as="image" type="image/webp" href="/yq-logo-160.webp" fetchpriority="high" />`)
           // Vite has already substituted %VITE_API_URL% by the time this runs — match the shape, not the placeholder.
           .replace(/(<script src="\/catalog-prefetch\.js" data-api="[^"]*")/, '$1 data-app="market"')
+          // the language (EN / عربي) and its direction on <html> before the first paint — an external
+          // file, like the prefetch, because the CSP forbids inline scripts (public/market-lang.js)
+          .replace('<script src="/catalog-prefetch.js"', '<script src="/market-lang.js"></script>\n    <script src="/catalog-prefetch.js"')
           // the first painted frame (see BOOT_CSS): night field + logo tile before React exists
           .replace('</head>', `<style>${BOOT_CSS}</style>
   </head>`)
@@ -165,8 +168,10 @@ function marketPwa(apiUrl: string) {
       // every new browser downloaded on the first idle after load.
       globPatterns: ['**/*.{js,css,html,ico,svg,webp,webmanifest,woff2}'],
       // never let the worker answer the version file or any API path from cache; the portal's
-      // fonts are copied into every build (shared public/) but the market never loads them
-      globIgnores: ['version.json', 'fonts/inter-*.woff2', 'fonts/space-grotesk-*.woff2'],
+      // fonts are copied into every build (shared public/) but the market never loads them; the
+      // Arabic font (R5) is fetched only by an Arabic page, so it is cached when used (below) and
+      // never precached into every English merchant's phone
+      globIgnores: ['version.json', 'fonts/inter-*.woff2', 'fonts/space-grotesk-*.woff2', 'fonts/ibm-plex-sans-arabic-*.woff2'],
       navigateFallback: '/index.html',
       navigateFallbackDenylist: [/^\/public\//, /^\/api\//, /\/version\.json$/],
       cleanupOutdatedCaches: true,
@@ -193,6 +198,12 @@ function marketPwa(apiUrl: string) {
           urlPattern: /^https:\/\/[a-z0-9]+\.supabase\.co\/storage\/v1\/object\/public\//,
           handler: 'CacheFirst',
           options: { cacheName: 'yq-market-images', expiration: { maxEntries: 600, maxAgeSeconds: 30 * 86400 } },
+        },
+        {
+          // the Arabic font, once an Arabic page has asked for it: offline Arabic keeps its type
+          urlPattern: /\/fonts\/ibm-plex-sans-arabic-[\w-]+\.woff2$/,
+          handler: 'CacheFirst',
+          options: { cacheName: 'yq-market-fonts', expiration: { maxEntries: 4, maxAgeSeconds: 365 * 86400 } },
         },
       ],
     },

@@ -10,10 +10,12 @@ import { rememberedOrders } from '../lib/device'
 import { bhd, minQtyOf, money, stepOf, productName } from '../lib/format'
 import { NAV_ICONS } from '../lib/icons'
 import { useCartCounts, useCartLines } from '../store/cart'
+import { ltrText } from '../i18n'
 import { S } from '../strings'
 import { Button, LinkButton } from '../ui/Button'
 import { ProductImage, SIZES_THUMB } from '../ui/ProductImage'
 import { Stepper } from '../ui/Stepper'
+import { Ltr } from '../ui/Ltr'
 import { useShell } from './ShellContext'
 
 /**
@@ -107,9 +109,11 @@ export function MiniCart({ inDrawer }: { inDrawer?: boolean }) {
                           apart is at the END of the name — "(2USB Port)" vs "(USB + Type-C Port)",
                           "1Mtr" vs "2Mtr" — and this is the panel where the merchant checks what
                           they are about to order */}
-                      <div className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{name}</div>
+                      <div {...ltrText} className="line-clamp-2 text-sm font-semibold leading-snug text-ink rtl:text-right">
+                        {name}
+                      </div>
                       {/* a line that can no longer be ordered is a state, not an error: grey, never red */}
-                      <div className="text-xs tnum text-ink-2">{dead ? q?.blocked_reason || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : line.item_code}</div>
+                      <div className="text-xs tnum text-ink-2">{dead ? q?.blocked_reason || S.card.soldOut : q ? `${money(q.unit_price_bhd)} ${S.cart.each}` : <Ltr>{line.item_code}</Ltr>}</div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <span className="text-sm font-semibold tnum text-ink">{dead ? '—' : bhd(q?.line_total_bhd ?? (Number(item?.price_bhd) || 0) * line.qty)}</span>

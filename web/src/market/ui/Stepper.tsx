@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Minus, Plus, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { S } from '../strings'
 
 /**
  * Quantity control. Steps by `step` (a pack size, usually), never goes below `min` (the MOQ) —
@@ -45,7 +46,7 @@ interface Hold {
   latest: { value: number; step: number; min: number; max?: number; onChange: (n: number) => void; onRemove?: () => void }
 }
 
-export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, label = 'quantity', size = 'md', className, onValueClick }: StepperProps) {
+export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, label = S.stepper.fallback, size = 'md', className, onValueClick }: StepperProps) {
   // direction of the last change, for the tick animation (derived during render, no effect)
   const [seen, setSeen] = useState(value)
   const [dir, setDir] = useState<'up' | 'down' | null>(null)
@@ -112,7 +113,7 @@ export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, lab
   const tick = cn('inline-block', dir === 'up' && 'anim-tick-up', dir === 'down' && 'anim-tick-down')
 
   return (
-    <div role="group" aria-label={`Quantity for ${label}`} className={cn('inline-flex select-none items-center justify-between gap-0.5 border border-plum/40 bg-surface transition duration-1 ease-m focus-within:border-plum', PAD[size], SHELL[size], className)}>
+    <div role="group" aria-label={S.stepper.group(label)} className={cn('inline-flex select-none items-center justify-between gap-0.5 border border-plum/40 bg-surface transition duration-1 ease-m focus-within:border-plum', PAD[size], SHELL[size], className)}>
       <button
         type="button"
         onClick={() => clickStep(-1)}
@@ -121,7 +122,7 @@ export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, lab
         onPointerLeave={stopHold}
         onPointerCancel={stopHold}
         onContextMenu={(e) => e.preventDefault()}
-        aria-label={willRemove ? `Remove ${label}` : `Decrease ${label} by ${step}`}
+        aria-label={willRemove ? S.stepper.remove(label) : S.stepper.decrease(label, step)}
         className={cn(
           'hit relative grid shrink-0 place-items-center text-ink-2 transition duration-1 ease-m hover:bg-plum-wash hover:text-ink active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70',
           willRemove && 'hover:bg-bad-soft hover:text-bad',
@@ -131,7 +132,7 @@ export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, lab
         {willRemove ? <Trash2 size={icon - 2} aria-hidden="true" /> : <Minus size={icon} aria-hidden="true" />}
       </button>
       {onValueClick ? (
-        <button type="button" onClick={onValueClick} aria-label={`Type a quantity for ${label} (currently ${value})`} className={cn('min-w-[2.25rem] flex-1 self-stretch overflow-hidden rounded-xs text-center font-display font-bold tnum text-ink transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70', VALUE[size])}>
+        <button type="button" onClick={onValueClick} aria-label={S.stepper.type(label, value)} className={cn('min-w-[2.25rem] flex-1 self-stretch overflow-hidden rounded-xs text-center font-display font-bold tnum text-ink transition duration-1 ease-m hover:bg-plum-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus/70', VALUE[size])}>
           <span key={value} className={tick}>
             {value}
           </span>
@@ -152,7 +153,7 @@ export function Stepper({ value, onChange, onRemove, step = 1, min = 1, max, lab
         onPointerCancel={stopHold}
         onContextMenu={(e) => e.preventDefault()}
         disabled={atMax}
-        aria-label={`Increase ${label} by ${step}`}
+        aria-label={S.stepper.increase(label, step)}
         className={cn('hit relative grid shrink-0 place-items-center bg-plum text-white transition duration-1 ease-m hover:bg-plum-deep active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70', BTN[size])}
       >
         <Plus size={icon} aria-hidden="true" />

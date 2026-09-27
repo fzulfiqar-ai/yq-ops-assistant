@@ -4,9 +4,10 @@ import { ChevronRight, Download } from 'lucide-react'
 import type { MarketPromise as PromiseRow } from '@/lib/shopApi'
 import { cn } from '@/lib/utils'
 import { useMarket } from '../MarketContext'
-import { bhd, money } from '../lib/format'
+import { bhdRound } from '../lib/format'
 import { PROMISE_ICON_FALLBACK, PROMISE_ICONS } from '../lib/icons'
 import { canPromptInstall, isStandalone, onInstallChange, promptInstall } from '../lib/install'
+import { LangSwitch } from './LangSwitch'
 import { locale, S } from '../strings'
 
 /**
@@ -21,6 +22,10 @@ import { locale, S } from '../strings'
  *
  * The phone strip is ONE line (see PromiseStrip): the minimum and free delivery, then a chevron to
  * About · How ordering works, which lists every promise. It never scrolls sideways.
+ *
+ * The desktop bar also carries the language switch (EN / عربي, R5) at its end, beside "Add YQ app":
+ * the header row under it is budgeted to the pixel at 1024 (StickyHeader), and a switch there took
+ * the search trigger down to a sliver. The phones carry theirs on the brand row (PhoneHeader).
  */
 
 /**
@@ -35,9 +40,10 @@ function usePromises(): PromiseRow[] {
     const rows = (settings.promises || []).filter((p) => p && p.en)
     const min = Number(settings.min_order_bhd) || 0
     if (min <= 0 || rows.some((p) => p.key === 'minimum')) return rows
-    // a round threshold reads as a headline ("BHD 20"); prices elsewhere keep their 3 decimals
-    const amount = Number.isInteger(min) ? `BHD ${min}` : bhd(min)
-    return [{ key: 'minimum', en: S.promise.minimum(amount), ar: S.promise.minimumAr(money(min)), icon: 'package', to: '/about#trade' }, ...rows]
+    // a round threshold reads as a headline ("BHD 20" / «20 د.ب»); prices elsewhere keep their 3
+    // decimals. S is already the page's language, so the one line serves both fields.
+    const line = S.promise.minimum(bhdRound(min))
+    return [{ key: 'minimum', en: line, ar: line, icon: 'package', to: '/about#trade' }, ...rows]
   }, [settings])
 }
 
@@ -60,7 +66,6 @@ const onDark = 'rounded-xs focus-visible:outline-none focus-visible:ring-2 focus
 export function PromiseBar() {
   const promises = usePromises()
   const [installable, install] = useInstallable()
-  if (!promises.length && !installable) return null
   return (
     <div className="hidden bg-plum-ink text-white/90 lg:block">
       {/* 40px under a mouse — the slim utility bar, but tall enough to hold a 36px "Add YQ app"
@@ -98,11 +103,14 @@ export function PromiseBar() {
             )
           })}
         </ul>
-        {installable && (
-          <button type="button" onClick={install} className={cn('ms-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3.5 font-semibold text-white transition-colors duration-1 ease-m hover:bg-white/20 [@media(pointer:coarse)]:h-11', onDark)}>
-            <Download size={13} strokeWidth={2} aria-hidden="true" /> {S.promise.app}
-          </button>
-        )}
+        <div className="ms-auto flex shrink-0 items-center gap-2 ps-4">
+          <LangSwitch where="bar" tone="bar" />
+          {installable && (
+            <button type="button" onClick={install} className={cn('inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3.5 font-semibold text-white transition-colors duration-1 ease-m hover:bg-white/20 [@media(pointer:coarse)]:h-11', onDark)}>
+              <Download size={13} strokeWidth={2} aria-hidden="true" /> {S.promise.app}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

@@ -62,8 +62,14 @@ export function Rail({ id, title, subtitle, action, seeAllTo, children, max = 6 
       ro.disconnect()
     }
   }, [tablet, all.length])
-  // smooth only without prefers-reduced-motion — a rail never forces an animated scroll
-  const by = (dir: 1 | -1) => scroller.current?.scrollBy({ left: dir * scroller.current.clientWidth * 0.8, behavior: scrollMotion() })
+  // smooth only without prefers-reduced-motion — a rail never forces an animated scroll. `dir` is
+  // logical (1 = toward the inline end); scrollBy is physical, and the end is to the LEFT in RTL.
+  const by = (dir: 1 | -1) => {
+    const el = scroller.current
+    if (!el) return
+    const rtl = getComputedStyle(el).direction === 'rtl'
+    el.scrollBy({ left: dir * (rtl ? -1 : 1) * el.clientWidth * 0.8, behavior: scrollMotion() })
+  }
 
   const arrows = tablet ? (
     <>
