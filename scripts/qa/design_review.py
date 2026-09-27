@@ -144,6 +144,9 @@ def main() -> int:
 
     nav, rows, missing = [], [], 0
     for key, label in SCREENS:
+        # a run captured with --only covers some screens: leave out the ones neither side has
+        if not any((f / "shots" / vp / (key + ".png")).exists() for f in (before, after) for vp in VIEWPORTS):
+            continue
         nav.append('<a href="#' + key + '">' + esc(label.split(" · ")[0].split(",")[0]) + "</a>")
         block = ['<section class="screen" id="' + key + '"><h2>' + esc(label) + "</h2>"]
         for vp in VIEWPORTS:
