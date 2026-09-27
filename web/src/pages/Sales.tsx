@@ -5,6 +5,7 @@ import { CalendarDays, Store, Truck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, type Column } from '@/components/DataTable'
 import { Card } from '@/components/ui/card'
@@ -87,7 +88,7 @@ const sellerCols: Column<Seller>[] = [
 ]
 
 export default function Sales() {
-  const { data, isLoading } = useQuery({ queryKey: ['report', 'sales'], queryFn: () => apiGet<Data>('/report/sales') })
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'sales'], queryFn: () => apiGet<Data>('/report/sales') })
   const trend = (data?.trend || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
   const salesmen = (data?.by_salesman || []).slice(0, 12).map((s) => ({ ...s, name: s.salesman, rev: Number(s.revenue_bhd || 0) }))
   const channels = data?.by_channel || []
@@ -96,7 +97,9 @@ export default function Sales() {
   return (
     <div>
       <PageHeader title="Sales" subtitle="Performance · salesmen · B2C/B2B channel — gross (VAT-incl)" />
-      {isLoading || !data ? (
+      {isError && !data ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load sales." />
+      ) : isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
         <div className="space-y-4">

@@ -4,6 +4,7 @@ import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 
 import { apiGet } from '@/lib/api'
 import { bhd, fmtDate, num } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { LoadError } from '@/components/LoadError'
 import { PageHeader } from '@/components/PageHeader'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import { Card } from '@/components/ui/card'
@@ -46,13 +47,15 @@ const cols: Column<Row>[] = [
 
 export default function Receivables() {
   const [params] = useSearchParams()
-  const { data, isLoading } = useQuery({ queryKey: ['report', 'receivables'], queryFn: () => apiGet<Data>('/report/receivables') })
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'receivables'], queryFn: () => apiGet<Data>('/report/receivables') })
   const bucketData = data ? BUCKET_LABELS.map(([k, label]) => ({ label, value: Number(data.buckets[k] || 0) })) : []
   const hasGap = data?.focus_total != null && data.focus_gap != null && Math.abs(Number(data.focus_gap)) > 0.005
   return (
     <div>
       <PageHeader title="Receivables" subtitle="Cash & trade-debtor balances with ageing (Focus AR)" />
-      {isLoading || !data ? (
+      {isError && !data ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load receivables." />
+      ) : isLoading || !data ? (
         <Skeleton className="h-[60vh]" />
       ) : (
         <>

@@ -2,13 +2,28 @@ import { getSessionSafe } from './supabase'
 
 const BASE = (import.meta.env.VITE_API_URL as string) || ''
 
+function refOf(body: string): string | null {
+  try {
+    const j = JSON.parse(body) as { ref?: unknown }
+    return j && typeof j.ref === 'string' && j.ref ? j.ref.slice(0, 16) : null
+  } catch {
+    return null
+  }
+}
+
 export class ApiError extends Error {
   status: number
   body: string
+  /**
+   * The server's error reference: an unhandled error answers 500 {"detail": "Server error", "ref": "…"}
+   * (app/main.py ServerErrorJSON) and the same ref is on its log line. Null on every other answer.
+   */
+  ref: string | null
   constructor(status: number, body: string) {
     super(`API ${status}: ${body.slice(0, 200)}`)
     this.status = status
     this.body = body
+    this.ref = refOf(body)
   }
   /** The server's `detail.code` when the body is FastAPI's {"detail": {"code": ...}} shape. */
   get code(): string | null {
