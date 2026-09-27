@@ -1,13 +1,17 @@
 import { useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Check, Loader2, MessageCircle, UserRoundCheck } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { AlertTriangle, Check, ChevronDown, Loader2, MessageCircle, UserRoundCheck, X } from 'lucide-react'
 import { apiGet, apiPost, ApiError } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
-import { bhd } from '@/lib/format'
+import { bhd, fmtDate } from '@/lib/format'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Stepper } from '@/components/ui/stepper'
-import { apiDetail, CANCEL_REASONS, PAYMENT_LABEL, PAYMENT_METHODS, PAYMENT_PILL_LABEL, PAYMENT_TONE } from './pipeline'
+import {
+  apiDetail, CANCEL_REASONS, confidencePct, lineDiffSummary, PAYMENT_LABEL, PAYMENT_METHODS,
+  PAYMENT_PILL_LABEL, PAYMENT_TONE, useFocusCandidates,
+  type FocusCandidate, type FocusLinkResp, type FocusOrderRow,
+} from './pipeline'
 
 /**
  * The actions the marketplace added to an order, shared by the desk drawer, the field sheet and
@@ -425,7 +429,11 @@ export function ConfirmEditor({
   )
 }
 
-export function useSalesmenOptions(enabled: boolean) {
+// Not exported: nothing outside this file uses it (react-refresh/only-export-components wants a
+// components-only file, and this file already has three pre-existing constant exports it
+// violates for — STATUS_LABEL/STATUS_TONE/ACTION_LABEL, consumed by PickList.tsx and
+// sales/Today.tsx — out of this stream's file scope to relocate).
+function useSalesmenOptions(enabled: boolean) {
   return useQuery({
     queryKey: ['shop-salesmen-options'],
     queryFn: async () => (await apiGet<{ salesmen: SalesmanOpt[] }>('/shop/salesmen')).salesmen.filter((s) => s.is_active !== false),
@@ -578,5 +586,130 @@ export function CustomerWhatsApp({ url, first }: { url?: string | null; first?: 
     <a href={url} target="_blank" rel="noreferrer" className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#25d366] text-[13.5px] font-semibold text-[#08331b] hover:opacity-90">
       <MessageCircle size={16} aria-hidden="true" /> WhatsApp {first || 'the shop'} the update
     </a>
+  )
+}
+
+/* ───────────────────────── R7a: Focus exceptions (item 6) ───────────────────────── */
+
+function FocusOrderCandidates({
+  row, onOpenOrder, onChanged, readOnly,
+}: {
+  row: FocusOrderRow
+  onOpenOrder: (id: number) => void
+  onChanged: () => void
+  readOnly?: boolean
+}) {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState<string | null>(null)
+  // "Not this one" is a real POST (action: reject) — the server never suggests that pair again.
+  // The next-best candidate is already in hand, so this row swaps to it immediately rather than
+  // waiting on the refetch below (which still runs, so the panel's own order/suggestion counts
+  // catch up too).
+  const [turnedDown, setTurnedDown] = useState<Set<string>>(new Set())
+  const best = row.candidates.find((c) => !turnedDown.has(c.invoice_key))
+
+  async function decide(c: FocusCandidate, action: 'accept' | 'reject') {
+    setBusy(`${action}:${c.invoice_key}`)
+    try {
+      const res = await apiPost<FocusLinkResp>(`/shop/orders/${row.order_id}/focus-link`, { invoice_key: c.invoice_key, action })
+      if (action === 'accept') {
+        toast(`${row.order_no} linked to ${res.invoice_key}.`, 'success')
+        onChanged()
+      } else {
+        setTurnedDown((s) => new Set(s).add(c.invoice_key))
+        toast('Noted — not this one.', 'success')
+      }
+      qc.invalidateQueries({ queryKey: ['shop-focus-candidates'] })
+    } catch (e) {
+      toast(apiDetail(e, 'Could not record the decision.'), 'error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!best) {
+    return (
+      <li className="p-3 text-[12.5px] text-muted-foreground">
+        <button type="button" onClick={() => onOpenOrder(row.order_id)} className="font-semibold text-foreground hover:text-primary hover:underline">{row.order_no}</button>
+        {' '}— every suggestion here was turned down.
+      </li>
+    )
+  }
+
+  return (
+    <li className="grid gap-2 p-3 text-[12.5px] sm:grid-cols-[1fr_auto] sm:items-center">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button type="button" onClick={() => onOpenOrder(row.order_id)} className="font-semibold text-foreground hover:text-primary hover:underline">{row.order_no}</button>
+          <Badge tone={best.exact ? 'green' : 'amber'}>{best.invoice_key}</Badge>
+          <Badge tone="grey">{best.method_label} · {confidencePct(best.confidence)}</Badge>
+          {row.candidates.length > 1 && <span className="text-muted-foreground">+{row.candidates.length - 1} more</span>}
+        </div>
+        <div className="mt-0.5 text-muted-foreground">
+          {[row.customer_shop, row.salesman_name].filter(Boolean).join(' · ')} · order {bhd(row.order_total_bhd, 3)}
+          {best.invoice_date ? ` · invoice ${fmtDate(best.invoice_date)}` : ''}
+          {best.amount_diff_bhd ? ` · diff ${bhd(best.amount_diff_bhd, 3)}` : ''}
+        </div>
+        <div className="mt-0.5 text-muted-foreground">{lineDiffSummary(best.lines)}</div>
+      </div>
+      {!readOnly && (
+        <div className="flex gap-1.5 sm:w-[13rem]">
+          <button type="button" onClick={() => decide(best, 'accept')} disabled={busy !== null}
+            className="flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-[#137a48] px-2.5 text-[12px] font-semibold text-white disabled:opacity-50">
+            {busy === `accept:${best.invoice_key}` ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Accept
+          </button>
+          <button type="button" onClick={() => decide(best, 'reject')} disabled={busy !== null}
+            className="flex h-9 flex-1 items-center justify-center gap-1 rounded-lg border border-[#E2DCEA] bg-white px-2.5 text-[12px] font-semibold text-[#1A1428] disabled:opacity-50">
+            {busy === `reject:${best.invoice_key}` ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />} Not this one
+          </button>
+        </div>
+      )}
+    </li>
+  )
+}
+
+/**
+ * Replaces the old "Focus check" banner, the Payment column/pills, the PaymentBox and the
+ * free-text "Focus invoice no" inputs (R7a item 6) — one place that says what the ledger
+ * suggests and lets the office accept it in a tap. Renders nothing while loading, on any error
+ * (the route may not be deployed yet), or once the migration is applied but nothing needs a
+ * look — same "say nothing until there's something to say" rule as AssignmentQueue.
+ */
+export function FocusExceptionsPanel({
+  onOpenOrder, onChanged, readOnly,
+}: {
+  onOpenOrder: (id: number) => void
+  onChanged: () => void
+  readOnly?: boolean
+}) {
+  const { data, isLoading, isError } = useFocusCandidates()
+  const [open, setOpen] = useState(true)
+  if (isLoading || isError || !data?.orders?.length) return null
+  return (
+    <section className="mb-5 rounded-[18px] border border-[#f3c9d2] bg-[#fff7f8] p-4" aria-labelledby="focus-exceptions">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="flex w-full items-center justify-between gap-2 text-left">
+        <h2 id="focus-exceptions" className="flex items-center gap-2 font-display text-[15px] font-bold">
+          <AlertTriangle size={16} className="text-amber-600" /> Focus exceptions
+          <span className="text-[12.5px] font-medium text-muted-foreground">
+            {data.count} order{data.count === 1 ? '' : 's'} · {data.candidates} suggestion{data.candidates === 1 ? '' : 's'}
+          </span>
+        </h2>
+        <ChevronDown size={16} className={cn('shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="mt-3">
+          <p className="mb-2 text-[12px] text-muted-foreground">
+            Orders the uploaded Focus sales ledger suggests an invoice for
+            {data.ledger_as_of ? <> (sales up to <b>{fmtDate(data.ledger_as_of)}</b>)</> : null} — one tap accepts the best match, or turn it down to see the next one.
+          </p>
+          <ul className="divide-y overflow-hidden rounded-xl border bg-white">
+            {data.orders.map((o) => (
+              <FocusOrderCandidates key={o.order_id} row={o} onOpenOrder={onOpenOrder} onChanged={onChanged} readOnly={readOnly} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   )
 }

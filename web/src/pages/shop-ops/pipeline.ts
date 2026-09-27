@@ -1,4 +1,5 @@
-import { ApiError } from '@/lib/api'
+import { useQuery } from '@tanstack/react-query'
+import { apiGet, ApiError } from '@/lib/api'
 import { bhd } from '@/lib/format'
 import type { BadgeTone } from '@/components/ui/badge'
 
@@ -64,4 +65,134 @@ export function minimumGapText(row: { status?: string | null; order_kind?: strin
   const gap = Number(row.minimum_gap_bhd || 0)
   if (!(gap > 0)) return null
   return `${bhd(gap, 3)} short of the wholesale minimum when placed`
+}
+
+/* ───────────────────────── R7a: plain-English attribution (item 3) ───────────────────────── */
+
+/** app/shop.py ATTRIBUTION — how an order landed with its rep, in words a shop owner (or the
+ *  office reading it over their shoulder) would actually say. Anything not in this map
+ *  (focus_map, staff, default, legacy…) falls back to the old "snake_case -> words" reading, so
+ *  an attribution source added later never renders blank. */
+const ATTRIBUTION_LABEL: Record<string, (rep: string) => string> = {
+  session_ref: (rep) => `Came via ${rep}'s link`,
+  sticky: (rep) => `${rep}'s shop`,
+  customer_admin: () => 'Assigned by office',
+  checkout_pick: () => 'Picked at checkout',
+}
+
+export function attributionLabel(source: string | null | undefined, repName?: string | null): string {
+  if (!source) return ''
+  const fn = ATTRIBUTION_LABEL[source]
+  return fn ? fn(repName || 'the rep') : source.replace(/_/g, ' ')
+}
+
+/** The shop's settled-rep line in the order drawer. Replaces the old "not settled yet · first
+ *  link /x" (a state, not an action) with what actually happens next. */
+export function shopRepLine(
+  shopRep: { salesman_name?: string | null; sticky_name?: string | null },
+  currentRepName?: string | null,
+): string {
+  if (shopRep.salesman_name) return `Assigned by office — ${shopRep.salesman_name}`
+  if (shopRep.sticky_name) return `${shopRep.sticky_name}'s shop`
+  return `New shop — becomes ${currentRepName || 'the rep'}'s when they confirm`
+}
+
+/* ───────────────────────── R7a: Focus exceptions (item 6) ─────────────────────────
+ * app/shop_focus_links, live once scripts/r7_focus_links_migration.sql is applied. Types +
+ * pure formatting live here (not OrderActions.tsx) so that file stays components-only. */
+
+export interface FocusCandidateLines {
+  order: number
+  invoice: number
+  matched: number
+  qty_diff: number
+  price_diff: number
+  missing_on_invoice: number
+  extra_on_invoice: number
+}
+
+export interface FocusCandidate {
+  invoice_key: string
+  invoice_date: string | null
+  focus_salesman: string | null
+  focus_customer: string | null
+  invoice_total_bhd: number
+  invoice_open_bhd: number
+  invoice_linked_n: number
+  invoice_orders_n: number
+  amount_diff_bhd: number
+  method: 'narration_ref' | 'sio_ref' | 'auto_items'
+  method_label: string
+  confidence: number
+  overlap_share: number | null
+  sio_key: string | null
+  rank: number
+  exact: boolean
+  lines: FocusCandidateLines
+}
+
+export interface FocusOrderRow {
+  order_id: number
+  order_no: string
+  status: string
+  status_label: string
+  created_at: string
+  customer_shop: string | null
+  salesman_id: number | null
+  salesman_name: string | null
+  order_total_bhd: number
+  typed_invoice_key: string | null
+  candidates: FocusCandidate[]
+}
+
+export interface FocusCandidatesResp {
+  orders: FocusOrderRow[]
+  count: number
+  candidates: number
+  ledger_as_of: string | null
+  hint?: string
+}
+
+export interface FocusLinkResp {
+  ok: true
+  order_id: number
+  order_no: string
+  invoice_key: string
+  action: 'accept' | 'reject'
+  state: 'confirmed' | 'rejected'
+  method: string
+  method_label: string
+  confidence: number | null
+  sio_key: string | null
+  status: string
+  status_label: string
+  advanced: boolean
+  focus_invoice_no: string | null
+}
+
+/** "12 of 13 lines match · 1 not invoiced" — only the parts that differ from a clean match, so a
+ *  perfect candidate reads as just "13 of 13 lines match". */
+export function lineDiffSummary(l: FocusCandidateLines): string {
+  const parts = [`${l.matched} of ${l.order} lines match`]
+  if (l.missing_on_invoice) parts.push(`${l.missing_on_invoice} not invoiced`)
+  if (l.extra_on_invoice) parts.push(`${l.extra_on_invoice} extra on invoice`)
+  if (l.qty_diff) parts.push(`${l.qty_diff} qty ${l.qty_diff === 1 ? 'differs' : 'differ'}`)
+  if (l.price_diff) parts.push(`${l.price_diff} price ${l.price_diff === 1 ? 'differs' : 'differ'}`)
+  return parts.join(' · ')
+}
+
+/** The API sends 1.0 | 0.95 | at most 0.9 — "100%" / "95%" / "90%". */
+export function confidencePct(c: number): string {
+  return `${Math.round(c * 100)}%`
+}
+
+/** Not a component, so it lives here rather than OrderActions.tsx (react-refresh wants that file
+ *  components-only) — shared between the panel there and the order desk's own "Needs action"
+ *  count (ShopOrders.tsx), same query key either way, so mounting both never double-fetches. */
+export function useFocusCandidates() {
+  return useQuery({
+    queryKey: ['shop-focus-candidates'],
+    queryFn: () => apiGet<FocusCandidatesResp>('/shop/focus/candidates?limit=300&per_order=5'),
+    staleTime: 60_000,
+  })
 }

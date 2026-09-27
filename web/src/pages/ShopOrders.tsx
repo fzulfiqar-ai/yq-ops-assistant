@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Copy, ExternalLink, Link2, MessageCircle, X, Check, Loader2,
-  Phone, Mail, PackageX, ChevronRight, AlertTriangle, ChevronDown,
+  Phone, Mail, PackageX, ChevronRight,
 } from 'lucide-react'
 import { apiGet, apiPost, ApiError, API_BASE } from '@/lib/api'
 import { getSessionSafe } from '@/lib/supabase'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
-import { bhd, fmtDate, num } from '@/lib/format'
+import { bhd, num } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -22,9 +22,12 @@ import { DataTable, Stat, type Column } from '@/components/DataTable'
 import {
   ACTION_LABEL, AssignBox, AssignmentQueue, ConfirmEditor, CustomerWhatsApp, STATUS_LABEL,
   STATUS_TONE as MARKET_STATUS_TONE,
-  CancelReasonPicker, InvoiceBox, PaymentBox, PaymentPill, ReturnBox,
+  CancelReasonPicker, FocusExceptionsPanel, ReturnBox,
 } from '@/pages/shop-ops/OrderActions'
-import { apiDetail, cancelReady, cancelReasonLabel, minimumGapText, PAYMENT_LABEL } from '@/pages/shop-ops/pipeline'
+import {
+  apiDetail, attributionLabel, cancelReady, cancelReasonLabel, minimumGapText, PAYMENT_LABEL,
+  shopRepLine, useFocusCandidates,
+} from '@/pages/shop-ops/pipeline'
 
 // ── types (kept close to docs/SHOP.md — fields we're not certain about stay optional) ──
 
@@ -126,7 +129,9 @@ interface ShopMe {
 }
 
 const STATUSES = ['new', 'confirmed', 'packed', 'out_for_delivery', 'delivered', 'cancelled'] as const
-type StatusFilter = 'all' | 'unassigned' | (typeof STATUSES)[number]
+// 'needs_action' is a computed view (item 4, R7a), not a real status: it maps to no `status`
+// filter on the API call and is client-filtered afterwards (see DeskOrders).
+type StatusFilter = 'all' | 'unassigned' | 'needs_action' | (typeof STATUSES)[number]
 
 /**
  * Three buckets, not six statuses. Standing in a shop the only questions are
@@ -152,6 +157,38 @@ const STOCK_LABEL: Record<string, string> = { in_stock: 'In stock', low_stock: '
 const STOCK_TONE: Record<string, BadgeTone> = { in_stock: 'green', low_stock: 'amber', out_of_stock: 'rose' }
 function StockPill({ status }: { status: string }) {
   return <Badge tone={STOCK_TONE[status] || 'grey'}>{STOCK_LABEL[status] || status}</Badge>
+}
+
+/** The R3 Payment column/pills, the PaymentBox and the free-text Focus invoice inputs are gone
+ *  (item 6, R7a) — this is the one thing left to say about Focus on an order: it already has a
+ *  linked invoice, from either the old manual entry or a Focus-exceptions Accept. */
+function InvoicedBadge({ invoiceNo }: { invoiceNo?: string | null }) {
+  if (!invoiceNo) return null
+  return <Badge tone="green">Invoiced in Focus: {invoiceNo}</Badge>
+}
+
+/** "2d" / "3h" / "45m" — compact enough to sit inside a filter chip. */
+function ageCompact(mins: number): string {
+  if (mins < 60) return `${Math.max(0, Math.round(mins))}m`
+  const hours = mins / 60
+  if (hours < 24) return `${Math.round(hours)}h`
+  return `${Math.round(hours / 24)}d`
+}
+
+/** A Received order past the SLA setting — the same lateness the "Needs action" chip counts. */
+function isLateReceived(r: { status: string; created_at?: string | null }, slaMin: number): boolean {
+  if (r.status !== 'new' || !r.created_at) return false
+  const t = Date.parse(r.created_at)
+  return Number.isFinite(t) && (Date.now() - t) / 60000 > slaMin
+}
+
+/** Minutes since the oldest of these rows was created — null with nothing to measure. Kept as its
+ *  own named function (not inlined in DeskOrders) so the impure Date.now() read stays out of a
+ *  component body, same as relTime()/isLateReceived() above (react-hooks/purity). */
+function oldestAgeMin(rows: { created_at?: string | null }[]): number | null {
+  const times = rows.map((r) => Date.parse(r.created_at || '')).filter((t) => Number.isFinite(t))
+  if (!times.length) return null
+  return Math.max(0, Math.floor((Date.now() - Math.min(...times)) / 60000))
 }
 
 function fmtDateTime(iso?: string | null): string {
@@ -196,6 +233,11 @@ function eventLabel(event: string, detail?: Record<string, unknown> | null): str
     if (detail?.rep) return 'Reminder sent to the rep'
     return 'Reminder attempted · rep not reached'
   }
+  if (event === 'reminded:summary') {
+    const total = Number(detail?.total || 0)
+    const reached = Number(detail?.reached || 0)
+    return reached > 0 ? `Reminded ${total}× — rep reached ${reached}×` : `Reminded ${total}× — rep not reached`
+  }
   // R3 pipeline events
   if (event === 'payment') {
     const to = String(detail?.to || '')
@@ -224,6 +266,23 @@ function cancelSummary(o: { cancel_reason?: string | null; cancel_reason_code?: 
   const text = (o.cancel_reason || '').trim()
   if (!code && !text) return null
   return code && text && text.toLowerCase() !== code.toLowerCase() ? `${code} · ${text}` : code || text
+}
+
+/** An old unconfirmed order can carry dozens of 'reminded' rows (one per retry) — collapse them
+ *  into one summary line at the latest reminder's slot instead of a wall of identical entries
+ *  (item 5, R7a). Events arrive oldest-first (app/shop.py _order_events .order("id")), so the
+ *  summary is reinserted just before the first surviving event that is newer than it. */
+function collapseReminders(events: OrderEvent[]): OrderEvent[] {
+  const reminded = events.filter((e) => e.event === 'reminded')
+  if (reminded.length < 2) return events
+  const reached = reminded.filter((e) => e.detail?.rep).length
+  const latestTs = reminded.reduce((max, e) => (Date.parse(e.ts) > Date.parse(max) ? e.ts : max), reminded[0].ts)
+  const summary: OrderEvent = { ts: latestTs, event: 'reminded:summary', detail: { total: reminded.length, reached } }
+  const rest = events.filter((e) => e.event !== 'reminded')
+  const at = rest.findIndex((e) => Date.parse(e.ts) > Date.parse(latestTs))
+  if (at === -1) rest.push(summary)
+  else rest.splice(at, 0, summary)
+  return rest
 }
 
 // ── notify_result (app/shop_notify.py) ────────────────────────────────────────
@@ -466,39 +525,38 @@ function MyLinkCard({
   )
 }
 
-function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => void; onChanged: () => void }) {
+function OrderDrawer({
+  id, onClose, onChanged, readOnly,
+}: { id: number; onClose: () => void; onChanged: () => void; readOnly?: boolean }) {
   const toast = useToast()
   const qc = useQueryClient()
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
-  const [note, setNote] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [reassigning, setReassigning] = useState(false)
-  // R3: a staff cancel names its reason; Delivered may carry the Focus invoice; returns are recorded on delivered orders
+  // R3: a staff cancel names its reason; returns are recorded on delivered orders
   const [cancelling, setCancelling] = useState(false)
   const [cancel, setCancel] = useState({ reason_code: '', note: '' })
-  const [invoiceNo, setInvoiceNo] = useState('')
   const [returning, setReturning] = useState(false)
 
   const refetchOrder = () => {
     qc.invalidateQueries({ queryKey: ['shop-order', id] })
     qc.invalidateQueries({ queryKey: ['shop-assignment-queue'] })
-    qc.invalidateQueries({ queryKey: ['shop-focus-recon'] })
+    qc.invalidateQueries({ queryKey: ['shop-focus-candidates'] })
     onChanged()
   }
 
   async function setStatus(next: string) {
     setBusy(next)
     try {
-      const body: Record<string, unknown> = { status: next, note: note.trim() || undefined }
+      const body: Record<string, unknown> = { status: next }
       if (next === 'cancelled') {
         body.reason_code = cancel.reason_code
         body.note = cancel.note.trim() || undefined
       }
-      if (next === 'delivered' && invoiceNo.trim()) body.focus_invoice_no = invoiceNo.trim()
       await apiPost(`/shop/orders/${id}/status`, body)
       toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
-      setNote(''); setInvoiceNo(''); setCancelling(false); setCancel({ reason_code: '', note: '' })
+      setCancelling(false); setCancel({ reason_code: '', note: '' })
       refetchOrder()
     } catch (e) {
       toast(apiDetail(e, 'Could not update the order.'), 'error')
@@ -524,7 +582,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
             {data && (
               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 <StatusPill status={data.status} />
-                <PaymentPill status={data.payment_status} orderStatus={data.status} />
+                <InvoicedBadge invoiceNo={data.focus_invoice_no} />
                 {!!data.returned_bhd && <Badge tone="rose">Returned {bhd(data.returned_bhd, 3)}</Badge>}
                 <NotNotifiedBadge status={data.status} failed={notifyFailed(data.notify_result, data.created_at)} attempts={attemptsOf(data.notify_result)} />
               </div>
@@ -542,25 +600,24 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
             <section>
               <div className="mb-1.5 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 <span>Salesman</span>
-                {!unassigned && !reassigning && data.status !== 'delivered' && data.status !== 'cancelled' && (
+                {!readOnly && !unassigned && !reassigning && data.status !== 'delivered' && data.status !== 'cancelled' && (
                   <button type="button" onClick={() => setReassigning(true)} className="text-[11px] font-semibold normal-case tracking-normal text-primary hover:underline">Reassign</button>
                 )}
               </div>
-              {unassigned || reassigning ? (
+              {!readOnly && (unassigned || reassigning) ? (
                 <AssignBox orderId={id} currentSalesmanId={data.salesman_id ?? null} canBindShop={Boolean(data.customer_id)} shopName={data.customer_shop}
                   onDone={() => { setReassigning(false); refetchOrder() }} />
               ) : (
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border p-3 text-sm">
-                  <span className="font-semibold">{data.salesman_name}</span>
-                  {data.attribution_source && <Badge tone="grey">{data.attribution_source.replace(/_/g, ' ')}</Badge>}
+                  <span className="font-semibold">{data.salesman_name || 'Unassigned'}</span>
+                  {data.attribution_source && <Badge tone="grey">{attributionLabel(data.attribution_source, data.salesman_name)}</Badge>}
                   {data.attribution_conflict && <Badge tone="amber">{data.source === 'salesman' ? 'Another rep’s shop' : `Referral conflict${data.referral_code ? ` · /${data.referral_code}` : ''}`}</Badge>}
                   {data.expected_delivery && <span className="ml-auto text-[12px] text-muted-foreground">Expected: {data.expected_delivery}</span>}
                 </div>
               )}
               {shopRep && (
                 <p className="mt-1.5 text-[11.5px] text-muted-foreground">
-                  Shop’s rep: {shopRepName ? <b className="text-foreground">{shopRepName}</b> : 'not settled yet'}
-                  {shopRep.salesman_name ? ' (assigned by the office)' : shopRep.sticky_name ? ' (first rep to confirm)' : shopRep.first_ref ? ` · first link /${shopRep.first_ref}` : ''}
+                  {shopRepLine(shopRep, data.salesman_name)}
                   {shopRepName && data.salesman_id && shopRep.salesman_id !== data.salesman_id && shopRep.sticky_salesman_id !== data.salesman_id && !shopRep.salesman_id
                     ? ' — this order is with a different rep' : ''}
                 </p>
@@ -645,33 +702,22 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
               )}
             </section>
 
-            {data.status === 'new' && !unassigned && (
-              confirming ? (
-                <ConfirmEditor orderId={id} lines={data.lines || []} onCancel={() => setConfirming(false)} onDone={() => { setConfirming(false); refetchOrder() }} />
-              ) : (
-                <Button type="button" onClick={() => setConfirming(true)} className="w-full"><Check size={14} /> Confirm order (adjust quantities)</Button>
-              )
+            {data.status === 'new' && !unassigned && confirming && (
+              <ConfirmEditor orderId={id} lines={data.lines || []} onCancel={() => setConfirming(false)} onDone={() => { setConfirming(false); refetchOrder() }} />
             )}
             {data.whatsapp_url && data.status !== 'new' && <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />}
 
-            {data.status === 'delivered' && (
+            {data.status === 'delivered' && (returning || !readOnly || !!data.returned_bhd) && (
               <section className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">After delivery</div>
-                <div className="rounded-xl border p-3">
-                  <div className="mb-1.5 flex items-center justify-between text-[12px] font-semibold">
-                    <span>Focus invoice</span>
-                    {data.focus_invoice_no && <code className="rounded bg-secondary px-1.5 py-0.5 text-[12px]">{data.focus_invoice_no}</code>}
-                  </div>
-                  <InvoiceBox orderId={id} current={data.focus_invoice_no} onDone={refetchOrder} />
-                  {!data.focus_invoice_no && <p className="mt-1.5 text-[11px] text-muted-foreground">Without it this order sits in the Focus check as “no invoice”.</p>}
-                </div>
-                <PaymentBox orderId={id} status={data.payment_status} method={data.payment_method} total={data.total_confirmed_bhd ?? data.total_bhd} onDone={refetchOrder} />
                 {returning ? (
                   <ReturnBox orderId={id} lines={data.lines || []} onCancel={() => setReturning(false)} onDone={() => { setReturning(false); refetchOrder() }} />
-                ) : (
+                ) : !readOnly ? (
                   <button type="button" onClick={() => setReturning(true)} className="h-10 w-full rounded-xl border border-[#f3c9d2] text-[12.5px] font-semibold text-[#9f1239] hover:bg-[#fff7f8]">
                     Record a return{data.returned_bhd ? ` (so far ${bhd(data.returned_bhd, 3)})` : ''}
                   </button>
+                ) : (
+                  <p className="text-[12.5px] text-muted-foreground">Returned so far: {bhd(data.returned_bhd, 3)}</p>
                 )}
               </section>
             )}
@@ -687,7 +733,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
               <section>
                 <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Timeline</div>
                 <ul className="space-y-2">
-                  {data.events.map((e, i) => (
+                  {collapseReminders(data.events).map((e, i) => (
                     <li key={i} className="flex gap-2 text-[12px]">
                       <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
                       <div>
@@ -709,7 +755,7 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
           </div>
         )}
 
-        {data && actions.length > 0 && !confirming && (
+        {data && actions.length > 0 && !confirming && !readOnly && (
           <div className="sticky bottom-0 space-y-2 border-t bg-card p-4">
             {cancelling ? (
               <div className="space-y-2 rounded-xl border border-[#f3c9d2] bg-[#fff7f8] p-3">
@@ -723,20 +769,28 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
               </div>
             ) : (
               <>
-                <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note to the shop (optional) — goes in their update email" aria-label="Note to the shop" />
-                {actions.includes('delivered') && (
-                  <Input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} placeholder="Focus invoice no (optional, with Delivered)" maxLength={40} spellCheck={false} className="font-mono" />
-                )}
+                {/* Received always shows Confirm first (it opens the quantity editor above) and
+                   Cancel second — never just Cancel on its own (item 2, R7a). Every other next
+                   status (packed / on the way / delivered) is a plain forward step. */}
                 <div className="flex flex-wrap gap-2">
-                  {actions.filter((a) => a !== 'confirmed' || unassigned).map((a) => (
-                    <Button key={a} size="sm" variant={a === 'cancelled' ? 'destructive' : 'default'}
-                      onClick={() => (a === 'cancelled' ? setCancelling(true) : setStatus(a))} disabled={busy !== null || (a === 'confirmed' && unassigned)}>
+                  {data.status === 'new' && (
+                    <Button type="button" onClick={() => setConfirming(true)} disabled={unassigned || busy !== null} className="flex-1">
+                      <Check size={14} /> Confirm order
+                    </Button>
+                  )}
+                  {actions.filter((a) => a !== 'confirmed' && a !== 'cancelled').map((a) => (
+                    <Button key={a} size="sm" onClick={() => setStatus(a)} disabled={busy !== null}>
                       {busy === a ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
                       {actionLabel(a)}
                     </Button>
                   ))}
+                  {actions.includes('cancelled') && (
+                    <Button type="button" size="sm" variant="destructive" onClick={() => setCancelling(true)} disabled={busy !== null}>
+                      <X size={14} /> Cancel order
+                    </Button>
+                  )}
                 </div>
-                {unassigned && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
+                {unassigned && data.status === 'new' && <p className="text-[11.5px] text-muted-foreground">Assign a salesman before confirming.</p>}
               </>
             )}
           </div>
@@ -746,119 +800,60 @@ function OrderDrawer({ id, onClose, onChanged }: { id: number; onClose: () => vo
   )
 }
 
-// ── R3: the Focus check (delivered orders vs the Focus ledger, by invoice) ────
-
-interface ReconRow {
-  order_id: number
-  order_no: string
-  delivered_at?: string | null
-  customer_shop?: string | null
-  salesman_name?: string | null
-  salesman_focus_name?: string | null
-  order_total_bhd?: number | null
-  payment_status?: string | null
-  focus_invoice_no?: string | null
-  invoice_total_bhd?: number | null
-  invoice_date?: string | null
-  focus_salesman?: string | null
-  amount_diff_bhd?: number | null
-  flags: string[]
-  is_test?: boolean
-}
-interface ReconResp { rows: ReconRow[]; count: number; issues: number; hint?: string; ledger_as_of?: string | null }
-
-// "Not in the uploaded ledger", never "not in Focus": the check reads the ledger as uploaded up to
-// ledger_as_of, and a recent invoice is simply not uploaded yet.
-const RECON_FLAG_LABEL: Record<string, string> = {
-  missing_invoice: 'No invoice', invoice_not_found: 'Not in the uploaded ledger', salesman_mismatch: 'Salesman differs',
-  amount_mismatch: 'Amount differs', invoice_reused: 'Invoice on more than one order',
-}
-
-function FocusCheck({ onOpen, onChanged }: { onOpen: (id: number) => void; onChanged: () => void }) {
-  const [open, setOpen] = useState(false)
-  const [showAll, setShowAll] = useState(false)
-  const { data, isLoading } = useQuery({ queryKey: ['shop-focus-recon'], queryFn: () => apiGet<ReconResp>('/shop/focus-recon'), staleTime: 60_000 })
-  const rows = (data?.rows || []).filter((r) => !r.is_test)
-  const issues = rows.filter((r) => r.flags.length)
-  const shown = showAll ? rows : issues
-  return (
-    <section className="mb-5 rounded-[18px] border p-4" aria-labelledby="focus-check">
-      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="flex w-full items-center justify-between gap-2 text-left">
-        <h2 id="focus-check" className="flex items-center gap-2 font-display text-[15px] font-bold">
-          {issues.length ? <AlertTriangle size={16} className="text-amber-600" /> : <Check size={16} className="text-emerald-600" />}
-          Focus check
-          <span className="text-[12.5px] font-medium text-muted-foreground">
-            {isLoading ? 'checking…' : data?.hint ? 'not available yet' : issues.length ? `${issues.length} of ${rows.length} delivered orders need a look` : `${rows.length} delivered orders match`}
-          </span>
-        </h2>
-        <ChevronDown size={16} className={cn('shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
-      </button>
-      {open && (
-        <div className="mt-3">
-          <p className="mb-2 text-[12px] text-muted-foreground">
-            Delivered marketplace orders against the uploaded Focus sales ledger
-            {data?.ledger_as_of ? <> (sales up to <b>{fmtDate(data.ledger_as_of)}</b>)</> : null}, by invoice number: an order with no invoice recorded,
-            an invoice the upload does not carry yet, a different salesman on the invoice, a total that differs by more than 0.005 BHD,
-            or one invoice number recorded on more than one order.
-          </p>
-          {data?.hint ? (
-            <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">{data.hint}</p>
-          ) : shown.length === 0 ? (
-            <p className="text-[13px] text-muted-foreground">{rows.length ? 'Every delivered order has a matching Focus invoice.' : 'No delivered orders yet.'}</p>
-          ) : (
-            <ul className="divide-y overflow-hidden rounded-xl border">
-              {shown.map((r) => (
-                <li key={r.order_id} className="grid gap-2 p-3 text-[12.5px] sm:grid-cols-[1fr_auto] sm:items-center">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button type="button" onClick={() => onOpen(r.order_id)} className="font-semibold text-foreground hover:text-primary hover:underline">{r.order_no}</button>
-                      {r.flags.map((f) => <Badge key={f} tone={f === 'missing_invoice' || f === 'invoice_not_found' ? 'amber' : 'rose'}>{RECON_FLAG_LABEL[f] || f}</Badge>)}
-                      {!r.flags.length && <Badge tone="green">Matches</Badge>}
-                      <PaymentPill status={r.payment_status} orderStatus="delivered" />
-                    </div>
-                    <div className="mt-0.5 text-muted-foreground">
-                      {[r.customer_shop, r.salesman_name, fmtDateTime(r.delivered_at)].filter(Boolean).join(' · ')} · order {bhd(r.order_total_bhd, 3)}
-                      {r.focus_invoice_no ? ` · invoice ${r.focus_invoice_no}${r.invoice_total_bhd != null ? ` = ${bhd(r.invoice_total_bhd, 3)}` : ''}${r.focus_salesman ? ` (${r.focus_salesman})` : ''}` : ''}
-                      {r.amount_diff_bhd ? ` · diff ${bhd(r.amount_diff_bhd, 3)}` : ''}
-                    </div>
-                  </div>
-                  {r.flags.includes('missing_invoice') && (
-                    <div className="sm:w-[19rem]"><InvoiceBox orderId={r.order_id} current={null} onDone={onChanged} /></div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-          {rows.length > issues.length && !data?.hint && (
-            <button type="button" onClick={() => setShowAll((v) => !v)} className="mt-2 text-[12px] font-semibold text-primary hover:underline">
-              {showAll ? 'Show only the ones that need a look' : `Show all ${rows.length} delivered orders`}
-            </button>
-          )}
-        </div>
-      )}
-    </section>
-  )
-}
+// The old "Focus check" (delivered orders vs the Focus ledger, via /shop/focus-recon) is gone —
+// replaced by OrderActions.FocusExceptionsPanel, fed by /shop/focus/candidates (item 6, R7a).
 
 function DeskOrders({
-  meData, rows, isLoading, companyKpis, needsCompanyKpi, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus,
+  meData, rows, isLoading, counts, status, setStatus, qRaw, setQRaw, onRefresh, queueFocus, readOnly,
 }: {
   meData?: ShopMe
   rows: ShopOrderRow[]
   isLoading: boolean
-  companyKpis: { orders_7d: number; orders_30d: number; value_30d_bhd: number; customers_30d: number } | null
-  needsCompanyKpi: boolean
+  counts: StatusCounts
   status: StatusFilter
   setStatus: (s: StatusFilter) => void
   qRaw: string
   setQRaw: (v: string) => void
   onRefresh: () => void
   queueFocus?: boolean
+  readOnly?: boolean
 }) {
   const qc = useQueryClient()
   const [openId, setOpenId] = useState<number | null>(null)
   const openRow = (r: ShopOrderRow) => setOpenId(r.id)
-  const refreshRecon = () => { qc.invalidateQueries({ queryKey: ['shop-focus-recon'] }); onRefresh() }
+  const refreshFocus = () => { qc.invalidateQueries({ queryKey: ['shop-focus-candidates'] }); onRefresh() }
+
+  // "Needs action" (item 4, R7a) — Received orders past the SLA, unassigned orders and open Focus
+  // exceptions, all in one number. The desk's own list is scoped by whichever status the office
+  // has selected, so the late-Received signal is read from a small dedicated fetch instead
+  // (independent of that filter) — the same /shop/orders endpoint, just always scanning 'new'.
+  const receivedScan = useQuery({
+    queryKey: ['shop-orders-received-scan'],
+    queryFn: () => apiGet<ShopOrdersResp>('/shop/orders?status=new&limit=100'),
+    staleTime: 30_000,
+  })
+  const queueQuery = useQuery({
+    queryKey: ['shop-assignment-queue'],
+    queryFn: () => apiGet<{ orders: unknown[]; count: number; sla_min?: number }>('/shop/assignment-queue'),
+    staleTime: 30_000,
+  })
+  const focusQuery = useFocusCandidates()
+
+  // shop_assign_sla_min (the only SLA any query on this page already reads — AssignmentQueue's
+  // own `sla_min`, shared here via the same query key); shop_confirm_sla_min isn't exposed to the
+  // web anywhere yet, so 120 min is the documented fallback.
+  const slaMin = queueQuery.data?.sla_min ?? 120
+  const receivedRows = receivedScan.data?.orders || []
+  const oldestReceivedMin = oldestAgeMin(receivedRows)
+  const lateReceivedCount = receivedRows.filter((r) => isLateReceived(r, slaMin)).length
+  const unassignedCount = queueQuery.data?.count ?? 0
+  const focusExceptionsCount = focusQuery.data?.count ?? 0
+  const needsActionCount = lateReceivedCount + unassignedCount + focusExceptionsCount
+  const totalCount = Object.values(counts).reduce((s, n) => s + (n || 0), 0)
+
+  const displayRows = status === 'needs_action'
+    ? rows.filter((r) => isLateReceived(r, slaMin) || (!r.salesman_id && !r.salesman_name))
+    : rows
 
   const cols: Column<ShopOrderRow>[] = [
     { key: 'order_no', label: 'Order', render: (_, r) => (
@@ -886,14 +881,9 @@ function DeskOrders({
           <StatusPill status={r.status} />
           {r.order_kind === 'small' && <Badge tone="accent" title={minimumGapText(r) || undefined}>Small</Badge>}
           <NotNotifiedBadge status={r.status} failed={rowNotifyFailed(r)} attempts={r.notify_attempts} />
-          {r.status === 'cancelled' && cancelSummary(r) && <span className="text-[11px] text-muted-foreground">{cancelSummary(r)}</span>}
-        </span>
-      ) },
-    { key: 'payment_status', label: 'Payment', render: (_, r) => (
-        <span className="inline-flex flex-wrap items-center gap-1.5">
-          <PaymentPill status={r.payment_status} orderStatus={r.status} />
           {!!r.returned_bhd && <Badge tone="rose">Returned {bhd(r.returned_bhd, 3)}</Badge>}
-          {r.status === 'delivered' && !r.focus_invoice_no && <Badge tone="amber">No invoice</Badge>}
+          <InvoicedBadge invoiceNo={r.focus_invoice_no} />
+          {r.status === 'cancelled' && cancelSummary(r) && <span className="text-[11px] text-muted-foreground">{cancelSummary(r)}</span>}
         </span>
       ) },
     { key: 'has_backorder', label: 'Backorder', render: (_, r) => (
@@ -913,21 +903,35 @@ function DeskOrders({
     <div>
       <PageHeader title="Shop Orders" subtitle="Orders from the marketplace, salesman links and the shared catalog" />
 
-      <AssignmentQueue onChanged={onRefresh} highlight={queueFocus} />
+      {!readOnly && <AssignmentQueue onChanged={onRefresh} highlight={queueFocus} />}
 
-      <FocusCheck onOpen={(id) => setOpenId(id)} onChanged={refreshRecon} />
+      <FocusExceptionsPanel onOpenOrder={(id) => setOpenId(id)} onChanged={refreshFocus} readOnly={readOnly} />
 
-      <MyLinkCard me={meData} isAdmin companyKpis={needsCompanyKpi ? companyKpis : null} />
+      {meData?.salesman && <MyLinkCard me={meData} isAdmin companyKpis={null} />}
 
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <div className="flex gap-1.5 overflow-x-auto pb-1">
-          {(['all', ...STATUSES] as StatusFilter[]).map((s) => (
-            <button key={s} onClick={() => setStatus(s)}
-              className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition duration-150 motion-reduce:transition-none',
-                status === s ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
-              {s === 'all' ? 'All' : STATUS_LABEL[s] || s}
-            </button>
-          ))}
+          <button onClick={() => setStatus('needs_action')}
+            className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium tabular-nums transition duration-150 motion-reduce:transition-none',
+              status === 'needs_action' ? 'border-primary bg-primary text-primary-foreground'
+                : needsActionCount > 0 ? 'border-[#f3c9d2] bg-[#fff7f8] text-[#9f1239] hover:border-[#9f1239]/50' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
+            Needs action{needsActionCount > 0 ? ` ${needsActionCount}` : ''}
+          </button>
+          {(['all', ...STATUSES] as const).map((s) => {
+            const n = s === 'all' ? totalCount : (counts[s] ?? 0)
+            const late = s === 'new' && oldestReceivedMin != null && oldestReceivedMin > slaMin
+            const label = s === 'all' ? `All ${n}`
+              : s === 'new' ? `Received ${n}${oldestReceivedMin != null ? ` · oldest ${ageCompact(oldestReceivedMin)}` : ''}`
+                : `${STATUS_LABEL[s] || s} ${n}`
+            return (
+              <button key={s} onClick={() => setStatus(s)}
+                className={cn('shrink-0 rounded-full border px-3.5 py-1.5 text-[13px] font-medium tabular-nums transition duration-150 motion-reduce:transition-none',
+                  status === s ? 'border-primary bg-primary text-primary-foreground'
+                    : late ? 'border-[#f3c9d2] bg-[#fff7f8] text-[#9f1239]' : 'border-border bg-card text-muted-foreground hover:border-primary/40')}>
+                {label}
+              </button>
+            )
+          })}
         </div>
         <div className="ml-auto flex items-center gap-2 rounded-lg border bg-card px-3 shadow-sm focus-within:border-primary/40">
           <Search size={15} className="text-muted-foreground" />
@@ -939,12 +943,14 @@ function DeskOrders({
       {isLoading ? (
         <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)}</div>
       ) : (
-        <DataTable rows={rows} cols={cols} searchable={false} exportName="yq-shop-orders"
-          empty="No orders yet — customers order from your shared catalog link (see “My link” above) and orders will appear here automatically." />
+        <DataTable rows={displayRows} cols={cols} searchable={false} exportName="yq-shop-orders"
+          empty={status === 'needs_action'
+            ? 'Nothing needs action right now.'
+            : 'No orders yet — customers order from your shared catalog link (see “My link” above) and orders will appear here automatically.'} />
       )}
 
       {openId != null && (
-        <OrderDrawer id={openId} onClose={() => setOpenId(null)} onChanged={refreshRecon} />
+        <OrderDrawer id={openId} onClose={() => setOpenId(null)} onChanged={refreshFocus} readOnly={readOnly} />
       )}
     </div>
   )
@@ -988,7 +994,7 @@ function OrderCard({ row, onOpen }: { row: ShopOrderRow; onOpen: () => void }) {
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <StatusPill status={row.status} />
-        <PaymentPill status={row.payment_status} orderStatus={row.status} />
+        <InvoicedBadge invoiceNo={row.focus_invoice_no} />
         {row.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
         {row.has_backorder && <Badge tone="amber">Backorder</Badge>}
         {row.order_kind === 'small' && <Badge tone="accent">Small order</Badge>}
@@ -1010,9 +1016,9 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
   const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmCancel, setConfirmCancel] = useState(false)
-  // R3: the cancel names its reason (chips); Delivered may carry the Focus invoice number
+  // R3: the cancel names its reason (chips). The old free-text Focus invoice number at Delivered
+  // is gone (item 6, R7a) — invoices are matched from the Focus exceptions panel on the desk now.
   const [cancel, setCancel] = useState({ reason_code: '', note: '' })
-  const [invoiceNo, setInvoiceNo] = useState('')
 
   async function setStatus(next: string) {
     setBusy(next)
@@ -1022,12 +1028,10 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
         body.reason_code = cancel.reason_code
         body.note = cancel.note.trim() || undefined
       }
-      if (next === 'delivered' && invoiceNo.trim()) body.focus_invoice_no = invoiceNo.trim()
       await apiPost(`/shop/orders/${id}/status`, body)
       toast(next === 'cancelled' ? 'Order cancelled.' : `Order marked ${STATUS_LABEL[next] || next}.`, 'success')
       setConfirmCancel(false)
       setCancel({ reason_code: '', note: '' })
-      setInvoiceNo('')
       qc.invalidateQueries({ queryKey: ['shop-order', id] })
       onChanged()
     } catch (e) {
@@ -1055,17 +1059,6 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
     <div className="space-y-2">
       {data.whatsapp_url && data.status !== 'new' && (
         <CustomerWhatsApp url={data.whatsapp_url} first={(data.customer_name || '').split(' ')[0]} />
-      )}
-      {forward === 'delivered' && (
-        <input
-          value={invoiceNo}
-          onChange={(e) => setInvoiceNo(e.target.value)}
-          placeholder="Focus invoice no (optional)"
-          aria-label="Focus invoice number"
-          maxLength={40}
-          spellCheck={false}
-          className={cn('h-11 w-full rounded-xl border bg-white px-3.5 font-mono text-[13px] outline-none focus:border-[#6D4091]', HAIRLINE, INK)}
-        />
       )}
       {forward === 'confirmed' ? (
         <button
@@ -1148,7 +1141,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
         <div className="space-y-4 p-4">
           <div className="flex flex-wrap items-center gap-1.5">
             <StatusPill status={data.status} />
-            <PaymentPill status={data.payment_status} orderStatus={data.status} />
+            <InvoicedBadge invoiceNo={data.focus_invoice_no} />
             {data.source === 'salesman' && <Badge tone="accent">You placed</Badge>}
             {data.source === 'market' && <Badge tone="accent">Marketplace</Badge>}
             {data.attribution_conflict && <Badge tone="amber">{data.source === 'salesman' ? 'Another rep’s shop' : 'Referral conflict'}</Badge>}
@@ -1163,9 +1156,6 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             </p>
           )}
           {cancelledWhy && <p className={cn('text-[12.5px]', MUTED)}>Cancelled · {cancelledWhy}</p>}
-          {data.status === 'delivered' && data.focus_invoice_no && (
-            <p className={cn('text-[11.5px]', MUTED)}>Focus invoice <code className="rounded bg-[#F3F0F6] px-1">{data.focus_invoice_no}</code></p>
-          )}
 
           {confirming && (
             <ConfirmEditor
@@ -1271,7 +1261,7 @@ function FieldOrderSheet({ id, onClose, onChanged }: { id: number; onClose: () =
             <section>
               <h3 className={cn('mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide', MUTED)}>Timeline</h3>
               <ul className="space-y-2.5">
-                {data.events.map((e, i) => (
+                {collapseReminders(data.events).map((e, i) => (
                   <li key={i} className="flex gap-2.5">
                     <span className="mt-[0.4rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6D4091]" aria-hidden="true" />
                     <div className="min-w-0">
@@ -1422,6 +1412,14 @@ export default function ShopOrders() {
   const { me } = useAuth()
   const qc = useQueryClient()
   const isAdmin = me?.role === 'admin'
+  // The management stream is adding a read-only 'management' role (web/src/lib/auth.tsx) — its
+  // helper isn't in this worktree yet, so this is a local, type-safe stand-in (`role` is widened
+  // to `string` on purpose: `me.role` is a Role union that doesn't include 'management', and
+  // comparing a literal union to a value outside it is a TS2367 build error).
+  // TODO(management-stream): replace with the real `isManagement(me)` / readOnly helper once it lands.
+  const role: string | undefined = me?.role
+  const isManagementRole = role === 'management'
+  const showDesk = isAdmin || isManagementRole
   // Deep links: the Telegram "UNASSIGNED" alert opens the queue (?queue=1); Today and Customers
   // open one order (?open=id), a stage (?bucket=progress) or a search (?q=phone).
   const [sp] = useSearchParams()
@@ -1442,9 +1440,11 @@ export default function ShopOrders() {
   const meQuery = useQuery({ queryKey: ['shop-me'], queryFn: () => apiGet<ShopMe>('/shop/me') })
 
   // The desk filters by one status, the field by a bucket of statuses (the API takes a
-  // comma list) — both collapse to a single `status` query param.
-  const statusParam = isAdmin
-    ? (status === 'all' || status === 'unassigned' ? '' : status)
+  // comma list) — both collapse to a single `status` query param. 'needs_action' (item 4, R7a)
+  // is a computed view, not a real status, so it fetches the same as 'all' and is filtered
+  // client-side (DeskOrders).
+  const statusParam = showDesk
+    ? (status === 'all' || status === 'unassigned' || status === 'needs_action' ? '' : status)
     : (BUCKETS.find((b) => b.key === bucket)?.param ?? 'new')
 
   const ordersQuery = useQuery({
@@ -1457,38 +1457,14 @@ export default function ShopOrders() {
     },
   })
 
-  const needsCompanyKpi = !!isAdmin && !!meQuery.data && meQuery.data.salesman == null
-  const companyKpiQuery = useQuery({
-    queryKey: ['shop-orders-kpi-fallback'],
-    queryFn: () => apiGet<ShopOrdersResp>('/shop/orders?limit=200'),
-    enabled: needsCompanyKpi,
-  })
-  const companyKpis = useMemo(() => {
-    if (!companyKpiQuery.data) return null
-    const rows = companyKpiQuery.data.orders || []
-    // Use the query's own fetch timestamp rather than Date.now() — a pure function of
-    // already-committed state, so this useMemo stays a pure computation during render.
-    const now = companyKpiQuery.dataUpdatedAt
-    const within = (iso: string | null | undefined, days: number) => (iso ? now - new Date(iso).getTime() <= days * 864e5 : false)
-    const r7 = rows.filter((r) => within(r.created_at, 7))
-    const r30 = rows.filter((r) => within(r.created_at, 30))
-    const custKey = (r: ShopOrderRow) => r.customer_phone || `${r.customer_name || ''}|${r.customer_shop || ''}`
-    return {
-      orders_7d: r7.length,
-      orders_30d: r30.length,
-      value_30d_bhd: r30.reduce((s, r) => s + Number(r.total_bhd || 0), 0),
-      customers_30d: new Set(r30.map(custKey)).size,
-    }
-  }, [companyKpiQuery.data, companyKpiQuery.dataUpdatedAt])
-
   const rows = ordersQuery.data?.orders || []
   const refreshList = () => {
     qc.invalidateQueries({ queryKey: ['shop-orders'] })
     qc.invalidateQueries({ queryKey: ['shop-orders-new-count'] })
-    qc.invalidateQueries({ queryKey: ['shop-orders-kpi-fallback'] })
+    qc.invalidateQueries({ queryKey: ['shop-orders-received-scan'] })
   }
 
-  if (!isAdmin) {
+  if (!showDesk) {
     return (
       <FieldOrders
         meData={meQuery.data}
@@ -1511,14 +1487,14 @@ export default function ShopOrders() {
       meData={meQuery.data}
       rows={rows}
       isLoading={ordersQuery.isLoading}
-      companyKpis={companyKpis}
-      needsCompanyKpi={needsCompanyKpi}
+      counts={ordersQuery.data?.counts || {}}
       status={status}
       setStatus={setStatus}
       qRaw={qRaw}
       setQRaw={setQRaw}
       onRefresh={refreshList}
       queueFocus={queueFocus}
+      readOnly={isManagementRole}
     />
   )
 }
