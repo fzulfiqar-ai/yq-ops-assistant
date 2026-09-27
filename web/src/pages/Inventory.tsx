@@ -18,6 +18,23 @@ interface Row {
   days_cover: number | null
   suggested_reorder_qty: number
   status: string
+  /** R7d: the item's stock at COST (Focus average cost, else landed) — null when no usable cost */
+  cost_value_bhd?: number | null
+  cost_source?: string | null
+}
+/** R7d: stock at COST (app/metrics.py stock_cost_summary) */
+interface StockCost {
+  cost_value_bhd: number
+  sell_value_bhd: number
+  items_held: number
+  items_costed: number
+  items_uncosted: number
+  uncosted_sell_value_bhd: number
+  cost_coverage_pct: number | null
+  dead_cost_bhd: number
+  dead_sell_bhd: number
+  dead_count: number
+  dead_uncosted: number
 }
 interface Warehouse { warehouse_name: string; value_bhd: number; qty: number; items: number }
 interface Receipt { voucher: string; received_on: string; items: number; units: number; value_bhd: number }
@@ -34,8 +51,10 @@ interface Reserved {
 interface Data {
   rows: Row[]
   by_status: Record<string, number>
+  /** the Focus stock balance is valued at the SELLING rate */
   stock_value: number
   stock_value_cost: number
+  stock_cost?: StockCost | null
   stock_qty: number
   by_warehouse: Warehouse[]
   /** Material Receipt Notes in the last 14 days — a shipment that just landed */
@@ -75,6 +94,12 @@ const cols: Column<Row>[] = [
     },
   },
   { key: 'suggested_reorder_qty', label: 'Reorder', align: 'right', render: (v) => (Number(v) > 0 ? <span className="font-semibold text-primary">{num(Number(v))}</span> : '—') },
+  {
+    key: 'cost_value_bhd', label: 'At cost', align: 'right',
+    render: (v, r) => (v == null
+      ? <span className="text-muted-foreground" title={Number(r.current_stock) > 0 ? 'No usable cost on file' : undefined}>—</span>
+      : <span className="tabular-nums" title={r.cost_source === 'focus_avg' ? 'Focus average cost' : 'Latest landed cost'}>{bhd(Number(v), 0)}</span>),
+  },
 ]
 
 export default function Inventory() {
@@ -82,6 +107,7 @@ export default function Inventory() {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['report', 'inventory'], queryFn: () => apiGet<Data>('/report/inventory') })
   const s = data?.by_status || {}
   const alerts = (s.urgent_out_of_stock || 0) + (s.low_stock || 0)
+  const sc = data?.stock_cost
   return (
     <div>
       <PageHeader title="Inventory" subtitle="Velocity-aware stock health — what to reorder, what's stuck" />
@@ -92,15 +118,21 @@ export default function Inventory() {
       ) : (
         <>
           <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-6">
-            <Stat label="Stock value (selling)" value={bhd(data.stock_value, 0)} tone="violet" />
-            {data.stock_value_cost > 0 && (
-              <Stat label="Stock value (at cost)" value={bhd(data.stock_value_cost, 0)} tone="blue"
-                foot="capital invested" />
+            {sc ? (
+              <Stat label="Stock value (at cost)" value={bhd(sc.cost_value_bhd, 0)} tone="violet"
+                foot={sc.items_uncosted > 0
+                  ? `capital invested · Focus average cost, else landed · ${num(sc.items_uncosted)} item${sc.items_uncosted === 1 ? '' : 's'} without a usable cost`
+                  : 'capital invested · Focus average cost, else landed'} />
+            ) : (
+              <Stat label="Stock value (at cost)" value="—" foot="not available right now" />
             )}
+            <Stat label="Stock value (at selling price)" value={bhd(data.stock_value, 0)} tone="blue"
+              foot="what it would fetch at the book rate" />
             <Stat label="Units on hand" value={num(data.stock_qty)} />
             <Stat label="Low stock (<30d)" value={num(alerts)} tone="amber" />
             <Stat label="Urgent out-of-stock" value={num(s.urgent_out_of_stock || 0)} tone="rose" />
-            <Stat label="Dead stock" value={num(s.dead_stock || 0)} />
+            <Stat label="Dead stock (at cost)" value={sc ? bhd(sc.dead_cost_bhd, 0) : num(s.dead_stock || 0)}
+              foot={sc ? `${num(sc.dead_count)} item${sc.dead_count === 1 ? '' : 's'} · no sale in 90 days` : 'items · no sale in 90 days'} />
           </div>
 
           {(data.recent_receipts?.length ?? 0) > 0 && (
@@ -182,7 +214,7 @@ export default function Inventory() {
 
           {data.by_warehouse?.length > 0 && (
             <Card className="mb-4 p-5">
-              <div className="mb-3 font-display text-base font-semibold">Stock value by warehouse / salesman</div>
+              <div className="mb-3 font-display text-base font-semibold">Stock value by warehouse / salesman <span className="text-[12px] font-normal text-muted-foreground">· at selling price</span></div>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {data.by_warehouse.slice(0, 12).map((w) => (
                   <div key={w.warehouse_name} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">

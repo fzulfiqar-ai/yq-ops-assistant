@@ -165,7 +165,7 @@ const SHOP_FIELDS: ShopField[] = [
   { key: 'shop_gap_suggestions', label: 'Gap suggestions', hint: 'How many one-tap add-ons merchants get to complete a wholesale order.', type: 'number' },
   { key: 'shop_low_stock_units', label: 'Low-stock units', hint: 'Units remaining at/below which an item shows "Only a few left."', type: 'number' },
   { key: 'shop_low_stock_days_cover', label: 'Low-stock days cover', hint: 'Days of stock cover at/below which an item is flagged low stock.', type: 'number' },
-  { key: 'shop_min_margin_pct', label: 'Minimum margin', hint: 'Margin floor over landed cost — no rule or coupon can price below this.', type: 'percent' },
+  { key: 'shop_min_margin_pct', label: 'Minimum markup', hint: 'Markup over landed cost (20% = cost × 1.2, plus VAT) — no rule or coupon can price below this floor.', type: 'percent' },
   { key: 'shop_allow_backorder', label: 'Allow backorder — merchants', hint: 'Let merchants (marketplace + share link) order a sold-out line as a backorder your rep confirms. Off: merchants see "Tell me when back" instead of Add, and a sold-out cart line cannot be sent.', type: 'toggle' },
   { key: 'shop_allow_backorder_staff', label: 'Allow backorder — salesman app', hint: 'Let reps add a sold-out line as a backorder for a shop (the office confirms it), whatever the merchant switch says. A rep’s confirmation re-price always keeps its backorder lines.', type: 'toggle' },
   { key: 'shop_stock_fresh_days', label: 'Stock snapshot freshness (days)', hint: 'Focus omits zero-balance items, so a SKU missing from the latest Stock Balance is sold out. Older than this many days, the marketplace keeps the status and prints the snapshot date beside "Sold out".', type: 'number' },

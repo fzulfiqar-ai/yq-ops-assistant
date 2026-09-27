@@ -13,11 +13,18 @@ interface Row {
   sell_now: number | null; sell_prev: number | null; sell_changed_on: string | null; sell_change_pct: number | null
   cost_now: number | null; cost_prev: number | null; last_bought_on: string | null; cost_change_pct: number | null
   cost_source?: 'po' | 'mrn' | 'supplier_est' | null
+  /** unit margins on the EX-VAT selling price (sell ÷ 1.1), recomputed by the API (R7d) */
   margin_now_pct: number | null; margin_before_pct: number | null
+  sell_now_ex_vat?: number | null
+  /** missing | implausible (a cost under 10% of the price): the margin is not to be trusted */
+  cost_flag?: 'missing' | 'implausible' | null
 }
 
 const SOURCE_LABEL: Record<string, string> = { po: 'PO', mrn: 'received', supplier_est: 'est.' }
-interface TrackerData { rows: Row[]; count: number; divisions: string[]; brands: string[]; categories: string[] }
+interface TrackerData {
+  rows: Row[]; count: number; divisions: string[]; brands: string[]; categories: string[]
+  vat_rate?: number; margin_basis?: 'ex_vat'; check_cost?: number
+}
 
 interface HistEvent {
   source: 'po' | 'mrn' | 'supplier_invoice'; event_date: string | null; vendor: string | null
@@ -55,7 +62,8 @@ function HistoryDialog({ row, onClose }: { row: Row; onClose: () => void }) {
         <div className="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-[13px]">
           {row.sell_now != null && <span className="text-muted-foreground">Selling <b className="text-foreground tabular-nums">{bhd(Number(row.sell_now), 3)}</b></span>}
           {row.cost_now != null && <span className="text-muted-foreground">Cost now <b className="text-foreground tabular-nums">{bhd(Number(row.cost_now), 3)}</b></span>}
-          {row.margin_now_pct != null && <span className="text-muted-foreground">Margin <b className="text-foreground tabular-nums">{Number(row.margin_now_pct).toFixed(0)}%</b></span>}
+          {row.margin_now_pct != null && <span className="text-muted-foreground">Margin ex-VAT <b className="text-foreground tabular-nums">{Number(row.margin_now_pct).toFixed(0)}%</b></span>}
+          {row.cost_flag === 'implausible' && <span className="font-semibold text-amber-600">Check cost: under 10% of the price</span>}
         </div>
         {isLoading ? <Skeleton className="h-48" /> : (
           <>
@@ -162,12 +170,18 @@ const costNowCol: Column<Row> = {
   ),
 }
 const marginCol: Column<Row> = {
-  key: 'margin_now_pct', label: 'Margin now', align: 'right',
-  render: (v, r) => v == null ? <span className="text-muted-foreground">—</span> : (
-    <span className={cn('font-semibold tabular-nums', Number(v) < 20 ? 'text-amber-600' : 'text-foreground')}>
-      {Number(v).toFixed(0)}%{r.margin_before_pct != null && <span className="ml-1 text-[11px] font-normal text-muted-foreground">was {Number(r.margin_before_pct).toFixed(0)}%</span>}
-    </span>
-  ),
+  key: 'margin_now_pct', label: 'Margin now (ex-VAT)', align: 'right',
+  render: (v, r) => {
+    if (r.cost_flag === 'implausible') {
+      return <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-700 dark:bg-amber-500/15 dark:text-amber-300"
+        title="The cost on file is under 10% of the price: fix the cost before trusting this margin">Check cost</span>
+    }
+    return v == null ? <span className="text-muted-foreground">—</span> : (
+      <span className={cn('font-semibold tabular-nums', Number(v) < 20 ? 'text-amber-600' : 'text-foreground')}>
+        {Number(v).toFixed(0)}%{r.margin_before_pct != null && <span className="ml-1 text-[11px] font-normal text-muted-foreground">was {Number(r.margin_before_pct).toFixed(0)}%</span>}
+      </span>
+    )
+  },
 }
 
 function sellingCols(onPick: (r: Row) => void): Column<Row>[] {
@@ -270,7 +284,7 @@ export default function PriceTracker() {
       <p className="mt-3 text-[11px] text-muted-foreground">
         {tab === 'purchase'
           ? 'Click a SKU for its full purchase timeline — every PO, goods receipt and supplier ¥ invoice. Cost source: PO rate → MRN landed → supplier estimate.'
-          : 'Sell Δ green = price went up (more margin) · Cost Δ red = supplier cost went up. Click a SKU for its full purchase history. Margin = (sell − landed base cost) ÷ sell.'}
+          : `Sell Δ green = price went up (more margin) · Cost Δ red = supplier cost went up. Click a SKU for its full purchase history. Selling prices include VAT; margin is on the ex-VAT price: (sell ÷ (1 + VAT) − cost) ÷ (sell ÷ (1 + VAT)), VAT ${Math.round((data?.vat_rate ?? 0.1) * 100)}%.`}
       </p>
 
       {hist && <HistoryDialog row={hist} onClose={() => setHist(null)} />}
