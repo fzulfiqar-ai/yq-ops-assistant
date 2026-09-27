@@ -7,12 +7,14 @@
   GET /management/attention                                         (admin + management)
       the needs-attention exceptions alone
   GET /freshness                                                    (any portal login)
-      the header chip: Focus data date and whether the marketplace answered; the invoice match
-      rate only for admin and management
+      the header chip: Focus data date and whether the marketplace answered; the invoice links
+      (match_rate: delivered orders whose Focus invoice link a person ACCEPTED, "confirmed x of y" —
+      a suggestion awaiting acceptance does not count) only for admin and management
 
-Every figure comes from app/metrics.py (the metric dictionary). The routes only gate and pick the
-period. They are GETs, so the read-only management login passes the central gate in app.auth; the
-role check sits in the route (like GET /report/{key}) so the route table in
+Every figure comes from app/metrics.py (the metric dictionary): marketplace money ex-VAT, units the
+shop asked for, the company target read as ex-VAT Accessories on business days. The routes only
+gate and pick the period. They are GETs, so the read-only management login passes the central gate
+in app.auth; the role check sits in the route (like GET /report/{key}) so the route table in
 tests/test_r1_security.py reads it as a plain "user" dependency.
 """
 # NOTE: no `from __future__ import annotations` — FastAPI must see real annotation objects.

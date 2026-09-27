@@ -10,6 +10,7 @@ import logging
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 from app.db_read import exec_sql
 from app.database import get_client
@@ -385,12 +386,15 @@ def daily_sales_mtd() -> list[dict]:
     """One row per day of the current month (anchored to the data's latest date) —
     the owner's 'daily current-month sales' dashboard chart."""
     # acc_bhd = Mobile Accessories only. Targets never include Batelco SIM sales (owner,
-    # 21-Sep-2026), so the dashboard's daily bars and pace read acc_bhd; gross_bhd stays the
-    # all-division total for the tooltip and the division chips.
+    # 21-Sep-2026); gross_bhd stays the all-division total for the tooltip and the division chips.
+    # acc_net_bhd = the same Accessories ex-VAT, giveaways out: the basis the company target is read
+    # on (app.metrics.PACE_BASIS), so the Dashboard's bars and target lines compare like with like.
     return exec_sql(
         "WITH d AS (SELECT MAX(sale_date) AS mx FROM v_sales) "
         "SELECT sale_date::text AS day, ROUND(SUM(revenue_bhd)::numeric, 2) AS gross_bhd, "
         "ROUND(SUM(CASE WHEN division = 'Accessories' THEN revenue_bhd ELSE 0 END)::numeric, 2) AS acc_bhd, "
+        "ROUND(SUM(CASE WHEN division = 'Accessories' AND NOT is_giveaway THEN net_bhd ELSE 0 END)::numeric, 3) "
+        "AS acc_net_bhd, "
         "ROUND(SUM(net_bhd)::numeric, 2) AS net_bhd, COUNT(DISTINCT invoice_no) AS orders "
         "FROM v_sales, d WHERE sale_date >= date_trunc('month', d.mx)::date "
         "GROUP BY sale_date ORDER BY sale_date"
@@ -405,39 +409,49 @@ def sales_split_mtd() -> dict:
     pay = exec_sql(
         f"SELECT sale_type, COUNT(DISTINCT invoice_no) AS orders, "
         f"ROUND(SUM(revenue_bhd)::numeric, 2) AS revenue_bhd {win} GROUP BY sale_type") or []
+    # net_ex_vat_bhd: ex-VAT, giveaways out — the Accessories row's is the month to date the company
+    # target is paced on (app.metrics.PACE_BASIS; _pace below)
     div = exec_sql(
         f"SELECT division, COUNT(DISTINCT invoice_no) AS orders, "
         f"ROUND(SUM(revenue_bhd)::numeric, 2) AS revenue_bhd, "
+        f"ROUND(COALESCE(SUM(net_bhd) FILTER (WHERE NOT is_giveaway), 0)::numeric, 3) AS net_ex_vat_bhd, "
         f"SUM(CASE WHEN is_giveaway THEN quantity ELSE 0 END) AS giveaway_qty "
         f"{win} GROUP BY division ORDER BY revenue_bhd DESC") or []
     return {"by_payment": pay, "by_division": div}
 
 
+PACE_BASIS_TEXT = ("Accessories · ex-VAT · month to date on business days · company target read as ex-VAT, "
+                   "Accessories, business days (Sun–Thu; Fri, Sat off)")
+
+
 def _pace(kpis: dict, data_date: str | None) -> dict:
-    """MTD pace vs target — 'on track for BHD X'. The target is a MOBILE ACCESSORIES target
-    (owner, 21-Sep-2026): Batelco SIM sales never count, so mtd_bhd here is the Accessories
-    division only (kpis['rev_mtd_acc']); the all-division figure stays on the revenue tile."""
-    import calendar
+    """MTD pace vs target — 'on track for BHD X' — on the ONE basis the Command Centre uses
+    (app.metrics.month_pace): the company target is read as ex-VAT, Accessories only (SIM never
+    counts, owner 21-Sep-2026), paced on business days (Sun–Thu). mtd_bhd is the Accessories
+    ex-VAT month to date (kpis['acc_mtd_ex_vat']); the VAT-inclusive, all-division figures stay on
+    the revenue tile."""
     from datetime import date
+    from app import metrics
     try:
         from app.settings import setting
         target = float(setting("monthly_sales_target_bhd") or 0)
     except Exception:  # noqa: BLE001
         target = 0.0
-    mtd = float(kpis.get("rev_mtd_acc") if kpis.get("rev_mtd_acc") is not None else kpis.get("rev_mtd") or 0)
+    mtd = metrics.dec(kpis.get("acc_mtd_ex_vat"))
     prev = float(kpis.get("rev_prev_month") or 0)
-    out = {"target_bhd": target, "mtd_bhd": mtd, "prev_month_bhd": prev, "basis": "Accessories",
-           "projected_bhd": None, "target_pct": None, "on_track": None}
+    out = {"target_bhd": target, "mtd_bhd": metrics.money(mtd), "prev_month_bhd": prev, "basis": "Accessories",
+           "vat": "ex-VAT", "basis_text": PACE_BASIS_TEXT,
+           "projected_bhd": None, "target_pct": None, "on_track": None,
+           "business_days_done": None, "business_days_total": None}
     try:
         d = date.fromisoformat(str(data_date)[:10])
-        days_in_month = calendar.monthrange(d.year, d.month)[1]
-        projected = mtd / d.day * days_in_month if d.day else mtd
-        out["projected_bhd"] = round(projected, 0)
-        if target > 0:
-            out["target_pct"] = round(mtd / target * 100, 1)
-            out["on_track"] = projected >= target
-    except Exception:  # noqa: BLE001
-        pass
+    except (TypeError, ValueError):
+        return out
+    p = metrics.month_pace(mtd, d, target)
+    out.update(projected_bhd=p["projected_bhd"], business_days_done=p["business_days_done"],
+               business_days_total=p["business_days_total"])
+    if target > 0:
+        out.update(target_pct=p["pct_of_target"], on_track=p["on_track"])
     return out
 
 
@@ -531,9 +545,10 @@ def _assemble_dashboard(r: dict) -> dict:
         "daily_mtd": r["daily_mtd"],
         "by_payment": r["split"]["by_payment"],
         "by_division": r["split"]["by_division"],
-        "pace": _pace({**kpis, "rev_mtd_acc": sum(
-            float(d.get("revenue_bhd") or 0) for d in (r["split"]["by_division"] or [])
-            if str(d.get("division") or "") == "Accessories")}, s.get("data_date")),
+        # the Accessories ex-VAT month to date: the basis the target is read on (same as the Command Centre)
+        "pace": _pace({**kpis, "acc_mtd_ex_vat": sum(
+            (Decimal(str(d.get("net_ex_vat_bhd") or 0)) for d in (r["split"]["by_division"] or [])
+             if str(d.get("division") or "") == "Accessories"), Decimal(0))}, s.get("data_date")),
         # Kept for the payload's shape only. The per-rep rows (kickback, tier, referral code)
         # are money and live behind Shop Admin on /shop/attainment; the Dashboard feature is a
         # default member grant, so they never travel with it (re-review, 24-Sep-2026).

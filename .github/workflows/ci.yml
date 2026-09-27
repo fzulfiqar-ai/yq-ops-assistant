@@ -162,11 +162,10 @@ jobs:
       # reason, when the "Shop agreed" tick is required, the pro-rata cart share to the fils
       - name: Order heart rules (node, no browser)
         run: node scripts/order_heart_ui_test.mjs
-      # Advisory until the design-system pass clears the 18 pre-existing portal findings
-      # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
-      # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.
-      - name: Lint (advisory)
-        continue-on-error: true
+      # A hard gate since R7b: the portal lints at 0 errors (the pre-existing React-compiler and `any`
+      # findings were fixed or annotated in the Wave A integration). An error fails the job; a warning
+      # does not. Type errors fail it too: tsc -b runs inside `npm run build`.
+      - name: Lint
         run: npm run lint
       - name: Build
         env:

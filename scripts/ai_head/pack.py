@@ -345,12 +345,21 @@ def trust_gate(sources: list[dict], today: date, *, orders: list[dict] | None = 
             f"Last merchant event {m_last:%d %b} ({behind} day(s) ago).", behind)
 
     if orders is not None:
+        # the shop prices a subtotal as list price x quantity, line by line to the fils (app.shop.price_cart;
+        # app.shop_heart.compute_totals after a change), before any line or cart discount — so the lines
+        # are compared on that basis, not on their discounted line totals. The requested subtotal is the
+        # shop's own lines only: a line the rep added or substituted (added_at_stage, R7c) came later.
         by_order = defaultdict(lambda: [Decimal(0), Decimal(0), 0, 0])     # requested, confirmed, lines, confirmed lines
         for ln in lines or []:
             b = by_order[ln["order_id"]]
-            b[0] += D(ln.get("line_total_bhd"))
-            if ln.get("line_total_confirmed") is not None:
-                b[1] += D(ln["line_total_confirmed"])
+            # no list price on file: the unit the line was sold at (compute_totals' own fallback)
+            lp = next((ln[k] for k in ("list_price_bhd", "unit_price_bhd") if ln.get(k) is not None), 0)
+            lpc = next((ln[k] for k in ("list_price_bhd", "unit_price_confirmed", "unit_price_bhd")
+                        if ln.get(k) is not None), 0)
+            if not ln.get("added_at_stage"):
+                b[0] += q3(D(lp) * D(ln.get("qty")))
+            if ln.get("qty_confirmed") is not None:
+                b[1] += q3(D(lpc) * D(ln["qty_confirmed"]))
                 b[3] += 1
             b[2] += 1
         bad_total, bad_sub, bad_conf = [], [], []
@@ -369,12 +378,13 @@ def trust_gate(sources: list[dict], today: date, *, orders: list[dict] | None = 
             "Every order total = subtotal - discount + delivery + small-order fee." if not bad_total else
             f"{len(bad_total)} order total(s) do not add up: {', '.join(bad_total[:8])}.", len(bad_total))
         add("order_lines_sum", "ok" if not bad_sub else "fail",
-            "Every order subtotal = the sum of its lines." if not bad_sub else
-            f"{len(bad_sub)} subtotal(s) differ from their lines: {', '.join(bad_sub[:8])}.", len(bad_sub))
+            "Every order subtotal = list price x quantity of the lines the shop asked for." if not bad_sub else
+            f"{len(bad_sub)} subtotal(s) differ from list price x quantity of the requested lines: "
+            f"{', '.join(bad_sub[:8])}.", len(bad_sub))
         add("confirmed_lines_sum", "ok" if not bad_conf else "warn",
-            "Confirmed subtotals match their confirmed lines." if not bad_conf else
-            f"{len(bad_conf)} confirmed subtotal(s) differ from the confirmed lines: {', '.join(bad_conf[:8])}.",
-            len(bad_conf))
+            "Confirmed subtotals = list price x confirmed quantity of their lines." if not bad_conf else
+            f"{len(bad_conf)} confirmed subtotal(s) differ from list price x confirmed quantity: "
+            f"{', '.join(bad_conf[:8])}.", len(bad_conf))
         since = datetime.combine(today - timedelta(days=30), datetime.min.time(), BH)
         delivered = [o for o in orders if not o.get("is_test") and o.get("status") == "delivered"
                      and o.get("delivered_at") and o["delivered_at"] >= since]
@@ -685,7 +695,8 @@ def item_signals(items: list[dict], lines: list[dict], searches: list[dict], vat
     stock (Focus leaves zero-stock lines out of the snapshot) and says so (stock_row: false)."""
     wanted = Counter()
     for ln in lines:
-        if not ln.get("is_test") and ln.get("order_status") != "cancelled":
+        # what the shops asked for: a line the rep added or substituted (added_at_stage, R7c) is not demand
+        if not ln.get("is_test") and ln.get("order_status") != "cancelled" and not ln.get("added_at_stage"):
             wanted[str(ln.get("item_code") or "").upper()] += int(ln.get("qty") or 0)
     sold_out, low_cover, margins, drift = [], [], [], []
     with_cost = active = 0

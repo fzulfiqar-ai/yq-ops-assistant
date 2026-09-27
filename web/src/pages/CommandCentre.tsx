@@ -34,7 +34,8 @@ const PERIODS: { key: PeriodKey; label: string }[] = [
 
 interface Drill { to: string; label: string }
 interface Chip { label: string; value: number | null; unit: 'bhd' | 'count' | 'pct'; share_pct?: number | null; items?: number }
-interface Stage { key: string; label: string; orders: number; units: number; bhd: number }
+/** units = what the shop asked for; units_added = lines the rep added (counted apart); bhd ex-VAT */
+interface Stage { key: string; label: string; orders: number; units: number; bhd: number; units_added?: number }
 interface WeekPoint { week_start: string; label: string; value: number; partial: boolean }
 interface TeamRow {
   salesman: string; name: string; salesman_id: number | null; net_bhd: number; no_target: boolean; tier_reached: number | null
@@ -55,10 +56,11 @@ interface Tile {
   pct_of_target?: number | null; on_track?: boolean | null; needed_per_business_day_bhd?: number | null
   series?: WeekPoint[]
   stages?: Stage[]; cancelled?: number; open?: number
-  units_ordered?: number; units_accepted?: number; orders?: number
+  units_ordered?: number; units_accepted?: number; orders?: number; units_added?: number; staff_orders_left_out?: number
   p50_hours?: number | null; p90_hours?: number | null; open_included?: number
   bhd?: number; oldest_hours?: number | null; by_rep?: { rep: string; orders: number; bhd: number }[]
   matched?: number; eligible?: number; unmatched_bhd?: number; by_shop?: number
+  awaiting?: number; awaiting_bhd?: number; no_invoice?: number; no_invoice_bhd?: number
   rows?: TeamRow[]; totals?: { net_bhd: number; marketplace_orders: number }
   new_30d?: number; items?: Row[]; all?: Row[]
   top10_bhd?: number; named_bhd?: number; invoices_pct?: number | null; sales_pct?: number | null
@@ -260,8 +262,10 @@ function TileBody({ t }: { t: Tile }) {
               <li key={s.key} className="relative rounded-xl bg-[#F3ECF8] p-2.5 dark:bg-[#6D4091]/15">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6D4091] dark:text-[#c7a6e6]">{s.label}</div>
                 <div className="mt-0.5 font-display text-[1.35rem] font-bold tabular-nums">{fmtCount(s.orders)}</div>
-                <div className="text-[11px] text-muted-foreground">{fmtCount(s.units)} units</div>
-                <div className="text-[11px] font-medium tabular-nums">{fmtBhd(s.bhd)}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  {fmtCount(s.units)} units{s.units_added ? ` · +${fmtCount(s.units_added)} added by the rep` : ''}
+                </div>
+                <div className="text-[11px] font-medium tabular-nums">{fmtBhd(s.bhd)} <span className="font-normal text-muted-foreground">ex-VAT</span></div>
                 {i < 2 && <ArrowRight size={14} className="absolute -right-2 top-1/2 hidden -translate-y-1/2 text-[#824FAB] sm:block" aria-hidden="true" />}
               </li>
             ))}
@@ -273,7 +277,8 @@ function TileBody({ t }: { t: Tile }) {
       return (
         <>
           <BigValue t={t} />
-          {t.units_ordered != null && <p className="mt-1 text-[12px] text-muted-foreground">{fmtCount(t.units_accepted)} of {fmtCount(t.units_ordered)} units on {fmtCount(t.orders)} orders</p>}
+          {t.units_ordered != null && <p className="mt-1 text-[12px] text-muted-foreground">{fmtCount(t.units_accepted)} of {fmtCount(t.units_ordered)} units the shops asked for, on {fmtCount(t.orders)} orders</p>}
+          {!!t.units_added && <p className="mt-0.5 text-[11.5px] text-muted-foreground">+{fmtCount(t.units_added)} units added by the rep, counted apart</p>}
         </>
       )
     case 'orders.confirm_time':
@@ -290,7 +295,7 @@ function TileBody({ t }: { t: Tile }) {
       return (
         <>
           <BigValue t={t} tone={(t.value ?? 0) > 0 ? 'alert' : 'ok'} />
-          {(t.value ?? 0) > 0 && <p className="mt-1 text-[12px] text-muted-foreground">{fmtBhd(t.bhd)} · oldest {fmtHours(t.oldest_hours)}</p>}
+          {(t.value ?? 0) > 0 && <p className="mt-1 text-[12px] text-muted-foreground">{fmtBhd(t.bhd)} <span>ex-VAT</span> · oldest {fmtHours(t.oldest_hours)}</p>}
           {!!t.by_rep?.length && <MiniList rows={t.by_rep.map((r) => ({ label: r.rep, value: `${r.orders}`, sub: fmtBhd(r.bhd) }))} />}
         </>
       )
@@ -299,7 +304,14 @@ function TileBody({ t }: { t: Tile }) {
         <>
           <BigValue t={t} />
           {t.eligible != null && t.eligible > 0 && (
-            <p className="mt-1 text-[12px] text-muted-foreground">{fmtCount(t.matched)} of {fmtCount(t.eligible)} delivered orders · {fmtBhd(t.unmatched_bhd)} still to match</p>
+            <>
+              <p className="mt-1 text-[12px] text-muted-foreground">{fmtCount(t.matched)} of {fmtCount(t.eligible)} delivered orders have an accepted Focus invoice link</p>
+              {(t.eligible - (t.matched ?? 0)) > 0 && (
+                <p className="mt-0.5 text-[12px] text-muted-foreground">
+                  Not yet matched: {fmtCount(t.awaiting ?? 0)} awaiting acceptance · {fmtCount(t.no_invoice ?? 0)} no Focus invoice found · {fmtBhd(t.unmatched_bhd)} <span>ex-VAT</span>
+                </p>
+              )}
+            </>
           )}
         </>
       )
@@ -568,7 +580,7 @@ function TeamTable({ t, full }: { t: Tile; full: boolean }) {
             <th scope="col" className="px-3 py-2 font-semibold">Tier</th>
             <th scope="col" className="px-3 py-2 text-right font-semibold">To next tier</th>
             <th scope="col" className="px-3 py-2 text-right font-semibold">Named shops</th>
-            <th scope="col" className="px-3 py-2 text-right font-semibold">Marketplace orders</th>
+            <th scope="col" className="px-3 py-2 text-right font-semibold">Marketplace orders (ex-VAT)</th>
             <th scope="col" className="px-3 py-2 font-semibold">Last invoice</th>
           </tr>
         </thead>
@@ -604,7 +616,7 @@ function TeamTable({ t, full }: { t: Tile; full: boolean }) {
 }
 
 function DormantTable({ rows }: { rows: Row[] }) {
-  if (!rows.length) return <p className="text-[13px] text-muted-foreground">No dormant account with sales in the last 12 months.</p>
+  if (!rows.length) return <p className="text-[13px] text-muted-foreground">No dormant account with BHD 100 or more in the last 12 months.</p>
   return (
     <div className="overflow-x-auto rounded-2xl border bg-card shadow-sm">
       <table className="w-full min-w-[520px] text-left text-[12.5px]">

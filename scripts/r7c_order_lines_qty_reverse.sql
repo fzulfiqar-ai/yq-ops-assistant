@@ -9,6 +9,9 @@
 -- 'below_minimum' stay exactly as they are (never rewritten); only NEW writes are held to the old
 -- lists again. RESTART THE API AFTER REVERSING: has_column() remembers a hit for 10 minutes, and
 -- until then the editor may still write an R7c status the narrowed check refuses.
+-- No view pins the dropped columns: v_command_orders and v_agent_shop_lines (R7b) read
+-- added_at_stage / qty_delivered through to_jsonb(l), so they keep answering (every line then
+-- reads as requested again, delivered = confirmed) and nothing has to be restored first.
 
 alter table shop_order_lines drop constraint if exists shop_order_lines_substitute_for_line_fkey;
 alter table shop_order_lines drop constraint if exists shop_order_lines_unit_cost_bhd_check;

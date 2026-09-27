@@ -3859,8 +3859,11 @@ def analytics(days: int = 30, salesman: dict | None = None) -> dict:
         waited_min = ((assigned or now) - created).total_seconds() / 60
         if waited_min > sla_min:
             breaches += 1
+    # Received -> Confirmed only: an order a rep placed himself (source 'salesman') is born Confirmed
+    # (R7c) and never waited, so it would pull the median to zero
     confirm_mins = sorted((_ts(o["confirmed_at"]) - _ts(o["created_at"])).total_seconds() / 60
-                          for o in live if _ts(o.get("confirmed_at")) and _ts(o.get("created_at")))
+                          for o in live if _ts(o.get("confirmed_at")) and _ts(o.get("created_at"))
+                          and o.get("source") != "salesman")
     cancelled = [o for o in orders if o.get("status") == "cancelled"]
     ops = {"by_attribution": sorted(by_attr.values(), key=lambda a: -a["value_bhd"]),
            "unassigned_now": sum(1 for o in live if not o.get("salesman_id") and o.get("status") in ("new", "confirmed")),

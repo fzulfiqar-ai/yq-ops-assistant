@@ -4,10 +4,11 @@ import { cn } from '@/lib/utils'
 
 /**
  * The data-freshness chip (Sprint 4, plan §8 / §27): "Focus data to 24 Sep · Marketplace live ·
- * Invoice match 75 %". It replaces the portal header's rotating quotes and its always-green "Live"
- * pill, which said nothing true. Focus figures stop at the last uploaded sale day; marketplace
- * figures are read live; the invoice match rate (admin and management only) says how many
- * delivered orders already carry their Focus invoice.
+ * Invoice links confirmed 3 of 4". It replaces the portal header's rotating quotes and its
+ * always-green "Live" pill, which said nothing true. Focus figures stop at the last uploaded sale
+ * day; marketplace figures are read live; the invoice links (admin and management only) say how
+ * many delivered orders have a Focus invoice link a PERSON accepted — a suggested invoice still
+ * waiting for acceptance does not count, so this is never read as "0 % of orders have no invoice".
  *
  * Without `data` the chip reads GET /freshness itself (any portal login); the Command Centre passes
  * the freshness block of its own overview instead, so the page does not ask twice.
@@ -35,7 +36,7 @@ function freshnessParts(f: Freshness): { focus: string; market: string; match: s
   const focus = f.focus_to ? `Focus data to ${f.focus_label || dayLabel(f.focus_to)}` : 'No Focus data loaded'
   const market = f.marketplace_live ? 'Marketplace live' : 'Marketplace not answering'
   const m = f.match_rate
-  const match = m && m.available && m.pct != null ? `Invoice match ${Math.round(m.pct)} %` : null
+  const match = m && m.available && m.eligible > 0 ? `Invoice links confirmed ${m.matched} of ${m.eligible}` : null
   return { focus, market, match }
 }
 
@@ -49,7 +50,7 @@ function titleOf(f: Freshness): string {
   const m = f.match_rate
   if (m && m.available) {
     lines.push(m.eligible
-      ? `${m.matched} of ${m.eligible} delivered orders older than 3 days carry a confirmed Focus invoice.`
+      ? `${m.matched} of ${m.eligible} delivered orders older than 3 days have a Focus invoice link someone accepted; the rest are not yet matched (a suggested invoice may be waiting for acceptance).`
       : 'No delivered order is old enough to need its Focus invoice yet.')
   }
   return lines.join(' ')

@@ -381,11 +381,14 @@ the schema (Supabase-style `anon` / `authenticated` / `yq_readonly` roles, a fak
 applied twice, every reverse twice, re-applied after the reverse, and every refusal below provoked once.
 
 - **`user_roles_must_reset_migration.sql`** (R1's file, never applied, widened): the backfill now flags every role
-  whose auth metadata says `must_reset` — salesmen AND admins — except the owner addresses listed in the file (keep
-  them equal to `OWNER_EMAILS`); the closing check refuses to finish if an owner row is flagged. Production read
-  27-Sep-2026: 16 rows would be flagged (15 of 16 salesmen, 1 of 3 admins); the owner's row is not among them.
-  **Scheduled by the owner at an announced quiet hour** — from that moment each flagged person is held at the
-  password screen until they set their own. Reverse: `user_roles_must_reset_reverse.sql` (drops the column).
+  whose auth metadata says `must_reset` — salesmen, management AND admins — except the owner addresses listed in the
+  file (keep them equal to `OWNER_EMAILS`); the closing check refuses to finish if an owner row is flagged.
+  **Who gets locked today** (re-counted read-only on production 27-Sep-2026, the backfill's own rule): **18 logins
+  — 15 salesmen (of 16) + 3 management (all 3), 0 admins (of 2), never the owner.** Re-count right before the apply
+  (the query is in the file's header): anyone invited since changes the list. **Scheduled by the owner at an
+  announced quiet hour, and the announcement goes to the reps, the office AND the three management logins** —
+  management is locked too. From that moment each flagged person is held at the password screen until they set
+  their own. Reverse: `user_roles_must_reset_reverse.sql` (drops the column).
 - **`r7_narration_mask_migration.sql`** — now the canonical owner of `v_sales`: `CREATE OR REPLACE` with the 31
   columns of `division_payment_migration.sql`'s definition verbatim except `narration`, which masks every 9-digit
   run (CPR) and every run of 15+ digits (cards, accounts), keeping the last 3 digits. `v_sales_agent` (`select *`)
@@ -400,6 +403,10 @@ applied twice, every reverse twice, re-applied after the reverse, and every refu
   the same patterns. It cannot be undone from SQL: take `python -m scripts.db_backup --tables order_lines` first
   and keep that backup (it holds the numbers in clear) out of OneDrive. `r7_narration_mask_data_reverse.sql`
   changes nothing and raises with the instructions, so running it can never be mistaken for a restore.
+  **If the raw digits are wanted at all, that backup must be taken BEFORE THE R7b CODE DEPLOY** — not just before
+  this file: from the deploy on, the parser masks the narration of every Sales Day Book it loads and the loader
+  writes those lines over the stored ones (upsert on invoice + line), so every upload after the deploy masks the
+  stored narration it covers whether or not this file is ever applied. Not applying the file does not keep them.
 - **`r7_salesmen_login_unique_migration.sql`** — `salesmen_user_email_lower_key`, a unique index on
   `lower(user_email) where user_email is not null`; a duplicate guard runs first and names the problem instead of
   failing half way (production: 17 logins, 17 distinct). `app/shop.salesman_for_user` now matches the lower-cased
@@ -429,6 +436,14 @@ rejected, approved → done); and the LOGIN role `ai_head_ro` with **no password
 `v_agent_customer_regulars`: shop names with cadence stay off `yq_readonly`, the marketplace_migration 9a rule),
 EXECUTE on the mask to both and `service_role`; everything revoked from `anon` / `authenticated`.
 
+Review changes (27-Sep-2026, before any apply): `v_agent_shop_lines` appends `added_at_stage` and `qty_delivered`,
+read through `to_jsonb(l)` like `v_command_orders` (NULL before R7c; R7c's reverse can still drop the columns), so
+the pack leaves rep-added lines out of the requested subtotal check and out of item demand; a rep's own order
+(`source = 'salesman'`, born Confirmed) is left out of `v_agent_rep_governance`'s median / max confirm hours and has
+`confirm_hours` NULL in `v_agent_shop_orders`. The pack's trust gate now compares `subtotal_bhd` with list price ×
+qty of the requested lines (the shop's subtotal is before discounts), and the confirmed subtotal with list price ×
+confirmed qty.
+
 **`ai_head_ro` is a member of no role** — a deliberate change from the plan's "member of `yq_readonly`", after a
 read-only look at production (27-Sep-2026): `yq_readonly` holds SELECT on `customer_contacts` and `leads` (phones,
 emails) and OWNS the SECURITY DEFINER functions `run_readonly_query(text)` / `run_readonly_query_params(text, jsonb)`,
@@ -455,23 +470,39 @@ drop it anyway. Owner steps and the Sunday routine: `scripts/ai_head/README.md`.
 
 Additive and idempotent, with `r7b_command_views_reverse.sql`; **not rehearsed on production** (the build session
 had read-only access only) — rehearse with `--rehearse`, apply, then `python -m scripts.audit_grants`. Order: after
-`r7_focus_links_migration.sql` (the file stops with a clear message if `shop_order_focus_links` is missing).
+`r7_focus_links_migration.sql` (the file stops with a clear message if `shop_order_focus_links` or
+`v_shop_focus_candidates` is missing); before or after `r7c_order_lines_qty_migration.sql`, either works. Reverse it
+BEFORE `r7_focus_links_reverse.sql` (that one drops two objects this view reads).
 
 Creates one view, `v_command_orders`: one row per marketplace order with status, source, the rep (id + name),
 `has_customer` (a flag, never the id), `is_test`, the lifecycle timestamps, the order and confirmed totals, units
 ordered vs units confirmed and the line count (one `GROUP BY` over `shop_order_lines`), `has_invoice_no` (a flag,
-never the number) and the confirmed Focus links (count + first decision time). No shop or merchant name, phone,
-email, token, IP or invoice number. `REVOKE ALL ... FROM anon, authenticated`; `GRANT SELECT` to `yq_readonly`
-only (the Command Centre's read path, `app/metrics.py`); not `security_invoker`. No row is written. The closing
-`DO` block asserts the 22 columns, that none of the personal columns is present, the grants, and one row per order.
+never the number), the confirmed Focus links (count + first decision time), and — appended after the review —
+`units_added`, `units_delivered` and `has_suggestion`. No shop or merchant name, phone, email, token, IP or invoice
+number. `REVOKE ALL ... FROM anon, authenticated`; `GRANT SELECT` to `yq_readonly` only (the Command Centre's read
+path, `app/metrics.py`); not `security_invoker`. No row is written. The closing `DO` block asserts the 25 columns,
+that none of the personal columns is present, the grants, and one row per order.
+
+Units are the shop's request (review, 27-Sep-2026): `units_ordered` / `units_confirmed` / `units_delivered` count only
+the lines the shop asked for; a line the rep added or substituted (`shop_order_lines.added_at_stage` set, R7c) is in
+`units_added`, so the accepted rate can never read above what the shop asked for, and the Delivered stage reads
+`units_delivered` (`qty_delivered`, else `qty_confirmed`). `added_at_stage` and `qty_delivered` arrive with the R7c
+file, so the view reads them through `to_jsonb(l)`: before R7c every line reads as requested and delivered =
+confirmed; after it the rep's lines are counted apart; `r7c_order_lines_qty_reverse.sql` can still drop the columns
+(a whole-row reference pins none) and the view keeps answering — neither file recreates the other's objects.
+`has_suggestion` = `v_shop_focus_candidates` has a rank-1 row for the order: the Command Centre's invoice attention
+splits "not yet matched — a suggested Focus invoice awaits acceptance" from "no Focus invoice found", and only an
+accepted link (`focus_links_n`) counts as matched ("Invoice links confirmed x of y").
 
 Code first is fine: `app/metrics.py` probes the view (a miss is remembered 5 minutes and re-probed on every upload)
 and until it exists reads `v_shop_orders_agent` — test orders cannot be told apart, the accepted rate and the
 invoice match rate are not shown, and the page says so. The view body was run read-only on production 27-Sep-2026
 as a plain SELECT (one row per order). Replayed on a throwaway local Postgres (synthetic schema and data, one
 rolled-back transaction: `python -m tests.test_r7b_command` with `YQ_LOCAL_PG_R7B` set): applied twice, the
-Command Centre's own order and match SQL run as `yq_readonly`, anon/authenticated refused, reverse twice,
-re-applied, refused without the links table. The reverse drops the view only (no CASCADE; nothing depends on it).
+Command Centre's own order and match SQL run as `yq_readonly`, anon/authenticated refused, then the REAL
+`r7c_order_lines_qty_migration.sql` applied on top (a rep-added line counted apart, a short delivery read), its
+reverse run with the view in place (the view keeps answering), R7c again, then this reverse twice, re-applied,
+refused without the links table. The reverse drops the view only (no CASCADE; nothing depends on it).
 
 ## Release R7b (27-Sep-2026, not yet applied): `r7b_market_intel_migration.sql` — Market Intelligence v1
 
@@ -523,5 +554,7 @@ first) and puts both checks back to their old lists `NOT VALID`, so rows already
 rewritten while new writes are held to the old lists — restart the API after reversing (the column probes cache a
 hit for 10 minutes). Replayed on a throwaway local cluster (synthetic tables): apply twice, the new values and the FK
 work, bad values are refused, reverse with R7c rows present, apply again — all rolled back
-(`tests/test_r7c_order_heart.py`, SKIPs without a cluster).
+(`tests/test_r7c_order_heart.py`, SKIPs without a cluster). The two R7b views that count these columns
+(`v_command_orders`, `v_agent_shop_lines`) read them through `to_jsonb(l)`, so this file recreates no view and its
+reverse meets no dependent view (a test fails if any view on `shop_order_lines` names them directly).
 
