@@ -90,34 +90,9 @@ export function specPills(it: UpcomingItem): string[] {
   return out
 }
 
-/** A disc-ready picture for ComposedCreative / ProductImage: the model's product photo or its box photo (both carry a WebP size set). */
-export function asCreative(it: UpcomingItem, kind: 'photo' | 'box') {
-  return {
-    item_code: `wk:${it.id}`,
-    thumb_urls: (kind === 'box' ? it.box_thumb_urls : it.photo_thumb_urls) || null,
-    product_image_url: (kind === 'box' ? it.box_url : it.photo_url) || null,
-  }
-}
-
-const hasPhoto = (it: UpcomingItem) => Boolean(it.photo_url || it.photo_thumb_urls?.['320'])
-
-/** The night stage's three discs: the first photo of three DIFFERENT categories (earbuds, a cable, a charger — not three cables), topped up in page order when fewer categories exist. */
-export function stageArt(items: UpcomingItem[]) {
-  const picked: UpcomingItem[] = []
-  const cats = new Set<string>()
-  for (const it of items) {
-    if (picked.length >= 3) break
-    const c = (it.category || '').trim()
-    if (!hasPhoto(it) || cats.has(c)) continue
-    cats.add(c)
-    picked.push(it)
-  }
-  for (const it of items) {
-    if (picked.length >= 3) break
-    if (hasPhoto(it) && !picked.includes(it)) picked.push(it)
-  }
-  return picked.map((it) => asCreative(it, 'photo'))
-}
+/* asCreative (a disc picture from a card) and stageArt (the stage's three discs) live in lib/upcoming,
+ * beside the shared fetch, so the home slide (lib/slides 'd:soon') draws the same discs as the stage */
+export { asCreative, stageArt } from '../lib/upcoming'
 
 /** "Hello Furqan, I am interested in the WEKOME range when it arrives…" — the rep's own number, for the whole range (the desktop tile) */
 export function askRangeUrl(rep: RepCard | null, brand: string): string | null {

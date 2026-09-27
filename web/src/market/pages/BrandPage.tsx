@@ -9,7 +9,8 @@ import { MarketCard } from '../components/MarketCard'
 import { Rail } from '../components/Rail'
 import { ConnectingState, EmptyState } from '../components/States'
 import { useMarket } from '../MarketContext'
-import { getUpcoming, type UpcomingItem, type UpcomingPayload } from '../lib/marketApi'
+import type { UpcomingItem, UpcomingPayload } from '../lib/marketApi'
+import { cachedUpcoming, fetchUpcoming } from '../lib/upcoming'
 import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { locale, S } from '../strings'
@@ -39,15 +40,20 @@ export default function BrandPage() {
   const desktop = isDesktopLike(viewport)
   const phone = viewport === 'phone'
   // { tick, data } — the effect records which attempt it answered; "loading" is derived (the
-  // useAuthedBlob pattern), so a retry never sets state synchronously inside the effect
+  // useAuthedBlob pattern), so a retry never sets state synchronously inside the effect. The payload
+  // is the one lib/upcoming shares with the home slide, rail and aside: arriving from Home it is
+  // already here (first render, no skeleton); a failed attempt is never cached, so Retry asks again.
   const [tick, setTick] = useState(0)
-  const [got, setGot] = useState<{ tick: number; data: UpcomingPayload | 'error' } | null>(null)
+  const [got, setGot] = useState<{ tick: number; data: UpcomingPayload | 'error' } | null>(() => {
+    const known = cachedUpcoming()
+    return known ? { tick: 0, data: known } : null
+  })
   useSearchBand()
   usePageTitle(brand, true, `${brand} · ${S.brand}`)
 
   useEffect(() => {
     let alive = true
-    getUpcoming()
+    fetchUpcoming()
       .then((d) => {
         if (alive) setGot({ tick, data: d })
       })

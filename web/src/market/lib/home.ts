@@ -31,7 +31,7 @@ export function hasRealDrop(i: ShopItem): boolean {
 /* ───────────────────────── v3: deals, exclusive rails, brands ───────────────────────── */
 
 /** Has a photo the slider / tiles can show (WebP set, legacy thumb or the full photo). */
-export function hasPhoto(i: ShopItem): boolean {
+export function hasPhoto(i: Pick<ShopItem, 'thumb_urls' | 'thumb_url' | 'product_image_url'>): boolean {
   return Boolean(i.thumb_urls?.['320'] || i.thumb_url || i.product_image_url)
 }
 
@@ -232,7 +232,9 @@ export function brandTiles(items: ShopItem[]): BrandTile[] {
 export function heroSplit(slides: readonly Slide[]): { hero: Slide[]; tiles: Slide[] } {
   const n = slides.length
   const maxTiles = n >= 4 ? 2 : n >= 3 ? 1 : 0
-  const tileable = (s: Slide) => s.kind === 'data' && s.id !== 'd:again'
+  // Order again and the "Coming soon" teaser are stage slides: both can land after the first paint,
+  // so neither may ever be cut out as a tile (Home also keeps both out of this function's count)
+  const tileable = (s: Slide) => s.kind === 'data' && s.id !== 'd:again' && s.id !== 'd:soon'
   const picked = new Set<string>()
   // pastel first, then the night slide, each walked from the end of the list
   for (const pass of [(s: Slide) => s.canvas !== 'night', () => true]) {

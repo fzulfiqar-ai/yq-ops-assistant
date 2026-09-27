@@ -5,6 +5,7 @@ import { useMarket } from '../MarketContext'
 import { bhd, productName } from '../lib/format'
 import { bestSellers } from '../lib/home'
 import { buildSlides, useCarousel, useClaimedSlides, useSlideClaimsActive } from '../lib/slides'
+import { useUpcoming } from '../lib/upcoming'
 import { useReducedMotion } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
 import { S } from '../strings'
@@ -25,17 +26,24 @@ import { SlideCard } from './SlideCard'
  * this re-renders before paint. A page without a slider gets SETTLE_MS to register one before the
  * aside shows anything (the aside sits below the mini-cart, so the late entrance moves nothing).
  *
- * On Home it renders NOTHING, by design, and there is deliberately no fallback. Home claims its
- * composition AND every id it states as a section of its own (SECTION_SLIDE_IDS), which today is
- * the whole deck — so the only slides left to "fall back" to are the ones the merchant is already
- * looking at. A fallback would put "Restock essentials" beside the essentials rail or a third
- * paste ask on one screen, which is the exact repetition this component was built to avoid. The
- * aside earns its column on Home through the mini-cart and its popular rows below instead.
+ * The "Coming soon" teaser ('d:soon', lib/slides) shows here too, second in the rotation, on every
+ * page that has this aside (the brand pages do not — DesktopShell). Its payload is the one shared
+ * request (lib/upcoming); the aside waits up to SOON_WAIT_MS for it before its first slide, so the
+ * teaser is not spliced into a rotation that is already turning. The deck is capped at MAX with it.
+ *
+ * On Home it renders NOTHING, by design, and there is deliberately no fallback. Home claims every
+ * slide it built (its composition, and what the stage had no room for) AND every id it states as a
+ * section of its own (SECTION_SLIDE_IDS), which today is the whole deck — so the only slides left
+ * to "fall back" to are the ones the merchant is already looking at. A fallback would put "Restock
+ * essentials" beside the essentials rail or a third paste ask on one screen, which is the exact
+ * repetition this component was built to avoid. The aside earns its column on Home through the
+ * mini-cart and its popular rows below instead.
  */
 
 const DWELL = 7000
 const MAX = 5
 const SETTLE_MS = 400
+const SOON_WAIT_MS = 1500
 
 export function Spotlight({ className }: { className?: string }) {
   const { items, campaigns, recognized } = useMarket()
@@ -51,9 +59,18 @@ export function Spotlight({ className }: { className?: string }) {
     const t = window.setTimeout(() => setSettled(true), SETTLE_MS)
     return () => window.clearTimeout(t)
   }, [hasItems, settled])
+  // the "Coming soon" payload, asked for once the catalog is in; a slow answer is waited for only so long
+  const upcoming = useUpcoming(hasItems)
+  const [waited, setWaited] = useState(false)
+  useEffect(() => {
+    if (!hasItems || waited) return
+    const t = window.setTimeout(() => setWaited(true), SOON_WAIT_MS)
+    return () => window.clearTimeout(t)
+  }, [hasItems, waited])
 
-  const slides = useMemo(() => buildSlides({ items, campaigns, recognized }, { exclude: claimed, placements: ['aside', 'hero', 'strip'], max: MAX }), [items, campaigns, recognized, claimed])
-  const n = claiming || settled ? slides.length : 0
+  // the teaser rides on top of buildSlides' `max`; the aside's own cap keeps it at MAX
+  const slides = useMemo(() => buildSlides({ items, campaigns, recognized, upcoming: upcoming ?? null }, { exclude: claimed, placements: ['aside', 'hero', 'strip'], max: MAX }).slice(0, MAX), [items, campaigns, recognized, upcoming, claimed])
+  const n = (claiming || settled) && (upcoming !== undefined || waited) ? slides.length : 0
   const c = useCarousel({ count: n, dwell: DWELL, reduced, rootRef })
   const idx = c.index
 

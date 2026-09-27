@@ -3,6 +3,8 @@ import type { Campaign, CampaignCanvas, ShopItem } from '@/lib/shopApi'
 import { locale, S } from '../strings'
 import { categorySlug, countdownLabel, hasBadge, niceCategory } from './format'
 import { dealSets, hasPhoto, inStock } from './home'
+import type { UpcomingPayload } from './marketApi'
+import { stageArt } from './upcoming'
 
 /**
  * The promo slide model, built ONCE per render from real data and shared by the phone slider,
@@ -20,7 +22,7 @@ export type SlideSize = 'hero' | 'phone' | 'tile' | 'aside'
 type Placement = 'hero' | 'strip' | 'aside'
 
 export interface Slide {
-  /** 'c:<campaign id>' | 'd:again' | 'd:last' | 'd:drops' | 'd:essentials' | 'd:fresh' | 'd:moving' | 'd:brand' | 'd:quick' */
+  /** 'c:<campaign id>' | 'd:again' | 'd:soon' | 'd:last' | 'd:drops' | 'd:essentials' | 'd:fresh' | 'd:moving' | 'd:brand' | 'd:quick' */
   id: string
   kind: SlideKind
   /** small line above the title, e.g. S.deals.title, or the sponsor label on a sponsored campaign */
@@ -32,8 +34,9 @@ export interface Slide {
   canvas: SlideCanvas
   /** uploaded campaign image (1200 w in `src`, 600 w in `src600` when the upload made one) */
   image?: { src: string; src600?: string | null; fit: 'contain' | 'cover' } | null
-  /** 0–3 items with photos for a composed creative (used when `image` is null) */
-  products: ShopItem[]
+  /** 0–3 pictures for a composed creative (used when `image` is null): catalog items, or the
+   *  "Coming soon" cards' photos (lib/upcoming asCreative — a picture only, never a price or stock) */
+  products: SlideArt[]
   /** the sponsor label when the campaign is sponsored — same text as `kicker`; render one of them */
   sponsored?: string | null
   endsAt?: string | null
@@ -42,6 +45,9 @@ export interface Slide {
   sticker?: { label: string; tone: 'deal' | 'fresh' | 'drop' } | null
 }
 
+/** what a composed creative draws: a photo set and nothing a price or a stock level could be read from */
+export type SlideArt = Pick<ShopItem, 'item_code' | 'thumb_url' | 'thumb_urls' | 'product_image_url' | 'package_image_url'>
+
 export interface SlideContext {
   items: ShopItem[]
   /** already audience-filtered by MarketContext */
@@ -49,6 +55,8 @@ export interface SlideContext {
   recognized: boolean
   /** items of the merchant's newest order (in stock), when known */
   lastOrder?: ShopItem[] | null
+  /** the "Coming soon" announcement (lib/upcoming useUpcoming) — null or absent: no 'd:soon' slide */
+  upcoming?: UpcomingPayload | null
 }
 
 export interface SlideOptions {
@@ -62,6 +70,14 @@ export interface SlideOptions {
   placements?: Placement[]
 }
 
+/**
+ * The "Coming soon" teaser's id. It is a stage slide only: never slide 1 (catalog-prefetch.js
+ * preloads slide 1), never a desktop tile (lib/home heroSplit), never dropped as a section — the
+ * home page keeps its "Coming soon" rail as well (owner, 27-Sep: the slide is for awareness, the rail
+ * for browsing), so it is deliberately NOT in SECTION_SLIDE_IDS.
+ */
+export const SOON_SLIDE_ID = 'd:soon'
+
 /** Pastel canvases a campaign without its own canvas cycles through. */
 const CAMPAIGN_CYCLE: readonly SlideCanvas[] = ['lilac', 'apricot', 'mint']
 const MIN_DATA = 3
@@ -73,8 +89,12 @@ const ART = 3
  * moving ≥3) → the brand slide → paste-a-list (always). Order again (a recognised merchant) goes
  * SECOND, so slide 1 depends on the catalog payload alone — public/catalog-prefetch.js preloads its
  * image before the app has even downloaded (mirror any change to the slide-1 rules there).
+ * The "Coming soon" teaser ('d:soon', when `ctx.upcoming` announces a range) goes right after
+ * them — second, or third behind Order again — and only into a deck that already has a slide 1.
  * `exclude` drops slide ids (e.g. the ones Home already shows), `kinds` keeps only those kinds,
- * `max` caps (default 6).
+ * `max` caps (default 6) the deck the teaser joins: the teaser rides on top of it and never takes a
+ * data slide's place, so everything around it is the same before and after the upcoming payload
+ * lands (it arrives on its own request, after the catalog). A surface with a hard cap trims.
  */
 export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
   const max = Math.max(0, opts?.max ?? 6)
@@ -172,6 +192,20 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
     const slide: Slide = { id: 'd:again', kind: 'data', kicker: S.home.lastOrder, title: S.slides.again, line: S.slides.againLine(again.length), cta: S.slides.againCta, to: '/quick?load=last', canvas: 'plum', products: art(again) }
     out.splice(Math.min(1, out.length), 0, slide)
   }
+
+  /* 4 · "Coming soon": the next range, announced in the brand's own plum — never the night canvas,
+   * so it can never sit beside the dark brand slide looking like it. The month is the payload's
+   * ("Arriving October", "Arriving soon" once the month has passed), the headline and line are copy,
+   * the discs are the cards' photos (three categories); no price, no count, no tier word. */
+  const soon = ctx.upcoming
+  if (soon && soon.enabled && soon.items.length > 0 && out.length > 0 && allowed(SOON_SLIDE_ID, 'data')) {
+    const t = locale.lang === 'ar' ? S.upcoming.ar : S.upcoming.en
+    const when = ((locale.lang === 'ar' ? soon.expected_label_ar : soon.expected_label_en) || '').trim()
+    const slide: Slide = { id: SOON_SLIDE_ID, kind: 'data', kicker: when || t.kicker, title: t.headline(soon.brand), line: t.stageLineShort, cta: t.seeAll, to: `/brands/${encodeURIComponent(soon.brand.toLowerCase())}`, canvas: 'plum', products: stageArt(soon.items) }
+    // never slide 1: second, or third when Order again holds the second place
+    const at = out[1]?.id === 'd:again' ? 2 : 1
+    out.splice(Math.min(at, out.length), 0, slide)
+  }
   return out
 }
 
@@ -180,6 +214,8 @@ export function buildSlides(ctx: SlideContext, opts?: SlideOptions): Slide[] {
  * (pages/HomeBelow: the "Restock essentials" rail, the "Moving fast in Bahrain" rail and the
  * "Ready to restock?" paste band). They say nothing the merchant is not about to read anyway, so
  * the phone hero — the most expensive card on the page — must not spend a slide on them.
+ * Not 'd:soon': the "Coming soon" rail further down stays too (owner, 27-Sep) — the slide makes the
+ * announcement, the rail is where the range is browsed.
  */
 export const SECTION_SLIDE_IDS: readonly string[] = ['d:essentials', 'd:moving', 'd:quick']
 
@@ -196,6 +232,10 @@ const DEALS_SLIDE_IDS: readonly string[] = ['d:last', 'd:drops']
  * carry something the page does not otherwise state (no rail headings, no second paste offer).
  * Capped at `max` (a 5-slide hero is a table of contents; 2–3 is a promotion).
  *
+ * The "Coming soon" teaser joins only a deck that already turns — two slides or more without it —
+ * so its payload landing after the first paint never adds the dots row under a one-slide hero (and
+ * never shifts the page). It keeps its place (2nd or 3rd), so a full deck gives up its last slide.
+ *
  * `deals` caps how many of the deck's cards may come from the Stock-Up Deals section. A phone deck
  * is a stack of equals, one after the other, so it passes 1: with this catalog both survivors were
  * that section ("Last-Chance Stock · 24 lines" then "4 prices cut in our price book"), which made
@@ -206,6 +246,12 @@ const DEALS_SLIDE_IDS: readonly string[] = ['d:last', 'd:drops']
  * Never empty when `slides` is not.
  */
 export function heroDeck(slides: Slide[], max = 3, deals = slides.length): Slide[] {
+  const rest = slides.filter((s) => s.id !== SOON_SLIDE_ID)
+  const deck = trimDeck(rest, max, deals)
+  return rest.length === slides.length || deck.length < 2 ? deck : trimDeck(slides, max, deals)
+}
+
+function trimDeck(slides: Slide[], max: number, deals: number): Slide[] {
   if (slides.length < 2) return slides
   let spent = 0
   const deck = slides.filter((s, i) => {

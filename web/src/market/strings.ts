@@ -619,6 +619,8 @@ export const S = {
       headline: (brand: string) => `${brand} is coming to YQ`,
       /** the night stage's line under the headline (BrandPage) */
       stageLine: 'A step up for your shelf, in retail-ready boxes.',
+      /** the home slide's line (lib/slides 'd:soon') — one clause of at most 34 characters, like every S.slides *Line */
+      stageLineShort: 'A step up for your shelf.',
       /** the lilac tile beside the stage (desktop) */
       tileTitle: 'The step-up range beside VFAN',
       askRange: (first: string) => (first ? `Ask ${first} on WhatsApp` : 'Ask your rep on WhatsApp'),
@@ -661,7 +663,7 @@ export const S = {
       browseBrand: (brand: string) => `Browse ${brand}`,
     },
     /* DRAFT Arabic — needs a native speaker's review before the AR pass ships.
-     * NATIVE REVIEW (27-Sep): stageLine, tileTitle and tagline render "a step up" literally
+     * NATIVE REVIEW (27-Sep): stageLine, stageLineShort, tileTitle and tagline render "a step up" literally
      * ("خطوة للأعلى") — no elative or superlative, no tier or quality word. The first draft's
      * superlative ("the most refined range") read as a tier / quality claim; ask the reviewer for a
      * natural, non-superlative way to say "the step-up range beside VFAN". */
@@ -670,6 +672,7 @@ export const S = {
       rail: (brand: string) => `قريبًا · ${brand}`,
       headline: (brand: string) => (brand === 'WEKOME' ? 'ويكوم قادمة إلى YQ' : `${brand} قادمة إلى YQ`),
       stageLine: 'خطوة للأعلى لرفوف محلك، في علب جاهزة للعرض.',
+      stageLineShort: 'خطوة للأعلى لرفوف محلك.',
       tileTitle: 'خطوة للأعلى بجانب VFAN',
       askRange: (first: string) => (first ? `اسأل ${first} على واتساب` : 'اسأل مندوبك على واتساب'),
       askShort: (first: string) => (first ? `اسأل ${first}` : 'اسأل مندوبك'),

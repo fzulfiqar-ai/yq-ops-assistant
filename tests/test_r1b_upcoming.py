@@ -596,6 +596,77 @@ def _():
     assert "assert_public_copy(rows)" in importer and 'TIER_WORD = re.compile(r"premium", re.I)' in importer
 
 
+@test("home slide 'd:soon': plum teaser, never slide 1, never a section drop or a desktop tile, commerce-free, one shared fetch, prefetch untouched")
+def _():
+    slides = _web("lib/slides.ts")
+    home_ts = _web("lib/home.ts")
+    home = _web("pages/Home.tsx")
+    spot = _web("components/Spotlight.tsx")
+    up = _web("lib/upcoming.ts")
+    # the slide exists, is plum (never night: it must not look like the dark brand slide beside it)
+    assert "export const SOON_SLIDE_ID = 'd:soon'" in slides
+    lit = re.search(r"const slide: Slide = \{ id: SOON_SLIDE_ID,(.*?)\}\n", slides)
+    assert lit, "the d:soon slide literal is not where it was"
+    body = lit.group(1)
+    assert "canvas: 'plum'" in body and "night" not in body
+    assert "t.headline(soon.brand)" in body and "line: t.stageLineShort" in body and "cta: t.seeAll" in body and "products: stageArt(soon.items)" in body
+    assert "kicker: when || t.kicker" in body and "expected_label_en" in slides and "expected_label_ar" in slides
+    # never a price, a BHD figure, a count or the tier word on it
+    for bad in ("price", "bhd", "count", "plural", "length", "premium", "sticker"):
+        assert bad not in body.lower(), f"the d:soon slide carries {bad!r}"
+    # only for a switched-on payload with cards, and only into a deck that already has a slide 1
+    block = slides[slides.index("/* 4 · \"Coming soon\""):slides.index("  return out\n}", slides.index("/* 4 · \"Coming soon\""))]
+    assert "soon.enabled && soon.items.length > 0 && out.length > 0 && allowed(SOON_SLIDE_ID, 'data')" in block
+    # never index 0: second, or third behind Order again (out.length >= 1 here, so the min is >= 1)
+    assert "const at = out[1]?.id === 'd:again' ? 2 : 1" in block and "out.splice(Math.min(at, out.length), 0, slide)" in block
+    assert "splice(0" not in block and "unshift" not in block
+    # it rides on top of `max` (never takes a data slide's place), so the deck around it is stable
+    assert slides.index("/* 4 · \"Coming soon\"") > slides.index("/* 3 · Order again"), "the teaser is placed after Order again"
+    # not a section: the home rail stays too (owner, 27-Sep), so SECTION_SLIDE_IDS never drops it
+    sections = re.search(r"export const SECTION_SLIDE_IDS: readonly string\[\] = \[(.*?)\]", slides).group(1)
+    assert "d:soon" not in sections and "SOON" not in sections, sections
+    # heroDeck: joins only a deck that already turns (>= 2 without it) — the dots row never appears late
+    deck = slides[slides.index("export function heroDeck("):slides.index("function trimDeck(")]
+    assert "slides.filter((s) => s.id !== SOON_SLIDE_ID)" in deck and "deck.length < 2 ? deck : trimDeck(slides, max, deals)" in deck
+    # a stage slide only: heroSplit never tiles it, and Home keeps it out of the split's arithmetic
+    assert "s.id !== 'd:again' && s.id !== 'd:soon'" in home_ts
+    assert "heroSplit(deck.filter((s) => s.id !== 'd:again' && s.id !== SOON_SLIDE_ID))" in home
+    # Home claims every slide it built, so a slide the teaser pushes off the 3-slide stage never pops into the aside on Home
+    assert "[...new Set([...slides.map((s) => s.id), ...SECTION_SLIDE_IDS])]" in home
+    # Home passes the shared payload, asked for once the catalog is in; the Spotlight too (capped at MAX)
+    assert "const upcoming = useUpcoming(Boolean(data))" in home and "upcoming: upcoming ?? null" in home
+    assert "useUpcoming(hasItems)" in spot and "upcoming: upcoming ?? null" in spot and ".slice(0, MAX)" in spot
+    assert "(upcoming !== undefined || waited)" in spot, "the aside waits (briefly) for the teaser before it starts turning"
+    # one shared request: one in-flight promise + memory cache; every surface reads it, nobody calls getUpcoming itself
+    assert "let inflight: Promise<UpcomingPayload> | null = null" in up and "const TTL_MS = 60000" in up
+    assert "if (!inflight) {" in up and "inflight = null\n        throw err" in up, "a failure is never cached"
+    for rel in ("pages/BrandPage.tsx", "components/ComingSoonRail.tsx", "pages/Home.tsx", "components/Spotlight.tsx"):
+        src = _web(rel)
+        assert "getUpcoming" not in src, f"{rel} fetches the payload itself"
+        assert "from '../lib/upcoming'" in src, f"{rel} does not use the shared fetch"
+    # the art is a picture only: asCreative carries an id and photos, never a ShopItem's commerce fields
+    ac = up[up.index("export function asCreative("):up.index("export function stageArt(")]
+    assert set(re.findall(r"^\s{4}(\w+):", ac, re.M)) == {"item_code", "thumb_urls", "product_image_url"}, ac
+    assert "export { asCreative, stageArt } from '../lib/upcoming'" in _web("components/ComingSoonShared.ts")
+    # the slide's line: one clause of at most 34 characters (the S.slides *Line rule), in both languages, no tier word
+    strings = _web("strings.ts")
+    lines = re.findall(r"^      stageLineShort: '([^']*)',$", strings, re.M)
+    assert len(lines) == 2, lines
+    for text in lines:
+        assert len(text) <= 34 and not re.search(r"premium", text, re.I), text
+    # slide 1 is preloaded by public/catalog-prefetch.js, which mirrors buildSlides: untouched
+    import subprocess
+    try:
+        shipped = subprocess.run(["git", "show", "cec2706:web/public/catalog-prefetch.js"], cwd=str(ROOT), capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        shipped = None
+    if shipped is None or shipped.returncode != 0:
+        print("        SKIP: git or commit cec2706 not available — catalog-prefetch.js not compared")
+    else:
+        now = (ROOT / "web" / "public" / "catalog-prefetch.js").read_bytes().replace(b"\r\n", b"\n")
+        assert now == shipped.stdout.replace(b"\r\n", b"\n"), "catalog-prefetch.js changed — slide 1 must stay exactly as it preloads"
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

@@ -12,7 +12,8 @@ import { fetchOrderCached, useRecentOrders } from '../hooks/useRecentOrders'
 import { useMarket, useOrder } from '../MarketContext'
 import { currentRef, forgetRef, isSlugShaped, rememberedOrders, rememberRef } from '../lib/device'
 import { categoryTiles, heroSplit, liveOffer, orderLines, splitReorder } from '../lib/home'
-import { buildSlides, heroDeck, SECTION_SLIDE_IDS, useClaimSlides } from '../lib/slides'
+import { buildSlides, heroDeck, SECTION_SLIDE_IDS, SOON_SLIDE_ID, useClaimSlides } from '../lib/slides'
+import { useUpcoming } from '../lib/upcoming'
 import { usePageTitle, useSearchBand, useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
 import { useCartLines } from '../store/cart'
@@ -39,7 +40,11 @@ import { S } from '../strings'
  *
  * The orders this phone remembers arrive after the first paint: while they do, the Order again
  * slot is held (skeleton) and the hero tiles are built without 'd:again', so a returning
- * merchant's top zone is laid out once instead of shifting when they land.
+ * merchant's top zone is laid out once instead of shifting when they land. The "Coming soon"
+ * teaser ('d:soon') is the same kind of late guest — its payload (lib/upcoming, one shared request,
+ * asked for once the catalog is in) lands after the first paint — so it is kept out of the tile
+ * arithmetic too and joins only a deck that already turns (lib/slides heroDeck): the stage, the
+ * tiles and the dots row are laid out identically before and after it arrives.
  *
  * A slide shows once (lib/slides, claimed so the aside Spotlight skips it). Two-phase render: the
  * first commit is this top zone only; the below-the-fold sections are their own chunk (HomeBelow —
@@ -137,7 +142,10 @@ export default function Home() {
   const tiles = useMemo(() => categoryTiles(items, categories), [items, categories])
   const offer = useMemo(() => liveOffer(data), [data])
   const lastOrderItems = useMemo(() => againLines.map((l) => l.item), [againLines])
-  const slides = useMemo(() => buildSlides({ items, campaigns, recognized, lastOrder: lastOrderItems }), [items, campaigns, recognized, lastOrderItems])
+  // the "Coming soon" announcement: requested once the catalog is here (the first screen's own
+  // requests go first), shared with the rail below and the aside — null means no teaser slide
+  const upcoming = useUpcoming(Boolean(data))
+  const slides = useMemo(() => buildSlides({ items, campaigns, recognized, lastOrder: lastOrderItems, upcoming: upcoming ?? null }), [items, campaigns, recognized, lastOrderItems, upcoming])
   // the phone carries the paste offer twice — the card under the tiles and the closing band — so
   // the deck never opens with a third: 'd:quick' is out of it and the slider sells stock instead
   const phoneSlides = useMemo(() => slides.filter((s) => s.id !== 'd:quick'), [slides])
@@ -149,15 +157,19 @@ export default function Home() {
     // them, so no headline appears twice in one frame. It also spends the page's SECOND paste
     // offer: the aside mini-cart and the closing band make it, the hero no longer does.
     const deck = heroDeck(slides, 6)
-    // 'd:again' appears only once the last order has loaded, and it is never tileable: keep it out
-    // of the split's arithmetic so the tile column beside the stage does not change when it arrives
-    const split = heroSplit(deck.filter((s) => s.id !== 'd:again'))
+    // 'd:again' appears only once the last order has loaded and 'd:soon' once the upcoming payload
+    // has, and neither is ever tileable: keep both out of the split's arithmetic so the tile column
+    // beside the stage does not change when they arrive
+    const split = heroSplit(deck.filter((s) => s.id !== 'd:again' && s.id !== SOON_SLIDE_ID))
     const picked = new Set(split.tiles.map((s) => s.id))
     return { hero: deck.filter((s) => !picked.has(s.id)).slice(0, 3), tiles: split.tiles }
   }, [desktop, slides, phoneSlides])
-  // What this page has spent: the composition itself, plus every id it states as a section of its
-  // own — the aside Spotlight must not bring "Restock essentials" back beside the essentials rail.
-  const shownSlides = useMemo(() => [...new Set([...[...stage.hero, ...stage.tiles].map((s) => s.id), ...SECTION_SLIDE_IDS])], [stage])
+  // What this page has spent: every slide it built — the composition itself, and also one the
+  // three-slide stage had no room for (Order again and the "Coming soon" teaser take a place when
+  // they land) or the teaser a one-slide deck leaves out, so neither is handed to the aside, which on
+  // Home stays the mini-cart's column (components/Spotlight) — plus every id it states as a section
+  // of its own: the aside must not bring "Restock essentials" back beside the essentials rail.
+  const shownSlides = useMemo(() => [...new Set([...slides.map((s) => s.id), ...SECTION_SLIDE_IDS])], [slides])
   useClaimSlides(shownSlides)
 
   useEffect(() => {
