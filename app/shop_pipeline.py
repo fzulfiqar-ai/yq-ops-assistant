@@ -49,10 +49,15 @@ CANCEL_REASONS: dict[str, str] = {
     "duplicate": "Duplicate order",
     "test": "Test order",
     "price_issue": "Price issue",
+    "below_minimum": "Below the minimum order",
     "other": "Other",
 }
+# codes the shop_orders.cancel_reason_code check accepts only after scripts/r7c_order_lines_qty_migration.sql
+# (set_status writes 'other' to the column until then; the event keeps the real code)
+R7C_CANCEL_REASONS = ("below_minimum",)
 CANCEL_NOTE_MIN = 3
-CANCEL_REASON_REQUIRED = "Pick a cancel reason (out of stock, customer request, duplicate, test, price issue or other)."
+CANCEL_REASON_REQUIRED = ("Pick a cancel reason (out of stock, customer request, duplicate, test, price issue, "
+                          "below the minimum or other).")
 CANCEL_NOTE_REQUIRED = "Say why in the note when the reason is 'other'."
 # What the MERCHANT is told when staff cancel: the reason's label from the fixed list, never the
 # free-text note (that is the office's record — see customer_cancel_text). 'test' and 'other'
@@ -62,6 +67,7 @@ CUSTOMER_CANCEL_TEXT: dict[str, str] = {
     "customer_request": "As you asked",
     "duplicate": "Duplicate order",
     "price_issue": "Price issue",
+    "below_minimum": "Below the minimum order value",
 }
 
 PAYMENT_STATUSES = ("unpaid", "partial", "paid")
@@ -153,7 +159,7 @@ def set_payment(order_id: int, status: str, method: str | None, amount_bhd, note
     if o.get("status") == "cancelled":
         raise shop.ShopError("A cancelled order has no payment to record.")
     if st == "paid" and amt is None:
-        amt = q3(o.get("total_confirmed_bhd") if o.get("total_confirmed_bhd") is not None else o.get("total_bhd"))
+        amt = q3(shop.shop_heart.order_total(o))
     now = _iso()
     method = m or (str(o.get("payment_method") or "").strip().lower() or None)     # omitted = unchanged
     upd: dict = {"payment_status": st, "payment_method": method, "updated_at": now}
@@ -230,10 +236,11 @@ def record_return(order_id: int, lines, reason: str | None, actor: str) -> dict:
         if not ln or lid in seen:
             raise shop.ShopError("Unknown or repeated order line.")
         seen.add(lid)
-        if (ln.get("line_status") or "ok") == "removed":
-            raise shop.ShopError(f"{ln['item_code']} was removed at confirmation — nothing to return.")
         qty = _i((it or {}).get("qty"))
-        delivered = _i(ln.get("qty_confirmed")) if ln.get("qty_confirmed") is not None else _i(ln.get("qty"))
+        # R7c: what was handed over (qty_delivered; plain Delivered = the confirmed quantity)
+        delivered = shop.shop_heart.qty_delivered_eff(ln, o.get("status")) or 0
+        if delivered <= 0:
+            raise shop.ShopError(f"{ln['item_code']} was not delivered — nothing to return.")
         back = already.get(lid, 0)
         cap = max(0, delivered - back)
         if cap <= 0:
@@ -618,7 +625,7 @@ def decide_focus_link(order_id: int, invoice_key, action: str, actor: str, note:
             status_to = done.get("status") or "delivered"
         elif empty:
             _fill_invoice_if_empty(o, key, tag, extra)
-        total = o.get("total_confirmed_bhd") if o.get("total_confirmed_bhd") is not None else o.get("total_bhd")
+        total = shop.shop_heart.order_total(o)
         link = _save_link(existing, order_id, key, state="confirmed", method=method, confidence=confidence,
                           sio_key=sio_key, allocated=total, note=why, actor=actor)
     else:

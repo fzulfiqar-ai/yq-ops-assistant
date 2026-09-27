@@ -704,6 +704,10 @@ class _Query:
         self.filters.append((col, val))
         return self
 
+    def is_(self, col, val):                   # R7c: the confirm swap pins updated_at (IS NULL here)
+        self.filters.append((col, None) if str(val).lower() == "null" else (col, val))
+        return self
+
     def order(self, *_a, **_k):
         return self
 
@@ -737,29 +741,34 @@ def _confirm_env(db, ctx):
         shop.get_client, shop.has_column, shop.context = saved
 
 
-@test("confirm: the confirmed unit and line totals stored are the engine's fils figures (no float re-arithmetic)")
+@test("confirm: the price lock — confirmed figures are the ORDERED unit prices at the confirmed quantities, exactly")
 def _():
     from app.shop import confirm_order
-    # both lines are exact half-fils ties the float engine booked one fils LOW (2.135 x 0.9 = 1.9215 ->
-    # 1.922, it stored 1.921; 0.29 x 0.95 = 0.2755 -> 0.276, it stored 0.275): the stored confirmed
-    # prices prove HALF_UP on the exact product, not just the arithmetic
-    ctx = _ctx([_item("T02", "2.135"), _item("X05", "0.29")],
-               rules=[_rule(5, "qty_tier", min_qty=12, pct_off=10, item_codes=["T02"]),
-                      _rule(6, "qty_tier", min_qty=7, pct_off=5, item_codes=["X05"])])
-    db = {"shop_orders": [{"id": 1, "order_no": "YQ-2609-0001", "status": "new", "subtotal_bhd": 30.0, "total_bhd": 30.0,
-                           "coupon_code": None, "referral_code": None}],
-          "shop_order_lines": [{"id": 11, "order_id": 1, "item_code": "T02", "qty": 3, "qty_confirmed": None, "line_status": "ok"},
-                               {"id": 12, "order_id": 1, "item_code": "X05", "qty": 7, "qty_confirmed": None, "line_status": "ok"}],
+    # R7c (owner, 27-Sep-2026): the shop pays the price it ordered at. The two lines were placed at their
+    # tier prices (the engine's HALF_UP fils: 2.135 x 0.9 = 1.9215 -> 1.922; 0.29 x 0.95 = 0.2755 -> 0.276);
+    # the book and the rules have changed since (T02 now 9.999, no tiers at all). A stock cut below the
+    # tier's minimum keeps the tier price — never today's book, never a float re-arithmetic.
+    ctx = _ctx([_item("T02", "9.999"), _item("X05", "9.999")])
+    db = {"shop_orders": [{"id": 1, "order_no": "YQ-2609-0001", "status": "new", "subtotal_bhd": 27.65,
+                           "discount_bhd": 2.654, "delivery_bhd": 0, "total_bhd": 24.996,
+                           "coupon_code": None, "referral_code": None, "updated_at": None}],
+          "shop_order_lines": [{"id": 11, "order_id": 1, "item_code": "T02", "qty": 12, "list_price_bhd": 2.135,
+                                "unit_price_bhd": 1.922, "discount_bhd": 2.556, "line_total_bhd": 23.064,
+                                "qty_confirmed": None, "line_status": "ok"},
+                               {"id": 12, "order_id": 1, "item_code": "X05", "qty": 7, "list_price_bhd": 0.29,
+                                "unit_price_bhd": 0.276, "discount_bhd": 0.098, "line_total_bhd": 1.932,
+                                "qty_confirmed": None, "line_status": "ok"}],
           "shop_order_events": []}
     with _confirm_env(db, ctx):
-        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 12}], "Tomorrow", None, actor="rep@example.com")
+        out = confirm_order(1, [{"line_id": 11, "qty_confirmed": 5, "reason": "out_of_stock"}], "Tomorrow", None,
+                            actor="rep@example.com")
     by = {ln["id"]: ln for ln in db["shop_order_lines"]}
-    assert by[11]["unit_price_confirmed"] == 1.922 and by[11]["line_total_confirmed"] == 23.064, by[11]  # 12 x 1.922
+    assert by[11]["unit_price_confirmed"] == 1.922 and by[11]["line_total_confirmed"] == 9.61, by[11]    # 5 x 1.922
     assert by[12]["unit_price_confirmed"] == 0.276 and by[12]["line_total_confirmed"] == 1.932, by[12]   # 7 x 0.276
     hdr = db["shop_orders"][0]
-    # subtotal 12 x 2.135 + 7 x 0.29 = 27.65; total 23.064 + 1.932 = 24.996 (old engine: 23.052 + 1.925 = 24.977)
-    assert hdr["status"] == "confirmed" and hdr["total_confirmed_bhd"] == 24.996 and hdr["subtotal_confirmed_bhd"] == 27.65, hdr
-    assert out["totals"]["total_bhd"] == 24.996 and all(isinstance(v, float) for v in
+    # subtotal 5 x 2.135 + 7 x 0.29 = 12.705; total 9.610 + 1.932 = 11.542
+    assert hdr["status"] == "confirmed" and hdr["total_confirmed_bhd"] == 11.542 and hdr["subtotal_confirmed_bhd"] == 12.705, hdr
+    assert out["totals"]["total_bhd"] == 11.542 and all(isinstance(v, float) for v in
                                                            (hdr["total_confirmed_bhd"], by[11]["unit_price_confirmed"]))
     assert _f2d(hdr["total_confirmed_bhd"]) == sum((_f2d(by[i]["line_total_confirmed"]) for i in (11, 12)), ZERO)
 

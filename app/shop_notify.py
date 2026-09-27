@@ -121,36 +121,59 @@ def customer_to_salesman_email_url(o: dict) -> str | None:
     return f"mailto:{q(to, safe='@')}?subject={q(subject)}&body={q(body)}"
 
 
-def _changes_text(o: dict) -> str:
-    """One line per changed or removed line after confirm-with-changes; empty when none."""
+def _changes_text(o: dict, delivered: bool = False) -> str:
+    """One line per line that is not as the shop asked — reduced, unavailable, substituted, added
+    (and, once delivered, handed over differently) — with the reason's PUBLIC label, never the
+    rep's note. Empty when nothing changed."""
+    from app import shop_heart
     out = []
+    status = o.get("status")
     for ln in _lines(o):
-        st = ln.get("line_status") or "ok"
-        if st == "removed":
-            out.append(f"- {ln.get('item_code')}: not available this time")
-        elif st in ("changed", "backorder") and ln.get("qty_confirmed") is not None \
-                and int(ln.get("qty_confirmed") or 0) != int(ln.get("qty") or 0):
-            out.append(f"- {ln.get('item_code')}: {ln.get('qty')} -> {ln.get('qty_confirmed')}")
+        code = ln.get("item_code")
+        why = shop_heart.public_reason(ln.get("change_reason"))
+        tail = f" ({why})" if why else ""
+        kind = shop_heart.disposition(ln)
+        qty = int(ln.get("qty") or 0)
+        qc = shop_heart.qty_confirmed_eff(ln)
+        if kind == "substituted":
+            sub = ln.get("substitute_item_code")
+            out.append(f"- {code}: replaced by {sub}{tail}" if sub else f"- {code}: not available this time{tail}")
+        elif kind == "unavailable":
+            out.append(f"- {code}: not available this time{tail}")
+        elif kind == "added":
+            if ln.get("substitute_for_line"):
+                continue             # the substituted line above already names it
+            out.append(f"- {code}: added {qc}{tail}")
+        elif kind in ("reduced", "increased"):
+            out.append(f"- {code}: {qty} -> {qc}{tail}")
+        if delivered:
+            qd = shop_heart.qty_delivered_eff(ln, status)
+            if qd is not None and qd != qc:
+                out.append(f"- {code}: delivered {qd} of {qc}")
     return "\n".join(out)
 
 
 def salesman_to_customer_wa_url(o: dict, status: str | None = None) -> str | None:
-    """Prefilled message the salesman taps to update the customer at each stage. The merchant's
-    tracking page uses the same words (Received / Confirmed / Preparing / On the way / Delivered)."""
+    """Prefilled message the salesman taps to update the customer at each step — the rep's "Tell
+    the shop" (POST /shop/orders/{id}/customer-notified logs the tap). The shop sees three stages
+    (Received / Confirmed / Delivered): an order the storekeeper stamped Preparing / On the way
+    gets the Confirmed message. 'amended' = the confirmed order changed."""
+    from app import shop_heart
     name = (o.get("customer_name") or "").split(" ")[0] or "there"
     st = status or o.get("status") or "new"
+    if st in ("packed", "out_for_delivery"):
+        st = "confirmed"
     no = o.get("order_no")
-    total = o.get("total_confirmed_bhd") if o.get("total_confirmed_bhd") is not None else o.get("total_bhd")
+    total = shop_heart.order_total(o)
     eta = f" Expected delivery: {o['expected_delivery']}." if o.get("expected_delivery") else ""
-    changes = _changes_text(o)
-    confirmed = (f"Hello {name}, your order {no} is confirmed. Total {_money(total)}.{eta}"
-                 + (f"\nChanges to your order:\n{changes}" if changes else ""))
+    changes = _changes_text(o, delivered=(st == "delivered"))
+    what = f"\nChanges to your order:\n{changes}" if changes else ""
     msgs = {
         "new": f"Hello {name}, thank you for your order {no} with YQ Bahrain. I'm checking availability and will confirm shortly.",
-        "confirmed": confirmed,
-        "packed": f"Hello {name}, your order {no} is being prepared at our warehouse.{eta}",
-        "out_for_delivery": f"Hello {name}, your order {no} is on its way to you.",
-        "delivered": f"Hello {name}, your order {no} has been delivered. Thank you for choosing YQ Bahrain!",
+        "confirmed": f"Hello {name}, your order {no} is confirmed. Total {_money(total)}.{eta}{what}",
+        "amended": f"Hello {name}, your order {no} was updated. Total now {_money(total)}.{eta}{what}",
+        "delivered": (f"Hello {name}, your order {no} has been delivered. Total {_money(total)}.{what}\n"
+                      "Thank you for choosing YQ Bahrain!"),
         "cancelled": f"Hello {name}, your order {no} has been cancelled. Please message me if this is unexpected.",
     }
     return wa_url(o.get("customer_phone"), msgs.get(st, msgs["new"]) + f"\n{_status_url(o)}")

@@ -19,7 +19,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from fastapi import BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
     from pydantic import BaseModel, Field
 
-    from app import attribution, shop, shop_audit, shop_notify, shop_pipeline
+    from app import attribution, shop, shop_audit, shop_heart, shop_notify, shop_pipeline
     from app.audit import log_event
     from app.auth import CurrentUser, get_current_user, has_feature, require_admin, require_feature
     from app.catalog import share_token
@@ -106,15 +106,53 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         also_customer: bool = False
 
     class ConfirmLine(BaseModel):
+        # R7c editor (confirm + amend): a confirmed quantity (0 = unavailable), or line_status
+        # 'unavailable' / 'removed' (the same), 'backorder' (comes later); a substitute; a reason
+        # chip (shop_heart.CHANGE_REASONS) for every change — 'other' needs the note
         line_id: int
         qty_confirmed: int | None = Field(default=None, ge=0, le=shop.MAX_QTY)
-        line_status: str | None = Field(default=None, max_length=16)   # 'removed' drops the line
+        line_status: str | None = Field(default=None, max_length=16)
+        reason: str | None = Field(default=None, max_length=20)
+        note: str | None = Field(default=None, max_length=200)                # internal — never shown to the shop
+        substitute_item_code: str | None = Field(default=None, max_length=64)
+        substitute_qty: int | None = Field(default=None, ge=1, le=shop.MAX_QTY)
+        backorder: bool | None = None
+
+    class AddedLine(BaseModel):
+        item_code: str = Field(max_length=64)
+        qty: int = Field(ge=1, le=shop.MAX_QTY)
+        reason: str | None = Field(default=None, max_length=20)             # default customer_changed
         note: str | None = Field(default=None, max_length=200)
+
+    class ShopAgreed(BaseModel):
+        via: str = Field(max_length=12)                                      # whatsapp | phone | visit
 
     class ConfirmRequest(BaseModel):
         lines: list[ConfirmLine] = Field(default_factory=list, max_length=shop.MAX_LINES)
-        expected_delivery: str | None = Field(default=None, max_length=120)
+        added_lines: list[AddedLine] = Field(default_factory=list, max_length=shop.MAX_LINES)
+        expected_delivery: str | None = Field(default=None, max_length=120)   # the ETA chip or typed text
+        expected_delivery_date: str | None = Field(default=None, max_length=10)   # YYYY-MM-DD (a date picker)
+        note: str | None = Field(default=None, max_length=500)                # the note for the shop
+        shop_agreed: ShopAgreed | None = None      # required when a change is adverse (shop_heart.ADVERSE_MSG)
+
+    class DeliverLine(BaseModel):
+        line_id: int
+        qty_delivered: int = Field(ge=0, le=shop.MAX_QTY)
+        reason: str | None = Field(default=None, max_length=20)             # required when ≠ confirmed
+        note: str | None = Field(default=None, max_length=200)
+
+    class DeliverRequest(BaseModel):
+        lines: list[DeliverLine] = Field(default_factory=list, max_length=shop.MAX_LINES)
+        added: list[AddedLine] = Field(default_factory=list, max_length=shop.MAX_LINES)
         note: str | None = Field(default=None, max_length=500)
+        shop_agreed: ShopAgreed | None = None
+        focus_invoice_no: str | None = Field(default=None, max_length=shop_pipeline.INVOICE_MAX)
+
+    class ReopenRequest(BaseModel):
+        reason: str = Field(max_length=300)
+
+    class NotifiedRequest(BaseModel):
+        channel: str = Field(default="whatsapp", max_length=12)             # whatsapp | phone | visit | email
 
     class StatusRequest(BaseModel):
         status: str = Field(max_length=16)
@@ -404,7 +442,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         return {
             "ok": True, "duplicate": bool(o.get("duplicate")),
             "order_no": o["order_no"], "token": o["token"], "status_url": o["status_url"],
-            "status": o.get("status", "new"), "status_label": shop.STATUS_LABELS.get(o.get("status", "new"), "Received"),
+            "status": o.get("status", "new"), "status_label": shop_heart.status_label(o.get("status", "new")),
             "assigned": bool(sm), "attribution": o.get("attribution_source"),
             "salesman": ({"name": name, "first_name": name.split(" ")[0] if name else ""} if sm else None),
             "whatsapp_url": shop_notify.customer_to_salesman_wa_url(o),
@@ -660,11 +698,12 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             background.add_task(shop_notify.notify_new_order, o["id"])
         log_event(user.email, "shop.order_placed", detail={"order_id": o["id"], "order_no": o["order_no"]})
         sm = o.get("salesman") or {}
+        st = o.get("status") or "new"          # R7c: a rep-placed order is born Confirmed
         return {
             "ok": True, "order_id": o["id"], "order_no": o["order_no"], "token": o["token"],
-            "status_url": o["status_url"],
+            "status_url": o["status_url"], "status": st, "status_label": shop_heart.status_label(st),
             "salesman": ({"name": sm.get("name"), "phone": sm.get("whatsapp") or sm.get("phone")} if sm else None),
-            "whatsapp_url": shop_notify.salesman_to_customer_wa_url(o, "new"),   # the salesman's tap TO the shop
+            "whatsapp_url": shop_notify.salesman_to_customer_wa_url(o, st),   # the salesman's tap TO the shop
             "email_url": None,
             "totals": o["totals"], "has_backorder": bool(o.get("has_backorder")), "source": "salesman",
         }
@@ -702,35 +741,70 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         sid, _admin = _scope(user)
         return o.get("salesman_id") == sid
 
+    def _decorate(user: CurrentUser, o: dict, wa_status: str | None = None) -> dict:
+        """The staff order payload (R7c): the owner's three visible stages, what this role is
+        offered next (next_statuses / actions), every line with its three numbers and the public
+        reason label, the effective money, and whether the shop was told after the latest step.
+        Drawer, status, confirm, amend, deliver and reopen all answer with this shape."""
+        read_only = is_read_only(user.role)
+        o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, wa_status)
+        base = shop.market_base()
+        o["status_url"] = f"{base}/o/{o.get('token')}" if base else f"/o/{o.get('token')}"
+        o["next_statuses"] = shop_heart.next_statuses(o["status"], user.role, read_only=read_only)
+        o["actions"] = shop_heart.actions(o, user.role, is_admin=user.role == "admin", read_only=read_only)
+        o["steps"] = shop.order_steps(o)
+        o["status_label"] = shop_heart.status_label(o["status"])
+        o["visible_status"] = shop_heart.visible_status(o["status"])
+        o["stamp_label"] = (shop.STATUS_LABELS.get(o["status"])
+                            if o["status"] in ("packed", "out_for_delivery") else None)   # the pick-list word
+        o["lines"] = [{**ln, **shop_heart.line_view(ln, o)} for ln in o.get("lines") or []]
+        o.update(shop_heart.order_money(o))
+        o.update(shop_heart.notify_state(o.get("events")))
+        until = shop_heart.reopen_deadline(o)
+        o["reopen_until"] = until.isoformat() if until and user.role == "admin" else None
+        o["payment_label"] = shop_pipeline.PAYMENT_LABELS.get(o.get("payment_status") or "unpaid", "Unpaid")
+        o["cancel_reasons"] = shop_pipeline.CANCEL_REASONS
+        o["change_reasons"] = shop_heart.CHANGE_REASONS
+        o["agreed_via"] = list(shop_heart.AGREED_VIA)
+        # the minimum the editor's adverse check measures against (the cached context's settings)
+        o["min_order_bhd"] = shop.money((shop.context().get("settings") or {}).get("shop_min_order_bhd"))
+        if user.role == "admin":     # the shop's recorded rep (admin assignment / sticky) for the drawer
+            o["customer"] = attribution.customer_rep(o.get("customer_id"))
+        o.pop("ip_hash", None)
+        return _masked(user, o)
+
+    def _acting_rep_or_admin(user: CurrentUser, order_id: int) -> dict:
+        """The order's rep or an admin may act (R7c confirm-side writes). Management reads only and
+        the storekeeper only stamps the pick list: 403 for both, whatever the central gate did."""
+        if is_read_only(user.role) or user.role == "storekeeper":
+            raise HTTPException(status_code=403, detail="Your role cannot change orders.")
+        cur = shop.get_order(order_id)
+        if not _visible(user, cur, write=True):
+            raise HTTPException(status_code=404, detail="Order not found.")
+        return cur
+
     @app.get("/shop/orders/{order_id}")
     def shop_order_detail(order_id: int,
                           user: CurrentUser = Depends(require_any_feature("Shop Orders", "Storekeeper"))) -> dict:
         o = shop.get_order(order_id)
         if not _visible(user, o):
             raise HTTPException(status_code=404, detail="Order not found.")
-        o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o)
-        base = shop.market_base()
-        o["status_url"] = f"{base}/o/{o.get('token')}" if base else f"/o/{o.get('token')}"
-        allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
-        nxt = list(shop.NEXT_STATUS.get(o["status"], ()))
-        o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
-        o["steps"] = shop.order_steps(o)
-        o["status_label"] = shop.STATUS_LABELS.get(o["status"], o["status"])
-        o["payment_label"] = shop_pipeline.PAYMENT_LABELS.get(o.get("payment_status") or "unpaid", "Unpaid")
-        o["cancel_reasons"] = shop_pipeline.CANCEL_REASONS
-        if user.role == "admin":     # the shop's recorded rep (admin assignment / sticky) for the drawer
-            o["customer"] = attribution.customer_rep(o.get("customer_id"))
-        o.pop("ip_hash", None)
-        if is_read_only(user.role):
-            o["next_statuses"] = []      # nothing to move: management reads only
-        return _masked(user, o)
+        return _decorate(user, o)
 
     @app.post("/shop/orders/{order_id}/status")
     def shop_order_set_status(order_id: int, body: StatusRequest, background: BackgroundTasks,
                               user: CurrentUser = Depends(require_any_feature("Shop Orders", "Storekeeper"))) -> dict:
+        """The forward step only (R7c): Confirmed / Preparing / On the way → Delivered (one tap:
+        delivered = confirmed), and Cancel. Received → Confirmed goes through POST …/confirm (400
+        here); Preparing / On the way are the storekeeper's pick-list stamps (400 for anyone else)."""
         cur = shop.get_order(order_id)
         if not _visible(user, cur, write=True):
             raise HTTPException(status_code=404, detail="Order not found.")
+        want = str(body.status or "").strip().lower()
+        if want == "confirmed":
+            raise HTTPException(status_code=400, detail=shop_heart.USE_CONFIRM_MSG)
+        if want in ("packed", "out_for_delivery") and user.role != "storekeeper":
+            raise HTTPException(status_code=400, detail=shop_heart.STAMP_ONLY_MSG)
         allowed = None if user.role == "admin" else shop.ROLE_STATUSES.get(user.role)
         try:
             o = shop.set_status(order_id, body.status, body.note, actor=user.email, allowed=allowed,
@@ -739,42 +813,122 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             raise _conflict_or_400(e) from e
         # The merchant's email carries the note on every move but a cancel: there the note is the
         # office's record ("duplicate / fake number", "price too low for this shop") and the shop
-        # is told the reason's public label only — shop_pipeline.customer_cancel_text.
-        customer_note = (shop_pipeline.customer_cancel_text(body.reason_code)
-                         if o.get("status") == "cancelled" else body.note)
-        background.add_task(shop_notify.notify_status, order_id, body.status, customer_note)
+        # is told the reason's public label only — shop_pipeline.customer_cancel_text. The
+        # storekeeper's stamps are not a step the shop sees: no email for them.
+        if want not in ("packed", "out_for_delivery"):
+            customer_note = (shop_pipeline.customer_cancel_text(body.reason_code)
+                             if o.get("status") == "cancelled" else body.note)
+            background.add_task(shop_notify.notify_status, order_id, body.status, customer_note)
         log_event(user.email, "shop.order_status", detail={"order_id": order_id, "status": body.status,
                                                            "reason_code": body.reason_code,
                                                            "focus_invoice_no": o.get("focus_invoice_no")})
-        o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, body.status)
-        nxt = list(shop.NEXT_STATUS.get(o["status"], ()))
-        o["next_statuses"] = [s for s in nxt if allowed is None or s in allowed]
-        o["steps"] = shop.order_steps(o)
-        o.pop("ip_hash", None)
-        return {"ok": True, "order": o}
+        o = _decorate(user, o, want)
+        return {"ok": True, "order": o, "next_action": "tell_shop"}
+
+    def _edit_response(user: CurrentUser, o: dict, wa_status: str) -> dict:
+        totals = o.pop("totals", None)
+        changed, removed = o.get("changed"), o.get("removed")
+        adverse, agreed = o.pop("adverse", None), o.pop("shop_agreed", None)
+        o = _decorate(user, o, wa_status)
+        return {"ok": True, "order": o, "totals": totals, "changed": changed, "removed": removed,
+                "adverse": adverse or [], "shop_agreed": agreed,
+                "whatsapp_url": o["whatsapp_url"], "next_statuses": o["next_statuses"], "next_action": "tell_shop"}
 
     @app.post("/shop/orders/{order_id}/confirm")
     def shop_order_confirm(order_id: int, body: ConfirmRequest, background: BackgroundTasks,
                            user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
-        """Confirm with changes: confirmed quantities / removed lines, expected delivery, re-price."""
+        """Received → Confirmed with the editor: per-line confirmed quantity / unavailable /
+        substitute / backorder with a reason chip, lines added, the ETA; price lock; an adverse
+        change needs shop_agreed (400 otherwise). The only way an order becomes Confirmed."""
         cur = shop.get_order(order_id)
         if not _visible(user, cur, write=True):
             raise HTTPException(status_code=404, detail="Order not found.")
         try:
             o = shop.confirm_order(order_id, [ln.model_dump() for ln in body.lines], body.expected_delivery,
-                                   body.note, actor=user.email)
+                                   body.note, actor=user.email,
+                                   added_lines=[a.model_dump() for a in body.added_lines],
+                                   shop_agreed=body.shop_agreed.model_dump() if body.shop_agreed else None,
+                                   expected_delivery_date=body.expected_delivery_date)
         except ShopError as e:
             raise _conflict_or_400(e) from e
         background.add_task(shop_notify.notify_status, order_id, "confirmed", body.note)
         log_event(user.email, "shop.order_confirm",
-                  detail={"order_id": order_id, "changed": o.get("changed"), "removed": o.get("removed")})
+                  detail={"order_id": order_id, "changed": o.get("changed"), "removed": o.get("removed"),
+                          "adverse": [a.get("kind") for a in o.get("adverse") or []],
+                          "shop_agreed": (o.get("shop_agreed") or {}).get("via")})
+        return _edit_response(user, o, "confirmed")
+
+    @app.post("/shop/orders/{order_id}/amend")
+    def shop_order_amend(order_id: int, body: ConfirmRequest,
+                         user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """The same editor after confirming (Confirmed; Preparing / On the way read as Confirmed).
+        The order's rep or an admin; management and the storekeeper get 403."""
+        _acting_rep_or_admin(user, order_id)
+        try:
+            o = shop.amend_order(order_id, [ln.model_dump() for ln in body.lines], body.expected_delivery,
+                                 body.note, actor=user.email,
+                                 added_lines=[a.model_dump() for a in body.added_lines],
+                                 shop_agreed=body.shop_agreed.model_dump() if body.shop_agreed else None,
+                                 expected_delivery_date=body.expected_delivery_date)
+        except ShopError as e:
+            raise _conflict_or_400(e) from e
+        log_event(user.email, "shop.order_amend",
+                  detail={"order_id": order_id, "changed": o.get("changed"), "removed": o.get("removed"),
+                          "adverse": [a.get("kind") for a in o.get("adverse") or []],
+                          "shop_agreed": (o.get("shop_agreed") or {}).get("via")})
+        return _edit_response(user, o, "amended")
+
+    @app.post("/shop/orders/{order_id}/deliver")
+    def shop_order_deliver(order_id: int, background: BackgroundTasks, body: DeliverRequest | None = None,
+                           user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """Delivered: one tap (no body / no lines — delivered = confirmed) or "Deliver with changes"
+        (what was really handed over, a reason for every difference, lines added at the shop).
+        The order's rep or an admin; management and the storekeeper get 403."""
+        _acting_rep_or_admin(user, order_id)
+        body = body or DeliverRequest()
+        try:
+            o = shop.deliver_with_changes(order_id, [ln.model_dump() for ln in body.lines],
+                                          [a.model_dump() for a in body.added],
+                                          body.shop_agreed.model_dump() if body.shop_agreed else None,
+                                          actor=user.email, note=body.note, focus_invoice_no=body.focus_invoice_no)
+        except ShopError as e:
+            raise _conflict_or_400(e) from e
+        background.add_task(shop_notify.notify_status, order_id, "delivered", body.note)
+        log_event(user.email, "shop.order_deliver",
+                  detail={"order_id": order_id, "with_changes": bool(body.lines or body.added),
+                          "adverse": [a.get("kind") for a in o.get("adverse") or []],
+                          "focus_invoice_no": o.get("focus_invoice_no")})
         totals = o.pop("totals", None)
-        o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, "confirmed")
-        o["next_statuses"] = list(shop.NEXT_STATUS.get(o["status"], ()))
-        o["steps"] = shop.order_steps(o)
-        o.pop("ip_hash", None)
-        return {"ok": True, "order": o, "totals": totals, "changed": o.get("changed"), "removed": o.get("removed"),
-                "whatsapp_url": o["whatsapp_url"], "next_statuses": o["next_statuses"]}
+        adverse, agreed = o.pop("adverse", None), o.pop("shop_agreed", None)
+        o = _decorate(user, o, "delivered")
+        return {"ok": True, "order": o, "totals": totals, "adverse": adverse or [], "shop_agreed": agreed,
+                "whatsapp_url": o["whatsapp_url"], "next_action": "tell_shop"}
+
+    @app.post("/shop/orders/{order_id}/reopen")
+    def shop_order_reopen(order_id: int, body: ReopenRequest, admin: CurrentUser = Depends(require_admin)) -> dict:
+        """Admin only: undo a wrong Delivered (→ Confirmed) or Cancelled (→ Received) within 7 days,
+        with a reason. Audited (audit_log 'shop.order_reopen' + shop_admin_audit 'order')."""
+        try:
+            o = shop.reopen_order(order_id, body.reason, actor=admin.email)
+        except ShopError as e:
+            if str(e) == "Order not found.":
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            raise _conflict_or_400(e) from e
+        log_event(admin.email, "shop.order_reopen",
+                  detail={"order_id": order_id, "order_no": o.get("order_no"), "to": o.get("status"),
+                          "reason": shop.clean(body.reason, 300)})
+        return {"ok": True, "order": _decorate(admin, o)}
+
+    @app.post("/shop/orders/{order_id}/customer-notified")
+    def shop_order_customer_notified(order_id: int, body: NotifiedRequest | None = None,
+                                     user: CurrentUser = Depends(require_feature("Shop Orders"))) -> dict:
+        """The rep tapped "Tell the shop" (the prefilled WhatsApp) — or phoned / visited. Logged as
+        a 'customer_notified' event (+ a shop_notifications row once that table exists)."""
+        _acting_rep_or_admin(user, order_id)
+        try:
+            return shop.record_customer_notified(order_id, (body.channel if body else None), actor=user.email)
+        except ShopError as e:
+            raise _conflict_or_400(e) from e
 
     @app.patch("/shop/orders/{order_id}/test")
     def shop_order_test_flag(order_id: int, body: TestFlagRequest,
@@ -819,7 +973,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             except ShopError as e:
                 customer_assign = {"error": str(e)}      # the order is assigned; the shop's rep was not changed
         o["whatsapp_url"] = shop_notify.salesman_to_customer_wa_url(o, o.get("status"))
-        o["next_statuses"] = list(shop.NEXT_STATUS.get(o["status"], ()))
+        o["next_statuses"] = shop_heart.next_statuses(o["status"], user.role, read_only=is_read_only(user.role))
         o.pop("ip_hash", None)
         return {"ok": True, "order": o, "customer_assign": customer_assign}
 

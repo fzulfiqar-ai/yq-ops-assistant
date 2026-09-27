@@ -96,6 +96,13 @@ jobs:
           python -m tests.test_r7a_rbac
           python -m tests.test_r7a_b4
           python -m py_compile scripts/weekly_report.py   # owner tool: must parse on the pinned 3.11
+      # R7c order heart (Sprint 3): Received -> Confirmed -> Delivered, the one editor, the price lock,
+      # the adverse tick, deliver with changes, reopen, the Decimal property test; the local-Postgres
+      # replay of the migration SKIPs here
+      - name: R7c order heart suite (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r7c_order_heart
       # R2a batch importer: the pure tests; the local-Postgres replay SKIPs here. Its own step — it
       # used to sit on a folded second line of the step above, which YAML read as extra arguments to
       # test_r3_pipeline, so it never ran.

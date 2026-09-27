@@ -372,3 +372,31 @@ four new roles (change those people on the Team page first). Both files were run
 the migration twice, the reverse refused with a management row and with a pending finance invite, then restored
 the six roles twice.
 
+## Release R7c (27-Sep-2026, not yet applied): `r7c_order_lines_qty_migration.sql` — the order heart
+
+Additive and idempotent, with `r7c_order_lines_qty_reverse.sql`. The owner's simplified flow (Received → Confirmed →
+Delivered, or Cancelled; `app/shop_heart.py`): every line keeps three numbers — `qty` (requested, never changed),
+`qty_confirmed`, and the new `qty_delivered` — and every change carries a reason chip.
+
+- `shop_order_lines` gains `qty_delivered`, `change_reason` (check: out_of_stock, discontinued, price,
+  customer_changed, substituted, damaged, other), `substitute_item_code`, `substitute_for_line` (FK to the line it
+  replaces, `on delete set null`), `added_at_stage` (check: confirm, amend, delivery), `unit_cost_bhd numeric(12,4)`
+  and `cost_source` (the landed cost the pricing engine floored the line with, snapshotted at creation / when added).
+- `shop_order_lines_line_status_check` is WIDENED: `substituted`, `added`, `unavailable` join ok / changed /
+  removed / backorder (the live definition was read read-only on 27-Sep-2026 before this was written).
+- `shop_orders` gains `expected_delivery_date` (the ETA chip as a Bahrain date), `reopened_at`, `reopened_by`,
+  `reopen_reason`; `shop_orders_cancel_reason_code_check` is WIDENED with `below_minimum`.
+
+Every new column is nullable with no default, so no row is rewritten; the closing `DO` block raises unless the 11
+columns exist, both checks allow every old and new value, and neither table is granted to `anon`/`authenticated`.
+Deploy order: either. The API probes the columns (`shop_heart.lines_ready` / `orders_ready`): before the migration
+confirm / amend with reductions and removals, plain Delivered, cancel, reopen and "shop told" all work — a line
+confirmed at 0 is written `removed`, a `below_minimum` cancel writes `other` to the column (the event keeps the real
+code), reasons live on the events; adding / substituting a line and delivering with changes answer 400 naming this
+file. The reverse drops the 11 columns (take `python -m scripts.db_backup --tables shop_orders,shop_order_lines`
+first) and puts both checks back to their old lists `NOT VALID`, so rows already written with an R7c value are never
+rewritten while new writes are held to the old lists — restart the API after reversing (the column probes cache a
+hit for 10 minutes). Replayed on a throwaway local cluster (synthetic tables): apply twice, the new values and the FK
+work, bad values are refused, reverse with R7c rows present, apply again — all rolled back
+(`tests/test_r7c_order_heart.py`, SKIPs without a cluster).
+
