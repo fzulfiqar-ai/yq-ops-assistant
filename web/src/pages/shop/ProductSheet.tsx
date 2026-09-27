@@ -28,6 +28,8 @@ export interface ProductSheetProps {
   onRemove: (item: ShopItem) => void
   onOpenItem: (code: string) => void
   onClose: () => void
+  /** Salesman: tapping the quantity opens the keypad sheet. */
+  onQtyClick?: (item: ShopItem) => void
 }
 
 export function ProductSheet({
@@ -46,6 +48,7 @@ export function ProductSheet({
   onRemove,
   onOpenItem,
   onClose,
+  onQtyClick,
 }: ProductSheetProps) {
   const toast = useToast()
   // Keyed to the product: a new product always opens on its product shot, never
@@ -125,6 +128,7 @@ export function ProductSheet({
               label={item.item_code}
               onChange={(n) => onSetQty(item, n)}
               onRemove={() => onRemove(item)}
+              onValueClick={onQtyClick ? () => onQtyClick(item) : undefined}
             />
           ) : (
             <button
@@ -210,6 +214,12 @@ export function ProductSheet({
                 )
               })}
             </div>
+            {/* Salesman: the exact free-to-sell figure lives here, and only here — cards and rows show a band */}
+            {typeof item.stock_qty === 'number' && (
+              <p className="mt-2 text-[12px] text-[#6b6480]">
+                Free to sell: <b className="font-semibold tabular-nums text-[#1A1428]">{Math.max(0, item.stock_qty)} pcs</b>
+              </p>
+            )}
             {out && allowBackorder && (
               <p className="mt-2.5 rounded-xl bg-[#fdecef] px-3 py-2 text-[11.5px] leading-snug text-[#9f1239]">
                 Sold out — order now and your salesman will confirm the ETA.

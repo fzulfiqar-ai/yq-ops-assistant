@@ -94,6 +94,28 @@ export function stockPill(item?: ShopItem | null): { label: string; tone: BadgeT
   return { label: `${qty} in stock`, tone: 'green' }
 }
 
+/** From this many units a salesman's card just says "Plenty": the exact figure lives in the product sheet. */
+export const PLENTY_UNITS = 50
+
+/**
+ * The stock band on a salesman's card or list row (Sprint 5): "Plenty" (50 and up), "N left",
+ * "Sold Out". Bands scan faster than numbers across a screen of products; the exact free-to-sell
+ * figure is one tap away in the sheet (stockPill). A public item has no number, so it keeps the
+ * status wording.
+ */
+export function stockBand(item?: ShopItem | null): { label: string; tone: BadgeTone } {
+  const qty = item?.stock_qty
+  if (typeof qty !== 'number' || !Number.isFinite(qty)) return stockMeta(item?.stock_status)
+  if (qty <= 0 || item?.stock_status === 'out_of_stock') return { label: 'Sold Out', tone: 'rose' }
+  if (qty >= PLENTY_UNITS) return { label: 'Plenty', tone: 'green' }
+  return { label: `${qty} left`, tone: item?.stock_status === 'low_stock' ? 'amber' : 'green' }
+}
+
+/** Sold out: no units (salesman payload) or the status says so (public payload). */
+export function isSoldOut(item?: ShopItem | null): boolean {
+  return item?.stock_status === 'out_of_stock' || (typeof item?.stock_qty === 'number' && item.stock_qty <= 0)
+}
+
 /* ───────────────────────── names ───────────────────────── */
 
 /** "Ali Hassan" → "Ali". Used for the one-tap "Send confirmation to Ali" button. */

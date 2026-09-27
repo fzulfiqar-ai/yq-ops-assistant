@@ -4,7 +4,7 @@ import { Stepper } from '@/components/ui/stepper'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { ProductImage } from './ProductImage'
-import { badgeMeta, bhd, minQtyOf, money, RING, RING_INSET, stepOf, stockPill } from './shared'
+import { badgeMeta, bhd, minQtyOf, money, RING, RING_INSET, stepOf, stockBand } from './shared'
 
 export interface ProductCardProps {
   item: ShopItem
@@ -17,6 +17,8 @@ export interface ProductCardProps {
   onRemove: () => void
   eagerImage?: boolean
   className?: string
+  /** Salesman: tapping the quantity opens the keypad sheet. */
+  onQtyClick?: () => void
 }
 
 /** Order the chips so the strongest signal wins the limited space on a phone. */
@@ -41,9 +43,11 @@ export function ProductCard({
   onRemove,
   eagerImage,
   className,
+  onQtyClick,
 }: ProductCardProps) {
   const out = item.stock_status === 'out_of_stock' || (typeof item.stock_qty === 'number' && item.stock_qty <= 0)
-  const stock = stockPill(item)
+  // a band, not a number (Sprint 5): "Plenty" / "N left" / "Sold Out" — the exact figure is in the sheet
+  const stock = stockBand(item)
   const step = stepOf(item)
   const min = minQtyOf(item)
   const name = item.display_name || item.item_code
@@ -151,6 +155,7 @@ export function ProductCard({
                 label={item.item_code}
                 onChange={onSetQty}
                 onRemove={onRemove}
+                onValueClick={onQtyClick}
                 className="w-full"
               />
             ) : (
