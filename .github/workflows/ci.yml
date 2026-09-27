@@ -132,6 +132,18 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r7c_ui
+      # R7d (Wave C): merchant ordering (What changed, honest placed screen, same as last time,
+      # area reps, product requests), shop analytics on SQL views + the merchant profile, one
+      # official margin + master data, the offer ledger + follow-up hold-outs + rate limits per real
+      # client. All in-memory; the local-Postgres replays SKIP here.
+      - name: R7d suites (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: |
+          python -m tests.test_r7d_merchant
+          python -m tests.test_r7d_analytics
+          python -m tests.test_r7d_profit
+          python -m tests.test_r7d_ops
 
   web:
     runs-on: ubuntu-latest
@@ -162,6 +174,9 @@ jobs:
       # reason, when the "Shop agreed" tick is required, the pro-rata cart share to the fils
       - name: Order heart rules (node, no browser)
         run: node scripts/order_heart_ui_test.mjs
+      # R7d merchant ordering helpers (market/lib/orderChanges.ts and friends) on hand-worked orders
+      - name: Merchant ordering rules (node, no browser)
+        run: node scripts/merchant_test.mjs
       # Advisory until the design-system pass clears the 18 pre-existing portal findings
       # (React compiler rules in AppShell/CommandPalette/DataTable/Dashboard, `any` in
       # Assistant.tsx). Type errors still fail the job: tsc -b runs inside `npm run build`.

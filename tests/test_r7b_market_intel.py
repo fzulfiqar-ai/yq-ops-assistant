@@ -1195,6 +1195,20 @@ def _():
     assert "roll_demand_signals" not in jobs and "market_intel" not in jobs
 
 
+@test("signals: an R7d product_request ('tell {rep}' on an empty search) rolls up with the zero-result searches")
+def _():
+    from app import market_intel as mi
+    now = datetime(2026, 9, 27, 10, 0, tzinfo=timezone.utc)
+    fake = _db(shop_events=[
+        {"id": 1, "event": "search_zero", "ts": now.isoformat(), "session_id": "a", "meta": {"q": "sandisk"}},
+        {"id": 2, "event": "product_request", "ts": now.isoformat(), "session_id": "b", "meta": {"q": "sandisk"}},
+        {"id": 3, "event": "product_request", "ts": now.isoformat(), "session_id": "c", "meta": {"q": "memory card"}},
+        {"id": 4, "event": "search", "ts": now.isoformat(), "session_id": "d", "meta": {"q": "charger"}}])
+    with _env(fake):
+        dry = mi.roll_demand_signals(now=now, dry_run=True)
+    assert dry["written"]["search_zero"] == 2, dry   # sandisk (2 visitors) + memory card; the found search is not demand
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 9. the capture route end to end
 # ═══════════════════════════════════════════════════════════════════════════════

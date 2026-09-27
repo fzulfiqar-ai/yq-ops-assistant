@@ -171,6 +171,8 @@ export interface ShopSettings {
   areas?: string[] | null
   /** R7d: area (lower-cased) → the first name of the rep shop_area_reps routes a no-link order to. */
   area_reps?: Record<string, string> | null
+  /** R7d: a coupon this storefront could use is live. false = the cart hides "Have a coupon?" (an older API sends nothing: shown). */
+  has_coupons?: boolean | null
   /** Marketplace v3: what happens under the minimum — request = send as a small order request, allow = accept, block = refuse. */
   small_order_mode?: 'request' | 'allow' | 'block' | null
 }
@@ -314,6 +316,8 @@ export interface QuoteRequest {
   lines: CartLine[]
   coupon_code?: string
   referral_code?: string
+  /** R7d: the marketplace device — a hold-out (scope.bucket) offer is decided on it, exactly as the order is */
+  device_id?: string
 }
 
 export interface OrderCustomer {

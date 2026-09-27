@@ -353,6 +353,8 @@ export default function CartPage() {
             <Textarea id="yq-note" value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder={S.cart.notePlaceholder} />
           </div>
 
+          {/* R7d: no live coupon for this storefront = no dead "Have a coupon?" field (an applied one stays visible) */}
+          {(m.settings.has_coupons !== false || coupon) && (
           <div className="mt-4">
             {!couponOpen ? (
               <button type="button" onClick={() => setCouponOpen(true)} className="hit relative inline-flex h-10 items-center gap-1.5 rounded-sm text-sm font-semibold text-plum underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus/70">
@@ -368,6 +370,7 @@ export default function CartPage() {
             )}
             {quote?.coupon?.message && <p className={cn('mt-1.5 text-xs font-medium', quote.coupon.valid === false ? 'text-bad' : 'text-ok')}>{quote.coupon.message}</p>}
           </div>
+          )}
 
           {(quote?.warnings || []).length > 0 && (
             <ul className="mt-4 space-y-1.5">

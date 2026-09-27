@@ -1347,7 +1347,7 @@ def _search_terms(rows: list[dict]) -> dict[str, dict]:
 
 def roll_demand_signals(days: int = 7, *, now: datetime | None = None, dry_run: bool = False) -> dict:
     """Roll the marketplace's free demand signals into sightings with source='system': zero-result
-    searches (per cleaned term) and "tell me when back" restock asks (per SKU) over the last `days`.
+    searches and "tell {rep}" product requests (per cleaned term) and "tell me when back" restock asks (per SKU) over the last `days`.
     One sighting per term / SKU per ISO week (client_uuid = uuid5 of the key), so running it twice in
     a week writes nothing new. Callable from app/shop_jobs.py later; NOT scheduled yet."""
     now = now or _now()
@@ -1356,7 +1356,9 @@ def roll_demand_signals(days: int = 7, *, now: datetime | None = None, dry_run: 
     since = now - timedelta(days=max(1, int(days)))
     week = _week_start(now)
     c = get_client()
-    ev = (c.table("shop_events").select("ts,session_id,meta").eq("event", "search_zero")
+    # R7d: a "tell {rep}" tap on an empty search is logged as product_request (meta.q = the words) once
+    # r7d_product_request_migration.sql is applied; before it, the same tap is a search_zero row
+    ev = (c.table("shop_events").select("ts,session_id,meta").in_("event", ["search_zero", "product_request"])
           .gte("ts", _iso(since)).limit(20000).execute().data or [])
     asks = (c.table("shop_restock_requests").select("item_code,phone,device_id,created_at")
             .gte("created_at", _iso(since)).limit(20000).execute().data or [])

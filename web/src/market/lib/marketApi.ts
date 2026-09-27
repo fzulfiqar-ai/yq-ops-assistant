@@ -24,6 +24,7 @@ import {
   type QuoteRequest,
   type RepCard,
 } from '@/lib/shopApi'
+import { deviceId } from './device'
 import { noteCatalog } from './rum'
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
@@ -110,7 +111,9 @@ export function getRep(slug: string): Promise<RepCard> {
 }
 
 export function postMarketQuote(body: QuoteRequest, signal?: AbortSignal): Promise<Quote> {
-  return request<Quote>('/public/market/quote', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) }, signal)
+  // R7d: the device goes with every quote, so a hold-out offer the order would give is shown in the cart too
+  const withDevice: QuoteRequest = { ...body, device_id: body.device_id || deviceId() }
+  return request<Quote>('/public/market/quote', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withDevice) }, signal)
 }
 
 export function postMarketOrder(body: MarketOrderRequest): Promise<MarketOrderResponse> {

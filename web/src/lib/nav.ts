@@ -90,6 +90,8 @@ export const NAV: NavItem[] = [
 export const MANAGEMENT_NAV: { to: string; label: string; section: string; icon: LucideIcon; feature?: string }[] = [
   { to: '/command', label: 'Command Centre', section: 'Overview', icon: Gauge },
   { to: '/shop-orders', label: 'Customer orders', section: 'Marketplace', icon: ClipboardList, feature: 'Shop Orders' },
+  // R7d: the storefront's funnel, searches and each shop's profile (read-only; same grant as Customer orders)
+  { to: '/shop-analytics', label: 'Shop analytics', section: 'Marketplace', icon: BarChart3, feature: 'Shop Orders' },
   { to: '/command/team', label: 'Team', section: 'Company', icon: Trophy },
   { to: '/command/customers', label: 'Customers', section: 'Company', icon: Store },
   { to: '/inventory', label: 'Products & stock', section: 'Company', icon: Boxes, feature: 'Inventory' },

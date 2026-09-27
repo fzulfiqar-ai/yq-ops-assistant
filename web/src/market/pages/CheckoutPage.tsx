@@ -8,7 +8,7 @@ import { useMarket, useOrder } from '../MarketContext'
 import { clientOrderId, deviceId, EMPTY_CUSTOMER, lastPlacedOrder, readCustomer, rememberOrder, rememberQty, resetClientOrderId, saveDetailsEnabled, setSaveDetails, writeCustomer, type CustomerDraft } from '../lib/device'
 import { track } from '../lib/events'
 import { en } from '../i18n/en'
-import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName } from '../lib/format'
+import { areaLabel, bhd, cleanPhone, isEmail, isPhone, money, productName, sessionId } from '../lib/format'
 import { postMarketOrder, recognizePhone } from '../lib/marketApi'
 import { clearSmallAck } from '../lib/smallOrder'
 import { PageBar, useHideNav, usePageTitle, useShell } from '../shell/ShellContext'
@@ -172,6 +172,8 @@ export default function CheckoutPage() {
         note: [deliveryPref != null ? `${en.checkout.deliveryLabel}: ${en.checkout.deliveryOptions[deliveryPref] ?? S.checkout.deliveryOptions[deliveryPref]}` : null, note.trim()].filter(Boolean).join(' · '),
         website,
         device_id: deviceId(),
+        // R7d: the order event carries the visit, so the funnel counts the order step on the session
+        session_id: sessionId(),
         client_order_id: clientOrderId(),
       })
       if (res.token) rememberOrder({ token: res.token, order_no: res.order_no, ts: Date.now(), total: res.totals?.total_bhd ?? null })
