@@ -56,14 +56,36 @@ export const BADGE_META: Record<BadgeKind, { label: string; tone: BadgeTone }> =
   best_seller: { label: 'Best seller', tone: 'accent' },
   trending: { label: 'Trending', tone: 'accent' },
   new: { label: 'New', tone: 'ink' },
-  on_offer: { label: 'On offer', tone: 'green' },
+  // the marketplace's words (R7d): "Deal" only for a live offer; a clearance line is a "Clearing line"
+  on_offer: { label: 'Deal', tone: 'green' },
   price_drop: { label: 'Price drop', tone: 'rose' },
   selling_fast: { label: 'Selling fast', tone: 'amber' },
-  clearance: { label: 'Clearance', tone: 'amber' },
+  clearance: { label: 'Clearing line', tone: 'amber' },
 }
 
 export function badgeMeta(kind: string) {
   return BADGE_META[kind as BadgeKind] || { label: String(kind).replace(/_/g, ' '), tone: 'grey' as BadgeTone }
+}
+
+/** The marketplace's chip order (market/lib/format BADGE_ORDER): the strongest signal wins a small card. */
+const BADGE_ORDER: readonly string[] = ['on_offer', 'price_drop', 'clearance', 'best_seller', 'selling_fast', 'new', 'trending']
+
+/**
+ * The chips a card or sheet shows, in the marketplace's order, at most `limit`. A badge this build
+ * does not know ranks last (never first: indexOf's -1 once sorted clearance and selling_fast ahead
+ * of everything). Price drop wins: a line with a price drop never also reads "Clearing line".
+ */
+export function shownBadges(item: ShopItem, limit = Infinity): BadgeKind[] {
+  const have = [...new Set(item.badges || [])]
+  const drop = have.includes('price_drop')
+  const rank = (b: string) => {
+    const n = BADGE_ORDER.indexOf(b)
+    return n < 0 ? BADGE_ORDER.length : n
+  }
+  return have
+    .filter((b) => !(drop && b === 'clearance'))
+    .sort((a, b) => rank(a) - rank(b))
+    .slice(0, limit)
 }
 
 /** Status only — the PUBLIC shop never reveals a stock number (docs/SHOP.md). */

@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { ProductImage } from './ProductImage'
+import { priceDropOf, wasText } from './priceDrops'
 import { bhd, isSoldOut, minQtyOf, RING, stepOf, stockBand } from './shared'
 
 export interface ProductRowProps {
@@ -67,7 +68,10 @@ function QtyInput({ item, qty, disabled, onSetQty }: { item: ShopItem; qty: numb
  * showing a customer). Phone: a 72 px row — photo, code, stock band, price, then the quantity (a
  * tap opens the keypad) and "+". From 1280 px the same row is a line of the dense order-entry
  * table: code and name · stock band · price · a typed quantity · "+". The exact free-to-sell number
- * is only in the product sheet; the row carries the band.
+ * is only in the product sheet; the row carries the band. A genuine price drop (priceDrops) adds
+ * "Was 1.500 · ↓20%" under the price and a "Price drop" chip in the desk's stock cell; on a phone the
+ * price line says "↓20%" (the full words in its title, the sheet and the grid card) — a second chip on
+ * the code line, or the whole "Was …" beside the price, has no room at 390 px.
  */
 export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, highlighted, eagerImage, onOpen, onSetQty, onQtyClick }: ProductRowProps) {
   const out = isSoldOut(item)
@@ -76,6 +80,7 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
   const step = stepOf(item)
   const min = minQtyOf(item)
   const name = item.display_name && item.display_name !== item.item_code ? item.display_name : (item.spec || '').split('\n')[0]
+  const drop = priceDropOf(item)
   const plus = () => onSetQty(qty > 0 ? Math.min(9999, qty + step) : min)
   return (
     <div
@@ -101,7 +106,7 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
         />
       </button>
 
-      <button type="button" onClick={onOpen} className={cn('min-w-0 flex-1 rounded-lg text-left', RING)} aria-label={`${item.item_code} — details`}>
+      <button type="button" onClick={onOpen} className={cn('min-w-0 flex-1 rounded-lg text-left', RING)} aria-label={`${item.item_code}${drop ? `, price drop ${drop.pct}%` : ''} — details`}>
         <span className="flex items-center gap-1.5">
           <span className={cn('truncate font-display text-[13.5px] font-bold leading-tight tracking-[-0.01em]', out ? 'text-[#8d86a0]' : 'text-[#1A1428]')}>{item.item_code}</span>
           <Badge tone={band.tone} dot className="shrink-0 xl:hidden">
@@ -109,19 +114,27 @@ export const ProductRow = memo(function ProductRow({ item, qty, allowBackorder, 
           </Badge>
         </span>
         {name && <span className="mt-0.5 block truncate text-[11.5px] leading-tight text-[#6b6480]">{name}</span>}
-        <span className="mt-0.5 block font-display text-[12.5px] font-bold tabular-nums text-[#6D4091] xl:hidden">
-          {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
-          {min > 1 && <span className="ml-1.5 font-sans text-[10.5px] font-medium text-[#6b6480]">min {min}</span>}
+        <span className="mt-0.5 flex min-w-0 items-center font-display text-[12.5px] font-bold tabular-nums text-[#6D4091] xl:hidden">
+          <span className="shrink-0">{item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}</span>
+          {/* the cut only: at 390 px "Was 1.500" is cut to "Was …" (measured) — the sheet and the grid card carry it */}
+          {drop && (
+            <span title={wasText(drop.was, drop.pct)} className="ml-1.5 min-w-0 truncate font-sans text-[10.5px] font-semibold text-[#9f1239]">
+              ↓{drop.pct}%
+            </span>
+          )}
+          {min > 1 && <span className="ml-1.5 shrink-0 font-sans text-[10.5px] font-medium text-[#6b6480]">min {min}</span>}
         </span>
       </button>
 
-      <span className="hidden xl:block">
+      <span className="hidden xl:flex xl:flex-col xl:items-start xl:gap-0.5">
         <Badge tone={band.tone} dot>
           {band.label}
         </Badge>
+        {drop && <Badge tone="rose">Price drop</Badge>}
       </span>
       <span className="hidden text-right font-display text-[13.5px] font-bold tabular-nums text-[#6D4091] xl:block">
         {item.price_bhd != null ? bhd(item.price_bhd) : '—'}
+        {drop && <span className="block truncate font-sans text-[10.5px] font-semibold text-[#9f1239]">{wasText(drop.was, drop.pct)}</span>}
         {min > 1 && <span className="block font-sans text-[10.5px] font-medium text-[#6b6480]">min {min}</span>}
       </span>
 

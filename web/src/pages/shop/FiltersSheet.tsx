@@ -6,7 +6,8 @@ import { NO_FILTERS, STAFF_SORTS, type StaffFilters, type StaffSort } from './st
 
 const TOGGLES: { key: keyof StaffFilters; label: string; hint: string }[] = [
   { key: 'inStock', label: 'In stock', hint: 'Hide the sold-out lines' },
-  { key: 'clearance', label: 'Clearance', hint: 'Lines marked for clearance' },
+  { key: 'drops', label: 'Price drops', hint: 'Trade price cut in the price book' },
+  { key: 'clearance', label: 'Clearing lines', hint: 'Lines marked for clearance' },
   { key: 'best', label: 'Best sellers', hint: 'What shops reorder most' },
 ]
 

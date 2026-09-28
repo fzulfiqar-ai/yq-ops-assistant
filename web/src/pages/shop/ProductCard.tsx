@@ -4,7 +4,8 @@ import { Stepper } from '@/components/ui/stepper'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { ProductImage } from './ProductImage'
-import { badgeMeta, bhd, minQtyOf, money, RING, RING_INSET, stepOf, stockBand } from './shared'
+import { priceDropOf, wasText } from './priceDrops'
+import { badgeMeta, bhd, minQtyOf, money, RING, RING_INSET, shownBadges, stepOf, stockBand } from './shared'
 
 export interface ProductCardProps {
   item: ShopItem
@@ -20,9 +21,6 @@ export interface ProductCardProps {
   /** Salesman: tapping the quantity opens the keypad sheet. */
   onQtyClick?: () => void
 }
-
-/** Order the chips so the strongest signal wins the limited space on a phone. */
-const BADGE_ORDER = ['best_seller', 'price_drop', 'on_offer', 'new', 'trending']
 
 /**
  * One product, two columns wide on a phone.
@@ -61,10 +59,9 @@ export function ProductCard({
       ? Number(item.save_pct) || Math.round(((compare - Number(item.price_bhd)) / compare) * 100)
       : null
 
-  const badges = (item.badges || [])
-    .slice()
-    .sort((a, b) => BADGE_ORDER.indexOf(a) - BADGE_ORDER.indexOf(b))
-    .slice(0, 2)
+  // the strongest two, in the marketplace's order (price drop wins over a clearing line)
+  const badges = shownBadges(item, 2)
+  const drop = priceDropOf(item)
 
   const tier = (item.tiers || [])[0]
   const canOrder = !out || allowBackorder
@@ -133,6 +130,11 @@ export function ProductCard({
           <div className="font-display text-[15px] font-extrabold leading-none tracking-[-0.01em] tabular-nums text-[#6D4091]">
             {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
           </div>
+          {drop && (
+            <Badge tone="rose" className="mt-1.5">
+              {wasText(drop.was, drop.pct)}
+            </Badge>
+          )}
           <div className="mt-1 space-y-0.5 text-[10.5px] leading-[1.35] text-[#6b6480]">
             {compare != null && <div className="tabular-nums line-through">Retail BHD {money(compare)}</div>}
             {tier && (

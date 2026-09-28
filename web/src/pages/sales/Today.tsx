@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { ageLabel, bhd3, bhdStr, dayLabel, firstName, greeting, monthName, relTime, useAuthedBlob, useToday, waLink, type MoneyStrip, type TodayData } from './lib'
 import { ComingSoon } from './ComingSoon'
 import { BasketsNotSent, DueThisWeek, LinkThisWeek } from './FollowUps'
+import { PriceDrops } from './PriceDrops'
 
 /**
  * /today — the salesman's home, in ONE call (GET /shop/me/today, Sprint 5). It opens on the money
@@ -268,6 +269,9 @@ export default function Today() {
                 </ul>
               </section>
             )}
+
+            {/* price drops: the catalog's own cache (a line got cheaper — easier to sell); hidden when there are none */}
+            <PriceDrops link={link} />
 
             {/* coming soon: its own calls, mounted after Today's one call has answered */}
             <ComingSoon link={link} />

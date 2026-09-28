@@ -526,7 +526,7 @@ def _():
     assert r.returncode == 0, "node order-heart tests failed:\n" + out[-2000:]
 
 
-@test("node: the rep's screens — quick-add, the checkout id, the Change carry, shop told (web/scripts/rep_ui_test.mjs)")
+@test("node: the rep's screens — quick-add, the checkout id, the Change carry, shop told, price drops (web/scripts/rep_ui_test.mjs)")
 def _():
     node = shutil.which("node")
     script = ROOT / REP_NODE_TEST
@@ -599,6 +599,99 @@ def _():
     staff = _read(STAFF)
     assert "const codeKeys = useMemo(() => new Set(items.map((i) => codeKey(i.item_code))), [items])" in staff
     assert "const quick = isQuickList(q, (word) => codeKeys.has(codeKey(word)))" in staff
+
+
+# ── 9c. price drops in the rep's app (R7e, sub-stream C — no backend change) ──
+
+DROPS = "web/src/pages/shop/priceDrops.ts"
+SHARED = "web/src/pages/shop/shared.ts"
+FILTERS = "web/src/pages/shop/staffFilters.ts"
+FILTERS_SHEET = "web/src/pages/shop/FiltersSheet.tsx"
+CARD = "web/src/pages/shop/ProductCard.tsx"
+ROW = "web/src/pages/shop/ProductRow.tsx"
+SHEET = "web/src/pages/shop/ProductSheet.tsx"
+TODAY = "web/src/pages/sales/Today.tsx"
+TODAY_DROPS = "web/src/pages/sales/PriceDrops.tsx"
+
+
+@test("R7e price drops: one rule — the market's priceAnchor (was_bhd above today's price); Was pill, never struck through")
+def _():
+    src = _read(DROPS)
+    assert "import { priceAnchor } from '@/market/lib/format'" in src, "the marketplace's own Was → Now rule"
+    assert "const a = priceAnchor(item)" in src and "if (!a || a.kind !== 'was') return null" in src
+    assert "return `Was ${money(was)} · ↓${pct}%`" in src, "the market's wasPill wording"
+    assert "`${name} — now ${bhd(d.now)} (was ${bhd(d.was)}, ↓${d.pct}%)`" in src
+    assert "`${url.origin}/p/${encodeURIComponent(code)}${slug ? `?ref=${encodeURIComponent(slug)}` : ''}`" in src
+    for rel in (DROPS, TODAY_DROPS):
+        assert "line-through" not in _read(rel) and "<s " not in _read(rel), f"{rel}: the old price is never struck through"
+    # every surface asks the same helper
+    for rel in (CARD, ROW, SHEET):
+        assert "priceDropOf(item)" in _read(rel) and "wasText(drop.was, drop.pct)" in _read(rel), rel
+    assert "{drop && <Badge tone=\"rose\">Price drop</Badge>}" in _read(ROW), "the desk's stock cell names it"
+    assert "const text = dropShareText(item)" in _read(SHEET), "the shared words carry was → now"
+
+
+@test("R7e labels: Clearance -> 'Clearing line(s)', On offer -> 'Deal'; the Filters sheet gains 'Price drops'")
+def _():
+    shared = _read(SHARED)
+    assert "on_offer: { label: 'Deal', tone: 'green' }" in shared
+    assert "clearance: { label: 'Clearing line', tone: 'amber' }" in shared
+    assert "'On offer'" not in shared and "label: 'Clearance'" not in shared
+    sheet = _read(FILTERS_SHEET)
+    assert "{ key: 'drops', label: 'Price drops', hint: 'Trade price cut in the price book' }" in sheet
+    assert "{ key: 'clearance', label: 'Clearing lines'," in sheet and "label: 'Clearance'" not in sheet
+
+
+@test("R7e chips: the market's order via shared.shownBadges (the BADGE_ORDER indexOf -1 bug is gone); price drop wins")
+def _():
+    shared = _read(SHARED)
+    assert "const BADGE_ORDER: readonly string[] = ['on_offer', 'price_drop', 'clearance', 'best_seller', 'selling_fast', 'new', 'trending']" in shared
+    fn = shared.split("export function shownBadges(", 1)[1].split("\n}", 1)[0]
+    assert "return n < 0 ? BADGE_ORDER.length : n" in fn, "an unknown badge ranks last, never first"
+    assert ".filter((b) => !(drop && b === 'clearance'))" in fn
+    card = _read(CARD)
+    assert "BADGE_ORDER" not in card and "const badges = shownBadges(item, 2)" in card
+    assert "shownBadges(item).map((b) => {" in _read(SHEET)
+    flt = _read(FILTERS)
+    assert "drops: boolean" in flt and "NO_FILTERS: StaffFilters = { inStock: false, drops: false, clearance: false, best: false }" in flt
+    assert "(!f.drops || priceDropOf(i) != null)" in flt and "(!f.clearance || isClearing(i))" in flt
+    assert "return hasBadge(i, 'clearance') && !hasBadge(i, 'price_drop')" in flt
+
+
+@test("R7e catalog: ?f=drops opens on Price drops; the sheet shares the product on the rep's own link")
+def _():
+    staff = _read(STAFF)
+    assert "new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS" in staff
+    assert "const passFilters = useCallback((i: ShopItem) => passesStaffFilters(i, filters), [filters])" in staff
+    assert "drops: inCat.filter((i) => priceDropOf(i) != null).length," in staff
+    assert "Number(filters.drops)" in staff.split("const activeFilters = ", 1)[1].split("\n", 1)[0]
+    assert "queryKey: ['shop-today'], queryFn: () => apiGet<TodayData>('/shop/me/today'), enabled: !!sheetItem" in staff
+    assert "const shareUrl = sheetItem ? productShareUrl(linkQ.data?.me?.link || '', sheetItem.item_code) : ''" in staff
+    assert "canShare={Boolean(shareUrl)}" in staff and "shareUrl={shareUrl}" in staff
+    assert "canShare={false}" not in staff, "the staff sheet shares again (with the rep's link)"
+    # the hook sits above the early returns (the rules of hooks)
+    assert staff.index("const linkQ = useQuery(") < staff.index("if (catalogQ.isError && !data) {")
+
+
+@test("R7e Today: '{n} products got a lower price' from the catalog's cache, top 5, WhatsApp per row, See all -> /shop?f=drops")
+def _():
+    today = _read(TODAY)
+    assert "import { PriceDrops } from './PriceDrops'" in today
+    assert "<PriceDrops link={link} />" in today and today.index("<PriceDrops link={link} />") < today.index("<ComingSoon link={link} />")
+    src = _read(TODAY_DROPS)
+    assert "useQuery({ queryKey: ['staff-catalog'], queryFn: getStaffCatalog, staleTime: 5 * 60_000" in src, "the Catalog tab's own cache"
+    assert "{n} {n === 1 ? 'product' : 'products'} got a lower price" in src
+    assert "const TOP = 5" in src and ".slice(0, TOP)" in src
+    assert "if ((catalogQ.isError && !catalogQ.data) || !drops.length) return null" in src, "no drops or no catalog: no card"
+    assert 'to="/shop?f=drops"' in src and "See all" in src
+    assert "href={`https://wa.me/?text=${encodeURIComponent(dropShareText(item, url))}`}" in src
+    assert "const url = productShareUrl(link, item.item_code)" in src
+    # honest: no urgency words, no counters
+    low = src.lower()
+    for word in ("hurry", "last chance", "ends in", "only today", "limited time", "don't miss"):
+        assert word not in low, word
+    # the 390 px phone: the text column can shrink, the row never pushes the card wider
+    assert '<span className="min-w-0 flex-1">' in src and "truncate" in src and "overflow-hidden rounded-2xl" in src
 
 
 # ── 10. the page's copies of the server's words (after the streams are merged) ─

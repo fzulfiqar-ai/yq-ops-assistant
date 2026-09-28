@@ -15,7 +15,10 @@
  *     safe retry), a different basket or shop after a failed attempt gets a new one;
  *   • the checkout's "Change" carries its lines into the new shop's cart only when that cart is empty;
  *   • the order sheet's "Shop not told yet" / "Tell the shop first" rule: never on a rep-placed order
- *     (born Confirmed in the shop) until something changes; the pick-list stamps are not steps.
+ *     (born Confirmed in the shop) until something changes; the pick-list stamps are not steps;
+ *   • price drops (R7e): only a real `was_bhd` above today's price (the market's priceAnchor rule),
+ *     the deepest cut first, the product link on the rep's storefront, the share words; the chips in
+ *     the market's order with price drop over "Clearing line"; the catalog's Price drops filter.
  */
 import { registerHooks } from 'node:module'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -50,9 +53,13 @@ registerHooks({
   },
 })
 
+// priceDrops reads market/lib/format's priceAnchor: its i18n settles on English without a document
 const Q = await import(pathToFileURL(path.join(SRC, 'pages/shop/quickAdd.ts')).href)
 const O = await import(pathToFileURL(path.join(SRC, 'pages/shop/staffOrder.ts')).href)
 const H = await import(pathToFileURL(path.join(SRC, 'pages/shop-ops/heart.ts')).href)
+const P = await import(pathToFileURL(path.join(SRC, 'pages/shop/priceDrops.ts')).href)
+const SH = await import(pathToFileURL(path.join(SRC, 'pages/shop/shared.ts')).href)
+const F = await import(pathToFileURL(path.join(SRC, 'pages/shop/staffFilters.ts')).href)
 
 let passed = 0
 let failed = 0
@@ -192,6 +199,73 @@ check('never on a Received order; with no step on record the server flag decides
   eq(H.shopNotTold({ status: 'confirmed', shop_told: false, events: [] }), true, 'server flag')
   eq(H.shopNotTold({ status: 'confirmed', shop_told: true }), false, 'server flag, no events')
   eq(H.shopNotTold({ status: 'confirmed' }), false, 'an older API says nothing')
+})
+
+/* ── price drops in the rep's app (R7e): the market's Was → Now rule, nothing looser ── */
+const it = (code, price, was, extra = {}) => ({ item_code: code, price_bhd: price, was_bhd: was, ...extra })
+
+check('priceDropOf: only a was_bhd above today\'s price; a badge alone, a rise, no price or no was is no drop', () => {
+  eq(P.priceDropOf(it('A1', 1.2, 1.5)), { was: 1.5, now: 1.2, pct: 20 })
+  eq(P.priceDropOf(it('A2', 1.2, null, { badges: ['price_drop'] })), null, 'a badge without the old price')
+  eq(P.priceDropOf(it('A3', 1.5, 1.5)), null, 'the same price')
+  eq(P.priceDropOf(it('A4', 1.8, 1.5)), null, 'a rise')
+  eq(P.priceDropOf(it('A5', null, 1.5)), null, 'no price')
+  eq(P.priceDropOf(it('A6', 1.2, undefined)), null, 'an older payload')
+  eq(P.priceDropOf(it('A7', 1.2, 'abc')), null, 'not a number')
+  eq(P.priceDropOf({ item_code: 'A8', price_bhd: 1, compare_at_bhd: 2 }), null, 'a retail price is never an anchor')
+  eq(P.priceDropOf(null), null)
+})
+
+check('dropsOf: the deepest cut first, then by code; lines without a drop left out', () => {
+  const rows = P.dropsOf([it('B2', 0.9, 1), it('Z9', 1, null), it('C3', 0.5, 1), it('A1', 0.9, 1), it('D4', 2, 1.5)])
+  eq(rows.map((r) => [r.item.item_code, r.drop.pct]), [['C3', 50], ['A1', 10], ['B2', 10]])
+  eq(P.dropsOf([]), [])
+})
+
+check('wasText / dropShareText: the market\'s wording, new and old price, no strike-through', () => {
+  eq(P.wasText(1.5, 20), 'Was 1.500 · ↓20%')
+  eq(P.dropShareText(it('A1', 1.2, 1.5, { display_name: 'Cable 1m' })), 'Cable 1m — now BHD 1.200 (was BHD 1.500, ↓20%)')
+  eq(P.dropShareText(it('A1', 1.2, 1.5), 'https://m.example/p/A1?ref=rep'), 'A1 — now BHD 1.200 (was BHD 1.500, ↓20%)\nhttps://m.example/p/A1?ref=rep')
+  eq(P.dropShareText(it('A2', 1.2, null, { display_name: 'Charger' })), 'Charger — BHD 1.200', 'no drop: the sheet\'s old text')
+})
+
+check('productShareUrl: /p/CODE?ref=slug on the rep\'s storefront; encoded code, trailing /, legacy token link, no link', () => {
+  eq(P.productShareUrl('https://m.example/furqan', 'X05 UC-1Mtr'), 'https://m.example/p/X05%20UC-1Mtr?ref=furqan')
+  eq(P.productShareUrl('https://m.example/furqan/', 'C18'), 'https://m.example/p/C18?ref=furqan', 'trailing slash')
+  eq(P.productShareUrl('https://m.example/furqan', 'A/B#1'), 'https://m.example/p/A%2FB%231?ref=furqan', 'a code with / and #')
+  eq(P.productShareUrl('https://ops.example/c/tok123?ref=furqan', 'C18'), 'https://ops.example/c/tok123?ref=furqan&item=C18', 'legacy token link')
+  eq([P.productShareUrl('', 'C18'), P.productShareUrl(null, 'C18'), P.productShareUrl(undefined, 'C18'), P.productShareUrl('not a url', 'C18')], ['', '', '', ''])
+})
+
+check('shownBadges: the market\'s order, unknown badges last, clearance / selling_fast no longer first (the indexOf -1 bug)', () => {
+  const b = (badges, limit) => SH.shownBadges({ item_code: 'X', badges }, limit)
+  eq(b(['best_seller', 'selling_fast', 'on_offer'], 2), ['on_offer', 'best_seller'])
+  eq(b(['new', 'selling_fast', 'best_seller'], 2), ['best_seller', 'selling_fast'])
+  eq(b(['mystery', 'trending', 'new']), ['new', 'trending', 'mystery'], 'unknown last')
+  eq(b(['clearance', 'best_seller'], 1), ['clearance'], 'a clearing line alone still reads so')
+  eq(b(null), [])
+})
+
+check('shownBadges: price drop wins — a line with a price drop never also reads "Clearing line"', () => {
+  eq(SH.shownBadges({ item_code: 'X', badges: ['clearance', 'price_drop', 'best_seller'] }), ['price_drop', 'best_seller'])
+  eq(SH.badgeMeta('clearance').label, 'Clearing line')
+  eq(SH.badgeMeta('on_offer').label, 'Deal')
+  eq(SH.badgeMeta('price_drop').label, 'Price drop')
+})
+
+check('passesStaffFilters: Price drops = a genuine drop; Clearing lines never lists a price drop; filters combine', () => {
+  const on = (k) => ({ ...F.NO_FILTERS, [k]: true })
+  const drop = it('D1', 1, 1.25, { stock_qty: 5, badges: ['price_drop', 'clearance'] })
+  const badgeOnly = it('D2', 1, null, { stock_qty: 5, badges: ['price_drop'] })
+  const clearing = it('D3', 1, null, { stock_qty: 5, badges: ['clearance'] })
+  const soldDrop = it('D4', 1, 2, { stock_qty: 0 })
+  const all = [drop, badgeOnly, clearing, soldDrop]
+  const pick = (f) => all.filter((i) => F.passesStaffFilters(i, f)).map((i) => i.item_code)
+  eq(pick(F.NO_FILTERS), ['D1', 'D2', 'D3', 'D4'])
+  eq(pick(on('drops')), ['D1', 'D4'])
+  eq(pick(on('clearance')), ['D3'])
+  eq(pick({ ...F.NO_FILTERS, drops: true, inStock: true }), ['D1'])
+  eq(F.NO_FILTERS.drops, false)
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

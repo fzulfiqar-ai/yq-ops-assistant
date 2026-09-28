@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LayoutGrid, List, MessageCircle, RotateCcw, Search, ShoppingBag, SlidersHorizontal, X } from 'lucide-react'
 import { useToast } from '@/components/Toast'
+import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { peekCart, useCart, writeCart } from '@/lib/cart'
 import { useSeo } from '@/lib/seo'
@@ -21,11 +22,13 @@ import {
   useShopBook,
   waLink,
   type ShopBasket,
+  type TodayData,
 } from '@/pages/sales/lib'
 import { CartDrawer } from './CartDrawer'
 import { FiltersSheet } from './FiltersSheet'
+import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
-import { NO_FILTERS, type StaffFilters, type StaffSort } from './staffFilters'
+import { isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
 import { carryCart } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
 import { OrderSuccess } from './OrderSuccess'
@@ -44,8 +47,9 @@ import { useQuote, type QuoteFetcher } from './useQuote'
  * of taps: pick the shop (one picker over the merged book), "Order again" fills its usual basket,
  * Review, Place. Everything else is there to find a line fast:
  *
- *  • one chip row — the categories that have matches, then "Filters" (In stock, Clearance, Best
- *    sellers, Sort) — and search through the marketplace's index (codes with spaces work);
+ *  • one chip row — the categories that have matches, then "Filters" (In stock, Price drops,
+ *    Clearing lines, Best sellers, Sort; Today's price-drop card opens it on /shop?f=drops) — and
+ *    search through the marketplace's index (codes with spaces work);
  *  • a quick-add in the same field: "C18 3, UK15 6" + Enter adds the exact codes (a sold-out line is
  *    never added on its own; anything that is not a code stays in the field to pick from the list).
  *    Only an explicit list turns quick — a separator, an "x" / "×", or one "C18 3" whose word is a
@@ -164,7 +168,8 @@ export function StaffCatalog() {
   /* ── browse state ── */
   const [cat, setCat] = useState('All')
   const [q, setQ] = useState('')
-  const [filters, setFilters] = useState<StaffFilters>(NO_FILTERS)
+  // Today's "See all" price drops lands here as /shop?f=drops
+  const [filters, setFilters] = useState<StaffFilters>(() => (new URLSearchParams(location.search).get('f') === 'drops' ? { ...NO_FILTERS, drops: true } : NO_FILTERS))
   const [sort, setSort] = useState<StaffSort>('featured')
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [view, setViewState] = useState<View>(readView)
@@ -297,10 +302,7 @@ export function StaffCatalog() {
     return [...exact, ...hits.filter((i) => !seen.has(i.item_code))]
   }, [items, index, q, quick, quickRows])
 
-  const passFilters = useCallback(
-    (i: ShopItem) => (!filters.inStock || !isSoldOut(i)) && (!filters.clearance || hasBadge(i, 'clearance')) && (!filters.best || hasBadge(i, 'best_seller')),
-    [filters],
-  )
+  const passFilters = useCallback((i: ShopItem) => passesStaffFilters(i, filters), [filters])
 
   const catCounts = useMemo(() => {
     const m = new Map<string, number>()
@@ -312,7 +314,8 @@ export function StaffCatalog() {
     const inCat = searched.filter((i) => cat === 'All' || (i.category || 'OTHER') === cat)
     return {
       inStock: inCat.filter((i) => !isSoldOut(i)).length,
-      clearance: inCat.filter((i) => hasBadge(i, 'clearance')).length,
+      drops: inCat.filter((i) => priceDropOf(i) != null).length,
+      clearance: inCat.filter(isClearing).length,
       best: inCat.filter((i) => hasBadge(i, 'best_seller')).length,
     }
   }, [searched, cat])
@@ -339,7 +342,7 @@ export function StaffCatalog() {
     setHlKey(filterKey)
     setHighlight(0)
   }
-  const activeFilters = Number(filters.inStock) + Number(filters.clearance) + Number(filters.best) + Number(sort !== 'featured')
+  const activeFilters = Number(filters.inStock) + Number(filters.drops) + Number(filters.clearance) + Number(filters.best) + Number(sort !== 'featured')
 
   /* ── the live quote (the bar, the slip and the checkout all show the server's total) ── */
   const [coupon, setCoupon] = useState('')
@@ -437,6 +440,10 @@ export function StaffCatalog() {
     const pair = (data?.pairs || []).find((p) => p.item_code === sheetItem.item_code)
     return (pair?.with || []).map((c) => itemsByCode.get(c)).filter((x): x is ShopItem => Boolean(x))
   }, [sheetItem, data, itemsByCode])
+  // the sheet's Share hands out the product on the rep's OWN storefront link (Today's cache, fetched
+  // once a sheet opens); a login not linked to a salesman has no link, so no Share button
+  const linkQ = useQuery({ queryKey: ['shop-today'], queryFn: () => apiGet<TodayData>('/shop/me/today'), enabled: !!sheetItem, staleTime: 5 * 60_000, retry: 1 })
+  const shareUrl = sheetItem ? productShareUrl(linkQ.data?.me?.link || '', sheetItem.item_code) : ''
 
   useSeo({ title: 'Catalog · YQ Bahrain', items: null, allowBackorder })
 
@@ -781,7 +788,8 @@ export function StaffCatalog() {
         token=""
         allowBackorder={allowBackorder}
         showCompare={settings.show_retail_compare !== false}
-        canShare={false}
+        canShare={Boolean(shareUrl)}
+        shareUrl={shareUrl}
         qty={sheetItem ? cart.qtyOf(sheetItem.item_code) : 0}
         pairs={sheetPairs}
         onAdd={(it) => addLine(it)}
