@@ -9,6 +9,7 @@ import { apiGet, apiPost, apiUpload, apiDownload, apiSend } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
+import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -162,6 +163,7 @@ function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => voi
     ['B2C · Causeway & Roadshow', item.b2c_rate],
   ] as const
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="max-h-[90vh] w-full max-w-md overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
@@ -194,6 +196,7 @@ function DetailDialog({ item, onClose }: { item: CatalogItem; onClose: () => voi
         </div>
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 
@@ -241,6 +244,7 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
   }
 
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="max-h-[90vh] w-full max-w-lg overflow-auto p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
@@ -289,6 +293,7 @@ function EditDialog({ item, onClose, onSaved }: { item: Partial<CatalogItem>; on
         </form>
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 
@@ -304,6 +309,7 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
   const url = data?.url?.startsWith('http') ? data.url : data ? `${window.location.origin}${data.url}` : ''
   const waText = encodeURIComponent(`Hello! Here is the latest YQ Bahrain VFAN accessories catalog with prices: ${url}`)
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-1 flex items-center justify-between">
@@ -342,6 +348,7 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
         )}
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 

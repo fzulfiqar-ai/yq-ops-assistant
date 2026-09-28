@@ -7,6 +7,7 @@ import { errorText } from '@/lib/errorText'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { bhd, num } from '@/lib/format'
+import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -477,6 +478,7 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
   }
 
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="flex min-h-full items-start justify-center py-4 sm:items-center sm:py-8">
         <Card className="w-full max-w-2xl p-0" onClick={(e) => e.stopPropagation()}>
@@ -675,6 +677,7 @@ function RuleDialog({ rule, onClose, onSaved }: { rule: DiscountRule | null; onC
         </Card>
       </div>
     </div>
+    </BodyPortal>
   )
 }
 

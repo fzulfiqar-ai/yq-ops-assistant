@@ -4,6 +4,7 @@ import { ArrowDownRight, ArrowUpRight, History, LineChart, X } from 'lucide-reac
 import { apiGet } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { bhd, num, fmtDate } from '@/lib/format'
+import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DataTable, type Column } from '@/components/DataTable'
@@ -49,6 +50,7 @@ function HistoryDialog({ row, onClose }: { row: Row; onClose: () => void }) {
     queryFn: () => apiGet<HistData>(`/prices/history?sku=${encodeURIComponent(row.sku_code)}`),
   })
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border bg-card p-5 shadow-luxe"
         onClick={(e) => e.stopPropagation()}>
@@ -118,6 +120,7 @@ function HistoryDialog({ row, onClose }: { row: Row; onClose: () => void }) {
         )}
       </div>
     </div>
+    </BodyPortal>
   )
 }
 

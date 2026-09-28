@@ -9,6 +9,7 @@ import { apiGet, apiPost, apiPatch, apiDelete, apiUpload, apiSend } from '@/lib/
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
+import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -166,6 +167,7 @@ function PromoteDialog({ f, onClose, onDone }: { f: Find; onClose: () => void; o
     } catch { toast('Promote failed.', 'error') } finally { setBusy(false) }
   }
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-1 flex items-center justify-between">
@@ -183,6 +185,7 @@ function PromoteDialog({ f, onClose, onDone }: { f: Find; onClose: () => void; o
         </div>
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 
@@ -208,6 +211,7 @@ function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void;
   }
 
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="flex min-h-full items-center justify-center">
         <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
@@ -237,6 +241,7 @@ function EditFindDialog({ f, onClose, onSaved }: { f: Find; onClose: () => void;
         </Card>
       </div>
     </div>
+    </BodyPortal>
   )
 }
 
@@ -313,6 +318,7 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
   })
   const url = data?.url?.startsWith('http') ? data.url : data ? `${window.location.origin}${data.url}` : ''
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-1 flex items-center justify-between">
@@ -342,6 +348,7 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
         ) : <Skeleton className="h-10" />}
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 

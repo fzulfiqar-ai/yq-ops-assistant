@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Area, AreaChart, Bar, BarChart, Cell, ComposedChart, Line, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, Bar, BarChart, Cell, ComposedChart, Line, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { motion } from 'motion/react'
 import {
   DollarSign, FileText, Boxes, Landmark, TrendingUp, TrendingDown, Crown, TriangleAlert,
-  CalendarDays, Bot, Store, Truck, ListChecks, ArrowRight, Percent, Clock, Snowflake,
+  CalendarDays, Store, Truck, ListChecks, ArrowRight, Percent, Clock, Snowflake,
   Flame, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
 import { apiGet } from '@/lib/api'
@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
 import { deadUncostedNote } from '@/lib/basisText'
 import { CountUp } from '@/components/CountUp'
-import { DataBanner } from '@/components/DataBanner'
+import type { Freshness } from '@/components/FreshnessChip'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -28,13 +28,30 @@ interface Kpis {
   overdue_count: number; overdue_total_bhd: number
   current_receivables_bhd?: number
 }
-interface ChannelRow { channel: string; orders: number; qty: number; revenue_bhd: number; net_bhd: number }
+/** R7e: one Command Centre tile as app/metrics.py built it (app/reports.command_basis picks them): Accessories,
+ *  ex-VAT, with the API's own basis line — the Dashboard recomputes nothing */
+interface CcTile {
+  key: string; label: string; basis: string; value: number | null
+  compare?: { value: number; label: string } | null; delta_pct?: number | null; invoices?: number
+  chips?: { label: string; value: number | null; share_pct?: number | null }[]
+  source?: string; accounts?: number; over_90_bhd?: number; note?: string | null
+}
+interface CcSpan { start: string; end: string; label: string; business_days: number; basis?: string }
+/** null when the Command Centre could not be built (every figure then reads "—"); a field is null when its
+ *  module did not answer */
+interface CommandBasis {
+  sales_mtd: CcTile | null; sales_day: CcTile | null; channels: CcTile | null
+  ar_total: CcTile | null; ar_over90: CcTile | null
+  compare_basis: string | null; focus: CcSpan | null; day: CcSpan | null; day_compare: string | null
+}
+/** Accessories ex-VAT by calendar month, giveaways out; `partial` = the month the data stops in, `through` its last day */
+interface TrendAccRow { period_month: string; acc_net_bhd: number; invoices: number; partial: boolean; through: string | null }
+interface TopCustomerAcc { customer_name: string; net_bhd: number; invoices: number }
 /** R3a: the dashboard's salesman rows are the CURRENT MONTH, ACCESSORIES ONLY (ex-VAT net beside gross);
  *  no_target comes from the attainment (an outlet such as Causeway has no target row). Tier, kickback and
  *  referral codes never travel here — they are Shop Admin data on the Salesmen page. */
 interface SalesmanRow { salesman: string; orders: number; qty: number | null; revenue_bhd: number; net_bhd: number; no_target?: boolean }
 interface SalesmanScope { division?: string; basis?: string; period?: string | null; data_through?: string | null; error?: string | null }
-interface AgentRow { agent: string; last_run: string; summary: string }
 interface ActionItem { action: string; to: string; bhd: number; urgency: number }
 /** R7d: gp_pct is THE official margin (ex-VAT sales vs Focus COGS, every item costed — app/metrics.py);
  *  landed_* is the secondary MRN margin with its coverage; dead stock is valued at COST. */
@@ -80,18 +97,17 @@ function businessDaysTo(iso: string): number {
 }
 interface DashboardData {
   data_as_of?: string | null
-  data_stale?: boolean
-  data_days_behind?: number | null
   actions?: ActionItem[]
   health?: Health
   movers?: { rising: MoverRow[]; falling: MoverRow[] }
   kpis: Kpis
-  top_customers: { customer_name: string; total_revenue_bhd: number; order_count: number }[]
-  revenue_trend: { period_month: string; gross_bhd: number; net_revenue_bhd: number }[]
-  by_channel: ChannelRow[]
+  /** R7e: the headline figures on the Command Centre's basis; the older VAT-inclusive, every-division
+   *  fields (kpis.rev_*, revenue_trend, by_channel, top_customers) still travel for the digests, unread here */
+  command?: CommandBasis | null
+  revenue_trend_acc?: TrendAccRow[]
+  top_customers_acc?: TopCustomerAcc[]
   by_salesman: SalesmanRow[]
   by_salesman_scope?: SalesmanScope | null
-  agents: AgentRow[]
   alerts: { negative_margin_count: number | null }
   daily_mtd?: DailyRow[]
   by_payment?: PaymentRow[]
@@ -112,24 +128,34 @@ const ACCENTS = {
   slate: 'linear-gradient(90deg,#475569,#94a3b8)',
 }
 
-function agentLabel(a: string) {
-  return a.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
-function relTime(iso?: string) {
-  if (!iso) return '—'
-  const ms = Date.now() - new Date(iso).getTime()
-  const h = Math.floor(ms / 3.6e6)
-  if (h < 1) return 'just now'
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/** '2026-09-27' → '27 Sep': the form the API's basis lines and the freshness chip use */
+function dayLabel(iso?: string | null): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '')
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}` : ''
 }
 
-function KpiCard({ accent, icon: Icon, label, value, foot, hero, to }: {
+/** A change against the comparison window, with that window in words ("vs the same 18 business days last month") */
+function Delta({ pct, vs }: { pct: number | null | undefined; vs?: string | null }) {
+  if (pct == null) return <span className="font-semibold text-muted-foreground">No comparison{vs ? ` with ${vs}` : ''}</span>
+  const up = pct >= 0
+  return (
+    <span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
+      {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
+      {up ? '+' : ''}{pct.toFixed(1)}%
+      {vs && <span className="font-normal text-muted-foreground"> vs {vs}</span>}
+    </span>
+  )
+}
+
+function KpiCard({ accent, icon: Icon, label, value, foot, hero, to, basis }: {
   accent: string; icon: typeof DollarSign; label: string; value: React.ReactNode
   foot?: React.ReactNode; hero?: boolean; to?: string
+  /** the API's full basis line (the Command Centre's words), on hover */
+  basis?: string
 }) {
   const card = (
-    <Card className="group relative flex h-full flex-col overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
+    <Card title={basis} className="group relative flex h-full flex-col overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
       {/* top accent rail */}
       <div className="absolute inset-x-0 top-0 h-[3px]" style={{ background: accent }} />
       {/* soft accent glow that intensifies on hover */}
@@ -236,21 +262,32 @@ export default function Dashboard() {
     })
   }, [data?.daily_mtd, data?.pace?.business_days_total, dailyTarget])
 
+  // ONE freshness rule with the header chip (GET /freshness: Focus data date, the 3-day rule on the Bahrain
+  // day): the chip's own query key, so the page and the chip read it once between them
+  const { data: fresh } = useQuery({
+    queryKey: ['freshness'],
+    queryFn: () => apiGet<Freshness>('/freshness'),
+    staleTime: 60_000,
+    retry: 1,
+  })
+
   const k = data?.kpis
-  // Compare MTD against the SAME slice of last month, not the whole of it. MTD only covers
-  // the days elapsed so far, so measuring it against a complete prior month reports a
-  // collapse on the 1st that quietly 'recovers' by the 30th -- an artefact of the window,
-  // not the business. On 14-Sep the old basis said -65.4%; like-for-like it is -34.0%.
-  // Fall back to the old field only if the API predates rev_prev_month_mtd.
-  const prevBase = k?.rev_prev_month_mtd ?? k?.rev_prev_month ?? 0
-  const likeForLike = k?.rev_prev_month_mtd != null
-  // null (not 0) when there is no baseline at all -- a first trading month or a freshly
-  // reloaded DB. Zero would render as a confident green "+0.0%" next to an up-arrow.
-  const deltaPct = prevBase > 0 ? ((k!.rev_mtd - prevBase) / prevBase) * 100 : null
-  const up = (deltaPct ?? 0) >= 0
-  const trend = (data?.revenue_trend || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
-  const channels = data?.by_channel || []
-  const channelTotal = channels.reduce((s, c) => s + Number(c.revenue_bhd || 0), 0) || 1
+  // R7e: the headline tiles are the Command Centre's own (Accessories · ex-VAT, the month to date vs the same
+  // business days last month, the latest day vs the previous business day) — never a second definition
+  const cc = data?.command ?? null
+  const salesMtd = cc?.sales_mtd ?? null
+  const salesDay = cc?.sales_day ?? null
+  const arTile = cc?.ar_total ?? null
+  const arOver90 = cc?.ar_over90 ?? null
+  // Focus's own Grand Total when the ageing snapshot stored one; else the account rows (the older kpi)
+  const arValue = arTile?.value ?? k?.total_receivables ?? null
+  const arLabel = arTile?.source === 'focus_total' ? 'Receivables · Focus Grand Total' : 'Receivables · sum of accounts'
+  const trendAcc = (data?.revenue_trend_acc || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
+  const partialMonth = trendAcc.find((r) => r.partial && r.through)
+  const monthTarget = (data?.pace?.target_bhd ?? 0) > 0 ? data!.pace!.target_bhd : null
+  const chTile = cc?.channels ?? null
+  const chips = (chTile?.chips || []).filter((c) => c.label === 'B2B' || c.label === 'B2C')
+  const topCustomers = data?.top_customers_acc || []
   // ex-VAT accessories sales this month — the kickback basis — with gross kept for the tooltip
   const salesmen = (data?.by_salesman || []).map((s) => ({ ...s, name: s.salesman, rev: Number(s.net_bhd ?? s.revenue_bhd ?? 0), gross: Number(s.revenue_bhd || 0) }))
   const smScope = data?.by_salesman_scope
@@ -268,13 +305,14 @@ export default function Dashboard() {
   return (
     <div>
       <PageHeader title={greeting} subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus} />
-      <DataBanner date={data?.data_as_of} />
 
-      {/* Stale-data guard */}
-      {data?.data_stale && (
-        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700">
+      {/* Stale-data guard: the header's freshness chip says the date; this says what to do about it */}
+      {fresh?.stale && (
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
           <TriangleAlert size={16} className="shrink-0" />
-          Data is {data.data_days_behind ?? '—'} day(s) old — upload the latest Focus exports for accurate figures.
+          {fresh.focus_to
+            ? `Focus data is ${fresh.focus_days_behind ?? '—'} day(s) old (to ${fresh.focus_label || dayLabel(fresh.focus_to)})`
+            : 'No Focus sales are loaded'} — upload the latest Focus exports for accurate figures.
         </div>
       )}
 
@@ -307,24 +345,32 @@ export default function Dashboard() {
       ) : (
         <motion.div variants={container} initial="hidden" animate="show"
           className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Revenue this month (gross)" hero to="/sales"
-            value={<CountUp value={k.rev_mtd} format={(n) => bhd(n, 0)} />}
-            foot={deltaPct === null
-              ? <span className="font-semibold text-muted-foreground">No prior-month baseline · ex-VAT {bhd(k.net_mtd, 0)}</span>
-              : <span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
-                  {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
-                  {up ? '+' : ''}{deltaPct.toFixed(1)}% {likeForLike ? 'vs same days last month' : 'MoM'} · ex-VAT {bhd(k.net_mtd, 0)}</span>} />
-          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label="Latest day" to="/sales"
-            value={<CountUp value={k.rev_today} format={(n) => bhd(n, 0)} />}
-            foot={<span className="text-muted-foreground">Yesterday {bhd(k.rev_yesterday, 0)} · {k.orders_today} orders</span>} />
-          <KpiCard accent={ACCENTS.slate} icon={FileText} label="Orders this month" to="/sales"
-            value={<CountUp value={k.orders_mtd} />}
-            foot={<span className="text-muted-foreground">Invoices processed</span>} />
-          <KpiCard accent={ACCENTS.green} icon={Landmark} label="Receivables (total)" to="/receivables"
-            value={<CountUp value={k.total_receivables} format={(n) => bhd(n, 0)} />}
+          <KpiCard accent={ACCENTS.purple} icon={DollarSign} label="Accessories sales this month · ex-VAT" hero to="/sales"
+            basis={salesMtd?.basis}
+            value={salesMtd?.value != null ? <CountUp value={salesMtd.value} format={(n) => bhd(n, 0)} /> : '—'}
+            foot={salesMtd
+              ? <Delta pct={salesMtd.delta_pct} vs={cc?.compare_basis || salesMtd.compare?.label} />
+              : <span className="text-muted-foreground">Not available just now · the Command Centre figures did not load</span>} />
+          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label={cc?.day ? `Latest day · ${dayLabel(cc.day.end)}` : 'Latest day'} to="/sales"
+            basis={salesDay?.basis}
+            value={salesDay?.value != null ? <CountUp value={salesDay.value} format={(n) => bhd(n, 0)} /> : '—'}
+            foot={salesDay ? (
+              <span className="text-muted-foreground">
+                Accessories ex-VAT · <Delta pct={salesDay.delta_pct}
+                  vs={salesDay.compare ? `${cc?.day_compare || salesDay.compare.label} (${bhd(salesDay.compare.value, 0)})` : cc?.day_compare} />
+                {' '}· {num(salesDay.invoices)} invoices
+              </span>
+            ) : <span className="text-muted-foreground">Accessories · ex-VAT · not available just now</span>} />
+          <KpiCard accent={ACCENTS.slate} icon={FileText} label="Focus invoices this month (Accessories)" to="/sales"
+            basis={salesMtd?.basis}
+            value={salesMtd?.invoices != null ? <CountUp value={salesMtd.invoices} /> : '—'}
+            foot={<span className="text-muted-foreground">Month to date{cc?.focus ? ` · ${cc.focus.label}` : ''} · the Focus sales day book</span>} />
+          <KpiCard accent={ACCENTS.green} icon={Landmark} label={arLabel} to="/receivables"
+            basis={arTile?.basis}
+            value={arValue != null ? <CountUp value={arValue} format={(n) => bhd(n, 0)} /> : '—'}
             foot={<span className="text-muted-foreground">
-              <span className="font-semibold text-rose-600">{bhd(k.overdue_total_bhd, 0)} overdue &gt;30d</span>
-              {' '}· {bhd(k.current_receivables_bhd ?? Math.max(k.total_receivables - k.overdue_total_bhd, 0), 0)} current · {k.overdue_count} accts</span>} />
+              {arOver90?.value != null && <><span className="font-semibold text-rose-600">{arOver90.value.toFixed(1)}% over 90 days</span>{' '}· </>}
+              {bhd(k.overdue_total_bhd, 0)} overdue &gt;30d · {k.overdue_count} accts</span>} />
           <KpiCard accent={ACCENTS.amber} icon={Boxes} label="Low-stock items" to="/inventory"
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
@@ -418,6 +464,8 @@ export default function Dashboard() {
           )}
           {(data.by_payment?.length || data.by_division?.length) && (
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3 text-[13px]">
+              {/* these chips are the Focus month as invoiced: VAT-inclusive, every division (SIM included) */}
+              <span className="text-[11px] text-muted-foreground">Month to date · gross, VAT-incl · every division:</span>
               {(data.by_payment || []).map((p) => (
                 <span key={p.sale_type} className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
                   <span className={cn('h-2 w-2 rounded-full', p.sale_type === 'cash' ? 'bg-emerald-500' : 'bg-blue-500')} />
@@ -467,60 +515,74 @@ export default function Dashboard() {
       {/* Trend + channel split */}
       <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="p-5 lg:col-span-2">
-          <div className="mb-1 font-display text-base font-semibold">Revenue trend</div>
-          <div className="mb-4 text-xs text-muted-foreground">Gross revenue by month (VAT-incl)</div>
-          {isLoading ? <Skeleton className="h-[260px]" /> : (
+          <div className="mb-1 font-display text-base font-semibold">Accessories sales by month</div>
+          <div className="mb-4 text-xs text-muted-foreground">
+            Accessories · ex-VAT · giveaways out · 12 calendar months
+            {partialMonth ? ` · ${partialMonth.m} so far (to ${dayLabel(partialMonth.through)}), the lighter bar` : ''}
+            {monthTarget ? ' · the line is the monthly target' : ''}
+          </div>
+          {isLoading ? <Skeleton className="h-[260px]" /> : trendAcc.length === 0 ? (
+            <p className="grid h-[260px] place-items-center text-sm text-muted-foreground">Monthly Accessories sales could not be read just now.</p>
+          ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={trend} margin={{ top: 6, right: 8, left: 8, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="rev" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#7c3aed" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#7c3aed" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
+              <BarChart data={trendAcc} margin={{ top: 14, right: 8, left: 8, bottom: 0 }}>
                 <XAxis dataKey="m" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false}
                   width={48} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
-                <Tooltip formatter={(value) => [bhd(Number(value), 0), 'Gross']}
+                <Tooltip formatter={(value) => [bhd(Number(value), 0), 'Accessories ex-VAT']}
+                  labelFormatter={(m, payload) => {
+                    const row = payload?.[0]?.payload as { partial?: boolean; through?: string | null } | undefined
+                    return row?.partial && row.through ? `${m} · so far (to ${dayLabel(row.through)})` : String(m)
+                  }}
+                  cursor={{ fill: 'hsl(var(--accent))' }}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-                <Area type="monotone" dataKey="gross_bhd" stroke="#7c3aed" strokeWidth={2.5} fill="url(#rev)" />
-              </AreaChart>
+                {monthTarget && (
+                  <ReferenceLine y={monthTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
+                    label={{ value: `monthly target ${bhd(monthTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+                )}
+                <Bar dataKey="acc_net_bhd" radius={[4, 4, 0, 0]} maxBarSize={34}>
+                  {/* the month still running is lighter: it is not a whole month yet */}
+                  {trendAcc.map((r, i) => <Cell key={i} fill={r.partial ? '#c4b5fd' : '#7c3aed'} />)}
+                </Bar>
+              </BarChart>
             </ResponsiveContainer>
           )}
         </Card>
 
         <Card className="p-5">
-          <div className="mb-2 font-display text-base font-semibold">Sales by channel</div>
-          {isLoading ? <Skeleton className="h-[220px]" /> : (
-            <div>
+          <div className="font-display text-base font-semibold">Sales by channel</div>
+          <div className="mb-2 text-xs text-muted-foreground">Accessories · ex-VAT · month to date · B2C = Causeway + Roadshow</div>
+          {isLoading ? <Skeleton className="h-[220px]" /> : !chTile ? (
+            <p className="text-sm text-muted-foreground">Not available just now · the Command Centre figures did not load.</p>
+          ) : (
+            <div title={chTile.basis}>
               <div className="relative">
                 <ResponsiveContainer width="100%" height={168}>
                   <PieChart>
-                    <Pie data={channels.map((c) => ({ name: c.channel, value: Number(c.revenue_bhd) || 0 }))}
+                    <Pie data={chips.map((c) => ({ name: c.label, value: Number(c.value) || 0 }))}
                       dataKey="value" nameKey="name" innerRadius={54} outerRadius={78} paddingAngle={2} stroke="none">
-                      {channels.map((c, i) => <Cell key={i} fill={c.channel === 'B2C' ? '#8b5cf6' : '#3b82f6'} />)}
+                      {chips.map((c, i) => <Cell key={i} fill={c.label === 'B2C' ? '#8b5cf6' : '#3b82f6'} />)}
                     </Pie>
-                    <Tooltip formatter={(v) => [bhd(Number(v), 0), 'Gross']}
+                    <Tooltip formatter={(v) => [bhd(Number(v), 0), 'Accessories ex-VAT']}
                       contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                  <div className="font-display text-lg font-extrabold tabular-nums">{bhd(channelTotal, 0)}</div>
-                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">total gross</div>
+                  <div className="font-display text-lg font-extrabold tabular-nums">{bhd(chTile.value, 0)}</div>
+                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">ex-VAT · MTD</div>
                 </div>
               </div>
               <div className="mt-2 space-y-1.5">
-                {channels.map((c) => {
-                  const isB2C = c.channel === 'B2C'
-                  const share = (Number(c.revenue_bhd) / channelTotal) * 100
+                {chips.map((c) => {
+                  const isB2C = c.label === 'B2C'
                   return (
-                    <div key={c.channel} className="flex items-center justify-between text-sm">
+                    <div key={c.label} className="flex items-center justify-between text-sm">
                       <span className="flex items-center gap-2 font-medium">
                         <span className="h-2.5 w-2.5 rounded-full" style={{ background: isB2C ? '#8b5cf6' : '#3b82f6' }} />
                         {isB2C ? <Store size={14} className="text-violet-500" /> : <Truck size={14} className="text-blue-500" />}
-                        {c.channel} · {isB2C ? 'Retail' : 'Wholesale'}
+                        {c.label} · {isB2C ? 'Retail' : 'Wholesale'}
                       </span>
-                      <span className="font-semibold tabular-nums">{bhd(c.revenue_bhd, 0)} <span className="text-muted-foreground">({share.toFixed(0)}%)</span></span>
+                      <span className="font-semibold tabular-nums">{bhd(c.value, 0)} <span className="text-muted-foreground">({c.share_pct != null ? `${c.share_pct.toFixed(0)}%` : '—'})</span></span>
                     </div>
                   )
                 })}
@@ -560,22 +622,24 @@ export default function Dashboard() {
         </Card>
 
         <Card className="p-5">
-          <div className="mb-4 flex items-center gap-2 font-display text-base font-semibold">
+          <div className="flex items-center gap-2 font-display text-base font-semibold">
             <Crown size={18} className="text-amber-500" /> Top customers
           </div>
+          <div className="mb-3 text-[12px] text-muted-foreground">Accessories · ex-VAT · month to date · Cash Customer left out</div>
           {isLoading ? (
             <div className="space-y-3">{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-10" />)}</div>
-          ) : (data?.top_customers || []).length === 0 ? (
-            <p className="text-sm text-muted-foreground">No named-account orders this month.</p>
+          ) : topCustomers.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No named-account Accessories sales this month.</p>
           ) : (
             <ul className="space-y-1.5">
-              {(data?.top_customers || []).slice(0, 7).map((c, i) => (
-                <li key={i} className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-accent/50">
+              {topCustomers.slice(0, 7).map((c, i) => (
+                <li key={i} className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-accent/50"
+                  title={`${num(c.invoices)} invoice${c.invoices === 1 ? '' : 's'} this month`}>
                   <span className="flex min-w-0 items-center gap-2.5">
                     <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-accent text-[11px] font-bold text-accent-foreground">{i + 1}</span>
                     <span className="truncate text-sm font-medium">{c.customer_name}</span>
                   </span>
-                  <span className="shrink-0 text-sm font-semibold text-primary">{bhd(c.total_revenue_bhd, 0)}</span>
+                  <span className="shrink-0 text-sm font-semibold text-primary">{bhd(c.net_bhd, 0)}</span>
                 </li>
               ))}
             </ul>
@@ -597,35 +661,6 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* Agent Performance panel */}
-      <Card className="mt-5 p-5">
-        <div className="mb-4 flex items-center gap-2 font-display text-base font-semibold">
-          <Bot size={18} className="text-primary" /> AI Agent Team
-          <span className="ml-1 rounded-full bg-accent px-2 py-0.5 text-[11px] font-semibold text-accent-foreground">
-            {(data?.agents || []).length} active
-          </span>
-        </div>
-        {isLoading ? (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-20" />)}</div>
-        ) : (data?.agents || []).length === 0 ? (
-          <p className="text-sm text-muted-foreground">No agent runs recorded yet.</p>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {(data?.agents || []).map((a) => (
-              <div key={a.agent} className="rounded-xl border bg-card p-3.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-sm font-semibold">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" /> {agentLabel(a.agent)}
-                  </div>
-                  <span className="text-[11px] text-muted-foreground">{relTime(a.last_run)}</span>
-                </div>
-                <p className="mt-1.5 line-clamp-2 text-[12.5px] leading-snug text-muted-foreground">{a.summary}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-
       {/* Alerts strip */}
       {k && (
         <Card className="mt-5 flex flex-wrap items-center gap-x-8 gap-y-3 p-5">
@@ -637,7 +672,7 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 text-sm">
             <Landmark size={16} className="text-rose-500" />
             <span className="font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
-            <span className="text-muted-foreground">overdue across {k.overdue_count} accounts</span>
+            <span className="text-muted-foreground">overdue &gt;30 days across {k.overdue_count} accounts</span>
           </div>
           {data?.alerts?.negative_margin_count != null && (
           <div className="flex items-center gap-2 text-sm">
@@ -646,7 +681,6 @@ export default function Dashboard() {
             <span className="text-muted-foreground">products below cost</span>
           </div>
           )}
-          <div className="ml-auto text-[11px] text-muted-foreground">Data as of {fmtDate(data?.data_as_of)}</div>
         </Card>
       )}
     </div>

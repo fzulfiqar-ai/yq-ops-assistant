@@ -6,6 +6,7 @@ import { getSessionSafe } from '@/lib/supabase'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import { num } from '@/lib/format'
+import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -155,6 +156,7 @@ function sanitizeCode(s: string): string {
 function QrDialog({ salesman, onClose }: { salesman: Salesman; onClose: () => void }) {
   const { blobUrl, loading } = useAuthedBlob(`/shop/salesmen/${salesman.id}/qr.png`)
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="w-full max-w-xs p-5 text-center" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
@@ -171,6 +173,7 @@ function QrDialog({ salesman, onClose }: { salesman: Salesman; onClose: () => vo
         <p className="mt-3 text-[12px] text-muted-foreground">Customers scan this to open {salesman.name}'s catalog link.</p>
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 
@@ -227,6 +230,7 @@ function SalesmanDialog({
   }
 
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="flex min-h-full items-center justify-center">
         <Card className="w-full max-w-lg p-5" onClick={(e) => e.stopPropagation()}>
@@ -294,6 +298,7 @@ function SalesmanDialog({
         </Card>
       </div>
     </div>
+    </BodyPortal>
   )
 }
 

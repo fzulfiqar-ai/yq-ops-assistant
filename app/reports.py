@@ -146,6 +146,48 @@ def revenue_trend(months: int = 12) -> list[dict]:
     return list(reversed(rows or []))
 
 
+# The Dashboard's monthly trend on the Command Centre's basis (R7e): Accessories only (SIM never counts),
+# ex-VAT net_bhd, giveaways out, the 12 calendar months to the latest loaded sale. revenue_trend above
+# (VAT-inclusive, every division) stays for the Sales page. Subqueries, not CTEs; data_date rides on
+# every row so the partial month is told apart without a second round-trip.
+REVENUE_TREND_ACC_SQL = (
+    "SELECT to_char(date_trunc('month', sale_date), 'YYYY-MM-DD') AS period_month, "
+    "ROUND(COALESCE(SUM(net_bhd), 0)::numeric, 3) AS acc_net_bhd, COUNT(DISTINCT invoice_no) AS invoices, "
+    "(SELECT MAX(sale_date) FROM v_sales)::text AS data_date "
+    "FROM v_sales "
+    "WHERE division = 'Accessories' AND NOT is_giveaway "
+    "AND sale_date >= (SELECT (date_trunc('month', MAX(sale_date)) - interval '11 months')::date FROM v_sales) "
+    "GROUP BY 1 ORDER BY 1"
+)
+
+
+def _flag_partial(rows: list[dict], data_date) -> list[dict]:
+    """Pure: the month the data stops in is `partial` when the data stops before that month's last day
+    (data to 27 Sep: September is "so far (to 27 Sep)"; data to 30 Sep: a whole month). New dicts;
+    `through` is the data date on the partial month, else None."""
+    from app import metrics
+    d = metrics.parse_day(data_date)
+    month = d.strftime("%Y-%m") if d else None
+    partial_open = bool(d and d < metrics.month_end(d))
+    out = []
+    for r in rows or []:
+        partial = partial_open and str(r.get("period_month") or "")[:7] == month
+        out.append({**r, "partial": partial, "through": d.isoformat() if partial else None})
+    return out
+
+
+def revenue_trend_acc() -> list[dict]:
+    """Accessories ex-VAT by calendar month (REVENUE_TREND_ACC_SQL), the current month flagged partial.
+    Optional like recent_receipts(): a failure leaves the chart empty, never the whole Dashboard."""
+    try:
+        rows = exec_sql(REVENUE_TREND_ACC_SQL) or []
+    except Exception as e:  # noqa: BLE001 -- one chart never costs the page
+        log.warning("dashboard: accessories trend unavailable: %s", e)
+        return []
+    data_date = rows[0].get("data_date") if rows else None
+    return _flag_partial([{k: v for k, v in r.items() if k != "data_date"} for r in rows], data_date)
+
+
 def sales_by_salesman() -> list[dict]:
     return exec_sql(
         "SELECT salesman, orders, qty, revenue_bhd, net_bhd FROM v_sales_by_salesman LIMIT 40"
@@ -429,7 +471,30 @@ def sales_split_mtd() -> dict:
     return {"by_payment": pay, "by_division": div}
 
 
-PACE_BASIS_TEXT = ("Accessories · ex-VAT · month to date on business days · company target read as ex-VAT, "
+# The Dashboard's top customers (R7e): the sales_split_mtd window (the month of the latest loaded sale),
+# Accessories, ex-VAT, giveaways out, the walk-in Cash Customer left out. daily_summary's own
+# top_customers (VAT-inclusive, every division) is unchanged: the email digests read it.
+TOP_CUSTOMERS_ACC_SQL = (
+    "SELECT COALESCE(customer_name, customer_account) AS customer_name, "
+    "ROUND(COALESCE(SUM(net_bhd), 0)::numeric, 3) AS net_bhd, COUNT(DISTINCT invoice_no) AS invoices "
+    "FROM v_sales, (SELECT MAX(sale_date) AS mx FROM v_sales) d "
+    "WHERE sale_date >= date_trunc('month', d.mx)::date "
+    "AND division = 'Accessories' AND NOT is_giveaway AND NOT is_cash_customer "
+    "GROUP BY 1 HAVING COALESCE(SUM(net_bhd), 0) > 0 "
+    "ORDER BY 2 DESC NULLS LAST, 1 LIMIT {limit}"
+)
+
+
+def top_customers_acc_mtd(limit: int = 7) -> list[dict]:
+    """The month's top named accounts by Accessories ex-VAT sales ([] on failure: the card says so)."""
+    try:
+        return exec_sql(TOP_CUSTOMERS_ACC_SQL.format(limit=int(limit))) or []
+    except Exception as e:  # noqa: BLE001 -- one card never costs the page
+        log.warning("dashboard: accessories top customers unavailable: %s", e)
+        return []
+
+
+PACE_BASIS_TEXT =("Accessories · ex-VAT · month to date on business days · company target read as ex-VAT, "
                    "Accessories, business days (Sun–Thu; Fri, Sat off)")
 
 
@@ -464,6 +529,42 @@ def _pace(kpis: dict, data_date: str | None) -> dict:
     return out
 
 
+def _cc_tile(ov: dict | None, key: str) -> dict | None:
+    """One Command Centre tile by key, copied; None when its module is missing or it was not computed."""
+    for mod in (ov or {}).get("modules") or []:
+        for t in mod.get("tiles") or []:
+            if t.get("key") == key:
+                return dict(t) if t.get("available") else None
+    return None
+
+
+def command_basis() -> dict | None:
+    """The Dashboard's headline figures on the Command Centre's basis (R7e): the very tiles
+    app.metrics.overview builds — cached and shared with the Command Centre, no second definition of
+    "sales this month". Accessories · ex-VAT · the month to date vs the same business days last month,
+    the latest day vs the previous business day, B2B / B2C, and receivables on Focus's own Grand Total.
+    None when the overview cannot be built (the page shows "—"); a module that did not answer (or
+    a tile it could not compute) leaves its field None."""
+    from app import metrics
+    try:
+        mtd, day = metrics.overview("mtd"), metrics.overview("today")
+        per, day_per = mtd.get("period") or {}, day.get("period") or {}
+        return {
+            "sales_mtd": _cc_tile(mtd, "sales.accessories"),
+            "sales_day": _cc_tile(day, "sales.accessories"),
+            "channels": _cc_tile(mtd, "sales.channels"),
+            "ar_total": _cc_tile(mtd, "ar.total"),
+            "ar_over90": _cc_tile(mtd, "ar.over90"),
+            "compare_basis": (per.get("compare") or {}).get("basis"),
+            "focus": per.get("focus"),
+            "day": day_per.get("focus"),
+            "day_compare": (day_per.get("compare") or {}).get("label"),
+        }
+    except Exception as e:  # noqa: BLE001 -- the Dashboard keeps its other cards
+        log.warning("dashboard: command centre basis unavailable: %s", e)
+        return None
+
+
 # The dashboard payload is ~20 view queries; each is a PostgREST round-trip. Build the
 # independent sections concurrently and serve warm hits from an in-process cache (zero
 # round-trips). flush on ingest via invalidate_dashboard_cache() (ai.flush_cache calls it).
@@ -492,11 +593,14 @@ def dashboard(force: bool = False) -> dict:
             "movers": ex.submit(movers, 5),
             "trend": ex.submit(revenue_trend, 12),
             "channel": ex.submit(sales_by_channel),
-            "agents": ex.submit(agents_status),
             "fresh": ex.submit(data_freshness),
             "daily_mtd": ex.submit(daily_sales_mtd),
             "split": ex.submit(sales_split_mtd),
             "attainment": ex.submit(salesman_attainment_result),
+            # R7e: the headline tiles, the monthly trend and the top customers on the Command Centre's basis
+            "cc": ex.submit(command_basis),
+            "trend_acc": ex.submit(revenue_trend_acc),
+            "top_acc": ex.submit(top_customers_acc_mtd, 7),
         }
         r = {k: f.result() for k, f in futs.items()}
     out = _assemble_dashboard(r)
@@ -549,7 +653,13 @@ def _assemble_dashboard(r: dict) -> dict:
             "data_through": (att_rows[0].get("data_through") if att_rows else None),
             "error": att_error,
         },
-        "agents": r["agents"],
+        # R7e: the headline tiles on the Command Centre's basis (command_basis; None = "—" on the page),
+        # the monthly trend and the top customers as Accessories ex-VAT. Only added: kpis and the older
+        # VAT-inclusive fields stay as they were (daily_summary feeds the email digests, and
+        # scripts/reconcile_check.py reads kpis.total_receivables).
+        "command": r.get("cc"),
+        "revenue_trend_acc": r.get("trend_acc") or [],
+        "top_customers_acc": r.get("top_acc") or [],
         "alerts": a,
         "daily_mtd": r["daily_mtd"],
         "by_payment": r["split"]["by_payment"],

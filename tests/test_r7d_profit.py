@@ -854,6 +854,226 @@ def _():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 7b. R7e: the admin Dashboard on the Command Centre's basis (only ADDED fields)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# the kpis block exactly as it was: daily_summary feeds the email digests, and scripts/reconcile_check.py
+# compares kpis.total_receivables against the AR report
+OLD_KPI_KEYS = {"rev_today", "net_today", "orders_today", "rev_yesterday", "orders_yesterday", "rev_mtd", "net_mtd",
+                "orders_mtd", "rev_prev_month", "rev_prev_month_mtd", "prev_month_through", "total_receivables",
+                "low_stock_count", "overdue_count", "overdue_total_bhd", "current_receivables_bhd"}
+OLD_DASH_KEYS = {"data_as_of", "data_stale", "data_days_behind", "actions", "kpis", "health", "movers", "top_customers",
+                 "revenue_trend", "by_channel", "by_salesman", "by_salesman_scope", "alerts", "daily_mtd", "by_payment",
+                 "by_division", "pace", "attainment"}
+
+
+def _dash_base() -> dict:
+    s = {"rev_today": 110.0, "net_today": 100.0, "orders_today": 3, "rev_yesterday": 55.0, "orders_yesterday": 2,
+         "rev_mtd": 1573.0, "net_mtd": 1430.0, "orders_mtd": 40, "rev_prev_month": 2000.0, "rev_prev_month_mtd": 1500.0,
+         "prev_month_through": "2026-08-27", "total_receivables": 10495.0, "overdue_accounts": 7,
+         "overdue_receivables_bhd": 4000.0, "current_receivables_bhd": 6495.0,
+         "top_customers": [{"customer_name": "Shop A", "total_revenue_bhd": 500.0, "order_count": 4}],
+         "data_date": "2026-09-27"}
+    return {"s": s, "a": {"low_stock_count": 36, "negative_margin_count": 0}, "health": {}, "movers": {},
+            "trend": [{"period_month": "2026-09-01", "gross_bhd": 1573.0}], "channel": [{"channel": "B2B"}],
+            "fresh": {"stale": False, "days_behind": 1}, "daily_mtd": [], "attainment": {"rows": [], "error": None},
+            "split": {"by_payment": [], "by_division": [{"division": "Accessories", "net_ex_vat_bhd": 930.0}]}}
+
+
+CC_STUB = {"sales_mtd": {"key": "sales.accessories", "value": 930.0, "delta_pct": 5.2, "invoices": 41,
+                         "basis": "Accessories · ex-VAT · 1–27 Sep vs the same 19 business days last month"},
+           "sales_day": {"key": "sales.accessories", "value": 120.0, "invoices": 3}, "channels": None,
+           "ar_total": {"key": "ar.total", "value": 10050.0, "source": "focus_total"}, "ar_over90": None,
+           "compare_basis": "the same 19 business days last month", "focus": {"label": "1–27 Sep"},
+           "day": {"end": "2026-09-27"}, "day_compare": "24 Sep"}
+
+
+@test("R7e dashboard payload: command / revenue_trend_acc / top_customers_acc are ADDED; kpis and the old fields unchanged; agents gone")
+def _():
+    from app import reports
+    from app import settings as app_settings
+    trend = [{"period_month": "2026-09-01", "acc_net_bhd": 930.0, "invoices": 41, "partial": True, "through": "2026-09-27"}]
+    top = [{"customer_name": "Shop A", "net_bhd": 420.0, "invoices": 4}]
+    # the pace reads the monthly target setting: a stand-in, never the database
+    with _Patched((app_settings, "setting", lambda key: 10000.0 if key == "monthly_sales_target_bhd" else None)):
+        out = reports._assemble_dashboard({**_dash_base(), "cc": CC_STUB, "trend_acc": trend, "top_acc": top})
+        old = reports._assemble_dashboard({**_dash_base(), "agents": []})
+    assert set(out) == OLD_DASH_KEYS | {"command", "revenue_trend_acc", "top_customers_acc"}, set(out) ^ OLD_DASH_KEYS
+    assert "agents" not in out, "the AI Agent Team panel is off the Dashboard"
+    assert out["command"] is CC_STUB and out["revenue_trend_acc"] == trend and out["top_customers_acc"] == top
+    k = out["kpis"]
+    assert set(k) == OLD_KPI_KEYS, set(k) ^ OLD_KPI_KEYS
+    assert (k["rev_mtd"], k["total_receivables"], k["overdue_count"], k["overdue_total_bhd"]) == (1573.0, 10495.0, 7, 4000.0)
+    # the older VAT-inclusive fields still travel, untouched
+    assert out["top_customers"][0]["total_revenue_bhd"] == 500.0 and out["revenue_trend"][0]["gross_bhd"] == 1573.0
+    assert out["by_channel"] == [{"channel": "B2B"}] and out["pace"]["mtd_bhd"] == 930.0
+    assert out["pace"]["target_bhd"] == 10000.0 and out["pace"]["business_days_total"] == 22
+    # an older caller's dict (no cc / trend_acc / top_acc: test_r7b_command, test_r3_reps) still assembles
+    assert old["command"] is None and old["revenue_trend_acc"] == [] and old["top_customers_acc"] == []
+    assert "agents" not in old
+    # the command block is sales and receivables only: no cost, margin, kickback or referral field rides along
+    blob = str(out["command"]).lower()
+    for word in ("kickback", "referral", "gp_bhd", "margin", "cost"):
+        assert word not in blob, word
+
+
+def _ov(period: str, focus: dict, compare: dict, modules: list) -> dict:
+    return {"period": {"key": period, "label": period, "focus": focus, "compare": compare}, "modules": modules}
+
+
+def _t(key: str, available: bool = True, value: float = 1.0, **kw) -> dict:
+    """A tile as app.metrics.tile returns it (an unavailable one carries no figures)."""
+    base = {"key": key, "label": key, "unit": "bhd", "basis": f"{key} basis", "drill": None, "available": available}
+    return {**base, "value": value, **kw} if available else {**base, "value": None, "note": "Could not be computed."}
+
+
+def _cc_overviews(receivables: bool = True, day_ok: bool = True) -> dict:
+    mtd_mods = [{"key": "attention", "tiles": [], "items": []},
+                {"key": "sales", "tiles": [
+                    _t("sales.accessories", value=930.0, delta_pct=5.2, invoices=41,
+                       compare={"value": 884.0, "label": "1–25 Aug"}),
+                    _t("sales.pace", value=1136.667),
+                    _t("sales.channels", value=930.0, chips=[{"label": "B2B", "value": 700.0, "unit": "bhd", "share_pct": 75.3},
+                                                             {"label": "B2C", "value": 230.0, "unit": "bhd", "share_pct": 24.7}])]}]
+    if receivables:
+        mtd_mods.append({"key": "receivables", "tiles": [_t("ar.total", value=10050.0, source="focus_total", accounts=44),
+                                                          _t("ar.over90", value=12.5, over_90_bhd=1256.25)]})
+    day_mods = [{"key": "sales", "tiles": [_t("sales.accessories", available=day_ok, value=120.0, delta_pct=-10.0,
+                                              invoices=3, compare={"value": 133.333, "label": "24 Sep"})]}]
+    return {
+        "mtd": _ov("mtd", {"start": "2026-09-01", "end": "2026-09-27", "label": "1–27 Sep", "business_days": 19},
+                   {"start": "2026-08-02", "end": "2026-08-27", "label": "2–27 Aug", "business_days": 19,
+                    "basis": "the same 19 business days last month"}, mtd_mods),
+        "today": _ov("today", {"start": "2026-09-27", "end": "2026-09-27", "label": "27 Sep", "business_days": 1},
+                     {"start": "2026-09-24", "end": "2026-09-24", "label": "24 Sep", "business_days": 1,
+                      "basis": "the previous business day"}, day_mods),
+    }
+
+
+@test("R7e command_basis: the Command Centre's own tiles (mtd + latest day), a missing module or tile is None, a failure is None")
+def _():
+    from app import metrics, reports
+    calls: list = []
+    ovs = _cc_overviews()
+
+    def fake(period="mtd", reader=None, use_cache=True):
+        calls.append(period)
+        return ovs[period]
+
+    with _Patched((metrics, "overview", fake)):
+        out = reports.command_basis()
+    assert sorted(calls) == ["mtd", "today"], "the two cached overviews, shared with the Command Centre"
+    assert out["sales_mtd"]["value"] == 930.0 and out["sales_mtd"]["delta_pct"] == 5.2 and out["sales_mtd"]["invoices"] == 41
+    assert out["sales_day"]["value"] == 120.0 and out["sales_day"]["compare"] == {"value": 133.333, "label": "24 Sep"}
+    assert [c["label"] for c in out["channels"]["chips"]] == ["B2B", "B2C"] and out["channels"]["chips"][0]["share_pct"] == 75.3
+    assert out["ar_total"]["value"] == 10050.0 and out["ar_total"]["source"] == "focus_total"
+    assert out["ar_over90"]["value"] == 12.5
+    assert out["compare_basis"] == "the same 19 business days last month"
+    assert out["focus"]["label"] == "1–27 Sep" and out["day"]["end"] == "2026-09-27" and out["day_compare"] == "24 Sep"
+    assert out["sales_mtd"]["basis"] == "sales.accessories basis", "the API's own basis line travels with the figure"
+    out["sales_mtd"]["value"] = -1
+    assert ovs["mtd"]["modules"][1]["tiles"][0]["value"] == 930.0, "a copy: the cached overview is never changed"
+    # a missing receivables module, or a tile the build could not compute, leaves ONLY those fields None
+    ovs = _cc_overviews(receivables=False, day_ok=False)
+    with _Patched((metrics, "overview", fake)):
+        out = reports.command_basis()
+    assert out["ar_total"] is None and out["ar_over90"] is None and out["sales_day"] is None, "not computed = None"
+    assert out["sales_mtd"]["value"] == 930.0 and out["channels"]["value"] == 930.0
+
+    def boom(period="mtd", reader=None, use_cache=True):
+        raise RuntimeError("the database blinked")
+
+    with _Patched((metrics, "overview", boom)):
+        assert reports.command_basis() is None
+
+
+@test("R7e _flag_partial: data to 27 Sep = September partial (so far, to 27 Sep); data to 30 Sep = a whole month")
+def _():
+    from app import reports
+    rows = [{"period_month": "2026-08-01", "acc_net_bhd": 5000.0}, {"period_month": "2026-09-01", "acc_net_bhd": 930.0}]
+    out = reports._flag_partial(rows, "2026-09-27")
+    assert [(r["partial"], r["through"]) for r in out] == [(False, None), (True, "2026-09-27")]
+    assert "partial" not in rows[1], "new dicts: the input is not changed"
+    assert [r["partial"] for r in reports._flag_partial(rows, "2026-09-30")] == [False, False]
+    assert [r["partial"] for r in reports._flag_partial(rows, None)] == [False, False]
+    assert reports._flag_partial([{"period_month": "2026-02-01"}], "2026-02-28")[0]["partial"] is False, "Feb 28 ends Feb"
+    assert reports._flag_partial([{"period_month": "2028-02"}], "2028-02-28")[0]["partial"] is True, "a leap February runs to 29"
+    assert reports._flag_partial([], "2026-09-27") == []
+
+
+@test("R7e revenue_trend_acc / top_customers_acc_mtd: data_date stripped, the partial month flagged; a failed read is []")
+def _():
+    from app import reports
+    seen: list = []
+
+    def rpc(sql):
+        seen.append(sql)
+        if "period_month" in sql:
+            return [{"period_month": "2026-08-01", "acc_net_bhd": 5000.0, "invoices": 90, "data_date": "2026-09-27"},
+                    {"period_month": "2026-09-01", "acc_net_bhd": 930.0, "invoices": 41, "data_date": "2026-09-27"}]
+        return [{"customer_name": "Shop A", "net_bhd": 420.0, "invoices": 4}]
+
+    with _Patched((reports, "exec_sql", rpc)):
+        trend = reports.revenue_trend_acc()
+        top = reports.top_customers_acc_mtd(7)
+    assert [(r["period_month"], r["partial"], r["through"]) for r in trend] == [
+        ("2026-08-01", False, None), ("2026-09-01", True, "2026-09-27")]
+    assert all("data_date" not in r for r in trend)
+    assert top == [{"customer_name": "Shop A", "net_bhd": 420.0, "invoices": 4}] and seen[-1].endswith("LIMIT 7")
+
+    def fail(sql):
+        raise RuntimeError("permission denied")
+
+    with _Patched((reports, "exec_sql", fail)):
+        assert reports.revenue_trend_acc() == [] and reports.top_customers_acc_mtd() == []
+
+
+@test("R7e SQL: Accessories only, giveaways out, ex-VAT net_bhd, Cash Customer out; subqueries, not CTEs")
+def _():
+    import inspect
+    from app import reports
+    trend = reports.REVENUE_TREND_ACC_SQL
+    for s in ("division = 'Accessories'", "NOT is_giveaway", "SUM(net_bhd)", "interval '11 months'",
+              "(SELECT MAX(sale_date) FROM v_sales)", "AS acc_net_bhd", "AS period_month"):
+        assert s in trend, s
+    top = reports.TOP_CUSTOMERS_ACC_SQL
+    for s in ("division = 'Accessories'", "NOT is_giveaway", "NOT is_cash_customer", "SUM(net_bhd)",
+              "date_trunc('month', d.mx)", "AS net_bhd", "AS invoices"):
+        assert s in top, s
+    for sql in (trend, top):
+        assert not sql.lstrip().upper().startswith("WITH") and "revenue_bhd" not in sql, "ex-VAT, never the VAT-inclusive"
+    dash = inspect.getsource(reports.dashboard)
+    assert "command_basis" in dash and "revenue_trend_acc" in dash and "top_customers_acc_mtd" in dash
+    assert "agents_status" not in dash
+    # the email digests' source is untouched: daily_summary still answers the keys they read
+    from app import digest
+    ds = inspect.getsource(digest.daily_summary)
+    for key in ('"rev_mtd"', '"total_receivables"', '"top_customers"', '"overdue_receivables_bhd"'):
+        assert key in ds, key
+
+
+@test("R7e web: the Dashboard reads the Command Centre's basis, one freshness element, no agent panel")
+def _():
+    dash = _read("web/src/pages/Dashboard.tsx")
+    for gone in ("AI Agent Team", "DataBanner", "Data as of", "agentLabel(", "relTime(", "data_stale",
+                 "Revenue this month (gross)"):
+        assert gone not in dash, gone
+    for s in ("['freshness']", "apiGet<Freshness>('/freshness')", "revenue_trend_acc", "top_customers_acc",
+              "data?.command", "Accessories sales this month · ex-VAT", "Focus invoices this month (Accessories)",
+              "Latest day · ${dayLabel(cc.day.end)}", "cc?.compare_basis", "arTile?.source === 'focus_total'",
+              "k?.total_receivables", "chTile?.chips", "Accessories · ex-VAT · month to date",
+              "so far (to ${dayLabel(", "ReferenceLine y={monthTarget}", "r.partial ? "):
+        assert s in dash, s
+    # the strings other suites pin stay (test_r7b_command, this file's own 'web:' tests)
+    for s in ("pace.basis_text", "acc_net_bhd", "business_days_total", "Gross margin · ex-VAT on Focus COGS",
+              "Capital frozen in dead stock · at cost", "at selling price",
+              "deadUncostedNote(data.health.dead_stock_count, data.health.dead_stock_uncosted)", "from '@/lib/basisText'"):
+        assert s in dash, s
+    # the chip and the banner share the one query key (so /freshness is read once for both)
+    assert "queryKey: ['freshness']" in _read("web/src/components/FreshnessChip.tsx")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 8. opt-in: the new view bodies READ ONLY against production (YQ_R7D_LIVE=1)
 # ═══════════════════════════════════════════════════════════════════════════════
 

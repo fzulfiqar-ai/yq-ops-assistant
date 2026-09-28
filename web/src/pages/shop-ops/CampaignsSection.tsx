@@ -8,6 +8,7 @@ import { apiDelete, apiGet, apiPatch, apiPost, apiUpload, ApiError } from '@/lib
 import type { BadgeKind, CampaignCanvas, CatalogPayload, ShopItem } from '@/lib/shopApi'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
+import { BodyPortal } from '@/components/BodyPortal'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -776,6 +777,7 @@ function CampaignDialog({ campaign, rules, catalog, catalogStatus, onClose, onSa
   }
 
   return (
+    <BodyPortal>
     <div
       ref={dialogRef} tabIndex={-1}
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 outline-none sm:items-center sm:p-4"
@@ -1059,6 +1061,7 @@ function CampaignDialog({ campaign, rules, catalog, catalogStatus, onClose, onSa
         </div>
       </form>
     </div>
+    </BodyPortal>
   )
 }
 
