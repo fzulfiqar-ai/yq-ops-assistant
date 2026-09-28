@@ -7,7 +7,8 @@ import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
 import type { ShopItem } from '@/lib/shopApi'
 import { ProductImage } from './ProductImage'
-import { badgeMeta, bhd, minQtyOf, money, RING, stepOf, stockPill } from './shared'
+import { dropShareText, priceDropOf, wasText } from './priceDrops'
+import { badgeMeta, bhd, minQtyOf, money, RING, shownBadges, stepOf, stockPill } from './shared'
 
 export interface ProductSheetProps {
   item: ShopItem | null
@@ -17,9 +18,9 @@ export interface ProductSheetProps {
   showCompare: boolean
   qty: number
   pairs: ShopItem[]
-  /** Salesman mode has no public link to hand out — the sheet drops the share button. */
+  /** False when there is no link to hand out (a staff login not linked to a salesman) — no share button. */
   canShare?: boolean
-  /** Marketplace: share this URL instead of the token link (e.g. https://…/p/CODE). */
+  /** Share this URL instead of the token link: the marketplace's / the rep's own …/p/CODE?ref=slug. */
   shareUrl?: string
   /** Marketplace: called after a successful share (analytics). */
   onShared?: () => void
@@ -73,6 +74,8 @@ export function ProductSheet({
       : null
   const savePct =
     compare != null ? Number(item.save_pct) || Math.round(((compare - Number(item.price_bhd)) / compare) * 100) : null
+  // a genuine price-book cut only (was_bhd above today's price) — the market's Was → Now rule
+  const drop = priceDropOf(item)
 
   const shareUrl =
     shareUrlOverride ||
@@ -85,7 +88,8 @@ export function ProductSheet({
     })()
 
   const share = async () => {
-    const text = `${name}${item.price_bhd != null ? ` — ${bhd(item.price_bhd)}` : ''}`
+    // "… now BHD 1.200 (was BHD 1.500, ↓20%)" on a price drop; the URL travels as the share's own field
+    const text = dropShareText(item)
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
         await navigator.share({ title: `YQ Bahrain — ${name}`, text, url: shareUrl })
@@ -205,7 +209,7 @@ export function ProductSheet({
               <Badge tone={stock.tone} dot>
                 {stock.label}
               </Badge>
-              {(item.badges || []).map((b) => {
+              {shownBadges(item).map((b) => {
                 const meta = badgeMeta(b)
                 return (
                   <Badge key={b} tone={meta.tone}>
@@ -230,6 +234,11 @@ export function ProductSheet({
               <div className="font-display text-[28px] font-extrabold leading-[0.95] tracking-[-0.02em] tabular-nums text-[#6D4091]">
                 {item.price_bhd != null ? bhd(item.price_bhd) : 'Price on request'}
               </div>
+              {drop && (
+                <Badge tone="rose" className="mb-1">
+                  {wasText(drop.was, drop.pct)}
+                </Badge>
+              )}
               {compare != null && (
                 <div className="flex items-center gap-2 pb-1">
                   <span className="text-[12px] tabular-nums text-[#6b6480] line-through">
