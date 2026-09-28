@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
+import { BodyPortal } from '@/components/BodyPortal'
 import { DataTable, Stat, type Column } from '@/components/DataTable'
 import {
   AssignBox, AssignmentQueue, CancelReasonPicker, FocusExceptionsPanel, FocusLinkBox, ReturnBox,
@@ -767,10 +768,13 @@ function OrderDrawer({
   const stamp = data?.stamp_label || (data ? STAMP_LABEL[data.status] : null)
   const hasFooter = Boolean(data) && !readOnly && !editing && (flow.actions.some((a) => a !== 'tell_shop') || flow.tellFirst)
 
+  // BodyPortal: left inside AppShell's <main> the drawer opened under the sticky top bar (R7e);
+  // the header sticks inside the drawer's own scroll so Close never scrolls away
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="flex h-full w-full flex-col overflow-y-auto bg-card shadow-lift sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-start justify-between gap-3 border-b px-5 py-4">
+        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b bg-card px-5 py-4">
           <div className="min-w-0 flex-1">
             <div className="font-display text-base font-semibold">{data?.order_no || 'Order'}</div>
             {data && (
@@ -975,6 +979,7 @@ function OrderDrawer({
         )}
       </div>
     </div>
+    </BodyPortal>
   )
 }
 

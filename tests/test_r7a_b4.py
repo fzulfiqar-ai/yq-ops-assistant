@@ -297,6 +297,58 @@ def _():
     assert "mask" not in src.lower(), "masking (or not) is the API's job, per the brief"
 
 
+# ── R7e: the portal overlay bug (owner screenshot: the drawer's top hid under the top bar) ──────
+
+BODY_PORTAL = "web/src/components/BodyPortal.tsx"
+# every page that hand-rolls a `fixed inset-0 z-50` overlay (a <Sheet> already portals by itself)
+OVERLAY_FILES = (SHOP, "web/src/pages/Catalog.tsx", "web/src/pages/Finds.tsx", "web/src/pages/Leads.tsx",
+                 "web/src/pages/PriceTracker.tsx", "web/src/pages/Salesmen.tsx", "web/src/pages/ShopRules.tsx",
+                 "web/src/pages/shop-ops/CampaignsSection.tsx")
+
+
+@test("R7e: BodyPortal renders its children beside the shell's <main> (else the body), never inside it")
+def _():
+    src = _read(BODY_PORTAL)
+    assert "export function BodyPortal(" in src
+    assert "createPortal(" in src and "document.body" in src
+    # beside <main>, not the body: the app (toasts z-[100] included) lives in ArcRevealHero's isolated z-0
+    # layer, so a body-level overlay would hide every toast an open drawer raises
+    assert "document.querySelector('main')?.parentElement ?? document.body" in src
+    arc = _read(ARC)
+    assert "isolate" in arc and "<div className={cn('relative z-0', revealClassName)}>{children}</div>" in arc
+    assert "z-[100]" in _read("web/src/components/Toast.tsx")
+    # the stacking context it escapes is still AppShell's main (this release leaves AppShell alone); the
+    # salesman shell's main sits inside the root that carries its plum tokens
+    assert '<main className="relative z-10' in _read("web/src/components/AppShell.tsx")
+    shell = _read("web/src/components/SalesmanShell.tsx")
+    assert shell.index('data-shell="sales" style={SALES_TOKENS}') < shell.index("<main ")
+
+
+@test("R7e: the order drawer is portalled and its header (order no, status pills, Close) sticks at the top")
+def _():
+    drawer = _read(SHOP).split("function OrderDrawer(", 1)[1].split("\nfunction ", 1)[0]
+    assert "<BodyPortal>" in drawer and "</BodyPortal>" in drawer
+    assert drawer.index("<BodyPortal>") < drawer.index('className="fixed inset-0 z-50') < drawer.index("</BodyPortal>")
+    head = drawer.split("sticky top-0", 1)[1].split(">", 1)[0]
+    assert "z-10" in head and "bg-card" in head, "an opaque header above the drawer's own scroll"
+    assert drawer.index("sticky top-0") < drawer.index('aria-label="Close"'), "Close lives in the sticky header"
+    # the backdrop still closes it; a click inside the panel does not
+    assert 'backdrop-blur-sm" onClick={onClose}>' in drawer and "onClick={(e) => e.stopPropagation()}" in drawer
+
+
+@test("R7e: every hand-rolled z-50 overlay in the portal pages is wrapped in <BodyPortal> (one each, imported)")
+def _():
+    for rel in OVERLAY_FILES:
+        src = _read(rel)
+        n = src.count("fixed inset-0 z-50")
+        assert n >= 1, rel
+        assert src.count("<BodyPortal>") == n == src.count("</BodyPortal>"), (rel, n, src.count("<BodyPortal>"))
+        assert "import { BodyPortal } from '@/components/BodyPortal'" in src, rel
+    # the campaign dialog keeps its own manners: Escape from anywhere, focus in and back
+    camp = _read("web/src/pages/shop-ops/CampaignsSection.tsx")
+    assert "if (e.key === 'Escape') closeRef.current()" in camp and "document.addEventListener('keydown', onKey)" in camp
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

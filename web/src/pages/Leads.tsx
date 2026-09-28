@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { apiGet, apiPost, apiSend } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { BodyPortal } from '@/components/BodyPortal'
 import { PageHeader } from '@/components/PageHeader'
 import { useToast } from '@/components/Toast'
 import { Card } from '@/components/ui/card'
@@ -73,6 +74,7 @@ function LeadEditDialog({ lead, onClose, onSaved }: { lead: Lead; onClose: () =>
     finally { setBusy(false) }
   }
   return (
+    <BodyPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
@@ -94,6 +96,7 @@ function LeadEditDialog({ lead, onClose, onSaved }: { lead: Lead; onClose: () =>
         </form>
       </Card>
     </div>
+    </BodyPortal>
   )
 }
 
