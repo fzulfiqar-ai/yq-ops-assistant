@@ -17,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
+      # configPath is a repo file: without a checkout every run died on ENOENT (found 28-Sep-2026)
+      # and, being continue-on-error, still showed green.
+      - uses: actions/checkout@v4
       - name: Wake the API first (free tier sleeps)
         run: curl -sS --max-time 120 -o /dev/null -w 'API %{http_code} in %{time_total}s\n' https://api.yqmarketplace.com/public/market || true
       - name: Lighthouse (mobile, 3 runs, median)
