@@ -18,7 +18,12 @@ Covered:
     the header compare-and-swap loses to a racing writer; a failed event puts header and lines back;
     a re-run is a no-op; a later Confirm / Amend keeps the lowered price; --reverse puts it back and
     skips an order touched since; 0 cuts / an --expect-cuts mismatch stop before any write; and
-    --verify-load's read-only checks;
+    --verify-load's read-only checks. The review fixes: only the cut moves a total (a total on file
+    its lines do not add up to, or missing lines, is skipped; lines are read per order past
+    PostgREST's 1,000 rows); a Received order the cut takes under the minimum waits for the rep's
+    Confirm; --reverse exits 1 unless every order went back; a confirmed Focus link / a Focus
+    suggestion holds an order back (--include overrides a suggestion); the offer ledger measures a
+    lowered line against its moved list;
   * the price in force — app/orders.py, app/order_verify.py, app/agents.py and app/bi_simulator.py
     read v_price_list_by_book (never MAX(rate_bhd) over selling_prices as today's price), and the
     simulator's price history keeps MAX per start_date over the rows the price views count.
@@ -171,8 +176,9 @@ def _():
 @test("3 never raised: today above the lock, a tier line the engine prices no lower, a line already on the new book")
 def _():
     cut = [{"sku_code": "T02", "prev_price_bhd": 2.95, "current_price_bhd": 2.9}]
-    orders = [H._order(1, "confirmed"), H._order(2, "new", subtotal_bhd=29.5, discount_bhd=2.95, total_bhd=26.55),
-              H._order(3, "new")]
+    orders = [H._order(1, "confirmed", items_count=1),
+              H._order(2, "new", subtotal_bhd=29.5, discount_bhd=2.95, total_bhd=26.55, items_count=1),
+              H._order(3, "new", items_count=1)]
     lines = [H._line(11, 1, "T02", 10, 1.5, lp=2.95, confirmed=True),      # the rep agreed 1.500 < today's 2.900
              H._line(21, 2, "T02", 10, 2.655, lp=2.95, rule_ids=[5]),       # a 10 %-off tier: no tier today, 2.900
              H._line(31, 3, "T02", 10, 2.9)]                                # placed on the new book
@@ -235,34 +241,104 @@ def _():
         assert cart <= H.D(row["discount_bhd"]), "the cart discount never grows"
         assert (row["discount_bhd"], row["delivery_bhd"]) == (orders[oid - 1]["discount_bhd"], 1.5), "placed as placed"
     assert "is not what its lines add up to" not in out
-    # a total on file its lines do not add up to is reported (the new one follows the lines)
-    fake = H._db(shop_orders=[H._order(1, "new", total_bhd=40.0)], shop_order_lines=H._lines(1))
+
+
+@test("5b a total on file its lines do not add up to, or fewer lines than the order was placed with: skipped, nothing written")
+def _():
+    # review: the new total used to follow the lines, taking the gap off the order with the cut
+    # (confirmed 60.000 on 37.500 of lines, cut 12.500 -> written 25.000)
+    orders = [H._order(1, "new", total_bhd=40.0), H._order(2, "confirmed", total_confirmed_bhd=60.0),
+              H._order(3, "confirmed", items_count=3), H._order(4, "confirmed")]
+    fake = H._db(shop_orders=orders, shop_order_lines=[ln for i in range(1, 5) for ln in H._lines(i, i != 1)])
     with _env(fake):
         code, out = _run([])
-    assert code == 0 and "note YQ-2609-0001: the total on file 40.000 is not what its lines add up to (37.500)" in out, out
+        assert code == 0, out
+        assert ("skipped YQ-2609-0001: the total on file 40.000 is not what its lines add up to (37.500): "
+                "check by hand") in out, out
+        assert "skipped YQ-2609-0002: the total on file 60.000 is not what its lines add up to (37.500)" in out
+        assert "skipped YQ-2609-0003: 2 of the 3 lines it was placed with read: check by hand" in out
+        assert "Orders to lower: 1   lines: 1   BHD reduction: 12.500" in out, out
+        code, out = _commit()
+    assert code == 0, out
+    rows = {o["id"]: o for o in fake.rows("shop_orders")}
+    assert (rows[1]["total_confirmed_bhd"], rows[2]["total_confirmed_bhd"], rows[3]["total_confirmed_bhd"]) == \
+        (None, 60.0, 37.5)
+    assert rows[4]["total_confirmed_bhd"] == 25.0
+    assert [e["order_id"] for e in H._events(fake, name="amended")] == [4]
 
 
-@test("6 minimum: a cut under BHD 20 is reported (BELOW MIN), never cancelled; an order already under it says so")
+@test("5c an order's lines are read on their own: PostgREST's 1,000-row page never cuts one off")
 def _():
-    orders = [H._order(1, "new", subtotal_bhd=23.6, total_bhd=23.6),
+    # 30 orders x 38 lines = 1,140 lines: one batched read of 50 orders came back cut at 1,000 rows,
+    # order 27 with 12 of its lines (lowered to their partial sum) and 28-30 with none (missed)
+    orders, lines = [], []
+    for i in range(1, 31):
+        orders.append(H._order(i, "confirmed", subtotal_bhd=103.5, total_bhd=103.5, subtotal_confirmed_bhd=103.5,
+                               total_confirmed_bhd=103.5, items_count=38, units_count=47))
+        lines.append(H._line(i * 100, i, "T02", 10, 2.95, confirmed=True))
+        lines += [H._line(i * 100 + k, i, "X05", 1, 2.0, confirmed=True) for k in range(1, 38)]
+    fake = H._db(shop_orders=orders, shop_order_lines=lines)
+    real = H._Query.execute
+
+    def capped(self):                    # PostgREST's max-rows (app/followups.py): a response stops at 1,000
+        got = real(self)
+        if self.op == "select" and got.data and len(got.data) > 1000:
+            got.data = got.data[:1000]
+        return got
+    with H._swap(H._Query, execute=capped), _env(fake):
+        code, out = _commit()
+    assert code == 0, out
+    assert "Orders to lower: 30   lines: 30   BHD reduction: 375.000" in out, out
+    assert sorted({o["total_confirmed_bhd"] for o in fake.rows("shop_orders")}) == [91.0], "each order 12.500 lower"
+
+
+@test("6 minimum: a Confirmed order cut under BHD 20 is lowered and reported (BELOW MIN), never cancelled; an order already under it says so")
+def _():
+    orders = [H._order(3, "confirmed", subtotal_bhd=23.6, total_bhd=23.6, subtotal_confirmed_bhd=23.6,
+                       total_confirmed_bhd=23.6, items_count=1),
               H._order(2, "confirmed", subtotal_bhd=14.75, total_bhd=14.75, subtotal_confirmed_bhd=14.75,
-                       total_confirmed_bhd=14.75)]
-    lines = [H._line(11, 1, "T02", 8, 2.95), H._line(21, 2, "T02", 5, 2.95, confirmed=True)]
+                       total_confirmed_bhd=14.75, items_count=1)]
+    lines = [H._line(31, 3, "T02", 8, 2.95, confirmed=True), H._line(21, 2, "T02", 5, 2.95, confirmed=True)]
     fake = H._db(shop_orders=orders, shop_order_lines=lines)
     ctx = _ctx()
     with _env(fake, ctx):
         cuts = P.load_cuts(EFF)
         plans = {o["id"]: P.plan_order(o, ctx, cuts) for o in P.load_open_orders()}
-        assert (plans[1]["min"], plans[2]["min"]) == ("BELOW MIN", "already small"), plans
-        assert plans[1]["skip"] is None and plans[2]["skip"] is None
+        assert (plans[3]["min"], plans[2]["min"]) == ("BELOW MIN", "already small"), plans
+        assert plans[3]["skip"] is None and plans[2]["skip"] is None
         code, out = _run([])
-        assert "BELOW MIN (reported, never cancelled): YQ-2609-0001" in out and "Shop agreed" in out, out
+        assert "BELOW MIN (reported, never cancelled): YQ-2609-0003" in out, out
         code, out = _commit()
     assert code == 0, out
-    row = next(o for o in fake.rows("shop_orders") if o["id"] == 1)
+    row = next(o for o in fake.rows("shop_orders") if o["id"] == 3)
     assert (row["status"], row["order_kind"], row["total_confirmed_bhd"], row["cancelled_at"]) == \
-        ("new", "standard", 13.6, None)
+        ("confirmed", "standard", 13.6, None)
     assert next(o for o in fake.rows("shop_orders") if o["id"] == 2)["total_confirmed_bhd"] == 8.5
+
+
+@test("6b minimum: a Received order the cut takes under BHD 20 is skipped (its Confirm would need 'Shop agreed'); lowered once the rep confirms")
+def _():
+    from app import shop_heart
+    # review: T02 3 x 2.950 + X05 6 x 2.000 = 20.850 -> 17.100; the rep's Confirm compares with the
+    # placed total and asked for the tick although the rep changed nothing
+    orders = [H._order(1, "new", subtotal_bhd=20.85, total_bhd=20.85, units_count=9)]
+    lines = [H._line(11, 1, "T02", 3, 2.95), H._line(12, 1, "X05", 6, 2.0)]
+    fake = H._db(shop_orders=orders, shop_order_lines=lines)
+    with _env(fake):
+        code, out = _commit()
+        assert code == 0 and f"skipped YQ-2609-0001: {P.BELOW_MIN_NEW}" in out, out
+        assert "Nothing to lower. Nothing written." in out and fake.writes() == [], fake.writes()
+        # the rep confirms as placed, no tick; a re-run lowers it, and an Amend needs no tick either
+        got = shop_heart.confirm_order(1, [], "Tomorrow", None, actor=H.REP)
+        assert got["totals"]["total_bhd"] == 20.85
+        assert H._events(fake, 1, "status:confirmed")[0]["detail"]["adverse"] == []
+        code, out = _commit()
+        assert code == 0 and "BELOW MIN (reported, never cancelled): YQ-2609-0001" in out, out
+        assert fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 17.1
+        shop_heart.amend_order(1, [{"line_id": 12, "qty_confirmed": 5, "reason": "out_of_stock"}], None, None,
+                               actor=H.REP)
+    row = fake.rows("shop_orders")[0]
+    assert (row["status"], row["total_confirmed_bhd"]) == ("confirmed", 15.1), row
 
 
 @test("7 compare-and-swap: a write between the read and the swap wins — the order is skipped, nothing written")
@@ -346,8 +422,10 @@ def _():
         assert code == 0 and len(fake.writes()) == n, "a reverse without --commit writes nothing"
         assert "Price change undone: T02 1.700 → 2.950. Total BHD 37.500 (was 25.000)." in out, out
         assert "YQ-2609-0003: touched since the price change, skipped" in out
+        assert "1 would be left as it is (adjust by hand): YQ-2609-0003" in out, out
         code, out = _run(["--reverse", str(folder), "--commit", "--by", BY])
-    assert code == 0, out
+    # an undo that left an order lowered is not a success (review: it exited 0)
+    assert code == 1 and "2 put back, 1 not (adjust by hand): YQ-2609-0003" in out, out
     rows = {o["id"]: o for o in fake.rows("shop_orders")}
     by = H._lines_by(fake)
     money = ("total_confirmed_bhd", "subtotal_confirmed_bhd", "total_bhd", "status")
@@ -364,6 +442,27 @@ def _():
     assert (d["total_before"], d["total_after"]) == (25.0, 37.5)
     assert len(fake.rows("shop_admin_audit")) == 5 and fake.rows("shop_admin_audit")[-1]["after"]["reason"] == \
         "price book 2026-09-28 undone"
+
+
+@test("11b --reverse exits 1 when an order is gone or a line moved since the price change; 0 only when every order went back")
+def _():
+    orders = [H._order(1, "confirmed"), H._order(2, "confirmed")]
+    fake = H._db(shop_orders=orders, shop_order_lines=H._lines(1, True) + H._lines(2, True))
+    with _env(fake) as tmp:
+        assert _commit()[0] == 0
+        folder = _folder(tmp)
+        H._lines_by(fake)[11]["unit_price_confirmed"] = 1.6            # by hand, updated_at left as it was
+        fake.tables["shop_orders"] = [o for o in fake.rows("shop_orders") if o["id"] != 2]
+        n = len(fake.writes())
+        code, out = _run(["--reverse", str(folder), "--commit", "--by", BY])
+        assert code == 1 and len(fake.writes()) == n, out
+        assert "YQ-2609-0001: a line moved since the price change, skipped" in out and "YQ-2609-0002: gone" in out
+        assert "0 put back, 2 not (adjust by hand): YQ-2609-0001, YQ-2609-0002" in out, out
+    fake = H._one("confirmed")
+    with _env(fake) as tmp:
+        assert _commit()[0] == 0
+        code, out = _run(["--reverse", str(_folder(tmp)), "--commit", "--by", BY])
+    assert code == 0 and "1 put back, 0 not." in out and fake.rows("shop_orders")[0]["total_confirmed_bhd"] == 37.5, out
 
 
 @test("12 guards: 0 cuts -> exit 2 'load the price book first'; an --expect-cuts mismatch aborts before any write; --commit needs --by")
@@ -409,6 +508,77 @@ def _():
         code, out = _run(["--verify-load"])
         assert code == 1 and "FAIL  e. catalog Was/Now: 0 of 1" in out, out
     assert fake.writes() == [], "--verify-load is read-only"
+
+
+@test("14 Focus may have billed it: a confirmed link is a credit note; a suggestion is skipped unless --include names the order; unreadable = refused")
+def _():
+    # review: 'invoiced' was only focus_invoice_no / payment_status — an order whose Focus SI names it
+    # (a narration_ref suggestion nobody accepted yet) was lowered under the invoice's price
+    orders = [H._order(i, "confirmed") for i in range(1, 6)]
+    cands = [{"order_id": 1, "invoice_key": "SI-YQ-26-09-101", "method": "narration_ref", "confidence": 1.0, "rank": 1},
+             {"order_id": 4, "invoice_key": "SI-YQ-26-09-104", "method": "auto_items", "confidence": 0.9, "rank": 1}]
+    links = [{"order_id": 2, "invoice_key": "SI-YQ-26-09-102", "state": "confirmed", "method": "manual"},
+             {"order_id": 3, "invoice_key": "SI-YQ-26-09-103", "state": "rejected", "method": "auto_items"}]
+    fake = H._db(shop_orders=orders, shop_order_lines=[ln for i in range(1, 6) for ln in H._lines(i, True)],
+                 v_shop_focus_candidates=cands, shop_order_focus_links=links)
+    lowered = lambda: sorted(o["id"] for o in fake.rows("shop_orders") if o["total_confirmed_bhd"] == 25.0)  # noqa: E731
+    with _env(fake):
+        code, out = _run([])
+        assert code == 0 and lowered() == [], out
+        assert ("skipped YQ-2609-0001: possibly invoiced in Focus (SI-YQ-26-09-101, Order number in the invoice "
+                "note): credit note, or --include YQ-2609-0001") in out, out
+        assert f"skipped YQ-2609-0002: {P.CREDIT_NOTE} (linked to SI-YQ-26-09-102)" in out, out
+        assert "skipped YQ-2609-0004: possibly invoiced in Focus (SI-YQ-26-09-104, Same rep, same items)" in out
+        assert "YQ-2609-0003:" not in out.split("Orders to lower")[1], "a rejected pair is no sign of an invoice"
+        code, out = _commit()
+        assert code == 0 and lowered() == [3, 5], out
+        # the operator looked: 0004's suggestion is another sale — named, it is lowered; a confirmed link never
+        code, out = _commit("--include", "yq-2609-0004", "--include", "YQ-2609-0002")
+        assert code == 0 and lowered() == [3, 4, 5], out
+        assert f"skipped YQ-2609-0002: {P.CREDIT_NOTE} (linked to SI-YQ-26-09-102)" in out
+    # the links / suggestions cannot be read: nothing is lowered blind
+    fake = H._db(shop_orders=[H._order(1, "confirmed")], shop_order_lines=H._lines(1, True))
+    fake.fail[("select", "v_shop_focus_candidates")] = RuntimeError("statement timeout")
+    with _env(fake) as tmp:
+        code, out = _commit()
+        assert list(tmp.iterdir()) == []
+    assert code == 2 and "REFUSED: could not read the Focus links / suggestions" in out, out
+    assert fake.writes() == []
+
+
+@test("15 offer ledger: a lowered tier line's rule spend is measured against the moved list (1.700), never the book's cut (14.200)")
+def _():
+    from app import shop
+    # review: list 2.950, placed 2.655 (10 % at 10), lowered to 1.530 (1.700 less 10 %); the ledger
+    # measured (placed list - lowered unit) x qty = 14.200 on the next Confirm / Amend
+    rules = [{"id": 5, "name": "10 off at 10", "kind": "qty_tier", "min_qty": 10, "pct_off": 10,
+              "scope": {"item_codes": ["T02"], "categories": [], "referral_codes": []}, "stackable": False}]
+    orders = [H._order(1, "confirmed", discount_bhd=2.95, total_bhd=34.55, total_confirmed_bhd=34.55),
+              H._order(2, "new", discount_bhd=2.95, total_bhd=34.55)]
+    lines = [H._line(11, 1, "T02", 10, 2.655, lp=2.95, confirmed=True, rule_ids=[5]),
+             H._line(12, 1, "X05", 4, 2.0, confirmed=True),
+             H._line(21, 2, "T02", 10, 2.655, lp=2.95, rule_ids=[5]), H._line(22, 2, "X05", 4, 2.0)]
+    ledger = [{"id": 1, "order_id": 1, "line_id": 11, "item_code": "T02", "rule_id": 5, "kind": "qty_tier",
+               "level": "line", "amount_bhd": 2.95, "amount_confirmed_bhd": 2.95, "stage": "confirmed"},
+              {"id": 2, "order_id": 2, "line_id": 21, "item_code": "T02", "rule_id": 5, "kind": "qty_tier",
+               "level": "line", "amount_bhd": 2.95, "amount_confirmed_bhd": None, "stage": "placed"}]
+    fake = H._db(shop_orders=orders, shop_order_lines=lines, shop_order_discounts=ledger)
+    amt = lambda rid: next(r for r in fake.rows("shop_order_discounts") if r["id"] == rid)["amount_confirmed_bhd"]  # noqa: E731
+    with _env(fake, _ctx(rules=rules)):
+        code, out = _commit()
+        assert code == 0, out
+        by = H._lines_by(fake)
+        assert (by[11]["unit_price_confirmed"], by[21]["unit_price_confirmed"]) == (1.53, 1.53)
+        assert amt(1) == 1.7 and (amt(2), fake.rows("shop_order_discounts")[1]["stage"]) == (None, "placed")
+        shop.amend_order(1, [{"line_id": 11, "qty_confirmed": 8, "reason": "out_of_stock"}], None, None, actor=H.REP)
+        assert amt(1) == 1.36, amt(1)                 # (1.700 - 1.530) x 8
+        shop.confirm_order(2, [], "Tomorrow", None, actor=H.REP)
+        assert amt(2) == 1.7, amt(2)
+    # a line never lowered is measured as before: the placed list less the locked unit
+    from app.offers import confirmed_amounts
+    o = {"id": 9, "status": "confirmed", "discount_bhd": 2.95, "delivery_bhd": 0}
+    ln = H._line(91, 9, "T02", 10, 2.655, lp=2.95, confirmed=True, rule_ids=[5])
+    assert confirmed_amounts(o, [ln], [{"id": 7, "line_id": 91, "level": "line", "amount_bhd": 2.95}]) == {7: 2.95}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

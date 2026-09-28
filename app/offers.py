@@ -356,8 +356,11 @@ def write_added_ledger(client, order: dict, inserted: list[dict], priced: list[d
 def confirmed_amounts(order: dict, lines: list[dict], ledger: list[dict]) -> dict[int, float]:
     """Pure: ledger row id → the discount at the order's agreed quantities. Line rows: the line's
     locked unit discount × its confirmed (or, once delivered, delivered) quantity, shared over the
-    line's rules in the placed proportions. Cart rows: the order's own cart discount as the order
-    heart re-shares it (shop_heart.compute_totals), in the placed proportions."""
+    line's rules in the placed proportions. A line a price book lowered (a confirmed unit under the
+    placed one: scripts/apply_price_drops_to_open_orders — the heart never confirms under it) is
+    measured against its list moved in the same proportion, so the book's cut is never a rule's
+    spend. Cart rows: the order's own cart discount as the order heart re-shares it
+    (shop_heart.compute_totals), in the placed proportions."""
     from app import shop_heart
     shop = _shop()
     status = order.get("status")
@@ -390,6 +393,9 @@ def confirmed_amounts(order: dict, lines: list[dict], ledger: list[dict]) -> dic
         except shop.ShopError:
             continue
         lp = shop.dmoney(ln.get("list_price_bhd")) if ln.get("list_price_bhd") is not None else unit
+        placed = shop.dmoney(ln.get("unit_price_bhd")) if ln.get("unit_price_bhd") is not None else None
+        if placed is not None and shop.D0 < unit < placed:
+            lp = shop.dmoney(lp * unit / placed)     # 2.950 list, 2.655 placed, 1.530 now -> 1.700
         total = shop.dmoney(max(shop.D0, lp - unit) * qty_of(ln))
         rows = sorted(rows, key=lambda r: int(r["id"]))
         shares = allocate(total, [shop.dmoney(r.get("amount_bhd")) for r in rows])

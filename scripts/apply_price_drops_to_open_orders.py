@@ -3,13 +3,14 @@
     python -m scripts.apply_price_drops_to_open_orders                                  # dry run: the table, nothing written
     python -m scripts.apply_price_drops_to_open_orders --effective 2026-09-28 --expect-cuts 34
     python -m scripts.apply_price_drops_to_open_orders --expect-cuts 34 --commit --by owner@example.com
+    python -m scripts.apply_price_drops_to_open_orders --expect-cuts 34 --commit --by owner@example.com --include YQ-2609-0012
     python -m scripts.apply_price_drops_to_open_orders --reverse business_data/backups/<DAY>_pre-price-drop-orders
     python -m scripts.apply_price_drops_to_open_orders --reverse <dir> --commit --by owner@example.com
     python -m scripts.apply_price_drops_to_open_orders --verify-load --expect-cuts 34   # read-only load checks
 
-Exit: 0 done (or a dry run); 1 an order not lowered / put back (changed since read, a failed write)
-or a --verify-load FAIL; 2 no cuts on that date (load the price book first) or refused; 3 the cut
-count is not --expect-cuts (nothing written).
+Exit: 0 done (or a dry run); 1 an order not lowered / put back (changed since read, gone, a line
+moved, a failed write) or a --verify-load FAIL; 2 no cuts on that date (load the price book first)
+or refused (the Focus links unreadable); 3 the cut count is not --expect-cuts (nothing written).
 
 The owner's rule: an order still open when the book cuts a price gets the lower price; nothing is
 ever raised. Only the CONFIRMED layer moves -- lines' unit_price_confirmed / line_total_confirmed and
@@ -21,20 +22,30 @@ line at shop_heart.lock_unit, which prefers the confirmed unit: a later Confirm,
 keeps the lowered price. The order heart itself is not changed -- this only calls it.
 
 Which lines: open orders (new / confirmed / packed / out_for_delivery), not test orders, not invoiced
-or paid ones (those are listed: adjust in Focus by credit note). A line qualifies when its code is
-cut in v_price_change on --effective, its confirmed quantity is above 0, it was placed on the old
-book (list price above today's standard_rate), and today's engine price for it
-(shop_heart.price_new_line: the order's rep, tiers, offers, margin floor) is under its locked unit.
-New unit = min(locked, today). The cart discount is re-shared pro rata and never grows (the heart's
-compute_totals); delivery stays; no small-order fee comes or goes. An order the cut takes below the
-minimum is reported, never cancelled.
+or paid ones (those are listed: adjust in Focus by credit note). Invoiced = a Focus invoice number on
+the order, a payment, or a confirmed shop_order_focus_links row; an order v_shop_focus_candidates
+suggests an invoice for (nobody accepted it yet) is listed as possibly invoiced and left alone unless
+--include names it. A line qualifies when its code is cut in v_price_change on --effective, its
+confirmed quantity is above 0, it was placed on the old book (list price above today's
+standard_rate), and today's engine price for it (shop_heart.price_new_line: the order's rep, tiers,
+offers, margin floor) is under its locked unit. New unit = min(locked, today). The cart discount is
+re-shared pro rata and never grows (the heart's compute_totals); delivery stays; no small-order fee
+comes or goes. Only the cut moves a total: an order whose total on file is not what its lines add
+up to, or with fewer lines than it was placed with, is listed (check by hand). An order the cut
+takes below the minimum is reported, never cancelled -- except a Received one: the rep's Confirm
+compares with the placed total and would ask for 'Shop agreed' for a change nobody made, so it is
+listed and left until the rep confirms (a re-run then lowers it).
 
 Writes, per order, the heart's own pattern (PostgREST has no multi-statement transaction): the
 header compare-and-swap on status + updated_at, then the lines, then one 'amended' event (reason
 'price', stage 'price_book' -- the shop sees its note on the tracking page); any failure after the
-swap puts the lines and the header back. Then one shop_admin_audit row. Before the first write the
-open orders and their lines are saved under business_data/backups/<DAY>_pre-price-drop-orders/, and
-applied.json there grows after each order -- --reverse reads it. A re-run is a no-op.
+swap puts the lines and the header back. Then one shop_admin_audit row, and the offer ledger's
+confirmed amounts re-measured (offers.refresh_confirmed: a lowered line's discount is measured
+against its list moved with it, so the book's cut never reads as a rule's spend -- run this after
+the API carrying that measure is deployed, or a rep's Confirm meanwhile re-measures the old way).
+Before the first write the open orders and their lines are saved under
+business_data/backups/<DAY>_pre-price-drop-orders/, and applied.json there grows after each order --
+--reverse reads it. A re-run is a no-op.
 """
 from __future__ import annotations
 
@@ -58,6 +69,9 @@ LINE_MONEY = ("unit_price_confirmed", "line_total_confirmed")
 BACKUPS = ROOT / "business_data" / "backups"
 STAGE = "price_book"
 CREDIT_NOTE = "invoiced / paid: adjust in Focus by credit note"
+POSSIBLY_INVOICED = "possibly invoiced in Focus"
+BELOW_MIN_NEW = ("Received, and the cut takes it under the minimum: the rep confirms it first "
+                 "(else the Confirm asks for 'Shop agreed'), then re-run")
 NOT_IN_CATALOG = "not in today's catalog"
 
 
@@ -103,28 +117,49 @@ def load_cuts(effective: str) -> dict[str, dict]:
 
 
 def load_open_orders() -> list[dict]:
-    """Every open order (full rows) with its lines (full rows, by id) under "lines"."""
-    client = _shop().get_client()
-    orders = (client.table("shop_orders").select("*").in_("status", list(OPEN)).order("id")
-              .execute().data or [])
-    ids = [o["id"] for o in orders]
-    lines: list[dict] = []
-    for i in range(0, len(ids), 50):          # PostgREST caps a page; open orders are few
-        lines += (client.table("shop_order_lines").select("*").in_("order_id", ids[i:i + 50]).order("id")
-                  .execute().data or [])
-    by_order: dict = {}
-    for ln in sorted(lines, key=lambda x: int(x.get("id") or 0)):
-        by_order.setdefault(ln.get("order_id"), []).append(ln)
+    """Every open order (full rows, paged) with its lines (full rows, by id) under "lines". Lines
+    are read order by order: a batched read stops silently at PostgREST's 1,000 rows, and an order
+    missing lines would be priced on the ones that came back."""
+    from app import shop_analytics as sa
+    shop = _shop()
+    orders = sa.paged(lambda a: (shop.get_client().table("shop_orders").select("*").in_("status", list(OPEN))
+                                 .order("id").range(a, a + sa.PAGE - 1).execute().data or []),
+                      sa.ORDERS_MAX_PAGES)[0]
     for o in orders:
-        o["lines"] = by_order.get(o["id"], [])
+        o["lines"] = shop._order_lines(o["id"])
     return orders
+
+
+def load_focus_marks(order_ids: list) -> dict[int, dict]:
+    """{order id: {"state", "invoice_key", "method"}} for the orders Focus may already have billed:
+    a confirmed shop_order_focus_links row (state 'confirmed'), else the best suggestion in
+    v_shop_focus_candidates (state 'suggested': the invoice note / stock issue names the order, or
+    the same rep sold the same items -- nobody accepted it yet). Service role. Raises when either
+    cannot be read: an order that may be invoiced is never lowered blind."""
+    from app import shop_pipeline as sp
+    client = _shop().get_client()
+    out: dict[int, dict] = {}
+    for oid in order_ids:
+        got = (client.table(sp.LINKS_TABLE).select("invoice_key,method").eq("order_id", oid)
+               .eq("state", "confirmed").limit(1).execute().data or [])
+        if got:
+            out[oid] = {"state": "confirmed", **got[0]}
+            continue
+        got = (client.table(sp.CANDIDATES_VIEW).select("invoice_key,method,rank").eq("order_id", oid)
+               .order("rank").limit(1).execute().data or [])
+        if got:
+            out[oid] = {"state": "suggested", **got[0]}
+    return out
 
 
 # ── the plan (pure: nothing is written) ───────────────────────────────────────
 
-def plan_order(o: dict, ctx: dict, cuts: dict) -> dict:
+def plan_order(o: dict, ctx: dict, cuts: dict, focus: dict | None = None, *, include: bool = False) -> dict:
     """What the cut does to one order: the qualifying lines (old -> new unit), the confirmed-layer
-    writes, the totals before / after and the minimum. `skip` says why nothing is written."""
+    writes, the totals before / after and the minimum. `skip` says why nothing is written. `focus` =
+    the order's load_focus_marks entry; `include` = the operator named it (--include): a suggestion
+    no longer holds it back, a confirmed link still does."""
+    from app import shop_pipeline as sp
     shop, heart = _shop(), _heart()
     D0 = shop.D0
     st = o.get("status")
@@ -168,15 +203,25 @@ def plan_order(o: dict, ctx: dict, cuts: dict) -> dict:
             continue
         row["new"] = new
         new_unit[int(ln["id"])] = new
+    placed, want = sum(1 for ln in lines if not heart.is_added(ln)), shop._i(o.get("items_count"))
     if shop._is_test(o):
         plan["skip"] = "test order"
     elif o.get("focus_invoice_no") or (o.get("payment_status") or "unpaid") != "unpaid":
         plan["skip"] = CREDIT_NOTE
+    elif focus and focus.get("state") == "confirmed":
+        plan["skip"] = f"{CREDIT_NOTE} (linked to {focus.get('invoice_key')})"
+    elif focus and not include:
+        # the recon has not been accepted, but Focus may already bill the old price: the owner decides
+        label = sp.LINK_METHOD_LABELS.get(focus.get("method"), focus.get("method"))
+        plan["skip"] = (f"{POSSIBLY_INVOICED} ({focus.get('invoice_key')}, {label}): credit note, "
+                        f"or --include {o.get('order_no')}")
     elif st not in OPEN:
         plan["skip"] = f"order is {st}"
     elif not new_unit:
         plan["skip"] = "nothing to lower"
-    if not new_unit:
+    elif placed < want:
+        plan["skip"] = f"{placed} of the {want} lines it was placed with read: check by hand"
+    if not new_unit or placed < want:
         return plan
     after_lines = [({**ln, "unit_price_confirmed": float(new_unit[int(ln["id"])])}
                     if int(ln["id"]) in new_unit else ln) for ln in lines]
@@ -188,9 +233,12 @@ def plan_order(o: dict, ctx: dict, cuts: dict) -> dict:
         return plan
     before, after = shop.dmoney(heart.order_total(o)), t["total_bhd"]
     plan["before"], plan["after"] = before, after
-    # a total on file its own lines do not add up to: reported, the new one follows the heart's
-    # arithmetic (the rep's next Confirm / Amend would write the same)
-    plan["drift"] = t0["total_bhd"] if t0["total_bhd"] != before else None
+    if t0["total_bhd"] != before:
+        # a total on file its own lines do not add up to: writing the lines' total would take the
+        # gap off (or put it on) with the cut -- only the cut may move a total
+        plan["drift"] = t0["total_bhd"]
+        plan["skip"] = plan["skip"] or (f"the total on file {_f3(before)} is not what its lines add up to "
+                                        f"({_f3(t0['total_bhd'])}): check by hand")
     for x in t["lines"]:
         lid = int(x["line"]["id"])
         if lid in new_unit:
@@ -207,9 +255,12 @@ def plan_order(o: dict, ctx: dict, cuts: dict) -> dict:
         plan["min"] = "already small"
     else:
         plan["min"] = "BELOW MIN"       # reported only: the order stays, status and kind untouched
+        if st == "new":
+            # the heart's Confirm measures the minimum against the PLACED total (plan_edit, stage
+            # confirm): it would ask the rep for 'Shop agreed' and record a below-minimum he never made
+            plan["skip"] = plan["skip"] or BELOW_MIN_NEW
     if after >= before and not plan["skip"]:
-        # a total the heart would re-price upwards (a stored total out of step with its lines) is
-        # not this script's business: never raise an order
+        # a total the heart would re-price upwards is not this script's business: never raise an order
         plan["skip"] = "total would not drop: check by hand"
     return plan
 
@@ -253,16 +304,9 @@ def footer(plans: list[dict], *, commit: bool) -> None:
     print(f"\nOrders to lower: {len(todo)}   lines: {n_lines}   BHD reduction: {cut:.3f}")
     for p in skipped:
         print(f"  skipped {p['order_no']}: {p['skip']}")
-    for p in todo:
-        if p.get("drift") is not None:
-            print(f"  note {p['order_no']}: the total on file {_f3(p['before'])} is not what its lines add up to "
-                  f"({_f3(p['drift'])}) — the new total follows the lines")
     below = [p for p in todo if p["min"] == "BELOW MIN"]
     if below:
         print(f"  BELOW MIN (reported, never cancelled): {', '.join(p['order_no'] for p in below)}")
-        if any(p["status"] == "new" for p in below):
-            print("  note: when the rep Confirms a Received order that is now under the minimum, the heart compares "
-                  "against the placed total and asks for 'Shop agreed'.")
     if not commit:
         print("\nDry run. Nothing written. Add --commit --by <owner email> to lower these orders.")
 
@@ -310,10 +354,10 @@ def write_backup(orders: list[dict], plans: list[dict], root: Path | None = None
 def _write_order(o: dict, upd_o: dict, line_updates: dict, detail: dict, *, by: str,
                  expected_updated_at, audit_before: dict, audit_after: dict) -> tuple[str, str | None]:
     """The heart's write (shop_heart._edit): header CAS, lines, the event -- all put back on a
-    failure after the swap -- then the audit row. ('applied', new updated_at) | ('changed', None) |
-    ('failed: ...', None)."""
+    failure after the swap -- then the audit row and the offer ledger re-measured, as the heart's
+    callers do (app/shop.py). ('applied', new updated_at) | ('changed', None) | ('failed: ...', None)."""
     shop, heart = _shop(), _heart()
-    from app import shop_audit
+    from app import offers, shop_audit
     oid, st = o["id"], o["status"]
     now = shop._iso()
     upd = {**upd_o, "updated_at": now}
@@ -336,6 +380,7 @@ def _write_order(o: dict, upd_o: dict, line_updates: dict, detail: dict, *, by: 
                              order_no=o.get("order_no"), err=e)
         return f"failed: {e}", None
     shop_audit.record(by, "order", oid, "update", audit_before, audit_after)
+    offers.refresh_confirmed(oid)       # best effort, never raises; the ledger's updated_at, not the order's
     return "applied", str((swapped[0] or {}).get("updated_at") or now)
 
 
@@ -370,7 +415,8 @@ def apply_order(o: dict, plan: dict, *, by: str, effective: str) -> dict:
 def reverse(folder: str | Path, *, commit: bool, by: str | None) -> int:
     """Put back what applied.json says was lowered: the old confirmed layer (NULL on a Received
     order), an 'amended' event "Price change undone", an audit row. Compare-and-swap on the
-    updated_at the apply wrote: an order touched since is skipped (adjust it by hand)."""
+    updated_at the apply wrote: an order touched since is skipped (adjust it by hand). With
+    --commit, exit 1 unless every order in applied.json went back."""
     shop, heart = _shop(), _heart()
     path = Path(folder) / "applied.json"
     if not path.exists():
@@ -378,21 +424,24 @@ def reverse(folder: str | Path, *, commit: bool, by: str | None) -> int:
         return 2
     entries = json.loads(path.read_text(encoding="utf-8"))
     print(f"{len(entries)} order(s) in {path}")
-    failed = 0
+    back, left = 0, []                  # left: every order not put back, whatever the reason
     for e in entries:
         o = shop.get_order(e["order_id"])
-        label = e.get("order_no") or e["order_id"]
+        label = str(e.get("order_no") or e["order_id"])
         if not o:
             print(f"  {label}: gone, skipped")
+            left.append(label)
             continue
         if heart.is_stale(o, e["updated_at"]) or o.get("status") != e.get("status"):
             print(f"  {label}: touched since the price change, skipped (adjust by hand)")
+            left.append(label)
             continue
         by_id = {int(ln["id"]): ln for ln in o.get("lines") or []}
         lowered = {int(x["line_id"]): x for x in e["after"]["lines"]}
         if any(lid not in by_id or shop.money(by_id[lid].get("unit_price_confirmed"))
                != shop.money(x.get("unit_price_confirmed")) for lid, x in lowered.items()):
             print(f"  {label}: a line moved since the price change, skipped (adjust by hand)")
+            left.append(label)
             continue
         back_lines = {int(x["line_id"]): {k: x.get(k) for k in LINE_MONEY} for x in e["before"]["lines"]}
         upd_o = {k: e["before"].get(k) for k in ORDER_MONEY}
@@ -417,10 +466,18 @@ def reverse(folder: str | Path, *, commit: bool, by: str | None) -> int:
         result, _ = _write_order(o, upd_o, back_lines, detail, by=by or "", expected_updated_at=o.get("updated_at"),
                                  audit_before=_money_snapshot(o, list(back_lines)), audit_after=audit_after)
         print(f"    -> {result}")
-        failed += result != "applied"
+        if result == "applied":
+            back += 1
+        else:
+            left.append(label)
+    listed = f" (adjust by hand): {', '.join(left)}" if left else ""
     if not commit:
+        if left:
+            print(f"\n{len(left)} would be left as it is{listed}")
         print("\nDry run. Nothing written. Add --commit --by <owner email> to put these back.")
-    return 1 if failed else 0
+        return 0
+    print(f"\n{back} put back, {len(left)} not{listed}.")
+    return 1 if left else 0
 
 
 # ── the load, read-only (release step 3) ──────────────────────────────────────
@@ -481,6 +538,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expect-cuts", type=int, default=None, help="abort before any write unless exactly N cuts")
     ap.add_argument("--commit", action="store_true", help="write (default: dry run)")
     ap.add_argument("--by", default=None, help="the owner's email: the event's actor and the audit row's")
+    ap.add_argument("--include", action="append", default=[], metavar="ORDER_NO",
+                    help="lower this order although Focus suggests an invoice for it (the owner checked the "
+                         "invoice is not this order's); repeatable. A confirmed Focus link is never overridden")
     ap.add_argument("--reverse", default=None, metavar="DIR", help="put back what DIR/applied.json lowered")
     ap.add_argument("--verify-load", action="store_true", help="read-only checks of the price-book load")
     a = ap.parse_args(argv)
@@ -516,7 +576,19 @@ def main(argv: list[str] | None = None) -> int:
     ctx = shop.context(force=True)
     orders = load_open_orders()
     by_id = {o["id"]: o for o in orders}
-    plans = [p for p in (plan_order(o, ctx, cuts) for o in orders) if p["lines"]]
+    touched = [o["id"] for o in orders if any(str(ln.get("item_code") or "").upper() in cuts for ln in o["lines"])]
+    try:
+        focus = load_focus_marks(touched)
+    except Exception as e:  # noqa: BLE001 — unread = unknown, and an invoiced order is never lowered blind
+        print(f"REFUSED: could not read the Focus links / suggestions ({e}). Nothing written.")
+        return 2
+    include = {x.strip().upper() for x in a.include if x.strip()}
+    plans = [p for p in (plan_order(o, ctx, cuts, focus.get(o["id"]),
+                                    include=str(o.get("order_no") or "").upper() in include) for o in orders)
+             if p["lines"]]
+    unknown = sorted(include - {str(p["order_no"] or "").upper() for p in plans})
+    if unknown:
+        print(f"--include: {', '.join(unknown)} is not an open order with a cut line (ignored)")
     print(f"{len(cuts)} cuts dated {a.effective}; {len(orders)} open orders, {len(plans)} with a cut line.\n")
     print_table(plans)
     footer(plans, commit=a.commit)
