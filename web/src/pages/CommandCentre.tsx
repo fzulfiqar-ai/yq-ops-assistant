@@ -68,9 +68,10 @@ interface Tile {
   needed_per_business_day_bhd?: number | null
   /** the days a figure really covers (the official margin: every loaded day, whatever the period) */
   covers?: { from: string | null; to: string | null; period_bound?: boolean } | null
-  /** products.price_drops: items are { code, item, was_bhd, now_bhd, cut_pct, on }; profit.thin_drops adds
-   *  unit_cost_bhd and margin_pct (that tile only reaches a login holding 'Margins') */
-  latest_on?: string | null; costed?: number; drops?: number; threshold_pct?: number
+  /** products.price_drops: items are { code, item, was_bhd, now_bhd, cut_pct, on } (trade prices incl. VAT);
+   *  profit.thin_drops adds now_ex_vat_bhd, unit_cost_bhd and margin_pct (that tile only reaches a login holding
+   *  'Margins'). drop_days: the window both count, always the last N days — never the period chosen above */
+  latest_on?: string | null; costed?: number; drops?: number; threshold_pct?: number; drop_days?: number
   series?: WeekPoint[]
   stages?: Stage[]; cancelled?: number; open?: number
   units_ordered?: number; units_accepted?: number; orders?: number; units_added?: number; staff_orders_left_out?: number
@@ -258,24 +259,29 @@ function Sparkline({ series, compact }: { series: WeekPoint[]; compact?: boolean
 
 type ListRow = { label: string; value: string; sub?: string; tone?: 'up' | 'down' }
 
-/** a price drop as one line: the item, was → now (trade price), then its code, the cut and the day */
+/** a price drop as one line: the item, was → now (the trade price incl. VAT, as the marketplace shows it — the
+ *  rest of this page is ex-VAT, so the row says so), then the cut, the day and its code */
 function dropRow(r: Row): ListRow {
   const cut = num(r.cut_pct)
   return {
     label: String(r.item || r.code),
     value: `${fmtBhd(num(r.was_bhd))} → ${(num(r.now_bhd) ?? 0).toFixed(3)}`,
-    sub: [r.code, cut != null ? `↓${cut.toFixed(1)} %` : null, r.on ? fmtDay(r.on) : null].filter(Boolean).join(' · '),
+    sub: [cut != null ? `↓${cut.toFixed(1)} %` : null, r.on ? fmtDay(r.on) : null, 'trade price incl. VAT', r.code]
+      .filter(Boolean).join(' · '),
   }
 }
 
-/** a price cut that left a thin margin (Profitability, 'Margins' logins only): the margin, then price and cost */
+/** a price cut that left a thin margin (Profitability, 'Margins' logins only): the margin, then the price it is
+ *  worked on (ex-VAT, with the VAT-inclusive book price the marketplace shows) and the landed cost — so
+ *  (price ex-VAT − landed) ÷ price ex-VAT is the margin on the row */
 function thinRow(r: Row): ListRow {
   const m = num(r.margin_pct)
+  const now = (num(r.now_bhd) ?? 0).toFixed(3)
+  const ex = num(r.now_ex_vat_bhd)
   return {
     label: String(r.item || r.code),
     value: m != null ? `${m.toFixed(1)} % margin` : '—',
-    // the book price (VAT-inclusive, as the marketplace shows it) beside the landed cost; the margin is ex-VAT
-    sub: `price ${(num(r.now_bhd) ?? 0).toFixed(3)} · landed ${(num(r.unit_cost_bhd) ?? 0).toFixed(3)}`,
+    sub: `${ex != null ? `price ${ex.toFixed(3)} ex-VAT (${now} incl. VAT)` : `price ${now} incl. VAT`} · landed ${(num(r.unit_cost_bhd) ?? 0).toFixed(3)}`,
     tone: 'down',
   }
 }
@@ -288,7 +294,7 @@ function MiniList({ rows }: { rows: ListRow[] }) {
         <li key={`${r.label}-${i}`} className="flex items-baseline justify-between gap-3 py-1.5 text-[12.5px]">
           <span className="min-w-0">
             <span className="block truncate font-medium" title={r.label}>{r.label}</span>
-            {r.sub && <span className="block truncate text-[11px] text-muted-foreground">{r.sub}</span>}
+            {r.sub && <span className="block truncate text-[11px] text-muted-foreground" title={r.sub}>{r.sub}</span>}
           </span>
           <span className={cn('shrink-0 font-semibold tabular-nums',
             r.tone === 'up' && 'text-emerald-600 dark:text-emerald-400', r.tone === 'down' && 'text-rose-600 dark:text-rose-400')}>
@@ -821,7 +827,7 @@ function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
       )}
       {pace && (
         <KpiCard label="Month pace" value={fmtBhd0(pace.projected_bhd)} exact={`${fmtBhd(pace.projected_bhd)} projected`}
-          chip={pace.target_bhd ? <Pill tone={pace.on_track ? 'up' : 'warn'}>{fmtPct(pace.projected_pct_of_target)} of target</Pill> : null}
+          chip={pace.target_bhd ? <Pill tone={pace.on_track ? 'up' : 'warn'}>projected {fmtPct(pace.projected_pct_of_target)} of target</Pill> : null}
           basis={pace.basis} me={me}
           caption={pace.target_bhd
             ? `Projected ${pace.month ?? ''} · target ${fmtBhd0(pace.target_bhd)}`
@@ -958,9 +964,9 @@ function Panel({ id, title, drill, me, children }: { id: string; title: string; 
   )
 }
 
-function SubHead({ tone = 'plum', children }: { tone?: 'plum' | 'up' | 'down' | 'warn'; children: ReactNode }) {
+function SubHead({ tone = 'plum', title, children }: { tone?: 'plum' | 'up' | 'down' | 'warn'; title?: string; children: ReactNode }) {
   return (
-    <div className={cn('mt-3 text-[11px] font-semibold uppercase tracking-wide',
+    <div title={title} className={cn('mt-3 text-[11px] font-semibold uppercase tracking-wide',
       tone === 'plum' && 'text-[#6D4091] dark:text-[#c7a6e6]', tone === 'up' && 'text-emerald-700 dark:text-emerald-400',
       tone === 'down' && 'text-rose-700 dark:text-rose-400', tone === 'warn' && 'text-amber-700 dark:text-amber-400')}>
       {children}
@@ -1003,6 +1009,9 @@ function SalesmenPanel({ t, me }: { t: Tile; me: Me | null }) {
   )
 }
 
+/** ' · last 30 days': the price-drop window beside a count (none when an older API sends no drop_days) */
+const dropWindow = (t: Tile) => (t.drop_days ? ` · last ${t.drop_days} days` : '')
+
 function ProductsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
   const drops = findTile(ov, 'products.price_drops')
   // the Profitability module: the API drops it for a login without 'Margins', so the cost never reaches one
@@ -1014,9 +1023,10 @@ function ProductsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
     <Panel id="fs-products" title="Products" drill={movers?.drill ?? soldOut?.drill} me={me}>
       {drops && (
         <>
-          <SubHead>
+          {/* the count is always the last N days (app_settings.shop_price_drop_days), whatever the period above */}
+          <SubHead title={drops.basis}>
             <span className="inline-flex items-center gap-1">
-              {fmtCount(drops.value)} price drop{drops.value === 1 ? '' : 's'}
+              {fmtCount(drops.value)} price drop{drops.value === 1 ? '' : 's'}{dropWindow(drops)}
               <DrillLink drill={drops.drill} me={me} iconOnly className="h-5 w-5" />
             </span>
           </SubHead>
@@ -1025,7 +1035,9 @@ function ProductsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
       )}
       {thin && !!thin.value && (
         <>
-          <SubHead tone="warn">{fmtCount(thin.value)} cut to {thin.threshold_pct ?? 20} % margin or less</SubHead>
+          <SubHead tone="warn" title={thin.basis}>
+            {fmtCount(thin.value)} cut to {thin.threshold_pct ?? 20} % margin or less{dropWindow(thin)}
+          </SubHead>
           <MiniList rows={(thin.items || []).slice(0, 3).map(thinRow)} />
         </>
       )}

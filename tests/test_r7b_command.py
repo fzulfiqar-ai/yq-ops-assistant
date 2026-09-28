@@ -376,6 +376,17 @@ def _():
     assert (cur.start, cur.end, cmp.start, cmp.end) == (a, a, date(2026, 9, 23), date(2026, 9, 23))
     cur, cmp = m.windows("today", date(2026, 9, 27))
     assert cmp.start == date(2026, 9, 24), "Sunday compares with Thursday, not the weekend"
+    assert cmp.basis == "the previous business day"
+    # review: a Friday or Saturday against Thursday is a weekday-vs-weekend gap, not a fall in sales — a
+    # weekend day compares with the same weekday a week before
+    cur, cmp = m.windows("today", date(2026, 9, 26))
+    assert (cur.start, cur.end, cmp.start, cmp.end) == (date(2026, 9, 26), date(2026, 9, 26), date(2026, 9, 19),
+                                                        date(2026, 9, 19)), "Saturday vs last Saturday"
+    assert cmp.basis == "last Saturday" and cmp.label == "19 Sep"
+    cur, cmp = m.windows("today", date(2026, 9, 25))
+    assert (cmp.start, cmp.basis) == (date(2026, 9, 18), "last Friday"), "Friday vs last Friday"
+    cur, cmp = m.windows("today", date(2026, 10, 3))
+    assert cmp.start == date(2026, 9, 26), "across a month end"
     cur, cmp = m.windows("7d", a)
     assert (cur.start, cur.end, cmp.start, cmp.end) == (date(2026, 9, 18), a, date(2026, 9, 11), date(2026, 9, 17))
     cur, cmp = m.windows("last_month", a)
@@ -708,8 +719,9 @@ def _():
     assert t["items"][0] == {"code": "EP03", "item": "Item Earphones", "was_bhd": 5.5, "now_bhd": 3.3,
                              "cut_pct": 40.0, "on": "2026-09-10"}, t["items"][0]
     assert [x["cut_pct"] for x in t["items"]] == [40.0, 20.0, 12.0, 8.3]
-    assert t["latest_on"] == "2026-09-20"
-    assert t["basis"] == "Trade-price (MA_base) cuts in the last 30 days · the marketplace shows Was → Now on them"
+    assert t["latest_on"] == "2026-09-20" and t["drop_days"] == 30, "the window rides with the count"
+    assert t["basis"] == ("Trade-price (MA_base) cuts in the last 30 days, prices incl. VAT as the marketplace shows "
+                          "them · the items it shows Was → Now on: active, not hidden, still at the cut price")
     assert t["drill"] == {"to": "/prices", "label": "Price tracker"}
     assert "cost" not in json.dumps(t).lower(), "trade prices only: a cost never rides on this tile"
     from app import metrics as m
@@ -731,6 +743,7 @@ def _():
     ov = _overview(fake)
     assert fake.params("price_drops") == ["14"] and fake.params("drop_costs") == ["14"]
     assert "in the last 14 days" in _tile(ov, "products.price_drops")["basis"]
+    assert _tile(ov, "products.price_drops")["drop_days"] == 14 and _tile(ov, "profit.thin_drops")["drop_days"] == 14
     for junk in ("0", "-3", "soon", None):
         fake = FakeRPC(anchor={**ANCHOR, "price_drop_days": junk})
         _overview(fake)
@@ -742,6 +755,29 @@ def _():
     import inspect
     from app import shop
     assert "current_price_bhd < prev_price_bhd AND changed_on >= CURRENT_DATE" in inspect.getsource(shop._load_price_drops)
+
+
+@test("review: the price-drop count keeps to what the marketplace shows Was → Now on — active, visible, still at the cut price")
+def _():
+    import inspect
+    from app import metrics as m
+    from app import shop
+    sql = m.PRICE_DROPS_SQL
+    # the shelf: app.shop._load_items' own filter (active, not hidden by the owner), matched on the code the
+    # way the shop looks a drop up (upper-cased, trimmed)
+    load_items = inspect.getsource(shop._load_items)
+    assert "c.is_active AND NOT COALESCE(ci.hidden, false)" in load_items
+    assert "c.is_active AND NOT COALESCE(ci.hidden, false)" in sql
+    assert "FROM v_catalog c JOIN catalog_items ci ON ci.item_code = c.item_code" in sql
+    assert "UPPER(TRIM(c.item_code)) = UPPER(TRIM(p.sku_code))" in sql
+    assert ".strip().upper()" in inspect.getsource(shop._load_price_drops)
+    # still the cut price: app.shop._was_bhd shows Was → Now only while the live trade price equals it
+    assert "ABS(c.standard_rate - p.current_price_bhd) <= 0.0005" in sql
+    assert "abs(_f(price) - drop[\"now\"]) > 0.0005" in inspect.getsource(shop._was_bhd)
+    assert '"was_bhd": _was_bhd(ctx, code, lp)' in inspect.getsource(shop) and 'lp = it.get("standard_rate")' in inspect.getsource(shop)
+    # EXISTS, not a JOIN: a code is counted once whatever the catalog holds
+    assert "AND EXISTS (SELECT 1 FROM v_catalog" in sql and " JOIN v_catalog" not in sql
+    assert sql.count("$1") == 1, "one parameter: the window"
 
 
 @test("products: a failing price-drop source costs its tile only; the page and the other tiles stand")
@@ -766,14 +802,21 @@ def _():
     # CB01 0.800 ÷ 1.10 against 0.650 = 10.6 %; BT04 exactly 20.0 % counts; CH02 at 50 % does not; EP03's
     # 0.100 cost is under 10 % of its price (not trusted) and is left out of the costed count
     assert t["value"] == 2 and [x["code"] for x in t["items"]] == ["CB01", "BT04"], t
-    assert t["items"][0] == {"code": "CB01", "item": "Item Cable", "now_bhd": 0.8, "cut_pct": 20.0,
-                             "unit_cost_bhd": 0.65, "margin_pct": 10.6}, t["items"][0]
+    # review: the row carries the ex-VAT price its margin is worked on, beside the VAT-inclusive book price,
+    # so (0.727 − 0.650) ÷ 0.727 on the row itself gives its 10.6 %
+    assert t["items"][0] == {"code": "CB01", "item": "Item Cable", "now_bhd": 0.8, "now_ex_vat_bhd": 0.727,
+                             "cut_pct": 20.0, "unit_cost_bhd": 0.65, "margin_pct": 10.6}, t["items"][0]
+    it = t["items"][0]
+    assert round((it["now_ex_vat_bhd"] - it["unit_cost_bhd"]) / it["now_ex_vat_bhd"] * 100, 1) == it["margin_pct"]
+    assert t["items"][1]["now_ex_vat_bhd"] == 1.0 and t["drop_days"] == 30
+    assert "(the price book is VAT-inclusive)" in t["basis"]
     assert t["items"][1]["margin_pct"] == 20.0 and t["costed"] == 3 and t["drops"] == 4
     assert t["threshold_pct"] == 20.0 and m.THIN_MARGIN_PCT == Decimal("20")
     assert "ex-VAT" in t["basis"] and "landed cost" in t["basis"] and "last 30 days" in t["basis"]
     # the VAT rate is the setting's: at 5 % BT04's 1.100 is 1.048 ex-VAT → 23.6 %, no longer thin
     t5 = _tile(_overview(FakeRPC(anchor={**ANCHOR, "shop_vat_rate": "0.05"})), "profit.thin_drops")
     assert [x["code"] for x in t5["items"]] == ["CB01"], t5
+    assert t5["items"][0]["now_ex_vat_bhd"] == 0.762, "0.800 ÷ 1.05 at the setting's rate"
     # a login without 'Margins' loses the whole Profitability module: the cost never leaves the server,
     # while the price drops (trade prices, not cost) stay on its Products module
     narrow = command_api.scope_overview(ov, frozenset({"Receivables"}))
@@ -1125,7 +1168,9 @@ def _():
 def _():
     from app import metrics as m
     granted = {"v_sales", "stock_balance", "v_receivables", "v_product_margin", "app_settings", "v_stock_health",
-               "v_product_economics", "ar_ageing_totals", "v_command_orders", "v_shop_orders_agent", "v_price_change"}
+               "v_product_economics", "ar_ageing_totals", "v_command_orders", "v_shop_orders_agent", "v_price_change",
+               # the price drops keep to the marketplace's own shelf (scripts/catalog_migration.sql grants both)
+               "v_catalog", "catalog_items"}
     sqls = [m.ANCHOR_SQL, m.SALES_SQL, m.TREND_SQL, m.REPS_SQL, m.CUSTOMERS_SQL, m.MOVERS_SQL, m.STOCK_SQL,
             m.LANDED_SQL, m.RECEIVABLES_SQL, m.AR_TOTALS_SQL, m.AR_OWNER_SQL, m.ORDERS_SQL, m.ORDERS_FALLBACK_SQL,
             m.MATCH_SQL, m.LAST_ORDER_SQL, m.PRICE_DROPS_SQL, m.PRICE_DROP_COSTS_SQL]
@@ -1409,6 +1454,29 @@ def _():
     assert "AI Head" not in page and "Market Intel" not in page
     # a KPI card: whole BHD on the card, the exact figure in its tooltip
     assert "maximumFractionDigits: 0" in page and "title={exact" in page
+
+
+@test("review: the first screen's price rows say which price they show, the counts their window, the pace chip 'projected'")
+def _():
+    page = _web("pages/CommandCentre.tsx")
+    fn = lambda name: page.split(f"function {name}(", 1)[1].split("\n}\n", 1)[0]
+    # a drop row: the trade price incl. VAT (the rest of the page is ex-VAT)
+    assert "'trade price incl. VAT'" in fn("dropRow")
+    # a thin-margin row: the ex-VAT price its margin is worked on, beside the VAT-inclusive book price
+    thin = fn("thinRow")
+    assert "r.now_ex_vat_bhd" in thin and "ex-VAT (${now} incl. VAT)" in thin and "landed" in thin
+    assert "price ${now} incl. VAT" in thin, "an older API with no ex-VAT price still labels the one it has"
+    # the counts carry their window (the last N days, never the period chosen above) and the basis as a tooltip
+    assert "const dropWindow = (t: Tile) => (t.drop_days ? ` · last ${t.drop_days} days` : '')" in page
+    panel = fn("ProductsPanel")
+    assert "<SubHead title={drops.basis}>" in panel and '<SubHead tone="warn" title={thin.basis}>' in panel
+    assert panel.count("{dropWindow(") == 2
+    assert "title={title}" in fn("SubHead")
+    # a truncated row line is readable in full on hover
+    assert 'text-muted-foreground" title={r.sub}>{r.sub}</span>' in fn("MiniList")
+    # the Month pace chip is the PROJECTED share (the Details tile and the Dashboard show the month so far)
+    assert "projected {fmtPct(pace.projected_pct_of_target)} of target" in page
+    assert "{fmtPct(pace.projected_pct_of_target)} of target</Pill>" not in page.replace("projected {fmtPct", "")
 
 
 @test("review: CI's web Lint step is a hard gate (lint is at 0 errors), its comment says so")

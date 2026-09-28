@@ -910,6 +910,12 @@ def _():
     assert out["pace"]["target_bhd"] == 10000.0 and out["pace"]["business_days_total"] == 22
     # an older caller's dict (no cc / trend_acc / top_acc: test_r7b_command, test_r3_reps) still assembles
     assert old["command"] is None and old["revenue_trend_acc"] == [] and old["top_customers_acc"] == []
+    # review: a FAILED top-customers read travels as None (the card says "could not be read just now"), a real
+    # month with no named-account sales as [] — never the same thing on the page
+    with _Patched((app_settings, "setting", lambda key: None)):
+        failed = reports._assemble_dashboard({**_dash_base(), "top_acc": None})
+        empty = reports._assemble_dashboard({**_dash_base(), "top_acc": []})
+    assert failed["top_customers_acc"] is None and empty["top_customers_acc"] == []
     assert "agents" not in old
     # the command block is sales and receivables only: no cost, margin, kickback or referral field rides along
     blob = str(out["command"]).lower()
@@ -970,6 +976,7 @@ def _():
     assert out["ar_over90"]["value"] == 12.5
     assert out["compare_basis"] == "the same 19 business days last month"
     assert out["focus"]["label"] == "1–27 Sep" and out["day"]["end"] == "2026-09-27" and out["day_compare"] == "24 Sep"
+    assert out["day_compare_on"] == "2026-09-24", "the compared day's date: the page names its weekday"
     assert out["sales_mtd"]["basis"] == "sales.accessories basis", "the API's own basis line travels with the figure"
     out["sales_mtd"]["value"] = -1
     assert ovs["mtd"]["modules"][1]["tiles"][0]["value"] == 930.0, "a copy: the cached overview is never changed"
@@ -1001,7 +1008,7 @@ def _():
     assert reports._flag_partial([], "2026-09-27") == []
 
 
-@test("R7e revenue_trend_acc / top_customers_acc_mtd: data_date stripped, the partial month flagged; a failed read is []")
+@test("R7e revenue_trend_acc / top_customers_acc_mtd: data_date stripped, the partial month flagged; a failed read is [] / None")
 def _():
     from app import reports
     seen: list = []
@@ -1025,7 +1032,11 @@ def _():
         raise RuntimeError("permission denied")
 
     with _Patched((reports, "exec_sql", fail)):
-        assert reports.revenue_trend_acc() == [] and reports.top_customers_acc_mtd() == []
+        assert reports.revenue_trend_acc() == []
+        # review: None, not [] — an empty list is a month with no named-account sales, a failure is not
+        assert reports.top_customers_acc_mtd() is None
+    with _Patched((reports, "exec_sql", lambda sql: [])):
+        assert reports.top_customers_acc_mtd() == [], "a real empty month stays []"
 
 
 @test("R7e SQL: Accessories only, giveaways out, ex-VAT net_bhd, Cash Customer out; subqueries, not CTEs")
@@ -1052,6 +1063,22 @@ def _():
         assert key in ds, key
 
 
+@test("review: the Dashboard tells a failed top-customers read from an empty month; Latest day names both weekdays")
+def _():
+    dash = _read("web/src/pages/Dashboard.tsx")
+    assert "top_customers_acc?: TopCustomerAcc[] | null" in dash
+    assert "const topCustomersFailed = data?.top_customers_acc === null" in dash
+    card = dash.split("<Crown size={18} className=\"text-amber-500\" /> Top customers", 1)[1].split("</Card>", 1)[0]
+    assert card.index("topCustomersFailed ?") < card.index("topCustomers.length === 0 ?"), "the failure is checked first"
+    assert "Top customers could not be read just now." in card and "No named-account Accessories sales this month." in card
+    # 'Sat 26 Sep vs Sat 19 Sep': a weekend day reads as one, and the compared day is named with its weekday
+    assert "const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']" in dash and "getUTCDay()" in dash
+    assert "day_compare_on?: string | null" in dash
+    assert "cc?.day_compare_on ? weekdayLabel(cc.day_compare_on) : cc?.day_compare" in dash
+    # the pace chip is the month SO FAR (the Command Centre's Month pace chip says 'projected')
+    assert "{data.pace.target_pct}% of {bhd(data.pace.target_bhd, 0)} target so far" in dash
+
+
 @test("R7e web: the Dashboard reads the Command Centre's basis, one freshness element, no agent panel")
 def _():
     dash = _read("web/src/pages/Dashboard.tsx")
@@ -1060,7 +1087,7 @@ def _():
         assert gone not in dash, gone
     for s in ("['freshness']", "apiGet<Freshness>('/freshness')", "revenue_trend_acc", "top_customers_acc",
               "data?.command", "Accessories sales this month · ex-VAT", "Focus invoices this month (Accessories)",
-              "Latest day · ${dayLabel(cc.day.end)}", "cc?.compare_basis", "arTile?.source === 'focus_total'",
+              "Latest day · ${weekdayLabel(cc.day.end)}", "cc?.compare_basis", "arTile?.source === 'focus_total'",
               "k?.total_receivables", "chTile?.chips", "Accessories · ex-VAT · month to date",
               "so far (to ${dayLabel(", "ReferenceLine y={monthTarget}", "r.partial ? "):
         assert s in dash, s

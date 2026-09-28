@@ -349,6 +349,20 @@ def _():
     assert "if (e.key === 'Escape') closeRef.current()" in camp and "document.addEventListener('keydown', onKey)" in camp
 
 
+@test("review: Ctrl/Cmd+K opens the command palette ABOVE an open drawer or dialog, still under the toasts")
+def _():
+    # BodyPortal puts a page overlay (z-50) beside <main>, later in the DOM than the palette (the first child of
+    # the AppShell root); neither parent is a stacking context, so a tie at z-50 painted the overlay over it
+    pal = _read("web/src/components/CommandPalette.tsx")
+    assert 'className="fixed inset-0 z-[60] flex items-start justify-center' in pal
+    assert "fixed inset-0 z-50" not in pal
+    shell = _read("web/src/components/AppShell.tsx")
+    assert shell.index("<CommandPalette />") < shell.index("<main "), "the palette is earlier in the DOM"
+    for rel in OVERLAY_FILES:
+        assert "fixed inset-0 z-50" in _read(rel) and "z-[60]" not in _read(rel), rel
+    assert "z-[100]" in _read("web/src/components/Toast.tsx"), "the toasts stay above the palette"
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

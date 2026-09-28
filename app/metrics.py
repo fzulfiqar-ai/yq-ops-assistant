@@ -270,13 +270,17 @@ class Window:
 def windows(period: str, anchor: date) -> tuple[Window, Window | None]:
     """(current window, comparison window) for a period ending on `anchor`.
 
-    today      anchor · vs the previous business day
+    today      anchor · vs the previous business day; a weekend anchor (Fri, Sat) vs the same weekday a
+               week before — a Friday or Saturday against Thursday is a weekday-vs-weekend gap, not a fall
     7d         the 7 days to anchor · vs the 7 days before
     mtd        the 1st to anchor · vs the same number of business days from the 1st of last month
     last_month the whole previous month · vs the month before it
     quarter    the quarter's 1st day to anchor · vs the same business days of the previous quarter
     """
     if period == "today":
+        if not is_business_day(anchor):
+            p = anchor - timedelta(days=7)
+            return Window(anchor, anchor), Window(p, p, f"last {anchor:%A}")
         p = prev_business_day(anchor)
         return Window(anchor, anchor), Window(p, p, "the previous business day")
     if period == "7d":
@@ -427,10 +431,18 @@ MOVERS_SQL = (
 )
 
 # $1 = app_settings.shop_price_drop_days: real trade-price (MA_base) cuts inside the window — the same
-# rule as app.shop._load_price_drops, so the page counts what the marketplace shows as "Was → Now"
+# rule as app.shop._load_price_drops — kept to what the marketplace (and the rep app, which reads its
+# catalog) really shows as "Was → Now": an active catalog item the owner has not hidden
+# (app.shop._load_items) whose live trade price is still the cut price (app.shop._was_bhd, to the fil).
+# A cut on a display stand, a sample, a deactivated item or a price since changed again is not counted.
+# EXISTS, not a JOIN: a code is never counted twice.
 PRICE_DROPS_SQL = (
-    "SELECT sku_code, item_name, changed_on::text AS changed_on, current_price_bhd, prev_price_bhd, price_change_pct "
-    "FROM v_price_change WHERE current_price_bhd < prev_price_bhd AND changed_on >= CURRENT_DATE - $1::int"
+    "SELECT p.sku_code, p.item_name, p.changed_on::text AS changed_on, p.current_price_bhd, p.prev_price_bhd, "
+    "p.price_change_pct FROM v_price_change p "
+    "WHERE p.current_price_bhd < p.prev_price_bhd AND p.changed_on >= CURRENT_DATE - $1::int "
+    "AND EXISTS (SELECT 1 FROM v_catalog c JOIN catalog_items ci ON ci.item_code = c.item_code "
+    "WHERE UPPER(TRIM(c.item_code)) = UPPER(TRIM(p.sku_code)) AND c.is_active AND NOT COALESCE(ci.hidden, false) "
+    "AND ABS(c.standard_rate - p.current_price_bhd) <= 0.0005)"
 )
 # the latest landed cost (MRN receipt, else purchase_costs) of those same codes: read apart, so the
 # Products tile never carries a cost and the thin-margin tile (Profitability, behind 'Margins') does
@@ -1199,14 +1211,16 @@ def price_drop_rows(rows: list[dict] | None) -> list[dict]:
 
 
 @metric("products.price_drops", "Price drops", "products",
-        "Trade-price (MA_base) cuts in the last {drop_days} days · the marketplace shows Was → Now on them", "count",
+        "Trade-price (MA_base) cuts in the last {drop_days} days, prices incl. VAT as the marketplace shows them · "
+        "the items it shows Was → Now on: active, not hidden, still at the cut price", "count",
         ("/prices", "Price tracker"))
 def _products_price_drops(ctx: Ctx) -> dict | None:
     rows = ctx.r.get("price_drops")
     if rows is None:
         return None
     drops = price_drop_rows(rows)
-    return {"value": len(drops), "items": drops[:TOP_N],
+    # drop_days: the window in days, so the first screen can print it beside the count (not the period)
+    return {"value": len(drops), "items": drops[:TOP_N], "drop_days": drop_days(ctx.anchors),
             "latest_on": max((x["on"] for x in drops if x["on"]), default=None)}
 
 
@@ -1362,7 +1376,8 @@ def _profit_below(ctx: Ctx) -> dict | None:
 
 @metric("profit.thin_drops", "Price cuts at a thin margin", "profitability",
         "Trade-price cuts in the last {drop_days} days whose new price leaves 20 % margin or less · new price ex-VAT "
-        "vs the latest landed cost (MRN receipt, else purchase cost) · items with a usable cost only", "list",
+        "(the price book is VAT-inclusive) vs the latest landed cost (MRN receipt, else purchase cost) · items with "
+        "a usable cost only", "list",
         ("/prices", "Price tracker"))
 def _profit_thin_drops(ctx: Ctx) -> dict | None:
     # lives in Profitability so the Command Centre's 'Margins' gate (command_api.MODULE_FEATURE) takes it
@@ -1383,11 +1398,13 @@ def _profit_thin_drops(ctx: Ctx) -> dict | None:
         ex = ctx.ex_vat(now)                      # the price book is VAT-inclusive, the cost is not
         pct = share(ex - cost, ex)
         if pct is not None and Decimal(str(pct)) <= THIN_MARGIN_PCT:
-            thin.append({"code": d["code"], "item": d["item"], "now_bhd": d["now_bhd"], "cut_pct": d["cut_pct"],
-                         "unit_cost_bhd": money(cost), "margin_pct": pct})
+            # now_bhd is the book price (incl. VAT, as the marketplace shows it); now_ex_vat_bhd is the price
+            # the margin is worked on, so the row's own numbers give its margin
+            thin.append({"code": d["code"], "item": d["item"], "now_bhd": d["now_bhd"], "now_ex_vat_bhd": money(ex),
+                         "cut_pct": d["cut_pct"], "unit_cost_bhd": money(cost), "margin_pct": pct})
     thin.sort(key=lambda x: (x["margin_pct"], x["code"]))
     return {"value": len(thin), "items": thin[:TOP_N], "costed": costed, "drops": len(drops),
-            "threshold_pct": float(THIN_MARGIN_PCT)}
+            "threshold_pct": float(THIN_MARGIN_PCT), "drop_days": drop_days(ctx.anchors)}
 
 
 # ══ Receivables ═══════════════════════════════════════════════════════════════

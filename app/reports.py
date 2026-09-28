@@ -485,13 +485,14 @@ TOP_CUSTOMERS_ACC_SQL = (
 )
 
 
-def top_customers_acc_mtd(limit: int = 7) -> list[dict]:
-    """The month's top named accounts by Accessories ex-VAT sales ([] on failure: the card says so)."""
+def top_customers_acc_mtd(limit: int = 7) -> list[dict] | None:
+    """The month's top named accounts by Accessories ex-VAT sales. None when the read failed, so the
+    card says "could not be read just now" — [] is a real month with no named-account sales."""
     try:
         return exec_sql(TOP_CUSTOMERS_ACC_SQL.format(limit=int(limit))) or []
     except Exception as e:  # noqa: BLE001 -- one card never costs the page
         log.warning("dashboard: accessories top customers unavailable: %s", e)
-        return []
+        return None
 
 
 PACE_BASIS_TEXT =("Accessories · ex-VAT · month to date on business days · company target read as ex-VAT, "
@@ -542,7 +543,8 @@ def command_basis() -> dict | None:
     """The Dashboard's headline figures on the Command Centre's basis (R7e): the very tiles
     app.metrics.overview builds — cached and shared with the Command Centre, no second definition of
     "sales this month". Accessories · ex-VAT · the month to date vs the same business days last month,
-    the latest day vs the previous business day, B2B / B2C, and receivables on Focus's own Grand Total.
+    the latest day vs the previous business day (a Friday or Saturday vs the same weekday a week before),
+    B2B / B2C, and receivables on Focus's own Grand Total.
     None when the overview cannot be built (the page shows "—"); a module that did not answer (or
     a tile it could not compute) leaves its field None."""
     from app import metrics
@@ -559,6 +561,8 @@ def command_basis() -> dict | None:
             "focus": per.get("focus"),
             "day": day_per.get("focus"),
             "day_compare": (day_per.get("compare") or {}).get("label"),
+            # the compared day's date, so the page can name both weekdays ("Sat 26 Sep vs Sat 19 Sep")
+            "day_compare_on": (day_per.get("compare") or {}).get("end"),
         }
     except Exception as e:  # noqa: BLE001 -- the Dashboard keeps its other cards
         log.warning("dashboard: command centre basis unavailable: %s", e)
@@ -659,7 +663,8 @@ def _assemble_dashboard(r: dict) -> dict:
         # scripts/reconcile_check.py reads kpis.total_receivables).
         "command": r.get("cc"),
         "revenue_trend_acc": r.get("trend_acc") or [],
-        "top_customers_acc": r.get("top_acc") or [],
+        # None = the read failed (the card says so); an older caller's dict without the key is []
+        "top_customers_acc": r["top_acc"] if "top_acc" in r else [],
         "alerts": a,
         "daily_mtd": r["daily_mtd"],
         "by_payment": r["split"]["by_payment"],

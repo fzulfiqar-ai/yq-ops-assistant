@@ -43,6 +43,9 @@ interface CommandBasis {
   sales_mtd: CcTile | null; sales_day: CcTile | null; channels: CcTile | null
   ar_total: CcTile | null; ar_over90: CcTile | null
   compare_basis: string | null; focus: CcSpan | null; day: CcSpan | null; day_compare: string | null
+  /** the compared day's date (a weekday vs the previous business day; a Friday or Saturday vs the same weekday
+   *  a week before), so the card names both weekdays */
+  day_compare_on?: string | null
 }
 /** Accessories ex-VAT by calendar month, giveaways out; `partial` = the month the data stops in, `through` its last day */
 interface TrendAccRow { period_month: string; acc_net_bhd: number; invoices: number; partial: boolean; through: string | null }
@@ -105,7 +108,8 @@ interface DashboardData {
    *  fields (kpis.rev_*, revenue_trend, by_channel, top_customers) still travel for the digests, unread here */
   command?: CommandBasis | null
   revenue_trend_acc?: TrendAccRow[]
-  top_customers_acc?: TopCustomerAcc[]
+  /** null = the read failed (the card says so); [] = a month with no named-account sales */
+  top_customers_acc?: TopCustomerAcc[] | null
   by_salesman: SalesmanRow[]
   by_salesman_scope?: SalesmanScope | null
   alerts: { negative_margin_count: number | null }
@@ -133,6 +137,14 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 function dayLabel(iso?: string | null): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '')
   return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}` : ''
+}
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+/** '2026-09-26' → 'Sat 26 Sep': the Latest day card names the weekday, so a Friday or Saturday reads as one */
+function weekdayLabel(iso?: string | null): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '')
+  if (!m) return ''
+  const dow = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay()
+  return `${WEEKDAYS[dow]} ${dayLabel(iso)}`
 }
 
 /** A change against the comparison window, with that window in words ("vs the same 18 business days last month") */
@@ -273,10 +285,13 @@ export default function Dashboard() {
 
   const k = data?.kpis
   // R7e: the headline tiles are the Command Centre's own (Accessories · ex-VAT, the month to date vs the same
-  // business days last month, the latest day vs the previous business day) — never a second definition
+  // business days last month, the latest day vs the previous business day — a Friday or Saturday vs the same
+  // weekday a week before, never a weekend day against Thursday) — never a second definition
   const cc = data?.command ?? null
   const salesMtd = cc?.sales_mtd ?? null
   const salesDay = cc?.sales_day ?? null
+  // "Sat 19 Sep" when the API sends the compared day's date (an older API: its "19 Sep" label)
+  const dayCompare = (cc?.day_compare_on ? weekdayLabel(cc.day_compare_on) : cc?.day_compare) || null
   const arTile = cc?.ar_total ?? null
   const arOver90 = cc?.ar_over90 ?? null
   // Focus's own Grand Total when the ageing snapshot stored one; else the account rows (the older kpi)
@@ -287,6 +302,8 @@ export default function Dashboard() {
   const monthTarget = (data?.pace?.target_bhd ?? 0) > 0 ? data!.pace!.target_bhd : null
   const chTile = cc?.channels ?? null
   const chips = (chTile?.chips || []).filter((c) => c.label === 'B2B' || c.label === 'B2C')
+  // null = the read failed: "could not be read just now", never "no sales this month"
+  const topCustomersFailed = data?.top_customers_acc === null
   const topCustomers = data?.top_customers_acc || []
   // ex-VAT accessories sales this month — the kickback basis — with gross kept for the tooltip
   const salesmen = (data?.by_salesman || []).map((s) => ({ ...s, name: s.salesman, rev: Number(s.net_bhd ?? s.revenue_bhd ?? 0), gross: Number(s.revenue_bhd || 0) }))
@@ -351,13 +368,13 @@ export default function Dashboard() {
             foot={salesMtd
               ? <Delta pct={salesMtd.delta_pct} vs={cc?.compare_basis || salesMtd.compare?.label} />
               : <span className="text-muted-foreground">Not available just now · the Command Centre figures did not load</span>} />
-          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label={cc?.day ? `Latest day · ${dayLabel(cc.day.end)}` : 'Latest day'} to="/sales"
+          <KpiCard accent={ACCENTS.blue} icon={CalendarDays} label={cc?.day ? `Latest day · ${weekdayLabel(cc.day.end)}` : 'Latest day'} to="/sales"
             basis={salesDay?.basis}
             value={salesDay?.value != null ? <CountUp value={salesDay.value} format={(n) => bhd(n, 0)} /> : '—'}
             foot={salesDay ? (
               <span className="text-muted-foreground">
                 Accessories ex-VAT · <Delta pct={salesDay.delta_pct}
-                  vs={salesDay.compare ? `${cc?.day_compare || salesDay.compare.label} (${bhd(salesDay.compare.value, 0)})` : cc?.day_compare} />
+                  vs={salesDay.compare ? `${dayCompare || salesDay.compare.label} (${bhd(salesDay.compare.value, 0)})` : dayCompare} />
                 {' '}· {num(salesDay.invoices)} invoices
               </span>
             ) : <span className="text-muted-foreground">Accessories · ex-VAT · not available just now</span>} />
@@ -398,7 +415,7 @@ export default function Dashboard() {
                   <span className={cn('rounded-full px-2.5 py-0.5 text-[12px] font-semibold',
                     data.pace.on_track ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
                       : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300')}>
-                    {data.pace.target_pct}% of {bhd(data.pace.target_bhd, 0)} target
+                    {data.pace.target_pct}% of {bhd(data.pace.target_bhd, 0)} target so far
                   </span>
                 ) : (
                   <span className="text-xs text-muted-foreground">Set a monthly target in Settings →</span>
@@ -628,6 +645,8 @@ export default function Dashboard() {
           <div className="mb-3 text-[12px] text-muted-foreground">Accessories · ex-VAT · month to date · Cash Customer left out</div>
           {isLoading ? (
             <div className="space-y-3">{[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-10" />)}</div>
+          ) : topCustomersFailed ? (
+            <p className="text-sm text-muted-foreground">Top customers could not be read just now.</p>
           ) : topCustomers.length === 0 ? (
             <p className="text-sm text-muted-foreground">No named-account Accessories sales this month.</p>
           ) : (

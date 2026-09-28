@@ -80,8 +80,10 @@ export function CommandPalette() {
   return (
     <AnimatePresence>
       {open && (
+        // z-[60]: above a page's own drawer or dialog (BodyPortal puts those, z-50, beside <main> — later in
+        // the DOM, so a tie at z-50 would paint them over the palette); still under the toasts (z-[100])
         <motion.div
-          className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-[12vh] backdrop-blur-md"
+          className="fixed inset-0 z-[60] flex items-start justify-center bg-black/50 p-4 pt-[12vh] backdrop-blur-md"
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
           onClick={() => setOpen(false)}
         >
