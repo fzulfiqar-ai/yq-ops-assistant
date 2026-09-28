@@ -142,10 +142,12 @@ def detail(po_no: str, with_files: bool = True) -> dict:
         for r in exec_sql_params(
             # Match on the BASE code (first token): the price book lists variants like 'X33 CCL 1.2 Mtr'
             # while an order line is the base 'X33', so an exact match silently missed those prices.
-            "SELECT SPLIT_PART(sku_code,' ',1) AS code, MAX(rate_bhd) AS sell FROM selling_prices "
-            "WHERE price_book='MA_base' AND warehouse_name IS NULL AND rate_bhd > 0 "
+            # R7e: the price IN FORCE (the view the shop sells at) — MAX over the history kept the
+            # pre-cut price after the book lowered it.
+            "SELECT SPLIT_PART(sku_code,' ',1) AS code, MAX(price_bhd) AS sell FROM v_price_list_by_book "
+            "WHERE price_book='MA_base' "
             "AND SPLIT_PART(sku_code,' ',1) IN (SELECT jsonb_array_elements_text($1::jsonb)) "
-            "GROUP BY SPLIT_PART(sku_code,' ',1)", [names]) or []:
+            "GROUP BY 1", [names]) or []:
             if r.get("sell"):
                 sell_by[r["code"]] = float(r["sell"])
         missing = [c for c in codes if c not in sell_by]

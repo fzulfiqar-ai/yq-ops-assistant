@@ -364,6 +364,33 @@ def _():
     assert "clearance" in b3["SLOW3"]
 
 
+@test("badges: a price drop wins (R7e) — a genuine Was is never also Clearing; its slot goes to the next slow mover")
+def _():
+    from app.shop import _badges, catalog_payload
+    items = [_item("SLOW1", 1.0, stock=600, sold_90d=10),      # 5400 days of cover
+             _item("SLOW2", 1.0, stock=200, sold_90d=0, b2c=2.0),  # infinite cover, the worst mover
+             _item("SLOW3", 1.0, stock=100, sold_90d=20)]      # 450 days
+    ctx = _ctx(items, shop_clearance_max=2, shop_best_seller_top_n=0, shop_show_retail_compare="0",
+               shop_clearance_show_retail="1")
+    ctx["drops"] = {"SLOW2": {"was": 1.5, "now": 1.0, "on": "2026-09-28"}}
+    b = _badges(ctx)
+    assert "price_drop" in b["SLOW2"] and "clearance" not in b["SLOW2"], b["SLOW2"]
+    assert {c for c in ctx["order"] if "clearance" in b[c]} == {"SLOW1", "SLOW3"}, "the cap's slot goes to SLOW3"
+    # the public payload follows: Was/Now shown, and no clearance retail anchor with compare off
+    ctx["share_token"] = "tok-test-token-value"
+    restore = _with_cached_ctx(ctx)
+    try:
+        p = {i["item_code"]: i for i in catalog_payload("tok-test-token-value")["items"]}
+    finally:
+        restore()
+    assert p["SLOW2"]["was_bhd"] == 1.5 and p["SLOW2"]["compare_at_bhd"] is None, p["SLOW2"]
+    assert "clearance" not in p["SLOW2"]["badges"] and "clearance" in p["SLOW3"]["badges"]
+    # a stale drop (the price moved again: no Was on the card) keeps its Clearing line
+    ctx["drops"] = {"SLOW2": {"was": 1.5, "now": 0.9, "on": "2026-09-28"}}
+    b = _badges(ctx)
+    assert "clearance" in b["SLOW2"] and {c for c in ctx["order"] if "clearance" in b[c]} == {"SLOW2", "SLOW1"}
+
+
 @test("payload: a clearance item shows the real retail anchor even with retail compare off")
 def _():
     from app.shop import catalog_payload  # noqa: F401
