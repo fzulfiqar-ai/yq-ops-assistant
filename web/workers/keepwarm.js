@@ -3,7 +3,7 @@
  *
  * Two triggers, told apart by the cron string the runtime hands us:
  *   HEALTH_CRON     GET {API_URL}/health — keeps the free Render container inside its 15-minute idle
- *                   window during Bahrain business hours (a cold start costs 11-12 s per merchant).
+ *                   window around the clock (a cold start costs 11-12 s per merchant; 24/7 since 28-Sep-2026).
  *   SCHEDULER_CRON  GET each SCHEDULER_PATHS entry with X-Agent-Key — the shop jobs (order alert
  *                   retries, unassigned + unconfirmed reminders, cleanup, stale-stock alert), the
  *                   daily agents and the agent reactions. Same method, path and header as
@@ -17,9 +17,9 @@
  * Nothing here caches: the API answers JSON without Cache-Control headers, which Cloudflare's
  * fetch() does not store.
  */
-const HEALTH_CRON = '*/10 3-19 * * *'
+const HEALTH_CRON = '*/10 * * * *'
 const SCHEDULER_CRON = '*/15 * * * *'
-const DEFAULT_API = 'https://yq-ops-assistant.onrender.com'
+const DEFAULT_API = 'https://api.yqmarketplace.com'
 const HEALTH_TIMEOUT_MS = 90_000      // tolerates a genuine cold start (keepalive.yml: --max-time 90)
 const SCHEDULER_TIMEOUT_MS = 120_000  // shop-cron.yml: --max-time 120
 

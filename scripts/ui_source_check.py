@@ -56,7 +56,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 DEFAULT_BASE = "https://yqmarketplace.com"
-DEFAULT_API = "https://yq-ops-assistant.onrender.com"
+DEFAULT_API = "https://api.yqmarketplace.com"
 FILS = Decimal("0.001")
 ZERO = Decimal(0)
 DROP_DIR = re.compile(r"^\d{6}$")              # DDMMYY, the owner's drop folders

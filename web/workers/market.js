@@ -83,7 +83,7 @@
  * Workers Logs (observability) additionally records one invocation event per request that reaches the
  * script, which is the same small set listed under Budget.
  */
-const ORIGIN = 'https://yq-ops-assistant.onrender.com'
+const ORIGIN = 'https://api.yqmarketplace.com'
 const ORIGIN_PATH = '/public/market'
 const EDGE_PATH = '/api/market'
 const DEFAULTS = { fresh: 60, swr: 600, sie: 86400 }

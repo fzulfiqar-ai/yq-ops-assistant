@@ -149,7 +149,7 @@ function versionJson(buildId: string, kill: boolean): Plugin {
 
 function marketPwa(apiUrl: string) {
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const api = esc((apiUrl || 'https://yq-ops-assistant.onrender.com').replace(/\/$/, ''))
+  const api = esc((apiUrl || 'https://api.yqmarketplace.com').replace(/\/$/, ''))
   return VitePWA({
     // Registered by market/lib/sw.ts (prompt flow + kill-switch), not by an injected snippet.
     injectRegister: false,

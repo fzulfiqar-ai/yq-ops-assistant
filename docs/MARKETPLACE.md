@@ -416,7 +416,7 @@ maskable + shortcuts) → `web/public/`.
 
 - **Production:** `https://yqmarketplace.com` — Cloudflare Worker `yq-marketplace` (static assets; "Pages" is now this product; default URL `yq-marketplace.yqbahrain.workers.dev` until the domain is attached)
   (account id + Write token in the root `.env`), built locally with `VITE_APP=market`,
-  `VITE_API_URL=https://yq-ops-assistant.onrender.com` by `python -m scripts.deploy_cf market`,
+  `VITE_API_URL=https://api.yqmarketplace.com` by `python -m scripts.deploy_cf market`,
   and on every push to `main` by `.github/workflows/cf-deploy.yml` once the `CLOUDFLARE_*`
   repository secrets exist. The market build imports no Supabase code, so it needs no
   `VITE_SUPABASE_*` values. Cloudflare hosts both apps since 20-Sep-2026: Vercel Hobby capped transfer at
@@ -445,7 +445,7 @@ Python Playwright (Chromium is cached on the dev machine). Full notes: `scripts/
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots --quick
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots --only cart_under,checkout_small
-python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
+python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://api.yqmarketplace.com --out scratchpad/qa/prod
 ```
 
 `--quick` keeps 390×844 and 1440×900 (also the "lead" viewports that carry the extras: full-page

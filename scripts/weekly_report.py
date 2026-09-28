@@ -819,7 +819,7 @@ def resend_key() -> str:
         return k
     import httpx  # owner PC: read the key from the Render service (GET only)
 
-    r = httpx.get("https://api.render.com/v1/services/srv-da20eavlk1mc73agsbk0/env-vars/RESEND_API_KEY",
+    r = httpx.get("https://api.render.com/v1/services/srv-dat5i2g473hc73er6gsg/env-vars/RESEND_API_KEY",
                   headers={"Authorization": "Bearer " + os.environ["RENDER_API_KEY"], "Accept": "application/json"}, timeout=30)
     r.raise_for_status()
     return r.json()["value"]

@@ -966,17 +966,17 @@ def _jsonc(path: Path) -> dict:
     return json.loads(text)
 
 
-@test("worker: keepwarm cron config + script match the plan (health 03-19 UTC every 10 min, scheduler every 15 min)")
+@test("worker: keepwarm cron config + script match the plan (health every 10 min around the clock, scheduler every 15 min)")
 def _():
     web = ROOT / "web"
     cfg = _jsonc(web / "wrangler.keepwarm.jsonc")
     assert cfg["name"] == "yq-keepwarm" and cfg["main"] == "workers/keepwarm.js" and cfg["workers_dev"] is False, cfg
-    assert cfg["triggers"]["crons"] == ["*/10 3-19 * * *", "*/15 * * * *"], cfg["triggers"]
-    assert cfg["vars"]["API_URL"] == "https://yq-ops-assistant.onrender.com"
+    assert cfg["triggers"]["crons"] == ["*/10 * * * *", "*/15 * * * *"], cfg["triggers"]
+    assert cfg["vars"]["API_URL"] == "https://api.yqmarketplace.com"
     assert cfg["vars"]["SCHEDULER_PATHS"].split(",")[0] == "/scheduler/shop-jobs"
     assert "AGENT_API_KEY" not in json.dumps(cfg["vars"]), "the key is a Worker secret, never a plain var"
     js = (web / cfg["main"]).read_text(encoding="utf-8")
-    for needle in ("'*/10 3-19 * * *'", "'*/15 * * * *'", "env.AGENT_API_KEY", "'X-Agent-Key'", "/health",
+    for needle in ("'*/10 * * * *'", "'*/15 * * * *'", "env.AGENT_API_KEY", "'X-Agent-Key'", "/health",
                    "async scheduled(event, env, ctx)", "AbortSignal.timeout"):
         assert needle in js, needle
     assert "console.log(JSON" not in js and "res.text()" not in js, "never log the response body (order numbers, shop names)"

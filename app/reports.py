@@ -7,6 +7,7 @@ with ex-VAT alongside; all windows anchor to the data's latest date.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -574,9 +575,12 @@ def command_basis() -> dict | None:
 # round-trips). flush on ingest via invalidate_dashboard_cache() (ai.flush_cache calls it).
 _DASH_TTL_S = 300
 _dash_cache: dict = {"at": 0.0, "payload": None}
+_report_gen = 0  # bumped on every upload: a build that started before it must not be stored
 
 
 def invalidate_dashboard_cache() -> None:
+    global _report_gen
+    _report_gen += 1
     _dash_cache.update(at=0.0, payload=None)
     _report_cache.clear()
     try:  # the Command Centre's Focus figures are kept until the next upload too (app/metrics.py)
@@ -589,6 +593,7 @@ def invalidate_dashboard_cache() -> None:
 def dashboard(force: bool = False) -> dict:
     if not force and _dash_cache["payload"] is not None and time.time() - _dash_cache["at"] < _DASH_TTL_S:
         return _dash_cache["payload"]
+    gen = _report_gen
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="dash") as ex:
         futs = {
             "s": ex.submit(daily_summary),
@@ -608,7 +613,8 @@ def dashboard(force: bool = False) -> dict:
         }
         r = {k: f.result() for k, f in futs.items()}
     out = _assemble_dashboard(r)
-    _dash_cache.update(at=time.time(), payload=out)
+    if gen == _report_gen:
+        _dash_cache.update(at=time.time(), payload=out)
     return out
 
 
@@ -893,18 +899,65 @@ REPORTS = {
 
 # Every page payload is served from this in-process cache between uploads — the data
 # only changes on ingest (which calls invalidate_dashboard_cache), so repeat clicks
-# cost ZERO DB round-trips. TTL is a safety net, not the real invalidation.
+# cost ZERO DB round-trips. Stale-while-revalidate (28-Sep-2026): under _REPORT_TTL_S a hit is
+# served as is; up to _REPORT_STALE_S it is STILL served at once while one background thread
+# rebuilds it, so a visit after the TTL never waits on the ~20 PostgREST round-trips. An upload
+# drops everything and bumps _report_gen, so a rebuild that started before it is thrown away.
 _REPORT_TTL_S = 300
+_REPORT_STALE_S = 12 * 3600
 _report_cache: dict[str, tuple[float, object]] = {}
+_refreshing: set[str] = set()
+_refresh_lock = threading.Lock()
+
+
+def _build_report(key: str):
+    gen = _report_gen
+    out = REPORTS[key]()
+    if gen == _report_gen:
+        _report_cache[key] = (time.time(), out)
+    return out
+
+
+def _refresh_in_background(key: str) -> None:
+    with _refresh_lock:
+        if key in _refreshing:
+            return
+        _refreshing.add(key)
+
+    def run() -> None:
+        try:
+            _build_report(key)
+        except Exception as e:  # noqa: BLE001 -- the stale copy keeps serving; the next visit retries
+            log.warning("report %s: background refresh failed: %s", key, e)
+        finally:
+            with _refresh_lock:
+                _refreshing.discard(key)
+
+    threading.Thread(target=run, name=f"report-{key}", daemon=True).start()
 
 
 def cached_report(key: str):
     hit = _report_cache.get(key)
-    if hit and time.time() - hit[0] < _REPORT_TTL_S:
-        return hit[1]
-    out = REPORTS[key]()
-    _report_cache[key] = (time.time(), out)
-    return out
+    if hit:
+        age = time.time() - hit[0]
+        if age < _REPORT_TTL_S:
+            return hit[1]
+        if age < _REPORT_STALE_S:
+            _refresh_in_background(key)
+            return hit[1]
+    return _build_report(key)
+
+
+def prewarm_reports() -> None:
+    """Build every page payload once after boot, so the first visit after a deploy or a restart
+    is a cache hit. Runs in a background thread (app/main.py) — never on the event loop."""
+    for key in REPORTS:
+        if key in _report_cache:
+            continue
+        try:
+            _build_report(key)
+        except Exception as e:  # noqa: BLE001 -- the first real visit builds it instead
+            log.warning("report %s: prewarm failed: %s", key, e)
 
 
 # The Inventory report's cost fields (R7d stock AT COST): per item and the at-cost totals. Cost is

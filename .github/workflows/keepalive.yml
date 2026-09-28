@@ -122,7 +122,7 @@ jobs:
           set -uo pipefail
           # --max-time 90 tolerates a genuine cold start rather than failing the run.
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 \
-            https://yq-ops-assistant.onrender.com/health)
+            https://api.yqmarketplace.com/health)
           code=${code:-000}
           echo "health -> HTTP $code"
           [ "$code" = "200" ] || { echo "::error::API did not return 200 (got $code)"; exit 1; }

@@ -51,7 +51,7 @@ jobs:
       - name: Call the scheduled endpoints
         env:
           AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
-          API_URL: https://yq-ops-assistant.onrender.com
+          API_URL: https://api.yqmarketplace.com
         run: |
           set -uo pipefail
           if [ -z "${AGENT_API_KEY}" ]; then

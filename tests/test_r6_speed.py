@@ -374,7 +374,7 @@ def _():
 def _():
     src = _read("web/workers/market.js")
     assert "caches.default" in src and "ORIGIN_SOFT_MS = 3000" in src
-    assert "'https://yq-ops-assistant.onrender.com'" in src and "'/public/market'" in src and "'/api/market'" in src
+    assert "'https://api.yqmarketplace.com'" in src and "'/public/market'" in src and "'/api/market'" in src
     assert "stale-while-revalidate" in src and "stale-if-error" in src
     assert "if (fresh.status !== 200) return passThrough(fresh)" in src, "a non-200 is never stored"
     assert "if (!/application\\/json/i.test(type)) return null" in src, "a non-JSON 200 is passed through, never relabelled"
@@ -462,7 +462,7 @@ def _():
     csp_v = next(h["value"] for r in csp_v["headers"] for h in r["headers"] if h["key"] == "Content-Security-Policy")
     assert csp_h == csp_v, "the two CSP copies must stay identical"
     assert "fonts.g" not in csp_h and "font-src 'self';" in csp_h and "style-src 'self' 'unsafe-inline';" in csp_h
-    assert "connect-src 'self' https://cloudflareinsights.com https://yq-ops-assistant.onrender.com" in csp_h
+    assert "connect-src 'self' https://cloudflareinsights.com https://api.yqmarketplace.com" in csp_h
     # the market's own fonts are untouched
     assert "instrument-sans-v1.woff2" in _read("web/vite.config.ts")
 
@@ -524,6 +524,59 @@ def _():
     for k in ('"samples"', '"visits"', '"lcp_ttfb_ms_p75"', '"lcp_load_ms_p75"', '"lcp_render_ms_p75"', '"catalog_ms_p75"', '"catalog_src"'):
         assert k in body, k
     assert 'for k in ("lcp", "inp", "cls")' in body, "samples = beacons that carry a metric; visits = every beacon"
+
+
+@test("cached_report: fresh = served as is; stale = served at once + ONE background rebuild; an upload drops a build in flight")
+def _t_report_swr():
+    import threading
+    import time as _time
+    from app import reports
+    calls, gate = [], threading.Event()
+
+    def build():
+        calls.append(1)
+        gate.wait(5)
+        return {"n": len(calls)}
+
+    saved = dict(reports.REPORTS), dict(reports._report_cache)
+    try:
+        reports.REPORTS["t_swr"] = build
+        reports._report_cache.pop("t_swr", None)
+        gate.set()
+        assert reports.cached_report("t_swr") == {"n": 1} and len(calls) == 1, "a miss builds in the request"
+        assert reports.cached_report("t_swr") == {"n": 1} and len(calls) == 1, "a fresh hit never builds"
+        # stale: served straight away, one rebuild however many visits land while it runs
+        gate.clear()
+        reports._report_cache["t_swr"] = (_time.time() - reports._REPORT_TTL_S - 1, {"n": 1})
+        assert [reports.cached_report("t_swr") for _ in range(3)] == [{"n": 1}] * 3, "stale copy served at once"
+        gate.set()
+        for _ in range(100):
+            if "t_swr" not in reports._refreshing:
+                break
+            _time.sleep(0.02)
+        assert len(calls) == 2 and reports._report_cache["t_swr"][1] == {"n": 2}, "exactly one background rebuild"
+        # past the stale window: rebuilt in the request, like a miss
+        reports._report_cache["t_swr"] = (_time.time() - reports._REPORT_STALE_S - 1, {"n": 0})
+        assert reports.cached_report("t_swr") == {"n": 3}
+        # an upload during a build: the build's result is returned but never stored
+        gate.clear()
+        reports._report_cache.pop("t_swr", None)
+        t = threading.Thread(target=reports.cached_report, args=("t_swr",))
+        t.start()
+        for _ in range(100):
+            if len(calls) == 4:
+                break
+            _time.sleep(0.01)
+        reports.invalidate_dashboard_cache()
+        gate.set()
+        t.join(5)
+        assert "t_swr" not in reports._report_cache, "a pre-upload build must not repopulate the cache"
+    finally:
+        gate.set()
+        reports.REPORTS.clear(); reports.REPORTS.update(saved[0])
+        reports._report_cache.clear(); reports._report_cache.update(saved[1])
+    main_src = _read("app/main.py")
+    assert "def _prewarm_reports" in main_src and 'os.environ.get("RENDER")' in main_src and "threading.Thread(target=_run" in main_src
 
 
 def main() -> int:

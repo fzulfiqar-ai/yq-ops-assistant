@@ -8,14 +8,16 @@
 // run_shop_jobs holds a 10-minute lease so a stray second caller is skipped, not doubled).
 //
 // Code: workers/keepwarm.js (no build step). Triggers, in UTC:
-//   */10 3-19 * * *   GET /health                          06:00-22:59 Bahrain, every 10 min
+//   */10 * * * *      GET /health                          around the clock, every 10 min (28-Sep-2026:
+//                     was 06:00-22:59 Bahrain; */15 alone sits on Render's 15-min idle line)
 //   */15 * * * *      GET the SCHEDULER_PATHS with X-Agent-Key (the same call shop-cron.yml makes)
 // Both count as Worker requests: ~200/day against the free 100,000/day. Cron Triggers are free.
 //
 // RENDER FREE-HOURS BUDGET: the */15 scheduler trigger runs around the clock, so the free Render
 // service never idles long enough to spin down. That is ~720-744 of the 750 free instance-hours
 // per workspace per month (Render bills a free instance for the hours it is awake). It fits only
-// while yq-ops-assistant is the ONLY free web service in the workspace (verified 24-Sep-2026); a
+// while ONE free web service is awake in the workspace: yq-ops-api-sg (Singapore, 28-Sep-2026), with
+// the old Frankfurt yq-ops-assistant SUSPENDED as the rollback (a suspended service spends no hours); a
 // second free service would push the workspace over 750 h late in the month and Render suspends
 // BOTH until the 1st. Options if that day comes: trim the scheduler trigger to business hours plus
 // a sparse overnight one (Workers Free allows 5 cron triggers), or move the API to a paid instance.
@@ -35,12 +37,12 @@
   "workers_dev": false,
   "observability": { "enabled": true },
   "vars": {
-    "API_URL": "https://yq-ops-assistant.onrender.com",
+    "API_URL": "https://api.yqmarketplace.com",
     // Comma-separated; mirrors the loop in .github/workflows/shop-cron.yml. Trim to
     // "/scheduler/shop-jobs" if the agent reactions or the daily agents should stay on GitHub only.
     "SCHEDULER_PATHS": "/scheduler/shop-jobs,/scheduler/run-due,/events/dispatch"
   },
   "triggers": {
-    "crons": ["*/10 3-19 * * *", "*/15 * * * *"]
+    "crons": ["*/10 * * * *", "*/15 * * * *"]
   }
 }

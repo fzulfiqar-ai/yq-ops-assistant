@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Wake the API first (free tier sleeps)
-        run: curl -sS --max-time 120 -o /dev/null -w 'API %{http_code} in %{time_total}s\n' https://yq-ops-assistant.onrender.com/public/market || true
+        run: curl -sS --max-time 120 -o /dev/null -w 'API %{http_code} in %{time_total}s\n' https://api.yqmarketplace.com/public/market || true
       - name: Lighthouse (mobile, 3 runs, median)
         continue-on-error: true
         uses: treosh/lighthouse-ci-action@v12

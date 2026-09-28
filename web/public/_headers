@@ -16,7 +16,7 @@
 # connect-src 'self' also covers the same-origin /api/market and /version.json.
 
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://vofwqcqmdwdidueqxtxy.supabase.co; media-src 'self' blob: https://vofwqcqmdwdidueqxtxy.supabase.co; connect-src 'self' https://cloudflareinsights.com https://yq-ops-assistant.onrender.com https://vofwqcqmdwdidueqxtxy.supabase.co; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://vofwqcqmdwdidueqxtxy.supabase.co; media-src 'self' blob: https://vofwqcqmdwdidueqxtxy.supabase.co; connect-src 'self' https://cloudflareinsights.com https://api.yqmarketplace.com https://vofwqcqmdwdidueqxtxy.supabase.co; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   X-Robots-Tag: noindex, nofollow
   Referrer-Policy: strict-origin-when-cross-origin

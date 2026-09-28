@@ -18,7 +18,7 @@ python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/
 python scripts/qa/market_qa.py --base http://localhost:5174 --out scratchpad/qa/shots --only cart_under,checkout_small
 
 # production
-python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://yq-ops-assistant.onrender.com --out scratchpad/qa/prod
+python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://api.yqmarketplace.com --out scratchpad/qa/prod
 
 # R5: the same walk in Arabic, at any widths (here the brief's 390 phone and 1366 desktop)
 python scripts/qa/market_qa.py --base http://localhost:5174 --api http://127.0.0.1:8002 --out scratchpad/qa/ar --lang ar --widths 390,1366

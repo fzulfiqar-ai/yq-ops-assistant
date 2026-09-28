@@ -13,7 +13,7 @@ salesman app and checkout) and delete every key added since. Env changes are mad
 dashboard, one key at a time. This script never reads .env.render and never prints a secret.
 
 RENDER_API_KEY and RENDER_SERVICE_ID come from .env (RENDER_SERVICE_ID defaults to the live
-service srv-da20eavlk1mc73agsbk0).
+service srv-dat5i2g473hc73er6gsg).
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, object
 
 
 def _svc() -> str:
-    return os.environ.get("RENDER_SERVICE_ID", "srv-da20eavlk1mc73agsbk0")
+    return os.environ.get("RENDER_SERVICE_ID", "srv-dat5i2g473hc73er6gsg")
 
 
 def _deploys(limit: int = 5) -> list[dict]:

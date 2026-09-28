@@ -93,22 +93,22 @@ a GET route, so `-I` is a 405 from the API (the Worker on yqmarketplace.com does
 a request that sends `Accept-Encoding` sees `Content-Encoding: gzip`:
 
 ```
-curl -s https://yq-ops-assistant.onrender.com/health
+curl -s https://api.yqmarketplace.com/health
     → {"status":"ok", ..., "commit":"<sha12>"}   the SHA must be the one just deployed (R6: /health carries RENDER_GIT_COMMIT)
-curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' https://yq-ops-assistant.onrender.com/public/market
+curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' https://api.yqmarketplace.com/public/market
     → 200, ETag: W/"…", Cache-Control: public, max-age=60, stale-while-revalidate=600, stale-if-error=86400, Content-Encoding: gzip, Vary: Accept-Encoding
-curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' -H 'If-None-Match: <that etag>' https://yq-ops-assistant.onrender.com/public/market
+curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' -H 'If-None-Match: <that etag>' https://api.yqmarketplace.com/public/market
     → 304, no body
-curl -s 'https://yq-ops-assistant.onrender.com/public/market?ref=<slug1>' | head -c 300     two real rep slugs: "ref" and "rep" filled
-curl -s 'https://yq-ops-assistant.onrender.com/public/market?ref=<slug2>' | head -c 300
-curl -s https://yq-ops-assistant.onrender.com/public/rep/<slug1>
-curl -s https://yq-ops-assistant.onrender.com/public/shop/order/<a known tracking token>
+curl -s 'https://api.yqmarketplace.com/public/market?ref=<slug1>' | head -c 300     two real rep slugs: "ref" and "rep" filled
+curl -s 'https://api.yqmarketplace.com/public/market?ref=<slug2>' | head -c 300
+curl -s https://api.yqmarketplace.com/public/rep/<slug1>
+curl -s https://api.yqmarketplace.com/public/shop/order/<a known tracking token>
 ```
 
 plus one quote POST, which prices a cart and writes nothing:
 
 ```
-curl -s -X POST https://yq-ops-assistant.onrender.com/public/market/quote -H 'content-type: application/json' \
+curl -s -X POST https://api.yqmarketplace.com/public/market/quote -H 'content-type: application/json' \
      -d '{"lines":[{"item_code":"X01","qty":2}]}'
 ```
 
@@ -119,11 +119,11 @@ version and switch traffic to it — market first, then portal:
 
 ```
 cd web
-BUILD_ID=<sha> VITE_APP=market VITE_API_URL=https://yq-ops-assistant.onrender.com npm run build:market
+BUILD_ID=<sha> VITE_APP=market VITE_API_URL=https://api.yqmarketplace.com npm run build:market
 npx --yes wrangler@4 versions upload -c wrangler.market.jsonc          # prints the new version id
 npx --yes wrangler@4 versions deploy <new-version-id>@100% -c wrangler.market.jsonc -y
 
-BUILD_ID=<sha> VITE_API_URL=https://yq-ops-assistant.onrender.com VITE_SUPABASE_URL=… VITE_SUPABASE_ANON_KEY=… npm run build
+BUILD_ID=<sha> VITE_API_URL=https://api.yqmarketplace.com VITE_SUPABASE_URL=… VITE_SUPABASE_ANON_KEY=… npm run build
 npx --yes wrangler@4 versions upload -c wrangler.portal.jsonc
 npx --yes wrangler@4 versions deploy <new-version-id>@100% -c wrangler.portal.jsonc -y
 ```
@@ -157,7 +157,7 @@ Then the QA harness (`scripts/qa/market_qa.py`) against production — it reads 
 the order POST, the receipt, the phone lookup and the event ping, and never places an order:
 
 ```
-python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://yq-ops-assistant.onrender.com --out business_data/qa/<rN>
+python scripts/qa/market_qa.py --base https://yqmarketplace.com --api https://api.yqmarketplace.com --out business_data/qa/<rN>
 ```
 
 ### 5. Verify

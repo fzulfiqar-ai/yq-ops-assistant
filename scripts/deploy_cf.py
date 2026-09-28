@@ -35,7 +35,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
-API_URL = "https://yq-ops-assistant.onrender.com"
+API_URL = "https://api.yqmarketplace.com"
 WRANGLER = ["npx", "--yes", "wrangler@4"]
 
 TARGETS = {

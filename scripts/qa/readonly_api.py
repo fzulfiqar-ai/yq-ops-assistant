@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-UPSTREAM = "https://yq-ops-assistant.onrender.com"
+UPSTREAM = "https://api.yqmarketplace.com"
 LOCAL_ORIGIN_PREFIXES = ("http://localhost:", "http://127.0.0.1:")
 
 # The fictional order the checkout flow lands on (the harness mocks the same shapes in-page).

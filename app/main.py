@@ -164,6 +164,27 @@ async def _warm_embeddings() -> None:
     threading.Thread(target=_warm, daemon=True).start()
 
 
+@app.on_event("startup")
+async def _prewarm_reports() -> None:
+    """Build the portal's page payloads once after boot (Render only), so the first visit after a
+    deploy or a restart is a cache hit. A background thread that waits for the boot health check
+    first — never work on the event loop, which is what got the container killed on uploads."""
+    import os
+    import threading
+    if not os.environ.get("RENDER"):
+        return
+
+    def _run():
+        import time
+        time.sleep(20)
+        try:
+            from app.reports import prewarm_reports
+            prewarm_reports()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_run, name="prewarm-reports", daemon=True).start()
+
+
 @app.get("/health")
 @limiter.limit(settings.rate_limit)
 async def health(request: Request) -> dict:

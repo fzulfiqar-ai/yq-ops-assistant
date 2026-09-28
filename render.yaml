@@ -12,12 +12,16 @@
 # them in the dashboard (bulk-paste .env.render via "Add from .env").
 services:
   - type: web
-    name: yq-ops-assistant
+    name: yq-ops-api-sg
     runtime: docker
     plan: free
-    # Frankfurt is the closest free region to Bahrain (~4,600 km vs ~6,400 km
-    # to Singapore), so it wins on latency for the Manama team.
-    region: frankfurt
+    # Singapore, next to the Supabase database (aws-1-ap-southeast-1). Every page runs
+    # 2-20 PostgREST calls, each one paid Frankfurt<->Singapore when the API sat in
+    # Frankfurt; Bahrain reaches both regions in ~0.15 s, so the browser loses nothing.
+    # Measured 28-Sep-2026: /digest/daily 1.7-2.4 s (Frankfurt) -> 0.44-0.61 s (Singapore).
+    # Served as https://api.yqmarketplace.com (Cloudflare DNS-only CNAME; Render is
+    # already behind Cloudflare). Frankfurt yq-ops-assistant is kept SUSPENDED as rollback.
+    region: singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
