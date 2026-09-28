@@ -28,6 +28,9 @@ Definitions (owner rules, 21-Sep and 24-Sep-2026):
     profitability(), never its own SQL.
   * Stock value (R7d): at COST — the Focus average cost, else the latest landed cost
     (stock_cost_sql); a selling-price figure is always labelled "at selling price".
+  * Price drops (R7e): a trade-price (MA_base) cut that started inside app_settings.shop_price_drop_days,
+    the marketplace's own "Was → Now" rule. Trade prices are not cost, so the Products tile needs no
+    grant; the cuts that leave a thin margin compare with cost and sit in Profitability ('Margins').
 
 Reads: everything goes through the read-only RPC as yq_readonly (app.db_read exec_sql /
 exec_sql_params) over views that role is already granted, plus v_command_orders
@@ -64,7 +67,7 @@ log = logging.getLogger(__name__)
 COMMAND_ROLES: frozenset[str] = frozenset({"admin", "management"})
 
 PERIODS: dict[str, str] = {
-    "today": "Today",
+    "today": "Latest day",          # the last loaded Focus sale day, not the calendar's today
     "7d": "Last 7 days",
     "mtd": "Month to date",
     "last_month": "Last month",
@@ -82,6 +85,8 @@ DEFAULT_VAT_RATE = Decimal("0.10")   # = app.shop.SETTING_DEFAULTS['shop_vat_rat
 STAFF_SOURCE = "salesman"        # shop_orders.source of an order a rep placed himself: born Confirmed (R7c)
 PACE_BASIS = "target read as ex-VAT, Accessories, business days (Sun–Thu; Fri, Sat off)"
 STALE_AFTER_DAYS = 3             # app.reports.STALE_AFTER_DAYS: the same lenient rule
+DROP_DAYS_DEFAULT = 30           # = app.shop.SETTING_DEFAULTS['shop_price_drop_days']; the setting wins
+THIN_MARGIN_PCT = Decimal("20")  # a price cut that leaves this margin or less (ex-VAT, on landed cost) is flagged
 TOP_N = 5
 
 _BAHRAIN = timezone(timedelta(hours=3))
@@ -131,6 +136,13 @@ def _int(x) -> int:
         return int(float(x or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def drop_days(anchors: dict | None) -> int:
+    """The price-drop window in days: app_settings.shop_price_drop_days, else 30 (unset, junk or not
+    above 0 — a window of no days would silently empty the tile)."""
+    n = _int((anchors or {}).get("price_drop_days"))
+    return n if n > 0 else DROP_DAYS_DEFAULT
 
 
 # ── dates, business days and the period windows ────────────────────────────────
@@ -358,7 +370,8 @@ ANCHOR_SQL = (
     "(SELECT MAX(as_of_date) FROM v_receivables)::text AS ar_as_of, "
     "(SELECT MAX(report_date) FROM v_product_margin)::text AS margin_report_date, "
     "(SELECT value FROM app_settings WHERE key = 'monthly_sales_target_bhd' LIMIT 1) AS target_bhd, "
-    "(SELECT value FROM app_settings WHERE key = 'shop_vat_rate' LIMIT 1) AS shop_vat_rate"
+    "(SELECT value FROM app_settings WHERE key = 'shop_vat_rate' LIMIT 1) AS shop_vat_rate, "
+    "(SELECT value FROM app_settings WHERE key = 'shop_price_drop_days' LIMIT 1) AS price_drop_days"
 )
 
 # $1 = the windows as JSON [{"k": "cur", "s": "2026-09-01", "e": "2026-09-24"}, ...]; a line counts in
@@ -411,6 +424,20 @@ MOVERS_SQL = (
     "COALESCE(SUM(quantity), 0) AS qty_60, ROUND(COALESCE(SUM(net_bhd), 0)::numeric, 3) AS net_60 "
     "FROM v_sales WHERE division = 'Accessories' AND NOT is_giveaway AND item_name IS NOT NULL "
     "AND sale_date > $1::date - 60 AND sale_date <= $1::date GROUP BY 1"
+)
+
+# $1 = app_settings.shop_price_drop_days: real trade-price (MA_base) cuts inside the window — the same
+# rule as app.shop._load_price_drops, so the page counts what the marketplace shows as "Was → Now"
+PRICE_DROPS_SQL = (
+    "SELECT sku_code, item_name, changed_on::text AS changed_on, current_price_bhd, prev_price_bhd, price_change_pct "
+    "FROM v_price_change WHERE current_price_bhd < prev_price_bhd AND changed_on >= CURRENT_DATE - $1::int"
+)
+# the latest landed cost (MRN receipt, else purchase_costs) of those same codes: read apart, so the
+# Products tile never carries a cost and the thin-margin tile (Profitability, behind 'Margins') does
+PRICE_DROP_COSTS_SQL = (
+    "SELECT e.sku_code, e.cost_bhd, e.cost_source FROM v_product_economics e WHERE e.cost_bhd > 0 "
+    "AND e.sku_code IN (SELECT c.sku_code FROM v_price_change c WHERE c.current_price_bhd < c.prev_price_bhd "
+    "AND c.changed_on >= CURRENT_DATE - $1::int)"
 )
 
 # ── stock at COST (R7d, plan §17): one definition for every stock-value tile ──────────────────────
@@ -693,6 +720,7 @@ class Ctx:
             "stock_as_of": day_label(parse_day(self.anchors.get("stock_as_of"))) or "no snapshot",
             "ar_as_of": day_label(parse_day(self.anchors.get("ar_as_of"))) or "no snapshot",
             "margin_date": day_label(parse_day(self.anchors.get("margin_report_date"))) or "no report",
+            "drop_days": str(drop_days(self.anchors)),
             "tests": ("test orders not yet told apart (r7b migration pending)"
                       if self.r.get("orders_source") == "v_shop_orders_agent" else "test orders left out"),
         }
@@ -1154,6 +1182,34 @@ def _products_movers(ctx: Ctx) -> dict | None:
     return {"value": len(rising), "rising": rising, "falling": falling}
 
 
+def price_drop_rows(rows: list[dict] | None) -> list[dict]:
+    """Pure: PRICE_DROPS_SQL rows → {code, item, was_bhd, now_bhd, cut_pct, on}, the deepest cut first.
+    cut_pct is positive (20.0 = 20 % off); the field names stay clear of any cost word — trade prices
+    are not cost, so this list needs no page grant."""
+    out = []
+    for r in rows or []:
+        was, now = dec(r.get("prev_price_bhd")), dec(r.get("current_price_bhd"))
+        if now <= 0 or was <= now:
+            continue          # the SQL already says so; a junk row never reads as a cut
+        cut = change_pct(now, was)
+        out.append({"code": str(r.get("sku_code") or "").strip(), "item": r.get("item_name"),
+                    "was_bhd": money(was), "now_bhd": money(now), "cut_pct": -cut if cut is not None else None,
+                    "on": str(r.get("changed_on"))[:10] if r.get("changed_on") else None})
+    return sorted(out, key=lambda x: (-(x["cut_pct"] or 0), x["code"]))
+
+
+@metric("products.price_drops", "Price drops", "products",
+        "Trade-price (MA_base) cuts in the last {drop_days} days · the marketplace shows Was → Now on them", "count",
+        ("/prices", "Price tracker"))
+def _products_price_drops(ctx: Ctx) -> dict | None:
+    rows = ctx.r.get("price_drops")
+    if rows is None:
+        return None
+    drops = price_drop_rows(rows)
+    return {"value": len(drops), "items": drops[:TOP_N],
+            "latest_on": max((x["on"] for x in drops if x["on"]), default=None)}
+
+
 def sold_out_with_demand(ctx: Ctx) -> list[dict] | None:
     stock, movers = ctx.r.get("stock"), ctx.r.get("movers")
     if stock is None or movers is None:
@@ -1302,6 +1358,36 @@ def _profit_below(ctx: Ctx) -> dict | None:
               "margin_pct": float(r["margin_ex_vat_pct"]) if r.get("margin_ex_vat_pct") is not None else None}
              for r in rows[:TOP_N]]
     return {"value": _int((tot or {}).get("below")) if tot else len(rows), "items": items}
+
+
+@metric("profit.thin_drops", "Price cuts at a thin margin", "profitability",
+        "Trade-price cuts in the last {drop_days} days whose new price leaves 20 % margin or less · new price ex-VAT "
+        "vs the latest landed cost (MRN receipt, else purchase cost) · items with a usable cost only", "list",
+        ("/prices", "Price tracker"))
+def _profit_thin_drops(ctx: Ctx) -> dict | None:
+    # lives in Profitability so the Command Centre's 'Margins' gate (command_api.MODULE_FEATURE) takes it
+    # out whole for a login without that page: a cost never reaches it
+    from app.margin_truth import IMPLAUSIBLE_COST_SHARE
+    rows, costs = ctx.r.get("price_drops"), ctx.r.get("drop_costs")
+    if rows is None or costs is None:
+        return None
+    cost_of = {str(c.get("sku_code") or "").strip().upper(): dec(c.get("cost_bhd")) for c in costs}
+    drops = price_drop_rows(rows)
+    thin, costed = [], 0
+    for d in drops:
+        now, cost = dec(d["now_bhd"]), cost_of.get(d["code"].upper())
+        # a cost under 10 % of the price is a typo or a per-carton figure (margin_truth): not trusted
+        if cost is None or cost <= 0 or cost < Decimal(str(IMPLAUSIBLE_COST_SHARE)) * now:
+            continue
+        costed += 1
+        ex = ctx.ex_vat(now)                      # the price book is VAT-inclusive, the cost is not
+        pct = share(ex - cost, ex)
+        if pct is not None and Decimal(str(pct)) <= THIN_MARGIN_PCT:
+            thin.append({"code": d["code"], "item": d["item"], "now_bhd": d["now_bhd"], "cut_pct": d["cut_pct"],
+                         "unit_cost_bhd": money(cost), "margin_pct": pct})
+    thin.sort(key=lambda x: (x["margin_pct"], x["code"]))
+    return {"value": len(thin), "items": thin[:TOP_N], "costed": costed, "drops": len(drops),
+            "threshold_pct": float(THIN_MARGIN_PCT)}
 
 
 # ══ Receivables ═══════════════════════════════════════════════════════════════
@@ -1534,8 +1620,9 @@ MODULES: list[tuple[str, str, list[str]]] = [
                                 "orders.match_rate", "orders.self_order"]),
     ("team", "Team", ["team.reps"]),
     ("customers", "Customers", ["customers.active", "customers.dormant", "customers.concentration", "customers.cash"]),
-    ("products", "Products & stock", ["products.movers", "products.sold_out", "products.stock_shape"]),
-    ("profitability", "Profitability", ["profit.official", "profit.landed", "profit.below_cost"]),
+    ("products", "Products & stock", ["products.movers", "products.price_drops", "products.sold_out",
+                                      "products.stock_shape"]),
+    ("profitability", "Profitability", ["profit.official", "profit.landed", "profit.below_cost", "profit.thin_drops"]),
     ("receivables", "Receivables", ["ar.total", "ar.over90", "ar.top_overdue", "ar.no_receipt"]),
 ]
 LIVE_MODULES = frozenset({"orders"})
@@ -1638,7 +1725,11 @@ def load_focus(r: Reader, period: str, anchor: date | None) -> None:
             "movers": lambda: r.qp(MOVERS_SQL, [a]) or [],
             "landed": lambda: (r.qp(LANDED_SQL, [a]) or [{}])[0],
         })
+    # the price drops ride with the Focus half: cached until the next upload, so a new price book shows at once
+    days = [str(drop_days(r.get("anchor")))]
     jobs.update({
+        "price_drops": lambda: r.qp(PRICE_DROPS_SQL, days) or [],
+        "drop_costs": lambda: r.qp(PRICE_DROP_COSTS_SQL, days) or [],
         "stock": lambda: r.q(STOCK_SQL) or [],
         "margin_totals": lambda: margin_truth.margin_totals(q=r.q)[0],
         "below_cost": lambda: margin_truth.margin_rows("is_below_cost", "gp_ex_vat_bhd ASC", TOP_N, q=r.q)[0],

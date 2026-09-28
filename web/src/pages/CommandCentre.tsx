@@ -2,8 +2,11 @@ import type { ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, Info, Loader2, RefreshCw,
+  AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Info, Loader2, RefreshCw,
 } from 'lucide-react'
+import {
+  Bar as ChartBar, Cell, ComposedChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
+} from 'recharts'
 import { apiGet } from '@/lib/api'
 import { isManagement, useAuth, type Me } from '@/lib/auth'
 import { managementMayOpen } from '@/lib/nav'
@@ -19,13 +22,19 @@ import { Skeleton } from '@/components/ui/skeleton'
  * ex-VAT · 1–24 Sep · data to 24 Sep") exactly as the API's metric dictionary (app/metrics.py) wrote
  * it; nothing is recomputed here. Read-only for everyone; admin and management only.
  *
+ * R7e: the whole page opens on a first screen read in seconds — six KPI cards (one number, one chip,
+ * one caption with its window; the basis in the tooltip), the weekly chart beside the top five
+ * exceptions, then Salesmen · Products · Merchants. Every module in full sits below, collapsed, under
+ * "Details". A card whose tile this login may not read (the API left it out or marked it restricted)
+ * is simply not drawn.
+ *
  * `view` = 'team' and 'customers' are the same payload with that module in full (management's Team
  * and Customers menu items).
  */
 
 type PeriodKey = 'today' | '7d' | 'mtd' | 'last_month' | 'quarter'
 const PERIODS: { key: PeriodKey; label: string }[] = [
-  { key: 'today', label: 'Today' },
+  { key: 'today', label: 'Latest day' },
   { key: '7d', label: '7 days' },
   { key: 'mtd', label: 'Month to date' },
   { key: 'last_month', label: 'Last month' },
@@ -55,7 +64,13 @@ interface Tile {
   chips?: Chip[]
   month?: string; mtd_bhd?: number; target_bhd?: number | null; projected_bhd?: number
   business_days_done?: number; business_days_total?: number; business_days_left?: number
-  pct_of_target?: number | null; on_track?: boolean | null; needed_per_business_day_bhd?: number | null
+  pct_of_target?: number | null; projected_pct_of_target?: number | null; on_track?: boolean | null
+  needed_per_business_day_bhd?: number | null
+  /** the days a figure really covers (the official margin: every loaded day, whatever the period) */
+  covers?: { from: string | null; to: string | null; period_bound?: boolean } | null
+  /** products.price_drops: items are { code, item, was_bhd, now_bhd, cut_pct, on }; profit.thin_drops adds
+   *  unit_cost_bhd and margin_pct (that tile only reaches a login holding 'Margins') */
+  latest_on?: string | null; costed?: number; drops?: number; threshold_pct?: number
   series?: WeekPoint[]
   stages?: Stage[]; cancelled?: number; open?: number
   units_ordered?: number; units_accepted?: number; orders?: number; units_added?: number; staff_orders_left_out?: number
@@ -106,6 +121,21 @@ function fmtDay(iso?: string | number | null): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso))
   return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}` : String(iso)
 }
+/** whole BHD for a first-screen card; the exact 3-dp figure goes in its tooltip */
+const fmtBhd0 = (n?: number | null) =>
+  n == null ? '—' : `BHD ${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+/** '2026-09-24' → '24 Sep 2026' */
+const fmtDayYear = (iso: string) => `${fmtDay(iso)} ${iso.slice(0, 4)}`
+/** "12 months to 24 Sep" only when the figure really spans about a year (11–13 months); else its real span */
+function coversLabel(c?: Tile['covers']): string {
+  if (!c?.from || !c.to) return 'every loaded day'
+  const days = (Date.parse(`${c.to}T00:00:00Z`) - Date.parse(`${c.from}T00:00:00Z`)) / 86_400_000 + 1
+  const months = days / 30.44
+  if (months >= 11 && months <= 13) return `12 months to ${fmtDay(c.to)}`
+  return c.from.slice(0, 4) === c.to.slice(0, 4)
+    ? `${fmtDay(c.from)} – ${fmtDayYear(c.to)}`
+    : `${fmtDayYear(c.from)} – ${fmtDayYear(c.to)}`
+}
 function fmtValue(t: Tile): string {
   if (t.unit === 'pct') return fmtPct(t.value)
   if (t.unit === 'count' || t.unit === 'list') return fmtCount(t.value)
@@ -126,10 +156,29 @@ function shownTiles(tiles: Tile[]): Tile[] {
   return tiles.filter((t) => !t.restricted)
 }
 
+/** A tile from any module for the first screen — undefined when this login may not read it (the API left
+ *  its module out, or marked it restricted) or it did not build, so its card is simply not drawn. */
+function findTile(ov: Overview, key: string): Tile | undefined {
+  for (const m of ov.modules) {
+    const t = m.tiles.find((x) => x.key === key)
+    if (t) return t.restricted || !t.available ? undefined : t
+  }
+  return undefined
+}
+
 /* ─────────────────────────── small pieces ─────────────────────────── */
 
-function DrillLink({ drill, me, className }: { drill?: Drill | null; me: Me | null; className?: string }) {
+function DrillLink({ drill, me, className, iconOnly }: { drill?: Drill | null; me: Me | null; className?: string; iconOnly?: boolean }) {
   if (!drill || !mayOpen(me, drill.to)) return null
+  if (iconOnly) {
+    // the first screen's compact form: the arrow alone, its label for screen readers and the tooltip
+    return (
+      <Link to={drill.to} aria-label={drill.label} title={drill.label}
+        className={cn('inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[#6D4091] hover:bg-[#F3ECF8] dark:text-[#c7a6e6] dark:hover:bg-[#6D4091]/20', className)}>
+        <ArrowRight size={14} aria-hidden="true" />
+      </Link>
+    )
+  }
   return (
     <Link to={drill.to} className={cn('inline-flex items-center gap-1 text-[12px] font-semibold text-[#6D4091] hover:underline dark:text-[#c7a6e6]', className)}>
       {drill.label} <ArrowRight size={13} aria-hidden="true" />
@@ -181,11 +230,12 @@ function Bar({ pct, className }: { pct: number; className?: string }) {
   )
 }
 
-function Sparkline({ series }: { series: WeekPoint[] }) {
+/** `compact` = the first screen's KPI card: a short strip, no axis row */
+function Sparkline({ series, compact }: { series: WeekPoint[]; compact?: boolean }) {
   const max = Math.max(1, ...series.map((p) => p.value))
   return (
-    <div className="mt-3">
-      <div className="flex h-20 items-end gap-1" role="img"
+    <div className={compact ? 'mt-2' : 'mt-3'}>
+      <div className={cn('flex items-end gap-1', compact ? 'h-10' : 'h-20')} role="img"
         aria-label={`Weekly Accessories sales, ${series.map((p) => `${p.label}: ${fmtBhd(p.value)}`).join('; ')}`}>
         {series.map((p) => (
           <div key={p.week_start} className="flex h-full flex-1 flex-col justify-end" title={`Week of ${p.label}: ${fmtBhd(p.value)}${p.partial ? ' (so far)' : ''}`}>
@@ -196,15 +246,41 @@ function Sparkline({ series }: { series: WeekPoint[] }) {
           </div>
         ))}
       </div>
-      <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
-        <span>{series[0]?.label}</span>
-        <span>{series[series.length - 1]?.label} (so far)</span>
-      </div>
+      {!compact && (
+        <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+          <span>{series[0]?.label}</span>
+          <span>{series[series.length - 1]?.label} (so far)</span>
+        </div>
+      )}
     </div>
   )
 }
 
-function MiniList({ rows }: { rows: { label: string; value: string; sub?: string; tone?: 'up' | 'down' }[] }) {
+type ListRow = { label: string; value: string; sub?: string; tone?: 'up' | 'down' }
+
+/** a price drop as one line: the item, was → now (trade price), then its code, the cut and the day */
+function dropRow(r: Row): ListRow {
+  const cut = num(r.cut_pct)
+  return {
+    label: String(r.item || r.code),
+    value: `${fmtBhd(num(r.was_bhd))} → ${(num(r.now_bhd) ?? 0).toFixed(3)}`,
+    sub: [r.code, cut != null ? `↓${cut.toFixed(1)} %` : null, r.on ? fmtDay(r.on) : null].filter(Boolean).join(' · '),
+  }
+}
+
+/** a price cut that left a thin margin (Profitability, 'Margins' logins only): the margin, then price and cost */
+function thinRow(r: Row): ListRow {
+  const m = num(r.margin_pct)
+  return {
+    label: String(r.item || r.code),
+    value: m != null ? `${m.toFixed(1)} % margin` : '—',
+    // the book price (VAT-inclusive, as the marketplace shows it) beside the landed cost; the margin is ex-VAT
+    sub: `price ${(num(r.now_bhd) ?? 0).toFixed(3)} · landed ${(num(r.unit_cost_bhd) ?? 0).toFixed(3)}`,
+    tone: 'down',
+  }
+}
+
+function MiniList({ rows }: { rows: ListRow[] }) {
   if (!rows.length) return <p className="mt-2 text-[12.5px] text-muted-foreground">Nothing to list.</p>
   return (
     <ul className="mt-2 divide-y divide-border/70">
@@ -372,6 +448,22 @@ function TileBody({ t }: { t: Tile }) {
             <MiniList rows={(t.falling || []).map((m) => ({ label: m.item, value: fmtBhd(m.delta_bhd), sub: `${m.qty_prev} → ${m.qty_30} units`, tone: 'down' as const }))} />
           </div>
         </div>
+      )
+    case 'products.price_drops':
+      return (
+        <>
+          <BigValue t={t} suffix="items" />
+          {t.latest_on && <p className="mt-1 text-[12px] text-muted-foreground">Latest cut {fmtDay(t.latest_on)}</p>}
+          <MiniList rows={(t.items || []).map(dropRow)} />
+        </>
+      )
+    case 'profit.thin_drops':
+      return (
+        <>
+          <BigValue t={t} suffix="items" tone={(t.value ?? 0) > 0 ? 'warn' : 'ok'} />
+          <p className="mt-1 text-[12px] text-muted-foreground">{fmtCount(t.costed)} of {fmtCount(t.drops)} price drops have a usable cost</p>
+          <MiniList rows={(t.items || []).map(thinRow)} />
+        </>
       )
     case 'products.sold_out':
       return (
@@ -651,6 +743,361 @@ function DormantTable({ rows }: { rows: Row[] }) {
   )
 }
 
+/* ─────────────────────────── the first screen ─────────────────────────── */
+// Read in seconds: a card says what happened (the number), whether it is improving (one chip) and over which
+// days (one caption); how it is counted is in its tooltip. Anything longer lives in Details below.
+
+const PILL = {
+  up: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
+  down: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
+  warn: 'bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300',
+  plum: 'bg-[#F3ECF8] text-[#6D4091] dark:bg-[#6D4091]/20 dark:text-[#e6d6f5]',
+  muted: 'bg-muted text-muted-foreground',
+} as const
+
+function Pill({ tone, children }: { tone: keyof typeof PILL; children: ReactNode }) {
+  return (
+    <span className={cn('inline-flex items-center gap-0.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11.5px] font-semibold tabular-nums', PILL[tone])}>
+      {children}
+    </span>
+  )
+}
+
+function DeltaPill({ pct }: { pct?: number | null }) {
+  if (pct == null) return null
+  const up = pct >= 0
+  return (
+    <Pill tone={up ? 'up' : 'down'}>
+      {up ? <ArrowUpRight size={12} aria-hidden="true" /> : <ArrowDownRight size={12} aria-hidden="true" />}
+      {up ? '+' : ''}{pct.toFixed(1)} %
+    </Pill>
+  )
+}
+
+function KpiCard({ label, value, exact, chip, caption, basis, drill, me, children }: {
+  label: string; value?: string; exact?: string; chip?: ReactNode; caption: string; basis: string
+  drill?: Drill | null; me: Me | null; children?: ReactNode
+}) {
+  return (
+    <article title={basis} className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="flex min-h-6 items-center justify-between gap-2">
+        <h3 className="truncate text-[11.5px] font-semibold uppercase tracking-[0.08em] text-[#6D4091] dark:text-[#c7a6e6]">{label}</h3>
+        <DrillLink drill={drill} me={me} iconOnly />
+      </div>
+      {(value != null || chip) && (
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+          {value != null && (
+            <span title={exact} className="font-display text-[1.7rem] font-bold leading-tight tabular-nums tracking-tight">{value}</span>
+          )}
+          {chip}
+        </div>
+      )}
+      {children}
+      <p className="mt-auto pt-2 text-[11.5px] leading-snug text-muted-foreground">{caption}</p>
+    </article>
+  )
+}
+
+function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
+  const sales = findTile(ov, 'sales.accessories')
+  const trend = findTile(ov, 'sales.trend')
+  const pace = findTile(ov, 'sales.pace')
+  const funnel = findTile(ov, 'orders.funnel')
+  const waiting = findTile(ov, 'orders.waiting')
+  const active = findTile(ov, 'customers.active')
+  const margin = findTile(ov, 'profit.official')
+  const ar = findTile(ov, 'ar.total')
+  const over90 = findTile(ov, 'ar.over90')
+  const span = ov.period.focus?.label ?? ''
+  const waitingN = waiting?.value ?? 0
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+      {sales && (
+        <KpiCard label="Accessories sales" value={fmtBhd0(sales.value)} exact={`${fmtBhd(sales.value)} ex-VAT`}
+          chip={<DeltaPill pct={sales.delta_pct} />} basis={sales.basis} drill={sales.drill} me={me}
+          caption={`${span}${sales.compare ? ` vs ${sales.compare.label}` : ''} · ex-VAT`}>
+          {!!trend?.series?.length && <Sparkline series={trend.series} compact />}
+        </KpiCard>
+      )}
+      {pace && (
+        <KpiCard label="Month pace" value={fmtBhd0(pace.projected_bhd)} exact={`${fmtBhd(pace.projected_bhd)} projected`}
+          chip={pace.target_bhd ? <Pill tone={pace.on_track ? 'up' : 'warn'}>{fmtPct(pace.projected_pct_of_target)} of target</Pill> : null}
+          basis={pace.basis} me={me}
+          caption={pace.target_bhd
+            ? `Projected ${pace.month ?? ''} · target ${fmtBhd0(pace.target_bhd)}`
+            : `Projected ${pace.month ?? ''} · no company target set`}>
+          {!!pace.target_bhd && <Bar pct={pace.projected_pct_of_target ?? 0} className="mt-2" />}
+        </KpiCard>
+      )}
+      {funnel && (
+        <KpiCard label="Marketplace orders" basis={funnel.basis} drill={waiting?.drill} me={me}
+          chip={waitingN > 0 ? <Pill tone="down">{fmtCount(waitingN)} waiting &gt;24 business h</Pill> : null}
+          caption={`Placed ${ov.period.live.label} · live`}>
+          {/* three cells side by side; on the six-across row (2xl) the card is narrow, so three short rows */}
+          <dl className="mt-1.5 grid grid-cols-3 gap-1.5 2xl:grid-cols-1 2xl:gap-1">
+            {(funnel.stages || []).map((s) => (
+              <div key={s.key} className="min-w-0 rounded-lg bg-[#F3ECF8] px-2 py-1 dark:bg-[#6D4091]/15 2xl:flex 2xl:items-baseline 2xl:justify-between 2xl:py-0.5">
+                <dt className="truncate text-[10.5px] font-semibold text-[#6D4091] dark:text-[#c7a6e6]">{s.label}</dt>
+                <dd className="font-display text-[1.2rem] font-bold leading-tight tabular-nums 2xl:text-[1rem]">{fmtCount(s.orders)}</dd>
+              </div>
+            ))}
+          </dl>
+        </KpiCard>
+      )}
+      {active && (
+        <KpiCard label="Active accounts" value={fmtCount(active.value)} basis={active.basis} me={me}
+          chip={active.new_30d ? <Pill tone="plum">+{fmtCount(active.new_30d)} new</Pill> : null}
+          caption={`Named B2B · 30 days to ${fmtDay(ov.freshness.focus_to)}`} />
+      )}
+      {margin && (
+        <KpiCard label="Gross margin" value={fmtPct(margin.value)} basis={margin.basis} drill={margin.drill} me={me}
+          exact={`${fmtBhd(margin.gp_bhd)} gross profit on ${fmtBhd(margin.net_ex_vat_bhd)} ex-VAT`}
+          caption={`${coversLabel(margin.covers)} · ex-VAT vs Focus COGS`} />
+      )}
+      {ar && (
+        <KpiCard label="Receivables" value={fmtBhd0(ar.value)} exact={fmtBhd(ar.value)} basis={ar.basis} drill={ar.drill} me={me}
+          chip={over90 ? <Pill tone={(over90.value ?? 0) >= 30 ? 'down' : 'muted'}>{fmtPct(over90.value)} over 90 days</Pill> : null}
+          caption={`Focus ageing · ${fmtDay(ov.freshness.ar_as_of)}`} />
+      )}
+    </div>
+  )
+}
+
+function WeeklyChart({ t, pace, drill, me }: { t: Tile; pace?: Tile; drill?: Drill | null; me: Me | null }) {
+  const series = t.series || []
+  // a week is five business days: the monthly target over the month's business days, five times
+  const weekly = pace?.target_bhd && pace.business_days_total ? (pace.target_bhd / pace.business_days_total) * 5 : null
+  return (
+    <section aria-labelledby="fs-weekly" title={t.basis} className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 id="fs-weekly" className="font-display text-[1rem] font-bold">Weekly Accessories sales</h2>
+          <p className="text-[11.5px] text-muted-foreground">ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far</p>
+        </div>
+        <DrillLink drill={drill} me={me} />
+      </div>
+      <div className="mt-2 h-[210px] min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={series} margin={{ top: 14, right: 8, left: 0, bottom: 0 }}>
+            <XAxis dataKey="label" interval="preserveStartEnd" minTickGap={10}
+              tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
+              width={44} tickFormatter={(v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+            <Tooltip cursor={{ fill: 'hsl(var(--accent))' }}
+              formatter={(v) => [fmtBhd(Number(v)), 'Accessories ex-VAT']}
+              labelFormatter={(label, payload) => {
+                const p = payload?.[0]?.payload as WeekPoint | undefined
+                return `Week of ${String(label)}${p?.partial ? ' (so far)' : ''}`
+              }}
+              contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+            {weekly != null && (
+              <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
+                label={{ value: `weekly target ${fmtBhd0(weekly)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+            )}
+            <ChartBar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={34}>
+              {series.map((p) => <Cell key={p.week_start} fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1} />)}
+            </ChartBar>
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
+  )
+}
+
+// the orders card carries the waiting count and the header chip the data date: not repeated in the list
+const EXCLUDE_ON_CARDS = new Set(['orders_waiting', 'stale_data'])
+const TONE_DOT = { alert: 'bg-rose-500', warn: 'bg-amber-500', info: 'bg-[#6D4091]' } as const
+
+function Exceptions({ m, me }: { m?: Module; me: Me | null }) {
+  const all = (m?.items || []).filter((i) => !EXCLUDE_ON_CARDS.has(i.key))
+  const top = all.slice(0, 5)
+  return (
+    <section aria-labelledby="fs-attention" className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 id="fs-attention" className="font-display text-[1rem] font-bold">Needs attention</h2>
+        {all.length > top.length && <span className="text-[11.5px] text-muted-foreground">{top.length} of {all.length} · the rest in Details</span>}
+      </div>
+      {!top.length ? (
+        <p className="mt-3 flex items-center gap-2 text-[13px] font-medium text-emerald-700 dark:text-emerald-300">
+          <CheckCircle2 size={16} aria-hidden="true" />
+          {m?.items?.length ? 'Nothing else needs attention.' : 'Nothing needs attention right now.'}
+        </p>
+      ) : (
+        <ul className="mt-1.5 divide-y divide-border/70">
+          {top.map((it) => (
+            <li key={it.key} title={`${it.detail} · ${it.basis}`} className="flex items-center gap-2.5 py-2 text-[13px]">
+              <span aria-hidden="true" className={cn('h-2 w-2 shrink-0 rounded-full', TONE_DOT[it.tone])} />
+              <span className="sr-only">{it.tone === 'alert' ? 'Alert:' : 'Warning:'}</span>
+              {/* a narrow column wraps a long title once rather than cutting its meaning off */}
+              <span className="line-clamp-2 min-w-0 flex-1 font-medium leading-snug">{it.title}</span>
+              {/* the money once: a title that already names it ("BHD 300.000 over 90 days …") needs no column */}
+              {it.bhd != null && !it.title.includes('BHD') && (
+                <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">{fmtBhd(it.bhd)}</span>
+              )}
+              <DrillLink drill={it.drill} me={me} iconOnly />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function Panel({ id, title, drill, me, children }: { id: string; title: string; drill?: Drill | null; me: Me | null; children: ReactNode }) {
+  return (
+    <section aria-labelledby={id} className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="flex items-center justify-between gap-2">
+        <h2 id={id} className="flex items-center gap-2 font-display text-[1rem] font-bold">
+          <span className="h-3.5 w-1 rounded-full bg-gradient-to-b from-[#6D4091] to-[#824FAB]" aria-hidden="true" />
+          {title}
+        </h2>
+        <DrillLink drill={drill} me={me} />
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function SubHead({ tone = 'plum', children }: { tone?: 'plum' | 'up' | 'down' | 'warn'; children: ReactNode }) {
+  return (
+    <div className={cn('mt-3 text-[11px] font-semibold uppercase tracking-wide',
+      tone === 'plum' && 'text-[#6D4091] dark:text-[#c7a6e6]', tone === 'up' && 'text-emerald-700 dark:text-emerald-400',
+      tone === 'down' && 'text-rose-700 dark:text-rose-400', tone === 'warn' && 'text-amber-700 dark:text-amber-400')}>
+      {children}
+    </div>
+  )
+}
+
+function SalesmenPanel({ t, me }: { t: Tile; me: Me | null }) {
+  const reps = (t.rows || []).filter((r) => !r.no_target)
+  const lead = [...reps].sort((a, b) => b.net_bhd - a.net_bhd).slice(0, 3)
+  const shown = new Set(lead.map((r) => r.salesman))
+  // furthest behind: the lowest progress among the reps not already leading (a short team shows them once)
+  const behind = reps.filter((r) => !shown.has(r.salesman))
+    .sort((a, b) => (a.progress_pct ?? 0) - (b.progress_pct ?? 0)).slice(0, 3)
+  const below = reps.filter((r) => !r.tier_reached).length
+  const tier = (r: TeamRow) => (r.tier_reached ? `Tier ${r.tier_reached}` : 'Below tier 1')
+  const gap = (r: TeamRow) => (r.gap_to_next_bhd != null && r.next_tier
+    ? `${tier(r)} · ${fmtBhd0(r.gap_to_next_bhd)} to tier ${r.next_tier}` : tier(r))
+  return (
+    <Panel id="fs-reps" title="Salesmen" drill={t.drill} me={me}>
+      {!reps.length ? <p className="mt-2 text-[12.5px] text-muted-foreground">No rep has a target this month yet.</p> : (
+        <>
+          <p className="mt-1 text-[12px] text-muted-foreground">
+            <span className={cn('font-semibold', below ? 'text-amber-700 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400')}>
+              {below} of {reps.length}
+            </span> below tier 1 · Accessories ex-VAT this month
+          </p>
+          <SubHead tone="up">Leading</SubHead>
+          <MiniList rows={lead.map((r) => ({ label: r.name || r.salesman, value: fmtBhd0(r.net_bhd), sub: tier(r) }))} />
+          {!!behind.length && (
+            <>
+              <SubHead tone="down">Furthest behind</SubHead>
+              <MiniList rows={behind.map((r) => ({ label: r.name || r.salesman, value: fmtBhd0(r.net_bhd), sub: gap(r),
+                tone: r.tier_reached ? undefined : ('down' as const) }))} />
+            </>
+          )}
+        </>
+      )}
+    </Panel>
+  )
+}
+
+function ProductsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
+  const drops = findTile(ov, 'products.price_drops')
+  // the Profitability module: the API drops it for a login without 'Margins', so the cost never reaches one
+  const thin = findTile(ov, 'profit.thin_drops')
+  const movers = findTile(ov, 'products.movers')
+  const soldOut = findTile(ov, 'products.sold_out')
+  if (!drops && !movers && !soldOut) return null
+  return (
+    <Panel id="fs-products" title="Products" drill={movers?.drill ?? soldOut?.drill} me={me}>
+      {drops && (
+        <>
+          <SubHead>
+            <span className="inline-flex items-center gap-1">
+              {fmtCount(drops.value)} price drop{drops.value === 1 ? '' : 's'}
+              <DrillLink drill={drops.drill} me={me} iconOnly className="h-5 w-5" />
+            </span>
+          </SubHead>
+          {!!drops.value && <MiniList rows={(drops.items || []).slice(0, 3).map(dropRow)} />}
+        </>
+      )}
+      {thin && !!thin.value && (
+        <>
+          <SubHead tone="warn">{fmtCount(thin.value)} cut to {thin.threshold_pct ?? 20} % margin or less</SubHead>
+          <MiniList rows={(thin.items || []).slice(0, 3).map(thinRow)} />
+        </>
+      )}
+      {movers && (
+        <>
+          <SubHead tone="up">Rising · 30 days</SubHead>
+          <MiniList rows={(movers.rising || []).slice(0, 3).map((m) => ({ label: m.item, value: `+${fmtBhd0(m.delta_bhd)}`, tone: 'up' as const }))} />
+          <SubHead tone="down">Losing momentum</SubHead>
+          <MiniList rows={(movers.falling || []).slice(0, 3).map((m) => ({ label: m.item, value: fmtBhd0(m.delta_bhd), tone: 'down' as const }))} />
+        </>
+      )}
+      {soldOut && (
+        <p className="mt-3 text-[12.5px]">
+          <span className={cn('font-semibold', (soldOut.value ?? 0) > 0 && 'text-amber-700 dark:text-amber-400')}>
+            {fmtCount(soldOut.value)} sold out with demand
+          </span>
+          <span className="text-muted-foreground"> · {fmtBhd0(soldOut.bhd)} sold in 60 days</span>
+        </p>
+      )}
+    </Panel>
+  )
+}
+
+function MerchantsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
+  const dormant = findTile(ov, 'customers.dormant')
+  const active = findTile(ov, 'customers.active')
+  if (!dormant && !active) return null
+  return (
+    <Panel id="fs-merchants" title="Merchants" drill={dormant?.drill ?? { to: '/command/customers', label: 'Customers' }} me={me}>
+      {active && (
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          <span className="font-semibold text-foreground">{fmtCount(active.new_30d)} new</span> in 30 days · {fmtCount(active.value)} active
+        </p>
+      )}
+      {dormant && (
+        <>
+          <SubHead tone={(dormant.value ?? 0) > 0 ? 'warn' : 'plum'}>
+            {fmtCount(dormant.value)} gone quiet · {fmtBhd0(dormant.bhd)} a year
+          </SubHead>
+          <MiniList rows={(dormant.items || []).slice(0, 3).map((r) => ({
+            label: String(r.account), value: fmtBhd0(num(r.net_12m_bhd)), sub: `no invoice for ${r.days} days`,
+          }))} />
+        </>
+      )}
+    </Panel>
+  )
+}
+
+function FirstScreen({ ov, me }: { ov: Overview; me: Me | null }) {
+  const trend = findTile(ov, 'sales.trend')
+  const sales = findTile(ov, 'sales.accessories')
+  const team = findTile(ov, 'team.reps')
+  const attention = ov.modules.find((m) => m.key === 'attention')
+  return (
+    <div className="mt-5 space-y-3">
+      <KpiRow ov={ov} me={me} />
+      <div className={cn('grid grid-cols-1 gap-3', trend?.series && 'xl:grid-cols-[2fr_1fr]')}>
+        {trend?.series && (
+          <WeeklyChart t={trend} pace={findTile(ov, 'sales.pace')} me={me}
+            drill={sales?.drill ? { to: sales.drill.to, label: 'Sales' } : null} />
+        )}
+        <Exceptions m={attention} me={me} />
+      </div>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        {team && <SalesmenPanel t={team} me={me} />}
+        <ProductsPanel ov={ov} me={me} />
+        <MerchantsPanel ov={ov} me={me} />
+      </div>
+    </div>
+  )
+}
+
 /* ─────────────────────────── the page ─────────────────────────── */
 
 export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' | 'customers' }) {
@@ -677,7 +1124,7 @@ export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' 
     ? 'Every rep this month: sales ex-VAT, tier, named shops, marketplace orders and the last Focus invoice.'
     : view === 'customers'
       ? 'Who is buying, who has gone quiet, and how much rests on the biggest accounts.'
-      : 'The whole company on one page. Every tile says what it counts and how fresh it is.'
+      : 'The whole company on one page. Hover any figure for how it is counted; every module in full is under Details.'
   const updated = ov ? new Date(ov.generated_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''
 
   return (
@@ -734,46 +1181,65 @@ export default function CommandCentre({ view = 'all' }: { view?: 'all' | 'team' 
               Some figures could not be read just now and show as not available; the rest of the page is complete.
             </p>
           )}
-          {ov.modules.filter((m) => view === 'all' || m.key === view || (view === 'team' && m.key === 'attention')).map((m) => {
-            if (m.key === 'attention') {
-              const items = view === 'team' ? (m.items || []).filter((i) => i.key === 'rep_silence') : m.items
-              if (view === 'team' && !items?.length) return null
-              return <ModuleSection key={m.key} m={m} me={me}><Attention m={{ ...m, items }} me={me} /></ModuleSection>
-            }
-            if (m.key === 'team') {
-              const t = m.tiles[0]
-              return (
-                <ModuleSection key={m.key} m={view === 'team' ? { ...m, drill: null } : m} me={me}>
-                  {t?.available ? (
-                    <>
-                      <TeamTable t={t} full={view === 'team'} />
-                      <p className="mt-2 flex items-start gap-1.5 text-[11px] text-muted-foreground"><Info size={12} className="mt-[1px] shrink-0" aria-hidden="true" />{t.basis}</p>
-                    </>
-                  ) : <p className="text-[13px] text-muted-foreground">{t?.note || 'Not available yet.'}</p>}
-                </ModuleSection>
-              )
-            }
-            if (m.key === 'customers' && view === 'customers') {
-              const dormant = m.tiles.find((t) => t.key === 'customers.dormant')
-              return (
-                <ModuleSection key={m.key} m={{ ...m, drill: null }} me={me}>
-                  <TileGrid m={{ ...m, tiles: m.tiles.map((t) => (t.key === 'customers.dormant' ? { ...t, drill: null } : t)) }} me={me} />
-                  {dormant?.available && (
-                    <div className="mt-5">
-                      <h3 className="mb-2 font-display text-[1rem] font-bold">Every dormant account, by the last 12 months</h3>
-                      <DormantTable rows={dormant.all || []} />
-                    </div>
-                  )}
-                </ModuleSection>
-              )
-            }
-            return <ModuleSection key={m.key} m={m} me={me}><TileGrid m={m} me={me} /></ModuleSection>
-          })}
+          {view === 'all' && <FirstScreen ov={ov} me={me} />}
+          {view === 'all' ? (
+            <details className="group mt-6 rounded-2xl border bg-card/40 px-4 pb-4 pt-1 sm:px-5">
+              <summary className="flex cursor-pointer list-none items-center gap-2 py-3 font-display text-[1rem] font-bold">
+                <ChevronDown size={17} className="text-[#6D4091] transition-transform group-open:rotate-180 motion-reduce:transition-none dark:text-[#c7a6e6]" aria-hidden="true" />
+                Details · every module
+                <span className="font-sans text-[12px] font-normal text-muted-foreground">each tile with its basis</span>
+              </summary>
+              <ModuleList ov={ov} me={me} view={view} />
+            </details>
+          ) : <ModuleList ov={ov} me={me} view={view} />}
           <p className="mt-8 text-center text-[11px] text-muted-foreground">
             Read only. Focus figures change when the daily reports are uploaded; marketplace figures refresh every two minutes.
           </p>
         </div>
       )}
     </div>
+  )
+}
+
+/** Every module in full: the page's Details on the whole view, the page itself on Team and Customers. */
+function ModuleList({ ov, me, view }: { ov: Overview; me: Me | null; view: 'all' | 'team' | 'customers' }) {
+  return (
+    <>
+      {ov.modules.filter((m) => view === 'all' || m.key === view || (view === 'team' && m.key === 'attention')).map((m) => {
+        if (m.key === 'attention') {
+          const items = view === 'team' ? (m.items || []).filter((i) => i.key === 'rep_silence') : m.items
+          if (view === 'team' && !items?.length) return null
+          return <ModuleSection key={m.key} m={m} me={me}><Attention m={{ ...m, items }} me={me} /></ModuleSection>
+        }
+        if (m.key === 'team') {
+          const t = m.tiles[0]
+          return (
+            <ModuleSection key={m.key} m={view === 'team' ? { ...m, drill: null } : m} me={me}>
+              {t?.available ? (
+                <>
+                  <TeamTable t={t} full={view === 'team'} />
+                  <p className="mt-2 flex items-start gap-1.5 text-[11px] text-muted-foreground"><Info size={12} className="mt-[1px] shrink-0" aria-hidden="true" />{t.basis}</p>
+                </>
+              ) : <p className="text-[13px] text-muted-foreground">{t?.note || 'Not available yet.'}</p>}
+            </ModuleSection>
+          )
+        }
+        if (m.key === 'customers' && view === 'customers') {
+          const dormant = m.tiles.find((t) => t.key === 'customers.dormant')
+          return (
+            <ModuleSection key={m.key} m={{ ...m, drill: null }} me={me}>
+              <TileGrid m={{ ...m, tiles: m.tiles.map((t) => (t.key === 'customers.dormant' ? { ...t, drill: null } : t)) }} me={me} />
+              {dormant?.available && (
+                <div className="mt-5">
+                  <h3 className="mb-2 font-display text-[1rem] font-bold">Every dormant account, by the last 12 months</h3>
+                  <DormantTable rows={dormant.all || []} />
+                </div>
+              )}
+            </ModuleSection>
+          )
+        }
+        return <ModuleSection key={m.key} m={m} me={me}><TileGrid m={m} me={me} /></ModuleSection>
+      })}
+    </>
   )
 }

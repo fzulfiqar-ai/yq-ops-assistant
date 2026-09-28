@@ -18,9 +18,10 @@ Covered:
     (test orders out), accepted rate, confirm-time P50/P90 with open orders at their age, orders
     waiting over 24 business hours across a weekend, invoice match, self-orders; the rep table
     (attainment + named-shop share + marketplace orders + last invoice); active / new / dormant
-    accounts, top-10 concentration, Cash Customer share; movers, sold out with demand, stock shape
-    at cost; official and landed margin; receivables with and without Focus's Grand Total, over 90,
-    top overdue, unowned over-90 AR;
+    accounts, top-10 concentration, Cash Customer share; movers, trade-price drops (the window from
+    app_settings, no cost on the tile), sold out with demand, stock shape at cost; official and
+    landed margin, the price cuts at a thin margin (Profitability only); receivables with and
+    without Focus's Grand Total, over 90, top overdue, unowned over-90 AR;
   * Needs attention: every exception, ranked alerts first; stale data; a failed source costs one
     tile, never the page;
   * before the r7b migration: the agent-view fallback (no accepted rate, no match rate, test orders
@@ -173,6 +174,23 @@ STOCK = [
     {"item_name": "Item Dead", "current_stock": 10, "sold_90d": 0, "days_cover": None, "cost_bhd": 3.0},
     {"item_name": "Item NoCost", "current_stock": 5, "sold_90d": 1, "days_cover": 450, "cost_bhd": None},
 ]
+# trade-price (MA_base) cuts, as v_price_change answers them; the costs as v_product_economics does
+PRICE_DROPS = [
+    {"sku_code": "CB01", "item_name": "Item Cable", "changed_on": "2026-09-20", "current_price_bhd": 0.8,
+     "prev_price_bhd": 1.0, "price_change_pct": -20.0},
+    {"sku_code": "CH02", "item_name": "Item Charger", "changed_on": "2026-09-15", "current_price_bhd": 2.2,
+     "prev_price_bhd": 2.5, "price_change_pct": -12.0},
+    {"sku_code": "EP03", "item_name": "Item Earphones", "changed_on": "2026-09-10", "current_price_bhd": 3.3,
+     "prev_price_bhd": 5.5, "price_change_pct": -40.0},
+    {"sku_code": "BT04", "item_name": "Item Holder", "changed_on": "2026-09-01", "current_price_bhd": 1.1,
+     "prev_price_bhd": 1.2, "price_change_pct": -8.3},
+]
+DROP_COSTS = [
+    {"sku_code": "CB01", "cost_bhd": 0.65, "cost_source": "mrn"},             # 0.8 ÷ 1.10 = 0.727: 10.6 % margin
+    {"sku_code": "ch02", "cost_bhd": 1.0, "cost_source": "purchase_costs"},   # typed lower-case; 2.0 ex-VAT: 50 %
+    {"sku_code": "EP03", "cost_bhd": 0.1, "cost_source": "purchase_costs"},   # under 10 % of 3.300: not trusted
+    {"sku_code": "BT04", "cost_bhd": 0.8, "cost_source": "mrn"},              # 1.1 ÷ 1.10 = 1.000: exactly 20 %
+]
 MARGIN_TOTALS = {"n": 10, "below": 1, "net": 1100, "net_ex": 1000, "gp_ex": 376, "gp_rep": 400}
 BELOW_COST = [{"item_name": "Item Down", "gp_ex_vat_bhd": -5.5, "margin_ex_vat_pct": -12.5, "is_below_cost": True}]
 LANDED = {"costed_net_bhd": 800, "gp_bhd": 272, "acc_net_bhd": 1000}
@@ -229,7 +247,7 @@ class FakeRPC:
         self.data = {"anchor": ANCHOR, "sales": SALES, "trend": TREND, "reps": REPS, "attainment": ATTAINMENT,
                      "customers": CUSTOMERS, "movers": MOVERS, "stock": STOCK, "margin_totals": MARGIN_TOTALS,
                      "below_cost": BELOW_COST, "landed": LANDED, "receivables": RECEIVABLES, "ar_owner": AR_OWNER,
-                     "orders": ORDERS, "match": MATCH}
+                     "orders": ORDERS, "match": MATCH, "price_drops": PRICE_DROPS, "drop_costs": DROP_COSTS}
         self.data.update(over)
         self.calls: list[tuple[str, str, list | None]] = []
 
@@ -245,7 +263,9 @@ class FakeRPC:
                  ("AS net_12m", "customers"), ("AS qty_30", "movers"), ("FROM v_stock_health h", "stock"),
                  ("AS costed_net_bhd", "landed"), ("FROM ar_ageing_totals", "ar_totals"),
                  ("DISTINCT ON (v.customer_name)", "ar_owner"), ("AS invoiced_open", "match"),
-                 ("FROM v_command_orders", "orders"), ("units_count AS units_ordered", "orders_fallback")]
+                 ("FROM v_command_orders", "orders"), ("units_count AS units_ordered", "orders_fallback"),
+                 # the costs' subquery also reads v_price_change: its own needle comes first
+                 ("FROM v_product_economics e WHERE", "drop_costs"), ("FROM v_price_change", "price_drops")]
         for needle, name in table:
             if needle in s:
                 return name
@@ -677,6 +697,101 @@ def _():
     assert chips["No sale in 90 days"]["value"] == 30.0 and chips["No sale in 90 days"]["items"] == 1
 
 
+@test("products: price drops — every trade-price cut in the window, deepest first, was → now, no cost on the tile")
+def _():
+    ov = _overview()
+    assert [t["key"] for t in _module(ov, "products")["tiles"]] == ["products.movers", "products.price_drops",
+                                                                     "products.sold_out", "products.stock_shape"]
+    t = _tile(ov, "products.price_drops")
+    assert t["available"] is True and t["value"] == 4 and t["unit"] == "count"
+    assert [x["code"] for x in t["items"]] == ["EP03", "CB01", "CH02", "BT04"], "by the cut, deepest first"
+    assert t["items"][0] == {"code": "EP03", "item": "Item Earphones", "was_bhd": 5.5, "now_bhd": 3.3,
+                             "cut_pct": 40.0, "on": "2026-09-10"}, t["items"][0]
+    assert [x["cut_pct"] for x in t["items"]] == [40.0, 20.0, 12.0, 8.3]
+    assert t["latest_on"] == "2026-09-20"
+    assert t["basis"] == "Trade-price (MA_base) cuts in the last 30 days · the marketplace shows Was → Now on them"
+    assert t["drill"] == {"to": "/prices", "label": "Price tracker"}
+    assert "cost" not in json.dumps(t).lower(), "trade prices only: a cost never rides on this tile"
+    from app import metrics as m
+    many = [{"sku_code": f"X{i:02d}", "item_name": f"Item {i}", "changed_on": "2026-09-20", "current_price_bhd": 1,
+             "prev_price_bhd": 1 + i / 10, "price_change_pct": None} for i in range(1, 9)]
+    t = _tile(_overview(FakeRPC(price_drops=many)), "products.price_drops")
+    assert t["value"] == 8 and len(t["items"]) == m.TOP_N and t["items"][0]["code"] == "X08"
+    # a row that is not a cut (the SQL says so; a junk row still never reads as one)
+    assert m.price_drop_rows([{"sku_code": "Z", "current_price_bhd": 2, "prev_price_bhd": 1}]) == []
+
+
+@test("products: the price-drop window is app_settings.shop_price_drop_days (30 when unset or junk), same rule as the shop")
+def _():
+    from app import metrics as m
+    fake = FakeRPC()
+    _overview(fake)
+    assert fake.params("price_drops") == ["30"] and fake.params("drop_costs") == ["30"]
+    fake = FakeRPC(anchor={**ANCHOR, "price_drop_days": "14"})
+    ov = _overview(fake)
+    assert fake.params("price_drops") == ["14"] and fake.params("drop_costs") == ["14"]
+    assert "in the last 14 days" in _tile(ov, "products.price_drops")["basis"]
+    for junk in ("0", "-3", "soon", None):
+        fake = FakeRPC(anchor={**ANCHOR, "price_drop_days": junk})
+        _overview(fake)
+        assert fake.params("price_drops") == ["30"], junk
+    assert "key = 'shop_price_drop_days'" in m.ANCHOR_SQL and m.DROP_DAYS_DEFAULT == 30
+    # app.shop._load_price_drops' rule: a real cut (now under was) that started inside the window
+    for sql in (m.PRICE_DROPS_SQL, m.PRICE_DROP_COSTS_SQL):
+        assert "current_price_bhd < " in sql and "prev_price_bhd" in sql and "changed_on >= CURRENT_DATE - $1::int" in sql
+    import inspect
+    from app import shop
+    assert "current_price_bhd < prev_price_bhd AND changed_on >= CURRENT_DATE" in inspect.getsource(shop._load_price_drops)
+
+
+@test("products: a failing price-drop source costs its tile only; the page and the other tiles stand")
+def _():
+    ov = _overview(FakeRPC(fail={"price_drops": RuntimeError("statement timeout")}))
+    assert ov["unavailable"] == ["price_drops"]
+    assert _tile(ov, "products.price_drops")["available"] is False and _tile(ov, "products.price_drops")["note"]
+    assert _tile(ov, "profit.thin_drops")["available"] is False, "no drops, no thin-margin list"
+    assert _tile(ov, "products.movers")["available"] is True and _tile(ov, "sales.accessories")["value"] == 930.0
+    ov = _overview(FakeRPC(fail={"drop_costs": RuntimeError("boom")}))
+    assert ov["unavailable"] == ["drop_costs"]
+    assert _tile(ov, "products.price_drops")["value"] == 4, "the costs failing never costs the drops"
+    assert _tile(ov, "profit.thin_drops")["available"] is False
+
+
+@test("profitability: price cuts at a thin margin — ex-VAT new price vs landed cost, 20 % or less, behind 'Margins'")
+def _():
+    from app import command_api, metrics as m
+    ov = _overview()
+    assert "profit.thin_drops" in [t["key"] for t in _module(ov, "profitability")["tiles"]]
+    t = _tile(ov, "profit.thin_drops")
+    # CB01 0.800 ÷ 1.10 against 0.650 = 10.6 %; BT04 exactly 20.0 % counts; CH02 at 50 % does not; EP03's
+    # 0.100 cost is under 10 % of its price (not trusted) and is left out of the costed count
+    assert t["value"] == 2 and [x["code"] for x in t["items"]] == ["CB01", "BT04"], t
+    assert t["items"][0] == {"code": "CB01", "item": "Item Cable", "now_bhd": 0.8, "cut_pct": 20.0,
+                             "unit_cost_bhd": 0.65, "margin_pct": 10.6}, t["items"][0]
+    assert t["items"][1]["margin_pct"] == 20.0 and t["costed"] == 3 and t["drops"] == 4
+    assert t["threshold_pct"] == 20.0 and m.THIN_MARGIN_PCT == Decimal("20")
+    assert "ex-VAT" in t["basis"] and "landed cost" in t["basis"] and "last 30 days" in t["basis"]
+    # the VAT rate is the setting's: at 5 % BT04's 1.100 is 1.048 ex-VAT → 23.6 %, no longer thin
+    t5 = _tile(_overview(FakeRPC(anchor={**ANCHOR, "shop_vat_rate": "0.05"})), "profit.thin_drops")
+    assert [x["code"] for x in t5["items"]] == ["CB01"], t5
+    # a login without 'Margins' loses the whole Profitability module: the cost never leaves the server,
+    # while the price drops (trade prices, not cost) stay on its Products module
+    narrow = command_api.scope_overview(ov, frozenset({"Receivables"}))
+    dump = json.dumps(narrow)
+    assert "profit.thin_drops" not in dump and "unit_cost_bhd" not in dump and "margin_pct" not in dump
+    assert _tile(narrow, "products.price_drops")["value"] == 4
+    assert _tile(command_api.scope_overview(ov, frozenset({"Margins"})), "profit.thin_drops")["value"] == 2
+
+
+@test("periods: 'today' reads 'Latest day' (the last loaded Focus sale day, not the calendar's today)")
+def _():
+    from app import metrics as m
+    assert m.PERIODS["today"] == "Latest day"
+    ov = _overview(period="today")
+    assert ov["period"]["label"] == "Latest day"
+    assert {o["key"]: o["label"] for o in ov["period"]["options"]}["today"] == "Latest day"
+
+
 @test("profitability: official GM on Focus COGS, landed GM with its coverage, the below-cost list")
 def _():
     ov = _overview()
@@ -1010,10 +1125,10 @@ def _():
 def _():
     from app import metrics as m
     granted = {"v_sales", "stock_balance", "v_receivables", "v_product_margin", "app_settings", "v_stock_health",
-               "v_product_economics", "ar_ageing_totals", "v_command_orders", "v_shop_orders_agent"}
+               "v_product_economics", "ar_ageing_totals", "v_command_orders", "v_shop_orders_agent", "v_price_change"}
     sqls = [m.ANCHOR_SQL, m.SALES_SQL, m.TREND_SQL, m.REPS_SQL, m.CUSTOMERS_SQL, m.MOVERS_SQL, m.STOCK_SQL,
             m.LANDED_SQL, m.RECEIVABLES_SQL, m.AR_TOTALS_SQL, m.AR_OWNER_SQL, m.ORDERS_SQL, m.ORDERS_FALLBACK_SQL,
-            m.MATCH_SQL, m.LAST_ORDER_SQL]
+            m.MATCH_SQL, m.LAST_ORDER_SQL, m.PRICE_DROPS_SQL, m.PRICE_DROP_COSTS_SQL]
     for s in sqls:
         rels = set(re.findall(r"\b(?:from|join)\s+([a-z_][a-z0-9_]*)\b(?!\.)", s, re.I))
         rels -= {"jsonb_to_recordset"}
@@ -1273,6 +1388,27 @@ def _():
     assert "awaiting acceptance" in page and "no Focus invoice found" in page and "added by the rep" in page
     for s in ("today", "7d", "mtd", "last_month", "quarter"):
         assert s in _web("pages/CommandCentre.tsx")
+
+
+@test("web page: a first screen above the modules — KPI cards, the weekly chart, five exceptions, three panels; Details below")
+def _():
+    page = _web("pages/CommandCentre.tsx")
+    for needle in ("function FirstScreen(", "EXCLUDE_ON_CARDS", ".slice(0, 5)", "ReferenceLine", "<details",
+                   "products.price_drops", "function findTile(", "function KpiCard(", "Details · every module"):
+        assert needle in page, needle
+    assert "{ key: 'today', label: 'Latest day' }" in page and "label: 'Today'" not in page
+    # the orders card already carries the waiting count and the header chip the data date: not repeated
+    assert "new Set(['orders_waiting', 'stale_data'])" in page
+    # a tile a login may not read (restricted) or that did not build is simply not drawn
+    fn = page.split("function findTile(", 1)[1].split("\n}\n", 1)[0]
+    assert "t.restricted" in fn and "t.available" in fn
+    # the first screen only on the whole page; Team and Customers stay as they were
+    assert "view === 'all' && <FirstScreen" in page
+    # the thin-margin cuts come from the Profitability module, which the API drops without 'Margins'
+    assert "findTile(ov, 'profit.thin_drops')" in page
+    assert "AI Head" not in page and "Market Intel" not in page
+    # a KPI card: whole BHD on the card, the exact figure in its tooltip
+    assert "maximumFractionDigits: 0" in page and "title={exact" in page
 
 
 @test("review: CI's web Lint step is a hard gate (lint is at 0 errors), its comment says so")
