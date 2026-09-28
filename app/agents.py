@@ -1195,9 +1195,9 @@ def reorder_proposal(target_days_cover: int = 45, lead_time_days: int = 21) -> d
     landed = {x["code"]: x["c"] for x in (_q(
         "SELECT SPLIT_PART(sku_code,' ',1) AS code, ROUND(AVG(landed_cost_bhd)::numeric,4) AS c "
         "FROM mrn_landed_costs WHERE landed_cost_bhd > 0 GROUP BY 1") or [])}
+    # R7e: the MA_base price in force today (MAX over the history kept a cut SKU at its old price)
     sell_book = {x["code"]: x["s"] for x in (_q(
-        "SELECT sku_code AS code, MAX(rate_bhd) AS s FROM selling_prices "
-        "WHERE price_book='MA_base' AND warehouse_name IS NULL AND rate_bhd > 0 GROUP BY sku_code") or [])}
+        "SELECT sku_code AS code, price_bhd AS s FROM v_price_list_by_book WHERE price_book='MA_base'") or [])}
 
     NO_VENDOR = "(vendor to confirm)"
     lines: list[dict] = []

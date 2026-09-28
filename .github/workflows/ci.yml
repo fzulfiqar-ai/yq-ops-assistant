@@ -109,6 +109,12 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r7c_order_heart
+      # R7e price book 41: open orders get the cuts on their confirmed layer (on the order heart's
+      # fakes: CAS, undo, reverse, re-run no-op), and the price in force replaces MAX(rate_bhd)
+      - name: R7e price book suite (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r7e_pricebook
       # R2a batch importer: the pure tests; the local-Postgres replay SKIPs here. Its own step — it
       # used to sit on a folded second line of the step above, which YAML read as extra arguments to
       # test_r3_pipeline, so it never ran.

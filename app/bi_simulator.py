@@ -48,10 +48,13 @@ def _landed_cost(code: str) -> float | None:
 
 
 def _epochs(code: str) -> list[dict]:
-    """Price epochs (rate + active window) for a base code, oldest first."""
+    """Price epochs (rate + active window) for a base code, oldest first. History, so MAX per
+    start_date — over the rows the price views count (R7e): base layer, authorized, not voided,
+    already started (a phantom or future-dated row is no epoch)."""
     return exec_sql_params(
         "SELECT start_date, MAX(rate_bhd) AS rate FROM selling_prices "
         "WHERE price_book='MA_base' AND rate_bhd > 0 "
+        "AND warehouse_name IS NULL AND voided_at IS NULL AND status='Authorized' AND start_date<=CURRENT_DATE "
         "AND UPPER(SPLIT_PART(sku_code,' ',1)) = $1 AND start_date IS NOT NULL "
         "GROUP BY start_date ORDER BY start_date", [code]) or []
 
@@ -66,10 +69,11 @@ def _qty_between(code: str, d_from, d_to) -> float:
 
 
 def _current_baseline(code: str) -> tuple[float | None, float]:
-    """Current MA_base price + trailing-90d monthly run-rate qty."""
+    """Current MA_base price + trailing-90d monthly run-rate qty. The price is the one in force
+    (v_price_list_by_book, R7e) — the exact code first, else a variant of it."""
     price_rows = exec_sql_params(
-        "SELECT rate_bhd FROM selling_prices WHERE price_book='MA_base' AND rate_bhd>0 "
-        "AND UPPER(SPLIT_PART(sku_code,' ',1)) = $1 ORDER BY start_date DESC NULLS LAST LIMIT 1",
+        "SELECT price_bhd AS rate_bhd FROM v_price_list_by_book WHERE price_book='MA_base' "
+        "AND UPPER(SPLIT_PART(sku_code,' ',1))=$1 ORDER BY (UPPER(sku_code)=$1) DESC, sku_code LIMIT 1",
         [code]) or []
     price = float(price_rows[0]["rate_bhd"]) if price_rows else None
     q_rows = exec_sql_params(

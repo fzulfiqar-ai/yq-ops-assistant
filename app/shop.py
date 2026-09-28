@@ -1169,6 +1169,11 @@ def _badges(ctx: dict) -> dict[str, list[str]]:
         if any(b in out[code] for b in ("best_seller", "trending", "new")):
             continue
         it = ctx["items"][code]
+        # R7e owner 28-Sep: a price drop wins. A line whose card prints a genuine Was price is not
+        # also a Clearing line — skipped before the sort and the cap, so its slot goes to the next
+        # slow mover. A stale drop (no Was on the card) keeps its Clearing line.
+        if _was_bhd(ctx, code, it.get("standard_rate")) is not None:
+            continue
         born = _parse_ts(it.get("first_seen") or it.get("created_at"))
         if cl_age > 0 and born and born > young_after:
             continue

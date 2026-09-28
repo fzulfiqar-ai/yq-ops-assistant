@@ -94,10 +94,10 @@ def verify_order(data: bytes, filename: str) -> dict:
     vfan = {x["model"]: x for x in _q(
         "SELECT model, latest_rmb, latest_list_rmb, change_pct FROM v_supplier_price_history "
         f"WHERE model IN {_in}", [names])}
+    # R7e: the MA_base price in force today, never MAX over the history (a cut would not show)
     sell = {x["code"]: float(x["s"]) for x in _q(
-        "SELECT sku_code AS code, MAX(rate_bhd) AS s FROM selling_prices "
-        "WHERE price_book='MA_base' AND warehouse_name IS NULL AND rate_bhd > 0 "
-        f"AND sku_code IN {_in} GROUP BY sku_code", [names])}
+        "SELECT sku_code AS code, price_bhd AS s FROM v_price_list_by_book "
+        f"WHERE price_book='MA_base' AND sku_code IN {_in}", [names])}
     health = {x["code"]: x for x in _q(
         "SELECT SPLIT_PART(item_name,' ',1) AS code, MAX(current_stock) AS current_stock, "
         "MAX(avg_daily) AS avg_daily FROM v_stock_health "

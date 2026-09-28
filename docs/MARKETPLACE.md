@@ -374,7 +374,7 @@ arcs the first time it scrolls into view) and the `night` campaign canvas. The h
 | `new` | `catalog_items.created_at` within N days | `shop_new_days` |
 | `selling_fast` | days of cover below N | `shop_low_stock_days_cover` |
 | `on_offer` | an active item-scoped discount rule | — |
-| **`price_drop` + `was_bhd`** | a REAL trade-price cut in `v_price_change` within N days, shown only while the live price still equals the cut price | `shop_price_drop_days` (30) |
+| **`price_drop` + `was_bhd`** | a REAL trade-price cut in `v_price_change` within N days, shown only while the live price still equals the cut price. **R7e: a price drop wins** — a line showing a genuine Was price is never also `clearance` (left out before the sort and the cap, so its slot goes to the next slow mover); a stale drop keeps its Clearing line | `shop_price_drop_days` (30) |
 | **`clearance`** | stock ≥ min units and days of cover ≥ N (never a best seller / trending / new), the worst M first | `shop_clearance_min_units` (12), `shop_clearance_days_cover` (365), `shop_clearance_max` (24) |
 | retail (`compare_at_bhd`) | the price book's B2C rate — sent everywhere when `shop_show_retail_compare` is on, on clearing lines also when it is off. **v3: the market no longer strikes it through**; it renders the margin instead | `shop_clearance_show_retail` (1) |
 
