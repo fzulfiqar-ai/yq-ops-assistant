@@ -673,6 +673,19 @@ def _():
     assert staff.index("const linkQ = useQuery(") < staff.index("if (catalogQ.isError && !data) {")
 
 
+@test("visual QA: a switched-on filter is a removable chip beside the result count (Price drops is on screen at 390 px)")
+def _():
+    staff = _read(STAFF)
+    flt = _read(FILTERS)
+    res = staff.split("{/* ── results ── */}", 1)[1].split("{!data ? (", 1)[0]
+    assert "FILTER_CHIPS.filter((c) => filters[c.key]).map((c) => (" in res and "flex-wrap" in res
+    assert "onClick={() => setFilters((f) => ({ ...f, [c.key]: false }))}" in res and '<X size={12} aria-hidden="true" />' in res
+    # the chips say what the Filters sheet says
+    sheet = _read(FILTERS_SHEET)
+    for key, label in (("drops", "Price drops"), ("clearance", "Clearing lines"), ("best", "Best sellers"), ("inStock", "In stock")):
+        assert f"{{ key: '{key}', label: '{label}' }}" in flt and f"{{ key: '{key}', label: '{label}'," in sheet, key
+
+
 @test("R7e Today: '{n} products got a lower price' from the catalog's cache, top 5, WhatsApp per row, See all -> /shop?f=drops")
 def _():
     today = _read(TODAY)

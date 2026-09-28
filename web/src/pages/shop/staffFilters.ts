@@ -24,6 +24,14 @@ export interface StaffFilters {
 
 export const NO_FILTERS: StaffFilters = { inStock: false, drops: false, clearance: false, best: false }
 
+/** A switched-on filter as its removable chip beside the result count says it (the Filters sheet's words). */
+export const FILTER_CHIPS: { key: keyof StaffFilters; label: string }[] = [
+  { key: 'drops', label: 'Price drops' },
+  { key: 'clearance', label: 'Clearing lines' },
+  { key: 'best', label: 'Best sellers' },
+  { key: 'inStock', label: 'In stock' },
+]
+
 /** A line that reads "Clearing line" — never one with a price drop (price drop wins, shared.shownBadges). */
 export function isClearing(i: ShopItem): boolean {
   return hasBadge(i, 'clearance') && !hasBadge(i, 'price_drop')

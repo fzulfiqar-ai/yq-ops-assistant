@@ -12,7 +12,7 @@ import { revealActiveChip, useEdgeFade } from '../hooks/useEdgeFade'
 import { useReveal } from '../hooks/useReveal'
 import { track } from '../lib/events'
 import { applyQuickFilters, facetsFor, isDeal, isEssential, isMoving, isOffer, isRealDrop, matchesFacets, parseFilters, readFacets, shelfOrder, soldOutSplit, sortItems, type QuickFilter, type SortMode } from '../lib/facets'
-import { hasBadge } from '../lib/format'
+import { hasBadge, isClearing } from '../lib/format'
 import { dealSets } from '../lib/home'
 import { useShell } from '../shell/ShellContext'
 import { isDesktopLike } from '../shell/useViewport'
@@ -67,7 +67,7 @@ const CHIPS: ChipDef[] = [
   { key: 'instock', label: S.shop.inStock, dot: true },
   { key: 'deals', label: S.shop.deals, icon: Tag, deal: true, test: isDeal },
   { key: 'drops', label: S.shop.drops, icon: TrendingDown, test: isRealDrop },
-  { key: 'clearance', label: S.shop.clearance, icon: Hourglass, test: (i) => hasBadge(i, 'clearance') },
+  { key: 'clearance', label: S.shop.clearance, icon: Hourglass, test: isClearing },
   { key: 'saved', label: S.shop.saved, icon: Heart },
   { key: 'best', label: S.shop.essentials, icon: Star, test: isEssential, extra: true },
   { key: 'moving', label: S.shop.moving, icon: Flame, test: isMoving, extra: true },

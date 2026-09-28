@@ -1479,6 +1479,25 @@ def _():
     assert "{fmtPct(pace.projected_pct_of_target)} of target</Pill>" not in page.replace("projected {fmtPct", "")
 
 
+@test("visual QA: a row's sub-line wraps under the whole row (never cut at 1366), the KPI row has no hole, the weekly target label sits above its line")
+def _():
+    page = _web("pages/CommandCentre.tsx")
+    fn = lambda name: page.split(f"function {name}(", 1)[1].split("\n}\n", 1)[0]
+    mini = fn("MiniList")
+    sub = mini.split("{r.sub && ", 1)[1].split("\n", 1)[0]
+    assert "truncate" not in sub and "block text-pretty" in sub, sub
+    assert mini.index("{r.value}") < mini.index("{r.sub && "), "the sub-line is under the label/value line: the row's width"
+    # the KPI grid's columns follow how many cards this login gets (no 'Margins': five, never a hole or an empty column)
+    assert "const cards = [sales, pace, funnel, active, margin, ar].filter(Boolean).length" in page
+    assert "KPI_GRID[cards] ?? KPI_GRID[6]" in page and '2xl:grid-cols-6">' not in page
+    grid = page.split("const KPI_GRID: Record<number, string> = {", 1)[1].split("\n}\n", 1)[0]
+    assert "6: 'sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6'" in grid
+    assert "5: 'sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 sm:[&>:last-child]:col-span-2 2xl:[&>:last-child]:col-span-1'" in grid
+    assert "4: 'sm:grid-cols-2 2xl:grid-cols-4'" in grid
+    weekly = fn("WeeklyChart")
+    assert "position: 'insideBottomRight', offset: 5" in weekly and "insideTopRight" not in weekly
+
+
 @test("review: CI's web Lint step is a hard gate (lint is at 0 errors), its comment says so")
 def _():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

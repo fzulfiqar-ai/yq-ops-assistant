@@ -286,20 +286,22 @@ function thinRow(r: Row): ListRow {
   }
 }
 
+/** a row: the label and its value on one line, then the sub-line under both — the whole row's width, and it
+ *  wraps rather than cuts (a price row's "↓40.0 % · 10 Sep · trade price incl. VAT" is read in full at 1366) */
 function MiniList({ rows }: { rows: ListRow[] }) {
   if (!rows.length) return <p className="mt-2 text-[12.5px] text-muted-foreground">Nothing to list.</p>
   return (
     <ul className="mt-2 divide-y divide-border/70">
       {rows.map((r, i) => (
-        <li key={`${r.label}-${i}`} className="flex items-baseline justify-between gap-3 py-1.5 text-[12.5px]">
-          <span className="min-w-0">
-            <span className="block truncate font-medium" title={r.label}>{r.label}</span>
-            {r.sub && <span className="block truncate text-[11px] text-muted-foreground" title={r.sub}>{r.sub}</span>}
+        <li key={`${r.label}-${i}`} className="py-1.5 text-[12.5px]">
+          <span className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0 truncate font-medium" title={r.label}>{r.label}</span>
+            <span className={cn('shrink-0 font-semibold tabular-nums',
+              r.tone === 'up' && 'text-emerald-600 dark:text-emerald-400', r.tone === 'down' && 'text-rose-600 dark:text-rose-400')}>
+              {r.value}
+            </span>
           </span>
-          <span className={cn('shrink-0 font-semibold tabular-nums',
-            r.tone === 'up' && 'text-emerald-600 dark:text-emerald-400', r.tone === 'down' && 'text-rose-600 dark:text-rose-400')}>
-            {r.value}
-          </span>
+          {r.sub && <span className="block text-pretty text-[11px] leading-snug text-muted-foreground" title={r.sub}>{r.sub}</span>}
         </li>
       ))}
     </ul>
@@ -804,6 +806,17 @@ function KpiCard({ label, value, exact, chip, caption, basis, drill, me, childre
   )
 }
 
+/** the KPI row's columns by how many cards this login gets (no 'Margins': five), so a row never has a hole or an
+ *  empty column: an odd last card spans the gap (five at lg: 3 + 2 with the last one double), 2xl is one row */
+const KPI_GRID: Record<number, string> = {
+  6: 'sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6',
+  5: 'sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 sm:[&>:last-child]:col-span-2 2xl:[&>:last-child]:col-span-1',
+  4: 'sm:grid-cols-2 2xl:grid-cols-4',
+  3: 'sm:grid-cols-2 lg:grid-cols-3 sm:[&>:last-child]:col-span-2 lg:[&>:last-child]:col-span-1',
+  2: 'sm:grid-cols-2',
+  1: '',
+}
+
 function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
   const sales = findTile(ov, 'sales.accessories')
   const trend = findTile(ov, 'sales.trend')
@@ -816,8 +829,9 @@ function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
   const over90 = findTile(ov, 'ar.over90')
   const span = ov.period.focus?.label ?? ''
   const waitingN = waiting?.value ?? 0
+  const cards = [sales, pace, funnel, active, margin, ar].filter(Boolean).length
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+    <div className={cn('grid grid-cols-1 gap-3', KPI_GRID[cards] ?? KPI_GRID[6])}>
       {sales && (
         <KpiCard label="Accessories sales" value={fmtBhd0(sales.value)} exact={`${fmtBhd(sales.value)} ex-VAT`}
           chip={<DeltaPill pct={sales.delta_pct} />} basis={sales.basis} drill={sales.drill} me={me}
@@ -839,7 +853,7 @@ function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
         <KpiCard label="Marketplace orders" basis={funnel.basis} drill={waiting?.drill} me={me}
           chip={waitingN > 0 ? <Pill tone="down">{fmtCount(waitingN)} waiting &gt;24 business h</Pill> : null}
           caption={`Placed ${ov.period.live.label} · live`}>
-          {/* three cells side by side; on the six-across row (2xl) the card is narrow, so three short rows */}
+          {/* three cells side by side; on the one-row strip (2xl, up to six across) the card is narrow, so three short rows */}
           <dl className="mt-1.5 grid grid-cols-3 gap-1.5 2xl:grid-cols-1 2xl:gap-1">
             {(funnel.stages || []).map((s) => (
               <div key={s.key} className="min-w-0 rounded-lg bg-[#F3ECF8] px-2 py-1 dark:bg-[#6D4091]/15 2xl:flex 2xl:items-baseline 2xl:justify-between 2xl:py-0.5">
@@ -896,9 +910,10 @@ function WeeklyChart({ t, pace, drill, me }: { t: Tile; pace?: Tile; drill?: Dri
                 return `Week of ${String(label)}${p?.partial ? ' (so far)' : ''}`
               }}
               contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+            {/* the label sits ABOVE the line (insideBottom…): under it, it sat on the tallest bar's top */}
             {weekly != null && (
               <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
-                label={{ value: `weekly target ${fmtBhd0(weekly)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+                label={{ value: `weekly target ${fmtBhd0(weekly)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
             )}
             <ChartBar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={34}>
               {series.map((p) => <Cell key={p.week_start} fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1} />)}

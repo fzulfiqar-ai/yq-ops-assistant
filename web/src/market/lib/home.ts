@@ -1,6 +1,6 @@
 import type { CatalogPayload, Offer, OrderStatusPayload, ShopItem } from '@/lib/shopApi'
 import { recentlyViewed } from './device'
-import { hasBadge, marginOf, priceAnchor } from './format'
+import { hasBadge, isClearing, marginOf, priceAnchor } from './format'
 import type { Slide } from './slides'
 import { S } from '../strings'
 
@@ -38,10 +38,11 @@ export function hasPhoto(i: Pick<ShopItem, 'thumb_urls' | 'thumb_url' | 'product
 /**
  * Clearing lines: clearing lines still on the shelf (low stock included), the best real
  * retail margin first (lines without a public retail price after), then shelf order. No cap.
+ * A line with a real price drop is a drop, never a clearing line (isClearing).
  */
 export function lastChance(items: ShopItem[]): ShopItem[] {
   return inStock(items)
-    .filter((i) => hasBadge(i, 'clearance'))
+    .filter(isClearing)
     .map((item, index) => ({ item, index, pct: marginOf(item)?.pct ?? null }))
     .sort((a, b) => {
       if (a.pct != null && b.pct != null && a.pct !== b.pct) return b.pct - a.pct

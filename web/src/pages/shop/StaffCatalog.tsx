@@ -28,7 +28,7 @@ import { CartDrawer } from './CartDrawer'
 import { FiltersSheet } from './FiltersSheet'
 import { priceDropOf, productShareUrl } from './priceDrops'
 import { isQuickList } from './quickAdd'
-import { isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
+import { FILTER_CHIPS, isClearing, NO_FILTERS, passesStaffFilters, type StaffFilters, type StaffSort } from './staffFilters'
 import { carryCart } from './staffOrder'
 import { MinimumRuler, OrderSlip } from './OrderSlip'
 import { OrderSuccess } from './OrderSuccess'
@@ -630,16 +630,32 @@ export function StaffCatalog() {
 
           {/* ── results ── */}
           <main className="pb-6 pt-3">
-            <p aria-live="polite" className="mb-2 text-[12px] text-[#6b6480]">
-              {data ? (
-                <>
-                  <b className="font-semibold tabular-nums text-[#1A1428]">{shown.length}</b> {shown.length === 1 ? 'product' : 'products'}
-                  {shown.length !== items.length ? ` of ${items.length}` : ''}
-                </>
-              ) : (
-                'Loading the price list…'
-              )}
-            </p>
+            {/* the count, then each switched-on filter as a chip that takes it off — on a 390 px phone the
+                Filters chip sits off-screen at the end of the scrolling row, so /shop?f=drops says so here */}
+            <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+              <p aria-live="polite" className="text-[12px] text-[#6b6480]">
+                {data ? (
+                  <>
+                    <b className="font-semibold tabular-nums text-[#1A1428]">{shown.length}</b> {shown.length === 1 ? 'product' : 'products'}
+                    {shown.length !== items.length ? ` of ${items.length}` : ''}
+                  </>
+                ) : (
+                  'Loading the price list…'
+                )}
+              </p>
+              {data && FILTER_CHIPS.filter((c) => filters[c.key]).map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={() => setFilters((f) => ({ ...f, [c.key]: false }))}
+                  aria-label={`${c.label} filter on — remove it`}
+                  className={cn('inline-flex h-7 items-center gap-1 rounded-full border border-[#6D4091] bg-[#EEE8F4] pl-2.5 pr-2 text-[11.5px] font-semibold text-[#5A3478] transition duration-150 ease-out hover:bg-[#E4DAEE]', RING)}
+                >
+                  {c.label}
+                  <X size={12} aria-hidden="true" />
+                </button>
+              ))}
+            </div>
 
             {!data ? (
               <div className="overflow-hidden rounded-2xl border border-[#E9E4EF] bg-white">

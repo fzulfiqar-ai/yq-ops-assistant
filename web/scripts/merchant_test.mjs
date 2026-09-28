@@ -21,7 +21,9 @@
  *     unchanged, an older API's English sentences still worded;
  *   * lib/format.ts fmtDay — the ETA date read as a local calendar day;
  *   * lib/device.ts — opening a tracking link adopts the order (newest placed stays first, a placed
- *     order is never re-marked adopted) and "Same as last time" only ever uses an order placed here.
+ *     order is never re-marked adopted) and "Same as last time" only ever uses an order placed here;
+ *   * price drop wins (lib/format.ts isClearing): a line with a real drop is never "Clearing line" on the
+ *     card, on ?f=clearance or in the home Clearing set, even from an older payload that still says 'clearance'.
  */
 import { registerHooks } from 'node:module'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -71,6 +73,8 @@ const F = await mod('market/lib/format.ts')
 const D = await mod('market/lib/device.ts')
 const AR = await mod('market/lib/areaRep.ts')
 const SW = await mod('market/lib/serverWords.ts')
+const FA = await mod('market/lib/facets.ts')
+const H = await mod('market/lib/home.ts')
 const { en } = await mod('market/i18n/en.ts')
 const { ar } = await mod('market/i18n/ar.ts')
 
@@ -378,6 +382,23 @@ check('clearing, not "last chance": the wording in both languages', () => {
   ok(ar.deals.badge.includes('تصفية') && ar.deals.lastChance.includes('تصفية'), 'Arabic says تصفية')
   ok(en.slides.lastLine(24).length <= 34 && ar.slides.lastLine(24).length <= 34, 'a slide line stays one clause of ≤34 characters')
   eq([en.card.soldOut, en.card.stockOut, ar.card.soldOut], ['Sold Out', 'Sold Out', 'نفدت الكمية'], 'Sold Out casing')
+})
+
+check('price drop wins: a line with a REAL drop is never a clearing line — the card, ?f=clearance, the home set (an older payload or the edge cache)', () => {
+  const base = { stock_status: 'in_stock', category: 'CABLES', tiers: [] }
+  // the pre-R7e shape: a genuine cut in the price book that still carries 'clearance'
+  const stale = { ...base, item_code: 'T-DROP', price_bhd: 0.9, was_bhd: 1.3, badges: ['price_drop', 'clearance'] }
+  const clearing = { ...base, item_code: 'T-CLR', price_bhd: 0.9, was_bhd: null, badges: ['clearance'] }
+  const codes = (xs) => xs.map((i) => i.item_code)
+  ok(F.priceAnchor(stale) != null, 'the stale line has a real was')
+  eq([F.isClearing(stale), F.isClearing(clearing)], [false, true], 'isClearing')
+  eq(F.cardBadges(stale, 3), ['price_drop'], 'the card: Price drop, no Clearing line')
+  eq(F.cardBadges(clearing, 3), ['clearance'], 'a plain clearing line keeps its chip')
+  eq(codes(FA.applyQuickFilters([stale, clearing], new Set(['clearance']))), ['T-CLR'], '?f=clearance')
+  eq(codes(FA.applyQuickFilters([stale, clearing], new Set(['drops']))), ['T-DROP'], '?f=drops keeps it')
+  eq(codes(H.lastChance([stale, clearing])), ['T-CLR'], 'the home Clearing set')
+  const sets = H.dealSets([stale, clearing])
+  eq([codes(sets.drops), codes(sets.lastChance)], [['T-DROP'], ['T-CLR']], 'deal sets')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

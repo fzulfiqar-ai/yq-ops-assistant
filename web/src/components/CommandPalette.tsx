@@ -90,7 +90,7 @@ export function CommandPalette() {
           <motion.div
             initial={{ opacity: 0, y: -12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -12, scale: 0.98 }}
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-xl overflow-hidden rounded-2xl border border-white/10 bg-popover text-popover-foreground shadow-[0_30px_80px_-20px_rgba(76,29,149,.55)] ring-1 ring-black/5"
+            className="w-full max-w-xl overflow-hidden rounded-2xl border border-white/10 bg-card text-card-foreground shadow-[0_30px_80px_-20px_rgba(76,29,149,.55)] ring-1 ring-black/5"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-indigo-500" />

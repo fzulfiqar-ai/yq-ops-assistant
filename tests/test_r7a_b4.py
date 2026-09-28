@@ -356,6 +356,9 @@ def _():
     pal = _read("web/src/components/CommandPalette.tsx")
     assert 'className="fixed inset-0 z-[60] flex items-start justify-center' in pal
     assert "fixed inset-0 z-50" not in pal
+    # an opaque panel: tailwind.config.js defines no 'popover' colour, so bg-popover painted nothing over the overlay
+    assert "bg-card text-card-foreground" in pal and "popover" not in pal
+    assert "card: { DEFAULT: 'hsl(var(--card))'" in _read("web/tailwind.config.js")
     shell = _read("web/src/components/AppShell.tsx")
     assert shell.index("<CommandPalette />") < shell.index("<main "), "the palette is earlier in the DOM"
     for rel in OVERLAY_FILES:

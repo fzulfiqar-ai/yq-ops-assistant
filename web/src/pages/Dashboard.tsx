@@ -147,17 +147,29 @@ function weekdayLabel(iso?: string | null): string {
   return `${WEEKDAYS[dow]} ${dayLabel(iso)}`
 }
 
-/** A change against the comparison window, with that window in words ("vs the same 18 business days last month") */
-function Delta({ pct, vs }: { pct: number | null | undefined; vs?: string | null }) {
-  if (pct == null) return <span className="font-semibold text-muted-foreground">No comparison{vs ? ` with ${vs}` : ''}</span>
+/** a thousands tick with the decimals it needs: 7.5k, 15k, 22.5k, 1.05k (toFixed(0) printed 8k and 23k, and
+ *  toFixed(1) 1.1k for 1,050 once the daily target line widened the axis) */
+const kTick = (v: number) => (v >= 1000 ? `${Number((v / 1000).toFixed(3))}k` : `${v}`)
+
+/** A change against the comparison window, with that window in words ("vs the same 18 business days last month").
+ *  The arrow never wraps away from its %, nor 'BHD' from its amount (`vs` may carry a nowrap amount). */
+function Delta({ pct, vs }: { pct: number | null | undefined; vs?: React.ReactNode }) {
+  if (pct == null) return <span className="font-semibold text-muted-foreground">No comparison{vs ? <> with {vs}</> : null}</span>
   const up = pct >= 0
   return (
     <span className={up ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'}>
-      {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
-      {up ? '+' : ''}{pct.toFixed(1)}%
+      <span className="whitespace-nowrap">
+        {up ? <TrendingUp className="mr-1 inline" size={14} /> : <TrendingDown className="mr-1 inline" size={14} />}
+        {up ? '+' : ''}{pct.toFixed(1)}%
+      </span>
       {vs && <span className="font-normal text-muted-foreground"> vs {vs}</span>}
     </span>
   )
+}
+
+/** 'BHD 682' kept on one line */
+function Amount({ children }: { children: React.ReactNode }) {
+  return <span className="whitespace-nowrap">{children}</span>
 }
 
 function KpiCard({ accent, icon: Icon, label, value, foot, hero, to, basis }: {
@@ -374,7 +386,7 @@ export default function Dashboard() {
             foot={salesDay ? (
               <span className="text-muted-foreground">
                 Accessories ex-VAT · <Delta pct={salesDay.delta_pct}
-                  vs={salesDay.compare ? `${dayCompare || salesDay.compare.label} (${bhd(salesDay.compare.value, 0)})` : dayCompare} />
+                  vs={salesDay.compare ? <>{dayCompare || salesDay.compare.label} <Amount>({bhd(salesDay.compare.value, 0)})</Amount></> : dayCompare} />
                 {' '}· {num(salesDay.invoices)} invoices
               </span>
             ) : <span className="text-muted-foreground">Accessories · ex-VAT · not available just now</span>} />
@@ -387,7 +399,7 @@ export default function Dashboard() {
             value={arValue != null ? <CountUp value={arValue} format={(n) => bhd(n, 0)} /> : '—'}
             foot={<span className="text-muted-foreground">
               {arOver90?.value != null && <><span className="font-semibold text-rose-600">{arOver90.value.toFixed(1)}% over 90 days</span>{' '}· </>}
-              {bhd(k.overdue_total_bhd, 0)} overdue &gt;30d · {k.overdue_count} accts</span>} />
+              <Amount>{bhd(k.overdue_total_bhd, 0)}</Amount> overdue &gt;30d · {k.overdue_count} accts</span>} />
           <KpiCard accent={ACCENTS.amber} icon={Boxes} label="Low-stock items" to="/inventory"
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
@@ -434,18 +446,20 @@ export default function Dashboard() {
           </div>
           {dailyMode === 'daily' ? (
             <ResponsiveContainer width="100%" height={190}>
-              <BarChart data={data.daily_mtd} margin={{ top: 10, right: 8, left: 8, bottom: 0 }}>
+              <BarChart data={data.daily_mtd} margin={{ top: 18, right: 8, left: 8, bottom: 0 }}>
                 <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
                   tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
-                  width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+                  width={44} tickFormatter={kTick} />
                 <Tooltip
                   formatter={(v, name) => (name === barKey ? [bhd(Number(v)), exVat ? 'Accessories ex-VAT' : 'Accessories'] : [String(v), String(name)])}
                   labelFormatter={(d) => fmtDate(String(d))}
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
+                {/* extendDomain: the line shows when the target is above every bar; its label sits ABOVE the line
+                    (insideBottomRight) so it never lands on a bar's top */}
                 {dailyTarget && (
-                  <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4"
-                    label={{ value: `target per business day ${bhd(dailyTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+                  <ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
+                    label={{ value: `target per business day ${bhd(dailyTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
                 )}
                 <Bar dataKey={barKey} radius={[4, 4, 0, 0]} maxBarSize={26}>
                   {data.daily_mtd.map((r, i) => (
@@ -466,7 +480,7 @@ export default function Dashboard() {
                 <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(8)} interval="preserveStartEnd"
                   tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
-                  width={44} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
+                  width={44} tickFormatter={kTick} />
                 <Tooltip
                   formatter={(v, name) => [bhd(Number(v), 0), name === 'cum_bhd' ? (exVat ? 'Accessories MTD ex-VAT' : 'Accessories MTD') : 'Target to date (business days)']}
                   labelFormatter={(d) => fmtDate(String(d))}
@@ -542,10 +556,10 @@ export default function Dashboard() {
             <p className="grid h-[260px] place-items-center text-sm text-muted-foreground">Monthly Accessories sales could not be read just now.</p>
           ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={trendAcc} margin={{ top: 14, right: 8, left: 8, bottom: 0 }}>
+              <BarChart data={trendAcc} margin={{ top: 18, right: 8, left: 8, bottom: 0 }}>
                 <XAxis dataKey="m" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false}
-                  width={48} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
+                  width={48} tickFormatter={kTick} />
                 <Tooltip formatter={(value) => [bhd(Number(value), 0), 'Accessories ex-VAT']}
                   labelFormatter={(m, payload) => {
                     const row = payload?.[0]?.payload as { partial?: boolean; through?: string | null } | undefined
@@ -555,7 +569,7 @@ export default function Dashboard() {
                   contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
                 {monthTarget && (
                   <ReferenceLine y={monthTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
-                    label={{ value: `monthly target ${bhd(monthTarget, 0)}`, position: 'insideTopRight', fontSize: 10, fill: '#d97706' }} />
+                    label={{ value: `monthly target ${bhd(monthTarget, 0)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
                 )}
                 <Bar dataKey="acc_net_bhd" radius={[4, 4, 0, 0]} maxBarSize={34}>
                   {/* the month still running is lighter: it is not a whole month yet */}

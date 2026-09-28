@@ -1100,6 +1100,22 @@ def _():
     assert "queryKey: ['freshness']" in _read("web/src/components/FreshnessChip.tsx")
 
 
+@test("visual QA: the month axis reads 7.5k (not 8k), target labels sit above their lines, the daily line shows over every bar, a delta keeps its arrow")
+def _():
+    dash = _read("web/src/pages/Dashboard.tsx")
+    assert "const kTick = (v: number) => (v >= 1000 ? `${Number((v / 1000).toFixed(3))}k` : `${v}`)" in dash
+    # every axis of the page (daily, cumulative, monthly) uses it: no rounded 8k / 23k / 1.1k-for-1,050
+    assert dash.count("tickFormatter={kTick}") == 3 and "(v / 1000).toFixed(" not in dash.replace("Number((v / 1000).toFixed(3))", "")
+    # above the line (insideBottom…) the label never lands on the tallest bar's top; both charts get room at the top
+    assert "position: 'insideTopRight'" not in dash and dash.count("position: 'insideBottomRight', offset: 5") == 2
+    assert dash.count("margin={{ top: 18, right: 8, left: 8, bottom: 0 }}") == 2
+    assert '<ReferenceLine y={dailyTarget} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"' in dash
+    # the arrow stays with its %, 'BHD' with its amount
+    delta = dash.split("function Delta(", 1)[1].split("\n}\n", 1)[0]
+    assert '<span className="whitespace-nowrap">' in delta and "vs?: React.ReactNode" in delta
+    assert "<Amount>({bhd(salesDay.compare.value, 0)})</Amount>" in dash and "<Amount>{bhd(k.overdue_total_bhd, 0)}</Amount>" in dash
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 8. opt-in: the new view bodies READ ONLY against production (YQ_R7D_LIVE=1)
 # ═══════════════════════════════════════════════════════════════════════════════

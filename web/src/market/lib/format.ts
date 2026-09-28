@@ -131,11 +131,23 @@ export function badgeMeta(kind: string): { label: string; tone: ChipTone } {
 /** Badges that claim demand. A line nobody can order today does not advertise how well it sells. */
 const DEMAND_BADGES: BadgeKind[] = ['best_seller', 'selling_fast', 'trending']
 
-/** The badges a card shows: priority order, max `limit`, demand claims dropped once sold out. */
+/** The badges a card shows: priority order, max `limit`, demand claims dropped once sold out, and no
+ *  "Clearing line" on a real price drop (isClearing). */
 export function cardBadges(item: ShopItem, limit = 2): BadgeKind[] {
   const have = new Set(item.badges || [])
   if (item.stock_status === 'out_of_stock') for (const b of DEMAND_BADGES) have.delete(b)
+  if (!isClearing(item)) have.delete('clearance')
   return BADGE_ORDER.filter((b) => have.has(b)).slice(0, limit)
+}
+
+/**
+ * A clearing line — never one with a REAL price drop (priceAnchor has a was): price drop wins. The
+ * server already sends such a line without 'clearance'; this mirror covers an older API payload or the
+ * edge worker's cached copy during a deploy, so the card, the ?f=clearance shelf and the home Clearing
+ * set never call a cut line "Clearing line".
+ */
+export function isClearing(item: ShopItem): boolean {
+  return hasBadge(item, 'clearance') && priceAnchor(item) == null
 }
 
 /**

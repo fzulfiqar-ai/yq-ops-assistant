@@ -1,7 +1,7 @@
 import type { ShopItem } from '@/lib/shopApi'
 import { savedStore } from '../store/saved'
 import { S } from '../strings'
-import { hasBadge, marginOf, priceAnchor } from './format'
+import { hasBadge, isClearing, marginOf, priceAnchor } from './format'
 
 /**
  * Sub-facets inferred from the product text — no attribute model in the backend, and the
@@ -260,7 +260,7 @@ export type SortMode = 'shelf' | 'popular' | 'price_asc' | 'price_desc'
  *   deals     Stock-Up Deals: a real price-book drop, a live offer, or a clearing line
  *   drops     a real price-book drop — the card prints the old trade price (priceAnchor)
  *   offers    a live offer (the `on_offer` badge) — never a retail anchor
- *   clearance clearing lines
+ *   clearance clearing lines — never one with a real price drop (isClearing: price drop wins)
  *   best      Restock essentials (best sellers) · moving: Moving fast (trending / selling fast)
  *   new · saved · instock
  */
@@ -346,7 +346,7 @@ export function applyQuickFilters(items: ShopItem[], filters: Set<QuickFilter>):
   if (filters.has('instock')) r = r.filter((i) => i.stock_status !== 'out_of_stock')
   if (filters.has('offers')) r = r.filter(isOffer)
   if (filters.has('new')) r = r.filter((i) => hasBadge(i, 'new'))
-  if (filters.has('clearance')) r = r.filter((i) => hasBadge(i, 'clearance'))
+  if (filters.has('clearance')) r = r.filter(isClearing)
   if (filters.has('drops')) r = r.filter(isRealDrop)
   if (filters.has('deals')) r = r.filter(isDeal)
   if (filters.has('best')) r = r.filter(isEssential)
