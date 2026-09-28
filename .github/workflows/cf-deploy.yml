@@ -24,6 +24,10 @@
 # workflow_run trigger has no paths filter, and a deploy on every green push would stamp a new
 # /version.json and prompt every merchant to update for nothing). A CI run that is re-run to green
 # does not start a deploy by itself: run this workflow by hand (workflow_dispatch) on that commit.
+# The same holds for a FIX pushed after a red run (28-Sep-2026, R7d: 9a2dff3's CI failed, so its web
+# deploy was skipped, and the fix 9e13f51 touched only scripts/ - no web/** path, so no deploy ran and
+# the sites stayed on the old build while the API was new). After a red web push, either run this
+# workflow by hand once the fix is green, or let the fix touch web/** or this file.
 # Kept to this one file, so the commit that added it (ci(deploy): ...) can be dropped on its own.
 name: cf-deploy
 
