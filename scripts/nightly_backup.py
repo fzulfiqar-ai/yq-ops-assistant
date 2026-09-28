@@ -86,8 +86,17 @@ def synced_roots(env: dict | None = None) -> list[Path]:
     return out
 
 
+_WIN_ABS = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
 def _norm(p: Path) -> str:
-    return os.path.normcase(os.path.abspath(str(p))).rstrip("\\/")
+    """One comparable form on any OS: '/' separators, case-folded, no trailing slash. A Windows path
+    ('C:\\...', '\\\\server\\...') is judged as a Windows path even where Python runs on Linux (CI), where
+    Path would read it as ONE relative name and never see the OneDrive folder inside it."""
+    s = str(p)
+    if not _WIN_ABS.match(s):
+        s = os.path.abspath(s)
+    return s.replace("\\", "/").rstrip("/").lower()
 
 
 def is_synced(path: Path, env: dict | None = None) -> bool:
@@ -95,9 +104,9 @@ def is_synced(path: Path, env: dict | None = None) -> bool:
     target = _norm(path)
     for root in synced_roots(env):
         r = _norm(root)
-        if target == r or target.startswith(r + os.sep):
+        if target == r or target.startswith(r + "/"):
             return True
-    return any(part.lower().startswith("onedrive") for part in Path(os.path.abspath(str(path))).parts)
+    return any(part.startswith("onedrive") for part in target.split("/"))
 
 
 def backup_root(env: dict | None = None) -> Path:
