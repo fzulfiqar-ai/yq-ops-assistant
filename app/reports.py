@@ -583,6 +583,7 @@ def invalidate_dashboard_cache() -> None:
     _report_gen += 1
     _dash_cache.update(at=0.0, payload=None)
     _report_cache.clear()
+    _report_failed.clear()
     try:  # the Command Centre's Focus figures are kept until the next upload too (app/metrics.py)
         from app.metrics import invalidate as _invalidate_command
         _invalidate_command()
@@ -766,15 +767,20 @@ def reserved_stock() -> dict:
             "FROM v_catalog_reserved WHERE reserved > 0 OR in_transit > 0 "
             "ORDER BY reserved DESC, in_transit DESC, item_code LIMIT 100"
         ) or []
+        # Aliases must never be `t`: run_readonly_query wraps the SQL as json_agg(t) FROM (...) t,
+        # and a column named t shadows that row alias, so the RPC returned [0] instead of a row
+        # and every /report/inventory was a 500 (found 29-Sep-2026).
         tot = (exec_sql(
-            "SELECT COALESCE(SUM(reserved),0) AS r, COALESCE(SUM(in_transit),0) AS t, "
-            "COUNT(*) FILTER (WHERE reserved > 0) AS n, COALESCE(SUM(open_orders),0) AS o, "
+            "SELECT COALESCE(SUM(reserved),0) AS reserved_units, COALESCE(SUM(in_transit),0) AS in_transit_units, "
+            "COUNT(*) FILTER (WHERE reserved > 0) AS reserved_items, COALESCE(SUM(open_orders),0) AS open_orders, "
             "MAX(stock_as_of)::text AS as_of FROM v_catalog_reserved LIMIT 1"
         ) or [{}])[0]
     except Exception:  # noqa: BLE001 -- view not there yet
         return {"available": False, "rows": [], "units": 0, "in_transit": 0, "items": 0, "stock_as_of": None}
-    return {"available": True, "rows": rows, "units": float(tot.get("r") or 0),
-            "in_transit": float(tot.get("t") or 0), "items": int(tot.get("n") or 0),
+    if not isinstance(tot, dict):
+        tot = {}
+    return {"available": True, "rows": rows, "units": float(tot.get("reserved_units") or 0),
+            "in_transit": float(tot.get("in_transit_units") or 0), "items": int(tot.get("reserved_items") or 0),
             "stock_as_of": tot.get("as_of"),
             "rule": "open marketplace orders (new / confirmed, not issued, not test) created after the "
                     "snapshot's end of day in Bahrain; in transit = procurement orders raised, not received"}
@@ -908,6 +914,10 @@ _REPORT_STALE_S = 12 * 3600
 _report_cache: dict[str, tuple[float, object]] = {}
 _refreshing: set[str] = set()
 _refresh_lock = threading.Lock()
+# A build that raised is remembered briefly, so a broken report answers its error at once instead
+# of re-running every query on each request (and on the client's retry) until it is fixed.
+_REPORT_FAIL_S = 30
+_report_failed: dict[str, tuple[float, Exception]] = {}
 
 
 def _build_report(key: str):
@@ -915,6 +925,7 @@ def _build_report(key: str):
     out = REPORTS[key]()
     if gen == _report_gen:
         _report_cache[key] = (time.time(), out)
+        _report_failed.pop(key, None)
     return out
 
 
@@ -945,7 +956,14 @@ def cached_report(key: str):
         if age < _REPORT_STALE_S:
             _refresh_in_background(key)
             return hit[1]
-    return _build_report(key)
+    failed = _report_failed.get(key)
+    if failed and time.time() - failed[0] < _REPORT_FAIL_S:
+        raise failed[1]
+    try:
+        return _build_report(key)
+    except Exception as e:
+        _report_failed[key] = (time.time(), e)
+        raise
 
 
 def prewarm_reports() -> None:

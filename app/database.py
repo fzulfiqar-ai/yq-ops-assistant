@@ -5,31 +5,118 @@ requires live Supabase credentials.
 """
 from __future__ import annotations
 
+import logging
+import random
+import threading
 import time
-from functools import lru_cache
 from typing import Any
 
+import httpx
 from supabase import Client, create_client
+from supabase.lib.client_options import SyncClientOptions
 
 from app.config import settings
 
+log = logging.getLogger(__name__)
 
-@lru_cache
+# ── Supabase transport (perf-2609, 29-Sep-2026) ──────────────────────────────────────────────
+# supabase-py / postgrest 2.31 default to ONE httpx.Client(http2=True), and this process shares
+# one SDK client across the whole anyio threadpool. httpcore 1.0.9 allocates HTTP/2 stream ids
+# and HPACK-encodes headers outside its lock, so concurrent threads corrupt the shared
+# connection: StreamIDTooLowError / KeyError locally, and in prod PROTOCOL_ERROR GOAWAYs,
+# Cloudflare HTML "400 Bad Request" pages and 40 s stalls, which the portal showed as
+# "Waking the server". An HTTP/1.1 pool gives each in-flight request its own connection.
+# Measured, 40 threads x 25 reads against prod (read-only): HTTP/2 389/1000 failed, p95 11 s;
+# HTTP/1.1 0/1000 failed.
+_POOL_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=20)
+# 60 s, not the SDK's 120 s: batch upserts from /ingest share this client, so it stays generous;
+# the read RPCs stop themselves at 8 s (statement_timeout).
+_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+_READ_ONLY_RPCS = ("/rpc/run_readonly_query", "/rpc/run_readonly_query_params")
+_READ_RETRY_ERRORS = (httpx.RemoteProtocolError, httpx.LocalProtocolError, httpx.ReadError,
+                      httpx.WriteError, httpx.ConnectError)
+
+
+def _is_read(request: httpx.Request) -> bool:
+    """GET/HEAD, or a POST to one of the SELECT-only RPCs (owned by yq_readonly, so running one
+    twice cannot change anything)."""
+    if request.method in ("GET", "HEAD"):
+        return True
+    return request.method == "POST" and request.url.path.rstrip("/").endswith(_READ_ONLY_RPCS)
+
+
+def _edge_error(resp: httpx.Response) -> bool:
+    """An HTML error page from Supabase's Cloudflare edge. PostgREST's own errors are JSON, so an
+    HTML 4xx/5xx never came from the database."""
+    return resp.status_code >= 400 and "text/html" in resp.headers.get("content-type", "")
+
+
+class RetryReadsTransport(httpx.BaseTransport):
+    """Re-send a READ when the connection under it broke or the edge answered with an HTML error
+    page. Writes go through untouched: one that failed on the wire may still have landed. (The
+    inner transport's own `retries` re-sends only when no connection was made, which is safe for
+    writes too.)"""
+
+    def __init__(self, inner: httpx.BaseTransport, attempts: int = 3) -> None:
+        self._inner = inner
+        self._attempts = attempts
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if not _is_read(request):
+            return self._inner.handle_request(request)
+        for attempt in range(1, self._attempts + 1):
+            last = attempt == self._attempts
+            try:
+                resp = self._inner.handle_request(request)
+            except _READ_RETRY_ERRORS as exc:
+                if last:
+                    raise
+                log.warning("supabase read %s %s: %s, retry %d", request.method, request.url.path,
+                            type(exc).__name__, attempt)
+            else:
+                if last or not _edge_error(resp):
+                    return resp
+                resp.close()
+                log.warning("supabase read %s %s: edge HTML %d, retry %d", request.method,
+                            request.url.path, resp.status_code, attempt)
+            time.sleep(0.05 * 2 ** attempt + random.uniform(0, 0.1))
+        raise AssertionError("unreachable")
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _http_client() -> httpx.Client:
+    inner = httpx.HTTPTransport(http2=False, limits=_POOL_LIMITS, retries=1)
+    return httpx.Client(transport=RetryReadsTransport(inner), timeout=_TIMEOUT, follow_redirects=True)
+
+
+_client: Client | None = None
+_client_lock = threading.Lock()
+
+
 def get_client() -> Client:
-    """Return a cached Supabase client. Raises a clear error if config is missing."""
-    settings.require_supabase()
-    return create_client(settings.supabase_url, settings.supabase_key)
+    """Return the process-wide Supabase client (built once, under a lock so concurrent first calls
+    cannot build several). Raises a clear error if config is missing."""
+    global _client
+    client = _client
+    if client is None:
+        with _client_lock:
+            if _client is None:
+                settings.require_supabase()
+                _client = create_client(settings.supabase_url, settings.supabase_key,
+                                        options=SyncClientOptions(httpx_client=_http_client()))
+            client = _client
+    return client
 
 
 def reset_client() -> None:
-    """Forget the cached client so the next get_client() builds a new one, with a new HTTP/2
-    connection pool. Called by app.db_read.retry_read after Supabase dropped a connection
-    (GOAWAY / ConnectionTerminated): the old client is not closed, because another thread may
-    still be mid-request on it; it is garbage once nobody holds it. A no-op when a test has
-    swapped get_client for a plain function."""
-    clear = getattr(get_client, "cache_clear", None)
-    if clear is not None:
-        clear()
+    """Forget the cached client so the next get_client() builds a new one. The old one is not
+    closed: another thread may still be mid-request on it; it is garbage once nobody holds it.
+    Rarely needed now: the HTTP/1.1 pool drops a broken connection by itself."""
+    global _client
+    with _client_lock:
+        _client = None
 
 
 # user_roles is read on EVERY authenticated request — once by get_current_user (fetch_role)

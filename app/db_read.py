@@ -15,7 +15,6 @@ import json
 import logging
 from typing import Callable, TypeVar
 
-from app import database
 from app.database import get_client
 
 log = logging.getLogger(__name__)
@@ -48,18 +47,20 @@ TRANSIENT_ERRORS = _transient_errors()
 
 
 def retry_read(run: Callable[[], T], what: str = "read") -> T:
-    """Run an idempotent READ; if the connection dropped under it, reset the cached client and
-    run it once more. `run` must build its query from get_client() when called (not capture a
-    client from before), so the second try goes out on the new connection pool.
+    """Run an idempotent READ; if the connection dropped under it, run it once more.
+
+    A second line of defence: app.database's RetryReadsTransport already re-sends every read on a
+    broken connection. The client is NOT reset any more: the HTTP/1.1 pool discards the broken
+    connection itself, and every failing thread resetting at once (the old behaviour) threw away
+    the healthy connections too and sent the retries into the same storm.
 
     For reads only — a write that failed on the wire may still have landed, and running it
     again could apply it twice."""
     try:
         return run()
     except TRANSIENT_ERRORS as exc:
-        log.warning("%s: connection dropped (%s: %s) — retrying once on a fresh client",
+        log.warning("%s: connection dropped (%s: %s) — retrying once",
                     what, type(exc).__name__, str(exc)[:160])
-        database.reset_client()
         return run()
 
 

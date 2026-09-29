@@ -16,8 +16,9 @@ Covered:
     logged under the same ref; an HTTPException and a streaming body pass through untouched; a
     stream that fails after it started is not rewritten; the middleware order itself;
   * retry-once on a dropped Supabase connection: exec_sql / exec_sql_params, the order list,
-    the status counts and the merchant's order-status read — once, with a client reset, and
-    never for an ordinary error or a timeout; reset_client() really drops the cached client;
+    the status counts and the merchant's order-status read — once, WITHOUT a client reset (perf-2609:
+    the HTTP/1.1 pool drops a broken connection itself), and never for an ordinary error or a
+    timeout; reset_client() really drops the cached client;
   * the Inventory page: no SQL reads the ungranted base table stock_movements, the arrivals come
     from the granted `shipments` view, and a failing arrivals card no longer fails the page;
   * the web side, from the sources: ApiError carries the ref, the shared error line, the report
@@ -178,7 +179,7 @@ class _FakeDB:
 
 class _patched_shop:
     """Point app.shop and app.database at the fake and reset the caches the reads consult;
-    count reset_client() calls (retry_read makes them)."""
+    count reset_client() calls (retry_read must no longer make any)."""
 
     def __init__(self, fake: _FakeDB):
         self.fake = fake
@@ -493,18 +494,18 @@ class _resets:
         self.n += 1
 
 
-@test("retry: exec_sql / exec_sql_params read once more on a fresh client after a dropped connection")
+@test("retry: exec_sql / exec_sql_params read once more after a dropped connection, without resetting the client")
 def _():
     from app import database, db_read
     for exc in (_dropped(), httpx.ReadError("reset by peer"), httpx.ConnectError("refused")):
         cli, resets = _RpcClient([{"n": 1}], exc), _resets()
         with _Patched((db_read, "get_client", lambda: cli), (database, "reset_client", resets)):
             assert db_read.exec_sql("SELECT 1 AS n") == [{"n": 1}]
-        assert len(cli.calls) == 2 and resets.n == 1, (type(exc).__name__, cli.calls, resets.n)
+        assert len(cli.calls) == 2 and resets.n == 0, (type(exc).__name__, cli.calls, resets.n)
     cli, resets = _RpcClient(json.dumps([{"n": 2}]), _dropped()), _resets()
     with _Patched((db_read, "get_client", lambda: cli), (database, "reset_client", resets)):
         assert db_read.exec_sql_params("SELECT $1::int AS n", [2]) == [{"n": 2}]
-    assert [c[0] for c in cli.calls] == ["run_readonly_query_params"] * 2 and resets.n == 1
+    assert [c[0] for c in cli.calls] == ["run_readonly_query_params"] * 2 and resets.n == 0
     assert cli.calls[1][1] == {"sql_text": "SELECT $1::int AS n", "params": ["2"]}
 
 
@@ -518,7 +519,7 @@ def _():
             raise AssertionError("two drops in a row must surface")
         except httpx.RemoteProtocolError:
             pass
-    assert len(cli.calls) == 2 and resets.n == 1
+    assert len(cli.calls) == 2 and resets.n == 0
     for exc in (RuntimeError("permission denied for table stock_movements"), httpx.ReadTimeout("slow")):
         cli, resets = _RpcClient([], exc), _resets()
         with _Patched((db_read, "get_client", lambda: cli), (database, "reset_client", resets)):
@@ -530,24 +531,18 @@ def _():
         assert len(cli.calls) == 1 and resets.n == 0, type(exc).__name__
 
 
-@test("retry: reset_client() drops the cached client so the next get_client() builds a new one")
+@test("retry: reset_client() drops the process client so the next get_client() builds a new one")
 def _():
     from app import database
-    built = []
-
-    @functools.lru_cache
-    def fake_get_client():
-        built.append(object())
-        return built[-1]
-
-    with _Patched((database, "get_client", fake_get_client)):
-        a = database.get_client()
-        assert database.get_client() is a
+    sentinel = object()
+    saved = database._client
+    try:
+        database._client = sentinel
+        assert database.get_client() is sentinel     # built once, then reused
         database.reset_client()
-        b = database.get_client()
-    assert b is not a and len(built) == 2
-    with _Patched((database, "get_client", lambda: "plain")):
-        database.reset_client()                  # a test stand-in without cache_clear: no-op, no error
+        assert database._client is None
+    finally:
+        database._client = saved
 
 
 @test("retry: the order list and its status counts survive one dropped connection")
@@ -560,7 +555,7 @@ def _():
         out = shop.list_orders()
     assert sorted(o["id"] for o in out["orders"]) == [1, 2] and out["count"] == 2, out
     assert out["counts"]["new"] == 1 and out["counts"]["confirmed"] == 1, out["counts"]
-    assert p.resets == 2
+    assert p.resets == 0
     assert len(db.selects("shop_orders", lambda q: q.count == "exact")) == 2
 
 
@@ -590,15 +585,15 @@ def _():
     with _patched_shop(db) as p:
         got = shop.get_order_by_token(o["token"])
         assert got and got["id"] == 7 and got["lines"][0]["item_code"] == "T01", got
-        assert p.resets == 1 and len(db.selects("shop_orders", by_token)) == 2
+        assert p.resets == 0 and len(db.selects("shop_orders", by_token)) == 2
         # a drop in the middle (the lines) re-reads the whole order, still reads only
         db.fail_once(lambda q: q.table == "shop_order_lines", httpx.ReadError("reset"))
         got = shop.get_order_by_token(o["token"])
-        assert got and len(got["lines"]) == 1 and p.resets == 2
+        assert got and len(got["lines"]) == 1 and p.resets == 0
         db.fail_once(lambda q: q.table == "shop_orders" and any(f[1] == "token" and f[0] == "in" for f in q.filters),
                      _dropped())
         mine = shop.orders_by_tokens([o["token"]])
-        assert [x["order_no"] for x in mine] == [o["order_no"]] and p.resets == 3
+        assert [x["order_no"] for x in mine] == [o["order_no"]] and p.resets == 0
         assert shop.get_order_by_token("short") is None
 
 

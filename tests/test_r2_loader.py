@@ -1055,7 +1055,7 @@ def _():
                 raise RuntimeError("relation v_catalog_reserved does not exist")
             return state["reserved"]
         if "FROM v_catalog_reserved LIMIT 1" in sql:
-            return [{"r": 12, "t": 0, "n": 1, "o": 2, "as_of": "2026-09-24"}]
+            return [{"reserved_units": 12, "in_transit_units": 0, "reserved_items": 1, "open_orders": 2, "as_of": "2026-09-24"}]
         raise AssertionError(sql)
     reports.exec_sql = mt.exec_sql = fake
     state = {"totals": [{"as_of_date": "2026-09-24", "focus_total_bhd": 8633.84, "focus_over90_bhd": 4724.26, "rows_total_bhd": 9078.86}],
