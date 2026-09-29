@@ -240,7 +240,10 @@ on conflict (key) do nothing;
 --     giveaways excluded; windows anchor to MAX(sale_date) like every other sales view.
 --     Carries customer names -> NEVER granted to yq_readonly or anyone but the service role.
 create or replace view v_customer_regulars as
-with mx as (select max(sale_date) as d from v_sales),
+-- MATERIALIZED (perf-2609, 29-Sep-2026): referenced once, the CTE was inlined and the planner re-ran
+-- MAX(sale_date) over all of v_sales once per row under a shop filter (991 loops): the follow-ups
+-- read of 80 shops took 4.1-4.5 s; materialized 0.21-0.31 s, identical rows (EXCEPT ALL both ways = 0).
+with mx as materialized (select max(sale_date) as d from v_sales),
 base as (
   select distinct v.customer_name, v.sku_code, v.sale_date, v.quantity
   from v_sales v

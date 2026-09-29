@@ -3,8 +3,9 @@
 # Replaces Railway, whose trial lapsed and whose deployments were REMOVED.
 # Free tier reality check:
 #   * 512 MB RAM / 0.1 CPU  -> requirements.txt is kept lean for this
-#   * sleeps after 15 min idle, ~50 s cold start -> the portal's "Waking the
-#     server..." screen is designed for exactly this
+#   * sleeps after 15 min idle (~50 s cold start); the keepwarm Worker pings /health every
+#     10 min so it never does. 750 free instance-hours a month cover ONE always-on service
+#     only: keep every other free service suspended (Frankfurt yq-ops-assistant: 29-Sep-2026)
 #   * no credit card required
 #
 # Deploy:  Render Dashboard -> New -> Blueprint -> pick this repo.
