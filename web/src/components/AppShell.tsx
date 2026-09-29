@@ -5,27 +5,49 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Moon, Sun, LogOut, PanelLeftClose, PanelLeft, Loader2, Settings, ChevronDown, Search, Menu, KeyRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiGet } from '@/lib/api'
-import { mustResetOf, passwordScreenFor, useAuth } from '@/lib/auth'
+import { mustResetOf, passwordScreenFor, useAuth, type Me } from '@/lib/auth'
 import { useTheme } from '@/lib/theme'
 import { navFor, NAV } from '@/lib/nav'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
 import { FreshnessChip } from './FreshnessChip'
 
-/** Pre-warm the most-clicked pages a moment after login — by the time the owner
- *  clicks Sales/Inventory/Catalog, the data is already in memory (0ms click). */
-function usePrefetchPages(enabled: boolean) {
+const PREFETCH_REPORTS: [key: string, feature: string][] = [
+  ['sales', 'Sales'], ['inventory', 'Inventory'], ['margins', 'Margins'], ['receivables', 'Receivables'],
+]
+
+/** Pre-warm the most-clicked pages once the page in front of the user has its data — by the time
+ *  they click Sales/Inventory/Catalog, it is already in memory (0ms click). perf-2609: only pages
+ *  this login can open, only after the current page's own requests have finished (they used to
+ *  compete with it on a 0.1-CPU server, 2.5 s after every load), and a failure is not retried. */
+function usePrefetchPages(me: Me | null, enabled: boolean) {
   const qc = useQueryClient()
+  const role = me?.role
+  const features = (me?.features || []).join('|')
   useEffect(() => {
     if (!enabled) return
-    const t = setTimeout(() => {
-      for (const key of ['sales', 'inventory', 'margins', 'receivables']) {
-        qc.prefetchQuery({ queryKey: ['report', key], queryFn: () => apiGet(`/report/${key}`) })
+    const can = (feature: string) => role === 'admin' || features.split('|').includes(feature)
+    let timer: ReturnType<typeof setTimeout>
+    let waited = 0
+    const run = () => {
+      // Wait (up to ~20 s) until nothing else is loading, then warm quietly.
+      if (qc.isFetching() > 0 && waited < 20_000) {
+        waited += 1000
+        timer = setTimeout(run, 1000)
+        return
       }
-      qc.prefetchQuery({ queryKey: ['catalog'], queryFn: () => apiGet('/catalog') })
-    }, 2500)
-    return () => clearTimeout(t)
-  }, [enabled, qc])
+      for (const [key, feature] of PREFETCH_REPORTS) {
+        if (can(feature)) {
+          void qc.prefetchQuery({ queryKey: ['report', key], queryFn: () => apiGet(`/report/${key}`), retry: false })
+        }
+      }
+      if ((role === 'admin' || role === 'member') && can('Catalog')) {
+        void qc.prefetchQuery({ queryKey: ['catalog'], queryFn: () => apiGet('/catalog'), retry: false })
+      }
+    }
+    timer = setTimeout(run, 3000)
+    return () => clearTimeout(timer)
+  }, [enabled, qc, role, features])
 }
 
 function greeting() {
@@ -53,7 +75,7 @@ export function AppShell() {
   // A temporary password (server-owned must_reset): every API route but the password change
   // answers 403, so keep the member on Settings and say why instead of a page full of errors.
   const mustReset = mustResetOf(me, session)
-  usePrefetchPages(!!me && me.role !== 'salesman' && !mustReset)
+  usePrefetchPages(me, !!me && me.role !== 'salesman' && !mustReset)
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem('yq-collapsed') === '1',
   )

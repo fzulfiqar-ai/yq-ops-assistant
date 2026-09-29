@@ -584,6 +584,11 @@ def invalidate_dashboard_cache() -> None:
     _dash_cache.update(at=0.0, payload=None)
     _report_cache.clear()
     _report_failed.clear()
+    try:  # the reps' sales block on /shop/me (app/shop.py) is kept until the next upload too
+        from app.shop import invalidate_focus_cache
+        invalidate_focus_cache()
+    except Exception:  # noqa: BLE001
+        pass
     try:  # the Command Centre's Focus figures are kept until the next upload too (app/metrics.py)
         from app.metrics import invalidate as _invalidate_command
         _invalidate_command()

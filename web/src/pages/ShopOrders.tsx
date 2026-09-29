@@ -675,7 +675,11 @@ type FlowMode = 'view' | 'confirm' | 'amend' | 'deliver' | 'cancel' | 'reopen'
 function useOrderFlow(id: number, onChanged: () => void, readOnly: boolean) {
   const toast = useToast()
   const qc = useQueryClient()
-  const { data, isLoading } = useQuery({ queryKey: ['shop-order', id], queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`) })
+  const { data, isLoading } = useQuery({
+    queryKey: ['shop-order', id],
+    queryFn: () => apiGet<OrderDetail>(`/shop/orders/${id}`),
+    staleTime: 10_000,   // another desk may have moved this order: re-read on reopen (perf-2609)
+  })
   const [mode, setMode] = useState<FlowMode>('view')
   const [busy, setBusy] = useState<string | null>(null)
   const [cancel, setCancel] = useState({ reason_code: '', note: '' })
@@ -1627,6 +1631,11 @@ export default function ShopOrders() {
       if (q) params.set('q', q)
       return apiGet<ShopOrdersResp>(`/shop/orders?${params.toString()}`)
     },
+    // Orders are live data (perf-2609): coming back to this page paints the last list at once and
+    // re-reads it in the background after 15 s (the app-wide 5 min let a new order hide that long),
+    // and a return to the browser tab re-reads it too.
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
   })
 
   const rows = ordersQuery.data?.orders || []

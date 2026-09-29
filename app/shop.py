@@ -3668,6 +3668,45 @@ def rep_target(focus_name: str, period: str | None) -> dict | None:
 UNLINKED_HINT = "Your login is not linked to a salesman yet — an admin can link it on the Salesmen page."
 
 
+# The rep's sales block on /shop/me (Today / Me): three or four v_sales round trips that only change
+# when an upload lands, so it is kept per rep for _FOCUS_TTL_S and dropped by every upload
+# (reports.invalidate_dashboard_cache). The order counts beside it are read fresh on every call.
+_FOCUS_TTL_S = 300
+_focus_cache: dict[str, tuple[float, dict]] = {}
+
+
+def invalidate_focus_cache() -> None:
+    _focus_cache.clear()
+
+
+def _rep_focus(focus_name: str) -> dict:
+    hit = _focus_cache.get(focus_name)
+    if hit and time.time() - hit[0] < _FOCUS_TTL_S:
+        return hit[1]
+    focus: dict
+    try:
+        # Rep figures are MOBILE ACCESSORIES only (owner, 21-Sep-2026): Batelco SIM sales
+        # never count towards a rep's revenue or target, so both queries filter the division.
+        # Ex-VAT, like the kickback base (owner, 24-Sep-2026), so one screen never mixes bases.
+        rev = exec_sql_params(
+            "SELECT COALESCE(SUM(net_bhd),0) AS rev FROM v_sales "
+            "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND division = 'Accessories' "
+            "AND NOT is_giveaway "
+            "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [focus_name])
+        focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev")), "basis": KICKBACK_BASIS}
+        # Tiered kickback: this month's accessories sales (month of the latest loaded sale,
+        # giveaways excluded, EX-VAT) vs the rep's standing or month-specific target row.
+        amt, data_date = rep_month_sales(focus_name)
+        focus["target"] = tier_progress(rep_target(focus_name, str(data_date or "")[:7]), amt,
+                                        data_date, today=bahrain_today())
+    except Exception as e:  # noqa: BLE001
+        log.warning("focus kpis failed for %s: %s", focus_name, e)
+        focus = {"error": "Sales figures are unavailable right now; the office has been notified."}
+    if "error" not in focus:
+        _focus_cache[focus_name] = (time.time(), focus)
+    return focus
+
+
 def me_payload(email: str, *, is_admin: bool = False) -> dict:
     """The Today / Me card. A login without a salesmen row sees company-wide totals ONLY when
     it is an admin; any other unlinked login gets empty KPIs and the hint (R1 security)."""
@@ -3692,26 +3731,7 @@ def me_payload(email: str, *, is_admin: bool = False) -> dict:
         "value_30d_bhd": money(sum(_f(o.get("total_bhd")) for o in live)),
         "customers_30d": len({o.get("customer_phone") for o in live}),
     }
-    focus = None
-    if sm and sm.get("focus_name"):
-        try:
-            # Rep figures are MOBILE ACCESSORIES only (owner, 21-Sep-2026): Batelco SIM sales
-            # never count towards a rep's revenue or target, so both queries filter the division.
-            # Ex-VAT, like the kickback base (owner, 24-Sep-2026), so one screen never mixes bases.
-            rev = exec_sql_params(
-                "SELECT COALESCE(SUM(net_bhd),0) AS rev FROM v_sales "
-                "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 AND division = 'Accessories' "
-                "AND NOT is_giveaway "
-                "AND (salesman_resolved = $1 OR salesman_resolved LIKE $1 || ' - %')", [sm["focus_name"]])
-            focus = {"revenue_90d_bhd": money((rev or [{}])[0].get("rev")), "basis": KICKBACK_BASIS}
-            # Tiered kickback: this month's accessories sales (month of the latest loaded sale,
-            # giveaways excluded, EX-VAT) vs the rep's standing or month-specific target row.
-            amt, data_date = rep_month_sales(sm["focus_name"])
-            focus["target"] = tier_progress(rep_target(sm["focus_name"], str(data_date or "")[:7]), amt,
-                                            data_date, today=bahrain_today())
-        except Exception as e:  # noqa: BLE001
-            log.warning("focus kpis failed for %s: %s", sm.get("focus_name"), e)
-            focus = {"error": "Sales figures are unavailable right now; the office has been notified."}
+    focus = _rep_focus(sm["focus_name"]) if sm and sm.get("focus_name") else None
     return {"salesman": sm, "link": salesman_link(sm) if sm else None,
             "qr_url": f"/shop/salesmen/{sm['id']}/qr.png" if sm else None, "kpis": kpis, "focus": focus}
 

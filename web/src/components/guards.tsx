@@ -72,36 +72,40 @@ function ApiOffline() {
 }
 
 /**
- * Couldn't REACH the API (cold start / network). Free-tier hosts sleep after idle, so a
- * slow first load is normal — but we stop claiming "starting up" forever. After ~2 minutes
- * of failed polls the copy escalates to "probably down", so nobody stares at a spinner
- * believing it's about to recover.
+ * No `me` yet and /me has not answered (first sign-in on this device — a returning user opens
+ * straight into the app from the last good /me). It used to say "Waking the server… ~30 seconds"
+ * for EVERY failure, including a 500 from a server that was wide awake (29-Sep-2026); the copy now
+ * says what actually happened. After ~2 minutes of failed polls it escalates to "can't reach",
+ * so nobody stares at a spinner believing it's about to recover.
  */
-function ServerWaking() {
-  const { refreshMe, meError } = useAuth()
+function Connecting() {
+  const { refreshMe, retryMe, meError, meFail } = useAuth()
   const [busy, setBusy] = useState(false)
   const [attempts, setAttempts] = useState(0)
   const stalled = attempts >= 6   // 6 × 20s ≈ 2 min
   useEffect(() => {
     if (stalled) return           // stop hammering a server that clearly isn't coming back
-    const t = setInterval(() => { setAttempts((n) => n + 1); refreshMe() }, 20000)
+    // retryMe joins a load already in flight, so this poll never stacks /me requests.
+    const t = setInterval(() => { setAttempts((n) => n + 1); void retryMe() }, 20000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stalled])
+  const title = stalled
+    ? "Can't reach the server"
+    : meFail === 'server' ? 'The server hit an error' : 'Connecting to the server…'
+  const body = stalled
+    ? "The API hasn't answered properly for a couple of minutes. Your data is safe — please tell an admin."
+    : meFail === 'server'
+      ? 'It answered with an error instead of your account. Retrying automatically — or tap retry.'
+      : 'This is taking longer than usual. It will connect automatically — or tap retry.'
   return (
     <div className="grid h-screen place-items-center bg-background px-4">
       <div className="max-w-sm text-center">
         <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-accent text-accent-foreground">
           <CloudOff size={22} />
         </div>
-        <h1 className="font-display text-xl font-bold">
-          {stalled ? "Can't reach the server" : 'Waking the server…'}
-        </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {stalled
-            ? "The API hasn't responded for a couple of minutes, so it's likely down rather than just starting up. Your data is safe — please tell an admin."
-            : 'The API is starting up (this can take ~30 seconds after a quiet period). It will connect automatically — or tap retry.'}
-        </p>
+        <h1 className="font-display text-xl font-bold">{title}</h1>
+        <p className="mt-2 text-sm text-muted-foreground">{body}</p>
         <Button variant="outline" className="mt-5" disabled={busy}
           onClick={async () => { setBusy(true); setAttempts(0); await refreshMe(); setBusy(false) }}>
           {busy ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />} Retry now
@@ -123,7 +127,7 @@ export function ProtectedRoute() {
   if (!me) {
     if (meState === 'denied') return <NoAccess />
     if (meState === 'offline') return <ApiOffline />
-    return <ServerWaking />
+    return <Connecting />
   }
   // A salesman works from a phone in a shop — two tabs, no office sidebar.
   if (me.role === 'salesman') return <SalesmanShell />

@@ -128,6 +128,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Agent-Key", "Accept"],
     expose_headers=["Content-Disposition", "Retry-After"],
+    # Every portal call carries Authorization, so each distinct URL needs a preflight; the
+    # browser keeps the answer this long (Chrome caps it at 2 h; Starlette's default is 10 min),
+    # so a return visit skips one round trip per endpoint (perf-2609).
+    max_age=7200,
 )
 
 
