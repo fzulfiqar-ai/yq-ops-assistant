@@ -898,7 +898,9 @@ def _():
     with _Patched((app_settings, "setting", lambda key: 10000.0 if key == "monthly_sales_target_bhd" else None)):
         out = reports._assemble_dashboard({**_dash_base(), "cc": CC_STUB, "trend_acc": trend, "top_acc": top})
         old = reports._assemble_dashboard({**_dash_base(), "agents": []})
-    assert set(out) == OLD_DASH_KEYS | {"command", "revenue_trend_acc", "top_customers_acc"}, set(out) ^ OLD_DASH_KEYS
+    # R8 added payment_split_acc and scope the same way (tests/test_r8_dashboard.py): added, nothing else moved
+    assert set(out) == OLD_DASH_KEYS | {"command", "revenue_trend_acc", "top_customers_acc"} | {
+        "payment_split_acc", "scope"}, set(out) ^ OLD_DASH_KEYS
     assert "agents" not in out, "the AI Agent Team panel is off the Dashboard"
     assert out["command"] is CC_STUB and out["revenue_trend_acc"] == trend and out["top_customers_acc"] == top
     k = out["kpis"]

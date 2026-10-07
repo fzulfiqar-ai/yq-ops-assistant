@@ -254,9 +254,24 @@ def agents_status() -> list[dict]:
     return sorted(latest.values(), key=lambda x: x["agent"])
 
 
+# DSO's sales per day (R8, 7-Oct-2026): Accessories only, giveaways out — Batelco SIM is sold for cash and
+# nearly doubled the daily sales the receivables were divided by, so collection read almost twice as fast
+# as it is (34 days for 64). It stays VAT-INCLUSIVE (revenue_bhd): the receivables it divides are
+# VAT-inclusive Focus balances. Those stay every customer balance — Focus does not split one by product,
+# and no "accessories receivables" figure is made up here. The 90 days to the latest loaded sale.
+DSO_SALES_PER_DAY_SQL = (
+    "SELECT COALESCE(SUM(revenue_bhd),0)/90.0 AS d FROM v_sales "
+    "WHERE division = 'Accessories' AND NOT is_giveaway "
+    "AND sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 LIMIT 1"
+)
+DSO_BASIS = ("Receivables (every customer balance in Focus) ÷ Accessories sales per day · "
+             "VAT-inclusive, giveaways out · the 90 days to the latest loaded sale")
+
+
 def business_health() -> dict:
     """CEO-grade health metrics the totals don't show: the margin, cash efficiency, and capital
-    frozen in dead stock. Read-only.
+    frozen in dead stock. Read-only. The Dashboard is its one reader, so it is Accessories only (R8):
+    DSO divides by Accessories sales per day, dead stock is the Accessories stock.
 
     Margin (R7d, one definition — app.metrics.profitability): the OFFICIAL figure is gross margin on
     ex-VAT sales against Focus COGS (every item costed); the landed (MRN) margin is the secondary
@@ -266,18 +281,17 @@ def business_health() -> dict:
     from app import metrics
     prof = metrics.profitability(q=exec_sql)
     om, lm = prof.get("official") or {}, prof.get("landed") or {}
-    # Cash efficiency: how much AR is overdue, and crude DSO (AR ÷ avg daily gross over last 90d)
+    # Cash efficiency: how much AR is overdue, and crude DSO (AR ÷ avg daily Accessories gross over last 90d)
     ar = (exec_sql("SELECT COALESCE(SUM(outstanding_bhd),0) AS total, COALESCE(SUM(overdue_bhd),0) AS overdue "
                    "FROM v_receivables LIMIT 1") or [{}])[0]
     ar_total, ar_overdue = float(ar.get("total") or 0), float(ar.get("overdue") or 0)
     overdue_pct = (ar_overdue / ar_total * 100) if ar_total else 0.0
-    dpr = float((exec_sql("SELECT COALESCE(SUM(revenue_bhd),0)/90.0 AS d FROM v_sales "
-                          "WHERE sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 LIMIT 1")
-                 or [{}])[0].get("d") or 0)
+    dpr = float((exec_sql(DSO_SALES_PER_DAY_SQL) or [{}])[0].get("d") or 0)
     dso = (ar_total / dpr) if dpr else 0.0
-    # Capital frozen in dead stock (no sale in the velocity window), at COST
+    # Capital frozen in dead stock (no sale in the velocity window), at COST — the Accessories stock
+    # (metrics.STOCK_SQL, the Command Centre's own read; the summary leaves out what is not on hand)
     try:
-        stock = metrics.stock_cost_summary(exec_sql(metrics.STOCK_HELD_SQL) or [])
+        stock = metrics.stock_cost_summary(exec_sql(metrics.STOCK_SQL) or [])
     except Exception as e:  # noqa: BLE001 -- the tile says "not available", never a selling-price stand-in
         log.warning("business health: stock at cost unavailable: %s", e)
         stock = None
@@ -291,6 +305,8 @@ def business_health() -> dict:
         "landed_coverage_pct": lm.get("coverage_pct"), "cost_coverage_pct": lm.get("coverage_pct"),
         "returns_note": prof.get("returns_note"),
         "ar_overdue_pct": overdue_pct, "dso_days": dso,
+        # what the DSO divides, so the tile can say it on hover
+        "dso_receivables_bhd": round(ar_total, 3), "dso_sales_per_day_bhd": round(dpr, 3), "dso_basis": DSO_BASIS,
         "dead_stock_bhd": stock["dead_cost_bhd"] if stock else 0.0,
         "dead_stock_count": stock["dead_count"] if stock else 0,
         "dead_stock_uncosted": stock["dead_uncosted"] if stock else 0,
@@ -301,12 +317,14 @@ def business_health() -> dict:
 
 def movers(k: int = 5) -> dict:
     """What's accelerating vs fading — momentum = last-30d run-rate ÷ the 90-day baseline.
-    Risers to restock & push; fallers to investigate before stock goes dead."""
+    Risers to restock & push; fallers to investigate before stock goes dead. Accessories only (R8):
+    the Dashboard is its one reader, and Batelco starter packs were showing among the risers."""
     cols = ("item_name, sold_30d, sold_90d, status, "
             "ROUND((sold_30d / NULLIF(sold_90d / 3.0, 0))::numeric, 2) AS momentum")
-    rising = exec_sql(f"SELECT {cols} FROM v_stock_health WHERE sold_90d > 0 AND sold_30d > 0 "
+    acc = "division = 'Accessories' AND sold_90d > 0"
+    rising = exec_sql(f"SELECT {cols} FROM v_stock_health WHERE {acc} AND sold_30d > 0 "
                       f"ORDER BY momentum DESC LIMIT {int(k)}") or []
-    falling = exec_sql(f"SELECT {cols} FROM v_stock_health WHERE sold_90d > 0 "
+    falling = exec_sql(f"SELECT {cols} FROM v_stock_health WHERE {acc} "
                        f"ORDER BY momentum ASC LIMIT {int(k)}") or []
     return {"rising": rising, "falling": falling}
 
@@ -438,7 +456,8 @@ def daily_sales_mtd() -> list[dict]:
     """One row per day of the current month (anchored to the data's latest date) —
     the owner's 'daily current-month sales' dashboard chart."""
     # acc_bhd = Mobile Accessories only. Targets never include Batelco SIM sales (owner,
-    # 21-Sep-2026); gross_bhd stays the all-division total for the tooltip and the division chips.
+    # 21-Sep-2026); gross_bhd stays the all-division total in the payload — the Dashboard page draws the
+    # Accessories columns only (R8).
     # acc_net_bhd = the same Accessories ex-VAT, giveaways out: the basis the company target is read
     # on (app.metrics.PACE_BASIS), so the Dashboard's bars and target lines compare like with like.
     return exec_sql(
@@ -470,6 +489,51 @@ def sales_split_mtd() -> dict:
         f"SUM(CASE WHEN is_giveaway THEN quantity ELSE 0 END) AS giveaway_qty "
         f"{win} GROUP BY division ORDER BY revenue_bhd DESC") or []
     return {"by_payment": pay, "by_division": div}
+
+
+# The Dashboard's Cash / Credit chips (R8, 7-Oct-2026): the sales_split_mtd window (the month of the latest
+# loaded sale) on the page's one basis — Accessories only, ex-VAT net_bhd, giveaways out of the money and of
+# the invoice counts; the free units (zero-priced Accessories lines) are counted apart. One row per
+# sale_type; a subquery, not a CTE. sales_split_mtd above (VAT-inclusive, every division) still travels as
+# by_payment / by_division — _pace reads its Accessories row — but the page no longer shows it: its chips
+# put Batelco SIM cash beside the Accessories month.
+PAYMENT_SPLIT_ACC_SQL = (
+    "SELECT sale_type, COUNT(DISTINCT invoice_no) FILTER (WHERE NOT is_giveaway) AS invoices, "
+    "ROUND(COALESCE(SUM(net_bhd) FILTER (WHERE NOT is_giveaway), 0)::numeric, 3) AS net_bhd, "
+    "COALESCE(SUM(quantity) FILTER (WHERE is_giveaway), 0) AS giveaway_qty "
+    "FROM v_sales, (SELECT MAX(sale_date) AS mx FROM v_sales) d "
+    "WHERE sale_date >= date_trunc('month', d.mx)::date AND division = 'Accessories' "
+    "GROUP BY sale_type ORDER BY sale_type"
+)
+_PAYMENT_ORDER = {"cash": 0, "credit": 1}
+
+
+def payment_split_acc(rows: list[dict] | None) -> dict:
+    """Pure: PAYMENT_SPLIT_ACC_SQL rows → the Dashboard's chips. The result's `rows` hold one chip per
+    sale type, cash first, money to the fils; a sale type whose only Accessories lines this month were
+    free units makes no chip, and its units still count in `giveaway_qty`."""
+    from app import metrics
+    chips: list[dict] = []
+    free = Decimal(0)
+    for r in rows or []:
+        free += metrics.dec(r.get("giveaway_qty"))
+        invoices, net = int(metrics.dec(r.get("invoices"))), metrics.dec(r.get("net_bhd"))
+        if invoices <= 0 and net == 0:
+            continue
+        chips.append({"sale_type": str(r.get("sale_type") or "").strip().lower(), "net_bhd": metrics.money(net),
+                      "invoices": invoices})
+    chips.sort(key=lambda c: (_PAYMENT_ORDER.get(c["sale_type"], len(_PAYMENT_ORDER)), c["sale_type"]))
+    return {"division": "Accessories", "basis": "net_ex_vat", "rows": chips, "giveaway_qty": float(free)}
+
+
+def payment_split_acc_mtd() -> dict | None:
+    """The month's Accessories sales by how they were paid (PAYMENT_SPLIT_ACC_SQL → payment_split_acc).
+    None when the read failed: the page then shows no chips, never an every-division split in their place."""
+    try:
+        return payment_split_acc(exec_sql(PAYMENT_SPLIT_ACC_SQL) or [])
+    except Exception as e:  # noqa: BLE001 -- one row of chips never costs the page
+        log.warning("dashboard: accessories payment split unavailable: %s", e)
+        return None
 
 
 # The Dashboard's top customers (R7e): the sales_split_mtd window (the month of the latest loaded sale),
@@ -570,6 +634,20 @@ def command_basis() -> dict | None:
         return None
 
 
+# The Dashboard is Mobile Accessories only (R8, owner 7-Oct-2026: "no other numbers except mobile acc").
+# The payload says so once (`scope`) and the page prints it: the low-stock count, the momentum list, DSO's
+# sales per day, dead stock and the Cash / Credit chips are all read for this division. Receivables are
+# the one figure that cannot be: Focus keeps a balance per customer, not per product. The email digests
+# (app.digest's defaults) and the Sales / Inventory pages keep their own, wider basis.
+DASHBOARD_DIVISION = "Accessories"
+DASHBOARD_SCOPE = {
+    "division": DASHBOARD_DIVISION,
+    "text": ("Mobile Accessories only — Batelco SIM sales and stock are left out of every figure on this page; "
+             "receivables are the one exception, because Focus keeps one balance per customer and does not "
+             "split it by product."),
+}
+
+
 # The dashboard payload is ~20 view queries; each is a PostgREST round-trip. Build the
 # independent sections concurrently and serve warm hits from an in-process cache (zero
 # round-trips). flush on ingest via invalidate_dashboard_cache() (ai.flush_cache calls it).
@@ -603,7 +681,8 @@ def dashboard(force: bool = False) -> dict:
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="dash") as ex:
         futs = {
             "s": ex.submit(daily_summary),
-            "a": ex.submit(all_alerts),
+            # R8: the low-stock list and count for the page's division; the digests call all_alerts() bare
+            "a": ex.submit(all_alerts, DASHBOARD_DIVISION),
             "health": ex.submit(business_health),
             "movers": ex.submit(movers, 5),
             "trend": ex.submit(revenue_trend, 12),
@@ -616,6 +695,8 @@ def dashboard(force: bool = False) -> dict:
             "cc": ex.submit(command_basis),
             "trend_acc": ex.submit(revenue_trend_acc),
             "top_acc": ex.submit(top_customers_acc_mtd, 7),
+            # R8: the Cash / Credit chips on the same Accessories ex-VAT basis
+            "split_acc": ex.submit(payment_split_acc_mtd),
         }
         r = {k: f.result() for k, f in futs.items()}
     out = _assemble_dashboard(r)
@@ -635,6 +716,8 @@ def _assemble_dashboard(r: dict) -> dict:
         "rev_prev_month_mtd": s.get("rev_prev_month_mtd", 0),
         "prev_month_through": s.get("prev_month_through"),
         "total_receivables": s["total_receivables"],
+        # R8: Accessories only — dashboard() builds the alerts for DASHBOARD_DIVISION, so the tile, the
+        # "Reorder N" action and the alerts strip all read the one count
         "low_stock_count": a["low_stock_count"],
         # Whole-book SQL sums (daily_summary), NOT the capped alert list — keeps the
         # tile on the exact same basis as the collections agent.
@@ -681,6 +764,11 @@ def _assemble_dashboard(r: dict) -> dict:
         "daily_mtd": r["daily_mtd"],
         "by_payment": r["split"]["by_payment"],
         "by_division": r["split"]["by_division"],
+        # R8: the page's Cash / Credit chips, Accessories ex-VAT (None = the read failed, or an older
+        # caller's dict: no chips), and the scope the page states. Only added: by_payment / by_division
+        # above still travel for their other readers, the Dashboard page no longer shows them.
+        "payment_split_acc": r.get("split_acc"),
+        "scope": dict(DASHBOARD_SCOPE),
         # the Accessories ex-VAT month to date: the basis the target is read on (same as the Command Centre)
         "pace": _pace({**kpis, "acc_mtd_ex_vat": sum(
             (Decimal(str(d.get("net_ex_vat_bhd") or 0)) for d in (r["split"]["by_division"] or [])

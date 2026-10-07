@@ -484,9 +484,10 @@ def stock_cost_sql(where: str) -> str:
     )
 
 
-# the latest stock snapshot per Accessories item with its unit cost at cost (one row per item)
+# the latest stock snapshot per Accessories item with its unit cost at cost (one row per item): the
+# Command Centre's stock tiles and, since R8, the Dashboard's dead stock (app.reports.business_health)
 STOCK_SQL = stock_cost_sql("h.division = 'Accessories'")
-# every item held (any division) — the Inventory page's and the Dashboard's stock tiles
+# every item held (any division) — the Inventory page's stock tiles
 STOCK_HELD_SQL = stock_cost_sql("h.current_stock > 0")
 
 
