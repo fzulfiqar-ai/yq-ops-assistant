@@ -11,7 +11,12 @@
  *   * deadUncostedNote — the dead-stock tile's item count and its at-cost value never describe
  *     different items silently: whenever some dead items have no usable cost the note says how many
  *     of how many are left out of the value; nothing when every item is costed;
- *   * the VAT basis words Shop analytics and the merchant page put beside marketplace money.
+ *   * the VAT basis words Shop analytics and the merchant page put beside marketplace money;
+ *   * the Dashboard is Mobile Accessories only (R8, owner 7-Oct-2026) — read as source text, nothing is
+ *     rendered: the page never reads or prints the every-division split again (by_payment / by_division,
+ *     the "every division" caption, the all-division day total); its chips are Accessories ex-VAT with the
+ *     invoices on hover and a free-units chip only above 0; the scope pill and the Accessories labels wait
+ *     for the API's own scope; SIM is only ever named as left out.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -69,6 +74,57 @@ check('dead stock: the "of N" never reads fewer than the uncosted count; thousan
 check('shop analytics money: the VAT basis is named, and the Command Centre difference explained', () => {
   eq(B.VAT_LABEL, 'incl. VAT', 'label')
   ok(B.MONEY_NOTE.includes('incl. VAT') && B.MONEY_NOTE.includes('ex-VAT'), 'note names both bases')
+})
+
+// ── the Dashboard page, as text (a Windows checkout has CRLF, CI has LF: one form here) ──────────────
+const DASH_FILE = 'pages/Dashboard.tsx'
+const DASH = readFileSync(path.join(SRC, DASH_FILE), 'utf8').replace(/\r\n/g, '\n')
+const CHIPS_CAPTION = 'Month to date · Accessories · ex-VAT'
+
+check('dashboard: Mobile Accessories only — the every-division split is never read or rendered again', () => {
+  for (const gone of ['by_payment', 'by_division', 'PaymentRow', 'DivisionRow']) {
+    ok(!DASH.includes(gone), `${DASH_FILE} without "${gone}"`)
+  }
+  ok(!/every[\s-]+division/i.test(DASH), `${DASH_FILE} without the words "every division"`)
+  ok(!DASH.includes('gross, VAT-incl'), 'no VAT-inclusive chips caption')
+  // the daily bars and the running total never fall back to the all-division day total
+  ok(!DASH.includes('gross_bhd'), `${DASH_FILE} without the all-division "gross_bhd"`)
+  // no JSX prints a division name out of the payload (the old chips did: {d.division})
+  ok(!/\{\s*[\w.?]+\.division\s*\}/.test(DASH), 'no {x.division} rendered')
+})
+
+check('dashboard: the chips are Accessories ex-VAT, invoices on hover; the free-units chip only above 0', () => {
+  eq(DASH.split(CHIPS_CAPTION).length - 1, 1, 'the chips caption, once:')
+  const row = DASH.split(CHIPS_CAPTION)[1].split('</Card>')[0]
+  ok(DASH.includes('const split = data?.payment_split_acc ?? null'), 'the chips read payment_split_acc')
+  ok(row.includes('split.rows.map((p) => ('), 'one chip per sale type')
+  ok(row.includes('{bhd(p.net_bhd, 0)}'), 'the ex-VAT amount')
+  ok(row.includes("title={`${num(p.invoices)} invoice${p.invoices === 1 ? '' : 's'}"), 'the invoices on hover')
+  ok(row.includes('{split.giveaway_qty > 0 && ('), 'free units only when above 0')
+  ok(row.includes("free unit{split.giveaway_qty === 1 ? '' : 's'}"), '"N free units"')
+  ok(!/division|revenue_bhd|SIM/.test(row), 'no division chip, no VAT-inclusive amount, no SIM in the chips row')
+  // the row is drawn only from the Accessories split: a failed read or an older API shows no chips at all
+  const guard = DASH.slice(DASH.indexOf(CHIPS_CAPTION) - 600, DASH.indexOf(CHIPS_CAPTION))
+  ok(guard.includes('{split && (split.rows.length > 0 || split.giveaway_qty > 0) && ('), 'the row needs the split')
+})
+
+check('dashboard: the scope pill and the Accessories labels wait for the API to state the scope', () => {
+  ok(DASH.includes("const accOnly = data?.scope?.division === 'Accessories'"), 'accOnly comes from the API scope')
+  const header = DASH.split('<PageHeader title={greeting}')[1].split('/>\n\n')[0]
+  ok(header.includes('actions={accOnly ? ('), 'the pill only when the API says Accessories')
+  ok(header.includes('title={data?.scope?.text}'), "the API's sentence on hover")
+  ok(header.includes('Mobile Accessories only'), 'the pill text')
+  ok(DASH.includes("label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'}"), 'the low-stock tile label')
+  ok(DASH.includes("{accOnly ? 'Accessories items' : 'items'} under 30 days cover"), 'the alerts strip')
+  // receivables are the one figure that is not Accessories only, and its hover says so
+  ok(DASH.includes("'every customer balance in Focus, not split by product'"), 'the receivables hover')
+})
+
+check('dashboard: SIM is only ever named as left out, never shown as a figure', () => {
+  for (const m of DASH.matchAll(/\bSIM\b/g)) {
+    const near = DASH.slice(Math.max(0, m.index - 60), m.index + 60).replace(/\s+/g, ' ')
+    ok(/excluded|never counts/.test(near), `SIM named as left out near "…${near.slice(30, 90)}…"`)
+  }
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

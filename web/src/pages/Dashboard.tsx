@@ -6,7 +6,7 @@ import { motion } from 'motion/react'
 import {
   DollarSign, FileText, Boxes, Landmark, TrendingUp, TrendingDown, Crown, TriangleAlert,
   CalendarDays, Store, Truck, ListChecks, ArrowRight, Percent, Clock, Snowflake,
-  Flame, ArrowUpRight, ArrowDownRight,
+  Flame, ArrowUpRight, ArrowDownRight, Smartphone,
 } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
@@ -65,13 +65,19 @@ interface Health {
   margin_basis?: string; margin_available?: boolean; cost_coverage_pct?: number | null; below_cost_count?: number
   landed_gp_pct?: number | null; landed_coverage_pct?: number | null
   dead_stock_uncosted?: number; dead_stock_sell_bhd?: number | null; stock_basis?: string | null
+  /** R8: what the DSO divides — every customer balance in Focus ÷ Accessories sales per day (VAT-incl) */
+  dso_basis?: string; dso_receivables_bhd?: number; dso_sales_per_day_bhd?: number
 }
 interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
 /** acc_bhd = Mobile Accessories only, VAT-incl (SIM never counts); acc_net_bhd = the same ex-VAT, giveaways
- *  out — the basis the company target is read on, so the bars and the target lines compare like with like */
-interface DailyRow { day: string; gross_bhd: number; acc_bhd?: number; acc_net_bhd?: number; net_bhd: number; orders: number }
-interface PaymentRow { sale_type: string; orders: number; revenue_bhd: number }
-interface DivisionRow { division: string; orders: number; revenue_bhd: number; giveaway_qty: number }
+ *  out — the basis the company target is read on, so the bars and the target lines compare like with like.
+ *  The row's all-division totals also travel; this page is Accessories only and never reads them (R8) */
+interface DailyRow { day: string; acc_bhd?: number; acc_net_bhd?: number }
+/** R8: the month's Accessories sales by how they were paid — ex-VAT, giveaways out; giveaway_qty = the free
+ *  (zero-priced) Accessories units of the month, counted apart (app/reports.payment_split_acc) */
+interface PaymentSplitAcc { rows: { sale_type: string; net_bhd: number; invoices: number }[]; giveaway_qty: number }
+/** R8: what the page counts, said by the API (app/reports.DASHBOARD_SCOPE) */
+interface Scope { division: string; text: string }
 /** The Command Centre's pace (app.metrics.month_pace): mtd_bhd is Accessories ex-VAT; the target is read as
  *  ex-VAT, Accessories, business days (Sun–Thu) — basis_text says so on the card */
 interface Pace {
@@ -104,8 +110,9 @@ interface DashboardData {
   health?: Health
   movers?: { rising: MoverRow[]; falling: MoverRow[] }
   kpis: Kpis
-  /** R7e: the headline figures on the Command Centre's basis; the older VAT-inclusive, every-division
-   *  fields (kpis.rev_*, revenue_trend, by_channel, top_customers) still travel for the digests, unread here */
+  /** R7e: the headline figures on the Command Centre's basis; the older VAT-inclusive, all-division
+   *  fields (kpis.rev_*, revenue_trend, by_channel, top_customers, the split by payment and by division)
+   *  still travel for their other readers, unread here */
   command?: CommandBasis | null
   revenue_trend_acc?: TrendAccRow[]
   /** null = the read failed (the card says so); [] = a month with no named-account sales */
@@ -114,8 +121,10 @@ interface DashboardData {
   by_salesman_scope?: SalesmanScope | null
   alerts: { negative_margin_count: number | null }
   daily_mtd?: DailyRow[]
-  by_payment?: PaymentRow[]
-  by_division?: DivisionRow[]
+  /** null = the read failed, absent = an older API: no chips either way */
+  payment_split_acc?: PaymentSplitAcc | null
+  /** absent on an older API: the page then makes no "Accessories only" claim */
+  scope?: Scope | null
   pace?: Pace
 }
 
@@ -213,13 +222,15 @@ const TONES = {
   violet: { glow: '#8b5cf6', text: 'text-violet-600' },
 }
 
-function HealthStat({ icon: Icon, label, value, sub, tone, to }: {
+function HealthStat({ icon: Icon, label, value, sub, tone, to, basis }: {
   icon: typeof Percent; label: string; value: React.ReactNode; sub?: React.ReactNode
   tone: keyof typeof TONES; to?: string
+  /** what the figure is made of, on hover (as KpiCard's) */
+  basis?: string
 }) {
   const t = TONES[tone]
   const inner = (
-    <Card className="group relative h-full overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
+    <Card title={basis} className="group relative h-full overflow-hidden p-4 transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-luxe-hover">
       <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full opacity-30 blur-2xl transition-opacity group-hover:opacity-60" style={{ background: t.glow }} />
       <div className="relative flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         <Icon size={15} className={t.text} /> {label}
@@ -280,7 +291,7 @@ export default function Dashboard() {
     let run = 0
     return (data?.daily_mtd || []).map((r, i) => {
       // eslint-disable-next-line react-hooks/immutability -- a local running total inside map(), not render state
-      run += Number(r.acc_net_bhd ?? r.acc_bhd ?? r.gross_bhd ?? 0)
+      run += Number(r.acc_net_bhd ?? r.acc_bhd ?? 0)
       const steps = data?.pace?.business_days_total ? businessDaysTo(r.day) : i + 1
       return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * steps) : null }
     })
@@ -309,6 +320,11 @@ export default function Dashboard() {
   // Focus's own Grand Total when the ageing snapshot stored one; else the account rows (the older kpi)
   const arValue = arTile?.value ?? k?.total_receivables ?? null
   const arLabel = arTile?.source === 'focus_total' ? 'Receivables · Focus Grand Total' : 'Receivables · sum of accounts'
+  // R8: the page is Mobile Accessories only and says so when the API does (an older API sends no scope).
+  // Receivables are the one figure that cannot be: Focus keeps one balance per customer, not per product
+  const accOnly = data?.scope?.division === 'Accessories'
+  const arBasis = [arTile?.basis, 'every customer balance in Focus, not split by product'].filter(Boolean).join(' · ')
+  const split = data?.payment_split_acc ?? null
   const trendAcc = (data?.revenue_trend_acc || []).map((r) => ({ ...r, m: monthLabel(r.period_month) }))
   const partialMonth = trendAcc.find((r) => r.partial && r.through)
   const monthTarget = (data?.pace?.target_bhd ?? 0) > 0 ? data!.pace!.target_bhd : null
@@ -333,7 +349,16 @@ export default function Dashboard() {
 
   return (
     <div>
-      <PageHeader title={greeting} subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus} />
+      {/* the scope pill: what the page counts, in the API's own sentence on hover — quiet, the look of the
+          header's freshness chip */}
+      <PageHeader title={greeting} subtitle={isLoading ? 'Mobile Accessories Intelligence' : focus}
+        actions={accOnly ? (
+          <span title={data?.scope?.text}
+            className="inline-flex items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">
+            <Smartphone size={12} className="shrink-0 text-primary" aria-hidden="true" />
+            Mobile Accessories only
+          </span>
+        ) : undefined} />
 
       {/* Stale-data guard: the header's freshness chip says the date; this says what to do about it */}
       {fresh?.stale && (
@@ -395,18 +420,19 @@ export default function Dashboard() {
             value={salesMtd?.invoices != null ? <CountUp value={salesMtd.invoices} /> : '—'}
             foot={<span className="text-muted-foreground">Month to date{cc?.focus ? ` · ${cc.focus.label}` : ''} · the Focus sales day book</span>} />
           <KpiCard accent={ACCENTS.green} icon={Landmark} label={arLabel} to="/receivables"
-            basis={arTile?.basis}
+            basis={arBasis}
             value={arValue != null ? <CountUp value={arValue} format={(n) => bhd(n, 0)} /> : '—'}
             foot={<span className="text-muted-foreground">
               {arOver90?.value != null && <><span className="font-semibold text-rose-600">{arOver90.value.toFixed(1)}% over 90 days</span>{' '}· </>}
               <Amount>{bhd(k.overdue_total_bhd, 0)}</Amount> overdue &gt;30d · {k.overdue_count} accts</span>} />
-          <KpiCard accent={ACCENTS.amber} icon={Boxes} label="Low-stock items" to="/inventory"
+          <KpiCard accent={ACCENTS.amber} icon={Boxes} label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'} to="/inventory"
+            basis={accOnly ? 'Accessories items with under 30 days of stock cover, sold-out items with sales in the last 90 days included · the latest stock snapshot' : undefined}
             value={<CountUp value={k.low_stock_count} />}
             foot={<span className="font-medium text-amber-600">&lt; 30 days cover</span>} />
         </motion.div>
       )}
 
-      {/* This month, day by day — daily sales + pace vs target + cash/credit/division split */}
+      {/* This month, day by day — daily sales + pace vs target + the cash / credit split, all Accessories ex-VAT */}
       {data?.daily_mtd && data.daily_mtd.length > 0 && (
         <Card className="mt-4 p-5">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -463,7 +489,7 @@ export default function Dashboard() {
                 )}
                 <Bar dataKey={barKey} radius={[4, 4, 0, 0]} maxBarSize={26}>
                   {data.daily_mtd.map((r, i) => (
-                    <Cell key={i} fill={dailyTarget && Number(r.acc_net_bhd ?? r.acc_bhd ?? r.gross_bhd) >= dailyTarget ? '#059669' : '#7c3aed'} />
+                    <Cell key={i} fill={dailyTarget && Number(r.acc_net_bhd ?? r.acc_bhd ?? 0) >= dailyTarget ? '#059669' : '#7c3aed'} />
                   ))}
                 </Bar>
               </BarChart>
@@ -493,27 +519,25 @@ export default function Dashboard() {
               </ComposedChart>
             </ResponsiveContainer>
           )}
-          {(data.by_payment?.length || data.by_division?.length) && (
+          {split && (split.rows.length > 0 || split.giveaway_qty > 0) && (
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3 text-[13px]">
-              {/* these chips are the Focus month as invoiced: VAT-inclusive, every division (SIM included) */}
-              <span className="text-[11px] text-muted-foreground">Month to date · gross, VAT-incl · every division:</span>
-              {(data.by_payment || []).map((p) => (
-                <span key={p.sale_type} className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
+              {/* R8: the same basis as the bars above — Accessories, ex-VAT, giveaways out; nothing else is shown */}
+              <span className="text-[11px] text-muted-foreground">Month to date · Accessories · ex-VAT:</span>
+              {split.rows.map((p) => (
+                <span key={p.sale_type} title={`${num(p.invoices)} invoice${p.invoices === 1 ? '' : 's'} · ${bhd(p.net_bhd, 3)} ex-VAT`}
+                  className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
                   <span className={cn('h-2 w-2 rounded-full', p.sale_type === 'cash' ? 'bg-emerald-500' : 'bg-blue-500')} />
                   <span className="capitalize">{p.sale_type}</span>
-                  <b className="tabular-nums">{bhd(p.revenue_bhd, 0)}</b>
+                  <b className="tabular-nums">{bhd(p.net_bhd, 0)}</b>
                 </span>
               ))}
-              <span className="mx-1 hidden h-4 w-px bg-border sm:block" />
-              {(data.by_division || []).map((d) => (
-                <span key={d.division} className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1">
-                  <span className="text-muted-foreground">{d.division}</span>
-                  <b className="tabular-nums">{bhd(d.revenue_bhd, 0)}</b>
-                  {Number(d.giveaway_qty) > 0 && (
-                    <span className="text-[11px] text-amber-600">+{num(d.giveaway_qty)} free</span>
-                  )}
+              {split.giveaway_qty > 0 && (
+                <span title="Accessories units given free this month (zero-priced lines): not in the sales figures"
+                  className="inline-flex items-center gap-1.5 rounded-full border bg-secondary/40 px-3 py-1 text-amber-600">
+                  <b className="tabular-nums">{num(split.giveaway_qty)}</b>
+                  <span>free unit{split.giveaway_qty === 1 ? '' : 's'}</span>
                 </span>
-              ))}
+              )}
             </div>
           )}
         </Card>
@@ -532,6 +556,7 @@ export default function Dashboard() {
             to="/margins" />
           )}
           <HealthStat icon={Clock} label="Collection speed · DSO" tone={data.health.ar_overdue_pct > 40 ? 'red' : 'amber'}
+            basis={data.health.dso_basis && `${data.health.dso_basis} · ${bhd(data.health.dso_receivables_bhd, 0)} ÷ ${bhd(data.health.dso_sales_per_day_bhd, 0)} a day`}
             value={`${Math.round(data.health.dso_days)} days`}
             sub={<><span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
           <HealthStat icon={Snowflake} label={data.health.cost_hidden ? 'Dead stock · at selling price' : 'Capital frozen in dead stock · at cost'} tone="red"
@@ -687,7 +712,9 @@ export default function Dashboard() {
             <Flame size={18} className="text-primary" /> Momentum
             <span className="text-[12px] font-normal text-muted-foreground">· last 30 days vs the 90-day run-rate</span>
           </div>
-          <div className="grid gap-x-10 gap-y-4 md:grid-cols-2">
+          {/* grid-cols-1 = minmax(0,1fr): on a phone a long accessory name is cut with "…" and its % stays on
+              the card (an auto column grew to the name's full width and pushed the % off the edge) */}
+          <div className="grid grid-cols-1 gap-x-10 gap-y-4 md:grid-cols-2">
             <MoverList title="Rising — restock & push" rows={data.movers.rising} up />
             <MoverList title="Fading — investigate before it goes dead" rows={data.movers.falling} />
           </div>
@@ -700,11 +727,11 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 text-sm">
             <TriangleAlert size={16} className="text-amber-500" />
             <span className="font-semibold">{num(k.low_stock_count)}</span>
-            <span className="text-muted-foreground">items under 30 days cover</span>
+            <span className="text-muted-foreground">{accOnly ? 'Accessories items' : 'items'} under 30 days cover</span>
           </div>
           <div className="flex items-center gap-2 text-sm">
             <Landmark size={16} className="text-rose-500" />
-            <span className="font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
+            <span className="whitespace-nowrap font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
             <span className="text-muted-foreground">overdue &gt;30 days across {k.overdue_count} accounts</span>
           </div>
           {data?.alerts?.negative_margin_count != null && (

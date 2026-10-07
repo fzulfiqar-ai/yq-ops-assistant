@@ -107,27 +107,43 @@ def daily_summary() -> dict:
     }
 
 
-def low_stock_items() -> list[dict]:
+def _in_division(division: str | None) -> str:
+    """The low-stock reads' division filter: '' = every division (the email digests' own basis, as it
+    always was), a division name = that division of v_stock_health only.
+
+    The portal Dashboard passes 'Accessories' (owner, 7-Oct-2026: that page is Mobile Accessories
+    only). Batelco SIM stock is not loaded, so every SIM pack sold in the last 90 days reads "out of
+    stock" and rode in the count the owner reorders on (38 shown for 31 accessories). The name is a
+    fixed word from our own code, never user input; anything that is not plain letters is refused."""
+    if division is None:
+        return ""
+    if not (isinstance(division, str) and division.isalpha()):
+        raise ValueError(f"Unknown division {division!r}.")
+    return f" AND division = '{division}'"
+
+
+def low_stock_items(division: str | None = None) -> list[dict]:
     """Velocity-aware low stock (matches the Monthly workbook): < 30 days of cover,
-    including fast movers already out of stock."""
+    including fast movers already out of stock. `division`: see _in_division (None = every division)."""
     return exec_sql(
         "SELECT item_name, current_stock, sold_90d, days_cover, suggested_reorder_qty, status "
-        "FROM v_stock_health WHERE status IN ('urgent_out_of_stock','low_stock') "
+        f"FROM v_stock_health WHERE status IN ('urgent_out_of_stock','low_stock'){_in_division(division)} "
         "ORDER BY days_cover ASC NULLS FIRST LIMIT 60"
     )
 
 
-def low_stock_total() -> int:
+def low_stock_total(division: str | None = None) -> int:
     """UNCAPPED count of low/out-of-stock items.
 
     low_stock_items() is display-capped at 60, and taking len() of it pinned the dashboard
     KPI, the footer strip and the "Reorder N items" action at exactly 60 once the real count
     crossed it — a silent ceiling on the number that triggers reordering. overdue_count was
     already fixed this way (see the note in app/reports.py); this closes the same hole here.
+    `division`: see _in_division (None = every division).
     """
     r = exec_sql(
         "SELECT COUNT(*) AS n FROM v_stock_health "
-        "WHERE status IN ('urgent_out_of_stock','low_stock') LIMIT 1"
+        f"WHERE status IN ('urgent_out_of_stock','low_stock'){_in_division(division)} LIMIT 1"
     )
     return int((r or [{}])[0].get("n") or 0)
 
@@ -148,15 +164,19 @@ def negative_margins() -> list[dict]:
     return below_cost_rows(20)
 
 
-def all_alerts() -> dict:
-    """Combined alert payload for /digest/alerts endpoint."""
-    low = low_stock_items()
+def all_alerts(division: str | None = None) -> dict:
+    """Combined alert payload for /digest/alerts endpoint.
+
+    `division` narrows the LOW-STOCK list and its count to one division (the portal Dashboard passes
+    'Accessories'). None — the endpoint, the email digest, the Streamlit page — is every division, as
+    before. Overdue receivables are never narrowed: Focus keeps one balance per customer."""
+    low = low_stock_items(division)
     overdue = overdue_receivables()
     neg = negative_margins()
     return {
         "low_stock": low,
         # Uncapped SQL count, NOT len(low) — the list above stops at 60.
-        "low_stock_count": low_stock_total(),
+        "low_stock_count": low_stock_total(division),
         "overdue_receivables": overdue,
         "overdue_count": len(overdue),
         "overdue_total_bhd": sum(float(r.get("overdue_bhd") or 0) for r in overdue),
