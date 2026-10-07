@@ -13,6 +13,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
+from app import datastamp
 from app.db_read import exec_sql
 from app.database import get_client
 from app.digest import all_alerts, daily_summary
@@ -572,10 +573,11 @@ def command_basis() -> dict | None:
 
 # The dashboard payload is ~20 view queries; each is a PostgREST round-trip. Build the
 # independent sections concurrently and serve warm hits from an in-process cache (zero
-# round-trips). flush on ingest via invalidate_dashboard_cache() (ai.flush_cache calls it).
+# round-trips). Dropped by invalidate_dashboard_cache(): an upload through the API calls it
+# (ai.flush_cache), and a load made anywhere else is noticed by datastamp.sync() on the next read.
 _DASH_TTL_S = 300
 _dash_cache: dict = {"at": 0.0, "payload": None}
-_report_gen = 0  # bumped on every upload: a build that started before it must not be stored
+_report_gen = 0  # bumped on every data load: a build that started before it must not be stored
 
 
 def invalidate_dashboard_cache() -> None:
@@ -597,6 +599,7 @@ def invalidate_dashboard_cache() -> None:
 
 
 def dashboard(force: bool = False) -> dict:
+    datastamp.sync()
     if not force and _dash_cache["payload"] is not None and time.time() - _dash_cache["at"] < _DASH_TTL_S:
         return _dash_cache["payload"]
     gen = _report_gen
@@ -908,12 +911,14 @@ REPORTS = {
     "receivables": receivables,
 }
 
-# Every page payload is served from this in-process cache between uploads — the data
-# only changes on ingest (which calls invalidate_dashboard_cache), so repeat clicks
-# cost ZERO DB round-trips. Stale-while-revalidate (28-Sep-2026): under _REPORT_TTL_S a hit is
-# served as is; up to _REPORT_STALE_S it is STILL served at once while one background thread
-# rebuilds it, so a visit after the TTL never waits on the ~20 PostgREST round-trips. An upload
-# drops everything and bumps _report_gen, so a rebuild that started before it is thrown away.
+# Every page payload is served from this in-process cache between data loads — the data only
+# changes when a load lands, so repeat clicks cost ZERO DB round-trips. An upload through the API
+# calls invalidate_dashboard_cache itself; a load made anywhere else (a developer's PC, a cron) is
+# noticed by datastamp.sync() at the top of cached_report, which calls it too (R8).
+# Stale-while-revalidate (28-Sep-2026): under _REPORT_TTL_S a hit is served as is; up to
+# _REPORT_STALE_S it is STILL served at once while one background thread rebuilds it, so a visit
+# after the TTL never waits on the ~20 PostgREST round-trips. A load drops everything and bumps
+# _report_gen, so a rebuild that started before it is thrown away.
 _REPORT_TTL_S = 300
 _REPORT_STALE_S = 12 * 3600
 _report_cache: dict[str, tuple[float, object]] = {}
@@ -953,6 +958,7 @@ def _refresh_in_background(key: str) -> None:
 
 
 def cached_report(key: str):
+    datastamp.sync()
     hit = _report_cache.get(key)
     if hit:
         age = time.time() - hit[0]
@@ -974,6 +980,8 @@ def cached_report(key: str):
 def prewarm_reports() -> None:
     """Build every page payload once after boot, so the first visit after a deploy or a restart
     is a cache hit. Runs in a background thread (app/main.py) — never on the event loop."""
+    # the newest load is noted BEFORE the first build, so one that lands during boot is still noticed
+    datastamp.sync()
     for key in REPORTS:
         if key in _report_cache:
             continue

@@ -71,6 +71,13 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r6_speed
+      # R8 data stamp: a load made outside the API (a developer's PC, a cron) is noticed by the API
+      # itself, which then drops its cached numbers (app/datastamp.py). A stand-in stamp reader, and
+      # the real reader on httpx.MockTransport
+      - name: R8 suite - the API notices a data load (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: python -m tests.test_r8_datastamp
       # R3a: follow-ups, statements (one approval per month, figure-based dedup, the CLI's
       # --commit path on a fake connection), attainment, gates. The two scratch-Postgres
       # replays print SKIP here (no cluster, no psycopg); they run on the dev machine.

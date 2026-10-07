@@ -227,18 +227,14 @@ def _store_cache(client, key: str, question: str, reply: str, sql: str, rows: li
 
 def flush_cache() -> int:
     """Clear the text-to-SQL answer cache. MUST be called after any data refresh / view
-    change, or stale answers persist (the cache key is just the question text)."""
-    try:  # also drop the in-process dashboard payload cache so fresh data shows at once
-        from app.reports import invalidate_dashboard_cache
-        invalidate_dashboard_cache()
-    except Exception:  # noqa: BLE001
-        pass
-    _data_date_cache.update(d="", at=0.0)
-    try:  # the shop payload derives from the same data
-        from app.shop import invalidate as _shop_invalidate
-        _shop_invalidate()
-    except Exception:  # noqa: BLE001
-        pass
+    change, or stale answers persist (the cache key is just the question text).
+
+    Two halves: this process's own payloads (dashboard, reports, Command Centre, the reps' sales
+    block, the shop context, the "data as of" label) so fresh data shows at once, then the
+    query_cache rows in the database. The first half is also what a load made OUTSIDE this process
+    triggers by itself (app/datastamp.py)."""
+    from app.datastamp import drop_process_caches
+    drop_process_caches()
     try:
         get_client().table("query_cache").delete().neq("query_hash", "").execute()
         return 1
