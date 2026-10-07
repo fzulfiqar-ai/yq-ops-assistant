@@ -189,6 +189,15 @@ async def _prewarm_reports() -> None:
     threading.Thread(target=_run, name="prewarm-reports", daemon=True).start()
 
 
+@app.on_event("startup")
+async def _watch_data_loads() -> None:
+    """From here on this process notices a data load made outside it (a developer's PC, a cron): the
+    cached readers look for a newer ingest_runs row and drop their payloads when there is one
+    (app/datastamp.py). This only flips the switch; the reads happen on request threads."""
+    from app import datastamp
+    datastamp.watch()
+
+
 @app.get("/health")
 @limiter.limit(settings.rate_limit)
 async def health(request: Request) -> dict:

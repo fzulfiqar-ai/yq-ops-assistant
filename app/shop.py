@@ -27,7 +27,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from app import attribution, offers, shop_heart, shop_pipeline
+from app import attribution, datastamp, offers, shop_heart, shop_pipeline
 from app.catalog import CATEGORY_ORDER, prices_updated_date, public_url, share_token, thumb_path, THUMB_SIZES
 from app.config import settings as cfg
 from app.database import get_client
@@ -873,7 +873,9 @@ def context(force: bool = False) -> dict:
     Past its 60 s TTL the current copy is still returned at once while ONE background
     thread rebuilds it — no visitor ever waits for the rebuild. Only a cold process or an
     explicit invalidate() (price/stock upload, photo, rule or salesman edit) builds
-    synchronously, so an owner's change is still visible on the very next request."""
+    synchronously, so an owner's change is still visible on the very next request. A data load
+    made outside this process counts too: datastamp.sync() notices it and calls invalidate()."""
+    datastamp.sync()
     cached = _ctx_cache["ctx"]
     if not force and cached is not None:
         if time.time() - _ctx_cache["at"] >= _TTL:
@@ -3669,8 +3671,9 @@ UNLINKED_HINT = "Your login is not linked to a salesman yet — an admin can lin
 
 
 # The rep's sales block on /shop/me (Today / Me): three or four v_sales round trips that only change
-# when an upload lands, so it is kept per rep for _FOCUS_TTL_S and dropped by every upload
-# (reports.invalidate_dashboard_cache). The order counts beside it are read fresh on every call.
+# when a data load lands, so it is kept per rep for _FOCUS_TTL_S and dropped by every load
+# (reports.invalidate_dashboard_cache): an upload through the API calls it, and a load made anywhere
+# else is noticed by datastamp.sync() below. The order counts beside it are read fresh on every call.
 _FOCUS_TTL_S = 300
 _focus_cache: dict[str, tuple[float, dict]] = {}
 
@@ -3680,6 +3683,7 @@ def invalidate_focus_cache() -> None:
 
 
 def _rep_focus(focus_name: str) -> dict:
+    datastamp.sync()
     hit = _focus_cache.get(focus_name)
     if hit and time.time() - hit[0] < _FOCUS_TTL_S:
         return hit[1]

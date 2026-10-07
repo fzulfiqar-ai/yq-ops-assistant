@@ -39,9 +39,11 @@ v_shop_orders_agent (test orders cannot be told apart, no accepted rate, the inv
 empty) and the page says so. The rep names for the team table come from the salesmen table
 exactly as app.reports.salesman_attainment_result reads them (names only, never a phone).
 
-Caching: the Focus half of a period's payload is kept until the next data upload
-(app.reports.invalidate_dashboard_cache calls invalidate(); a 30-minute ceiling is the safety net
-for a load that bypasses the API). The marketplace half is live and kept for 60 seconds.
+Caching: the Focus half of a period's payload is kept until the next data load
+(app.reports.invalidate_dashboard_cache calls invalidate()). An upload through the API drops it
+at once; a load made anywhere else is noticed by datastamp.sync() at the top of overview() and
+freshness(), which looks for a new load every 30 seconds (R8). The 30-minute ceiling stays as the
+safety net. The marketplace half is live and kept for 60 seconds.
 """
 from __future__ import annotations
 
@@ -58,6 +60,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Callable
 
+from app import datastamp
 from app.db_read import exec_sql, exec_sql_params
 from app.shop_jobs import WEEKEND_DAYS, business_minutes
 
@@ -1794,7 +1797,7 @@ _fresh_cache: dict[str, tuple[float, dict]] = {}
 
 
 def invalidate() -> None:
-    """Drop every cached payload (called on every data upload via reports.invalidate_dashboard_cache)."""
+    """Drop every cached payload (called on every data load via reports.invalidate_dashboard_cache)."""
     _focus_cache.clear()
     _live_cache.clear()
     _fresh_cache.clear()
@@ -1835,6 +1838,7 @@ def overview(period: str = DEFAULT_PERIOD, reader: Reader | None = None, use_cac
     """GET /management/overview: freshness + the modules in the plan's order (Needs attention first)."""
     if period not in PERIODS:
         raise ValueError(f"Unknown period '{period}'.")
+    datastamp.sync()
     focus = (_cached(_focus_cache, period, FOCUS_TTL_S, lambda: build_focus(period, reader)) if use_cache
              else build_focus(period, reader))
     return _cached(_live_cache, period, LIVE_TTL_S, lambda: _assemble(period, focus, reader)) if use_cache \
@@ -1896,6 +1900,8 @@ def attention(reader: Reader | None = None, use_cache: bool = True) -> dict:
 def freshness(show_match: bool, reader: Reader | None = None, use_cache: bool = True) -> dict:
     """GET /freshness: the header chip for every portal login — Focus data date and whether the
     marketplace answered; the invoice match rate only for the Command Centre roles."""
+    datastamp.sync()        # every portal page reads this route, so any open tab notices a load made elsewhere
+
     def build() -> dict:
         r = reader or Reader()
         a = r.run("fresh_anchor", lambda: (r.q("SELECT (SELECT MAX(sale_date) FROM v_sales)::text AS focus_to") or [{}])[0]) or {}
