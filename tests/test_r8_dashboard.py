@@ -20,7 +20,8 @@ Covered:
   * the payload — payment_split_acc and scope are ADDED; every older key still travels (by_payment,
     by_division, kpis.rev_*); kpis.low_stock_count is the Accessories count and the action text follows;
     nothing new is hidden from a login without 'Margins';
-  * the page (source checks), the node half (web/scripts/numbers_ui_test.mjs), and CI running both.
+  * the page (source checks, the Momentum card and the alerts strip at phone width among them), the node
+    half (web/scripts/numbers_ui_test.mjs), and CI running both.
 """
 from __future__ import annotations
 
@@ -559,6 +560,18 @@ def _():
     for s in ("pace.basis_text", "acc_net_bhd", "business_days_total", "Capital frozen in dead stock · at cost",
               "Accessories sales this month · ex-VAT", "top_customers_acc", "revenue_trend_acc"):
         assert s in dash, s
+
+
+@test("web (phone): a long accessory name is cut, its momentum % stays on the card; 'BHD' stays with its amount")
+def _():
+    dash = _read("web/src/pages/Dashboard.tsx")
+    # the Momentum lists are all accessories now (long VFAN names): an auto grid column grew to the name's
+    # full width at 360–390 px and pushed the % off the card; grid-cols-1 is minmax(0, 1fr)
+    card = dash.split("<Flame size={18}", 1)[1].split("</Card>", 1)[0]
+    assert '<div className="grid grid-cols-1 gap-x-10 gap-y-4 md:grid-cols-2">' in card
+    row = dash.split("function MoverList(", 1)[1].split("\n}\n", 1)[0]
+    assert '<span className="min-w-0 truncate font-medium" title={r.item_name}>' in row and "shrink-0 font-semibold tabular-nums" in row
+    assert '<span className="whitespace-nowrap font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>' in dash
 
 
 @test("node: the Dashboard can never render the every-division chips again (web/scripts/numbers_ui_test.mjs)")

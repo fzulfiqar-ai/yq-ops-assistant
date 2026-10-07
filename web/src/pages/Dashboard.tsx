@@ -712,7 +712,9 @@ export default function Dashboard() {
             <Flame size={18} className="text-primary" /> Momentum
             <span className="text-[12px] font-normal text-muted-foreground">· last 30 days vs the 90-day run-rate</span>
           </div>
-          <div className="grid gap-x-10 gap-y-4 md:grid-cols-2">
+          {/* grid-cols-1 = minmax(0,1fr): on a phone a long accessory name is cut with "…" and its % stays on
+              the card (an auto column grew to the name's full width and pushed the % off the edge) */}
+          <div className="grid grid-cols-1 gap-x-10 gap-y-4 md:grid-cols-2">
             <MoverList title="Rising — restock & push" rows={data.movers.rising} up />
             <MoverList title="Fading — investigate before it goes dead" rows={data.movers.falling} />
           </div>
@@ -729,7 +731,7 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-2 text-sm">
             <Landmark size={16} className="text-rose-500" />
-            <span className="font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
+            <span className="whitespace-nowrap font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>
             <span className="text-muted-foreground">overdue &gt;30 days across {k.overdue_count} accounts</span>
           </div>
           {data?.alerts?.negative_margin_count != null && (
