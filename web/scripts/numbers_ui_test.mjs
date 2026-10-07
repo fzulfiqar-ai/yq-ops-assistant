@@ -16,7 +16,11 @@
  *     rendered: the page never reads or prints the every-division split again (by_payment / by_division,
  *     the "every division" caption, the all-division day total); its chips are Accessories ex-VAT with the
  *     invoices on hover and a free-units chip only above 0; the scope pill and the Accessories labels wait
- *     for the API's own scope; SIM is only ever named as left out.
+ *     for the API's own scope; SIM is only ever named as left out;
+ *   * the Command Centre's "Accessories sales" card (R8, web/src/lib/dailySales.ts): the daily chart's
+ *     x labels (counted back from the latest day, the month where it changes, sparser on a phone), the
+ *     target for one business day, the three facts and the spoken summary taken from the tile as sent,
+ *     and the card itself — one heading, a Daily / Weekly control, Daily first.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -125,6 +129,112 @@ check('dashboard: SIM is only ever named as left out, never shown as a figure', 
     const near = DASH.slice(Math.max(0, m.index - 60), m.index + 60).replace(/\s+/g, ' ')
     ok(/excluded|never counts/.test(near), `SIM named as left out near "…${near.slice(30, 90)}…"`)
   }
+})
+
+// ── the Command Centre's "Accessories sales" card (R8): the daily chart's pure helpers ──────────────
+const D = await load('lib/dailySales.ts')
+// the page's source, line ends normalised (a Windows checkout has CRLF): the checks cut it at "\n}\n"
+const PAGE = readFileSync(path.join(SRC, 'pages/CommandCentre.tsx'), 'utf8').replace(/\r\n/g, '\n')
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const bhd = (n) => `BHD ${n.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}`
+/** n calendar days ending on `end`, shaped as the API's sales.daily series (made-up amounts) */
+function series(end, values = {}, n = 30) {
+  const last = Date.parse(`${end}T00:00:00Z`)
+  return Array.from({ length: n }, (_, i) => {
+    const d = new Date(last - (n - 1 - i) * 86_400_000)
+    const day = d.toISOString().slice(0, 10)
+    return {
+      day, label: `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`, weekday: WEEKDAYS[d.getUTCDay()],
+      value: values[day] ?? 0, invoices: values[day] ? 3 : 0,
+      business_day: d.getUTCDay() !== 5 && d.getUTCDay() !== 6, latest: i === n - 1,
+    }
+  })
+}
+const DAYS = series('2026-10-06', { '2026-09-29': 900, '2026-10-02': 120, '2026-10-06': 110.5 })
+
+check('daily chart: x labels count back from the latest day; the month on the first label and where it changes', () => {
+  eq(Object.entries(D.dayTicks(DAYS, 2)).map(([d, t]) => `${d.slice(5)}=${t}`).join(' '),
+    '09-08=8 Sep 09-10=10 09-12=12 09-14=14 09-16=16 09-18=18 09-20=20 09-22=22 09-24=24 09-26=26 09-28=28 09-30=30 '
+    + '10-02=2 Oct 10-04=4 10-06=6', 'every 2nd day')
+  eq(D.dayTicks(DAYS, 5), { '2026-09-11': '11 Sep', '2026-09-16': '16', '2026-09-21': '21', '2026-09-26': '26',
+    '2026-10-01': '1 Oct', '2026-10-06': '6' }, 'every 5th day (a phone)')
+  const all = D.dayTicks(DAYS, 1)
+  eq([Object.keys(all).length, all['2026-09-07'], all['2026-09-30'], all['2026-10-01'], all['2026-10-06']],
+    [30, '7 Sep', '30', '1 Oct', '6'], 'every day')
+  // a window inside one month names the month once; a year end is a month change like any other
+  eq(Object.values(D.dayTicks(series('2026-10-31'), 5)), ['6 Oct', '11', '16', '21', '26', '31'], 'one month')
+  eq(Object.values(D.dayTicks(series('2026-01-05'), 5)), ['11 Dec', '16', '21', '26', '31', '5 Jan'], 'year end')
+  // the latest day always carries a label, whatever the step; a junk step labels every day
+  for (const step of [1, 2, 3, 4, 5, 6, 7, 9, 30, 45]) ok('2026-10-06' in D.dayTicks(DAYS, step), `latest at step ${step}`)
+  eq([Object.keys(D.dayTicks(DAYS, 0)).length, Object.keys(D.dayTicks(DAYS, NaN)).length], [30, 30], 'junk step')
+  eq(D.dayTicks([], 2), {}, 'no days')
+})
+
+check('daily chart: a label every 2nd day on a desktop card, every 3rd on a narrow one, every 5th on a 360 px phone', () => {
+  // plot width = the chart's width less the y axis (44) and the right margin (16)
+  eq([D.dayTickStep(593, 30), D.dayTickStep(642, 30)], [2, 2], '1366 and 1440 desktop')
+  eq(D.dayTickStep(535, 30), 3, '1280 desktop (the narrower two-column card)')
+  eq([D.dayTickStep(234, 30), D.dayTickStep(264, 30)], [5, 5], '360 and 390 phones')
+  eq([D.dayTickStep(0, 30), D.dayTickStep(NaN, 30), D.dayTickStep(-5, 30), D.dayTickStep(600, 0)], [5, 5, 5, 5], 'unknown width: sparse')
+  eq(D.dayTickStep(2000, 30), 1, 'never below every day')
+  // whatever the width, two neighbouring labels get the room one label needs (38 px)
+  for (let w = 150; w <= 1400; w += 7) ok(D.dayTickStep(w, 30) * (w / 30) >= 38 - 1e-9, `room at ${w}px`)
+})
+
+check('daily chart: the target for one business day is the monthly target over the month’s business days; none without a target', () => {
+  // October 2026 has 21 business days (Sun–Thu): BHD 10,000 a month is BHD 476 a business day
+  eq(Math.round(D.targetPerBusinessDay(10000, 21)), 476, 'October 2026')
+  eq(D.targetPerBusinessDay(10000, 21), 10000 / 21, 'the Dashboard’s rule, unrounded')
+  eq([D.targetPerBusinessDay(null, 21), D.targetPerBusinessDay(0, 21), D.targetPerBusinessDay(undefined, 21),
+    D.targetPerBusinessDay(10000, 0), D.targetPerBusinessDay(10000, null), D.targetPerBusinessDay(10000)],
+  [null, null, null, null, null, null], 'no target or no business days: no line')
+})
+
+check('the three facts: the latest day with its weekday, the average business day, the best day with its date', () => {
+  const tile = { avg_business_day: 104.926, best: { day: '2026-09-29', label: '29 Sep', value: 900 } }
+  eq(D.dailyFacts(DAYS, tile, bhd), [
+    { key: 'latest', label: 'Latest day', when: 'Tue 6 Oct', value: 'BHD 110.500' },
+    { key: 'average', label: 'Average business day', value: 'BHD 104.926' },
+    { key: 'best', label: 'Best day', when: '29 Sep', value: 'BHD 900.000' },
+  ], 'facts')
+  // the figures are the tile's own, never worked out here: a different average or best is shown as sent
+  const sent = D.dailyFacts(DAYS, { avg_business_day: 1.5, best: { day: '2026-10-02', label: '2 Oct', value: 7 } }, bhd)
+  eq(sent.map((f) => `${f.when ?? ''}|${f.value}`), ['Tue 6 Oct|BHD 110.500', '|BHD 1.500', '2 Oct|BHD 7.000'], 'as sent')
+  // nothing sold in the window: no best day; an average the API did not send is left out, a 0 is shown
+  eq(D.dailyFacts(DAYS, { avg_business_day: 0, best: null }, bhd).map((f) => f.key), ['latest', 'average'], 'no best')
+  eq(D.dailyFacts(DAYS, {}, bhd).map((f) => f.key), ['latest'], 'no average, no best')
+  eq(D.dailyFacts([], tile, bhd).map((f) => f.key), ['average', 'best'], 'no days')
+  // the latest day is the one the API flags; an unflagged payload falls back to the last point
+  const friday = series('2026-10-02', { '2026-10-02': 120 })
+  eq(D.dailyFacts(friday, {}, bhd)[0], { key: 'latest', label: 'Latest day', when: 'Fri 2 Oct', value: 'BHD 120.000' }, 'a weekend day')
+  eq(D.latestDay(DAYS.map((p) => ({ ...p, latest: false }))).day, '2026-10-06', 'no flag: the last point')
+  eq(D.latestDay([]), undefined, 'no days')
+})
+
+check('the chart’s spoken summary reads the latest day, the average and the best day', () => {
+  const facts = D.dailyFacts(DAYS, { avg_business_day: 104.926, best: { day: '2026-09-29', label: '29 Sep', value: 900 } }, bhd)
+  eq(D.dailySummary(facts, 30), 'Accessories sales by day, ex-VAT, the last 30 days. Latest day, Tue 6 Oct: BHD 110.500. '
+    + 'Average business day: BHD 104.926. Best day, 29 Sep: BHD 900.000', 'summary')
+  eq(D.dailySummary([], 30), 'Accessories sales by day, ex-VAT, the last 30 days', 'no facts')
+})
+
+check('invoice counts in words: "7 invoices", "1 invoice", "no invoices"', () => {
+  eq([D.invoicesText(7), D.invoicesText(1), D.invoicesText(0), D.invoicesText(null), D.invoicesText(undefined), D.invoicesText(1200)],
+    ['7 invoices', '1 invoice', 'no invoices', 'no invoices', 'no invoices', '1,200 invoices'], 'words')
+})
+
+check('the card: one "Accessories sales" heading with a Daily / Weekly control, Daily first; the weekly-only heading only as the fallback', () => {
+  const card = PAGE.split('function SalesChartCard(')[1].split('\n}\n')[0]
+  ok(card.includes("{both ? 'Accessories sales' : view === 'daily' ? 'Daily Accessories sales' : 'Weekly Accessories sales'}"), 'heading')
+  ok(!PAGE.includes('>Weekly Accessories sales</h2>'), 'the old one-chart heading is gone')
+  ok(card.includes('role="group"') && card.includes('aria-pressed={view === v.key}'), 'a group of pressed buttons')
+  const views = PAGE.split('const CHART_VIEWS')[1].split('\n]\n')[0]
+  ok(views.indexOf("label: 'Daily'") > 0 && views.indexOf("label: 'Daily'") < views.indexOf("label: 'Weekly'"), 'Daily first')
+  ok(card.includes('ex-VAT · last {span} days · lighter bars are Friday and Saturday'), 'the daily caption')
+  ok(PAGE.includes("const WEEKLY_CAPTION = 'ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far'"), 'the weekly caption, as it was')
+  // every figure on the card is read off the tile through the helpers above
+  ok(card.includes('dailyFacts(dayPoints(daily), daily, fmtBhd)') && card.includes('dailySummary(facts, span)'), 'facts from the tile')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

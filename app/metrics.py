@@ -14,6 +14,9 @@ Definitions (owner rules, 21-Sep and 24-Sep-2026):
   * Focus figures are anchored on the last loaded sale day ("data to 24 Sep"), never on the
     calendar: a Monday upload of Thursday's export compares Thursday with Thursday. Marketplace
     order figures are live and anchored on today in Bahrain.
+  * The daily chart (R8, "sales.daily") is the 30 calendar days ending on that last loaded sale
+    day, one point a day: a weekend or a day with no invoice is a 0, never a gap. Its average is
+    per business day (weekend sales left out, a quiet business day counted as a 0).
   * The company target (app_settings.monthly_sales_target_bhd) is read as ex-VAT, Accessories,
     paced on business days — here and on the Dashboard (app.reports._pace calls month_pace).
   * Marketplace order money is VAT-inclusive (the price book is): every marketplace BHD figure on
@@ -90,6 +93,7 @@ PACE_BASIS = "target read as ex-VAT, Accessories, business days (Sun–Thu; Fri,
 STALE_AFTER_DAYS = 3             # app.reports.STALE_AFTER_DAYS: the same lenient rule
 DROP_DAYS_DEFAULT = 30           # = app.shop.SETTING_DEFAULTS['shop_price_drop_days']; the setting wins
 THIN_MARGIN_PCT = Decimal("20")  # a price cut that leaves this margin or less (ex-VAT, on landed cost) is flagged
+DAILY_DAYS = 30                  # the daily sales chart: this many calendar days, ending on the data date
 TOP_N = 5
 
 _BAHRAIN = timezone(timedelta(hours=3))
@@ -401,6 +405,14 @@ TREND_SQL = (
     "ROUND(COALESCE(SUM(v.net_bhd), 0)::numeric, 3) AS net_bhd "
     "FROM v_sales v WHERE v.division = 'Accessories' AND NOT v.is_giveaway AND v.sale_date <= $1::date "
     "AND v.sale_date >= ($1::date - EXTRACT(DOW FROM $1::date)::int) - 84 GROUP BY 1 ORDER BY 1"
+)
+
+# the DAILY_DAYS calendar days to $1, one row per day that sold (a quiet day has no row: _sales_daily fills it with 0)
+DAILY_SQL = (
+    "SELECT v.sale_date::text AS day, ROUND(COALESCE(SUM(v.net_bhd), 0)::numeric, 3) AS net_bhd, "
+    "COUNT(DISTINCT v.invoice_no) AS invoices "
+    "FROM v_sales v WHERE v.division = 'Accessories' AND NOT v.is_giveaway AND v.sale_date <= $1::date "
+    f"AND v.sale_date > $1::date - {DAILY_DAYS} GROUP BY 1 ORDER BY 1"
 )
 
 # per Focus rep name: the last Accessories invoice ever, and this month's sales with the named-shop part
@@ -863,6 +875,31 @@ def _sales_trend(ctx: Ctx) -> dict | None:
         series.append({"week_start": ws.isoformat(), "label": day_label(ws), "value": money(by.get(ws.isoformat(), 0)),
                        "partial": i == 0})
     return {"value": series[-1]["value"], "series": series}
+
+
+@metric("sales.daily", "Daily sales", "sales",
+        f"Accessories · ex-VAT · giveaways out · each of the {DAILY_DAYS} days to {{focus_to}} · Friday and Saturday "
+        "are the weekend", "series")
+def _sales_daily(ctx: Ctx) -> dict | None:
+    rows = ctx.r.get("daily")
+    if rows is None or not ctx.focus_to:
+        return None
+    by = {str(r.get("day"))[:10]: r for r in rows}
+    series = []
+    for i in range(DAILY_DAYS - 1, -1, -1):
+        d = ctx.focus_to - timedelta(days=i)
+        row = by.get(d.isoformat()) or {}
+        # every calendar day is a point: a weekend or a day with no invoice is a 0, never a gap
+        series.append({"day": d.isoformat(), "label": day_label(d), "weekday": f"{d:%a}",
+                       "value": money(row.get("net_bhd")), "invoices": _int(row.get("invoices")),
+                       "business_day": is_business_day(d), "latest": i == 0})
+    work = [dec(p["value"]) for p in series if p["business_day"]]
+    best = max(series, key=lambda p: (p["value"], p["day"]))      # a tie goes to the later day
+    return {"value": series[-1]["value"], "series": series, "days": DAILY_DAYS,
+            "total": money(sum((dec(p["value"]) for p in series), Decimal(0))),
+            # Sunday–Thursday only, and a business day with no sale counts as a 0 day: weekend sales stay out of it
+            "business_days": len(work), "avg_business_day": money(sum(work, Decimal(0)) / len(work)) if work else None,
+            "best": {k: best[k] for k in ("day", "label", "value")} if best["value"] > 0 else None}
 
 
 # ══ Order health (live) ════════════════════════════════════════════════════════
@@ -1636,7 +1673,8 @@ def rank_attention(items: list[dict]) -> list[dict]:
 # ── modules in the plan's order ────────────────────────────────────────────────
 
 MODULES: list[tuple[str, str, list[str]]] = [
-    ("sales", "Sales", ["sales.accessories", "sales.pace", "sales.channels", "sales.sim", "sales.trend"]),
+    ("sales", "Sales", ["sales.accessories", "sales.pace", "sales.channels", "sales.sim", "sales.trend",
+                        "sales.daily"]),
     ("orders", "Order health", ["orders.funnel", "orders.accepted", "orders.confirm_time", "orders.waiting",
                                 "orders.match_rate", "orders.self_order"]),
     ("team", "Team", ["team.reps"]),
@@ -1741,6 +1779,7 @@ def load_focus(r: Reader, period: str, anchor: date | None) -> None:
         jobs.update({
             "sales": lambda: r.qp(SALES_SQL, [json.dumps(wins)]) or [],
             "trend": lambda: r.qp(TREND_SQL, [a]) or [],
+            "daily": lambda: r.qp(DAILY_SQL, [a]) or [],
             "reps": lambda: r.qp(REPS_SQL, [month_start(anchor).isoformat(), a]) or [],
             "customers": lambda: r.qp(CUSTOMERS_SQL, [a]) or [],
             "movers": lambda: r.qp(MOVERS_SQL, [a]) or [],
