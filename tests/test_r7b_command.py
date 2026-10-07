@@ -123,6 +123,8 @@ SALES = [
     {"k": "month", "channel": "B2C", "division": "Accessories", "net_bhd": 30, "invoices": 5, "cash_invoices": 5, "cash_net_bhd": 30},
 ]
 TREND = [{"week_start": "2026-09-20", "net_bhd": 500}, {"week_start": "2026-09-13", "net_bhd": 400}]
+# the days that sold in the 30 to the data date (R8: the daily chart; its own suite is tests/test_r8_daily.py)
+DAILY = [{"day": "2026-09-23", "net_bhd": 80, "invoices": 4}, {"day": "2026-09-24", "net_bhd": 120, "invoices": 6}]
 
 SALESMEN = [
     {"id": 1, "name": "Rep One", "focus_name": "Rep One", "is_active": True},
@@ -244,7 +246,7 @@ class FakeRPC:
 
     def __init__(self, view: bool = True, fail: dict | None = None, ar_totals: bool = True, **over):
         self.view, self.fail, self.ar_totals = view, dict(fail or {}), ar_totals
-        self.data = {"anchor": ANCHOR, "sales": SALES, "trend": TREND, "reps": REPS, "attainment": ATTAINMENT,
+        self.data = {"anchor": ANCHOR, "sales": SALES, "trend": TREND, "daily": DAILY, "reps": REPS, "attainment": ATTAINMENT,
                      "customers": CUSTOMERS, "movers": MOVERS, "stock": STOCK, "margin_totals": MARGIN_TOTALS,
                      "below_cost": BELOW_COST, "landed": LANDED, "receivables": RECEIVABLES, "ar_owner": AR_OWNER,
                      "orders": ORDERS, "match": MATCH, "price_drops": PRICE_DROPS, "drop_costs": DROP_COSTS}
@@ -259,7 +261,8 @@ class FakeRPC:
             return "anchor"
         if s.startswith("SELECT (SELECT MAX(sale_date) FROM v_sales)::text AS focus_to") and "stock_as_of" not in s:
             return "fresh_anchor"
-        table = [("jsonb_to_recordset", "sales"), ("AS week_start", "trend"), ("AS month_named_bhd", "reps"),
+        table = [("jsonb_to_recordset", "sales"), ("AS week_start", "trend"), ("sale_date::text AS day,", "daily"),
+                 ("AS month_named_bhd", "reps"),
                  ("AS net_12m", "customers"), ("AS qty_30", "movers"), ("FROM v_stock_health h", "stock"),
                  ("AS costed_net_bhd", "landed"), ("FROM ar_ageing_totals", "ar_totals"),
                  ("DISTINCT ON (v.customer_name)", "ar_owner"), ("AS invoiced_open", "match"),
@@ -1171,7 +1174,7 @@ def _():
                "v_product_economics", "ar_ageing_totals", "v_command_orders", "v_shop_orders_agent", "v_price_change",
                # the price drops keep to the marketplace's own shelf (scripts/catalog_migration.sql grants both)
                "v_catalog", "catalog_items"}
-    sqls = [m.ANCHOR_SQL, m.SALES_SQL, m.TREND_SQL, m.REPS_SQL, m.CUSTOMERS_SQL, m.MOVERS_SQL, m.STOCK_SQL,
+    sqls = [m.ANCHOR_SQL, m.SALES_SQL, m.TREND_SQL, m.DAILY_SQL, m.REPS_SQL, m.CUSTOMERS_SQL, m.MOVERS_SQL, m.STOCK_SQL,
             m.LANDED_SQL, m.RECEIVABLES_SQL, m.AR_TOTALS_SQL, m.AR_OWNER_SQL, m.ORDERS_SQL, m.ORDERS_FALLBACK_SQL,
             m.MATCH_SQL, m.LAST_ORDER_SQL, m.PRICE_DROPS_SQL, m.PRICE_DROP_COSTS_SQL]
     for s in sqls:

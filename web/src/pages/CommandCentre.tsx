@@ -1,14 +1,19 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Info, Loader2, RefreshCw,
 } from 'lucide-react'
 import {
-  Bar as ChartBar, Cell, ComposedChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Bar as ChartBar, Cell, ComposedChart, ReferenceArea, ReferenceLine, ResponsiveContainer, Tooltip, usePlotArea, XAxis,
+  YAxis,
 } from 'recharts'
 import { apiGet } from '@/lib/api'
 import { isManagement, useAuth, type Me } from '@/lib/auth'
+import {
+  dailyFacts, dailySummary, dayTicks, dayTickStep, invoicesText, latestDay, targetPerBusinessDay, type BestDay,
+  type DayPoint,
+} from '@/lib/dailySales'
 import { managementMayOpen } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 import { LoadError } from '@/components/LoadError'
@@ -27,6 +32,10 @@ import { Skeleton } from '@/components/ui/skeleton'
  * exceptions, then Salesmen · Products · Merchants. Every module in full sits below, collapsed, under
  * "Details". A card whose tile this login may not read (the API left it out or marked it restricted)
  * is simply not drawn.
+ *
+ * R8: that chart is one "Accessories sales" card with two views — day by day (the last 30 days, the
+ * default: one bar per calendar day, Friday and Saturday lighter, the target for one business day as a
+ * dashed line) and week by week (the chart as it was). The choice is kept in this browser.
  *
  * `view` = 'team' and 'customers' are the same payload with that module in full (management's Team
  * and Customers menu items).
@@ -73,6 +82,9 @@ interface Tile {
    *  'Margins'). drop_days: the window both count, always the last N days — never the period chosen above */
   latest_on?: string | null; costed?: number; drops?: number; threshold_pct?: number; drop_days?: number
   series?: WeekPoint[]
+  /** sales.daily: its `series` are days, not weeks (read them through dayPoints); the figures beside them are
+   *  the window in days, its total, its business days (Sun–Thu), their average and the best day */
+  days?: number; total?: number; business_days?: number; avg_business_day?: number | null; best?: BestDay | null
   stages?: Stage[]; cancelled?: number; open?: number
   units_ordered?: number; units_accepted?: number; orders?: number; units_added?: number; staff_orders_left_out?: number
   p50_hours?: number | null; p90_hours?: number | null; open_included?: number
@@ -167,6 +179,9 @@ function findTile(ov: Overview, key: string): Tile | undefined {
   return undefined
 }
 
+/** The sales.daily tile's points: the API sends days in the same `series` field sales.trend sends weeks in. */
+const dayPoints = (t?: Tile): DayPoint[] => (t?.series ?? []) as unknown[] as DayPoint[]
+
 /* ─────────────────────────── small pieces ─────────────────────────── */
 
 function DrillLink({ drill, me, className, iconOnly }: { drill?: Drill | null; me: Me | null; className?: string; iconOnly?: boolean }) {
@@ -253,6 +268,31 @@ function Sparkline({ series, compact }: { series: WeekPoint[]; compact?: boolean
           <span>{series[series.length - 1]?.label} (so far)</span>
         </div>
       )}
+    </div>
+  )
+}
+
+/** the daily series as a strip (Details): one thin bar per calendar day, Friday and Saturday lighter */
+function DayStrip({ days }: { days: DayPoint[] }) {
+  const max = Math.max(1, ...days.map((p) => p.value))
+  const say = (p: DayPoint) => `${p.weekday} ${p.label}: ${fmtBhd(p.value)}`
+  return (
+    <div className="mt-3">
+      <div className="flex h-24 items-end gap-px sm:gap-0.5" role="img"
+        aria-label={`Daily Accessories sales, ${days.map(say).join('; ')}`}>
+        {days.map((p) => (
+          <div key={p.day} className="flex h-full flex-1 flex-col justify-end" title={`${say(p)} · ${invoicesText(p.invoices)}`}>
+            <div
+              className={cn('w-full rounded-t-sm', p.business_day ? 'bg-[#6D4091]' : 'bg-[#6D4091]/45 dark:bg-[#6D4091]/60')}
+              style={{ height: `${Math.max(2, (p.value / max) * 100)}%` }}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+        <span>{days[0]?.label}</span>
+        <span>{days[days.length - 1]?.label}</span>
+      </div>
     </div>
   )
 }
@@ -345,6 +385,8 @@ function TileBody({ t }: { t: Tile }) {
     }
     case 'sales.trend':
       return t.series ? <Sparkline series={t.series} /> : null
+    case 'sales.daily':
+      return <DailyDetail t={t} />
     case 'orders.funnel':
       return (
         <>
@@ -559,6 +601,32 @@ function TileBody({ t }: { t: Tile }) {
   }
 }
 
+/** sales.daily in Details: the latest day, the 30 days as a strip, and the last seven days in figures — a phone
+ *  has no hover, so the recent days are also there to read. Every number is the tile's own. */
+function DailyDetail({ t }: { t: Tile }) {
+  const days = dayPoints(t)
+  const latest = latestDay(days)
+  const facts = dailyFacts(days, t, fmtBhd).filter((f) => f.key !== 'latest')
+  return (
+    <div className="grid gap-x-6 gap-y-3 md:grid-cols-[minmax(0,1fr)_minmax(0,18rem)]">
+      <div className="min-w-0">
+        <BigValue t={t} suffix={latest ? `on ${latest.weekday} ${latest.label}` : undefined} />
+        <DayStrip days={days} />
+        <p className="mt-2 text-[12px] text-muted-foreground">
+          {[...facts.map((f) => `${f.label} ${f.value}${f.when ? ` on ${f.when}` : ''}`),
+            ...(t.total != null ? [`${fmtBhd(t.total)} in the ${t.days ?? days.length} days`] : [])].join(' · ')}
+        </p>
+      </div>
+      <div className="min-w-0">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6D4091] dark:text-[#c7a6e6]">Last seven days</div>
+        <MiniList rows={days.slice(-7).reverse().map((p) => ({
+          label: `${p.weekday} ${p.label} · ${invoicesText(p.invoices)}`, value: fmtBhd(p.value),
+        }))} />
+      </div>
+    </div>
+  )
+}
+
 function BigValue({ t, suffix, tone }: { t: Tile; suffix?: string; tone?: 'alert' | 'warn' | 'ok' }) {
   return (
     <div className="flex flex-wrap items-baseline gap-x-2">
@@ -571,9 +639,10 @@ function BigValue({ t, suffix, tone }: { t: Tile; suffix?: string; tone?: 'alert
   )
 }
 
-function TileCard({ t, me, wide }: { t: Tile; me: Me | null; wide?: boolean }) {
+function TileCard({ t, me, wide, full }: { t: Tile; me: Me | null; wide?: boolean; full?: boolean }) {
   return (
-    <article aria-labelledby={`tile-${t.key}`} className={cn('flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm', wide && 'md:col-span-2')}>
+    <article aria-labelledby={`tile-${t.key}`} className={cn('flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm',
+      wide && 'md:col-span-2', full && 'md:col-span-2 xl:col-span-3')}>
       <div className="flex items-start justify-between gap-2">
         <h3 id={`tile-${t.key}`} className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6D4091] dark:text-[#c7a6e6]">{t.label}</h3>
         <DrillLink drill={t.drill} me={me} className="shrink-0" />
@@ -591,6 +660,8 @@ function TileCard({ t, me, wide }: { t: Tile; me: Me | null; wide?: boolean }) {
 /* ─────────────────────────── modules ─────────────────────────── */
 
 const WIDE = new Set(['sales.trend', 'orders.funnel', 'products.movers'])
+// a whole row of the grid: thirty bars beside seven rows of figures need the width
+const FULL = new Set(['sales.daily'])
 
 function ModuleSection({ m, me, children }: { m: Module; me: Me | null; children: ReactNode }) {
   return (
@@ -611,7 +682,7 @@ function ModuleSection({ m, me, children }: { m: Module; me: Me | null; children
 function TileGrid({ m, me }: { m: Module; me: Me | null }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-      {shownTiles(m.tiles).map((t) => <TileCard key={t.key} t={t} me={me} wide={WIDE.has(t.key)} />)}
+      {shownTiles(m.tiles).map((t) => <TileCard key={t.key} t={t} me={me} wide={WIDE.has(t.key)} full={FULL.has(t.key)} />)}
     </div>
   )
 }
@@ -883,45 +954,187 @@ function KpiRow({ ov, me }: { ov: Overview; me: Me | null }) {
   )
 }
 
-function WeeklyChart({ t, pace, drill, me }: { t: Tile; pace?: Tile; drill?: Drill | null; me: Me | null }) {
+/* ── the sales chart: day by day, or week by week ── */
+
+type ChartView = 'daily' | 'weekly'
+const CHART_VIEWS: { key: ChartView; label: string; hint: string }[] = [
+  { key: 'daily', label: 'Daily', hint: 'One bar per day' },
+  { key: 'weekly', label: 'Weekly', hint: 'One bar per week' },
+]
+const CHART_VIEW_KEY = 'yq-command-sales-chart'
+const WEEKLY_CAPTION = 'ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far'
+const TOOLTIP_STYLE = { borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }
+const AXIS_TICK = { fill: 'hsl(var(--muted-foreground))', fontSize: 11 }
+const kTick = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)
+
+function readChartView(): ChartView {
+  try {
+    return localStorage.getItem(CHART_VIEW_KEY) === 'weekly' ? 'weekly' : 'daily'
+  } catch {
+    return 'daily'
+  }
+}
+
+/** The first screen's chart card: Accessories sales day by day (the default) or week by week. The choice is kept
+ *  in this browser, and the card works the same without storage. A payload with no daily tile (an older API,
+ *  or its read failed) shows the weekly chart alone, as the card was before the daily view. */
+function SalesChartCard({ daily, trend, pace, drill, me }: {
+  daily?: Tile; trend?: Tile; pace?: Tile; drill?: Drill | null; me: Me | null
+}) {
+  const [picked, setPicked] = useState<ChartView>(readChartView)
+  const pick = (v: ChartView) => {
+    setPicked(v)
+    try {
+      localStorage.setItem(CHART_VIEW_KEY, v)
+    } catch {
+      /* private mode: the choice lasts this visit */
+    }
+  }
+  const view: ChartView | null = daily && (picked === 'daily' || !trend) ? 'daily' : trend ? 'weekly' : null
+  if (!view) return null
+  const both = !!daily && !!trend
+  const facts = daily ? dailyFacts(dayPoints(daily), daily, fmtBhd) : []
+  const span = daily?.days ?? dayPoints(daily).length      // the daily window in days, as the API says it
+  return (
+    <section aria-labelledby="fs-sales-chart" title={(view === 'daily' ? daily : trend)?.basis}
+      className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <h2 id="fs-sales-chart" className="font-display text-[1rem] font-bold">
+          {both ? 'Accessories sales' : view === 'daily' ? 'Daily Accessories sales' : 'Weekly Accessories sales'}
+        </h2>
+        <div className="flex items-center gap-2">
+          {both && (
+            <div role="group" aria-label="Sales by day or by week" className="inline-flex rounded-full bg-[#F3ECF8] p-0.5 dark:bg-[#6D4091]/20">
+              {CHART_VIEWS.map((v) => (
+                <button key={v.key} type="button" aria-pressed={view === v.key} title={v.hint} onClick={() => pick(v.key)}
+                  className={cn('h-7 rounded-full px-3 text-[12px] font-semibold transition-colors motion-reduce:transition-none',
+                    view === v.key ? 'bg-[#6D4091] text-white shadow-sm' : 'text-[#6D4091] hover:bg-white/70 dark:text-[#e6d6f5] dark:hover:bg-[#6D4091]/30')}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
+          )}
+          <DrillLink drill={drill} me={me} />
+        </div>
+      </div>
+      {/* both captions share one grid cell (the hidden one keeps its room), so the card's height never moves
+          when the view changes, however either line wraps */}
+      <div className="mt-1 grid text-[11.5px] text-muted-foreground">
+        {daily && (
+          <p className={cn('col-start-1 row-start-1', view !== 'daily' && 'invisible')}>
+            ex-VAT · last {span} days · lighter bars are Friday and Saturday
+          </p>
+        )}
+        {trend && <p className={cn('col-start-1 row-start-1', view !== 'weekly' && 'invisible')}>{WEEKLY_CAPTION}</p>}
+      </div>
+      {/* the three facts are the daily tile's own figures; they stay put under either view */}
+      {daily && !!facts.length && (
+        <dl title={daily.basis} className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[11.5px]">
+          {facts.map((f) => (
+            <div key={f.key} className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+              <dt className="text-muted-foreground">{f.label}{f.when ? ` · ${f.when}` : ''}</dt>
+              <dd className="font-semibold tabular-nums">{f.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {view === 'daily' && daily ? <DailyChart t={daily} pace={pace} summary={dailySummary(facts, span)} />
+        : trend ? <WeeklyChart t={trend} pace={pace} /> : null}
+    </section>
+  )
+}
+
+/** an x label of the daily chart: only the days dayTicks() picks for this plot's width; the latest day in bold */
+function DayTick({ x, y, payload, days }: {
+  x?: number | string; y?: number | string; payload?: { value?: string | number }; days: DayPoint[]
+}) {
+  const plot = usePlotArea()
+  const day = String(payload?.value ?? '')
+  const text = dayTicks(days, dayTickStep(plot?.width ?? 0, days.length))[day]
+  if (!text) return null
+  const latest = latestDay(days)?.day === day
+  return (
+    <text x={x} y={y} dy="0.71em" textAnchor="middle" fontSize={11} fontWeight={latest ? 700 : 400}
+      fill={latest ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))'}>
+      {text}
+    </text>
+  )
+}
+
+/** One bar per calendar day: business days in plum, Friday and Saturday lighter, the latest day on a lilac band.
+ *  The dashed line is the company target for one business day — the Dashboard's rule, the monthly target over
+ *  the month's business days — drawn only when a target is set; its key sits above the plot, where no bar
+ *  reaches, so it never lands on one. */
+function DailyChart({ t, pace, summary }: { t: Tile; pace?: Tile; summary: string }) {
+  const days = dayPoints(t)
+  const latest = latestDay(days)
+  const target = targetPerBusinessDay(pace?.target_bhd, pace?.business_days_total)
+  return (
+    // A click or a tap focuses the chart, or the layer under the pointer, and the browser frames whatever SVG it
+    // focused — here that would be the latest day's band. No frame for a pointer; Tab still shows the chart's ring.
+    <div className="relative mt-2 h-[210px] min-w-0 [&_.recharts-surface:focus:not(:focus-visible)]:outline-none [&_.recharts-surface_g:focus]:outline-none">
+      {target != null && (
+        <p className="pointer-events-none absolute right-4 top-0 z-[1] flex items-center gap-1.5 text-[10.5px] leading-none text-muted-foreground">
+          <span aria-hidden="true" className="w-4 border-t-2 border-dashed border-[#d97706]" />
+          target per business day {fmtBhd0(target)}
+        </p>
+      )}
+      <ResponsiveContainer width="100%" height="100%">
+        {/* right: room for the latest day's label when it names the month ("1 Oct" under a 7 px bar on a phone) */}
+        <ComposedChart data={days} margin={{ top: 18, right: 16, left: 0, bottom: 0 }} aria-label={summary}>
+          <XAxis dataKey="day" interval={0} tick={<DayTick days={days} />} axisLine={false} tickLine={false} />
+          <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} width={44} tickFormatter={kTick} />
+          {/* the invoices ride on the day's line, not the amount's: one long line would run off a 360 px phone */}
+          <Tooltip cursor={{ fill: 'hsl(var(--accent))' }}
+            formatter={(v) => [fmtBhd(Number(v)), 'Accessories ex-VAT']}
+            labelFormatter={(label, payload) => {
+              const p = payload?.[0]?.payload as DayPoint | undefined
+              return p ? `${p.weekday} ${p.label}${p.business_day ? '' : ' · weekend'} · ${invoicesText(p.invoices)}` : String(label)
+            }}
+            contentStyle={TOOLTIP_STYLE} />
+          {latest && <ReferenceArea x1={latest.day} x2={latest.day} fill="#824FAB" fillOpacity={0.12} />}
+          {target != null && <ReferenceLine y={target} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />}
+          {/* minPointSize: a day with no sale still leaves a 2 px mark, so every weekend shows as two lighter ones.
+              On the dark card 45 % plum all but disappears: the weekend bars are a little stronger there. */}
+          <ChartBar dataKey="value" radius={[3, 3, 0, 0]} maxBarSize={18} minPointSize={2}>
+            {days.map((p) => (p.business_day
+              ? <Cell key={p.day} fill="#6D4091" />
+              : <Cell key={p.day} fill="#6D4091" fillOpacity={0.45} className="dark:[fill-opacity:0.6]" />))}
+          </ChartBar>
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function WeeklyChart({ t, pace }: { t: Tile; pace?: Tile }) {
   const series = t.series || []
   // a week is five business days: the monthly target over the month's business days, five times
   const weekly = pace?.target_bhd && pace.business_days_total ? (pace.target_bhd / pace.business_days_total) * 5 : null
   return (
-    <section aria-labelledby="fs-weekly" title={t.basis} className="flex min-w-0 flex-col rounded-2xl border bg-card p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h2 id="fs-weekly" className="font-display text-[1rem] font-bold">Weekly Accessories sales</h2>
-          <p className="text-[11.5px] text-muted-foreground">ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far</p>
-        </div>
-        <DrillLink drill={drill} me={me} />
-      </div>
-      <div className="mt-2 h-[210px] min-w-0">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={series} margin={{ top: 14, right: 8, left: 0, bottom: 0 }}>
-            <XAxis dataKey="label" interval="preserveStartEnd" minTickGap={10}
-              tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }} axisLine={false} tickLine={false}
-              width={44} tickFormatter={(v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)} />
-            <Tooltip cursor={{ fill: 'hsl(var(--accent))' }}
-              formatter={(v) => [fmtBhd(Number(v)), 'Accessories ex-VAT']}
-              labelFormatter={(label, payload) => {
-                const p = payload?.[0]?.payload as WeekPoint | undefined
-                return `Week of ${String(label)}${p?.partial ? ' (so far)' : ''}`
-              }}
-              contentStyle={{ borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }} />
-            {/* the label sits ABOVE the line (insideBottom…): under it, it sat on the tallest bar's top */}
-            {weekly != null && (
-              <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
-                label={{ value: `weekly target ${fmtBhd0(weekly)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
-            )}
-            <ChartBar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={34}>
-              {series.map((p) => <Cell key={p.week_start} fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1} />)}
-            </ChartBar>
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    </section>
+    <div className="mt-2 h-[210px] min-w-0">
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={series} margin={{ top: 14, right: 8, left: 0, bottom: 0 }}>
+          <XAxis dataKey="label" interval="preserveStartEnd" minTickGap={10} tick={AXIS_TICK} axisLine={false} tickLine={false} />
+          <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} width={44} tickFormatter={kTick} />
+          <Tooltip cursor={{ fill: 'hsl(var(--accent))' }}
+            formatter={(v) => [fmtBhd(Number(v)), 'Accessories ex-VAT']}
+            labelFormatter={(label, payload) => {
+              const p = payload?.[0]?.payload as WeekPoint | undefined
+              return `Week of ${String(label)}${p?.partial ? ' (so far)' : ''}`
+            }}
+            contentStyle={TOOLTIP_STYLE} />
+          {/* the label sits ABOVE the line (insideBottom…): under it, it sat on the tallest bar's top */}
+          {weekly != null && (
+            <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
+              label={{ value: `weekly target ${fmtBhd0(weekly)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
+          )}
+          <ChartBar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={34}>
+            {series.map((p) => <Cell key={p.week_start} fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1} />)}
+          </ChartBar>
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   )
 }
 
@@ -1102,16 +1315,20 @@ function MerchantsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
 }
 
 function FirstScreen({ ov, me }: { ov: Overview; me: Me | null }) {
-  const trend = findTile(ov, 'sales.trend')
+  // a tile with no points draws no chart; an API from before the daily tile sends the weekly one alone
+  const charted = (t?: Tile) => (t?.series?.length ? t : undefined)
+  const trend = charted(findTile(ov, 'sales.trend'))
+  const daily = charted(findTile(ov, 'sales.daily'))
   const sales = findTile(ov, 'sales.accessories')
   const team = findTile(ov, 'team.reps')
   const attention = ov.modules.find((m) => m.key === 'attention')
+  const chart = !!(trend || daily)
   return (
     <div className="mt-5 space-y-3">
       <KpiRow ov={ov} me={me} />
-      <div className={cn('grid grid-cols-1 gap-3', trend?.series && 'xl:grid-cols-[2fr_1fr]')}>
-        {trend?.series && (
-          <WeeklyChart t={trend} pace={findTile(ov, 'sales.pace')} me={me}
+      <div className={cn('grid grid-cols-1 gap-3', chart && 'xl:grid-cols-[2fr_1fr]')}>
+        {chart && (
+          <SalesChartCard daily={daily} trend={trend} pace={findTile(ov, 'sales.pace')} me={me}
             drill={sales?.drill ? { to: sales.drill.to, label: 'Sales' } : null} />
         )}
         <Exceptions m={attention} me={me} />
