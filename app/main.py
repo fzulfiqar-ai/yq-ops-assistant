@@ -193,7 +193,7 @@ async def _prewarm_reports() -> None:
 async def _watch_data_loads() -> None:
     """From here on this process notices a data load made outside it (a developer's PC, a cron): the
     cached readers look for a newer ingest_runs row and drop their payloads when there is one
-    (app/datastamp.py). This only flips the switch; the reads happen on request threads."""
+    (app/datastamp.py). This only flips the switch; each read happens later, on a thread of its own."""
     from app import datastamp
     datastamp.watch()
 

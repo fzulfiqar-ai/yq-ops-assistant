@@ -20,7 +20,11 @@
  *   * the Command Centre's "Accessories sales" card (R8, web/src/lib/dailySales.ts): the daily chart's
  *     x labels (counted back from the latest day, the month where it changes, sparser on a phone), the
  *     target for one business day, the three facts and the spoken summary taken from the tile as sent,
- *     and the card itself — one heading, a Daily / Weekly control, Daily first.
+ *     the days the facts cover, the y ticks (1,050 is 1.05k), and the card itself — one heading, a
+ *     Daily / Weekly control, Daily first, the target's key above the plot on both charts;
+ *   * a page left open across a data load (R8 review, web/src/lib/dataDate.ts): behind only when the
+ *     header chip's Focus date is later than the page's own; the Dashboard asks again while it is
+ *     behind and when the tab comes back, with no standing poll.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -191,11 +195,11 @@ check('daily chart: the target for one business day is the monthly target over t
   [null, null, null, null, null, null], 'no target or no business days: no line')
 })
 
-check('the three facts: the latest day with its weekday, the average business day, the best day with its date', () => {
+check('the three facts: the latest day with its weekday, the average per business day, the best day with its date', () => {
   const tile = { avg_business_day: 104.926, best: { day: '2026-09-29', label: '29 Sep', value: 900 } }
   eq(D.dailyFacts(DAYS, tile, bhd), [
     { key: 'latest', label: 'Latest day', when: 'Tue 6 Oct', value: 'BHD 110.500' },
-    { key: 'average', label: 'Average business day', value: 'BHD 104.926' },
+    { key: 'average', label: 'Average per business day', value: 'BHD 104.926' },
     { key: 'best', label: 'Best day', when: '29 Sep', value: 'BHD 900.000' },
   ], 'facts')
   // the figures are the tile's own, never worked out here: a different average or best is shown as sent
@@ -215,8 +219,24 @@ check('the three facts: the latest day with its weekday, the average business da
 check('the chart’s spoken summary reads the latest day, the average and the best day', () => {
   const facts = D.dailyFacts(DAYS, { avg_business_day: 104.926, best: { day: '2026-09-29', label: '29 Sep', value: 900 } }, bhd)
   eq(D.dailySummary(facts, 30), 'Accessories sales by day, ex-VAT, the last 30 days. Latest day, Tue 6 Oct: BHD 110.500. '
-    + 'Average business day: BHD 104.926. Best day, 29 Sep: BHD 900.000', 'summary')
+    + 'Average per business day: BHD 104.926. Best day, 29 Sep: BHD 900.000', 'summary')
   eq(D.dailySummary([], 30), 'Accessories sales by day, ex-VAT, the last 30 days', 'no facts')
+})
+
+check('the days the facts cover are named as the cards beside them name a window: "30 days to 6 Oct"', () => {
+  eq(D.windowText(DAYS, 30), '30 days to 6 Oct', 'the data date')
+  eq(D.windowText(series('2026-10-02'), 30), '30 days to 2 Oct', 'a weekend data date')
+  eq(D.windowText(series('2026-01-05'), 30), '30 days to 5 Jan', 'across a year end')
+  // the day the API flags as latest, not simply the last point; no days at all: the plain wording
+  eq(D.windowText(DAYS.map((p) => ({ ...p, latest: p.day === '2026-10-05' })), 30), '30 days to 5 Oct', 'the flagged day')
+  eq(D.windowText([], 30), 'last 30 days', 'no days')
+})
+
+check('y ticks: thousands with the decimals they need — 1,050 is 1.05k, never 1.1k', () => {
+  eq([1050, 1950, 1400, 1000, 7500, 22500, 15000, 1234].map((v) => D.kTick(v)), ['1.05k', '1.95k', '1.4k', '1k', '7.5k', '22.5k', '15k', '1.234k'], 'thousands')
+  eq([0, 350, 700, 999].map((v) => D.kTick(v)), ['0', '350', '700', '999'], 'under a thousand: as it is')
+  // the ticks recharts draws for a best day a little over 1,300: every label is its gridline's own value
+  eq([0, 350, 700, 1050, 1400].map((v) => D.kTick(v)), ['0', '350', '700', '1.05k', '1.4k'], 'a 0–1,400 axis')
 })
 
 check('invoice counts in words: "7 invoices", "1 invoice", "no invoices"', () => {
@@ -231,10 +251,46 @@ check('the card: one "Accessories sales" heading with a Daily / Weekly control, 
   ok(card.includes('role="group"') && card.includes('aria-pressed={view === v.key}'), 'a group of pressed buttons')
   const views = PAGE.split('const CHART_VIEWS')[1].split('\n]\n')[0]
   ok(views.indexOf("label: 'Daily'") > 0 && views.indexOf("label: 'Daily'") < views.indexOf("label: 'Weekly'"), 'Daily first')
-  ok(card.includes('ex-VAT · last {span} days · lighter bars are Friday and Saturday'), 'the daily caption')
+  ok(card.includes('ex-VAT · one bar a day · lighter bars are Friday and Saturday'), 'the daily caption')
   ok(PAGE.includes("const WEEKLY_CAPTION = 'ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far'"), 'the weekly caption, as it was')
   // every figure on the card is read off the tile through the helpers above
   ok(card.includes('dailyFacts(dayPoints(daily), daily, fmtBhd)') && card.includes('dailySummary(facts, span)'), 'facts from the tile')
+  // the facts stay under the weekly chart too, so their row names its own days, under either view
+  ok(card.includes('<dd>{windowText(dayPoints(daily), span)}:</dd>'), 'the facts row leads with the days it covers')
+  // both charts print their y ticks with the helper tested above, and the target's key above the plot
+  eq(PAGE.split('tickFormatter={kTick}').length - 1, 2, 'both y axes use kTick:')
+  ok(!PAGE.includes('const kTick') && !PAGE.includes('.toFixed(1)}k'), 'no one-decimal formatter of the page’s own')
+  ok(PAGE.includes('<TargetKey>weekly target {fmtBhd0(weekly)}</TargetKey>') && !PAGE.includes('insideBottomRight'), 'no target label drawn across a bar')
+})
+
+// ── a page left open across a data load (R8 review): lib/dataDate.ts ───────────────────────────────
+const F = await load('lib/dataDate.ts')
+
+check('an open page is behind when the header chip’s Focus date is later than its own; never when level, ahead, or still loading', () => {
+  // the load lands: the chip reads 6 Oct, the page's figures still carry 5 Oct
+  eq(F.behindFocus('2026-10-06', { data_as_of: '2026-10-05' }), true, 'the chip moved first')
+  eq(F.behindFocus('2026-10-01', { data_as_of: '2026-09-30' }), true, 'across a month end')
+  eq(F.behindFocus('2026-01-01', { data_as_of: '2025-12-31' }), true, 'across a year end')
+  // level: nothing to ask; a longer date form is the same day
+  eq(F.behindFocus('2026-10-06', { data_as_of: '2026-10-06' }), false, 'level')
+  eq(F.behindFocus('2026-10-06', { data_as_of: '2026-10-06T00:00:00' }), false, 'a timestamp for the same day')
+  // the page is AHEAD of a chip that has not asked again yet: the page is right, it does not poll
+  eq(F.behindFocus('2026-10-05', { data_as_of: '2026-10-06' }), false, 'ahead')
+  // no payload yet (the first read is under way), or the chip has no date: nothing to compare
+  eq([F.behindFocus('2026-10-06', undefined), F.behindFocus('2026-10-06', null)], [false, false], 'still loading')
+  eq([F.behindFocus(null, { data_as_of: '2026-10-05' }), F.behindFocus(undefined, { data_as_of: '2026-10-05' }),
+    F.behindFocus('', { data_as_of: '2026-10-05' }), F.behindFocus('soon', { data_as_of: '2026-10-05' })],
+  [false, false, false, false], 'no chip date')
+  // a page built when nothing was loaded is behind as soon as the chip has a date
+  eq([F.behindFocus('2026-10-06', { data_as_of: null }), F.behindFocus('2026-10-06', {})], [true, true], 'a page with no date')
+})
+
+check('dashboard: an open tab asks again while it is behind the chip and when the tab comes back — and has no standing poll', () => {
+  const q = DASH.split("queryKey: ['report', 'dashboard'],")[1].split('})')[0]
+  ok(q.includes('staleTime: 60_000,') && q.includes('refetchOnWindowFocus: true,'), 'asks again on coming back to the tab')
+  ok(q.includes('refetchInterval: (q) => (behindFocus(fresh?.focus_to, q.state.data) ? CATCH_UP_MS : false),'), 'polls only while behind')
+  ok(!/refetchInterval:\s*\d/.test(DASH), 'no fixed interval')
+  ok(DASH.includes('const behind = behindFocus(fresh?.focus_to, data)') && DASH.includes('if (behind) void refetch()'), 'and at once when the chip moves ahead')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

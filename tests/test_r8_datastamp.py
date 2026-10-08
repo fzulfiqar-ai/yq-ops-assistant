@@ -16,13 +16,23 @@ Covered (app/datastamp.py and its call sites):
     block, the shop context and its settings, the assistant's "data as of" label);
   * one read per 30 s per process whatever the traffic; a reader that raises changes nothing, is
     not retried before the next look, and warns once per run of failures;
-  * requests arriving together: one read, one drop; the request beside the looker gives the look a
-    moment and then reads what is already dropped (a page sends GET /freshness and its report
-    together: without the moment one of the two was always answered from the old payload); a look
-    that hangs holds nobody past LOOK_WAIT_S from its start, and LOOK_WAIT_S = 0 switches it off;
+  * a first stamp read that follows a failed one, or comes back later than the moment a request
+    gives it, drops once what was built without it (a load in between would never be noticed);
+  * requests arriving together: one read, one drop; the request that began the look and the one
+    beside it give the look a moment and then read what is already dropped (a page sends
+    GET /freshness and its report together: without the moment one of the two was always answered
+    from the old payload); a look that hangs holds nobody past LOOK_WAIT_S from its start, and
+    LOOK_WAIT_S = 0 switches it off;
+  * the read runs on a thread of its own: a database that never answers costs a warm page the
+    moment, never the read's 60 s, and the request after the failed look does not hang either (the
+    review's finding: read on the request's thread, every request in turn hung the full timeout);
+    no thread to be had costs that one look only;
   * the cached readers look on entry, BEFORE they answer from the cache (the report cache, the
     dashboard, the prewarm, the Command Centre overview / attention, the header chip, the rep's
     sales block, the shop context);
+  * a build that began before a noticed load and ended after the drop is answered once and never
+    stored: the Command Centre's two halves (the live one would carry the old Focus half), the
+    header chip, the rep's sales block (the report cache already had this guard);
   * an upload through the API works as before: flush_cache() = the same drop + the query_cache
     delete, and it never reads the stamp;
   * noticing a load never imports the assistant (app.ai pulls in the LLM client);
@@ -104,21 +114,29 @@ def _caches() -> list[dict]:
 
 class _Sandbox:
     """datastamp's own state and every cache these tests fill, put back as they were afterwards.
-    With a reader, the process watches for loads for the length of the test."""
+    With a reader, the process watches for loads for the length of the test.
 
-    def __init__(self, read=None):
+    A look runs on its own thread and the request that began it gives it LOOK_WAIT_S. Here that
+    moment is long (the stand-in reads answer at once), so a test reads the look's result however
+    busy the machine is; the tests about the moment itself set their own."""
+
+    def __init__(self, read=None, wait: float = 30.0):
         self.read = read
+        self.wait = wait
 
     def __enter__(self):
         from app import datastamp
         self.seen = dict(datastamp._seen)
         self.saved = [(d, dict(d)) for d in _caches()]
+        self.look_wait, datastamp.LOOK_WAIT_S = datastamp.LOOK_WAIT_S, self.wait
         if self.read is not None:
             datastamp.watch(self.read)
         return self
 
     def __exit__(self, *exc):
         from app import datastamp
+        _settle()                                    # no look of this test is left running into the next
+        datastamp.LOOK_WAIT_S = self.look_wait
         for d, was in self.saved:
             d.clear()
             d.update(was)
@@ -131,6 +149,13 @@ def _due() -> None:
     """Make the next sync() a real look: the last one was more than CHECK_EVERY_S ago."""
     from app import datastamp
     datastamp._seen["at"] = time.monotonic() - datastamp.CHECK_EVERY_S - 1
+
+
+def _settle() -> None:
+    """Wait for the look under way, if any, to be over (it holds the lock until its read is back)."""
+    from app import datastamp
+    assert datastamp._lock.acquire(timeout=30), "a look never finished"
+    datastamp._lock.release()
 
 
 def _fill() -> dict:
@@ -269,7 +294,7 @@ def _():
         stamp.value = 59
         assert not any(datastamp.sync() for _ in range(200)) and stamp.calls == 1
         with datastamp._lock:       # a request that judged the look due, then got the lock after another had looked
-            assert datastamp._look(stamp) is False and stamp.calls == 1, "the look is not made twice"
+            assert datastamp._begin() is False and stamp.calls == 1, "the look is not made twice"
         datastamp._seen["at"] = time.monotonic() - (datastamp.CHECK_EVERY_S - 2)
         assert datastamp.sync() is False and stamp.calls == 1 and _kept(gen), "28 s after the last look: not yet"
         datastamp._seen["at"] = time.monotonic() - (datastamp.CHECK_EVERY_S + 0.5)
@@ -308,28 +333,58 @@ class _Log(logging.Handler):
 @test("a reader that raises: nothing changes, nothing is raised, no retry before the next look, one warning per run of failures")
 def _():
     from app import datastamp
-    stamp = _Stamp(RuntimeError("supabase is down"))
+    stamp = _Stamp(58)
     with _Sandbox(stamp), _Log() as log:
+        datastamp.sync()                   # a clean boot: 58 is noted
         gen = _fill()
-        assert datastamp.sync() is False and stamp.calls == 1
-        assert datastamp._seen["stamp"] is datastamp._UNSEEN and _kept(gen)
-        assert datastamp.sync() is False and stamp.calls == 1, "a failed read is not tried again on every request"
+        stamp.value = RuntimeError("supabase is down")
         _due()
-        assert datastamp.sync() is False and stamp.calls == 2 and _kept(gen)
+        assert datastamp.sync() is False and stamp.calls == 2
+        assert datastamp._seen["stamp"] == 58 and _kept(gen), "the last known stamp is kept"
+        assert datastamp.sync() is False and stamp.calls == 2, "a failed read is not tried again on every request"
+        _due()
+        assert datastamp.sync() is False and stamp.calls == 3 and _kept(gen)
         assert log.levels == [logging.WARNING, logging.DEBUG], log.levels
         assert "supabase is down" in log.lines[0]
-        stamp.value = 58                   # back: the first good look still only notes the stamp
+        stamp.value = 58                   # back, and no load landed meanwhile: nothing to drop
         _due()
         assert datastamp.sync() is False and datastamp._seen["stamp"] == 58 and _kept(gen)
         stamp.value = TimeoutError("slow")
         _due()
-        assert datastamp.sync() is False and datastamp._seen["stamp"] == 58, "the last known stamp is kept"
+        assert datastamp.sync() is False and datastamp._seen["stamp"] == 58
         assert log.levels[2:] == [logging.WARNING], "a new run of failures warns again"
         stamp.value = 59                   # the load that landed during the outage is still noticed
         _due()
         assert datastamp.sync() is True
         _assert_dropped(gen)
         assert log.levels[3:] == [logging.INFO] and "59" in log.lines[3], "the notice says which load"
+
+
+@test("the first stamp read fails, then works: what was built meanwhile is dropped once (a load in between would go unnoticed)")
+def _():
+    from app import datastamp, reports
+    stamp = _Stamp(RuntimeError("supabase blip"))
+    data = {"month": "september"}
+    with _Sandbox(stamp), _Log() as log:
+        saved = dict(reports.REPORTS)
+        reports.REPORTS["_t"] = lambda: {"month": data["month"]}
+        try:
+            # boot: the first look fails, and the page is built and cached with no stamp to set a load against
+            assert reports.cached_report("_t") == {"month": "september"} and stamp.calls == 1
+            assert datastamp._seen["stamp"] is datastamp._UNSEEN
+            gen = _fill()
+            data["month"], stamp.value = "october", 59      # a load lands, and the database answers again
+            _due()
+            assert datastamp.sync() is True, "the first good read cannot tell: it drops what was built without it"
+            _assert_dropped(gen)
+            assert reports.cached_report("_t") == {"month": "october"}
+            assert log.levels == [logging.WARNING, logging.INFO] and "dropped once" in log.lines[1]
+            gen = _fill()                                   # once: the look after it finds the same stamp
+            _due()
+            assert datastamp.sync() is False and _kept(gen)
+        finally:
+            reports.REPORTS.clear()
+            reports.REPORTS.update(saved)
 
 
 @test("one part of the drop failing never keeps the others, and sync() still does not raise")
@@ -368,7 +423,7 @@ class _Parked:
         return self.value
 
 
-@test("a page's requests arrive together: the one beside the looker gives the look a moment, then reads what is already dropped (one read, one drop)")
+@test("a page's requests arrive together: the one that began the look and the one beside it give it a moment, then read what is already dropped (one read, one drop)")
 def _():
     from app import datastamp, reports, shop
     read = _Parked(59)
@@ -391,6 +446,7 @@ def _():
             b.start()
             b.join(0.3)
             assert b.is_alive() and not second, "it does not answer from a payload that is about to be dropped"
+            assert a.is_alive() and not first, "nor does the request that began the look"
             assert _kept(gen)
         finally:
             read.release.set()
@@ -402,7 +458,7 @@ def _():
         _assert_dropped(gen)
 
 
-@test("a look that hangs holds nobody for long: the request beside it leaves LOOK_WAIT_S after the look began, later ones do not wait at all")
+@test("a look that hangs holds nobody for long: the request that began it and the one beside it leave LOOK_WAIT_S after it began, later ones do not wait at all")
 def _():
     from app import datastamp
     assert datastamp.LOOK_WAIT_S == 1.0
@@ -420,6 +476,8 @@ def _():
             assert datastamp.sync() is False
             assert time.monotonic() - datastamp._seen["at"] >= 0.35, "it gave the look its moment"
             assert time.monotonic() - t0 < 5.0 and _kept(gen), "then it answered from what is cached"
+            a.join(5)
+            assert not a.is_alive() and datastamp._lock.locked(), "the request that began the look has left too: the read is not on its thread"
             t1 = time.monotonic()
             assert datastamp.sync() is False            # past LOOK_WAIT_S: nothing to wait for
             _due()                                      # the next look falls due while this one still hangs
@@ -429,30 +487,137 @@ def _():
         finally:
             read.release.set()
             a.join(10)
+        _settle()                                       # the read is back: the look ends on its own thread
         _assert_dropped(gen)
 
 
-@test("LOOK_WAIT_S = 0 switches the moment off: the request beside the looker answers at once from what is cached")
+@test("LOOK_WAIT_S = 0 switches the moment off: every request answers at once from what is cached, the look goes on beside them")
 def _():
     from app import datastamp
     read = _Parked(59)
     with _Sandbox(_Stamp(58)), _Patched((datastamp, "LOOK_WAIT_S", 0.0)):
         datastamp.sync()
+        _settle()                                       # nobody waited for the first look: let it note its stamp
         gen = _fill()
         datastamp._seen["read"] = read
         _due()
-        a = threading.Thread(target=datastamp.sync)
-        a.start()
         try:
-            assert read.entered.wait(10), "the first request never started its read"
             t0 = time.monotonic()
-            assert datastamp.sync() is False
+            assert datastamp.sync() is False            # the request that began the look
+            assert read.entered.wait(10), "the look never started its read"
+            assert datastamp.sync() is False            # one beside it
             _due()
             assert datastamp._lock.locked() and datastamp.sync() is False
             assert time.monotonic() - t0 < 0.3 and _kept(gen) and read.calls == 1
         finally:
             read.release.set()
-            a.join(10)
+        _settle()
+        _assert_dropped(gen)
+
+
+class _Hung:
+    """A database that accepted the request and never answers: the read stays in flight until the
+    test lets it time out. Notes the thread each read ran on."""
+
+    def __init__(self):
+        self.calls = 0
+        self.threads: list = []
+        self.entered, self.give_up = threading.Event(), threading.Event()
+
+    def __call__(self):
+        self.calls += 1
+        self.threads.append(threading.current_thread())
+        self.entered.set()
+        assert self.give_up.wait(20), "the test never let the read time out"
+        raise TimeoutError("the read timed out")
+
+
+@test("a database that never answers: a warm page gives the look its moment, never the read's 60 s; nor does the request after the look has failed")
+def _():
+    from app import datastamp, reports
+    read = _Hung()
+    me = threading.current_thread()
+    with _Sandbox(_Stamp(58), wait=1.0), _Log():        # the moment as production has it
+        datastamp.sync()
+        saved = dict(reports.REPORTS)
+        reports.REPORTS["_t"] = lambda: {"v": "built"}
+        try:
+            reports._report_cache["_t"] = (time.time(), {"v": "warm"})
+            datastamp._seen["read"] = read
+            _due()
+            t0 = time.monotonic()
+            assert reports.cached_report("_t") == {"v": "warm"}, "the request that began the look is answered"
+            took = time.monotonic() - t0
+            assert took < 10.0, f"it waited {took:.1f} s: the read holds it"
+            assert read.entered.wait(10) and datastamp._lock.locked(), "while the read is still in flight"
+            assert read.threads[0] is not me, "the read is on a thread of its own"
+            t1 = time.monotonic()
+            for _ in range(3):                          # requests while it hangs, also once the next look is due
+                assert reports.cached_report("_t") == {"v": "warm"}
+                _due()
+            assert time.monotonic() - t1 < 0.5 and read.calls == 1, "they do not wait at all"
+            # the client gives up on the read. The next request begins the next look at once (60 s is
+            # longer than the 30 s between looks) and that read hangs too: it must not hold this request either
+            read.entered.clear()
+            read.give_up.set()
+            _settle()
+            read.give_up.clear()
+            _due()
+            t2 = time.monotonic()
+            assert reports.cached_report("_t") == {"v": "warm"}
+            took = time.monotonic() - t2
+            assert took < 10.0, f"it waited {took:.1f} s: the read after a failed look holds it"
+            assert read.entered.wait(10) and read.calls == 2 and datastamp._lock.locked()
+            assert all(t is not me for t in read.threads) and datastamp._seen["stamp"] == 58
+        finally:
+            read.give_up.set()
+            reports.REPORTS.clear()
+            reports.REPORTS.update(saved)
+
+
+@test("the first stamp read comes back later than the moment a request gives it: what was built meanwhile is dropped once")
+def _():
+    from app import datastamp
+    read = _Parked(58)
+    with _Sandbox(read, wait=0.05):
+        gen = _fill()                      # stands for the page a request built after giving the look its moment
+        try:
+            assert datastamp.sync() is False, "the request went ahead before the read was back"
+            assert read.entered.wait(10) and datastamp._lock.locked() and _kept(gen)
+            time.sleep(0.1)                # the moment is long past when the read answers
+        finally:
+            read.release.set()
+        _settle()
+        assert datastamp._seen["stamp"] == 58
+        _assert_dropped(gen)
+        gen = _fill()
+        _due()
+        datastamp.sync()                   # the same stamp at the next look: only a changed stamp drops from here on
+        _settle()
+        assert read.calls == 2 and _kept(gen)
+
+
+@test("no thread to be had for the look: no look this time, nothing raised, and the next one can begin")
+def _():
+    from app import datastamp
+
+    class NoThreads:
+        @staticmethod
+        def Thread(*a, **k):
+            raise RuntimeError("can't start new thread")
+
+    stamp = _Stamp(58)
+    with _Sandbox(stamp), _Log() as log:
+        datastamp.sync()
+        gen = _fill()
+        stamp.value = 59
+        _due()
+        with _Patched((datastamp, "threading", NoThreads)):
+            assert datastamp.sync() is False and stamp.calls == 1 and _kept(gen)
+        assert not datastamp._lock.locked(), "the lock is free again"
+        assert log.levels == [logging.WARNING] and "can't start new thread" in log.lines[0]
+        _due()
+        assert datastamp.sync() is True and stamp.calls == 2
         _assert_dropped(gen)
 
 
@@ -553,6 +718,76 @@ def _():
             reports.REPORTS.update(saved)
 
 
+@test("a build that began before a noticed load is answered once and never stored: the Command Centre's two halves, the header chip, the rep's sales block")
+def _():
+    from app import datastamp, metrics, shop
+    stamp = _Stamp(58)
+    data = {"month": "september"}                    # what "the database" holds
+
+    def load_lands():                                # a load made elsewhere, noticed by another request's look
+        data["month"], stamp.value = "october", stamp.value + 1
+        _due()
+        assert datastamp.sync() is True
+
+    def focus_half(period, reader=None):
+        seen = data["month"]                         # the build reads the old data ...
+        if seen == "september":
+            load_lands()                             # ... and the load is noticed before the build is back
+        return {"month": seen, "errors": {}}
+
+    with _Sandbox(stamp):
+        datastamp.sync()
+        # the Command Centre, its Focus half straddling the load
+        with _Patched((metrics, "build_focus", focus_half),
+                      (metrics, "_assemble", lambda period, focus, reader: {"month": focus["month"]})):
+            metrics.invalidate()
+            assert metrics.overview("mtd") == {"month": "september"}, "the straddling request is answered with what it read"
+            assert not metrics._focus_cache and not metrics._live_cache, "neither half is kept: the live one would carry the old Focus half"
+            assert metrics.overview("mtd") == {"month": "october"}, "the next request reads the new data"
+            assert metrics._focus_cache["mtd"][1]["month"] == "october" and metrics._live_cache["mtd"][1] == {"month": "october"}
+
+        # the live half alone: the Focus half was already cached, the load is noticed while the orders are read
+        data["month"] = "september"
+        metrics.invalidate()
+        metrics._focus_cache["mtd"] = (time.time(), {"month": "september"})
+
+        def live_half(period, focus, reader):
+            if data["month"] == "september":
+                load_lands()
+            return {"month": focus["month"]}
+        with _Patched((metrics, "_assemble", live_half), (metrics, "build_focus", lambda period, reader=None: {"month": data["month"]})):
+            assert metrics.overview("mtd") == {"month": "september"} and not metrics._live_cache
+            assert metrics.overview("mtd") == {"month": "october"}
+
+        # the header chip's payload goes through the same gate
+        data["month"] = "september"
+
+        def chip():
+            seen = data["month"]
+            if seen == "september":
+                load_lands()
+            return {"focus_to": seen}
+        assert metrics._cached(metrics._fresh_cache, "plain", metrics.LIVE_TTL_S, chip) == {"focus_to": "september"}
+        assert "plain" not in metrics._fresh_cache
+        assert metrics._cached(metrics._fresh_cache, "plain", metrics.LIVE_TTL_S, chip) == {"focus_to": "october"}
+        assert metrics._fresh_cache["plain"][1] == {"focus_to": "october"}, "a build with no load in between is kept as before"
+
+        # the rep's sales block on /shop/me
+        data["month"] = "september"
+
+        def revenue(sql, params):
+            seen = data["month"]
+            if seen == "september":
+                load_lands()
+            return [{"rev": 1 if seen == "september" else 2}]
+        with _Patched((shop, "exec_sql_params", revenue), (shop, "rep_month_sales", lambda name: (0, "2026-10-06")),
+                      (shop, "rep_target", lambda name, period: None), (shop, "tier_progress", lambda *a, **k: None)):
+            shop.invalidate_focus_cache()
+            assert shop._rep_focus("Rep One")["revenue_90d_bhd"] == 1.0 and "Rep One" not in shop._focus_cache
+            assert shop._rep_focus("Rep One")["revenue_90d_bhd"] == 2.0
+            assert shop._focus_cache["Rep One"][1]["revenue_90d_bhd"] == 2.0
+
+
 # ── an upload through the API ──────────────────────────────────────────────────
 
 class _CacheTable:
@@ -624,7 +859,7 @@ def _():
 def _():
     code = ("import sys; from app import datastamp, metrics, reports, shop; "
             "assert datastamp._seen['read'] is None and datastamp.sync() is False, 'watching without watch()'; "
-            "datastamp.watch(lambda: 1); datastamp.sync(); "
+            "datastamp.LOOK_WAIT_S = 30.0; datastamp.watch(lambda: 1); datastamp.sync(); "
             "datastamp._seen.update(read=lambda: 2, at=float('-inf')); assert datastamp.sync() is True; "
             "print('ai' if 'app.ai' in sys.modules else 'no-ai', 'openai' if 'openai' in sys.modules else 'no-openai')")
     env = dict(os.environ, SUPABASE_URL="https://ci.invalid", PYTHONUTF8="1")

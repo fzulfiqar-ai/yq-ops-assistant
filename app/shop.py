@@ -3676,9 +3676,12 @@ UNLINKED_HINT = "Your login is not linked to a salesman yet — an admin can lin
 # else is noticed by datastamp.sync() below. The order counts beside it are read fresh on every call.
 _FOCUS_TTL_S = 300
 _focus_cache: dict[str, tuple[float, dict]] = {}
+_focus_gen = 0  # bumped on every data load: a block read before it must not be stored after it
 
 
 def invalidate_focus_cache() -> None:
+    global _focus_gen
+    _focus_gen += 1
     _focus_cache.clear()
 
 
@@ -3687,6 +3690,7 @@ def _rep_focus(focus_name: str) -> dict:
     hit = _focus_cache.get(focus_name)
     if hit and time.time() - hit[0] < _FOCUS_TTL_S:
         return hit[1]
+    gen = _focus_gen
     focus: dict
     try:
         # Rep figures are MOBILE ACCESSORIES only (owner, 21-Sep-2026): Batelco SIM sales
@@ -3706,7 +3710,7 @@ def _rep_focus(focus_name: str) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("focus kpis failed for %s: %s", focus_name, e)
         focus = {"error": "Sales figures are unavailable right now; the office has been notified."}
-    if "error" not in focus:
+    if "error" not in focus and gen == _focus_gen:
         _focus_cache[focus_name] = (time.time(), focus)
     return focus
 

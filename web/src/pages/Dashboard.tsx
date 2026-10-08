@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Area, Bar, BarChart, Cell, ComposedChart, Line, Pie, PieChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -13,6 +13,7 @@ import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { bhd, num, monthLabel, fmtDate } from '@/lib/format'
 import { deadUncostedNote } from '@/lib/basisText'
+import { behindFocus } from '@/lib/dataDate'
 import { CountUp } from '@/components/CountUp'
 import type { Freshness } from '@/components/FreshnessChip'
 import { PageHeader } from '@/components/PageHeader'
@@ -65,10 +66,12 @@ interface Health {
   margin_basis?: string; margin_available?: boolean; cost_coverage_pct?: number | null; below_cost_count?: number
   landed_gp_pct?: number | null; landed_coverage_pct?: number | null
   dead_stock_uncosted?: number; dead_stock_sell_bhd?: number | null; stock_basis?: string | null
-  /** R8: what the DSO divides — every customer balance in Focus ÷ Accessories sales per day (VAT-incl) */
+  /** R8: what the DSO divides — the Receivables card's figure (Focus's Grand Total when the ageing snapshot
+   *  stored one, else the account rows) ÷ Accessories sales per day (VAT-incl) */
   dso_basis?: string; dso_receivables_bhd?: number; dso_sales_per_day_bhd?: number
 }
-interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string }
+/** current_stock: on hand in the latest snapshot (absent on an older API) */
+interface MoverRow { item_name: string; sold_30d: number; sold_90d: number; momentum: number; status?: string; current_stock?: number }
 /** acc_bhd = Mobile Accessories only, VAT-incl (SIM never counts); acc_net_bhd = the same ex-VAT, giveaways
  *  out — the basis the company target is read on, so the bars and the target lines compare like with like.
  *  The row's all-division totals also travel; this page is Accessories only and never reads them (R8) */
@@ -253,11 +256,18 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
       <ul className="space-y-0.5">
         {rows.map((r, i) => {
           const pct = Math.round((Number(r.momentum) - 1) * 100)
+          // The units beside the %: the % stops at +200 (every sale of the 90 days fell in the last 30) and at
+          // −100 (none did), so several rows carry the same one — the units are what tells them apart. A riser
+          // shows what it sold in the 30 days, a fader what is still on hand to go dead.
+          const units = up ? `${num(r.sold_30d)} sold` : r.current_stock != null ? `${num(r.current_stock)} on hand` : null
+          const detail = `${num(r.sold_30d)} sold in the last 30 days, ${num(r.sold_90d)} in the last 90`
+            + (r.current_stock != null ? ` · ${num(r.current_stock)} on hand` : '')
           return (
             <li key={i} className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-accent/40">
               <span className="min-w-0 truncate font-medium" title={r.item_name}>{r.item_name}</span>
-              <span className={cn('shrink-0 font-semibold tabular-nums', up ? 'text-emerald-600' : 'text-rose-600')}>
-                {pct > 0 ? '+' : ''}{pct}%
+              <span className="shrink-0 whitespace-nowrap tabular-nums" title={detail}>
+                {units && <span className="mr-2 text-[12px] text-muted-foreground">{units}</span>}
+                <span className={cn('font-semibold', up ? 'text-emerald-600' : 'text-rose-600')}>{pct > 0 ? '+' : ''}{pct}%</span>
               </span>
             </li>
           )
@@ -267,13 +277,36 @@ function MoverList({ title, rows, up }: { title: string; rows: MoverRow[]; up?: 
   )
 }
 
+/** how often the page asks again while its figures are behind the header chip's Focus date */
+const CATCH_UP_MS = 30_000
+
 export default function Dashboard() {
   const { me } = useAuth()
   const [dailyMode, setDailyMode] = useState<'daily' | 'cumulative'>('daily')
-  const { data, isLoading } = useQuery({
+  // ONE freshness rule with the header chip (GET /freshness: Focus data date, the 3-day rule on the Bahrain
+  // day): the chip's own query key, so the page and the chip read it once between them
+  const { data: fresh } = useQuery({
+    queryKey: ['freshness'],
+    queryFn: () => apiGet<Freshness>('/freshness'),
+    staleTime: 60_000,
+    retry: 1,
+  })
+  // The figures change when a data load lands. The portal's default keeps a page five minutes and never asks
+  // again by itself, so a tab left open went on showing the old month under a header chip that already read
+  // the new date. This page asks again when the tab comes back to the front (its figures a minute old or
+  // more), and — at once, then every 30 s until it has caught up — while the chip's Focus date is later than
+  // the date its own figures carry (lib/dataDate.ts). No standing poll: between loads an open tab asks nothing.
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ['report', 'dashboard'],
     queryFn: () => apiGet<DashboardData>('/report/dashboard'),
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
+    refetchInterval: (q) => (behindFocus(fresh?.focus_to, q.state.data) ? CATCH_UP_MS : false),
   })
+  const behind = behindFocus(fresh?.focus_to, data)
+  useEffect(() => {
+    if (behind) void refetch()
+  }, [behind, refetch])
 
   // ONE basis with the pace and the Command Centre (R7b review): the target is read as ex-VAT,
   // Accessories, business days — so the daily target is the monthly target ÷ the month's business days
@@ -296,15 +329,6 @@ export default function Dashboard() {
       return { day: r.day, cum_bhd: Math.round(run), cum_target: dailyTarget ? Math.round(dailyTarget * steps) : null }
     })
   }, [data?.daily_mtd, data?.pace?.business_days_total, dailyTarget])
-
-  // ONE freshness rule with the header chip (GET /freshness: Focus data date, the 3-day rule on the Bahrain
-  // day): the chip's own query key, so the page and the chip read it once between them
-  const { data: fresh } = useQuery({
-    queryKey: ['freshness'],
-    queryFn: () => apiGet<Freshness>('/freshness'),
-    staleTime: 60_000,
-    retry: 1,
-  })
 
   const k = data?.kpis
   // R7e: the headline tiles are the Command Centre's own (Accessories · ex-VAT, the month to date vs the same
@@ -555,10 +579,13 @@ export default function Dashboard() {
               {(data.health.below_cost_count ?? 0) > 0 && <> · <span className="font-semibold text-rose-600">{data.health.below_cost_count} below cost</span></>}</>}
             to="/margins" />
           )}
+          {/* what the days are made of is on the tile itself, not only on hover (a phone has none): the page's one
+              receivables figure, the Receivables card's, over a day of Accessories sales */}
           <HealthStat icon={Clock} label="Collection speed · DSO" tone={data.health.ar_overdue_pct > 40 ? 'red' : 'amber'}
             basis={data.health.dso_basis && `${data.health.dso_basis} · ${bhd(data.health.dso_receivables_bhd, 0)} ÷ ${bhd(data.health.dso_sales_per_day_bhd, 0)} a day`}
             value={`${Math.round(data.health.dso_days)} days`}
-            sub={<><span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
+            sub={<>{data.health.dso_basis && <>receivables ÷ a day of Accessories sales · </>}
+              <span className="font-semibold text-rose-600">{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue — chase to free cash</>} to="/receivables" />
           <HealthStat icon={Snowflake} label={data.health.cost_hidden ? 'Dead stock · at selling price' : 'Capital frozen in dead stock · at cost'} tone="red"
             value={data.health.stock_basis === 'cost' && data.health.dead_stock_bhd != null ? bhd(data.health.dead_stock_bhd, 0)
               : data.health.cost_hidden && data.health.dead_stock_sell_bhd != null ? bhd(data.health.dead_stock_sell_bhd, 0) : '—'}

@@ -11,8 +11,8 @@ import {
 import { apiGet } from '@/lib/api'
 import { isManagement, useAuth, type Me } from '@/lib/auth'
 import {
-  dailyFacts, dailySummary, dayTicks, dayTickStep, invoicesText, latestDay, targetPerBusinessDay, type BestDay,
-  type DayPoint,
+  dailyFacts, dailySummary, dayTicks, dayTickStep, invoicesText, kTick, latestDay, targetPerBusinessDay, windowText,
+  type BestDay, type DayPoint,
 } from '@/lib/dailySales'
 import { managementMayOpen } from '@/lib/nav'
 import { cn } from '@/lib/utils'
@@ -612,9 +612,11 @@ function DailyDetail({ t }: { t: Tile }) {
       <div className="min-w-0">
         <BigValue t={t} suffix={latest ? `on ${latest.weekday} ${latest.label}` : undefined} />
         <DayStrip days={days} />
+        {/* the average beside its divisor and the total: total ÷ business days is the figure, on the line itself */}
         <p className="mt-2 text-[12px] text-muted-foreground">
-          {[...facts.map((f) => `${f.label} ${f.value}${f.when ? ` on ${f.when}` : ''}`),
-            ...(t.total != null ? [`${fmtBhd(t.total)} in the ${t.days ?? days.length} days`] : [])].join(' · ')}
+          {[...facts.map((f) => `${f.label} ${f.value}${f.when ? ` on ${f.when}` : ''}${
+            f.key === 'average' && t.business_days ? ` over ${t.business_days} business days` : ''}`),
+          ...(t.total != null ? [`${fmtBhd(t.total)} in the ${t.days ?? days.length} days`] : [])].join(' · ')}
         </p>
       </div>
       <div className="min-w-0">
@@ -965,7 +967,6 @@ const CHART_VIEW_KEY = 'yq-command-sales-chart'
 const WEEKLY_CAPTION = 'ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far'
 const TOOLTIP_STYLE = { borderRadius: 12, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--foreground))', fontSize: 13 }
 const AXIS_TICK = { fill: 'hsl(var(--muted-foreground))', fontSize: 11 }
-const kTick = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`)
 
 function readChartView(): ChartView {
   try {
@@ -1022,14 +1023,19 @@ function SalesChartCard({ daily, trend, pace, drill, me }: {
       <div className="mt-1 grid text-[11.5px] text-muted-foreground">
         {daily && (
           <p className={cn('col-start-1 row-start-1', view !== 'daily' && 'invisible')}>
-            ex-VAT · last {span} days · lighter bars are Friday and Saturday
+            ex-VAT · one bar a day · lighter bars are Friday and Saturday
           </p>
         )}
         {trend && <p className={cn('col-start-1 row-start-1', view !== 'weekly' && 'invisible')}>{WEEKLY_CAPTION}</p>}
       </div>
-      {/* the three facts are the daily tile's own figures; they stay put under either view */}
+      {/* the three facts are the daily tile's own figures; they stay put under either view, so the row itself
+          names the days they cover: under the 13 weekly bars nothing else on the card does */}
       {daily && !!facts.length && (
         <dl title={daily.basis} className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[11.5px]">
+          <div className="text-muted-foreground">
+            <dt className="sr-only">Days covered</dt>
+            <dd>{windowText(dayPoints(daily), span)}:</dd>
+          </div>
           {facts.map((f) => (
             <div key={f.key} className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
               <dt className="text-muted-foreground">{f.label}{f.when ? ` · ${f.when}` : ''}</dt>
@@ -1061,6 +1067,17 @@ function DayTick({ x, y, payload, days }: {
   )
 }
 
+/** The key of a chart's dashed target line. It sits above the plot (the chart leaves 18 px there), where no bar
+ *  reaches: a label drawn on the line itself was printed across any bar that beat the target near the right edge. */
+function TargetKey({ children }: { children: ReactNode }) {
+  return (
+    <p className="pointer-events-none absolute right-4 top-0 z-[1] flex items-center gap-1.5 text-[10.5px] leading-none text-muted-foreground">
+      <span aria-hidden="true" className="w-4 border-t-2 border-dashed border-[#d97706]" />
+      {children}
+    </p>
+  )
+}
+
 /** One bar per calendar day: business days in plum, Friday and Saturday lighter, the latest day on a lilac band.
  *  The dashed line is the company target for one business day — the Dashboard's rule, the monthly target over
  *  the month's business days — drawn only when a target is set; its key sits above the plot, where no bar
@@ -1073,12 +1090,7 @@ function DailyChart({ t, pace, summary }: { t: Tile; pace?: Tile; summary: strin
     // A click or a tap focuses the chart, or the layer under the pointer, and the browser frames whatever SVG it
     // focused — here that would be the latest day's band. No frame for a pointer; Tab still shows the chart's ring.
     <div className="relative mt-2 h-[210px] min-w-0 [&_.recharts-surface:focus:not(:focus-visible)]:outline-none [&_.recharts-surface_g:focus]:outline-none">
-      {target != null && (
-        <p className="pointer-events-none absolute right-4 top-0 z-[1] flex items-center gap-1.5 text-[10.5px] leading-none text-muted-foreground">
-          <span aria-hidden="true" className="w-4 border-t-2 border-dashed border-[#d97706]" />
-          target per business day {fmtBhd0(target)}
-        </p>
-      )}
+      {target != null && <TargetKey>target per business day {fmtBhd0(target)}</TargetKey>}
       <ResponsiveContainer width="100%" height="100%">
         {/* right: room for the latest day's label when it names the month ("1 Oct" under a 7 px bar on a phone) */}
         <ComposedChart data={days} margin={{ top: 18, right: 16, left: 0, bottom: 0 }} aria-label={summary}>
@@ -1112,9 +1124,11 @@ function WeeklyChart({ t, pace }: { t: Tile; pace?: Tile }) {
   // a week is five business days: the monthly target over the month's business days, five times
   const weekly = pace?.target_bhd && pace.business_days_total ? (pace.target_bhd / pace.business_days_total) * 5 : null
   return (
-    <div className="mt-2 h-[210px] min-w-0">
+    <div className="relative mt-2 h-[210px] min-w-0">
+      {weekly != null && <TargetKey>weekly target {fmtBhd0(weekly)}</TargetKey>}
       <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={series} margin={{ top: 14, right: 8, left: 0, bottom: 0 }}>
+        {/* top: the room the target's key takes above the plot, as on the daily chart */}
+        <ComposedChart data={series} margin={{ top: 18, right: 8, left: 0, bottom: 0 }}>
           <XAxis dataKey="label" interval="preserveStartEnd" minTickGap={10} tick={AXIS_TICK} axisLine={false} tickLine={false} />
           <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} width={44} tickFormatter={kTick} />
           <Tooltip cursor={{ fill: 'hsl(var(--accent))' }}
@@ -1124,11 +1138,8 @@ function WeeklyChart({ t, pace }: { t: Tile; pace?: Tile }) {
               return `Week of ${String(label)}${p?.partial ? ' (so far)' : ''}`
             }}
             contentStyle={TOOLTIP_STYLE} />
-          {/* the label sits ABOVE the line (insideBottom…): under it, it sat on the tallest bar's top */}
-          {weekly != null && (
-            <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain"
-              label={{ value: `weekly target ${fmtBhd0(weekly)}`, position: 'insideBottomRight', offset: 5, fontSize: 10, fill: '#d97706' }} />
-          )}
+          {/* no label on the line: a week that beat the target near the right edge had it printed across its bar */}
+          {weekly != null && <ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />}
           <ChartBar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={34}>
             {series.map((p) => <Cell key={p.week_start} fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1} />)}
           </ChartBar>

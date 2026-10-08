@@ -15,9 +15,10 @@ Covered:
   * Friday and Saturday are the weekend (2 and 3 Oct 2026), Sunday to Thursday business days;
   * only the data date is the latest day and the tile's value is that day's — also when the data
     date is a Saturday, or a day with no Accessories sale of its own;
-  * the total, the business days in the window, their average (weekend sales out, a quiet business
-    day counted as a 0, to the fils half-up) and the best day (a tie to the later day, none when
-    nothing sold);
+  * the total, the business days in the window, the average per business day (the month pace's
+    rule: every sale of the window, weekend sales too, over its business days — so it compares
+    with the target for one business day; to the fils half-up) and the best day (a tie to the
+    later day, none when nothing sold);
   * a failed read costs this tile only (unavailable, with a note) and every other tile is what a
     healthy build makes; no data date, no tile and no read;
   * the SQL constant: division = 'Accessories', NOT is_giveaway, ex-VAT, the 30 days to $1, one
@@ -87,6 +88,10 @@ DAILY = [
 TOTAL = 2508.375                    # every row above
 WEEKEND_SALES = 200.0               # 2 and 3 Oct
 BUSINESS_DAYS = 22                  # Sunday to Thursday days from 7 Sep to 6 Oct
+# the tile's basis line with the data to 6 Oct: what the days are, and how the average is made
+BASIS = ("Accessories · ex-VAT · giveaways out · each of the 30 days to 6 Oct · Friday and Saturday are the weekend · "
+         "the average is all 30 days' sales, weekend sales too, divided by the business days (Sun–Thu) in them: the "
+         "month pace's rule")
 
 
 def _fake(**over) -> C.FakeRPC:
@@ -180,22 +185,34 @@ def _():
     assert t["value"] == 0.0 and t["available"] is True
 
 
-@test("figures: the total, the business-day average (weekend sales out, quiet business days in) and the best day")
+@test("figures: the total, the average per business day (the pace rule: weekend sales count, the divisor is business days) and the best day")
 def _():
+    from app import metrics as m
     t = _daily()
     assert t["total"] == TOTAL
     assert t["business_days"] == BUSINESS_DAYS
-    # (2,508.375 − 200.000 sold on the weekend) ÷ 22 business days = 104.9261…: 12 of those 22 sold nothing
-    assert t["avg_business_day"] == 104.926 == round((TOTAL - WEEKEND_SALES) / BUSINESS_DAYS, 3), t["avg_business_day"]
+    # 2,508.375 ÷ 22 business days = 114.0170…: every sale of the 30 days over its business days, 12 of which sold nothing
+    assert t["avg_business_day"] == 114.017 == round(TOTAL / BUSINESS_DAYS, 3), t["avg_business_day"]
+    # the 200.000 sold on the weekend is in it: left out, the average read 104.926 beside a target line that
+    # counts weekend sales (the monthly target ÷ the month's business days)
+    assert t["avg_business_day"] != round((TOTAL - WEEKEND_SALES) / BUSINESS_DAYS, 3)
+    assert abs(t["avg_business_day"] * t["business_days"] - t["total"]) < 0.011, "average × business days = the total shown beside it"
+    # the same rule as the month pace (month_pace): a whole month's sales, weekend ones too, over its business days.
+    # A window that IS September (data to 30 Sep, 22 business days): the two figures are one
+    sept = [r for r in DAILY if r["day"] < "2026-10-01"] + [{"day": "2026-09-05", "net_bhd": 50, "invoices": 1}]   # a Saturday
+    t9 = _daily(_fake(anchor={**ANCHOR, "focus_to": "2026-09-30"}, daily=sept), now=datetime(2026, 10, 1, 7, 0, tzinfo=timezone.utc))
+    pace = m.month_pace(t9["total"], date(2026, 9, 30), 10000)
+    assert (t9["series"][0]["day"], t9["business_days"], pace["business_days_done"], pace["business_days_total"]) == ("2026-09-01", 22, 22, 22)
+    assert t9["avg_business_day"] == round(pace["projected_bhd"] / pace["business_days_total"], 3) == round(1940.875 / 22, 3)
     assert t["best"] == {"day": "2026-09-29", "label": "29 Sep", "value": 900.0}
     assert set(t["best"]) == {"day", "label", "value"}
     # to the fils, half-up: 0.011 over 22 business days is 0.0005 → 0.001
     t = _daily(_fake(daily=[{"day": FOCUS_TO, "net_bhd": "0.011", "invoices": 1}]))
     assert (t["total"], t["avg_business_day"], t["value"]) == (0.011, 0.001, 0.011), t
-    # a weekend day can be the best day, and still stays out of the business-day average
+    # a weekend day can be the best day: its sales count in the average, the day itself is not in the divisor
     t = _daily(_fake(daily=[{"day": "2026-10-02", "net_bhd": 700, "invoices": 5}, {"day": "2026-09-08", "net_bhd": 440, "invoices": 2}]))
     assert t["best"] == {"day": "2026-10-02", "label": "2 Oct", "value": 700.0}
-    assert (t["total"], t["avg_business_day"]) == (1140.0, 20.0), "440 ÷ 22, the Friday's 700 left out"
+    assert (t["total"], t["avg_business_day"]) == (1140.0, 51.818), "1,140 ÷ 22: the Friday's 700 counts, as it does toward the month"
     # a tie goes to the later day
     t = _daily(_fake(daily=[{"day": "2026-09-08", "net_bhd": 500, "invoices": 1}, {"day": "2026-09-29", "net_bhd": 500, "invoices": 1}]))
     assert t["best"]["day"] == "2026-09-29"
@@ -276,7 +293,7 @@ def _():
         t = C._tile(_ov(fake, period), "sales.daily")
         assert fake.params("daily") == [FOCUS_TO], period
         assert (t["series"][0]["day"], t["series"][-1]["day"], t["total"]) == ("2026-09-07", FOCUS_TO, TOTAL), period
-        assert t["basis"] == "Accessories · ex-VAT · giveaways out · each of the 30 days to 6 Oct · Friday and Saturday are the weekend"
+        assert t["basis"] == BASIS
 
 
 @test("caching: the daily read is kept with the Focus half — a live refresh re-reads the orders only, an upload re-reads it")
@@ -319,7 +336,7 @@ def _():
                                                   "sales.trend", "sales.daily"]
     t = sales["tiles"][-1]
     assert (t["label"], t["unit"], t["drill"], t["available"]) == ("Daily sales", "series", None, True)
-    assert t["basis"] == "Accessories · ex-VAT · giveaways out · each of the 30 days to 6 Oct · Friday and Saturday are the weekend"
+    assert t["basis"] == BASIS and "weekend sales too" in BASIS, "the basis says how the average is made"
     assert set(t) == {"key", "label", "unit", "basis", "drill", "available", "value", "series", "days", "total",
                       "business_days", "avg_business_day", "best"}
     assert set(t["series"][0]) == {"day", "label", "weekday", "value", "invoices", "business_day", "latest"}
@@ -378,8 +395,14 @@ def _():
     assert "const CHART_VIEW_KEY = 'yq-command-sales-chart'" in page
     # the three facts and the spoken summary are the tile's figures, worded by lib/dailySales.ts
     assert "dailyFacts(dayPoints(daily), daily, fmtBhd)" in card and "dailySummary(facts, span)" in card
-    assert "ex-VAT · last {span} days · lighter bars are Friday and Saturday" in card
+    assert "ex-VAT · one bar a day · lighter bars are Friday and Saturday" in card
     assert "const span = daily?.days ?? dayPoints(daily).length" in card
+    # the facts stay on the card under the weekly view too: the row names the days they cover itself, first,
+    # under either view (the daily caption is hidden under Weekly, and a phone has no hover)
+    facts = card.split("{daily && !!facts.length && (", 1)[1]
+    assert "<dd>{windowText(dayPoints(daily), span)}:</dd>" in facts and '<dt className="sr-only">Days covered</dt>' in facts
+    assert facts.index("windowText(") < facts.index("{facts.map((f) => (")
+    assert "'invisible'" not in facts, "the facts row is never hidden: the same card height under both views"
 
 
 @test("web card: no daily tile — the weekly chart alone, no control; switching views never moves the card")
@@ -400,13 +423,34 @@ def _():
     assert daily.count("h-[210px]") == 1 and weekly.count("h-[210px]") == 1
     assert card.count("col-start-1 row-start-1") == 2 and card.count("'invisible'") == 2
     assert "{daily && !!facts.length && (" in card
-    # the weekly chart is the chart it was
-    for needle in ('dataKey="label" interval="preserveStartEnd" minTickGap={10}', "weekly target ${fmtBhd0(weekly)}",
-                   "position: 'insideBottomRight', offset: 5", "(pace.target_bhd / pace.business_days_total) * 5",
+    # the weekly chart is the chart it was — its bars, its target line ...
+    for needle in ('dataKey="label" interval="preserveStartEnd" minTickGap={10}',
+                   "(pace.target_bhd / pace.business_days_total) * 5",
                    "fill={p.partial ? '#824FAB' : '#6D4091'} fillOpacity={p.partial ? 0.45 : 1}",
-                   "radius={[4, 4, 0, 0]} maxBarSize={34}", "margin={{ top: 14, right: 8, left: 0, bottom: 0 }}"):
+                   "radius={[4, 4, 0, 0]} maxBarSize={34}",
+                   '<ReferenceLine y={weekly} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />'):
         assert needle in weekly, needle
     assert "const WEEKLY_CAPTION = 'ex-VAT · Sunday–Saturday weeks · the lighter bar is this week so far'" in page
+
+
+@test("web charts: the target's key sits above the plot on both views (never printed across a bar), and the y ticks never round 1,050 to 1.1k")
+def _():
+    page = _web("pages/CommandCentre.tsx")
+    daily, weekly, key = _fn(page, "DailyChart"), _fn(page, "WeeklyChart"), _fn(page, "TargetKey")
+    # one key for both charts: above the plot at the right, out of the pointer's way
+    assert "pointer-events-none absolute right-4 top-0" in key and "border-dashed border-[#d97706]" in key and "{children}" in key
+    assert "{target != null && <TargetKey>target per business day {fmtBhd0(target)}</TargetKey>}" in daily
+    assert "{weekly != null && <TargetKey>weekly target {fmtBhd0(weekly)}</TargetKey>}" in weekly
+    # a label on the weekly line itself was printed across the bar of a week that beat the target near the right edge
+    assert "label={{" not in weekly and "insideBottomRight" not in weekly and "insideTopRight" not in weekly
+    # both plots leave the key its room, and both wrappers are what the key is placed against
+    assert "margin={{ top: 18, right: 8, left: 0, bottom: 0 }}" in weekly and "margin={{ top: 18, right: 16, left: 0, bottom: 0 }}" in daily
+    assert '<div className="relative mt-2 h-[210px] min-w-0">' in weekly and '<div className="relative mt-2 h-[210px] min-w-0 ' in daily
+    # the y axis of both charts: the helper in lib/dailySales.ts (three decimals at most, trailing zeros dropped)
+    assert daily.count("tickFormatter={kTick}") == 1 and weekly.count("tickFormatter={kTick}") == 1
+    assert "const kTick" not in page and ".toFixed(1)}k" not in page, "the page has no formatter of its own"
+    lib = _web("lib/dailySales.ts")
+    assert "export function kTick(v: number): string {" in lib and "Number((v / 1000).toFixed(3))" in lib
 
 
 @test("web chart: plum bars, the weekend lighter, the latest day marked, the target for one business day from the pace tile")
@@ -441,6 +485,8 @@ def _():
     detail = _fn(page, "DailyDetail")
     assert "<DayStrip days={days} />" in detail and "days.slice(-7).reverse()" in detail and "Last seven days" in detail
     assert "fmtBhd(t.total)" in detail and "invoicesText(p.invoices)" in detail
+    # the average with its divisor beside the total: the line reconciles by itself (total ÷ business days)
+    assert "f.key === 'average' && t.business_days ? ` over ${t.business_days} business days` : ''" in detail
     strip = _fn(page, "DayStrip")
     assert 'role="img"' in strip and "aria-label={`Daily Accessories sales, " in strip
     assert "p.business_day ? 'bg-[#6D4091]' : 'bg-[#6D4091]/45" in strip

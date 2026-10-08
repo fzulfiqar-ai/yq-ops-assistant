@@ -16,7 +16,7 @@ from decimal import Decimal
 from app import datastamp
 from app.db_read import exec_sql
 from app.database import get_client
-from app.digest import all_alerts, daily_summary
+from app.digest import _in_division, all_alerts, daily_summary, low_stock_total
 
 log = logging.getLogger(__name__)
 
@@ -256,36 +256,50 @@ def agents_status() -> list[dict]:
 
 
 # DSO's sales per day (R8, 7-Oct-2026): Accessories only, giveaways out — Batelco SIM is sold for cash and
-# nearly doubled the daily sales the receivables were divided by, so collection read almost twice as fast
-# as it is (34 days for 64). It stays VAT-INCLUSIVE (revenue_bhd): the receivables it divides are
-# VAT-inclusive Focus balances. Those stay every customer balance — Focus does not split one by product,
-# and no "accessories receivables" figure is made up here. The 90 days to the latest loaded sale.
+# swelled the daily sales the receivables were divided by, so collection read much faster than it is.
+# It stays VAT-INCLUSIVE (revenue_bhd): the receivables it divides are VAT-inclusive Focus balances.
+# Those stay every customer balance — Focus does not split one by product, and no "accessories
+# receivables" figure is made up here. The 90 days to the latest loaded sale.
 DSO_SALES_PER_DAY_SQL = (
     "SELECT COALESCE(SUM(revenue_bhd),0)/90.0 AS d FROM v_sales "
     "WHERE division = 'Accessories' AND NOT is_giveaway "
     "AND sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90 LIMIT 1"
 )
-DSO_BASIS = ("Receivables (every customer balance in Focus) ÷ Accessories sales per day · "
-             "VAT-inclusive, giveaways out · the 90 days to the latest loaded sale")
+_DSO_BASIS_TAIL = (" ÷ Accessories sales per day · VAT-inclusive, giveaways out · the 90 days to the latest "
+                   "loaded sale")
+# the receivables the DSO divides are the page's ONE receivables figure (business_health): Focus's own
+# Grand Total when the ageing snapshot stored one, else the account rows added up
+DSO_BASIS = "Receivables (Focus's Grand Total: every customer balance in Focus)" + _DSO_BASIS_TAIL
+DSO_BASIS_ROWS = "Receivables (the account rows added up: every customer balance in Focus)" + _DSO_BASIS_TAIL
 
 
 def business_health() -> dict:
     """CEO-grade health metrics the totals don't show: the margin, cash efficiency, and capital
     frozen in dead stock. Read-only. The Dashboard is its one reader, so it is Accessories only (R8):
-    DSO divides by Accessories sales per day, dead stock is the Accessories stock.
+    DSO divides by Accessories sales per day, dead stock is the Accessories stock, and the margin
+    leaves out any item of the Focus report filed outside Accessories (margin_truth.ACCESSORIES_ONLY).
 
     Margin (R7d, one definition — app.metrics.profitability): the OFFICIAL figure is gross margin on
     ex-VAT sales against Focus COGS (every item costed); the landed (MRN) margin is the secondary
     figure with its coverage of Accessories sales. Dead stock is valued at COST (the Focus average
     cost, else the latest landed cost — app.metrics.stock_cost_sql), not at the selling rate the
     Focus stock balance carries; the selling value travels beside it, labelled."""
-    from app import metrics
-    prof = metrics.profitability(q=exec_sql)
+    from app import margin_truth, metrics
+    # R8: the page's margin leaves out any item of the Focus report filed outside Mobile Accessories (none
+    # today, so the figures are the whole report's — the Command Centre's and the Profitability page's)
+    prof = metrics.profitability(q=exec_sql, where=margin_truth.ACCESSORIES_ONLY)
     om, lm = prof.get("official") or {}, prof.get("landed") or {}
     # Cash efficiency: how much AR is overdue, and crude DSO (AR ÷ avg daily Accessories gross over last 90d)
     ar = (exec_sql("SELECT COALESCE(SUM(outstanding_bhd),0) AS total, COALESCE(SUM(overdue_bhd),0) AS overdue "
                    "FROM v_receivables LIMIT 1") or [{}])[0]
     ar_total, ar_overdue = float(ar.get("total") or 0), float(ar.get("overdue") or 0)
+    # ONE receivables figure on the page: the Receivables tile shows Focus's own Grand Total when the ageing
+    # snapshot stored one (app.metrics ar.total), so the DSO and the overdue share divide that same figure.
+    # The account rows read a little higher (the export prints credits as positive balances): divided
+    # here, they put a second receivables total on the page, in the DSO's own hover.
+    focus = _focus_ar_total()
+    if focus:
+        ar_total = focus["focus_total_bhd"]
     overdue_pct = (ar_overdue / ar_total * 100) if ar_total else 0.0
     dpr = float((exec_sql(DSO_SALES_PER_DAY_SQL) or [{}])[0].get("d") or 0)
     dso = (ar_total / dpr) if dpr else 0.0
@@ -307,7 +321,9 @@ def business_health() -> dict:
         "returns_note": prof.get("returns_note"),
         "ar_overdue_pct": overdue_pct, "dso_days": dso,
         # what the DSO divides, so the tile can say it on hover
-        "dso_receivables_bhd": round(ar_total, 3), "dso_sales_per_day_bhd": round(dpr, 3), "dso_basis": DSO_BASIS,
+        "dso_receivables_bhd": round(ar_total, 3), "dso_sales_per_day_bhd": round(dpr, 3),
+        "dso_basis": DSO_BASIS if focus else DSO_BASIS_ROWS,
+        "dso_receivables_source": "focus_total" if focus else "rows",
         "dead_stock_bhd": stock["dead_cost_bhd"] if stock else 0.0,
         "dead_stock_count": stock["dead_count"] if stock else 0,
         "dead_stock_uncosted": stock["dead_uncosted"] if stock else 0,
@@ -319,14 +335,23 @@ def business_health() -> dict:
 def movers(k: int = 5) -> dict:
     """What's accelerating vs fading — momentum = last-30d run-rate ÷ the 90-day baseline.
     Risers to restock & push; fallers to investigate before stock goes dead. Accessories only (R8):
-    the Dashboard is its one reader, and Batelco starter packs were showing among the risers."""
-    cols = ("item_name, sold_30d, sold_90d, status, "
+    the Dashboard is its one reader, and Batelco starter packs were showing among the risers. Only
+    items the division SOLD in the 90 days (app.digest._in_division): a free handout is not a mover.
+
+    Momentum tops out at 3.00 (every unit of the 90 days went in the last 30) and bottoms out at
+    0.00 (none did), so much of the pool ties at one end or the other, and ordered by momentum
+    alone the database chose which five to show. Ties go by units (the risers' last 30 days, the
+    fallers' 90), then by name: the same data always gives the same five, the biggest first. A
+    faller is an item with stock to go dead: one that sold out or runs low stopped selling for
+    want of stock — it is a reorder, and the page's low-stock count already has it."""
+    cols = ("item_name, sold_30d, sold_90d, current_stock, status, "
             "ROUND((sold_30d / NULLIF(sold_90d / 3.0, 0))::numeric, 2) AS momentum")
-    acc = "division = 'Accessories' AND sold_90d > 0"
+    acc = "sold_90d > 0" + _in_division(DASHBOARD_DIVISION)
     rising = exec_sql(f"SELECT {cols} FROM v_stock_health WHERE {acc} AND sold_30d > 0 "
-                      f"ORDER BY momentum DESC LIMIT {int(k)}") or []
+                      f"ORDER BY momentum DESC, sold_30d DESC, item_name LIMIT {int(k)}") or []
     falling = exec_sql(f"SELECT {cols} FROM v_stock_health WHERE {acc} "
-                       f"ORDER BY momentum ASC LIMIT {int(k)}") or []
+                       "AND status NOT IN ('urgent_out_of_stock','low_stock') "
+                       f"ORDER BY momentum ASC, sold_90d DESC, item_name LIMIT {int(k)}") or []
     return {"rising": rising, "falling": falling}
 
 
@@ -811,9 +836,19 @@ def inventory() -> dict:
         c = per_item.get(str(r.get("item_name")))
         r["cost_value_bhd"] = c["cost_value_bhd"] if c else None
         r["cost_source"] = c["cost_source"] if c else None
+    # The Dashboard's low-stock card opens this page. It counts Mobile Accessories only (R8); the stats here
+    # count every division, and Batelco SIM packs read "out of stock" in it (their stock is not loaded). The
+    # Dashboard's own count travels with the page (app.digest's one definition) so its stat can say both
+    # instead of answering the card with a different number. Optional: a failure leaves the stat as it was.
+    try:
+        low_acc = low_stock_total(DASHBOARD_DIVISION, q=exec_sql)
+    except Exception as e:  # noqa: BLE001 -- one caption never costs the page
+        log.warning("inventory: the Accessories low-stock count is unavailable: %s", e)
+        low_acc = None
     return {
         "rows": rows,
         "by_status": dict(Counter(r["status"] for r in rows)),
+        "low_stock_accessories": low_acc,
         # the Focus stock balance is valued at the SELLING rate: labelled "at selling price" on screen
         "stock_value": float(t.get("v", 0)),
         "stock_value_basis": "selling_price",
@@ -1069,6 +1104,7 @@ def prewarm_reports() -> None:
     """Build every page payload once after boot, so the first visit after a deploy or a restart
     is a cache hit. Runs in a background thread (app/main.py) — never on the event loop."""
     # the newest load is noted BEFORE the first build, so one that lands during boot is still noticed
+    # (a first read slower than the moment sync() gives it drops what was built without it: datastamp._note)
     datastamp.sync()
     for key in REPORTS:
         if key in _report_cache:

@@ -263,6 +263,8 @@ def _rpc(stock=None, fail=()):
             return stock
         if "FROM v_product_economics" in s and "cost_flag" in s:
             return [{"sku_code": "UK20 (New)", "item_name": "UK20", "price_bhd": 2.8, "cost_bhd": 0.0114, "cost_source": "mrn"}]
+        if "FROM ar_ageing_totals" in s:
+            return []            # no Grand Total stored for the snapshot: the DSO divides the account rows (R8)
         if "FROM v_receivables" in s:
             return [{"total": 1000, "overdue": 400}]
         if "/90.0 AS d" in s:

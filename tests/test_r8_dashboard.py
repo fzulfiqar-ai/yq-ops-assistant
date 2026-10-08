@@ -12,11 +12,19 @@ Covered:
   * the Cash / Credit chips — PAYMENT_SPLIT_ACC_SQL (Accessories only, ex-VAT, giveaways out of the money
     and of the invoice counts, the free units counted apart, the month of the latest loaded sale), the pure
     assembly, a failed read is None;
-  * low stock — app.digest's division filter: the Dashboard's alerts are built for Accessories, the email
-    digests' own SQL is byte for byte what it was, a made-up division is refused;
-  * momentum — both lists read v_stock_health for Accessories only;
+  * low stock — app.digest's division filter: the Dashboard's alerts are built for Accessories, and of it
+    the items it SOLD in the 90 days (a paid line: an item only ever given away is not in the count); the
+    email digests' own SQL is byte for byte what it was, a made-up division is refused; the Inventory page
+    the card opens carries the Dashboard's own count beside its every-division stats;
+  * momentum — both lists read v_stock_health for Accessories only; ties in momentum go by units, then by
+    name (the same five every time); a faller has stock to go dead, never an item of the reorder count;
   * business health — DSO divides by Accessories sales per day (VAT-inclusive like the receivables,
-    giveaways out); the receivables are never narrowed; dead stock reads the Accessories stock;
+    giveaways out); the receivables are never narrowed, and they are the Receivables card's own figure
+    (Focus's Grand Total when stored): one receivables total on the page; dead stock reads the Accessories stock;
+    the margin, the below-cost count and list leave out report items filed outside Accessories, by code and
+    not only by what the report happens to hold (every other reader still reads the whole report);
+  * an open tab — the page asks again while the header chip's Focus date is ahead of its own, and on coming
+    back to the tab; no standing poll;
   * the payload — payment_split_acc and scope are ADDED; every older key still travels (by_payment,
     by_division, kpis.rev_*); kpis.low_stock_count is the Accessories count and the action text follows;
     nothing new is hidden from a login without 'Margins';
@@ -206,6 +214,13 @@ OLD_TOTAL_SQL = ("SELECT COUNT(*) AS n FROM v_stock_health "
                  "WHERE status IN ('urgent_out_of_stock','low_stock') LIMIT 1")
 
 
+# what a division adds to a v_stock_health read: the division, and of it only the items it SOLD (a paid line in
+# v_sales, giveaways out) in the 90 days the cover is measured on
+ACC_ITEMS = (" AND division = 'Accessories' AND item_name IN (SELECT item_name FROM v_sales "
+             "WHERE division = 'Accessories' AND NOT is_giveaway "
+             "AND sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90)")
+
+
 @test("low stock: division='Accessories' narrows the count and the list; with no division the SQL is what it always was")
 def _():
     from app import digest
@@ -223,10 +238,25 @@ def _():
         assert digest.low_stock_items("Accessories")[0]["item_name"] == "Item A" and digest.low_stock_items()
     acc_total, old_total, acc_items, old_items = seen
     assert old_total == OLD_TOTAL_SQL and old_items == OLD_ITEMS_SQL, "the digests' reads, byte for byte"
-    assert acc_total == OLD_TOTAL_SQL.replace(" LIMIT 1", " AND division = 'Accessories' LIMIT 1")
-    assert acc_items == OLD_ITEMS_SQL.replace(" ORDER BY", " AND division = 'Accessories' ORDER BY")
+    assert acc_total == OLD_TOTAL_SQL.replace(" LIMIT 1", ACC_ITEMS + " LIMIT 1")
+    assert acc_items == OLD_ITEMS_SQL.replace(" ORDER BY", ACC_ITEMS + " ORDER BY")
     for sql in (acc_total, acc_items):
-        _safe_select(sql, {"v_stock_health"})
+        _safe_select(sql, {"v_stock_health", "v_sales"})
+
+
+@test("low stock: an item the division only ever gave away is not in its count — a paid sale in the 90 days, the page's own basis")
+def _():
+    from app import digest
+    f = digest._in_division("Accessories")
+    assert f == ACC_ITEMS
+    # v_stock_health counts every unit that left as sold, free ones too, and files an unplaced item under
+    # Accessories: the count is narrowed to the names v_sales has a PAID Accessories line for
+    paid = f.split("item_name IN (", 1)[1]
+    assert paid.startswith("SELECT item_name FROM v_sales WHERE division = 'Accessories' AND NOT is_giveaway ")
+    assert paid.endswith("AND sale_date > (SELECT MAX(sale_date) FROM v_sales) - 90)"), "the data date, the cover's own 90 days"
+    assert f.count("division = 'Accessories'") == 2 and "revenue_bhd" not in f and "net_bhd" not in f
+    # the same filter for any division asked for; none at all for the email digests
+    assert digest._in_division("SIM") == ACC_ITEMS.replace("'Accessories'", "'SIM'") and digest._in_division(None) == ""
 
 
 @test("low stock: a division that is not a plain word is refused before any SQL is sent")
@@ -238,10 +268,10 @@ def _():
             _raises(lambda b=bad: digest.low_stock_total(b), ValueError, "Unknown division")
             _raises(lambda b=bad: digest.low_stock_items(b), ValueError, "Unknown division")
     assert sent == [], "nothing reached the RPC"
-    assert digest._in_division(None) == "" and digest._in_division("Accessories") == " AND division = 'Accessories'"
+    assert digest._in_division(None) == "" and digest._in_division("Accessories") == ACC_ITEMS
 
 
-@test("alerts: all_alerts(division) narrows low stock only; all_alerts() — the endpoint and the email digest — is every division")
+@test("alerts: all_alerts(division) narrows low stock and the below-cost list; all_alerts() — the endpoint and the email digest — is every division")
 def _():
     from app import digest
     asked: list = []
@@ -254,14 +284,20 @@ def _():
         asked.append(("total", division))
         return 12 if division else 15
 
+    def below(division=None):
+        asked.append(("below", division))
+        return [{"item_name": "Item A"}] if division else [{"item_name": "Item A"}, {"item_name": "Starter Pack"}]
+
     overdue = [{"account": "Shop A", "overdue_bhd": 12.5}]
     with _Patched((digest, "low_stock_items", items), (digest, "low_stock_total", total),
-                  (digest, "overdue_receivables", lambda: overdue), (digest, "negative_margins", lambda: [])):
+                  (digest, "overdue_receivables", lambda: overdue), (digest, "negative_margins", below)):
         acc = digest.all_alerts("Accessories")
         every = digest.all_alerts()
-    assert asked == [("items", "Accessories"), ("total", "Accessories"), ("items", None), ("total", None)]
+    assert asked == [("items", "Accessories"), ("below", "Accessories"), ("total", "Accessories"),
+                     ("items", None), ("below", None), ("total", None)]
     assert acc["low_stock_count"] == 12 and [r["item_name"] for r in acc["low_stock"]] == ["Item A"]
     assert every["low_stock_count"] == 15 and len(every["low_stock"]) == 2
+    assert (acc["negative_margin_count"], every["negative_margin_count"]) == (1, 2), "a SIM item below cost is not the page's to fix"
     # receivables are per customer: the same either way
     assert acc["overdue_receivables"] == every["overdue_receivables"] == overdue and acc["overdue_total_bhd"] == 12.5
     assert set(acc) == set(every) == {"low_stock", "low_stock_count", "overdue_receivables", "overdue_count",
@@ -272,31 +308,97 @@ def _():
     assert "data = all_alerts()" in _read("scripts/send_digest.py")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 3. momentum: Accessories only
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@test("movers: both lists read v_stock_health for Accessories only (no starter pack can ride in)")
+@test("inventory: the page the low-stock card opens carries the Dashboard's own count beside its every-division stats")
 def _():
     from app import reports
     seen: list = []
 
     def rpc(sql):
         seen.append(sql)
-        return [{"item_name": "Item A", "sold_30d": 9, "sold_90d": 9, "status": "healthy", "momentum": 3.0}]
+        if "COUNT(*) AS n FROM v_stock_health" in sql:
+            return [{"n": 12}]
+        if sql.startswith("SELECT item_name, current_stock, stock_value"):       # the page's rows: every division
+            return [{"item_name": "Item A", "status": "low_stock"}, {"item_name": "Starter Pack", "status": "urgent_out_of_stock"}]
+        return []
+
+    def inventory(q):
+        with _Patched((reports, "exec_sql", q), (reports, "recent_receipts", lambda: []),
+                      (reports, "reserved_stock", lambda: {"available": False}), (reports, "stock_by_warehouse", lambda: [])):
+            return reports.inventory()
+
+    inv = inventory(rpc)
+    # the card said 12; the page it opens says 2 for every division AND carries the card's 12
+    assert inv["low_stock_accessories"] == 12 and inv["by_status"] == {"low_stock": 1, "urgent_out_of_stock": 1}
+    assert [s for s in seen if "COUNT(*) AS n" in s] == [OLD_TOTAL_SQL.replace(" LIMIT 1", ACC_ITEMS + " LIMIT 1")], \
+        "app.digest's one definition, through the report's own reader"
+    assert "division" not in next(s for s in seen if s.startswith("SELECT item_name, current_stock, stock_value")), \
+        "the page's rows and stats stay every division"
+
+    def no_count(sql):
+        if "COUNT(*) AS n FROM v_stock_health" in sql:
+            raise RuntimeError("statement timeout")
+        return rpc(sql)
+    with _Patched((reports.log, "disabled", True)):                              # its warning is expected
+        inv2 = inventory(no_count)
+    assert inv2["low_stock_accessories"] is None and len(inv2["rows"]) == 2, "a failed count costs the caption only"
+    # a count is not a cost: a login without 'Margins' reads it too
+    assert reports.inventory_for_viewer(inv, sees_cost=False)["low_stock_accessories"] == 12
+    # the page says both; the Dashboard's card still opens it
+    page = _read("web/src/pages/Inventory.tsx")
+    assert "low_stock_accessories?: number | null" in page and "{data.low_stock_accessories != null" in page
+    assert "`every division · ${num(data.low_stock_accessories)} are Mobile Accessories, the Dashboard's count`" in page
+    assert "label={accOnly ? 'Low-stock items · Accessories' : 'Low-stock items'} to=\"/inventory\"" in _read("web/src/pages/Dashboard.tsx")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. momentum: Accessories only
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("movers: both lists read v_stock_health for Accessories only — items it sold, not handed out (no starter pack can ride in)")
+def _():
+    from app import reports
+    seen: list = []
+
+    def rpc(sql):
+        seen.append(sql)
+        return [{"item_name": "Item A", "sold_30d": 9, "sold_90d": 9, "current_stock": 4, "status": "healthy", "momentum": 3.0}]
 
     with _Patched((reports, "exec_sql", rpc)):
         out = reports.movers(5)
     rising, falling = seen
     for sql in seen:
-        assert " FROM v_stock_health WHERE division = 'Accessories' AND sold_90d > 0" in sql, sql
+        assert " FROM v_stock_health WHERE sold_90d > 0" + ACC_ITEMS + " AND " in sql, sql
         assert "AS momentum" in sql and "sold_30d / NULLIF(sold_90d / 3.0, 0)" in sql
-        _safe_select(sql, {"v_stock_health"})
-    assert "AND sold_30d > 0 ORDER BY momentum DESC LIMIT 5" in rising and rising.count("division = 'Accessories'") == 1
-    assert falling.endswith("AND sold_90d > 0 ORDER BY momentum ASC LIMIT 5")
+        assert sql.startswith("SELECT item_name, sold_30d, sold_90d, current_stock, status, ROUND("), "the units travel with the %"
+        _safe_select(sql, {"v_stock_health", "v_sales"})
     assert set(out) == {"rising", "falling"} and out["rising"][0]["item_name"] == "Item A"
     with _Patched((reports, "exec_sql", lambda sql: None)):
         assert reports.movers(3) == {"rising": [], "falling": []}
+
+
+@test("movers: ties in momentum go by units, then by name — the same five every time, the biggest first; a faller has stock to go dead")
+def _():
+    from app import reports
+    seen: list = []
+    with _Patched((reports, "exec_sql", lambda sql: seen.append(sql) or [])):
+        reports.movers(5)
+        reports.movers(8)
+    rising, falling, rising8, falling8 = seen
+    # momentum stops at 3.00 and at 0.00, so much of the pool ties: ordered by momentum alone, the database
+    # chose which five came back (and a small seller could push out the biggest riser)
+    assert rising.endswith(" AND sold_30d > 0 ORDER BY momentum DESC, sold_30d DESC, item_name LIMIT 5"), rising
+    assert falling.endswith(" AND status NOT IN ('urgent_out_of_stock','low_stock') "
+                            "ORDER BY momentum ASC, sold_90d DESC, item_name LIMIT 5"), falling
+    assert rising8.endswith(" LIMIT 8") and falling8.endswith(" LIMIT 8")
+    for sql in seen:
+        order = sql.split(" ORDER BY ", 1)[1].rsplit(" LIMIT ", 1)[0]
+        assert order.split(", ")[-1] == "item_name", "the last key is unique: no two rows can swap places"
+    # a faller is never an item of the page's own reorder count (the low-stock statuses, app.digest):
+    # one that sold out, or runs low, stopped selling for want of stock
+    import inspect
+    from app import digest
+    assert "status IN ('urgent_out_of_stock','low_stock')" in inspect.getsource(digest.low_stock_total)
+    assert "status NOT IN" not in rising, "a riser may be low on stock: that is the point of 'restock'"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -314,8 +416,9 @@ STOCK_ROWS = [
 ]
 
 
-def _health_rpc(per_day=50.0, total=1000.0, overdue=400.0, fail=()):
-    """An exec_sql stand-in for business_health(): records every SQL, answers by shape."""
+def _health_rpc(per_day=50.0, total=1000.0, overdue=400.0, fail=(), focus_total=None):
+    """An exec_sql stand-in for business_health(): records every SQL, answers by shape. `total` / `overdue` are
+    the account rows added up; `focus_total` is Focus's own Grand Total for the snapshot (None = none stored)."""
     seen: list = []
 
     def q(sql):
@@ -323,6 +426,9 @@ def _health_rpc(per_day=50.0, total=1000.0, overdue=400.0, fail=()):
         for key in fail:
             if key in sql:
                 raise RuntimeError(f"{key} unavailable")
+        if "FROM ar_ageing_totals" in sql:
+            return [] if focus_total is None else [{"as_of_date": "2026-10-07", "focus_total_bhd": focus_total,
+                                                    "focus_over90_bhd": 0, "rows_total_bhd": total}]
         if "FROM v_receivables" in sql:
             return [{"total": total, "overdue": overdue}]
         if "/90.0 AS d" in sql:
@@ -343,8 +449,10 @@ def _():
         assert s in sql, s
     assert "net_bhd" not in sql, "receivables are VAT-inclusive: the sales they are divided by stay VAT-inclusive"
     _safe_select(sql, {"v_sales"})
-    b = reports.DSO_BASIS
-    assert "every customer balance in Focus" in b and "Accessories sales per day" in b and "VAT-inclusive" in b
+    for b in (reports.DSO_BASIS, reports.DSO_BASIS_ROWS):
+        assert "every customer balance in Focus" in b and "Accessories sales per day" in b and "VAT-inclusive" in b
+    # the basis names which receivables figure is divided
+    assert "Focus's Grand Total" in reports.DSO_BASIS and "account rows added up" in reports.DSO_BASIS_ROWS
 
 
 @test("business health: DSO = every customer balance ÷ Accessories sales per day; the receivables are never narrowed")
@@ -355,9 +463,9 @@ def _():
         h = reports.business_health()
     assert [s for s in seen if "/90.0 AS d" in s] == [reports.DSO_SALES_PER_DAY_SQL]
     assert h["dso_days"] == 20.0 and h["ar_overdue_pct"] == 40.0
-    assert (h["dso_receivables_bhd"], h["dso_sales_per_day_bhd"], h["dso_basis"]) == (1000.0, 50.0, reports.DSO_BASIS)
-    ar_sql = [s for s in seen if "FROM v_receivables" in s]
-    assert len(ar_sql) == 1 and "division" not in ar_sql[0] and "v_sales" not in ar_sql[0], \
+    assert (h["dso_receivables_bhd"], h["dso_sales_per_day_bhd"], h["dso_basis"]) == (1000.0, 50.0, reports.DSO_BASIS_ROWS)
+    ar_sql = [s for s in seen if "v_receivables" in s]
+    assert len(ar_sql) == 2 and all("division" not in s and "v_sales" not in s for s in ar_sql), \
         "no made-up 'accessories receivables': the balances are per customer"
     # the inputs leave to the fils; the days are computed on the unrounded figures
     q, _ = _health_rpc(per_day=123.45678, total=7407.41, overdue=2500.0)
@@ -373,6 +481,86 @@ def _():
     q, _ = _health_rpc(per_day=0)
     with _Patched((reports, "exec_sql", q)):
         assert reports.business_health()["dso_days"] == 0.0
+
+
+@test("business health: ONE receivables figure on the page — the DSO and the overdue share divide the Receivables card's own (Focus's Grand Total when stored)")
+def _():
+    from app import metrics, reports
+    # the account rows add up to more than Focus's Grand Total (the export prints credits as positive balances)
+    q, seen = _health_rpc(per_day=50.0, total=1000.0, overdue=400.0, focus_total=800.0)
+    with _Patched((reports, "exec_sql", q)):
+        h = reports.business_health()
+    assert (h["dso_receivables_bhd"], h["dso_receivables_source"]) == (800.0, "focus_total")
+    assert h["dso_days"] == 16.0, "800 ÷ 50 a day: the figure the Receivables card shows, not the rows' 1,000"
+    assert h["ar_overdue_pct"] == 50.0, "and the overdue share is of that same figure: 400 of 800"
+    assert h["dso_basis"] == reports.DSO_BASIS and "Focus's Grand Total" in h["dso_basis"]
+    # the very read the Command Centre's Receivables tile makes (app.metrics ar.total), so the two cannot part
+    assert [s for s in seen if "FROM ar_ageing_totals" in s] == [metrics.AR_TOTALS_SQL]
+    # no Grand Total stored for the snapshot: the rows, as the tile then shows them, and the basis says so
+    q, _ = _health_rpc(focus_total=None)
+    with _Patched((reports, "exec_sql", q)):
+        h = reports.business_health()
+    assert (h["dso_receivables_bhd"], h["dso_receivables_source"], h["dso_basis"]) == (1000.0, "rows", reports.DSO_BASIS_ROWS)
+    assert h["dso_days"] == 20.0 and h["ar_overdue_pct"] == 40.0
+    # the totals read failing (the table predates economics_v2) costs nothing: the rows again
+    q, _ = _health_rpc(fail=("FROM ar_ageing_totals",))
+    with _Patched((reports, "exec_sql", q)):
+        h = reports.business_health()
+    assert h["dso_receivables_source"] == "rows" and h["dso_days"] == 20.0
+    # a snapshot with nothing owed: 0 days and 0 %, never a division by zero
+    q, _ = _health_rpc(total=0.0, overdue=0.0, focus_total=0.0)
+    with _Patched((reports, "exec_sql", q)):
+        h = reports.business_health()
+    assert (h["dso_days"], h["ar_overdue_pct"], h["dso_receivables_source"]) == (0.0, 0.0, "focus_total")
+
+
+@test("margin: the page's margin, below-cost count and list leave out report items filed outside Accessories; every other reader reads the whole report")
+def _():
+    import inspect
+    from app import digest, metrics, reports
+    from app import margin_truth as mt
+    cond = mt.ACCESSORIES_ONLY
+    # NOT IN the other divisions, never IN Accessories: a name the resolver does not know stays in the margin
+    assert cond == "item_name NOT IN (SELECT item_name FROM v_item_division WHERE division <> 'Accessories')"
+    seen: list = []
+
+    def q(sql):                         # a report of three costed items, one of them a starter pack sold below cost
+        seen.append(sql)
+        acc = cond in sql
+        if "COUNT(*) AS n" in sql:
+            return [{"n": 2 if acc else 3, "below": 1 if acc else 2, "net": 110, "net_ex": 100 if acc else 200,
+                     "gp_ex": 40 if acc else 50, "gp_rep": 50}]
+        if "FROM v_product_margin" in sql and "is_below_cost" in sql:
+            rows = [{"item_name": "Item A", "margin_ex_vat_pct": -5.0, "is_below_cost": True}]
+            return rows if acc else rows + [{"item_name": "Starter Pack", "margin_ex_vat_pct": -9.0, "is_below_cost": True}]
+        return []
+
+    probe = dict(mt._probe)
+    try:
+        tot, basis = mt.margin_totals(q=q, where=cond)
+        assert (basis, tot["n"], tot["below"]) == ("view", 2, 1) and seen[-1] == mt._TOTALS + f" AND ({cond})"
+        whole, _ = mt.margin_totals(q=q)
+        assert whole["n"] == 3 and seen[-1] == mt._TOTALS, "the whole report, the SQL it always was, for every other reader"
+        _safe_select(mt._TOTALS + f" AND ({cond})", {"v_product_margin", "v_item_division"})
+        # the one margin definition takes the condition; the Dashboard's health read is the caller that passes it
+        assert metrics.profitability(q=q, where=cond)["official"]["pct"] == 40.0
+        assert metrics.profitability(q=q)["official"]["pct"] == 25.0
+        with _Patched((reports, "exec_sql", q)):
+            h = reports.business_health()
+        assert (h["gp_pct"], h["gp_bhd"], h["below_cost_count"]) == (40.0, 40.0, 1), "the starter pack is not in the page's margin"
+        assert "where=margin_truth.ACCESSORIES_ONLY" in inspect.getsource(reports.business_health)
+        # the below-cost list behind the alerts strip and the "Fix pricing" action: narrowed for the page only
+        with _Patched((mt, "exec_sql", q)):
+            acc, every = digest.negative_margins("Accessories"), digest.negative_margins()
+        assert [r["item_name"] for r in acc] == ["Item A"] and [r["item_name"] for r in every] == ["Item A", "Starter Pack"]
+        assert f" AND (is_below_cost AND ({cond})) ORDER BY gp_ex_vat_bhd ASC LIMIT 20" in seen[-2]
+        assert " AND (is_below_cost) ORDER BY gp_ex_vat_bhd ASC LIMIT 20" in seen[-1], "the digests' read, as it was"
+    finally:
+        mt._probe.clear()
+        mt._probe.update(probe)
+    # the Command Centre and the Profitability page go on reading the whole report
+    assert "margin_truth.margin_totals(q=r.q)[0]" in inspect.getsource(metrics.load_focus)
+    assert "tot, _ = margin_totals()" in inspect.getsource(reports.margins)
 
 
 @test("business health: dead stock reads the Accessories stock (the Command Centre's STOCK_SQL), at cost")
@@ -526,7 +714,7 @@ def _():
     assert (h["dso_days"], h["dso_basis"], h["dso_receivables_bhd"], h["dso_sales_per_day_bhd"]) == \
         (60.0, reports.DSO_BASIS, 9000.0, 150.0), "sales and receivables are not cost"
     assert h["gp_pct"] is None and h["dead_stock_bhd"] is None and h["cost_hidden"] is True
-    for key in ("dso_basis", "dso_receivables_bhd", "dso_sales_per_day_bhd"):
+    for key in ("dso_basis", "dso_receivables_bhd", "dso_sales_per_day_bhd", "dso_receivables_source"):
         assert key not in reports.DASHBOARD_HEALTH_COST_KEYS
     assert reports.dashboard_for_viewer(cached, sees_cost=True) is cached
 
@@ -562,7 +750,7 @@ def _():
         assert s in dash, s
 
 
-@test("web (phone): a long accessory name is cut, its momentum % stays on the card; 'BHD' stays with its amount")
+@test("web (phone): a long accessory name is cut, its units and momentum % stay on the card; 'BHD' stays with its amount")
 def _():
     dash = _read("web/src/pages/Dashboard.tsx")
     # the Momentum lists are all accessories now (long VFAN names): an auto grid column grew to the name's
@@ -570,8 +758,47 @@ def _():
     card = dash.split("<Flame size={18}", 1)[1].split("</Card>", 1)[0]
     assert '<div className="grid grid-cols-1 gap-x-10 gap-y-4 md:grid-cols-2">' in card
     row = dash.split("function MoverList(", 1)[1].split("\n}\n", 1)[0]
-    assert '<span className="min-w-0 truncate font-medium" title={r.item_name}>' in row and "shrink-0 font-semibold tabular-nums" in row
+    assert '<span className="min-w-0 truncate font-medium" title={r.item_name}>' in row
+    assert '<span className="shrink-0 whitespace-nowrap tabular-nums" title={detail}>' in row, "the figures never wrap or shrink"
     assert '<span className="whitespace-nowrap font-semibold">{bhd(k.overdue_total_bhd, 0)}</span>' in dash
+
+
+@test("web: a momentum row says its units beside the % (several rows tie at the same %); the DSO tile says what it divides on the tile")
+def _():
+    dash = _read("web/src/pages/Dashboard.tsx")
+    row = dash.split("function MoverList(", 1)[1].split("\n}\n", 1)[0]
+    # a riser: what it sold in the 30 days; a fader: what is still on hand (an older API sends no stock: the % alone)
+    assert "const units = up ? `${num(r.sold_30d)} sold` : r.current_stock != null ? `${num(r.current_stock)} on hand` : null" in row
+    assert "{units && <span" in row and "{pct > 0 ? '+' : ''}{pct}%" in row
+    assert "${num(r.sold_30d)} sold in the last 30 days, ${num(r.sold_90d)} in the last 90" in row, "both windows on hover"
+    assert "current_stock?: number" in dash
+    # the DSO: its two parts on hover, and on the tile itself what they are (a phone has no hover)
+    tile = dash.split('label="Collection speed · DSO"', 1)[1].split(' to="/receivables" />', 1)[0]
+    assert "{data.health.dso_basis && <>receivables ÷ a day of Accessories sales · </>}" in tile
+    assert "bhd(data.health.dso_receivables_bhd, 0)} ÷ ${bhd(data.health.dso_sales_per_day_bhd, 0)} a day" in tile
+    assert "{data.health.ar_overdue_pct.toFixed(0)}%</span> of receivables overdue" in tile
+
+
+@test("web: a Dashboard tab left open catches up with a data load — it asks again while the header chip's date is ahead, and on coming back to the tab")
+def _():
+    dash = _read("web/src/pages/Dashboard.tsx")
+    assert "import { behindFocus } from '@/lib/dataDate'" in dash and "import { useEffect, useMemo, useState } from 'react'" in dash
+    q = dash.split("queryKey: ['report', 'dashboard'],", 1)[1].split("})", 1)[0]
+    assert "staleTime: 60_000," in q and "refetchOnWindowFocus: true," in q
+    # no standing poll (it would have the API rebuild the payload for as long as a tab stays open): the page asks
+    # every CATCH_UP_MS only while it is behind the chip, and stops once level
+    assert "refetchInterval: (q) => (behindFocus(fresh?.focus_to, q.state.data) ? CATCH_UP_MS : false)," in q
+    assert "const CATCH_UP_MS = 30_000" in dash and not re.search(r"refetchInterval:\s*\d", dash)
+    # ...and at once when the chip moves ahead: `behind` flips, the effect runs once
+    assert "const behind = behindFocus(fresh?.focus_to, data)" in dash
+    effect = dash.split("const behind = behindFocus(fresh?.focus_to, data)", 1)[1].split("\n\n", 1)[0]
+    assert "useEffect(() => {\n    if (behind) void refetch()\n  }, [behind, refetch])" in effect
+    assert "const { data, isLoading, refetch } = useQuery({" in dash
+    # the chip's query (the same key, read once between the chip and the page) is declared before the report's
+    assert dash.index("queryKey: ['freshness'],") < dash.index("queryKey: ['report', 'dashboard'],")
+    lib = _read("web/src/lib/dataDate.ts")
+    assert not re.search(r"^\s*import\b", lib, re.M), "pure and import-free: the node test loads it on its own"
+    assert "return chip !== '' && chip > isoDay(page.data_as_of)" in lib and "if (!page) return false" in lib
 
 
 @test("node: the Dashboard can never render the every-division chips again (web/scripts/numbers_ui_test.mjs)")
@@ -622,6 +849,15 @@ def _():
     names = sorted({str(r["item_name"]) for r in mv["rising"] + mv["falling"]})
     other = exec_sql("SELECT item_name, division FROM v_stock_health WHERE division <> 'Accessories'") or []
     assert not {r["item_name"] for r in other} & set(names), "a non-accessory in the momentum lists"
+    # the review's fixes on real data: the same lists every time, ties by units, no faller from the reorder count,
+    # and the Inventory page carries the very count the Dashboard shows
+    assert mv == reports.movers(8), "the momentum lists change between two reads of the same data"
+    for side, units, sign in (("rising", "sold_30d", -1), ("falling", "sold_90d", 1)):
+        keys = [(sign * float(r["momentum"]), -float(r[units])) for r in mv[side]]
+        assert keys == sorted(keys), (side, keys)
+    low = {str(r["item_name"]) for r in digest.low_stock_items("Accessories")}
+    assert not low & {str(r["item_name"]) for r in mv["falling"]}, "a faller that is in the page's own reorder count"
+    assert reports.inventory()["low_stock_accessories"] == acc
     print(f"    chips {chips} = month {month}; low stock {acc} of {every}; {len(names)} movers, all Accessories")
 
 

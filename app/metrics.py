@@ -16,7 +16,8 @@ Definitions (owner rules, 21-Sep and 24-Sep-2026):
     order figures are live and anchored on today in Bahrain.
   * The daily chart (R8, "sales.daily") is the 30 calendar days ending on that last loaded sale
     day, one point a day: a weekend or a day with no invoice is a 0, never a gap. Its average is
-    per business day (weekend sales left out, a quiet business day counted as a 0).
+    the 30 days' sales over their business days — weekend sales count and only the divisor is
+    business days, the pace rule (month_pace), so it compares with the target for a business day.
   * The company target (app_settings.monthly_sales_target_bhd) is read as ex-VAT, Accessories,
     paced on business days — here and on the Dashboard (app.reports._pace calls month_pace).
   * Marketplace order money is VAT-inclusive (the price book is): every marketplace BHD figure on
@@ -879,7 +880,8 @@ def _sales_trend(ctx: Ctx) -> dict | None:
 
 @metric("sales.daily", "Daily sales", "sales",
         f"Accessories · ex-VAT · giveaways out · each of the {DAILY_DAYS} days to {{focus_to}} · Friday and Saturday "
-        "are the weekend", "series")
+        f"are the weekend · the average is all {DAILY_DAYS} days' sales, weekend sales too, divided by the business "
+        "days (Sun–Thu) in them: the month pace's rule", "series")
 def _sales_daily(ctx: Ctx) -> dict | None:
     rows = ctx.r.get("daily")
     if rows is None or not ctx.focus_to:
@@ -893,12 +895,14 @@ def _sales_daily(ctx: Ctx) -> dict | None:
         series.append({"day": d.isoformat(), "label": day_label(d), "weekday": f"{d:%a}",
                        "value": money(row.get("net_bhd")), "invoices": _int(row.get("invoices")),
                        "business_day": is_business_day(d), "latest": i == 0})
-    work = [dec(p["value"]) for p in series if p["business_day"]]
+    total = sum((dec(p["value"]) for p in series), Decimal(0))
+    work = sum(1 for p in series if p["business_day"])
     best = max(series, key=lambda p: (p["value"], p["day"]))      # a tie goes to the later day
-    return {"value": series[-1]["value"], "series": series, "days": DAILY_DAYS,
-            "total": money(sum((dec(p["value"]) for p in series), Decimal(0))),
-            # Sunday–Thursday only, and a business day with no sale counts as a 0 day: weekend sales stay out of it
-            "business_days": len(work), "avg_business_day": money(sum(work, Decimal(0)) / len(work)) if work else None,
+    return {"value": series[-1]["value"], "series": series, "days": DAILY_DAYS, "total": money(total),
+            # the pace rule (month_pace): every day's sales count, a weekend's too, and only the divisor is business
+            # days — so the average sits like for like beside the target for one business day (the target over the
+            # month's business days). With weekend sales left out it read low against that line.
+            "business_days": work, "avg_business_day": money(total / work) if work else None,
             "best": {k: best[k] for k in ("day", "label", "value")} if best["value"] > 0 else None}
 
 
@@ -1354,13 +1358,15 @@ def landed_margin(row: dict | None) -> dict | None:
             "coverage_pct": share(net, all_net), "basis": "landed_mrn_ex_vat", "label": LANDED_MARGIN_LABEL}
 
 
-def profitability(q=None) -> dict:
+def profitability(q=None, where: str = "") -> dict:
     """The official and the landed margin for the portal (Profitability page, Dashboard), read the
-    same way the Command Centre reads them; either is None when its source does not answer."""
+    same way the Command Centre reads them; either is None when its source does not answer.
+    `where` narrows the report items the official margin sums: the Dashboard passes
+    margin_truth.ACCESSORIES_ONLY (the landed margin is Accessories by its own SQL); '' = the whole report."""
     from app import margin_truth
     q = q or exec_sql
     try:
-        official = official_margin(margin_truth.margin_totals(q=q)[0])
+        official = official_margin(margin_truth.margin_totals(q=q, where=where)[0])
     except Exception as e:  # noqa: BLE001 -- one figure never costs the page
         log.warning("profitability: official margin unavailable: %s", e)
         official = None
@@ -1834,10 +1840,13 @@ LIVE_TTL_S = 60
 _focus_cache: dict[str, tuple[float, dict]] = {}
 _live_cache: dict[str, tuple[float, dict]] = {}
 _fresh_cache: dict[str, tuple[float, dict]] = {}
+_gen = 0  # bumped on every data load: a payload whose build began before it must not be stored
 
 
 def invalidate() -> None:
     """Drop every cached payload (called on every data load via reports.invalidate_dashboard_cache)."""
+    global _gen
+    _gen += 1
     _focus_cache.clear()
     _live_cache.clear()
     _fresh_cache.clear()
@@ -1847,15 +1856,21 @@ def invalidate() -> None:
 ERROR_TTL_S = 60                 # a build that missed a source is kept a minute, not until the next upload
 
 
-def _cached(cache: dict, key: str, ttl: float, build: Callable[[], dict]) -> dict:
+def _cached(cache: dict, key: str, ttl: float, build: Callable[[], dict], gen: int | None = None) -> dict:
+    """The cached payload, else `build()`'s — kept only when no load was noticed since `gen` was read
+    (the caller's, when a payload is made of two cached halves; else read here, before the build). A
+    build that began on the old data and ended after the drop is answered once and never stored: it
+    used to sit in the cache for the whole TTL, half an hour for the Focus half."""
     hit = cache.get(key)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
+    gen = _gen if gen is None else gen
     out = build()
     # a half-read payload (the database blinked) must not stick for the whole TTL: age it so it
     # expires ERROR_TTL_S from now
     stamp = time.time() - max(0.0, ttl - ERROR_TTL_S) if out.get("errors") else time.time()
-    cache[key] = (stamp, out)
+    if gen == _gen:
+        cache[key] = (stamp, out)
     return out
 
 
@@ -1879,9 +1894,10 @@ def overview(period: str = DEFAULT_PERIOD, reader: Reader | None = None, use_cac
     if period not in PERIODS:
         raise ValueError(f"Unknown period '{period}'.")
     datastamp.sync()
-    focus = (_cached(_focus_cache, period, FOCUS_TTL_S, lambda: build_focus(period, reader)) if use_cache
+    gen = _gen      # read once for both halves: a Focus half from before a load must not be kept inside the live one either
+    focus = (_cached(_focus_cache, period, FOCUS_TTL_S, lambda: build_focus(period, reader), gen) if use_cache
              else build_focus(period, reader))
-    return _cached(_live_cache, period, LIVE_TTL_S, lambda: _assemble(period, focus, reader)) if use_cache \
+    return _cached(_live_cache, period, LIVE_TTL_S, lambda: _assemble(period, focus, reader), gen) if use_cache \
         else _assemble(period, focus, reader)
 
 

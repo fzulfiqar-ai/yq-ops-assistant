@@ -1,7 +1,7 @@
-/** The Command Centre's daily sales chart, the pure part: which days carry an x label, the target line, and
- *  the three facts the card and its screen-reader label share. No React, no fetch, no import
- *  (web/scripts/numbers_ui_test.mjs exercises it in node). Every figure is the API's — the sales.daily tile
- *  built by app/metrics.py; this file only picks and words them, it never works one out. */
+/** The Command Centre's daily sales chart, the pure part: which days carry an x label, the y ticks, the target
+ *  line, and the three facts the card and its screen-reader label share, with the days they cover. No React,
+ *  no fetch, no import (web/scripts/numbers_ui_test.mjs exercises it in node). Every figure is the API's — the
+ *  sales.daily tile built by app/metrics.py; this file only picks and words them, it never works one out. */
 
 /** One calendar day of the sales.daily series: Accessories, ex-VAT, giveaways out. `business_day` false is a
  *  Friday or a Saturday (the Bahrain weekend); `latest` marks the data date. */
@@ -25,17 +25,31 @@ export function invoicesText(n?: number | null): string {
   return k === 0 ? 'no invoices' : `${k.toLocaleString('en-US')} invoice${k === 1 ? '' : 's'}`
 }
 
-/** The card's three facts in reading order: the latest day with its weekday, the average business day, the best
- *  day with its date. `bhd` formats an amount; a fact the API did not send is left out (no best day when
- *  nothing sold in the window). */
+/** The card's three facts in reading order: the latest day with its weekday, the average per business day, the
+ *  best day with its date. `bhd` formats an amount; a fact the API did not send is left out (no best day when
+ *  nothing sold in the window). The average is the API's: the window's sales, weekend sales too, over its
+ *  business days — the month pace's rule, so it reads like for like beside the target for one business day. */
 export function dailyFacts(days: DayPoint[], t: { avg_business_day?: number | null; best?: BestDay | null },
   bhd: (n: number) => string): DailyFact[] {
   const out: DailyFact[] = []
   const latest = latestDay(days)
   if (latest) out.push({ key: 'latest', label: 'Latest day', when: `${latest.weekday} ${latest.label}`, value: bhd(latest.value) })
-  if (t.avg_business_day != null) out.push({ key: 'average', label: 'Average business day', value: bhd(t.avg_business_day) })
+  if (t.avg_business_day != null) out.push({ key: 'average', label: 'Average per business day', value: bhd(t.avg_business_day) })
   if (t.best) out.push({ key: 'best', label: 'Best day', when: t.best.label, value: bhd(t.best.value) })
   return out
+}
+
+/** The days the facts cover, as the cards beside this one write a window: "30 days to 6 Oct" (`n` days ending on
+ *  the data date). The facts stay on the card under the weekly view too, where nothing else names their days. */
+export function windowText(days: DayPoint[], n: number): string {
+  const latest = latestDay(days)
+  return latest ? `${n} days to ${latest.label}` : `last ${n} days`
+}
+
+/** A y-axis tick in thousands with the decimals it needs: 1.05k, 1.95k, 7.5k, 15k. One decimal printed 1.1k
+ *  beside the gridline at 1,050 (the Dashboard's formatter, fixed for the same reason). */
+export function kTick(v: number): string {
+  return v >= 1000 ? `${Number((v / 1000).toFixed(3))}k` : `${v}`
 }
 
 /** What a screen reader hears for the chart: what it shows, then the same three facts. */

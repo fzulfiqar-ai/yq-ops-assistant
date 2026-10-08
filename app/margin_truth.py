@@ -150,6 +150,15 @@ _COLS_INLINE = ("item_name, sku_code, product_name, category_name, list_price_bh
                 "(net_amount_bhd / 1.1 < cogs_bhd) AS is_below_cost, 'vat_rate'::text AS ex_vat_source")
 _BASE_WHERE = "cogs_bhd IS NOT NULL AND net_amount_bhd IS NOT NULL"
 
+# The portal Dashboard is Mobile Accessories only (R8, owner 7-Oct-2026). The loader keeps every row of the
+# Focus profitability report, so the day a report carries a Batelco item it would ride in the page's margin,
+# its below-cost count and its "fix pricing" action. This WHERE condition leaves out the report's items that
+# the one item → division resolver (v_item_division) files under ANOTHER division; a name the resolver does
+# not know stays in, as it does everywhere else (Accessories is the resolver's residual). The Dashboard's
+# reads pass it; every other reader (the Command Centre, the Profitability page, the digests, the agents)
+# reads the whole report, as before.
+ACCESSORIES_ONLY = "item_name NOT IN (SELECT item_name FROM v_item_division WHERE division <> 'Accessories')"
+
 # the whole-report totals (never limited by a row cap): view columns first, then the inline form
 _TOTALS = ("SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE is_below_cost) AS below, "
            "COALESCE(SUM(net_amount_bhd), 0) AS net, COALESCE(SUM(net_ex_vat_bhd), 0) AS net_ex, "
@@ -215,19 +224,21 @@ def margin_rows(where: str = "", order: str = "margin_ex_vat_pct ASC NULLS LAST"
     return _finish(rows), "inline"
 
 
-def margin_totals(q=None) -> tuple[dict, str]:
+def margin_totals(q=None, where: str = "") -> tuple[dict, str]:
     """Whole-report sums over every costed item of v_product_margin, independent of any row limit
     (the Margins page shows 200 rows ordered by margin ascending; the report has 161 items today
     and 186 active codes, so a row-capped sum would drop the best margins first and bias
-    'Overall margin' low). Returns ({n, below, net, net_ex, gp_ex, gp_rep} as floats, basis)."""
+    'Overall margin' low). Returns ({n, below, net, net_ex, gp_ex, gp_rep} as floats, basis).
+    `where` narrows the items summed (the Dashboard passes ACCESSORIES_ONLY); '' = the whole report."""
     q = q or exec_sql
+    extra = f" AND ({where})" if where else ""
     try:
-        row = (q(_TOTALS) or [{}])[0]
+        row = (q(_TOTALS + extra) or [{}])[0]
         basis = "view"
         _remember(True)
     except Exception:  # noqa: BLE001 -- the view predates the migration
         _remember(False)
-        row = (q(_TOTALS_INLINE) or [{}])[0]
+        row = (q(_TOTALS_INLINE + extra) or [{}])[0]
         basis = "inline"
     out = {k: float(row.get(k) or 0) for k in ("net", "net_ex", "gp_ex", "gp_rep")}
     out["n"] = int(float(row.get("n") or 0))
@@ -235,9 +246,10 @@ def margin_totals(q=None) -> tuple[dict, str]:
     return out, basis
 
 
-def below_cost_rows(limit: int = 20) -> list[dict]:
-    """Items whose ex-VAT sales are below COGS on the latest report, worst first."""
-    rows, _ = margin_rows("is_below_cost", "gp_ex_vat_bhd ASC", limit)
+def below_cost_rows(limit: int = 20, where: str = "") -> list[dict]:
+    """Items whose ex-VAT sales are below COGS on the latest report, worst first. `where` narrows the
+    items looked at (the Dashboard passes ACCESSORIES_ONLY); '' = the whole report."""
+    rows, _ = margin_rows(f"is_below_cost AND ({where})" if where else "is_below_cost", "gp_ex_vat_bhd ASC", limit)
     return rows
 
 

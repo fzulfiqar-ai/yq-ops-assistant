@@ -1482,7 +1482,7 @@ def _():
     assert "{fmtPct(pace.projected_pct_of_target)} of target</Pill>" not in page.replace("projected {fmtPct", "")
 
 
-@test("visual QA: a row's sub-line wraps under the whole row (never cut at 1366), the KPI row has no hole, the weekly target label sits above its line")
+@test("visual QA: a row's sub-line wraps under the whole row (never cut at 1366), the KPI row has no hole, the weekly target's key sits above the plot")
 def _():
     page = _web("pages/CommandCentre.tsx")
     fn = lambda name: page.split(f"function {name}(", 1)[1].split("\n}\n", 1)[0]
@@ -1497,8 +1497,11 @@ def _():
     assert "6: 'sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6'" in grid
     assert "5: 'sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 sm:[&>:last-child]:col-span-2 2xl:[&>:last-child]:col-span-1'" in grid
     assert "4: 'sm:grid-cols-2 2xl:grid-cols-4'" in grid
+    # R8 review: no label on the line at all (under it, it sat on the tallest bar's top; above it, it was printed
+    # across a week that beat the target near the right edge) — the key is above the plot, as on the daily chart
     weekly = fn("WeeklyChart")
-    assert "position: 'insideBottomRight', offset: 5" in weekly and "insideTopRight" not in weekly
+    assert "<TargetKey>weekly target {fmtBhd0(weekly)}</TargetKey>" in weekly
+    assert "insideTopRight" not in weekly and "insideBottomRight" not in weekly
 
 
 @test("review: CI's web Lint step is a hard gate (lint is at 0 errors), its comment says so")

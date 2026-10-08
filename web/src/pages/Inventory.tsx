@@ -53,6 +53,9 @@ interface Reserved {
 interface Data {
   rows: Row[]
   by_status: Record<string, number>
+  /** R8: the Dashboard's own low-stock count — Mobile Accessories only (app/digest.py); null when it could not
+   *  be read, absent on an older API */
+  low_stock_accessories?: number | null
   /** the Focus stock balance is valued at the SELLING rate */
   stock_value: number
   /** at-cost figures: only for admins and logins holding 'Margins' (absent otherwise, with cost_hidden) */
@@ -137,7 +140,13 @@ export default function Inventory() {
             <Stat label="Stock value (at selling price)" value={bhd(data.stock_value, 0)} tone="blue"
               foot="what it would fetch at the book rate" />
             <Stat label="Units on hand" value={num(data.stock_qty)} />
-            <Stat label="Low stock (<30d)" value={num(alerts)} tone="amber" />
+            {/* The Dashboard's low-stock card opens this page and counts Mobile Accessories only; this stat counts
+                every division (Batelco SIM packs read out of stock here: their stock is not loaded). It says
+                both, so the card's number is on the page it leads to. */}
+            <Stat label="Low stock (<30d)" value={num(alerts)} tone="amber"
+              foot={data.low_stock_accessories != null
+                ? `every division · ${num(data.low_stock_accessories)} are Mobile Accessories, the Dashboard's count`
+                : undefined} />
             <Stat label="Urgent out-of-stock" value={num(s.urgent_out_of_stock || 0)} tone="rose" />
             <Stat label={sc ? 'Dead stock (at cost)' : 'Dead stock'} value={sc ? bhd(sc.dead_cost_bhd, 0) : num(s.dead_stock || 0)}
               foot={sc ? `${num(sc.dead_count)} item${sc.dead_count === 1 ? '' : 's'} · no sale in 90 days${deadUncostedNote(sc.dead_count, sc.dead_uncosted)}` : 'items · no sale in 90 days'} />
