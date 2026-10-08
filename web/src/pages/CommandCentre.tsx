@@ -1104,7 +1104,9 @@ function DailyChart({ t, pace, summary }: { t: Tile; pace?: Tile; summary: strin
               return p ? `${p.weekday} ${p.label}${p.business_day ? '' : ' · weekend'} · ${invoicesText(p.invoices)}` : String(label)
             }}
             contentStyle={TOOLTIP_STYLE} />
-          {latest && <ReferenceArea x1={latest.day} x2={latest.day} fill="#824FAB" fillOpacity={0.12} />}
+          {/* ifOverflow: at some widths (390, 768) the last band lands a rounding hair past the plot's edge, and
+              the default ("discard") then drops the whole band; clipped to the plot it is always drawn */}
+          {latest && <ReferenceArea x1={latest.day} x2={latest.day} fill="#824FAB" fillOpacity={0.12} ifOverflow="hidden" />}
           {target != null && <ReferenceLine y={target} stroke="#d97706" strokeDasharray="5 4" ifOverflow="extendDomain" />}
           {/* minPointSize: a day with no sale still leaves a 2 px mark, so every weekend shows as two lighter ones.
               On the dark card 45 % plum all but disappears: the weekend bars are a little stronger there. */}
