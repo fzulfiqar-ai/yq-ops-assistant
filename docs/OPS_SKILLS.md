@@ -38,7 +38,9 @@ load the reports, it answers with the line to type.
    answer **Yes**. Then a Windows box titled `YQ load <ddmmyy>` lists the folder, one line per file
    and the figures expected after the load. What the check flagged is there too, on lines that start
    `ATTENTION`, and anything you asked for on purpose, on a line that starts `ON YOUR WORD`. **Yes**
-   loads. **No**, closing the box, or no answer changes nothing.
+   loads. **No**, closing the box, or no answer changes nothing. A **Yes** in the first three
+   seconds does not count (it could be a key you typed for another window): the box comes back and
+   says so.
 4. Keep the PC plugged in and awake until it says the load finished, and do not upload on the Data
    page meanwhile. If Claude tells you to keep the Claude Code window open, do: on this PC the load
    would stop with it. The load then prints your brief. The portal follows by itself within minutes;
@@ -292,6 +294,16 @@ public.
   `tests/test_ops_skills.py` reads the decision words, the options, the exit codes, the window words
   and these lines from the programs and compares the skills and this page with them, so change the
   two together.
+- **When a load goes wrong** (`scripts/yq_load_go.py`, tested in `tests/test_ops_load_go.py`): the
+  one identical re-run compares the files and the commits with the table again first; a program file
+  changed in the folder and not committed counts as a change of the programs; the worker runs in a
+  Windows job of its own, so ending it ends its loader too, and the lock names the loader while it
+  runs; a load that had begun keeps its lock until its closing line is in the journal;
+  `LAST LOAD FAILED` stays until a load finishes, whatever was checked or rehearsed in between.
+  Two limits are known and left for a later step. A resume does not look at the database, so an
+  upload on the Data page between an interruption and its resume would be overwritten inside the
+  resumed files' dates: nothing else is loaded while a load reads `INTERRUPTED`. And the lock is
+  judged by a process on this PC: the project folder is used for loads from one computer only.
 - **Adding a skill:** a new folder with the same rules, one row in section 1, one line in
   `CLAUDE.md`, then `python -m tests.test_ops_skills` and `python -m tests.test_ops_readonly`.
 - **Before a commit:** `python -m scripts.ops selftest --repo-clean`. It refuses a staged file outside

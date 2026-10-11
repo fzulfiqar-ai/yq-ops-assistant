@@ -179,18 +179,21 @@ jobs:
       # synthetic Focus files and the writer runs on a stand-in step runner. These tools run on the
       # owner's PC (3.14), never in the API image, so the first line proves they still parse on 3.11.
       # Comparisons with real Focus files print SKIP here (business_data/ is not in the repository).
+      # A failed test is also raised as an annotation (its title, the assert line and the error line),
+      # so the run's summary page names it without the log being opened.
       - name: Ops skills suites - read-only engine, load check, load writer, brief (no DB)
         env:
           SUPABASE_URL: https://ci.invalid
         run: |
           python -m compileall -q scripts/ops scripts/yq_load_go.py
-          python -m tests.test_ops_readonly
-          python -m tests.test_ops_engine
-          python -m tests.test_ops_skills
-          python -m tests.test_ops_sales
-          python -m tests.test_ops_moves
-          python -m tests.test_ops_load
-          python -m tests.test_ops_load_go
+          for suite in readonly engine skills sales moves load load_go; do
+            echo "== tests.test_ops_$suite"
+            python -m tests.test_ops_$suite 2>&1 | tee "$RUNNER_TEMP/ops_suite.log" || {
+              grep -E '^(FAIL|[[:space:]]+assert |[A-Za-z_.]*(Error|Exception)\b)' "$RUNNER_TEMP/ops_suite.log" \
+                | head -n 30 | sed "s/^/::error title=tests.test_ops_$suite::/"
+              exit 1
+            }
+          done
 
   web:
     runs-on: ubuntu-latest

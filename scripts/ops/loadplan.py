@@ -30,8 +30,9 @@ from pathlib import Path
 
 from scripts.ops import paths
 
-RUN_RE = re.compile(r"^\d{6}_\d{4}$")
+RUN_RE = re.compile(r"[0-9]{6}_[0-9]{4}")     # matched whole (is_run): ten plain digits and nothing after them
 WRITER_MODULE = "scripts.yq_load_go"
+HEAD_LOCAL = " + changed here: "             # what head_part() adds when a program file differs from its commit
 STEPS = ("token", "backup", "pre_gate", "wait_tick", "refresh", "reconcile", "post_gate", "publish")
 VERDICTS = ("load", "trim", "hold_back", "leave_out", "needs_decision", "not_loaded", "stop")
 # Focus tables the load changes: count and max id of each go into the fingerprint.
@@ -42,7 +43,9 @@ _DIGIT_TO_LETTER = str.maketrans("0123456789", "ghijklmnop")
 
 
 def is_run(name: str) -> bool:
-    return bool(RUN_RE.match(name or ""))
+    """A run name is ddmmyy_HHMM in plain digits, with nothing before or after (no line break, no
+    other script's digits): it becomes a folder name."""
+    return isinstance(name, str) and RUN_RE.fullmatch(name) is not None
 
 
 def run_dir(run: str) -> Path:
@@ -94,15 +97,26 @@ def fingerprint(session) -> dict:
     return out
 
 
+def head_part(root: Path) -> str:
+    """The programs of this folder as the token binds them: the commit (HEAD) and, after it, every
+    tracked engine file that was changed here and not committed. The loader's programs are read
+    from the disk when they start, not from the commit, so a file edited after the check is a
+    change of the programs even though HEAD stands still. The check's own preflight stops on such
+    a file, so the head part of a token it issues is always a bare commit."""
+    from scripts.ops import gitinfo
+    head = gitinfo.head(root) or ""
+    local = sorted(gitinfo.engine_local_changes(root))
+    return head + (HEAD_LOCAL + ", ".join(local) if local else "")
+
+
 def collect_parts(drop: Path, run: str, root: Path, live: str, session) -> dict:
     """The token's parts as they are NOW: the check computes them once, the writer computes them
     again (twice) and compares. `live` is the commit /health reports; `session` a read-only
     scripts.ops.db.Session."""
-    from scripts.ops import gitinfo
     return {
         "drop": manifest(Path(drop)),
         "staging": manifest(staging_path(run)),
-        "head": gitinfo.head(root) or "",
+        "head": head_part(root),
         "live": str(live or ""),
         "fingerprint": fingerprint(session),
     }
@@ -130,7 +144,9 @@ def moved_parts(old: dict, new: dict) -> list[str]:
             if a.get(name) != b.get(name):
                 out.append(f"{label}: {name}")
     if old.get("head") != new.get("head"):
-        out.append("this folder's programs (HEAD)")
+        local = str(new.get("head") or "").partition(HEAD_LOCAL)[2]
+        out.append(f"this folder's programs (changed on this PC and not committed: {local})" if local
+                   else "this folder's programs (HEAD)")
     if old.get("live") != new.get("live"):
         out.append("the live site's commit")
     fa, fb = old.get("fingerprint") or {}, new.get("fingerprint") or {}
@@ -215,9 +231,11 @@ def last_step(run: str) -> str | None:
 
 
 def latest_run() -> str | None:
+    """The run folder written last (two folders written within one tick of the file system's clock
+    carry one time: the name then decides, so the answer never depends on the listing's order)."""
     base = paths.loads_dir()
     if not base.is_dir():
         return None
     runs = sorted((p for p in base.iterdir() if p.is_dir() and is_run(p.name)),
-                  key=lambda p: p.stat().st_mtime)
+                  key=lambda p: (p.stat().st_mtime, p.name))
     return runs[-1].name if runs else None

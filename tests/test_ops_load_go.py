@@ -1473,6 +1473,13 @@ def _():
         h = Harness(root)
         h.runner.script["pre_gate"] = [yq.Child(0, "snapshot ..\\..\\elsewhere.json: x\n")]
         assert h.go() == 0 and h.work() == 1 and h.runner.labels() == ["backup", "pre_gate"]
+    with data_root() as root:                    # ... not even to a file that is there and reads like a snapshot
+        h = Harness(root)                        # (forward slashes: a path on every system)
+        (root / "business_data" / "gates").mkdir(parents=True, exist_ok=True)
+        (root / "elsewhere.json").write_text(json.dumps({"tables": {}}), encoding="utf-8")
+        h.runner.script["pre_gate"] = [yq.Child(0, "snapshot ../../elsewhere.json: x\n")]
+        assert h.go() == 0 and h.work() == 1 and h.runner.labels() == ["backup", "pre_gate"]
+        assert h.rows("failed")[0]["why"].startswith("The before-snapshot was not written"), h.rows("failed")[0]
 
 
 @test("the token is checked a second time just before the refresh; a change there is 'check again', nothing written")
@@ -3504,6 +3511,482 @@ def _():
     assert (yq.CREATE_NO_WINDOW, yq.CREATE_NEW_PROCESS_GROUP, yq.CREATE_BREAKAWAY_FROM_JOB) == (0x08000000, 0x200, 0x01000000)
     assert (yq.ES_CONTINUOUS | yq.ES_SYSTEM_REQUIRED) == 0x80000001
     assert yq.MODULE == "scripts.yq_load_go" and not (ROOT / "scripts" / "ops" / "yq_load_go.py").exists()
+
+
+# ── the failure paths (independent review, before the first production go) ────────────────────
+
+@test("the box: a Yes that comes at once does not count (a key typed for another window); three such answers load nothing")
+def _():
+    def boxed(answers, timeout_s=540):           # [(the button's number, the seconds the box stood open)]
+        t, shows, queue = [100.0], [], list(answers)
+
+        def show(title, text, timeout_ms):
+            button, took = queue.pop(0)
+            shows.append((text, timeout_ms))
+            t[0] += took
+            return button
+        return yq.windows_box("YQ load 010126", "the table", timeout_s, show=show, clock=lambda: t[0]), shows
+
+    said, shows = boxed([(6, 10.0)])
+    assert said == "yes" and shows == [("the table", 540000)]
+    said, shows = boxed([(6, 0.5), (6, 12.0)])   # a stray Y as the box took the keyboard, then an answer he gave
+    assert said == "yes" and len(shows) == 2
+    assert shows[1][0].startswith("A Yes came within 3 seconds") and shows[1][0].endswith("\n\nthe table")
+    assert shows[1][1] == 539500, "the time is one budget, not one per showing"
+    assert boxed([(6, 0.5), (7, 5.0)])[0] == "no"
+    said, shows = boxed([(6, 0.25), (6, 0.25), (6, 0.5)])
+    assert said == "too_fast" and len(shows) == 3 == yq.BOX_SHOWS
+    assert boxed([(7, 0.25)])[0] == "no", "a quick No is a No: only a Yes has to be a read one"
+    assert boxed([(6, 3.0)])[0] == "yes" and yq.BOX_MIN_READ_S == 3
+    assert boxed([(32000, 540.0)])[0] == "timeout" and boxed([(2, 1.0)])[0] == "closed" and boxed([(0, 0.0)])[0] == "unavailable"
+    said, shows = boxed([(6, 0.5), (6, 0.5)], timeout_s=1.0)
+    assert said == "timeout" and len(shows) == 2 and shows[1][1] == 500      # nothing is left for a third showing
+
+    def broken(title, text, timeout_ms):
+        raise OSError("no desktop")
+    assert yq.windows_box("t", "x", 5, show=broken, clock=lambda: 0.0) == "unavailable"
+    with data_root() as root:                    # the launcher: that is no answer, nothing loads, and it says why
+        h = Harness(root, answer="too_fast")
+        assert h.go() == 4
+        assert h.out == ["Yes came at once every time the box opened, before it could be read. That is no answer: "
+                         "nothing loaded. Type /yq-load again."], h.out
+        h.assert_nothing_started()
+    with data_root() as root:                    # No at the RESUME box of a load that had begun: the database is not as it was
+        h = Harness(root, answer="no")
+        interrupted(h, upto="refresh")
+        assert h.go() == 4
+        assert h.out == [f"You answered No: nothing more was loaded and the load stays INTERRUPTED. {MAY_HOLD}"], h.out
+        assert not says_nothing_was_written(h.said()) and status.read_lock()["word_sha"] == "old-word"
+        h.box.answer = "timeout"
+        h.out.clear()
+        assert h.go() == 4 and MAY_HOLD in h.said() and not says_nothing_was_written(h.said())
+    with data_root() as root:                    # ... interrupted before any refresh: "nothing loaded" is true, and said
+        h = Harness(root, answer="no")
+        interrupted(h, upto="pre_gate")
+        assert h.go() == 4 and h.out == ["You answered No: nothing loaded."], h.out
+
+
+@test("LAST LOAD FAILED stays until a load FINISHES: a later check that never loaded, a rehearsal or a run closed "
+      "before it wrote takes nothing away")
+def _():
+    told = "The data loaded, but these totals do not match the reports: Sales"
+    with data_root() as root:
+        h = Harness(root)
+        h.runner.script["refresh"] = [verify_fails_with(h, told)]
+        assert h.go() == 0 and h.work() == 1
+        assert status.failed_load() == {"run": RUN, "step": "refresh"}
+        # he types /yq-load: the new check makes a newer run folder, and he answers No at its box
+        newer = Harness(root, run="020126_0900", answer="no")
+        ahead = time.time() + 600
+        os.utime(loadplan.run_dir("020126_0900"), (ahead, ahead))
+        assert loadplan.latest_run() == "020126_0900" and newer.go() == 4
+        assert status.failed_load() == {"run": RUN, "step": "refresh"}
+        assert status.interrupted_banner() == last_failed("refresh")
+        # a rehearsal that finished afterwards is no load
+        yq.journal("000000_0905", "finished", result="ok", text="REHEARSAL FINISHED: nothing was loaded.")
+        assert status.failed_load() == {"run": RUN, "step": "refresh"}
+        # a newer run that was closed BEFORE it wrote anything changed nothing in the database either
+        third = Harness(root, run="030126_0900")
+        third.runner.script["backup"] = [yq.Child(1, "no database\n")]
+        assert third.go() == 0 and third.work() == 1 and third.rows()[-1]["written"] is False
+        assert status.failed_load() == {"run": RUN, "step": "refresh"}
+        assert status.interrupted_banner() == last_failed("refresh")
+        # only a load that finishes makes the database whole again
+        fourth = Harness(root, run="040126_0900")
+        assert fourth.load() == 0, fourth.rows()[-1]
+        assert status.failed_load() is None and status.interrupted_banner() is None
+    with data_root() as root:                    # two failures: the banner names the later one
+        h = Harness(root)
+        crash = yq.Child(1, "Traceback (most recent call last):\nMemoryError\n")
+        h.runner.script["refresh"] = [crash, crash]
+        assert h.go() == 0 and h.work() == 1
+        rows = loadplan.journal_read(RUN)        # ... which was closed a day before the next one
+        day = timedelta(days=1)
+        text = "\n".join(json.dumps(dict(r, at=(datetime.fromisoformat(r["at"]) - day).isoformat(timespec="seconds")),
+                                    sort_keys=True) for r in rows) + "\n"
+        loadplan.journal_file(RUN).write_text(text, encoding="utf-8")
+        second = Harness(root, run="020126_0900")
+        second.runner.script["refresh"] = [verify_fails_with(second, told)]
+        assert second.go() == 0 and second.work() == 1
+        assert status.failed_load() == {"run": "020126_0900", "step": "refresh"}
+    with data_root():                            # a state file whose last load is no object, a journal row with no time
+        paths.write_text(paths.state_file(), json.dumps({"last_load": "yesterday"}))
+        paths.write_text(loadplan.journal_file(RUN), json.dumps({"event": "failed", "written": True, "step": "refresh"}) + "\n")
+        assert status.failed_load() is None
+        assert status.when("2026-01-01T09:00:00") == datetime(2026, 1, 1, 9, tzinfo=timezone.utc) and status.when(None) is None
+    for name in ("010126_0900\n", "٠١٠١٢٦_٠٩٠٠", "010126_0900 ", "010126-0900", None, 7):
+        assert not loadplan.is_run(name), repr(name)         # a line break or another script's digits is no run name
+    assert loadplan.is_run(RUN)
+
+
+@test("the one identical re-run starts only on what the table showed: files and commits are compared again, never the database")
+def _():
+    def stage_fails(h, then=None):
+        def answer(argv):
+            h.w.newest_run += 1                  # refresh's own error row
+            if then is not None:
+                then()
+            return yq.Child(2, refresh_line(ok=False, verify_ok=None, error="The load step failed.") + "\n")
+        return answer
+
+    with data_root() as root:                    # nothing moved: the re-run goes ahead, after one more comparison
+        h = Harness(root)
+        h.runner.script["refresh"] = [stage_fails(h)]
+        assert h.load() == 0
+        at = [n for n, t in enumerate(h.w.trace) if t == "run:refresh"]
+        between = h.w.trace[at[0] + 1:at[1]]
+        assert "token:files and commits only" in between and "token:with fingerprint" not in between, between
+    with data_root() as root:                    # the database has moved, of course: the first run moved it
+        h = Harness(root)
+        h.runner.script["refresh"] = [stage_fails(h, then=lambda: h.w.fingerprint.update(orders=[11, 100]))]
+        assert h.load() == 0 and h.runner.labels().count("refresh") == 2
+    with data_root() as root:                    # the programs changed while the first run was going: no second run
+        h = Harness(root)
+        h.runner.script["refresh"] = [stage_fails(h, then=lambda: setattr(h.w, "head", "c" * 40))]
+        assert h.go() == 0 and h.work() == 3
+        assert h.runner.labels().count("refresh") == 1, "the re-run started on programs the table never showed"
+        failed = h.rows("failed")[0]
+        assert failed["result"] == "failed" and failed["written"] is True and failed["check_again"] is True
+        assert failed["text"] == f"CHECK AGAIN at refresh. {MAY_HOLD}" and failed["step"] == "refresh"
+        assert "this folder's programs (HEAD)" in failed["why"] and not says_nothing_was_written(whole(failed))
+        assert status.interrupted_banner() == last_failed("refresh") and not paths.lock_file().exists()
+    with data_root() as root:                    # ... or a staged file was replaced meanwhile
+        h = Harness(root)
+        swap = lambda: (h.w.staging / "Sales_day_book1.xlsx").write_bytes(b"replaced meanwhile")     # noqa: E731
+        h.runner.script["refresh"] = [stage_fails(h, then=swap)]
+        assert h.go() == 0 and h.work() == 3 and h.runner.labels().count("refresh") == 1
+        assert "the staged copies: Sales_day_book1.xlsx" in h.rows("failed")[0]["why"]
+    with data_root() as root:                    # ... or a newer check replaced this one
+        h = Harness(root)
+        h.runner.script["refresh"] = [stage_fails(h, then=lambda: h.w.write_plan(superseded_by="010126_0930"))]
+        assert h.go() == 0 and h.work() == 3 and h.runner.labels().count("refresh") == 1
+        assert "a newer check replaced it (run 010126_0930)" in h.rows("failed")[0]["why"]
+
+    # the clock. A run that left the database WHOLE (loaded, its verification could not run) waits for a quiet
+    # moment between two production ticks before the second run, exactly as the first run did ...
+    with data_root() as root:
+        h = Harness(root)                        # 09:02:00, two minutes after a tick
+        starts: list[datetime] = []
+        h.runner.hooks["refresh"] = lambda: starts.append(h.clock.now())
+
+        def slow_and_unverified(argv):
+            h.clock.t += timedelta(minutes=8)    # the first run took eight minutes: the next tick is 5 minutes away
+            return cannot_verify(h)(argv)
+        h.runner.script["refresh"] = [slow_and_unverified]
+        assert h.load() == 0, h.rows()[-1]
+        assert starts[0] == NOON and starts[1] == datetime(2026, 1, 1, 9, 16, 0, tzinfo=timezone.utc), starts
+        assert yq.tick_wait_seconds(starts[1]) == 0
+        note = h.rows("note", "refresh")
+        assert [n["text"] for n in note] == ["Waited 5.5 min for a quiet moment between two production ticks before "
+                                             "the second run."], note
+        at = [n for n, t in enumerate(h.w.trace) if t == "run:refresh"]
+        assert h.w.trace[at[0] + 1:at[1]] == ["token:files and commits only", "runs:None"], \
+            "the table is compared after the wait, right before the second run"
+        assert sum(h.clock.sleeps) == yq.RETRY_PAUSE_S + 330        # the pause, then 5.5 minutes to the quiet moment
+    with data_root() as root:                    # ... and never inside the morning window
+        h = Harness(root, start=datetime(2026, 1, 1, 4, 46, 0, tzinfo=timezone.utc))      # 07:46 in Bahrain
+        starts = []
+        h.runner.hooks["refresh"] = lambda: starts.append(h.clock.now())
+
+        def five_minutes_unverified(argv):
+            h.clock.t += timedelta(minutes=5)
+            return cannot_verify(h)(argv)
+        h.runner.script["refresh"] = [five_minutes_unverified]
+        assert h.load() == 0, h.rows()[-1]
+        local = starts[1].astimezone(yq.BAHRAIN)
+        assert (local.hour, local.minute) >= (8, 21) and yq.tick_wait_seconds(starts[1]) == 0, starts
+    # ... while a load stage that failed part-way is run again at once: half a ledger is the worse thing to leave
+    with data_root() as root:
+        h = Harness(root)
+        starts = []
+        h.runner.hooks["refresh"] = lambda: starts.append(h.clock.now())
+
+        def slow_failure(argv):
+            h.clock.t += timedelta(minutes=8)
+            return stage_fails(h)(argv)
+        h.runner.script["refresh"] = [slow_failure]
+        assert h.load() == 0
+        assert (starts[1] - starts[0]).total_seconds() == 8 * 60 + yq.RETRY_PAUSE_S and h.rows("note", "refresh") == []
+
+
+@test("a program file changed in the folder after the check is a change of the programs, though HEAD stands still")
+def _():
+    from scripts.ops import gitinfo
+    real_head, real_local = gitinfo.head, gitinfo.engine_local_changes
+    gitinfo.head = lambda root: "a" * 40
+    try:
+        gitinfo.engine_local_changes = lambda root: []
+        clean = loadplan.head_part(ROOT)
+        gitinfo.engine_local_changes = lambda root: ["scripts/load_supabase.py", "app/ingest_batch.py"]
+        dirty = loadplan.head_part(ROOT)
+    finally:
+        gitinfo.head, gitinfo.engine_local_changes = real_head, real_local
+    assert clean == "a" * 40 and dirty == "a" * 40 + " + changed here: app/ingest_batch.py, scripts/load_supabase.py"
+    named = "this folder's programs (changed on this PC and not committed: app/ingest_batch.py, scripts/load_supabase.py)"
+    assert loadplan.moved_parts({"head": clean}, {"head": dirty}) == [named]
+    assert loadplan.moved_parts({"head": clean}, {"head": "b" * 40}) == ["this folder's programs (HEAD)"]
+    with data_root() as root:                    # edited while the box stood open: the worker's first check stops it
+        h = Harness(root)
+        h.box.on_show = lambda: setattr(h.w, "head", dirty)
+        assert h.go() == 0 and h.work() == 3
+        failed = h.rows("failed")[0]
+        assert failed["result"] == "check_again" and failed["written"] is False and failed["step"] == "token"
+        assert "changed on this PC and not committed: app/ingest_batch.py" in failed["why"]
+        assert h.runner.calls == [], "a program of the engine was started"
+    with data_root() as root:                    # even a table whose own token was made over such a file never loads
+        h = Harness(root)
+        h.w.head = dirty
+        parts = h.w.parts(True)
+        h.w.write_plan(token_parts=parts, token=loadplan.token_of(parts))
+        assert h.go() == 3 and named in h.said(), h.out
+        h.assert_nothing_started()
+        assert h.box.shown == []
+
+
+@test("the lock names the engine program the worker waits on; while one of a worker that is gone still runs, nothing "
+      "starts beside it")
+def _():
+    with data_root() as root:                    # a runner that starts real children tells the worker, which writes the lock
+        h = Harness(root)
+        during, after = {}, {}
+
+        class Telling(Runner):
+            on_child = None                      # as yq.RealRunner: the worker sets it
+
+            def __call__(self, label, argv, timeout=None):
+                self.on_child(label, os.getpid())
+                during[label] = dict(status.read_lock())
+                out = super().__call__(label, argv, timeout)
+                self.on_child(label, None)
+                after[label] = dict(status.read_lock())
+                return out
+        h.runner = h.deps.runner = Telling(h.w)
+        assert h.load() == 0
+        seen = during["refresh"]
+        assert seen["child_pid"] == os.getpid() and seen["child_step"] == "refresh"
+        assert seen["child_created"] == yq.process_created(os.getpid())
+        assert yq.loader_alive(seen) == os.getpid()
+        gone = after["refresh"]
+        assert gone["child_pid"] is None and gone["child_step"] is None and yq.loader_alive(gone) is None
+        assert set(during) == {"backup", "pre_gate", "refresh", "reconcile", "post_gate", "compare"}
+    assert yq.RealRunner(ROOT, RUN).on_child is None and not hasattr(Runner(None), "on_child")
+    got: list = []                               # run_child itself: the id as the child starts, None once it has ended
+    child = yq.run_child([sys.executable, "-c", "print('x')"], cwd=ROOT, env=yq.child_env(), seen=got.append)
+    assert child.code == 0 and len(got) == 2 and isinstance(got[0], int) and got[0] > 0 and got[1] is None, got
+
+    linked, real_settings = yq.gitinfo.is_linked_worktree, yq.settings_files
+    yq.gitinfo.is_linked_worktree, yq.settings_files = (lambda r: False), (lambda r: [])
+    try:
+        with data_root() as root:                # the worker was ended by hand; the loader it had started was not
+            h = Harness(root)
+            lock = dict(interrupted(h, upto="refresh")["lock"], child_pid=os.getpid(),
+                        child_created=yq.process_created(os.getpid()), child_step="refresh")
+            paths.write_text(paths.lock_file(), json.dumps(lock))
+            assert not yq.worker_alive(lock) and yq.loader_alive(lock) == os.getpid()
+            assert h.go() == 2
+            assert h.out == [f"The worker of run {RUN} is gone, but the program it had started at step refresh is still "
+                             f"running on this PC (python.exe, pid {os.getpid()}) and may still be writing to the "
+                             "database. Nothing was started and nothing is resumed beside it: wait until it has ended, "
+                             "then type /yq-load. If it has truly hung, end that process in Task Manager first."], h.out
+            assert h.box.shown == [] and h.spawn.calls == [] and status.read_lock() == lock, "the lock was touched"
+            assert loadplan.run_result(RUN) == "RUNNING" and h.rows("failed") == []
+            out: list[str] = []                  # a rehearsal keeps away as well
+            assert yq.rehearse(0, no_box=True, say=out.append, spawn=Spawn(), start_wait_s=0) == 2
+            assert "is still running on this PC" in out[0] and "No rehearsal was started" in out[0], out
+            assert status.read_lock() == lock and [p.name for p in paths.loads_dir().iterdir()] == [RUN]
+            # the same number given to another program later is nobody's loader: the load can be resumed
+            other = dict(lock, child_created=1)
+            paths.write_text(paths.lock_file(), json.dumps(other))
+            assert yq.loader_alive(other) is None and yq.loader_alive(dict(lock, child_pid=DEAD_PID)) is None
+            assert yq.loader_alive(dict(lock, child_pid=None)) is None and yq.loader_alive({"child_pid": "x"}) is None
+            h.out.clear()
+            assert h.go() == 0 and "interrupted at step 'refresh'" in h.box.shown[0][1]
+    finally:
+        yq.gitinfo.is_linked_worktree, yq.settings_files = linked, real_settings
+
+
+@test("on Windows the worker's own job ends what it started: a worker that is ended takes its loader with it")
+def _():
+    if os.name != "nt":
+        assert yq.own_job() is False
+        print("SKIP  (a Windows job object)")
+        return
+    program = (
+        "import subprocess, sys, time\n"
+        "from scripts import yq_load_go as yq\n"
+        "print('JOB', yq.own_job(), flush=True)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "print('CHILD', child.pid, flush=True)\n"
+        "time.sleep(120)\n")
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        env = dict(os.environ, YQ_MAIN_CHECKOUT=tmp, USERPROFILE=tmp, PYTHONUTF8="1")
+        parent = subprocess.Popen([sys.executable, "-X", "utf8", "-c", program], cwd=str(ROOT), env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        child_pid = None
+        try:
+            made = parent.stdout.readline().decode("utf-8", "replace").split()
+            child_pid = int(parent.stdout.readline().decode("utf-8", "replace").split()[1])
+            assert made[:1] == ["JOB"] and status.pid_alive(child_pid), (made, child_pid)
+            if made[1] != "True":                # Windows refused the job here: the lock's child record is the guard
+                print("SKIP  (Windows did not allow a job of its own in this session)")
+                return
+            parent.kill()                        # as Task Manager's End task does: no clean-up of its own runs
+            parent.wait(timeout=30)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and status.pid_alive(child_pid):
+                time.sleep(0.1)
+            assert not status.pid_alive(child_pid), "the child outlived the process that started it"
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+            if child_pid and status.pid_alive(child_pid):
+                subprocess.run(["taskkill", "/PID", str(child_pid), "/F"], capture_output=True, timeout=30)
+            parent.stdout.close()
+
+
+@test("a load that had begun never loses its lock while its closing line is not on disk")
+def _():
+    real_journal = yq.journal
+
+    def no_closing_row(run, event, **fields):    # the journal file is held: only the closing row cannot be written
+        if event in ("failed", "finished"):
+            return False
+        return real_journal(run, event, **fields)
+
+    told = "The data loaded, but these totals do not match the reports: Sales"
+    with data_root() as root:                    # the worker: a failed verify whose closing row cannot be written
+        h = Harness(root)
+        h.runner.script["refresh"] = [verify_fails_with(h, told)]
+        assert h.go() == 0
+        yq.journal = no_closing_row
+        try:
+            assert h.work() == 1
+        finally:
+            yq.journal = real_journal
+        assert h.rows("failed") == [] and loadplan.run_result(RUN) == "RUNNING"
+        lock = status.read_lock()
+        assert lock is not None and lock["run"] == RUN and lock["step"] == "refresh", "the lock went with no closing row"
+        assert any("the lock is kept" in line for line in h.w.log)
+        h.launcher_gone()                        # the worker has ended: every skill says so until /yq-load settles it
+        assert status.interrupted_banner() == "LOAD INTERRUPTED at refresh: run /yq-load"
+    with data_root() as root:                    # ... while a run that wrote nothing is simply unlocked, row or no row
+        h = Harness(root)
+        h.runner.script["backup"] = [yq.Child(1, "no database\n")]
+        assert h.go() == 0
+        yq.journal = no_closing_row
+        try:
+            assert h.work() == 1
+        finally:
+            yq.journal = real_journal
+        assert not paths.lock_file().exists() and status.interrupted_banner() is None
+    with data_root() as root:                    # a load that FINISHED is unlocked even so: it is whole, and state.json says so
+        h = Harness(root)
+        assert h.go() == 0
+        yq.journal = no_closing_row
+        try:
+            assert h.work() == 0
+        finally:
+            yq.journal = real_journal
+        assert not paths.lock_file().exists() and status.read_state()["last_load"]["run"] == RUN
+        assert any("FINISHED could not be written" in line for line in h.w.log)
+
+    # the launcher. An interrupted load that can never be resumed is closed by a row; without the row its dead lock stays
+    with data_root() as root:
+        h = Harness(root)
+        interrupted(h, upto="refresh")
+        (h.w.staging / "Sales_day_book1.xlsx").write_bytes(b"replaced since")
+        yq.journal = no_closing_row
+        try:
+            assert h.go() == 3
+        finally:
+            yq.journal = real_journal
+        assert status.read_lock()["word_sha"] == "old-word" and h.rows("failed") == []
+        assert "It stays INTERRUPTED" in h.said() and MAY_HOLD in h.said() and not says_nothing_was_written(h.said())
+        h.out.clear()                            # the next /yq-load can write the row: closed, unlocked, LAST LOAD FAILED
+        assert h.go() == 3 and "The interrupted load is closed: it cannot be resumed." in h.said()
+        assert not paths.lock_file().exists() and status.interrupted_banner() == last_failed("refresh")
+    with data_root() as root:                    # the same for a check that a newer one replaced
+        h = Harness(root)
+        interrupted(h, upto="refresh")
+        h.w.write_plan(superseded_by="010126_0930")
+        yq.journal = no_closing_row
+        try:
+            assert h.go() == 2
+        finally:
+            yq.journal = real_journal
+        assert status.read_lock()["word_sha"] == "old-word" and "It stays INTERRUPTED" in h.said()
+        h.out.clear()
+        assert h.go() == 2 and not paths.lock_file().exists() and status.interrupted_banner() == last_failed("refresh")
+    with data_root() as root:                    # interrupted BEFORE any refresh: there is nothing to keep a lock for
+        h = Harness(root)
+        interrupted(h, upto="pre_gate")
+        (h.w.staging / "Sales_day_book1.xlsx").write_bytes(b"replaced since")
+        yq.journal = no_closing_row
+        try:
+            assert h.go() == 3
+        finally:
+            yq.journal = real_journal
+        assert not paths.lock_file().exists() and "It stays INTERRUPTED" not in h.said()
+
+    # after his Yes at the RESUME box of a load that had begun: whatever keeps the worker from starting, the lock stays
+    with data_root() as root:
+        h = Harness(root, spawn=Spawn(error=OSError("worker.log is held")))
+        interrupted(h, upto="refresh")
+        assert h.go() == 2
+        assert h.out == ["The worker could not be started (OSError: worker.log is held). LOAD INTERRUPTED at refresh: the "
+                         f"load stays as it was. {MAY_HOLD} Type /yq-load to resume."], h.out
+        lock = status.read_lock()
+        assert lock is not None and lock["run"] == RUN and lock["step"] == "refresh" and lock["word_sha"] == h.spawn.sha
+        assert h.rows("failed") == [] and loadplan.run_result(RUN) == "RUNNING"
+        h.launcher_gone()
+        assert status.interrupted_banner() == "LOAD INTERRUPTED at refresh: run /yq-load"
+        h.spawn._error, h.w.newest_run = None, 8  # and the next go resumes it
+        h.out.clear()
+        assert h.go() == 0 and h.work() == 0 and loadplan.run_result(RUN) == "FINISHED"
+    with data_root() as root:                    # ... replaced by a newer check while that box stood open: closed, by a row
+        h = Harness(root)
+        interrupted(h, upto="refresh")
+        h.box.on_show = lambda: h.w.write_plan(superseded_by="010126_0930")
+        assert h.go() == 2
+        assert h.out[0] == f"The interrupted load is closed: it cannot be resumed. {MAY_HOLD}" and "replaced" in h.out[1]
+        closing = h.rows("failed")[0]
+        assert closing["written"] is True and closing["step"] == "refresh" and closing["result"] == "failed"
+        assert not paths.lock_file().exists() and status.interrupted_banner() == last_failed("refresh")
+        assert h.spawn.calls == []
+    with data_root() as root:                    # a first go whose worker cannot start: nothing loaded, no lock (as before)
+        h = Harness(root, spawn=Spawn(error=OSError("no such program")))
+        assert h.go() == 2 and h.out[-1].endswith("Nothing was loaded.") and not paths.lock_file().exists()
+
+
+@test("a resume before anything was written takes a backup and a before-snapshot again when the old ones are hours old")
+def _():
+    with data_root() as root:                    # interrupted before the refresh, resumed a day later
+        h = Harness(root, start=datetime.now(timezone.utc) + timedelta(days=1, minutes=2))
+        h.clock.t = h.clock.t.replace(minute=2, second=0, microsecond=0)     # two minutes after a tick
+        kept = interrupted(h, upto="wait_tick")
+        assert h.go() == 0 and h.work() == 0, h.rows()[-1]
+        assert h.runner.labels() == ["backup", "pre_gate", "refresh", "reconcile", "post_gate", "compare"]
+        notes = [n["text"] for n in h.rows("note")]
+        assert any("no longer recent" in n and "a new one is taken" in n for n in notes if "backup" in n.lower()), notes
+        assert any("before-snapshot" in n and "no longer recent" in n for n in notes), notes
+        backup = h.rows("step_ok", "backup")[-1]
+        assert "reused" not in backup and backup["archive"] != str(kept["archive"])
+    with data_root() as root:                    # resumed within the hour: the journalled ones stand (as before)
+        h = Harness(root, start=datetime.now(timezone.utc) + timedelta(minutes=20))
+        h.clock.t = h.clock.t.replace(second=0, microsecond=0)
+        interrupted(h, upto="wait_tick")
+        assert h.go() == 0
+        h.deps.wait_for_tick = False
+        assert h.work() == 0, h.rows()[-1]
+        assert h.runner.labels() == ["refresh", "reconcile", "post_gate", "compare"]
+    with data_root() as root:                    # once the refresh had begun the old baseline is all there is, whatever its age
+        h = Harness(root, start=datetime.now(timezone.utc) + timedelta(days=3))
+        h.clock.t = h.clock.t.replace(minute=2, second=0, microsecond=0)
+        interrupted(h, upto="refresh")
+        h.w.newest_run = 8
+        assert h.go() == 0 and h.work() == 0, h.rows()[-1]
+        assert h.runner.labels() == ["refresh", "reconcile", "post_gate", "compare"]
+        assert h.rows("step_ok", "backup")[-1]["reused"] is True
 
 
 @test("the writer runs on Python 3.11: grammar, an encoding on every text open, no real name or amount")

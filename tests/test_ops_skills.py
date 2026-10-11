@@ -1265,7 +1265,7 @@ def _():
     for needle in (f"- Exit code {ok} (it says `load started`): go to Step 3.",
                    f"- Exit code {again} (check again): run Step 1 once more with the same arguments, show the new table "
                    "and run its new line once.",
-                   f"- Exit code {no_answer} (No, or no answer): say nothing was loaded and wait for him.",
+                   f"- Exit code {no_answer} (No, or no answer): say what the output says and wait for him: ",
                    f"- The output holds `Its resume: ` (exit code {refused}, or {error}): ",
                    f"- Exit code {error} or {refused}, or anything else: show the last lines unchanged and wait."):
         assert any(ln.startswith(needle) for ln in bullets), f"Step 2 lacks: {needle}"
@@ -1493,7 +1493,8 @@ MUST_CONTAIN = {
         "Exit code 0 (it says `load started`): go to Step 3",
         "If it also says to keep the Claude Code window open, tell him that first",
         "Exit code 3 (check again): run Step 1 once more", "and run its new line once", "wait for him: never loop",
-        "Exit code 4 (No, or no answer): say nothing was loaded and wait for him",
+        "Exit code 4 (No, or no answer): say what the output says and wait for him",
+        "at a RESUME box, the load stays interrupted",
         "The output holds `Its resume: `", "Show the output unchanged",
         "run it, as in this step, only when he says so, and only if it starts with `python`",
         "do not retry, rephrase or wrap it",
@@ -1549,7 +1550,7 @@ def _():
 def _():
     load, brief = read(SKILLS / "yq-load" / "SKILL.md"), read(SKILLS / "yq-brief" / "SKILL.md")
     turned = (
-        ("say nothing was loaded and wait for him", "run the line again until he clicks Yes"),
+        ("say what the output says and wait for him", "run the line again until he clicks Yes"),
         ("do not retry, rephrase or wrap it", "try it once more through PowerShell"),
         ("If he himself answered No to Claude Code's question, nothing was loaded: wait for him. Otherwise tell", "Tell"),
         ("double-click `business_data/ops/loads/<run>/go.cmd`", "double-click the `go.cmd` the check named"),

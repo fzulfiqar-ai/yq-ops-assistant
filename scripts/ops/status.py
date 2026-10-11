@@ -120,23 +120,47 @@ def lock_state(now: datetime | None = None) -> dict:
     return {"state": state, "run": run, "step": step}
 
 
-def failed_load() -> dict | None:
-    """The newest real load attempt, when it was CLOSED as failed after its refresh had begun (the
-    database may hold part of it) and no load has finished since. None otherwise."""
-    from scripts.ops import loadplan
-    run = loadplan.latest_run()
-    if not run or run.startswith(REHEARSAL_PREFIX):
-        return None
-    ends = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
-    if not ends or ends[-1].get("event") != "failed" or not ends[-1].get("written"):
-        return None
-    last = (read_state().get("last_load") or {}).get("finished_at")
+def when(text) -> datetime | None:
+    """A time as the journal and state.json write it (ISO, with its offset); None when it is none."""
     try:
-        if last and datetime.fromisoformat(str(last)) > datetime.fromisoformat(str(ends[-1].get("at"))):
-            return None
+        t = datetime.fromisoformat(str(text))
     except (TypeError, ValueError):
-        pass
-    return {"run": run, "step": ends[-1].get("step") or "?"}
+        return None
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
+def failed_load() -> dict | None:
+    """The newest load that was CLOSED as failed after its refresh had begun (the database may hold
+    part of it), while no load has finished since. None otherwise.
+
+    Every real run's journal is read, not the newest folder's alone: a later check that never
+    loaded (he answered No, or it stopped), a rehearsal, or a run that was closed before it wrote
+    anything changes nothing in the database, so none of them may take the banner away. Only a
+    load that FINISHED after the failure does."""
+    from scripts.ops import loadplan
+    last = read_state().get("last_load")
+    good = when(last.get("finished_at")) if isinstance(last, dict) else None
+    bad: tuple[datetime, str, dict] | None = None
+    base = paths.loads_dir()
+    for folder in (base.iterdir() if base.is_dir() else []):
+        run = folder.name
+        if not loadplan.is_run(run) or run.startswith(REHEARSAL_PREFIX) or not folder.is_dir():
+            continue
+        try:
+            rows = loadplan.journal_read(run)
+        except OSError:
+            continue                          # a journal held by another program this moment says nothing
+        for row in rows:
+            at = when(row.get("at"))
+            if at is None:
+                continue
+            if row.get("event") == "finished":
+                good = at if good is None or at > good else good
+            elif row.get("event") == "failed" and row.get("written") and (bad is None or at > bad[0]):
+                bad = (at, run, row)
+    if bad is None or (good is not None and good >= bad[0]):
+        return None
+    return {"run": bad[1], "step": bad[2].get("step") or "?"}
 
 
 def interrupted_banner() -> str | None:

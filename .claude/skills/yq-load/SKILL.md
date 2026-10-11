@@ -32,7 +32,7 @@ Run `python -m scripts.ops load check $ARGUMENTS` and show its table in full.
 In the same turn, when the output ends with a `GO: ` line, first tell him a Yes/No box opens on the PC when the line runs: Yes loads, No changes nothing. Then run exactly the text after `GO: ` (Bash tool, timeout 600000 ms, not in the background). Claude Code may ask him to approve it first: that is expected.
 - Exit code 0 (it says `load started`): go to Step 3. If it also says to keep the Claude Code window open, tell him that first.
 - Exit code 3 (check again): run Step 1 once more with the same arguments, show the new table and run its new line once. If that go ends with exit code 3 as well, show its lines and wait for him: never loop.
-- Exit code 4 (No, or no answer): say nothing was loaded and wait for him.
+- Exit code 4 (No, or no answer): say what the output says and wait for him: nothing was loaded, or, at a RESUME box, the load stays interrupted.
 - The output holds `Its resume: ` (exit code 2, or 1): a load was cut off and has to be finished first. Show the output unchanged. The text after `Its resume: ` is the line that resumes it: run it, as in this step, only when he says so, and only if it starts with `python`.
 - If the permission layer refuses the line: do not retry, rephrase or wrap it. If he himself answered No to Claude Code's question, nothing was loaded: wait for him. Otherwise tell him to double-click `business_data/ops/loads/<run>/go.cmd` in the project folder (the check printed its full path, on the line that starts `If Claude may not start it`): the same box opens. When he says he has answered it, go to Step 3.
 - Exit code 1 or 2, or anything else: show the last lines unchanged and wait.

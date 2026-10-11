@@ -20,10 +20,14 @@ THE GO (the launcher: it returns in seconds)
      Under the file lines it shows what the check flagged, each on a line that starts ATTENTION
      (reports with different as-on dates and the like), and it names every option he gave the
      check that changes what a Yes does (--replace-ok and the like); a marker file the box would
-     not show is refused. Anything but Yes: exit 4, nothing loaded.
+     not show is refused. Anything but Yes: exit 4, nothing loaded. A Yes within three seconds of
+     the box opening does not count (a key typed for another window): the box is shown again.
   4. Takes business_data/ops/LOCK, starts the worker detached, hands the lock over, returns 0. The
      worker runs only as the child of the launcher that holds the lock, and only with that launcher's
      one-time word: the lock keeps the word's hash, never the word, so it cannot be read back.
+     (That keeps a worker from being started by mistake, by hand or from a lock read off the disk.
+     It is no defence against a program written to forge a lock: such a program could run the
+     loader itself.)
 
 THE WORKER (loadplan.STEPS; every step journalled; the lock's heartbeat every 10 s; the PC kept awake)
   token      the same check once more; data/clean emptied and confirmed empty
@@ -37,9 +41,11 @@ THE WORKER (loadplan.STEPS; every step journalled; the lock's heartbeat every 10
   refresh    scripts.refresh.refresh(staging, send=False) in a CHILD process. It passes on: ok,
              verify passed, no loader notice, ingest_runs grew by exactly 2 in that attempt. A
              load-stage failure is run once more, identically; so is a load whose verification
-             could not RUN (nothing was compared: that is no failed verify). Verify failed (it
-             ran and the totals differ): the run is closed FAILED and this staging is refused
-             from then on (the data IS loaded; the journal says so)
+             could not RUN (nothing was compared: that is no failed verify). Before that second
+             run the files and the commits are compared with the table once more, and after a
+             load that is whole but unverified the quiet moment is waited for again. Verify
+             failed (it ran and the totals differ): the run is closed FAILED and this staging is
+             refused from then on (the data IS loaded; the journal says so)
   reconcile  scripts.reconcile_check. Not passed: reported, the load goes on
   post_gate  the after-snapshot and its compare. Not passed: "gate needs a look", still published
   publish    staging -> business_data/Focus ERP <as-on date>/ (the marker of a partial export
@@ -56,6 +62,10 @@ and model keys in os.environ; python-dotenv never fills a variable that is set, 
 os.environ would run with those keys blank instead of the way the engine runs when it is started by
 hand. The refresh child still calls refresh(folder, send=False): the refresh sends no briefing
 from this PC either way.
+The worker puts itself into a Windows job of its own (own_job), so whatever it has started ends
+with it: a worker ended by hand leaves no loader writing behind it. Where Windows refuses that
+job, the lock is the guard: while the worker waits on a child the lock names it (child_pid), and
+no go, resume or rehearsal starts while such a child of a worker that is gone still runs.
 
 INTERRUPTED = a lock whose process is gone. The next go for the same run is a RESUME: files and
 commits are checked (not the fingerprint, which the interrupted load has moved), the journalled
@@ -66,7 +76,9 @@ resume that cannot go on (its files or programs moved) is closed with those word
 whose worker never got going keeps its lock, so the load stays INTERRUPTED and can be resumed.
 A run that is closed as failed after its refresh had begun carries step and written = true in its
 closing row: scripts.ops.status.failed_load() reads them, and every skill then opens with LAST
-LOAD FAILED until a load has finished.
+LOAD FAILED until a load has finished. A load that had begun never loses its lock while that
+closing row is not on disk (the journal sits in a synced folder and a write can be refused): it
+then goes on reading INTERRUPTED, which is the careful one of the two.
 A lock whose process is ALIVE but silent (no heartbeat for two minutes) also reads INTERRUPTED in
 every skill; no second loader is started beside a live process, and the go says exactly that and
 what he can do about a worker that has truly hung.
@@ -131,9 +143,12 @@ FOLLOW_LINE = "python -m scripts.ops load status --wait"
 EXIT_OK, EXIT_ERROR, EXIT_REFUSED, EXIT_CHECK_AGAIN, EXIT_NO_ANSWER = 0, 1, 2, 3, 4
 
 BOX_TIMEOUT_S = 540                 # the skill's tool call lasts 600 s at most
+BOX_MIN_READ_S = 3                  # a Yes sooner than this after the box opened was a stray key, not an answer
+BOX_SHOWS = 3                       # how often the box is shown before such answers end it as 'too_fast'
 HEARTBEAT_S = 10                    # scripts.ops.status calls a lock stale after 120 s
 START_WAIT_S = 10                   # the launcher waits this long for the worker's first journal line
 RETRY_PAUSE_S = 30                  # before the one identical re-run of a failed load stage
+REUSE_MAX_S = 3600                  # a resume reuses a backup or before-snapshot no older than this (nothing written)
 NEW_RUNS_PER_LOAD = 2               # ingest_runs rows of one refresh: the loader's and its own
 FIELD = 160                         # no sentence of the journal is longer (`load status` shows a field whole)
 BACKUP_TIMEOUT_S, GATE_TIMEOUT_S, RECONCILE_TIMEOUT_S = 1800, 900, 1800      # read-only steps only
@@ -311,6 +326,10 @@ def own_command_lines(run: str, token: str) -> list[str]:
     for exe in ("python", "python.exe", "py", "python3", here, here.replace("\\", "/"), f'"{here}"'):
         out.append(f"{exe} {tail}")
         out.append(f"{exe} -X utf8 {tail}")
+    # and the spelling this very process was started with, whatever its interpreter options were
+    started = [str(a) for a in getattr(sys, "orig_argv", [])]
+    if MODULE in started and started[-4:] == ["--run", run, "--token", token]:
+        out.append(" ".join(started))
     return out
 
 
@@ -343,19 +362,46 @@ def allow_entries_matching(commands: list[str], files: list[Path]) -> tuple[list
 
 # ── Windows: the box, wakefulness, liveness ───────────────────────────────────────────────────
 
-def windows_box(title: str, text: str, timeout_s: float = BOX_TIMEOUT_S) -> str:
-    """The owner's confirmation: 'yes', 'no', 'timeout', 'closed' or 'unavailable'. Only 'yes' loads."""
-    if os.name != "nt":
-        return "unavailable"
-    try:
-        show = ctypes.WinDLL("user32", use_last_error=True).MessageBoxTimeoutW
-        show.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint,
-                         ctypes.c_ushort, ctypes.c_uint]
-        show.restype = ctypes.c_int
-        answer = int(show(None, text, title, BOX_FLAGS, 0, int(timeout_s * 1000)))
-    except Exception:  # noqa: BLE001
-        return "unavailable"
-    return _BOX_ANSWERS.get(answer, "closed" if answer else "unavailable")
+def _show_box(title: str, text: str, timeout_ms: int) -> int:
+    """One showing of the Windows box; the button's number (0 = it could not be shown)."""
+    show = ctypes.WinDLL("user32", use_last_error=True).MessageBoxTimeoutW
+    show.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint,
+                     ctypes.c_ushort, ctypes.c_uint]
+    show.restype = ctypes.c_int
+    return int(show(None, text, title, BOX_FLAGS, 0, int(timeout_ms)))
+
+
+def windows_box(title: str, text: str, timeout_s: float = BOX_TIMEOUT_S, *, show=None,
+                clock: Callable[[], float] = time.monotonic) -> str:
+    """The owner's confirmation: 'yes', 'no', 'timeout', 'closed', 'too_fast' or 'unavailable'.
+    Only 'yes' loads.
+
+    The box takes the keyboard when it opens, and in a Yes/No box the letter Y alone answers Yes.
+    A key typed for another window at that moment would start a load nobody has read. So a Yes
+    that comes within BOX_MIN_READ_S of the box opening does not count: the box is shown again and
+    says why. After BOX_SHOWS such answers it is 'too_fast', which loads nothing. (Enter and the
+    space bar fall on No, the default button.) `show` and `clock` are given by tests only."""
+    if show is None:
+        if os.name != "nt":
+            return "unavailable"
+        show = _show_box
+    deadline = clock() + float(timeout_s)
+    note = ""
+    for _ in range(BOX_SHOWS):
+        left = deadline - clock()
+        if left <= 0:
+            return "timeout"
+        opened = clock()
+        try:
+            answer = int(show(title, note + text, int(left * 1000)))
+        except Exception:  # noqa: BLE001
+            return "unavailable"
+        said = _BOX_ANSWERS.get(answer, "closed" if answer else "unavailable")
+        if said != "yes" or clock() - opened >= BOX_MIN_READ_S:
+            return said
+        note = (f"A Yes came within {int(BOX_MIN_READ_S)} seconds of this box opening, before it could be read: "
+                "it did not count.\nRead the lines below, then answer.\n\n")
+    return "too_fast"
 
 
 def keep_awake(on: bool) -> bool:
@@ -398,19 +444,90 @@ def process_created(pid: int) -> int | None:
         return None
 
 
-def worker_alive(lock: dict) -> bool:
-    """Is the process that holds this lock still running? Read with OpenProcess (scripts.ops.status),
-    never by signalling it: on Windows a signal ENDS the process."""
+def _same_process(pid, created) -> bool:
+    """Is the process with this id running, and is it the one that was born when `created` says?
+    Read with OpenProcess (scripts.ops.status), never by signalling it: on Windows a signal ENDS
+    the process."""
     try:
-        pid = int(lock.get("pid") or 0)
+        pid = int(pid or 0)
     except (TypeError, ValueError):
         return False
     if not status.pid_alive(pid):
         return False
-    then, now = lock.get("pid_created"), process_created(pid)
-    if then is None or now is None:
+    now = process_created(pid)
+    if created is None or now is None:
         return True                          # cannot tell it from a stranger: never start a second load
-    return int(then) == int(now)
+    try:
+        return int(created) == int(now)
+    except (TypeError, ValueError):
+        return True
+
+
+def worker_alive(lock: dict) -> bool:
+    """Is the process that holds this lock still running?"""
+    return _same_process(lock.get("pid"), lock.get("pid_created"))
+
+
+def loader_alive(lock: dict) -> int | None:
+    """The engine program a worker that is GONE left running: its process id, None when there is
+    none. While the worker waits on an engine step, the lock names that child (child_pid,
+    child_created, child_step). A worker that is ended by hand does not always take its child with
+    it (own_job() below is what makes it so; Windows may refuse it), and a loader that is still
+    writing must never get a second one beside it."""
+    pid = lock.get("child_pid")
+    return int(pid) if pid and _same_process(pid, lock.get("child_created")) else None
+
+
+JOB_KILL_ON_CLOSE = 0x00002000               # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+_JOB_EXTENDED_LIMITS = 9                     # JobObjectExtendedLimitInformation
+_own_job_handle = None                       # kept open for the life of the process: closing it is the signal
+
+
+def own_job() -> bool:
+    """Put THIS process into a Windows job of its own that ends with it. Every program started
+    afterwards (the loader, and whatever the loader starts) belongs to that job, and Windows ends
+    them all the moment this process is gone, however it went. So a worker that is ended in Task
+    Manager leaves no loader writing behind it, and a load that reads INTERRUPTED is one that has
+    stopped. False when it could not be done (another system, or Windows refused): the child the
+    lock names is then what keeps a second loader from starting beside the first."""
+    global _own_job_handle
+    if os.name != "nt":
+        return False
+    try:
+        class _Basic(ctypes.Structure):      # JOBOBJECT_BASIC_LIMIT_INFORMATION
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+                        ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32),
+                        ("SchedulingClass", ctypes.c_uint32)]
+
+        class _Extended(ctypes.Structure):   # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            _fields_ = [("BasicLimitInformation", _Basic), ("IoInfo", ctypes.c_ulonglong * 6),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        k32.SetInformationJobObject.restype = ctypes.c_int
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.AssignProcessToJobObject.restype = ctypes.c_int
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return False
+        limits = _Extended()
+        limits.BasicLimitInformation.LimitFlags = JOB_KILL_ON_CLOSE
+        if not k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)) \
+                or not k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()):
+            k32.CloseHandle(job)             # this process is in no such job: closing it ends nothing
+            return False
+        _own_job_handle = job
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ── children ──────────────────────────────────────────────────────────────────────────────────
@@ -437,12 +554,16 @@ def child_env(base=None) -> dict:
 
 
 def run_child(argv: list, *, cwd: Path, env: dict, log: Callable[[str], None] | None = None,
-              timeout: float | None = None) -> Child:
+              timeout: float | None = None, seen: Callable[[int | None], None] | None = None) -> Child:
     """Run one child to its end. Output is read as BYTES and decoded here (UTF-8, replacement):
-    an em dash or a stray cp1252 byte in a report line can never stop the worker."""
+    an em dash or a stray cp1252 byte in a report line can never stop the worker. `seen` is told
+    the child's process id as it starts and None when it has ended (the worker writes it into the
+    lock: see loader_alive)."""
     proc = subprocess.Popen([str(a) for a in argv], cwd=str(cwd), env=env, shell=False,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             close_fds=True)
+    if seen is not None:
+        seen(proc.pid)
     expired = threading.Event()
 
     def _expire() -> None:
@@ -465,6 +586,8 @@ def run_child(argv: list, *, cwd: Path, env: dict, log: Callable[[str], None] | 
         if timer is not None:
             timer.cancel()
         proc.stdout.close()
+    if seen is not None:                     # only a child that HAS ended is taken out of the lock
+        seen(None)
     return Child(int(code), "".join(parts), expired.is_set())
 
 
@@ -743,6 +866,20 @@ def _lock_unreadable(exc: OSError, nothing: str) -> str:
             f"may be running. {nothing}: try again in a minute.")
 
 
+def _closed_or_kept(dead: dict | None, began: bool, closed: bool, tell_state: bool = True) -> str:
+    """An interrupted load that can never be resumed is closed by a row in its journal, and only
+    then does its dead lock go. A load that had BEGUN keeps the lock while that row could not be
+    written (the journal sits in a synced folder; another program may hold the file): without the
+    row nothing would say any more that the database may hold part of it. -> what the owner is told."""
+    if closed or not began:
+        if dead is not None:
+            _clear_dead_lock(dead)
+        state = " " + MAY_HOLD if began and tell_state else ""
+        return "The interrupted load is closed: it cannot be resumed." + state
+    return ("The interrupted load could not be closed: its journal cannot be written at this moment (another "
+            f"program holds the file). It stays INTERRUPTED. {MAY_HOLD} Try /yq-load again in a minute.")
+
+
 def _began(run: str, rows: list[dict] | None = None) -> bool:
     """Has a refresh of this run ever started? Every load deletes and re-inserts the whole stock
     ledger, so from that journal line on the database may hold part of the load until a load
@@ -791,6 +928,15 @@ def _held_words(lock: dict, nothing: str) -> str:
         after = "; the next load or rehearsal clears its lock." if rehearsal else ", then type /yq-load to resume."
         return said + f"; if it has truly hung, end python.exe (pid {pid}) in Task Manager{after}"
     return f"A {what} is running (run {held_by}, at {at}). {nothing}: follow it with {FOLLOW_LINE}"
+
+
+def _orphan_words(lock: dict, pid: int, nothing: str) -> str:
+    """Why nothing starts or resumes while the engine program of a worker that is gone still runs."""
+    held_by, step = str(lock.get("run") or "?"), str(lock.get("child_step") or lock.get("step") or "?")
+    return (f"The worker of run {held_by} is gone, but the program it had started at step {step} is still running on "
+            f"this PC (python.exe, pid {pid}) and may still be writing to the database. {nothing} and nothing is "
+            "resumed beside it: wait until it has ended, then type /yq-load. If it has truly hung, end that process "
+            "in Task Manager first.")
 
 
 # ── reading the plan ──────────────────────────────────────────────────────────────────────────
@@ -1059,10 +1205,16 @@ def _same_commit_form(old: str, new: str) -> str:
 
 def token_moved(plan: dict, deps: "Deps", with_fingerprint: bool) -> list[str]:
     """The parts of the token that differ from what the table showed, in plain words ([] = none).
-    Without the fingerprint (a resume) only the files and the two commits are compared."""
+    Without the fingerprint (a resume, the re-run of a load stage) only the files and the two
+    commits are compared. A program file that was changed in this folder and not committed is a
+    change whatever the table's own token says (loadplan.head_part): the loader reads its programs
+    from the disk."""
     old = dict(plan.get("token_parts") or {})
     new = dict(deps.collect_parts(plan, with_fingerprint))
     new["live"] = _same_commit_form(str(old.get("live") or ""), str(new.get("live") or ""))
+    local = str(new.get("head") or "").partition(loadplan.HEAD_LOCAL)[2]
+    if local and old.get("head") == new.get("head"):
+        return [f"this folder's programs (changed on this PC and not committed: {local})"]
     if not with_fingerprint:
         return loadplan.moved_parts(dict(old, fingerprint={}), dict(new, fingerprint={}))
     if loadplan.token_of(new) == plan.get("token"):
@@ -1144,7 +1296,7 @@ def _real_parts(plan: dict, with_fingerprint: bool, root: Path) -> dict:
     drop, run = drop_path(plan), str(plan["run"])
     if not with_fingerprint:
         return {"drop": loadplan.manifest(drop), "staging": loadplan.manifest(loadplan.staging_path(run)),
-                "head": gitinfo.head(root) or "", "live": live}
+                "head": loadplan.head_part(root), "live": live}
     with db.session() as session:            # read-only: asserted by scripts.ops.db before it is handed out
         return loadplan.collect_parts(drop, run, root, live, session)
 
@@ -1183,9 +1335,12 @@ class RealRunner:
         if run.startswith(REHEARSAL_PREFIX):
             raise RuntimeError("a rehearsal never gets the real runner")
         self.root, self.run, self.log = Path(root), run, log
+        self.on_child: Callable[[str, int | None], None] | None = None     # (step, pid or None): set by the worker
 
     def __call__(self, label: str, argv: list, timeout: float | None = None) -> Child:
-        return run_child(argv, cwd=self.root, env=child_env(), log=self.log, timeout=timeout)
+        told = self.on_child
+        return run_child(argv, cwd=self.root, env=child_env(), log=self.log, timeout=timeout,
+                         seen=(lambda pid: told(label, pid)) if told is not None else None)
 
 
 def real_deps(run: str, plan: dict, root: Path = ROOT) -> Deps:
@@ -1486,6 +1641,9 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
         held_by, at = str(lock.get("run") or "?"), str(lock.get("step") or "start")
         if worker_alive(lock):               # a load's worker, or a rehearsal's: nothing starts beside it
             raise Refusal(_held_words(lock, "Nothing was started"))
+        orphan = loader_alive(lock)          # the worker is gone and the loader it started is not
+        if orphan:
+            raise Refusal(_orphan_words(lock, orphan, "Nothing was started"))
         if held_by == "?":
             _clear_dead_lock(lock)           # a launcher died while writing it: no worker was ever started
             say("(an unreadable left-over lock is cleared: no load was running under it)")
@@ -1514,14 +1672,12 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
             # here and its dead lock goes; left as it is, the check would keep sending him to this
             # very line, and this line would keep refusing.
             began = _began(run)
-            journal(run, "failed", result="failed" if began else "check_again", check_again=True,
-                    step=_stopped_step(run, dead), written=began,
-                    text="This interrupted load cannot be resumed: a newer check replaced its table."
-                         + (" " + MAY_HOLD if began else ""),
-                    why=_sentence(f"the check of run {newer} replaced this one"), next="Type /yq-load.")
-            if dead is not None:
-                _clear_dead_lock(dead)
-            say("The interrupted load is closed: it cannot be resumed." + (" " + MAY_HOLD if began else ""))
+            closed = journal(run, "failed", result="failed" if began else "check_again", check_again=True,
+                             step=_stopped_step(run, dead), written=began,
+                             text="This interrupted load cannot be resumed: a newer check replaced its table."
+                                  + (" " + MAY_HOLD if began else ""),
+                             why=_sentence(f"the check of run {newer} replaced this one"), next="Type /yq-load.")
+            say(_closed_or_kept(dead, began, closed))
         raise Refusal(_replaced_words(newer))
 
     stops = plan_stops(plan)
@@ -1557,14 +1713,12 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
         if resume:
             # closed for good: these files can never be resumed. When the refresh had begun the row
             # says so and is no 'check_again' result (that one reads "stopped before anything was loaded")
-            journal(run, "failed", result="failed" if refresh_started else "check_again", check_again=True,
-                    step=stopped_at, written=refresh_started, moved=moved,
-                    text="This interrupted load cannot be resumed: something changed since its table was shown."
-                         + (" " + MAY_HOLD if refresh_started else ""),
-                    why=_sentence("this changed: " + "; ".join(moved)), next="Type /yq-load for a new check.")
-            if dead is not None:
-                _clear_dead_lock(dead)
-            say("The interrupted load is closed: it cannot be resumed.")
+            closed = journal(run, "failed", result="failed" if refresh_started else "check_again", check_again=True,
+                             step=stopped_at, written=refresh_started, moved=moved,
+                             text="This interrupted load cannot be resumed: something changed since its table was "
+                                  "shown." + (" " + MAY_HOLD if refresh_started else ""),
+                             why=_sentence("this changed: " + "; ".join(moved)), next="Type /yq-load for a new check.")
+            say(_closed_or_kept(dead, refresh_started, closed, tell_state=False))
         raise CheckAgain(moved, written=refresh_started)
 
     # the options and the loader's marker files must tell one story: the box shows the options
@@ -1577,11 +1731,17 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
     title, text = box_text(run, plan, resume_step=stopped_at if resume else None, rehearsal=rehearsal)
     answer = "yes" if no_box else str(deps.box(title, text, BOX_TIMEOUT_S))
     if answer != "yes":
+        # at the RESUME box of a load that had begun, "nothing loaded" would not be true of the database
+        begun = resume and refresh_started
+        nothing = f"nothing more was loaded and the load stays INTERRUPTED. {MAY_HOLD}" if begun else "nothing loaded."
         if answer == "no":
-            raise NoAnswer("You answered No: nothing loaded.")
+            raise NoAnswer(f"You answered No: {nothing}")
         if answer == "unavailable":
-            raise NoAnswer("The Yes/No box could not be shown on this screen: no answer, nothing loaded.")
-        raise NoAnswer("no answer, nothing loaded")
+            raise NoAnswer(f"The Yes/No box could not be shown on this screen: no answer, {nothing}")
+        if answer == "too_fast":
+            raise NoAnswer("Yes came at once every time the box opened, before it could be read. That is no answer: "
+                           f"{nothing} Type /yq-load again.")
+        raise NoAnswer(f"no answer, {nothing}" if begun else "no answer, nothing loaded")
 
     # take the lock, start the worker, hand the lock over. The one-time word goes to the worker in
     # its environment; the lock and the journal keep its hash only. The lock of a resume whose
@@ -1598,21 +1758,38 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
         raise Refusal("Another load took the lock while the box was open. Nothing was started here: follow "
                       f"that one with {FOLLOW_LINE}") from None
     log_path = loadplan.run_dir(run) / "worker.log"
+    # From here this launcher's lock stands where the dead lock of the interrupted load stood. A load
+    # that had BEGUN must keep a lock until a row of its journal says how it ended: whatever goes wrong
+    # before the worker runs, the lock is then left behind (its process ends with this call, so every
+    # skill reads LOAD INTERRUPTED at the step the lock names) and nothing says "nothing was loaded".
+    keep = resume and refresh_started
     try:
         # the box may have stood open for minutes: what was true before it is asked once more
         if loadplan.run_result(run) in ("FINISHED", "FAILED"):
+            keep = False                     # its closing row is on disk: the lock has nothing left to say
             raise Refusal(f"Run {run} was closed while the box was open. Nothing was started: type /yq-load.")
         newer = _replaced_by(run)
         if newer:
+            if keep:                         # it can never be resumed now: closed here, as before the box
+                keep = not journal(run, "failed", result="failed", check_again=True, step=stopped_at, written=True,
+                                   text="This interrupted load cannot be resumed: a newer check replaced its table. "
+                                        + MAY_HOLD,
+                                   why=_sentence(f"the check of run {newer} replaced this one"), next="Type /yq-load.")
+                say(f"The interrupted load {'stays INTERRUPTED' if keep else 'is closed: it cannot be resumed'}. "
+                    + MAY_HOLD)
             raise Refusal(_replaced_words(newer, late=True))
         proc = deps.spawn(run, Path(deps.root), nonce, log_path)
     except Refusal:
-        lockfile.release()
+        if not keep:
+            lockfile.release()
         raise
     except Exception as exc:  # noqa: BLE001
+        why = f"The worker could not be started ({type(exc).__name__}: {_short(str(exc), 160)})."
+        if keep:
+            raise Refusal(f"{why} LOAD INTERRUPTED at {stopped_at}: the load stays as it was. {MAY_HOLD} "
+                          "Type /yq-load to resume.") from None
         lockfile.release()
-        raise Refusal(f"The worker could not be started ({type(exc).__name__}: {_short(str(exc), 160)}). "
-                      "Nothing was loaded.") from None
+        raise Refusal(f"{why} Nothing was loaded.") from None
     try:
         return _confirm_start(run, proc, word_sha[:8], lockfile, deps, say, log_path)
     except Exception:  # noqa: BLE001  (the worker IS running: never say otherwise because a file could not be read)
@@ -1707,6 +1884,8 @@ class Job:
         self.pre_gate: Path | None = None
         self.result: dict = {}
         self.published: str | None = None
+        if getattr(deps.runner, "on_child", self) is None:     # a runner that starts real children (RealRunner)
+            deps.runner.on_child = self._child_seen
 
     # plumbing
     def j(self, event: str, **fields) -> bool:
@@ -1747,18 +1926,50 @@ class Job:
                     self.deps.sleep(10)
         raise Stop(self.step, f"{what} ({type(last).__name__}: {_short(str(last), 200)})")
 
-    def _check_token(self) -> None:
+    def _check_token(self, with_fingerprint: bool | None = None) -> None:
         """Is everything still what the table showed? Asked at the first step and again right before
         the write. The plan file is read once more as well: a check that a newer check replaced
-        meanwhile is not loaded (the lock keeps a new check from starting, not from finishing)."""
+        meanwhile is not loaded (the lock keeps a new check from starting, not from finishing).
+        with_fingerprint None = as this run stands (not after a refresh of it had begun)."""
         newer = _replaced_by(self.run)
         if newer:
             named = f" (run {newer})" if loadplan.is_run(newer) else ""
             raise CheckAgain([f"the load check itself: a newer check replaced it{named}"])
-        moved = self._read(lambda: token_moved(self.plan, self.deps, not self.resumed_after_write),
+        compare_db = (not self.resumed_after_write) if with_fingerprint is None else bool(with_fingerprint)
+        moved = self._read(lambda: token_moved(self.plan, self.deps, compare_db),
                            "the files, the live site or the database could not be read for the token check")
         if moved:
             raise CheckAgain(moved)
+
+    def _child_seen(self, step: str, pid: int | None) -> None:
+        """The engine child this worker waits on, kept in the lock while it runs (loader_alive)."""
+        if pid:
+            self.lock.update(child_pid=int(pid), child_created=process_created(int(pid)), child_step=step)
+        else:
+            self.lock.update(child_pid=None, child_created=None, child_step=None)
+
+    def _before_rerun(self, whole: bool) -> None:
+        """What holds before the one identical re-run of the load starts. The first run may have
+        taken minutes (or the PC slept through it): the files and the two commits are compared
+        with the table once more, never the database, which the first run has moved. And when the
+        first run left the database WHOLE (the data loaded, only its verification could not run),
+        the re-run waits for a quiet moment between two production ticks as the first run did;
+        after a load stage that failed part-way it starts at once, because a half-loaded ledger is
+        the worse thing to leave standing."""
+        d = self.deps
+        if whole and d.wait_for_tick:
+            waited = 0.0
+            while True:
+                wait = tick_wait_seconds(d.now())
+                if wait <= 0:
+                    break
+                nap = min(wait, 30.0)
+                d.sleep(nap)
+                waited += nap
+            if waited:
+                self.j("note", step="refresh", text=f"Waited {round(waited / 60, 1)} min for a quiet moment between "
+                                                    "two production ticks before the second run.")
+        self._check_token(with_fingerprint=False)
 
     def _snapshot(self, label: str, gate_label: str) -> tuple[Path | None, Child]:
         gates = Path(self.deps.gates_dir)
@@ -1794,6 +2005,7 @@ class Job:
             # the row every status call shows first, that the window has to stay open
             self.j("started", launch=self.launch_tag, pid=os.getpid(), resume=self.resume or None,
                    rehearsal=d.rehearsal or None, awake=bool(awake), breakaway=self.breakaway,
+                   own_job=True if _own_job_handle is not None else None,
                    options=option_flags(self.plan) or None, text=opening,
                    next=stay_open_words(d.rehearsal) if self.breakaway is False else None)
             if d.prepare is not None:
@@ -1874,10 +2086,16 @@ class Job:
                     "against the reports.")
         else:
             text = f"{pre}LOAD FAILED at {step}. The database holds this load, or part of it."
-        self.j("failed", launch=self.launch_tag, result=result, check_again=again or None, step=step,
-               written=bool(self.written), text=text, why=why, next=nxt, metrics=fields.get("metrics"),
-               moved=fields.get("moved"))
-        self.lock.release()
+        closed = self.j("failed", launch=self.launch_tag, result=result, check_again=again or None, step=step,
+                        written=bool(self.written), text=text, why=why, next=nxt, metrics=fields.get("metrics"),
+                        moved=fields.get("moved"))
+        if closed or not self.written:
+            self.lock.release()
+        else:
+            # The closing row is what tells every skill that the database may hold part of this load
+            # (LAST LOAD FAILED). It could not be written, so the lock stays instead: its process ends
+            # with this worker and the load reads INTERRUPTED until /yq-load settles it.
+            self.deps.log("(the closing line could not be written: the lock is kept, the load reads INTERRUPTED)")
         return EXIT_CHECK_AGAIN if again else EXIT_ERROR
 
     def _finish(self) -> int:
@@ -1892,8 +2110,14 @@ class Job:
             text += " Needs a look: " + ", ".join(look) + "."
             nxt = ("Nothing was loaded" if self.deps.rehearsal else "The data is loaded and verified") \
                 + ": ask Claude to look into the 'needs a look' lines above."
-        self.j("finished", launch=self.launch_tag, result="ok" if not look else "ok_needs_look",
-               needs_look=look or None, data_date=data_date, published=published, text=text, next=nxt)
+        for _ in range(3):                   # the row that says FINISHED is tried for a minute, not 20 seconds
+            if self.j("finished", launch=self.launch_tag, result="ok" if not look else "ok_needs_look",
+                      needs_look=look or None, data_date=data_date, published=published, text=text, next=nxt):
+                break
+        else:
+            # the load IS whole (verified, and state.json has its result): a lock left behind would
+            # call a finished load interrupted, so it goes all the same and the log says what is missing
+            self.deps.log("(the line that says FINISHED could not be written; state.json holds this load's result)")
         self.lock.release()
         return EXIT_OK
 
@@ -1910,12 +2134,27 @@ class Job:
                     + emptied), {}
         return "Files, programs and database are as the table showed. " + emptied, {}
 
+    def _old_baseline(self, prior: dict) -> bool:
+        """Is a journalled backup or before-snapshot too old to stand for "before the load"? Only
+        asked while nothing was written: orders come in all day, so a baseline from hours ago is
+        taken again. (Once a refresh had begun the old one is all there is, whatever its age.)"""
+        if self.resumed_after_write:
+            return False
+        at = status.when(prior.get("at"))
+        return at is not None and (self.deps.now() - at).total_seconds() > REUSE_MAX_S
+
     def step_backup(self):
         """A resume reuses the journalled backup. Once a refresh had begun it is never retaken (it
-        would hold a half-loaded state); before that, an archive that is gone is simply taken again."""
+        would hold a half-loaded state); before that, an archive that is gone or more than an hour
+        old is simply taken again."""
         d, prior = self.deps, self.reuse["backup"] or {}
         kept = str(prior.get("archive") or "")
         on_disk = bool(kept) and Path(kept).is_file()
+        if kept and on_disk and self._old_baseline(prior):
+            self.j("note", step="backup", text=_short(f"The backup {Path(kept).name} is from before the interruption "
+                                                      "and no longer recent: nothing was loaded yet, so a new one is "
+                                                      "taken.", FIELD))
+            kept, on_disk = "", False
         if kept and (on_disk or self.resumed_after_write):
             name = Path(kept).name
             if not on_disk:
@@ -1964,6 +2203,10 @@ class Job:
         prior = self.reuse["pre_gate"] or {}
         kept = str(prior.get("path") or "")
         on_disk = bool(kept) and Path(kept).is_file()
+        if kept and on_disk and self._old_baseline(prior):
+            self.j("note", step="pre_gate", text=_short(f"The before-snapshot {Path(kept).name} is no longer recent: "
+                                                        "nothing was loaded yet, so a new one is taken.", FIELD))
+            kept, on_disk = "", False
         if kept and (on_disk or self.resumed_after_write):
             self.pre_gate = Path(kept)
             if not on_disk:
@@ -2029,6 +2272,8 @@ class Job:
         argv = [sys.executable, "-X", "utf8", "-c", REFRESH_PROGRAM, str(d.staging)]
         unchecked = 0                        # runs that loaded the data and could not compare it with the reports
         for attempt in (1, 2):
+            if attempt > 1:
+                self._before_rerun(whole=unchecked > 0)      # stops (CHECK AGAIN) when the table no longer holds
             before = self._read(lambda: d.ingest_runs(None), "the run records could not be read before the load")[0]
             if attempt > 1:
                 self.j("step_start", step="refresh", attempt=attempt, text="The identical load runs once more.")
@@ -2248,6 +2493,9 @@ def rehearse(seconds: int = REHEARSAL_SECONDS, *, no_box: bool = False, dev: boo
     except OSError as exc:
         say(_lock_unreadable(exc, "No rehearsal was started"))
         return EXIT_REFUSED
+    if lock is not None and not worker_alive(lock) and loader_alive(lock):
+        say(_orphan_words(lock, loader_alive(lock) or 0, "No rehearsal was started"))
+        return EXIT_REFUSED
     if lock is not None and not worker_alive(lock):
         held_by = str(lock.get("run") or "?")
         if held_by.startswith(REHEARSAL_PREFIX):
@@ -2324,6 +2572,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.no_box or a.dev or a.seconds is not None:
             print("The worker takes no other option. Nothing was started.")
             return EXIT_REFUSED
+        if not own_job() and os.name == "nt":    # before any child exists: whatever it starts ends with it
+            _to_log("(this worker could not be given a job of its own: the lock names its loader instead)")
         return worker(a.worker)              # every ending of a worker is journalled by the worker itself
     try:
         if a.rehearse:
