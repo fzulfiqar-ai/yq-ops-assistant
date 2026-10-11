@@ -95,3 +95,13 @@ web/.wrangler/
 # DB backups written by scripts/db_backup.py live under business_data/ (already ignored) --
 # listed again so a moved backup folder can never be committed.
 backups/
+
+# The owner's Focus drop folder (8-Oct-2026): about 100 supplier PDFs and product photos sit in it.
+# The dated-folder rule above only catches a dated folder at the top of the repository, so inside this
+# folder just the spreadsheets and archives were ignored: the folder is now ignored whole.
+# The owner spells it 'Uplaods'; the correct spelling is read by the same tools, so both are listed.
+/Uplaods/
+/Uploads/
+# Jahez onboarding folders hold commercial terms: never in the PUBLIC repo.
+Jahez/
+/Jahez*/

@@ -23,12 +23,23 @@ re-upload — the loader is idempotent, so the same days never create duplicates
 | **ModernTradeSellerBook** | Modern-trade price list | prices change |
 | **Multi_level_stock_movement** | Product **categories** (Cable, Charger, Power Bank, Sim…) → by-category analysis + Accessories vs Telecom split | categories/SKUs change |
 
+### Month end (1 report — goes in the drop folder, never on the Data page)
+| Focus report | Powers | Export when |
+|---|---|---|
+| **Ledger** (all accounts, the whole month) | Sales returns with their values, receipts and credit notes — `/yq-month` (a later command) reads it for the returns, receivables and KPI checks | on the first morning of the new month, **as on the last day of the month just ended**, so that it covers the whole month |
+
+Put it in the dated drop folder with that morning's reports (`Uplaods/<ddmmyy>/`). `/yq-load` lists it as
+*NOT LOADED* and prints its "as on" date, so you can see that it reaches the last day of the month;
+**the load never loads it**. Keep it out of the Data-page upload too: the portal's loader would add its
+rows to the ledger table without checks.
+
 ### Do NOT export (the portal ignores these — they add nothing)
 - **Stock_movement** (plain) — item summary; **Stock_ledger** already has the full per-voucher
   transfer detail.
 - The other 3 **Customer_ageing** variants (detail_analysis, detail_by_due_date, summary_analysis) —
   duplicates; only `Customer_summary_ageing_by_due_date` is used.
-- **Ledger / Ledger_detail** — the full trial balance; receivables come from the ageing report.
+- **Ledger_detail** — a subset of the Ledger; receivables come from the ageing report. (The month-end
+  **Ledger** is the one exception: see above.)
 - The **Mobile Accessories Monthly** workbooks — your manual workbook, not ingested.
 
 ## How to export (in Focus)

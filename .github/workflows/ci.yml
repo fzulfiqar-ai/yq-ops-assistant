@@ -173,6 +173,24 @@ jobs:
         env:
           SUPABASE_URL: https://ci.invalid
         run: python -m tests.test_r8_dashboard
+      # YQ Ops Skills, phase 1 (/yq-load, /yq-brief): the read-only engine `python -m scripts.ops` and
+      # its one writer, scripts/yq_load_go.py. Every suite pins the Supabase and database addresses to
+      # ci.invalid before any import: a write through any channel must raise, the load check reads
+      # synthetic Focus files and the writer runs on a stand-in step runner. These tools run on the
+      # owner's PC (3.14), never in the API image, so the first line proves they still parse on 3.11.
+      # Comparisons with real Focus files print SKIP here (business_data/ is not in the repository).
+      - name: Ops skills suites - read-only engine, load check, load writer, brief (no DB)
+        env:
+          SUPABASE_URL: https://ci.invalid
+        run: |
+          python -m compileall -q scripts/ops scripts/yq_load_go.py
+          python -m tests.test_ops_readonly
+          python -m tests.test_ops_engine
+          python -m tests.test_ops_skills
+          python -m tests.test_ops_sales
+          python -m tests.test_ops_moves
+          python -m tests.test_ops_load
+          python -m tests.test_ops_load_go
 
   web:
     runs-on: ubuntu-latest
