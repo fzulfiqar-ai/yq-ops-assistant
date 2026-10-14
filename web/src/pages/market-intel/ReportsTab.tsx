@@ -478,7 +478,7 @@ function CountsView({ counts, edition }: { counts: Record<string, unknown>; edit
 const STATE_GROUPS: { state: MiReportRowState; title: string; note: string }[] = [
   { state: 'included', title: 'In the report', note: '' },
   { state: 'insufficient', title: 'Insufficient evidence: listed, not counted', note: 'No photo, evidence level 1 and a single report. Tick one to count it anyway.' },
-  { state: 'excluded', title: 'Left out', note: 'Taken out of this report by hand. Tick one to put it back.' },
+  { state: 'excluded', title: 'Left out', note: 'Not in this report: taken out by hand, or reported after the draft was built. Tick one to put it in.' },
   { state: 'withheld', title: 'Withheld: not sent to the supplier', note: 'Never shown, counted or cited in the workbook. Send one again to list it.' },
 ]
 
@@ -573,7 +573,7 @@ function FindingRow({
                     onClick={() => onHoldPhoto(Number(p.id))}
                     aria-label={`Withhold ${p.ref || `photo ${p.id}`} from the supplier`}
                     title="Withhold this photo from the supplier"
-                    className="absolute inset-x-0 bottom-0 rounded-b-lg bg-black/60 py-0.5 text-[10px] font-semibold text-white hover:bg-black/75 disabled:opacity-60"
+                    className="absolute inset-x-0 bottom-0 flex min-h-[44px] items-end justify-center rounded-b-lg bg-gradient-to-t from-black/70 to-black/0 pb-1 text-[10px] font-semibold text-white hover:from-black/80 disabled:opacity-60"
                   >
                     Withhold
                   </button>

@@ -171,6 +171,8 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
   const suggestions = (d.suggestions || []).filter((s) => s.id !== c.id)
   const merged = c.merged_into != null
   const canEdit = roles.review && !merged
+  const closed = c.status === 'closed' || c.status === 'not_substantiated'   // the server refuses merge / move then
+  const canMove = canEdit && !closed
   const brand = nameOf(c.brand) || lists?.brands.find((b) => b.id === c.brand_id)?.name || ''
   const supplier = nameOf(c.supplier) || lists?.suppliers.find((s) => s.id === c.supplier_id)?.name || ''
   const statusText = c.status_label || CASE_STATUS_LABEL[c.status] || c.status
@@ -247,6 +249,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
                     o={o}
                     raw={raw}
                     canEdit={canEdit}
+                    canMove={canMove}
                     onFlag={(photoId, f) => flag.mutate({ id: photoId, flag: f })}
                     suggestions={suggestions}
                     caseId={c.id}
@@ -303,7 +306,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
             </section>
           )}
           <ActionsPanel c={c} actions={actions} canEdit={canEdit} lists={lists} onDone={ok} onError={fail} />
-          {canEdit && <MergePanel c={c} suggestions={suggestions} onMerged={(into) => { ok(`Merged into case ${into}.`); navigate(`/market-intel/cases/${into}`) }} onError={fail} />}
+          {canMove && <MergePanel c={c} suggestions={suggestions} onMerged={(into) => { ok(`Merged into case ${into}.`); navigate(`/market-intel/cases/${into}`) }} onError={fail} />}
           {roles.admin && observations.some((o) => (o.photos || []).some((p) => p.has_people || p.has_people_flag)) && (
             <section className={CARD}>
               <h2 className="mb-1 font-display text-[15px] font-bold">Photos with people</h2>
@@ -527,6 +530,7 @@ function SightingCard({
   o,
   raw,
   canEdit,
+  canMove,
   onFlag,
   suggestions,
   caseId,
@@ -536,6 +540,7 @@ function SightingCard({
   o: MiObservation
   raw: boolean
   canEdit: boolean
+  canMove: boolean
   onFlag: (photoId: number, flag: boolean) => void
   suggestions: MiCaseRow[]
   caseId: number
@@ -580,7 +585,7 @@ function SightingCard({
           ))}
         </div>
       )}
-      {canEdit && <MoveBox obsId={o.id} caseId={caseId} suggestions={suggestions} onDone={onMoved} onError={onError} />}
+      {canMove && <MoveBox obsId={o.id} caseId={caseId} suggestions={suggestions} onDone={onMoved} onError={onError} />}
     </li>
   )
 }
