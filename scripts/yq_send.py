@@ -126,6 +126,8 @@ def prepare(run: str, env: dict | None = None) -> None:
                            timeout=DELIVER_TIMEOUT_S)
     if child.returncode != 0:
         last = (child.stdout or child.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        if child.returncode == 2:            # the deliver command refused: the database no longer holds this load
+            raise Refused(f"the brief for this load is not made now ({last[0][:200]})")
         raise Failed(f"the brief for this load could not be prepared ({last[0][:120]})")
 
 
@@ -183,22 +185,32 @@ def post(key: str, body: dict, idem: str, opener=None) -> dict:
 
 # ── the command ──────────────────────────────────────────────────────────────────────────────────
 
-def record(run: str, event: str, **fields) -> None:
-    try:
-        loadplan.delivery_append(run, event, **fields)
-    except OSError:
-        pass
+def record(run: str, event: str, **fields) -> bool:
+    """One row of the run's delivery journal, tried again for about 20 s (the folder syncs through
+    OneDrive), and state.json's last_delivery. -> whether the row was written: a 'sent' row that is lost
+    would let a later send go out twice."""
+    written = False
+    for attempt in range(12):
+        try:
+            loadplan.delivery_append(run, event, **fields)
+            written = True
+            break
+        except OSError:
+            time.sleep(0.25 * (attempt + 1))
     try:
         status.write_state({"last_delivery": {"run": run, "event": event,
                                               "at": datetime.now(status.BAHRAIN).isoformat(timespec="seconds"),
                                               "kind": fields.get("kind")}})
     except OSError:
         pass
+    return written
 
 
-def already_sent(run: str, kind: str, to_digest: str) -> dict | None:
+def already_sent(run: str, kind: str) -> dict | None:
+    """The last real send of this load's e-mail of this kind, to ANY list of addresses: one more address in
+    delivery.json must not send it to everybody again without the box."""
     for row in reversed(loadplan.delivery_read(run)):
-        if row.get("event") == "sent" and row.get("kind") == kind and row.get("to_digest") == to_digest:
+        if row.get("event") == "sent" and row.get("kind") == kind:
             return row
     return None
 
@@ -235,13 +247,14 @@ def send(run: str, *, test: bool = False, resend: bool = False, auto: bool = Fal
         say(f"Delivery: nothing to send for run {run} (the load wrote nothing).")
         return EXIT_OK
     last_run = str((status.read_state().get("last_load") or {}).get("run") or "")
-    if kind == "full" and last_run and last_run != run and not (test or resend):
-        raise Refused(f"a newer load (run {last_run}) is on record: its own brief is the one to send")
+    if kind == "full" and last_run != run and not (test or resend):
+        raise Refused(f"the last load on record is run {last_run or '(none)'}, not this one: the brief to send is "
+                      "that load's own")
     to = conf["test_to"] if test else conf["to"]
     if not to:
         raise Failed("delivery.json names no " + ("test address" if test else "recipient"))
     to_digest = digest(to)
-    sent_before = None if test else already_sent(run, kind, to_digest)
+    sent_before = None if test else already_sent(run, kind)
     if sent_before and not resend:
         raise Refused(f"the e-mail of run {run} went already ({str(sent_before.get('at'))[:16]} UTC); to send it once "
                       f"more: {retry_line(run)} --resend")
@@ -257,17 +270,21 @@ def send(run: str, *, test: bool = False, resend: bool = False, auto: bool = Fal
         html = ('<p style="font-family:Arial,sans-serif;font-size:12px;color:#904F0E;">TEST: this copy went to the '
                 "test address only.</p>" + html)
         text = "TEST: this copy went to the test address only.\n\n" + text
-    n = sum(1 for r in loadplan.delivery_read(run) if r.get("event") in ("sent", "test_sent"))
-    idem = hashlib.sha256(f"{run}|{kind}|{to_digest}|{'test' if test else 'send'}|{n}".encode("utf-8")).hexdigest()
+    event = "test_sent" if test else "sent"
+    # the same attempt keeps its key until it is recorded as sent (a retry after a timeout that did deliver
+    # is then dropped by the mail service); a test copy in between never changes the key of the real one
+    n = sum(1 for r in loadplan.delivery_read(run)
+            if r.get("event") == event and r.get("kind") == kind and r.get("to_digest") == to_digest)
+    idem = hashlib.sha256(f"{run}|{kind}|{to_digest}|{event}|{n}".encode("utf-8")).hexdigest()
     body = {"from": conf["from"], "to": to, "subject": subject, "html": html, "text": text}
     if conf.get("reply_to"):
         body["reply_to"] = conf["reply_to"]
     answer = post(key, body, idem, opener)
-    event = "test_sent" if test else "sent"
     how = "resend" if resend else "auto" if auto else "by hand"
-    record(run, event, kind=kind, to_count=len(to), to_digest=to_digest, id=str(answer.get("id") or "") or None,
-           how=how, subject=subject[:160], text=f"The {kind} e-mail went to {len(to)} address(es).")
-    say(f"Delivery: {'TEST ' if test else ''}e-mail sent to {len(to)} address(es) ({kind}, {how}): {subject}")
+    kept = record(run, event, kind=kind, to_count=len(to), to_digest=to_digest, id=str(answer.get("id") or "") or None,
+                  how=how, subject=subject[:160], text=f"The {kind} e-mail went to {len(to)} address(es).")
+    warn = "" if kept else " (its record could not be written: do not send it again by hand)"
+    say(f"Delivery: {'TEST ' if test else ''}e-mail sent to {len(to)} address(es) ({kind}, {how}): {subject}{warn}")
     return EXIT_OK
 
 

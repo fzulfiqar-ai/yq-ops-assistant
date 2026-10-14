@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -281,14 +282,75 @@ def _():
             raise AssertionError("a changed file went")
         except ys.Failed as exc:
             assert "changed since" in str(exc)
+    for last in ("161026_0900", ""):                  # a newer load on record, or none at all (state.json unreadable)
+        with data_root():
+            settings()
+            delivery(last_run=last)
+            try:
+                send(opener=Opener())
+                raise AssertionError("an older brief went")
+            except ys.Refused as exc:
+                assert f"the last load on record is run {last or '(none)'}, not this one" in str(exc), str(exc)
+
+
+@test("no second copy to anybody: one more address is refused without the box; a test copy never moves the real key")
+def _():
     with data_root():
         settings()
-        delivery(last_run="161026_0900")
+        delivery()
+        assert send(opener=Opener()) == ys.EXIT_OK
+        settings(to=["owner@example.invalid", "second@example.invalid"])
         try:
             send(opener=Opener())
-            raise AssertionError("an older brief went")
+            raise AssertionError("a second address sent it to everybody again")
         except ys.Refused as exc:
-            assert "a newer load" in str(exc)
+            assert "went already" in str(exc)
+    with data_root():
+        settings()
+        delivery()
+        lost = Opener(422)
+        try:
+            send(opener=lost)                       # it did not go (or went and the answer was lost)
+        except ys.Failed:
+            pass
+        assert send(opener=Opener(), test=True) == ys.EXIT_OK
+        again = Opener()
+        assert send(opener=again) == ys.EXIT_OK
+        assert again.requests[0]["headers"]["Idempotency-key"] == lost.requests[0]["headers"]["Idempotency-key"]
+
+
+@test("a sent e-mail whose record cannot be written says so; a brief the deliver command refuses is a refusal")
+def _():
+    with data_root():
+        settings()
+        delivery()
+        real_append, real_sleep = ys.loadplan.delivery_append, ys.time.sleep
+
+        def append(run, event, **fields):
+            if event == "sent":
+                raise OSError("held by another program")
+            return real_append(run, event, **fields)
+        ys.loadplan.delivery_append, ys.time.sleep = append, (lambda s: None)
+        said = []
+        try:
+            assert send(opener=Opener(), say=said.append) == ys.EXIT_OK
+        finally:
+            ys.loadplan.delivery_append, ys.time.sleep = real_append, real_sleep
+        assert said[-1].startswith("Delivery: e-mail sent") and "do not send it again by hand" in said[-1], said
+    with data_root():
+        settings()
+        status.write_state({"last_load": {"run": RUN}})             # no manifest: the sender asks for the brief
+        real_run = ys.subprocess.run
+        ys.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 2, stdout="Delivery of run x: NOT prepared: "
+                                                                                    "the database was written after this "
+                                                                                    "load.", stderr="")
+        try:
+            send(opener=Opener())
+            raise AssertionError("a brief of other figures went")
+        except ys.Refused as exc:
+            assert "the database was written after this load" in str(exc)
+        finally:
+            ys.subprocess.run = real_run
 
 
 @test("a load that wrote nothing has nothing to send; the settings are checked")

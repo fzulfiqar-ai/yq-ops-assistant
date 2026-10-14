@@ -1552,7 +1552,7 @@ MUST_CONTAIN = {
         "the data is loaded: name the metric the script names and do not go again",
         "typing /yq-load resumes it", "NOT STARTED: the load did not begin", "no deploy is needed",
         # after the load: the e-mail, said in one sentence; its retry only on his word; never a second copy
-        "`RUNNING at delivery` means the load is done and its brief and e-mail are being made: keep following",
+        "`RUNNING at delivery` means the load has ended and its e-mail is being made: keep following",
         "Say in one sentence what the line that starts `Delivery:` says",
         "after a load it is the brief the load made, the figures of the e-mail",
         "A line that holds `Its retry: `", "the e-mail did not go, and the load is not touched by that",
@@ -1863,7 +1863,8 @@ OPS_DOC_SAYS = (
     "writes anything", "Each backup is read back whole before the load goes on", "a load's e-mail goes once",
     "They post nothing to WhatsApp", "the team message is sent by you", "You send it yourself",
     # the two safety gaps of phase 1, closed, and what is left of the second
-    "a row of `ingest_runs` that is not this run's, or an upload batch in `audit_log`, closes the cut-off load",
+    "a loader row more than this run's own starts of its refresh, or an upload in `audit_log` since the go first "
+    "started", "closes the cut-off load", "by a load or a rehearsal", "the slowest of the last five refreshes",
     "a lock from another PC is never judged, resumed or cleared on this one",
     "two PCs that start a load within OneDrive's sync delay of each other",
     # the seam after the load

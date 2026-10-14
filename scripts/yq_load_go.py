@@ -160,6 +160,8 @@ REHEARSAL_SECONDS = 180
 NONCE_ENV = "YQ_LOAD_GO_NONCE"           # the one-time word the launcher hands its worker (never on disk)
 BACKUP_PASSWORD_ENV = "YQ_BACKUP_PASSWORD"     # scripts/yq_secrets.py reads it; no engine child gets it
 BACKUP_MARKER = "backup.json"                  # business_data/ops: since when the backups are encrypted
+MARKER_UNREADABLE = "an unknown day (business_data/ops/backup.json cannot be read)"
+REFRESH_RECENT = 5                   # refreshes on record behind the start window (last_refresh_seconds)
 BREAKAWAY_ENV = "YQ_LOAD_GO_BREAKAWAY"   # "1" when the worker was started outside the editor's job
 for _own in (NONCE_ENV, BREAKAWAY_ENV):  # in the worker these two are in the copy made above: they are the
     LAUNCH_ENV.pop(_own, None)           # launcher's words to its worker, no part of anybody's environment
@@ -564,7 +566,7 @@ def child_env(base=None) -> dict:
     env = dict(LAUNCH_ENV if base is None else base)
     env["PYTHONUTF8"] = "1"
     for name in ("PYTHONIOENCODING", NONCE_ENV, BREAKAWAY_ENV, BACKUP_PASSWORD_ENV):
-        env.pop(name, None)                  # (no engine step needs the backup password: this worker packs)
+        env.pop(name, None)                  # (no engine step needs the backup password; only the worker gets it)
     return env
 
 
@@ -634,6 +636,8 @@ def spawn_worker(run: str, root: Path, nonce: str, log_path: Path):
     env = child_env()
     env.update(needs)
     env[NONCE_ENV] = nonce
+    if LAUNCH_ENV.get(BACKUP_PASSWORD_ENV):  # the worker packs the backup: the one process handed it (the box
+        env[BACKUP_PASSWORD_ENV] = LAUNCH_ENV[BACKUP_PASSWORD_ENV]   # read the same place); its children never are
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "ab") as log:
         common = dict(cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
@@ -879,6 +883,22 @@ def _read_lock() -> dict | None:
     """The lock as scripts.ops.status reads it: None = no lock, run '?' = a file that is no lock.
     Raises OSError only when the file is there and cannot be read for several seconds."""
     return _again(status.read_lock)
+
+
+def _lock_is_fresh() -> bool:
+    """Was the lock file written within status.HEARTBEAT_STALE_S? A lock that is no lock (no run in it)
+    and is that fresh is being written at this moment, here or on another PC whose folder syncs here:
+    it is never taken for a launcher's left-over."""
+    try:
+        age = time.time() - paths.lock_file().stat().st_mtime
+    except OSError:
+        return False
+    return age <= status.HEARTBEAT_STALE_S
+
+
+def _fresh_unreadable_words(nothing: str) -> str:
+    return (f"The load lock is being written at this moment (it may come from another PC): {nothing}. Try again "
+            "in a few minutes.")
 
 
 def _lock_unreadable(exc: OSError, nothing: str) -> str:
@@ -1273,14 +1293,25 @@ def start_until_s(last_refresh_s=None) -> int:
     return int(min(START_UNTIL_S, max(START_UNTIL_MIN_S, TICK_S - TICK_MARGIN_S - need)))
 
 
+def _seconds(x) -> float | None:
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0 else None
+
+
 def last_refresh_seconds(read_state: Callable[[], dict]) -> float | None:
-    """How long the refresh of the last load took (state.json last_load.refresh_seconds), if known."""
+    """How long a refresh may take, from the loads on record: the slowest of the last REFRESH_RECENT
+    refreshes (state.json last_load.refresh_seconds_recent), else the last one (refresh_seconds). One
+    quick refresh never widens the window for a load whose database is slow that day."""
     try:
         last = read_state().get("last_load")
     except (OSError, ValueError, AttributeError, TypeError):
         return None
-    seconds = last.get("refresh_seconds") if isinstance(last, dict) else None
-    return seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None
+    if not isinstance(last, dict):
+        return None
+    recent = [x for x in (_seconds(v) for v in (last.get("refresh_seconds_recent") or [])
+                          if isinstance(last.get("refresh_seconds_recent"), list)) if x is not None]
+    one = _seconds(last.get("refresh_seconds"))
+    found = recent + ([one] if one is not None else [])
+    return max(found) if found else None
 
 
 def tick_wait_seconds(now: datetime, until_s: int = START_UNTIL_S) -> float:
@@ -1390,18 +1421,46 @@ def _real_backup_root() -> Path:
     return Path(nightly_backup.backup_root())
 
 
-def backup_marker() -> str | None:
-    """Since which day the pre-load backups are encrypted (business_data/ops/backup.json), or None."""
-    try:
-        data = json.loads((paths.ops_dir() / BACKUP_MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return str(data.get("encrypted_since") or "") or None if isinstance(data, dict) else None
+def backup_marker(preload: Path | None = None) -> str | None:
+    """Since which day the pre-load backups are encrypted, or None. business_data/ops/backup.json says;
+    it fails CLOSED: a marker that is there but cannot be read (a OneDrive file that is not on this PC,
+    a broken copy) counts as encryption begun, and so does an encrypted pre-load archive in the backup
+    store (`preload`, outside OneDrive), whatever the marker says."""
+    f = paths.ops_dir() / BACKUP_MARKER
+    if f.exists():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            day = str(data.get("encrypted_since") or "") if isinstance(data, dict) else ""
+        except (OSError, ValueError):
+            day = ""
+        return day or MARKER_UNREADABLE
+    if preload is not None:
+        try:
+            found = sorted(Path(preload).glob(nb_prefix() + "*.7z"))
+        except OSError:
+            found = []
+        if found:
+            day = re.search(r"\d{4}-\d{2}-\d{2}", found[0].name)
+            return day.group(0) if day else "an earlier load"
+    return None
+
+
+def nb_prefix() -> str:
+    from scripts import nightly_backup
+    return str(nightly_backup.PREFIX)
 
 
 def mark_encrypted(day: str) -> None:
-    """The first encrypted backup: from now on a plain one is refused (archive_refusal)."""
-    paths.write_text(paths.ops_dir() / BACKUP_MARKER, json.dumps({"encrypted_since": day}) + "\n")
+    """The first encrypted backup: from now on a plain one is refused (archive_refusal). Tried a few
+    times: the folder syncs through OneDrive, and another program may hold the file for a moment."""
+    for attempt in range(3):
+        try:
+            paths.write_text(paths.ops_dir() / BACKUP_MARKER, json.dumps({"encrypted_since": day}) + "\n")
+            return
+        except OSError:
+            if attempt == 2:
+                raise
+            time.sleep(0.5)
 
 
 def archive_refusal(password: str | None, exe: str | None, encrypted_since: str | None) -> str | None:
@@ -1426,7 +1485,7 @@ def _real_archive(folder: Path, dest: Path, stamp: str) -> tuple[Path, bool]:
     from scripts.yq_backup import read_back
     password, _source = yq_secrets.backup_password(LAUNCH_ENV)
     exe = nb.find_7z()
-    refused = archive_refusal(password, exe, backup_marker())
+    refused = archive_refusal(password, exe, backup_marker(dest))
     if refused:
         raise RuntimeError(refused)
     archive, encrypted = nb.make_archive(folder, dest, stamp, password=password, exe=exe)
@@ -1456,7 +1515,8 @@ def delivery_words() -> str:
     to = conf.get("test_to" if mode == "test" else "to") or []
     n = 1 if isinstance(to, str) else len(to)
     what = "a TEST copy of the brief" if mode == "test" else "the brief"
-    return f"Afterwards, if every check passes: {what} by e-mail to {n} address(es), with the team message."
+    return (f"Afterwards: {what} by e-mail to {n} address(es), with the team message (a short note with no figure "
+            "instead when a check needs a look, or when the load fails after it began to write).")
 
 
 def _real_box_notes() -> list[str]:
@@ -1465,7 +1525,11 @@ def _real_box_notes() -> list[str]:
         from scripts import nightly_backup as nb
         from scripts import yq_secrets
         password, _source = yq_secrets.backup_password(LAUNCH_ENV)
-        refused = archive_refusal(password, nb.find_7z(), backup_marker())
+        try:
+            preload = _real_backup_root() / "preload"
+        except Exception:  # noqa: BLE001
+            preload = None
+        refused = archive_refusal(password, nb.find_7z(), backup_marker(preload))
         if refused:
             out.append("ATTENTION: " + refused + ".")
         elif not password:
@@ -1719,6 +1783,21 @@ def parse_refresh(text: str) -> dict | None:
     return None
 
 
+def _delivery_row(run: str, event: str, **fields) -> bool:
+    """One row of the run's delivery journal, tried a few times (the folder syncs through OneDrive and
+    another program may hold the file for a moment). A row that cannot be written never stops the
+    e-mail: the worker log has the line, and `load status` reads a queued delivery that never ended as
+    cut off, with its retry."""
+    for attempt in range(12):                # as journal(): about 20 s in all
+        try:
+            loadplan.delivery_append(run, event, **fields)
+            return True
+        except OSError:
+            time.sleep(0.25 * (attempt + 1))
+    _to_log(f"(the delivery row '{event}' could not be written: {fields.get('text') or ''})")
+    return False
+
+
 def _why(child: Child) -> str:
     last = next((ln.strip() for ln in reversed(child.text.splitlines()) if ln.strip()), "")
     out = f" (exit code {child.code}"
@@ -1801,6 +1880,8 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
         if orphan:
             raise Refusal(_orphan_words(lock, orphan, "Nothing was started"))
         if held_by == "?":
+            if _lock_is_fresh():             # being written now, here or (synced) on another PC: never cleared
+                raise Refusal(_fresh_unreadable_words("Nothing was started"))
             _clear_dead_lock(lock)           # a launcher died while writing it: no worker was ever started
             say("(an unreadable left-over lock is cleared: no load was running under it)")
         elif held_by != run:
@@ -2311,10 +2392,10 @@ class Job:
         if not closing or (closing[-1].get("event") == "failed" and not closing[-1].get("written")):
             return
         if d.rehearsal:
-            loadplan.delivery_append(run, "ended", text="Delivery: (rehearsal) a real load would now write the brief "
-                                                        "and send the e-mail.")
+            _delivery_row(run, "ended", text="Delivery: (rehearsal) a real load would now write the brief and send "
+                                             "the e-mail.")
             return
-        loadplan.delivery_append(run, "queued", pid=os.getpid(), text="Preparing the brief and the e-mail.")
+        _delivery_row(run, "queued", pid=os.getpid(), text="Preparing the brief and the e-mail.")
         awake = d.keep_awake(True)
         try:
             pack = d.runner("deliver", [sys.executable, "-X", "utf8", "-m", "scripts.ops", "deliver", "--run", run],
@@ -2334,7 +2415,7 @@ class Job:
         finally:
             if awake:
                 d.keep_awake(False)
-        loadplan.delivery_append(run, "ended", text=said)
+        _delivery_row(run, "ended", text=said)
 
     # the steps
     def step_token(self):
@@ -2406,11 +2487,12 @@ class Job:
             raise Stop("backup", f"the backup could not be packed ({_short(str(exc), 200)})") from None
         plain_gone = _remove_tree(folder)    # only now: the archive has been read back whole (deps.archive)
         pruned = prune_archives(base, keep)
-        if encrypted and not d.rehearsal and not backup_marker():
+        if encrypted and not d.rehearsal and backup_marker() in (None, MARKER_UNREADABLE):
             try:
                 mark_encrypted(day)          # from now on a plain backup is refused (archive_refusal)
-            except OSError:
-                pass
+            except OSError:                  # the encrypted archive in the store says the same (backup_marker)
+                self.j("note", step="backup", text="The note that backups are now encrypted could not be written; "
+                                                   "the encrypted archive in the backup store says the same.")
         text = ("Backup of every table packed, "
                 + ("encrypted and read back" if encrypted else "UNENCRYPTED (no backup password set) and read back")
                 + f": {Path(archive).name}. Kept: the newest {keep}.")
@@ -2618,8 +2700,14 @@ class Job:
         last = {"run": self.run, "finished_at": d.now().astimezone(BAHRAIN).isoformat(timespec="seconds"),
                 "data_date": self.result.get("data_as_of"), "published": self.published,
                 "result": "ok" if not look else "ok, needs a look: " + ", ".join(look)}
-        if self.timings.get("refresh") and not d.rehearsal:
+        if self.timings.get("refresh") is not None and not d.rehearsal:
             last["refresh_seconds"] = self.timings["refresh"]       # the next load's start window (start_until_s)
+            try:
+                earlier = (d.read_state().get("last_load") or {}).get("refresh_seconds_recent") or []
+            except (OSError, ValueError, AttributeError, TypeError):
+                earlier = []
+            earlier = [x for x in (earlier if isinstance(earlier, list) else []) if _seconds(x) is not None]
+            last["refresh_seconds_recent"] = (earlier + [self.timings["refresh"]])[-REFRESH_RECENT:]
         # since which report day the profitability report is held back (the brief says "held back
         # since" from it): only a load knows, so it is written down here and carried from load to load
         try:
@@ -2721,6 +2809,13 @@ def rehearse(seconds: int = REHEARSAL_SECONDS, *, no_box: bool = False, dev: boo
         lock = _read_lock()                  # from the file: see the launcher on why not status.lock_state()
     except OSError as exc:
         say(_lock_unreadable(exc, "No rehearsal was started"))
+        return EXIT_REFUSED
+    away = status.host_elsewhere(lock) if lock is not None else None
+    if away:                                 # its processes cannot be looked at from here: never judged
+        say(_elsewhere_words(lock, away, "No rehearsal was started"))
+        return EXIT_REFUSED
+    if lock is not None and str(lock.get("run") or "?") == "?" and _lock_is_fresh():
+        say(_fresh_unreadable_words("No rehearsal was started"))
         return EXIT_REFUSED
     if lock is not None and not worker_alive(lock) and loader_alive(lock):
         say(_orphan_words(lock, loader_alive(lock) or 0, "No rehearsal was started"))

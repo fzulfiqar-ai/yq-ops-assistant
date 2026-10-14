@@ -96,6 +96,45 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def own_last_ingest_run(run: str) -> int | None:
+    """The newest ingest_runs id this load's own refresh left (its journalled refresh row), if known."""
+    for r in reversed(loadplan.journal_read(run)):
+        pair = r.get("ingest_runs") if r.get("step") == "refresh" else None
+        if isinstance(pair, list) and len(pair) == 2:
+            try:
+                return int(pair[1])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def newest_ingest_run() -> int | None:
+    """The newest ingest_runs id in the database now (read-only), or None when it cannot be read."""
+    try:
+        from scripts.ops import db
+        with db.session() as session:
+            return int(session.q("select coalesce(max(id), 0) as max_id from ingest_runs")[0]["max_id"])
+    except Exception:  # noqa: BLE001  (the brief itself says so if the database does not answer)
+        return None
+
+
+def stale_reason(run: str, state: dict) -> str | None:
+    """Why the database no longer holds what this load left, so that its full brief cannot be made now
+    (it would show another load's figures under this load's name), or None. Right after the load, as the
+    worker runs this, none holds; a retry hours later may meet any of them."""
+    last = str((state.get("last_load") or {}).get("run") or "")
+    if last != run:
+        return f"the last load on record is run {last or '(none)'}, not this one"
+    failed = status.failed_load()
+    if failed and failed.get("run") != run:
+        return f"a later load (run {failed.get('run')}) failed after it began to write"
+    own = own_last_ingest_run(run)
+    newest = newest_ingest_run() if own is not None else None
+    if own is not None and newest is not None and newest > own:
+        return "the database was written after this load (a Data-page upload or another load)"
+    return None
+
+
 def run(args) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
     state = status.read_state()
@@ -112,6 +151,14 @@ def run(args) -> dict:
             loadplan.delivery_append(name, "pack", kind="none", text="Nothing to deliver: the load did not write.")
         return dict(out, text=f"Delivery of run {name}: nothing to deliver (the load did not write anything).",
                     flags={"kind": "none"})
+
+    if kind == "full" and not preview:
+        why = stale_reason(name, state)
+        if why:
+            loadplan.delivery_append(name, "pack", kind="refused", text=f"Not prepared: {why}.")
+            return dict(out, ok=False, exit=2, flags={"kind": "refused"},
+                        text=f"Delivery of run {name}: NOT prepared: {why}. Its brief would show other figures than "
+                             "this load's, so nothing is sent for it.")
 
     files: dict[str, str] = {}
     if kind == "full":

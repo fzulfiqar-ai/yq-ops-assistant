@@ -104,27 +104,26 @@ def _words(text: str) -> str:
 # ── the team message ─────────────────────────────────────────────────────────────────────────────
 
 def team_text(facts: dict, made_on: date) -> str:
-    """The WhatsApp message for the team group. Team figures only: no account, no money owed, nothing
-    of one rep but praise. Lines are dropped from the end of the lists until it fits TEAM_MAX."""
+    """The WhatsApp message for the team group. No sales total of the company (the month is a share of the
+    target, plus what is still needed a day), no account, no money owed, nothing of one rep but praise.
+    Lines are dropped from the end of the lists until it fits TEAM_MAX."""
     sales = facts.get("sales") or {}
-    day, mtd = sales.get("day") or {}, sales.get("mtd") or {}
+    mtd = sales.get("mtd") or {}
     pace = facts.get("pace") or {}
     en = facts.get("enriched") or {}
     d = fmt.as_date(facts.get("data_date"))
     month = d.strftime("%B") if d else "This month"
-    head = [f"*YQ Accessories - {fmt.day(made_on)}*",
-            f"Latest day ({_day(day.get('start'))}): {whole(day.get('bhd'))} from {day.get('invoices') or 0} invoices."]
+    head = [f"*YQ Accessories - {fmt.day(made_on)}*"]
     step, p = pace.get("kpi_step"), pace.get("pace") or {}
     if step and p:
         if _d(mtd.get("bhd")) >= _d(step):
-            head.append(f"{month} so far: {whole(mtd.get('bhd'))}: our {whole(step)} target is reached. Well done, team!")
+            head.append(f"{month} so far: our monthly target is reached. Well done, team!")
         else:
-            head.append(f"{month} so far: {whole(mtd.get('bhd'))} = {whole_pct(p.get('done_pct'))} of our {whole(step)} "
-                        f"target; {p.get('business_days_left')} working days left, {whole(p.get('needed_per_business_day'))} "
-                        "a day needed.")
-    else:
-        change = mtd.get("change")
-        head.append(f"{month} so far: {whole(mtd.get('bhd'))}" + (f" ({change} on the same days last month)." if change else "."))
+            head.append(f"{month} so far: {whole_pct(p.get('done_pct'))} of our monthly target; "
+                        f"{_plural(p.get('business_days_left'), 'working day')} left, "
+                        f"{whole(p.get('needed_per_business_day'))} a day needed.")
+    elif mtd.get("change"):
+        head.append(f"{month} so far: {mtd.get('change')} on the same days last month.")
     praise = _praise(facts)
     push = [x["item"] for x in (en.get("push") or [])][:3]
     sold_out = [x.get("item") for x in ((facts.get("stock") or {}).get("items") or [])][:3]
@@ -168,10 +167,10 @@ def _praise(facts: dict) -> str | None:
         out.append(f"Well done {names[0]}, {names[1]} and {names[2]}, leading this month's sales")
     sales = facts.get("sales") or {}
     if str((sales.get("d7") or {}).get("reading") or "") == "above the normal range":
-        out.append("the last 7 days were above our normal range")
+        out.append("the last seven days were above our normal range")       # no digit on a line that names a rep
     avg = _d((sales.get("average_business_day") or {}).get("bhd"))
     if avg > 0 and _d((sales.get("day") or {}).get("bhd")) > avg:
-        out.append("the latest day beat our 30-day daily average")
+        out.append("the latest day beat our daily average of the last month")
     if not out:
         return None
     text = "; ".join(out)
@@ -192,8 +191,25 @@ def _priorities(facts: dict, push: list[str], due: bool) -> list[str]:
     return out[:3]
 
 
+def _norm(text) -> str:
+    """A name or a text with case, punctuation and spacing set aside: 'AL-MANAR  Mobiles ' and 'al manar
+    mobiles' are one name (letters of any script count, Arabic included)."""
+    return " ".join(re.sub(r"[\W_]+", " ", str(text or "").casefold()).split())
+
+
+def known_names() -> list[str]:
+    """Every customer and salesman name of the loaded Focus files (business_data/ops/denylist.json, the
+    commit gate's list), or [] when it is not there."""
+    try:
+        from scripts.ops import selftest
+        return [str(n) for n in (selftest.load_denylist() or [])]
+    except Exception:  # noqa: BLE001  (the names the facts carry are checked all the same)
+        return []
+
+
 def team_names(facts: dict) -> tuple[set[str], set[str]]:
-    """(customer and shop names, rep names) that the facts carry, for the privacy check."""
+    """(customer and shop names, rep names) for the privacy check: the names the facts carry, and every
+    other name of the loaded Focus files that is not a rep's (a shop's name inside an item name counts)."""
     customers: set[str] = set()
     for a in (facts.get("accounts_not_back") or {}).get("accounts") or []:
         customers.add(str(a.get("account") or ""))
@@ -210,23 +226,30 @@ def team_names(facts: dict) -> tuple[set[str], set[str]]:
         reps.update({str(r.get("name") or ""), str(r.get("salesman") or "")})
     for r in ((facts.get("reps") or {}).get("salesmen")) or []:
         reps.add(str(r.get("salesman") or ""))
-    clean = {c for c in customers if len(c.strip()) >= 4 and c.strip().lower() not in ("cash customer",)}
-    return clean, {r for r in reps if len(r.strip()) >= 3}
+    reps = {r for r in reps if len(_norm(r)) >= 3}
+    rep_keys = {_norm(r) for r in reps} | {_norm(r.split(" - ")[0]) for r in reps}
+    customers.update(n for n in known_names()          # a rep's Focus name is '<name>' or '<name> - ...'
+                     if _norm(n) not in rep_keys and _norm(n.split(" - ")[0]) not in rep_keys)
+    clean = {c for c in customers if len(_norm(c)) >= 4 and _norm(c) not in ("cash customer",)}
+    return clean, reps
 
 
 def _has(word: str, text: str) -> bool:
-    return re.search(r"(?<![\w])" + re.escape(word.lower()) + r"(?![\w])", text.lower()) is not None
+    """Is `word` in `text` as whole words, case, punctuation and spacing set aside?"""
+    w = _norm(word)
+    return bool(w) and f" {w} " in f" {_norm(text)} "
 
 
 def privacy_problems(text: str, facts: dict) -> list[str]:
     """Why this text may not go to the team group ([] = it may): a customer or shop name, a word about
-    money owed or the reps' pay, a rep named beside an amount, or a rep named beside a word that singles
-    him out. The check reads the finished text, so nothing added later can slip past it."""
+    money owed or the reps' pay, a rep named on a line that holds any figure (a digit or a percent), or a
+    rep named beside a word that singles him out. The check reads the finished text, so nothing added later
+    can slip past it. A rep may be named on a line of praise alone, and that line holds no figure."""
     customers, reps = team_names(facts)
     problems = []
     for name in sorted(customers):
         if _has(name, text):
-            problems.append(f"a customer or shop is named ({name[:2]}...)")
+            problems.append(f"a customer or shop is named ({name.strip()[:2]}...)")
     for form in TEAM_FORBIDDEN:
         hit = re.search(r"(?<![\w])(?:" + form + r")(?![\w])", text, re.IGNORECASE)
         if hit:
@@ -235,8 +258,8 @@ def privacy_problems(text: str, facts: dict) -> list[str]:
         named = [r for r in reps if _has(r, line) or _has(r.split(" - ")[0], line)]
         if not named:
             continue
-        if re.search(r"\bBHD\b|\d[\d,]*\.\d{3}", line):
-            problems.append("a rep is named beside an amount")
+        if re.search(r"\d|%", line):
+            problems.append("a rep is named beside an amount or a figure")
         if any(_has(w, line) for w in NEGATIVE):
             problems.append("a rep is named beside a word that singles him out")
     return problems

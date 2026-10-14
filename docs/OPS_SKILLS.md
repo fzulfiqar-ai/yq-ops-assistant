@@ -259,11 +259,11 @@ one of two lines, and the load check says the same in its own words:
 - **NOT EVIDENCED.** A figure the portal holds no data for (shop visits, calls, quotations, the stock
   in the vans, and discounts for as long as Focus exports none) reads *NOT EVIDENCED*. It is never
   guessed.
-- **The team message.** Written for the salesmen's group: the team's latest day and month against
-  your KPI step, what is still needed per working day, items in stock to push, today's priorities and
-  the end-of-day ask. Salesmen are named only to praise them, never beside a figure. It never holds a
-  customer's or a shop's name, money owed, a tier, a commission or a salesman's own figure: a message
-  that would is not made, and the e-mail says why. You send it yourself: copy it from
+- **The team message.** Written for the salesmen's group: the month so far as a share of your KPI
+  step and what is still needed per working day (never a sales total), items in stock to push,
+  today's priorities and the end-of-day ask. Salesmen are named only to praise them, never beside a
+  figure. It never holds a customer's or a shop's name, money owed, a tier, a commission or a
+  salesman's own figure: a message that would is not made, and the e-mail says why. You send it yourself: copy it from
   `/yq-brief team`, or press *Open in WhatsApp* in the e-mail, choose the group and send.
 
 ## 5. Where things are kept
@@ -340,23 +340,30 @@ public.
   runs; a load that had begun keeps its lock until its closing line is in the journal;
   `LAST LOAD FAILED` stays until a load finishes, whatever was checked or rehearsed in between.
   A resume does not compare the database's fingerprint, but it reads what was written since the
-  check (`loadplan.foreign_writes`): a row of `ingest_runs` that is not this run's, or an upload
-  batch in `audit_log`, closes the cut-off load, and a new check is needed. The lock names the PC it
-  was taken on: a lock from another PC is never judged, resumed or cleared on this one, and the check
-  stops and names that PC. What is left: two PCs that start a load within OneDrive's sync delay of
-  each other. Closing that needs a lock in the database that the portal's upload takes as well, a
-  change of the portal for later.
+  check (`loadplan.foreign_writes`): a row of `ingest_runs` that names another folder or a batch, a
+  loader row more than this run's own starts of its refresh, or an upload in `audit_log` since the
+  go first started (one that recognised no report wrote nothing and does not count) closes the
+  cut-off load, and a new check is needed. The lock names the PC it was taken on: a lock from
+  another PC is never judged, resumed or cleared on this one, by a load or a rehearsal, and the check
+  stops and names that PC; a lock that is no lock and was written in the last minutes is left alone
+  too. What is left: two PCs that start a load within OneDrive's sync delay of each other, and an
+  upload that runs at the very moment of a resume. Closing that needs a lock in the database that the
+  portal's upload takes as well, a change of the portal for later. The start window after a tick is
+  worked out from the slowest of the last five refreshes on record.
 - **After the load** (`Job.deliver_after` in `scripts/yq_load_go.py`): once the closing row is in the
   journal and the lock is gone, the worker runs `python -m scripts.ops deliver --run <run>` (the brief,
   the e-mail and the team message, worked out once), then `python -m scripts.yq_send --run <run> --auto`,
   and writes one row that starts `Delivery:`. Nothing of it changes the load's result, journal or
   lock: its rows are in `loads/<run>/delivery.jsonl`. Until that row is written, `load status` reads
-  `RUNNING at delivery`, for up to ten minutes; then it shows the `Delivery:` line, and the brief
-  prints the stored brief once. A line that holds `Its retry: ` is followed by the line that sends the
-  e-mail again; it loads nothing. `scripts/yq_send.py` is the one program that sends: exit code 0 sent
-  or nothing to send, 1 not sent (recorded, with its retry), 2 refused (the e-mail went already, and
-  `--resend` asks at the Windows box first; or a newer load is on record). `--test` sends to the test
-  address only and never counts as sent. `scripts/ops` imports none of `scripts/yq_send.py`,
+  `RUNNING at delivery` (after a load that finished, or one that failed after it began to write), for
+  up to ten minutes; then it shows the `Delivery:` line, and the brief prints the stored brief once. A
+  line that holds `Its retry: ` is followed by the line that sends the e-mail again; it loads nothing.
+  A retry never makes a full brief from figures that are no longer that load's: once a newer load is
+  on record, a later load failed, or anything was written to the database since, it is refused.
+  `scripts/yq_send.py` is the one program that sends: exit code 0 sent or nothing to send, 1 not sent
+  (recorded, with its retry), 2 refused (that load's e-mail went already, to any list of addresses, and
+  `--resend` asks at the Windows box first; or it is not that load's own brief any more). `--test`
+  sends to the test address only and never counts as sent. `scripts/ops` imports none of `scripts/yq_send.py`,
   `scripts/yq_secrets.py` and `scripts/yq_backup.py` (`tests/test_ops_readonly.py`), and the engine
   paths that decide a deploy leave out every `scripts/yq_*.py`.
 - **Backups** (`scripts/yq_backup.py`): `drill` restores the newest pre-load archive into a

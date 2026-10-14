@@ -35,7 +35,7 @@ import os
 import sys
 import tempfile
 import traceback
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,25 +162,29 @@ LOAD = {"run": RUN, "result": "ok", "timings": {"backup": 60.0, "wait_tick": 0.0
 
 # ── the team message ─────────────────────────────────────────────────────────────────────────────
 
-@test("the team message: team figures in whole dinars, praise without figures, the items to push, the ask")
+@test("the team message: the month as a share of the target, no sales total, praise without figures, the items, the ask")
 def _():
     text = render.team_text(facts(), TODAY)
     assert text.startswith("*YQ Accessories - Thu 15 Oct*"), text
-    assert "Latest day (Wed 14 Oct): BHD 450 from 12 invoices." in text
-    assert "October so far: BHD 2,500 = 25% of our BHD 10,000 target; 12 working days left, BHD 625 a day needed." in text
-    assert "Well done Rep Alpha, Rep Bravo and Rep Charlie" in text and "the last 7 days were above our normal range" in text
+    assert text.splitlines()[1] == "October so far: 25% of our monthly target; 12 working days left, BHD 625 a day needed."
+    for total in ("2,500", "450", "10,000", "Latest day"):                 # no sales total of the company
+        assert total not in text, total
+    assert "Well done Rep Alpha, Rep Bravo and Rep Charlie" in text and "the last seven days were above our normal range" in text
     assert "Push today (in stock, selling faster): Charger Z 20W." in text
     assert "Your shops due a re-order are on your Today page" in text and text.rstrip().endswith("in the app).")
     assert "Rep Delta" not in text, "a rep with no sale is never named in the group"
     assert len(text) <= render.TEAM_MAX and render.privacy_problems(text, facts()) == [], render.privacy_problems(text, facts())
     reached = facts()
     reached["sales"]["mtd"]["bhd"] = M(10500)
-    assert "target is reached. Well done, team!" in render.team_text(reached, TODAY)
+    assert "October so far: our monthly target is reached. Well done, team!" in render.team_text(reached, TODAY)
     few = facts()
     few["enriched"]["team"] = few["enriched"]["team"][:2]
     assert "Well done Rep" not in render.team_text(few, TODAY), "two reps who sold are not named for praise"
     nostep = facts(pace={"kpi_step": None, "portal_target": None})
-    assert "October so far: BHD 2,500 (+12% on the same days last month)." in render.team_text(nostep, TODAY)
+    assert render.team_text(nostep, TODAY).splitlines()[1] == "October so far: +12% on the same days last month."
+    last = facts()
+    last["pace"]["pace"]["business_days_left"] = 1
+    assert "; 1 working day left, BHD 625 a day needed." in render.team_text(last, TODAY)
 
 
 @test("the team message stays within its length: lists are cut from the end, never the ask")
@@ -206,6 +210,30 @@ def _():
         assert problems and any(why in p for p in problems), (bad, problems)
     assert render.privacy_problems("Shop Riverside Mart opens late", f), "a shop due a re-order is a name too"
     assert render.privacy_problems(good + "\nThe owner thanks you all.", f) == [], "'owner' is not 'owe'"
+    # a name written another way is the same name: case, hyphens, dots and spacing set aside
+    for written in ("call shop moonlight-trading", "Call SHOP  MOONLIGHT TRADING.", "Shop Moonlight Trading's order"):
+        assert any("customer or shop" in p for p in render.privacy_problems(written, f)), written
+    # a rep on a line with any figure at all, not only BHD: a count, a share
+    for bad in ("Rep Alpha 1,234 this month", "Rep Bravo reached 85% of his month", "Rep Charlie: 3 shops"):
+        assert any("beside an amount or a figure" in p for p in render.privacy_problems(bad, f)), bad
+    assert render.privacy_problems("Rep Alphabet Cases are in stock", f) == [], "whole words only: no rep is named"
+
+
+@test("the privacy check knows every name of the loaded Focus files: a shop inside an item name, never a rep's praise")
+def _():
+    f = facts()
+    with data_root():
+        paths.write_text(paths.ops_dir() / "denylist.json",
+                         json.dumps(["Shop Starlight Phones", "Rep Alpha", "Van A - Acc WH"]))
+        assert "Shop Starlight Phones" in render.known_names()
+        customers, reps = render.team_names(f)
+        assert "Shop Starlight Phones" in customers and "Rep Alpha" not in customers and "Van A - Acc WH" not in customers
+        item = "Push today (in stock, selling faster): Charger for SHOP STARLIGHT-PHONES display."
+        assert any("customer or shop" in p for p in render.privacy_problems(item, f))
+        good = render.team_text(f, TODAY)
+        assert "Well done Rep Alpha" in good and render.privacy_problems(good, f) == []
+    with data_root():                                   # no list on this PC: the names the facts carry are checked
+        assert render.known_names() == [] and render.privacy_problems(render.team_text(f, TODAY), f) == []
 
 
 @test("the wa.me link carries the text exactly, percent-encoded UTF-8")
@@ -370,6 +398,44 @@ def _():
             assert sales.unshown_brief(date(2026, 10, 14), status.read_state()) is None, "another load since"
     finally:
         sales.full_screen = real
+
+
+@test("deliver refuses a full brief once the database no longer holds the load: a newer load, a failed one, a write")
+def _():
+    real, real_newest = sales.full_screen, deliver.newest_ingest_run
+    fake = FakeBrief()
+    sales.full_screen = fake
+    try:
+        for setup, said in ((lambda: status.write_state({"last_load": {"run": "161026_0900"}}),
+                             "the last load on record is run 161026_0900, not this one"),
+                            (lambda: (status.write_state({"last_load": {"run": RUN}}),
+                                      loadplan.journal_append("161026_0900", "started"),
+                                      loadplan.journal_append("161026_0900", "failed", step="refresh", result="failed",
+                                                              written=True, at=(datetime.now(timezone.utc) + timedelta(
+                                                                  minutes=1)).isoformat(timespec="seconds"))),
+                             "a later load (run 161026_0900) failed after it began to write"),
+                            (lambda: (status.write_state({"last_load": {"run": RUN}}),
+                                      loadplan.journal_append(RUN, "step_ok", step="refresh", ingest_runs=[5, 7])),
+                             "the database was written after this load")):
+            with data_root():
+                closed(RUN, "finished", result="ok", text="LOAD FINISHED.")
+                setup()
+                deliver.newest_ingest_run = lambda: 9
+                res = deliver.run(args())
+                assert res["ok"] is False and res["exit"] == 2 and said in res["text"], res["text"]
+                assert [r["kind"] for r in loadplan.delivery_read(RUN) if r["event"] == "pack"] == ["refused"]
+                assert fake.calls == [] and not (paths.exports_dir(date(2026, 10, 14)) / "delivery" / RUN).exists()
+                assert deliver.run(args(preview=True))["ok"], "a preview is no delivery: it is always made"
+                fake.calls.clear()
+        with data_root():                                   # its own rows are the newest: the brief is made
+            closed(RUN, "finished", result="ok", text="LOAD FINISHED.")
+            status.write_state({"last_load": {"run": RUN}})
+            loadplan.journal_append(RUN, "step_ok", step="refresh", ingest_runs=[5, 7])
+            deliver.newest_ingest_run = lambda: 7
+            assert deliver.run(args())["flags"]["kind"] == "full"
+            assert deliver.own_last_ingest_run(RUN) == 7
+    finally:
+        sales.full_screen, deliver.newest_ingest_run = real, real_newest
 
 
 @test("deliver --preview records nothing: no register, no state, no row in the delivery journal")

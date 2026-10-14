@@ -116,13 +116,58 @@ def _():
         notes = yq._real_box_notes()
         assert notes[0].startswith("ATTENTION: the backup password is no longer found"), notes
         paths.write_text(paths.ops_dir() / "delivery.json", json.dumps({"mode": "on", "to": ["a@b.invalid", "c@d.invalid"]}))
-        assert yq.delivery_words().startswith("Afterwards, if every check passes: the brief by e-mail to 2 address(es)")
+        said = yq.delivery_words()
+        assert said.startswith("Afterwards: the brief by e-mail to 2 address(es), with the team message"), said
+        assert "a short note with no figure instead when a check needs a look" in said, "notes go out too: it says so"
         paths.write_text(paths.ops_dir() / "delivery.json", json.dumps({"mode": "test", "test_to": ["a@b.invalid"]}))
         assert "a TEST copy of the brief by e-mail to 1 address(es)" in yq.delivery_words()
     with data_root():
         title, text = yq.box_text("151026_0900", {"drop": "Uplaods/151026", "verdicts": []}, notes=["ATTENTION: x."])
         lines = text.splitlines()
         assert "ATTENTION: x." in lines and lines[-1] == "Yes = load now. No = nothing changes."
+
+
+@test("the rule fails closed: a marker that cannot be read, or an encrypted archive in the store, means encryption began")
+def _():
+    with data_root() as root:
+        store = root / "store" / "preload"
+        store.mkdir(parents=True)
+        assert yq.backup_marker(store) is None
+        (store / "yq-backup_2026-10-15_pre-data-151026_0900.7z").write_bytes(b"7z")
+        assert yq.backup_marker(store) == "2026-10-15", "an encrypted archive says so, whatever the marker"
+        assert yq.archive_refusal(None, "7z.exe", yq.backup_marker(store)), "no password now: a plain one is refused"
+        paths.write_text(paths.ops_dir() / "backup.json", "{ a broken copy")
+        assert yq.backup_marker() == yq.MARKER_UNREADABLE and "cannot be read" in yq.MARKER_UNREADABLE
+        assert "no longer found" in yq.archive_refusal(None, "7z.exe", yq.backup_marker())
+        paths.write_text(paths.ops_dir() / "backup.json", json.dumps({"encrypted_since": ""}))
+        assert yq.backup_marker() == yq.MARKER_UNREADABLE, "a marker without its day still counts"
+
+
+@test("the worker is the one process handed the backup password; the engine programs it starts never are")
+def _():
+    real = dict(yq.LAUNCH_ENV)
+    yq.LAUNCH_ENV[yq.BACKUP_PASSWORD_ENV] = "an-invented-password"
+    seen = {}
+
+    class Started:
+        pid, breakaway = 4242, True
+
+    real_popen = yq.subprocess.Popen
+
+    def popen(argv, **kw):
+        seen["env"] = kw.get("env")
+        return Started()
+    yq.subprocess.Popen = popen
+    try:
+        with data_root() as root:
+            yq.spawn_worker("151026_0900", root, "a-word", root / "worker.log")
+        assert seen["env"][yq.BACKUP_PASSWORD_ENV] == "an-invented-password", "the worker packs: it gets it"
+        assert yq.BACKUP_PASSWORD_ENV not in yq.child_env(), "an engine child never does"
+    finally:
+        yq.subprocess.Popen = real_popen
+        yq.LAUNCH_ENV.clear()
+        yq.LAUNCH_ENV.update(real)
+    assert yq.BACKUP_PASSWORD_ENV not in yq.child_env()
 
 
 @test("read-back: a whole zip passes, a damaged one does not, a 7z needs 7-Zip and its password")

@@ -399,6 +399,12 @@ class Harness:
         assert loadplan.run_result(self.w.run) in ("NOT_STARTED", "FINISHED", "FAILED")
 
 
+def aged(f: Path) -> None:
+    """Make a file look older than a heartbeat could leave it (a left-over, not a lock being written)."""
+    old = time.time() - status.HEARTBEAT_STALE_S - 60
+    os.utime(f, (old, old))
+
+
 def interrupted(h: Harness, upto: str = "refresh", step: str | None = None) -> dict:
     """Leave the journal and the lock the way a worker that was cut off leaves them."""
     w = h.w
@@ -831,6 +837,11 @@ def _():
     with data_root() as root:
         h = Harness(root)
         paths.write_text(paths.lock_file(), "")
+        # written just now (here, or synced from another PC while its launcher writes it): never cleared
+        assert h.go() == 2 and "being written at this moment" in h.said() and paths.lock_file().read_text() == ""
+        assert h.spawn.calls == []
+        h.out.clear()
+        aged(paths.lock_file())                  # a launcher's left-over: no load ever ran under it
         assert h.go() == 0 and "unreadable" in h.said() and status.read_lock()["run"] == RUN
     with data_root() as root:
         h = Harness(root)
@@ -1595,6 +1606,18 @@ def _():
         assert h.load() == 0
         row = h.rows("step_ok", "wait_tick")[0]
         assert row["until_s"] == 300 and row["waited_seconds"] == 600, row          # 09:06 is past 5 minutes: 09:16
+    # the slowest of the last refreshes counts, not the last one alone: one quick day never widens the window
+    recent = {"last_load": {"refresh_seconds": 150, "refresh_seconds_recent": [160, 420, 150]}}
+    assert yq.last_refresh_seconds(lambda: recent) == 420 and yq.start_until_s(420) == yq.START_UNTIL_MIN_S
+    assert yq.last_refresh_seconds(lambda: {"last_load": {"refresh_seconds_recent": "junk", "refresh_seconds": 9}}) == 9
+    with data_root() as root:                    # publish keeps the last REFRESH_RECENT refresh times
+        h = Harness(root)
+        before = {"last_load": {"run": "301225_0900", "refresh_seconds_recent": [100, 110, 120, 130, 140]}}
+        status.write_state(before)
+        h.deps.read_state = status.read_state
+        assert h.load() == 0
+        kept = status.read_state()["last_load"]["refresh_seconds_recent"]
+        assert len(kept) == yq.REFRESH_RECENT == 5 and kept[:4] == [110, 120, 130, 140], kept
 
 
 @test("the worker waits for the quiet moment and checks the token again after the wait")
@@ -2150,6 +2173,7 @@ def _():
             assert seen["sql"][-1] == ("select count(*) as new_rows, coalesce(max(id), 0) as max_id from ingest_runs where id > %s", (7,))
             assert seen["open"] == seen["closed"] == 3
             # a resume reads what another load wrote meanwhile: one session, SELECTs the guard accepts
+            yq.journal(RUN, "step_start", step="refresh")       # this run's own refresh left the loader's row
             foreign = yq._real_foreign_writes(dict(w.plan, token_parts={"fingerprint": {"ingest_runs": 7}}))
             assert seen["open"] == seen["closed"] == 4 and len(foreign) == 2, foreign
             assert "refresh _upload" in foreign[0] and "Data page" in foreign[1]
@@ -2181,7 +2205,8 @@ def _():
         state = status.read_state()
         last = state["last_load"]
         # the fixture's plan holds its profitability report back: the load writes the day down (see the test below)
-        assert set(last) == {"run", "finished_at", "data_date", "result", "published", "profit_held_since"}, last
+        assert set(last) == {"run", "finished_at", "data_date", "result", "published", "profit_held_since",
+                             "refresh_seconds", "refresh_seconds_recent"}, last       # the next load's start window
         assert last["run"] == RUN and last["data_date"] == "2025-12-31" and last["result"] == "ok"
         assert last["published"] == "Focus ERP 2026-01-01" and last["finished_at"].endswith("+03:00")
         assert state["last_brief_data_date"] == "2025-12-30", "the rest of state.json was lost"
@@ -3368,6 +3393,10 @@ def _():
         with data_root() as root:                                # a file that is no lock (a launcher died writing it):
             paths.write_text(paths.lock_file(), "not a lock")    # cleared and said, exactly as a go does it
             spawn, out = Spawn(), []
+            assert yq.rehearse(0, no_box=True, say=out.append, spawn=spawn, start_wait_s=0) == 2, out   # once it is old
+            assert "being written at this moment" in out[0] and spawn.calls == []
+            aged(paths.lock_file())
+            out.clear()
             assert yq.rehearse(0, no_box=True, say=out.append, spawn=spawn, start_wait_s=0) == 0, out
             assert out[0] == "(an unreadable left-over lock is cleared: no load was running under it)"
             assert status.read_lock()["run"] == spawn.calls[0]["run"]
@@ -4249,7 +4278,8 @@ def _():
         assert h.load() == 0 and asked == []
 
 
-@test("foreign writes: the rows of this run's refresh and of the loader are its own; another folder, a batch, an upload log are not")
+@test("foreign writes: this run's own rows (one loader row per start of its refresh) pass; another folder, a batch, "
+      "a loader row too many, an upload since the go do not")
 def _():
     class Rows:
         def __init__(self, runs, events):
@@ -4261,17 +4291,41 @@ def _():
             return self.events if "audit_log" in sql else self.runs
     plan = {"run": RUN, "created_at": "2026-01-01T09:00:00+00:00", "token_parts": {"fingerprint": {"ingest_runs": 7}}}
     own = [{"id": 8, "file": f"refresh {RUN} (data as of 2025-12-31)"}, {"id": 9, "file": "Focus refresh (data as of x)"}]
-    assert loadplan.foreign_writes(Rows(own, []), RUN, plan) == []
-    other = own + [{"id": 10, "file": "refresh _upload (data as of 2026-01-01)"},
-                   {"id": 11, "file": "batch 4 committed by owner (data as of 2026-01-01)"},
-                   {"id": 12, "file": "refresh 020126_0900 (data as of 2026-01-01)"}]
-    said = loadplan.foreign_writes(Rows(other, [{"event": "ingest", "at": "2026-01-01 09:30"}]), RUN, plan)
-    assert len(said) == 4 and "refresh _upload" in said[0] and "batch 4" in said[1] and "020126_0900" in said[2]
-    assert "ingest" in said[3]
-    rows = Rows(own, [])
-    loadplan.foreign_writes(rows, RUN, plan)
-    assert rows.sql[0][1] == (7,) and rows.sql[1][1] == ("2026-01-01T09:00:00+00:00",)
-    assert loadplan.foreign_writes(Rows(other, []), RUN, {"run": RUN}) == [], "no fingerprint, no check time: nothing to compare"
+    with data_root():
+        loadplan.journal_append(RUN, "started", at="2026-01-01T09:05:00+00:00")
+        loadplan.journal_append(RUN, "step_start", step="refresh")
+        assert loadplan.own_attempts(loadplan.journal_read(RUN)) == 1
+        assert loadplan.foreign_writes(Rows(own, []), RUN, plan) == []
+        rows = Rows(own, [])
+        loadplan.foreign_writes(rows, RUN, plan)
+        # the upload log is read from the go's first start, not from the check: an upload in between was seen
+        # by the go's own comparison of the whole fingerprint
+        assert rows.sql[0][1] == (7,) and rows.sql[1][1] == ("2026-01-01T09:05:00+00:00",)
+        other = own + [{"id": 10, "file": "refresh _upload (data as of 2026-01-01)"},
+                       {"id": 11, "file": "batch 4 committed by owner (data as of 2026-01-01)"},
+                       {"id": 12, "file": "refresh 020126_0900 (data as of 2026-01-01)"}]
+        said = loadplan.foreign_writes(Rows(other, [{"event": "ingest", "at": "2026-01-01 09:30", "recognised": "3"}]),
+                                       RUN, plan)
+        assert len(said) == 4 and "refresh _upload" in said[0] and "batch 4" in said[1] and "020126_0900" in said[2]
+        assert "ingest" in said[3]
+        # an upload that died after its loader and before its own row: one loader row more than this run's attempts
+        died = own + [{"id": 10, "file": "Focus refresh (data as of 2026-01-01)"}]
+        said = loadplan.foreign_writes(Rows(died, []), RUN, plan)
+        assert said == ["1 more loader record(s) than this run's own refreshes since the check: another load ran the "
+                        "loader"], said
+        loadplan.journal_append(RUN, "step_start", step="refresh", attempt=2)          # its own second run: two rows
+        assert loadplan.foreign_writes(Rows(died, []), RUN, plan) == []
+        # an upload that recognised no report wrote nothing; the other upload events count
+        quiet = [{"event": "ingest", "at": "2026-01-01 09:30", "recognised": "0"}]
+        assert loadplan.foreign_writes(Rows(own, quiet), RUN, plan) == []
+        marked = [{"event": "ingest_markers", "at": "2026-01-01 09:31", "recognised": ""}]
+        assert "ingest_markers" in loadplan.foreign_writes(Rows(own, marked), RUN, plan)[0]
+    with data_root():                            # no journal yet: the check's own time is where the log is read from
+        rows = Rows(own, [])
+        loadplan.foreign_writes(rows, RUN, plan)
+        assert rows.sql[1][1] == ("2026-01-01T09:00:00+00:00",)
+        assert "1 more loader record" in loadplan.foreign_writes(Rows(own, []), RUN, plan)[0]
+        assert loadplan.foreign_writes(Rows(own, []), RUN, {"run": RUN}) == [], "no fingerprint, no time: nothing"
     # the texts it reads are the ones the programs write: a change there must fail here first
     refresh = (ROOT / "scripts" / "refresh.py").read_text(encoding="utf-8")
     loader = (ROOT / "scripts" / "load_supabase.py").read_text(encoding="utf-8")

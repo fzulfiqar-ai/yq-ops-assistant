@@ -213,7 +213,8 @@ def journal_read(run: str) -> list[dict]:
 
 FOREIGN_RUNS_SQL = "select id, coalesce(file, '') as file from ingest_runs where id > %s order by id"
 FOREIGN_EVENTS_SQL = (
-    "select event, ts::text as at from audit_log where ts > %s::timestamptz "
+    "select event, ts::text as at, coalesce(detail->>'recognised', '') as recognised from audit_log "
+    "where ts > %s::timestamptz "
     "and event in ('ingest', 'ingest_markers', 'ingest_purge', 'ingest.batch_commit', 'ingest.batch_undo') order by ts"
 )
 LOADER_RUN_PREFIX = "Focus refresh ("          # scripts/load_supabase.py, whoever ran the loader
@@ -225,6 +226,18 @@ def own_refresh_prefix(run: str) -> str:
     return f"refresh {run} ("
 
 
+def own_attempts(rows: list[dict]) -> int:
+    """How many times this run's refresh was started (a start of the refresh step, each attempt and each
+    resume): each may have left at most one loader row in ingest_runs, and no more."""
+    return sum(1 for r in rows if r.get("event") == "step_start" and r.get("step") == "refresh")
+
+
+def go_started_at(rows: list[dict]) -> str:
+    """When this run was first started by its go (the first 'started' row of its journal): the database
+    was compared with the table right after it, so whatever another load wrote is after it."""
+    return next((str(r.get("at") or "") for r in rows if r.get("event") == "started" and r.get("at")), "")
+
+
 def foreign_writes(session, run: str, plan: dict) -> list[str]:
     """What another load wrote to the database after this run's check, in plain words ([] = nothing).
     SELECT only. Asked where the fingerprint can no longer be compared, because this run's own refresh
@@ -232,27 +245,40 @@ def foreign_writes(session, run: str, plan: dict) -> list[str]:
     between would otherwise be overwritten inside the resumed files' dates.
       ingest_runs   every refresh records itself: a row after the check's own last id that names
                     another folder (refresh _upload (...) is the Data page) or a batch import. The
-                    loader's own row (Focus refresh (...)) names no folder and is not counted: an
-                    interrupted refresh of this very run may have left one.
-      audit_log     the Data page and the batch importer log every upload, purge, commit and undo;
-                    any after the check counts, even one that stopped before it wrote its run row."""
+                    loader's rows (Focus refresh (...)) name no folder: this run may have left one for
+                    each start of its refresh (own_attempts), and one more than that is another load's,
+                    even one that died before it wrote its own row.
+      audit_log     the Data page and the batch importer log every upload, purge, commit and undo
+                    after the go first started this run (an upload that recognised no report wrote
+                    nothing and is not counted).
+    What it cannot see: an upload that is running at this very moment and has written no row yet, and
+    one that died before its loader while a refresh of this run had died before its own loader too."""
     fp = (plan.get("token_parts") or {}).get("fingerprint") or {}
+    rows = journal_read(run)
     out: list[str] = []
     try:
         since = int(fp.get("ingest_runs"))
     except (TypeError, ValueError):
         since = None
     if since is not None:
-        own = own_refresh_prefix(run)
+        own, loaders = own_refresh_prefix(run), []
         for row in session.q(FOREIGN_RUNS_SQL, (since,)):
             name = " ".join(str(row.get("file") or "").split())
-            if name.startswith(own) or name.startswith(LOADER_RUN_PREFIX):
+            if name.startswith(own):
                 continue
-            if name.startswith(("refresh ", "batch ")):
+            if name.startswith(LOADER_RUN_PREFIX):
+                loaders.append(name)
+            elif name.startswith(("refresh ", "batch ")):
                 out.append(f"another load wrote to the database after this check ({name[:70]})")
-    created = str(plan.get("created_at") or "")
-    if created:
-        for row in session.q(FOREIGN_EVENTS_SQL, (created,)):
+        extra = len(loaders) - own_attempts(rows)
+        if extra > 0:
+            out.append(f"{extra} more loader record(s) than this run's own refreshes since the check: another load "
+                       "ran the loader")
+    since_at = go_started_at(rows) or str(plan.get("created_at") or "")
+    if since_at:
+        for row in session.q(FOREIGN_EVENTS_SQL, (since_at,)):
+            if row.get("event") == "ingest" and str(row.get("recognised") or "") == "0":
+                continue                       # an upload that recognised no report: nothing was written
             out.append(f"an upload on the Data page or a batch import after this check ({row.get('event')}, "
                        f"{str(row.get('at') or '')[:16]})")
     return out[:6]

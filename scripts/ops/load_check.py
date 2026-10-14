@@ -2732,11 +2732,12 @@ def delivery_cut_off(run: str, now: datetime | None = None) -> bool:
 def run_state(run: str, now: datetime | None = None) -> tuple[str, str | None]:
     """(RUNNING | FINISHED | FAILED | INTERRUPTED | NOT STARTED, step). The journal says whether the
     run started and how it ended; the lock says whether its worker is still alive. A load that has
-    finished reads RUNNING at 'delivery' while its brief and e-mail are being made (deliver_after of
-    the writer): the skill then follows it a little longer, and shows the brief that was made."""
+    closed (FINISHED, or FAILED after it began to write) reads RUNNING at 'delivery' while its brief or its
+    note and the e-mail are being made (deliver_after of the writer): the skill then follows it a little
+    longer, and its `Delivery:` line is shown before the state it ended in."""
     result = loadplan.run_result(run)
     step = loadplan.last_step(run)
-    if result == "FINISHED" and delivery_pending(run, now):
+    if result in ("FINISHED", "FAILED") and delivery_pending(run, now):
         return "RUNNING", "delivery"
     if result in ("FINISHED", "FAILED"):
         return result, step
@@ -2885,7 +2886,7 @@ def run_status(args, deps: Deps | None = None) -> dict:
         if not getattr(args, "wait", False) or final or waited >= WAIT_MAX_S:
             break
         deps.pause(WAIT_POLL_S)
-    if state == "FINISHED" and delivery_cut_off(run):
+    if state in ("FINISHED", "FAILED") and delivery_cut_off(run):
         lines.append("  Delivery: cut off before the e-mail went (the PC slept, or the load's window was closed). "
                      f"Nothing was reloaded. Its retry: {SEND_RETRY.format(run=run)}")
     text = [f"Load {run}"]
