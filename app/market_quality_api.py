@@ -159,7 +159,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     @app.get("/market-intel/products")
     def market_intel_products(q: str | None = None, shop_id: int | None = None, shop_phone: str | None = None,
                               limit: int = 20, user: CurrentUser = Depends(gate)) -> list:
-        return mq.products((q or "")[:80], shop_id=shop_id, shop_phone=(shop_phone or "")[:40] or None, limit=limit)
+        """A salesman's shop counts only when it is his own customer (else: as if no shop was named)."""
+        rep = user.role == "salesman"
+        sm = mi._salesman_for(_me(user)) if rep else None
+        return mq.products((q or "")[:80], shop_id=shop_id, shop_phone=(shop_phone or "")[:40] or None, limit=limit,
+                           salesman_id=(sm or {}).get("id"), own_shops_only=rep)
 
     # ── cases ─────────────────────────────────────────────────────────────────
     @app.get("/market-intel/cases")

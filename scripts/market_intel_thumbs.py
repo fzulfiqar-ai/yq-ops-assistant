@@ -37,7 +37,11 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     from app import market_intel as mi
-    out = mi.backfill_thumbnails(limit=max(1, args.limit), dry_run=not args.apply)
+    try:
+        out = mi.backfill_thumbnails(limit=max(1, args.limit), dry_run=not args.apply)
+    except mi.MarketIntelError as e:              # the database did not answer (a blip): nothing was written
+        print(f"Not run: {e}")
+        return 2
     if not out.get("ok"):
         print(f"Not run: {out.get('reason')}")
         return 2

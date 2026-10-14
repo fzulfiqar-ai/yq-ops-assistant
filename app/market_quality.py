@@ -76,6 +76,11 @@ QUESTION_FROM = ("submitted", "under_review", "more_info_required")
 EVIDENCE_LABELS = {1: "Reported", 2: "Evidence submitted", 3: "Inspected & verified by YQ",
                    4: "Supplier confirmed", 5: "Resolution verified"}
 EVIDENCE_VERIFIED = 3
+# What a level needs (evidence_cap): 3 only once a person verified the case (verification_method: the move to
+# Verified sets it, with at least 3); 4 from Action requested on (the supplier was asked); 5 once Resolved.
+EVIDENCE_NEEDS = {3: "Inspected & verified by YQ (level 3) comes with the move to Verified: verify the case first.",
+                  4: "Supplier confirmed (level 4) is possible once the supplier was asked: from Action requested on.",
+                  5: "Resolution verified (level 5) is possible once the case is Resolved."}
 VERIFICATION_METHODS = ("sample_inspected", "photos_sufficient", "several_shops")
 VERIFICATION_LABELS = {"sample_inspected": "Sample inspected", "photos_sufficient": "Photos judged sufficient",
                        "several_shops": "Reported by several shops"}
@@ -92,7 +97,11 @@ AT_SHOP_DAYS = 180
 AT_SHOP_TTL_S = 300.0
 MISSING_HINT = mi.QUALITY_HINT
 _BAHRAIN = timezone(timedelta(hours=3))
-_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{1,39}$")
+_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,59}$")         # market_issue_types_code_slug, as the database checks it
+RELINK_ACTOR = "system (brand re-linked)"
+FINISH_ACTOR = "system (capture finished)"
+SWEEP_AFTER = timedelta(minutes=2)       # a safety sighting this old without its case / claim is finished
+SWEEP_WITHIN = timedelta(days=7)
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -347,7 +356,7 @@ def _entry_values(kind: str, body: dict, names: Names, current: dict | None) -> 
         if "code" in body and body.get("code") not in (None, ""):
             code = str(body.get("code")).strip().lower()
             if not _SLUG.match(code):
-                raise MarketIntelError("A code is 2-40 lower-case letters, digits or _ (like not_charging).")
+                raise MarketIntelError("A code is up to 60 lower-case letters, digits, _ or - (like not_charging).")
             row["code"] = code
         if "safety_default" in body and body["safety_default"] is not None:
             row["safety_default"] = _flag(body["safety_default"], "safety_default")
@@ -372,7 +381,7 @@ def _entry_values(kind: str, body: dict, names: Names, current: dict | None) -> 
             if not row.get("kind") or not row.get("label_en"):
                 raise MarketIntelError("An issue type needs a kind and an English label.")
             if not row.get("code"):
-                slug = re.sub(r"[^a-z0-9]+", "_", row["label_en"].lower()).strip("_")[:40]
+                slug = re.sub(r"[^a-z0-9]+", "_", row["label_en"].lower()).strip("_")[:60]
                 if not _SLUG.match(slug or ""):
                     raise MarketIntelError("Give the issue type a code (like not_charging).")
                 row["code"] = slug
@@ -406,12 +415,18 @@ def _merge_target(kind: str, names: Names, entry_id: int, target) -> int | None:
         raise MarketIntelError("An entry cannot be merged into itself.")
     if tid not in table:
         raise MarketIntelError(f"Unknown {kind[:-1]} to merge into.", 404)
-    seen, cur = set(), table.get(tid)
-    while cur and cur.get("merged_into") and len(seen) < 10:     # no loop: the target never leads back here
-        if int(cur["merged_into"]) == entry_id:
+    # Walk the target's own merge chain: it must never lead back here (a circle), and a chain that
+    # already loops (made by hand) or runs on and on is refused instead of walked forever.
+    seen: set[int] = set()
+    cur = table.get(tid)
+    while cur and cur.get("merged_into"):
+        nxt = int(cur["merged_into"])
+        if nxt == entry_id:
             raise MarketIntelError("That merge would go round in a circle.", 409)
         seen.add(int(cur["id"]))
-        cur = table.get(int(cur["merged_into"]))
+        if nxt in seen or len(seen) > 50:
+            raise MarketIntelError(f"The {kind[:-1]} to merge into is in a merge loop; untangle it first.", 409)
+        cur = table.get(nxt)
     return tid
 
 
@@ -486,8 +501,34 @@ def update_entry(kind: str, entry_id: int, body: dict, actor: str, role: str) ->
         if mi._unique_violation(e):
             raise MarketIntelError("That name or code is already taken.", 409) from None
         raise
-    return {"ok": True, "changed": True, "entry": _OUT[kind]((got or [{**cur, **upd}])[0]),
-            "fields": sorted(diffs)}
+    out = {"ok": True, "changed": True, "entry": _OUT[kind]((got or [{**cur, **upd}])[0]), "fields": sorted(diffs)}
+    if kind == "brands" and "supplier_id" in diffs:
+        out["cases_moved"] = relink_brand_cases(int(entry_id), cur.get("supplier_id"), upd["supplier_id"])
+    return out
+
+
+def relink_brand_cases(brand_id: int, old_supplier, new_supplier) -> list[int]:
+    """A brand moved from one supplier to another: its OPEN cases that still carry the old supplier (they
+    took it from the brand) move to the new one, each with an 'edit' event by RELINK_ACTOR — otherwise
+    new sightings of the brand would not join them (find_open_case keeps suppliers apart) and the old
+    supplier's workbook would keep them. Closed, not substantiated and merged cases keep their history."""
+    def rows():
+        q = _c().table("market_cases").select("id,status,supplier_id,merged_into").eq("brand_id", int(brand_id))
+        q = q.is_("supplier_id", "null") if old_supplier is None else q.eq("supplier_id", int(old_supplier))
+        return q.order("id")
+    moved = []
+    for r in mi._all(rows):
+        if r.get("merged_into") or r.get("status") in CLOSED_STATUSES:
+            continue
+        got = (_c().table("market_cases").update({"supplier_id": new_supplier, "updated_at": mi._iso(),
+                                                  "updated_by": RELINK_ACTOR})
+               .eq("id", int(r["id"])).eq("brand_id", int(brand_id)).execute().data)
+        if got is not None and len(got) == 0:
+            continue
+        case_event(int(r["id"]), "edit", RELINK_ACTOR,
+                   detail={"supplier_id": {"from": old_supplier, "to": new_supplier}, "brand_id": int(brand_id)})
+        moved.append(int(r["id"]))
+    return moved
 
 
 # ── the product picker ────────────────────────────────────────────────────────
@@ -523,16 +564,38 @@ def shop_codes(shop_id: int | None) -> frozenset:
     return out
 
 
+def rep_owns_shop(shop_id, salesman_id) -> bool:
+    """Is this shop the salesman's own customer: assigned to him (shop_customers.salesman_id, or the
+    first-touch sticky_salesman_id) or a shop he has a marketplace order for? Anything unreadable: no."""
+    if not shop_id or not salesman_id:
+        return False
+    try:
+        got = _c().table("shop_customers").select("*").eq("id", int(shop_id)).limit(1).execute().data or []
+        if got and any(got[0].get(k) is not None and str(got[0][k]) == str(salesman_id)
+                       for k in ("salesman_id", "sticky_salesman_id")):
+            return True
+        return bool(_c().table("shop_orders").select("id").eq("customer_id", int(shop_id))
+                    .eq("salesman_id", int(salesman_id)).limit(1).execute().data)
+    except Exception as e:  # noqa: BLE001 — a hint: when in doubt, nothing is said about the shop
+        log.info("market quality: shop ownership not read: %s", e)
+        return False
+
+
 def products(q: str | None = None, *, shop_id: int | None = None, shop_phone: str | None = None,
-             limit: int = 20) -> list[dict]:
+             limit: int = 20, salesman_id: int | None = None, own_shops_only: bool = False) -> list[dict]:
     """GET /market-intel/products: catalog items for the capture sheet's "Which product?" — with words, the
     best matches (the code exactly, a code that starts with them, then names / brands / categories holding
-    every word); without, the shop's own items first. Thumbnails are the catalog's public 320 px WebPs."""
+    every word); without, the shop's own items first. Thumbnails are the catalog's public 320 px WebPs.
+    own_shops_only (a salesman): the shop counts only when it is HIS customer (rep_owns_shop); any other
+    shop — another rep's, or a phone that is no customer at all — gives exactly the answer of no shop, so
+    the picker reveals neither another shop's purchases nor whether a phone is a customer."""
     from app.catalog import public_url, thumb_path
     ctx = mi._catalog_ctx() or {}
     items = ctx.get("items") or {}
     order = [c for c in (ctx.get("order") or list(items)) if c in items]
     sid = shop_id or (mi._shop_customer_id(shop_phone) if shop_phone else None)
+    if own_shops_only and not rep_owns_shop(sid, salesman_id):
+        sid = None
     mine = shop_codes(sid)
     lim = max(1, min(int(limit or 20), 50))
     words = [w for w in re.split(r"\s+", mi._ci(q)) if w]
@@ -629,24 +692,34 @@ def plan_capture(v2: dict, f: dict, yq_item: dict | None) -> dict:
             "obs_cols": obs_cols}
 
 
-def find_open_case(yq_code: str | None, issue_type_id, now: datetime) -> dict | None:
-    """The OPEN case a quality sighting joins: the same YQ SKU and issue type, not closed / not
-    substantiated / merged, last seen within CASE_WINDOW_DAYS. No SKU ("not sure / not ours") -> None:
+def _open_cases(yq_code: str | None, issue_type_id, now: datetime, supplier_id=None) -> list[dict]:
+    """The OPEN cases a quality sighting may join, oldest first: the same YQ SKU and issue type, not closed /
+    not substantiated / merged, last seen within CASE_WINDOW_DAYS, and never another supplier's (a case with
+    a supplier takes a sighting of that supplier, or of none known). No SKU ("not sure / not ours") -> none:
     unknown products never pool on an issue alone."""
     if not yq_code or not issue_type_id:
-        return None
+        return []
     since = now - timedelta(days=CASE_WINDOW_DAYS)
     rows = (_c().table("market_cases").select("*").eq("yq_item_code", yq_code).eq("issue_type_id", int(issue_type_id))
-            .is_("merged_into", "null").order("last_seen", desc=True).order("id", desc=True).limit(20)
-            .execute().data or [])
+            .is_("merged_into", "null").order("id").limit(50).execute().data or [])
+    out = []
     for r in rows:
         if r.get("status") in CLOSED_STATUSES:
+            continue
+        if supplier_id and r.get("supplier_id") and str(r["supplier_id"]) != str(supplier_id):
             continue
         seen = mi._parse_ts(r.get("last_seen")) or mi._parse_ts(r.get("first_seen")) or mi._parse_ts(r.get("created_at"))
         if seen and seen < since:
             continue
-        return r
-    return None
+        out.append(r)
+    return out
+
+
+def find_open_case(yq_code: str | None, issue_type_id, now: datetime, supplier_id=None) -> dict | None:
+    """The open case a quality sighting joins (_open_cases): the OLDEST, so two cases that were opened for
+    one problem at the same moment converge on one."""
+    got = _open_cases(yq_code, issue_type_id, now, supplier_id)
+    return got[0] if got else None
 
 
 def case_title(yq_item: dict | None, yq_code: str | None, f: dict, issue: dict | None) -> str:
@@ -657,11 +730,11 @@ def case_title(yq_item: dict | None, yq_code: str | None, f: dict, issue: dict |
 
 
 def case_event(case_id: int, event: str, actor: str, *, from_status: str | None = None,
-               to_status: str | None = None, detail: dict | None = None) -> None:
-    """One row of a case's history (market_case_events, append-only in the database)."""
-    _c().table("market_case_events").insert(
-        {"case_id": int(case_id), "event": event, "actor": actor or "system", "at": mi._iso(),
-         "from_status": from_status, "to_status": to_status, "detail": detail or {}}).execute()
+               to_status: str | None = None, detail: dict | None = None) -> dict:
+    """One row of a case's history (market_case_events, append-only in the database); returns it."""
+    row = {"case_id": int(case_id), "event": event, "actor": actor or "system", "at": mi._iso(),
+           "from_status": from_status, "to_status": to_status, "detail": detail or {}}
+    return (_c().table("market_case_events").insert(row).execute().data or [row])[0]
 
 
 def _case(case_id) -> dict | None:
@@ -698,22 +771,39 @@ def _has_photo(obs_id: int) -> bool:
     return bool(_c().table("market_photos").select("id").eq("observation_id", int(obs_id)).limit(1).execute().data)
 
 
-def _raise_evidence(case: dict, level: int, actor: str, why: str, **detail) -> dict:
-    """Evidence only moves up: set `level` when it is above the case's, with an 'evidence' event."""
+def evidence_cap(case: dict) -> int:
+    """The highest evidence level a case's state allows (EVIDENCE_NEEDS): 2 until a person verified it (no
+    verification_method), 3 once verified, 4 from Action requested on, 5 once Resolved (or Closed after)."""
+    if not case.get("verification_method"):
+        return 2
+    if case.get("status") in ("resolved", "closed"):
+        return 5
+    return 4 if case.get("status") == "action_requested" else 3
+
+
+def _raise_evidence(case: dict, level: int, actor: str, why: str, **detail) -> tuple[dict, bool]:
+    """Evidence only moves up — in the database too: the write carries `evidence_level < level`, so a stale
+    read (a reviewer verified meanwhile) can never lower it. The 'evidence' event is written only when a row
+    really changed. Returns (the case as now known, changed)."""
     cur = int(case.get("evidence_level") or 1)
     if level <= cur:
-        return case
-    _c().table("market_cases").update({"evidence_level": level, "updated_at": mi._iso(), "updated_by": actor or "system"}) \
-        .eq("id", case["id"]).execute()
+        return case, False
+    got = (_c().table("market_cases").update({"evidence_level": level, "updated_at": mi._iso(),
+                                              "updated_by": actor or "system"})
+           .eq("id", int(case["id"])).lt("evidence_level", level).execute().data)
+    if got is not None and len(got) == 0:
+        return case, False                    # already at this level or above
     case_event(case["id"], "evidence", actor, detail={"from": cur, "to": level, "why": why, **detail})
-    return {**case, "evidence_level": level}
+    return {**case, "evidence_level": level}, True
 
 
 def _set_safety(case: dict, actor: str, **detail) -> dict:
     if case.get("safety"):
         return case
-    _c().table("market_cases").update({"safety": True, "updated_at": mi._iso(), "updated_by": actor or "system"}) \
-        .eq("id", case["id"]).execute()
+    got = (_c().table("market_cases").update({"safety": True, "updated_at": mi._iso(), "updated_by": actor or "system"})
+           .eq("id", int(case["id"])).eq("safety", False).execute().data)
+    if got is not None and len(got) == 0:
+        return {**case, "safety": True}       # someone made it a safety case meanwhile
     case_event(case["id"], "edit", actor, detail={"safety": {"from": False, "to": True}, **detail})
     return {**case, "safety": True}
 
@@ -727,22 +817,51 @@ def _card_part(case: dict, issue: dict | None, *, joined: bool, title: str) -> d
             "safety": bool(case.get("safety"))}
 
 
+def _fold_into(dup: dict, keep: dict, obs: dict, actor: str) -> dict:
+    """Two captures of one product and issue opened a case each at the same moment: the newer one (`dup`)
+    folds into the older (`keep`) — its sighting moves, it closes as merged — evidence and safety carried,
+    both recounted, both timelines say so. Returns `keep` as now known."""
+    _c().table("market_observations").update({"case_id": int(keep["id"]), "result": "seen_before"}) \
+        .eq("case_id", int(dup["id"])).execute()
+    obs.update(case_id=int(keep["id"]), result="seen_before")
+    _c().table("market_cases").update({"merged_into": int(keep["id"]), "status": "closed",
+                                       "status_reason": f"merged into #{keep['id']}", "changed_at": mi._iso(),
+                                       "changed_by": actor, "updated_at": mi._iso(), "updated_by": actor}) \
+        .eq("id", int(dup["id"])).is_("merged_into", "null").execute()
+    why = "opened at the same moment as an older case of the same product and issue"
+    case_event(dup["id"], "merge", actor, from_status=dup.get("status"), to_status="closed",
+               detail={"into": int(keep["id"]), "moved_observations": [int(obs["id"])], "why": why})
+    case_event(keep["id"], "merge", actor, detail={"from": int(dup["id"]), "moved_observations": [int(obs["id"])],
+                                                   "why": why})
+    keep, _ = _raise_evidence(keep, min(int(dup.get("evidence_level") or 1), evidence_cap(keep)), actor, "merge",
+                              from_case=int(dup["id"]))
+    if dup.get("safety"):
+        keep = _set_safety(keep, actor, from_case=int(dup["id"]))
+    refresh_case(int(dup["id"]))
+    return keep
+
+
 def link_case(obs: dict, plan: dict, *, found: dict | None, yq_item: dict | None, f: dict, actor: str,
-              has_photo: bool, defer=None) -> tuple[dict, bool]:
-    """Put a fresh sighting on its case: `found` (already its case_id) or a new case opened for it. The
-    evidence rises to 2 with a photo, a safety sighting makes the case a safety case, the counts are
-    recounted and every change is an event. Returns (the card's case part, safety_alerted)."""
+              has_photo: bool, defer=None, now: datetime | None = None) -> tuple[dict, bool]:
+    """Put a sighting on its case: `found` (already its case_id) or a new case opened for it — and when an
+    older open case of the same product, issue and supplier appeared meanwhile (two captures at once), the
+    new case folds into it. The evidence rises to 2 with a photo, a safety sighting makes the case a safety
+    case, the counts are recounted, every change is an event, and a safety report claims the case's one
+    alert. Returns (the card's case part, safety_alerted: the case holds its alert claim)."""
+    now = now or mi._now()
     issue = plan["issue"]
+    supplier_id = (plan.get("supplier") or {}).get("id")
+    joined = bool(found)
     if found:
         case = found
         if has_photo:
-            case = _raise_evidence(case, 2, actor, "photo", observation_id=obs["id"])
+            case, _ = _raise_evidence(case, 2, actor, "photo", observation_id=obs["id"])
         if plan["safety"]:
             case = _set_safety(case, actor, observation_id=obs["id"])
         case_event(case["id"], "link", actor, detail={"observation_id": obs["id"]})
     else:
         row = {"yq_item_code": obs.get("yq_item_code"), "issue_type_id": issue["id"],
-               "brand_id": (plan.get("brand") or {}).get("id"), "supplier_id": (plan.get("supplier") or {}).get("id"),
+               "brand_id": (plan.get("brand") or {}).get("id"), "supplier_id": supplier_id,
                "batch_ref": obs.get("batch_ref"), "packaging_version": obs.get("packaging_version"),
                "status": "submitted", "evidence_level": 2 if has_photo else 1, "safety": bool(plan["safety"]),
                "title": case_title(yq_item, obs.get("yq_item_code"), f, issue),
@@ -755,27 +874,160 @@ def link_case(obs: dict, plan: dict, *, found: dict | None, yq_item: dict | None
         case_event(case["id"], "created", actor, to_status="submitted",
                    detail={"observation_id": obs["id"], "issue_type_id": issue["id"],
                            "yq_item_code": obs.get("yq_item_code"), "evidence_level": row["evidence_level"]})
+        older = [r for r in _open_cases(obs.get("yq_item_code"), issue["id"], now, supplier_id)
+                 if int(r["id"]) < int(case["id"])]
+        if older:
+            case = _fold_into(case, older[0], obs, actor)
+            joined = True
     case = {**case, **refresh_case(int(case["id"]))}
     alerted = False
     if plan["safety"]:
-        alerted = True
         if claim_alert(int(case["id"]), actor, obs["id"]):
             _later(defer, send_safety_alert, int(case["id"]), int(obs["id"]))
-    return _card_part(case, issue, joined=bool(found),
+        alerted = alert_claimed(int(case["id"]))
+    return _card_part(case, issue, joined=joined,
                       title=case_title(yq_item, obs.get("yq_item_code"), f, issue)), alerted
 
 
 def card_case(obs: dict) -> tuple[dict | None, bool]:
-    """The case part of a replayed card (a retried capture): the case it is on now."""
+    """The case part of a replayed card (a retried capture): the case it is on now; safety_alerted only when
+    that case holds its alert claim."""
     case = _live(_case(obs.get("case_id")))
     if not case:
-        return None, bool(obs.get("safety_flag"))
+        return None, False
     issue = Names.load().issue(obs.get("issue_type_id") or case.get("issue_type_id"))
     code = obs.get("yq_item_code")
     item = ((mi._catalog_ctx() or {}).get("items") or {}).get(code or "")
     return (_card_part(case, issue, joined=obs.get("result") == "seen_before",
                        title=case_title(item, code, {"title": obs.get("title"), "note": obs.get("note")}, issue)),
-            bool(obs.get("safety_flag")))
+            bool(obs.get("safety_flag")) and alert_claimed(int(case["id"])))
+
+
+# ── a capture that stopped half-way: finish it (the phone's retry, the safety sweep) ──
+
+def _needs_case(obs: dict, names: Names) -> dict | None:
+    """The issue a stored sighting's case is filed under when its capture would have put it on a case —
+    plan_capture's rule read back from the row (issue_type_id = the issue as filed, safety_flag = the
+    safety as decided) — else None."""
+    issue = names.issue(obs.get("issue_type_id"))
+    if issue and (issue.get("kind") in CASE_KINDS or obs.get("kind") == "complaint" or obs.get("safety_flag")):
+        return issue
+    return None
+
+
+def _mentions(e: dict, obs_id: int) -> bool:
+    d = e.get("detail") or {}
+    return d.get("observation_id") == obs_id or obs_id in (d.get("moved_observations") or [])
+
+
+def _case_events(case_id: int) -> list[dict]:
+    return mi._all(lambda: _c().table("market_case_events").select("id,case_id,event,detail")
+                   .eq("case_id", int(case_id)).order("id"))
+
+
+def capture_finished(obs: dict) -> bool:
+    """Did this sighting's capture get to its end? A quality sighting needs its case, a line on that case's
+    timeline that names it, and — for a safety report — the case's alert claim. Every other sighting is
+    whole once inserted."""
+    if not obs.get("issue_type_id"):
+        return True
+    if not _needs_case(obs, Names.load()):
+        return True
+    case = _live(_case(obs.get("case_id"))) if obs.get("case_id") else None
+    if not case:
+        return False
+    events = _case_events(int(case["id"]))
+    if not any(_mentions(e, int(obs["id"])) for e in events):
+        return False
+    return not obs.get("safety_flag") or any(e.get("event") == "safety_alert"
+                                             and (e.get("detail") or {}).get("email") == "queued" for e in events)
+
+
+def finish_capture(obs: dict, *, now: datetime, defer=None, actor: str = FINISH_ACTOR) -> tuple[dict | None, bool]:
+    """Finish a capture that stopped after its sighting was saved (an error between the insert and the
+    alert claim), as the capture would have, and idempotently: a sighting with no case joins the open case
+    or opens one (link_case); one already on its case gets the missing timeline line, evidence, safety flag,
+    recount and alert claim. A second run changes nothing. Returns (the card's case part, safety_alerted)."""
+    names = Names.load()
+    issue = _needs_case(obs, names)
+    if not issue:
+        return None, False
+    code = obs.get("yq_item_code")
+    item = ((mi._catalog_ctx() or {}).get("items") or {}).get(code or "")
+    f = {"title": obs.get("title"), "note": obs.get("note")}
+    safety = bool(obs.get("safety_flag"))
+    plan = {"issue": issue, "case": True, "safety": safety, "brand": names.brand(obs.get("brand_id")),
+            "supplier": names.supplier(obs.get("supplier_id"))}
+    has_photo = _has_photo(int(obs["id"]))
+    case = _live(_case(obs.get("case_id"))) if obs.get("case_id") else None
+    if case is None:
+        found = find_open_case(code, issue["id"], now, obs.get("supplier_id"))
+        if found:
+            _c().table("market_observations").update({"case_id": int(found["id"])}).eq("id", int(obs["id"])).execute()
+            obs["case_id"] = int(found["id"])
+        return link_case(obs, plan, found=found, yq_item=item, f=f, actor=actor, has_photo=has_photo, defer=defer,
+                         now=now)
+    if not any(_mentions(e, int(obs["id"])) for e in _case_events(int(case["id"]))):
+        case_event(case["id"], "link", actor, detail={"observation_id": int(obs["id"]), "finished": True})
+    if has_photo:
+        case, _ = _raise_evidence(case, 2, actor, "photo", observation_id=int(obs["id"]))
+    if safety:
+        case = _set_safety(case, actor, observation_id=int(obs["id"]))
+    case = {**case, **refresh_case(int(case["id"]))}
+    alerted = False
+    if safety:
+        if claim_alert(int(case["id"]), actor, int(obs["id"])):
+            _later(defer, send_safety_alert, int(case["id"]), int(obs["id"]))
+        alerted = alert_claimed(int(case["id"]))
+    return _card_part(case, issue, joined=obs.get("result") == "seen_before", title=case_title(item, code, f, issue)), \
+        alerted
+
+
+def sweep_safety(now: datetime) -> dict:
+    """The shop jobs' safety sweep (every tick): a safety report whose capture stopped half-way and whose
+    phone may never retry (the app was closed). (1) Safety sightings of the last SWEEP_WITHIN with an issue
+    type but no case, older than SWEEP_AFTER (a capture may still be running), are finished
+    (finish_capture). (2) Open safety cases with no alert claim (a capture or a reviewer's flag stopped
+    between the two), unchanged for SWEEP_AFTER, claim it and e-mail. The database's one-claim-per-case
+    index makes a race with a phone's retry harmless."""
+    if not available():
+        return {"skipped": MISSING_HINT}
+    c = _c()
+    lo, hi = mi._iso(now - SWEEP_WITHIN), mi._iso(now - SWEEP_AFTER)
+    out: dict = {"finished": [], "alerted": [], "failed": []}
+    loose = mi._all(lambda: c.table("market_observations").select("*").eq("safety_flag", True).is_("case_id", "null")
+                    .gte("created_at", lo).lte("created_at", hi).order("id"), 5)
+    for o in loose:
+        if not o.get("issue_type_id"):
+            continue                          # no list to file it under: alerted at capture (alert_without_case)
+        try:
+            part, _ = finish_capture(o, now=now)
+            if part:
+                out["finished"].append(int(o["id"]))
+        except Exception as e:  # noqa: BLE001 — one stuck sighting never stops the others
+            out["failed"].append({"observation_id": o.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
+    open_ = [r for r in mi._all(lambda: c.table("market_cases").select("id,status,safety,merged_into,updated_at")
+                                .eq("safety", True).is_("merged_into", "null").order("id"))
+             if r.get("status") not in OFF_SAFETY_TAB]
+    claimed: set[int] = set()
+    for chunk in _chunks([int(r["id"]) for r in open_]):
+        for e in mi._all(lambda chunk=chunk: c.table("market_case_events").select("id,case_id,detail")
+                         .in_("case_id", chunk).eq("event", "safety_alert").order("id")):
+            if (e.get("detail") or {}).get("email") == "queued":
+                claimed.add(int(e["case_id"]))
+    for r in open_:
+        changed = mi._parse_ts(r.get("updated_at"))
+        if int(r["id"]) in claimed or (changed and now - changed < SWEEP_AFTER):
+            continue
+        try:
+            if claim_alert(int(r["id"]), "system (safety sweep)", None):
+                send_safety_alert(int(r["id"]), None)
+                out["alerted"].append(int(r["id"]))
+        except Exception as e:  # noqa: BLE001
+            out["failed"].append({"case_id": r.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
+    if out["failed"]:
+        out["error"] = f"{len(out['failed'])} safety report(s) could not be finished"
+    return out
 
 
 # ── the safety alert ──────────────────────────────────────────────────────────
@@ -791,15 +1043,29 @@ def _later(defer, fn, *args) -> None:
         log.warning("market quality: safety alert not scheduled: %s", e)
 
 
-def claim_alert(case_id: int, actor: str, observation_id) -> bool:
-    """True when this case never had a safety alert; the claim (a 'safety_alert' event, e-mail queued) is
-    written here, so a second safety sighting on the same case sends nothing."""
-    got = (_c().table("market_case_events").select("id").eq("case_id", int(case_id)).eq("event", "safety_alert")
-           .limit(1).execute().data)
-    if got:
-        return False
-    case_event(case_id, "safety_alert", actor, detail={"email": "queued", "observation_id": observation_id})
-    return True
+def alert_claimed(case_id: int) -> bool:
+    """Does this case hold its safety-alert claim (the one 'queued' safety_alert event)?"""
+    rows = (_c().table("market_case_events").select("id,detail").eq("case_id", int(case_id)).eq("event", "safety_alert")
+            .order("id").limit(50).execute().data or [])
+    return any((r.get("detail") or {}).get("email") == "queued" for r in rows)
+
+
+def claim_alert(case_id: int, actor: str, observation_id, **extra) -> bool:
+    """Claim the case's ONE safety alert by inserting the claim (a 'safety_alert' event, email 'queued');
+    True = this caller won and sends the e-mail. The database allows one claim per case
+    (market_case_events_one_alert_claim_idx): a unique violation means another sighting, a reviewer or the
+    sweep claimed it first — and should that index ever be missing, the older of two claims still wins."""
+    try:
+        mine = case_event(case_id, "safety_alert", actor,
+                          detail={"email": "queued", "observation_id": observation_id, **extra})
+    except Exception as e:  # noqa: BLE001
+        if mi._unique_violation(e):
+            return False
+        raise
+    rows = (_c().table("market_case_events").select("id,detail").eq("case_id", int(case_id)).eq("event", "safety_alert")
+            .order("id").limit(50).execute().data or [])
+    first = next((r for r in rows if (r.get("detail") or {}).get("email") == "queued"), None)
+    return first is None or mine.get("id") is None or str(first.get("id")) == str(mine.get("id"))
 
 
 def alert_recipients() -> str:
@@ -1084,6 +1350,9 @@ def case_detail(case_id: int, *, role: str, mask: bool = False, raw: bool = Fals
                status_reason=_m(case.get("status_reason"), mask), changed_at=case.get("changed_at"),
                changed_by=_who(case.get("changed_by")) if case.get("changed_by") else None,
                created_at=case.get("created_at"), next_statuses=next_statuses(case, role),
+               # the levels this login may raise the evidence to now (only up, only what the state supports)
+               evidence_next=(list(range(int(case.get("evidence_level") or 1) + 1, evidence_cap(case) + 1))
+                              if role in REVIEW_ROLES and not case.get("merged_into") else []),
                yq_item=mi.yq_card(items.get(case.get("yq_item_code") or "")) if case.get("yq_item_code") else None,
                thumb_url=None)
     out_obs = []
@@ -1230,11 +1499,13 @@ def _linked_actions(case_id: int) -> list[dict]:
 
 
 def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=None) -> dict:
-    """PATCH /market-intel/cases/{id} (reviewers): fields, the evidence level (up only) and/or one status
-    move along NEXT_STATUS with what the move needs — verified: a method and what it found (evidence at
-    least 3); not substantiated: a reason; back to under review from not substantiated or closed: a reason
-    (closed: an admin only); action requested: a linked supplier action; resolved: a supplier action with
-    the supplier's response and YQ's check. Every change is an event."""
+    """PATCH /market-intel/cases/{id} (reviewers): fields, the evidence level (up only, and only as far as the
+    case's state supports: evidence_cap — 3 comes with the move to Verified, 4 from Action requested on, 5
+    once Resolved; 409 otherwise) and/or one status move along NEXT_STATUS with what the move needs —
+    verified: a method and what it found (evidence at least 3); not substantiated: a reason; back to under
+    review from not substantiated or closed: a reason (closed: an admin only); action requested: a linked
+    supplier action; resolved: a supplier action with the supplier's response and YQ's check. Every change is
+    an event."""
     _reviewer(role)
     case = _open_case_for_change(case_id)
     names = Names.load()
@@ -1302,31 +1573,43 @@ def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=Non
                 upd[k] = v
                 if not (moved and new == "verified"):
                     diffs[k] = {"from": case.get(k), "to": v}
-    if want_level != level:
-        upd["evidence_level"] = want_level
-    if not upd:
+    if want_level > level:
+        # a level the case's state (after this move) does not support yet is refused: 3 needs the move to
+        # Verified, 4 the supplier asked (Action requested on), 5 the case Resolved
+        cap = evidence_cap({**case, **{k: upd[k] for k in ("status", "verification_method") if k in upd}})
+        if want_level > cap:
+            raise MarketIntelError(EVIDENCE_NEEDS[cap + 1], 409)
+    if not upd and want_level <= level:
         return {"ok": True, "changed": False, "case_id": int(case_id), "status": cur, "evidence_level": level,
                 "safety_alerted": False}
-    upd.update(updated_at=mi._iso(), updated_by=actor)
-    _cas(int(case_id), cur, upd)
-    if diffs:
-        case_event(int(case_id), "edit", actor, detail={**diffs, **({"reason": reason} if reason and not moved else {})})
-    if want_level != level:
-        case_event(int(case_id), "evidence", actor, detail={"from": level, "to": want_level,
-                                                             "why": "verified" if moved and new == "verified" else "reviewer"})
-    if moved:
-        detail = {"reason": reason, "verification_method": method if new == "verified" else None,
-                  "verification_reason": why if new == "verified" else None}
-        case_event(int(case_id), "status", actor, from_status=cur, to_status=new,
-                   detail={k: v for k, v in detail.items() if v})
+    fields = sorted(upd)
+    if upd:
+        upd.update(updated_at=mi._iso(), updated_by=actor)
+        _cas(int(case_id), cur, upd)
+        if diffs:
+            case_event(int(case_id), "edit", actor,
+                       detail={**diffs, **({"reason": reason} if reason and not moved else {})})
+        if moved:
+            detail = {"reason": reason, "verification_method": method if new == "verified" else None,
+                      "verification_reason": why if new == "verified" else None}
+            case_event(int(case_id), "status", actor, from_status=cur, to_status=new,
+                       detail={k: v for k, v in detail.items() if v})
+    raised = False
+    if want_level > level:
+        # its own guarded write (evidence_level < the new level): a level someone raised meanwhile stays
+        _, raised = _raise_evidence(case, want_level, actor, "verified" if moved and new == "verified" else "reviewer")
+        if raised:
+            fields.append("evidence_level")
     alerted = False
     if upd.get("safety") is True:
-        alerted = True
         if claim_alert(int(case_id), actor, None):
             _later(defer, send_safety_alert, int(case_id), None)
-    return {"ok": True, "changed": True, "case_id": int(case_id), "status": upd.get("status", cur),
-            "evidence_level": want_level, "safety_alerted": alerted, "fields": sorted(k for k in upd
-                                                                                  if k not in ("updated_at", "updated_by"))}
+        alerted = alert_claimed(int(case_id))
+    now_row = _case(case_id) or {}
+    return {"ok": True, "changed": bool(upd) or raised, "case_id": int(case_id),
+            "status": now_row.get("status", upd.get("status", cur)),
+            "evidence_level": int(now_row.get("evidence_level") or want_level), "safety_alerted": alerted,
+            "fields": sorted(fields)}
 
 
 def ask_question(case_id: int, text, actor: str, role: str, *, observation_id=None) -> dict:
@@ -1382,13 +1665,25 @@ def answer(obs_id: int, text, photo: tuple[str, bytes] | None, actor: str, *, ro
     if role not in PHOTO_ROLES:
         raise MarketIntelError("A photo role is product, packaging, label_batch, receipt or other.")
     processed = mi.process_photo(photo[1], photo[0]) if photo else None     # validated before any write
-    photo_id = None
+    stored = None
     if processed:
         try:
-            stored = mi._upload(processed, now, thumb=True)
+            stored = mi._upload(processed, now, thumb=True)   # the files first: no database row yet
         except Exception as e:  # noqa: BLE001
             log.warning("market quality: answer photo upload failed: %s", e)
             raise MarketIntelError("Could not save the photo. Please try again.", 503) from None
+    try:
+        # the move first: an answer that lost a race (the office moved the case meanwhile) leaves no
+        # photo row and no event behind — only the uploaded files, which are removed again
+        _cas(int(case["id"]), "more_info_required", {"status": "under_review", "status_reason": "the rep answered",
+                                                     "changed_at": mi._iso(), "changed_by": actor,
+                                                     "updated_at": mi._iso(), "updated_by": actor})
+    except MarketIntelError:
+        if stored:
+            _discard(stored)
+        raise
+    photo_id = None
+    if stored:
         have = _c().table("market_photos").select("id,position").eq("observation_id", int(obs_id)).execute().data or []
         pos = max([int(p.get("position") or 0) for p in have] + [-1]) + 1
         row = {"observation_id": int(obs_id), "bucket": mi.BUCKET, "path": stored["path"], "position": pos,
@@ -1396,9 +1691,6 @@ def answer(obs_id: int, text, photo: tuple[str, bytes] | None, actor: str, *, ro
                "phash": processed["phash"], "role": role, "sha256": processed["sha256"],
                "thumb_path": stored["thumb_path"], "caption": "answer to the office's question"}
         photo_id = ((_c().table("market_photos").insert(row).execute().data or [row])[0]).get("id")
-    _cas(int(case["id"]), "more_info_required", {"status": "under_review", "status_reason": "the rep answered",
-                                                 "changed_at": mi._iso(), "changed_by": actor,
-                                                 "updated_at": mi._iso(), "updated_by": actor})
     case_event(int(case["id"]), "answer", actor, detail={"observation_id": int(obs_id), "text": reply,
                                                          "photo_id": photo_id})
     case_event(int(case["id"]), "status", actor, from_status="more_info_required", to_status="under_review")
@@ -1408,10 +1700,19 @@ def answer(obs_id: int, text, photo: tuple[str, bytes] | None, actor: str, *, ro
             "photo": bool(photo_id)}
 
 
+def _discard(stored: dict) -> None:
+    """Best effort: remove an upload no row will ever point at."""
+    try:
+        _c().storage.from_(mi.BUCKET).remove([p for p in (stored.get("path"), stored.get("thumb_path")) if p])
+    except Exception as e:  # noqa: BLE001
+        log.info("market quality: an unused upload was not removed: %s", e)
+
+
 def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
     """POST /market-intel/cases/{id}/merge (reviewers): this case duplicates `into_id`. Its sightings and
     supplier actions move there, it closes as merged (merged_into), the target keeps the higher evidence
-    level and the safety flag, both are recounted and both histories say so. No second safety e-mail."""
+    level and the safety flag — and the alert claim: a problem already alerted is not e-mailed again, by a
+    later sighting or the safety sweep. Both are recounted and both histories say so."""
     _reviewer(role)
     src = _open_case_for_change(case_id)
     dst = _live(_case(_id(into_id, "case")))
@@ -1433,9 +1734,14 @@ def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
     case_event(int(src["id"]), "merge", actor, from_status=src.get("status"), to_status="closed",
                detail={"into": int(dst["id"]), "moved_observations": moved})
     case_event(int(dst["id"]), "merge", actor, detail={"from": int(src["id"]), "moved_observations": moved})
-    dst = _raise_evidence(dst, int(src.get("evidence_level") or 1), actor, "merge", from_case=int(src["id"]))
+    # the target takes the higher evidence only as far as its own state allows (evidence_cap): a verified
+    # duplicate's level 3 does not make an unverified target "inspected and verified"
+    dst, _ = _raise_evidence(dst, min(int(src.get("evidence_level") or 1), evidence_cap(dst)), actor, "merge",
+                             from_case=int(src["id"]))
     if src.get("safety") and not dst.get("safety"):
         dst = _set_safety(dst, actor, from_case=int(src["id"]))
+    if alert_claimed(int(src["id"])):
+        claim_alert(int(dst["id"]), actor, None, carried_from=int(src["id"]))   # no e-mail: carried, not new
     refresh_case(int(dst["id"]))
     refresh_case(int(src["id"]))
     return {"ok": True, "case_id": int(src["id"]), "merged_into": int(dst["id"]), "moved_observations": len(moved)}
@@ -1461,7 +1767,7 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
     if src_id:
         case_event(src_id, "move", actor, detail={"observation_id": int(obs_id), "to_case": int(dst["id"])})
     if _has_photo(int(obs_id)):
-        dst = _raise_evidence(dst, 2, actor, "photo", observation_id=int(obs_id))
+        dst, _ = _raise_evidence(dst, 2, actor, "photo", observation_id=int(obs_id))
     refresh_case(int(dst["id"]))
     if src_id:
         refresh_case(src_id)
@@ -1470,8 +1776,9 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
 
 def create_action(case_id: int, body: dict, actor: str, role: str) -> dict:
     """POST /market-intel/cases/{id}/action (reviewers): ask the supplier to act on a VERIFIED case (no
-    complaint is a proven defect until a person verified it). Creates the supplier action, links it and
-    moves the case to Action requested (a second action on such a case only links)."""
+    complaint is a proven defect until a person verified it). The case moves to Action requested FIRST (a
+    reviewer who lost a race gets 409 and nothing is created), then the supplier action is created and
+    linked (a second action on such a case only links)."""
     _reviewer(role)
     case = _open_case_for_change(case_id)
     if case.get("status") not in ("verified", "action_requested"):
@@ -1489,15 +1796,16 @@ def create_action(case_id: int, body: dict, actor: str, role: str) -> dict:
     row = {"supplier_id": int(supplier["id"]), "request": request, "owner": clean_text(body.get("owner"), 120),
            "due_date": _day(body.get("due_date"), "due date"), "status": "open",
            "created_by": actor or None, "updated_by": actor or None}
-    action = (_c().table("supplier_actions").insert(row).execute().data or [row])[0]
-    _c().table("supplier_action_cases").insert({"action_id": int(action["id"]), "case_id": int(case_id)}).execute()
-    if case.get("status") == "verified":
+    moved = case.get("status") == "verified"
+    if moved:
         _cas(int(case_id), "verified", {"status": "action_requested", "status_reason": "supplier action requested",
                                          "changed_at": mi._iso(), "changed_by": actor, "updated_at": mi._iso(),
                                          "updated_by": actor})
+    action = (_c().table("supplier_actions").insert(row).execute().data or [row])[0]
+    _c().table("supplier_action_cases").insert({"action_id": int(action["id"]), "case_id": int(case_id)}).execute()
     case_event(int(case_id), "action", actor, detail={"action_id": int(action["id"]), "supplier_id": int(supplier["id"]),
                                                       "request": request, "due_date": row["due_date"]})
-    if case.get("status") == "verified":
+    if moved:
         case_event(int(case_id), "status", actor, from_status="verified", to_status="action_requested",
                    detail={"action_id": int(action["id"])})
     return {"ok": True, "case_id": int(case_id), "status": "action_requested",

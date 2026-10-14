@@ -37,11 +37,15 @@ Jobs (in run order):
   * stale_data_alert — when the stock snapshot merchants see is older than shop_stale_days, the
     owner channel gets one Telegram (owner email when Telegram is not configured) a day asking for
     the Focus report. The "alerted today" marker is written only when a channel really delivered.
+  * market_safety_sweep (R8m, Market Intel v2) — every tick: a safety report whose capture stopped
+    half-way (no case, or a case without its alert claim) is finished and its alert e-mailed; not held
+    for the send window (a safety alert is not a nudge). One claim per case in the database.
   * market_demand_rollup (R8m, Market Intel v2) — once a week, on the first tick after Sunday 06:00
     Bahrain (a missed Sunday runs on the next tick), app.market_intel.roll_demand_signals turns the
-    week's zero-result searches, product requests and restock asks into Market Intel sightings. The
-    app_settings marker 'market_demand_rolled_at' is written only after a roll-up that ran; the
-    roll-up itself writes one sighting per term / SKU per week, so a second run writes nothing.
+    zero-result searches, product requests and restock asks since the previous run into Market Intel
+    sightings, filed under the slot's Sunday. The app_settings marker 'market_demand_rolled_at' is
+    written only after a roll-up that ran; one sighting per term / SKU per slot, so a second run of the
+    same slot writes nothing.
 
 Nudges (unassigned, unconfirmed, digest, stale data) go out only between SEND_FROM_H and SEND_UNTIL_H
 Bahrain and never on the Bahrain weekend (Friday, Saturday); outside those hours the jobs answer
@@ -91,6 +95,7 @@ LOCK_TTL_MIN = 10
 # the weekly Market Intel demand roll-up (R8m): Sunday 06:00 Bahrain (datetime.weekday(): Sunday = 6)
 ROLLUP_WEEKDAY, ROLLUP_HOUR = 6, 6
 ROLLUP_MARKER = "market_demand_rolled_at"
+ROLLUP_MAX_DAYS = 35         # after a long outage, a roll-up reads at most this far back
 _LOCK_RELEASED = "1970-01-01T00:00:00Z"   # a released lease sorts before any live timestamp
 
 
@@ -782,8 +787,11 @@ def rollup_slot(now: datetime) -> datetime:
 
 def market_demand_rollup(now: datetime | None = None) -> dict:
     """R8m (Market Intel v2, Phase 0): the week's marketplace demand into Market Intel, once a week —
-    the first tick after Sunday 06:00 Bahrain, or the next one when that tick was missed. The marker is
-    written only after a roll-up that ran (before the R7b tables exist it says why and tries again)."""
+    the first tick after Sunday 06:00 Bahrain, or the next one when that tick was missed. Each run is
+    filed under its SLOT (the Sunday's Bahrain date: a Monday catch-up files the missed Sunday's week, the
+    next Sunday its own) and reads from the previous run (the marker; at most ROLLUP_MAX_DAYS back) to
+    now, so a missed Sunday neither loses a week nor counts a search twice. The marker is written only
+    after a roll-up that ran (before the R7b tables exist it says why and tries again)."""
     from app import market_intel
     now = now or _now()
     slot = rollup_slot(now)
@@ -792,7 +800,8 @@ def market_demand_rollup(now: datetime | None = None) -> dict:
     if last and last >= slot:
         return {"skipped": f"rolled up {last:%Y-%m-%d %H:%M} UTC; next after "
                            f"{slot + timedelta(days=7):%a %d %b %H:%M} Bahrain"}
-    out = market_intel.roll_demand_signals(days=7, now=now)
+    since = max(last, now - timedelta(days=ROLLUP_MAX_DAYS)) if last else now - timedelta(days=7)
+    out = market_intel.roll_demand_signals(now=now, since=since, week=slot.date().isoformat())
     if not out.get("ok"):
         return {"skipped": out.get("reason") or "Market Intel is not available"}
     err = _set_marker(client, ROLLUP_MARKER, now)
@@ -801,10 +810,20 @@ def market_demand_rollup(now: datetime | None = None) -> dict:
     return out
 
 
+def market_safety_sweep(now: datetime | None = None) -> dict:
+    """R8m: a safety report whose capture stopped half-way after its sighting was saved (no case yet, or a
+    case without its alert claim) — and whose phone may never retry (the app closed) — is finished and
+    its alert sent (app.market_quality.sweep_safety). Every tick, not held for the send window or the
+    weekend: a safety alert is not a nudge. Idempotent: the database allows one alert claim per case."""
+    from app import market_quality
+    return market_quality.sweep_safety(now or _now())
+
+
 JOBS = (("notify_retry", notify_retry), ("unassigned_reminder", unassigned_reminder),
         ("unconfirmed_reminder", unconfirmed_reminder), ("cleanup", cleanup),
         ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless),
-        ("badge_log", badge_log), ("market_demand_rollup", market_demand_rollup))
+        ("badge_log", badge_log), ("market_safety_sweep", market_safety_sweep),
+        ("market_demand_rollup", market_demand_rollup))
 
 
 def run_shop_jobs() -> dict:

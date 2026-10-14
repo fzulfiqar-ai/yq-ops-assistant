@@ -32,6 +32,16 @@ Covered:
     signed unless an admin asks ?raw=1), the backfill and its script, the weekly roll-up job, a Rejected
     item reopened by a new sighting;
   * before R8m — everything still works on the R7b schema and the v2 routes answer 503 with the hint;
+  * after the independent review — a capture that stopped half-way is finished by the phone's retry (503
+    while it may still be running) or by the shop jobs' safety sweep, with ONE alert (an inserted claim
+    the database allows once per case, carried by merges); a rep's picker answers only for his own shops;
+    evidence never moves down on a stale read and only as far as the case's state supports (3 with the
+    move to Verified, 4 from Action requested on, 5 once Resolved); two cases opened at once converge on
+    the oldest; a stale page offset (416) is an empty page; the weekly roll-up keys on its Sunday slot and
+    reads from its last run; a merge loop is refused; only a missing table means "not set up"; a brand
+    moved to another supplier takes its open cases along and suppliers never pool; My reports name the
+    issue; a lost race leaves no orphan; the backfill moves past a broken photo; the storekeeper reads
+    masked; and the stand-in itself refuses an unknown column and a second claim;
   * the code — Python 3.11 grammar, no nested f-string, no 3-decimal amount of 1,000 or more.
 """
 from __future__ import annotations
@@ -47,6 +57,7 @@ import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -332,15 +343,23 @@ def _():
 # 3. the product picker
 # ═══════════════════════════════════════════════════════════════════════════════
 
+SHOPS = R.SHOP_CUSTOMERS + [
+    {"id": 8, "phone": "97330000008", "name": "Shop Eight", "shop": "Shop Eight", "area": "Riffa", "salesman_id": 2},
+    {"id": 9, "phone": "97330000009", "name": "Shop Nine", "shop": "Shop Nine", "area": "Muharraq", "salesman_id": 1}]
+
+
 @test("products: code and name search with the 320 px thumbnails; the shop's own items (marketplace, 180 days) first with at_shop")
 def _():
     old = (NOW - timedelta(days=200)).isoformat()
-    fake = _qdb(shop_orders=[{"id": 1, "customer_id": 7, "status": "delivered", "created_at": "2026-10-01T08:00:00+00:00"},
-                             {"id": 2, "customer_id": 7, "status": "cancelled", "created_at": "2026-10-02T08:00:00+00:00"},
-                             {"id": 3, "customer_id": 7, "status": "delivered", "created_at": old},
-                             {"id": 4, "customer_id": 8, "status": "delivered", "created_at": "2026-10-03T08:00:00+00:00"}],
+    fake = _qdb(shop_customers=SHOPS,
+                shop_orders=[{"id": 1, "customer_id": 7, "salesman_id": 1, "status": "delivered", "created_at": "2026-10-01T08:00:00+00:00"},
+                             {"id": 2, "customer_id": 7, "salesman_id": 1, "status": "cancelled", "created_at": "2026-10-02T08:00:00+00:00"},
+                             {"id": 3, "customer_id": 7, "salesman_id": 1, "status": "delivered", "created_at": old},
+                             {"id": 4, "customer_id": 8, "salesman_id": 2, "status": "delivered", "created_at": "2026-10-03T08:00:00+00:00"},
+                             {"id": 5, "customer_id": 9, "salesman_id": 2, "status": "delivered", "created_at": "2026-10-04T08:00:00+00:00"}],
                 shop_order_lines=[{"id": 1, "order_id": 1, "item_code": "E-05"}, {"id": 2, "order_id": 2, "item_code": "P-22"},
-                                  {"id": 3, "order_id": 3, "item_code": "P-22"}, {"id": 4, "order_id": 4, "item_code": "C-10"}])
+                                  {"id": 3, "order_id": 3, "item_code": "P-22"}, {"id": 4, "order_id": 4, "item_code": "C-10"},
+                                  {"id": 5, "order_id": 5, "item_code": "P-22"}])
     with _qenv(fake):
         c = R._client()
         got = c.get("/market-intel/products?q=c-10", headers=R._h("rep1"))
@@ -352,9 +371,19 @@ def _():
         assert [p["code"] for p in c.get("/market-intel/products?q=power bank", headers=R._h("rep1")).json()] == ["P-22"]
         assert c.get("/market-intel/products?q=P", headers=R._h("rep1")).json()[0]["code"] == "P-22"
         assert c.get("/market-intel/products?q=nothing+like+it", headers=R._h("rep1")).json() == []
+        # his own customer (an order he took): the shop's own item first; a cancelled or 200-day-old order does not count
         shop = c.get("/market-intel/products?shop_phone=3000%200007", headers=R._h("rep1")).json()
-        assert [(p["code"], p["at_shop"]) for p in shop] == [("E-05", True), ("C-10", False), ("P-22", False)], \
-            "the shop's own item first; a cancelled or 200-day-old order does not count"
+        assert [(p["code"], p["at_shop"]) for p in shop] == [("E-05", True), ("C-10", False), ("P-22", False)]
+        # assigned to him (shop_customers.salesman_id), its orders taken by another rep: still his
+        assert c.get("/market-intel/products?shop_id=9&q=p-22", headers=R._h("rep1")).json()[0]["at_shop"] is True
+        # another rep's shop, or a phone that is no customer, answers exactly what no shop answers
+        none = c.get("/market-intel/products", headers=R._h("rep1")).json()
+        for url in ("/market-intel/products?shop_id=8", "/market-intel/products?shop_phone=97330000008",
+                    "/market-intel/products?shop_phone=39999999", "/market-intel/products?shop_id=999"):
+            assert c.get(url, headers=R._h("rep1")).json() == none, url
+        assert c.get("/market-intel/products?shop_id=8&q=c-10", headers=R._h("rep2")).json()[0]["at_shop"] is True
+        # the office reads any shop
+        assert c.get("/market-intel/products?shop_id=8&q=c-10", headers=R._h("clerk")).json()[0]["at_shop"] is True
         assert c.get("/market-intel/products?shop_id=7&q=e-05", headers=R._h("clerk")).json()[0]["at_shop"] is True
         assert len(c.get("/market-intel/products?limit=1", headers=R._h("rep1")).json()) == 1
         assert c.get("/market-intel/products", headers=R._h("rep3")).status_code == 403
@@ -639,26 +668,56 @@ def _():
         assert mq.update_case(c3["id"], {"status": "resolved"}, "clerk@example.com", "member")["status"] == "resolved"
 
 
-@test("evidence: only moves up (lower is 409, equal no change); 4 and 5 are set by a reviewer; every rise is an event")
+@test("evidence: only moves up (lower is 409, equal no change), and only as far as the case's state supports — 3 with the move to Verified, 4 from Action requested on, 5 once Resolved; every rise is an event")
 def _():
     from app import market_quality as mq
+    up = lambda case, n: mq.update_case(case["id"], {"evidence_level": n}, "clerk@example.com", "member")  # noqa: E731
     fake = _qdb()
     with _qenv(fake):
-        c = _seed_case(fake, evidence_level=2)
-        R._raises(lambda: mq.update_case(c["id"], {"evidence_level": 1}, "clerk@example.com", "member"), "only moves up", 409)
-        assert mq.update_case(c["id"], {"evidence_level": 2}, "clerk@example.com", "member")["changed"] is False
-        R._raises(lambda: mq.update_case(c["id"], {"evidence_level": 6}, "clerk@example.com", "member"), "1 to 5")
-        assert mq.update_case(c["id"], {"evidence_level": 4}, "clerk@example.com", "member")["evidence_level"] == 4
-        assert mq.update_case(c["id"], {"evidence_level": 5}, "clerk@example.com", "member")["evidence_level"] == 5
-        R._raises(lambda: mq.update_case(c["id"], {"evidence_level": 3}, "clerk@example.com", "member"), "only moves up", 409)
-        # verifying a case already at 4 keeps 4 (it only ever rises)
-        d = _seed_case(fake, evidence_level=4)
-        mq.update_case(d["id"], {"status": "verified", "verification_method": "several_shops", "verification_reason": "4 shops"},
+        c = _seed_case(fake, evidence_level=1)
+        assert up(c, 2)["evidence_level"] == 2, "evidence submitted: a reviewer may say so on any open case"
+        R._raises(lambda: up(c, 1), "only moves up", 409)
+        assert up(c, 2)["changed"] is False
+        R._raises(lambda: up(c, 6), "1 to 5")
+        R._raises(lambda: up(c, 3), "verify the case first", 409)        # not by hand: the move to Verified does it
+        R._raises(lambda: up(c, 5), "verify the case first", 409)
+        assert _case(fake, c["id"])["evidence_level"] == 2
+        out = mq.update_case(c["id"], {"status": "verified", "verification_method": "sample_inspected",
+                                       "verification_reason": "the sample's port is burnt"}, "clerk@example.com", "member")
+        assert out["evidence_level"] == 3
+        R._raises(lambda: up(c, 4), "from action requested on", 409)
+        _seed_action(fake, c["id"], supplier_response="Replacing the batch", resolution_check="New batch tested")
+        mq.update_case(c["id"], {"status": "action_requested"}, "clerk@example.com", "member")
+        R._raises(lambda: up(c, 5), "once the case is resolved", 409)
+        assert up(c, 4)["evidence_level"] == 4
+        out = mq.update_case(c["id"], {"status": "resolved", "evidence_level": 5}, "clerk@example.com", "member")
+        assert out["status"] == "resolved" and out["evidence_level"] == 5, "the move and the level together"
+        R._raises(lambda: up(c, 3), "only moves up", 409)
+        # the levels on offer follow the same rule (the case page shows only these)
+        d = _seed_case(fake, evidence_level=1)
+        e = _seed_case(fake, evidence_level=3, status="verified", verification_method="photos_sufficient")
+        f = _seed_case(fake, evidence_level=3, status="action_requested", verification_method="several_shops")
+        g = _seed_case(fake, evidence_level=4, status="closed", verification_method="sample_inspected")
+        offer = lambda case, who="clerk": R._client().get(f"/market-intel/cases/{case['id']}",  # noqa: E731
+                                                          headers=R._h(who)).json()["case"]["evidence_next"]
+        assert (offer(d), offer(e), offer(f), offer(g), offer(d, "mgmt")) == ([2], [], [4], [5], [])
+        # verifying a case already at 4 keeps 4 (it only ever rises); not substantiated never gets 3 by hand
+        h = _seed_case(fake, evidence_level=4)
+        mq.update_case(h["id"], {"status": "verified", "verification_method": "several_shops", "verification_reason": "4 shops"},
                        "clerk@example.com", "member")
-        assert _case(fake, d["id"])["evidence_level"] == 4
-    ev = [(e["detail"]["from"], e["detail"]["to"]) for e in fake.rows("market_case_events")
-          if e["case_id"] == c["id"] and e["event"] == "evidence"]
-    assert ev == [(2, 4), (4, 5)]
+        assert _case(fake, h["id"])["evidence_level"] == 4
+        n = _seed_case(fake, evidence_level=2)
+        mq.update_case(n["id"], {"status": "not_substantiated", "reason": "works when tested"}, "clerk@example.com", "member")
+        R._raises(lambda: up(n, 3), "verify the case first", 409)
+        # a merge carries a verified duplicate's level only as far as the target's own state supports
+        src = _seed_case(fake, evidence_level=3, status="verified", verification_method="sample_inspected",
+                         yq_item_code="E-05")
+        dst = _seed_case(fake, evidence_level=1, yq_item_code="E-05")
+        mq.merge_case(src["id"], dst["id"], "clerk@example.com", "member")
+        assert _case(fake, dst["id"])["evidence_level"] == 2
+    ev = [(x["detail"]["from"], x["detail"]["to"]) for x in fake.rows("market_case_events")
+          if x["case_id"] == c["id"] and x["event"] == "evidence"]
+    assert ev == [(1, 2), (2, 3), (3, 4), (4, 5)], ev
 
 
 @test("PATCH fields: title, severity, assignee, due date, product, brand, supplier, safety; bad values 400; a merged case 409; a stale status 409")
@@ -1273,7 +1332,396 @@ def _():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 12. the code itself
+# 12. after the independent review (findings 1-10 and the minor ones)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fails_once(fake, op: str, table: str):
+    fake.fail[(op, table)] = RuntimeError("transient: connection reset")
+
+
+def _first_attempt(**kw):
+    try:
+        _cap("rep1@example.com", [], **kw)
+    except RuntimeError:
+        return
+    raise AssertionError("the first attempt must fail half-way")
+
+
+@test("the stand-in refuses what PostgREST refuses: a column the table does not have (read, filter, order, write), an R8m column before R8m, a second alert claim")
+def _():
+    fake = _qdb()
+    for build in (lambda: fake.table("market_photos").select("id,nope"),
+                  lambda: fake.table("market_cases").select("*").eq("nope", 1),
+                  lambda: fake.table("market_cases").select("*").order("nope"),
+                  lambda: fake.table("market_case_events").insert({"case_id": 1, "event": "edit", "actor": "x",
+                                                                   "created_at": NOW.isoformat()}),
+                  lambda: fake.table("market_cases").update({"nope": 1}).eq("id", 1)):
+        try:
+            build().execute()
+        except RuntimeError as e:
+            assert "42703" in str(e) or "PGRST204" in str(e), str(e)
+            continue
+        raise AssertionError("an unknown column must be refused")
+    before = _qdb(missing=set(R8M_TABLES))
+    try:
+        before.table("market_observations").insert({"client_uuid": str(uuid.uuid4()), "case_id": 1}).execute()
+        raise AssertionError("an R8m column before R8m must be refused")
+    except RuntimeError as e:
+        assert "PGRST204" in str(e)
+    claim = {"case_id": 1, "event": "safety_alert", "actor": "x", "detail": {"email": "queued"}}
+    fake.table("market_case_events").insert(dict(claim)).execute()
+    fake.table("market_case_events").insert({**claim, "detail": {"email": "sent"}}).execute()     # outcomes: any number
+    try:
+        fake.table("market_case_events").insert(dict(claim)).execute()
+        raise AssertionError("a second claim must be refused")
+    except RuntimeError as e:
+        assert "23505" in str(e) and "one_alert_claim" in str(e)
+
+
+@test("review 1: a capture that stopped after its sighting was saved is finished by the phone's retry — its case, its timeline line, ONE alert; safety_alerted only with the claim")
+def _():
+    fake, mail = _qdb(), _Mail()
+    kw = dict(kind="complaint", yq_item_code="P-22", issue_type_id="1", safety_flag="true", note="smoke",
+              client_uuid=str(uuid.uuid4()))
+    with _qenv(fake, mail):
+        _fails_once(fake, "insert", "market_cases")                    # the case was never opened
+        _first_attempt(**kw)
+        obs = fake.rows("market_observations")[0]
+        assert obs["safety_flag"] is True and obs.get("case_id") is None and mail.calls == []
+        card = _cap("rep1@example.com", [], **kw)
+        again = _cap("rep1@example.com", [], **kw)
+    assert card["replayed"] and card["safety_alerted"] and again["safety_alerted"] and "Manager alerted." in card["message"]
+    assert len(fake.rows("market_cases")) == 1 and card["case"]["id"] == fake.rows("market_cases")[0]["id"]
+    assert len(mail.calls) == 1, "the retry finished it; the second retry sent nothing"
+    assert _events(fake, card["case"]["id"]) == [("created", None), ("safety_alert", "queued"), ("safety_alert", "sent")]
+    # the sighting joined an open case and made it a safety case, then its first timeline line failed
+    fake, mail = _qdb(), _Mail()
+    case = _seed_case(fake, yq_item_code="P-22", issue_type_id=1, status="under_review", safety=False)
+    kw = dict(kw, client_uuid=str(uuid.uuid4()))
+    with _qenv(fake, mail):
+        _fails_once(fake, "insert", "market_case_events")
+        _first_attempt(**kw)
+        card = _cap("rep1@example.com", [], **kw)
+    assert card["safety_alerted"] and _case(fake, case["id"])["safety"] is True and len(mail.calls) == 1
+    evs = [e["event"] for e in fake.rows("market_case_events") if e["case_id"] == case["id"]]
+    assert evs == ["link", "safety_alert", "safety_alert"], evs
+    # a non-safety quality report finished the same way says safety_alerted false
+    fake, mail = _qdb(), _Mail()
+    kw = dict(kind="complaint", yq_item_code="E-05", issue_type_id="3", client_uuid=str(uuid.uuid4()))
+    with _qenv(fake, mail):
+        _fails_once(fake, "insert", "market_cases")
+        _first_attempt(**kw)
+        card = _cap("rep1@example.com", [], **kw)
+    assert card["case"] and card["safety_alerted"] is False and mail.calls == []
+
+
+@test("review 1: a half-done capture younger than 20 s may still be running — its replay answers 503 (the phone retries later) and finishes it once it is older")
+def _():
+    from app import market_intel as mi
+    fake, mail = _qdb(), _Mail()
+    fake.clock = NOW - timedelta(seconds=5)                         # the sighting's created_at
+    kw = dict(kind="complaint", yq_item_code="P-22", issue_type_id="2", note="hot", client_uuid=str(uuid.uuid4()))
+    with _qenv(fake, mail):
+        _fails_once(fake, "insert", "market_cases")
+        _first_attempt(**kw)
+        R._raises(lambda: _cap("rep1@example.com", [], **kw), "still saving", 503)
+        assert fake.rows("market_cases") == [] and mail.calls == []
+        card = mi.capture("rep1@example.com", dict(kw), [], now=NOW + timedelta(seconds=30))
+    assert card["case"] and card["safety_alerted"] and len(mail.calls) == 1
+
+
+@test("review 1: the safety sweep (every tick) finishes a safety report its phone never retried, claims an open safety case left without its claim, and never e-mails a problem twice (merges carry the claim)")
+def _():
+    from app import market_quality as mq, shop_jobs
+    assert ("market_safety_sweep", shop_jobs.market_safety_sweep) in shop_jobs.JOBS
+    fake, mail = _qdb(), _Mail()
+    with _qenv(fake, mail):
+        _fails_once(fake, "insert", "market_cases")
+        _first_attempt(kind="complaint", yq_item_code="P-22", issue_type_id="1", safety_flag="true", note="smoke")
+        obs = fake.rows("market_observations")[0]
+        obs["created_at"] = (NOW - timedelta(seconds=30)).isoformat()
+        assert shop_jobs.market_safety_sweep(NOW)["finished"] == [] and mail.calls == [], "a capture may still be running"
+        obs["created_at"] = (NOW - timedelta(minutes=3)).isoformat()
+        out = shop_jobs.market_safety_sweep(NOW)
+        assert out["finished"] == [obs["id"]] and len(mail.calls) == 1
+        assert next(o for o in fake.rows("market_observations") if o["id"] == obs["id"])["case_id"]
+        assert shop_jobs.market_safety_sweep(NOW)["finished"] == [] and len(mail.calls) == 1, "once"
+        # a reviewer's safety flag whose claim was never written
+        five = (NOW - timedelta(minutes=5)).isoformat()
+        flagged = _seed_case(fake, yq_item_code="E-05", issue_type_id=1, safety=True, updated_at=five)
+        _seed_case(fake, yq_item_code="E-05", issue_type_id=3, safety=True, status="closed", updated_at=five)
+        out = shop_jobs.market_safety_sweep(NOW)
+        assert out["alerted"] == [flagged["id"]] and len(mail.calls) == 2
+        assert shop_jobs.market_safety_sweep(NOW)["alerted"] == [] and len(mail.calls) == 2
+        # merged into a case that was no safety case: the claim moves with it, no second e-mail
+        target = _seed_case(fake, yq_item_code="C-10", issue_type_id=3, safety=False, updated_at=five)
+        mq.merge_case(flagged["id"], target["id"], "clerk@example.com", "member")
+        assert _case(fake, target["id"])["safety"] is True and mq.alert_claimed(target["id"])
+        assert shop_jobs.market_safety_sweep(NOW + timedelta(hours=1))["alerted"] == [] and len(mail.calls) == 2
+        later = _cap("rep2@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="3", safety_flag="1")
+        assert later["case"]["id"] == target["id"] and later["safety_alerted"] and len(mail.calls) == 2
+    fake = _qdb(missing=set(R8M_TABLES))
+    with _qenv(fake):
+        assert "skipped" in shop_jobs.market_safety_sweep(NOW)
+
+
+@test("review 3: evidence never moves down — a capture that read the case before a reviewer verified it, or a reviewer's stale raise, leave the higher level and write no event")
+def _():
+    from app import market_intel as mi, market_quality as mq
+    fake = _qdb()
+    case = _seed_case(fake, yq_item_code="C-10", issue_type_id=1, evidence_level=1)
+    real = mi.near_duplicate
+
+    def verified_meanwhile(*a, **k):                # after the capture read the case, before it links
+        mq.update_case(case["id"], {"status": "verified", "verification_method": "sample_inspected",
+                                    "verification_reason": "sample checked"}, "boss@example.com", "admin")
+        return real(*a, **k)
+    with _qenv(fake):
+        with R._Patched((mi, "near_duplicate", verified_meanwhile)):
+            _cap("rep1@example.com", [("p.jpg", _jpg())], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        assert _case(fake, case["id"])["evidence_level"] == 3
+        ev = [(e["detail"]["from"], e["detail"]["to"]) for e in fake.rows("market_case_events") if e["event"] == "evidence"]
+        assert ev == [(1, 3)], ev
+        # a reviewer read level 3 (the supplier asked: 4 is allowed); the database holds 5 by now
+        stale = dict(_case(fake, case["id"]), status="action_requested")
+        for c in fake.rows("market_cases"):
+            if c["id"] == case["id"]:
+                c.update(evidence_level=5, status="resolved")
+        with R._Patched((mq, "_case", lambda cid: dict(stale) if int(cid) == case["id"] else None)):
+            out = mq.update_case(case["id"], {"evidence_level": 4}, "clerk@example.com", "member")
+        assert out["changed"] is False and _case(fake, case["id"])["evidence_level"] == 5
+        assert len([e for e in fake.rows("market_case_events") if e["event"] == "evidence"]) == 1
+
+
+@test("review 4: the alert claim is an INSERT the database allows once per case — a second claimant (sighting, reviewer, sweep) sends nothing; without the index the older claim still wins")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    case = _seed_case(fake, safety=True)
+
+    class _Blind:
+        """The second claimant at the moment of the race: its read of the timeline does not see the first
+        claim yet (both read before either wrote) — only the database's index stands between them."""
+
+        def table(self, name):
+            q = fake.table(name)
+            if name == "market_case_events":
+                real = q.execute
+                q.execute = lambda: SimpleNamespace(data=[], count=0) if q.op == "select" else real()
+            return q
+
+        def __getattr__(self, k):
+            return getattr(fake, k)
+    with _qenv(fake):
+        assert mq.claim_alert(case["id"], "rep1@example.com", 1) is True
+        with R._Patched((mq, "_c", lambda: _Blind())):
+            assert mq.claim_alert(case["id"], "rep2@example.com", 2) is False, "the race: the index decides"
+        assert mq.claim_alert(case["id"], "rep2@example.com", 2) is False
+        assert mq.alert_claimed(case["id"])
+        fake.unique = [u for u in fake.unique if u[-1] != "market_case_events_one_alert_claim_idx"]
+        other = _seed_case(fake, safety=True)
+        assert mq.claim_alert(other["id"], "a", 1) is True and mq.claim_alert(other["id"], "b", 2) is False
+    src = (ROOT / "scripts" / "r8m_market_quality_migration.sql").read_text(encoding="utf-8")
+    assert "market_case_events_one_alert_claim_idx" in src and "detail->>'email' = 'queued'" in src
+
+
+@test("review 4: two captures of one product + issue that each opened a case at the same moment converge on the oldest — the newer closes as merged into it, its sighting moves, both recounted, one e-mail")
+def _():
+    from app import market_quality as mq
+    fake, mail = _qdb(), _Mail()
+    with _qenv(fake, mail):
+        with R._Patched((mq, "find_open_case", lambda *a, **k: None)):       # both looked before either existed
+            a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1",
+                     safety_flag="true", shop_name="Shop Alpha")
+            b = _cap("rep2@example.com", [("p.jpg", _jpg())], kind="complaint", yq_item_code="C-10", issue_type_id="1",
+                     safety_flag="true", shop_name="Shop Beta")
+    keep = a["case"]["id"]
+    dup = next(c for c in fake.rows("market_cases") if c["id"] != keep)
+    assert b["case"]["id"] == keep and b["case"]["joined"] and b["result"] == "already_in_yq"
+    assert (dup["status"], dup["merged_into"], dup["obs_count"]) == ("closed", keep, 0)
+    k = _case(fake, keep)
+    assert (k["obs_count"], k["shop_count"], k["evidence_level"], k["safety"]) == (2, 2, 2, True)
+    assert all(o["case_id"] == keep for o in fake.rows("market_observations"))
+    assert next(o for o in fake.rows("market_observations") if o["id"] == b["observation_id"])["result"] == "seen_before"
+    assert [e[0] for e in _events(fake, dup["id"])] == ["created", "merge"] and len(mail.calls) == 1
+    # another supplier's case is never folded into
+    fake = _qdb()
+    with _qenv(fake):
+        with R._Patched((mq, "find_open_case", lambda *a, **k: None)):
+            x = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1", supplier_id="2")
+            y = _cap("rep2@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1", supplier_id="1")
+    assert x["case"]["id"] != y["case"]["id"] and all(not c.get("merged_into") for c in fake.rows("market_cases"))
+
+
+@test("review 5: a page asked for past the end (a stale offset, PostgREST's 416) answers empty with the true count — the review queue over HTTP too; the paged reads never ask past the end")
+def _():
+    from app import market_intel as mi
+    fake = _qdb()
+    with _qenv(fake):
+        _cap("rep1@example.com", [("u.jpg", _jpg())])                  # a photo only: waits for the office
+        try:
+            fake.table("market_observations").select("*", count="exact").range(50, 59).execute()
+            raise AssertionError("the stand-in answers a counted offset past the end like PostgREST")
+        except RuntimeError as e:
+            assert "PGRST103" in str(e) and mi.range_past_end(e)
+        q = mi.review_queue(offset=120, limit=60)
+        assert q["unassigned"] == [] and q["count"] == 1 and q["offset"] == 120
+        r = R._client().get("/market-intel/review?offset=500", headers=R._h("clerk"))
+        assert r.status_code == 200 and r.json()["count"] == 1 and r.json()["unassigned"] == []
+        assert mi.board(office=True, offset=900)["items"] == []
+        from app import market_quality as mq
+        assert mq.cases(offset=500)["rows"] == []
+
+
+@test("review 6: after a missed Sunday the catch-up files the missed week and the next Sunday its own — every search counted once, none lost")
+def _():
+    from app import shop_jobs
+    utc = timezone.utc
+    first = {"id": 1, "event": "search_zero", "ts": datetime(2026, 10, 12, 2, 0, tzinfo=utc).isoformat(),
+             "session_id": "s1", "meta": {"q": "sandisk"}}
+    later = [{"id": 10 + i, "event": "search_zero", "ts": datetime(2026, 10, day, 9, 0, tzinfo=utc).isoformat(),
+              "session_id": f"later{i}", "meta": {"q": "sandisk"}} for i, day in enumerate((13, 14, 15, 16, 17))]
+    fake = _qdb(shop_events=[first])
+    with _qenv(fake):
+        a = shop_jobs.market_demand_rollup(now=datetime(2026, 10, 12, 5, 0, tzinfo=utc))     # Monday 08:00 Bahrain
+        fake.tables["shop_events"] = [first, *later]
+        b = shop_jobs.market_demand_rollup(now=datetime(2026, 10, 18, 3, 5, tzinfo=utc))     # Sunday 06:05 Bahrain
+    assert (a["week"], a["written"]["search_zero"]) == ("2026-10-11", 1)
+    assert (b["week"], b["written"]["search_zero"]) == ("2026-10-18", 1)
+    assert sorted((o.get("meta") or {}).get("count") for o in fake.rows("market_observations")) == [1, 5]
+
+
+@test("review 7: a list merge whose target sits in a merge loop (or an endless chain) is refused with 409, never walked forever")
+def _():
+    from app import market_quality as mq
+    loop = mq.Names([{"id": 1, "name": "S1", "merged_into": 2}, {"id": 2, "name": "S2", "merged_into": 1},
+                     {"id": 3, "name": "S3", "merged_into": None}], [], [])
+    R._raises(lambda: mq._merge_target("suppliers", loop, 3, 1), "merge loop", 409)
+    chain = mq.Names([{"id": i, "name": f"S{i}", "merged_into": i + 1} for i in range(1, 80)]
+                     + [{"id": 80, "name": "S80", "merged_into": None}, {"id": 99, "name": "S99", "merged_into": None}],
+                     [], [])
+    R._raises(lambda: mq._merge_target("suppliers", chain, 99, 1), "merge loop", 409)
+    assert mq._merge_target("suppliers", chain, 99, 75) == 75
+
+
+@test("review 8: only a missing table means 'not set up' — a blip or a column error is a 503, so a capture is retried, never saved without its v2 fields or in the legacy tables")
+def _():
+    from app import market_intel as mi
+    fake, mail = _qdb(), _Mail()
+    kw = dict(kind="complaint", yq_item_code="P-22", issue_type_id="1", safety_flag="true", note="smoke",
+              client_uuid=str(uuid.uuid4()))
+    with _qenv(fake, mail):
+        fake.fail[("select", "market_cases")] = RuntimeError("timeout: the pooler is busy")
+        R._raises(lambda: _cap("rep1@example.com", [], **kw), "could not reach", 503)
+        assert fake.rows("market_observations") == [] and fake.rows("product_finds") == [] and mail.calls == []
+        card = _cap("rep1@example.com", [], **kw)                      # the phone's retry
+        assert card["case"] and card["safety_alerted"] and len(mail.calls) == 1
+        mi.forget_probe()
+        fake.fail[("select", "market_observations")] = R._pgrst("42703", "column market_observations.nope does not exist")
+        R._raises(lambda: mi.available(), "could not reach", 503)
+        mi.forget_probe()
+        fake.fail[("select", "market_observations")] = RuntimeError("connection reset by peer")
+        r = R._client().post("/market-intel/observations", headers=R._h("rep1"), data={"note": "x"})
+        assert r.status_code == 503 and fake.rows("field_notes") == []
+        mi.forget_probe()
+        fake.fail[("select", "market_observations")] = RuntimeError("connection reset by peer")
+        assert R._client().get("/market-intel/mine", headers=R._h("rep1")).status_code == 503
+    assert mi.is_missing_table(R._pgrst("42P01", 'relation "public.x" does not exist'))
+    assert mi.is_missing_table(R._pgrst("PGRST205", "Could not find the table 'public.x' in the schema cache"))
+    assert not mi.is_missing_table(R._pgrst("42703", 'column "x" of relation "y" does not exist'))
+    assert not mi.is_missing_table(R._pgrst("PGRST204", "Could not find the 'x' column of 'y' in the schema cache"))
+
+
+@test("review 9: a brand moved to another supplier takes its OPEN cases along (an 'edit' by the system), closed ones keep theirs; a sighting never joins another supplier's open case")
+def _():
+    fake = _qdb()
+    with _qenv(fake):
+        a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")    # Brand X: Supplier X
+        closed = _seed_case(fake, brand_id=1, supplier_id=1, status="closed")
+        c = R._client()
+        r = c.patch("/market-intel/lists/brands/1", headers=R._h("boss"), json={"supplier_id": 2})
+        assert r.status_code == 200 and r.json()["cases_moved"] == [a["case"]["id"]], r.text[:300]
+        assert _case(fake, a["case"]["id"])["supplier_id"] == 2 and _case(fake, closed["id"])["supplier_id"] == 1
+        ev = [e for e in fake.rows("market_case_events") if e["case_id"] == a["case"]["id"] and e["event"] == "edit"][0]
+        assert ev["actor"] == "system (brand re-linked)" and ev["detail"]["supplier_id"] == {"from": 1, "to": 2}
+        b = _cap("rep2@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        assert b["case"]["id"] == a["case"]["id"], "the brand's next sighting (Supplier Y now) joins the moved case"
+        x = _cap("rep2@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1", supplier_id="1")
+        assert x["case"]["id"] != a["case"]["id"], "Supplier X's sighting never joins Supplier Y's case"
+
+
+@test("review 10: My reports name the issue each sighting was reported under (issue_type_id, issue_label, issue_label_ar)")
+def _():
+    fake = _qdb()
+    with _qenv(fake):
+        _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1", note="dead")
+        _cap("rep1@example.com", [], kind="other", note="plain words")
+        rows = R._client().get("/market-intel/mine", headers=R._h("rep1")).json()["observations"]
+    by = {r["note"]: r for r in rows}
+    assert (by["dead"]["issue_type_id"], by["dead"]["issue_label"], by["dead"]["issue_label_ar"]) == (1, "Not charging", "لا يشحن")
+    assert by["plain words"]["issue_type_id"] is None and by["plain words"]["issue_label"] is None
+
+
+@test("minor: an answer or a supplier action that lost a race (409) leaves no photo row, no uploaded file, no event and no action behind")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    real = mq._cas
+
+    def moved_meanwhile(to: str):
+        def cas(case_id, status, upd):
+            fake.tables["market_cases"] = [dict(c, status=to) if c["id"] == case_id else c for c in fake.rows("market_cases")]
+            return real(case_id, status, upd)
+        return cas
+    with _qenv(fake):
+        a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        mq.ask_question(a["case"]["id"], "Which batch?", "clerk@example.com", "member")
+        files = set(fake.storage.objects)
+        with R._Patched((mq, "_cas", moved_meanwhile("verified"))):
+            R._raises(lambda: mq.answer(a["observation_id"], "Batch 2608", ("l.jpg", _jpg(1)), "rep1@example.com"),
+                      "changed this case meanwhile", 409)
+        assert fake.rows("market_photos") == [] and set(fake.storage.objects) == files
+        assert not [e for e in fake.rows("market_case_events") if e["event"] == "answer"]
+        v = _seed_case(fake, status="verified")
+        with R._Patched((mq, "_cas", moved_meanwhile("closed"))):
+            R._raises(lambda: mq.create_action(v["id"], {"request": "Replace the batch", "supplier_id": 1},
+                                               "clerk@example.com", "member"), "changed this case meanwhile", 409)
+        assert fake.rows("supplier_actions") == [] and fake.rows("supplier_action_cases") == []
+
+
+@test("minor: the thumbnail backfill passes over a photo it cannot make and goes on to the next ones")
+def _():
+    from app import market_intel as mi
+    fake = _qdb()
+    for name in ("finds/ok1.jpg", "finds/ok2.jpg"):
+        fake.storage.objects[("finds", name)] = (_jpg(), {})
+    fake.tables["market_photos"] = [
+        {"id": 1, "observation_id": 1, "bucket": "finds", "path": "finds/gone.jpg", "thumb_path": None, "has_people_flag": False},
+        {"id": 2, "observation_id": 1, "bucket": "finds", "path": "finds/ok1.jpg", "thumb_path": None, "has_people_flag": False},
+        {"id": 3, "observation_id": 1, "bucket": "finds", "path": "finds/ok2.jpg", "thumb_path": None, "has_people_flag": False}]
+    with _qenv(fake):
+        out = mi.backfill_thumbnails(limit=2, dry_run=False)
+    assert out["thumbs"] == 2 and [f["photo_id"] for f in out["failed"]] == [1], out
+    assert [bool(p.get("thumb_path")) for p in fake.rows("market_photos")] == [False, True, True]
+
+
+@test("minor: the v1 board, item and review queue mask phones and e-mails for a storekeeper holding the page, as for management")
+def _():
+    fake = _qdb()
+    with _qenv(fake):
+        a = _cap("rep1@example.com", [], kind="competitor_price", title="Stock via 33001122", note="call 39001234",
+                 shop_name="Shop 38001234")
+        c = R._client()
+        for url in ("/market-intel/items", f"/market-intel/items/{a['item']['id']}", "/market-intel/review"):
+            r = c.get(url, headers=R._h("store"))
+            assert r.status_code == 200, (url, r.text[:200])
+            for raw in ("33001122", "39001234", "38001234"):
+                assert raw not in r.text, (url, raw)
+        assert "39001234" in c.get(f"/market-intel/items/{a['item']['id']}", headers=R._h("clerk")).text
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. the code itself
 # ═══════════════════════════════════════════════════════════════════════════════
 
 FILES = ("app/market_intel.py", "app/market_intel_api.py", "app/market_quality.py", "app/market_quality_api.py",
