@@ -48,7 +48,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     from app import market_intel as mi
     from app.audit import log_event
     from app.auth import CurrentUser, require_feature
-    from app.features import is_read_only, masks_contacts
+    from app.features import is_read_only, masks_contacts, strips_contacts
     from app.uploads import MAX_PHOTO_BYTES, UploadTooLarge, read_capped
 
     gate = require_feature(FEATURE)
@@ -59,6 +59,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def _me(user: CurrentUser) -> str:
         """The login as a sighting stores it (created_by) and "my own" compares it: lower case."""
         return (user.email or "").strip().lower()
+
+    def _mask(user: CurrentUser) -> bool:
+        """Free text with phones and e-mails masked: management (read-only) and the storekeeper (who never
+        receives a merchant's phone or e-mail, app.features.CONTACT_STRIPPED_ROLES)."""
+        return masks_contacts(user.role) or strips_contacts(user.role)
 
     def _caps(user: CurrentUser) -> dict:
         return {"office": _office(user), "can_review": user.role in mi.REVIEW_ROLES,
@@ -169,7 +174,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
 
     @app.get("/market-intel/mine")
     def market_intel_mine(limit: int = 50, user: CurrentUser = Depends(gate)) -> dict:
-        return {**mi.mine(_me(user), limit=limit), "capabilities": _caps(user)}
+        try:
+            out = mi.mine(_me(user), limit=limit)
+        except mi.MarketIntelError as e:
+            _fail(e)
+        return {**out, "capabilities": _caps(user)}
 
     # ── the board ─────────────────────────────────────────────────────────────
     @app.get("/market-intel/items")
@@ -184,7 +193,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
             filters.update(rep=rep, area=area)
         try:
             out = mi.board(office=office, actor=_me(user), filters=filters, limit=limit, offset=offset,
-                           mask=masks_contacts(user.role))
+                           mask=_mask(user))
         except mi.MarketIntelError as e:
             _fail(e)
         return {**out, "capabilities": _caps(user)}
@@ -193,8 +202,7 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def market_intel_item(item_id: int, raw: bool = False, user: CurrentUser = Depends(gate)) -> dict:
         raw = bool(raw and user.role == "admin")       # the originals of people photos: an admin's, audited
         try:
-            out = mi.item_detail(item_id, office=_office(user), actor=_me(user), mask=masks_contacts(user.role),
-                                 raw=raw)
+            out = mi.item_detail(item_id, office=_office(user), actor=_me(user), mask=_mask(user), raw=raw)
         except mi.MarketIntelError as e:
             _fail(e)
         if raw:
@@ -206,8 +214,11 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
                             user: CurrentUser = Depends(gate)) -> dict:
         if not _office(user):
             raise HTTPException(status_code=403, detail="The review queue is for the office.")
-        return {**mi.review_queue(library=library, limit=limit, offset=offset, mask=masks_contacts(user.role)),
-                "capabilities": _caps(user)}
+        try:
+            out = mi.review_queue(library=library, limit=limit, offset=offset, mask=_mask(user))
+        except mi.MarketIntelError as e:
+            _fail(e)
+        return {**out, "capabilities": _caps(user)}
 
     # ── deciding ──────────────────────────────────────────────────────────────
     @app.patch("/market-intel/items/{item_id}")

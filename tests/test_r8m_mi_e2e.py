@@ -359,7 +359,8 @@ def _new_world() -> None:
               "app_settings": [], "market_items": [], "market_observations": [], "market_photos": [],
               "market_item_decisions": [], "product_finds": [], "field_notes": [], "shop_events": [],
               "shop_restock_requests": [],
-              "shop_orders": [{"id": 1, "customer_id": 11, "status": "delivered",
+              # rep one took this order: Shop Alpha is his customer, so his picker may mark its items
+              "shop_orders": [{"id": 1, "customer_id": 11, "salesman_id": 1, "status": "delivered",
                                "created_at": (NOW - timedelta(days=10)).isoformat()}],
               "shop_order_lines": [{"id": 1, "order_id": 1, "item_code": "C-10"}],
               "suppliers": [], "brands": [], "market_issue_types": [], "market_cases": [], "market_case_events": [],
@@ -568,6 +569,7 @@ def _():
         c = R._client()
         cable = _pick(c, "rep1", "c-10", SHOP_A)
         assert (cable["code"], cable["name"], cable["brand"], cable["at_shop"]) == ("C-10", "C-10 Type-C Cable 1m", "Brand X", True)
+        assert _pick(c, "rep2", "c-10", SHOP_A)["at_shop"] is False, "not rep two's customer: the picker says nothing of it"
         assert cable["thumb_url"].endswith("/catalog/thumbs/C-10-product-320.webp")
         assert PRICE not in json.dumps(cable) and COST not in json.dumps(cable), "the picker carries no price or cost"
         one = _post(c, "rep1", _fields(SHOP_A, at(6), product=cable, issue=W.issue["not_charging"], basis="customer_said",
@@ -607,7 +609,7 @@ def _():
     assert [e["event"] for e in W.fake.rows("market_case_events") if e["case_id"] == W.case["A"]] == ["created", "link"]
 
 
-@test("2. capture: a safety report alerts ONCE (its retry and a second sighting on the case send nothing); the e-mail names no shop or rep and masks the phone")
+@test("2. capture: a safety report alerts ONCE (its retry and a second sighting on the case send nothing); the e-mail carries no free text: no shop, rep or note")
 def _():
     at = lambda days, hours=0: NOW - timedelta(days=days, hours=hours)  # noqa: E731
     with _Env():
@@ -638,7 +640,10 @@ def _():
     text = mail["subject"] + mail["html"]
     for secret in ("Shop Beta", "Owner Beta", "Shop Alpha", "Rep Two", "Rep One", "rep2", "rep1", "3900 1234", "Muharraq"):
         assert secret not in text, secret
-    assert "[number]" in mail["html"] and "Gets hot or swells" in mail["html"]
+    for typed in ("Customer on", "swelled", "[number]", "Same model warm"):
+        assert typed not in text, ("the note never reaches the e-mail", typed)
+    assert f"#{W.case['S']}" in mail["html"] and "P-22 · P-22 Power Bank 10000" in mail["html"] \
+        and "Gets hot or swells" in mail["html"]
     case = _case("S")
     assert (case["safety"], case["obs_count"], case["shop_count"], case["evidence_level"]) == (True, 2, 2, 2)
     events = [(e["event"], (e.get("detail") or {}).get("email")) for e in W.fake.rows("market_case_events")
@@ -1031,8 +1036,11 @@ def _():
     assert set(mine1) == {W.obs[k] for k in ("o1", "oS2", "oB", "oP", "oY")}
     assert set(o["id"] for o in two.json()["observations"]) == {W.obs[k] for k in ("o2", "oS", "oD", "oK")}
     for secret in ("Shop Beta", "Owner Beta", "Rep Two", "rep2", "Two more dead", "swelled", "Lightning cable stopped",
-                   "sells it cheaper", "Muharraq", "Not charging", "Supplier X", "supplier_text"):
+                   "sells it cheaper", "Muharraq", "Supplier X", "supplier_text"):
         assert secret not in one.text, ("rep one reads", secret)
+    # the issue he reported is his to read (the contract's /mine row: issue_type_id + issue_label)
+    assert (mine1[W.obs["o1"]]["issue_type_id"], mine1[W.obs["o1"]]["issue_label"]) == \
+        (W.issue["not_charging"]["id"], "Not charging")
     for secret in ("Shop Alpha", "Shop Gamma", "Owner Alpha", "Rep One", "rep1", "stops charging after a week",
                    "White cable", "Box corners", "Manama", "Supplier X", "B2610 is on the label"):
         assert secret not in two.text, ("rep two reads", secret)

@@ -5,10 +5,14 @@
 Same lightweight runner as tests/test_r7a_focus.py: every test runs against an in-memory stand-in for
 the PostgREST client and Supabase Storage (eq / is / in / gte filters, real ordering, identity ids,
 the client_uuid unique key, missing tables that raise like PostgREST). Since R8m the stand-in also
-answers at most 1,000 rows per select (PostgREST's max-rows) and honours .range()'s offset, so a read
-that forgets to page shows up; tests/test_r8m_market_quality.py borrows it. Nothing here reaches a
-database, a storage bucket or the network: the Supabase and database addresses are pinned to ci.invalid
-before any import. Every name, phone, price and barcode is synthetic.
+answers at most 1,000 rows per select (PostgREST's max-rows), honours .range()'s offset (and answers 416 /
+PGRST103 for a counted offset past the end), refuses a column the table does not have in a select, filter,
+order or write (42703 / PGRST204, from the R7b and R8m migrations' column lists; R7b's alone while the R8m
+tables are missing) and enforces the migrations' unique keys, among them one safety-alert claim per case
+— so a read that forgets to page, a wrong column or a double claim fails here, not in production.
+tests/test_r8m_market_quality.py and other v2 suites borrow it. Nothing here reaches a database, a storage
+bucket or the network: the Supabase and database addresses are pinned to ci.invalid before any import.
+Every name, phone, price and barcode is synthetic.
 
 Covered:
   * features — 'Market Intel' is a page of its own, in the salesman defaults, grantable to management,
@@ -94,6 +98,78 @@ GRANTS_REVERSE = ROOT / "scripts" / "r7b_market_intel_grants_reverse.sql"
 # now does the same, and .range() honours its offset, so a read that forgets to page shows up as a bug)
 MAX_ROWS = 1000
 
+# The columns of every Market Intel table and view, as scripts/r7b_market_intel_migration.sql and
+# scripts/r8m_market_quality_migration.sql create them. The stand-in refuses any other column in a select,
+# a filter, an order or a write the way PostgREST does (42703 on a read, PGRST204 on a write), so code that
+# names a column the table does not have — or an R8m column before R8m — fails here, not in production.
+# A table not listed here (the shop's, the legacy boards') is not checked.
+_COLS_R7B = {
+    "market_items": {"id", "kind", "title", "norm_key", "brand", "competitor", "category", "barcode", "yq_item_code",
+                     "status", "action", "first_seen", "last_seen", "obs_count", "shop_count", "rep_count", "price_min",
+                     "price_max", "ai_suggestion", "ai_confidence", "verified", "merged_into", "status_reason",
+                     "status_changed_at", "status_changed_by", "created_at", "created_by", "updated_at", "updated_by"},
+    "market_observations": {"id", "item_id", "client_uuid", "source", "signal", "kind", "salesman_id", "created_by",
+                            "shop_customer_id", "shop_name", "area", "title", "brand", "competitor", "category", "note",
+                            "price_bhd", "demand_level", "demand_qty", "barcode_raw", "yq_item_code", "result",
+                            "near_duplicate_of", "legacy_ref", "meta", "observed_at", "created_at"},
+    "market_photos": {"id", "observation_id", "bucket", "path", "position", "width", "height", "bytes", "phash",
+                      "has_people_flag", "created_at"},
+    "market_item_decisions": {"id", "item_id", "event", "from_status", "to_status", "action", "reason", "actor",
+                              "actor_role", "detail", "created_at"},
+    "v_market_clusters": {"item_id", "kind", "title", "brand", "competitor", "category", "barcode", "yq_item_code",
+                          "status", "action", "merged_into", "observations", "shops", "reps", "price_min", "price_max",
+                          "first_seen", "last_seen", "system_signals", "near_duplicates", "demand_qty", "photos",
+                          "photos_people", "cover_bucket", "cover_path", "has_ai_suggestion", "ai_confidence",
+                          "verified", "status_changed_at", "created_at", "updated_at", "first_note"},
+}
+_AUDIT = {"created_at", "created_by", "updated_at", "updated_by"}
+_COLS_R8M_TABLES = {
+    "suppliers": {"id", "name", "code", "active", "merged_into"} | _AUDIT,
+    "brands": {"id", "name", "supplier_id", "aliases", "renamed_from", "active", "merged_into"} | _AUDIT,
+    "market_issue_types": {"id", "kind", "code", "label_en", "label_ar", "safety_default", "fields", "active",
+                           "sort"} | _AUDIT,
+    "market_cases": {"id", "yq_item_code", "brand_id", "supplier_id", "issue_type_id", "batch_ref", "packaging_version",
+                     "status", "evidence_level", "safety", "severity", "assignee", "due_date", "verification_method",
+                     "verification_reason", "title", "first_seen", "last_seen", "obs_count", "shop_count",
+                     "merged_into", "status_reason", "changed_at", "changed_by"} | _AUDIT,
+    "market_case_events": {"id", "case_id", "at", "actor", "event", "from_status", "to_status", "detail"},
+    "supplier_actions": {"id", "supplier_id", "request", "owner", "due_date", "status", "supplier_response",
+                         "resolution_check"} | _AUDIT,
+    "supplier_action_cases": {"action_id", "case_id", "created_at", "created_by"},
+    "supplier_reports": {"id", "supplier_id", "month", "edition", "status", "narrative", "included_observation_ids",
+                         "counts", "approved_by", "approved_at", "file_sha256", "downloads"} | _AUDIT,
+}
+R8M_TABLES = tuple(_COLS_R8M_TABLES)
+SCHEMA_R7B = dict(_COLS_R7B)
+SCHEMA_R8M = {**_COLS_R7B,
+              "market_observations": _COLS_R7B["market_observations"] | {
+                  "case_id", "issue_type_id", "report_basis", "qty_affected", "batch_ref", "packaging_version",
+                  "safety_flag", "client_observed_at", "brand_id", "supplier_id", "brand_text", "supplier_text"},
+              "market_photos": _COLS_R7B["market_photos"] | {"role", "sha256", "thumb_path", "caption", "blurred_path"},
+              **_COLS_R8M_TABLES}
+
+
+def _claim(r: dict) -> bool:
+    return r.get("event") == "safety_alert" and (r.get("detail") or {}).get("email") == "queued"
+
+
+# The unique keys the stand-in enforces on insert: (table, key of a row, which rows the index covers, its
+# name). R8m: market_case_events_one_alert_claim_idx — one 'queued' safety-alert claim per case.
+UNIQUE = (
+    ("market_observations", lambda r: (r.get("client_uuid"),), None, "market_observations_client_uuid_key"),
+    ("market_photos", lambda r: (r.get("bucket"), r.get("path")), None, "market_photos_path_key"),
+    ("market_issue_types", lambda r: (r.get("code"),), None, "market_issue_types_code_key"),
+    ("suppliers", lambda r: (str(r.get("name") or "").strip().lower(),), lambda r: r.get("active", True) is not False,
+     "suppliers_active_name_key"),
+    ("supplier_action_cases", lambda r: (r.get("action_id"), r.get("case_id")), None, "supplier_action_cases_pkey"),
+    ("market_case_events", lambda r: (r.get("case_id"),), _claim, "market_case_events_one_alert_claim_idx"),
+)
+
+
+def _pgrst(code: str, message: str, details: str | None = None) -> RuntimeError:
+    """An error as postgrest-py raises it: the JSON body PostgREST answered."""
+    return RuntimeError(json.dumps({"code": code, "message": message, "details": details}))
+
 
 def _same(a, b) -> bool:
     return a == b or str(a) == str(b)
@@ -103,15 +179,19 @@ def _key(v):
     return (v is None, str(v) if not isinstance(v, (int, float)) else f"{v:020.6f}")
 
 
+_IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
 class _Query:
     def __init__(self, db: "_FakeDB", table: str):
         self.db, self.table = db, table
         self.op, self.payload, self.filters = "select", None, []
         self.want_count, self.lim, self.orders = None, None, []
         self.off, self.negate, self.conflict = 0, False, None
+        self.cols = "*"
 
     def select(self, cols="*", count=None, head=False):
-        self.op, self.want_count = "select", count
+        self.op, self.want_count, self.cols = "select", count, cols
         return self
 
     def insert(self, payload):
@@ -207,6 +287,30 @@ class _Query:
                 return False
         return True
 
+    def _check_columns(self) -> None:
+        """PostgREST's answer to a column the table does not have (see SCHEMA_R8M): 42703 for one named in
+        a select, a filter or an order; PGRST204 for one in a written row. A stand-in that holds its requests
+        to the schema itself — tests/test_r8m_mi_e2e.py's, which reads it from the migrations and keeps a
+        `known` set of gaps another builder owns — is not checked a second time here."""
+        if hasattr(self.db, "known"):
+            return
+        cols = (getattr(self.db, "schema", None) or {}).get(self.table)
+        if cols is None:
+            return
+        named = []
+        if self.op == "select" and str(self.cols or "*").strip() != "*":
+            named += [c.strip() for c in str(self.cols).split(",") if _IDENT.match(c.strip())]
+        named += [col for _k, col, _v in self.filters if _IDENT.match(str(col))]
+        named += [col for col, _d in self.orders]
+        for c in named:
+            if c not in cols:
+                raise _pgrst("42703", f"column {self.table}.{c} does not exist")
+        if self.op in ("insert", "upsert", "update"):
+            for p in (self.payload if isinstance(self.payload, list) else [self.payload or {}]):
+                for c in p:
+                    if c not in cols:
+                        raise _pgrst("PGRST204", f"Could not find the '{c}' column of '{self.table}' in the schema cache")
+
     def execute(self):
         db = self.db
         db.calls.append((self.op, self.table, self.payload, list(self.filters)))
@@ -215,6 +319,7 @@ class _Query:
             raise fail
         if self.table in db.missing:
             raise RuntimeError(f'{{"code": "42P01", "message": "relation \\"public.{self.table}\\" does not exist"}}')
+        self._check_columns()
         if self.table in db.views:
             rows = db.views[self.table](db)
         else:
@@ -223,6 +328,10 @@ class _Query:
             out = [dict(r) for r in rows if self._match(r)]
             for col, desc in reversed(self.orders):
                 out.sort(key=lambda r, c=col: _key(r.get(c)), reverse=desc)
+            if self.want_count and self.off > len(out):
+                # PostgREST answers 416 for an offset past a counted total
+                raise _pgrst("PGRST103", "Requested range not satisfiable",
+                             f"An offset of {self.off} was requested, but there are only {len(out)} rows.")
             n = min(self.lim, MAX_ROWS) if self.lim else MAX_ROWS
             data = out[self.off:self.off + n]
             return SimpleNamespace(data=data, count=(len(out) if self.want_count else None))
@@ -243,15 +352,31 @@ class _Query:
             return SimpleNamespace(data=out, count=None)
         if self.op == "insert":
             items = self.payload if isinstance(self.payload, list) else [self.payload]
+            seen: list[dict] = list(rows)
             for p in items:
-                for tbl, col in db.unique:
-                    if tbl == self.table and p.get(col) is not None and any(_same(r.get(col), p.get(col)) for r in rows):
-                        raise RuntimeError('{"code": "23505", "message": "duplicate key value violates unique constraint"}')
+                for entry in db.unique:
+                    if entry[0] != self.table:
+                        continue
+                    if len(entry) == 2:                       # (table, column): an older suite's form
+                        key, where, name = (lambda r, c=entry[1]: (r.get(c),)), None, f"{entry[1]}_key"
+                    else:
+                        key, where, name = entry[1], entry[2], entry[3]
+                    k = key(p)
+                    if any(v is None for v in k) or (where is not None and not where(p)):
+                        continue
+                    if any(key(r) == k and (where is None or where(r)) for r in seen):
+                        raise _pgrst("23505", f"duplicate key value violates unique constraint \"{name}\"")
+                seen.append(p)
+            cols = (getattr(db, "schema", None) or {}).get(self.table)
             out = []
             for p in items:
                 r = dict(p)
-                r.setdefault("id", db.next_id(self.table))
-                r.setdefault("created_at", db.now_iso())
+                if cols is None or "id" in cols:
+                    r.setdefault("id", db.next_id(self.table))
+                if cols is None or "created_at" in cols:
+                    r.setdefault("created_at", db.now_iso())
+                if cols is not None and "at" in cols:
+                    r.setdefault("at", db.now_iso())          # market_case_events.at default now()
                 rows.append(r)
                 out.append(dict(r))
             return SimpleNamespace(data=out, count=None)
@@ -292,6 +417,8 @@ class _Bucket:
 
     def remove(self, paths):
         self.st.calls.append(("remove", self.name, list(paths)))
+        for p in paths:
+            self.st.objects.pop((self.name, p), None)
 
 
 class _Storage:
@@ -311,12 +438,14 @@ MI_TABLES = ("market_items", "market_observations", "market_photos", "market_ite
 
 
 class _FakeDB:
-    def __init__(self, tables: dict | None = None, missing: set | None = None):
+    def __init__(self, tables: dict | None = None, missing: set | None = None, schema: dict | None = None):
         self.tables: dict[str, list[dict]] = {k: [dict(r) for r in v] for k, v in (tables or {}).items()}
         self.missing: set[str] = set(missing or ())
         self.calls: list[tuple] = []
         self.fail: dict[tuple, Exception] = {}
-        self.unique = [("market_observations", "client_uuid")]
+        self.unique = list(UNIQUE)
+        # the columns the stand-in accepts: R8m's, or R7b's alone while the R8m tables are "missing"
+        self.schema = schema if schema is not None else (SCHEMA_R7B if self.missing & set(R8M_TABLES) else SCHEMA_R8M)
         self.views = {"v_market_clusters": _clusters_view}
         self.storage = _Storage()
         self._ids: dict[str, int] = {}

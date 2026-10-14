@@ -143,27 +143,52 @@ _probe: dict = {"until": 0.0, "ok": False}
 _PROBE_HIT_S, _PROBE_MISS_S = 600.0, 60.0
 
 
+UNREACHABLE = "Market Intel could not reach the database just now. Please try again in a moment."
+
+
 def is_missing_table(e: Exception) -> bool:
     """PostgREST's answers for a relation that is not there: 42P01 (undefined_table) and PGRST205
-    ("Could not find the table ... in the schema cache")."""
+    ("Could not find the table ... in the schema cache"). A missing COLUMN (42703, PGRST204) is never
+    "not set up": it is a bug in this code, and must surface as one."""
     msg = f"{getattr(e, 'code', '')} {e}"
+    if "42703" in msg or "PGRST204" in msg:
+        return False
     return "42P01" in msg or "PGRST205" in msg or ("relation" in msg and "does not exist" in msg) \
         or "Could not find the table" in msg
 
 
-def available(force: bool = False) -> bool:
-    """True when the R7b tables exist. A hit is remembered for 10 minutes, a miss for one."""
+def range_past_end(e: Exception) -> bool:
+    """PostgREST's 416 for an offset past a counted total (PGRST103: a page asked for after the rows
+    shrank, or a stale offset)."""
+    msg = f"{getattr(e, 'code', '')} {e}"
+    return "PGRST103" in msg or "416" in msg or "range not satisfiable" in msg.lower()
+
+
+def _probe_table(table: str, state: dict) -> bool:
+    """One cached existence probe. Only a missing table means "not set up" (a miss is remembered for a
+    minute, a hit for ten); any other failure — a timeout, a blip, a column bug — is a 503, so a phone's
+    capture is retried instead of being saved without its v2 fields (or in the legacy tables)."""
     now = time.monotonic()
-    if not force and _probe["until"] > now:
-        return bool(_probe["ok"])
+    if state["until"] > now:
+        return bool(state["ok"])
     try:
-        get_client().table("market_observations").select("id").limit(1).execute()
+        get_client().table(table).select("id").limit(1).execute()
         ok = True
-    except Exception as e:  # noqa: BLE001 — a missing table (or a blip) means "not yet"
-        log.debug("market intel probe failed: %s", e)
+    except Exception as e:  # noqa: BLE001
+        if not is_missing_table(e):
+            log.warning("market intel probe of %s failed: %s", table, e)
+            raise MarketIntelError(UNREACHABLE, 503) from None
         ok = False
-    _probe.update(until=now + (_PROBE_HIT_S if ok else _PROBE_MISS_S), ok=ok)
+    state.update(until=now + (_PROBE_HIT_S if ok else _PROBE_MISS_S), ok=ok)
     return ok
+
+
+def available(force: bool = False) -> bool:
+    """True when the R7b tables exist. A hit is remembered for 10 minutes, a miss for one; anything but
+    a missing table raises MarketIntelError(503)."""
+    if force:
+        _probe.update(until=0.0)
+    return _probe_table("market_observations", _probe)
 
 
 _qprobe: dict = {"until": 0.0, "ok": False}
@@ -171,19 +196,11 @@ _qprobe: dict = {"until": 0.0, "ok": False}
 
 def quality_available(force: bool = False) -> bool:
     """True when the R8m tables exist (scripts/r8m_market_quality_migration.sql: the cases, the lists and,
-    with them, the photo and sighting columns v2 writes). Cached like available(). Callers ask
-    available() first: the R8m migration needs the R7b one."""
-    now = time.monotonic()
-    if not force and _qprobe["until"] > now:
-        return bool(_qprobe["ok"])
-    try:
-        get_client().table("market_cases").select("id").limit(1).execute()
-        ok = True
-    except Exception as e:  # noqa: BLE001 — a missing table (or a blip) means "not yet"
-        log.debug("market quality probe failed: %s", e)
-        ok = False
-    _qprobe.update(until=now + (_PROBE_HIT_S if ok else _PROBE_MISS_S), ok=ok)
-    return ok
+    with them, the photo and sighting columns v2 writes). Cached like available(), and like it a 503 for
+    anything but a missing table. Callers ask available() first: the R8m migration needs the R7b one."""
+    if force:
+        _qprobe.update(until=0.0)
+    return _probe_table("market_cases", _qprobe)
 
 
 def forget_probe() -> None:
@@ -791,8 +808,15 @@ def _card(result: str, obs: dict, item: dict | None, stats: dict | None, yq: dic
             "photos": photos, "replayed": replayed, "case": case, "safety_alerted": bool(safety_alerted)}
 
 
-def _replay(obs: dict) -> dict:
-    """The card for a capture that already exists (a retry with the same client_uuid)."""
+FINISH_GRACE = timedelta(seconds=20)    # a younger half-done capture may still be running: 503, retry later
+
+
+def _replay(obs: dict, *, now: datetime | None = None, defer=None) -> dict:
+    """The card for a capture that already exists (a retry with the same client_uuid). R8m: a quality
+    sighting whose capture stopped half-way (an error after its insert: no case yet, or no safety-alert
+    claim) is FINISHED here, idempotently (app.market_quality.finish_capture) — unless it is younger than
+    FINISH_GRACE, when the first request may still be running: then 503, and the phone retries.
+    safety_alerted is true only when the case really holds a safety-alert claim."""
     item = _live(_item(obs.get("item_id")))
     yq = yq_card(((_catalog_ctx() or {}).get("items") or {}).get(obs.get("yq_item_code") or (item or {}).get("yq_item_code") or ""))
     try:
@@ -801,11 +825,16 @@ def _replay(obs: dict) -> dict:
         n = 0
     near = {"observation_id": obs["near_duplicate_of"]} if obs.get("near_duplicate_of") else None
     case, alerted = None, False
-    if obs.get("case_id") and quality_available():
+    if quality_available():
         from app import market_quality
-        case, alerted = market_quality.card_case(obs)
-    elif obs.get("safety_flag"):
-        alerted = True                       # a safety sighting the lists could not put on a case
+        now = now or _now()
+        if not market_quality.capture_finished(obs):
+            born = _parse_ts(obs.get("created_at"))
+            if born and now - born < FINISH_GRACE:
+                raise MarketIntelError("Still saving this report. It will be sent again in a moment.", 503)
+            case, alerted = market_quality.finish_capture(obs, now=now, defer=defer)
+        elif obs.get("case_id"):
+            case, alerted = market_quality.card_case(obs)
     return _card(obs.get("result") or ("saved_for_review" if not item else "new_find"), obs, item, None, yq, near, n,
                  replayed=True, case=case, safety_alerted=alerted)
 
@@ -882,7 +911,7 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
             return legacy()
         raise
     if existing:
-        return _replay(existing)
+        return _replay(existing, now=now, defer=defer)
 
     mq = v2 = None
     if quality_available():
@@ -902,9 +931,9 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
     on_case = bool(plan and plan["case"])
     item = found = None
     if on_case:
-        # a quality report: an open case of the same SKU + issue within 60 days, else a new one (after
-        # the insert, so a lost race never leaves an empty case behind)
-        found = mq.find_open_case(yq_code, plan["issue"]["id"], now)
+        # a quality report: an open case of the same SKU + issue (+ supplier) within 60 days, else a new one
+        # (after the insert, so a lost race never leaves an empty case behind)
+        found = mq.find_open_case(yq_code, plan["issue"]["id"], now, (plan.get("supplier") or {}).get("id"))
     else:
         item = find_item(f, yq_code, now)
         if item and not yq_item and item.get("yq_item_code"):
@@ -954,7 +983,7 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
         if _unique_violation(e):            # the same capture raced itself: the first one wins
             again = _obs_by_uuid(cu)
             if again:
-                return _replay(again)
+                return _replay(again, now=now, defer=defer)
         if _missing(e):
             return legacy()
         raise
@@ -979,7 +1008,7 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
     case, alerted = None, False
     if on_case:
         case, alerted = mq.link_case(obs, plan, found=found, yq_item=yq_item, f=f, actor=actor,
-                                     has_photo=bool(stored), defer=defer)
+                                     has_photo=bool(stored), defer=defer, now=now)
     elif plan and plan["safety"]:
         alerted = mq.alert_without_case(obs, defer=defer)     # no issue type at all to open a case on
     return _card(result, obs, item, stats, yq_card(yq_item), near, len(stored), case=case, safety_alerted=alerted)
@@ -1405,13 +1434,20 @@ def review_queue(*, library: bool = False, limit: int = 60, offset: int = 0, mas
     c = get_client()
     lim = max(1, min(int(limit or 60), 200))
     off = max(0, int(offset or 0))
-    q = c.table("market_observations").select("*", count="exact").is_("item_id", "null")
-    q = q.eq("source", "import") if library else q.in_("source", ["rep", "system"])
-    if not library and quality_available():
-        q = q.is_("case_id", "null")
-    res = q.order("observed_at", desc=True).order("id", desc=True).range(off, off + lim - 1).execute()
-    page = res.data or []
-    total = int(res.count) if res.count is not None else off + len(page)
+    cases = not library and quality_available()
+
+    def waiting():
+        q = c.table("market_observations").select("*", count="exact").is_("item_id", "null")
+        q = q.eq("source", "import") if library else q.in_("source", ["rep", "system"])
+        return q.is_("case_id", "null") if cases else q
+    try:
+        res = waiting().order("observed_at", desc=True).order("id", desc=True).range(off, off + lim - 1).execute()
+        page = res.data or []
+        total = int(res.count) if res.count is not None else off + len(page)
+    except Exception as e:  # noqa: BLE001
+        if not range_past_end(e):
+            raise
+        page, total = [], _count(waiting())          # a stale offset past the end: an empty page, the true count
     photos = _photos_for([int(o["id"]) for o in page])
     new_rows = [] if library else (c.table("v_market_clusters").select("*").eq("status", "new")
                                    .order("last_seen", desc=True).limit(200).execute().data or [])
@@ -1447,9 +1483,11 @@ def mine(actor: str, limit: int = 50) -> dict:
     signed = sign_many([k for ps in photos.values() for p in ps if not p.get("has_people_flag")
                         for k in photo_keys(p, master=False)])
     cases: dict[int, dict] = {}
-    if any(o.get("case_id") for o in obs) and quality_available():
+    issues: dict[int, dict] = {}
+    if any(o.get("case_id") or o.get("issue_type_id") for o in obs) and quality_available():
         from app import market_quality
         cases = market_quality.rep_case_info(obs)
+        issues = market_quality.Names.load().issues          # which issue he reported (EN / AR label)
     out = []
     for o in obs:
         it = items.get(int(o["item_id"])) if o.get("item_id") is not None else None
@@ -1467,6 +1505,10 @@ def mine(actor: str, limit: int = 50) -> dict:
                        status_label=cs["case_status_words"])
         elif "case_id" in o:
             row.update(case_status_words=None, open_question=None)
+        if "issue_type_id" in o:
+            it = issues.get(int(o["issue_type_id"])) if o.get("issue_type_id") else None
+            row.update(issue_type_id=o.get("issue_type_id"), issue_label=(it or {}).get("label_en"),
+                       issue_label_ar=(it or {}).get("label_ar"))
         out.append(row)
     return {"available": True, "observations": out}
 
@@ -1734,22 +1776,29 @@ def backfill_thumbnails(limit: int = 200, *, dry_run: bool = True) -> dict:
     if dry_run:
         return out
     n = max(1, int(limit or 200))
-    for p in no_thumb[:n]:
-        try:
-            store = c.storage.from_(p.get("bucket") or BUCKET)
-            blob, ext, ctype = _small(_decode(store.download(p["path"]), THUMB_EDGE), THUMB_EDGE)
-            path = derived_path(p["path"], THUMB_SUFFIX, ext)
-            store.upload(path, blob, {"content-type": ctype, "upsert": "true"})
-            c.table("market_photos").update({"thumb_path": path}).eq("id", p["id"]).execute()
-            out["thumbs"] += 1
-        except Exception as e:  # noqa: BLE001 — one unreadable photo never stops the others
-            out["failed"].append({"photo_id": p.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
-    for p in no_blur[:n]:
-        try:
-            blurred_copy(p)
-            out["blurs"] += 1
-        except Exception as e:  # noqa: BLE001
-            out["failed"].append({"photo_id": p.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
+
+    def thumb(p: dict) -> None:
+        store = c.storage.from_(p.get("bucket") or BUCKET)
+        blob, ext, ctype = _small(_decode(store.download(p["path"]), THUMB_EDGE), THUMB_EDGE)
+        path = derived_path(p["path"], THUMB_SUFFIX, ext)
+        store.upload(path, blob, {"content-type": ctype, "upsert": "true"})
+        c.table("market_photos").update({"thumb_path": path}).eq("id", p["id"]).execute()
+
+    # A photo that cannot be made (its master is gone, unreadable) is listed in `failed` and passed over:
+    # the run goes on to the next ones until `limit` are made, so a few broken old rows never hold the
+    # rest back (at most `limit` + 100 attempts of each kind per run).
+    for rows, make, key in ((no_thumb, thumb, "thumbs"), (no_blur, blurred_copy, "blurs")):
+        tries = 0
+        for p in rows:
+            if out[key] >= n or tries >= n + 100:
+                break
+            tries += 1
+            try:
+                make(p)
+                out[key] += 1
+            except Exception as e:  # noqa: BLE001 — one unreadable photo never stops the others
+                out["failed"].append({"photo_id": p.get("id"), "kind": key[:-1],
+                                      "error": f"{type(e).__name__}: {e}"[:160]})
     return out
 
 
@@ -1789,17 +1838,21 @@ def _search_terms(rows: list[dict]) -> dict[str, dict]:
     return terms
 
 
-def roll_demand_signals(days: int = 7, *, now: datetime | None = None, dry_run: bool = False) -> dict:
+def roll_demand_signals(days: int = 7, *, now: datetime | None = None, dry_run: bool = False,
+                        since: datetime | None = None, week: str | None = None) -> dict:
     """Roll the marketplace's free demand signals into sightings with source='system': zero-result
     searches and "tell {rep}" product requests (per cleaned term) and "tell me when back" restock asks (per SKU) over the last `days`.
-    One sighting per term / SKU per ISO week (client_uuid = uuid5 of the key), so running it twice in
-    a week writes nothing new. Scheduled weekly (R8m): app.shop_jobs.market_demand_rollup, Sunday 06:00
-    Bahrain. Both reads are paged (they used to stop at 1,000 rows whatever the limit said)."""
+    One sighting per term / SKU per week key (client_uuid = uuid5 of the key), so running it twice for
+    the same week writes nothing new. The key is the UTC ISO week of `now` unless `week` names it; the
+    window is the last `days` unless `since` starts it. The weekly job (app.shop_jobs.market_demand_rollup,
+    R8m) passes both: the week = its Sunday 06:00 Bahrain slot, the window = from its last run, so a
+    missed Sunday neither loses a week nor counts one twice. Both reads are paged (they used to stop at
+    1,000 rows whatever the limit said)."""
     now = now or _now()
     if not available():
         return {"ok": False, "reason": MISSING_HINT}
-    since = now - timedelta(days=max(1, int(days)))
-    week = _week_start(now)
+    since = since or now - timedelta(days=max(1, int(days)))
+    week = week or _week_start(now)
     c = get_client()
     # R7d: a "tell {rep}" tap on an empty search is logged as product_request (meta.q = the words) once
     # r7d_product_request_migration.sql is applied; before it, the same tap is a search_zero row
