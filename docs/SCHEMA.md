@@ -346,3 +346,144 @@ normalised-prefix match), `v_catalog_stock` (qty per code — never exposed publ
 `v_catalog_velocity` (30/90-day units, customers, from `v_sales.sku_code`), `v_catalog_pairs` (co-purchases, 180 d),
 `v_catalog_cost` (latest `mrn_landed_costs` per code; service role only), `v_shop_orders_agent` /
 `v_shop_order_lines_agent` (PII-free, granted to `yq_readonly`). Settings live in `app_settings` as `shop_*` keys.
+
+## Market Intelligence (R7b v1 `scripts/r7b_market_intel_migration.sql`; R8m v2 `scripts/r8m_market_quality_migration.sql`)
+
+Field sightings from the reps ("Spotted"), their photos, the office's decisions and, from v2, quality cases, supplier
+actions and the monthly supplier workbook. Contract: `docs/MARKET_INTEL.md`; apply / reverse: `docs/MIGRATIONS.md`.
+Every table below: bigint identity key (`id`) unless stated, RLS on with **no policy** (service role only), nothing
+granted to `anon` / `authenticated` (tables, identity sequences, views, trigger functions). `yq_readonly` reads the two
+agent views only. Data, never code: suppliers, brands and issue types are rows an admin adds; the migrations seed none.
+
+### market_items  *(R7b — the opportunity track: one thing seen in the market)*
+| column | type | notes |
+|---|---|---|
+| kind | text not null | new_product · competitor_price · promotion · shop_asked · complaint · other |
+| title, norm_key | text | what the reps call it; normalised tokens = the "seen before" key |
+| brand, competitor, category | text | as typed (category = the catalog's categories or free text) |
+| barcode | text | digits; an exact barcode is the same item |
+| yq_item_code | text | the YQ SKU when it is already ours; NULL = a gap |
+| status | text not null | new · researching · opportunity · approved · rejected · merged |
+| action | text | source · price_response · promo · ignore (required with approved) |
+| first_seen, last_seen | timestamptz | cached |
+| obs_count, shop_count, rep_count | int not null | cached DISTINCT counts |
+| price_min, price_max | numeric(12,3) | competitor prices seen |
+| ai_suggestion, ai_confidence, verified | jsonb, numeric(4,3), bool | the weekly AI Head's reading: Unverified until a person verifies |
+| merged_into | bigint FK→market_items | a duplicate points at the item kept |
+| status_reason, status_changed_at, status_changed_by | text, timestamptz, text | the last decision |
+| created_at / created_by / updated_at / updated_by | | audit |
+
+### market_observations  *(R7b, extended by R8m — one sighting)*
+| column | type | notes |
+|---|---|---|
+| item_id | bigint FK→market_items (set null) | NULL until the office identifies a photo-only sighting; v2 quality reports are grouped by `case_id` |
+| client_uuid | uuid not null UNIQUE | the capture's idempotency key |
+| source | text not null | rep · import · system |
+| signal | text | search_zero · restock_ask (system rows) |
+| kind | text not null | as in market_items |
+| salesman_id, shop_customer_id | bigint FK (set null) | who and where; `created_by` = the login |
+| shop_name, area, title, brand, competitor, category, note | text | as typed |
+| price_bhd | numeric(12,3) | 0 ≤ price < 100000 |
+| demand_level, demand_qty | text, int | low · medium · high; qty > 0 |
+| barcode_raw, yq_item_code | text | typed barcode; the catalog SKU it resolved to (v2: the product picked at capture) |
+| result | text | already_in_yq · seen_before · new_find · saved_for_review |
+| near_duplicate_of | bigint FK→market_observations | a photo within Hamming 8 |
+| legacy_ref, meta | text, jsonb | `product_finds:<id>` / `field_notes:<id>` for imported rows |
+| observed_at, created_at | timestamptz not null | v2: observed_at = the phone's capture time when trusted |
+| **R8m:** case_id | bigint FK→market_cases (**set null**) | the quality case it joined |
+| issue_type_id | bigint FK→market_issue_types | the issue chip |
+| report_basis | text | customer_said · rep_saw |
+| qty_affected | int | > 0 |
+| batch_ref, packaging_version | text | optional free text |
+| safety_flag | bool not null default false | heat / smoke / swelling / shock, or a safety issue type |
+| client_observed_at | timestamptz | when the phone took the photo (kept within the last 7 days, ≤ 10 min ahead) |
+| brand_id, supplier_id | bigint FK→brands / suppliers | as linked at capture |
+| brand_text, supplier_text | text | snapshot of the names as linked or typed at capture (history survives renames) |
+
+### market_photos  *(R7b, extended by R8m — 1–4 per sighting)*
+| column | type | notes |
+|---|---|---|
+| observation_id | bigint not null FK→market_observations (**cascade**) | |
+| bucket, path | text not null, UNIQUE together | PRIVATE bucket (`finds` / `field-notes`); the API signs 1-hour URLs |
+| position, width, height, bytes | smallint / int | |
+| phash | bigint | 64-bit dHash (near-duplicates) |
+| has_people_flag | bool not null | people in the photo: never in a rep view, report or agent view |
+| **R8m:** role | text default 'product' | product · packaging · label_batch · receipt · other (NULL reads as product) |
+| sha256 | text | of the stored master, recorded at capture |
+| thumb_path | text | the 320 px WebP (`<stem>-t320.webp`) |
+| caption | text | |
+| blurred_path | text | the server-blurred copy of a people-flagged photo (`<stem>-blur.webp`) |
+
+### market_item_decisions  *(R7b — append-only)*
+`item_id` (FK→market_items, no cascade), `event` (status · edit · identify · merge · approve), `from_status`,
+`to_status`, `action`, `reason`, `actor` (not null), `actor_role`, `detail jsonb`, `created_at`. Triggers refuse UPDATE,
+DELETE and TRUNCATE.
+
+### suppliers  *(R8m — admin list)*
+`name` (not null, not blank; one ACTIVE row per `lower(btrim(name))`), `code`, `active` (default true), `merged_into`
+(FK→suppliers, set null), audit columns. Never deleted while a brand, case, sighting, action or report points at it.
+
+### brands  *(R8m — admin list)*
+`name` (not null, not blank), `supplier_id` (FK→suppliers, **set null**), `aliases text[]` (default `{}`; a rename adds
+the old name), `renamed_from`, `active`, `merged_into` (FK→brands, set null), audit columns.
+
+### market_issue_types  *(R8m — admin list)*
+| column | type | notes |
+|---|---|---|
+| kind | text not null | quality · packaging (→ cases) · demand · competitor · other |
+| code | text not null UNIQUE | lowercase slug `^[a-z0-9][a-z0-9_-]{0,59}$`, stable |
+| label_en / label_ar | text (label_en not null, not blank) | the chip in English / Arabic |
+| safety_default | bool not null default false | choosing it flags the report as a safety risk |
+| fields | text[] default `{}` | extra capture fields: any of qty, batch_ref, packaging_version, label_photo |
+| active, sort | bool not null default true, int default 100 | |
+
+### market_cases  *(R8m — one real-world quality / packaging problem)*
+| column | type | notes |
+|---|---|---|
+| yq_item_code | text | the SKU; NULL = not identified / not ours (the title is the typed text) |
+| brand_id, supplier_id | bigint FK→brands / suppliers | |
+| issue_type_id | bigint **not null** FK→market_issue_types | |
+| batch_ref, packaging_version | text | |
+| status | text not null default 'submitted' | submitted · under_review · more_info_required · verified · not_substantiated · action_requested · resolved · closed (moves enforced by the API) |
+| evidence_level | smallint not null default 1, 1–5 | 1 reported · 2 evidence submitted · 3 inspected & verified by YQ · 4 supplier confirmed · 5 resolution verified (only ever raised, API) |
+| safety | bool not null default false | |
+| severity | smallint | 1–3 |
+| assignee, due_date | text, date | |
+| verification_method, verification_reason | text | sample_inspected · photos_sufficient · several_shops; why |
+| title | text not null, not blank | product name (or typed text) + issue label |
+| first_seen, last_seen | timestamptz | |
+| obs_count, shop_count | int not null default 0, ≥ 0 | cached |
+| merged_into | bigint FK→market_cases (set null), never itself | |
+| status_reason, changed_at, changed_by | text, timestamptz, text | the last move |
+| created_at / created_by / updated_at / updated_by | | audit |
+
+### market_case_events  *(R8m — append-only case timeline)*
+`case_id` (not null, FK→market_cases, **no cascade**: a case with a timeline is never deleted), `at` (not null, default
+now()), `actor` (not null), `event` (not null: created · status · evidence · question · answer · link · move · merge ·
+edit · action · safety_alert), `from_status`, `to_status`, `detail jsonb` (default `{}`). Triggers refuse UPDATE, DELETE
+and TRUNCATE, the API's own role included.
+
+### supplier_actions / supplier_action_cases  *(R8m — corrective actions, CA-&lt;id&gt;)*
+`supplier_actions`: `supplier_id` (FK→suppliers), `request` (not null, not blank), `owner` (a YQ login), `due_date`,
+`status` (not null default 'open': open · responded · resolved · cancelled), `supplier_response`, `resolution_check`,
+audit columns. `supplier_action_cases`: (`action_id`, `case_id`) primary key, both FKs **ON DELETE CASCADE**,
+`created_at`, `created_by`.
+
+### supplier_reports  *(R8m — the monthly supplier workbook)*
+`supplier_id` (not null FK→suppliers), `month` (date not null, the 1st of the month), `edition` (not null default
+'supplier': supplier · internal), `status` (not null default 'draft': draft · approved · superseded), `narrative` (every
+finding cites `[MI-<observation id>]`, every action `[CA-<id>]`), `included_observation_ids bigint[]` (default `{}`),
+`counts jsonb` (default `{}`), `approved_by`, `approved_at`, `file_sha256`, `downloads jsonb` (default `[]`:
+`{at, by, sha256}` per download), audit columns.
+
+### catalog_items.barcode  *(R8m)*
+`barcode text`, nullable, indexed where set (not unique).
+
+### Views
+- `v_market_clusters` (R7b) — one row per item counted from its sightings (DISTINCT shops / reps), cover photo path;
+  service role only.
+- `v_market_signals_agent` (R7b) — clusters + un-identified sightings, no rep, shop, note, login or path; `yq_readonly`.
+- `v_market_cases_agent` (R8m) — unmerged cases: status, evidence level, safety, severity, issue (id, kind, code, English
+  label), SKU, brand and supplier (id + name), batch, packaging version, verification method, first / last seen, counts,
+  `usable_photos` (not people-flagged), `open_actions` (open or responded), due date, created / changed; no title, note,
+  person, shop or photo path; `yq_readonly`.
