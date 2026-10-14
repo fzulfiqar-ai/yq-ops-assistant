@@ -13,8 +13,9 @@ weeks can be compared line by line.
 
 1. **Read-only.** The pack is built through the `ai_head_ro` login (SELECT on the `v_agent_*` views
    only). Never write to any database, never run `apply_sql`, `render_deploy`, `wrangler`, a git push,
-   or anything that changes production. The ONLY write in this whole routine is step 9
-   (`load_insights --commit`), and only after the owner has answered in this session.
+   or anything that changes production. The ONLY writes in this whole routine come in the last step,
+   "ask the owner" (`load_insights --commit`, and `market_intel_ai_head suggest --apply` for the photo
+   readings he approves), and only after he has answered in this session.
 2. **Never send anything** — no email, WhatsApp, Telegram, post or upload — without the owner's
    explicit "yes, send it" in this session. `python -m scripts.weekly_report --send` is the owner's
    own tool; do not run it for him.
@@ -30,8 +31,13 @@ weeks can be compared line by line.
      report, a single week). Always confidence low. Never present it as a finding.
 5. Money is BHD with 3 decimals. Focus figures are ex-VAT (net_bhd); marketplace order values include
    VAT — say which every time you mix them. Targets and kickbacks count Accessories only; SIM never counts.
-6. Field reports, product finds and restock asks are REPORTS, not facts, until two shops or reps
-   corroborate them (plan §18.9).
+6. Market Intel sightings (rep reports and the imported finds), restock asks and zero-result searches
+   are REPORTS, not facts, until two shops or reps corroborate them (plan §18.9) or a person verifies
+   them. In Market intelligence every finding also carries one of four labels (Market Intel plan F8):
+   **Verified fact** (a person verified it on the board), **Unverified report** (what was reported, by
+   how many shops / reps), **AI suggestion** (your reading of photos or records, always with the
+   sightings it rests on as `[MI-101]`), **Recommended action**. "3 shops reported X" is a FACT about the
+   reports, never about the product; an AI suggestion is never tagged FACT.
 
 ## Step 0 — build the pack
 
@@ -74,9 +80,35 @@ the same weekdays only (the pack already does this).
 8. **Profitability** — `items.json` margins (trade price ex-VAT vs latest landed cost), below cost,
    cost moves, landed-cost coverage. Name the coverage next to any margin claim.
 9. **Field and market intelligence** (plan §18.9) — `search_demand.csv` zero-result terms,
-   `market_signals.csv` (restock requests, product finds, field notes), `items.json` zero-result terms.
+   `items.json` zero-result terms and `market_signals.csv` (`v_agent_market_signals`, Market Intel since
+   R8): `restock_request` (marketplace asks per day × SKU), `market_item` (sightings per day × Market
+   Intel item: `n` sightings, `sources` distinct shops, `reps`, prices, usable `photos`, the item's
+   `status`, `item_shops` / `item_reps` over its whole life), `market_report` (sightings of one of our
+   SKUs outside any item), `market_unidentified` (one photo still to identify). `observation_ids` are
+   the sightings behind a row: cite them as `[MI-<id>]`. `system_signals` is the same marketplace
+   demand as `restock_request` / `search_demand.csv`, rolled onto an item: never add them together.
    Cluster what refers to the same product; rank by distinct shops × recency × commercial relevance
    (category revenue, margin headroom, sold-out overlap); pick the top 1–3.
+
+   Then the photos (read-only; the links expire in 1 hour):
+
+   ```
+   python -m scripts.market_intel_ai_head pack --photos --out exports/ai_head/<week-ending>
+   ```
+
+   `market_intel.json` holds the ranked items and, in `to_identify`, the photo-only sightings. Look at
+   every photo you are given and write what you can read (brand, model, spec, visible text; a YQ SKU
+   only when `items.csv` has it) into `market_suggestions.json` in the pack folder, in the file's
+   `suggest_format`: one row per item or sighting, `observation_ids` = the sightings whose photos you
+   read. Never a phone number, an email or a person's name (`suggest` refuses a phone number or an
+   email; a barcode goes under `barcode`, digits only). Check it (a dry run; nothing is written):
+
+   ```
+   python -m scripts.market_intel_ai_head suggest exports/ai_head/<week-ending>/market_suggestions.json
+   ```
+
+   Report each reading as an AI suggestion with its `[MI-…]` IDs. It is stored only after the owner's
+   yes, in the last step.
 10. **Opportunities** — due merchants with the SKUs they usually buy, sold-out items with demand,
     zero-result searches we could source.
 11. **Risks** — receivables (if loaded; if not, say it cannot be judged), shops without an owning rep,
@@ -155,5 +187,15 @@ python -m scripts.ai_head.load_insights <file> --approve … --reject … --appr
 ```
 
 Management then sees the approved statements on the Command Centre (`GET /management/insights`).
+
+Then ask whether to store the photo readings (`market_suggestions.json`). Only on his yes:
+
+```
+python -m scripts.market_intel_ai_head suggest exports/ai_head/<week-ending>/market_suggestions.json --apply
+```
+
+Each reading is stored Unverified (an item's AI reading, or a photo-only sighting's) with the sightings
+it cites, until a reviewer marks it verified. It never sets a status, identifies a sighting or merges
+items: those stay with the office on the Market Intel board.
 Next week, open `insights_history.csv` first and report what happened to last week's approved actions
 (mark finished ones with `--done <id> --by … --commit`, again only on the owner's word).
