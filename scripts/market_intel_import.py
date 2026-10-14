@@ -7,9 +7,10 @@
     python -m scripts.market_intel_import --list               # print every sighting (default: the first 10)
 
 Release R7b wrote this script (plan §18.4); Market Intel v2 (r8m, plan Part F, Phase 0) upgraded it: the
-photos now go through the live capture's own processing and get a 320 px thumbnail, and the r8m columns
-are filled when they exist. It runs ONCE, at release time, from the main project folder, after a backup.
-It refuses --apply from a code worktree (.claude/worktrees/...): the .env found from there is production's.
+photos now go through the live capture's own processing and get a 320 px thumbnail, and the r8m photo
+columns are filled when they exist. It runs ONCE, at release time, from the main project folder, after a
+backup. It refuses --apply from a code worktree (.claude/worktrees/...): the .env found from there is
+production's.
 
 What it does:
 
@@ -17,33 +18,46 @@ What it does:
     finds); rows the R7b API wrote before its migration existed (source_file 'mi:<uuid>:<n>', one row per
     photo) are grouped back into the ONE sighting they were, under that capture's client_uuid; every
     field_notes row becomes one sighting too (the 2 owner tests);
-  * observed_at is the old row's own time (posted_at / created_at), never the import time; so is
-    client_observed_at when the r8m column exists. A row without a time is reported, not guessed;
+  * observed_at is when the find was made, never the import time. The seeded WhatsApp finds carry the
+    seed day in posted_at (scripts/import_unique_items.py left it to its default), so their time comes
+    from the WhatsApp file name kept in source_file ("WhatsApp Image 2026-07-05 at 4.11.20 PM.jpeg", read
+    as Bahrain time, +03:00) when it is a real time no later than posted_at; otherwise from posted_at
+    (field_notes: created_at). meta.time_from says which ("whatsapp_file_name", "posted_at",
+    "created_at"); a row with no time at all is reported, not guessed. client_observed_at (r8m: when a
+    phone took the photo) stays empty for every import;
   * no rep identity is invented and no shop is guessed: salesman_id, shop_customer_id and shop_name stay
     empty, created_by keeps the old row's poster as it was recorded (the seeded finds say 'sales-team'),
     and item_id stays empty: the imports are the office's "Finds library", nothing is clustered on fuzzy
     evidence;
   * text is cleaned the way the capture cleans it (control characters out, spaces collapsed) and stored
     as typed: the app masks phones and emails where it masks them (management, the AI pack, supplier
-    files), and what this script PRINTS is masked the same way (app.ai_insights.mask_text);
+    files). What this script PRINTS is masked the same way (app.ai_insights.mask_text), the database's
+    own error messages included (a failed CHECK quotes the row);
   * each photo is downloaded (read only) from where it is (bucket 'finds' or 'field-notes') and goes
     through app.market_intel.process_photo exactly as a live capture: magic bytes, the 8 MB upload cap,
-    16 MP read from the header, EXIF (GPS) stripped, upright, at most 1600 px, WebP, a 64-bit dHash. The
-    master is stored in the private 'finds' bucket at market/YYYY/MM/imp-<sighting>-<n>.webp (the month it
-    was seen) and a 320 px WebP thumbnail (q70) next to it as <master stem>-t320.webp. With the r8m columns,
-    market_photos also gets thumb_path, sha256 (of the stored master) and role 'product'. has_people_flag
-    stays false: reviewers flag later. A photo that cannot be imported is reported; its sighting comes in
-    without it (and is not imported at all when no photo, text or price is left);
+    16 MP read from the header, EXIF (GPS) stripped, upright, at most 1600 px, WebP, a 64-bit dHash, the
+    sha256 of the stored master and the capture's own 320 px WebP thumbnail (q70). The master is stored in
+    the private 'finds' bucket at market/YYYY/MM/imp-<sighting>-<n>.webp (observed_at's month in UTC, as a
+    capture's) and the thumbnail next to it as <master stem>-t320.webp (app.market_intel.derived_path).
+    With the r8m columns, market_photos also gets thumb_path, sha256 and role 'product'. has_people_flag
+    stays false: reviewers flag later;
+  * a photo that cannot be imported (its object is not in the bucket, it is not a photo, it is too large,
+    or anything fails while processing it) is reported and recorded in its sighting's
+    meta.photos_not_imported, so no later run tries it again; the sighting comes in without it (and not
+    at all when no photo, text or price is left). Any other storage failure (a missing bucket, an error
+    page) stops the run: a blip never decides what is imported;
   * a photo within Hamming 8 of one already stored (or copied earlier in the same run) marks the sighting
     near_duplicate_of that one: a flag for the office, nothing is skipped or merged;
   * idempotent: client_uuid is uuid5 of 'import|product_finds|<id>' (or the capture's own uuid) and the
     insert is PostgREST's upsert with ignore-duplicates on that key, which the database runs as
-    INSERT ... ON CONFLICT (client_uuid) DO NOTHING: a second run writes nothing. A sighting copied
-    earlier whose photos did not all arrive (a stopped run) gets the missing ones, and a photo that
-    could not be imported is noted in its meta so a re-run does not try it again; object paths are fixed
-    per sighting and photo, so a resumed upload replaces its own object and leaves no orphan behind;
-  * the schema is probed once: the r7b tables must exist (refused otherwise), and each r8m column is set
-    only when it is there, so the script also works on the r7b schema alone.
+    INSERT ... ON CONFLICT (client_uuid) DO NOTHING: a second run writes nothing. The sighting is written
+    before its photos are uploaded, so nothing is uploaded for a row that turns out to exist already; a
+    row under the same client_uuid that is not this import (a live capture, another legacy_ref) is never
+    touched. A run that stops part-way is finished by the next one, which finds the sighting and adds
+    what it lacks; object paths are fixed per sighting and photo, so a repeated upload replaces its own
+    object and nothing is left orphaned once it has finished;
+  * the schema is probed once: the r7b tables must exist (refused otherwise), and each r8m photo column is
+    set only when it is there, so the script also works on the r7b schema alone.
 
 The old tables are only read: no UPDATE, DELETE or TRUNCATE of product_finds / field_notes anywhere here.
 
@@ -54,11 +68,10 @@ tables are missing, Supabase is not configured, --apply from a worktree, or a ba
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import re
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -76,13 +89,12 @@ BUCKET = "finds"                # where every processed master and thumbnail goe
 PAGE = 1000                     # PostgREST's row cap: every table read is an ordered loop of pages
 MAX_PAGES = 200                 # a safety stop for that loop
 IN_CHUNK = 100                  # uuids / ids per in.(...) filter: keeps the URL short
-THUMB_EDGE = 320                # px, longest side of the thumbnail (contract §3)
-THUMB_QUALITY = 70
 SHOW = 10                       # sightings listed by default (--list: all of them)
 ROLE = "product"                # market_photos.role of every imported photo (r8m)
-# The r8m columns this script fills when the migration has added them; each is probed once.
-R8M_COLUMNS = (("market_observations", "client_observed_at"), ("market_photos", "thumb_path"),
-               ("market_photos", "role"), ("market_photos", "sha256"))
+# The r8m columns this script fills when the migration has added them; each is probed once. An import
+# never writes client_observed_at: it means "when the phone took the photo".
+R8M_COLUMNS = (("market_photos", "thumb_path"), ("market_photos", "role"), ("market_photos", "sha256"))
+BAHRAIN = timezone(timedelta(hours=3))      # WhatsApp names its files in the PC's clock: Bahrain, no DST
 FIND_COLS = ("id,name,price_bhd,currency,note,category,source,image_path,status,promoted_item_code,"
              "source_file,posted_by,posted_at")
 NOTE_COLS = "id,note,category,created_by,created_at,image_path"
@@ -93,6 +105,10 @@ _LABEL_TO_KIND = {v.lower(): k for k, v in KIND_LABELS.items()}
 # field_notes.category -> market kind
 _NOTE_KIND = {"competitor_price": "competitor_price", "stockout": "shop_asked", "demand": "shop_asked",
               "complaint": "complaint", "new_product": "new_product", "other": "other"}
+# A WhatsApp export's file name: "WhatsApp Image 2026-07-05 at 4.11.20 PM (1).jpeg" (12-hour, as the seeded
+# folder has them; any space before AM / PM) or the 24-hour "... at 16.11.20.jpeg" / "..._a1b2c3.jpg".
+_WA_NAME = re.compile(r"^WhatsApp (?:Image|Video) (\d{4})-(\d{2})-(\d{2}) at (\d{1,2})\.(\d{2})\.(\d{2})"
+                      r"(?:\s*([AaPp])\.?[Mm]\.?)?(?:\s*\(\d+\)|_[0-9A-Za-z]+)?\.[0-9A-Za-z]+$")
 
 
 class Refused(RuntimeError):
@@ -118,9 +134,39 @@ def _stable(key: str) -> str:
 
 
 def _iso(v) -> str | None:
-    """A stored time as ISO 8601 with its offset (a naive one is UTC); None when there is none."""
+    """A stored time as ISO 8601 in UTC (a naive one is taken as UTC); None when there is none."""
     d = mi._parse_ts(v)
-    return d.isoformat() if d else None
+    return d.astimezone(timezone.utc).isoformat() if d else None
+
+
+def whatsapp_time(name) -> datetime | None:
+    """The time in a WhatsApp export's file name, as Bahrain time; None for any other name or for a time
+    that cannot be (13 PM, 30 February ...)."""
+    m = _WA_NAME.match(str(name or "").strip())
+    if not m:
+        return None
+    year, month, day, hour, minute, second = (int(x) for x in m.groups()[:6])
+    half = (m.group(7) or "").lower()
+    if half:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if half == "p" else 0)
+    try:
+        return datetime(year, month, day, hour, minute, second, tzinfo=BAHRAIN)
+    except ValueError:
+        return None
+
+
+def _find_time(source_file, posted_at) -> tuple[str | None, str | None]:
+    """(observed_at in UTC, where it came from) for one find: the WhatsApp file name's time when it is a
+    real time no later than posted_at (a find cannot be sent after it was posted), else posted_at."""
+    posted = mi._parse_ts(posted_at)
+    sent = whatsapp_time(source_file)
+    if sent is not None and (posted is None or sent <= posted):
+        return sent.astimezone(timezone.utc).isoformat(), "whatsapp_file_name"
+    if posted is not None:
+        return posted.astimezone(timezone.utc).isoformat(), "posted_at"
+    return None, None
 
 
 def _int_id(v) -> int | None:
@@ -189,6 +235,7 @@ def build_plan(finds: list[dict], notes: list[dict]) -> dict:
         price, warn = _price(head.get("price_bhd"))
         category = clean_text(head.get("category"), 60)
         src = str(head.get("source_file") or "")
+        observed_at, time_from = _find_time(src, head.get("posted_at"))
         photos = [{"bucket": "finds", "path": r["image_path"], "position": i}
                   for i, r in enumerate(rows) if r.get("image_path")]
         return {
@@ -196,12 +243,12 @@ def build_plan(finds: list[dict], notes: list[dict]) -> dict:
             "kind": _kind_from_note(head.get("note")) or "new_product",
             "created_by": _who(head.get("posted_by")), "title": clean_text(head.get("name"), 160),
             "note": clean_text(head.get("note"), 2000), "category": category.upper() if category else None,
-            "price_bhd": price, "observed_at": _iso(head.get("posted_at")),
+            "price_bhd": price, "observed_at": observed_at,
             "legacy_ref": "product_finds:" + ",".join(str(r["id"]) for r in rows),
             "meta": {"legacy_status": head.get("status"), "legacy_source": head.get("source"),
                      "currency": head.get("currency"), "promoted_item_code": head.get("promoted_item_code"),
                      "source_file": None if src.startswith("mi:") else (src or None),
-                     "photo_sources": [dict(p) for p in photos]},
+                     "time_from": time_from, "photo_sources": [dict(p) for p in photos]},
             "photos": photos, "warnings": [warn] if warn else [],
         }
 
@@ -215,13 +262,15 @@ def build_plan(finds: list[dict], notes: list[dict]) -> dict:
             skipped.append({"ref": "field_notes:?", "reason": "the row has no id"})
             continue
         photos = [{"bucket": "field-notes", "path": n["image_path"], "position": 0}] if n.get("image_path") else []
+        observed_at = _iso(n.get("created_at"))
         keep({
             "client_uuid": _stable(f"import|field_notes|{nid}"), "source": "import", "item_id": None,
             "kind": _NOTE_KIND.get(str(n.get("category") or "other"), "other"),
             "created_by": _who(n.get("created_by")), "title": None, "note": clean_text(n.get("note"), 2000),
-            "category": None, "price_bhd": None, "observed_at": _iso(n.get("created_at")),
+            "category": None, "price_bhd": None, "observed_at": observed_at,
             "legacy_ref": f"field_notes:{nid}",
-            "meta": {"legacy_category": n.get("category"), "photo_sources": [dict(p) for p in photos]},
+            "meta": {"legacy_category": n.get("category"), "time_from": "created_at" if observed_at else None,
+                     "photo_sources": [dict(p) for p in photos]},
             "photos": photos, "warnings": [],
         })
     obs.sort(key=lambda o: (o["observed_at"] or "", o["legacy_ref"]))
@@ -232,26 +281,24 @@ def build_plan(finds: list[dict], notes: list[dict]) -> dict:
 
 def photo_paths(o: dict, position: int, ext: str, thumb_ext: str) -> tuple[str, str]:
     """(master, thumbnail) object paths, fixed per sighting and photo: a resumed run writes the same ones.
-    The thumbnail is the master's stem + '-t320' (contract §3)."""
-    seen = mi._parse_ts(o["observed_at"])
-    stem = f"market/{seen:%Y/%m}/imp-{uuid.UUID(o['client_uuid']).hex}-{int(position)}"
-    return stem + ext, stem + "-t320" + thumb_ext
+    The month is observed_at's, in UTC; the thumbnail is the master's stem + '-t320', named as the app
+    names every derivative (contract §3)."""
+    seen = mi._parse_ts(o["observed_at"]).astimezone(timezone.utc)
+    path = f"market/{seen:%Y/%m}/imp-{uuid.UUID(o['client_uuid']).hex}-{int(position)}{ext}"
+    return path, mi.derived_path(path, mi.THUMB_SUFFIX, thumb_ext)
 
 
-def obs_row(o: dict, cols: set[str], near_id: int | None = None, not_imported: list[dict] | None = None) -> dict:
+def obs_row(o: dict, near_id: int | None = None, not_imported: list[dict] | None = None) -> dict:
     """The market_observations row for one planned sighting. The rep, the shop and the item stay empty
-    (nothing invented or guessed); client_observed_at only when the r8m column exists."""
+    (nothing invented or guessed), and so does client_observed_at: no phone took these photos just now."""
     meta = dict(o["meta"])
     if not_imported:
         meta["photos_not_imported"] = not_imported
-    row = {"client_uuid": o["client_uuid"], "source": "import", "kind": o["kind"], "item_id": None,
-           "salesman_id": None, "shop_customer_id": None, "shop_name": None, "created_by": o["created_by"],
-           "title": o["title"], "note": o["note"], "category": o["category"], "price_bhd": o["price_bhd"],
-           "observed_at": o["observed_at"], "legacy_ref": o["legacy_ref"], "meta": meta,
-           "near_duplicate_of": near_id}
-    if "market_observations.client_observed_at" in cols:
-        row["client_observed_at"] = o["observed_at"]
-    return row
+    return {"client_uuid": o["client_uuid"], "source": "import", "kind": o["kind"], "item_id": None,
+            "salesman_id": None, "shop_customer_id": None, "shop_name": None, "created_by": o["created_by"],
+            "title": o["title"], "note": o["note"], "category": o["category"], "price_bhd": o["price_bhd"],
+            "observed_at": o["observed_at"], "legacy_ref": o["legacy_ref"], "meta": meta,
+            "near_duplicate_of": near_id}
 
 
 def photo_row(obs_id: int, up: dict, cols: set[str]) -> dict:
@@ -283,24 +330,6 @@ def _sniff_ext(data: bytes, path: str) -> str:
     return "." + name.rsplit(".", 1)[-1] if "." in name else ""
 
 
-def make_thumb(master: bytes) -> tuple[bytes, str, str]:
-    """A 320 px thumbnail of the processed master: (bytes, extension, content type). WebP q70 like the
-    capture's own thumbnails; JPEG only where Pillow has no WebP (the master is JPEG there too)."""
-    from PIL import Image
-    img = Image.open(io.BytesIO(master))
-    img.load()
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    img.thumbnail((THUMB_EDGE, THUMB_EDGE), Image.Resampling.LANCZOS)
-    img.info = {}
-    out = io.BytesIO()
-    if mi._webp_ok():
-        img.save(out, format="WEBP", quality=THUMB_QUALITY, method=4, exif=b"")
-        return out.getvalue(), ".webp", "image/webp"
-    img.save(out, format="JPEG", quality=THUMB_QUALITY, optimize=True, exif=b"")
-    return out.getvalue(), ".jpg", "image/jpeg"
-
-
 def _refusal(e: Exception) -> str:
     """process_photo's refusal (written for a rep with a camera) in words for this report."""
     msg = str(e)
@@ -313,9 +342,14 @@ def _refusal(e: Exception) -> str:
     return msg
 
 
+_PHOTO_FIELDS = ("data", "ext", "content_type", "width", "height", "bytes", "phash", "sha256",
+                 "thumb", "thumb_ext", "thumb_type")
+
+
 def prepare_photo(data: bytes, path: str) -> dict:
-    """One old photo, ready to store: {"ok": True, master fields (process_photo), "thumb", "thumb_ext",
-    "thumb_type", "sha256"} or {"ok": False, "reason"}. Nothing is written."""
+    """One old photo, ready to store: {"ok": True, and process_photo's master, dHash, sha256 and
+    thumbnail} or {"ok": False, "reason"}. Nothing is written, and nothing about one photo (Pillow, a
+    codec, exif_transpose, the thumbnail) can stop the run: whatever fails is that photo's reason."""
     from app.uploads import MAX_PHOTO_BYTES
     if not data:
         return {"ok": False, "reason": "the stored file is empty"}
@@ -323,13 +357,11 @@ def prepare_photo(data: bytes, path: str) -> dict:
         return {"ok": False, "reason": f"larger than {MAX_PHOTO_BYTES // (1024 * 1024)} MB"}
     try:
         p = mi.process_photo(data, "photo" + _sniff_ext(data, path))
+        return {"ok": True, **{k: p[k] for k in _PHOTO_FIELDS}}
     except mi.MarketIntelError as e:
         return {"ok": False, "reason": _refusal(e)}
-    thumb, thumb_ext, thumb_type = make_thumb(p["data"])
-    return {"ok": True, "data": p["data"], "ext": p["ext"], "content_type": p["content_type"],
-            "width": p["width"], "height": p["height"], "bytes": p["bytes"], "phash": p["phash"],
-            "thumb": thumb, "thumb_ext": thumb_ext, "thumb_type": thumb_type,
-            "sha256": hashlib.sha256(p["data"]).hexdigest()}
+    except Exception as e:  # noqa: BLE001 — exif_transpose, a codec, the thumbnail: this photo only
+        return {"ok": False, "reason": f"could not be processed ({type(e).__name__})"}
 
 
 # ── the client: reads, probes, and a dry run that cannot write ────────────────
@@ -372,7 +404,8 @@ def _n(n: int, word: str) -> str:
 
 
 def _short(e: Exception) -> str:
-    return f"{type(e).__name__}: {str(e)[:200]}"
+    """An error for the report, masked: the database quotes the failing row (notes, phones) in some."""
+    return mask_text(f"{type(e).__name__}: {str(e)[:200]}")
 
 
 def _missing_column(e: Exception) -> bool:
@@ -383,11 +416,12 @@ def _missing_column(e: Exception) -> bool:
 
 
 def _not_found(e: Exception) -> bool:
-    """Storage's answer for an object that is not there (any other failure stops the run)."""
-    if isinstance(e, (KeyError, FileNotFoundError)):
-        return True
-    msg = f"{getattr(e, 'status', '')} {getattr(e, 'code', '')} {e}".lower()
-    return "not found" in msg or "not_found" in msg or "404" in msg
+    """Storage's answer for an OBJECT that is not there, and nothing else: StorageApiError with the message
+    "Object not found" (error not_found, status 404). A missing bucket ("Bucket not found"), an edge page,
+    a KeyError or any other failure is not a reason to give a photo up: it stops the run."""
+    message = str(getattr(e, "message", "") or "").strip().lower()
+    status = str(getattr(e, "status", "") or "404").strip()
+    return message == "object not found" and status in ("404", "400")
 
 
 def _paged(fetch) -> list[dict]:
@@ -452,6 +486,16 @@ def read_legacy(c) -> tuple[list[dict] | None, list[dict] | None]:
     return finds, notes
 
 
+def _ours(row: dict, o: dict) -> bool:
+    """A market_observations row under this sighting's client_uuid is this import's own: anything else (a
+    live capture that reached Market Intel itself, another legacy_ref) is never touched."""
+    return row.get("source") == "import" and str(row.get("legacy_ref") or "") == o["legacy_ref"]
+
+
+def _refused_positions(row: dict) -> set[int]:
+    return {int(x.get("position") or 0) for x in ((row.get("meta") or {}).get("photos_not_imported") or [])}
+
+
 # ── the run ───────────────────────────────────────────────────────────────────
 
 class Importer:
@@ -474,11 +518,12 @@ class Importer:
         self.photos_added = 0                           # photos (each with a thumbnail) of completed ones
         self.near = 0
         self.already = 0                                # copied before, nothing missing
-        self.live = 0                                   # the capture reached Market Intel itself
+        self.foreign = 0                                # the uuid is held by a row that is not this import
         self.left = 0                                   # held back by --limit
         self.unmapped: list[tuple[str, str]] = []       # (ref, why): not imported at all
         self.photo_problems: list[tuple[str, str, str]] = []   # (ref, photo, why): its sighting comes without it
         self.warnings: list[tuple[str, str]] = []
+        self.tried = self.refused = 0                   # photos read this run, and of them the ones refused
 
     # -- reads ------------------------------------------------------------------
     def _existing(self, uuids: list[str]) -> dict[str, dict]:
@@ -493,6 +538,14 @@ class Importer:
                 out[str(r["client_uuid"]).lower()] = r
         return out
 
+    def _row(self, client_uuid: str) -> dict | None:
+        try:
+            got = (self.c.table("market_observations").select("id,client_uuid,source,legacy_ref,meta")
+                   .eq("client_uuid", client_uuid).limit(1).execute().data or [])
+        except Exception as e:  # noqa: BLE001
+            raise Stop(f"could not read market_observations: {_short(e)}") from None
+        return got[0] if got else None
+
     def _stored_photos(self) -> list[dict]:
         try:
             return _paged(lambda a, b: self.c.table("market_photos").select("id,observation_id,position,phash")
@@ -502,9 +555,17 @@ class Importer:
         except Exception as e:  # noqa: BLE001
             raise Stop(f"could not read market_photos: {_short(e)}") from None
 
+    def _positions(self, obs_id: int) -> set[int]:
+        try:
+            rows = (self.c.table("market_photos").select("position").eq("observation_id", obs_id)
+                    .execute().data or [])
+        except Exception as e:  # noqa: BLE001
+            raise Stop(f"could not read market_photos: {_short(e)}") from None
+        return {int(r.get("position") or 0) for r in rows}
+
     def _prepare(self, p: dict) -> dict:
-        """Download one old photo (read only) and process it; a missing object is a reason, not an error.
-        Any other storage failure stops the run: a blip must not decide what is imported."""
+        """Download one old photo (read only) and process it. An object that is not in its bucket is a
+        reason; any other storage failure stops the run: a blip must not decide what is imported."""
         try:
             data = self.c.storage.from_(p["bucket"]).download(p["path"])
         except Exception as e:  # noqa: BLE001
@@ -518,9 +579,11 @@ class Importer:
         good, bad = [], []
         for p in photos:
             r = self._prepare(p)
+            self.tried += 1
             if r["ok"]:
                 good.append((p, r))
             else:
+                self.refused += 1
                 bad.append({"position": p["position"], "photo": f"{p['bucket']}:{p['path']}", "reason": r["reason"]})
         return good, bad
 
@@ -536,30 +599,48 @@ class Importer:
         return {"position": p["position"], "path": path, "thumb_path": thumb_path, "width": r["width"],
                 "height": r["height"], "bytes": r["bytes"], "phash": r["phash"], "sha256": r["sha256"]}
 
-    def _insert_photos(self, o: dict, obs_id: int, ups: list[dict]) -> None:
-        if not ups:
+    def _store_photos(self, o: dict, obs_id: int, good: list[tuple[dict, dict]]) -> None:
+        """Every master and its thumbnail, then their market_photos rows (one insert)."""
+        if not good:
             return
+        ups = [self._upload(o, p, r) for p, r in good]
         try:
             self.c.table("market_photos").insert([photo_row(obs_id, u, self.cols) for u in ups]).execute()
         except Exception as e:  # noqa: BLE001
             raise Stop(f"market_photos insert failed for {o['legacy_ref']}: {_short(e)}") from None
 
-    def _insert_obs(self, o: dict, near_id, not_imported: list[dict]) -> tuple[int, bool]:
-        """(observation id, created?). An upsert that ignores duplicates on client_uuid: a sighting that is
-        already there is never touched; its id is read back instead."""
-        row = obs_row(o, self.cols, near_id if isinstance(near_id, int) else None, not_imported)
+    def _insert_obs(self, o: dict, near_id, not_imported: list[dict]) -> tuple[int | None, dict | None]:
+        """(the new row's id, None), or (None, the row that already holds this client_uuid). PostgREST's
+        upsert ignoring duplicates on client_uuid: an existing row is never changed by it."""
+        row = obs_row(o, near_id if isinstance(near_id, int) else None, not_imported)
         try:
             got = (self.c.table("market_observations")
                    .upsert(row, on_conflict="client_uuid", ignore_duplicates=True).execute().data or [])
-            if got:
-                return int(got[0]["id"]), True
-            again = (self.c.table("market_observations").select("id").eq("client_uuid", o["client_uuid"])
-                     .limit(1).execute().data or [])
         except Exception as e:  # noqa: BLE001
             raise Stop(f"market_observations insert failed for {o['legacy_ref']}: {_short(e)}") from None
-        if not again:
+        if got:
+            return int(got[0]["id"]), None
+        there = self._row(o["client_uuid"])
+        if not there:
             raise Stop(f"market_observations: {o['legacy_ref']} was neither written nor found")
-        return int(again[0]["id"]), False
+        return None, there
+
+    def _note_not_imported(self, o: dict, row: dict, bad: list[dict]) -> None:
+        """Record in this import's own row the photos a later run must not try again (as a first run does
+        when it writes the row)."""
+        meta = dict(row.get("meta") or {})
+        listed = list(meta.get("photos_not_imported") or [])
+        seen = {int(x.get("position") or 0) for x in listed}
+        add = [{"position": b["position"], "reason": b["reason"]} for b in bad if b["position"] not in seen]
+        if not add:
+            return
+        meta["photos_not_imported"] = listed + add
+        try:
+            (self.c.table("market_observations").update({"meta": meta}).eq("id", int(row["id"]))
+             .eq("source", "import").execute())
+        except Exception as e:  # noqa: BLE001
+            raise Stop(f"market_observations meta update failed for {o['legacy_ref']}: {_short(e)}") from None
+        row["meta"] = meta
 
     # -- one sighting -----------------------------------------------------------
     def _nearest(self, hashes: list[int]):
@@ -577,37 +658,52 @@ class Importer:
             why = "; ".join(f"{b['photo']}: {b['reason']}" for b in bad)
             self.unmapped.append((o["legacy_ref"], f"no photo could be imported ({why}) and there is no text or price"))
             return
-        self.photo_problems += [(o["legacy_ref"], b["photo"], b["reason"]) for b in bad]
         near = self._nearest([r["phash"] for _, r in good]) if good else None
         obs_id: object = o["legacy_ref"]
-        made = True
         if self.apply:
-            ups = [self._upload(o, p, r) for p, r in good]
-            obs_id, made = self._insert_obs(o, near, [{"position": b["position"], "reason": b["reason"]} for b in bad])
-            if not made:                # written meanwhile by another run: add only the photos it lacks
-                have = {int(x.get("position") or 0) for x in self._stored_photos()
-                        if int(x.get("observation_id") or 0) == obs_id}
-                ups = [u for u in ups if u["position"] not in have]
-            self._insert_photos(o, obs_id, ups)
+            # the sighting first, then its photos: nothing is uploaded for a row that turns out to exist
+            new_id, there = self._insert_obs(o, near, [{"position": b["position"], "reason": b["reason"]} for b in bad])
+            if there is not None:
+                self._finish_existing(o, there, good, bad)
+                return
+            obs_id = new_id
+            self.photo_problems += [(o["legacy_ref"], b["photo"], b["reason"]) for b in bad]
+            self._store_photos(o, new_id, good)
+        else:
+            self.photo_problems += [(o["legacy_ref"], b["photo"], b["reason"]) for b in bad]
         self.known += [(obs_id, r["phash"]) for _, r in good]
-        if not made:
-            self.completed.append({**o, "_photos": len(good), "_near": False})
-            self.photos_added += len(good)
-            return
         self.created.append({**o, "_photos": len(good), "_near": near is not None})
         self.by_kind[o["kind"]] = self.by_kind.get(o["kind"], 0) + 1
         self.photos += len(good)
         self.near += near is not None
         self.warnings += [(o["legacy_ref"], w) for w in o.get("warnings") or []]
 
-    def _complete(self, o: dict, obs_id: int, missing: list[dict]) -> None:
+    def _finish_existing(self, o: dict, row: dict, good: list, bad: list[dict]) -> None:
+        """A row already held this client_uuid (it was not there at the first read): this import's own row
+        gets only the photos it lacks; any other row is left exactly as it is, and nothing is uploaded."""
+        if not _ours(row, o):
+            self.foreign += 1
+            return
+        done = self._positions(int(row["id"])) | _refused_positions(row)
+        good = [(p, r) for p, r in good if p["position"] not in done]
+        bad = [b for b in bad if b["position"] not in done]
+        if not good and not bad:
+            self.already += 1
+            return
+        self._complete_with(o, row, good, bad)
+
+    def _complete(self, o: dict, row: dict, missing: list[dict]) -> None:
         good, bad = self._prepare_all(missing)
+        self._complete_with(o, row, good, bad)
+
+    def _complete_with(self, o: dict, row: dict, good: list, bad: list[dict]) -> None:
         self.photo_problems += [(o["legacy_ref"], b["photo"], b["reason"]) for b in bad]
+        if self.apply:
+            self._note_not_imported(o, row, bad)
+            self._store_photos(o, int(row["id"]), good)
         if not good:
             return
-        if self.apply:
-            self._insert_photos(o, obs_id, [self._upload(o, p, r) for p, r in good])
-        self.known += [(obs_id, r["phash"]) for _, r in good]
+        self.known += [(int(row["id"]), r["phash"]) for _, r in good]
         self.completed.append({**o, "_photos": len(good), "_near": False})
         self.photos_added += len(good)
 
@@ -625,7 +721,7 @@ class Importer:
             say(f"ERROR: {e}")
             return 1
         missing = [f"{t}.{c}" for t, c in R8M_COLUMNS if f"{t}.{c}" not in self.cols]
-        say("schema: the R7b tables with every r8m column (client_observed_at, thumb_path, role, sha256)" if not missing
+        say("schema: the R7b tables with the r8m photo columns (thumb_path, role, sha256)" if not missing
             else "schema: the R7b tables; not there, so not set: " + ", ".join(missing)
             + " (thumbnails are still stored next to each master)")
         for table, rows in (("product_finds", finds), ("field_notes", notes)):
@@ -634,6 +730,10 @@ class Importer:
         plan = build_plan(finds or [], notes or [])
         say(f"read: {len(finds or [])} product_finds, {len(notes or [])} field_notes -> "
             f"{_n(plan['counts']['observations'], 'sighting')} with {_n(plan['counts']['photos'], 'photo')}")
+        times: dict[str, int] = {}
+        for o in plan["observations"]:
+            times[o["meta"].get("time_from") or "?"] = times.get(o["meta"].get("time_from") or "?", 0) + 1
+        say("time seen from: " + ", ".join(f"{k} {v}" for k, v in sorted(times.items())) if times else "time seen from: -")
         self.unmapped += [(s["ref"], s["reason"]) for s in plan["skipped"]]
         try:
             code = self._work(plan)
@@ -655,31 +755,30 @@ class Importer:
             have.setdefault(int(p["observation_id"]), set()).add(int(p.get("position") or 0))
             if p.get("phash") is not None:
                 self.known.append((int(p["observation_id"]), int(p["phash"])))
-        work: list[tuple[dict, int | None, list[dict]]] = []
+        work: list[tuple[dict, dict | None, list[dict]]] = []
         for o in plan["observations"]:
-            ex = existing.get(o["client_uuid"])
-            if ex is None:
+            row = existing.get(o["client_uuid"])
+            if row is None:
                 work.append((o, None, o["photos"]))
                 continue
-            if ex.get("source") != "import":
-                self.live += 1          # the capture itself reached Market Intel: nothing to add to it
+            if not _ours(row, o):
+                self.foreign += 1           # a live capture under the same uuid, or another import: untouched
                 continue
-            done = set(have.get(int(ex["id"]), set()))
-            done |= {int(x.get("position") or 0) for x in ((ex.get("meta") or {}).get("photos_not_imported") or [])}
+            done = have.get(int(row["id"]), set()) | _refused_positions(row)
             todo = [p for p in o["photos"] if p["position"] not in done]
             if todo:
-                work.append((o, int(ex["id"]), todo))
+                work.append((o, row, todo))
             else:
                 self.already += 1
         if self.limit is not None and len(work) > self.limit:
             self.left = len(work) - self.limit
             work = work[: self.limit]
-        for i, (o, obs_id, photos) in enumerate(work, 1):
+        for i, (o, row, photos) in enumerate(work, 1):
             try:
-                if obs_id is None:
+                if row is None:
                     self._create(o)
                 else:
-                    self._complete(o, obs_id, photos)
+                    self._complete(o, row, photos)
             except Stop as e:
                 self.say(f"ERROR at {o['legacy_ref']}: {e}")
                 self.say("Stopped there: nothing after it was attempted. Re-run with --apply to finish; it skips "
@@ -706,15 +805,20 @@ class Importer:
         verb = "created" if self.apply else "to create"
         kinds = ", ".join(f"{k} {n}" for k, n in sorted(self.by_kind.items(), key=lambda kv: (-kv[1], kv[0])))
         say(f"already in Market Intel (skipped): {_n(self.already, 'sighting')}"
-            + (f"; {self.live} more arrived as live captures (left as they are)" if self.live else ""))
+            + (f"; {self.foreign} more uuids are held by rows that are not this import (left as they are)"
+               if self.foreign else ""))
         say(f"{verb}: {_n(len(self.created), 'sighting')}" + (f" ({kinds})" if kinds else ""))
-        say(f"  photos: {self.photos}, each with a {THUMB_EDGE} px thumbnail, in bucket {BUCKET} under market/")
+        say(f"  photos: {self.photos}, each with a {mi.THUMB_EDGE} px thumbnail, in bucket {BUCKET} under market/")
         say(f"  near-duplicate photo: {_n(self.near, 'sighting')} (flagged near_duplicate_of; nothing skipped or merged)")
         if self.completed:
             say(f"{'completed' if self.apply else 'to complete'} (copied before, photos missing): "
                 f"{_n(len(self.completed), 'sighting')}, {_n(self.photos_added, 'photo')}, each with a thumbnail")
         if self.left:
             say(f"--limit {self.limit}: {_n(self.left, 'more sighting')} left for a later run")
+        if self.tried >= 3 and self.refused == self.tried:
+            # a refused photo is recorded and never tried again: a fault that refuses all of them must be seen
+            say(f"WARNING: none of the {self.tried} photos read could be imported. Check the reasons below before "
+                "--apply: a refused photo is recorded in its sighting and not tried again.")
         if self.unmapped:
             say(f"cannot be imported: {len(self.unmapped)}")
             for ref, why in self.unmapped[:50]:
@@ -793,13 +897,14 @@ def main(argv=None, *, client=None, out=print) -> int:
             from app.database import get_client
             client = get_client()
         except Exception as e:  # noqa: BLE001 — no SUPABASE_URL / SUPABASE_KEY, or a malformed one
-            out(f"REFUSED: Supabase is not configured: {e}")
+            out(f"REFUSED: Supabase is not configured: {mask_text(str(e))}")
             return 2
     try:
         return Importer(client, apply=args.apply, limit=args.limit, show_all=args.list, out=out).run()
-    except Exception:  # noqa: BLE001 — anything unforeseen is an error (exit 1), with its traceback for the record
+    except Exception:  # noqa: BLE001 — anything unforeseen is an error (exit 1), with its traceback, masked
         import traceback
-        out("ERROR: unexpected failure; a re-run resumes where this one stopped.\n" + traceback.format_exc())
+        out("ERROR: unexpected failure; a re-run resumes where this one stopped.\n"
+            + mask_text(traceback.format_exc()))
         return 1
 
 

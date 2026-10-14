@@ -5,30 +5,43 @@
 Same lightweight runner as tests/test_r7b_market_intel.py, on its in-memory PostgREST + Storage stand-in
 (imported from it and extended here: a column list per table, so a column that is not there answers the
 way PostgREST does, paging that honours the offset, the upsert the importer uses, the (bucket, path) key
-of market_photos, and storage reads that can be told to fail). SUPABASE_URL, SUPABASE_KEY and
-DATABASE_URL are pinned to ci.invalid BEFORE any import: a worktree under the main checkout would
-otherwise find the production .env through python-dotenv's walk-up. scripts/market_intel_import.py runs
-here only against the stand-in; nothing reaches a database, a bucket or the network. Every name, email,
-price and photo is invented ("Shop Alpha", "Brand X", rep1@example.com, drawn rectangles).
+of market_photos, storage errors in the shape storage3 raises them, and switches that make a read or a
+write fail). SUPABASE_URL, SUPABASE_KEY and DATABASE_URL are pinned to ci.invalid BEFORE any import: a
+worktree under the main checkout would otherwise find the production .env through python-dotenv's
+walk-up. On top of that, every run of the importer here happens with app.database.get_client (and every
+app module's own reference to it) raising: the importer only ever gets the stand-in, and a helper of the
+app that reached for a real client on its own (mi._upload, product_finds.ensure_bucket) fails the test.
+Nothing reaches a database, a bucket or the network. Every name, email, price and photo is invented
+("Shop Alpha", "Brand X", rep1@example.com, drawn rectangles).
 
 Covered:
   * the dry run (the default) writes nothing (no insert, upsert, update or delete, no upload) yet reads
-    and checks every photo, and says what --apply would create: per kind, photos and thumbnails,
-    sightings already copied, rows that cannot be imported and why; its client cannot write at all;
+    and checks every photo, and says what --apply would create: per kind, photos and thumbnails, where
+    the times come from, sightings already copied, rows that cannot be imported and why; its client
+    cannot write at all; the app's own client cannot be reached;
   * --apply: one sighting per find / note (a fallback capture's rows stay one sighting, under its own
-    uuid), source 'import', no rep, shop or item invented; the original time kept as observed_at and
-    client_observed_at; every photo processed like a live capture (no EXIF / GPS, upright, <= 1600 px
-    WebP, the same dHash) with a 320 px WebP thumbnail next to it as <stem>-t320.webp; thumb_path,
-    sha256 and role set; the old tables and objects untouched;
-  * a second --apply creates nothing; a capture that reached Market Intel live is left alone;
+    uuid), source 'import', no rep, shop or item invented; every photo processed like a live capture (no
+    EXIF / GPS, upright, <= 1600 px WebP, the same dHash) with the capture's own 320 px WebP thumbnail
+    next to it as <stem>-t320.webp; thumb_path, sha256 and role set; the old tables and objects untouched;
+  * time: observed_at from the WhatsApp file name (Bahrain time) when it is a real time no later than
+    posted_at, else posted_at (field notes: created_at), meta.time_from saying which; the photo's month
+    follows it (in UTC); client_observed_at is never written;
+  * a second --apply creates nothing; a row hidden from the first read is never doubled (the upsert on
+    client_uuid), this import's own row only gets what it lacks, and a row under the same uuid that is not
+    this import (a live capture, another legacy_ref) is never touched, nothing uploaded for it;
   * the r7b schema alone: nothing r8m is sent (the stand-in refuses an unknown column), thumbnails are
     still stored; field_notes without its photo column; a missing old table;
   * rows that cannot be mapped are reported, never crashed on (a missing object, a corrupt or HEIC photo,
-    no time, nothing at all, no id, a price the column cannot hold); a wrongly named photo is still read;
+    any failure while processing a photo, no time, nothing at all, no id, a price the column cannot hold);
+    a wrongly named photo is still read; a refused photo is recorded in meta, on a first run and when a
+    stopped run is finished, and never tried again;
+  * storage: only "Object not found" is a missing photo; a missing bucket, a KeyError or an error page
+    stops the run;
   * --limit N: the N oldest, then the next N, then the rest;
   * refused (exit 2): the R7b tables missing, --apply from a code worktree, Supabase not configured, a bad
     --limit. Exit 1 when a read or write fails; the re-run resumes without a duplicate or an orphan;
-  * near-duplicate photos are flagged, never skipped; what the script prints is masked;
+  * near-duplicate photos are flagged, never skipped; what the script prints is masked, the database's
+    own error messages and an unforeseen traceback included;
   * every read pages past PostgREST's 1,000-row cap; the test data is invented.
 """
 from __future__ import annotations
@@ -56,7 +69,8 @@ os.environ["SUPABASE_KEY"] = "ci-key"
 os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 
 from tests import test_r7b_market_intel as r7b  # noqa: E402  (the stand-ins; it also sets stdout to UTF-8)
-from app import market_intel as mi  # noqa: E402
+from storage3.exceptions import StorageApiError  # noqa: E402
+from app import database, field_notes, market_intel as mi, product_finds  # noqa: E402,F401
 from scripts import market_intel_import as imp  # noqa: E402
 
 TESTS: list[tuple[str, object]] = []
@@ -67,6 +81,30 @@ def test(name):
         TESTS.append((name, fn))
         return fn
     return deco
+
+
+# ── the app's own client is out of reach ──────────────────────────────────────
+
+class _RealClient(BaseException):
+    """An app helper reached for the real Supabase client inside an import test. A BaseException, so no
+    `except Exception` on the way (product_finds.ensure_bucket swallows those) can hide it."""
+
+
+REACHED: list[str] = []
+
+
+def _no_real_client(*_a, **_k):
+    REACHED.append("".join(traceback.format_stack(limit=8)[:-1]))
+    raise _RealClient("an app helper reached for the Supabase client during an import test")
+
+
+def _client_guard() -> r7b._Patched:
+    """app.database.get_client, and every loaded app module's own reference to it, raise."""
+    triples = [(database, "get_client", _no_real_client)]
+    for name, mod in sorted(sys.modules.items()):
+        if name.startswith("app.") and mod is not database and callable(getattr(mod, "get_client", None)):
+            triples.append((mod, "get_client", _no_real_client))
+    return r7b._Patched(*triples)
 
 
 # ── the stand-in, extended ────────────────────────────────────────────────────
@@ -93,20 +131,20 @@ def _pgrst(code: str, message: str) -> RuntimeError:
 
 
 class _Q(r7b._Query):
-    """r7b's query stand-in plus: the table's columns are checked (42703 on a read, PGRST204 on a write,
-    as PostgREST answers), range() honours its offset, upsert(on_conflict, ignore_duplicates), and the
-    (bucket, path) key of market_photos."""
+    """r7b's query stand-in (which caps a read at 1,000 rows and honours range()'s offset, as PostgREST
+    does) plus: the table's columns are checked (42703 on a read, PGRST204 on a write, as PostgREST
+    answers), every range() is recorded, upsert(on_conflict, ignore_duplicates) answers [] for a row that
+    is there (the base merges), and the (bucket, path) key of market_photos."""
 
     def __init__(self, db, table):
         super().__init__(db, table)
-        self._cols, self._offset, self._conflict, self._ignore = "*", None, "", False
+        self._cols, self._conflict, self._ignore = "*", "", False
 
     def select(self, cols="*", count=None, head=False):
         self._cols = cols
         return super().select(cols, count=count, head=head)
 
     def range(self, a, b):
-        self._offset = a
         self.db.ranges.append((self.table, a, b))
         return super().range(a, b)
 
@@ -140,11 +178,6 @@ class _Q(r7b._Query):
         self._check()
         if self.op == "upsert":
             return self._upsert()
-        if self.op == "select" and self._offset is not None:
-            lim, self.lim = self.lim, None
-            res = super().execute()
-            res.data = res.data[self._offset: self._offset + lim]
-            return res
         return super().execute()
 
     def _upsert(self):
@@ -174,6 +207,8 @@ class _Q(r7b._Query):
 
 
 class _Bucket(r7b._Bucket):
+    """Downloads answer like storage3: StorageApiError(message, error, statusCode)."""
+
     def upload(self, path, data, opts=None):
         st = self.st
         if st.fail_after is not None and st.uploads >= st.fail_after:
@@ -182,17 +217,26 @@ class _Bucket(r7b._Bucket):
         return super().upload(path, data, opts)
 
     def download(self, path):
-        self.st.calls.append(("download", self.name, path))
-        if self.st.fail_download:
+        st = self.st
+        st.calls.append(("download", self.name, path))
+        if st.fail_download:
             raise RuntimeError("503 Service Unavailable")
-        return super().download(path)
+        if st.fail_keyerror:
+            raise KeyError("statusCode")
+        if self.name not in st.buckets:
+            raise StorageApiError("Bucket not found", "not_found", 404)
+        if (self.name, path) not in st.objects:
+            raise StorageApiError("Object not found", "not_found", 404)
+        return st.objects[(self.name, path)][0]
 
 
 class _Storage(r7b._Storage):
     def __init__(self):
         super().__init__()
+        self.buckets = {"finds", "field-notes"}
         self.fail_after: int | None = None      # uploads allowed before the next one fails
         self.fail_download = False
+        self.fail_keyerror = False
         self.uploads = 0
 
     def from_(self, name):
@@ -214,6 +258,9 @@ class _DB(r7b._FakeDB):
 
     def uploads(self) -> list[tuple]:
         return [c for c in self.storage.calls if c[0] in ("upload", "remove")]
+
+    def downloads(self) -> list[tuple]:
+        return [c for c in self.storage.calls if c[0] == "download"]
 
 
 # ── invented fixtures ─────────────────────────────────────────────────────────
@@ -254,6 +301,7 @@ def _pic(k: int, size=(480, 360), fmt="JPEG", gps=False, orientation=1, quality=
 T0 = datetime(2026, 7, 12, 13, 42, 11, tzinfo=timezone.utc)      # the day the WhatsApp dump was seeded
 T1 = datetime(2026, 9, 27, 8, 0, tzinfo=timezone.utc)            # a capture saved before the R7b migration
 CU = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"                     # that capture's own uuid
+WA = "WhatsApp Image 2026-07-05 at 4.1{}.20 PM{}.jpeg"           # sent in WhatsApp a week before the seed
 
 
 def _at(minutes: int) -> str:
@@ -263,17 +311,16 @@ def _at(minutes: int) -> str:
 def _find(i: int, path: str | None, **kw) -> dict:
     row = {"id": i, "name": None, "price_bhd": None, "currency": "BHD", "note": None, "category": None,
            "source": "WhatsApp", "image_path": path, "status": "new", "promoted_item_code": None,
-           "source_file": f"WhatsApp Image 2026-01-01 at 9.00.0{i % 10} AM.jpeg", "posted_by": "sales-team",
-           "posted_at": _at(i)}
+           "source_file": None, "posted_by": "sales-team", "posted_at": _at(i)}
     row.update(kw)
     return row
 
 
 def FINDS() -> list[dict]:
     return [
-        _find(1, "finds/a1.jpeg"),
-        _find(2, "finds/a2.jpeg"),
-        _find(3, "finds/a3.png"),
+        _find(1, "finds/a1.jpeg", source_file=WA.format(1, "")),
+        _find(2, "finds/a2.jpeg", source_file=WA.format(2, "")),
+        _find(3, "finds/a3.png", source_file=WA.format(3, " (1)")),
         _find(4, "finds/a4.webp", name="Brand X 20W charger", price_bhd=2.4, category="charger",
               note="Seen at   Shop Alpha\x07", status="reviewing", posted_by="Boss@Example.com"),
         _find(5, "finds/f5.webp", name="Brand Y cable", price_bhd=1.5, note="[Competitor price] · cheaper · shop: Shop Alpha",
@@ -312,9 +359,12 @@ def _seed(*, schema=None, finds=None, notes=None, objects=None, missing=None, ex
 
 
 def _run(fake, *argv) -> tuple[int, str]:
+    """The importer's command line on the stand-in, with the app's own client raising throughout."""
     lines: list[str] = []
-    with redirect_stderr(io.StringIO()):
+    REACHED.clear()
+    with _client_guard(), redirect_stderr(io.StringIO()):
         code = imp.main(list(argv), client=fake, out=lines.append)
+    assert not REACHED, REACHED
     return code, "\n".join(str(x) for x in lines)
 
 
@@ -326,12 +376,18 @@ def _photos_of(fake, obs_id) -> list[dict]:
     return sorted((p for p in fake.rows("market_photos") if p["observation_id"] == obs_id), key=lambda p: p["position"])
 
 
+def _hide_first_read():
+    """The first read of market_observations sees nothing: every sighting goes the 'create' way."""
+    return r7b._Patched((imp.Importer, "_existing", lambda self, uuids: {}))
+
+
 ALL_REFS = {"product_finds:1", "product_finds:2", "product_finds:3", "product_finds:4", "product_finds:5,6",
             "field_notes:1", "field_notes:2"}
+CORRUPT = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. the dry run
+# 1. the dry run, and what may never be reached
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @test("fixtures: the invented photos are far apart to the dHash (no accidental near-duplicate)")
@@ -352,14 +408,14 @@ def _():
     assert fake.wrote() == [] and fake.uploads() == [], (fake.wrote(), fake.uploads())
     assert fake.rows("market_observations") == [] and fake.rows("market_photos") == []
     assert {k: v[0] for k, v in fake.storage.objects.items()} == before
-    downloads = sorted(c[2] for c in fake.storage.calls if c[0] == "download")
-    assert downloads == sorted(p for (_b, p) in OBJECTS()), downloads
+    assert sorted(c[2] for c in fake.downloads()) == sorted(p for (_b, p) in OBJECTS())
     assert "DRY RUN" in text and "read: 6 product_finds, 2 field_notes -> 7 sightings with 7 photos" in text, text
+    assert "time seen from: created_at 2, posted_at 2, whatsapp_file_name 3" in text, text
     assert "to create: 7 sightings (new_product 4, competitor_price 2, shop_asked 1)" in text, text
     assert "photos: 7, each with a 320 px thumbnail" in text
     assert "already in Market Intel (skipped): 0 sightings" in text
     assert "near-duplicate photo: 0 sightings" in text and "cannot be imported" not in text
-    assert "every r8m column" in text and "Dry run: nothing written." in text
+    assert "with the r8m photo columns (thumb_path, role, sha256)" in text and "Dry run: nothing written." in text
     assert imp.parse_args([]).apply is False
 
 
@@ -389,6 +445,33 @@ def _():
     assert fake.wrote() == [] and fake.uploads() == []
 
 
+@test("guard: during every run here the app's own client raises; a run that reached ensure_bucket or mi._upload fails the test")
+def _():
+    fake = _seed()
+    real_create = imp.Importer._create
+
+    def careless(self, o):              # a future regression: an app helper that writes by itself
+        product_finds.ensure_bucket()   # swallows every Exception, yet not this one
+        return real_create(self, o)
+    try:
+        with r7b._Patched((imp.Importer, "_create", careless)):
+            _run(fake)
+        raise AssertionError("the guard did not fire")
+    except _RealClient:
+        pass
+    assert REACHED and "ensure_bucket" in REACHED[0], REACHED
+    REACHED.clear()
+    try:
+        with _client_guard():
+            mi._upload({"data": b"x", "ext": ".webp", "content_type": "image/webp"}, datetime.now(timezone.utc))
+        raise AssertionError("mi._upload reached no client")
+    except _RealClient:
+        pass
+    assert REACHED and database.get_client is not _no_real_client, "restored after the run"
+    REACHED.clear()
+    assert fake.wrote() == [] and fake.uploads() == []
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. --apply
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -406,7 +489,7 @@ def _():
     f1 = obs["product_finds:1"]
     assert f1["client_uuid"] == str(uuid.uuid5(mi.UUID_NS, "import|product_finds|1"))
     assert f1["created_by"] == "sales-team" and f1["kind"] == "new_product" and f1["title"] is None and f1["note"] is None
-    assert f1["meta"]["legacy_status"] == "new" and f1["meta"]["source_file"].startswith("WhatsApp Image")
+    assert f1["meta"]["legacy_status"] == "new" and f1["meta"]["source_file"] == WA.format(1, "")
     assert f1["meta"]["photo_sources"] == [{"bucket": "finds", "path": "finds/a1.jpeg", "position": 0}]
     f4 = obs["product_finds:4"]
     assert (f4["title"], f4["price_bhd"], f4["category"]) == ("Brand X 20W charger", "2.400", "CHARGER")
@@ -424,22 +507,76 @@ def _():
     assert "product_finds and field_notes are unchanged" in text
 
 
-@test("--apply: the original time is kept (observed_at and client_observed_at), never the import time")
+@test("time: a WhatsApp file name is read as Bahrain time (12-hour, 24-hour, (n) and _hash endings); nothing else is a time")
+def _():
+    bh = imp.BAHRAIN
+    at = datetime(2026, 7, 5, 16, 11, 20, tzinfo=bh)
+    for name in ("WhatsApp Image 2026-07-05 at 4.11.20 PM.jpeg", "WhatsApp Image 2026-07-05 at 4.11.20 PM (3).jpeg",
+                 "WhatsApp Image 2026-07-05 at 4.11.20\u202fPM.jpeg", "WhatsApp Image 2026-07-05 at 4.11.20 p.m..jpeg",
+                 "WhatsApp Video 2026-07-05 at 16.11.20.mp4", "WhatsApp Image 2026-07-05 at 16.11.20_a1b2c3.jpg"):
+        assert imp.whatsapp_time(name) == at, name
+    assert imp.whatsapp_time("WhatsApp Image 2026-07-05 at 12.30.00 AM.jpeg") == datetime(2026, 7, 5, 0, 30, tzinfo=bh)
+    assert imp.whatsapp_time("WhatsApp Image 2026-07-05 at 12.30.00 PM.jpeg") == datetime(2026, 7, 5, 12, 30, tzinfo=bh)
+    for bad in ("WhatsApp Image 2026-02-30 at 9.00.00 AM.jpeg", "WhatsApp Image 2026-07-05 at 13.00.00 PM.jpeg",
+                "WhatsApp Image 2026-07-05 at 9.61.00 AM.jpeg", "WhatsApp Image 2026-07-05 at 25.00.00.jpeg",
+                "IMG_0001.jpg", "photo.jpg", "", None, f"mi:{CU}:0"):
+        assert imp.whatsapp_time(bad) is None, bad
+
+
+@test("time: observed_at is the WhatsApp time when it is no later than posted_at, else posted_at; meta.time_from says which")
+def _():
+    posted = "2026-07-12T13:43:11+00:00"
+    plan = imp.build_plan([
+        _find(1, "x1.jpeg", source_file=WA.format(1, ""), posted_at=posted),                       # sent, then seeded
+        _find(2, "x2.jpeg", source_file="WhatsApp Image 2026-07-20 at 4.11.20 PM.jpeg", posted_at=posted),  # after posting
+        _find(3, "x3.jpeg", source_file="WhatsApp Image 2026-02-30 at 9.00.00 AM.jpeg", posted_at=posted),  # no such day
+        _find(4, "x4.jpeg", posted_at=posted),                                                     # a portal upload
+        _find(5, "x5.jpeg", source_file="WhatsApp Image 2026-07-01 at 1.30.00 AM.jpeg", posted_at=None),    # no posted_at
+        _find(6, "x6.jpeg", posted_at="2026-07-12T16:43:11+03:00"),                                # an offset: kept in UTC
+    ], [{"id": 1, "note": "n", "category": "demand", "created_by": None, "created_at": "2026-06-30T05:59:00+00:00",
+         "image_path": None}])
+    by = {o["legacy_ref"]: o for o in plan["observations"]}
+    assert (by["product_finds:1"]["observed_at"], by["product_finds:1"]["meta"]["time_from"]) == \
+        ("2026-07-05T13:11:20+00:00", "whatsapp_file_name")
+    for ref in ("product_finds:2", "product_finds:3", "product_finds:4"):
+        assert (by[ref]["observed_at"], by[ref]["meta"]["time_from"]) == (posted, "posted_at"), by[ref]
+    assert (by["product_finds:5"]["observed_at"], by["product_finds:5"]["meta"]["time_from"]) == \
+        ("2026-06-30T22:30:00+00:00", "whatsapp_file_name"), "a find without posted_at keeps its WhatsApp time"
+    assert by["product_finds:6"]["observed_at"] == posted
+    assert (by["field_notes:1"]["observed_at"], by["field_notes:1"]["meta"]["time_from"]) == \
+        ("2026-06-30T05:59:00+00:00", "created_at")
+    # the photo's month is observed_at's in UTC: 01:30 on 1 July in Bahrain is still June
+    master, thumb = imp.photo_paths(by["product_finds:5"], 0, ".webp", ".webp")
+    assert master.startswith("market/2026/06/imp-") and thumb == master[: -len(".webp")] + "-t320.webp"
+
+
+@test("--apply: observed_at is when the find was made, never the import time; the photo's month follows it; client_observed_at is never written")
 def _():
     fake = _seed()
     fake.clock = datetime(2026, 10, 14, 7, 0, tzinfo=timezone.utc)
-    assert _run(fake, "--apply")[0] == 0
+    code, text = _run(fake, "--apply")
+    assert code == 0, text
     obs = _obs(fake)
-    assert obs["product_finds:1"]["observed_at"] == "2026-07-12T13:43:11+00:00"
-    assert obs["product_finds:4"]["observed_at"] == _at(4)
-    assert obs["product_finds:5,6"]["observed_at"] == T1.isoformat()
-    assert obs["field_notes:1"]["observed_at"] == "2026-06-30T05:59:00+00:00"
+    expect = {"product_finds:1": ("2026-07-05T13:11:20+00:00", "whatsapp_file_name"),
+              "product_finds:3": ("2026-07-05T13:13:20+00:00", "whatsapp_file_name"),
+              "product_finds:4": (_at(4), "posted_at"),
+              "product_finds:5,6": (T1.isoformat(), "posted_at"),
+              "field_notes:1": ("2026-06-30T05:59:00+00:00", "created_at")}
+    for ref, (when, source) in expect.items():
+        assert (obs[ref]["observed_at"], obs[ref]["meta"]["time_from"]) == (when, source), (ref, obs[ref])
     for o in obs.values():
-        assert o["client_observed_at"] == o["observed_at"], o
+        assert "client_observed_at" not in o, o
         assert o["created_at"] == fake.clock.isoformat() != o["observed_at"]
-    # the photo lives under the month it was seen, not the month it was imported
+    assert not [c for c in fake.wrote() if "client_observed_at" in json.dumps(c[2], default=str)]
+    assert _photos_of(fake, obs["product_finds:1"]["id"])[0]["path"].startswith("market/2026/07/")
     assert _photos_of(fake, obs["field_notes:2"]["id"])[0]["path"].startswith("market/2026/07/")
     assert _photos_of(fake, obs["product_finds:5,6"]["id"])[0]["path"].startswith("market/2026/09/")
+    # one find sent at 01:30 on 1 July (Bahrain): its photo is filed under June, the UTC month
+    fake = _seed(finds=[_find(9, "finds/a2.jpeg", source_file="WhatsApp Image 2026-07-01 at 1.30.00 AM.jpeg")], notes=[])
+    assert _run(fake, "--apply")[0] == 0
+    o9 = _obs(fake)["product_finds:9"]
+    assert o9["observed_at"] == "2026-06-30T22:30:00+00:00"
+    assert _photos_of(fake, o9["id"])[0]["path"].startswith("market/2026/06/")
 
 
 @test("--apply: each photo is processed like a live capture (no EXIF / GPS, upright, <= 1600 px WebP, same dHash) + a 320 px thumbnail")
@@ -464,7 +601,7 @@ def _():
         assert m.size == (p["width"], p["height"]) and b"SyntheticCam" not in master
         thumb, topts = fake.storage.objects[("finds", p["thumb_path"])]
         t = Image.open(io.BytesIO(thumb))
-        assert t.format == "WEBP" and max(t.size) == imp.THUMB_EDGE and topts["content-type"] == "image/webp"
+        assert t.format == "WEBP" and max(t.size) == mi.THUMB_EDGE and topts["content-type"] == "image/webp"
         assert len(thumb) < len(master)
     b8 = _photos_of(fake, obs["product_finds:8"]["id"])[0]
     assert (b8["width"], b8["height"]) == (1200, 1600), "orientation 6 turned upright, 2000 px cut to 1600"
@@ -494,6 +631,10 @@ def _():
     assert ".remove(" not in src and ".move(" not in src
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. idempotency and the duplicate key
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @test("idempotent: a second --apply creates nothing (no row, no upload) and its dry run says everything is in")
 def _():
     fake = _seed()
@@ -509,20 +650,55 @@ def _():
     assert code == 0 and "already in Market Intel (skipped): 7 sightings" in text and "to create: 0 sightings" in text
 
 
-@test("idempotent: a capture that reached Market Intel live under the same uuid is left as it is")
+@test("duplicate key: rows hidden from the first read are never doubled (upsert on client_uuid); this import's own row gets only what it lacks")
+def _():
+    fake = _seed()
+    assert _run(fake, "--apply")[0] == 0
+    n_up = len(fake.uploads())
+    with _hide_first_read():
+        code, text = _run(fake, "--apply")
+    assert code == 0, text
+    assert len(fake.rows("market_observations")) == 7 and len(fake.rows("market_photos")) == 7
+    assert len(fake.uploads()) == n_up, "the sighting is written first and was found there: nothing uploaded"
+    assert len([c for c in fake.calls if c[0] == "upsert"]) == 14, "each sighting tried once more and ignored"
+    assert "already in Market Intel (skipped): 7 sightings" in text and "created: 0 sightings" in text, text
+    # this import's own row lost a photo row: hidden from the first read, it gets that photo back, once
+    n2 = _obs(fake)["field_notes:2"]
+    fake.tables["market_photos"] = [p for p in fake.rows("market_photos") if p["observation_id"] != n2["id"]]
+    with _hide_first_read():
+        code, text = _run(fake, "--apply")
+    assert code == 0 and "completed (copied before, photos missing): 1 sighting, 1 photo" in text, text
+    assert len(_photos_of(fake, n2["id"])) == 1 and len(fake.rows("market_observations")) == 7
+    with _hide_first_read():
+        assert _run(fake, "--apply")[0] == 0
+    assert len(_photos_of(fake, n2["id"])) == 1 and len(fake.rows("market_photos")) == 7
+
+
+@test("duplicate key: a live capture or another import holding the uuid is never touched and nothing is uploaded for it (seen first or not)")
 def _():
     live = {"id": 50, "client_uuid": CU, "source": "rep", "kind": "competitor_price", "item_id": None,
             "observed_at": T1.isoformat(), "legacy_ref": None, "meta": None}
-    fake = _seed(extra={"market_observations": [live]})
-    code, text = _run(fake, "--apply")
-    assert code == 0, text
-    assert [o for o in fake.rows("market_observations") if o["client_uuid"] == CU] == [live]
-    assert _photos_of(fake, 50) == [] and len(fake.rows("market_observations")) == 7
-    assert "1 more arrived as live captures" in text, text
+    other = {"id": 51, "client_uuid": str(uuid.uuid5(mi.UUID_NS, "import|product_finds|1")), "source": "import",
+             "kind": "new_product", "item_id": None, "observed_at": T1.isoformat(), "legacy_ref": "product_finds:999",
+             "meta": {}}
+    hexes = (uuid.UUID(CU).hex, uuid.UUID(other["client_uuid"]).hex)
+    for hidden in (False, True):
+        fake = _seed(extra={"market_observations": [dict(live), dict(other)]})
+        if hidden:
+            with _hide_first_read():
+                code, text = _run(fake, "--apply")
+        else:
+            code, text = _run(fake, "--apply")
+        assert code == 0, (hidden, text)
+        rows = fake.rows("market_observations")
+        assert [o for o in rows if o["id"] == 50] == [live] and [o for o in rows if o["id"] == 51] == [other], hidden
+        assert _photos_of(fake, 50) == [] and _photos_of(fake, 51) == []
+        assert not [c for c in fake.storage.calls if c[0] == "upload" and any(h in c[2] for h in hexes)], hidden
+        assert len(rows) == 7 and "2 more uuids are held by rows that are not this import" in text, (hidden, text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. the r7b schema alone, missing tables and columns
+# 4. the r7b schema alone, missing tables and columns
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @test("r7b schema only: nothing r8m is sent (the stand-in refuses an unknown column), thumbnails are still stored")
@@ -530,11 +706,8 @@ def _():
     fake = _seed(schema=R7B)
     code, text = _run(fake, "--apply")
     assert code == 0, text
-    assert "not set: market_observations.client_observed_at, market_photos.thumb_path, market_photos.role, " \
-           "market_photos.sha256" in text, text
+    assert "not set: market_photos.thumb_path, market_photos.role, market_photos.sha256" in text, text
     assert len(fake.rows("market_observations")) == 7 and len(fake.rows("market_photos")) == 7
-    for o in fake.rows("market_observations"):
-        assert "client_observed_at" not in o
     for p in fake.rows("market_photos"):
         assert not {"thumb_path", "role", "sha256"} & set(p), p
         stem = p["path"][: -len(".webp")]
@@ -554,8 +727,7 @@ def _():
         for argv in ((), ("--apply",)):
             code, text = _run(fake, *argv)
             assert code == 2 and "REFUSED" in text and "r7b_market_intel_migration.sql" in text, (table, argv, text)
-        assert fake.wrote() == [] and fake.uploads() == []
-        assert not [c for c in fake.storage.calls if c[0] == "download"]
+        assert fake.wrote() == [] and fake.uploads() == [] and fake.downloads() == []
 
 
 @test("a missing old table is read as empty; field_notes without its photo column is read without it")
@@ -574,7 +746,7 @@ def _():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. rows that cannot be mapped
+# 5. rows and photos that cannot be imported, storage errors
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _awkward() -> _DB:
@@ -586,9 +758,10 @@ def _awkward() -> _DB:
         _find(25, "", name=None),                                                      # nothing at all
         _find(26, "finds/ok26.jpeg", name="Big number", price_bhd=250000),             # a price the column cannot hold
         _find(27, "finds/png-as.jpeg", name="Wrongly named"),                          # PNG bytes under .jpeg
-        {**_find(28, "finds/ok26.jpeg"), "id": "x"},                                   # no id
+        _find(28, "finds/gone2.jpeg", name="Brand Q lamp"),                            # object missing, has a name
+        {**_find(29, "finds/ok26.jpeg"), "id": "x"},                                   # no id
     ]
-    objects = {("finds", "finds/broken.jpg"): b"\xff\xd8\xff\xe0" + b"\x00" * 64,
+    objects = {("finds", "finds/broken.jpg"): CORRUPT,
                ("finds", "finds/x.heic"): b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64,
                ("finds", "finds/t24.jpeg"): _pic(24),
                ("finds", "finds/ok26.jpeg"): _pic(26),
@@ -596,57 +769,100 @@ def _awkward() -> _DB:
     return _seed(finds=finds, notes=[], objects=objects)
 
 
-@test("unmappable rows are reported with the reason, never crashed on; what can come in, comes in")
+@test("unmappable rows are reported with the reason, never crashed on; what can come in, comes in; refusals are recorded once")
 def _():
     fake = _awkward()
     code, text = _run(fake)
-    assert code == 0, text
-    assert fake.wrote() == []
+    assert code == 0 and fake.wrote() == [], text
     code, text = _run(fake, "--apply")
     assert code == 0, text
     obs = _obs(fake)
-    assert set(obs) == {"product_finds:22", "product_finds:23", "product_finds:26", "product_finds:27"}, set(obs)
+    assert set(obs) == {"product_finds:22", "product_finds:23", "product_finds:26", "product_finds:27",
+                        "product_finds:28"}, set(obs)
     assert "cannot be imported: 4" in text, text
     for ref, why in (("product_finds:21", "finds:finds/gone.jpeg: not found in storage"),
                      ("product_finds:24", "no original time"),
                      ("product_finds:25", "nothing to import: no photo, no text, no price"),
                      ("product_finds:?", "the row has no id")):
         assert re.search(re.escape(ref) + r"\s+.*" + re.escape(why), text), (ref, why, text)
-    assert "photos left out (their sighting comes in without them): 2" in text
+    assert "photos left out (their sighting comes in without them): 3" in text
     assert "finds:finds/broken.jpg: could not be decoded (truncated or corrupt)" in text
     assert "finds:finds/x.heic: not a JPG, PNG or WEBP photo" in text
-    assert _photos_of(fake, obs["product_finds:22"]["id"]) == [] and _photos_of(fake, obs["product_finds:23"]["id"]) == []
-    assert obs["product_finds:22"]["meta"]["photos_not_imported"] == [
-        {"position": 0, "reason": "could not be decoded (truncated or corrupt)"}]
+    assert "finds:finds/gone2.jpeg: not found in storage" in text
+    for ref, reason in (("product_finds:22", "could not be decoded (truncated or corrupt)"),
+                        ("product_finds:23", "not a JPG, PNG or WEBP photo"),
+                        ("product_finds:28", "not found in storage")):
+        assert _photos_of(fake, obs[ref]["id"]) == []
+        assert obs[ref]["meta"]["photos_not_imported"] == [{"position": 0, "reason": reason}], obs[ref]["meta"]
     assert obs["product_finds:26"]["price_bhd"] is None and "price left out: not between 0 and 100,000 BHD" in text
     assert len(_photos_of(fake, obs["product_finds:26"]["id"])) == 1
     assert len(_photos_of(fake, obs["product_finds:27"]["id"])) == 1, "a PNG under a .jpeg name is read by its bytes"
-    # a second run creates nothing and does not try the refused photos again
-    n_writes, n_down = len(fake.wrote()), len([c for c in fake.storage.calls if c[0] == "download"])
+    # a second run creates nothing and tries none of the recorded photos again
+    n_writes, n_down = len(fake.wrote()), len(fake.downloads())
     code, text = _run(fake, "--apply")
     assert code == 0 and len(fake.wrote()) == n_writes, text
-    assert len([c for c in fake.storage.calls if c[0] == "download"]) == n_down + 1, "only the missing object, again"
-    assert "already in Market Intel (skipped): 4 sightings" in text and "photos left out" not in text
+    assert [c[2] for c in fake.downloads()[n_down:]] == ["finds/gone.jpeg"], "only the one with nothing else to show"
+    assert "already in Market Intel (skipped): 5 sightings" in text and "photos left out" not in text
 
 
-@test("plan (pure): no id, no time and nothing at all are skipped with the reason; a v1 plan keeps its shape")
+@test("storage: only 'Object not found' is a missing photo; a missing bucket, a KeyError or an error page stops the run (exit 1), nothing recorded")
 def _():
-    plan = imp.build_plan([_find(1, "finds/a1.jpeg"), {"id": None}, _find(3, "", posted_at=None, name="x"),
-                           _find(4, None)], [{"id": 9, "note": " ", "category": "other", "created_by": None,
-                                              "created_at": "2026-07-01T00:00:00+00:00", "image_path": None}])
-    assert plan["counts"] == {"finds": 4, "notes": 1, "observations": 1, "photos": 1}
-    assert sorted((s["ref"], s["reason"]) for s in plan["skipped"]) == [
-        ("field_notes:9", "nothing to import: no photo, no text, no price"),
-        ("product_finds:3", "no original time (the old row has none)"),
-        ("product_finds:4", "nothing to import: no photo, no text, no price"),
-        ("product_finds:?", "the row has no id")]
-    o = plan["observations"][0]
-    assert o["photos"] == [{"bucket": "finds", "path": "finds/a1.jpeg", "position": 0}] and o["warnings"] == []
-    assert imp.build_plan([_find(1, "finds/a1.jpeg")], [])["observations"][0]["client_uuid"] == o["client_uuid"]
+    assert imp._not_found(StorageApiError("Object not found", "not_found", 404))
+    assert imp._not_found(StorageApiError("Object not found", "not_found", "400"))
+    for other in (StorageApiError("Bucket not found", "not_found", 404), StorageApiError("Bucket not found", "Bucket not found", "404"),
+                  StorageApiError("Object not found", "not_found", 500), StorageApiError("Internal Server Error", "internal", 500),
+                  KeyError("finds/x.jpeg"), FileNotFoundError("x"), RuntimeError("404 Not Found"),
+                  RuntimeError("Object not found")):
+        assert not imp._not_found(other), repr(other)
+    fake = _seed()
+    fake.storage.buckets.discard("field-notes")
+    for argv in ((), ("--apply",)):
+        code, text = _run(fake, *argv)
+        assert code == 1 and "could not read field-notes:notes/n2.jpg from storage: StorageApiError" in text, text
+    assert set(_obs(fake)) == {"field_notes:1"}, "nothing at or after the failed read"
+    fake = _seed()
+    fake.storage.fail_keyerror = True
+    code, text = _run(fake, "--apply")
+    assert code == 1 and "KeyError" in text and set(_obs(fake)) == {"field_notes:1"}, text
+    for o in fake.rows("market_observations"):
+        assert not (o.get("meta") or {}).get("photos_not_imported"), o
+
+
+@test("a photo that fails anywhere while being processed (a codec, Pillow, the thumbnail) is that photo's reason; the run goes on")
+def _():
+    real = mi.process_photo
+    bad = OBJECTS()[("finds", "finds/a4.webp")]
+
+    def flaky(data, name):
+        if data == bad:
+            raise OSError("broken data stream when reading image file")
+        return real(data, name)
+    fake = _seed()
+    with r7b._Patched((mi, "process_photo", flaky)):
+        code, text = _run(fake)
+        assert code == 0 and "finds:finds/a4.webp: could not be processed (OSError)" in text, text
+        assert "to create: 7 sightings" in text
+        code, text = _run(fake, "--apply")
+    assert code == 0, text
+    f4 = _obs(fake)["product_finds:4"]
+    assert _photos_of(fake, f4["id"]) == []
+    assert f4["meta"]["photos_not_imported"] == [{"position": 0, "reason": "could not be processed (OSError)"}]
+    assert len(fake.rows("market_photos")) == 6
+    assert "WARNING" not in text
+
+    def no_thumb(*_a, **_k):            # the capture's own thumbnail step (app.market_intel._small) fails
+        raise ValueError("thumbnail failed")
+    fake = _seed()
+    with r7b._Patched((mi, "_small", no_thumb)):
+        code, text = _run(fake)
+    assert code == 0 and text.count("could not be processed (ValueError)") == 7, text
+    assert "to create: 3 sightings" in text and "cannot be imported: 4" in text, "photo-only finds wait; the rest come in"
+    # a refusal is recorded and never tried again: a fault that refuses every photo is shouted, not listed quietly
+    assert "WARNING: none of the 7 photos read could be imported" in text, text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5. --limit, refusals, failures and the resume
+# 6. --limit, refusals, failures and the resume
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @test("--limit N: a trial of the N oldest, then the next N, then the rest; its dry run shows only N")
@@ -675,7 +891,6 @@ def _():
     assert imp.parse_args(["--with-phash"]).with_phash is True and imp.parse_args([]).with_phash is False
     assert imp.in_worktree(Path("C:/w/YQ/.claude/worktrees/agent-x")) is True
     assert imp.in_worktree(Path("C:/w/YQ")) is False and imp.in_worktree(Path("C:/w/worktrees/x")) is False
-    from app import database
 
     def no_client():
         raise RuntimeError("Missing required Supabase env vars: SUPABASE_URL")
@@ -693,10 +908,11 @@ def _():
     fake.storage.fail_after = 3          # note 2's master + thumbnail, find 1's master; its thumbnail fails
     code, text = _run(fake, "--apply")
     assert code == 1 and "ERROR at product_finds:1" in text and "Re-run with --apply" in text, text
-    assert set(_obs(fake)) == {"field_notes:1", "field_notes:2"}, "nothing after the failure was written"
+    assert set(_obs(fake)) == {"field_notes:1", "field_notes:2", "product_finds:1"}, "nothing after the failure"
+    assert _photos_of(fake, _obs(fake)["product_finds:1"]["id"]) == [], "its sighting is there, its photo not yet"
     fake.storage.fail_after = None
     code, text = _run(fake, "--apply")
-    assert code == 0, text
+    assert code == 0 and "completed (copied before, photos missing): 1 sighting, 1 photo" in text, text
     assert set(_obs(fake)) == ALL_REFS and len(fake.rows("market_photos")) == 7
     referenced = {p["path"] for p in fake.rows("market_photos")} | {p["thumb_path"] for p in fake.rows("market_photos")}
     stored = {path for (b, path) in fake.storage.objects if path.startswith("market/")}
@@ -717,6 +933,25 @@ def _():
     assert code == 0 and "completed (copied before, photos missing): 1 sighting, 1 photo" in text, text
     assert len(_photos_of(fake, n2["id"])) == 1 and set(_obs(fake)) == ALL_REFS
     assert len(fake.rows("market_photos")) == 7 and len(fake.rows("market_observations")) == 7
+
+
+@test("resume: a photo refused while a stopped run is finished is recorded in meta like on a first run, and never tried again")
+def _():
+    fake = _seed()
+    fake.fail[("insert", "market_photos")] = RuntimeError("boom")
+    assert _run(fake, "--apply")[0] == 1
+    fake.storage.objects[("field-notes", "notes/n2.jpg")] = (CORRUPT, {})         # the object went bad meanwhile
+    code, text = _run(fake, "--apply")
+    assert code == 0, text
+    n2 = _obs(fake)["field_notes:2"]
+    assert n2["meta"]["photos_not_imported"] == [{"position": 0, "reason": "could not be decoded (truncated or corrupt)"}]
+    assert _photos_of(fake, n2["id"]) == [] and "field-notes:notes/n2.jpg: could not be decoded" in text
+    meta_writes = [c for c in fake.wrote("market_observations") if c[0] == "update"]
+    assert len(meta_writes) == 1 and set(meta_writes[0][2]) == {"meta"}, meta_writes
+    n_down = len(fake.downloads())
+    code, text = _run(fake, "--apply")
+    assert code == 0 and len(fake.downloads()) == n_down, "not tried again"
+    assert "already in Market Intel (skipped): 7 sightings" in text and "photos left out" not in text
 
 
 @test("exit 1 when storage cannot be read (not a missing object): a blip never decides what is imported")
@@ -745,8 +980,26 @@ def _():
     assert fake.wrote() == [] and fake.uploads() == []
 
 
+@test("errors are printed masked: the database quotes the failing row (a phone, an email), the report does not")
+def _():
+    fake = _seed()
+    fake.fail[("upsert", "market_observations")] = RuntimeError(json.dumps({
+        "code": "23514", "message": "violates check constraint",
+        "details": "Failing row contains (9, call 3000 0001, beta@example.com)."}))
+    code, text = _run(fake, "--apply")
+    assert code == 1 and "Failing row contains" in text, text
+    assert "3000 0001" not in text and "beta@example.com" not in text and "[number]" in text and "[email]" in text
+
+    def boom(*_a, **_k):
+        raise ValueError("bad row: call 3000 0001 or beta@example.com")
+    with r7b._Patched((imp, "build_plan", boom)):
+        code, text = _run(_seed(), "--apply")
+    assert code == 1 and "ValueError: bad row: call [number] or [email]" in text, text
+    assert "3000 0001" not in text and "beta@example.com" not in text
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6. near-duplicates, masking, paging, invented data
+# 7. near-duplicates, masking, paging, invented data
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @test("near-duplicate photos are flagged near_duplicate_of the earlier sighting, never skipped")
@@ -793,6 +1046,12 @@ def _():
     assert [(a, b) for t, a, b in fake.ranges if t == "product_finds"] == [(0, 1), (2, 3), (4, 5)]
     assert [(a, b) for t, a, b in fake.ranges if t == "field_notes"] == [(0, 1), (2, 3)]
     assert len(fake.ranges) > 5, "market_photos is paged too"
+    # and at the real cap: the shared stand-in answers at most r7b.MAX_ROWS rows per read, as PostgREST does
+    n = r7b.MAX_ROWS + 5
+    fake = _seed(finds=[_find(i, None, name=f"Brand X item {i}") for i in range(1, n + 1)], notes=[], objects={})
+    code, text = _run(fake)
+    assert code == 0 and f"read: {n} product_finds" in text and f"to create: {n} sightings" in text, text
+    assert [(a, b) for t, a, b in fake.ranges if t == "product_finds"] == [(0, 999), (1000, 1999)]
 
 
 @test("the test data is invented: reserved domains only (example.com, .invalid), one deliberate fake phone, no real-looking amount")
@@ -812,7 +1071,7 @@ def main() -> int:
             fn()
             print(f"PASS  {name}")
             passed += 1
-        except Exception:  # noqa: BLE001
+        except (Exception, _RealClient):  # noqa: BLE001 — a _RealClient escaping a test fails that test only
             print(f"FAIL  {name}")
             traceback.print_exc()
             failed += 1
