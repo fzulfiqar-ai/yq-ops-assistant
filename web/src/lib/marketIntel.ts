@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { ApiError, apiGet, apiUpload } from './api'
-import { isNetworkError } from './errorText'
+import { detailText, isNetworkError } from './errorText'
 
 /**
  * Market Intelligence (release R7b, app/market_intel.py): the shapes the API answers, the photo
@@ -58,7 +58,8 @@ export interface MiCaps {
   can_review: boolean
   can_approve: boolean
   can_capture: boolean
-  /** v2: an admin (the Lists, a closed case reopened, the unblurred photo) — older APIs leave it out */
+  /** v2: an admin (the Lists, a closed case reopened, the unblurred photo): the quality routes send can_admin */
+  can_admin?: boolean
   is_admin?: boolean
 }
 
@@ -85,8 +86,21 @@ export interface MiCard {
   fallback?: string
   /** v2: a safety report e-mailed the manager (once per case) */
   safety_alerted?: boolean
-  /** v2: the quality case a quality / packaging report joined or opened */
-  case?: { id: number; title?: string | null; status?: MiCaseStatus | null; new?: boolean | null } | null
+  /**
+   * v2: the quality case a quality / packaging report opened, or joined (`joined`: another report of the
+   * same product and issue was open). Built from the rep's own sighting, never another rep's words.
+   */
+  case?: {
+    id: number
+    title?: string | null
+    status?: MiCaseStatus | null
+    status_words?: string | null
+    issue?: string | null
+    joined?: boolean | null
+    sightings?: number | null
+    shops?: number | null
+    safety?: boolean | null
+  } | null
   case_id?: number | null
 }
 
@@ -163,6 +177,8 @@ export interface MiPhoto {
   has_people: boolean
   /** v2 payloads name it after the column */
   has_people_flag?: boolean
+  /** v2: the urls are the server's blurred copy (a people photo, no admin ?raw=1) */
+  blurred?: boolean
   role?: MiPhotoRole | null
   caption?: string | null
 }
@@ -377,10 +393,11 @@ export const CASE_STATUSES: MiCaseStatus[] = [
   'closed',
 ]
 
+/** The server's own words (app/market_quality.py STATUS_LABELS); a payload's status_label wins. */
 export const CASE_STATUS_LABEL: Record<MiCaseStatus, string> = {
   submitted: 'Submitted',
   under_review: 'Under review',
-  more_info_required: 'More info required',
+  more_info_required: 'More information required',
   verified: 'Verified',
   not_substantiated: 'Not substantiated',
   action_requested: 'Action requested',
@@ -421,10 +438,12 @@ export interface CaseMove {
   blocked: string | null
 }
 
-export function caseMoves(from: MiCaseStatus, o: { admin: boolean; actionDone: boolean }): CaseMove[] {
+export function caseMoves(from: MiCaseStatus, o: { admin: boolean; actionDone: boolean; allowed?: readonly string[] | null }): CaseMove[] {
   const out: CaseMove[] = []
   for (const to of CASE_NEXT[from] || []) {
     if (from === 'closed' && to === 'under_review' && !o.admin) continue
+    // the case page's next_statuses: the moves THIS login may make now (none on a merged case)
+    if (o.allowed && !o.allowed.includes(to)) continue
     const via: CaseMove['via'] = to === 'more_info_required' ? 'question' : to === 'action_requested' ? 'action' : 'patch'
     const required =
       to === 'verified' || to === 'not_substantiated' || (from === 'not_substantiated' && to === 'under_review') || (from === 'closed' && to === 'under_review')
@@ -452,10 +471,11 @@ export function evidenceLabel(level?: number | null): string {
   return EVIDENCE_LEVELS.find((e) => e.level === Number(level))?.label || 'Reported'
 }
 
+/** app/market_quality.py VERIFICATION_LABELS; the case's verification_label wins. */
 export const VERIFY_METHODS: { value: string; label: string }[] = [
   { value: 'sample_inspected', label: 'Sample inspected' },
   { value: 'photos_sufficient', label: 'Photos judged sufficient' },
-  { value: 'several_shops', label: 'Seen at several shops' },
+  { value: 'several_shops', label: 'Reported by several shops' },
 ]
 
 export type MiNamed = string | { id?: number | null; name?: string | null } | null | undefined
@@ -473,14 +493,19 @@ export interface MiCaseRow {
   observation_id?: number | null
   title: string
   status: MiCaseStatus
+  /** the server's words for the status and the evidence level (preferred over the client copies) */
+  status_label?: string | null
   evidence_level: number
+  evidence_label?: string | null
   safety: boolean
   severity?: number | null
   issue_type?: { id: number; code?: string | null; label_en?: string | null; label_ar?: string | null } | null
   yq_item_code?: string | null
   product_name?: string | null
   brand?: MiNamed
+  brand_id?: number | null
   supplier?: MiNamed
+  supplier_id?: number | null
   obs_count?: number | null
   shop_count?: number | null
   first_seen?: string | null
@@ -504,16 +529,49 @@ export interface MiCaseList {
 
 export interface MiCase extends MiCaseRow {
   issue_type_id?: number | null
-  brand_id?: number | null
-  supplier_id?: number | null
   batch_ref?: string | null
   packaging_version?: string | null
   verification_method?: string | null
+  verification_label?: string | null
   verification_reason?: string | null
   status_reason?: string | null
   changed_at?: string | null
   changed_by?: string | null
   created_at?: string | null
+  /** the linked catalog item (display_name, thumb) when the case has a YQ code */
+  yq_item?: MiYqItem | null
+  /** the moves this login may make now (the server's NEXT_STATUS for a reviewer; empty otherwise) */
+  next_statuses?: MiCaseStatus[] | null
+}
+
+/** The case's product line: "C-10 · Brand X charger" (the catalog name, else what the payload carries). */
+export function caseProduct(c: Pick<MiCase, 'yq_item_code' | 'yq_item' | 'product_name'>): string {
+  if (!c.yq_item_code) return ''
+  return [c.yq_item_code, c.yq_item?.display_name || c.product_name].filter(Boolean).join(' · ')
+}
+
+/**
+ * Where the safety e-mail stands, from the case's 'safety_alert' events: the claim is written first
+ * (detail.email "queued"), the outcome after the answer ("sent", or "not_sent" with a reason). The
+ * latest outcome wins; only a "sent" outcome may say the manager was e-mailed.
+ */
+export function safetyMail(events: MiCaseEvent[] | null | undefined): { state: 'sent' | 'not_sent' | 'queued' | null; reason: string | null } {
+  let state: 'sent' | 'not_sent' | 'queued' | null = null
+  let reason: string | null = null
+  const ordered = [...(events || [])].filter((e) => e.event === 'safety_alert').sort((a, b) => Number(a.id) - Number(b.id))
+  for (const e of ordered) {
+    const mail = String((e.detail || {}).email || '')
+    if (mail === 'sent') {
+      state = 'sent'
+      reason = null
+    } else if (mail === 'not_sent') {
+      state = 'not_sent'
+      reason = typeof e.detail?.reason === 'string' ? e.detail.reason : null
+    } else if (mail === 'queued' && state === null) {
+      state = 'queued'
+    }
+  }
+  return { state, reason }
 }
 
 export interface MiCaseEvent {
@@ -572,56 +630,122 @@ export function caseOf(d: MiCaseDetail | null | undefined): MiCase | null {
 export type MiReportStatus = 'draft' | 'approved' | 'superseded'
 export type MiEdition = 'supplier' | 'internal'
 
+/** app/supplier_reports.py _report_out: one report (the list sends `downloads` as a number). */
 export interface MiReport {
   id: number
   supplier_id: number
   supplier?: MiNamed
   supplier_name?: string | null
-  /** 'YYYY-MM' or the first day 'YYYY-MM-01' */
+  /** 'YYYY-MM' (an older payload: the first day 'YYYY-MM-01') */
   month: string
+  month_label?: string | null
   edition: MiEdition
   status: MiReportStatus
   narrative?: string | null
+  narrative_source?: 'template' | 'edited' | string | null
   included_observation_ids?: number[] | null
+  insufficient_observation_ids?: number[] | null
   counts?: Record<string, unknown> | null
   approved_by?: string | null
   approved_at?: string | null
   file_sha256?: string | null
-  downloads?: { at?: string | null; by?: string | null; sha256?: string | null }[] | null
+  downloads?: { at?: string | null; by?: string | null; sha256?: string | null }[] | number | null
   created_at?: string | null
   created_by?: string | null
   updated_at?: string | null
 }
 
-/** One finding row of a report preview. Field names vary a little between builds; all optional. */
+export type MiReportRowState = 'included' | 'insufficient' | 'excluded'
+
+/**
+ * One row of a report preview (supplier_reports._finding_row / _market_row): a quality or packaging
+ * finding, or (internal edition) a competitor / demand sighting. `state` says where it stands: in the
+ * report, listed as insufficient evidence (not counted), or left out by hand.
+ */
 export interface MiReportRow {
-  id?: number | null
-  observation_id?: number | null
+  id: number
   ref?: string | null
   date?: string | null
-  observed_at?: string | null
-  yq_item_code?: string | null
+  kind?: string | null
   sku?: string | null
   product?: string | null
-  product_name?: string | null
-  issue?: string | null
-  issue_label?: string | null
+  /** an object {id, code, label}: render issue.label, never the object */
+  issue?: { id?: number | null; code?: string | null; label?: string | null } | string | null
+  description?: string | null
+  qty?: number | null
+  batch_ref?: string | null
+  packaging_version?: string | null
+  basis?: string | null
   evidence_level?: number | null
   evidence_label?: string | null
+  /** "Verified" | "Unverified report" */
+  finding?: string | null
   status?: string | null
-  verified?: boolean | null
-  label?: string | null
-  qty_affected?: number | null
-  description?: string | null
-  thumb_url?: string | null
+  case_id?: number | null
+  recurring?: boolean | null
+  safety?: boolean | null
+  photos_withheld?: number | null
+  state?: MiReportRowState | null
+  photos?: { ref?: string | null; id?: number | null; role?: string | null; role_words?: string | null; caption?: string | null; thumb_url?: string | null }[] | null
+  /* internal edition: competitor and demand rows */
+  note?: string | null
+  area?: string | null
+  product_seen?: string | null
+  brand?: string | null
+  competitor?: string | null
+  category?: string | null
+  price_seen?: string | null
+  source?: string | null
+  asked_for?: string | null
+  demand_level?: string | null
 }
 
-export interface MiReportDetail extends Partial<MiReport> {
+/** The report routes' own capabilities (build / edit: reviewers; approve: approvers the gate lets write). */
+export interface MiReportCaps {
+  can_build?: boolean
+  can_edit?: boolean
+  can_approve?: boolean
+  can_download?: boolean
+}
+
+/** GET / POST / PATCH a report: the report, its rows by sheet, its actions and what the data says now. */
+export interface MiReportDetail {
+  available?: boolean
   report?: MiReport
-  rows?: MiReportRow[] | null
-  included?: MiReportRow[] | null
-  observations?: MiReportRow[] | null
-  insufficient?: MiReportRow[] | null
+  /** keyed by sheet: product_issues, packaging (+ competitor, demand in the internal edition) */
+  rows?: Record<string, MiReportRow[]> | MiReportRow[] | null
+  actions?: { id: number; ref?: string | null; request?: string | null; status?: string | null; status_words?: string | null; due_date?: string | null; days_open?: number | null }[] | null
+  live_counts?: Record<string, unknown> | null
+  warnings?: string[] | null
+  /** build only: an existing draft of the same supplier, month and edition was rebuilt (hand edits replaced) */
+  rebuilt?: boolean | null
+  capabilities?: MiReportCaps | null
+}
+
+export const REPORT_SHEET_LABEL: Record<string, string> = {
+  product_issues: 'Product issues',
+  packaging: 'Packaging',
+  competitor: 'Competitor',
+  demand: 'Demand',
+}
+
+/** Every row of a preview with its sheet, whichever way the payload groups them. */
+export function reportRows(d: Pick<MiReportDetail, 'rows'> | null | undefined): { sheet: string; row: MiReportRow }[] {
+  const rows = d?.rows
+  if (!rows) return []
+  if (Array.isArray(rows)) return rows.map((row) => ({ sheet: row.kind === 'packaging' ? 'packaging' : 'product_issues', row }))
+  const out: { sheet: string; row: MiReportRow }[] = []
+  for (const [sheet, list] of Object.entries(rows)) {
+    if (Array.isArray(list)) for (const row of list) out.push({ sheet, row })
+  }
+  return out
+}
+
+/** The issue's words on a report row (an object from the API; a plain string from an older one). */
+export function reportIssue(row: Pick<MiReportRow, 'issue'>): string {
+  const i = row.issue
+  if (!i) return ''
+  return typeof i === 'string' ? i : String(i.label || i.code || '')
 }
 
 /**
@@ -676,18 +800,22 @@ export function matchBrand(lists: MiLists | null | undefined, text?: string | nu
   )
 }
 
+/** The shop's phone digits: the only way the products route knows the shop (no id in the rep's book). */
+export function shopPhone(shop: { phone?: string | null } | null | undefined): string {
+  return String(shop?.phone || '').replace(/\D/g, '')
+}
+
 /** One cache entry per shop and query, shared by the picker and the sheet's warm-up when it opens. */
-export function productsQueryKey(shop: { phone?: string | null; name?: string | null } | null | undefined, q: string) {
-  return ['mi-products', String(shop?.phone || '').replace(/\D/g, ''), shop?.name || '', q] as const
+export function productsQueryKey(shop: { phone?: string | null } | null | undefined, q: string) {
+  return ['mi-products', shopPhone(shop), q] as const
 }
 
 /**
  * The product picker's rows. An Arabic query is read into the catalog's English words first (the
  * marketplace's own reader, loaded only when Arabic is typed). The shop the rep stands in travels as
- * hints (`shop_phone`, `shop_name`): the staff book carries no shop id, and a route that does not
- * read them ignores them.
+ * its phone (`shop_phone`: the route resolves the shop from it; the staff book carries no shop id).
  */
-export async function fetchProducts(q: string, shop?: { phone?: string | null; name?: string | null } | null, limit = 20): Promise<MiProduct[]> {
+export async function fetchProducts(q: string, shop?: { phone?: string | null } | null, limit = 20): Promise<MiProduct[]> {
   let query = q.trim()
   if (/[؀-ۿ]/.test(query)) {
     try {
@@ -699,9 +827,8 @@ export async function fetchProducts(q: string, shop?: { phone?: string | null; n
   }
   const p = new URLSearchParams({ limit: String(limit) })
   if (query) p.set('q', query.slice(0, 80))
-  const phone = String(shop?.phone || '').replace(/\D/g, '')
+  const phone = shopPhone(shop)
   if (phone) p.set('shop_phone', phone)
-  if (shop?.name) p.set('shop_name', shop.name)
   const d = await apiGet<MiProduct[] | { items?: MiProduct[]; products?: MiProduct[]; rows?: MiProduct[] } | null>(`/market-intel/products?${p.toString()}`)
   const rows = Array.isArray(d) ? d : d?.items || d?.products || d?.rows || []
   return rows.filter((r) => r && r.code)
@@ -941,14 +1068,7 @@ async function attempt(id: string): Promise<MiCard | null> {
       return null
     }
     let msg = 'The server refused this sighting.'
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body) as { detail?: unknown }
-        if (typeof j.detail === 'string') msg = j.detail
-      } catch {
-        /* keep the plain line */
-      }
-    }
+    if (e instanceof ApiError) msg = detailText(e.body) || msg // its detail, or a 422's first line
     patch(id, { state: 'failed', error: msg })
     throw new Error(msg, { cause: e })
   }

@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, Download, FileSpreadsheet, Loader2, Stamp } from 'lucide-react'
+import { CheckCircle2, Download, FileSpreadsheet, Loader2, Stamp, TriangleAlert } from 'lucide-react'
 import { apiGet, apiGetDownload, apiPatch, apiPost } from '@/lib/api'
 import { errorText } from '@/lib/errorText'
 import { cn } from '@/lib/utils'
@@ -9,32 +9,54 @@ import { LoadError } from '@/components/LoadError'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import {
-  evidenceLabel,
   monthText,
   nameOf,
   notReady,
   previousMonth,
+  REPORT_SHEET_LABEL,
+  reportIssue,
+  reportRows,
   type MiEdition,
   type MiLists,
   type MiReport,
+  type MiReportCaps,
   type MiReportDetail,
   type MiReportRow,
+  type MiReportRowState,
 } from '@/lib/marketIntel'
 import { Empty, Loading, NotAvailableYet } from './ui'
 import { BTN, BTN_OUTLINE, CARD, dayText, INPUT, LABEL, qs, REPORT_STATUS_TONE, SELECT, TEXTAREA, whenText, who, type MiRoles } from './util'
 
 /**
- * Supplier reports (release r8m, plan F9, Phase 2): month + supplier -> a DRAFT built by the API from
- * that supplier's reports and cases (counts by issue, new vs recurring, open actions, and a narrative
- * in which every finding cites its report IDs [MI-…] and every action [CA-…]; weak evidence sits in
- * its own paragraph and is not counted) -> the narrative edited -> approved -> the .xlsx downloaded.
- * Reviewers build and edit drafts; approvers (reviewers and management) approve and download. A newer
- * approval of the same supplier, month and edition supersedes the older one. Nothing is e-mailed:
- * the approver sends the workbook himself, and every download is logged with the file's sha256.
+ * Supplier reports (release r8m, plan F9, Phase 2; app/supplier_reports.py): month + supplier -> a DRAFT
+ * built by the API from that supplier's reports and cases (counts by issue, new vs recurring, open
+ * actions, and a narrative in which every finding cites its report IDs [MI-…] and every action [CA-…];
+ * weak evidence is listed apart and not counted) -> rows put in or left out, the narrative edited ->
+ * approved -> the .xlsx downloaded. Building a month again REBUILDS its draft (hand edits replaced), so
+ * the page asks first. Who may do what comes from the routes' own capabilities (reviewers build and
+ * edit; approvers approve; both download); the roles are the fallback. Nothing is e-mailed: the approver
+ * sends the workbook himself, and every download is logged with the file's sha256.
  */
 
 const EDITION_LABEL: Record<MiEdition, string> = { supplier: 'Supplier edition', internal: 'Internal edition' }
 const STATUS_LABEL: Record<MiReport['status'], string> = { draft: 'Draft', approved: 'Approved', superseded: 'Superseded' }
+
+interface Can {
+  build: boolean
+  edit: boolean
+  approve: boolean
+  download: boolean
+}
+
+/** The report routes' capabilities when the payload has them; the page's roles otherwise. */
+function reportCan(caps: MiReportCaps | null | undefined, roles: MiRoles): Can {
+  return {
+    build: caps?.can_build ?? roles.review,
+    edit: caps?.can_edit ?? roles.review,
+    approve: caps?.can_approve ?? roles.approve,
+    download: caps?.can_download ?? (roles.approve || roles.review),
+  }
+}
 
 function rowsOf(d: unknown): MiReport[] {
   if (Array.isArray(d)) return d as MiReport[]
@@ -46,6 +68,15 @@ function supplierOf(r: Partial<MiReport>, lists: MiLists | null): string {
   return nameOf(r.supplier) || r.supplier_name || lists?.suppliers.find((s) => s.id === r.supplier_id)?.name || (r.supplier_id ? `Supplier ${r.supplier_id}` : 'Supplier')
 }
 
+function monthOf(r: Pick<MiReport, 'month' | 'month_label'>): string {
+  return r.month_label || monthText(r.month)
+}
+
+/** The list sends the number of downloads; a report's own payload the downloads themselves. */
+function downloadCount(r: Pick<MiReport, 'downloads'>): number {
+  return typeof r.downloads === 'number' ? r.downloads : (r.downloads || []).length
+}
+
 export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | null }) {
   const toast = useToast()
   const qc = useQueryClient()
@@ -54,23 +85,63 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
   const [month, setMonth] = useState(() => previousMonth(new Date()))
   const [supplierId, setSupplierId] = useState('')
   const [edition, setEdition] = useState<MiEdition>('supplier')
+  // a draft of the same supplier, month and edition exists: building again replaces it (asked first)
+  const [existing, setExisting] = useState<MiReport | null>(null)
+  const [checking, setChecking] = useState(false)
   const [openId, setOpenId] = useState<number | null>(null)
+  // the draft just rebuilt over an existing one: its sheet says so too (a toast sits under the sheet)
+  const [rebuiltId, setRebuiltId] = useState<number | null>(null)
   const query = qs({ supplier_id: fSupplier, month: fMonth })
   const listQ = useQuery({
     queryKey: ['mi-reports', query],
     queryFn: () => apiGet<unknown>(`/market-intel/supplier-reports${query}`),
     retry: (n, e) => !notReady(e) && n < 1,
   })
+  const can = reportCan((listQ.data as { capabilities?: MiReportCaps } | undefined)?.capabilities, roles)
   const build = useMutation({
-    mutationFn: () => apiPost<Partial<MiReport> & { report?: MiReport }>('/market-intel/supplier-reports', { supplier_id: Number(supplierId), month, edition }),
+    mutationFn: () => apiPost<MiReportDetail>('/market-intel/supplier-reports', { supplier_id: Number(supplierId), month, edition }),
     onSuccess: (res) => {
-      toast('Draft built. Read it, edit the narrative, then an approver approves it.', 'success')
+      setExisting(null)
+      // build_draft answers rebuilt: true when it replaced an existing draft's narrative and row choices
+      toast(
+        res?.rebuilt ? 'The existing draft was rebuilt from the data: its hand edits were replaced.' : 'Draft built. Read it, then an approver approves it.',
+        res?.rebuilt ? 'info' : 'success',
+      )
       qc.invalidateQueries({ queryKey: ['mi-reports'] })
-      const id = res?.report?.id ?? res?.id
-      if (id) setOpenId(Number(id))
+      const id = res?.report?.id
+      if (id) {
+        qc.setQueryData(['mi-report', Number(id)], res)
+        setRebuiltId(res?.rebuilt ? Number(id) : null)
+        setOpenId(Number(id))
+      }
     },
     onError: (e) => toast(errorText(e, 'Could not build the report.'), 'error'),
   })
+
+  function pickBuild(set: () => void) {
+    set()
+    setExisting(null)
+  }
+
+  async function startBuild() {
+    if (!existing) {
+      setChecking(true)
+      let found: MiReport | null
+      try {
+        const got = await apiGet<unknown>(`/market-intel/supplier-reports${qs({ supplier_id: supplierId, month, edition, status: 'draft' })}`)
+        found = rowsOf(got)[0] || null
+      } catch {
+        found = null // the build itself still says rebuilt: true
+      } finally {
+        setChecking(false)
+      }
+      if (found) {
+        setExisting(found)
+        return
+      }
+    }
+    build.mutate()
+  }
 
   if (listQ.isError && notReady(listQ.error)) return <NotAvailableYet what="Supplier reports" />
   const data = listQ.data as { available?: boolean } | undefined
@@ -80,7 +151,7 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
 
   return (
     <div className="space-y-5">
-      {roles.review && (
+      {can.build && (
         <section className={CARD}>
           <h3 className="flex items-center gap-1.5 font-display text-[15px] font-bold">
             <FileSpreadsheet size={16} className="text-primary" aria-hidden="true" /> Build a monthly report
@@ -91,26 +162,44 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
           <div className="flex flex-wrap items-end gap-2">
             <div>
               <label htmlFor="rep-month" className={LABEL}>Month</label>
-              <input id="rep-month" type="month" value={month} onChange={(e) => setMonth(e.target.value)} className={cn(INPUT, 'w-44')} />
+              <input id="rep-month" type="month" value={month} onChange={(e) => pickBuild(() => setMonth(e.target.value))} className={cn(INPUT, 'w-44')} />
             </div>
             <div className="min-w-[200px] flex-1">
               <label htmlFor="rep-supplier" className={LABEL}>Supplier</label>
-              <select id="rep-supplier" value={supplierId} onChange={(e) => setSupplierId(e.target.value)} className={cn(SELECT, 'w-full')}>
+              <select id="rep-supplier" value={supplierId} onChange={(e) => pickBuild(() => setSupplierId(e.target.value))} className={cn(SELECT, 'w-full')}>
                 <option value="">{suppliers.length ? 'Pick the supplier' : 'No suppliers listed yet (Lists tab)'}</option>
                 {suppliers.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
               </select>
             </div>
             <div>
               <label htmlFor="rep-edition" className={LABEL}>Edition</label>
-              <select id="rep-edition" value={edition} onChange={(e) => setEdition(e.target.value as MiEdition)} className={SELECT}>
+              <select id="rep-edition" value={edition} onChange={(e) => pickBuild(() => setEdition(e.target.value as MiEdition))} className={SELECT}>
                 <option value="supplier">{EDITION_LABEL.supplier}</option>
                 <option value="internal">{EDITION_LABEL.internal}</option>
               </select>
             </div>
-            <button type="button" disabled={!supplierId || !/^\d{4}-\d{2}$/.test(month) || build.isPending} onClick={() => build.mutate()} className={BTN}>
-              {build.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Build the draft
-            </button>
+            {!existing && (
+              <button type="button" disabled={!supplierId || !/^\d{4}-\d{2}$/.test(month) || build.isPending || checking} onClick={() => void startBuild()} className={BTN}>
+                {(build.isPending || checking) && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Build the draft
+              </button>
+            )}
           </div>
+          {existing && (
+            <div role="alert" className="mt-3 space-y-2 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] p-3 text-[12.5px] text-[#7a4d0a]">
+              <p>
+                <span className="font-bold">A draft for {supplierOf(existing, lists)}, {monthOf(existing)} ({EDITION_LABEL[existing.edition] || existing.edition}) already exists.</span>{' '}
+                Building again replaces its narrative and its row choices from the data: hand edits are lost.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" disabled={build.isPending} onClick={() => void startBuild()} className={cn(BTN, 'bg-[#96600d] hover:bg-[#7a4d0a]')}>
+                  {build.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Build again
+                </button>
+                <button type="button" onClick={() => { setOpenId(existing.id); setExisting(null) }} className={BTN_OUTLINE}>
+                  Open the draft instead
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       )}
 
@@ -134,55 +223,68 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
           <Loading />
         ) : !reports.length ? (
           <Empty icon={<FileSpreadsheet size={18} aria-hidden="true" />}>
-            {fSupplier || fMonth ? 'No report for this supplier or month.' : roles.review ? 'No reports yet. Build the first one above.' : 'No reports yet. The office builds them.'}
+            {fSupplier || fMonth ? 'No report for this supplier or month.' : can.build ? 'No reports yet. Build the first one above.' : 'No reports yet. The office builds them.'}
           </Empty>
         ) : (
           <ul className="grid gap-2.5 lg:grid-cols-2">
-            {reports.map((r) => (
-              <li key={r.id}>
-                <button
-                  type="button"
-                  onClick={() => setOpenId(r.id)}
-                  className="flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground">
-                    <FileSpreadsheet size={19} aria-hidden="true" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[14px] font-semibold">
-                      {supplierOf(r, lists)} · {monthText(r.month)}
+            {reports.map((r) => {
+              const n = downloadCount(r)
+              return (
+                <li key={r.id}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenId(r.id)}
+                    className="flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground">
+                      <FileSpreadsheet size={19} aria-hidden="true" />
                     </span>
-                    <span className="block truncate text-[11.5px] text-muted-foreground">
-                      {EDITION_LABEL[r.edition] || r.edition}
-                      {r.approved_at ? ` · approved ${dayText(r.approved_at)}${r.approved_by ? ` by ${who(r.approved_by)}` : ''}` : ''}
-                      {r.downloads?.length ? ` · ${r.downloads.length} download${r.downloads.length === 1 ? '' : 's'}` : ''}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[14px] font-semibold">
+                        {supplierOf(r, lists)} · {monthOf(r)}
+                      </span>
+                      <span className="block truncate text-[11.5px] text-muted-foreground">
+                        {EDITION_LABEL[r.edition] || r.edition}
+                        {r.approved_at ? ` · approved ${dayText(r.approved_at)}${r.approved_by ? ` by ${who(r.approved_by)}` : ''}` : ''}
+                        {n ? ` · ${n} download${n === 1 ? '' : 's'}` : ''}
+                      </span>
                     </span>
-                  </span>
-                  <Badge tone={REPORT_STATUS_TONE[r.status] || 'grey'}>{STATUS_LABEL[r.status] || r.status}</Badge>
-                </button>
-              </li>
-            ))}
+                    <Badge tone={REPORT_STATUS_TONE[r.status] || 'grey'}>{STATUS_LABEL[r.status] || r.status}</Badge>
+                  </button>
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>
 
-      <ReportSheet id={openId} onClose={() => setOpenId(null)} roles={roles} lists={lists} />
+      <ReportSheet
+        id={openId}
+        rebuilt={openId != null && openId === rebuiltId}
+        onClose={() => {
+          setOpenId(null)
+          setRebuiltId(null)
+        }}
+        roles={roles}
+        lists={lists}
+      />
     </div>
   )
 }
 
-function ReportSheet({ id, onClose, roles, lists }: { id: number | null; onClose: () => void; roles: MiRoles; lists: MiLists | null }) {
+function ReportSheet({ id, rebuilt, onClose, roles, lists }: { id: number | null; rebuilt: boolean; onClose: () => void; roles: MiRoles; lists: MiLists | null }) {
   const q = useQuery({
     queryKey: ['mi-report', id],
     queryFn: () => apiGet<MiReportDetail>(`/market-intel/supplier-reports/${id}`),
     enabled: id != null,
   })
-  const r = q.data ? q.data.report || (q.data as MiReport) : null
+  const r = q.data ? q.data.report || (q.data as unknown as MiReport) : null
+  const can = reportCan(q.data?.capabilities, roles)
   return (
     <Sheet
       open={id != null}
       onClose={onClose}
-      title={r ? `${supplierOf(r, lists)} · ${monthText(r.month)}` : 'Supplier report'}
+      title={r ? `${supplierOf(r, lists)} · ${monthOf(r)}` : 'Supplier report'}
       subtitle={r ? `${EDITION_LABEL[r.edition] || r.edition} · ${STATUS_LABEL[r.status] || r.status}` : undefined}
     >
       {q.isError ? (
@@ -192,7 +294,7 @@ function ReportSheet({ id, onClose, roles, lists }: { id: number | null; onClose
       ) : !q.data || !r ? (
         <Loading className="h-48" />
       ) : (
-        <ReportBody key={`${r.id}-${r.status}-${r.updated_at || ''}`} d={q.data} r={r} roles={roles} />
+        <ReportBody key={`${r.id}-${r.status}-${r.updated_at || ''}`} d={q.data} r={r} can={can} rebuilt={rebuilt} />
       )}
     </Sheet>
   )
@@ -221,122 +323,221 @@ function humanKey(k: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-/** Counts as the API sends them: numbers become tiles, objects and lists become small "label: n" lists. */
-function CountsView({ counts }: { counts: Record<string, unknown> }) {
+/** The counts' numbers worth a tile, in this order (supplier_reports.assemble counts). */
+const TILES: [string, string][] = [
+  ['reports', 'Reports counted'],
+  ['product_issues', 'Product issues'],
+  ['packaging', 'Packaging'],
+  ['shops', 'Shops'],
+  ['verified', 'Verified'],
+  ['unverified', 'Unverified'],
+  ['safety', 'Safety'],
+  ['photos', 'Photos'],
+  ['insufficient', 'Insufficient evidence'],
+  ['excluded', 'Left out'],
+  ['open_actions', 'Open actions'],
+  ['competitor', 'Competitor sightings'],
+  ['demand', 'Demand sightings'],
+]
+/** Never a tile: the counts' version, the month and edition, ids, the rules, the narrative's source. */
+const NOT_TILES = new Set(['version', 'month', 'edition', 'period', 'supplier', 'rules', 'new', 'recurring', 'by_issue',
+  'insufficient_observation_ids', 'action_ids', 'narrative_source', 'built_at'])
+
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function CountsView({ counts, edition }: { counts: Record<string, unknown>; edition: MiEdition }) {
   const tiles: [string, number][] = []
-  const groups: [string, [string, number][]][] = []
-  for (const [k, v] of Object.entries(counts)) {
-    if (typeof v === 'number') tiles.push([k, v])
-    else if (Array.isArray(v)) {
-      const pairs: [string, number][] = []
-      for (const item of v) {
-        if (!item || typeof item !== 'object') continue
-        const o = item as Record<string, unknown>
-        const label = o.label ?? o.label_en ?? o.issue ?? o.name ?? o.code ?? o.key
-        const n = o.count ?? o.n ?? o.total ?? o.value
-        if (label != null && typeof n === 'number') pairs.push([String(label), n])
-      }
-      if (pairs.length) groups.push([k, pairs])
-    } else if (v && typeof v === 'object') {
-      const pairs = Object.entries(v as Record<string, unknown>).filter((e): e is [string, number] => typeof e[1] === 'number')
-      if (pairs.length) groups.push([k, pairs])
-    }
+  for (const [k, label] of TILES) {
+    const n = num(counts[k])
+    if (n == null) continue
+    if ((k === 'competitor' || k === 'demand') && edition !== 'internal') continue
+    tiles.push([label, n])
   }
-  if (!tiles.length && !groups.length) return null
+  // a number this page does not know yet still shows (never the version)
+  const known = new Set(TILES.map(([k]) => k))
+  for (const [k, v] of Object.entries(counts)) {
+    const n = num(v)
+    if (n != null && !known.has(k) && !NOT_TILES.has(k)) tiles.push([humanKey(k), n])
+  }
+  const part = (v: unknown) => (v && typeof v === 'object' ? (v as { problems?: unknown; reports?: unknown }) : {})
+  const fresh = part(counts.new)
+  const again = part(counts.recurring)
+  const period = part(counts.period) as { from?: unknown; to?: unknown }
+  const byIssue = Array.isArray(counts.by_issue) ? (counts.by_issue as Record<string, unknown>[]) : []
+  const rules = counts.rules && typeof counts.rules === 'object' ? Object.values(counts.rules as Record<string, unknown>).filter((x): x is string => typeof x === 'string') : []
   return (
     <div className="space-y-3">
+      {typeof period.from === 'string' && typeof period.to === 'string' && (
+        <p className="text-[12px] text-muted-foreground">
+          {dayText(period.from)} to {dayText(period.to)}, Bahrain time
+        </p>
+      )}
       {tiles.length > 0 && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {tiles.map(([k, n]) => (
-            <div key={k} className="rounded-xl border border-[#E6DAF0] bg-gradient-to-br from-[#FAF7FC] to-[#F1E9F7] p-2.5">
-              <div className="text-[11px] font-semibold text-[#6D4091]">{humanKey(k)}</div>
+          {tiles.map(([label, n]) => (
+            <div key={label} className="rounded-xl border border-[#E6DAF0] bg-gradient-to-br from-[#FAF7FC] to-[#F1E9F7] p-2.5">
+              <div className="text-[11px] font-semibold text-[#6D4091]">{label}</div>
               <div className="font-display text-[20px] font-bold tabular-nums text-[#1A1428]">{n}</div>
             </div>
           ))}
         </div>
       )}
-      {groups.map(([k, pairs]) => (
-        <div key={k}>
-          <div className={LABEL}>{humanKey(k)}</div>
+      {(num(fresh.problems) != null || num(again.problems) != null) && (
+        <div className="grid grid-cols-2 gap-2 text-[12.5px]">
+          <div className="rounded-xl border border-border px-3 py-2">
+            <div className={LABEL}>New</div>
+            {num(fresh.problems) ?? 0} problem{num(fresh.problems) === 1 ? '' : 's'} · {num(fresh.reports) ?? 0} report{num(fresh.reports) === 1 ? '' : 's'}
+          </div>
+          <div className="rounded-xl border border-border px-3 py-2">
+            <div className={LABEL}>Recurring</div>
+            {num(again.problems) ?? 0} problem{num(again.problems) === 1 ? '' : 's'} · {num(again.reports) ?? 0} report{num(again.reports) === 1 ? '' : 's'}
+          </div>
+        </div>
+      )}
+      {byIssue.length > 0 && (
+        <div>
+          <div className={LABEL}>By issue</div>
           <ul className="divide-y divide-border rounded-xl border border-border">
-            {pairs.map(([label, n]) => (
-              <li key={label} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
-                <span className="min-w-0 truncate">{humanKey(label)}</span>
-                <span className="font-semibold tabular-nums">{n}</span>
-              </li>
-            ))}
+            {byIssue.map((b, i) => {
+              const reports = num(b.reports) ?? num(b.count) ?? num(b.n) ?? 0
+              const shops = num(b.shops)
+              const verified = num(b.verified)
+              return (
+                <li key={`${String(b.label ?? b.code ?? i)}-${String(b.kind ?? '')}`} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
+                  <span className="min-w-0 truncate">
+                    {String(b.label ?? b.code ?? 'Unspecified')}
+                    {b.recurring ? <span className="ml-1.5 text-[11px] font-semibold text-[#6D4091]">recurring</span> : null}
+                  </span>
+                  <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
+                    <span className="font-semibold text-foreground">{reports}</span> report{reports === 1 ? '' : 's'}
+                    {shops != null ? ` · ${shops} shop${shops === 1 ? '' : 's'}` : ''}
+                    {verified ? ` · ${verified} verified` : ''}
+                  </span>
+                </li>
+              )
+            })}
           </ul>
         </div>
-      ))}
+      )}
+      {rules.length > 0 && (
+        <ul className="space-y-0.5 text-[11.5px] text-muted-foreground">
+          {rules.map((t) => (
+            <li key={t}>{t.charAt(0).toUpperCase() + t.slice(1)}.</li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
 
-function rowRef(row: MiReportRow): string {
-  if (row.ref) return row.ref
-  const id = row.observation_id ?? row.id
-  return id != null ? `MI-${id}` : ''
-}
+const STATE_GROUPS: { state: MiReportRowState; title: string; note: string }[] = [
+  { state: 'included', title: 'In the report', note: '' },
+  { state: 'insufficient', title: 'Insufficient evidence: listed, not counted', note: 'No photo, evidence level 1 and a single report. Tick one to count it anyway.' },
+  { state: 'excluded', title: 'Left out', note: 'Taken out of this report by hand. Tick one to put it back.' },
+]
 
-function FindingRows({ title, rows, note }: { title: string; rows: MiReportRow[]; note?: ReactNode }) {
-  if (!rows.length) return null
+function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: string; row: MiReportRow; editable: boolean; inReport: boolean; onToggle: () => void }) {
+  const issue = reportIssue(row)
+  const changed = editable && inReport !== (row.state === 'included')
+  const what = row.product || row.product_seen || row.asked_for
+  const meta = [
+    dayText(row.date),
+    row.qty ? (row.kind === 'demand' ? `${row.qty} wanted` : `${row.qty} affected`) : '',
+    row.batch_ref ? `batch ${row.batch_ref}` : '',
+    row.packaging_version ? `packaging ${row.packaging_version}` : '',
+    row.basis || '',
+    row.brand || '',
+    row.competitor ? `competitor ${row.competitor}` : '',
+    row.price_seen ? `BHD ${row.price_seen}` : '',
+    row.source || '',
+    row.demand_level ? `demand ${row.demand_level}` : '',
+    row.area || '',
+    row.status || '',
+  ].filter(Boolean)
+  const photos = row.photos || []
   return (
-    <section>
-      <div className={LABEL}>{title}</div>
-      {note}
-      <ul className="space-y-1.5">
-        {rows.map((row, i) => {
-          const verified = row.verified ?? (row.evidence_level != null ? Number(row.evidence_level) >= 3 : null)
-          return (
-            <li key={`${rowRef(row)}-${i}`} className="rounded-xl border border-border px-3 py-2 text-[12.5px]">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="font-mono text-[11.5px] font-semibold text-muted-foreground">{rowRef(row)}</span>
-                {verified != null && <Badge tone={verified ? 'green' : 'amber'}>{row.label || (verified ? 'Verified' : 'Unverified report')}</Badge>}
-                {(row.evidence_label || row.evidence_level != null) && <Badge tone="grey">{row.evidence_label || evidenceLabel(row.evidence_level)}</Badge>}
-                {(row.issue_label || row.issue) && <Badge tone="accent">{row.issue_label || row.issue}</Badge>}
-              </div>
-              <div className="mt-0.5 font-semibold">
-                {[row.product_name || row.product, row.yq_item_code || row.sku].filter(Boolean).join(' · ') || 'Product not named'}
-              </div>
-              {row.description && <div className="text-muted-foreground">{row.description}</div>}
-              <div className="text-[11.5px] text-muted-foreground">
-                {[dayText(row.date || row.observed_at), row.qty_affected ? `${row.qty_affected} affected` : '', row.status || ''].filter(Boolean).join(' · ')}
-              </div>
-            </li>
-          )
-        })}
-      </ul>
-    </section>
+    <li className={cn('rounded-xl border px-3 py-2 text-[12.5px]', changed ? 'border-[#C9B7DA] bg-[#FAF7FC]' : 'border-border')}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="font-mono text-[11.5px] font-semibold text-muted-foreground">{row.ref || `MI-${row.id}`}</span>
+        <span className="text-[11px] text-muted-foreground">{REPORT_SHEET_LABEL[sheet] || humanKey(sheet)}</span>
+        {row.finding && <Badge tone={row.finding === 'Verified' ? 'green' : 'amber'}>{row.finding}</Badge>}
+        {row.evidence_label && <Badge tone="grey">{row.evidence_label}</Badge>}
+        {issue && <Badge tone="accent">{issue}</Badge>}
+        {row.safety && <Badge tone="rose">Safety</Badge>}
+        {row.recurring && <Badge tone="ink">Recurring</Badge>}
+        {editable && (
+          <label className="ml-auto flex min-h-9 cursor-pointer items-center gap-1.5 text-[12px] font-semibold">
+            <input type="checkbox" checked={inReport} onChange={onToggle} className="h-4 w-4 accent-[#6D4091]" />
+            In the report{changed ? (inReport ? ' (to add)' : ' (to leave out)') : ''}
+          </label>
+        )}
+      </div>
+      <div className="mt-0.5 font-semibold">{[what, row.sku].filter(Boolean).join(' · ') || 'Product not named'}</div>
+      {(row.description || row.note) && <div className="text-muted-foreground">{row.description || row.note}</div>}
+      {meta.length > 0 && <div className="text-[11.5px] text-muted-foreground">{meta.join(' · ')}</div>}
+      {(photos.length > 0 || Boolean(row.photos_withheld)) && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {photos.map((p, i) =>
+            p.thumb_url ? (
+              <img key={p.ref || p.id || i} src={p.thumb_url} alt={p.role_words || 'Evidence photo'} loading="lazy" className="h-12 w-12 rounded-lg border border-border object-cover" />
+            ) : null,
+          )}
+          {row.photos_withheld ? (
+            <span className="text-[11px] text-muted-foreground">
+              {row.photos_withheld} photo{row.photos_withheld === 1 ? '' : 's'} kept out (people)
+            </span>
+          ) : null}
+        </div>
+      )}
+    </li>
   )
 }
 
-function ReportBody({ d, r, roles }: { d: MiReportDetail; r: MiReport; roles: MiRoles }) {
+function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiReport; can: Can; rebuilt?: boolean }) {
   const toast = useToast()
   const qc = useQueryClient()
   const draft = r.status === 'draft'
-  const canEdit = roles.review && draft
+  const editable = can.edit && draft
+  const all = reportRows(d)
   const [narrative, setNarrative] = useState(r.narrative || '')
+  // the rows in the report: what the preview says now, changed by the ticks until saved
+  const [picked, setPicked] = useState<Set<number>>(() => new Set(all.filter((x) => x.row.state === 'included').map((x) => x.row.id)))
   const [sure, setSure] = useState(false)
   const [downloading, setDownloading] = useState(false)
-  const rows = d.rows || d.included || d.observations || []
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ['mi-report', r.id] })
+  const was = new Set(all.filter((x) => x.row.state === 'included').map((x) => x.row.id))
+  const changes = all.filter((x) => picked.has(x.row.id) !== was.has(x.row.id)).length
+  const narrativeChanged = narrative !== (r.narrative || '')
+
+  const refreshed = (res: MiReportDetail | undefined) => {
+    if (res && res.report) qc.setQueryData(['mi-report', r.id], res)
+    else qc.invalidateQueries({ queryKey: ['mi-report', r.id] })
     qc.invalidateQueries({ queryKey: ['mi-reports'] })
   }
   const fail = (fallback: string) => (e: unknown) => toast(errorText(e, fallback), 'error')
   const save = useMutation({
-    mutationFn: () => apiPatch(`/market-intel/supplier-reports/${r.id}`, { narrative }),
-    onSuccess: () => {
+    mutationFn: () => apiPatch<MiReportDetail>(`/market-intel/supplier-reports/${r.id}`, { narrative }),
+    onSuccess: (res) => {
       toast('Narrative saved.', 'success')
-      refresh()
+      refreshed(res)
     },
     onError: fail('Could not save the narrative.'),
   })
+  const select = useMutation({
+    mutationFn: () => apiPatch<MiReportDetail>(`/market-intel/supplier-reports/${r.id}`, { included_observation_ids: [...picked].sort((a, b) => a - b) }),
+    onSuccess: (res) => {
+      toast(r.narrative_source === 'edited' ? 'Rows saved. The narrative was edited by hand, so it was kept: check it still matches.' : 'Rows saved; the narrative follows them.', 'success')
+      refreshed(res)
+    },
+    onError: fail('Could not save the rows.'),
+  })
   const approve = useMutation({
-    mutationFn: () => apiPost(`/market-intel/supplier-reports/${r.id}/approve`, {}),
-    onSuccess: () => {
-      toast('Report approved. It can be downloaded now.', 'success')
-      refresh()
+    mutationFn: () => apiPost<{ superseded?: number[] }>(`/market-intel/supplier-reports/${r.id}/approve`, {}),
+    onSuccess: (res) => {
+      const n = res?.superseded?.length || 0
+      toast(`Report approved. It can be downloaded now.${n ? ` ${n} earlier approved report${n === 1 ? ' is' : 's are'} superseded.` : ''}`, 'success')
+      refreshed(undefined)
     },
     onError: fail('Could not approve the report.'),
   })
@@ -344,20 +545,33 @@ function ReportBody({ d, r, roles }: { d: MiReportDetail; r: MiReport; roles: Mi
     setDownloading(true)
     try {
       await apiGetDownload(`/market-intel/supplier-reports/${r.id}/download`, `supplier-report-${String(r.month).slice(0, 7)}-${r.edition}.xlsx`)
-      refresh() // the download is logged with its sha256
+      refreshed(undefined) // the download is logged with its sha256
     } catch (e) {
       fail('Could not download the workbook.')(e)
     } finally {
       setDownloading(false)
     }
   }
-  const narrativeChanged = narrative !== (r.narrative || '')
+  function toggle(id: number) {
+    setPicked((cur) => {
+      const next = new Set(cur)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const counts = (draft ? d.live_counts : r.counts) || r.counts || d.live_counts || null
+  const downloads = Array.isArray(r.downloads) ? r.downloads : []
+  const warnings = d.warnings || []
+  const actions = d.actions || []
 
   return (
     <div className="space-y-5 px-4 py-4 sm:px-5">
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge tone={REPORT_STATUS_TONE[r.status] || 'grey'}>{STATUS_LABEL[r.status] || r.status}</Badge>
         <Badge tone="grey">{EDITION_LABEL[r.edition] || r.edition}</Badge>
+        {r.narrative_source === 'edited' && <Badge tone="accent">Narrative edited by hand</Badge>}
         {r.approved_at && (
           <span className="text-[12px] text-muted-foreground">
             Approved {whenText(r.approved_at)}
@@ -368,14 +582,28 @@ function ReportBody({ d, r, roles }: { d: MiReportDetail; r: MiReport; roles: Mi
       {r.status === 'superseded' && (
         <p className="rounded-xl bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">A newer approved report for the same supplier, month and edition replaced this one. Use that one.</p>
       )}
+      {rebuilt && draft && (
+        <p role="status" className="rounded-xl bg-[#EEE8F4] px-3 py-2 text-[12.5px] font-medium text-[#4B2C66]">
+          Just rebuilt from the data: the narrative and the rows are the template's again, earlier hand edits were replaced.
+        </p>
+      )}
+      {warnings.length > 0 && (
+        <div role="alert" className="space-y-1 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] px-3 py-2.5 text-[12.5px] text-[#7a4d0a]">
+          {warnings.map((w) => (
+            <p key={w} className="flex gap-2">
+              <TriangleAlert size={14} className="mt-0.5 shrink-0" aria-hidden="true" /> {w}
+            </p>
+          ))}
+        </div>
+      )}
 
-      {r.counts && Object.keys(r.counts).length > 0 && <CountsView counts={r.counts} />}
+      {counts && Object.keys(counts).length > 0 && <CountsView counts={counts} edition={r.edition} />}
 
       <section>
         <div className={LABEL}>Narrative</div>
-        {canEdit ? (
+        {editable ? (
           <>
-            <textarea rows={10} value={narrative} onChange={(e) => setNarrative(e.target.value)} className={cn(TEXTAREA, 'font-[inherit]')} aria-label="Narrative" />
+            <textarea rows={10} value={narrative} onChange={(e) => setNarrative(e.target.value)} maxLength={20000} className={TEXTAREA} aria-label="Narrative" />
             <p className="mt-1 text-[11.5px] text-muted-foreground">Keep the [MI-…] and [CA-…] references: every finding must cite the reports it rests on.</p>
             <button type="button" disabled={!narrativeChanged || save.isPending} onClick={() => save.mutate()} className={cn(BTN_OUTLINE, 'mt-2')}>
               {save.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Save the narrative
@@ -390,46 +618,91 @@ function ReportBody({ d, r, roles }: { d: MiReportDetail; r: MiReport; roles: Mi
         )}
       </section>
 
-      <FindingRows title={`Findings in the report (${rows.length})`} rows={rows} />
-      <FindingRows
-        title="Insufficient evidence (not counted)"
-        rows={d.insufficient || []}
-        note={<p className="mb-1.5 text-[11.5px] text-muted-foreground">No photo, a single report, or level 1: mentioned, not counted.</p>}
-      />
+      {STATE_GROUPS.map((g) => {
+        const rows = all.filter((x) => (x.row.state || 'included') === g.state)
+        if (!rows.length) return null
+        return (
+          <section key={g.state}>
+            <div className={LABEL}>
+              {g.title} ({rows.length})
+            </div>
+            {g.note && editable && <p className="mb-1.5 text-[11.5px] text-muted-foreground">{g.note}</p>}
+            <ul className="space-y-1.5">
+              {rows.map((x) => (
+                <FindingRow key={`${x.sheet}-${x.row.id}`} sheet={x.sheet} row={x.row} editable={editable} inReport={picked.has(x.row.id)} onToggle={() => toggle(x.row.id)} />
+              ))}
+            </ul>
+          </section>
+        )
+      })}
+      {!all.length && <p className="text-[12.5px] text-muted-foreground">No reports of this supplier in the month.</p>}
+
+      {editable && changes > 0 && (
+        <div className="sticky bottom-0 -mx-4 flex flex-wrap items-center gap-2 border-t border-border bg-card px-4 py-2.5 sm:-mx-5 sm:px-5">
+          <span className="text-[12.5px] text-muted-foreground">
+            {changes} row{changes === 1 ? '' : 's'} changed{narrativeChanged ? ': save the narrative first' : ''}
+          </span>
+          <button type="button" onClick={() => setPicked(new Set(was))} className={cn(BTN_OUTLINE, 'ml-auto')}>
+            Undo
+          </button>
+          <button type="button" disabled={select.isPending || narrativeChanged} onClick={() => select.mutate()} className={BTN}>
+            {select.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Save the rows
+          </button>
+        </div>
+      )}
+
+      {actions.length > 0 && (
+        <section>
+          <div className={LABEL}>Corrective actions</div>
+          <ul className="space-y-1.5">
+            {actions.map((a) => (
+              <li key={a.id} className="rounded-xl border border-border px-3 py-2 text-[12.5px]">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-mono text-[11.5px] font-semibold text-muted-foreground">{a.ref || `CA-${a.id}`}</span>
+                  {(a.status_words || a.status) && <Badge tone="grey">{a.status_words || a.status}</Badge>}
+                </div>
+                {a.request && <div className="mt-0.5 font-semibold">{a.request}</div>}
+                <div className="text-[11.5px] text-muted-foreground">
+                  {[a.due_date ? `due ${dayText(a.due_date)}` : '', a.days_open != null ? `${a.days_open} day${a.days_open === 1 ? '' : 's'} open` : ''].filter(Boolean).join(' · ')}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="space-y-2 border-t border-border pt-4">
-        {draft && roles.approve && (
-          sure ? (
+        {draft && can.approve &&
+          (sure ? (
             <div className="space-y-2 rounded-xl border border-[#cfe9da] bg-[#f3fbf6] p-3">
               <p className="text-[12.5px] text-[#0f5a36]">Approve this report? An earlier approved report of the same supplier, month and edition becomes superseded.</p>
               <div className="flex gap-2">
-                <button type="button" disabled={approve.isPending || (canEdit && narrativeChanged)} onClick={() => approve.mutate()} className={cn(BTN, 'bg-[#137a48] hover:bg-[#0f5a36]')}>
+                <button type="button" disabled={approve.isPending || (editable && (narrativeChanged || changes > 0))} onClick={() => approve.mutate()} className={cn(BTN, 'bg-[#137a48] hover:bg-[#0f5a36]')}>
                   {approve.isPending ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Stamp size={15} aria-hidden="true" />} Yes, approve
                 </button>
                 <button type="button" onClick={() => setSure(false)} className={BTN_OUTLINE}>Not yet</button>
               </div>
-              {canEdit && narrativeChanged && <p className="text-[11.5px] text-[#96600d]">Save the narrative first.</p>}
+              {editable && (narrativeChanged || changes > 0) && <p className="text-[11.5px] text-[#96600d]">Save the narrative and the rows first.</p>}
             </div>
           ) : (
             <button type="button" onClick={() => setSure(true)} className={cn(BTN, 'w-full bg-[#137a48] hover:bg-[#0f5a36]')}>
               <CheckCircle2 size={16} aria-hidden="true" /> Approve
             </button>
-          )
-        )}
-        {r.status === 'approved' && (roles.approve || roles.review) && (
+          ))}
+        {r.status === 'approved' && can.download && (
           <button type="button" disabled={downloading} onClick={() => void download()} className={cn(BTN, 'w-full')}>
             {downloading ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Download size={16} aria-hidden="true" />} Download the workbook (.xlsx)
           </button>
         )}
-        {draft && !roles.approve && <p className="text-[12px] text-muted-foreground">An approver approves the draft before it can be downloaded.</p>}
+        {draft && !can.approve && <p className="text-[12px] text-muted-foreground">An approver approves the draft before it can be downloaded.</p>}
       </section>
 
-      {Boolean(r.downloads?.length || r.file_sha256) && (
+      {Boolean(downloads.length || r.file_sha256) && (
         <section>
           <div className={LABEL}>Downloads</div>
           {r.file_sha256 && <p className="mb-1 font-mono text-[11.5px] text-muted-foreground">File sha256 {r.file_sha256.slice(0, 16)}…</p>}
           <ul className="space-y-1 text-[12.5px]">
-            {(r.downloads || []).map((x, i) => (
+            {downloads.map((x, i) => (
               <li key={`${x.at}-${i}`} className="flex flex-wrap gap-x-2">
                 <span>{whenText(x.at)}</span>
                 <span className="text-muted-foreground">{who(x.by)}</span>

@@ -105,5 +105,6 @@ export function useMiRoles(caps?: MiCaps | null): MiRoles {
   const readOnly = isReadOnly(me)
   const review = !readOnly && (caps?.can_review ?? ['admin', 'member', 'operations', 'sales_manager'].includes(role))
   const approve = caps?.can_approve ?? (review || role === 'management')
-  return { office: role !== 'salesman', review, approve, admin: role === 'admin', readOnly }
+  const admin = caps?.can_admin ?? caps?.is_admin ?? role === 'admin'
+  return { office: role !== 'salesman', review, approve, admin, readOnly }
 }

@@ -32,12 +32,14 @@ import {
   CASE_STATUS_LABEL,
   caseMoves,
   caseOf,
+  caseProduct,
   EVIDENCE_LEVELS,
   evidenceLabel,
   fetchLists,
   nameOf,
   notReady,
   REPORT_BASIS_LABEL,
+  safetyMail,
   VERIFY_METHODS,
   type CaseMove,
   type MiActionStatus,
@@ -83,6 +85,12 @@ import {
  */
 
 const SEVERITY: Record<number, string> = { 1: 'Low', 2: 'Medium', 3: 'High' }
+
+/**
+ * What the server KEEPS of each text (app/market_quality.py clean_text): a longer one is cut there, so
+ * the fields stop at the same length (the API's own limits are a little higher).
+ */
+const LIMIT = { title: 160, assignee: 120, reason: 500, question: 500, request: 1000, owner: 120, response: 2000, check: 1000 } as const
 
 export default function CasePage() {
   const { id } = useParams()
@@ -165,6 +173,8 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
   const canEdit = roles.review && !merged
   const brand = nameOf(c.brand) || lists?.brands.find((b) => b.id === c.brand_id)?.name || ''
   const supplier = nameOf(c.supplier) || lists?.suppliers.find((s) => s.id === c.supplier_id)?.name || ''
+  const statusText = c.status_label || CASE_STATUS_LABEL[c.status] || c.status
+  const mail = safetyMail(d.events)
   const flag = useMutation({
     mutationFn: (p: { id: number; flag: boolean }) => apiPost(`/market-intel/photos/${p.id}/people`, { flag: p.flag }),
     onSuccess: () => ok('Photo updated.'),
@@ -180,8 +190,8 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
               <span className="inline-flex items-center gap-1"><Siren size={10} aria-hidden="true" /> Safety</span>
             </Badge>
           )}
-          <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{CASE_STATUS_LABEL[c.status] || c.status}</Badge>
-          <Badge tone="grey">{evidenceLabel(c.evidence_level)}</Badge>
+          <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{statusText}</Badge>
+          <Badge tone="grey">{c.evidence_label || evidenceLabel(c.evidence_level)}</Badge>
           {c.issue_type?.label_en && <Badge tone="accent">{c.issue_type.label_en}</Badge>}
           {c.severity ? <Badge tone="amber">Severity: {SEVERITY[c.severity] || c.severity}</Badge> : null}
         </div>
@@ -204,7 +214,15 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
         )}
         {c.safety && !merged && !['resolved', 'closed', 'not_substantiated'].includes(c.status) && (
           <p className="mt-3 rounded-xl bg-[#fdecef] px-3 py-2 text-[12.5px] font-semibold text-[#9f1239]">
-            Safety case: review it within one business day. The manager was e-mailed when it was reported.
+            Safety case: review it within one business day.{' '}
+            {/* only a "sent" outcome says the manager was e-mailed (market_quality.send_safety_alert) */}
+            {mail.state === 'sent'
+              ? 'The manager was e-mailed.'
+              : mail.state === 'not_sent'
+                ? `The safety e-mail did NOT go out${mail.reason ? ` (${mail.reason})` : ''}: tell the manager.`
+                : mail.state === 'queued'
+                  ? 'The safety e-mail to the manager is queued.'
+                  : ''}
           </p>
         )}
         {roles.readOnly && <p className="mt-2 text-[12px] text-muted-foreground">Read-only: management sees every case and changes nothing here.</p>}
@@ -243,11 +261,11 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
         </div>
 
         <aside className="space-y-4">
-          {canEdit && <StatusPanel key={`${c.status}-${c.changed_at || ''}`} c={c} actions={actions} admin={roles.admin} lists={lists} onDone={ok} onError={fail} />}
+          {canEdit && <StatusPanel key={`${c.status}-${c.changed_at || ''}`} c={c} statusText={statusText} actions={actions} admin={roles.admin} lists={lists} onDone={ok} onError={fail} />}
           {!canEdit && !merged && (
             <section className={CARD}>
               <h2 className="mb-1 font-display text-[15px] font-bold">Status</h2>
-              <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{CASE_STATUS_LABEL[c.status] || c.status}</Badge>
+              <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{statusText}</Badge>
             </section>
           )}
           <EvidencePanel key={`ev-${c.evidence_level}`} c={c} canEdit={canEdit} onDone={ok} onError={fail} />
@@ -256,7 +274,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
               <h2 className="mb-1.5 flex items-center gap-1.5 font-display text-[15px] font-bold">
                 <BadgeCheck size={15} className="text-[#137a48]" aria-hidden="true" /> Verification
               </h2>
-              <p className="text-[13px] font-semibold">{VERIFY_METHODS.find((m) => m.value === c.verification_method)?.label || c.verification_method}</p>
+              <p className="text-[13px] font-semibold">{c.verification_label || VERIFY_METHODS.find((m) => m.value === c.verification_method)?.label || c.verification_method}</p>
               {c.verification_reason && <p className="mt-1 whitespace-pre-line text-[12.5px] text-muted-foreground">{c.verification_reason}</p>}
             </section>
           )}
@@ -336,7 +354,7 @@ function Details({
       ) : (
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
           {/* the code first: a long product name truncates, the code never does */}
-          <Fact label="Product">{c.yq_item_code ? [c.yq_item_code, c.product_name].filter(Boolean).join(' · ') : <span className="text-[#96600d]">Not linked yet</span>}</Fact>
+          <Fact label="Product">{c.yq_item_code ? caseProduct(c) : <span className="text-[#96600d]">Not linked yet</span>}</Fact>
           <Fact label="Brand">{brand || '—'}</Fact>
           <Fact label="Supplier">{supplier || '—'}</Fact>
           <Fact label="Batch">{c.batch_ref || '—'}</Fact>
@@ -365,7 +383,11 @@ function EditCase({
   onCancel: () => void
 }) {
   const [title, setTitle] = useState(c.title || '')
-  const [product, setProduct] = useState<MiProduct | null>(c.yq_item_code ? { code: c.yq_item_code, name: c.product_name || c.yq_item_code } : null)
+  const [product, setProduct] = useState<MiProduct | null>(
+    c.yq_item_code
+      ? { code: c.yq_item_code, name: c.yq_item?.display_name || c.product_name || c.yq_item_code, brand: c.yq_item?.brand, thumb_url: c.yq_item?.thumb_url }
+      : null,
+  )
   const [picking, setPicking] = useState(false)
   const [brandId, setBrandId] = useState(c.brand_id ? String(c.brand_id) : '')
   const [supplierId, setSupplierId] = useState(c.supplier_id ? String(c.supplier_id) : '')
@@ -395,7 +417,7 @@ function EditCase({
     <div className="space-y-3">
       <div>
         <label htmlFor="case-title" className={LABEL}>Title</label>
-        <input id="case-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} className={INPUT} />
+        <input id="case-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={LIMIT.title} className={INPUT} />
       </div>
       <div>
         <span className={LABEL}>Product</span>
@@ -477,7 +499,7 @@ function EditCase({
         </div>
         <div className="col-span-2">
           <label htmlFor="case-assignee" className={LABEL}>Assignee</label>
-          <input id="case-assignee" value={assignee} onChange={(e) => setAssignee(e.target.value)} maxLength={80} className={INPUT} placeholder="Who follows it up" />
+          <input id="case-assignee" value={assignee} onChange={(e) => setAssignee(e.target.value)} maxLength={LIMIT.assignee} className={INPUT} placeholder="Who follows it up" />
         </div>
       </div>
       <label className="flex min-h-10 items-center gap-2 text-[13px] font-semibold">
@@ -522,7 +544,8 @@ function SightingCard({
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11.5px] font-semibold text-muted-foreground">MI-{o.id}</span>
         {o.safety_flag && <Badge tone="rose">Safety</Badge>}
-        {o.issue_type?.label_en && <Badge tone="accent">{o.issue_type.label_en}</Badge>}
+        {/* the case page sends the sighting's own issue as issue_label */}
+        {(o.issue_label || o.issue_type?.label_en) && <Badge tone="accent">{o.issue_label || o.issue_type?.label_en}</Badge>}
         {o.report_basis && <Badge tone="grey">{REPORT_BASIS_LABEL[o.report_basis] || o.report_basis}</Badge>}
         {o.qty_affected ? <Badge tone="grey">{o.qty_affected} affected</Badge> : null}
         {o.near_duplicate_of ? <Badge tone="amber">Photo seen before</Badge> : null}
@@ -632,23 +655,83 @@ function statusWord(s?: string | null): string {
   return s ? CASE_STATUS_LABEL[s as MiCaseStatus] || s : ''
 }
 
-function eventText(e: MiCaseEvent): { title: string; body: string } {
+/** Why the evidence rose (market_quality._raise_evidence / update_case: detail.why). */
+const EVIDENCE_WHY: Record<string, string> = {
+  photo: 'a photo came with a sighting',
+  verified: 'the case was verified',
+  reviewer: 'raised by a reviewer',
+  merge: 'a merged case brought it',
+}
+
+/** The fields an edit or an action update names (detail = {field: {from, to}}). */
+const FIELD_WORDS: Record<string, string> = {
+  title: 'title',
+  yq_item_code: 'product',
+  brand_id: 'brand',
+  supplier_id: 'supplier',
+  severity: 'severity',
+  assignee: 'assignee',
+  due_date: 'due date',
+  safety: 'safety',
+  verification_method: 'verification method',
+  verification_reason: 'verification reason',
+  batch_ref: 'batch',
+  packaging_version: 'packaging version',
+  supplier_response: "supplier's response",
+  resolution_check: "YQ's resolution check",
+  status: 'status',
+}
+/** Keys an event's detail carries beside its changes (never "edited"). */
+const NOT_CHANGES = new Set(['reason', 'observation_id', 'from_case', 'photo_id', 'action_id'])
+
+function changeOf(v: unknown): { from: unknown; to: unknown } | null {
+  return v && typeof v === 'object' && 'to' in (v as object) ? (v as { from: unknown; to: unknown }) : null
+}
+
+/** "status Open → Supplier responded; supplier's response recorded" from an action update's changes. */
+function actionChanges(changes: Record<string, unknown>): string {
+  const out: string[] = []
+  for (const [k, v] of Object.entries(changes)) {
+    const ch = changeOf(v)
+    if (!ch) continue
+    if (k === 'status') {
+      const word = (s: unknown) => ACTION_STATUS_LABEL[String(s) as MiActionStatus] || String(s ?? '')
+      out.push(`status ${word(ch.from)} → ${word(ch.to)}`)
+    } else {
+      out.push(`${FIELD_WORDS[k] || k.replace(/_/g, ' ')} ${ch.to ? 'recorded' : 'cleared'}`)
+    }
+  }
+  return out.join('; ')
+}
+
+/** One timeline line: `quote` marks words a person typed (a reason, a question, an answer, a request). */
+function eventText(e: MiCaseEvent): { title: string; body: string; quote?: boolean; alarm?: boolean } {
   const d = (e.detail || {}) as Record<string, unknown>
   switch (e.event) {
-    case 'created':
-      return { title: 'Case opened', body: detailText(d, 'title', 'reason') }
-    case 'status':
-      return { title: `${statusWord(e.from_status) || 'Status'} → ${statusWord(e.to_status)}`, body: detailText(d, 'reason', 'verification_reason') }
+    case 'created': {
+      const obs = detailText(d, 'observation_id')
+      return { title: 'Case opened', body: obs ? `from MI-${obs}` : '' }
+    }
+    case 'status': {
+      const aid = detailText(d, 'action_id')
+      const reason = detailText(d, 'reason', 'verification_reason')
+      const title = `${statusWord(e.from_status) || 'Status'} → ${statusWord(e.to_status)}`
+      return reason ? { title, body: reason, quote: true } : { title, body: aid ? `with CA-${aid}` : '' }
+    }
     case 'evidence': {
       const to = Number(d.to ?? d.evidence_level ?? d.level)
-      return { title: to ? `Evidence raised to "${evidenceLabel(to)}"` : 'Evidence level raised', body: detailText(d, 'reason') }
+      const why = EVIDENCE_WHY[String(d.why || '')] || detailText(d, 'why')
+      const from = detailText(d, 'from_case')
+      return { title: to ? `Evidence raised to "${evidenceLabel(to)}"` : 'Evidence level raised', body: [why, from ? `from case ${from}` : ''].filter(Boolean).join(', ') }
     }
     case 'question':
-      return { title: 'Asked the rep', body: detailText(d, 'text', 'question') }
+      return { title: 'Asked the rep', body: detailText(d, 'text', 'question'), quote: true }
     case 'answer':
-      return { title: 'The rep answered', body: detailText(d, 'text', 'answer') }
-    case 'link':
-      return { title: 'Linked', body: detailText(d, 'yq_item_code', 'product', 'brand', 'supplier') }
+      return { title: d.photo_id ? 'The rep answered, with a photo' : 'The rep answered', body: detailText(d, 'text', 'answer'), quote: true }
+    case 'link': {
+      const obs = detailText(d, 'observation_id')
+      return { title: obs ? `Sighting MI-${obs} joined` : 'A sighting joined', body: '' }
+    }
     case 'move': {
       const obs = detailText(d, 'observation_id')
       const to = detailText(d, 'to_case', 'case_id', 'to')
@@ -660,16 +743,32 @@ function eventText(e: MiCaseEvent): { title: string; body: string } {
       const from = detailText(d, 'from_id', 'merged_from', 'from')
       return { title: into ? `Merged into case ${into}` : from ? `Case ${from} merged into this one` : 'Merged', body: '' }
     }
-    case 'edit':
-      return { title: `Edited ${Object.keys(d).filter((k) => k !== 'reason').map((k) => k.replace(/_/g, ' ')).join(', ') || 'details'}`, body: detailText(d, 'reason') }
+    case 'edit': {
+      const safety = changeOf(d.safety)
+      if (safety && safety.to === true && Object.keys(d).every((k) => k === 'safety' || NOT_CHANGES.has(k))) {
+        return { title: 'Marked as a safety case', body: detailText(d, 'reason'), quote: true }
+      }
+      const fields = Object.keys(d).filter((k) => !NOT_CHANGES.has(k)).map((k) => FIELD_WORDS[k] || k.replace(/_/g, ' '))
+      return { title: `Edited ${fields.join(', ') || 'details'}`, body: detailText(d, 'reason'), quote: true }
+    }
     case 'action': {
       const aid = detailText(d, 'action_id', 'id')
-      return { title: aid ? `Supplier action CA-${aid}` : 'Supplier action', body: detailText(d, 'request', 'status', 'supplier_response') }
+      const ref = aid ? `CA-${aid}` : 'A supplier action'
+      // an update nests what changed (market_quality.update_action); the first event is the request itself
+      if (d.changes && typeof d.changes === 'object') return { title: `${ref} updated`, body: actionChanges(d.changes as Record<string, unknown>) }
+      const due = detailText(d, 'due_date')
+      return { title: `${aid ? `Supplier action ${ref}` : 'Supplier action'} requested${due ? `, due ${dayText(due)}` : ''}`, body: detailText(d, 'request'), quote: true }
     }
-    case 'safety_alert':
-      return { title: 'Safety alert e-mailed to the manager', body: '' }
+    case 'safety_alert': {
+      // the claim is written first ("queued"), the outcome after the answer ("sent" / "not_sent" + reason)
+      const mail = String(d.email || '')
+      if (mail === 'sent') return { title: 'Safety alert e-mailed to the manager', body: '' }
+      if (mail === 'not_sent') return { title: 'Safety alert NOT e-mailed', body: detailText(d, 'reason'), alarm: true }
+      if (mail === 'queued') return { title: 'Safety alert queued for the manager', body: '' }
+      return { title: 'Safety alert', body: '' }
+    }
     default:
-      return { title: e.event.replace(/_/g, ' '), body: detailText(d, 'reason', 'text') }
+      return { title: e.event.replace(/_/g, ' '), body: detailText(d, 'reason', 'text'), quote: true }
   }
 }
 
@@ -685,8 +784,8 @@ function Timeline({ events }: { events: MiCaseEvent[] }) {
             const t = eventText(e)
             return (
               <li key={e.id} className="text-[12.5px]">
-                <div className={cn('font-semibold', e.event === 'safety_alert' && 'text-[#9f1239]')}>{t.title}</div>
-                {t.body && <div className="whitespace-pre-line text-foreground/80">“{t.body}”</div>}
+                <div className={cn('font-semibold', e.event === 'safety_alert' && 'text-[#9f1239]', t.alarm && '-mx-1 inline-block rounded bg-[#fdecef] px-1')}>{t.title}</div>
+                {t.body && <div className="whitespace-pre-line text-foreground/80">{t.quote ? `“${t.body}”` : t.body}</div>}
                 <div className="text-muted-foreground">
                   {who(e.actor)}
                   {e.at ? ` · ${whenText(e.at)}` : ''}
@@ -716,6 +815,7 @@ function moveHint(m: CaseMove, from: MiCaseStatus): string {
 
 function StatusPanel({
   c,
+  statusText,
   actions,
   admin,
   lists,
@@ -723,6 +823,7 @@ function StatusPanel({
   onError,
 }: {
   c: MiCase
+  statusText: string
   actions: MiSupplierAction[]
   admin: boolean
   lists: MiLists | null
@@ -730,7 +831,8 @@ function StatusPanel({
   onError: (fallback: string) => (e: unknown) => void
 }) {
   const actionDone = actions.some((a) => (a.supplier_response || '').trim() && (a.resolution_check || '').trim())
-  const moves = caseMoves(c.status, { admin, actionDone })
+  // the contract's table, narrowed to what the server says this login may do now (next_statuses)
+  const moves = caseMoves(c.status, { admin, actionDone, allowed: c.next_statuses })
   const [to, setTo] = useState<MiCaseStatus | null>(null)
   const [reason, setReason] = useState('')
   const [method, setMethod] = useState('')
@@ -756,7 +858,7 @@ function StatusPanel({
     <section className={CARD}>
       <h2 className="mb-1.5 font-display text-[15px] font-bold">Status</h2>
       <div className="mb-3 flex items-center gap-2 text-[12.5px] text-muted-foreground">
-        Now <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{CASE_STATUS_LABEL[c.status] || c.status}</Badge>
+        Now <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{statusText}</Badge>
       </div>
       {moves.length ? (
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Move the case to">
@@ -773,7 +875,7 @@ function StatusPanel({
           ))}
         </div>
       ) : (
-        <p className="text-[12.5px] text-muted-foreground">No further move from {CASE_STATUS_LABEL[c.status] || c.status}.</p>
+        <p className="text-[12.5px] text-muted-foreground">No further move from {statusText}.</p>
       )}
 
       {move && (
@@ -800,7 +902,7 @@ function StatusPanel({
                 <label htmlFor="move-reason" className={LABEL}>
                   {move.method ? 'Why it is verified' : move.reason === 'required' ? 'Reason (required)' : 'Reason (optional)'}
                 </label>
-                <textarea id="move-reason" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} className={TEXTAREA} placeholder="Kept in the history" />
+                <textarea id="move-reason" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={LIMIT.reason} className={TEXTAREA} placeholder="Kept in the history" />
               </div>
               <button type="button" disabled={!ready || patch.isPending} onClick={() => patch.mutate()} className={cn(BTN, 'w-full')}>
                 {patch.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Move to {CASE_STATUS_LABEL[move.to]}
@@ -825,7 +927,7 @@ function AskRepForm({ caseId, onDone, onError }: { caseId: number; onDone: (msg:
   })
   return (
     <div className="space-y-2">
-      <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} maxLength={1000} className={TEXTAREA} placeholder="e.g. Can you photograph the batch code on the box?" aria-label="Question to the rep" />
+      <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} maxLength={LIMIT.question} className={TEXTAREA} placeholder="e.g. Can you photograph the batch code on the box?" aria-label="Question to the rep" />
       <p className="text-[11.5px] text-muted-foreground">The rep sees it under My reports and answers there, with a photo if needed.</p>
       <button type="button" disabled={text.trim().length < 3 || m.isPending} onClick={() => m.mutate()} className={cn(BTN, 'w-full')}>
         {m.isPending && <Loader2 size={15} className="animate-spin" aria-hidden="true" />} Send to the rep
@@ -893,12 +995,12 @@ function ActionForm({ c, lists, onDone, onError }: { c: MiCase; lists: MiLists |
     <div className="space-y-2.5">
       <div>
         <label htmlFor="act-request" className={LABEL}>What we ask the supplier</label>
-        <textarea id="act-request" rows={3} value={request} onChange={(e) => setRequest(e.target.value)} maxLength={1000} className={TEXTAREA} placeholder="e.g. Root cause and a replacement for the affected units" />
+        <textarea id="act-request" rows={3} value={request} onChange={(e) => setRequest(e.target.value)} maxLength={LIMIT.request} className={TEXTAREA} placeholder="e.g. Root cause and a replacement for the affected units" />
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div>
           <label htmlFor="act-owner" className={LABEL}>Owner at YQ</label>
-          <input id="act-owner" value={owner} onChange={(e) => setOwner(e.target.value)} maxLength={80} className={INPUT} placeholder="Who follows it up" />
+          <input id="act-owner" value={owner} onChange={(e) => setOwner(e.target.value)} maxLength={LIMIT.owner} className={INPUT} placeholder="Who follows it up" />
         </div>
         <div>
           <label htmlFor="act-due" className={LABEL}>Due</label>
@@ -1019,11 +1121,11 @@ function ActionItem({ a, canEdit, onDone, onError }: { a: MiSupplierAction; canE
           <div className="mt-2 space-y-2">
             <div>
               <label htmlFor={`resp-${a.id}`} className={LABEL}>Supplier response</label>
-              <textarea id={`resp-${a.id}`} rows={3} value={response} onChange={(e) => setResponse(e.target.value)} maxLength={2000} className={TEXTAREA} />
+              <textarea id={`resp-${a.id}`} rows={3} value={response} onChange={(e) => setResponse(e.target.value)} maxLength={LIMIT.response} className={TEXTAREA} />
             </div>
             <div>
               <label htmlFor={`check-${a.id}`} className={LABEL}>YQ resolution check</label>
-              <textarea id={`check-${a.id}`} rows={2} value={check} onChange={(e) => setCheck(e.target.value)} maxLength={2000} className={TEXTAREA} placeholder="What YQ checked to confirm the fix" />
+              <textarea id={`check-${a.id}`} rows={2} value={check} onChange={(e) => setCheck(e.target.value)} maxLength={LIMIT.check} className={TEXTAREA} placeholder="What YQ checked to confirm the fix" />
             </div>
             <div>
               <label htmlFor={`status-${a.id}`} className={LABEL}>Action status</label>

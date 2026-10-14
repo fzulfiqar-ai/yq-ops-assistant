@@ -26,15 +26,36 @@ export function serverErrorText(ref: string | null | undefined): string {
   return ref ? `Server error (ref ${ref}). Please retry.` : 'Server error. Please retry.'
 }
 
+/**
+ * The API's own words in an error body: its `detail` line, or — a 422 from FastAPI's validation, where
+ * detail is a list — the first item's message with its field. Null when the body says neither.
+ */
+export function detailText(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown }
+    if (parsed && typeof parsed.detail === 'string') return parsed.detail
+    if (parsed && Array.isArray(parsed.detail) && parsed.detail.length) return validationText(parsed.detail[0])
+  } catch {
+    /* body wasn't JSON */
+  }
+  return null
+}
+
+/** One FastAPI validation item ({loc, msg}) as a line: "text: String should have at most 600 characters". */
+function validationText(item: unknown): string {
+  if (typeof item === 'string') return item
+  const d = (item || {}) as { loc?: unknown; msg?: unknown }
+  const msg = typeof d.msg === 'string' && d.msg ? d.msg : 'The request was not accepted.'
+  const loc = Array.isArray(d.loc) ? d.loc.filter((x) => typeof x === 'string' && x !== 'body' && x !== 'query') : []
+  const field = loc.length ? String(loc[loc.length - 1]).replace(/_/g, ' ') : ''
+  return field ? `${field}: ${msg}` : msg
+}
+
 export function errorText(e: unknown, fallback: string): string {
   if (e instanceof ApiError) {
     if (e.status >= 500) return serverErrorText(e.ref)
-    try {
-      const parsed = JSON.parse(e.body) as { detail?: unknown }
-      if (parsed && typeof parsed.detail === 'string') return parsed.detail
-    } catch {
-      /* body wasn't JSON — fall through to the raw text below */
-    }
+    const said = detailText(e.body)
+    if (said) return said
     return e.body ? e.body.slice(0, 200) : e.message
   }
   if (isNetworkError(e)) return NETWORK_ERROR_TEXT

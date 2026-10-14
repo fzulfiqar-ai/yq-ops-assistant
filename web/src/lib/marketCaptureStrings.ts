@@ -111,6 +111,9 @@ export interface CaptureStrings {
   legacy: string
   reportReceived: string
   reportReceivedBody: string
+  /** the report joined an open case of the same product and issue (the API's case.joined) */
+  joinedTitle: string
+  joinedBody: (shops: number) => string
   alerted: string
   alertedBody: string
   safetyNoted: string
@@ -239,6 +242,9 @@ const en: CaptureStrings = {
   legacy: 'Saved to the Finds board while Market Intel is being set up.',
   reportReceived: 'Report received',
   reportReceivedBody: 'The office checks it. You see what happens in My reports.',
+  joinedTitle: 'Added to an open report',
+  joinedBody: (shops) =>
+    `The same problem was already reported${shops ? `, now from ${shops} shop${shops === 1 ? '' : 's'}` : ''}. The office reviews it as one case; you see what happens in My reports.`,
   alerted: 'Manager alerted',
   alertedBody: 'Keep the item aside if you can.',
   safetyNoted: 'Marked as a safety issue for the office.',
@@ -367,6 +373,9 @@ const ar: CaptureStrings = {
   legacy: 'حُفظ في لوحة الاكتشافات ريثما يُجهَّز نظام معلومات السوق.',
   reportReceived: 'وصل البلاغ',
   reportReceivedBody: 'سيراجعه المكتب، وترى ما يحدث في «تقاريري».',
+  joinedTitle: 'أُضيف إلى بلاغ مفتوح',
+  joinedBody: (shops) =>
+    `هذه المشكلة مُبلَّغ عنها من قبل${shops ? `، والآن من ${shops} ${shops === 1 ? 'محل' : 'محلات'}` : ''}. يراجعها المكتب كحالة واحدة، وترى ما يحدث في «تقاريري».`,
   alerted: 'تم تنبيه المدير',
   alertedBody: 'احتفظ بالقطعة جانبًا إن أمكن.',
   safetyNoted: 'سُجّل كمشكلة سلامة للمكتب.',
