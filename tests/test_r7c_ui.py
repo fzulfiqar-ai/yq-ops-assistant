@@ -17,6 +17,10 @@ money — run for real in plain node through web/scripts/order_heart_ui_test.mjs
 The API contract the page is coded to is app/shop_heart.py + app/shop_api.py (stream S3a). When
 that module is present (after the streams are merged) the last checks compare the page's copies of
 the server's exact messages and vocabularies with the server's own; before that they SKIP.
+
+Section 9d pins the Market Intel v2 screens (release r8m) the same way, from the sources: Spotted v2
+(tiles, the v2 capture fields on the same retry queue, safety, EN/AR), the office capture, the product
+picker, the case moves of the contract, the "Not available yet" panel, roles, My reports and photos.
 """
 from __future__ import annotations
 
@@ -705,6 +709,199 @@ def _():
         assert word not in low, word
     # the 390 px phone: the text column can shrink, the row never pushes the card wider
     assert '<span className="min-w-0 flex-1">' in src and "truncate" in src and "overflow-hidden rounded-2xl" in src
+
+
+# ── 9d. Market Intel v2 (release r8m, plan Part F): Spotted v2, the office capture, cases, lists,
+#        supplier reports, My reports. The R7b pins above (the button's position, SHOW_ON, the
+#        capture room) still hold unchanged: v2 adds an office mount and a new sheet behind the same
+#        floating button, so these pins are new, not edits.
+
+MI_LIB = "web/src/lib/marketIntel.ts"
+MI_STRINGS = "web/src/lib/marketCaptureStrings.ts"
+MI_DICTATION = "web/src/lib/dictation.ts"
+MI_PAGE = "web/src/pages/MarketIntel.tsx"
+MI_CASE = "web/src/pages/market-intel/CasePage.tsx"
+MI_CASES = "web/src/pages/market-intel/CasesTab.tsx"
+MI_LISTS = "web/src/pages/market-intel/ListsTab.tsx"
+MI_REPORTS = "web/src/pages/market-intel/ReportsTab.tsx"
+MI_UI = "web/src/pages/market-intel/ui.tsx"
+MI_UTIL = "web/src/pages/market-intel/util.ts"
+PICKER = "web/src/components/ProductPicker.tsx"
+
+# contract §3, PATCH /market-intel/cases/{id}: the only moves the API allows (anything else is 409)
+CASE_TRANSITIONS = {
+    "submitted": ["under_review", "more_info_required", "verified", "not_substantiated"],
+    "under_review": ["more_info_required", "verified", "not_substantiated"],
+    "more_info_required": ["under_review", "verified", "not_substantiated"],
+    "verified": ["action_requested", "closed"],
+    "not_substantiated": ["closed", "under_review"],
+    "action_requested": ["resolved"],
+    "resolved": ["closed"],
+    "closed": ["under_review"],
+}
+
+
+@test("r8m Spotted v2: six tiles; the v2 fields ride the same retry queue; the time of the shot is fixed at Save")
+def _():
+    cap = _read(CAPTURE)
+    tiles = cap.split("const TILES: { value: CaptureTile; icon: ReactNode }[] = [", 1)[1].split("\n]", 1)[0]
+    assert re.findall(r"value: '([a-z]+)'", tiles) == ["quality", "packaging", "asked", "competitor", "trend", "other"]
+    save = _fn(cap, "export function MarketCapture(").split("async function save()", 1)[1].split("\n  }\n", 1)[0]
+    for field in ("issue_type_id:", "yq_item_code:", "report_basis:", "qty_affected:", "batch_ref:", "packaging_version:",
+                  "safety_flag:", "client_observed_at:", "brand_id:", "supplier_id:", "photo_roles:", "shop_phone:"):
+        assert field in save, field
+    assert "client_observed_at: observedAtIso(photos, openedAt)," in save
+    assert "const got = await submitCapture(draft)" in save, "one queue for v1 and v2 captures"
+    lib = _read(MI_LIB)
+    assert "for (const [k, v] of Object.entries(d.fields)) if (v !== '') form.append(k, v)" in lib
+    obs = lib.split("export function observedAtIso(", 1)[1].split("\n}", 1)[0]
+    assert "t <= now + 10 * 60_000" in obs and "photos.map((p) => p.takenAt).find(ok)" in obs
+    assert "const takenAt = Number.isFinite(file.lastModified) && file.lastModified > 0 ? file.lastModified : undefined" in lib
+    # a label / batch photo travels as role label_batch, aligned with the photos
+    assert "void addFiles(e.target.files, 'label_batch')" in cap
+    assert "return photos.map((p) => p.role || 'product').join(',')" in lib
+
+
+@test("r8m Spotted v2: safety chips set safety_flag; 'Manager alerted' only when the API says safety_alerted")
+def _():
+    cap = _read(CAPTURE)
+    assert "const safetyOn = quality && (safety || Boolean(chosen?.safety_default))" in cap
+    assert "safety_flag: safetyOn ? 'true' : ''," in cap
+    card = _fn(cap, "function ResultCard(")
+    assert "card.safety_alerted ? (" in card and "S.alerted" in card
+    strings = _read(MI_STRINGS)
+    assert "alerted: 'Manager alerted'," in strings and "safetyChip: 'Heat / smoke / swelling / shock'," in strings
+    # the issue chips are the admin's list for the tile (quality / packaging), in his order, active only
+    assert "const ISSUE_KIND: Partial<Record<CaptureTile, 'quality' | 'packaging'>> = { quality: 'quality', packaging: 'packaging' }" in cap
+    lib = _read(MI_LIB)
+    fn = lib.split("export function issueTypesFor(", 1)[1].split("\n}", 1)[0]
+    assert ".filter((t) => t.active !== false && t.kind === kind)" in fn and "(a.sort ?? 100) - (b.sort ?? 100)" in fn
+
+
+@test("r8m Spotted v2: an EN/AR strings table, the sheet right to left in Arabic, voice in en-US / ar-SA")
+def _():
+    strings = _read(MI_STRINGS)
+    assert "const en: CaptureStrings = {\n  dir: 'ltr'," in strings and "const ar: CaptureStrings = {\n  dir: 'rtl'," in strings
+    assert "const LANG_KEY = 'yq-mi-lang'" in strings
+    cap = _read(CAPTURE)
+    assert "dir={S.dir}" in cap and "lang={lang}" in cap
+    sheet = _read("web/src/components/ui/sheet.tsx")
+    assert "dir={dir}" in sheet and "lang={lang}" in sheet
+    dic = _read(MI_DICTATION)
+    assert "export type DictationLang = 'en-US' | 'ar-SA'" in dic
+    assert "w.SpeechRecognition || w.webkitSpeechRecognition" in dic
+    assert "dict.start(voiceLang," in cap and "{dict.supported && (" in cap, "no mic where the browser has no recognizer"
+
+
+@test("r8m office capture: AppShell mounts Spotted on the Market Intel pages, clear of a tab bar it does not have")
+def _():
+    shell = _read("web/src/components/AppShell.tsx")
+    assert "<MarketCapture office />" in shell
+    assert "pb-[calc(1.5rem+var(--yq-capture-room,0px))]" in shell
+    cap = _read(CAPTURE)
+    assert "const OFFICE_SHOW_ON = ['/market-intel']" in cap
+    assert "const showOn = office ? OFFICE_SHOW_ON : SHOW_ON" in cap
+    assert "${office ? ' [--yq-tabbar:0px]' : ''}" in cap
+    # management is read-only: no capture (the same `allowed` rule as v1)
+    assert "!isReadOnly(me)" in cap
+
+
+@test("r8m product picker: GET /market-intel/products with photos, 'Not sure / not ours', Arabic read into the catalog's words")
+def _():
+    lib = _read(MI_LIB)
+    fn = lib.split("export async function fetchProducts(", 1)[1].split("\n}", 1)[0]
+    assert "`/market-intel/products?${p.toString()}`" in fn
+    assert "await import('@/market/lib/search')" in fn and "m.queryText(query)" in fn
+    pick = _read(PICKER)
+    assert "onNotSure && words.notSure" in pick
+    assert "p.thumb_url || p.package_thumb_url" in pick
+    # MiniSearch stays out of the shell's chunk: only a dynamic import, never a static one
+    for rel in (CAPTURE, PICKER, MI_LIB):
+        assert "from '@/market/lib/search'" not in _read(rel), rel
+
+
+@test("r8m case moves: exactly the contract's transitions, each with what it needs")
+def _():
+    lib = _read(MI_LIB)
+    block = lib.split("export const CASE_NEXT: Record<MiCaseStatus, readonly MiCaseStatus[]> = {", 1)[1].split("\n}", 1)[0]
+    got = {k: re.findall(r"'([a-z_]+)'", v) for k, v in re.findall(r"^  ([a-z_]+): \[([^\]]*)\],$", block, re.M)}
+    assert got == CASE_TRANSITIONS, got
+    moves = lib.split("export function caseMoves(", 1)[1].split("\n}", 1)[0]
+    assert "if (from === 'closed' && to === 'under_review' && !o.admin) continue" in moves
+    assert ("to === 'verified' || to === 'not_substantiated' || (from === 'not_substantiated' && to === 'under_review') "
+            "|| (from === 'closed' && to === 'under_review')") in moves
+    assert "method: to === 'verified'," in moves
+    assert "blocked: to === 'resolved' && !o.actionDone ?" in moves
+    page = _read(MI_CASE)
+    status = _fn(page, "function StatusPanel(")
+    assert "body.verification_method = method" in status and "body.verification_reason = r" in status
+    assert "a.supplier_response || '').trim() && (a.resolution_check || '').trim()" in status
+    for route in ("`/market-intel/cases/${caseId}/question`", "`/market-intel/cases/${c.id}/action`",
+                  "`/market-intel/cases/${c.id}/merge`", "`/market-intel/observations/${obsId}/move`",
+                  "`/market-intel/actions/${a.id}`"):
+        assert route in page, route
+    # the evidence level only moves up
+    assert "EVIDENCE_LEVELS.filter((e) => e.level > cur)" in _fn(page, "function EvidencePanel(")
+
+
+@test("r8m: a 503 (tables not migrated) or a list route the API lacks shows 'Not available yet', never a crash")
+def _():
+    lib = _read(MI_LIB)
+    assert "return e instanceof ApiError && (e.status === 503 || (missingRouteToo && e.status === 404))" in lib
+    for rel in (MI_CASES, MI_LISTS, MI_REPORTS, MI_CASE):
+        src = _read(rel)
+        assert "<NotAvailableYet" in src and "notReady(" in src, rel
+    assert "Not available yet" in _read(MI_UI)
+
+
+@test("r8m roles: a salesman never sees Cases, Lists or reports; Lists is admin-only; management reads and approves")
+def _():
+    page = _read(MI_PAGE)
+    assert "return me?.role === 'salesman' ? <RepSignals /> : <OfficeBoard />" in page
+    assert "(t !== 'lists' || roles.admin) && (t !== 'reports' || roles.review || roles.approve)" in page
+    case = _read(MI_CASE)
+    assert "const isRep = me?.role === 'salesman'" in case and "enabled: !isRep && valid" in case
+    assert "const canEdit = roles.review && !merged" in case
+    util = _read(MI_UTIL)
+    assert "const review = !readOnly && (caps?.can_review ??" in util
+    rep = _read(MI_REPORTS)
+    assert "{draft && roles.approve && (" in rep
+    assert "r.status === 'approved' && (roles.approve || roles.review)" in rep
+    assert "apiGetDownload(`/market-intel/supplier-reports/${r.id}/download`" in rep
+    assert "{roles.review && (" in rep, "only reviewers build drafts"
+    app = _read("web/src/App.tsx")
+    assert 'path="market-intel/cases/:id" element={<Gate feature="Market Intel"><MarketCase /></Gate>}' in app
+
+
+@test("r8m My reports: the case in plain words; the office's question answered in place (text + one photo)")
+def _():
+    page = _read(MI_PAGE)
+    reps = _fn(page, "function RepSignals(")
+    assert "words={o.case_status_words}" in reps and "<AnswerBox obs={o} />" in reps
+    box = _fn(page, "function AnswerBox(")
+    assert "form.append('text', text.trim())" in box and "form.append('photo', photo.blob, photo.name)" in box
+    assert "apiUpload(`/market-intel/observations/${obs.id}/answer`, form)" in box
+    assert "qc.invalidateQueries({ queryKey: ['mi-mine'] })" in box
+
+
+@test("r8m board: 320 px thumbnails first, pages of 48 over the true count; 'Seen' is a day, not a timestamp")
+def _():
+    page = _read(MI_PAGE)
+    assert "c.thumb_url || c.cover_thumb_url || c.cover_url" in page
+    assert "offset: page * BOARD_PAGE," in page and "count={data.count ?? data.items.length}" in page
+    assert "since: sinceDay(f.since)," in page and "sinceIso" not in page
+    util = _read(MI_UTIL)
+    assert "export function sinceDay(" in util
+
+
+@test("r8m people photos: the server's blurred copy; the original only for an admin who asks (?raw=1)")
+def _():
+    case = _read(MI_CASE)
+    assert "`/market-intel/cases/${caseId}${raw ? '?raw=1' : ''}`" in case
+    assert "{roles.admin && observations.some(" in case
+    page = _read(MI_PAGE)
+    assert "`/market-intel/items/${id}${raw ? '?raw=1' : ''}`" in page and "me?.role === 'admin' ? setRaw : undefined" in page
+    assert "people && !raw && 'blur-md'" in _read(MI_UI)
 
 
 # ── 10. the page's copies of the server's words (after the streams are merged) ─
