@@ -655,6 +655,17 @@ def _replay(conn, psycopg) -> None:
     )
     for sql, params, exc in bad:
         _refused(cur, sql, params, exc)
+    cur.execute("savepoint one_claim")
+    claim = ("insert into market_case_events (case_id, actor, event, detail) values "
+             "(%s, 'system', 'safety_alert', '{\"email\": \"queued\"}')")
+    cur.execute(claim, (case1,))
+    _refused(cur, claim, (case1,), E.UniqueViolation)
+    cur.execute("insert into market_case_events (case_id, actor, event, detail) values "
+                "(%s, 'system', 'safety_alert', '{\"email\": \"sent\"}'), "
+                "(%s, 'system', 'safety_alert', '{\"email\": \"not_sent\"}')", (case1, case1))   # outcomes are free
+    cur.execute(claim, (case2,))                                                              # another case claims its own
+    cur.execute("rollback to savepoint one_claim")
+    _step("one safety-alert claim per case: a second claim is refused; outcomes and other cases are not")
     cur.execute("savepoint one_approved")
     cur.execute("insert into supplier_reports (supplier_id, month, status) values (%s, '2026-11-01', 'approved')", (sa,))
     _refused(cur, "insert into supplier_reports (supplier_id, month, status) values (%s, '2026-11-01', 'approved')", (sa,),

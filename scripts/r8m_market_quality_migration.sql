@@ -251,6 +251,12 @@ begin
 end $$;
 revoke all on function market_case_events_no_rewrite() from public, anon, authenticated;
 
+-- one safety-alert CLAIM per case: two safety sightings (or a sighting and a reviewer) racing can never send two
+-- e-mails; the API claims by inserting the 'queued' event and reads a unique violation as "already claimed". The
+-- outcome events ('sent' / 'not_sent') are not limited.
+create unique index if not exists market_case_events_one_alert_claim_idx on market_case_events (case_id)
+  where event = 'safety_alert' and detail->>'email' = 'queued';
+
 drop trigger if exists market_case_events_append_only on market_case_events;
 create trigger market_case_events_append_only
   before update or delete on market_case_events
