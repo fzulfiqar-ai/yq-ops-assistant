@@ -132,6 +132,17 @@ export async function apiDownload(path: string, body?: unknown, fallbackName = '
     body: body === undefined ? undefined : JSON.stringify(body),
   }, UPLOAD_TIMEOUT_MS)
   if (!res.ok) return fail(res)
+  await saveAs(res, fallbackName)
+}
+
+/** GET a file with the bearer token and save it under the server's name (the supplier workbook, r8m). */
+export async function apiGetDownload(path: string, fallbackName = 'download'): Promise<void> {
+  const res = await fetchTimeout(`${BASE}${path}`, { headers: { ...(await authHeaders()) } }, UPLOAD_TIMEOUT_MS)
+  if (!res.ok) return fail(res)
+  await saveAs(res, fallbackName)
+}
+
+async function saveAs(res: Response, fallbackName: string): Promise<void> {
   const blob = await res.blob()
   const cd = res.headers.get('content-disposition') || ''
   const m = cd.match(/filename="?([^"]+)"?/)

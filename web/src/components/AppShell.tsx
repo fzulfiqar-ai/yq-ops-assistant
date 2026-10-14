@@ -11,6 +11,7 @@ import { navFor, NAV } from '@/lib/nav'
 import { Logo } from './Logo'
 import { CommandPalette } from './CommandPalette'
 import { FreshnessChip } from './FreshnessChip'
+import { MarketCapture } from './MarketCapture'
 
 const PREFETCH_REPORTS: [key: string, feature: string][] = [
   ['sales', 'Sales'], ['inventory', 'Inventory'], ['margins', 'Margins'], ['receivables', 'Receivables'],
@@ -305,7 +306,8 @@ export function AppShell() {
           </div>
         )}
 
-        {/* Page content with cross-fade */}
+        {/* Page content with cross-fade. --yq-capture-room: the floating Spotted button's height while it
+            shows (MarketCapture, office mount below), so a page's last line can scroll out from under it */}
         <main className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden">
           <AnimatePresence mode="wait">
             <motion.div
@@ -314,7 +316,7 @@ export function AppShell() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-              className="w-full min-w-0 max-w-full overflow-x-hidden px-4 py-6 sm:px-5 md:px-7 lg:px-8"
+              className="w-full min-w-0 max-w-full overflow-x-hidden px-4 py-6 pb-[calc(1.5rem+var(--yq-capture-room,0px))] sm:px-5 md:px-7 lg:px-8"
             >
               <Suspense
                 fallback={
@@ -329,6 +331,9 @@ export function AppShell() {
           </AnimatePresence>
         </main>
       </div>
+      {/* Market Intel v2 (r8m): the office reports what it sees too — Spotted on the Market Intel pages
+          (members, admins and reviewers holding the page; management is read-only and never sees it) */}
+      <MarketCapture office />
     </div>
   )
 }

@@ -53,9 +53,12 @@ export interface SheetProps {
   /** Pinned to the bottom of the panel, outside the scroll area. */
   footer?: ReactNode
   className?: string
+  /** The panel's writing direction and language (the Spotted sheet in Arabic reads right to left). */
+  dir?: 'ltr' | 'rtl'
+  lang?: string
 }
 
-export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', children, footer, className }: SheetProps) {
+export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', children, footer, className, dir, lang }: SheetProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   const restoreRef = useRef<HTMLElement | null>(null)
   const titleId = useId()
@@ -128,6 +131,8 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={subtitle ? descId : undefined}
+        dir={dir}
+        lang={lang}
         tabIndex={-1}
         className={cn(
           'yq-panel relative flex flex-col overflow-hidden bg-white shadow-[0_-8px_44px_-12px_rgba(24,16,48,.32)] outline-none',

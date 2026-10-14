@@ -1,5 +1,6 @@
-import { useMemo, useState, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Barcode,
   Camera,
@@ -7,19 +8,25 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  FileSpreadsheet,
   History,
-  ImageOff,
+  ImagePlus,
   Inbox,
   Library,
+  ListChecks,
   Loader2,
+  MessageSquareReply,
   PackageCheck,
   Radar,
   Search,
+  Send,
+  Siren,
   Sparkles,
   Store,
   UserRound,
+  X,
 } from 'lucide-react'
-import { apiGet, apiPatch, apiPost } from '@/lib/api'
+import { apiGet, apiPatch, apiPost, apiUpload } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { errorText } from '@/lib/errorText'
 import { cn } from '@/lib/utils'
@@ -30,10 +37,12 @@ import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import {
   ACTIONS,
+  fetchLists,
   KINDS,
-  STATUS_LABEL,
+  preparePhoto,
   priceRange,
   shortDate,
+  STATUS_LABEL,
   type MiAction,
   type MiBoard,
   type MiCluster,
@@ -42,19 +51,30 @@ import {
   type MiObservation,
   type MiReview,
   type MiStatus,
+  type ReadyPhoto,
 } from '@/lib/marketIntel'
+import { Cover, Empty, Fact, Loading, NotReady, Pager, PhotoTile, Tabs } from './market-intel/ui'
+import { INPUT, qs, SELECT, sinceDay, useMiRoles } from './market-intel/util'
+
+/* the office's v2 tabs load on their first open: a rep's phone never downloads them */
+const CasesTab = lazy(() => import('./market-intel/CasesTab').then((m) => ({ default: m.CasesTab })))
+const ListsTab = lazy(() => import('./market-intel/ListsTab').then((m) => ({ default: m.ListsTab })))
+const ReportsTab = lazy(() => import('./market-intel/ReportsTab').then((m) => ({ default: m.ReportsTab })))
 
 /**
- * /market-intel — Market Intelligence (release R7b, plan §18.2), replacing Product Finds and Field
- * Notes in the nav (their pages still open at /finds and /field-notes).
+ * /market-intel — Market Intelligence (release R7b, plan §18.2; v2 in release r8m, plan Part F),
+ * replacing Product Finds and Field Notes in the nav (their pages still open at /finds and /field-notes).
  *
  *  • Office / management: the board — clusters, not photos ("7 sightings of Brand X 20W charger at
- *    BHD 2.500–3.000 across 5 shops, 3 reps, first seen 12 Oct"), filters, the review queue (new
- *    items + photo-only sightings to identify), the imported Finds library, and the item detail:
- *    photo strip, timeline, shops, the YQ SKU or "gap", the AI suggestion (Unverified) and the
- *    decision history. Reviewers move statuses and edit; management approves an Opportunity only.
- *  • A salesman: "My signals" (his own sightings and what became of each) and what the team has
- *    seen, aggregated, never another rep's name. The Spotted button is the way in.
+ *    BHD 2.500–3.000 across 5 shops, 3 reps, first seen 12 Oct"), 320 px thumbnails, filters and pages
+ *    over the true count; the review queue (new items + photo-only sightings to identify); the quality
+ *    CASES (Safety · New · Need info · Photos to identify; each opens /market-intel/cases/:id); the
+ *    imported Finds library; the admin's LISTS (suppliers, brands, issue types); and the monthly
+ *    SUPPLIER REPORTS (build, edit, approve, download). Reviewers move statuses and edit; management
+ *    reads, approves an Opportunity or a supplier report, and downloads.
+ *  • A salesman: "My reports" (his own sightings, what became of each in plain words, and the office's
+ *    questions, answered in place with a line and a photo) and what the team has seen, aggregated,
+ *    never another rep's name. The Spotted button is the way in. He never sees Cases, Lists or reports.
  */
 
 const STATUS_TONE: Record<MiStatus, BadgeTone> = {
@@ -66,27 +86,15 @@ const STATUS_TONE: Record<MiStatus, BadgeTone> = {
   merged: 'grey',
 }
 
-const SELECT = 'h-10 rounded-xl border border-border bg-card px-3 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/40'
-const INPUT = 'h-10 w-full rounded-xl border border-border bg-card px-3 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/40'
-const SINCE: { value: string; label: string; days: number }[] = [
-  { value: '', label: 'Any time', days: 0 },
-  { value: '7', label: 'Last 7 days', days: 7 },
-  { value: '30', label: 'Last 30 days', days: 30 },
-  { value: '90', label: 'Last 90 days', days: 90 },
+const SINCE: { value: string; label: string }[] = [
+  { value: '', label: 'Any time' },
+  { value: '7', label: 'Last 7 days' },
+  { value: '30', label: 'Last 30 days' },
+  { value: '90', label: 'Last 90 days' },
 ]
 
-function sinceIso(days: string): string {
-  const n = Number(days)
-  if (!n) return ''
-  return new Date(Date.now() - n * 86400000).toISOString()
-}
-
-function qs(p: Record<string, string>): string {
-  const u = new URLSearchParams()
-  Object.entries(p).forEach(([k, v]) => v && u.set(k, v))
-  const s = u.toString()
-  return s ? `?${s}` : ''
-}
+const BOARD_PAGE = 48
+const REVIEW_PAGE = 60
 
 export default function MarketIntel() {
   const { me } = useAuth()
@@ -95,66 +103,13 @@ export default function MarketIntel() {
 
 /* ───────────────────────── shared bits ───────────────────────── */
 
-function NotReady({ hint }: { hint?: string }) {
-  return (
-    <div className="rounded-2xl border border-dashed border-border bg-card px-5 py-10 text-center">
-      <Radar size={24} className="mx-auto text-primary" aria-hidden="true" />
-      <p className="mx-auto mt-3 max-w-md text-[13.5px] text-muted-foreground">
-        {hint || 'Market Intel is not set up yet.'} Sightings saved meanwhile are kept on the Finds board and copied in afterwards.
-      </p>
-    </div>
-  )
-}
-
-function Empty({ icon, children }: { icon: ReactNode; children: ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-dashed border-border bg-card px-5 py-10 text-center text-[13.5px] text-muted-foreground">
-      <span className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-xl bg-accent text-accent-foreground">{icon}</span>
-      {children}
-    </div>
-  )
-}
-
-function Cover({ url, alt, className }: { url?: string | null; alt: string; className?: string }) {
-  return url ? (
-    <img src={url} alt={alt} loading="lazy" decoding="async" className={cn('h-full w-full object-cover', className)} />
-  ) : (
-    <span className={cn('grid h-full w-full place-items-center bg-gradient-to-br from-[#F3EDF8] to-[#E6DAF0] text-[#824FAB]', className)}>
-      <ImageOff size={22} aria-hidden="true" />
-    </span>
-  )
-}
-
-function Tabs<T extends string>({ value, onChange, tabs }: { value: T; onChange: (v: T) => void; tabs: { value: T; label: string; count?: number | null; icon: ReactNode }[] }) {
-  return (
-    <div role="tablist" className="mb-5 flex gap-1 overflow-x-auto rounded-2xl border border-border bg-muted p-1">
-      {tabs.map((t) => (
-        <button
-          key={t.value}
-          type="button"
-          role="tab"
-          aria-selected={value === t.value}
-          onClick={() => onChange(t.value)}
-          className={cn(
-            'flex h-10 shrink-0 items-center gap-2 rounded-xl px-3.5 text-[13px] font-semibold transition-colors',
-            value === t.value ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground',
-          )}
-        >
-          {t.icon}
-          {t.label}
-          {t.count ? <span className="rounded-full bg-primary/10 px-1.5 text-[11px] tabular-nums text-primary">{t.count}</span> : null}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 function ClusterCard({ c, onOpen, showMine }: { c: MiCluster; onOpen?: () => void; showMine?: boolean }) {
   const range = priceRange(c.price_min, c.price_max)
   const body = (
     <>
       <div className="relative aspect-[4/3] overflow-hidden bg-muted">
-        <Cover url={c.cover_url} alt={c.title || c.kind_label} />
+        {/* the 320 px thumbnail (r8m); an older API sends only the master */}
+        <Cover url={c.thumb_url || c.cover_thumb_url || c.cover_url} alt={c.title || c.kind_label} />
         <span className="absolute left-2 right-2 top-2 flex">
           <Badge tone={STATUS_TONE[c.status]}>{c.status_label}</Badge>
         </span>
@@ -189,28 +144,33 @@ function ClusterCard({ c, onOpen, showMine }: { c: MiCluster; onOpen?: () => voi
   )
 }
 
-function SightingRow({ o, action, showBy = true }: { o: MiObservation; action?: ReactNode; showBy?: boolean }) {
+function SightingRow({ o, action, showBy = true, words }: { o: MiObservation; action?: ReactNode; showBy?: boolean; words?: string | null }) {
   const photo = o.photos[0]
+  const people = Boolean(photo && (photo.has_people || photo.has_people_flag))
+  const status = words || o.status_label
+  const issue = o.issue_type?.label_en || o.issue_label
   return (
     <li className="flex gap-3 rounded-2xl border border-border bg-card p-3">
       <div className="h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-muted">
-        {photo?.has_people ? (
+        {people ? (
           <span className="grid h-full w-full place-items-center bg-muted text-[11px] text-muted-foreground">People</span>
         ) : (
-          <Cover url={photo?.url} alt={o.title || o.kind_label} />
+          <Cover url={photo?.thumb_url || photo?.url} alt={o.title || o.kind_label} />
         )}
       </div>
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone="grey">{o.kind_label}</Badge>
-          {o.status_label && <Badge tone={o.item_status ? STATUS_TONE[o.item_status] : 'grey'}>{o.status_label}</Badge>}
+          {status && <Badge tone={o.open_question ? 'amber' : o.item_status ? STATUS_TONE[o.item_status] : 'accent'}>{status}</Badge>}
+          {issue && <Badge tone="accent">{issue}</Badge>}
+          {o.safety_flag && <Badge tone="rose">Safety</Badge>}
           {o.near_duplicate_of ? <Badge tone="amber">Photo seen before</Badge> : null}
           {o.photos.length > 1 && <span className="text-[11px] text-muted-foreground">{o.photos.length} photos</span>}
         </div>
         <div className="line-clamp-2 text-[13.5px] font-semibold leading-snug">{o.item_title || o.title || o.note || 'Photo only'}</div>
         {o.note && (o.item_title || o.title) && <div className="line-clamp-2 text-[12.5px] text-muted-foreground">{o.note}</div>}
         <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-muted-foreground">
-          <span>{shortDate(o.observed_at)}</span>
+          <span>{shortDate(o.client_observed_at || o.observed_at)}</span>
           {o.price_bhd && <span className="font-semibold tabular-nums text-foreground">BHD {o.price_bhd}</span>}
           {o.shop_name && (
             <span className="inline-flex items-center gap-1">
@@ -225,6 +185,7 @@ function SightingRow({ o, action, showBy = true }: { o: MiObservation; action?: 
           )}
           {o.demand_level && <span>Demand: {o.demand_level}{o.demand_qty ? ` (${o.demand_qty})` : ''}</span>}
           {!o.demand_level && o.demand_qty ? <span>Qty {o.demand_qty}</span> : null}
+          {o.qty_affected ? <span>{o.qty_affected} affected</span> : null}
           {o.barcode && <span className="tabular-nums">Barcode {o.barcode}</span>}
         </div>
         {action}
@@ -233,36 +194,45 @@ function SightingRow({ o, action, showBy = true }: { o: MiObservation; action?: 
   )
 }
 
-/* ───────────────────────── a salesman: my signals ───────────────────────── */
+/* ───────────────────────── a salesman: my reports ───────────────────────── */
 
 function RepSignals() {
   const [tab, setTab] = useState<'mine' | 'team'>('mine')
   const mineQ = useQuery({ queryKey: ['mi-mine'], queryFn: () => apiGet<MiMine>('/market-intel/mine') })
   const teamQ = useQuery({ queryKey: ['mi-board', 'rep'], queryFn: () => apiGet<MiBoard>('/market-intel/items'), enabled: tab === 'team' })
+  const asked = (mineQ.data?.observations || []).filter((o) => o.open_question).length
   return (
     <div className="mx-auto max-w-5xl px-4 pb-24 pt-4 lg:px-8 lg:py-8">
       <div className="mb-4">
         <h1 className="font-display text-[24px] font-bold leading-tight tracking-tight lg:text-[28px]">Market Intel</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">What you spotted in the market, and what the office made of it. Tap Spotted to add one.</p>
+        <p className="mt-1 text-[13px] text-muted-foreground">What you reported from the market, and what the office made of it. Tap Spotted to add one.</p>
       </div>
       <Tabs
         value={tab}
         onChange={setTab}
         tabs={[
-          { value: 'mine', label: 'My signals', count: mineQ.data?.observations?.length, icon: <Camera size={15} aria-hidden="true" /> },
+          { value: 'mine', label: 'My reports', count: mineQ.data?.observations?.length, icon: <Camera size={15} aria-hidden="true" /> },
           { value: 'team', label: 'Seen by the team', icon: <Radar size={15} aria-hidden="true" /> },
         ]}
       />
+      {tab === 'mine' && asked > 0 && (
+        <div role="status" className="mb-4 flex items-center gap-3 rounded-2xl border border-[#f1dfb8] bg-[#fdf8ee] px-4 py-3 text-[13.5px] text-[#7a4d0a]">
+          <MessageSquareReply size={18} className="shrink-0" aria-hidden="true" />
+          <span>
+            <span className="font-bold">The office asked you {asked === 1 ? 'a question' : `${asked} questions`}.</span> Answer below; a photo helps.
+          </span>
+        </div>
+      )}
       {tab === 'mine' &&
         (mineQ.isError ? (
           <LoadError error={mineQ.error} onRetry={() => mineQ.refetch()} isRetrying={mineQ.isFetching} />
         ) : mineQ.isLoading ? (
-          <div className="grid h-40 place-items-center text-muted-foreground"><Loader2 className="animate-spin" size={20} /></div>
+          <Loading />
         ) : !mineQ.data?.available ? (
           <NotReady hint={mineQ.data?.hint} />
         ) : mineQ.data.observations.length === 0 ? (
           <Empty icon={<Camera size={18} aria-hidden="true" />}>
-            Nothing yet. Tap <span className="font-semibold text-foreground">Spotted</span> when you see a new product, a competitor's price, a promotion or a shop asking for something.
+            Nothing yet. Tap <span className="font-semibold text-foreground">Spotted</span> when a product has a quality problem, a shop asks for something, or you see a new product, a competitor's price or a promotion.
           </Empty>
         ) : (
           <ul className="space-y-2.5">
@@ -271,7 +241,14 @@ function RepSignals() {
                 key={o.id}
                 o={o}
                 showBy={false}
-                action={o.item_shops && o.item_shops > 1 ? <div className="text-[11.5px] font-semibold text-primary">Seen in {o.item_shops} shops</div> : undefined}
+                words={o.case_status_words}
+                action={
+                  o.open_question ? (
+                    <AnswerBox obs={o} />
+                  ) : o.item_shops && o.item_shops > 1 ? (
+                    <div className="text-[11.5px] font-semibold text-primary">Seen in {o.item_shops} shops</div>
+                  ) : undefined
+                }
               />
             ))}
           </ul>
@@ -280,7 +257,7 @@ function RepSignals() {
         (teamQ.isError ? (
           <LoadError error={teamQ.error} onRetry={() => teamQ.refetch()} isRetrying={teamQ.isFetching} />
         ) : teamQ.isLoading ? (
-          <div className="grid h-40 place-items-center text-muted-foreground"><Loader2 className="animate-spin" size={20} /></div>
+          <Loading />
         ) : !teamQ.data?.available ? (
           <NotReady hint={teamQ.data?.hint} />
         ) : teamQ.data.items.length === 0 ? (
@@ -292,6 +269,110 @@ function RepSignals() {
             ))}
           </div>
         ))}
+    </div>
+  )
+}
+
+/**
+ * The office's question on one of the rep's own reports, answered in place: a line and, if it helps,
+ * one photo (resized on the phone like a capture). POST /market-intel/observations/{id}/answer; the
+ * case goes back to the office's review.
+ */
+function AnswerBox({ obs }: { obs: MiObservation }) {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [text, setText] = useState('')
+  const [photo, setPhoto] = useState<ReadyPhoto | null>(null)
+  const [preparing, setPreparing] = useState(false)
+  const [busy, setBusy] = useState(false)
+  // the preview is an object URL: let it go with the box
+  const photoRef = useRef<ReadyPhoto | null>(null)
+  useEffect(() => {
+    photoRef.current = photo
+  }, [photo])
+  useEffect(
+    () => () => {
+      if (photoRef.current) URL.revokeObjectURL(photoRef.current.url)
+    },
+    [],
+  )
+
+  async function pick(list: FileList | null) {
+    const f = list?.[0]
+    if (!f) return
+    setPreparing(true)
+    try {
+      const ready = await preparePhoto(f, 0)
+      if (photo) URL.revokeObjectURL(photo.url)
+      setPhoto({ ...ready, name: `answer-${obs.id}.${ready.name.split('.').pop() || 'webp'}` })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Could not read that photo.', 'error')
+    } finally {
+      setPreparing(false)
+    }
+  }
+
+  function dropPhoto() {
+    if (photo) URL.revokeObjectURL(photo.url)
+    setPhoto(null)
+  }
+
+  async function send() {
+    setBusy(true)
+    const form = new FormData()
+    form.append('text', text.trim())
+    if (photo) form.append('photo', photo.blob, photo.name)
+    try {
+      await apiUpload(`/market-intel/observations/${obs.id}/answer`, form)
+      toast('Answer sent. The office takes it from here.', 'success')
+      setText('')
+      dropPhoto()
+      qc.invalidateQueries({ queryKey: ['mi-mine'] })
+    } catch (e) {
+      toast(errorText(e, 'Could not send the answer. Please try again.'), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 space-y-2 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] p-3">
+      <p className="text-[13px] leading-snug text-[#7a4d0a]">
+        <span className="font-bold">The office asks:</span> {obs.open_question}
+      </p>
+      <textarea
+        rows={2}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        maxLength={1000}
+        placeholder="Your answer"
+        aria-label="Your answer"
+        className="min-h-[64px] w-full resize-none rounded-xl border border-[#E2DCEA] bg-white px-3 py-2 text-[14px] leading-snug text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25"
+      />
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { void pick(e.target.files); e.target.value = '' }} />
+      <div className="flex flex-wrap items-center gap-2">
+        {photo ? (
+          <span className="relative">
+            <img src={photo.url} alt="Your photo" className="h-14 w-14 rounded-lg border border-[#E2DCEA] object-cover" />
+            <button type="button" onClick={dropPhoto} aria-label="Remove the photo" className="absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full bg-[#1A1428] text-white ring-2 ring-white">
+              <X size={12} aria-hidden="true" />
+            </button>
+          </span>
+        ) : (
+          <button type="button" disabled={preparing} onClick={() => fileRef.current?.click()} className="inline-flex h-11 items-center gap-1.5 rounded-xl border border-[#E2DCEA] bg-white px-3 text-[13px] font-semibold text-[#4B2C66] hover:bg-[#F7F3FA] disabled:opacity-50">
+            {preparing ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <ImagePlus size={15} aria-hidden="true" />} Add a photo
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={busy || preparing || (!text.trim() && !photo)}
+          onClick={() => void send()}
+          className="ml-auto inline-flex h-11 items-center gap-1.5 rounded-xl bg-[#6D4091] px-4 text-[13.5px] font-semibold text-white hover:bg-[#5A3478] disabled:opacity-45"
+        >
+          {busy ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Send size={15} aria-hidden="true" />} Send answer
+        </button>
+      </div>
     </div>
   )
 }
@@ -311,29 +392,62 @@ interface Filters {
 
 const NO_FILTERS: Filters = { q: '', kind: '', status: '', brand: '', category: '', rep: '', area: '', since: '' }
 
+type OfficeTab = 'board' | 'review' | 'cases' | 'library' | 'lists' | 'reports'
+const OFFICE_TABS: readonly OfficeTab[] = ['board', 'review', 'cases', 'library', 'lists', 'reports']
+
 function OfficeBoard() {
-  const [tab, setTab] = useState<'board' | 'review' | 'library'>('board')
+  const [params, setParams] = useSearchParams()
   const [f, setF] = useState<Filters>(NO_FILTERS)
+  const [page, setPage] = useState(0)
+  const [reviewPage, setReviewPage] = useState(0)
   const [openId, setOpenId] = useState<number | null>(null)
   const [identify, setIdentify] = useState<MiObservation | null>(null)
   const [libPage, setLibPage] = useState(0)
-  const query = qs({ q: f.q.trim(), kind: f.kind, status: f.status, brand: f.brand, category: f.category, rep: f.rep, area: f.area, since: sinceIso(f.since) })
-  const boardQ = useQuery({ queryKey: ['mi-board', query], queryFn: () => apiGet<MiBoard>(`/market-intel/items${query}`) })
-  const reviewQ = useQuery({ queryKey: ['mi-review', 'queue'], queryFn: () => apiGet<MiReview>('/market-intel/review'), enabled: tab === 'review' })
+  const query = qs({
+    q: f.q.trim(),
+    kind: f.kind,
+    status: f.status,
+    brand: f.brand,
+    category: f.category,
+    rep: f.rep,
+    area: f.area,
+    since: sinceDay(f.since),
+    offset: page * BOARD_PAGE,
+    limit: BOARD_PAGE,
+  })
+  const boardQ = useQuery({ queryKey: ['mi-board', query], queryFn: () => apiGet<MiBoard>(`/market-intel/items${query}`), placeholderData: keepPreviousData })
+  const data = boardQ.data
+  const caps = data?.capabilities
+  const roles = useMiRoles(caps)
+  const allowed = OFFICE_TABS.filter((t) => (t !== 'lists' || roles.admin) && (t !== 'reports' || roles.review || roles.approve))
+  const want = params.get('tab') as OfficeTab | null
+  const tab: OfficeTab = want && allowed.includes(want) ? want : 'board'
+  const setTab = (t: OfficeTab) => setParams(t === 'board' ? {} : { tab: t }, { replace: true })
+
+  const reviewQ = useQuery({
+    queryKey: ['mi-review', 'queue', reviewPage],
+    queryFn: () => apiGet<MiReview>(`/market-intel/review?limit=${REVIEW_PAGE}&offset=${reviewPage * REVIEW_PAGE}`),
+    enabled: tab === 'review',
+    placeholderData: keepPreviousData,
+  })
   const libQ = useQuery({
     queryKey: ['mi-review', 'library', libPage],
     queryFn: () => apiGet<MiReview>(`/market-intel/review?library=true&limit=48&offset=${libPage * 48}`),
     enabled: tab === 'library',
   })
-  const data = boardQ.data
-  const caps = data?.capabilities
+  // the admin's lists: the Cases filters and the report builder's suppliers (one cache with the capture)
+  const listsQ = useQuery({ queryKey: ['mi-lists'], queryFn: () => fetchLists(), enabled: tab === 'cases' || tab === 'reports', staleTime: 10 * 60_000, retry: 1 })
+  const lists = listsQ.data?.available ? listsQ.data : null
   const facets = data?.facets || {}
-  const set = (k: keyof Filters) => (v: string) => setF((cur) => ({ ...cur, [k]: v }))
+  const set = (k: keyof Filters) => (v: string) => {
+    setF((cur) => ({ ...cur, [k]: v }))
+    setPage(0)
+  }
   const filtered = Object.values(f).some(Boolean)
 
   return (
     <div>
-      <PageHeader title="Market Intel" subtitle="What the field sees, grouped into clusters: products, competitor prices, promotions and shops' asks." />
+      <PageHeader title="Market Intel" subtitle="What the field sees: products, competitor prices, promotions and shops' asks on the board; quality and packaging problems as cases." />
 
       {data && !data.available ? (
         <NotReady hint={data.hint} />
@@ -358,10 +472,13 @@ function OfficeBoard() {
             value={tab}
             onChange={setTab}
             tabs={[
-              { value: 'board', label: 'Board', icon: <Radar size={15} aria-hidden="true" /> },
-              { value: 'review', label: 'Review queue', count: data?.queue ? data.queue.new_items + data.queue.unassigned : null, icon: <Inbox size={15} aria-hidden="true" /> },
-              { value: 'library', label: 'Finds library', count: data?.queue?.library, icon: <Library size={15} aria-hidden="true" /> },
-            ]}
+              { value: 'board' as const, label: 'Board', icon: <Radar size={15} aria-hidden="true" /> },
+              { value: 'review' as const, label: 'Review queue', count: data?.queue ? data.queue.new_items + data.queue.unassigned : null, icon: <Inbox size={15} aria-hidden="true" /> },
+              { value: 'cases' as const, label: 'Cases', icon: <Siren size={15} aria-hidden="true" /> },
+              { value: 'library' as const, label: 'Finds library', count: data?.queue?.library, icon: <Library size={15} aria-hidden="true" /> },
+              { value: 'lists' as const, label: 'Lists', icon: <ListChecks size={15} aria-hidden="true" /> },
+              { value: 'reports' as const, label: 'Supplier reports', icon: <FileSpreadsheet size={15} aria-hidden="true" /> },
+            ].filter((t) => allowed.includes(t.value))}
           />
 
           {tab === 'board' && (
@@ -399,21 +516,24 @@ function OfficeBoard() {
                   {SINCE.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </select>
                 {filtered && (
-                  <button type="button" onClick={() => setF(NO_FILTERS)} className="h-10 rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">Clear</button>
+                  <button type="button" onClick={() => { setF(NO_FILTERS); setPage(0) }} className="h-10 rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">Clear</button>
                 )}
               </div>
               {boardQ.isError ? (
                 <LoadError error={boardQ.error} onRetry={() => boardQ.refetch()} isRetrying={boardQ.isFetching} />
               ) : boardQ.isLoading ? (
-                <div className="grid h-48 place-items-center text-muted-foreground"><Loader2 className="animate-spin" size={20} /></div>
+                <Loading className="h-48" />
               ) : !data?.items.length ? (
                 <Empty icon={<Radar size={18} aria-hidden="true" />}>
                   {filtered ? 'Nothing matches these filters.' : 'Nothing on the board yet. Reps add sightings with the Spotted button.'}
                 </Empty>
               ) : (
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
-                  {data.items.map((c) => <ClusterCard key={c.item_id} c={c} onOpen={() => setOpenId(c.item_id)} />)}
-                </div>
+                <>
+                  <div className={cn('grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4', boardQ.isFetching && boardQ.isPlaceholderData && 'opacity-70')}>
+                    {data.items.map((c) => <ClusterCard key={c.item_id} c={c} onOpen={() => setOpenId(c.item_id)} />)}
+                  </div>
+                  <Pager offset={page * BOARD_PAGE} limit={BOARD_PAGE} count={data.count ?? data.items.length} onPage={(o) => setPage(Math.floor(o / BOARD_PAGE))} />
+                </>
               )}
             </>
           )}
@@ -422,7 +542,7 @@ function OfficeBoard() {
             (reviewQ.isError ? (
               <LoadError error={reviewQ.error} onRetry={() => reviewQ.refetch()} isRetrying={reviewQ.isFetching} />
             ) : reviewQ.isLoading ? (
-              <div className="grid h-48 place-items-center text-muted-foreground"><Loader2 className="animate-spin" size={20} /></div>
+              <Loading className="h-48" />
             ) : (
               <div className="space-y-6">
                 <section>
@@ -438,11 +558,14 @@ function OfficeBoard() {
                 <section>
                   <h2 className="mb-2 font-display text-[15px] font-bold">Photos to identify</h2>
                   {reviewQ.data?.unassigned.length ? (
-                    <ul className="grid gap-2.5 lg:grid-cols-2">
-                      {reviewQ.data.unassigned.map((o) => (
-                        <SightingRow key={o.id} o={o} action={caps?.can_review ? <IdentifyButton onClick={() => setIdentify(o)} /> : undefined} />
-                      ))}
-                    </ul>
+                    <>
+                      <ul className="grid gap-2.5 lg:grid-cols-2">
+                        {reviewQ.data.unassigned.map((o) => (
+                          <SightingRow key={o.id} o={o} action={roles.review ? <IdentifyButton onClick={() => setIdentify(o)} /> : undefined} />
+                        ))}
+                      </ul>
+                      <Pager offset={reviewPage * REVIEW_PAGE} limit={REVIEW_PAGE} count={reviewQ.data.count} onPage={(o) => setReviewPage(Math.floor(o / REVIEW_PAGE))} />
+                    </>
                   ) : (
                     <Empty icon={<CheckCircle2 size={18} aria-hidden="true" />}>Every photo is identified.</Empty>
                   )}
@@ -450,11 +573,17 @@ function OfficeBoard() {
               </div>
             ))}
 
+          {tab === 'cases' && (
+            <Suspense fallback={<Loading />}>
+              <CasesTab lists={lists} />
+            </Suspense>
+          )}
+
           {tab === 'library' &&
             (libQ.isError ? (
               <LoadError error={libQ.error} onRetry={() => libQ.refetch()} isRetrying={libQ.isFetching} />
             ) : libQ.isLoading ? (
-              <div className="grid h-48 place-items-center text-muted-foreground"><Loader2 className="animate-spin" size={20} /></div>
+              <Loading className="h-48" />
             ) : !libQ.data?.unassigned.length ? (
               <Empty icon={<Library size={18} aria-hidden="true" />}>The old Finds board has not been copied in yet (scripts/market_intel_import.py).</Empty>
             ) : (
@@ -464,18 +593,24 @@ function OfficeBoard() {
                 </p>
                 <ul className="grid gap-2.5 lg:grid-cols-2">
                   {libQ.data.unassigned.map((o) => (
-                    <SightingRow key={o.id} o={o} action={caps?.can_review ? <IdentifyButton onClick={() => setIdentify(o)} /> : undefined} />
+                    <SightingRow key={o.id} o={o} action={roles.review ? <IdentifyButton onClick={() => setIdentify(o)} /> : undefined} />
                   ))}
                 </ul>
-                <div className="mt-4 flex items-center justify-center gap-2">
-                  <button type="button" disabled={libPage === 0} onClick={() => setLibPage((p) => Math.max(0, p - 1))} className="h-10 rounded-xl border border-border px-4 text-[13px] font-semibold disabled:opacity-40">Previous</button>
-                  <span className="text-[12.5px] tabular-nums text-muted-foreground">
-                    {libPage * 48 + 1}–{Math.min(libQ.data.count, (libPage + 1) * 48)} of {libQ.data.count}
-                  </span>
-                  <button type="button" disabled={(libPage + 1) * 48 >= libQ.data.count} onClick={() => setLibPage((p) => p + 1)} className="h-10 rounded-xl border border-border px-4 text-[13px] font-semibold disabled:opacity-40">Next</button>
-                </div>
+                <Pager offset={libPage * 48} limit={48} count={libQ.data.count} onPage={(o) => setLibPage(Math.floor(o / 48))} />
               </>
             ))}
+
+          {tab === 'lists' && (
+            <Suspense fallback={<Loading />}>
+              <ListsTab />
+            </Suspense>
+          )}
+
+          {tab === 'reports' && (
+            <Suspense fallback={<Loading />}>
+              <ReportsTab roles={roles} lists={lists} />
+            </Suspense>
+          )}
         </>
       )}
 
@@ -545,7 +680,7 @@ function IdentifySheet({ obs, onClose, boardItems }: { obs: MiObservation | null
           {obs.photos.length > 0 && (
             <div className="flex gap-2 overflow-x-auto">
               {obs.photos.map((p) => (
-                <div key={p.id} className="h-40 w-40 shrink-0 overflow-hidden rounded-xl bg-muted"><Cover url={p.url} alt="Sighting photo" /></div>
+                <PhotoTile key={p.id} p={p} alt="Sighting photo" className="h-40 w-40" />
               ))}
             </div>
           )}
@@ -582,31 +717,25 @@ function IdentifySheet({ obs, onClose, boardItems }: { obs: MiObservation | null
 /* ───────────────────────── the item ───────────────────────── */
 
 function ItemDrawer({ id, onClose, boardItems }: { id: number | null; onClose: () => void; boardItems: MiCluster[] }) {
-  const q = useQuery({ queryKey: ['mi-item', id], queryFn: () => apiGet<MiItemDetail>(`/market-intel/items/${id}`), enabled: !!id })
+  const { me } = useAuth()
+  // an admin may open the original of a photo flagged with people (the server signs its blurred copy otherwise)
+  const [raw, setRaw] = useState(false)
+  const q = useQuery({ queryKey: ['mi-item', id, raw], queryFn: () => apiGet<MiItemDetail>(`/market-intel/items/${id}${raw ? '?raw=1' : ''}`), enabled: !!id })
   const d = q.data
   return (
-    <Sheet open={!!id} onClose={onClose} variant="drawer" title={d?.item.title || 'Item'} subtitle={d ? `${d.item.kind_label} · ${d.item.status_label}` : undefined}>
+    <Sheet open={!!id} onClose={() => { setRaw(false); onClose() }} variant="drawer" title={d?.item.title || 'Item'} subtitle={d ? `${d.item.kind_label} · ${d.item.status_label}` : undefined}>
       {q.isError ? (
         <div className="p-4"><LoadError error={q.error} onRetry={() => q.refetch()} isRetrying={q.isFetching} /></div>
       ) : !d ? (
-        <div className="grid h-48 place-items-center text-muted-foreground"><Loader2 className="animate-spin" size={20} /></div>
+        <Loading className="h-48" />
       ) : (
-        <ItemBody d={d} boardItems={boardItems} />
+        <ItemBody d={d} boardItems={boardItems} raw={raw} onRaw={me?.role === 'admin' ? setRaw : undefined} />
       )}
     </Sheet>
   )
 }
 
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{label}</div>
-      <div className="truncate text-[13.5px] font-semibold text-foreground">{children}</div>
-    </div>
-  )
-}
-
-function ItemBody({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] }) {
+function ItemBody({ d, boardItems, raw, onRaw }: { d: MiItemDetail; boardItems: MiCluster[]; raw: boolean; onRaw?: (v: boolean) => void }) {
   const toast = useToast()
   const invalidate = useInvalidate()
   const caps = d.capabilities
@@ -625,33 +754,33 @@ function ItemBody({ d, boardItems }: { d: MiItemDetail; boardItems: MiCluster[] 
     onError: (e) => toast(errorText(e, 'Could not verify it.'), 'error'),
   })
   const c = d.cluster
+  const anyPeople = photos.some((p) => p.has_people || p.has_people_flag)
   return (
     <div className="space-y-5 px-4 py-4 sm:px-5">
       {photos.length > 0 && (
         <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
           {photos.map((p) => (
-            <figure key={p.id} className="relative h-44 w-44 shrink-0 overflow-hidden rounded-xl bg-muted">
-              {p.url ? (
-                <a href={p.url} target="_blank" rel="noreferrer" className={cn('block h-full w-full', p.has_people && 'blur-md')}>
-                  <Cover url={p.url} alt={p.obs.title || 'Sighting photo'} />
-                </a>
-              ) : (
-                <Cover url={null} alt="" />
-              )}
-              {p.has_people && <span className="absolute left-2 top-2"><Badge tone="rose">People: kept out of reports</Badge></span>}
-              {caps.can_review && (
-                <button
-                  type="button"
-                  onClick={() => people.mutate({ id: p.id, flag: !p.has_people })}
-                  className="absolute bottom-2 right-2 inline-flex h-8 items-center gap-1 rounded-lg bg-black/60 px-2 text-[11px] font-semibold text-white hover:bg-black/75"
-                >
-                  {p.has_people ? <Eye size={12} aria-hidden="true" /> : <EyeOff size={12} aria-hidden="true" />}
-                  {p.has_people ? 'Remove flag' : 'Flag people'}
-                </button>
-              )}
-            </figure>
+            <PhotoTile
+              key={p.id}
+              p={p}
+              alt={p.obs.title || 'Sighting photo'}
+              raw={raw}
+              className="h-44 w-44"
+              canFlag={caps.can_review}
+              onFlag={(flag) => people.mutate({ id: p.id, flag })}
+            />
           ))}
         </div>
+      )}
+      {anyPeople && (
+        <p className="-mt-3 flex flex-wrap items-center gap-2 text-[11.5px] text-muted-foreground">
+          Photos with people are blurred and kept out of reports.
+          {onRaw && (
+            <button type="button" onClick={() => onRaw(!raw)} className="inline-flex h-8 items-center gap-1 rounded-lg px-2 font-semibold text-primary hover:bg-accent">
+              {raw ? <EyeOff size={12} aria-hidden="true" /> : <Eye size={12} aria-hidden="true" />} {raw ? 'Blur again' : 'Show originals (admin)'}
+            </button>
+          )}
+        </p>
       )}
 
       {c && (
