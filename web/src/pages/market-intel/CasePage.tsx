@@ -850,6 +850,8 @@ function StatusPanel({
       }
       return apiPatch(`/market-intel/cases/${c.id}`, body)
     },
+    // onDone re-reads the case (useCaseWrite): after Resolved its supplier actions are resolved too
+    // (market_quality resolves them with the case), so the actions panel must not show them open
     onSuccess: () => onDone(`Moved to ${move ? CASE_STATUS_LABEL[move.to] : 'the new status'}.`),
     onError: onError('Could not move the case.'),
   })

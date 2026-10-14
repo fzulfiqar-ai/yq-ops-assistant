@@ -9,6 +9,7 @@ import { LoadError } from '@/components/LoadError'
 import { Badge } from '@/components/ui/badge'
 import { Sheet } from '@/components/ui/sheet'
 import {
+  approvableNow,
   monthText,
   nameOf,
   notReady,
@@ -48,12 +49,15 @@ interface Can {
   download: boolean
 }
 
-/** The report routes' capabilities when the payload has them; the page's roles otherwise. */
+/**
+ * The report routes' capabilities when the payload has them (always, on this API); the page's roles
+ * otherwise. Approving is management's or an admin's only (supplier_reports.APPROVER_ROLES).
+ */
 function reportCan(caps: MiReportCaps | null | undefined, roles: MiRoles): Can {
   return {
     build: caps?.can_build ?? roles.review,
     edit: caps?.can_edit ?? roles.review,
-    approve: caps?.can_approve ?? roles.approve,
+    approve: caps?.can_approve ?? (roles.admin || (roles.readOnly && roles.approve)),
     download: caps?.can_download ?? (roles.approve || roles.review),
   }
 }
@@ -91,6 +95,8 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
   const [openId, setOpenId] = useState<number | null>(null)
   // the draft just rebuilt over an existing one: its sheet says so too (a toast sits under the sheet)
   const [rebuiltId, setRebuiltId] = useState<number | null>(null)
+  // what an approval reported (a photo that could not be read is frozen as "photo not available")
+  const [approveNotes, setApproveNotes] = useState<Record<number, string[]>>({})
   const query = qs({ supplier_id: fSupplier, month: fMonth })
   const listQ = useQuery({
     queryKey: ['mi-reports', query],
@@ -245,6 +251,7 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
                       </span>
                       <span className="block truncate text-[11.5px] text-muted-foreground">
                         {EDITION_LABEL[r.edition] || r.edition}
+                        {r.status === 'draft' && r.approvable_from && !approvableNow(r) ? ` · can be approved from ${dayText(r.approvable_from)}` : ''}
                         {r.approved_at ? ` · approved ${dayText(r.approved_at)}${r.approved_by ? ` by ${who(r.approved_by)}` : ''}` : ''}
                         {n ? ` · ${n} download${n === 1 ? '' : 's'}` : ''}
                       </span>
@@ -261,6 +268,8 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
       <ReportSheet
         id={openId}
         rebuilt={openId != null && openId === rebuiltId}
+        notes={openId != null ? approveNotes[openId] || [] : []}
+        onApproved={(id, warnings) => setApproveNotes((cur) => ({ ...cur, [id]: warnings }))}
         onClose={() => {
           setOpenId(null)
           setRebuiltId(null)
@@ -272,7 +281,23 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
   )
 }
 
-function ReportSheet({ id, rebuilt, onClose, roles, lists }: { id: number | null; rebuilt: boolean; onClose: () => void; roles: MiRoles; lists: MiLists | null }) {
+function ReportSheet({
+  id,
+  rebuilt,
+  notes,
+  onApproved,
+  onClose,
+  roles,
+  lists,
+}: {
+  id: number | null
+  rebuilt: boolean
+  notes: string[]
+  onApproved: (id: number, warnings: string[]) => void
+  onClose: () => void
+  roles: MiRoles
+  lists: MiLists | null
+}) {
   const q = useQuery({
     queryKey: ['mi-report', id],
     queryFn: () => apiGet<MiReportDetail>(`/market-intel/supplier-reports/${id}`),
@@ -294,7 +319,15 @@ function ReportSheet({ id, rebuilt, onClose, roles, lists }: { id: number | null
       ) : !q.data || !r ? (
         <Loading className="h-48" />
       ) : (
-        <ReportBody key={`${r.id}-${r.status}-${r.updated_at || ''}`} d={q.data} r={r} can={can} rebuilt={rebuilt} />
+        <ReportBody
+          key={`${r.id}-${r.status}-${r.updated_at || ''}`}
+          d={q.data}
+          r={r}
+          can={can}
+          rebuilt={rebuilt}
+          notes={notes}
+          onApproved={(warnings) => onApproved(r.id, warnings)}
+        />
       )}
     </Sheet>
   )
@@ -436,11 +469,33 @@ const STATE_GROUPS: { state: MiReportRowState; title: string; note: string }[] =
   { state: 'included', title: 'In the report', note: '' },
   { state: 'insufficient', title: 'Insufficient evidence: listed, not counted', note: 'No photo, evidence level 1 and a single report. Tick one to count it anyway.' },
   { state: 'excluded', title: 'Left out', note: 'Taken out of this report by hand. Tick one to put it back.' },
+  { state: 'withheld', title: 'Withheld: not sent to the supplier', note: 'Never shown, counted or cited in the workbook. Send one again to list it.' },
 ]
 
-function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: string; row: MiReportRow; editable: boolean; inReport: boolean; onToggle: () => void }) {
+function FindingRow({
+  sheet,
+  row,
+  editable,
+  inReport,
+  onToggle,
+  onHold,
+  onHoldPhoto,
+  busy = false,
+}: {
+  sheet: string
+  row: MiReportRow
+  editable: boolean
+  inReport: boolean
+  onToggle: () => void
+  /** withhold the row from the supplier (true) or send it again (false): a draft, reviewers */
+  onHold?: (hold: boolean) => void
+  /** withhold one of its photos from the supplier */
+  onHoldPhoto?: (photoId: number) => void
+  busy?: boolean
+}) {
   const issue = reportIssue(row)
-  const changed = editable && inReport !== (row.state === 'included')
+  const held = row.state === 'withheld'
+  const changed = editable && !held && inReport !== (row.state === 'included')
   const what = row.product || row.product_seen || row.asked_for
   const meta = [
     dayText(row.date),
@@ -457,21 +512,39 @@ function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: strin
     row.status || '',
   ].filter(Boolean)
   const photos = row.photos || []
+  // a frozen report lists every photo it approved; one no longer fit to show has no thumbnail
+  const unshown = photos.filter((p) => !p.thumb_url).length
   return (
-    <li className={cn('rounded-xl border px-3 py-2 text-[12.5px]', changed ? 'border-[#C9B7DA] bg-[#FAF7FC]' : 'border-border')}>
+    <li className={cn('rounded-xl border px-3 py-2 text-[12.5px]', changed ? 'border-[#C9B7DA] bg-[#FAF7FC]' : 'border-border', held && 'border-dashed bg-muted/40')}>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11.5px] font-semibold text-muted-foreground">{row.ref || `MI-${row.id}`}</span>
         <span className="text-[11px] text-muted-foreground">{REPORT_SHEET_LABEL[sheet] || humanKey(sheet)}</span>
+        {held && <Badge tone="grey">Withheld</Badge>}
         {row.finding && <Badge tone={row.finding === 'Verified' ? 'green' : 'amber'}>{row.finding}</Badge>}
         {row.evidence_label && <Badge tone="grey">{row.evidence_label}</Badge>}
         {issue && <Badge tone="accent">{issue}</Badge>}
         {row.safety && <Badge tone="rose">Safety</Badge>}
         {row.recurring && <Badge tone="ink">Recurring</Badge>}
         {editable && (
-          <label className="ml-auto flex min-h-9 cursor-pointer items-center gap-1.5 text-[12px] font-semibold">
-            <input type="checkbox" checked={inReport} onChange={onToggle} className="h-4 w-4 accent-[#6D4091]" />
-            In the report{changed ? (inReport ? ' (to add)' : ' (to leave out)') : ''}
-          </label>
+          <span className="ml-auto flex flex-wrap items-center gap-1">
+            {!held && (
+              <label className="flex min-h-9 cursor-pointer items-center gap-1.5 px-1 text-[12px] font-semibold">
+                <input type="checkbox" checked={inReport} onChange={onToggle} className="h-4 w-4 accent-[#6D4091]" />
+                In the report{changed ? (inReport ? ' (to add)' : ' (to leave out)') : ''}
+              </label>
+            )}
+            {onHold && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onHold(!held)}
+                title={held ? 'List it in the report again' : 'Never send this report to the supplier: not shown, counted or cited'}
+                className="inline-flex h-9 items-center rounded-lg px-2 text-[12px] font-semibold text-primary hover:bg-accent disabled:opacity-45"
+              >
+                {held ? 'Send again' : 'Withhold'}
+              </button>
+            )}
+          </span>
         )}
       </div>
       <div className="mt-0.5 font-semibold">{[what, row.sku].filter(Boolean).join(' · ') || 'Product not named'}</div>
@@ -481,12 +554,31 @@ function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: strin
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           {photos.map((p, i) =>
             p.thumb_url ? (
-              <img key={p.ref || p.id || i} src={p.thumb_url} alt={p.role_words || 'Evidence photo'} loading="lazy" className="h-12 w-12 rounded-lg border border-border object-cover" />
+              <span key={p.ref || p.id || i} className="relative inline-block">
+                <img src={p.thumb_url} alt={p.role_words || 'Evidence photo'} loading="lazy" className="h-14 w-14 rounded-lg border border-border object-cover" />
+                {onHoldPhoto && !held && p.id != null && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onHoldPhoto(Number(p.id))}
+                    aria-label={`Withhold ${p.ref || `photo ${p.id}`} from the supplier`}
+                    title="Withhold this photo from the supplier"
+                    className="absolute inset-x-0 bottom-0 rounded-b-lg bg-black/60 py-0.5 text-[10px] font-semibold text-white hover:bg-black/75 disabled:opacity-60"
+                  >
+                    Withhold
+                  </button>
+                )}
+              </span>
             ) : null,
+          )}
+          {unshown > 0 && (
+            <span className="text-[11px] text-muted-foreground">
+              {unshown} photo{unshown === 1 ? '' : 's'} not shown here
+            </span>
           )}
           {row.photos_withheld ? (
             <span className="text-[11px] text-muted-foreground">
-              {row.photos_withheld} photo{row.photos_withheld === 1 ? '' : 's'} kept out (people)
+              {row.photos_withheld} photo{row.photos_withheld === 1 ? '' : 's'} not sent (people, or withheld)
             </span>
           ) : null}
         </div>
@@ -495,12 +587,32 @@ function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: strin
   )
 }
 
-function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiReport; can: Can; rebuilt?: boolean }) {
+function ReportBody({
+  d,
+  r,
+  can,
+  rebuilt = false,
+  notes = [],
+  onApproved,
+}: {
+  d: MiReportDetail
+  r: MiReport
+  can: Can
+  rebuilt?: boolean
+  /** what the approval of this report reported (kept by the tab: the body is rebuilt on approval) */
+  notes?: string[]
+  onApproved?: (warnings: string[]) => void
+}) {
   const toast = useToast()
   const qc = useQueryClient()
   const draft = r.status === 'draft'
-  const editable = can.edit && draft
+  // an approved (or superseded) report is read from the manifest frozen at approval: never edited
+  const frozen = Boolean(d.frozen || r.frozen)
+  const editable = can.edit && draft && !frozen
+  const opens = approvableNow(r)
   const all = reportRows(d)
+  const heldRows = new Set<number>(r.withheld_observation_ids || all.filter((x) => x.row.state === 'withheld').map((x) => x.row.id))
+  const heldPhotos = [...new Set<number>(r.withheld_photo_ids || [])].sort((a, b) => a - b)
   const [narrative, setNarrative] = useState(r.narrative || '')
   // the rows in the report: what the preview says now, changed by the ticks until saved
   const [picked, setPicked] = useState<Set<number>>(() => new Set(all.filter((x) => x.row.state === 'included').map((x) => x.row.id)))
@@ -532,11 +644,39 @@ function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiRe
     },
     onError: fail('Could not save the rows.'),
   })
+  // withhold / send again: a row or a photo never reaches the supplier. Unsaved row ticks go with it
+  // (the answer re-reads the draft), and the narrative must be saved first for the same reason.
+  const hold = useMutation({
+    mutationFn: (body: { withheld_observation_ids?: number[]; withheld_photo_ids?: number[] }) =>
+      apiPatch<MiReportDetail>(`/market-intel/supplier-reports/${r.id}`, {
+        ...body,
+        ...(changes > 0 ? { included_observation_ids: [...picked].sort((a, b) => a - b) } : {}),
+      }),
+    onSuccess: (res) => {
+      toast('Saved: what the supplier receives has changed.', 'success')
+      refreshed(res)
+    },
+    onError: fail('Could not change what the supplier receives.'),
+  })
+  function holdRow(id: number, on: boolean) {
+    const next = new Set(heldRows)
+    if (on) next.add(id)
+    else next.delete(id)
+    hold.mutate({ withheld_observation_ids: [...next].sort((a, b) => a - b) })
+  }
+  function holdPhoto(id: number, on: boolean) {
+    const next = new Set(heldPhotos)
+    if (on) next.add(id)
+    else next.delete(id)
+    hold.mutate({ withheld_photo_ids: [...next].sort((a, b) => a - b) })
+  }
   const approve = useMutation({
-    mutationFn: () => apiPost<{ superseded?: number[] }>(`/market-intel/supplier-reports/${r.id}/approve`, {}),
+    mutationFn: () => apiPost<{ superseded?: number[]; warnings?: string[] }>(`/market-intel/supplier-reports/${r.id}/approve`, {}),
     onSuccess: (res) => {
       const n = res?.superseded?.length || 0
       toast(`Report approved. It can be downloaded now.${n ? ` ${n} earlier approved report${n === 1 ? ' is' : 's are'} superseded.` : ''}`, 'success')
+      // e.g. a photo that could not be read at approval, frozen as "photo not available"
+      onApproved?.(Array.isArray(res?.warnings) ? res.warnings : [])
       refreshed(undefined)
     },
     onError: fail('Could not approve the report.'),
@@ -571,6 +711,7 @@ function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiRe
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge tone={REPORT_STATUS_TONE[r.status] || 'grey'}>{STATUS_LABEL[r.status] || r.status}</Badge>
         <Badge tone="grey">{EDITION_LABEL[r.edition] || r.edition}</Badge>
+        {frozen && <Badge tone="ink">Frozen at approval</Badge>}
         {r.narrative_source === 'edited' && <Badge tone="accent">Narrative edited by hand</Badge>}
         {r.approved_at && (
           <span className="text-[12px] text-muted-foreground">
@@ -579,8 +720,23 @@ function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiRe
           </span>
         )}
       </div>
+      {frozen && (
+        <p className="rounded-xl bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">
+          Frozen at approval: the rows, photos and narrative exactly as the workbook prints them. Nothing here changes any more.
+        </p>
+      )}
       {r.status === 'superseded' && (
         <p className="rounded-xl bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">A newer approved report for the same supplier, month and edition replaced this one. Use that one.</p>
+      )}
+      {notes.length > 0 && (
+        <div role="alert" className="space-y-1 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] px-3 py-2.5 text-[12.5px] text-[#7a4d0a]">
+          <p className="font-semibold">At approval:</p>
+          {notes.map((w) => (
+            <p key={w} className="flex gap-2">
+              <TriangleAlert size={14} className="mt-0.5 shrink-0" aria-hidden="true" /> {w}
+            </p>
+          ))}
+        </div>
       )}
       {rebuilt && draft && (
         <p role="status" className="rounded-xl bg-[#EEE8F4] px-3 py-2 text-[12.5px] font-medium text-[#4B2C66]">
@@ -629,13 +785,45 @@ function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiRe
             {g.note && editable && <p className="mb-1.5 text-[11.5px] text-muted-foreground">{g.note}</p>}
             <ul className="space-y-1.5">
               {rows.map((x) => (
-                <FindingRow key={`${x.sheet}-${x.row.id}`} sheet={x.sheet} row={x.row} editable={editable} inReport={picked.has(x.row.id)} onToggle={() => toggle(x.row.id)} />
+                <FindingRow
+                  key={`${x.sheet}-${x.row.id}`}
+                  sheet={x.sheet}
+                  row={x.row}
+                  editable={editable}
+                  inReport={picked.has(x.row.id)}
+                  onToggle={() => toggle(x.row.id)}
+                  onHold={editable && !narrativeChanged ? (on) => holdRow(x.row.id, on) : undefined}
+                  onHoldPhoto={editable && !narrativeChanged ? (pid) => holdPhoto(pid, true) : undefined}
+                  busy={hold.isPending}
+                />
               ))}
             </ul>
           </section>
         )
       })}
       {!all.length && <p className="text-[12.5px] text-muted-foreground">No reports of this supplier in the month.</p>}
+      {editable && narrativeChanged && <p className="text-[11.5px] text-[#96600d]">Save the narrative before withholding rows or photos.</p>}
+
+      {editable && heldPhotos.length > 0 && (
+        <section>
+          <div className={LABEL}>Photos withheld from the supplier ({heldPhotos.length})</div>
+          <ul className="flex flex-wrap gap-1.5">
+            {heldPhotos.map((pid) => (
+              <li key={pid} className="inline-flex items-center gap-1 rounded-full border border-border bg-card py-0.5 pl-2.5 pr-1 text-[12px]">
+                <span className="font-mono">PH-{pid}</span>
+                <button
+                  type="button"
+                  disabled={hold.isPending || narrativeChanged}
+                  onClick={() => holdPhoto(pid, false)}
+                  className="h-8 rounded-full px-2 text-[11.5px] font-semibold text-primary hover:bg-accent disabled:opacity-45"
+                >
+                  Send again
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {editable && changes > 0 && (
         <div className="sticky bottom-0 -mx-4 flex flex-wrap items-center gap-2 border-t border-border bg-card px-4 py-2.5 sm:-mx-5 sm:px-5">
@@ -672,7 +860,18 @@ function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiRe
       )}
 
       <section className="space-y-2 border-t border-border pt-4">
-        {draft && can.approve &&
+        {/* approval opens 7 days after the month ends (late captures): the server refuses it before */}
+        {draft && !opens && r.approvable_from && (
+          <p className="rounded-xl bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">
+            Can be approved from {dayText(r.approvable_from)}: reports of the month's last days may still arrive until then.
+          </p>
+        )}
+        {draft && can.approve && !opens && (
+          <button type="button" disabled className={cn(BTN, 'w-full bg-[#137a48]')}>
+            <CheckCircle2 size={16} aria-hidden="true" /> Approve
+          </button>
+        )}
+        {draft && can.approve && opens &&
           (sure ? (
             <div className="space-y-2 rounded-xl border border-[#cfe9da] bg-[#f3fbf6] p-3">
               <p className="text-[12.5px] text-[#0f5a36]">Approve this report? An earlier approved report of the same supplier, month and edition becomes superseded.</p>
@@ -694,7 +893,7 @@ function ReportBody({ d, r, can, rebuilt = false }: { d: MiReportDetail; r: MiRe
             {downloading ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Download size={16} aria-hidden="true" />} Download the workbook (.xlsx)
           </button>
         )}
-        {draft && !can.approve && <p className="text-[12px] text-muted-foreground">An approver approves the draft before it can be downloaded.</p>}
+        {draft && !can.approve && <p className="text-[12px] text-muted-foreground">Management (or an admin) approves the draft before it can be downloaded.</p>}
       </section>
 
       {Boolean(downloads.length || r.file_sha256) && (
