@@ -864,11 +864,15 @@ def _():
     assert "const canEdit = roles.review && !merged" in case
     util = _read(MI_UTIL)
     assert "const review = !readOnly && (caps?.can_review ??" in util
+    # updated after the backend landed: the report routes send their own capabilities
+    # (supplier_reports_api._caps: can_build / can_edit / can_approve / can_download); the roles are the fallback
     rep = _read(MI_REPORTS)
-    assert "{draft && roles.approve && (" in rep
-    assert "r.status === 'approved' && (roles.approve || roles.review)" in rep
+    can = rep.split("function reportCan(", 1)[1].split("\n}", 1)[0]
+    assert "build: caps?.can_build ?? roles.review," in can and "approve: caps?.can_approve ?? roles.approve," in can
+    assert "{draft && can.approve &&" in rep
+    assert "r.status === 'approved' && can.download" in rep
     assert "apiGetDownload(`/market-intel/supplier-reports/${r.id}/download`" in rep
-    assert "{roles.review && (" in rep, "only reviewers build drafts"
+    assert "{can.build && (" in rep, "only reviewers build drafts"
     app = _read("web/src/App.tsx")
     assert 'path="market-intel/cases/:id" element={<Gate feature="Market Intel"><MarketCase /></Gate>}' in app
 
@@ -902,6 +906,70 @@ def _():
     page = _read(MI_PAGE)
     assert "`/market-intel/items/${id}${raw ? '?raw=1' : ''}`" in page and "me?.role === 'admin' ? setRaw : undefined" in page
     assert "people && !raw && 'blur-md'" in _read(MI_UI)
+
+
+@test("r8m contract check: report rows by sheet and state, the issue object, the safety e-mail outcome, the server's limits")
+def _():
+    lib = _read(MI_LIB)
+    rows = lib.split("export function reportRows(", 1)[1].split("\n}", 1)[0]
+    assert "for (const [sheet, list] of Object.entries(rows))" in rows, "rows come keyed by sheet"
+    issue = lib.split("export function reportIssue(", 1)[1].split("\n}", 1)[0]
+    assert "typeof i === 'string' ? i : String(i.label || i.code || '')" in issue, "never the issue object itself"
+    rep = _read(MI_REPORTS)
+    assert "included_observation_ids: [...picked]" in rep, "include / leave out PATCHes the ids"
+    assert "res?.rebuilt ?" in rep and "Building again replaces its narrative" in rep
+    assert "const warnings = d.warnings || []" in rep
+    assert "typeof r.downloads === 'number' ? r.downloads" in rep, "the list sends a number"
+    assert "'version'" in rep.split("const NOT_TILES = new Set([", 1)[1].split("])", 1)[0]
+    assert "num(b.reports) ?? num(b.count)" in rep, "by_issue items carry reports"
+    mail = lib.split("export function safetyMail(", 1)[1].split("\n}", 1)[0]
+    assert "mail === 'sent'" in mail and "mail === 'not_sent'" in mail and "mail === 'queued' && state === null" in mail
+    case = _read(MI_CASE)
+    assert "mail.state === 'sent'" in case and "'Safety alert NOT e-mailed'" in case
+    assert ("const LIMIT = { title: 160, assignee: 120, reason: 500, question: 500, request: 1000, owner: 120, "
+            "response: 2000, check: 1000 } as const") in case
+    for lim in ("maxLength={LIMIT.question}", "maxLength={LIMIT.reason}", "maxLength={LIMIT.check}", "maxLength={LIMIT.title}"):
+        assert lim in case, lim
+    assert "allowed: c.next_statuses" in case
+    assert "caseProduct(c)" in case and "c.yq_item?.display_name" in lib
+    assert "o.issue_label || o.issue_type?.label_en" in case
+    assert "Sighting MI-${obs} joined" in case and "d.changes && typeof d.changes === 'object'" in case
+    assert "EVIDENCE_WHY[String(d.why || '')]" in case
+    et = _read("web/src/lib/errorText.ts")
+    assert "Array.isArray(parsed.detail) && parsed.detail.length" in et, "a 422 reads its first message"
+    # the products route reads shop_phone, never a name: only a phone makes the shop known
+    assert "p.set('shop_name'" not in lib
+    assert "const shopKnown = shopPhone(shop) !== ''" in _read(PICKER)
+    assert "const joined = Boolean(card.case?.joined)" in _read(CAPTURE)
+
+
+@test("contract (r8m): the page's statuses, moves, labels and the limits it uses match the backend in this tree")
+def _():
+    mq = ROOT / "app" / "market_quality.py"
+    sr = ROOT / "app" / "supplier_reports.py"
+    if not mq.exists() or not sr.exists():
+        print("        SKIP: app/market_quality.py / app/supplier_reports.py not in this tree yet")
+        return
+    srv = mq.read_text(encoding="utf-8")
+    lib = _read(MI_LIB)
+    block = srv.split("NEXT_STATUS: dict[str, tuple[str, ...]] = {", 1)[1].split("\n}", 1)[0]
+    srv_next = {k: re.findall(r'"([a-z_]+)"', v) for k, v in re.findall(r'^    "([a-z_]+)": \(([^)]*)\),$', block, re.M)}
+    assert srv_next == CASE_TRANSITIONS, srv_next
+    labels = dict(re.findall(r'"([a-z_]+)": "([^"]+)"', srv.split("STATUS_LABELS = {", 1)[1].split("}", 1)[0]))
+    page = lib.split("export const CASE_STATUS_LABEL: Record<MiCaseStatus, string> = {", 1)[1].split("\n}", 1)[0]
+    assert dict(re.findall(r"^  ([a-z_]+): '([^']+)',$", page, re.M)) == labels
+    for k, v in re.findall(r'"([a-z_]+)": "([^"]+)"', srv.split("VERIFICATION_LABELS = {", 1)[1].split("}", 1)[0]):
+        assert f"{{ value: '{k}', label: '{v}' }}" in lib, k
+    for k, v in re.findall(r'(\d): "([^"]+)"', srv.split("EVIDENCE_LABELS = {", 1)[1].split("}", 1)[0]):
+        assert f"{{ level: {k}, code:" in lib and f"label: '{v}' }}" in lib, k
+    # what the server keeps (clean_text) is what the case page's fields stop at
+    assert "q = clean_text(text, 500)" in srv and 'clean_text(changes.get("reason"), 500)' in srv
+    assert 'clean_text(body.get("resolution_check"), 1000)' in srv and "t = clean_text(v, 160)" in srv
+    # the safety e-mail: a claim ("queued"), then the outcome ("sent" / "not_sent")
+    assert 'detail={"email": "queued"' in srv and '"sent" if out["emailed"] else "not_sent"' in srv
+    rep = sr.read_text(encoding="utf-8")
+    assert 'rows: dict[str, list[dict]] = {"product_issues": [], "packaging": []}' in rep
+    assert '"version": 1' in rep and 'o["downloads"] = len(o["downloads"])' in rep and '"rebuilt": rebuilt' in rep
 
 
 # ── 10. the page's copies of the server's words (after the streams are merged) ─

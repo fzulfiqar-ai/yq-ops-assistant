@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { CircleQuestionMark, Loader2, PackageOpen, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { fetchProducts, notReady, productsQueryKey, readRecentProducts, type MiProduct } from '@/lib/marketIntel'
+import { fetchProducts, notReady, productsQueryKey, readRecentProducts, shopPhone, type MiProduct } from '@/lib/marketIntel'
 
 /**
  * "Which product?" (Market Intel v2, release r8m): the YQ catalog with its photos, so a rep names a
@@ -40,7 +40,7 @@ export function ProductPicker({
   words: PickerWords
   onPick: (p: MiProduct) => void
   onNotSure?: () => void
-  shop?: { phone?: string | null; name?: string | null } | null
+  shop?: { phone?: string | null } | null
   showRecent?: boolean
   autoFocus?: boolean
 }) {
@@ -63,8 +63,9 @@ export function ProductPicker({
 
   const rows = productsQ.data || []
   const searching = dq !== ''
-  // "at this shop" only means something when the sheet knows the shop (the case page has none)
-  const shopKnown = Boolean(shop && (String(shop.phone || '').replace(/\D/g, '') || shop.name))
+  // "at this shop" only means something when the route knows the shop: it reads the shop's phone (the
+  // case page and a shop typed without one have none)
+  const shopKnown = shopPhone(shop) !== ''
   const here = (p: MiProduct) => shopKnown && Boolean(p.at_shop)
   let sections: { key: string; title: string; rows: MiProduct[] }[]
   if (searching) {
