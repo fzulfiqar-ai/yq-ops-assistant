@@ -22,6 +22,14 @@ the one write on its allowlist (auth.READ_ONLY_WRITE_ALLOWLIST), because approvi
 plan §7 gives management here. The capture reads the photos on the event loop (bounded by
 read_capped) and does everything else — Pillow, storage, the database — in the threadpool.
 
+R8m (Market Intel v2, plan Part F): the capture also takes the Spotted v2 fields (issue_type_id,
+yq_item_code, report_basis, qty_affected, batch_ref, packaging_version, safety_flag, client_observed_at,
+brand_id, supplier_id, photo_roles) — a v1 client sends none and is answered as before — and a safety
+report's alert e-mail goes out after the answer (BackgroundTasks). The board pages (?offset=&limit=,
+`count` = the true total). ?raw=1 on an item gives an admin the originals of people-flagged photos
+(audited); everyone else only ever receives their blurred copies. The quality cases, the lists and the
+product picker are app/market_quality_api.py.
+
 No `from __future__ import annotations`: the request models are defined inside register(), and
 FastAPI must see real annotation objects to bind bodies.
 """
@@ -33,7 +41,7 @@ FEATURE = "Market Intel"
 
 
 def register(app, limiter) -> None:  # noqa: C901 — one registration function, many small routes
-    from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
+    from fastapi import BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
     from pydantic import BaseModel, Field
     from starlette.concurrency import run_in_threadpool
 
@@ -111,11 +119,25 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         shop_phone: str | None = Form(default=None, max_length=40),
         area: str | None = Form(default=None, max_length=80),
         barcode: str | None = Form(default=None, max_length=40),
+        # Spotted v2 (R8m); a v1 client sends none of them
+        issue_type_id: str | None = Form(default=None, max_length=12),
+        yq_item_code: str | None = Form(default=None, max_length=64),
+        report_basis: str | None = Form(default=None, max_length=20),
+        qty_affected: str | None = Form(default=None, max_length=10),
+        batch_ref: str | None = Form(default=None, max_length=80),
+        packaging_version: str | None = Form(default=None, max_length=80),
+        safety_flag: str | None = Form(default=None, max_length=10),
+        client_observed_at: str | None = Form(default=None, max_length=40),
+        brand_id: str | None = Form(default=None, max_length=12),
+        supplier_id: str | None = Form(default=None, max_length=12),
+        photo_roles: str | None = Form(default=None, max_length=200),
+        background: BackgroundTasks = None,
         user: CurrentUser = Depends(gate),
     ) -> dict:
         """One sighting from the Spotted sheet -> the instant result card. Photos arrive already
         resized on the phone; the server re-checks, strips and hashes them. A retry with the same
-        client_uuid returns the first answer and writes nothing."""
+        client_uuid returns the first answer and writes nothing. A safety report's alert e-mail is sent
+        after the answer, so a slow or failed e-mail never holds or fails the capture."""
         files = [p for p in (photos or []) if p is not None and (p.filename or "")]
         if len(files) > mi.MAX_PHOTOS:
             raise HTTPException(status_code=400, detail=f"At most {mi.MAX_PHOTOS} photos per sighting.")
@@ -128,15 +150,21 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
         raw = {"client_uuid": client_uuid, "kind": kind, "note": note, "title": title, "brand": brand,
                "competitor": competitor, "category": category, "price_bhd": price_bhd,
                "demand_level": demand_level, "demand_qty": demand_qty, "shop_name": shop_name,
-               "shop_phone": shop_phone, "area": area, "barcode": barcode}
+               "shop_phone": shop_phone, "area": area, "barcode": barcode,
+               "issue_type_id": issue_type_id, "yq_item_code": yq_item_code, "report_basis": report_basis,
+               "qty_affected": qty_affected, "batch_ref": batch_ref, "packaging_version": packaging_version,
+               "safety_flag": safety_flag, "client_observed_at": client_observed_at, "brand_id": brand_id,
+               "supplier_id": supplier_id, "photo_roles": photo_roles}
         try:
-            card = await run_in_threadpool(mi.capture, _me(user), raw, blobs)
+            card = await run_in_threadpool(mi.capture, _me(user), raw, blobs,
+                                           defer=background.add_task if background is not None else None)
         except mi.MarketIntelError as e:
             _fail(e)
         log_event(user.email, "market_intel.capture",
                   detail={"result": card.get("result"), "photos": card.get("photos"), "kind": kind or "other",
                           "observation_id": card.get("observation_id"), "replayed": card.get("replayed"),
-                          "fallback": card.get("fallback")})
+                          "fallback": card.get("fallback"), "case_id": (card.get("case") or {}).get("id"),
+                          "issue_type_id": issue_type_id or None, "safety_alerted": card.get("safety_alerted")})
         return card
 
     @app.get("/market-intel/mine")
@@ -148,25 +176,29 @@ def register(app, limiter) -> None:  # noqa: C901 — one registration function,
     def market_intel_items(kind: str | None = None, status: str | None = None, brand: str | None = None,
                            category: str | None = None, rep: str | None = None, area: str | None = None,
                            since: str | None = None, q: str | None = None, mine: bool = False,
-                           limit: int = 300, user: CurrentUser = Depends(gate)) -> dict:
+                           limit: int = 300, offset: int = 0, user: CurrentUser = Depends(gate)) -> dict:
         office = _office(user)
         filters = {"kind": kind, "status": status, "brand": brand, "category": category, "since": since,
                    "q": (q or "")[:80], "mine": mine}
         if office:                     # a rep never filters by another rep (or learns who saw what)
             filters.update(rep=rep, area=area)
         try:
-            out = mi.board(office=office, actor=_me(user), filters=filters, limit=limit,
+            out = mi.board(office=office, actor=_me(user), filters=filters, limit=limit, offset=offset,
                            mask=masks_contacts(user.role))
         except mi.MarketIntelError as e:
             _fail(e)
         return {**out, "capabilities": _caps(user)}
 
     @app.get("/market-intel/items/{item_id}")
-    def market_intel_item(item_id: int, user: CurrentUser = Depends(gate)) -> dict:
+    def market_intel_item(item_id: int, raw: bool = False, user: CurrentUser = Depends(gate)) -> dict:
+        raw = bool(raw and user.role == "admin")       # the originals of people photos: an admin's, audited
         try:
-            out = mi.item_detail(item_id, office=_office(user), actor=_me(user), mask=masks_contacts(user.role))
+            out = mi.item_detail(item_id, office=_office(user), actor=_me(user), mask=masks_contacts(user.role),
+                                 raw=raw)
         except mi.MarketIntelError as e:
             _fail(e)
+        if raw:
+            log_event(user.email, "market_intel.raw_photos", detail={"item_id": item_id})
         return {**out, "capabilities": _caps(user)}
 
     @app.get("/market-intel/review")

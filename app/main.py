@@ -2451,4 +2451,5 @@ _register_command(app)
 from app.market_intel_api import register as _register_market_intel  # noqa: E402
 
 _register_market_intel(app, limiter)
+from app.market_quality_api import register as _register_market_quality; _register_market_quality(app, limiter)  # noqa: E402,E702 — R8m: cases, lists, picker
 from app.supplier_reports_api import register as _register_supplier_reports; _register_supplier_reports(app, limiter)  # noqa: E402,E702 — Market Intel v2 supplier workbook
