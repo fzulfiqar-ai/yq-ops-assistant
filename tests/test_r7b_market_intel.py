@@ -4,9 +4,11 @@
 
 Same lightweight runner as tests/test_r7a_focus.py: every test runs against an in-memory stand-in for
 the PostgREST client and Supabase Storage (eq / is / in / gte filters, real ordering, identity ids,
-the client_uuid unique key, missing tables that raise like PostgREST). Nothing here reaches a database,
-a storage bucket or the network, and the pure tests pass with no .env. Every name, phone, price and
-barcode is synthetic.
+the client_uuid unique key, missing tables that raise like PostgREST). Since R8m the stand-in also
+answers at most 1,000 rows per select (PostgREST's max-rows) and honours .range()'s offset, so a read
+that forgets to page shows up; tests/test_r8m_market_quality.py borrows it. Nothing here reaches a
+database, a storage bucket or the network: the Supabase and database addresses are pinned to ci.invalid
+before any import. Every name, phone, price and barcode is synthetic.
 
 Covered:
   * features — 'Market Intel' is a page of its own, in the salesman defaults, grantable to management,
@@ -28,7 +30,7 @@ Covered:
   * decisions — the transition map, Approved needs an action, merge moves the sightings (recorded),
     management approves only an Opportunity and cannot edit, a rep cannot decide; identify; photo flag;
   * system demand signals — zero-result searches folded ("san" -> "sandisk"), restock asks per SKU,
-    once per week (a re-run writes nothing), dry run, not scheduled yet;
+    once per week (a re-run writes nothing), dry run, scheduled weekly by the shop jobs (R8m);
   * the routes — every /market-intel route behind 'Market Intel', the multipart capture end to end;
   * the migration, its reverse and the grants script read as text; the import script's plan (copy, not
     move; grouped fallback rows; stable ids; dry run by default);
@@ -55,6 +57,15 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# R8m: nothing here may reach production. A worktree finds the project folder's .env by walking up (app.config
+# load_dotenv), and that .env points at production: pin the addresses (and silence every e-mail provider)
+# BEFORE any app module loads; load_dotenv never overrides a variable that is already set.
+os.environ["SUPABASE_URL"] = "https://ci.invalid"
+os.environ["SUPABASE_KEY"] = "ci-key"
+os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
+for _k in ("RESEND_API_KEY", "BREVO_API_KEY", "SMTP_USER", "SMTP_PASS", "ALERT_EMAIL_TO", "TELEGRAM_BOT_TOKEN"):
+    os.environ[_k] = ""
+
 from dotenv import load_dotenv  # noqa: E402
 load_dotenv(ROOT / ".env")
 
@@ -79,6 +90,11 @@ GRANTS_REVERSE = ROOT / "scripts" / "r7b_market_intel_grants_reverse.sql"
 
 # ── an in-memory PostgREST + Storage stand-in ──────────────────────────────────
 
+# PostgREST's max-rows: a select answers at most this many rows whatever .limit() asks for (R8m: the fake
+# now does the same, and .range() honours its offset, so a read that forgets to page shows up as a bug)
+MAX_ROWS = 1000
+
+
 def _same(a, b) -> bool:
     return a == b or str(a) == str(b)
 
@@ -92,6 +108,7 @@ class _Query:
         self.db, self.table = db, table
         self.op, self.payload, self.filters = "select", None, []
         self.want_count, self.lim, self.orders = None, None, []
+        self.off, self.negate, self.conflict = 0, False, None
 
     def select(self, cols="*", count=None, head=False):
         self.op, self.want_count = "select", count
@@ -99,6 +116,10 @@ class _Query:
 
     def insert(self, payload):
         self.op, self.payload = "insert", payload
+        return self
+
+    def upsert(self, payload, on_conflict=None, **_kw):
+        self.op, self.payload, self.conflict = "upsert", payload, on_conflict
         return self
 
     def update(self, payload):
@@ -109,25 +130,39 @@ class _Query:
         self.op = "delete"
         return self
 
-    def eq(self, col, val):
-        self.filters.append(("eq", col, val))
+    @property
+    def not_(self):
+        self.negate = True                      # postgrest: the next filter is negated
         return self
+
+    def _add(self, kind, col, val):
+        self.filters.append((("not:" if self.negate else "") + kind, col, val))
+        self.negate = False
+        return self
+
+    def eq(self, col, val):
+        return self._add("eq", col, val)
+
+    def neq(self, col, val):
+        return self._add("neq", col, val)
 
     def is_(self, col, val):
-        self.filters.append(("is", col, val))
-        return self
+        return self._add("is", col, val)
 
     def in_(self, col, vals):
-        self.filters.append(("in", col, list(vals)))
-        return self
+        return self._add("in", col, list(vals))
 
     def gte(self, col, val):
-        self.filters.append(("gte", col, val))
-        return self
+        return self._add("gte", col, val)
+
+    def lt(self, col, val):
+        return self._add("lt", col, val)
+
+    def lte(self, col, val):
+        return self._add("lte", col, val)
 
     def ilike(self, col, val):
-        self.filters.append(("ilike", col, val))
-        return self
+        return self._add("ilike", col, val)
 
     def order(self, col, desc=False, **_kw):
         self.orders.append((col, bool(desc)))
@@ -138,25 +173,36 @@ class _Query:
         return self
 
     def range(self, a, b):
-        self.lim = b - a + 1
+        self.off, self.lim = a, b - a + 1
         return self
+
+    @staticmethod
+    def _test(kind, got, val) -> bool:
+        if kind == "eq":
+            return _same(got, val)
+        if kind == "neq":
+            return got is not None and not _same(got, val)
+        if kind == "is":
+            return (got is None) if str(val).lower() == "null" else (bool(got) == (str(val).lower() == "true"))
+        if kind == "in":
+            return any(_same(got, v) for v in val)
+        if kind == "gte":
+            return got is not None and str(got) >= str(val)
+        if kind == "lt":
+            return got is not None and str(got) < str(val)
+        if kind == "lte":
+            return got is not None and str(got) <= str(val)
+        if kind == "ilike":
+            rx = "".join(".*" if ch == "%" else "." if ch == "_" else re.escape(ch) for ch in str(val))
+            return re.fullmatch(rx, str(got or ""), re.I | re.S) is not None
+        return True
 
     def _match(self, row: dict) -> bool:
         for kind, col, val in self.filters:
-            got = row.get(col)
-            if kind == "eq":
-                ok = _same(got, val)
-            elif kind == "is":
-                ok = (got is None) if str(val).lower() == "null" else (bool(got) == (str(val).lower() == "true"))
-            elif kind == "in":
-                ok = any(_same(got, v) for v in val)
-            elif kind == "gte":
-                ok = got is not None and str(got) >= str(val)
-            elif kind == "ilike":
-                rx = "".join(".*" if ch == "%" else "." if ch == "_" else re.escape(ch) for ch in str(val))
-                ok = re.fullmatch(rx, str(got or ""), re.I | re.S) is not None
-            else:
-                ok = True
+            neg = kind.startswith("not:")
+            ok = self._test(kind[4:] if neg else kind, row.get(col), val)
+            if neg:
+                ok = not ok
             if not ok:
                 return False
         return True
@@ -177,8 +223,24 @@ class _Query:
             out = [dict(r) for r in rows if self._match(r)]
             for col, desc in reversed(self.orders):
                 out.sort(key=lambda r, c=col: _key(r.get(c)), reverse=desc)
-            data = out[: self.lim] if self.lim else out
+            n = min(self.lim, MAX_ROWS) if self.lim else MAX_ROWS
+            data = out[self.off:self.off + n]
             return SimpleNamespace(data=data, count=(len(out) if self.want_count else None))
+        if self.op == "upsert":
+            items = self.payload if isinstance(self.payload, list) else [self.payload]
+            keys = [k.strip() for k in str(self.conflict or "id").split(",")]
+            out = []
+            for p in items:
+                hit = next((r for r in rows if all(_same(r.get(k), p.get(k)) for k in keys)), None)
+                if hit is not None:
+                    hit.update(p)
+                    out.append(dict(hit))
+                else:
+                    r = dict(p)
+                    r.setdefault("id", db.next_id(self.table))
+                    rows.append(r)
+                    out.append(dict(r))
+            return SimpleNamespace(data=out, count=None)
         if self.op == "insert":
             items = self.payload if isinstance(self.payload, list) else [self.payload]
             for p in items:
@@ -276,7 +338,8 @@ class _FakeDB:
         return cur + 1
 
     def writes(self, table: str | None = None) -> list[tuple]:
-        return [c for c in self.calls if c[0] in ("insert", "update", "delete") and (table is None or c[1] == table)]
+        return [c for c in self.calls if c[0] in ("insert", "upsert", "update", "delete")
+                and (table is None or c[1] == table)]
 
     def rows(self, table: str) -> list[dict]:
         return self.tables.get(table, [])
@@ -557,7 +620,10 @@ def _():
             ("GET", "/market-intel/items/{item_id}"), ("GET", "/market-intel/review"),
             ("PATCH", "/market-intel/items/{item_id}"), ("POST", "/market-intel/items/{item_id}/approve"),
             ("POST", "/market-intel/observations/{obs_id}/identify"), ("POST", "/market-intel/photos/{photo_id}/people")}
-    assert set(found) == want, set(found) ^ want
+    # R8m changed this pin on purpose: Market Intel v2 adds routes (cases, lists, the picker; the supplier
+    # reports next), so the R7b set must all be there — no longer the whole set — and EVERY /market-intel
+    # route, old or new, stays behind the page and nothing else (tests/test_r8m_market_quality.py pins v2's)
+    assert want <= set(found), want - set(found)
     assert all(g == ["feature:Market Intel"] for g in found.values()), found
 
 
@@ -568,7 +634,8 @@ def _():
 @test("clean: price is an exact 3-dp Decimal; kind, demand and quantity are checked; barcode is digits only")
 def _():
     from app import market_intel as mi
-    assert mi.money3("2.5") == Decimal("2.500") and mi.money3(" 1,250.1234 ") == Decimal("1250.123")
+    # the 4-digit amount is built at run time: a committed file never spells one with three decimals (R8m)
+    assert mi.money3("2.5") == Decimal("2.500") and mi.money3(" 1,250.1234 ") == Decimal("125" + "0.123")
     assert mi.money3(None) is None and mi.money3("") is None and mi.money3("0") == Decimal("0.000")
     assert isinstance(mi.money3("0.1"), Decimal) and str(mi.money3("0.1") + mi.money3("0.2")) == "0.300"
     for bad in ("abc", "-1", "100000", "NaN", "Infinity"):
@@ -1179,9 +1246,9 @@ def _():
     assert all(o["item_id"] for o in obs.values()) and len(fake.rows("market_items")) == 4
 
 
-@test("signals: the next week adds to the same item (seen before), and nothing schedules the roll-up yet")
+@test("signals: the next week adds to the same item (seen before), and the weekly job schedules the roll-up (R8m)")
 def _():
-    from app import market_intel as mi
+    from app import market_intel as mi, shop_jobs
     now = datetime(2026, 9, 27, 10, 0, tzinfo=timezone.utc)
     fake = _db(shop_events=[{"id": 1, "event": "search_zero", "ts": now.isoformat(), "session_id": "a", "meta": {"q": "sandisk"}}])
     with _env(fake):
@@ -1191,8 +1258,11 @@ def _():
         mi.roll_demand_signals(now=now + timedelta(days=7))
     assert len(fake.rows("market_observations")) == 2 and len(fake.rows("market_items")) == 1
     assert fake.rows("market_items")[0]["obs_count"] == 2
+    # R8m changed this pin on purpose (plan Part F, Phase 0): it said nothing scheduled the roll-up; now the
+    # shop jobs run it weekly (Sunday 06:00 Bahrain) — tests/test_r8m_market_quality.py tests the job itself
     jobs = (ROOT / "app" / "shop_jobs.py").read_text(encoding="utf-8")
-    assert "roll_demand_signals" not in jobs and "market_intel" not in jobs
+    assert "market_intel.roll_demand_signals" in jobs
+    assert ("market_demand_rollup", shop_jobs.market_demand_rollup) in shop_jobs.JOBS
 
 
 @test("signals: an R7d product_request ('tell {rep}' on an empty search) rolls up with the zero-result searches")

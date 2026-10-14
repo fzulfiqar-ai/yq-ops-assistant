@@ -25,9 +25,25 @@ change statuses and edit; management may only approve an Opportunity with an act
 The tables arrive with scripts/r7b_market_intel_migration.sql. Until then `available()` is False, the
 reads answer empty + MISSING_HINT, and a capture is saved to the legacy product_finds / field_notes
 tables (scripts/market_intel_import.py copies those in later), so the API may deploy first.
+
+Market Intel v2 (release R8m, plan Part F), Phase 0 here and Phase 1 in app/market_quality.py:
+  * every read that can pass PostgREST's 1,000 rows is paged (_all); the board answers the TRUE count of
+    what the filters keep and pages with offset / limit;
+  * each photo also gets a 320 px WebP thumbnail next to the master (<stem>-t320.webp,
+    market_photos.thumb_path) and its sha256; lists and the board sign thumbnails, the item / case page
+    the master; a photo without a thumbnail falls back to the master (backfill_thumbnails);
+  * a photo flagged with people gets a server-blurred copy (<stem>-blur.webp, blurred_path) and from
+    then on only that copy is ever signed — url and thumb_url — unless an admin asks for the original;
+  * the capture time is the phone's (client_observed_at) when it lies within the last 7 days and at most
+    10 minutes ahead, else the server's;
+  * a quality / packaging report goes to a case (app.market_quality), the demand roll-up runs weekly
+    (app.shop_jobs), and a new barcode sighting on a Rejected item reopens it to Researching.
+The R8m columns and tables are probed like the R7b ones (quality_available()); before
+scripts/r8m_market_quality_migration.sql the v2 fields are ignored and nothing new is written.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import re
@@ -83,13 +99,25 @@ MAX_PHOTOS = 4
 MAX_EDGE = 1600                 # px, longest side (the client already resizes; this is the guard)
 MAX_PIXELS = 16_000_000         # a photo larger than this is refused before decoding (decompression bomb)
 PHASH_NEAR = 8                  # Hamming distance: at or below = near-duplicate photo
-PHASH_SCAN = 5000               # newest stored hashes compared per capture
+PHASH_SCAN = 5000               # newest stored hashes (non-null only) compared per capture
 SEEN_WINDOW_DAYS = 30
 BUCKET = "finds"                # PRIVATE (created by app.product_finds); new captures go to market/...
 BUCKETS = ("finds", "field-notes")
 SIGNED_TTL = 60 * 60
 MIGRATION = "scripts/r7b_market_intel_migration.sql"
 MISSING_HINT = "Market Intel is not set up yet: apply scripts/r7b_market_intel_migration.sql."
+# R8m (v2): the quality tables and the photo / sighting columns of scripts/r8m_market_quality_migration.sql
+QUALITY_MIGRATION = "scripts/r8m_market_quality_migration.sql"
+QUALITY_HINT = "Quality cases are not set up yet: apply scripts/r8m_market_quality_migration.sql."
+MAX_PAGES = 50                  # x 1,000 rows per paged read (_all); reaching it is logged, never silent
+THUMB_EDGE = 320                # px: the lists' and the board's thumbnail (WebP q70, a few KB)
+THUMB_QUALITY = 70
+THUMB_SUFFIX = "-t320"          # market/2026/10/ab12.webp -> market/2026/10/ab12-t320.webp
+BLUR_RADIUS = 24                # the people-photo copy: Pillow GaussianBlur on the master
+BLUR_SUFFIX = "-blur"
+CLIENT_TIME_PAST = timedelta(days=7)        # the phone's capture time is trusted this far back ...
+CLIENT_TIME_AHEAD = timedelta(minutes=10)   # ... and this far ahead of the server's clock
+REOPEN_REASON = "new sighting after rejection"
 # The 'system' demand signals and the import derive their client_uuid from a stable key (uuid5), so
 # rolling the same week twice, or importing twice, writes nothing new.
 UUID_NS = uuid.UUID("6b1d3f0e-2f49-4b8e-9d0c-5a7e0c9b7d21")
@@ -138,16 +166,49 @@ def available(force: bool = False) -> bool:
     return ok
 
 
+_qprobe: dict = {"until": 0.0, "ok": False}
+
+
+def quality_available(force: bool = False) -> bool:
+    """True when the R8m tables exist (scripts/r8m_market_quality_migration.sql: the cases, the lists and,
+    with them, the photo and sighting columns v2 writes). Cached like available(). Callers ask
+    available() first: the R8m migration needs the R7b one."""
+    now = time.monotonic()
+    if not force and _qprobe["until"] > now:
+        return bool(_qprobe["ok"])
+    try:
+        get_client().table("market_cases").select("id").limit(1).execute()
+        ok = True
+    except Exception as e:  # noqa: BLE001 — a missing table (or a blip) means "not yet"
+        log.debug("market quality probe failed: %s", e)
+        ok = False
+    _qprobe.update(until=now + (_PROBE_HIT_S if ok else _PROBE_MISS_S), ok=ok)
+    return ok
+
+
 def forget_probe() -> None:
     _probe.update(until=0.0, ok=False)
+    _qprobe.update(until=0.0, ok=False)
 
 
 def _missing(e: Exception) -> bool:
-    """A read or write met a missing table: forget the cached hit (the reverse ran)."""
+    """A read or write met a missing table: forget the cached hits (a reverse ran)."""
     if is_missing_table(e):
         forget_probe()
         return True
     return False
+
+
+def _all(build, max_pages: int = MAX_PAGES) -> list[dict]:
+    """Every row of a read, 1,000 at a time: PostgREST answers at most 1,000 rows whatever .limit() asks,
+    so an unpaged read stops there without a word. `build()` returns a FRESH query with a total order
+    (a unique column last), the pages are cut with .range() (app.shop_analytics.paged). A read that
+    reaches max_pages is logged, never silently short."""
+    from app.shop_analytics import PAGE, paged
+    rows, capped = paged(lambda a: build().range(a, a + PAGE - 1).execute().data or [], max_pages)
+    if capped:
+        log.warning("market intel: a paged read stopped at %d rows (max_pages=%d)", len(rows), max_pages)
+    return rows
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -172,6 +233,16 @@ def _parse_ts(v) -> datetime | None:
         return None
 
 
+def client_time(v, now: datetime) -> datetime | None:
+    """The phone's capture time (client_observed_at, ISO) when it is believable: at most 7 days before
+    the server's clock and at most 10 minutes after it. Missing, unreadable or out of bounds (a phone
+    clock days off) -> None, and the sighting takes the server's time."""
+    t = _parse_ts(str(v).strip()) if v not in (None, "") else None
+    if t is None:
+        return None
+    return t if now - CLIENT_TIME_PAST <= t <= now + CLIENT_TIME_AHEAD else None
+
+
 def clean_text(v, limit: int) -> str | None:
     """Control characters out, whitespace collapsed, capped; '' -> None."""
     s = re.sub(r"\s+", " ", _CTRL.sub("", str(v or ""))).strip()
@@ -188,7 +259,7 @@ def money3(v) -> Decimal | None:
     except (InvalidOperation, ValueError):
         raise MarketIntelError("The price must be a number, like 2.500.") from None
     if not d.is_finite() or d < 0 or d >= 100000:
-        raise MarketIntelError("The price must be between 0 and 99,999.999 BHD.")
+        raise MarketIntelError("The price must be at least 0 and under 100,000 BHD.")
     return d
 
 
@@ -268,17 +339,10 @@ def _webp_ok() -> bool:
         return False
 
 
-def process_photo(data: bytes, filename: str) -> dict:
-    """Validate one uploaded photo and return it ready to store:
-    {"data", "ext", "content_type", "width", "height", "bytes", "phash" (signed 64-bit)}.
-    The bytes are re-encoded from pixels only, so no EXIF (GPS, device, time) survives."""
-    from app.uploads import content_matches
-    name = (filename or "").lower()
-    ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
-    if ext not in _PHOTO_EXTS:
-        raise MarketIntelError("Please send a photo (JPG, PNG or WEBP).")
-    if not data or not content_matches(name, data) or (ext == ".webp" and data[8:12] != b"WEBP"):
-        raise MarketIntelError("That file isn't a valid photo.")
+def _decode(data: bytes, edge: int = MAX_EDGE):
+    """Pillow-decode a photo: the pixel count read from the header first (over MAX_PIXELS is refused before
+    anything is decoded), a JPEG decoded at a reduced scale, turned upright, cut to `edge` px BEFORE any
+    mode conversion, then flattened to RGB on white. Raises MarketIntelError when it cannot be read."""
     from PIL import Image, ImageOps
     try:
         img = Image.open(io.BytesIO(data))
@@ -288,20 +352,20 @@ def process_photo(data: bytes, filename: str) -> dict:
         if img.format == "JPEG":
             # decode at 1/2, 1/4 or 1/8 scale straight to about the size kept: a 16 MP phone photo
             # never becomes a full-size bitmap in memory (draft must come before load)
-            img.draft("RGB", (MAX_EDGE, MAX_EDGE))
+            img.draft("RGB", (edge, edge))
         img.load()
     except MarketIntelError:
         raise
     except Exception:  # noqa: BLE001 — truncated / corrupt / an unsupported codec
         raise MarketIntelError("That photo could not be read. Take it again with the camera.") from None
     img = ImageOps.exif_transpose(img)          # upright, as the rep saw it
-    if max(img.size) > MAX_EDGE:
-        # cut to size BEFORE any mode conversion, so every conversion below runs on 1600 px
+    if max(img.size) > edge:
+        # cut to size BEFORE any mode conversion, so every conversion below runs on the kept size
         try:
-            img.thumbnail((MAX_EDGE, MAX_EDGE), Image.Resampling.LANCZOS)
+            img.thumbnail((edge, edge), Image.Resampling.LANCZOS)
         except ValueError:                      # a mode the resampler has no kernel for (16-bit, …)
             img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
-            img.thumbnail((MAX_EDGE, MAX_EDGE), Image.Resampling.LANCZOS)
+            img.thumbnail((edge, edge), Image.Resampling.LANCZOS)
     if img.mode in ("RGBA", "LA", "P", "PA"):
         rgba = img if img.mode == "RGBA" else img.convert("RGBA")
         base = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -310,6 +374,48 @@ def process_photo(data: bytes, filename: str) -> dict:
     elif img.mode != "RGB":
         img = img.convert("RGB")
     img.info = {}                               # nothing from the original file rides along
+    return img
+
+
+def _small(img, edge: int, *, blur: int = 0) -> tuple[bytes, str, str]:
+    """An upright RGB picture re-encoded at most `edge` px (WebP q70; JPEG where Pillow has no WebP),
+    blurred first when `blur` is set: the list thumbnail and the people-photo copy.
+    Returns (bytes, extension, content type)."""
+    from PIL import Image, ImageFilter
+    t = img.copy()
+    if max(t.size) > edge:
+        t.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+    if blur:
+        t = t.filter(ImageFilter.GaussianBlur(blur))
+    out = io.BytesIO()
+    if _webp_ok():
+        t.save(out, format="WEBP", quality=THUMB_QUALITY, method=4)
+        return out.getvalue(), ".webp", "image/webp"
+    t.save(out, format="JPEG", quality=THUMB_QUALITY, optimize=True)
+    return out.getvalue(), ".jpg", "image/jpeg"
+
+
+def derived_path(path: str, suffix: str, ext: str) -> str:
+    """A derivative stored next to its master: ('market/2026/10/ab12.webp', '-t320', '.webp') ->
+    'market/2026/10/ab12-t320.webp'. The master itself is never overwritten."""
+    head, _, name = str(path).rpartition("/")
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return f"{head}/{stem}{suffix}{ext}" if head else f"{stem}{suffix}{ext}"
+
+
+def process_photo(data: bytes, filename: str) -> dict:
+    """Validate one uploaded photo and return it ready to store:
+    {"data", "ext", "content_type", "width", "height", "bytes", "phash" (signed 64-bit), "sha256" (of the
+    stored bytes), "thumb", "thumb_ext", "thumb_type" (the 320 px thumbnail)}.
+    The bytes are re-encoded from pixels only, so no EXIF (GPS, device, time) survives."""
+    from app.uploads import content_matches
+    name = (filename or "").lower()
+    ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
+    if ext not in _PHOTO_EXTS:
+        raise MarketIntelError("Please send a photo (JPG, PNG or WEBP).")
+    if not data or not content_matches(name, data) or (ext == ".webp" and data[8:12] != b"WEBP"):
+        raise MarketIntelError("That file isn't a valid photo.")
+    img = _decode(data, MAX_EDGE)
     out = io.BytesIO()
     if _webp_ok():
         img.save(out, format="WEBP", quality=80, method=4, exif=b"")
@@ -318,17 +424,30 @@ def process_photo(data: bytes, filename: str) -> dict:
         img.save(out, format="JPEG", quality=82, optimize=True, progressive=True, exif=b"")
         ext_out, ctype = ".jpg", "image/jpeg"
     blob = out.getvalue()
+    thumb, t_ext, t_type = _small(img, THUMB_EDGE)
     return {"data": blob, "ext": ext_out, "content_type": ctype, "width": img.size[0], "height": img.size[1],
-            "bytes": len(blob), "phash": to_signed64(dhash64(img))}
+            "bytes": len(blob), "phash": to_signed64(dhash64(img)), "sha256": hashlib.sha256(blob).hexdigest(),
+            "thumb": thumb, "thumb_ext": t_ext, "thumb_type": t_type}
 
 
-def _upload(p: dict, now: datetime) -> str:
-    """Store one processed photo in the private bucket; returns the object path."""
+def _upload(p: dict, now: datetime, *, thumb: bool = False) -> dict:
+    """Store one processed photo in the private bucket and, with thumb=True (R8m), its 320 px thumbnail
+    next to it. Returns {"path", "thumb_path"}. A failed thumbnail costs only the thumbnail: the lists
+    fall back to the master and backfill_thumbnails makes it later."""
     from app.product_finds import ensure_bucket
     ensure_bucket()
+    store = get_client().storage.from_(BUCKET)
     path = f"market/{now:%Y/%m}/{uuid.uuid4().hex}{p['ext']}"
-    get_client().storage.from_(BUCKET).upload(path, p["data"], {"content-type": p["content_type"], "upsert": "false"})
-    return path
+    store.upload(path, p["data"], {"content-type": p["content_type"], "upsert": "false"})
+    tpath = None
+    if thumb and p.get("thumb"):
+        want = derived_path(path, THUMB_SUFFIX, p["thumb_ext"])
+        try:
+            store.upload(want, p["thumb"], {"content-type": p["thumb_type"], "upsert": "false"})
+            tpath = want
+        except Exception as e:  # noqa: BLE001
+            log.warning("market intel thumbnail upload failed: %s", e)
+    return {"path": path, "thumb_path": tpath}
 
 
 def sign_many(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
@@ -358,6 +477,36 @@ def sign_many(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
                     except Exception:  # noqa: BLE001
                         pass
     return out
+
+
+def photo_keys(p: dict, *, master: bool, raw: bool = False) -> list[tuple[str, str]]:
+    """The (bucket, path) pairs one photo row may have signed. A photo flagged with people: ONLY its
+    blurred copy (nothing when it has none yet) — the original is never signed, so its URL cannot leak —
+    unless an admin asked for the original (raw). Otherwise a list (master=False) signs the thumbnail,
+    or the master while the photo has none; the item / case page (master=True) signs both."""
+    b = p.get("bucket")
+    if p.get("has_people_flag") and not raw:
+        return [(b, p["blurred_path"])] if p.get("blurred_path") else []
+    keys = []
+    if p.get("thumb_path"):
+        keys.append((b, p["thumb_path"]))
+    if (master or not p.get("thumb_path")) and p.get("path"):
+        keys.append((b, p["path"]))
+    return keys
+
+
+def photo_urls(p: dict, signed: dict, *, master: bool, raw: bool = False) -> tuple[str | None, str | None]:
+    """(url, thumb_url) for one photo row out of sign_many's answer, by the rule of photo_keys. A list
+    answers the thumbnail in both; a flagged photo the blurred copy in both."""
+    b = p.get("bucket")
+    if p.get("has_people_flag") and not raw:
+        u = signed.get((b, p.get("blurred_path"))) if p.get("blurred_path") else None
+        return u, u
+    full = signed.get((b, p.get("path"))) if p.get("path") else None
+    small = signed.get((b, p.get("thumb_path"))) if p.get("thumb_path") else None
+    if master:
+        return full, small or full
+    return small or full, small or full
 
 
 # ── the catalog: "already in YQ" ──────────────────────────────────────────────
@@ -526,7 +675,8 @@ def _live(item: dict | None, hops: int = 5) -> dict | None:
 
 def find_item(f: dict, yq_code: str | None, now: datetime) -> dict | None:
     """The existing item a sighting belongs to, by the plan's keys in order: exact barcode, then the
-    YQ SKU (+ kind), then kind + brand + category + normalised name seen within 30 days."""
+    YQ SKU (+ kind), then kind + brand + category + normalised name seen within 30 days. An exact
+    barcode is the same product even on a Rejected item: capture() then reopens it (R8m)."""
     c = get_client()
     if f.get("barcode"):
         rows = c.table("market_items").select("*").eq("barcode", f["barcode"]).order("id").limit(5).execute().data or []
@@ -557,11 +707,13 @@ def find_item(f: dict, yq_code: str | None, now: datetime) -> dict | None:
 
 
 def near_duplicate(hashes: list[int], exclude_obs: int | None = None) -> dict | None:
-    """The closest stored photo within PHASH_NEAR of any new hash: {observation_id, photo_id, distance}."""
+    """The closest stored photo within PHASH_NEAR of any new hash: {observation_id, photo_id, distance}.
+    Compares the newest PHASH_SCAN photos that HAVE a hash (paged: one read used to stop at 1,000 rows,
+    hash-less imports included)."""
     if not hashes:
         return None
-    rows = (get_client().table("market_photos").select("id,observation_id,phash")
-            .order("id", desc=True).limit(PHASH_SCAN).execute().data or [])
+    rows = _all(lambda: get_client().table("market_photos").select("id,observation_id,phash")
+                .not_.is_("phash", "null").order("id", desc=True), max(1, PHASH_SCAN // 1000))
     best = None
     for r in rows:
         if r.get("phash") is None or r.get("observation_id") == exclude_obs:
@@ -574,9 +726,9 @@ def near_duplicate(hashes: list[int], exclude_obs: int | None = None) -> dict | 
 
 def refresh_item(item_id: int) -> dict:
     """Recount an item from its sightings (distinct shops and reps) and cache it on the row."""
-    obs = (get_client().table("market_observations")
-           .select("id,observed_at,price_bhd,shop_customer_id,shop_name,salesman_id,created_by,source")
-           .eq("item_id", item_id).execute().data or [])
+    obs = _all(lambda: get_client().table("market_observations")
+               .select("id,observed_at,price_bhd,shop_customer_id,shop_name,salesman_id,created_by,source")
+               .eq("item_id", item_id).order("id"))
     shops = {f"c{o['shop_customer_id']}" if o.get("shop_customer_id") else f"n{_ci(o.get('shop_name'))}"
              for o in obs if o.get("shop_customer_id") or _ci(o.get("shop_name"))}
     reps = {f"s{o['salesman_id']}" if o.get("salesman_id") else f"e{_ci(o.get('created_by'))}"
@@ -602,10 +754,18 @@ def _new_item(f: dict, yq_code: str | None, actor: str, now: datetime, title: st
 
 
 def _card(result: str, obs: dict, item: dict | None, stats: dict | None, yq: dict | None,
-          near: dict | None, photos: int, *, replayed: bool = False) -> dict:
+          near: dict | None, photos: int, *, replayed: bool = False, case: dict | None = None,
+          safety_alerted: bool = False) -> dict:
     shops = int((stats or {}).get("shop_count") or (item or {}).get("shop_count") or 0)
     title = (item or {}).get("title") or (yq or {}).get("display_name")
-    if result == "already_in_yq":
+    if case:
+        # a quality report (R8m): the rep reads which report it joined, never another rep's words
+        n = int(case.get("shops") or 0)
+        msg = (f"Added to an open report: “{case.get('title')}”" + (f" (now {n} shop{'s' if n != 1 else ''})." if n else ".")
+               if case.get("joined") else "Quality report saved. The office will review it.")
+        if safety_alerted:
+            msg += " Manager alerted."
+    elif result == "already_in_yq":
         msg = f"We already sell this: {(yq or {}).get('display_name') or title or 'a YQ item'}. Your sighting is attached to it for the office."
     elif result == "seen_before":
         msg = (f"Added your sighting to “{title}”" if title else "Added your sighting to one the team already reported") \
@@ -614,6 +774,8 @@ def _card(result: str, obs: dict, item: dict | None, stats: dict | None, yq: dic
         msg = "New find saved. The office will review it."
     else:
         msg = "Saved. The office will identify it from the photo."
+    if safety_alerted and not case:
+        msg += " Manager alerted."
     if near:
         msg += " This photo looks like one sent before; the office will check."
     out_item = None
@@ -626,7 +788,7 @@ def _card(result: str, obs: dict, item: dict | None, stats: dict | None, yq: dic
     return {"ok": True, "result": result, "message": msg, "observation_id": obs.get("id"),
             "client_uuid": obs.get("client_uuid"), "item": out_item, "yq_item": yq,
             "near_duplicate": ({"observation_id": near["observation_id"]} if near else None),
-            "photos": photos, "replayed": replayed}
+            "photos": photos, "replayed": replayed, "case": case, "safety_alerted": bool(safety_alerted)}
 
 
 def _replay(obs: dict) -> dict:
@@ -638,8 +800,42 @@ def _replay(obs: dict) -> dict:
     except Exception:  # noqa: BLE001
         n = 0
     near = {"observation_id": obs["near_duplicate_of"]} if obs.get("near_duplicate_of") else None
+    case, alerted = None, False
+    if obs.get("case_id") and quality_available():
+        from app import market_quality
+        case, alerted = market_quality.card_case(obs)
+    elif obs.get("safety_flag"):
+        alerted = True                       # a safety sighting the lists could not put on a case
     return _card(obs.get("result") or ("saved_for_review" if not item else "new_find"), obs, item, None, yq, near, n,
-                 replayed=True)
+                 replayed=True, case=case, safety_alerted=alerted)
+
+
+def _picked(ctx: dict | None, code: str) -> tuple[dict | None, str]:
+    """The product picker's SKU (v2) in the catalog's own spelling. A code the catalog does not know is
+    refused; when the catalog cannot be read at all the code is kept as picked (it came from it)."""
+    items = (ctx or {}).get("items") or {}
+    if not items:
+        return None, code
+    from app.shop import resolve_code
+    hit = resolve_code(ctx, code)
+    if not hit:
+        raise MarketIntelError(f"{code} is not a YQ catalog code.")
+    return items[hit], str(hit)
+
+
+def _reopen_rejected(item: dict, actor: str) -> dict:
+    """A new sighting on a Rejected item (an exact barcode match still lands there) moves it back to
+    Researching with a decision row, so the office looks again instead of evidence piling up unseen."""
+    at = _iso()
+    who = actor or "system"
+    got = (get_client().table("market_items").update(
+        {"status": "researching", "status_reason": REOPEN_REASON, "status_changed_at": at, "status_changed_by": who,
+         "updated_at": at, "updated_by": who}).eq("id", item["id"]).eq("status", "rejected").execute().data)
+    if got is not None and len(got) == 0:
+        return _item(item["id"]) or item         # someone moved it meanwhile: keep what it is now
+    _decision(int(item["id"]), "status", who, "system", from_status="rejected", to_status="researching",
+              reason=REOPEN_REASON)
+    return {**item, "status": "researching"}
 
 
 def _unique_violation(e: Exception) -> bool:
@@ -647,42 +843,77 @@ def _unique_violation(e: Exception) -> bool:
     return "23505" in msg or "duplicate key" in msg
 
 
-def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: datetime | None = None) -> dict:
+def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: datetime | None = None,
+            defer=None) -> dict:
     """One sighting from the capture sheet -> the instant result card (see the module doc).
     `photos` = [(filename, bytes)], at most MAX_PHOTOS. Every photo is validated before anything is
-    written; a retry with the same client_uuid returns the stored card and writes nothing."""
+    written; a retry with the same client_uuid returns the stored card and writes nothing.
+
+    R8m (v2): the time of the shot (client_observed_at) becomes observed_at when believable; a picked
+    product (yq_item_code) is the YQ item without guessing. With the quality tables in place the v2
+    fields are read too (app.market_quality.clean_v2 / plan_capture) and a quality or packaging report
+    goes to a CASE instead of a cluster. `defer(fn, *args)` runs the safety alert e-mail after the answer
+    (the route passes BackgroundTasks.add_task); None sends it here, best effort — never a failed capture."""
     now = now or _now()
     actor = (actor or "").strip().lower()
     if len(photos) > MAX_PHOTOS:
         raise MarketIntelError(f"At most {MAX_PHOTOS} photos per sighting.")
     f = clean_fields(raw)
     cu = parse_uuid(raw.get("client_uuid")) or str(uuid.uuid4())
-    if not photos and not (f["note"] or f["title"] or f["barcode"] or f["price"] is not None):
+    picked = clean_text(raw.get("yq_item_code"), 64)          # the product picker's SKU (v2)
+    has_v1 = bool(photos or f["note"] or f["title"] or f["barcode"] or f["price"] is not None or picked)
+    if not has_v1 and not str(raw.get("issue_type_id") or "").strip():
         raise MarketIntelError("Add a photo or a note.")
     processed = [process_photo(data, name) for name, data in photos]
+    seen_at = client_time(raw.get("client_observed_at"), now)
+
+    def legacy() -> dict:
+        if not has_v1:                                      # an issue type alone needs the R8m tables
+            raise MarketIntelError("Add a photo or a note.")
+        return legacy_capture(actor, {**f, "title": f["title"] or picked}, processed, cu)
 
     if not available():
-        return legacy_capture(actor, f, processed, cu)
+        return legacy()
 
     try:
         existing = _obs_by_uuid(cu)
     except Exception as e:  # noqa: BLE001
         if _missing(e):
-            return legacy_capture(actor, f, processed, cu)
+            return legacy()
         raise
     if existing:
         return _replay(existing)
 
+    mq = v2 = None
+    if quality_available():
+        from app import market_quality as mq
+        v2 = mq.clean_v2(raw, len(processed))
+    if not has_v1 and not (v2 or {}).get("issue_type_id"):
+        raise MarketIntelError("Add a photo or a note.")      # an issue type alone needs the R8m tables
+
     sm = _salesman_for(actor)
     ctx = _catalog_ctx()
-    yq_item = match_catalog(f.get("title"), f.get("brand"), ctx) if f.get("title") else None
-    yq_code = str(yq_item["item_code"]) if yq_item else None
-    item = find_item(f, yq_code, now)
-    if item and not yq_item and item.get("yq_item_code"):
-        yq_item = ((ctx or {}).get("items") or {}).get(item["yq_item_code"])
+    if picked:
+        yq_item, yq_code = _picked(ctx, picked)
+    else:
+        yq_item = match_catalog(f.get("title"), f.get("brand"), ctx) if f.get("title") else None
         yq_code = str(yq_item["item_code"]) if yq_item else None
+    plan = mq.plan_capture(v2, f, yq_item) if mq else None
+    on_case = bool(plan and plan["case"])
+    item = found = None
+    if on_case:
+        # a quality report: an open case of the same SKU + issue within 60 days, else a new one (after
+        # the insert, so a lost race never leaves an empty case behind)
+        found = mq.find_open_case(yq_code, plan["issue"]["id"], now)
+    else:
+        item = find_item(f, yq_code, now)
+        if item and not yq_item and item.get("yq_item_code"):
+            yq_item = ((ctx or {}).get("items") or {}).get(item["yq_item_code"])
+            yq_code = str(yq_item["item_code"]) if yq_item else None
     has_text = bool(f["title"] or f["note"] or f["barcode"])
-    if yq_item:
+    if on_case and found:
+        result = "seen_before"
+    elif yq_item or (on_case and yq_code):
         result = "already_in_yq"
     elif item:
         result = "seen_before"
@@ -692,10 +923,10 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
         result = "saved_for_review"
     near = near_duplicate([p["phash"] for p in processed])
 
-    paths: list[str] = []
+    stored: list[dict] = []
     for p in processed:
         try:
-            paths.append(_upload(p, now))
+            stored.append(_upload(p, now, thumb=mq is not None))
         except Exception as e:  # noqa: BLE001
             log.warning("market intel photo upload failed: %s", e)
             raise MarketIntelError("Could not save the photo. Please try again.", 503) from None
@@ -711,8 +942,12 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
         "barcode_raw": f.get("barcode_raw"), "yq_item_code": yq_code, "result": result,
         "item_id": item.get("id") if item else None,
         "near_duplicate_of": near["observation_id"] if near else None,
-        "observed_at": _iso(now),
+        "observed_at": _iso(seen_at or now),
     }
+    if mq:
+        obs_row.update(plan["obs_cols"], client_observed_at=_iso(seen_at) if seen_at else None)
+        if found:
+            obs_row["case_id"] = found["id"]
     try:
         obs = (get_client().table("market_observations").insert(obs_row).execute().data or [obs_row])[0]
     except Exception as e:  # noqa: BLE001
@@ -721,19 +956,33 @@ def capture(actor: str, raw: dict, photos: list[tuple[str, bytes]], *, now: date
             if again:
                 return _replay(again)
         if _missing(e):
-            return legacy_capture(actor, f, processed, cu)
+            return legacy()
         raise
-    if not item and result in ("new_find", "already_in_yq"):
+    if item and item.get("status") == "rejected":
+        item = _reopen_rejected(item, actor)
+    if not on_case and not item and result in ("new_find", "already_in_yq"):
         item = _new_item(f, yq_code, actor, now, title=(yq_item or {}).get("display_name") if yq_item else None)
         get_client().table("market_observations").update({"item_id": item["id"]}).eq("id", obs["id"]).execute()
         obs["item_id"] = item["id"]
-    if paths:
-        get_client().table("market_photos").insert([
-            {"observation_id": obs["id"], "bucket": BUCKET, "path": path, "position": i,
-             "width": p["width"], "height": p["height"], "bytes": p["bytes"], "phash": p["phash"]}
-            for i, (path, p) in enumerate(zip(paths, processed))]).execute()
+    if stored:
+        roles = (v2 or {}).get("photo_roles") or []
+        rows = []
+        for i, (s, p) in enumerate(zip(stored, processed)):
+            row = {"observation_id": obs["id"], "bucket": BUCKET, "path": s["path"], "position": i,
+                   "width": p["width"], "height": p["height"], "bytes": p["bytes"], "phash": p["phash"]}
+            if mq:
+                row.update(role=roles[i] if i < len(roles) else "product", sha256=p["sha256"],
+                           thumb_path=s["thumb_path"])
+            rows.append(row)
+        get_client().table("market_photos").insert(rows).execute()
     stats = refresh_item(int(item["id"])) if item else None
-    return _card(result, obs, item, stats, yq_card(yq_item), near, len(paths))
+    case, alerted = None, False
+    if on_case:
+        case, alerted = mq.link_case(obs, plan, found=found, yq_item=yq_item, f=f, actor=actor,
+                                     has_photo=bool(stored), defer=defer)
+    elif plan and plan["safety"]:
+        alerted = mq.alert_without_case(obs, defer=defer)     # no issue type at all to open a case on
+    return _card(result, obs, item, stats, yq_card(yq_item), near, len(stored), case=case, safety_alerted=alerted)
 
 
 # ── before the migration: the legacy boards keep the capture ──────────────────
@@ -803,9 +1052,41 @@ def _m(v, mask: bool):
     return mask_text(v)
 
 
-def _cluster_out(r: dict, signed: dict, *, office: bool, mask: bool = False) -> dict:
+def _cover_photo(r: dict, covers: dict | None) -> dict | None:
+    """The cluster's cover as a photo row: its market_photos row when read (thumb_path, flags), else the
+    view's bucket + path. None when the item has no photo to show."""
+    if not r.get("cover_path"):
+        return None
+    key = (r.get("cover_bucket") or BUCKET, r.get("cover_path"))
+    return (covers or {}).get(key) or {"bucket": key[0], "path": key[1]}
+
+
+def _cover_rows(rows: list[dict]) -> dict[tuple[str, str], dict]:
+    """{(bucket, path): market_photos row} for the covers of these clusters — only with the R8m columns
+    (thumb_path), which is all the row adds to what the view says."""
+    paths = sorted({r["cover_path"] for r in rows if r.get("cover_path")})
+    if not paths or not quality_available():
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    try:
+        for i in range(0, len(paths), 100):
+            chunk = paths[i:i + 100]
+            for p in _all(lambda chunk=chunk: get_client().table("market_photos").select("*")
+                          .in_("path", chunk).order("id")):
+                out[(p.get("bucket"), p.get("path"))] = p
+    except Exception as e:  # noqa: BLE001 — a cover without its thumbnail falls back to the master
+        log.info("market intel: cover photos not read: %s", e)
+    return out
+
+
+def _cluster_out(r: dict, signed: dict, *, office: bool, mask: bool = False, cover: dict | None = None,
+                 master: bool = False) -> dict:
+    """One cluster as the API answers it. `cover` = the cover's photo row (_cover_photo); a list signs
+    its thumbnail (cover_url and thumb_url both), the item page (master=True) the master in cover_url."""
     pmin, pmax = money_out(r.get("price_min")), money_out(r.get("price_max"))
-    cover = signed.get((r.get("cover_bucket") or "", r.get("cover_path") or "")) if r.get("cover_path") else None
+    cover_url = thumb_url = None
+    if cover:
+        cover_url, thumb_url = photo_urls(cover, signed, master=master)
     # an item without a typed name shows the office its first note; a rep only ever sees a typed name
     title = _m(r.get("title") or ((clean_text(r.get("first_note"), 80) if office else None)), mask)
     out = {"item_id": r.get("item_id"), "kind": r.get("kind"), "kind_label": KIND_LABELS.get(r.get("kind"), "Other"),
@@ -817,7 +1098,7 @@ def _cluster_out(r: dict, signed: dict, *, office: bool, mask: bool = False) -> 
            "observations": int(r.get("observations") or 0), "shops": int(r.get("shops") or 0),
            "reps": int(r.get("reps") or 0), "price_min": pmin, "price_max": pmax,
            "first_seen": r.get("first_seen"), "last_seen": r.get("last_seen"),
-           "photos": int(r.get("photos") or 0), "cover_url": cover,
+           "photos": int(r.get("photos") or 0), "cover_url": cover_url, "thumb_url": thumb_url,
            "system_signals": int(r.get("system_signals") or 0), "demand_qty": r.get("demand_qty")}
     if office:
         out.update(near_duplicates=int(r.get("near_duplicates") or 0), merged_into=r.get("merged_into"),
@@ -853,17 +1134,20 @@ def _unavailable(extra: dict | None = None) -> dict:
     return {"available": False, "hint": MISSING_HINT, **(extra or {})}
 
 
-def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: int = 300,
+def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: int = 300, offset: int = 0,
           mask: bool = False) -> dict:
     """The Market Intel board: clusters (one per item), newest sighting first, with filters
     kind / status / brand / category / rep / area / since / q (text, barcode, code). `mask`
-    (management: features.masks_contacts) masks phones and emails in the free text."""
+    (management: features.masks_contacts) masks phones and emails in the free text.
+    Every cluster is read (paged), so `count` is the TRUE number the filters keep and `items` is the
+    page [offset, offset + limit) of it; the facets count the whole board. Covers are thumbnails."""
     f = filters or {}
     if not available():
         return _unavailable({"items": [], "facets": {}, "queue": {"new_items": 0, "unassigned": 0}})
     c = get_client()
     try:
-        rows = c.table("v_market_clusters").select("*").order("last_seen", desc=True).limit(2000).execute().data or []
+        rows = _all(lambda: c.table("v_market_clusters").select("*").order("last_seen", desc=True)
+                    .order("item_id", desc=True))
     except Exception as e:  # noqa: BLE001
         if _missing(e):
             return _unavailable({"items": [], "facets": {}, "queue": {"new_items": 0, "unassigned": 0}})
@@ -890,32 +1174,41 @@ def board(*, office: bool, actor: str = "", filters: dict | None = None, limit: 
                 or q in _ci(r.get("yq_item_code")) or (qd and len(qd) >= 6 and qd in str(r.get("barcode") or ""))]
     mine_ids: set[int] = set()
     if not office and actor:
-        own = (c.table("market_observations").select("item_id").eq("created_by", actor.strip().lower())
-               .limit(2000).execute().data or [])
+        me = actor.strip().lower()
+        own = _all(lambda: c.table("market_observations").select("id,item_id").eq("created_by", me).order("id"))
         mine_ids = {int(o["item_id"]) for o in own if o.get("item_id") is not None}
     if office and (f.get("rep") or f.get("area")):
-        q2 = c.table("market_observations").select("item_id,salesman_id,area")
+        rep_id = None
         if f.get("rep"):
             try:
-                q2 = q2.eq("salesman_id", int(f["rep"]))
+                rep_id = int(f["rep"])
             except (TypeError, ValueError):
                 raise MarketIntelError("Unknown rep.") from None
-        obs = q2.limit(5000).execute().data or []
+
+        def _rep_rows():
+            q2 = c.table("market_observations").select("id,item_id,salesman_id,area")
+            return (q2.eq("salesman_id", rep_id) if rep_id is not None else q2).order("id")
+        obs = _all(_rep_rows)
         if f.get("area"):
             obs = [o for o in obs if _ci(o.get("area")) == _ci(f["area"])]
         keep = {int(o["item_id"]) for o in obs if o.get("item_id") is not None}
         rows = [r for r in rows if int(r["item_id"]) in keep]
     if f.get("mine") and not office:
         rows = [r for r in rows if int(r["item_id"]) in mine_ids]
-    rows = rows[: max(1, min(int(limit or 300), 1000))]
-    signed = sign_many([(r.get("cover_bucket"), r.get("cover_path")) for r in rows if r.get("cover_path")])
+    total = len(rows)
+    off = max(0, int(offset or 0))
+    lim = max(1, min(int(limit or 300), 1000))
+    rows = rows[off:off + lim]
+    covers = _cover_rows(rows)
+    cover_of = {int(r["item_id"]): _cover_photo(r, covers) for r in rows}
+    signed = sign_many([k for p in cover_of.values() if p for k in photo_keys(p, master=False)])
     items = []
     for r in rows:
-        it = _cluster_out(r, signed, office=office, mask=mask)
+        it = _cluster_out(r, signed, office=office, mask=mask, cover=cover_of.get(int(r["item_id"])))
         if not office:
             it["mine"] = int(r["item_id"]) in mine_ids
         items.append(it)
-    return {"available": True, "items": items, "count": len(items),
+    return {"available": True, "items": items, "count": total, "offset": off, "limit": lim,
             "facets": facets(all_rows, office=office), "queue": queue_counts() if office else None}
 
 
@@ -938,8 +1231,8 @@ def facets(rows: list[dict], *, office: bool) -> dict:
            "categories": cats, "brands": brands, "demand_levels": list(DEMAND_LEVELS)}
     if office:
         try:
-            obs = (get_client().table("market_observations").select("salesman_id,area").eq("source", "rep")
-                   .limit(5000).execute().data or [])
+            obs = _all(lambda: get_client().table("market_observations").select("id,salesman_id,area")
+                       .eq("source", "rep").order("id"))
         except Exception:  # noqa: BLE001
             obs = []
         names = _salesmen_names()
@@ -949,43 +1242,65 @@ def facets(rows: list[dict], *, office: bool) -> dict:
     return out
 
 
+def _count(q) -> int:
+    res = q.limit(1).execute()
+    return int(res.count if res.count is not None else len(res.data or []))
+
+
 def queue_counts() -> dict:
+    """What waits for the office: New items, un-identified sightings (rep / system, not on a quality
+    case) and the imported library — counted by the database, never from a capped read."""
     c = get_client()
+    cases = quality_available()
+
+    def waiting(library: bool):
+        q = c.table("market_observations").select("id", count="exact").is_("item_id", "null")
+        q = q.eq("source", "import") if library else q.in_("source", ["rep", "system"])
+        return q.is_("case_id", "null") if cases and not library else q
     try:
-        new_items = c.table("market_items").select("id", count="exact").eq("status", "new").limit(1).execute()
-        unassigned = (c.table("market_observations").select("id,source").is_("item_id", "null")
-                      .limit(5000).execute().data or [])
+        new_items = _count(c.table("market_items").select("id", count="exact").eq("status", "new"))
+        unassigned, library = _count(waiting(False)), _count(waiting(True))
     except Exception as e:  # noqa: BLE001
         _missing(e)
         return {"new_items": 0, "unassigned": 0, "library": 0}
-    return {"new_items": int(new_items.count if new_items.count is not None else len(new_items.data or [])),
-            "unassigned": sum(1 for o in unassigned if o.get("source") != "import"),
-            "library": sum(1 for o in unassigned if o.get("source") == "import")}
+    return {"new_items": new_items, "unassigned": unassigned, "library": library}
 
 
 def _photos_for(obs_ids: list[int]) -> dict[int, list[dict]]:
+    """{observation id: its photo rows, in order} — every column (the R8m ones when they exist: thumb_path,
+    blurred_path, role, sha256, caption), paged per 100 sightings."""
     if not obs_ids:
         return {}
     out: dict[int, list[dict]] = {}
-    for i in range(0, len(obs_ids), 200):
-        rows = (get_client().table("market_photos").select("id,observation_id,bucket,path,position,width,height,has_people_flag")
-                .in_("observation_id", obs_ids[i:i + 200]).execute().data or [])
-        for r in rows:
+    for i in range(0, len(obs_ids), 100):
+        chunk = obs_ids[i:i + 100]
+        for r in _all(lambda chunk=chunk: get_client().table("market_photos").select("*")
+                      .in_("observation_id", chunk).order("id")):
             out.setdefault(int(r["observation_id"]), []).append(r)
     for v in out.values():
         v.sort(key=lambda p: (p.get("position") or 0, p.get("id") or 0))
     return out
 
 
-def _photo_out(p: dict, signed: dict, *, office: bool) -> dict | None:
+def _photo_out(p: dict, signed: dict, *, office: bool, master: bool = False, raw: bool = False) -> dict | None:
+    """One photo for the API. A rep never receives a people-flagged photo; the office receives only its
+    blurred copy (`blurred`: true) unless an admin asked for the original (raw)."""
     if p.get("has_people_flag") and not office:
         return None
-    return {"id": p.get("id"), "url": signed.get((p.get("bucket"), p.get("path"))), "width": p.get("width"),
-            "height": p.get("height"), "has_people": bool(p.get("has_people_flag"))}
+    url, thumb = photo_urls(p, signed, master=master, raw=raw)
+    flagged = bool(p.get("has_people_flag"))
+    return {"id": p.get("id"), "url": url, "thumb_url": thumb, "width": p.get("width"),
+            "height": p.get("height"), "has_people": flagged, "has_people_flag": flagged,
+            "blurred": flagged and not raw, "role": p.get("role") or "product", "caption": p.get("caption")}
+
+
+# the R8m sighting columns, answered when the row has them (a v1 row simply does not)
+_V2_OBS = ("case_id", "issue_type_id", "report_basis", "qty_affected", "batch_ref", "packaging_version",
+           "safety_flag", "client_observed_at", "brand_id", "supplier_id", "brand_text", "supplier_text")
 
 
 def _obs_out(o: dict, photos: list[dict], signed: dict, names: dict[int, str], *, office: bool, actor: str,
-            mask: bool = False) -> dict:
+             mask: bool = False, master: bool = False, raw: bool = False) -> dict:
     mine = bool(actor) and _ci(o.get("created_by")) == _ci(actor)
     out = {"id": o.get("id"), "kind": o.get("kind"), "kind_label": KIND_LABELS.get(o.get("kind"), "Other"),
            "source": o.get("source"), "signal": o.get("signal"), "title": _m(o.get("title"), mask),
@@ -996,7 +1311,10 @@ def _obs_out(o: dict, photos: list[dict], signed: dict, names: dict[int, str], *
            "result": o.get("result"), "observed_at": o.get("observed_at"), "area": o.get("area"),
            "shop_name": _m(o.get("shop_name"), mask), "item_id": o.get("item_id"), "mine": mine,
            "near_duplicate_of": o.get("near_duplicate_of") if office else None,
-           "photos": [x for x in (_photo_out(p, signed, office=office) for p in photos) if x]}
+           "photos": [x for x in (_photo_out(p, signed, office=office, master=master, raw=raw) for p in photos) if x]}
+    for k in _V2_OBS:
+        if k in o:
+            out[k] = _m(o.get(k), mask) if k in ("batch_ref", "packaging_version") else o.get(k)
     if office:
         sid = o.get("salesman_id")
         if o.get("source") == "system":
@@ -1009,26 +1327,30 @@ def _obs_out(o: dict, photos: list[dict], signed: dict, names: dict[int, str], *
     return out
 
 
-def item_detail(item_id: int, *, office: bool, actor: str = "", mask: bool = False) -> dict:
+def item_detail(item_id: int, *, office: bool, actor: str = "", mask: bool = False, raw: bool = False) -> dict:
     """One item: the cluster, the photo strip, the sightings (a rep: only his own), the shops seen at,
-    the linked YQ SKU or "gap", the AI suggestion (Unverified) and the decision history (office)."""
+    the linked YQ SKU or "gap", the AI suggestion (Unverified) and the decision history (office).
+    Photos carry the master (url) and the thumbnail (thumb_url); a people-flagged one only its blurred
+    copy, unless `raw` (the route sets it for an admin's ?raw=1 only)."""
     if not available():
         raise MarketIntelError(MISSING_HINT, 409)
     c = get_client()
     item = _item(item_id)
     if not item:
         raise MarketIntelError("That item does not exist.", 404)
+    raw = bool(raw and office)
     cl = c.table("v_market_clusters").select("*").eq("item_id", item_id).limit(1).execute().data or []
     q = c.table("market_observations").select("*").eq("item_id", item_id)
     if not office:
         q = q.eq("created_by", (actor or "").strip().lower())
     obs = q.order("observed_at", desc=True).order("id", desc=True).limit(500).execute().data or []
     photos = _photos_for([int(o["id"]) for o in obs])
-    signed = sign_many([(p.get("bucket"), p.get("path")) for ps in photos.values() for p in ps
-                        if office or not p.get("has_people_flag")] +
-                       ([(cl[0].get("cover_bucket"), cl[0].get("cover_path"))] if cl and cl[0].get("cover_path") else []))
+    cover = _cover_photo(cl[0], _cover_rows(cl)) if cl else None
+    signed = sign_many([k for ps in photos.values() for p in ps if office or not p.get("has_people_flag")
+                        for k in photo_keys(p, master=True, raw=raw)] +
+                       (photo_keys(cover, master=True) if cover else []))
     names = _salesmen_names() if office else {}
-    cluster = _cluster_out(cl[0], signed, office=office, mask=mask) if cl else None
+    cluster = _cluster_out(cl[0], signed, office=office, mask=mask, cover=cover, master=True) if cl else None
     ctx_items = (_catalog_ctx() or {}).get("items") or {}
     out = {"available": True, "item": {
                "id": item["id"], "kind": item.get("kind"), "kind_label": KIND_LABELS.get(item.get("kind"), "Other"),
@@ -1044,7 +1366,7 @@ def item_detail(item_id: int, *, office: bool, actor: str = "", mask: bool = Fal
            "yq_item": yq_card(ctx_items.get(item.get("yq_item_code") or "")) if item.get("yq_item_code") else None,
            "gap": not item.get("yq_item_code"),
            "observations": [_obs_out(o, photos.get(int(o["id"]), []), signed, names, office=office, actor=actor,
-                                     mask=mask) for o in obs]}
+                                     mask=mask, master=True, raw=raw) for o in obs]}
     if office:
         shops: dict[str, dict] = {}
         for o in obs:
@@ -1076,32 +1398,40 @@ def item_detail(item_id: int, *, office: bool, actor: str = "", mask: bool = Fal
 
 def review_queue(*, library: bool = False, limit: int = 60, offset: int = 0, mask: bool = False) -> dict:
     """Office: the new items and the un-identified sightings (photo only). library=True browses the
-    imported baseline (the old Finds board) instead."""
+    imported baseline (the old Finds board) instead. The database filters and pages the sightings and
+    counts them (`count` is the true total); a sighting on a quality case (R8m) is not waiting here."""
     if not available():
         return _unavailable({"new_items": [], "unassigned": [], "count": 0})
     c = get_client()
     lim = max(1, min(int(limit or 60), 200))
     off = max(0, int(offset or 0))
-    obs = (c.table("market_observations").select("*").is_("item_id", "null")
-           .order("observed_at", desc=True).order("id", desc=True).limit(5000).execute().data or [])
-    obs = [o for o in obs if (o.get("source") == "import") == library]
-    total = len(obs)
-    page = obs[off:off + lim]
+    q = c.table("market_observations").select("*", count="exact").is_("item_id", "null")
+    q = q.eq("source", "import") if library else q.in_("source", ["rep", "system"])
+    if not library and quality_available():
+        q = q.is_("case_id", "null")
+    res = q.order("observed_at", desc=True).order("id", desc=True).range(off, off + lim - 1).execute()
+    page = res.data or []
+    total = int(res.count) if res.count is not None else off + len(page)
     photos = _photos_for([int(o["id"]) for o in page])
     new_rows = [] if library else (c.table("v_market_clusters").select("*").eq("status", "new")
                                    .order("last_seen", desc=True).limit(200).execute().data or [])
-    signed = sign_many([(p.get("bucket"), p.get("path")) for ps in photos.values() for p in ps] +
-                       [(r.get("cover_bucket"), r.get("cover_path")) for r in new_rows if r.get("cover_path")])
+    covers = _cover_rows(new_rows)
+    cover_of = {int(r["item_id"]): _cover_photo(r, covers) for r in new_rows}
+    signed = sign_many([k for ps in photos.values() for p in ps for k in photo_keys(p, master=False)] +
+                       [k for p in cover_of.values() if p for k in photo_keys(p, master=False)])
     names = _salesmen_names()
     return {"available": True,
-            "new_items": [_cluster_out(r, signed, office=True, mask=mask) for r in new_rows],
+            "new_items": [_cluster_out(r, signed, office=True, mask=mask, cover=cover_of.get(int(r["item_id"])))
+                          for r in new_rows],
             "unassigned": [_obs_out(o, photos.get(int(o["id"]), []), signed, names, office=True, actor="", mask=mask)
                            for o in page],
             "count": total, "offset": off, "limit": lim}
 
 
 def mine(actor: str, limit: int = 50) -> dict:
-    """The rep's own sightings, newest first, with what became of each ("My signals")."""
+    """The rep's own sightings, newest first, with what became of each ("My signals"). A sighting on a
+    quality case (R8m) also carries the case's status in plain words and the office's open question
+    to him (case_status_words, open_question) — never the case's other sightings, shops or reps."""
     if not available():
         return _unavailable({"observations": []})
     c = get_client()
@@ -1114,16 +1444,29 @@ def mine(actor: str, limit: int = 50) -> dict:
         for r in c.table("market_items").select("id,title,status,merged_into,shop_count,obs_count").in_("id", item_ids).execute().data or []:
             items[int(r["id"])] = r
     photos = _photos_for([int(o["id"]) for o in obs])
-    signed = sign_many([(p.get("bucket"), p.get("path")) for ps in photos.values() for p in ps if not p.get("has_people_flag")])
+    signed = sign_many([k for ps in photos.values() for p in ps if not p.get("has_people_flag")
+                        for k in photo_keys(p, master=False)])
+    cases: dict[int, dict] = {}
+    if any(o.get("case_id") for o in obs) and quality_available():
+        from app import market_quality
+        cases = market_quality.rep_case_info(obs)
     out = []
     for o in obs:
         it = items.get(int(o["item_id"])) if o.get("item_id") is not None else None
         row = _obs_out(o, photos.get(int(o["id"]), []), signed, {}, office=False, actor=actor)
+        row.pop("supplier_text", None)                 # which supplier the office linked is office business
+        row.pop("supplier_id", None)
         row["shop_name"] = o.get("shop_name")         # his own shop: fine to show back to him
         row["item_title"] = (it or {}).get("title")
         row["item_status"] = (it or {}).get("status")
         row["status_label"] = REP_STATUS_LABELS.get((it or {}).get("status"))
         row["item_shops"] = int((it or {}).get("shop_count") or 0)
+        cs = cases.get(int(o["id"]))
+        if cs:
+            row.update(case_status_words=cs["case_status_words"], open_question=cs["open_question"],
+                       status_label=cs["case_status_words"])
+        elif "case_id" in o:
+            row.update(case_status_words=None, open_question=None)
         out.append(row)
     return {"available": True, "observations": out}
 
@@ -1235,7 +1578,7 @@ def update_item(item_id: int, changes: dict, actor: str, role: str) -> dict:
         _decision(item_id, "edit", actor, role, reason=reason, detail=diffs)
     if "status" in upd:
         if new_status == "merged" and target:
-            own = (get_client().table("market_observations").select("id").eq("item_id", item_id).execute().data or [])
+            own = _all(lambda: get_client().table("market_observations").select("id").eq("item_id", item_id).order("id"))
             moved = [int(o["id"]) for o in own]
             if moved:
                 get_client().table("market_observations").update({"item_id": int(target["id"])}).eq("item_id", item_id).execute()
@@ -1318,8 +1661,23 @@ def identify_observation(obs_id: int, body: dict, actor: str, role: str) -> dict
     return {"ok": True, "observation_id": obs_id, "item_id": int(item["id"]), "created": created}
 
 
+def blurred_copy(p: dict) -> str:
+    """Make the people-photo copy of one stored photo row: the master read back, blurred (GaussianBlur
+    BLUR_RADIUS), stored next to it as <stem>-blur.webp and recorded in market_photos.blurred_path.
+    Returns the copy's path; raises when the master cannot be read or stored."""
+    store = get_client().storage.from_(p.get("bucket") or BUCKET)
+    blob, ext, ctype = _small(_decode(store.download(p["path"]), MAX_EDGE), MAX_EDGE, blur=BLUR_RADIUS)
+    path = derived_path(p["path"], BLUR_SUFFIX, ext)
+    store.upload(path, blob, {"content-type": ctype, "upsert": "true"})
+    get_client().table("market_photos").update({"blurred_path": path}).eq("id", p["id"]).execute()
+    return path
+
+
 def flag_photo(photo_id: int, flag: bool, actor: str, role: str) -> dict:
-    """Reviewer: people in a photo -> kept for the office, excluded from every report and the agent view."""
+    """Reviewer: people in a photo -> kept for the office, excluded from every report and the agent view.
+    With the R8m columns a flagged photo also gets its server-blurred copy (blurred_copy) and from then on
+    only that copy is signed; unflagging keeps the copy and signs the master again. A copy that cannot
+    be made leaves the photo with no URL at all (never the master) until backfill_thumbnails makes it."""
     if role not in REVIEW_ROLES:
         raise MarketIntelError("Only the office can flag photos.", 403)
     if not available():
@@ -1328,16 +1686,71 @@ def flag_photo(photo_id: int, flag: bool, actor: str, role: str) -> dict:
            .eq("id", photo_id).execute().data)
     if got is not None and len(got) == 0:
         raise MarketIntelError("That photo does not exist.", 404)
-    # on the item's history too, when the photo's sighting is on an item (who flagged it, and when)
+    row = (got or [{}])[0]
+    out = {"ok": True, "photo_id": photo_id, "has_people": bool(flag)}
+    if flag and quality_available():
+        blurred = row.get("blurred_path")
+        if not blurred and row.get("path"):
+            try:
+                blurred = blurred_copy(row)
+            except Exception as e:  # noqa: BLE001 — the flag holds; the photo shows nothing until a copy exists
+                log.warning("market intel: blurred copy of photo %s not made: %s", photo_id, e)
+                blurred = None
+        out["blurred"] = bool(blurred)
+    # on the item's history too, when the photo's sighting is on an item (who flagged it, and when); and
+    # on its quality case's (R8m)
     try:
-        oid = (got or [{}])[0].get("observation_id")
-        obs = get_client().table("market_observations").select("item_id").eq("id", oid).limit(1).execute().data or []
+        oid = row.get("observation_id")
+        obs = get_client().table("market_observations").select("*").eq("id", oid).limit(1).execute().data or []
         if obs and obs[0].get("item_id"):
             _decision(int(obs[0]["item_id"]), "edit", actor, role,
                       detail={"photo_people": {"photo_id": photo_id, "to": bool(flag)}})
+        if obs and obs[0].get("case_id"):
+            from app import market_quality
+            market_quality.case_event(int(obs[0]["case_id"]), "edit", actor,
+                                      detail={"photo_people": {"photo_id": photo_id, "to": bool(flag)}})
     except Exception as e:  # noqa: BLE001 — the flag itself is saved; the history line is best-effort
         log.info("market intel photo flag history not written: %s", e)
-    return {"ok": True, "photo_id": photo_id, "has_people": bool(flag)}
+    return out
+
+
+# ── thumbnails and blurred copies for photos stored before R8m ────────────────
+
+def backfill_thumbnails(limit: int = 200, *, dry_run: bool = True) -> dict:
+    """The 320 px thumbnail for every photo that has none (stored before R8m, imported from the old
+    boards, or its thumbnail upload failed) and the blurred copy for every people-flagged photo that has
+    none. Each master is read back and the derivative written next to it — the master is never touched —
+    then its path recorded. At most `limit` of each per run; dry_run (the default) only counts.
+    scripts/market_intel_thumbs.py is the owner's command for it."""
+    if not available() or not quality_available():
+        return {"ok": False, "reason": QUALITY_HINT}
+    c = get_client()
+    no_thumb = _all(lambda: c.table("market_photos").select("id,bucket,path,thumb_path")
+                    .is_("thumb_path", "null").order("id"))
+    no_blur = _all(lambda: c.table("market_photos").select("id,bucket,path,blurred_path,has_people_flag")
+                   .eq("has_people_flag", True).is_("blurred_path", "null").order("id"))
+    out = {"ok": True, "dry_run": bool(dry_run), "missing_thumbs": len(no_thumb), "missing_blurs": len(no_blur),
+           "thumbs": 0, "blurs": 0, "failed": []}
+    if dry_run:
+        return out
+    n = max(1, int(limit or 200))
+    for p in no_thumb[:n]:
+        try:
+            store = c.storage.from_(p.get("bucket") or BUCKET)
+            blob, ext, ctype = _small(_decode(store.download(p["path"]), THUMB_EDGE), THUMB_EDGE)
+            path = derived_path(p["path"], THUMB_SUFFIX, ext)
+            store.upload(path, blob, {"content-type": ctype, "upsert": "true"})
+            c.table("market_photos").update({"thumb_path": path}).eq("id", p["id"]).execute()
+            out["thumbs"] += 1
+        except Exception as e:  # noqa: BLE001 — one unreadable photo never stops the others
+            out["failed"].append({"photo_id": p.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
+    for p in no_blur[:n]:
+        try:
+            blurred_copy(p)
+            out["blurs"] += 1
+        except Exception as e:  # noqa: BLE001
+            out["failed"].append({"photo_id": p.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
+    return out
 
 
 # ── system demand signals (zero-result searches, restock asks) ────────────────
@@ -1380,7 +1793,8 @@ def roll_demand_signals(days: int = 7, *, now: datetime | None = None, dry_run: 
     """Roll the marketplace's free demand signals into sightings with source='system': zero-result
     searches and "tell {rep}" product requests (per cleaned term) and "tell me when back" restock asks (per SKU) over the last `days`.
     One sighting per term / SKU per ISO week (client_uuid = uuid5 of the key), so running it twice in
-    a week writes nothing new. Callable from app/shop_jobs.py later; NOT scheduled yet."""
+    a week writes nothing new. Scheduled weekly (R8m): app.shop_jobs.market_demand_rollup, Sunday 06:00
+    Bahrain. Both reads are paged (they used to stop at 1,000 rows whatever the limit said)."""
     now = now or _now()
     if not available():
         return {"ok": False, "reason": MISSING_HINT}
@@ -1389,10 +1803,10 @@ def roll_demand_signals(days: int = 7, *, now: datetime | None = None, dry_run: 
     c = get_client()
     # R7d: a "tell {rep}" tap on an empty search is logged as product_request (meta.q = the words) once
     # r7d_product_request_migration.sql is applied; before it, the same tap is a search_zero row
-    ev = (c.table("shop_events").select("ts,session_id,meta").in_("event", ["search_zero", "product_request"])
-          .gte("ts", _iso(since)).limit(20000).execute().data or [])
-    asks = (c.table("shop_restock_requests").select("item_code,phone,device_id,created_at")
-            .gte("created_at", _iso(since)).limit(20000).execute().data or [])
+    ev = _all(lambda: c.table("shop_events").select("id,ts,session_id,meta")
+              .in_("event", ["search_zero", "product_request"]).gte("ts", _iso(since)).order("id"), 20)
+    asks = _all(lambda: c.table("shop_restock_requests").select("id,item_code,phone,device_id,created_at")
+                .gte("created_at", _iso(since)).order("id"), 20)
     ctx = _catalog_ctx()
     items = (ctx or {}).get("items") or {}
     planned: list[dict] = []

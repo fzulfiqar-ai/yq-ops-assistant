@@ -37,6 +37,11 @@ Jobs (in run order):
   * stale_data_alert — when the stock snapshot merchants see is older than shop_stale_days, the
     owner channel gets one Telegram (owner email when Telegram is not configured) a day asking for
     the Focus report. The "alerted today" marker is written only when a channel really delivered.
+  * market_demand_rollup (R8m, Market Intel v2) — once a week, on the first tick after Sunday 06:00
+    Bahrain (a missed Sunday runs on the next tick), app.market_intel.roll_demand_signals turns the
+    week's zero-result searches, product requests and restock asks into Market Intel sightings. The
+    app_settings marker 'market_demand_rolled_at' is written only after a roll-up that ran; the
+    roll-up itself writes one sighting per term / SKU per week, so a second run writes nothing.
 
 Nudges (unassigned, unconfirmed, digest, stale data) go out only between SEND_FROM_H and SEND_UNTIL_H
 Bahrain and never on the Bahrain weekend (Friday, Saturday); outside those hours the jobs answer
@@ -82,6 +87,10 @@ REMINDER_KINDS = ("reminder", "escalation")
 
 LOCK_KEY = "shop_jobs_lock"
 LOCK_TTL_MIN = 10
+
+# the weekly Market Intel demand roll-up (R8m): Sunday 06:00 Bahrain (datetime.weekday(): Sunday = 6)
+ROLLUP_WEEKDAY, ROLLUP_HOUR = 6, 6
+ROLLUP_MARKER = "market_demand_rolled_at"
 _LOCK_RELEASED = "1970-01-01T00:00:00Z"   # a released lease sorts before any live timestamp
 
 
@@ -763,10 +772,39 @@ def badge_log() -> dict:
     return offers.log_badges_daily()
 
 
+def rollup_slot(now: datetime) -> datetime:
+    """The latest Sunday 06:00 Bahrain at or before `now`: the weekly roll-up is due once per slot."""
+    local = now.astimezone(_BAHRAIN)
+    slot = datetime(local.year, local.month, local.day, ROLLUP_HOUR, tzinfo=_BAHRAIN) \
+        - timedelta(days=(local.weekday() - ROLLUP_WEEKDAY) % 7)
+    return slot if slot <= local else slot - timedelta(days=7)
+
+
+def market_demand_rollup(now: datetime | None = None) -> dict:
+    """R8m (Market Intel v2, Phase 0): the week's marketplace demand into Market Intel, once a week —
+    the first tick after Sunday 06:00 Bahrain, or the next one when that tick was missed. The marker is
+    written only after a roll-up that ran (before the R7b tables exist it says why and tries again)."""
+    from app import market_intel
+    now = now or _now()
+    slot = rollup_slot(now)
+    client = get_client()
+    last = _marker(client, ROLLUP_MARKER)
+    if last and last >= slot:
+        return {"skipped": f"rolled up {last:%Y-%m-%d %H:%M} UTC; next after "
+                           f"{slot + timedelta(days=7):%a %d %b %H:%M} Bahrain"}
+    out = market_intel.roll_demand_signals(days=7, now=now)
+    if not out.get("ok"):
+        return {"skipped": out.get("reason") or "Market Intel is not available"}
+    err = _set_marker(client, ROLLUP_MARKER, now)
+    if err:
+        out["marker"] = err
+    return out
+
+
 JOBS = (("notify_retry", notify_retry), ("unassigned_reminder", unassigned_reminder),
         ("unconfirmed_reminder", unconfirmed_reminder), ("cleanup", cleanup),
         ("stale_data_alert", stale_data_alert), ("sweep_lineless", sweep_lineless),
-        ("badge_log", badge_log))
+        ("badge_log", badge_log), ("market_demand_rollup", market_demand_rollup))
 
 
 def run_shop_jobs() -> dict:

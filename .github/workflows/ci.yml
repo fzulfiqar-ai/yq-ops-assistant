@@ -108,6 +108,7 @@ jobs:
           python -m tests.test_r7b_rep
           python -m tests.test_r7b_ai_head
           python -m tests.test_r7b_market_intel
+          python -m tests.test_r8m_market_quality
           python -m tests.test_r7b_arabic
           python -m py_compile scripts/weekly_report.py   # owner tool: must parse on the pinned 3.11
       # R7c order heart (Sprint 3): Received -> Confirmed -> Delivered, the one editor, the price lock,

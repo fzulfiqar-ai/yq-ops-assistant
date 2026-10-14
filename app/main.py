@@ -2451,3 +2451,6 @@ _register_command(app)
 from app.market_intel_api import register as _register_market_intel  # noqa: E402
 
 _register_market_intel(app, limiter)
+from app.market_quality_api import register as _register_market_quality  # noqa: E402  (R8m: cases, lists, picker)
+
+_register_market_quality(app, limiter)
