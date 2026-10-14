@@ -1083,36 +1083,47 @@ def alert_recipients() -> str:
 
 
 def _alert_html(case: dict | None, obs: dict, issue: dict | None) -> tuple[str, str]:
+    """The safety alert e-mail. It carries NO free text a person typed — no note, no typed product name, no
+    batch or packaging text, no case title (it may hold typed words), no shop, no rep: only the case number,
+    the product's code and name from the catalog, the issue's label from the admin list, the time of the
+    report (Bahrain) and the link to the case page, where the office reads the rest. A code the catalog does
+    not hold now (kept while the catalog could not be read) is not printed: it is 'not identified' here."""
     from app.ai_insights import mask_text
-    title = mask_text((case or {}).get("title") or obs.get("title") or "Safety report") or "Safety report"
-    rows = [("Issue", (issue or {}).get("label_en") or "Not given"),
-            ("Product", mask_text(obs.get("yq_item_code") or obs.get("title")) or "Not identified"),
-            ("Reported as", {"customer_said": "The customer said it", "rep_saw": "The rep saw it"}.get(
-                obs.get("report_basis") or "", "Not said")),
-            ("Quantity affected", obs.get("qty_affected") or "Not given"),
-            ("Batch / packaging", " / ".join(x for x in (obs.get("batch_ref"), obs.get("packaging_version")) if x)
-             or "Not given"),
-            ("Note", mask_text(obs.get("note")) or "None"),
-            ("Sightings on this case", (case or {}).get("obs_count") or 1)]
+    from app.shop import resolve_code
+    raw = (case or {}).get("yq_item_code") or obs.get("yq_item_code")
+    ctx = mi._catalog_ctx() or {}
+    code = resolve_code(ctx, raw) if raw and ctx.get("items") else None
+    item = (ctx.get("items") or {}).get(code) if code else None
+    name = (item or {}).get("display_name") if item else None
+    product = (f"{code} · {name}" if name else code) if code else ""
+    name = name or code or "Product not identified"
+    label = (issue or {}).get("label_en") or "Issue not given"
+    when = mi._parse_ts(obs.get("observed_at")) or mi._parse_ts((case or {}).get("last_seen")) or mi._now()
+    on_case = bool(case and case.get("id"))
+    rows = [("Case", f"#{case['id']}" if on_case else
+             (f"not on a case yet (report #{obs['id']})" if obs.get("id") else "not on a case yet")),
+            ("Product", mask_text(product) or "Not identified (see the case)"),
+            ("Issue", mask_text(label)),
+            ("Reported", f"{when.astimezone(_BAHRAIN):%d %b %Y, %H:%M} (Bahrain)")]
     base = (os.getenv("APP_BASE_URL") or "").rstrip("/")
-    link = f"{base}/market-intel/cases/{case['id']}" if base and case else ""
+    link = (f"{base}/market-intel/cases/{case['id']}" if on_case else f"{base}/market-intel") if base else ""
     body = "".join(f"<tr><td style=\"padding:4px 12px 4px 0;color:#6b7280\">{_html.escape(str(k))}</td>"
                    f"<td style=\"padding:4px 0\">{_html.escape(str(v))}</td></tr>" for k, v in rows)
     html = ("<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#111827\">"
             "<h2 style=\"color:#b91c1c;margin:0 0 8px\">Safety report</h2>"
-            f"<p style=\"margin:0 0 12px\"><b>{_html.escape(title)}</b></p>"
             f"<table style=\"border-collapse:collapse\">{body}</table>"
             "<p style=\"margin:12px 0 0\">Please review it within one business day."
             + (f" <a href=\"{_html.escape(link)}\">Open the case</a>." if link else "")
-            + "</p><p style=\"color:#6b7280;font-size:12px\">YQ Market Intel. The shop and the rep are on the "
-            "case page, not in this e-mail.</p></div>")
-    return f"YQ Market Intel - Safety report: {title}"[:200], html
+            + "</p><p style=\"color:#6b7280;font-size:12px\">YQ Market Intel. What was reported, the shop and the "
+            "rep are on the case page, never in this e-mail.</p></div>")
+    return f"YQ Market Intel - Safety report: {mask_text(name)} · {mask_text(label)}"[:200], html
 
 
 def send_safety_alert(case_id: int | None, observation_id: int | None = None) -> dict:
     """E-mail one safety alert (app.emailer.send_html to alert_recipients()). Runs after the answer and
-    never raises: the outcome is a second 'safety_alert' event on the case and an audit_log row. The
-    e-mail names no shop and no rep (the case page has them) and masks phones and e-mails in the note."""
+    never raises: the outcome is a second 'safety_alert' event on the case and an audit_log row. The e-mail
+    holds no free text at all (_alert_html): the case number, the catalog product, the issue label, the time
+    and the link — what was reported, the shop and the rep stay on the case page."""
     out: dict = {"case_id": case_id, "observation_id": observation_id, "emailed": False}
     try:
         case = _case(case_id) if case_id else None
@@ -1500,6 +1511,29 @@ def _linked_actions(case_id: int) -> list[dict]:
     return _actions_for([int(case_id)]).get(int(case_id), [])
 
 
+def _resolve_actions(case_id: int, actor: str) -> list[int]:
+    """A case moved to Resolved: each of its supplier actions that holds the supplier's response AND YQ's
+    resolution check is resolved with it (otherwise the supplier workbook lists it as still open, awaiting
+    YQ's check). An incomplete or cancelled action keeps its status. Every case the action covers gets an
+    'action' event. Returns the actions resolved."""
+    done: list[int] = []
+    for a in _linked_actions(case_id):
+        if not (a.get("supplier_response") and a.get("resolution_check")) or a.get("status") in ("resolved", "cancelled"):
+            continue
+        got = (_c().table("supplier_actions").update({"status": "resolved", "updated_at": mi._iso(), "updated_by": actor})
+               .eq("id", int(a["id"])).eq("status", a.get("status") or "open").execute().data)
+        if got is not None and len(got) == 0:
+            continue                                  # changed meanwhile: left as it is now
+        links = mi._all(lambda aid=int(a["id"]): _c().table("supplier_action_cases").select("action_id,case_id")
+                        .eq("action_id", aid).order("case_id"))
+        for x in links:
+            case_event(int(x["case_id"]), "action", actor,
+                       detail={"action_id": int(a["id"]), "why": "the case was resolved",
+                               "changes": {"status": {"from": a.get("status") or "open", "to": "resolved"}}})
+        done.append(int(a["id"]))
+    return done
+
+
 def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=None) -> dict:
     """PATCH /market-intel/cases/{id} (reviewers): fields, the evidence level (up only, and only as far as the
     case's state supports: evidence_cap — 3 comes with the move to Verified, 4 from Action requested on, 5
@@ -1559,7 +1593,7 @@ def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=Non
         if new == "action_requested" and not _linked_actions(int(case_id)):
             raise MarketIntelError("Request the supplier action first (it moves the case on its own).", 409)
         if new == "resolved" and not any(a.get("supplier_response") and a.get("resolution_check")
-                                         for a in _linked_actions(int(case_id))):
+                                         and a.get("status") != "cancelled" for a in _linked_actions(int(case_id))):
             raise MarketIntelError("A case is resolved only when a supplier action has the supplier's response "
                                    "and YQ's check.", 409)
         upd.update(status=new, status_reason=reason, changed_at=mi._iso(), changed_by=actor)
@@ -1596,6 +1630,8 @@ def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=Non
                       "verification_reason": why if new == "verified" else None}
             case_event(int(case_id), "status", actor, from_status=cur, to_status=new,
                        detail={k: v for k, v in detail.items() if v})
+            if new == "resolved":
+                fields += [f"action:{a}" for a in _resolve_actions(int(case_id), actor)]
     raised = False
     if want_level > level:
         # its own guarded write (evidence_level < the new level): a level someone raised meanwhile stays

@@ -535,7 +535,7 @@ def _():
 # 5. safety
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@test("safety: a flag (or the type's safety default) makes a safety case and e-mails ONCE per case; no shop or rep in it, the note masked")
+@test("safety: a flag (or the type's safety default) makes a safety case and e-mails ONCE per case; no shop, rep or note in it")
 def _():
     fake = _qdb()
     mail = _Mail()
@@ -552,10 +552,10 @@ def _():
     assert case["safety"] is True and _case(fake, c["case"]["id"])["safety"] is True
     assert _events(fake, case["id"]) == [("created", None), ("safety_alert", "queued"), ("safety_alert", "sent"), ("link", None)]
     sent = mail.calls[0]
-    assert "Safety report" in sent["subject"] and "P-22 Power Bank 10000" in sent["subject"]
-    for secret in ("Shop Alpha", "Shop Beta", "Rep One", "rep1", "3900 1234"):
+    assert sent["subject"] == "YQ Market Intel - Safety report: P-22 Power Bank 10000 · Not charging", sent["subject"]
+    for secret in ("Shop Alpha", "Shop Beta", "Rep One", "rep1", "3900 1234", "Swelled", "owner on"):
         assert secret not in sent["html"] and secret not in sent["subject"], secret
-    assert "[number]" in sent["html"] and "Not charging" in sent["html"]
+    assert f"#{case['id']}" in sent["html"] and "P-22 · P-22 Power Bank 10000" in sent["html"] and "Not charging" in sent["html"]
     assert next(o for o in fake.rows("market_observations") if o["id"] == c["observation_id"])["safety_flag"] is True
     audits = [x for x in fake.rows("audit_log") if x["event"] == "market_intel.safety_alert"]
     assert len(audits) == 2 and all(x["detail"]["emailed"] for x in audits)
@@ -595,6 +595,8 @@ def _():
         b = _cap("rep1@example.com", [], kind="complaint", title="Brand Q charger", safety_flag="yes", note="smoke")
         assert b["case"] is None and b["safety_alerted"] and "Manager alerted." in b["message"]
         assert len(mail.calls) == 1 and b["item"]["kind"] == "complaint"
+    sent = mail.calls[0]["subject"] + mail.calls[0]["html"]
+    assert f"not on a case yet (report #{b['observation_id']})" in sent and "Brand Q" not in sent and "smoke" not in sent
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -945,8 +947,10 @@ def _():
         assert c.patch(f"/market-intel/actions/{aid}", headers=R._h("mgmt"), json={"status": "resolved"}).status_code == 403
         detail = c.get(f"/market-intel/cases/{cid}", headers=R._h("clerk")).json()
         assert detail["actions"][0]["supplier_response"] == "Will replace 24 units"
+        assert detail["actions"][0]["status"] == "resolved", "the case resolved its complete action with it"
     evs = [e["event"] for e in fake.rows("market_case_events") if e["case_id"] == cid]
-    assert evs.count("action") == 3 and "status" in evs
+    # created, response, check, and the action resolved with the case
+    assert evs.count("action") == 4 and "status" in evs
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1687,6 +1691,62 @@ def _():
             R._raises(lambda: mq.create_action(v["id"], {"request": "Replace the batch", "supplier_id": 1},
                                                "clerk@example.com", "member"), "changed this case meanwhile", 409)
         assert fake.rows("supplier_actions") == [] and fake.rows("supplier_action_cases") == []
+
+
+@test("resolved: moving a case to Resolved resolves its supplier actions that hold the response and YQ's check (an event on every case they cover); an incomplete or cancelled one keeps its status")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    with _qenv(fake):
+        case = _seed_case(fake, status="action_requested", evidence_level=3, verification_method="sample_inspected")
+        other = _seed_case(fake, status="action_requested", evidence_level=3, verification_method="sample_inspected",
+                           yq_item_code="E-05")
+        done = _seed_action(fake, case["id"], status="responded", supplier_response="Replacing the batch",
+                            resolution_check="New batch tested")
+        fake.tables["supplier_action_cases"].append({"action_id": done["id"], "case_id": other["id"]})
+        half = _seed_action(fake, case["id"], status="responded", supplier_response="Looking into it")
+        gone = _seed_action(fake, case["id"], status="cancelled", supplier_response="x", resolution_check="y")
+        out = mq.update_case(case["id"], {"status": "resolved"}, "clerk@example.com", "member")
+    status = {a["id"]: a["status"] for a in fake.rows("supplier_actions")}
+    assert (status[done["id"]], status[half["id"]], status[gone["id"]]) == ("resolved", "responded", "cancelled")
+    assert f"action:{done['id']}" in out["fields"] and _case(fake, case["id"])["status"] == "resolved"
+    for cid in (case["id"], other["id"]):
+        ev = [e for e in fake.rows("market_case_events") if e["case_id"] == cid and e["event"] == "action"]
+        assert [e["detail"]["changes"]["status"] for e in ev] == [{"from": "responded", "to": "resolved"}], (cid, ev)
+
+
+@test("the safety e-mail carries NO free text — no note, typed product name, batch or case title (a shop a rep typed never reaches it): only the case number, the catalog product, the issue label, the time and the link")
+def _():
+    fake, mail = _qdb(), _Mail()
+    old = os.environ.get("APP_BASE_URL", "")
+    os.environ["APP_BASE_URL"] = "https://portal.example.com"
+    try:
+        with _qenv(fake, mail):
+            a = _cap("rep1@example.com", [], kind="complaint", issue_type_id="2", title="Shop Alpha's own-brand charger",
+                     note="At Shop Alpha, owner on 3900 1234, it melted", batch_ref="Shop Alpha lot 7",
+                     shop_name="Shop Alpha")
+            b = _cap("rep2@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="2",
+                     note="Shop Beta says it smoked", client_observed_at=(NOW - timedelta(hours=3)).isoformat())
+            # a code the catalog does not hold (kept while it could not be read) is typed text too
+            from app import market_quality as mq
+            odd = _seed_case(fake, yq_item_code="SHOP-ALPHA-7", issue_type_id=2, safety=True, title="Shop Alpha's lot")
+            mq.send_safety_alert(odd["id"], None)
+    finally:
+        os.environ["APP_BASE_URL"] = old
+    assert a["safety_alerted"] and b["safety_alerted"] and len(mail.calls) == 3
+    first, second, third = mail.calls
+    assert third["subject"] == "YQ Market Intel - Safety report: Product not identified · Gets hot", third["subject"]
+    assert "SHOP-ALPHA" not in third["html"] and "Shop Alpha" not in third["html"] and "Not identified" in third["html"]
+    assert first["subject"] == "YQ Market Intel - Safety report: Product not identified · Gets hot"
+    assert second["subject"] == "YQ Market Intel - Safety report: C-10 Type-C Cable 1m · Gets hot"
+    for sent in (first, second):
+        text = sent["subject"] + sent["html"]
+        for typed in ("Shop Alpha", "Shop Beta", "own-brand", "melted", "smoked", "3900 1234", "[number]", "lot 7",
+                      "Rep One", "rep1", "Rep Two"):
+            assert typed not in text, typed
+    assert f"#{a['case']['id']}" in first["html"] and "Not identified" in first["html"] and "Gets hot" in first["html"]
+    assert f"https://portal.example.com/market-intel/cases/{b['case']['id']}" in second["html"]
+    assert "C-10 · C-10 Type-C Cable 1m" in second["html"] and "14 Oct 2026, 09:00 (Bahrain)" in second["html"]
 
 
 @test("move: a safety sighting moved from an alerted case onto another takes it onto the Safety tab with the alert claim — no second e-mail, now or from the sweep")
