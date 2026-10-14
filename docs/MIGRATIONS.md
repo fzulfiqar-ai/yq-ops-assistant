@@ -203,8 +203,8 @@ id desc` as the fallback; 3 columns appended), `v_product_margin` (6 columns app
 day-book totals per item come from one `GROUP BY` CTE over `order_lines` joined once, plus the index
 `order_lines_item_name_idx` — the correlated per-item SUM it replaced cost 365 ms as `yq_readonly` on
 production and 1.2 s on the local copy per call, the CTE form 15 ms), `ar_ageing_totals` (Focus's Grand
-Total per ageing snapshot, written by `scripts/load_supabase.py` from `parse_receivables_totals`; 24-Sep:
-rows 9,078.860 vs Focus 8,633.840 — credits shown as positive), and `v_catalog_reserved` (staff only:
+Total per ageing snapshot, written by `scripts/load_supabase.py` from `parse_receivables_totals`; on 24-Sep
+the rows summed about 5 % above Focus's total — credits shown as positive), and `v_catalog_reserved` (staff only:
 on-hand / reserved / available / in-transit; reserved = open, un-issued, non-test marketplace orders
 created after the snapshot's end of day in Bahrain, backorder lines excluded — 0 units today; in-transit
 = an allow-list of the in-flight procurement stages `raised` / `paid` and their legacy aliases, so a
@@ -512,7 +512,10 @@ Command Centre's own order and match SQL run as `yq_readonly`, anon/authenticate
 reverse run with the view in place (the view keeps answering), R7c again, then this reverse twice, re-applied,
 refused without the links table. The reverse drops the view only (no CASCADE; nothing depends on it).
 
-## Release R7b (27-Sep-2026, not yet applied): `r7b_market_intel_migration.sql` — Market Intelligence v1
+## Release R7b (27-Sep-2026, applied with the R7d release on 28-Sep-2026): `r7b_market_intel_migration.sql` — Market Intelligence v1
+
+(Live since 28-Sep-2026: the four tables existed and held 0 rows on 14-Oct-2026; the import of the old boards had not
+been run. Market Intel v2 builds on it: § Release R8m below.)
 
 Additive and idempotent, with `r7b_market_intel_reverse.sql` (drops the two views and the four tables; take
 `python -m scripts.db_backup --tables market_items market_observations market_photos market_item_decisions` first if
@@ -580,7 +583,7 @@ granted to `anon`/`authenticated`.
 
 Deploy order: either. Before the migration the CHECK refuses the new kind and `app/shop.py record_event` stores the
 same request as a `search_zero` row with `meta.where = 'product_request'` (Market Intel's `roll_demand_signals`
-reads `search_zero` today; it does not read `product_request` rows yet). The reverse narrows the CHECK back to the 20
+reads both `search_zero` and `product_request` rows, so either form is counted). The reverse narrows the CHECK back to the 20
 values `NOT VALID` — no row is deleted or rewritten; new `product_request` inserts fall back as above. Order with
 R6: to reverse `shop_events_error_migration.sql` after this one, reverse this file first.
 
@@ -697,3 +700,106 @@ exposure row or any archived rule / campaign exists, unless `SET yq.offer_ledger
 Replayed on a throwaway local cluster (synthetic tables): apply twice, the per-rule and follow-up numbers, the RPCs,
 the FK and checks, the reverse guard, reverse, apply again — all rolled back (`tests/test_r7d_ops.py`, SKIPs without
 a cluster). Run `python -m scripts.audit_grants` after applying.
+
+
+## Release R8m (14-Oct-2026, built, not applied): `r8m_market_quality_migration.sql` — Market Intel v2, the quality track
+
+Additive and idempotent, with `r8m_market_quality_reverse.sql`. Needs `r7b_market_intel_migration.sql` (live since
+28-Sep-2026), `catalog_items` and the `yq_readonly` role; its first block stops and names what is missing. **Not
+rehearsed on production yet**: it was built in a code worktree, which never connects to production. Contract and
+workflow: `docs/MARKET_INTEL.md` § v2; tables column by column: `docs/SCHEMA.md` § Market Intelligence.
+
+Creates (bigint identity keys, `created_at` / `updated_at` / `created_by` / `updated_by` on every list and record):
+- `suppliers` (one ACTIVE row per name, any case: unique index `suppliers_active_name_key` on `lower(btrim(name))`),
+  `brands` (supplier, aliases, `renamed_from`), `market_issue_types` (kind quality / packaging / demand / competitor /
+  other, unique lowercase slug `code`, `label_en` / `label_ar`, `safety_default`, `fields` ⊆ qty / batch_ref /
+  packaging_version / label_photo, `sort`). Admin lists: **nothing is seeded** (the repository is public). Each has
+  `active` and `merged_into`.
+- `market_cases`: product (`yq_item_code`, text, no FK), brand, supplier, issue type (required), batch, packaging version,
+  the eight statuses (default `submitted`), `evidence_level` 1–5 (default 1), `safety`, `severity` 1–3, assignee, due
+  date, `verification_method` / `verification_reason`, title, first / last seen, cached `obs_count` / `shop_count`,
+  `merged_into`.
+- `market_case_events`: the append-only case timeline (row triggers refuse UPDATE / DELETE, a statement trigger refuses
+  TRUNCATE, like `market_item_decisions`; no cascade from the case, so a case with a timeline cannot be deleted).
+- `supplier_actions` (request, owner, due date, status open / responded / resolved / cancelled, the supplier's response,
+  YQ's resolution check) and `supplier_action_cases` (the cases an action covers; both keys `ON DELETE CASCADE`).
+- `supplier_reports` (supplier, month = the first day, edition supplier / internal, status draft / approved /
+  superseded, narrative, `included_observation_ids bigint[]`, `counts jsonb`, approver, `file_sha256`, `downloads jsonb`).
+- `v_market_cases_agent`: unmerged cases with status, evidence, safety, issue, SKU, brand, supplier, counts and dates
+  (no title, note, person, shop or photo path) — the only object granted to `yq_readonly`; not `security_invoker`.
+
+Adds columns (each nullable or with a constant default, so no row is rewritten): `market_observations` — `case_id`
+(`ON DELETE SET NULL`), `issue_type_id`, `report_basis` (customer_said / rep_saw), `qty_affected` (> 0), `batch_ref`,
+`packaging_version`, `safety_flag` (not null, default false), `client_observed_at`, `brand_id`, `supplier_id`,
+`brand_text`, `supplier_text` (the picked product goes in R7b's own `yq_item_code`); `market_photos` — `role` (product /
+packaging / label_batch / receipt / other, default product), `sha256`, `thumb_path`, `caption`, `blurred_path`;
+`catalog_items` — `barcode` (indexed where set). Indexes on every foreign key and on what the API filters by (status,
+safety, issue type, SKU, supplier, last seen).
+
+The database checks VALUES only: which status may follow which, "evidence only moves up" and what Verified / Resolved
+need are enforced by the API (`app/market_quality.py`). Suppliers, brands and issue types in use cannot be deleted (no
+cascade; deactivate or merge). RLS on every new table with no policy; everything revoked from `anon` / `authenticated`
+(tables, identity sequences, the view, the trigger function). `v_market_clusters`, `v_market_signals_agent` and R7b's
+one GRANT are not touched. The closing `DO` block raises unless all of that holds, the 18 columns exist, the timeline
+triggers exist, `service_role` (the API) can read and write the new tables (Supabase's default grant) and
+`v_market_signals_agent` is still `yq_readonly`'s.
+
+Order: after R7b. Apply it before, or together with, the API release that brings Market Intel v2; the v1 routes read
+none of these columns, so the API running today keeps working after the apply.
+
+**Apply — from the MAIN project folder, never from a worktree** (a worktree finds the project folder's `.env`, which is
+production), at a quiet hour (the file sets `lock_timeout` 2 s, so a busy `catalog_items` makes it fail fast, never wait):
+
+```
+python -m scripts.db_backup --all --out business_data/backups/<date>_pre-r8m
+python -m scripts.prod_gate snapshot --label pre-r8m
+python -m scripts.apply_sql scripts/r8m_market_quality_migration.sql --rehearse     # runs everything, rolls back
+python -m scripts.apply_sql scripts/r8m_market_quality_migration.sql
+python -m scripts.audit_grants                                                       # exit 0 = nothing exposed
+python -m scripts.prod_gate snapshot --label post-r8m
+python -m scripts.prod_gate compare business_data/gates/<…>_pre-r8m.json business_data/gates/<…>_post-r8m.json
+```
+
+**Reverse** (reverse R8m BEFORE `r7b_market_intel_reverse.sql`: `v_market_cases_agent` reads R7b's tables, so the R7b
+reverse stops, without CASCADE, until this one ran). While R8m holds nothing (R7b's own sightings and photos do not count)
+it runs as it is:
+
+```
+python -m scripts.apply_sql scripts/r8m_market_quality_reverse.sql ; python -m scripts.audit_grants
+```
+
+It REFUSES while any R8m table holds a row or any sighting / photo / catalog row holds an R8m value (a true safety flag,
+a photo role other than product, a thumbnail, a barcode…). To drop them anyway, back them up first and give the switch
+in the SAME session as the file (`apply_sql` opens a session of its own, so use one psql session or the Supabase SQL
+editor):
+
+```
+python -m scripts.db_backup --tables suppliers,brands,market_issue_types,market_cases,market_case_events,supplier_actions,supplier_action_cases,supplier_reports,market_observations,market_photos,catalog_items
+set yq.r8m_drop = 'yes';   -- then the reverse file, in that same session
+```
+
+It drops the view, the eight tables, the trigger function, the 18 columns and R8m's indexes, and never an R7b object
+(`market_observations.yq_item_code` stays). Photo objects in storage (thumbnails, blurred copies) stay, unreferenced.
+Restart the API after reversing if it caches a probe of these tables.
+
+**Rehearsed locally, 14-Oct-2026** — throwaway PostgreSQL 17.6 on 127.0.0.1 (scratch data directory, deleted afterwards),
+synthetic schema and data, Supabase-style `anon` / `authenticated` / `service_role` / `yq_readonly` roles with the
+pre-hotfix default grants (every new object granted to anon / authenticated, so only the file's own revokes close it):
+- `YQ_LOCAL_PG_R8M=postgresql://postgres@127.0.0.1:<port>/<empty db> python -m tests.test_r8m_market_quality_replay`
+  (one transaction, rolled back): R7b, R8m twice; R7b's rows read the new defaults; the reverse without the switch on an
+  empty R8m (accepted, R7b's rows untouched) and refused for each kind of R8m data alone (a supplier, a barcode, a photo
+  role, a thumbnail, a safety flag, a batch, a phone capture time); lists, cases, timeline, actions, a report; the
+  self-check on that data; 39 bad values refused; any status may follow any other in the database; the timeline refuses
+  UPDATE / DELETE / TRUNCATE (as `service_role` too); the FK behaviours; anon / authenticated refused everywhere,
+  `service_role` reads and writes, `yq_readonly` reads the agent view and R7b's view only; the reverse refused, then
+  accepted with the switch (R7b's sightings, photos, codes and grant untouched), again with and without the switch; R8m
+  twice again; R7b re-applied over R8m; R7b's reverse stopped by R8m's view.
+- The way `apply_sql` runs it (one committed transaction per file, `psql -X -1 -v ON_ERROR_STOP=1 -f <file>`): minimal
+  schema → R7b → R8m ×2 → a sighting + photo → reverse with no switch (ok) → R8m → a supplier, issue type, case and event
+  → reverse refused ("6 R8m row(s) / value(s) would be lost") → R7b's reverse refused (`cannot drop table market_photos
+  because other objects depend on it`) → a timeline DELETE refused → reverse with `set yq.r8m_drop = 'yes'` in the same
+  session (ok) → reverse again (ok) → R7b's rows kept → R8m ×2 → nothing granted to anon / authenticated → R8m reverse
+  then R7b reverse (ok) → R7b + R8m re-applied (ok).
+
+Tests: `python -m tests.test_r8m_market_quality_replay` (in CI: the text pins; the replay SKIPs without
+`YQ_LOCAL_PG_R8M`, which must be a loopback address — anything else is refused before a connection is made).
