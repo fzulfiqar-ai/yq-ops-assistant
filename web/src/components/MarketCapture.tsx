@@ -150,7 +150,8 @@ const CHIP_OFF = 'bg-[#F3EDF8] text-[#4B2C66] hover:bg-[#EADFF3]'
 const CHIP_ON = 'bg-[#6D4091] text-white shadow-sm'
 const FIELD =
   'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[14px] text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25'
-const LABEL = 'mb-1.5 block text-[11.5px] font-semibold uppercase tracking-[0.06em] text-[#6b6480]'
+/** Arabic labels: no letter-spacing (it breaks the joined letters on iPhones) and a size Arabic reads at */
+const LABEL = 'mb-1.5 block text-[11.5px] font-semibold uppercase tracking-[0.06em] text-[#6b6480] rtl:text-[13px] rtl:tracking-normal'
 const PANEL = 'space-y-4 rounded-2xl border border-[#EFE9F5] bg-[#FCFAFE] p-3'
 
 interface Shop {
@@ -506,15 +507,15 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
 
           {(stage === 'edit' || stage === 'saving') && (
             <>
-              {/* photos */}
-              <div className="flex gap-2 overflow-x-auto pb-1">
+              {/* photos (pt-2: the scroll box clips, and the remove badges sit above each photo's corner) */}
+              <div className="flex gap-2 overflow-x-auto pb-1 pt-2">
                 {photos.map((p, i) => (
                   <div key={p.url} className="relative shrink-0">
                     <img src={p.url} alt={S.photoAlt(i + 1)} className="h-24 w-24 rounded-xl border border-[#E2DCEA] object-cover" />
                     {p.role === 'label_batch' && (
                       <span className="absolute bottom-1 start-1 rounded-full bg-[#1A1428]/75 px-1.5 py-0.5 text-[10px] font-bold text-white">{S.labelBadge}</span>
                     )}
-                    <button type="button" onClick={() => removePhoto(i)} aria-label={S.removePhoto(i + 1)} className="absolute -end-1.5 -top-1.5 grid h-7 w-7 place-items-center rounded-full bg-[#1A1428] text-white shadow ring-2 ring-white">
+                    <button type="button" onClick={() => removePhoto(i)} aria-label={S.removePhoto(i + 1)} className="absolute -end-1.5 -top-1.5 grid h-7 w-7 place-items-center rounded-full bg-[#1A1428] text-white shadow ring-2 ring-white after:absolute after:-inset-2">
                       <X size={13} aria-hidden="true" />
                     </button>
                   </div>
@@ -729,9 +730,11 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                     {quick.price && (
                       <div>
                         <label htmlFor="mi-price" className={LABEL}>{S.price}</label>
-                        <div className="relative">
+                        {/* the amount box is left to right in both languages: the currency and the digits share one side
+                            (in Arabic it reads "0.000 د.ب"); rtl right-alignment put the digits under the currency */}
+                        <div className="relative" dir="ltr">
                           <span className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 text-[12px] font-semibold text-[#6b6480]">{S.currency}</span>
-                          <input id="mi-price" dir="ltr" inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value.replace(/[^0-9.]/g, ''))} maxLength={10} className={cn(FIELD, 'ps-12 tabular-nums rtl:text-right')} placeholder="0.000" />
+                          <input id="mi-price" dir="ltr" inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value.replace(/[^0-9.]/g, ''))} maxLength={10} className={cn(FIELD, 'ps-12 tabular-nums')} placeholder="0.000" />
                         </div>
                       </div>
                     )}
@@ -763,8 +766,10 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                       type="button"
                       onClick={() => setVoiceLang((v) => (v === 'en-US' ? 'ar-SA' : 'en-US'))}
                       aria-label={`${S.voiceLang}: ${voiceLang === 'en-US' ? 'English' : 'العربية'}`}
-                      className="h-10 min-w-12 rounded-lg px-2.5 text-[12px] font-bold text-[#6b6480] hover:bg-[#F3EDF8]"
+                      title={S.voiceLang}
+                      className="inline-flex h-10 min-w-12 items-center justify-center gap-1.5 rounded-full border border-[#E2DCEA] bg-white px-3 text-[12px] font-bold text-[#4B2C66] hover:bg-[#F7F3FA]"
                     >
+                      <Mic size={13} className="text-[#824FAB]" aria-hidden="true" />
                       {voiceLang === 'en-US' ? 'EN' : 'AR'}
                     </button>
                   )}
@@ -800,9 +805,14 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                 {shop && !pickShop ? (
                   <div className="flex items-center gap-2 rounded-xl border border-[#E2DCEA] bg-white px-3 py-2">
                     <Store size={16} className="shrink-0 text-[#824FAB]" aria-hidden="true" />
+                    {/* bdi: an English shop name inside the Arabic sheet keeps its place (no "Shop Alpha· Manama") */}
                     <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#1A1428]">
-                      {shop.name || S.thisShop}
-                      {shop.area && <span className="ms-1.5 font-normal text-[#6b6480]">· {shop.area}</span>}
+                      <bdi>{shop.name || S.thisShop}</bdi>
+                      {shop.area && (
+                        <span className="ms-1.5 font-normal text-[#6b6480]">
+                          · <bdi>{shop.area}</bdi>
+                        </span>
+                      )}
                     </span>
                     <button type="button" onClick={() => setPickShop(true)} className="h-11 rounded-lg px-2 text-[12.5px] font-semibold text-[#6D4091] hover:bg-[#F3EDF8]">{S.changeShop}</button>
                     <button type="button" onClick={() => setShop(null)} aria-label={S.notAtShop} className="grid h-11 w-11 place-items-center rounded-lg text-[#6b6480] hover:bg-[#F3EDF8]">
@@ -846,7 +856,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
           )}
 
           {(stage === 'result' || stage === 'queued') && (
-            <Link to="/market-intel" onClick={() => { setOpen(false); reset() }} className="flex items-center justify-center gap-1.5 text-[13px] font-semibold text-[#6D4091] hover:underline">
+            <Link to="/market-intel" onClick={() => { setOpen(false); reset() }} className="flex min-h-11 items-center justify-center gap-1.5 text-[13px] font-semibold text-[#6D4091] hover:underline">
               <CircleDot size={14} aria-hidden="true" /> {S.seeMine}
             </Link>
           )}

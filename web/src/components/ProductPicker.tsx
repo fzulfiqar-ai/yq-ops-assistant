@@ -27,7 +27,8 @@ export interface PickerWords {
 
 const FIELD =
   'h-11 w-full rounded-xl border border-[#E2DCEA] bg-white px-3 text-[14px] text-[#1A1428] placeholder:text-[#9a93ad] focus:border-[#824FAB] focus:outline-none focus:ring-2 focus:ring-[#824FAB]/25'
-const HEAD = 'mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[#6b6480]'
+/** in the Arabic sheet: no letter-spacing (it breaks the joined letters on iPhones), a size Arabic reads at */
+const HEAD = 'mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[#6b6480] rtl:text-[12.5px] rtl:tracking-normal'
 
 export function ProductPicker({
   words,

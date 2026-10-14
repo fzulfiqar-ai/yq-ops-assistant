@@ -161,7 +161,7 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
             type="button"
             onClick={close}
             aria-label="Close"
-            className="-mr-1.5 -mt-0.5 grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[#6b6480] transition duration-150 ease-out hover:bg-[#F3F0F6] hover:text-[#1A1428] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70"
+            className="-me-1.5 -mt-0.5 grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[#6b6480] transition duration-150 ease-out hover:bg-[#F3F0F6] hover:text-[#1A1428] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#6D4091]/70"
           >
             <X size={18} />
           </button>

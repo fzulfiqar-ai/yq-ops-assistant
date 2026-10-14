@@ -9,6 +9,8 @@ import type { MiActionStatus, MiCaps, MiCaseStatus, MiReportStatus } from '@/lib
 
 export const SELECT =
   'h-10 rounded-xl border border-border bg-card px-3 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/40'
+/** a filter in a row of filters: a full cell of the two-column grid on a phone, its own width from 640 px */
+export const FILTER = `${SELECT} w-full min-w-0 sm:w-auto`
 export const INPUT =
   'h-10 w-full rounded-xl border border-border bg-card px-3 text-[13.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/40'
 export const TEXTAREA =

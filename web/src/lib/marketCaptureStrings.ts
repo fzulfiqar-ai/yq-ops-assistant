@@ -251,13 +251,30 @@ const en: CaptureStrings = {
   safetyQueued: 'Safety report: the manager is told as soon as it sends.',
 }
 
+/**
+ * A count in natural Arabic: one (its own word), two (the dual), 3–10 and 103–110 (plural), 11–99 (singular
+ * accusative), 100, 101, 102, 200… (singular): "محلّين", "3 محلات", "12 محلًا" — never "2 محلات".
+ */
+function arCount(n: number, w: { one: string; two: string; few: string; many: string; hundred: string }): string {
+  if (n === 1) return w.one
+  if (n === 2) return w.two
+  const r = n % 100
+  if (r >= 3 && r <= 10) return `${n} ${w.few}`
+  if (r >= 11 && r <= 99) return `${n} ${w.many}`
+  return `${n} ${w.hundred}`
+}
+/** after "من" / "في" (genitive) */
+const AR_SHOPS = { one: 'محل واحد', two: 'محلّين', few: 'محلات', many: 'محلًا', hundred: 'محل' }
+/** as the subject (nominative) */
+const AR_SIGHTINGS = { one: 'ملاحظة واحدة', two: 'ملاحظتان', few: 'ملاحظات', many: 'ملاحظة', hundred: 'ملاحظة' }
+
 const ar: CaptureStrings = {
   dir: 'rtl',
   switchTo: 'English',
   switchAria: 'اعرض النموذج بالإنجليزية',
   spotted: 'رصد',
   buttonAria: 'رصد: سجّل ما رأيته في السوق',
-  buttonWaiting: (n) => `رصد: ${n} بانتظار الإرسال`,
+  buttonWaiting: (n) => `رصد: ${arCount(n, AR_SIGHTINGS)} بانتظار الإرسال`,
   titleEdit: 'ماذا رأيت؟',
   titleResult: 'شكرًا، وصلت',
   titleQueued: 'محفوظ على هذا الهاتف',
@@ -352,7 +369,7 @@ const ar: CaptureStrings = {
   seeMine: 'تقاريري',
   queuedTitle: 'لا توجد إشارة الآن.',
   queuedBody: 'ملاحظتك محفوظة على هذا الهاتف وتُرسل تلقائيًا عند عودة الاتصال، ما دام التطبيق مفتوحًا.',
-  waiting: (n) => `${n} بانتظار الإشارة. أبقِ التطبيق مفتوحًا.`,
+  waiting: (n) => `${arCount(n, AR_SIGHTINGS)} بانتظار الإشارة. أبقِ التطبيق مفتوحًا.`,
   retryNow: 'أعد المحاولة',
   notSaved: 'لم يُحفظ:',
   discard: 'تجاهل',
@@ -368,14 +385,14 @@ const ar: CaptureStrings = {
     new_find: 'شيء جديد: سيطّلع عليه المكتب.',
     saved_for_review: 'سيتعرّف المكتب عليه من الصورة.',
   },
-  seenIn: (n) => `شوهد في ${n} ${n === 1 ? 'محل' : 'محلات'}`,
+  seenIn: (n) => `شوهد في ${arCount(n, AR_SHOPS)}`,
   yqCode: 'رمز YQ',
   legacy: 'حُفظ في لوحة الاكتشافات ريثما يُجهَّز نظام معلومات السوق.',
   reportReceived: 'وصل البلاغ',
   reportReceivedBody: 'سيراجعه المكتب، وترى ما يحدث في «تقاريري».',
   joinedTitle: 'أُضيف إلى بلاغ مفتوح',
   joinedBody: (shops) =>
-    `هذه المشكلة مُبلَّغ عنها من قبل${shops ? `، والآن من ${shops} ${shops === 1 ? 'محل' : 'محلات'}` : ''}. يراجعها المكتب كحالة واحدة، وترى ما يحدث في «تقاريري».`,
+    `هذه المشكلة مُبلَّغ عنها من قبل${shops ? `، والآن من ${arCount(shops, AR_SHOPS)}` : ''}. يراجعها المكتب كحالة واحدة، وترى ما يحدث في «تقاريري».`,
   alerted: 'تم تنبيه المدير',
   alertedBody: 'احتفظ بالقطعة جانبًا إن أمكن.',
   safetyNoted: 'سُجّل كمشكلة سلامة للمكتب.',

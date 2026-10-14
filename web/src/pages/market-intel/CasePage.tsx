@@ -228,8 +228,11 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
         {roles.readOnly && <p className="mt-2 text-[12px] text-muted-foreground">Read-only: management sees every case and changes nothing here.</p>}
       </header>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="min-w-0 space-y-5">
+      {/* phones: the details and sightings, then the status, evidence and actions, the timeline last (it was above
+          the status panel, so a reviewer scrolled the whole history to act); from 1024 px the timeline sits under the
+          sightings in the left column and the panels span both rows on the right */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-[auto_1fr]">
+        <div className="min-w-0 space-y-5 lg:col-start-1 lg:row-start-1">
           <Details c={c} brand={brand} supplier={supplier} lists={lists} canEdit={canEdit} onSaved={ok} onError={fail} />
 
           <section>
@@ -256,11 +259,9 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
               <p className="rounded-2xl border border-dashed border-border bg-card px-4 py-6 text-center text-[13px] text-muted-foreground">No sightings on this case.</p>
             )}
           </section>
-
-          <Timeline events={events} />
         </div>
 
-        <aside className="space-y-4">
+        <aside className="space-y-4 lg:col-start-2 lg:row-[1/span_2]">
           {canEdit && <StatusPanel key={`${c.status}-${c.changed_at || ''}`} c={c} statusText={statusText} actions={actions} admin={roles.admin} lists={lists} onDone={ok} onError={fail} />}
           {!canEdit && !merged && (
             <section className={CARD}>
@@ -314,6 +315,10 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
             </section>
           )}
         </aside>
+
+        <div className="min-w-0 lg:col-start-1 lg:row-start-2 lg:self-start">
+          <Timeline events={events} />
+        </div>
       </div>
     </div>
   )
@@ -744,6 +749,11 @@ function eventText(e: MiCaseEvent): { title: string; body: string; quote?: boole
       return { title: into ? `Merged into case ${into}` : from ? `Case ${from} merged into this one` : 'Merged', body: '' }
     }
     case 'edit': {
+      // the people flag on one photo (POST /photos/{id}/people) reads as what happened, not "Edited photo people"
+      const people = changeOf(d.photo_people)
+      if (people && Object.keys(d).every((k) => k === 'photo_people' || NOT_CHANGES.has(k))) {
+        return { title: people.to ? 'A photo was flagged: people in it' : 'A photo flag was removed', body: people.to ? 'It is blurred and kept out of reports.' : '' }
+      }
       const safety = changeOf(d.safety)
       if (safety && safety.to === true && Object.keys(d).every((k) => k === 'safety' || NOT_CHANGES.has(k))) {
         return { title: 'Marked as a safety case', body: detailText(d, 'reason'), quote: true }
@@ -1123,7 +1133,7 @@ function ActionItem({ a, canEdit, onDone, onError }: { a: MiSupplierAction; canE
           <div className="mt-2 space-y-2">
             <div>
               <label htmlFor={`resp-${a.id}`} className={LABEL}>Supplier response</label>
-              <textarea id={`resp-${a.id}`} rows={3} value={response} onChange={(e) => setResponse(e.target.value)} maxLength={LIMIT.response} className={TEXTAREA} />
+              <textarea id={`resp-${a.id}`} rows={3} value={response} onChange={(e) => setResponse(e.target.value)} maxLength={LIMIT.response} className={TEXTAREA} placeholder="What the supplier answered" />
             </div>
             <div>
               <label htmlFor={`check-${a.id}`} className={LABEL}>YQ resolution check</label>
