@@ -5,8 +5,11 @@
 --   Needs:    r7b_market_intel_migration.sql (market_items, market_observations, market_photos) and
 --             r7b_ai_head_migration.sql (v_agent_market_signals, ai_agent_mask, the ai_head_ro login).
 --             The first block refuses and names the file to apply when one is missing.
---   Order with r8m_market_quality_migration.sql: either. This file reads no r8m table or column (cases,
---             issue types, suppliers, brands, photo roles), and r8m neither reads nor redefines this view.
+--   Order with r8m_market_quality_migration.sql: either. This file reads no r8m table and pins no r8m
+--             column: the two it needs (market_observations.case_id, market_photos.role) are read through
+--             to_jsonb(<row>) (the precedent: r7b_ai_head's v_agent_shop_lines), so they read NULL before
+--             r8m, and r8m's reverse can still drop them with this view in place. r8m neither reads nor
+--             redefines this view.
 --
 -- Why: the weekly review (.claude/commands/weekly-review.md) reads v_agent_market_signals through
 -- scripts/ai_head/pack.py (market_signals.csv every week, repeated_field_requests at month end), and
@@ -24,17 +27,20 @@
 --     market_item          Bahrain day x Market Intel item (a merged item left out): n field sightings (by
 --                          reps, or imported from the old boards), sources = distinct shops, qty asked, the
 --                          lowest price seen; status = the item's status
---     market_report        Bahrain day x YQ SKU x kind: sightings of one of OUR products that no market item
---                          clusters (Market Intel v2 files quality reports on cases, not on items)
---     market_unidentified  one sighting with neither an item nor a YQ product: a photo still to be
---                          identified (ref_id = its observation id)
+--     market_case          Bahrain day x quality case (Market Intel v2 files a quality or packaging report on
+--                          a case, never on an item): ref_id = the case id (its issue, status and evidence
+--                          are in r8m's v_market_cases_agent), item_code = the SKU a sighting carries
+--     market_report        Bahrain day x YQ SKU x kind: sightings of one of OUR products on neither an item
+--                          nor a case
+--     market_unidentified  one sighting on neither an item nor a case, with no YQ product: a photo still to
+--                          be identified (ref_id = its observation id)
 --   The product_find / field_note rows are gone: scripts/market_intel_import.py copies those boards into
 --   Market Intel (source = 'import'), and they are read from there.
 --   Appended (CREATE OR REPLACE VIEW can only append):
 --     kind             new_product, competitor_price, promotion, shop_asked, complaint or other
 --     brand            the brand as typed, masked
 --     reps             distinct reps behind the row (counted, never named)
---     photos           photos of the row's sightings, never one flagged with people
+--     photos           photos of the row's sightings, never one flagged with people or a receipt
 --     system_signals   marketplace demand rolled onto the item that day (zero-result searches, "tell {rep}"
 --                      requests, restock asks): the SAME demand as the restock_request rows and
 --                      v_agent_search_demand, so the two are never added together
@@ -47,12 +53,17 @@
 --
 -- Privacy (counts and aggregates only): no shop or rep name, shop or rep id, login, note, area, competitor,
 -- barcode, meta, photo path or device id is a column. A shop and a rep are COUNTED (distinct) through keys
--- the view never shows. The typed title and brand pass ai_agent_mask() (emails -> '[email]', runs of 8+
--- digits -> '[number]'). The closing block refuses to finish if any of this is off.
+-- the view never shows. The typed title, brand and category pass ai_agent_mask() (emails -> '[email]',
+-- runs of 8+ digits -> '[number]'). The closing block refuses to finish if any of this is off, or if a
+-- sighting on a case is counted as a report or as a photo to identify.
 --
--- Re-running r7b_ai_head_migration.sql after this file FAILS LOUDLY at v_agent_market_signals ("cannot
--- drop columns from view"): that is the protection, because it would put the old boards back. To return
--- to r7b, run the reverse. Never force it with CASCADE.
+-- Two traps once this file is applied (each fails loudly; through apply_sql, one transaction, nothing changes;
+-- never force it with CASCADE):
+--   * re-running r7b_ai_head_migration.sql fails at v_agent_market_signals ("cannot drop columns from
+--     view"), because it would put the old boards back: run this file's reverse first, then r7b_ai_head,
+--     then this file again;
+--   * r7b_market_intel_reverse.sql cannot drop the Market Intel tables, which this view reads: run this
+--     file's reverse (and r8m's) first.
 
 -- ── 0. dependencies ──────────────────────────────────────────────────────────────
 do $$
@@ -83,14 +94,19 @@ end $$;
 
 -- ── 1. the view ──────────────────────────────────────────────────────────────────
 create or replace view v_agent_market_signals as
-with ph as (           -- photos a report may count: never one flagged with people
-  select p.observation_id, count(*) filter (where not p.has_people_flag) as usable
+with ph as (           -- photos a report may count: never one flagged with people, never a receipt (r8m's role,
+                       -- read through the whole row so it pins no column: 'product' before r8m)
+  select p.observation_id,
+         count(*) filter (where not p.has_people_flag
+                            and coalesce(to_jsonb(p) ->> 'role', 'product') <> 'receipt')             as usable
   from market_photos p
   group by p.observation_id
 ),
 obs as (               -- every sighting with its Bahrain day; a merged item's left out (a merge moves them on)
   select o.id, o.item_id, o.source, o.kind, o.title, o.brand, o.category, o.price_bhd, o.demand_qty, o.yq_item_code,
          (o.observed_at at time zone 'Asia/Bahrain')::date                                         as day,
+         -- r8m's quality case, read through the whole row like the role above (NULL before r8m)
+         (to_jsonb(o) ->> 'case_id')::bigint                                                       as case_id,
          -- a shop and a rep are COUNTED through these two keys and never shown (v_market_clusters' rule)
          coalesce('c' || o.shop_customer_id::text, 'n' || lower(nullif(btrim(o.shop_name), '')))   as shop_key,
          case when o.source = 'rep'
@@ -135,7 +151,7 @@ from shop_restock_requests r
 group by 3, 4
 union all
 select 'market_item', i.id, b.day, i.yq_item_code,
-       ai_agent_mask(left(i.title, 200)), i.category,
+       ai_agent_mask(left(i.title, 200)), ai_agent_mask(left(i.category, 80)),
        (count(*) filter (where b.source <> 'system'))::int,
        (count(distinct b.shop_key) filter (where b.source <> 'system'))::int,
        coalesce(sum(b.demand_qty) filter (where b.source <> 'system'), 0)::int,
@@ -157,6 +173,28 @@ join market_items i on i.id = b.item_id
 left join tot t on t.item_id = b.item_id
 group by i.id, b.day, t.shops, t.reps
 union all
+select 'market_case', b.case_id, b.day, max(b.yq_item_code),
+       null::text, null::text,
+       count(*)::int,
+       count(distinct b.shop_key)::int,
+       coalesce(sum(b.demand_qty), 0)::int,
+       min(b.price_bhd),
+       case when count(b.price_bhd) > 0 then 'BHD' end,
+       null::text,
+       mode() within group (order by b.kind),
+       null::text,
+       count(distinct b.rep_key)::int,
+       sum(b.usable)::int,
+       0,
+       null::int,
+       null::int,
+       max(b.price_bhd),
+       null::text,
+       array_agg(b.id order by b.id)
+from obs b
+where b.item_id is null and b.case_id is not null and b.source <> 'system'
+group by b.case_id, b.day
+union all
 select 'market_report', null::bigint, b.day, b.yq_item_code,
        null::text, null::text,
        count(*)::int,
@@ -176,11 +214,11 @@ select 'market_report', null::bigint, b.day, b.yq_item_code,
        null::text,
        array_agg(b.id order by b.id)
 from obs b
-where b.item_id is null and b.yq_item_code is not null and b.source <> 'system'
+where b.item_id is null and b.case_id is null and b.yq_item_code is not null and b.source <> 'system'
 group by b.day, b.yq_item_code, b.kind
 union all
 select 'market_unidentified', b.id, b.day, null::text,
-       ai_agent_mask(left(b.title, 200)), b.category,
+       ai_agent_mask(left(b.title, 200)), ai_agent_mask(left(b.category, 80)),
        1,
        (b.shop_key is not null)::int,
        coalesce(b.demand_qty, 0),
@@ -198,10 +236,10 @@ select 'market_unidentified', b.id, b.day, null::text,
        case when b.has_ai then case when b.ai_verified then 'verified' else 'unverified' end end,
        array[b.id]
 from obs b
-where b.item_id is null and b.yq_item_code is null and b.source <> 'system';
+where b.item_id is null and b.case_id is null and b.yq_item_code is null and b.source <> 'system';
 
 comment on view v_agent_market_signals is
-  'AI Head (R7b; rebuilt on Market Intel in R8 by r8n_ai_market_signals_migration.sql): market signals, each a REPORT until two shops or reps corroborate it (plan §18.9) or a person verifies it. restock_request (per Bahrain day x SKU: requests, distinct devices, quantity of interest; never the phone); market_item (per day x Market Intel item: field sightings, distinct shops and reps, price range, usable photos, the item''s status, its whole-life distinct shops / reps, marketplace demand apart in system_signals); market_report (per day x YQ SKU x kind: sightings of our products that no item clusters); market_unidentified (one sighting to identify). observation_ids = the sightings behind the row, cited as [MI-<id>]. Counts and aggregates only: no shop, rep, login, note, area, competitor, barcode or photo path; title and brand masked. ai_head_ro + yq_readonly.';
+  'AI Head (R7b; rebuilt on Market Intel in R8 by r8n_ai_market_signals_migration.sql): market signals, each a REPORT until two shops or reps corroborate it (plan §18.9) or a person verifies it. restock_request (per Bahrain day x SKU: requests, distinct devices, quantity of interest; never the phone); market_item (per day x Market Intel item: field sightings, distinct shops and reps, price range, usable photos, the item''s status, its whole-life distinct shops / reps, marketplace demand apart in system_signals); market_case (per day x quality case, ref_id = the case: v_market_cases_agent has its issue, status and evidence); market_report (per day x YQ SKU x kind: sightings of our products on no item and no case); market_unidentified (one sighting to identify). observation_ids = the sightings behind the row, cited as [MI-<id>]. Counts and aggregates only: no shop, rep, login, note, area, competitor, barcode or photo path; usable photos never include a people-flagged photo or a receipt; title, brand and category masked. ai_head_ro + yq_readonly.';
 
 -- ── 2. grants: exactly those r7b_ai_head gives this view (plain statements) ───────
 revoke all on table v_agent_market_signals from anon, authenticated;
@@ -284,10 +322,16 @@ begin
   if n <> m then
     raise exception 'r8n_ai_market_signals: the market rows count % sighting(s), market_observations holds %', n, m;
   end if;
-  -- the typed text is masked: no run of 8+ digits survives in a label or a brand
+  -- a sighting on a quality case is never counted as a report or as a photo to identify
+  if exists (select 1 from public.v_agent_market_signals v
+             join public.market_observations o on o.id = any(v.observation_ids)
+             where v.signal in ('market_report', 'market_unidentified') and to_jsonb(o) ->> 'case_id' is not null) then
+    raise exception 'r8n_ai_market_signals: a sighting on a quality case is counted as a report or a photo to identify';
+  end if;
+  -- the typed text is masked: no run of 8+ digits survives in a label, a brand or a category
   if exists (select 1 from public.v_agent_market_signals
-             where coalesce(label, '') || ' ' || coalesce(brand, '') ~ '\d(?: ?\d){7,}') then
-    raise exception 'r8n_ai_market_signals: a label or a brand carries an unmasked number';
+             where label ~ '\d(?: ?\d){7,}' or brand ~ '\d(?: ?\d){7,}' or category ~ '\d(?: ?\d){7,}') then
+    raise exception 'r8n_ai_market_signals: a label, a brand or a category carries an unmasked number';
   end if;
   raise notice 'r8n_ai_market_signals: ok (v_agent_market_signals reads Market Intel: % field sighting(s); no personal column; ai_head_ro + yq_readonly only)', m;
 end $$;

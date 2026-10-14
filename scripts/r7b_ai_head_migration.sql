@@ -653,6 +653,10 @@ comment on view v_agent_items is
   'AI Head (R7b): every catalog item with stock (latest snapshot), Focus velocity (30/60/90 d, anchored to the last sale date), the latest MRN landed cost and the one before it (margin drift), and marketplace restock requests in 30 days (counted; never the phone). Prices are the price-book rates, VAT included. ai_head_ro + yq_readonly.';
 
 -- 3l. market signals: restock asks (counted), product finds, field notes
+-- R8n (scripts/r8n_ai_market_signals_migration.sql) rebuilds this view on the Market Intel tables and appends
+-- ten columns. Once R8n is applied, re-running THIS file fails here ("cannot drop columns from view"; through
+-- apply_sql, one transaction, nothing changes): run scripts/r8n_ai_market_signals_reverse.sql first, then this
+-- file, then R8n again.
 create or replace view v_agent_market_signals as
 select 'restock_request'::text                                          as signal,
        null::bigint                                                     as ref_id,

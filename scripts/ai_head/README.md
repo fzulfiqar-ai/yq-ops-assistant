@@ -12,6 +12,8 @@ decides**; only then are the approved statements loaded for management to see.
 | Piece | What it does | Writes |
 |---|---|---|
 | `scripts/r7b_ai_head_migration.sql` | 14 `v_agent_*` views (no phone, email, token, IP or raw device id), the `ai_insights` table, the `ai_head_ro` login | the schema, once (integrator) |
+| `scripts/r8n_ai_market_signals_migration.sql` | rebuilds `v_agent_market_signals` on the Market Intel tables (R8): item, case, report and photo-to-identify rows, counts only | the schema, once (integrator) |
+| `python -m scripts.market_intel_ai_head` | weekly step 9: `pack` (read-only, over `DATABASE_URL`: it needs the photos' paths) and `suggest` (the photo readings, a dry run by default) | `market_items.ai_suggestion` / a sighting's `meta`, only with `--apply --by` |
 | `python -m scripts.ai_head.pack` | the dated pack `exports/ai_head/<week-ending>/` (CSV / JSON, phones masked) | local files only (gitignored) |
 | `python -m scripts.ai_head.render <folder>` | `weekly.html` → `weekly.pdf`, the CSVs → `weekly.xlsx` | local files only |
 | `python -m scripts.ai_head.load_insights <file>` | validates `insights.json`; dry run by default | `ai_insights`, only with `--commit` |
@@ -25,6 +27,10 @@ decides**; only then are the approved statements loaded for management to see.
    python -m scripts.apply_sql scripts/r7b_ai_head_migration.sql
    python -m scripts.audit_grants
    ```
+   Then, with Market Intel, `scripts/r8n_ai_market_signals_migration.sql` the same way. Once R8n is in
+   place, re-running `r7b_ai_head_migration.sql` fails at `v_agent_market_signals` ("cannot drop columns
+   from view") and changes nothing: run `scripts/r8n_ai_market_signals_reverse.sql` first, then this file,
+   then R8n again.
 2. **Owner** gives the login a password — Supabase dashboard → SQL editor, once:
    ```sql
    alter role ai_head_ro password '<a long random secret>';

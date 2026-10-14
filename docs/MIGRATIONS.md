@@ -810,9 +810,14 @@ Tests: `python -m tests.test_r8m_market_quality_replay` (in CI: the text pins; t
 Why: `v_agent_market_signals` (R7b AI Head) still read the old `product_finds` / `field_notes`, so Market Intel sightings
 never reached the weekly AI review. R8n redefines the view on `market_items`, `market_observations` and `market_photos`
 (plus the unchanged restock rows): the same twelve columns first, then counts and masked labels only (no shop, rep,
-login, note, area, barcode, path or meta column; titles and brands through `ai_agent_mask`). Grants exactly R7b's:
-revoked from anon / authenticated, SELECT for `ai_head_ro` and `yq_readonly`. Additive, idempotent, no CASCADE, a
-self-check at the end. It reads no R8m object: apply it after R7b's Market Intel and AI Head files, before or after R8m.
+login, note, area, barcode, path or meta column; titles, brands and categories through `ai_agent_mask`). Rows:
+`market_item` (per day x item), `market_case` (per day x R8m quality case; a quality sighting has no item),
+`market_report` (a YQ SKU on no item and no case), `market_unidentified` (a photo still to identify). Usable photos
+never count a people-flagged photo or a receipt. Grants exactly R7b's: revoked from anon / authenticated, SELECT for
+`ai_head_ro` and `yq_readonly`. Additive, idempotent, no CASCADE, a self-check at the end. It reads no R8m table and
+pins no R8m column (`market_observations.case_id` and `market_photos.role` are read through `to_jsonb(<row>)`, NULL
+before R8m, and R8m's reverse can still drop them): apply it after R7b's Market Intel and AI Head files, before or
+after R8m.
 
 **Apply — from the MAIN project folder** (after the branch is on `main` and pulled), with the backup of the release:
 
@@ -824,7 +829,8 @@ python -m scripts.audit_grants
 
 **Reverse:** `python -m scripts.apply_sql scripts/r8n_ai_market_signals_reverse.sql` restores R7b's definition byte for
 byte. NOTE: re-running `r7b_ai_head_migration.sql` while R8n is in place fails loudly ("cannot drop columns from view"):
-run R8n's reverse first, then R7b AI Head, then R8n again.
+run R8n's reverse first, then R7b AI Head, then R8n again. Likewise `r7b_market_intel_reverse.sql` stops at its DROP
+TABLE while R8n's view reads the Market Intel tables: reverse R8n (and R8m) first.
 
 Tests: `python -m tests.test_r8n_ai_market_signals` (in CI: the text pins; the replay SKIPs without
 `YQ_LOCAL_PG_R8N`, a loopback address only).
