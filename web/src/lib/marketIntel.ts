@@ -645,6 +645,13 @@ export interface MiReport {
   narrative_source?: 'template' | 'edited' | string | null
   included_observation_ids?: number[] | null
   insufficient_observation_ids?: number[] | null
+  /** rows and photos a reviewer withheld: never sent to the supplier (not shown, counted or cited) */
+  withheld_observation_ids?: number[] | null
+  withheld_photo_ids?: number[] | null
+  /** the first day it may be approved (YYYY-MM-DD, Bahrain): the month's end plus 7 days for late captures */
+  approvable_from?: string | null
+  /** approved (or superseded): the preview is the manifest frozen at approval */
+  frozen?: boolean | null
   counts?: Record<string, unknown> | null
   approved_by?: string | null
   approved_at?: string | null
@@ -655,7 +662,7 @@ export interface MiReport {
   updated_at?: string | null
 }
 
-export type MiReportRowState = 'included' | 'insufficient' | 'excluded'
+export type MiReportRowState = 'included' | 'insufficient' | 'excluded' | 'withheld'
 
 /**
  * One row of a report preview (supplier_reports._finding_row / _market_row): a quality or packaging
@@ -719,7 +726,19 @@ export interface MiReportDetail {
   warnings?: string[] | null
   /** build only: an existing draft of the same supplier, month and edition was rebuilt (hand edits replaced) */
   rebuilt?: boolean | null
+  /** an approved / superseded report read from the manifest frozen at approval (never edited) */
+  frozen?: boolean | null
   capabilities?: MiReportCaps | null
+}
+
+/**
+ * Whether a report's month may be approved yet: approval opens on `approvable_from` (Bahrain midnight,
+ * the month's end plus 7 days). An older payload without the date leaves it to the server.
+ */
+export function approvableNow(r: Pick<MiReport, 'approvable_from'>, now: number = Date.now()): boolean {
+  const day = String(r.approvable_from || '')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return true
+  return now >= Date.parse(`${day}T00:00:00+03:00`)
 }
 
 export const REPORT_SHEET_LABEL: Record<string, string> = {
