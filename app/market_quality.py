@@ -23,13 +23,15 @@ with MISSING_HINT.
     safety     a safety flag (or the issue type's safety default) puts the case on the Safety tab and
                e-mails ONE alert per case (app.emailer.send_html) after the answer has gone: a failed or
                slow e-mail never costs the capture. The claim is a 'safety_alert' event written first, the
-               outcome a second one.
+               outcome a second one; a claim left without its outcome (the e-mail was lost with a failed
+               request or a restart) is sent by the shop jobs' safety sweep.
 
 Who: a rep captures and reads his own sightings with plain status words and the office's open question
 (app.market_intel.mine), and answers that question; the office (any role but salesman) reads cases;
 reviewers (REVIEW_ROLES) change them; management reads them with phones and e-mails masked and is
-read-only centrally (app.auth); only an admin edits the lists or reopens a closed case. Every case change
-writes a market_case_events row (append-only); the routes write the audit_log rows.
+read-only centrally (app.auth); only an admin edits the lists or reopens a closed case — a closed case is
+read-only until then. Every case change writes a market_case_events row (append-only); the routes write the
+audit_log rows.
 """
 from __future__ import annotations
 
@@ -100,8 +102,17 @@ _BAHRAIN = timezone(timedelta(hours=3))
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,59}$")         # market_issue_types_code_slug, as the database checks it
 RELINK_ACTOR = "system (brand re-linked)"
 FINISH_ACTOR = "system (capture finished)"
+SWEEP_ACTOR = "system (safety sweep)"
 SWEEP_AFTER = timedelta(minutes=2)       # a safety sighting this old without its case / claim is finished
 SWEEP_WITHIN = timedelta(days=7)
+# A claim with no outcome ('sent' / 'not_sent') this long after it, or after the sweep's last try, lost its
+# e-mail (the request failed after the claim — Starlette drops a failed request's background task — or the
+# process restarted first): the sweep sends it. At most RESEND_LIMIT tries per claim; then it says so, once.
+ORPHAN_AFTER = timedelta(minutes=10)
+RESEND_LIMIT = 3
+ANSWER_REASON = "the rep answered"
+CLOSED_READ_ONLY = ("A closed case is read-only: an admin reopens it first (Closed → Under review, with a reason), "
+                    "then it can be changed.")
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -695,19 +706,24 @@ def plan_capture(v2: dict, f: dict, yq_item: dict | None) -> dict:
 def _open_cases(yq_code: str | None, issue_type_id, now: datetime, supplier_id=None) -> list[dict]:
     """The OPEN cases a quality sighting may join, oldest first: the same YQ SKU and issue type, not closed /
     not substantiated / merged, last seen within CASE_WINDOW_DAYS, and never another supplier's (a case with
-    a supplier takes a sighting of that supplier, or of none known). No SKU ("not sure / not ours") -> none:
-    unknown products never pool on an issue alone."""
+    a supplier takes a sighting of that supplier, or of none known). Suppliers compare as they live in the
+    list: a case still naming a supplier that was merged into another is that other supplier's. No SKU
+    ("not sure / not ours") -> none: unknown products never pool on an issue alone."""
     if not yq_code or not issue_type_id:
         return []
     since = now - timedelta(days=CASE_WINDOW_DAYS)
     rows = (_c().table("market_cases").select("*").eq("yq_item_code", yq_code).eq("issue_type_id", int(issue_type_id))
             .is_("merged_into", "null").order("id").limit(50).execute().data or [])
     out = []
+    names: Names | None = None
     for r in rows:
         if r.get("status") in CLOSED_STATUSES:
             continue
         if supplier_id and r.get("supplier_id") and str(r["supplier_id"]) != str(supplier_id):
-            continue
+            names = names or Names.load()           # read only when two ids differ: a merge may make them one
+            theirs, ours = names.supplier(r["supplier_id"]), names.supplier(supplier_id)
+            if not theirs or not ours or str(theirs["id"]) != str(ours["id"]):
+                continue
         seen = mi._parse_ts(r.get("last_seen")) or mi._parse_ts(r.get("first_seen")) or mi._parse_ts(r.get("created_at"))
         if seen and seen < since:
             continue
@@ -771,14 +787,28 @@ def _has_photo(obs_id: int) -> bool:
     return bool(_c().table("market_photos").select("id").eq("observation_id", int(obs_id)).limit(1).execute().data)
 
 
-def evidence_cap(case: dict) -> int:
-    """The highest evidence level a case's state allows (EVIDENCE_NEEDS): 2 until a person verified it (no
-    verification_method), 3 once verified, 4 from Action requested on, 5 once Resolved (or Closed after)."""
+def _reached(case_id: int) -> set[str]:
+    """The statuses a case has been in: every timeline line that moved it (created, status, merge) names its
+    new status."""
+    rows = mi._all(lambda: _c().table("market_case_events").select("id,to_status").eq("case_id", int(case_id))
+                   .not_.is_("to_status", "null").order("id"))
+    return {str(r["to_status"]) for r in rows if r.get("to_status")}
+
+
+def evidence_cap(case: dict, reached: set[str] | None = None) -> int:
+    """The highest evidence level a case's HISTORY allows (EVIDENCE_NEEDS), whatever its status now: 2 until a
+    person verified it (no verification_method), 3 once verified, 4 once it went to Action requested (the
+    supplier was asked), 5 once it went to Resolved. A case closed straight from Verified stays at 3: it was
+    never asked of a supplier, never resolved. `reached`: the statuses it has been in (_reached; read here
+    when not given); its status now always counts."""
     if not case.get("verification_method"):
         return 2
-    if case.get("status") in ("resolved", "closed"):
+    if reached is None:
+        reached = _reached(int(case["id"])) if case.get("id") is not None else set()
+    been = set(reached) | {str(case.get("status") or "")}
+    if "resolved" in been:
         return 5
-    return 4 if case.get("status") == "action_requested" else 3
+    return 4 if "action_requested" in been else 3
 
 
 def _raise_evidence(case: dict, level: int, actor: str, why: str, **detail) -> tuple[dict, bool]:
@@ -976,17 +1006,19 @@ def finish_capture(obs: dict, *, now: datetime, defer=None, actor: str = FINISH_
 
 
 def sweep_safety(now: datetime) -> dict:
-    """The shop jobs' safety sweep (every tick): a safety report whose capture stopped half-way and whose
-    phone may never retry (the app was closed). (1) Safety sightings of the last SWEEP_WITHIN with an issue
-    type but no case, older than SWEEP_AFTER (a capture may still be running), are finished
-    (finish_capture). (2) Open safety cases with no alert claim (a capture or a reviewer's flag stopped
-    between the two), unchanged for SWEEP_AFTER, claim it and e-mail. The database's one-claim-per-case
-    index makes a race with a phone's retry harmless."""
+    """The shop jobs' safety sweep (every tick), for the alerts nobody else will finish:
+      (1) safety sightings of the last SWEEP_WITHIN with an issue type but no case, older than SWEEP_AFTER (a
+          capture may still be running), whose phone may never retry (the app was closed): finished
+          (finish_capture: their case and their claim, and the e-mail);
+      (2) open safety cases with no alert claim (a capture or a reviewer's flag stopped between the two),
+          unchanged for SWEEP_AFTER: claimed and e-mailed;
+      (3) open safety cases whose claim never got its e-mail (_resend): sent now, one sender per case.
+    The database's one-claim-per-case index makes a race with a phone's retry harmless."""
     if not available():
         return {"skipped": MISSING_HINT}
     c = _c()
     lo, hi = mi._iso(now - SWEEP_WITHIN), mi._iso(now - SWEEP_AFTER)
-    out: dict = {"finished": [], "alerted": [], "failed": []}
+    out: dict = {"finished": [], "alerted": [], "resent": [], "failed": []}
     loose = mi._all(lambda: c.table("market_observations").select("*").eq("safety_flag", True).is_("case_id", "null")
                     .gte("created_at", lo).lte("created_at", hi).order("id"), 5)
     for o in loose:
@@ -1001,25 +1033,103 @@ def sweep_safety(now: datetime) -> dict:
     open_ = [r for r in mi._all(lambda: c.table("market_cases").select("id,status,safety,merged_into,updated_at")
                                 .eq("safety", True).is_("merged_into", "null").order("id"))
              if r.get("status") not in OFF_SAFETY_TAB]
-    claimed: set[int] = set()
-    for chunk in _chunks([int(r["id"]) for r in open_]):
-        for e in mi._all(lambda chunk=chunk: c.table("market_case_events").select("id,case_id,detail")
-                         .in_("case_id", chunk).eq("event", "safety_alert").order("id")):
-            if (e.get("detail") or {}).get("email") == "queued":
-                claimed.add(int(e["case_id"]))
+    alerts = _alert_events([int(r["id"]) for r in open_])
     for r in open_:
+        evs = alerts.get(int(r["id"]), [])
+        if any((e.get("detail") or {}).get("email") == "queued" for e in evs):
+            continue                          # claimed: (3) below sees to its e-mail
         changed = mi._parse_ts(r.get("updated_at"))
-        if int(r["id"]) in claimed or (changed and now - changed < SWEEP_AFTER):
+        if changed and now - changed < SWEEP_AFTER:
             continue
         try:
-            if claim_alert(int(r["id"]), "system (safety sweep)", None):
+            if claim_alert(int(r["id"]), SWEEP_ACTOR, None):
                 send_safety_alert(int(r["id"]), None)
                 out["alerted"].append(int(r["id"]))
         except Exception as e:  # noqa: BLE001
             out["failed"].append({"case_id": r.get("id"), "error": f"{type(e).__name__}: {e}"[:160]})
+    _resend(open_, alerts, now, out)
     if out["failed"]:
         out["error"] = f"{len(out['failed'])} safety report(s) could not be finished"
     return out
+
+
+def _alert_events(case_ids: list[int]) -> dict[int, list[dict]]:
+    """The 'safety_alert' lines of these cases (claim, tries, outcomes), oldest first, by case."""
+    out: dict[int, list[dict]] = {}
+    for chunk in _chunks(sorted(set(case_ids))):
+        for e in mi._all(lambda chunk=chunk: _c().table("market_case_events").select("id,case_id,at,detail")
+                         .in_("case_id", chunk).eq("event", "safety_alert").order("id")):
+            out.setdefault(int(e["case_id"]), []).append(e)
+    return out
+
+
+def _email(e: dict) -> str | None:
+    return (e.get("detail") or {}).get("email")
+
+
+def _resend(open_: list[dict], alerts: dict[int, list[dict]], now: datetime, out: dict) -> None:
+    """(3) of the sweep: a claim with no outcome ('sent' / 'not_sent') after it, ORPHAN_AFTER after the claim
+    or the last try, never got its e-mail — the request failed after the claim (Starlette drops a failed
+    request's background task) or the process restarted before the task ran. It is sent now, with a 'resend'
+    line first (the try). A claim a merge or a move carried (carried_from: the case whose claim sends) waits
+    for that case: still open, it is that case's own line; merged away or closed, its outcome is read, and
+    without one the carried case sends. One sender per case even when two sweeps run at once: each try is
+    taken with a conditional write on the case row as this sweep read it (_take_send). After RESEND_LIMIT
+    tries without an outcome the sweep stops, says so once on the case ('gave_up') and in its error."""
+    roots: dict[int, int] = {}
+    for cid, evs in alerts.items():
+        claim = next((e for e in evs if _email(e) == "queued"), None)
+        root = ((claim or {}).get("detail") or {}).get("carried_from")
+        if root and int(root) not in alerts:
+            roots[cid] = int(root)
+    sent_at_root = {cid for cid, evs in _alert_events(sorted(set(roots.values()))).items()
+                    if any(_email(e) in ("sent", "not_sent") for e in evs)} if roots else set()
+    for r in open_:
+        cid = int(r["id"])
+        evs = alerts.get(cid, [])
+        claim = next((e for e in evs if _email(e) == "queued"), None)
+        if claim is None:
+            continue
+        carried = (claim.get("detail") or {}).get("carried_from")
+        if carried and cid not in roots:
+            continue                          # its first case is open: the e-mail is that case's own
+        if carried and roots[cid] in sent_at_root:
+            continue
+        after = [e for e in evs if int(e["id"]) > int(claim["id"])]
+        if any(_email(e) in ("sent", "not_sent", "gave_up") for e in after):
+            continue
+        tries = [e for e in after if _email(e) == "resend"]
+        last = mi._parse_ts((tries[-1] if tries else claim).get("at"))
+        if last and now - last < ORPHAN_AFTER:
+            continue                          # the e-mail may still be on its way
+        try:
+            if not _take_send(r):
+                continue                      # another sweep took this one
+            if len(tries) >= RESEND_LIMIT:
+                case_event(cid, "safety_alert", SWEEP_ACTOR, detail={"email": "gave_up", "tries": len(tries)})
+                out["failed"].append({"case_id": cid, "error": f"the safety e-mail was tried {len(tries) + 1} "
+                                                               "times and never confirmed"})
+                continue
+            case_event(cid, "safety_alert", SWEEP_ACTOR,
+                       detail={"email": "resend", "claim_id": int(claim["id"]), "try": len(tries) + 1})
+            send_safety_alert(cid, (claim.get("detail") or {}).get("observation_id"))
+            out["resent"].append(cid)
+        except Exception as e:  # noqa: BLE001 — one stuck alert never stops the others
+            out["failed"].append({"case_id": cid, "error": f"{type(e).__name__}: {e}"[:160]})
+
+
+def _take_send(row: dict) -> bool:
+    """One sender per case: a conditional write on the case row exactly as this sweep read it (its
+    updated_at). A second sweep holding the same read meets a changed row and leaves the e-mail to the
+    first; the value written is always later than the one read, so the write itself changes the row."""
+    was = mi._parse_ts(row.get("updated_at"))
+    at = mi._now()
+    if was and at <= was:
+        at = was + timedelta(microseconds=1)
+    q = _c().table("market_cases").update({"updated_at": mi._iso(at), "updated_by": SWEEP_ACTOR}).eq("id", int(row["id"]))
+    q = q.eq("updated_at", row["updated_at"]) if row.get("updated_at") else q.is_("updated_at", "null")
+    got = q.execute().data
+    return not (got is not None and len(got) == 0)
 
 
 # ── the safety alert ──────────────────────────────────────────────────────────
@@ -1038,17 +1148,35 @@ def _later(defer, fn, *args) -> None:
 def _claim_and_send(case_id: int, actor: str, observation_id, defer) -> bool:
     """Claim the case's one alert; the caller that wins sends it (after the answer when `defer`). Returns True:
     once claim_alert has returned, the case holds its claim — this caller's or the one that beat it — which is
-    what safety_alerted reports. A claim that could not be written at all raises (the phone retries)."""
+    what safety_alerted reports. A claim that could not be written at all raises (the phone retries). Callers
+    claim as their LAST fallible step; should the e-mail still never go (the request failed afterwards and
+    its background task was dropped, or the process restarted), the safety sweep sends it (_resend)."""
     if claim_alert(case_id, actor, observation_id):
         _later(defer, send_safety_alert, case_id, observation_id)
     return True
 
 
-def alert_claimed(case_id: int) -> bool:
-    """Does this case hold its safety-alert claim (the one 'queued' safety_alert event)?"""
+def _claim_event(case_id: int) -> dict | None:
+    """The case's safety-alert claim (its one 'queued' safety_alert event), or None."""
     rows = (_c().table("market_case_events").select("id,detail").eq("case_id", int(case_id)).eq("event", "safety_alert")
             .order("id").limit(50).execute().data or [])
-    return any((r.get("detail") or {}).get("email") == "queued" for r in rows)
+    return next((r for r in rows if (r.get("detail") or {}).get("email") == "queued"), None)
+
+
+def alert_claimed(case_id: int) -> bool:
+    """Does this case hold its safety-alert claim (the one 'queued' safety_alert event)?"""
+    return _claim_event(case_id) is not None
+
+
+def _carry_claim(src_id: int, dst_id: int, actor: str, observation_id) -> None:
+    """A merge or a move took an alerted problem to another case: the claim goes along, with no e-mail (the
+    problem was alerted under its first case). carried_from names the case whose own claim sends — the first
+    of a chain of carries — which is the outcome the safety sweep looks for."""
+    claim = _claim_event(int(src_id))
+    if claim is None:
+        return
+    root = (claim.get("detail") or {}).get("carried_from") or int(src_id)
+    claim_alert(int(dst_id), actor, observation_id, carried_from=int(root))
 
 
 def claim_alert(case_id: int, actor: str, observation_id, **extra) -> bool:
@@ -1363,9 +1491,13 @@ def case_detail(case_id: int, *, role: str, mask: bool = False, raw: bool = Fals
                status_reason=_m(case.get("status_reason"), mask), changed_at=case.get("changed_at"),
                changed_by=_who(case.get("changed_by")) if case.get("changed_by") else None,
                created_at=case.get("created_at"), next_statuses=next_statuses(case, role),
-               # the levels this login may raise the evidence to now (only up, only what the state supports)
-               evidence_next=(list(range(int(case.get("evidence_level") or 1) + 1, evidence_cap(case) + 1))
-                              if role in REVIEW_ROLES and not case.get("merged_into") else []),
+               # the levels this login may raise the evidence to now (only up, only what the case's history
+               # supports; nothing on a closed case, which is read-only until an admin reopens it)
+               evidence_next=(list(range(int(case.get("evidence_level") or 1) + 1,
+                                         evidence_cap(case, {str(e["to_status"]) for e in events
+                                                             if e.get("to_status")}) + 1))
+                              if role in REVIEW_ROLES and not case.get("merged_into")
+                              and case.get("status") != "closed" else []),
                yq_item=mi.yq_card(items.get(case.get("yq_item_code") or "")) if case.get("yq_item_code") else None,
                thumb_url=None)
     out_obs = []
@@ -1536,12 +1668,12 @@ def _resolve_actions(case_id: int, actor: str) -> list[int]:
 
 def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=None) -> dict:
     """PATCH /market-intel/cases/{id} (reviewers): fields, the evidence level (up only, and only as far as the
-    case's state supports: evidence_cap — 3 comes with the move to Verified, 4 from Action requested on, 5
-    once Resolved; 409 otherwise) and/or one status move along NEXT_STATUS with what the move needs —
-    verified: a method and what it found (evidence at least 3); not substantiated: a reason; back to under
-    review from not substantiated or closed: a reason (closed: an admin only); action requested: a linked
-    supplier action; resolved: a supplier action with the supplier's response and YQ's check. Every change is
-    an event."""
+    case's history supports: evidence_cap — 3 comes with the move to Verified, 4 once it went to Action
+    requested, 5 once it went to Resolved; 409 otherwise) and/or one status move along NEXT_STATUS with what
+    the move needs — verified: a method and what it found (evidence at least 3); not substantiated: a reason;
+    back to under review from not substantiated or closed: a reason (closed: an admin only); action requested:
+    a linked supplier action; resolved: a supplier action with the supplier's response and YQ's check. A
+    CLOSED case takes nothing but the admin's reopen (409 CLOSED_READ_ONLY). Every change is an event."""
     _reviewer(role)
     case = _open_case_for_change(case_id)
     names = Names.load()
@@ -1609,10 +1741,15 @@ def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=Non
                 upd[k] = v
                 if not (moved and new == "verified"):
                     diffs[k] = {"from": case.get(k), "to": v}
+    if cur == "closed" and (diffs or want_level > level):
+        # a closed case takes one change: an admin's reopen (above), on its own; nothing else — no field,
+        # no supplier, no safety flag (a fresh e-mail), no verification, no evidence
+        raise MarketIntelError(CLOSED_READ_ONLY, 409)
     if want_level > level:
-        # a level the case's state (after this move) does not support yet is refused: 3 needs the move to
-        # Verified, 4 the supplier asked (Action requested on), 5 the case Resolved
-        cap = evidence_cap({**case, **{k: upd[k] for k in ("status", "verification_method") if k in upd}})
+        # a level the case's history (with this move) does not support is refused: 3 needs the move to
+        # Verified, 4 the supplier asked (it went to Action requested), 5 the case Resolved
+        cap = evidence_cap({**case, **{k: upd[k] for k in ("status", "verification_method") if k in upd}},
+                           _reached(int(case_id)) | {str(cur)})
         if want_level > cap:
             raise MarketIntelError(EVIDENCE_NEEDS[cap + 1], 409)
     if not upd and want_level <= level:
@@ -1638,8 +1775,10 @@ def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=Non
         _, raised = _raise_evidence(case, want_level, actor, "verified" if moved and new == "verified" else "reviewer")
         if raised:
             fields.append("evidence_level")
-    alerted = _claim_and_send(int(case_id), actor, None, defer) if upd.get("safety") is True else False
+    # the case is read BEFORE the claim: the claim is this request's last fallible step, so its e-mail (a
+    # background task, dropped if the request then failed) is not lost to a later error
     now_row = _case(case_id) or {}
+    alerted = _claim_and_send(int(case_id), actor, None, defer) if upd.get("safety") is True else False
     return {"ok": True, "changed": bool(upd) or raised, "case_id": int(case_id),
             "status": now_row.get("status", upd.get("status", cur)),
             "evidence_level": int(now_row.get("evidence_level") or want_level), "safety_alerted": alerted,
@@ -1673,26 +1812,121 @@ def ask_question(case_id: int, text, actor: str, role: str, *, observation_id=No
     return {"ok": True, "case_id": int(case_id), "status": "more_info_required"}
 
 
+def _latest_question(events: list[dict], obs_id: int) -> dict | None:
+    """The office's latest question to this sighting's rep (to it, or to everyone on the case)."""
+    return next((e for e in sorted(events, key=lambda e: int(e.get("id") or 0), reverse=True)
+                 if e.get("event") == "question" and (e.get("detail") or {}).get("observation_id") in (None, obs_id)),
+                None)
+
+
+def _answer_after_question(events: list[dict], obs_id: int) -> dict | None:
+    """This sighting's answer to that latest question, or None."""
+    q = _latest_question(events, obs_id)
+    if q is None:
+        return None
+    return next((e for e in sorted(events, key=lambda e: int(e.get("id") or 0), reverse=True)
+                 if e.get("event") == "answer" and (e.get("detail") or {}).get("observation_id") == obs_id
+                 and int(e.get("id") or 0) > int(q.get("id") or 0)), None)
+
+
+def _answer_reason(obs_id: int) -> str:
+    return f"{ANSWER_REASON} (MI-{int(obs_id)})"
+
+
+def _answer_move(actor: str, obs_id: int) -> dict:
+    at = mi._iso()
+    return {"status": "under_review", "status_reason": _answer_reason(obs_id), "changed_at": at, "changed_by": actor,
+            "updated_at": at, "updated_by": actor}
+
+
+def _moved_by_answer(case: dict, obs_id: int, actor: str) -> bool:
+    """Is the case Under review because THIS sighting's answer moved it (its rep, its reason)?"""
+    return (case.get("status") == "under_review" and case.get("status_reason") == _answer_reason(obs_id)
+            and mi._ci(case.get("changed_by")) == actor)
+
+
+def _undo_answer(case: dict, actor: str, before: dict, photo_id, stored: dict | None) -> None:
+    """An answer that could not be written after its move: the case goes back to waiting for it (only while
+    this rep's move is still what it holds), the photo row and the uploaded files go — so the rep's retry finds
+    the question open. Best effort; should the case stay moved, the retry resumes it (answer)."""
+    try:
+        _c().table("market_cases").update({"status": "more_info_required", **before, "updated_at": mi._iso(),
+                                           "updated_by": actor}) \
+            .eq("id", int(case["id"])).eq("status", "under_review").eq("changed_by", actor).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("market quality: an answer's move was not put back: %s", e)
+    if photo_id:
+        try:
+            _c().table("market_photos").delete().eq("id", int(photo_id)).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("market quality: an answer's photo row was not removed: %s", e)
+    if stored:
+        _discard(stored)
+
+
+def _finish_answer(case: dict, obs_id: int, actor: str, ans: dict, events: list[dict]) -> str:
+    """A recorded answer sent again (the phone resent it): what a stopped attempt left out is written now,
+    each part only when missing — the move to Under review with its timeline line, the photo's evidence.
+    Returns the case's status."""
+    status = case.get("status")
+    line = any(e.get("event") == "status" and e.get("to_status") == "under_review"
+               and int(e.get("id") or 0) > int(ans.get("id") or 0) for e in events)
+    write_line = False
+    if status == "more_info_required":
+        try:
+            _cas(int(case["id"]), "more_info_required", _answer_move(actor, obs_id))
+            status, write_line = "under_review", True
+        except MarketIntelError:
+            status = (_case(case["id"]) or {}).get("status") or status        # the office moved it meanwhile
+    elif not line and _moved_by_answer(case, obs_id, actor):
+        write_line = True
+    if write_line:
+        case_event(int(case["id"]), "status", actor, from_status="more_info_required", to_status="under_review")
+    photo_id = (ans.get("detail") or {}).get("photo_id")
+    if photo_id:
+        _raise_evidence(case, 2, actor, "photo", observation_id=int(obs_id), photo_id=photo_id)
+    return status
+
+
 def answer(obs_id: int, text, photo: tuple[str, bytes] | None, actor: str, *, role_name: str | None = None,
            now: datetime | None = None) -> dict:
     """POST /market-intel/observations/{id}/answer (the rep who made the sighting): his reply to the office's
-    open question, with an optional photo appended to the sighting. The case goes back to Under review."""
+    open question, with an optional photo appended to the sighting. The case goes back to Under review.
+    Safe to retry, whatever stopped an attempt:
+      * the move comes first — an answer that lost a race (the office moved the case meanwhile) leaves no
+        photo row, no event and no file behind (409);
+      * a photo row or answer that then fails puts the move back and removes the upload (_undo_answer), so
+        the retry finds the question open; a case left moved anyway (the undo failed too, or the process
+        stopped) is resumed by the retry: the move is this sighting's (_moved_by_answer), the answer is not
+        written yet — it is written now;
+      * the same answer again once it was written (the phone resent it) is answered as saved, finishing what
+        the attempt left out (_finish_answer) — never a 409."""
     _need()
     now = now or mi._now()
     actor = (actor or "").strip().lower()
-    got = _c().table("market_observations").select("*").eq("id", int(obs_id)).limit(1).execute().data or []
+    oid = int(obs_id)
+    got = _c().table("market_observations").select("*").eq("id", oid).limit(1).execute().data or []
     if not got:
         raise MarketIntelError("That report does not exist.", 404)
     obs = got[0]
     if mi._ci(obs.get("created_by")) != actor or not actor:
         raise MarketIntelError("Only the rep who sent this report can answer.", 403)
     case = _live(_case(obs.get("case_id")))
-    events = mi._all(lambda: _c().table("market_case_events").select("id,case_id,event,detail")
-                     .eq("case_id", int(case["id"])).in_("event", ["question", "answer"]).order("id")) if case else []
-    question = _open_question(case, int(obs_id), events) if case else None
-    if not question:
-        raise MarketIntelError("There is no open question on this report.", 409)
+    events = mi._all(lambda: _c().table("market_case_events").select("id,case_id,event,detail,to_status")
+                     .eq("case_id", int(case["id"])).in_("event", ["question", "answer", "status"])
+                     .order("id")) if case else []
     reply = clean_text(text, 1000)
+    question = _open_question(case, oid, events) if case else None
+    resume = False
+    if not question and case:
+        done = _answer_after_question(events, oid)
+        if done is not None and ((done.get("detail") or {}).get("text") or None) == (reply or None):
+            status = _finish_answer(case, oid, actor, done, events)
+            return {"ok": True, "observation_id": oid, "case_status_words": STATUS_WORDS.get(status, ""),
+                    "photo": bool((done.get("detail") or {}).get("photo_id")), "replayed": True}
+        resume = done is None and _latest_question(events, oid) is not None and _moved_by_answer(case, oid, actor)
+    if not question and not resume:
+        raise MarketIntelError("There is no open question on this report.", 409)
     if not reply and not photo:
         raise MarketIntelError("Write an answer or add a photo.")
     role = str(role_name or "product").strip().lower() or "product"
@@ -1706,31 +1940,37 @@ def answer(obs_id: int, text, photo: tuple[str, bytes] | None, actor: str, *, ro
         except Exception as e:  # noqa: BLE001
             log.warning("market quality: answer photo upload failed: %s", e)
             raise MarketIntelError("Could not save the photo. Please try again.", 503) from None
-    try:
-        # the move first: an answer that lost a race (the office moved the case meanwhile) leaves no
-        # photo row and no event behind — only the uploaded files, which are removed again
-        _cas(int(case["id"]), "more_info_required", {"status": "under_review", "status_reason": "the rep answered",
-                                                     "changed_at": mi._iso(), "changed_by": actor,
-                                                     "updated_at": mi._iso(), "updated_by": actor})
-    except MarketIntelError:
-        if stored:
-            _discard(stored)
-        raise
+    if resume:
+        before = {"status_reason": "question to the rep"}
+    else:
+        before = {k: case.get(k) for k in ("status_reason", "changed_at", "changed_by")}
+        try:
+            # the move first: an answer that lost a race leaves no photo row and no event behind — only the
+            # uploaded files, which are removed again
+            _cas(int(case["id"]), "more_info_required", _answer_move(actor, oid))
+        except MarketIntelError:
+            if stored:
+                _discard(stored)
+            raise
     photo_id = None
-    if stored:
-        have = _c().table("market_photos").select("id,position").eq("observation_id", int(obs_id)).execute().data or []
-        pos = max([int(p.get("position") or 0) for p in have] + [-1]) + 1
-        row = {"observation_id": int(obs_id), "bucket": mi.BUCKET, "path": stored["path"], "position": pos,
-               "width": processed["width"], "height": processed["height"], "bytes": processed["bytes"],
-               "phash": processed["phash"], "role": role, "sha256": processed["sha256"],
-               "thumb_path": stored["thumb_path"], "caption": "answer to the office's question"}
-        photo_id = ((_c().table("market_photos").insert(row).execute().data or [row])[0]).get("id")
-    case_event(int(case["id"]), "answer", actor, detail={"observation_id": int(obs_id), "text": reply,
-                                                         "photo_id": photo_id})
+    try:
+        if stored:
+            have = _c().table("market_photos").select("id,position").eq("observation_id", oid).execute().data or []
+            pos = max([int(p.get("position") or 0) for p in have] + [-1]) + 1
+            row = {"observation_id": oid, "bucket": mi.BUCKET, "path": stored["path"], "position": pos,
+                   "width": processed["width"], "height": processed["height"], "bytes": processed["bytes"],
+                   "phash": processed["phash"], "role": role, "sha256": processed["sha256"],
+                   "thumb_path": stored["thumb_path"], "caption": "answer to the office's question"}
+            photo_id = ((_c().table("market_photos").insert(row).execute().data or [row])[0]).get("id")
+        case_event(int(case["id"]), "answer", actor, detail={"observation_id": oid, "text": reply, "photo_id": photo_id})
+    except Exception as e:  # noqa: BLE001 — nothing of the answer is written: undo the move, the retry starts over
+        _undo_answer(case, actor, before, photo_id, stored)
+        log.warning("market quality: an answer was not saved: %s", e)
+        raise MarketIntelError("Could not save your answer. Please try again.", 503) from None
     case_event(int(case["id"]), "status", actor, from_status="more_info_required", to_status="under_review")
     if photo_id:
-        _raise_evidence(case, 2, actor, "photo", observation_id=int(obs_id), photo_id=photo_id)
-    return {"ok": True, "observation_id": int(obs_id), "case_status_words": STATUS_WORDS["under_review"],
+        _raise_evidence(case, 2, actor, "photo", observation_id=oid, photo_id=photo_id)
+    return {"ok": True, "observation_id": oid, "case_status_words": STATUS_WORDS["under_review"],
             "photo": bool(photo_id)}
 
 
@@ -1742,18 +1982,40 @@ def _discard(stored: dict) -> None:
         log.info("market quality: an unused upload was not removed: %s", e)
 
 
+def _takes_sightings(dst: dict) -> None:
+    """A merge or a move lands on an OPEN case: a closed or not-substantiated one takes no sightings (a safety
+    case merged into one would drop off the Safety tab and out of every report)."""
+    if dst.get("status") in CLOSED_STATUSES:
+        raise MarketIntelError(f"Case #{dst['id']} is {STATUS_LABELS.get(dst.get('status'), dst.get('status'))}: it "
+                               "takes no sightings. Pick an open case (or reopen that one first).", 409)
+
+
+def _keeps_sightings(src: dict) -> None:
+    """...and a closed or not-substantiated case keeps its sightings: it is not merged away and none is moved
+    out until it is reopened — a closed one by an admin (CLOSED_READ_ONLY), a not-substantiated one by a
+    reviewer, with a reason. (The case page offers no merge or move on such a case.)"""
+    if src.get("status") == "closed":
+        raise MarketIntelError(CLOSED_READ_ONLY, 409)
+    if src.get("status") == "not_substantiated":
+        raise MarketIntelError("A not-substantiated case keeps its sightings: reopen it first (Not substantiated → "
+                               "Under review, with a reason).", 409)
+
+
 def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
-    """POST /market-intel/cases/{id}/merge (reviewers): this case duplicates `into_id`. Its sightings and
-    supplier actions move there, it closes as merged (merged_into), the target keeps the higher evidence
-    level and the safety flag — and the alert claim: a problem already alerted is not e-mailed again, by a
-    later sighting or the safety sweep. Both are recounted and both histories say so."""
+    """POST /market-intel/cases/{id}/merge (reviewers): this case duplicates `into_id`, an OPEN case. Its
+    sightings and supplier actions move there, it closes as merged (merged_into), the target keeps the higher
+    evidence level and the safety flag — and the alert claim: a problem already alerted is not e-mailed again,
+    by a later sighting or the safety sweep. Both are recounted and both histories say so. A closed or
+    not-substantiated case is not merged away (_keeps_sightings)."""
     _reviewer(role)
     src = _open_case_for_change(case_id)
+    _keeps_sightings(src)
     dst = _live(_case(_id(into_id, "case")))
     if not dst:
         raise MarketIntelError("The case to merge into does not exist.", 404)
     if int(dst["id"]) == int(src["id"]):
         raise MarketIntelError("Pick another case to merge into.")
+    _takes_sightings(dst)
     moved = [int(o["id"]) for o in mi._all(lambda: _c().table("market_observations").select("id")
                                            .eq("case_id", int(src["id"])).order("id"))]
     _cas(int(src["id"]), src.get("status"), {"merged_into": int(dst["id"]), "status": "closed",
@@ -1774,18 +2036,18 @@ def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
                              from_case=int(src["id"]))
     if src.get("safety") and not dst.get("safety"):
         dst = _set_safety(dst, actor, from_case=int(src["id"]))
-    if alert_claimed(int(src["id"])):
-        claim_alert(int(dst["id"]), actor, None, carried_from=int(src["id"]))   # no e-mail: carried, not new
+    _carry_claim(int(src["id"]), int(dst["id"]), actor, None)      # no e-mail: carried, not new
     refresh_case(int(dst["id"]))
     refresh_case(int(src["id"]))
     return {"ok": True, "case_id": int(src["id"]), "merged_into": int(dst["id"]), "moved_observations": len(moved)}
 
 
 def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
-    """POST /market-intel/observations/{id}/move (reviewers): put one sighting on another case (or, for a
+    """POST /market-intel/observations/{id}/move (reviewers): put one sighting on another OPEN case (or, for a
     sighting on no case yet — an old complaint — on a case). Both cases are recounted, both histories say so.
     Like a merge, the sighting carries its photo's evidence and its safety flag (the case it joins goes on the
-    Safety tab; no second e-mail: the problem was alerted already)."""
+    Safety tab; no second e-mail: the problem was alerted already). A closed or not-substantiated case keeps
+    its sightings (_keeps_sightings)."""
     _reviewer(role)
     _need()
     got = _c().table("market_observations").select("*").eq("id", int(obs_id)).limit(1).execute().data or []
@@ -1798,6 +2060,10 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
     src_id = int(obs["case_id"]) if obs.get("case_id") else None
     if src_id == int(dst["id"]):
         return {"ok": True, "changed": False, "observation_id": int(obs_id), "case_id": int(dst["id"])}
+    _takes_sightings(dst)
+    src = _case(src_id) if src_id else None
+    if src and not src.get("merged_into"):
+        _keeps_sightings(src)                                  # (a merged-away case's sighting may still move)
     _c().table("market_observations").update({"case_id": int(dst["id"])}).eq("id", int(obs_id)).execute()
     case_event(int(dst["id"]), "move", actor, detail={"observation_id": int(obs_id), "from_case": src_id})
     if src_id:
@@ -1806,8 +2072,8 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
         dst, _ = _raise_evidence(dst, 2, actor, "photo", observation_id=int(obs_id))
     if obs.get("safety_flag"):
         dst = _set_safety(dst, actor, observation_id=int(obs_id))
-        if src_id and alert_claimed(src_id):          # alerted already: the claim moves along, no second e-mail
-            claim_alert(int(dst["id"]), actor, int(obs_id), carried_from=src_id)
+        if src_id:                                    # alerted already: the claim moves along, no second e-mail
+            _carry_claim(src_id, int(dst["id"]), actor, int(obs_id))
     refresh_case(int(dst["id"]))
     if src_id:
         refresh_case(src_id)
