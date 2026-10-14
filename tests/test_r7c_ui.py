@@ -868,7 +868,10 @@ def _():
     # (supplier_reports_api._caps: can_build / can_edit / can_approve / can_download); the roles are the fallback
     rep = _read(MI_REPORTS)
     can = rep.split("function reportCan(", 1)[1].split("\n}", 1)[0]
-    assert "build: caps?.can_build ?? roles.review," in can and "approve: caps?.can_approve ?? roles.approve," in can
+    # updated again: approving moved to management and admins only (supplier_reports.APPROVER_ROLES);
+    # the fallback for a payload without capabilities follows it
+    assert "build: caps?.can_build ?? roles.review," in can
+    assert "approve: caps?.can_approve ?? (roles.admin || (roles.readOnly && roles.approve))," in can
     assert "{draft && can.approve &&" in rep
     assert "r.status === 'approved' && can.download" in rep
     assert "apiGetDownload(`/market-intel/supplier-reports/${r.id}/download`" in rep
@@ -941,6 +944,28 @@ def _():
     assert "p.set('shop_name'" not in lib
     assert "const shopKnown = shopPhone(shop) !== ''" in _read(PICKER)
     assert "const joined = Boolean(card.case?.joined)" in _read(CAPTURE)
+
+
+@test("r8m reports: withhold rows and photos from the supplier, the approval window, the frozen report, approval warnings")
+def _():
+    rep = _read(MI_REPORTS)
+    assert "{ state: 'withheld', title: 'Withheld: not sent to the supplier'," in rep
+    body = _fn(rep, "function ReportBody(")
+    assert "hold.mutate({ withheld_observation_ids: [...next].sort((a, b) => a - b) })" in body
+    assert "hold.mutate({ withheld_photo_ids: [...next].sort((a, b) => a - b) })" in body
+    # unsaved row ticks travel with a withhold (its answer re-reads the draft)
+    assert "...(changes > 0 ? { included_observation_ids: [...picked].sort((a, b) => a - b) } : {})" in body
+    assert "const frozen = Boolean(d.frozen || r.frozen)" in body and "const editable = can.edit && draft && !frozen" in body
+    assert "Frozen at approval" in body
+    assert "const opens = approvableNow(r)" in body and "Can be approved from {dayText(r.approvable_from)}" in body
+    assert "{draft && can.approve && opens &&" in body, "Approve stays shut before the window opens"
+    assert "onApproved?.(Array.isArray(res?.warnings) ? res.warnings : [])" in body
+    lib = _read(MI_LIB)
+    fn = lib.split("export function approvableNow(", 1)[1].split("\n}", 1)[0]
+    assert "Date.parse(`${day}T00:00:00+03:00`)" in fn, "Bahrain midnight of approvable_from"
+    # a move to Resolved re-reads the case: its supplier actions resolve with it
+    case = _read(MI_CASE)
+    assert "after Resolved its supplier actions are resolved too" in case
 
 
 @test("contract (r8m): the page's statuses, moves, labels and the limits it uses match the backend in this tree")
