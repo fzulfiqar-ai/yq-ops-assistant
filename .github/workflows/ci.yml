@@ -113,6 +113,8 @@ jobs:
           python -m tests.test_r8m_supplier_reports
           python -m tests.test_r8n_ai_market_signals   # R8: the weekly AI Head reads Market Intel (replay SKIPs here)
           python -m tests.test_r8m_market_quality
+          python -m tests.test_r8m_mi_e2e   # Market Intel v2: the four modules end to end on one stand-in held to the real schema
+          python -m tests.test_r8m_release_script   # the Market Intel v2 release script + runbook, read as text (never run)
           python -m tests.test_r7b_arabic
           python -m py_compile scripts/weekly_report.py   # owner tool: must parse on the pinned 3.11
       # R7c order heart (Sprint 3): Received -> Confirmed -> Delivered, the one editor, the price lock,

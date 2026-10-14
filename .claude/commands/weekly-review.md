@@ -12,15 +12,19 @@ weeks can be compared line by line.
 ## Hard rules (read before anything else)
 
 1. **Read-only.** The pack is built through the `ai_head_ro` login (SELECT on the `v_agent_*` views
-   only). Never write to any database, never run `apply_sql`, `render_deploy`, `wrangler`, a git push,
-   or anything that changes production. The ONLY writes in this whole routine come in the last step,
-   "ask the owner" (`load_insights --commit`, and `market_intel_ai_head suggest --apply` for the photo
-   readings he approves), and only after he has answered in this session.
+   only). The one other read is step 9's Market Intel photo step (`market_intel_ai_head pack`): it needs
+   the photos' paths, which no view carries, so it reads over `DATABASE_URL` (the owner login) inside a
+   read-only transaction. Never write to any database, never run `apply_sql`, `render_deploy`,
+   `wrangler`, a git push, or anything that changes production. The ONLY writes in this whole routine
+   come in the last step, "ask the owner" (`load_insights --commit`, and `market_intel_ai_head suggest
+   --apply --by …` for the photo readings he approves), and only after he has answered in this session.
 2. **Never send anything** — no email, WhatsApp, Telegram, post or upload — without the owner's
    explicit "yes, send it" in this session. `python -m scripts.weekly_report --send` is the owner's
    own tool; do not run it for him.
-3. **No personal contact details.** Phones and emails are masked in the pack; never try to recover
-   them and never put one in the report or in `insights.json` (the loader refuses the file).
+3. **No personal contact details.** Phones and emails are masked in the pack and in `market_intel.json`
+   (which also leaves out competitor names and every receipt photo); never try to recover them and never
+   put one in the report, in `insights.json` (the loader refuses the file) or in a photo reading (`suggest`
+   refuses it).
 4. **Every statement is tagged** `FACT` / `ANALYSIS` / `RECOMMENDATION` / `LOW-CONFIDENCE HYPOTHESIS`,
    with a confidence (high / medium / low) and the freshness stamp of the data it rests on
    (e.g. "Focus to Thu 24 Sep · marketplace to Sat 26 Sep 23:10").
@@ -83,25 +87,32 @@ the same weekdays only (the pack already does this).
    `items.json` zero-result terms and `market_signals.csv` (`v_agent_market_signals`, Market Intel since
    R8): `restock_request` (marketplace asks per day × SKU), `market_item` (sightings per day × Market
    Intel item: `n` sightings, `sources` distinct shops, `reps`, prices, usable `photos`, the item's
-   `status`, `item_shops` / `item_reps` over its whole life), `market_report` (sightings of one of our
-   SKUs outside any item), `market_unidentified` (one photo still to identify). `observation_ids` are
-   the sightings behind a row: cite them as `[MI-<id>]`. `system_signals` is the same marketplace
-   demand as `restock_request` / `search_demand.csv`, rolled onto an item: never add them together.
-   Cluster what refers to the same product; rank by distinct shops × recency × commercial relevance
-   (category revenue, margin headroom, sold-out overlap); pick the top 1–3.
+   `status`, `item_shops` / `item_reps` over its whole life), `market_case` (quality reports per day ×
+   case: `ref_id` is the case; its issue, status and evidence level live on the office's Cases tab),
+   `market_report` (sightings of one of our SKUs on no item and no case), `market_unidentified` (one
+   photo still to identify). `observation_ids` are the sightings behind a row: cite them as `[MI-<id>]`.
+   `system_signals` is the same marketplace demand as `restock_request` / `search_demand.csv`, rolled
+   onto an item: never add them together. Cluster what refers to the same product; rank by distinct
+   shops × recency × commercial relevance (category revenue, margin headroom, sold-out overlap); pick
+   the top 1–3.
 
-   Then the photos (read-only; the links expire in 1 hour):
+   Then the photos (the links expire in 1 hour). This is the one read outside the `ai_head_ro` pack:
+   `v_market_signals_agent` plus the sightings' and photos' tables, over `DATABASE_URL` in a read-only
+   transaction (rule 1); it writes `market_intel.json`, masked like the pack, with no competitor name:
 
    ```
    python -m scripts.market_intel_ai_head pack --photos --out exports/ai_head/<week-ending>
    ```
 
-   `market_intel.json` holds the ranked items and, in `to_identify`, the photo-only sightings. Look at
-   every photo you are given and write what you can read (brand, model, spec, visible text; a YQ SKU
-   only when `items.csv` has it) into `market_suggestions.json` in the pack folder, in the file's
+   `market_intel.json` holds the ranked items and, in `to_identify`, the photo-only sightings. Quality
+   reports on a case are not in it: the office verifies those, and the AI never reads them for a
+   suggestion. Receipt photos and people-flagged photos are never in it either. Look at every photo you
+   are given and write what you can read (brand, model, spec, visible text; a YQ SKU only when
+   `items.csv` has it) into `market_suggestions.json` in the pack folder, in the file's
    `suggest_format`: one row per item or sighting, `observation_ids` = the sightings whose photos you
    read. Never a phone number, an email or a person's name (`suggest` refuses a phone number or an
-   email; a barcode goes under `barcode`, digits only). Check it (a dry run; nothing is written):
+   email; a barcode goes under `barcode`: a GTIN with a valid check digit). Check it (a dry run; nothing
+   is written):
 
    ```
    python -m scripts.market_intel_ai_head suggest exports/ai_head/<week-ending>/market_suggestions.json
@@ -188,14 +199,17 @@ python -m scripts.ai_head.load_insights <file> --approve … --reject … --appr
 
 Management then sees the approved statements on the Command Centre (`GET /management/insights`).
 
-Then ask whether to store the photo readings (`market_suggestions.json`). Only on his yes:
+Then ask whether to store the photo readings (`market_suggestions.json`). Only on his yes, with his
+login as the approver:
 
 ```
-python -m scripts.market_intel_ai_head suggest exports/ai_head/<week-ending>/market_suggestions.json --apply
+python -m scripts.market_intel_ai_head suggest exports/ai_head/<week-ending>/market_suggestions.json --apply --by <his login email>
 ```
 
 Each reading is stored Unverified (an item's AI reading, or a photo-only sighting's) with the sightings
-it cites, until a reviewer marks it verified. It never sets a status, identifies a sighting or merges
-items: those stay with the office on the Market Intel board.
+it cites and who approved it, until a reviewer marks it verified. It never sets a status, identifies a
+sighting, touches a quality case or merges items, and never writes over a reading a person verified:
+those stay with the office on the Market Intel board.
+
 Next week, open `insights_history.csv` first and report what happened to last week's approved actions
 (mark finished ones with `--done <id> --by … --commit`, again only on the owner's word).

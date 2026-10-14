@@ -179,8 +179,8 @@ export function CaseCard({ r, compact = false }: { r: MiCaseRow; compact?: boole
               <span className="inline-flex items-center gap-1"><Siren size={10} aria-hidden="true" /> Safety</span>
             </Badge>
           )}
-          {r.status && <Badge tone={CASE_STATUS_TONE[r.status] || 'grey'}>{CASE_STATUS_LABEL[r.status] || r.status}</Badge>}
-          {!compact && <Badge tone="grey">{evidenceLabel(r.evidence_level)}</Badge>}
+          {r.status && <Badge tone={CASE_STATUS_TONE[r.status] || 'grey'}>{r.status_label || CASE_STATUS_LABEL[r.status] || r.status}</Badge>}
+          {!compact && <Badge tone="grey">{r.evidence_label || evidenceLabel(r.evidence_level)}</Badge>}
           {r.issue_type?.label_en && <Badge tone="accent">{r.issue_type.label_en}</Badge>}
         </div>
         <div className="line-clamp-2 text-[14px] font-semibold leading-snug text-foreground">{r.title || 'Not named yet'}</div>

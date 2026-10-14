@@ -10,7 +10,11 @@
 --
 -- Order: the agent view depends on the clusters view, the clusters view on the tables; the decisions,
 -- photos and observations reference the items. Each is dropped after everything that depends on it,
--- so no CASCADE is needed (nothing outside this release depends on them: checked in pg_depend).
+-- so no CASCADE is needed (nothing outside this release depended on them when it was written).
+-- Two later releases read these tables, and this file's DROP TABLE stops (no CASCADE; apply_sql runs the
+-- file as one transaction, so nothing is dropped) while either is in place: run their reverses FIRST,
+--   scripts/r8n_ai_market_signals_reverse.sql   (the AI Head's v_agent_market_signals reads the tables), then
+--   scripts/r8m_market_quality_reverse.sql      (the quality cases; see its header).
 --
 -- The API keeps working through it: app/market_intel.py forgets its cached probe the first time a read
 -- or a write meets a missing table, then answers "not set up yet" and saves captures to the legacy

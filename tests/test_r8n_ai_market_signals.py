@@ -12,25 +12,34 @@ Covered:
   * scripts/r8n_ai_market_signals_migration.sql, read as text: v_agent_market_signals keeps the twelve r7b
     columns first (names and order read from r7b_ai_head_migration.sql itself) and appends ten; it reads
     market_items / market_observations / market_photos and never product_finds / field_notes or an r8m
-    object; no output column names a shop, a rep, a login, a note, an area, a competitor, a barcode, meta
-    or a photo path, and the shop / rep keys are only ever counted; the typed title and brand pass
-    ai_agent_mask(); the grants are r7b_ai_head's, as plain statements; no CASCADE, no DROP, no
-    security_invoker, no row written; the dependency block and the self-check;
-  * every reader of the view (scripts/ai_head/pack.py's two queries) names only columns it keeps;
-  * the reverse: r7b's statement and comment verbatim, the same grants, a plain DROP, its own checks;
+    table, and the two r8m columns it needs (case_id, role) only through to_jsonb(<row>), so no column is
+    pinned; a quality sighting (item_id NULL, case_id set) is a market_case row, never a report or a photo
+    to identify; usable photos never count a receipt; no output column names a shop, a rep, a login, a
+    note, an area, a competitor, a barcode, meta or a photo path, and the shop / rep keys are only ever
+    counted; title, brand and category pass ai_agent_mask(); the grants are r7b_ai_head's, as plain
+    statements; no CASCADE, no DROP, no security_invoker, no row written; the dependency block and the
+    self-check;
+  * every reader of the view (scripts/ai_head/pack.py's two queries) runs on R7b's twelve columns, the
+    month's repeated requests leave unnamed photos out and count an item's distinct shops, never a sum;
+  * the reverse: r7b's statement and comment verbatim, the same grants, a plain DROP, its own checks; the
+    order traps are written where they bite (r7b_ai_head, r7b_market_intel's reverse, the README, docs);
   * the AI pack (scripts/market_intel_ai_head.py): photo-only sightings are listed for a reading, with
-    photo links and their observation IDs, never a people-flagged photo; every row names the sightings to
-    cite; a suggestion must cite its own target's sightings and carry no phone number or email (a barcode
-    goes under "barcode"); it is stored Unverified (an item: verified = false; a photo-only sighting:
-    meta.ai_suggestion while it is still unidentified); a verified or merged item and a sighting
-    identified meanwhile are left alone; no statement writes a status, an item_id or a merge; a dry run
-    reads only, on a read-only connection;
+    photo links and their observation IDs, never a people-flagged photo or a receipt, and never a sighting
+    on a quality case; every text cell is masked and no competitor name is written; every row names the
+    sightings to cite; a suggestion must cite its own target's sightings and carry no phone number or email
+    (a barcode, a GTIN with a valid check digit, goes under "barcode"); it is stored Unverified (an item:
+    verified = false; a photo-only sighting: meta.ai_suggestion while it is on no item and no case and no
+    person verified its reading); a verified or merged item and a sighting identified meanwhile are left
+    alone; --apply needs --by and records it; no statement writes a status, an item_id, a case or a merge;
+    a dry run reads only, on a read-only connection;
   * the weekly review command and CI;
   * a local Postgres replay, only when YQ_LOCAL_PG_R8N names a loopback cluster (SKIP when it is not set;
-    any other address is refused): r7b's market tables and r7b's view on seeded sightings, this migration
+    any other address is refused): r7b's market tables, r7b's view and the real r8m migration on seeded
+    sightings (quality cases and receipts included), pack.py's monthly query on R7b's view, this migration
     twice, the rows and counts, nothing personal in any cell, ai_head_ro and yq_readonly read it (and still
-    no base table), the pack's own queries, r7b's statement refused after it, the AI pack and its
-    suggestions on real tables, the reverse twice (r7b again), the migration again. All rolled back.
+    no base table), the pack's queries, r7b's statement refused after it, the AI pack and its suggestions on
+    real tables (the SQL guards on their own), r8m's reverse with this view in place, r7b_market_intel's
+    reverse refused while it stands, the reverse twice (r7b again), the migration again. All rolled back.
 """
 from __future__ import annotations
 
@@ -49,7 +58,7 @@ import sys  # noqa: E402
 import tempfile  # noqa: E402
 import traceback  # noqa: E402
 from contextlib import redirect_stdout  # noqa: E402
-from datetime import datetime, timedelta, timezone  # noqa: E402
+from datetime import date, datetime, timedelta, timezone  # noqa: E402
 from decimal import Decimal  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
@@ -74,8 +83,13 @@ MIGRATION = ROOT / "scripts" / "r8n_ai_market_signals_migration.sql"
 REVERSE = ROOT / "scripts" / "r8n_ai_market_signals_reverse.sql"
 R7B_AI_HEAD = ROOT / "scripts" / "r7b_ai_head_migration.sql"
 R7B_MARKET_INTEL = ROOT / "scripts" / "r7b_market_intel_migration.sql"
+R7B_MARKET_INTEL_REVERSE = ROOT / "scripts" / "r7b_market_intel_reverse.sql"
+R8M = ROOT / "scripts" / "r8m_market_quality_migration.sql"
+R8M_REVERSE = ROOT / "scripts" / "r8m_market_quality_reverse.sql"
 AI_PACK = ROOT / "scripts" / "market_intel_ai_head.py"
 PACK = ROOT / "scripts" / "ai_head" / "pack.py"
+README = ROOT / "scripts" / "ai_head" / "README.md"
+MIGRATIONS_DOC = ROOT / "docs" / "MIGRATIONS.md"
 WEEKLY = ROOT / ".claude" / "commands" / "weekly-review.md"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 
@@ -88,6 +102,7 @@ TYPES = {"signal": "text", "ref_id": "bigint", "day": "date", "item_code": "text
          "currency": "text", "status": "text", "kind": "text", "brand": "text", "reps": "integer",
          "photos": "integer", "system_signals": "integer", "item_shops": "integer", "item_reps": "integer",
          "price_max": "numeric", "ai_reading": "text", "observation_ids": "bigint[]"}
+SIGNALS = ("'restock_request'", "'market_item'", "'market_case'", "'market_report'", "'market_unidentified'")
 # a column of this view may never carry one of these (r7b_ai_head's list plus Market Intel's own)
 PERSONAL = {"phone", "email", "whatsapp", "shop_name", "shop_customer_id", "salesman_id", "salesman",
             "created_by", "posted_by", "user_email", "note", "area", "competitor", "barcode", "barcode_raw",
@@ -97,6 +112,8 @@ GRANTS = ["revoke all on table v_agent_market_signals from anon, authenticated;"
           "grant select on v_agent_market_signals to ai_head_ro;",
           "grant select on v_agent_market_signals to yq_readonly;"]
 F8_LABELS = {"Verified fact", "Unverified report", "AI suggestion", "Recommended action"}
+CASE_READ = "(to_jsonb(o) ->> 'case_id')::bigint"
+ROLE_READ = "coalesce(to_jsonb(p) ->> 'role', 'product') <> 'receipt'"
 
 
 class _Patched:
@@ -156,6 +173,13 @@ def _first_branch_columns(stmt: str) -> list[str]:
     return cols
 
 
+def _branch(stmt: str, signal: str) -> str:
+    """One union branch of the view: from its `select '<signal>'` to the next union (or the end)."""
+    start = stmt.index(f"select '{signal}'")
+    end = stmt.find("union all", start)
+    return stmt[start:end if end > 0 else len(stmt)]
+
+
 def _do_blocks(code: str) -> list[str]:
     return re.findall(r"do \$\$(.*?)\$\$;", code, re.S)
 
@@ -166,6 +190,13 @@ def _outside_do(code: str) -> str:
 
 def _grants(code: str) -> list[str]:
     return [" ".join(s.split()) for s in re.findall(r"\b(?:grant|revoke)\s[^;]*;", _outside_do(code))]
+
+
+def _pack_sqls() -> list[str]:
+    """scripts/ai_head/pack.py's statements on the view, as the pack sends them."""
+    tree = ast.parse(PACK.read_text(encoding="utf-8"))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and "from v_agent_market_signals" in n.value]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -188,26 +219,49 @@ def _():
     assert "numeric(12,3)" not in stmt, "a typmod on price would refuse CREATE OR REPLACE over the r7b view"
 
 
-@test("migration: reads market_items / market_observations / market_photos and the restock asks; never the old boards or an r8m object")
+@test("migration: reads the Market Intel tables and the restock asks; r8m's case_id and role only through to_jsonb (no column pinned), no r8m table")
 def _():
     stmt = _strip(_view_stmt(MIGRATION)).lower()
     for t in ("market_items", "market_observations", "market_photos", "shop_restock_requests"):
         assert re.search(rf"\b(from|join) {t}\b", stmt), t
     for t in ("product_finds", "field_notes", "v_market_clusters", "v_market_signals_agent"):
         assert t not in stmt, t
-    code = _sql_code(MIGRATION).lower()
+    # identifiers only: the view's COMMENT may name r8m's v_market_cases_agent for the reader
+    code = re.sub(r"'[^']*'", "''", _sql_code(MIGRATION).lower())
     for r8m in ("market_cases", "market_case_events", "market_issue_types", "supplier", "brands", "brand_id",
-                "case_id", "issue_type_id", "safety_flag", "report_basis", "qty_affected", "batch_ref",
-                "packaging_version", "client_observed_at", "thumb_path", "blurred_path", "caption", "sha256",
-                "evidence_level", "to_jsonb"):
+                "issue_type_id", "safety_flag", "report_basis", "qty_affected", "batch_ref", "packaging_version",
+                "client_observed_at", "thumb_path", "blurred_path", "caption", "sha256", "evidence_level",
+                "o.case_id", "p.role"):
         assert r8m not in code, r8m
-    for s in ("'restock_request'", "'market_item'", "'market_report'", "'market_unidentified'"):
+    # the two r8m columns: read through the whole row, so r8m's reverse can still drop them (r7b precedent)
+    assert stmt.count("to_jsonb(o)") == 1 and CASE_READ in stmt
+    assert stmt.count("to_jsonb(p)") == 1 and ROLE_READ in stmt
+    assert "to_jsonb(" not in stmt.replace("to_jsonb(o) ->> 'case_id'", "").replace("to_jsonb(p) ->> 'role'", "")
+    for s in SIGNALS:
         assert s in stmt, s
     # a merged item is left out (its sightings moved to the target); system demand is counted apart
     assert "where o.item_id is null or i.status <> 'merged'" in stmt
-    assert stmt.count("b.source <> 'system'") >= 10 and "(count(*) filter (where b.source = 'system'))::int" in stmt
-    # the photos a report may count never include one flagged with people
-    assert "count(*) filter (where not p.has_people_flag) as usable" in stmt
+    assert stmt.count("b.source <> 'system'") >= 11 and "(count(*) filter (where b.source = 'system'))::int" in stmt
+    # the photos a report may count: never one flagged with people, never a receipt
+    assert "count(*) filter (where not p.has_people_flag\n" in stmt and ROLE_READ + ")" in stmt
+
+
+@test("migration: a quality sighting (no item, a case) is a market_case row, never a report or a photo to identify")
+def _():
+    stmt = _strip(_view_stmt(MIGRATION)).lower()
+    case = _branch(stmt, "market_case")
+    assert "select 'market_case', b.case_id, b.day, max(b.yq_item_code)," in case
+    assert "where b.item_id is null and b.case_id is not null and b.source <> 'system'" in case
+    assert "group by b.case_id, b.day" in case and "array_agg(b.id order by b.id)" in case
+    assert "mode() within group (order by b.kind)" in case
+    report, unidentified = _branch(stmt, "market_report"), _branch(stmt, "market_unidentified")
+    assert "where b.item_id is null and b.case_id is null and b.yq_item_code is not null" in report
+    assert "where b.item_id is null and b.case_id is null and b.yq_item_code is null" in unidentified
+    # the self-check proves it on the live rows, and every field sighting still adds up
+    check = _do_blocks(_sql_code(MIGRATION).lower())[-1]
+    assert "counted as a report or a photo to identify" in check
+    assert "v.signal in ('market_report', 'market_unidentified') and to_jsonb(o) ->> 'case_id' is not null" in check
+    assert "where v.signal like 'market\\_%'" in check
 
 
 @test("migration: no output column names a shop, a rep, a login, a note, an area, a competitor, a barcode, meta or a path; shops and reps are only counted")
@@ -222,32 +276,36 @@ def _():
     rest = stmt.replace(shop_key[0], "").replace(rep_key[0], "")
     metas = re.findall(r"o\.meta -> 'ai_suggestion'", rest)
     assert len(metas) == 2, "meta is read for the AI-reading flag only"
-    rest = rest.replace("o.meta -> 'ai_suggestion'", "")
+    # the whole rows read for r8m's case and role never leave the CTEs: one key each, nothing else
+    rest = rest.replace("o.meta -> 'ai_suggestion'", "").replace("to_jsonb(o) ->> 'case_id'", "")
+    rest = rest.replace("to_jsonb(p) ->> 'role'", "")
     for col in ("shop_name", "shop_customer_id", "salesman_id", "created_by", "note", "area", "competitor",
                 "barcode", "barcode_raw", "path", "bucket", "legacy_ref", "client_uuid", "meta", "phone", "email",
-                "user_email", "session_id"):
+                "user_email", "session_id", "to_jsonb"):
         assert not re.search(rf"\b{col}\b", rest), col
     assert rest.count("device_id") == 1 and "count(distinct r.device_id)::int" in rest, "devices: counted, as in r7b"
     # the keys only ever feed a count (or a 0/1 for one sighting), never a column
     uses = list(re.finditer(r"\bb\.(shop_key|rep_key)\b", stmt))
-    assert len(uses) >= 8, len(uses)
+    assert len(uses) >= 10, len(uses)
     for m in uses:
         before, after = stmt[max(0, m.start() - 15):m.start()], stmt[m.end():m.end() + 18]
         assert before.endswith("count(distinct ") or after.startswith(" is not null)::int"), (before, after)
 
 
-@test("migration: the typed title and brand pass ai_agent_mask(); nothing else is free text")
+@test("migration: the typed title, brand and category pass ai_agent_mask(); the self-check proves no number survives")
 def _():
     stmt = _strip(_view_stmt(MIGRATION))
     union = stmt[stmt.index("select 'restock_request'::text"):]
-    found = list(re.finditer(r"\b[ib]\.(title|brand)\b", union))
-    assert len(found) == 4, [m.group(0) for m in found]
+    found = list(re.finditer(r"\b[ib]\.(title|brand|category)\b", union))
+    assert len(found) == 6, [m.group(0) for m in found]
     for m in found:
         assert union[m.start() - 19:m.start()] == "ai_agent_mask(left(", union[m.start() - 25:m.end() + 8]
-    assert union.count("ai_agent_mask(left(") == 4
-    # the mask is r7b_ai_head's (an 8+ digit run and an email go); the self-check proves no number survives
-    assert "ai_agent_mask(text) is missing" in _sql_code(MIGRATION)
-    assert "a label or a brand carries an unmasked number" in _sql_code(MIGRATION)
+    assert union.count("ai_agent_mask(left(") == 6
+    code = _sql_code(MIGRATION)
+    assert "ai_agent_mask(text) is missing" in code
+    assert "a label, a brand or a category carries an unmasked number" in code
+    # each column on its own: concatenated, '...1234' + ' ' + '5678...' would read as one 8-digit run
+    assert "where label ~ '\\d(?: ?\\d){7,}' or brand ~ '\\d(?: ?\\d){7,}' or category ~ '\\d(?: ?\\d){7,}'" in code
 
 
 @test("migration: the grants are r7b_ai_head's (anon / authenticated revoked; SELECT for ai_head_ro and yq_readonly), plain statements, nothing else")
@@ -283,31 +341,40 @@ def _():
         assert needle in deps, needle
     for needle in ("must be owned by postgres", "must not be security_invoker", "does not read", "still reads product_finds",
                    "must read v_agent_market_signals", "may write to v_agent_market_signals", "granted to anon/authenticated",
-                   "carry a person, a contact or a raw identifier", "the market rows count", "unmasked number"):
+                   "carry a person, a contact or a raw identifier", "the market rows count", "unmasked number",
+                   "counted as a report or a photo to identify"):
         assert needle in check, needle
     assert code.index("do $$") < code.index("create or replace view") < code.index("revoke all on table") \
         < code.rindex("do $$"), "dependencies, the view, the grants, then the self-check"
 
 
-@test("readers: scripts/ai_head/pack.py's queries on v_agent_market_signals name only columns the view keeps")
+@test("readers: pack.py's two queries run on R7b's twelve columns too; the month's requests skip unnamed photos and count an item's shops, never a sum")
 def _():
     src = PACK.read_text(encoding="utf-8")
     agent_views = re.search(r"AGENT_VIEWS = \((.*?)\)", src, re.S).group(1)
     assert '"v_agent_market_signals"' in agent_views
-    sqls = [n.value for n in ast.walk(ast.parse(src))
-            if isinstance(n, ast.Constant) and isinstance(n.value, str) and "from v_agent_market_signals" in n.value]
+    sqls = _pack_sqls()
     assert len(sqls) == 2, sqls
-    cols = set(R7B_COLUMNS)              # the readers predate R8: they must keep working on the r7b names alone
     words = {"select", "from", "where", "and", "between", "order", "by", "desc", "asc", "group", "having", "as",
-             "coalesce", "sum", "s", "v_agent_market_signals", "what", "reports"}
+             "coalesce", "sum", "max", "int", "s", "v", "v_agent_market_signals", "what", "reports", "shops", "reps"}
     for sql in sqls:
-        unknown = {t for t in re.findall(r"[a-z_]+", sql.lower()) if t not in words | cols}
+        low = sql.lower()
+        later = re.findall(r"to_jsonb\(v\) ->> '(\w+)'", low)       # R8n's columns: NULL on R7b's view, never an error
+        assert set(later) <= set(APPENDED), later
+        bare = re.sub(r"'[^']*'", "", re.sub(r"to_jsonb\(v\) ->> '\w+'", "", low))
+        unknown = {t for t in re.findall(r"[a-z_]+", bare) if t not in words | set(R7B_COLUMNS)}
         assert not unknown, (sql, unknown)
-    assert any("order by day desc, signal" in s for s in sqls) and any("coalesce(item_code, label)" in s for s in sqls)
+    weekly, monthly = sorted(sqls, key=lambda s: "coalesce" in s)
+    assert "order by day desc, signal" in weekly
+    assert "coalesce(item_code, label, signal || ':' || ref_id) as what" in monthly, "an unnamed row groups as itself"
+    assert "signal <> 'market_unidentified'" in monthly, "a photo nobody named is not a request"
+    assert "sum(sources)" not in monthly, "per-day distinct shops do not add up across days"
+    assert "max((to_jsonb(v) ->> 'item_shops')::int) as shops" in monthly
+    assert "max((to_jsonb(v) ->> 'item_reps')::int) as reps" in monthly
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. the reverse, as text
+# 2. the reverse and the order notes, as text
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @test("reverse: r7b's statement and comment verbatim, the same three grants, a plain DROP (no CASCADE), its own checks")
@@ -333,6 +400,26 @@ def _():
     assert code.index("do $$") < code.index("drop view") < code.rindex("do $$")
 
 
+@test("order notes: the two traps are written where they bite (r7b_ai_head's view, r7b_market_intel's reverse, the README, MIGRATIONS.md)")
+def _():
+    r7b = R7B_AI_HEAD.read_text(encoding="utf-8")
+    block = r7b[r7b.index("-- 3l."):r7b.index("create or replace view v_agent_market_signals as")]
+    assert "cannot drop columns from view" in block and "scripts/r8n_ai_market_signals_reverse.sql first" in block
+    rev = R7B_MARKET_INTEL_REVERSE.read_text(encoding="utf-8")
+    header = rev[:rev.index("drop view if exists")]
+    assert "scripts/r8n_ai_market_signals_reverse.sql" in header and "scripts/r8m_market_quality_reverse.sql" in header
+    assert header.index("r8n_ai_market_signals_reverse") < header.index("r8m_market_quality_reverse")
+    readme = README.read_text(encoding="utf-8")
+    assert "r8n_ai_market_signals_reverse.sql" in readme and "cannot drop columns" in readme
+    assert "--apply --by" in readme and "DATABASE_URL" in readme
+    doc = MIGRATIONS_DOC.read_text(encoding="utf-8")
+    sec = doc[doc.index("## Release R8n"):]
+    for needle in ("cannot drop columns from view", "r7b_market_intel_reverse.sql", "to_jsonb", "market_case", "receipt"):
+        assert needle in sec, needle
+    mig = MIGRATION.read_text(encoding="utf-8")
+    assert "r7b_market_intel_reverse.sql cannot drop the Market Intel tables" in mig
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. the AI pack: a stand-in connection and photo signer
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -342,8 +429,8 @@ T0 = datetime(2026, 10, 14, 6, 0, tzinfo=timezone.utc)
 
 class _World:
     """Just enough of the Market Intel tables for scripts/market_intel_ai_head.py: it answers the script's
-    own reads and applies its two guarded UPDATEs and two INSERTs, recording every statement. An UPDATE
-    without its guard in the WHERE fails the test."""
+    own reads (honouring the case and receipt filters only when the statement carries them) and applies
+    its two UPDATEs and two INSERTs, recording every statement. An UPDATE without its guards fails the test."""
 
     def __init__(self):
         self.items = {
@@ -353,37 +440,46 @@ class _World:
             14: {"id": 14, "title": "Brand S", "status": "merged", "verified": False, "ai_suggestion": None, "ai_confidence": None},
             15: {"id": 15, "title": "Brand T", "status": "new", "verified": False, "ai_suggestion": None, "ai_confidence": None},
         }
+        verified = {"suggestion": {"brand": "Brand V"}, "confidence": 0.5, "verified": True, "label": "Verified"}
         self.obs = {o["id"]: o for o in (
-            {"id": 101, "item_id": 12, "observed_at": T0 - timedelta(days=2), "meta": None},
-            {"id": 102, "item_id": 12, "observed_at": T0 - timedelta(days=1), "meta": None},
-            {"id": 103, "item_id": 13, "observed_at": T0 - timedelta(days=3), "meta": None},
-            {"id": 104, "item_id": 15, "observed_at": T0 - timedelta(days=20), "meta": None},
-            {"id": 230, "item_id": None, "observed_at": T0 - timedelta(hours=5), "meta": {"legacy": "kept"}},
-            {"id": 231, "item_id": None, "observed_at": T0 - timedelta(hours=1), "meta": None},
-            {"id": 232, "item_id": None, "observed_at": T0, "meta": None},
-            {"id": 233, "item_id": None, "observed_at": T0, "meta": None},
-            {"id": 234, "item_id": 15, "observed_at": T0, "meta": None},
+            {"id": 101, "item_id": 12, "case_id": None, "observed_at": T0 - timedelta(days=2), "meta": None},
+            {"id": 102, "item_id": 12, "case_id": None, "observed_at": T0 - timedelta(days=1), "meta": None},
+            {"id": 103, "item_id": 13, "case_id": None, "observed_at": T0 - timedelta(days=3), "meta": None},
+            {"id": 104, "item_id": 15, "case_id": None, "observed_at": T0 - timedelta(days=20), "meta": None},
+            {"id": 230, "item_id": None, "case_id": None, "observed_at": T0 - timedelta(hours=5), "meta": {"legacy": "kept"}},
+            {"id": 231, "item_id": None, "case_id": None, "observed_at": T0 - timedelta(hours=1), "meta": None},
+            {"id": 232, "item_id": None, "case_id": None, "observed_at": T0, "meta": None},
+            {"id": 233, "item_id": None, "case_id": None, "observed_at": T0, "meta": None},
+            {"id": 234, "item_id": 15, "case_id": None, "observed_at": T0, "meta": None},
+            {"id": 235, "item_id": None, "case_id": None, "observed_at": T0 - timedelta(hours=2), "meta": {"ai_suggestion": verified}},
+            {"id": 240, "item_id": None, "case_id": 7, "observed_at": T0 - timedelta(minutes=30), "meta": None},
         )}
+        photo = {"bucket": "finds", "position": 0, "has_people_flag": False, "role": "product"}
         self.photos = [
-            {"id": 1, "observation_id": 101, "bucket": "finds", "path": "market/2026/10/p1.webp", "position": 0, "has_people_flag": False},
-            {"id": 2, "observation_id": 101, "bucket": "finds", "path": "market/2026/10/people-p2.webp", "position": 1, "has_people_flag": True},
-            {"id": 3, "observation_id": 230, "bucket": "finds", "path": "market/2026/10/p3.webp", "position": 0, "has_people_flag": False},
-            {"id": 4, "observation_id": 231, "bucket": "finds", "path": "market/2026/10/people-p4.webp", "position": 0, "has_people_flag": True},
-            {"id": 5, "observation_id": 231, "bucket": "finds", "path": "market/2026/10/p5.webp", "position": 1, "has_people_flag": False},
+            {**photo, "id": 1, "observation_id": 101, "path": "market/2026/10/p1.webp"},
+            {**photo, "id": 2, "observation_id": 101, "path": "market/2026/10/people-p2.webp", "position": 1, "has_people_flag": True},
+            {**photo, "id": 3, "observation_id": 230, "path": "market/2026/10/p3.webp"},
+            {**photo, "id": 4, "observation_id": 231, "path": "market/2026/10/people-p4.webp", "has_people_flag": True},
+            {**photo, "id": 5, "observation_id": 231, "path": "market/2026/10/p5.webp", "position": 1, "role": "packaging"},
+            {**photo, "id": 6, "observation_id": 230, "path": "market/2026/10/receipt-p6.webp", "position": 1, "role": "receipt"},
+            {**photo, "id": 7, "observation_id": 240, "path": "market/2026/10/case-p7.webp"},
         ]
         base = {"row_type": None, "item_id": None, "observation_id": None, "kind": "other", "title": None, "brand": None,
                 "competitor": None, "category": None, "barcode": None, "yq_item_code": None, "status": "new", "action": None,
                 "observations": 1, "shops": 0, "reps": 1, "price_min": None, "price_max": None, "first_seen": None,
                 "last_seen": None, "system_signals": 0, "demand_qty": None, "usable_photos": 0,
                 "has_ai_suggestion": False, "ai_confidence": None, "verified": False}
-        self.signals = [  # v_market_signals_agent: no rep, shop, note, login or photo path
-            {**base, "row_type": "item", "item_id": 12, "kind": "new_product", "title": "Brand Q 65W", "observations": 2,
-             "shops": 2, "reps": 2, "price_min": Decimal("2.500"), "last_seen": T0 - timedelta(days=1), "usable_photos": 1},
+        self.signals = [  # v_market_signals_agent: its 'unassigned' branch also holds the sightings on a case
+            {**base, "row_type": "item", "item_id": 12, "kind": "competitor_price", "title": "Brand Q 65W, call 3300 0001",
+             "brand": "Brand Q", "competitor": "Shop Beta", "barcode": "6971234567895", "observations": 2, "shops": 2,
+             "reps": 2, "price_min": Decimal("2.500"), "last_seen": T0 - timedelta(days=1), "usable_photos": 1},
             {**base, "row_type": "item", "item_id": 15, "title": "Brand T", "shops": 1, "last_seen": T0 - timedelta(days=20)},
             {**base, "row_type": "unassigned", "observation_id": 230, "last_seen": T0 - timedelta(hours=5), "usable_photos": 1},
             {**base, "row_type": "unassigned", "observation_id": 231, "last_seen": T0 - timedelta(hours=1), "usable_photos": 1},
             {**base, "row_type": "unassigned", "observation_id": 232, "yq_item_code": "SKU-C", "last_seen": T0, "usable_photos": 1},
             {**base, "row_type": "unassigned", "observation_id": 233, "last_seen": T0, "usable_photos": 0},
+            {**base, "row_type": "unassigned", "observation_id": 240, "kind": "complaint", "last_seen": T0 - timedelta(minutes=30),
+             "usable_photos": 1},
         ]
         self.decisions: list[dict] = []
         self.audit: list[dict] = []
@@ -392,11 +488,17 @@ class _World:
         self.commits = 0
         self.rollbacks = 0
 
+    def _verified(self, o: dict) -> bool:
+        return str(((o.get("meta") or {}).get("ai_suggestion") or {}).get("verified")).lower() == "true"
+
     def run(self, sql: str, params):
         s = " ".join(sql.split()).lower()
         self.statements.append((s, params))
-        if s.startswith("select * from v_market_signals_agent"):
-            return list(self.signals[0]), self.signals, len(self.signals)
+        if s.startswith("select s.* from v_market_signals_agent s"):
+            rows = self.signals
+            if "to_jsonb(o) ->> 'case_id' is not null" in s:
+                rows = [r for r in rows if r["row_type"] != "unassigned" or not self.obs[r["observation_id"]]["case_id"]]
+            return list(self.signals[0]), rows, len(rows)
         if s.startswith("select id, item_id from market_observations where item_id = any("):
             rows = [o for o in self.obs.values() if o["item_id"] in params[0]]
             if "order by observed_at desc, id desc" in s:
@@ -411,6 +513,8 @@ class _World:
                     continue
                 if "not p.has_people_flag" in s and p["has_people_flag"]:
                     continue
+                if ROLE_READ in s and (p.get("role") or "product") == "receipt":
+                    continue
                 out.append({"observation_id": o["id"], "item_id": o["item_id"], "bucket": p["bucket"], "path": p["path"],
                             "_k": (o["observed_at"], o["id"], -p["position"], -p["id"])})
             out.sort(key=lambda r: r["_k"], reverse=True)
@@ -418,9 +522,11 @@ class _World:
         if s.startswith("select id, title, status, verified, ai_suggestion, ai_confidence from market_items where id = any("):
             rows = [dict(self.items[i]) for i in params[0] if i in self.items]
             return ["id", "title", "status", "verified", "ai_suggestion", "ai_confidence"], rows, len(rows)
-        if s.startswith("select id, item_id, meta from market_observations where id = any("):
-            rows = [dict(self.obs[i]) for i in params[0] if i in self.obs]
-            return ["id", "item_id", "meta"], rows, len(rows)
+        if s.startswith("select o.id, o.item_id, o.meta, to_jsonb(o) ->> 'case_id' as case_id from market_observations o "
+                        "where o.id = any("):
+            rows = [{**self.obs[i], "case_id": None if self.obs[i]["case_id"] is None else str(self.obs[i]["case_id"])}
+                    for i in params[0] if i in self.obs]
+            return ["id", "item_id", "meta", "case_id"], rows, len(rows)
         if s.startswith("update market_items set ai_suggestion = %s::jsonb, ai_confidence = %s, verified = false,"):
             assert s.endswith("where id = %s and not verified and status <> 'merged'"), s
             it = self.items.get(params[2])
@@ -431,10 +537,13 @@ class _World:
         if s.startswith("insert into market_item_decisions (item_id, event, actor, actor_role, detail)"):
             self.decisions.append({"item_id": params[0], "event": "edit", "actor": "ai-head", "detail": json.loads(params[1])})
             return None, [], 1
-        if s.startswith("update market_observations set meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('ai_suggestion', %s::jsonb)"):
-            assert "where id = %s and item_id is null" in s, s
+        if s.startswith("update market_observations o set meta = coalesce(o.meta, '{}'::jsonb) || "
+                        "jsonb_build_object('ai_suggestion', %s::jsonb)"):
+            for guard in ("where o.id = %s and o.item_id is null and to_jsonb(o) ->> 'case_id' is null",
+                          "coalesce(o.meta -> 'ai_suggestion' ->> 'verified', '') <> 'true'"):
+                assert guard in s, (guard, s)
             o = self.obs.get(params[1])
-            if not o or o["item_id"] is not None:
+            if not o or o["item_id"] is not None or o["case_id"] is not None or self._verified(o):
                 return None, [], 0
             o["meta"] = {**(o["meta"] or {}), "ai_suggestion": json.loads(params[0])}
             return None, [], 1
@@ -500,20 +609,25 @@ def _run(world: _World, argv: list[str], signed: list | None = None) -> tuple[in
 def _():
     from scripts import market_intel_ai_head as ah
     w = _World()
-    assert [r["observation_id"] for r in ah.to_identify(w.signals)] == [231, 230], "232 is a YQ product, 233 has no usable photo"
+    rows = [r for r in w.signals if r.get("observation_id") != 240]          # SIGNALS_SQL leaves the case out
+    assert [r["observation_id"] for r in ah.to_identify(rows)] == [231, 230], "232 is a YQ product, 233 has no usable photo"
     # the r7b ranking is unchanged: an un-identified sighting still competes on distinct shops x recency
-    assert [ah._key(r) for r in ah.rank(w.signals, T0, top=3)][0] == ("item", 12)
+    assert [ah._key(r) for r in ah.rank(rows, T0, top=3)][0] == ("item", 12)
     assert set(ah.LABELS) == F8_LABELS
+    sql = " ".join(ah.SIGNALS_SQL.split()).lower()
+    assert "from v_market_signals_agent s" in sql and "to_jsonb(o) ->> 'case_id' is not null" in sql
+    assert "s.row_type <> 'unassigned' or not exists" in sql
 
 
-@test("AI pack: every row names the sightings to cite; photo links carry their observation ID, never a people-flagged photo; reads only")
+@test("AI pack: case sightings and receipts never reach it; text cells masked, no competitor; every row names its sightings; reads only")
 def _():
     w = _World()
     signed: list = []
     with tempfile.TemporaryDirectory() as tmp:
         rc, out = _run(w, ["pack", "--photos", "--top", "1", "--out", tmp], signed)
         assert rc == 0, out
-        pack = json.loads((Path(tmp) / "market_intel.json").read_text(encoding="utf-8"))
+        raw = (Path(tmp) / "market_intel.json").read_text(encoding="utf-8")
+        pack = json.loads(raw)
     assert w.read_only == [True] and w.commits == 0 and w.rollbacks == 1
     assert all(s.startswith("select ") for s, _ in w.statements), [s[:40] for s, _ in w.statements]
     assert [(e["row_type"], e.get("item_id")) for e in pack["items"]] == [("item", 12)]
@@ -521,14 +635,19 @@ def _():
     assert item["observation_ids"] == [102, 101], "newest first"
     assert item["photos"] == [{"observation_id": 101, "url": "https://signed.invalid/market/2026/10/p1.webp"}]
     assert item["label"] == "Unverified report" and item["corroborated"] is True and item["needs_identification"] is False
-    assert [e["observation_id"] for e in pack["to_identify"]] == [231, 230]
+    # masked on the way out, like the weekly pack; no competitor name at all
+    assert item["title"] == "Brand Q 65W, call [number]" and item["barcode"] == "[number]" and "competitor" not in item
+    for leak in ("3300 0001", "Shop Beta", "6971234567895", '"competitor":'):
+        assert leak not in raw, leak
+    assert [e["observation_id"] for e in pack["to_identify"]] == [231, 230], "the case sighting 240 is the office's"
     for e in pack["to_identify"]:
         assert e["observation_ids"] == [e["observation_id"]] and e["needs_identification"] is True
         assert e["label"] == "Unverified report" and e["corroborated"] is False
     assert pack["to_identify"][0]["photos"] == [{"observation_id": 231, "url": "https://signed.invalid/market/2026/10/p5.webp"}]
     assert pack["to_identify"][1]["photos"] == [{"observation_id": 230, "url": "https://signed.invalid/market/2026/10/p3.webp"}]
-    assert signed and not any("people" in p[1] for p in signed), signed
-    assert set(pack["labels"]) == F8_LABELS and "[MI-<id>]" in pack["cite"]
+    assert signed and not any("people" in p[1] or "receipt" in p[1] or "case" in p[1] for p in signed), signed
+    assert set(pack["labels"]) == F8_LABELS and "[MI-<id>]" in pack["cite"] and "masked" in pack
+    assert "DATABASE_URL" in pack["source"] and "quality case" in pack["source"]
     assert all("observation_ids" in r and r["confidence"] <= 1 for r in pack["suggest_format"])
     assert pack["totals"] == {"clusters": 2, "unidentified": 4, "photo_only": 2}
     assert "1 ranked + 2 to identify" in out
@@ -538,6 +657,15 @@ def _():
         assert _run(w2, ["pack", "--top", "1", "--out", tmp], signed2)[0] == 0
         pack2 = json.loads((Path(tmp) / "market_intel.json").read_text(encoding="utf-8"))
     assert signed2 == [] and "photos" not in pack2["items"][0] and pack2["items"][0]["observation_ids"] == [102, 101]
+
+
+@test("AI pack: a barcode is a GTIN with a valid check digit (8 / 12 / 13 / 14 digits); an 8-digit mobile number is not")
+def _():
+    from scripts import market_intel_ai_head as ah
+    for code, ok in (("4006381333931", True), ("036000291452", True), ("96385074", True), ("10012345678902", True),
+                     ("6971234567895", True), ("6971234567890", False), ("33000001", False), ("1234567", False),
+                     ("123456789", False), ("12345678901", False), ("abcdefgh", False), ("", False)):
+        assert ah.is_gtin(code) is ok, code
 
 
 @test("AI pack: a suggestion names one target, cites 1-50 sightings (101 or MI-101), carries no phone or email; r7b's shape still validates")
@@ -557,23 +685,25 @@ def _():
         {"item_id": 8, "observation_ids": list(range(1, 52)), "suggestion": {"a": 1}, "confidence": 0.5},
         {"item_id": 9, "observation_ids": [1], "suggestion": {"sightings": ["MI-1"]}, "confidence": 0.5},
         {"item_id": 10, "observation_ids": [1], "suggestion": {"a": 1}, "confidence": 1.2},
-        # no phone number or email in a reading (the shared rule); a barcode is a product code, under "barcode"
+        # no phone number or email in a reading (the shared rule); a barcode is a GTIN, under "barcode"
         {"item_id": 21, "observation_ids": [1], "suggestion": {"visible_text": "call 3300 0001"}, "confidence": 0.5},
         {"item_id": 22, "observation_ids": [1], "suggestion": {"visible_text": "zed@example.com"}, "confidence": 0.5},
-        {"item_id": 23, "observation_ids": [1], "suggestion": {"model": "6971234567890"}, "confidence": 0.5},
+        {"item_id": 23, "observation_ids": [1], "suggestion": {"model": "6971234567895"}, "confidence": 0.5},
         {"item_id": 24, "observation_ids": [1], "suggestion": {"specs": ["65W", "33000001"]}, "confidence": 0.5},
-        {"item_id": 25, "observation_ids": [1], "suggestion": {"barcode": "6971234567890", "brand": "Brand Q"}, "confidence": 0.5},
-        {"item_id": 26, "observation_ids": [1], "suggestion": {"barcode": 6971234567890}, "confidence": 0.5},
+        {"item_id": 25, "observation_ids": [1], "suggestion": {"barcode": "6971234567895", "brand": "Brand Q"}, "confidence": 0.5},
+        {"item_id": 26, "observation_ids": [1], "suggestion": {"barcode": 96385074}, "confidence": 0.5},
+        {"item_id": 27, "observation_ids": [1], "suggestion": {"barcode": "6971234567890"}, "confidence": 0.5},
+        {"item_id": 28, "observation_ids": [1], "suggestion": {"barcode": "33000001"}, "confidence": 0.5},
     ])
     assert ok == [{"item_id": 1, "suggestion": {"brand": "Brand X"}, "confidence": 0.623},
                   {"item_id": 2, "suggestion": {"model": "Q1"}, "confidence": 0.5, "observation_ids": [101, 105]},
                   {"observation_id": 230, "suggestion": {"brand": "Brand Z"}, "confidence": 0.4, "observation_ids": [230]},
-                  {"item_id": 25, "suggestion": {"barcode": "6971234567890", "brand": "Brand Q"}, "confidence": 0.5,
+                  {"item_id": 25, "suggestion": {"barcode": "6971234567895", "brand": "Brand Q"}, "confidence": 0.5,
                    "observation_ids": [1]},
-                  {"item_id": 26, "suggestion": {"barcode": 6971234567890}, "confidence": 0.5, "observation_ids": [1]}], ok
-    assert len(bad) == 14, bad
+                  {"item_id": 26, "suggestion": {"barcode": 96385074}, "confidence": 0.5, "observation_ids": [1]}], ok
+    assert len(bad) == 16, bad
     assert any("name one target" in b for b in bad) and any("'sightings' is filled from observation_ids" in b for b in bad)
-    assert sum("carries a phone number or an email address" in b for b in bad) == 4, bad
+    assert sum("carries a phone number or an email address" in b for b in bad) == 6, bad
     # the evidence rule: at least one sighting, only the target's own
     row = {"item_id": 12, "observation_ids": [101, 105], "suggestion": {"brand": "Brand Q"}, "confidence": 0.62}
     assert ah.cite_problem(row, {101, 105, 106}, "item 12") is None
@@ -597,6 +727,8 @@ def _suggestions(tmp: str) -> str:
         {"item_id": 15, "suggestion": {"brand": "Brand T"}, "confidence": 0.9},                             # cites nothing
         {"observation_id": 231, "observation_ids": [231, 101], "suggestion": {"brand": "Brand Y"}, "confidence": 0.3},
         {"observation_id": 234, "observation_ids": [234], "suggestion": {"brand": "Brand W"}, "confidence": 0.3},  # identified
+        {"observation_id": 240, "observation_ids": [240], "suggestion": {"brand": "Brand U"}, "confidence": 0.3},  # a case
+        {"observation_id": 235, "observation_ids": [235], "suggestion": {"brand": "Brand X"}, "confidence": 0.3},  # verified
         {"observation_id": 999, "observation_ids": [999], "suggestion": {"brand": "Brand V"}, "confidence": 0.3},
         {"item_id": 77, "observation_ids": [1], "suggestion": {"brand": "Brand U"}, "confidence": 0.3},
     ]
@@ -618,18 +750,24 @@ def _():
     assert json.dumps([w.items, {k: v["meta"] for k, v in w.obs.items()}], default=str) == before
     for needle in ("item 12: cites MI-230, not one of its own sightings", "item 13 (Brand R cable) was verified by a person",
                    "item 14 was merged", "item 15: cites no sighting", "sighting MI-231: cites MI-101, not one of its own",
-                   "sighting MI-234 was identified meanwhile (item 15)", "sighting MI-999 does not exist",
+                   "sighting MI-234 was identified meanwhile (item 15)",
+                   "sighting MI-240 is a quality report on case 7; the office reviews it there",
+                   "sighting MI-235: a person verified its reading; left as it is", "sighting MI-999 does not exist",
                    "item 77 does not exist", "item 12: confidence 0.70, citing MI-101, MI-102",
                    "sighting MI-230: confidence 0.40, citing MI-230", "Dry run: 2 suggestion(s) would be written as Unverified"):
         assert needle in out, (needle, out)
 
 
-@test("AI pack: --apply stores each reading Unverified with its sightings; never a status, an item_id or a merge; a re-run writes nothing")
+@test("AI pack: --apply needs --by; it stores each reading Unverified with its sightings and approver; never a status, an item_id, a case or a merge")
 def _():
     w = _World()
     with tempfile.TemporaryDirectory() as tmp:
         path = _suggestions(tmp)
-        rc, out = _run(w, ["suggest", path, "--apply"])
+        for argv in (["suggest", path, "--apply"], ["suggest", path, "--apply", "--by", "owner"]):
+            rc, out = _run(w, argv)
+            assert rc == 2 and "--apply needs --by" in out, out
+        assert w.statements == [] and w.read_only == [], "refused before connecting"
+        rc, out = _run(w, ["suggest", path, "--apply", "--by", "owner@example.com"])
         assert rc == 0, out
         assert w.read_only == [False] and w.commits == 1
         it = w.items[12]
@@ -637,24 +775,29 @@ def _():
         assert it["ai_confidence"] == Decimal("0.7") and it["verified"] is False and it["status"] == "new"
         assert w.items[13]["ai_suggestion"] == {"brand": "Brand R"} and w.items[13]["verified"] is True
         assert w.decisions == [{"item_id": 12, "event": "edit", "actor": "ai-head",
-                                "detail": {"ai_suggestion": {"to": "Unverified", "confidence": 0.7, "sightings": [101, 102]}}}]
+                                "detail": {"ai_suggestion": {"to": "Unverified", "confidence": 0.7, "sightings": [101, 102],
+                                                             "approved_by": "owner@example.com"}}}]
         o = w.obs[230]
         assert o["item_id"] is None and o["meta"]["legacy"] == "kept", "the office identifies; meta is merged, not replaced"
         reading = o["meta"]["ai_suggestion"]
         assert reading["suggestion"] == {"brand": "Brand Z", "sightings": ["MI-230"]} and reading["confidence"] == 0.4
         assert reading["verified"] is False and reading["label"] == "Unverified" and reading["by"] == "ai-head"
-        assert w.obs[231]["meta"] is None and w.obs[234]["meta"] is None
+        assert "owner@example.com" not in json.dumps(reading), "the approver's login stays in the history, not the reading"
+        assert w.obs[231]["meta"] is None and w.obs[234]["meta"] is None and w.obs[240]["meta"] is None
+        assert w.obs[235]["meta"]["ai_suggestion"]["suggestion"] == {"brand": "Brand V"}, "a verified reading stays"
         assert w.audit == [{"event": "market_intel.ai_suggestion",
-                            "detail": {"observation_id": 230, "to": "Unverified", "confidence": 0.4, "sightings": [230]}}]
+                            "detail": {"observation_id": 230, "to": "Unverified", "confidence": 0.4, "sightings": [230],
+                                       "approved_by": "owner@example.com"}}]
         writes = [s for s, _ in w.statements if not s.startswith("select ")]
         assert len(writes) == 4, writes
         for s in writes:
-            assert s.split(" where ")[0].count("status") == 0 and "item_id =" not in s.split(" where ")[0], s
+            set_part = s.split(" where ")[0]
+            assert "status" not in set_part and "item_id =" not in set_part and "case_id" not in set_part, s
             assert "merged_into" not in s and "verified = true" not in s and "delete" not in s, s
         assert "wrote 2 suggestion(s), all Unverified" in out
         # the same file again: both already carry it, nothing is written
         n = len(w.statements)
-        rc, out = _run(w, ["suggest", path, "--apply"])
+        rc, out = _run(w, ["suggest", path, "--apply", "--by", "owner@example.com"])
         assert rc == 0 and "unchanged: item 12 already carries this suggestion" in out
         assert "unchanged: sighting MI-230 already carries this suggestion" in out
         assert all(s.startswith("select ") for s, _ in w.statements[n:]) and "wrote 0 suggestion(s)" in out
@@ -663,11 +806,11 @@ def _():
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "bad.json"
         p.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
-        rc, out = _run(w3, ["suggest", str(p), "--apply"])
+        rc, out = _run(w3, ["suggest", str(p), "--apply", "--by", "owner@example.com"])
     assert rc == 1 and "nothing to write" in out and w3.statements == [] and w3.read_only == []
 
 
-@test("AI pack (source): every UPDATE is guarded and sets only the reading; inserts only the history; people-flagged photos never signed")
+@test("AI pack (source): every UPDATE is guarded and sets only the reading; inserts only the history; no case, receipt or people photo")
 def _():
     src = AI_PACK.read_text(encoding="utf-8")
     sqls = [" ".join(n.value.split()).lower() for n in ast.walk(ast.parse(src))
@@ -677,35 +820,44 @@ def _():
     assert updates == [
         "update market_items set ai_suggestion = %s::jsonb, ai_confidence = %s, verified = false, updated_at = now(), "
         "updated_by = 'ai-head' where id = %s and not verified and status <> 'merged'",
-        "update market_observations set meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('ai_suggestion', %s::jsonb) "
-        "where id = %s and item_id is null and (meta is null or jsonb_typeof(meta) = 'object')"], updates
+        "update market_observations o set meta = coalesce(o.meta, '{}'::jsonb) || jsonb_build_object('ai_suggestion', %s::jsonb) "
+        "where o.id = %s and o.item_id is null and to_jsonb(o) ->> 'case_id' is null "
+        "and (o.meta is null or jsonb_typeof(o.meta) = 'object') "
+        "and coalesce(o.meta -> 'ai_suggestion' ->> 'verified', '') <> 'true'"], updates
     inserts = sorted(s.split("(")[0].strip() for s in sqls if s.startswith("insert "))
     assert inserts == ["insert into audit_log", "insert into market_item_decisions"], inserts
     assert not any(s.startswith("delete") for s in sqls)
+    photo = next(s for s in sqls if "from market_photos p" in s)
+    assert "not p.has_people_flag" in photo and ROLE_READ in photo
+    sightings = next(s for s in sqls if s.startswith("select o.id, o.item_id, o.meta"))
+    assert "to_jsonb(o) ->> 'case_id' as case_id" in sightings
     low = src.lower()
     assert "verified = false" in low and "and not verified" in low and "update market_items set status" not in low
-    assert "not p.has_people_flag" in low and "conn.read_only = true" in low
-    assert "read_only=not args.apply" in src, "the dry run connects read-only"
+    assert "conn.read_only = true" in low and "read_only=not args.apply" in src, "the dry run connects read-only"
+    assert 'if args.apply and not (args.by and "@" in args.by)' in src, "--by like load_insights"
+    assert 'UNSHOWN = ("competitor",)' in src and "mask_text(_plain(v))" in src
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. the weekly review command and CI
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@test("weekly review: market_signals.csv is Market Intel now; photo readings are drafted, dry-run, and stored only after the owner's yes")
+@test("weekly review: Market Intel rows incl. cases; the photo step's real read (DATABASE_URL); readings dry-run, stored only on his yes with --by")
 def _():
     w = WEEKLY.read_text(encoding="utf-8")
     assert "product finds, field notes" not in w and "Field reports, product finds" not in w
-    for needle in ("v_agent_market_signals", "market_item", "market_report", "market_unidentified", "observation_ids",
-                   "[MI-", "system_signals", "python -m scripts.market_intel_ai_head pack --photos", "to_identify",
-                   "suggest_format", "market_suggestions.json", "Verified fact", "Unverified report", "AI suggestion",
-                   "Recommended action", "never tagged FACT", "corroborate"):
+    for needle in ("v_agent_market_signals", "market_item", "market_case", "market_report", "market_unidentified",
+                   "observation_ids", "[MI-", "system_signals", "python -m scripts.market_intel_ai_head pack --photos",
+                   "to_identify", "suggest_format", "market_suggestions.json", "Verified fact", "Unverified report",
+                   "AI suggestion", "Recommended action", "never tagged FACT", "corroborate", "DATABASE_URL",
+                   "read-only transaction", "Receipt photos", "GTIN", "Cases tab", "competitor"):
         assert needle in w, needle
     step15 = w.index("## Step 15")
     dry = w.index("python -m scripts.market_intel_ai_head suggest exports/ai_head/<week-ending>/market_suggestions.json\n")
     assert w.index("## Step 0") < dry < w.index("## Step 13"), "the dry run sits in step 9"
     applies = [m.start() for m in re.finditer(r"market_suggestions\.json --apply", w)]
     assert applies and all(p > step15 for p in applies), "the write only in Step 15"
+    assert "market_suggestions.json --apply --by <his login email>" in w[step15:]
     assert "Only on his yes" in w[step15:] and "never sets a status" in w[step15:]
 
 
@@ -754,11 +906,13 @@ def _():
     assert _local_dsn({})[2] == "YQ_LOCAL_PG_R8N is not set"
 
 
+# Supabase-style roles and default grants (as tests/test_r8m_market_quality_replay.py: r8m's self-check needs
+# service_role to hold what the API writes), the tables r7b's Market Intel, r7b's view and r8m need
 REPLAY_SCHEMA = """
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
   if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
-  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
   if not exists (select 1 from pg_roles where rolname = 'yq_readonly') then create role yq_readonly nologin; end if;
   if not exists (select 1 from pg_roles where rolname = 'ai_head_ro') then
     create role ai_head_ro login inherit connection limit 3;
@@ -768,6 +922,9 @@ create table salesmen (id bigint generated by default as identity primary key, n
   referral_code text not null unique, user_email text);
 create table shop_customers (id bigint generated by default as identity primary key, phone text not null unique,
   name text, shop text, area text);
+create table catalog_items (id bigint generated always as identity primary key, item_code text not null unique,
+  display_name text, category text, brand text, is_active boolean default true,
+  hidden boolean not null default false, created_at timestamptz default now(), updated_at timestamptz default now());
 create table shop_restock_requests (id bigint generated always as identity primary key, item_code text not null,
   phone text, device_id text, referral_code text, created_at timestamptz not null default now(),
   notified_at timestamptz, qty_interest integer);
@@ -779,9 +936,10 @@ create table field_notes (id bigint generated always as identity primary key, no
 create table audit_log (id bigint generated always as identity primary key, ts timestamptz default now(),
   user_email text, event text, question text, sql_used text, detail jsonb);
 grant usage on schema public to ai_head_ro;
-grant all on all tables in schema public to anon, authenticated;
-alter default privileges in schema public grant all on tables to anon, authenticated;
-alter default privileges in schema public grant all on sequences to anon, authenticated;
+grant all on all tables in schema public to anon, authenticated, service_role;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
 """
 R7B_GRANTS = "\n".join(GRANTS) + "\n"
 
@@ -798,7 +956,7 @@ def _r7b_ai_head_part() -> str:
 
 def _seed(cur) -> dict:
     """Invented reps, shops and sightings, with a name, a phone and an email in every column the view must
-    never show. Returns the ids."""
+    never show; v2 quality sightings on a case and receipt photos (r8m is applied first). Returns the ids."""
     ids: dict = {}
     cur.execute("insert into salesmen (name, referral_code, user_email) values "
                 "('Rep One', 'r8n-one', 'repone@example.com'), ('Rep Two', 'r8n-two', 'reptwo@example.com') returning id")
@@ -814,7 +972,7 @@ def _seed(cur) -> dict:
                 "('Old board find', 1.5, 'CABLE', 'repone@example.com', '2026-07-20 10:00+03')")
     cur.execute("insert into field_notes (note, category, created_by) values ('Old board note', 'demand', 'repone@example.com')")
     cur.execute("insert into market_items (kind, title, brand, category, status, ai_suggestion, ai_confidence) values "
-                "('competitor_price', 'Brand Q 65W charger, ask 3300 0001', 'Brand Q', 'CHARGER', 'new', %s::jsonb, 0.5) "
+                "('competitor_price', 'Brand Q 65W charger, ask 3300 0001', 'Brand Q', 'CHARGER 3300 0001', 'new', %s::jsonb, 0.5) "
                 "returning id", (json.dumps({"brand": "Brand Q"}),))
     ids["A"] = cur.fetchone()[0]
     cur.execute("insert into market_items (kind, title, category, yq_item_code, status) values "
@@ -823,42 +981,58 @@ def _seed(cur) -> dict:
     cur.execute("insert into market_items (kind, title, status, merged_into) values ('other', 'Dup of Q', 'merged', %s) "
                 "returning id", (ids["A"],))
     ids["M"] = cur.fetchone()[0]
+    cur.execute("insert into market_issue_types (kind, code, label_en) values ('quality', 'not-charging', 'Not charging') "
+                "returning id")
+    ids["issue"] = cur.fetchone()[0]
+    cur.execute("insert into market_cases (yq_item_code, issue_type_id, title) values ('SKU-C', %s, 'Cable C, not charging') "
+                "returning id", (ids["issue"],))
+    ids["C1"] = cur.fetchone()[0]
     note = "call Person Zed on +973 3300 0001 or zed@example.com"
-    rows = [  # name, item, source, signal, kind, rep, login, shop id, shop name, title, competitor, price, qty, yq, legacy, when
-        ("o1", ids["A"], "rep", None, "competitor_price", ids["r1"], "repone@example.com", ids["sa"], None, "Brand Q 65W",
-         "Shop Beta", "2.5", None, None, None, "2026-10-11 10:00+03"),
-        ("o2", ids["A"], "rep", None, "competitor_price", ids["r2"], "reptwo@example.com", None, "Shop Gamma", "Brand Q 65W",
-         "Shop Beta", "3.0", None, None, None, "2026-10-13 01:30+03"),
-        ("o3", ids["A"], "rep", None, "competitor_price", ids["r2"], "reptwo@example.com", ids["sa"], None, "Brand Q 65W",
-         None, "2.75", None, None, None, "2026-10-13 09:00+03"),
-        ("o4", ids["A"], "system", "restock_ask", "shop_asked", None, None, None, None, "Brand Q 65W", None, None, 4, None,
-         None, "2026-10-13 10:00+03"),
-        ("o5", None, "rep", None, "other", ids["r1"], "repone@example.com", None, None, None, None, None, None, None, None,
-         "2026-10-14 09:00+03"),
-        ("o6", None, "rep", None, "complaint", ids["r1"], "repone@example.com", ids["sa"], None, "stops charging", None, None,
-         None, "SKU-C", None, "2026-10-14 10:00+03"),
-        ("o7", None, "rep", None, "complaint", ids["r2"], "reptwo@example.com", None, "Shop Delta", None, None, None, None,
-         "SKU-C", None, "2026-10-14 11:00+03"),
-        ("o8", None, "import", None, "new_product", None, "repone@example.com", None, None, "Old find 3300 0001 99", None,
-         "1.5", None, None, "product_finds:1", "2026-07-20 10:00+03"),
-        ("o9", ids["M"], "rep", None, "other", ids["r1"], "repone@example.com", None, "Shop Gamma", "Dup of Q", None, None,
-         None, None, None, "2026-10-14 12:00+03"),
-        ("o10", ids["S"], "system", "search_zero", "shop_asked", None, None, None, None, "usb c hub", None, None, 2, "SKU-A",
-         None, "2026-10-14 08:00+03"),
+    rows = [  # name, item, case, source, signal, kind, rep, login, shop id, shop name, title, competitor, price, qty, yq, legacy, when
+        ("o1", ids["A"], None, "rep", None, "competitor_price", ids["r1"], "repone@example.com", ids["sa"], None,
+         "Brand Q 65W", "Shop Beta", "2.5", None, None, None, "2026-10-11 10:00+03"),
+        ("o2", ids["A"], None, "rep", None, "competitor_price", ids["r2"], "reptwo@example.com", None, "Shop Gamma",
+         "Brand Q 65W", "Shop Beta", "3.0", None, None, None, "2026-10-13 01:30+03"),
+        ("o3", ids["A"], None, "rep", None, "competitor_price", ids["r2"], "reptwo@example.com", ids["sa"], None,
+         "Brand Q 65W", None, "2.75", None, None, None, "2026-10-13 09:00+03"),
+        ("o4", ids["A"], None, "system", "restock_ask", "shop_asked", None, None, None, None, "Brand Q 65W", None, None, 4,
+         None, None, "2026-10-13 10:00+03"),
+        ("o5", None, None, "rep", None, "other", ids["r1"], "repone@example.com", None, None, None, None, None, None, None,
+         None, "2026-10-14 09:00+03"),
+        ("o6", None, None, "rep", None, "complaint", ids["r1"], "repone@example.com", ids["sa"], None, "stops charging",
+         None, None, None, "SKU-C", None, "2026-10-14 10:00+03"),
+        ("o7", None, None, "rep", None, "complaint", ids["r2"], "reptwo@example.com", None, "Shop Delta", None, None, None,
+         None, "SKU-C", None, "2026-10-14 11:00+03"),
+        ("o8", None, None, "import", None, "new_product", None, "repone@example.com", None, None, "Old find 3300 0001 99",
+         None, "1.5", None, None, "product_finds:1", "2026-07-20 10:00+03"),
+        ("o9", ids["M"], None, "rep", None, "other", ids["r1"], "repone@example.com", None, "Shop Gamma", "Dup of Q", None,
+         None, None, None, None, "2026-10-14 12:00+03"),
+        ("o10", ids["S"], None, "system", "search_zero", "shop_asked", None, None, None, None, "usb c hub", None, None, 2,
+         "SKU-A", None, "2026-10-14 08:00+03"),
+        # Market Intel v2 quality reports: no item, on a case; o11 "not sure" of the product, o12 picked SKU-C
+        ("o11", None, ids["C1"], "rep", None, "complaint", ids["r1"], "repone@example.com", ids["sa"], None,
+         "cable broke, call 3300 0002", None, None, None, None, None, "2026-10-14 12:30+03"),
+        ("o12", None, ids["C1"], "rep", None, "complaint", ids["r2"], "reptwo@example.com", None, "Shop Delta", None, None,
+         None, None, "SKU-C", None, "2026-10-14 13:00+03"),
     ]
-    for (name, item, source, signal, kind, rep, login, shop_id, shop_name, title, competitor, price, qty, yq, legacy,
+    for (name, item, case, source, signal, kind, rep, login, shop_id, shop_name, title, competitor, price, qty, yq, legacy,
          when) in rows:
-        cur.execute("""insert into market_observations (item_id, client_uuid, source, signal, kind, salesman_id, created_by,
-                         shop_customer_id, shop_name, area, title, brand, competitor, category, note, price_bhd, demand_qty,
-                         yq_item_code, legacy_ref, observed_at)
-                       values (%s, gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, 'Area Nine', %s, %s, %s, 'CHARGER', %s, %s, %s,
-                               %s, %s, %s) returning id""",
-                    (item, source, signal, kind, rep, login, shop_id, shop_name, title,
+        cur.execute("""insert into market_observations (item_id, case_id, client_uuid, source, signal, kind, salesman_id,
+                         created_by, shop_customer_id, shop_name, area, title, brand, competitor, category, note, price_bhd,
+                         demand_qty, yq_item_code, legacy_ref, observed_at)
+                       values (%s, %s, gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, 'Area Nine', %s, %s, %s, 'CHARGER', %s,
+                               %s, %s, %s, %s, %s) returning id""",
+                    (item, case, source, signal, kind, rep, login, shop_id, shop_name, title,
                      "Brand Q" if item == ids["A"] else None, competitor, note, price, qty, yq, legacy, when))
         ids[name] = cur.fetchone()[0]
-    cur.execute("insert into market_photos (observation_id, bucket, path, phash, has_people_flag) values "
-                "(%s, 'finds', 'market/2026/10/o1.webp', 5, false), (%s, 'finds', 'market/2026/10/o5.webp', 7, false), "
-                "(%s, 'finds', 'market/2026/10/o5-people.webp', 9, true)", (ids["o1"], ids["o5"], ids["o5"]))
+    cur.execute("""insert into market_photos (observation_id, bucket, path, phash, has_people_flag, role) values
+                     (%s, 'finds', 'market/2026/10/o1.webp', 5, false, 'product'),
+                     (%s, 'finds', 'market/2026/10/o5.webp', 7, false, 'product'),
+                     (%s, 'finds', 'market/2026/10/o5-people.webp', 9, true, 'product'),
+                     (%s, 'finds', 'market/2026/10/o5-receipt.webp', 11, false, 'receipt'),
+                     (%s, 'finds', 'market/2026/10/o11.webp', 13, false, 'product'),
+                     (%s, 'finds', 'market/2026/10/o11-receipt.webp', 15, false, 'receipt')""",
+                (ids["o1"], ids["o5"], ids["o5"], ids["o5"], ids["o11"], ids["o11"]))
     return ids
 
 
@@ -871,6 +1045,10 @@ def _view_rows(cur) -> dict:
         row = dict(zip(cols, r))
         out[(row["signal"], row["ref_id"], row["day"], row["item_code"])] = row
     return out
+
+
+def _market_total(v: dict) -> int:
+    return sum(r["n"] for k, r in v.items() if k[0].startswith("market_"))
 
 
 class _Nested:
@@ -899,7 +1077,28 @@ class _Nested:
         return False
 
 
-@test("local replay: r7b on seeded sightings, r8n twice, rows / counts / privacy / grants, the pack's queries, the AI pack, reverse twice, r8n again (SKIP without YQ_LOCAL_PG_R8N)")
+def _run_pack_queries(cur, role: str, expect_rows: int) -> set:
+    """pack.py's weekly and monthly statements as `role`; returns the month's (signal, what, reports)."""
+    weekly, monthly = sorted(_pack_sqls(), key=lambda s: "coalesce" in s)
+    cur.execute(f"set local role {role}")
+    cur.execute(weekly, (date(2026, 9, 16),))
+    assert len(cur.fetchall()) == expect_rows
+    cur.execute(monthly, (date(2026, 10, 1), date(2026, 10, 31)))
+    got = {(r[0], r[1], int(r[2])) for r in cur.fetchall()}
+    cur.execute("reset role")
+    return got
+
+
+def _apply_suggest(conn, ah, argv: list[str], opened: list) -> str:
+    buf = io.StringIO()
+    with _Patched((ah, "_connect", lambda read_only: _Nested(conn, read_only, opened))):
+        with redirect_stdout(buf):
+            rc = ah.main(argv)
+    assert rc in (0, 2), (rc, buf.getvalue())
+    return buf.getvalue()
+
+
+@test("local replay: r7b + r8m on seeded sightings, r8n twice, rows / cases / receipts / privacy / grants, pack.py on both views, the AI pack, r8m's reverse under r8n, the traps, r8n's reverse (SKIP without YQ_LOCAL_PG_R8N)")
 def _():
     dsn, hostaddr, why = _local_dsn()
     if dsn is None:
@@ -926,10 +1125,15 @@ def _():
         cur.execute(REPLAY_SCHEMA)
         cur.execute(R7B_MARKET_INTEL.read_text(encoding="utf-8"))
         cur.execute(_r7b_ai_head_part())
+        cur.execute(R8M.read_text(encoding="utf-8"))
         ids = _seed(cur)
+        o = ids
         # the problem: r7b's view reads the old boards, so not one Market Intel sighting reaches the AI Head
         cur.execute("select signal, count(*) from v_agent_market_signals group by 1 order by 1")
         assert cur.fetchall() == [("field_note", 1), ("product_find", 1), ("restock_request", 2)]
+        # pack.py's statements run on R7b's view as they are (R8n's columns read NULL there)
+        got = _run_pack_queries(cur, "ai_head_ro", 3)
+        assert ("restock_request", "SKU-A", 2) in got, got
         # a missing dependency stops it before anything changes (scaffolding inside a savepoint)
         cur.execute("savepoint dep")
         cur.execute("drop view v_agent_market_signals")
@@ -946,54 +1150,56 @@ def _():
                         order by a.attnum""")
         assert [r[0] for r in cur.fetchall()] == [f"{c} {TYPES[c]}" for c in R7B_COLUMNS + APPENDED]
         v = _view_rows(cur)
-        A, S, o = ids["A"], ids["S"], ids
+        A, S = ids["A"], ids["S"]
         a11 = v[("market_item", A, "2026-10-11", None)]
         assert (a11["n"], a11["sources"], a11["reps"], a11["photos"], a11["system_signals"], a11["qty"]) == (1, 1, 1, 1, 0, 0)
         assert (a11["price"], a11["price_max"], a11["currency"], a11["status"], a11["kind"], a11["brand"]) == \
             (Decimal("2.500"), Decimal("2.500"), "BHD", "new", "competitor_price", "Brand Q")
         assert (a11["item_shops"], a11["item_reps"], a11["ai_reading"], a11["observation_ids"]) == (2, 2, "unverified", [o["o1"]])
-        assert a11["label"] == "Brand Q 65W charger, ask [number]", a11["label"]
+        assert (a11["label"], a11["category"]) == ("Brand Q 65W charger, ask [number]", "CHARGER [number]"), a11
         a13 = v[("market_item", A, "2026-10-13", None)]   # 01:30 Bahrain is still the 12th in UTC: the Bahrain day counts
         assert (a13["n"], a13["sources"], a13["reps"], a13["photos"], a13["system_signals"]) == (2, 2, 1, 0, 1)
         assert (a13["price"], a13["price_max"], a13["observation_ids"]) == (Decimal("2.750"), Decimal("3.000"), [o["o2"], o["o3"]])
         s14 = v[("market_item", S, "2026-10-14", "SKU-A")]
         assert (s14["n"], s14["sources"], s14["system_signals"], s14["observation_ids"], s14["price"], s14["status"]) == \
             (0, 0, 1, [], None, "researching"), s14
+        case = v[("market_case", ids["C1"], "2026-10-14", "SKU-C")]
+        assert (case["n"], case["sources"], case["reps"], case["kind"], case["label"], case["observation_ids"]) == \
+            (2, 2, 2, "complaint", None, [o["o11"], o["o12"]]), case
+        assert (case["photos"], case["ai_reading"], case["status"]) == (1, None, None), "the receipt is not a usable photo"
         rep = v[("market_report", None, "2026-10-14", "SKU-C")]
-        assert (rep["n"], rep["sources"], rep["reps"], rep["kind"], rep["label"], rep["observation_ids"]) == \
-            (2, 2, 2, "complaint", None, [o["o6"], o["o7"]])
+        assert (rep["n"], rep["sources"], rep["reps"], rep["kind"], rep["observation_ids"]) == \
+            (2, 2, 2, "complaint", [o["o6"], o["o7"]]), "o12 (the same SKU, on a case) is the case's, not the report's"
         u5 = v[("market_unidentified", o["o5"], "2026-10-14", None)]
         assert (u5["n"], u5["sources"], u5["reps"], u5["photos"], u5["observation_ids"], u5["ai_reading"]) == \
-            (1, 0, 1, 1, [o["o5"]], None), "the people-flagged photo never counts"
+            (1, 0, 1, 1, [o["o5"]], None), "neither the people photo nor the receipt counts"
         u8 = v[("market_unidentified", o["o8"], "2026-07-20", None)]
         assert (u8["reps"], u8["label"], u8["price"]) == (0, "Old find [number]", Decimal("1.500"))
-        assert not any(k[1] == ids["M"] for k in v), "a merged item has no row"
+        unidentified = {k[1] for k in v if k[0] == "market_unidentified"}
+        assert unidentified == {o["o5"], o["o8"]}, "o11, 'not sure' of its product, is on a case: not a photo to identify"
+        assert not any(k[1] == ids["M"] for k in v if k[0] == "market_item"), "a merged item has no row"
         assert v[("restock_request", None, "2026-10-13", "SKU-A")]["n"] == 2
         assert v[("restock_request", None, "2026-10-13", "SKU-A")]["qty"] == 3
-        assert {k[0] for k in v} == {"restock_request", "market_item", "market_report", "market_unidentified"}
-        assert sum(r["n"] for k, r in v.items() if k[0].startswith("market_")) == 7, "every field sighting, the merged one aside"
+        assert {k[0] for k in v} == {"restock_request", "market_item", "market_case", "market_report", "market_unidentified"}
+        assert _market_total(v) == 9, "every field sighting, the merged one aside"
         # nothing personal in any cell
         cur.execute("select * from v_agent_market_signals")
         cells = json.dumps([list(r) for r in cur.fetchall()], default=str)
         for leak in ("Rep One", "Rep Two", "repone", "reptwo", "Person Zed", "Shop Alpha", "Shop Beta", "Shop Gamma",
-                     "Shop Delta", "Area Nine", "zed@", "3300 0001", "97300000001", "97300000002", "dev-1", ".webp",
-                     "market/2026", "stops charging", "Old board"):
+                     "Shop Delta", "Area Nine", "zed@", "3300 000", "97300000001", "97300000002", "dev-1", ".webp",
+                     "market/2026", "stops charging", "cable broke", "Old board", "Cable C"):
             assert leak not in cells, leak
         # who may read it: the AI Head's login and the assistant's role, never the browser roles; no base table
         cur.execute("""select count(*) from information_schema.role_table_grants where table_schema = 'public'
                          and table_name = 'v_agent_market_signals' and grantee in ('anon', 'authenticated')""")
         assert cur.fetchone()[0] == 0
-        weekly, monthly = sorted((n.value for n in ast.walk(ast.parse(PACK.read_text(encoding="utf-8")))
-                                  if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                                  and "from v_agent_market_signals" in n.value), key=lambda s: "coalesce" in s)
+        weekly_rows = sum(1 for k in v if k[2] >= "2026-09-16")
         for role in ("ai_head_ro", "yq_readonly"):
+            got = _run_pack_queries(cur, role, weekly_rows)
+            assert {("market_item", "Brand Q 65W charger, ask [number]", 3), ("market_case", "SKU-C", 2),
+                    ("market_report", "SKU-C", 2), ("restock_request", "SKU-A", 2)} <= got, got
+            assert not any(g[0] == "market_unidentified" for g in got), "an unnamed photo is not a request"
             cur.execute(f"set local role {role}")
-            cur.execute(weekly, (datetime(2026, 9, 16).date(),))
-            assert len(cur.fetchall()) == sum(1 for k in v if k[2] >= "2026-09-16")
-            cur.execute(monthly, (datetime(2026, 10, 1).date(), datetime(2026, 10, 31).date()))
-            got = {(r[0], r[1], int(r[2])) for r in cur.fetchall()}
-            assert {("market_item", "Brand Q 65W charger, ask [number]", 3), ("market_report", "SKU-C", 2),
-                    ("restock_request", "SKU-A", 2)} <= got, got
             cur.execute("savepoint base")
             try:
                 cur.execute("select count(*) from market_observations")
@@ -1001,6 +1207,9 @@ def _():
             except psycopg.errors.InsufficientPrivilege:
                 cur.execute("rollback to savepoint base")
             cur.execute("reset role")
+        cur.execute("""select max((to_jsonb(v) ->> 'item_shops')::int) from v_agent_market_signals v
+                        where signal = 'market_item' and ref_id = %s""", (A,))
+        assert cur.fetchone()[0] == 2, "the month's shops: the item's distinct shops, not the 1 + 2 the days add up to"
         # re-running r7b's statement after r8n fails loudly (it would put the old boards back)
         cur.execute("savepoint r7b_again")
         try:
@@ -1008,61 +1217,101 @@ def _():
             raise AssertionError("r7b's view statement must be refused after r8n")
         except psycopg.errors.InvalidTableDefinition:
             cur.execute("rollback to savepoint r7b_again")
-        # the AI pack on real tables: the photo-only sighting gets its photo (never the people one) and its IDs
+        # the AI pack on real tables: no case sighting, no receipt, no people photo; masked; citations
         signed: list = []
         opened: list = []
         with _Patched((ah, "_connect", lambda read_only: _Nested(conn, read_only, opened)), (ah, "_sign", _signer(signed))):
             with tempfile.TemporaryDirectory() as tmp:
                 with redirect_stdout(io.StringIO()):
                     assert ah.main(["pack", "--photos", "--top", "1", "--out", tmp]) == 0
-                pack = json.loads((Path(tmp) / "market_intel.json").read_text(encoding="utf-8"))
-                entries = {(e["row_type"], e.get("item_id") or e.get("observation_id")): e
-                           for e in pack["items"] + pack["to_identify"]}
-                e5 = entries[("unassigned", o["o5"])]
-                assert e5["observation_ids"] == [o["o5"]] and e5["needs_identification"] is True
-                assert e5["photos"] == [{"observation_id": o["o5"], "url": "https://signed.invalid/market/2026/10/o5.webp"}]
-                assert not any("people" in p[1] for p in signed)
-                if ("item", A) in entries:
-                    assert set(entries[("item", A)]["observation_ids"]) == {o["o1"], o["o2"], o["o3"], o["o4"]}
-                path = Path(tmp) / "market_suggestions.json"
-                path.write_text(json.dumps([
-                    {"item_id": A, "observation_ids": [o["o1"], o["o2"]], "suggestion": {"brand": "Brand Q", "model": "Q65"},
-                     "confidence": 0.7},
-                    {"observation_id": o["o5"], "observation_ids": [o["o5"]], "suggestion": {"brand": "Brand Z"}, "confidence": 0.4},
-                    {"item_id": A, "observation_ids": [o["o5"]], "suggestion": {"brand": "Brand Q"}, "confidence": 0.5},
-                ]), encoding="utf-8")
-                with redirect_stdout(io.StringIO()):
-                    assert ah.main(["suggest", str(path)]) == 0                   # dry run
-                cur.execute("select ai_suggestion from market_items where id = %s", (A,))
-                assert cur.fetchone()[0] == {"brand": "Brand Q"}, "a dry run writes nothing"
-                buf = io.StringIO()
-                with redirect_stdout(buf):
-                    assert ah.main(["suggest", str(path), "--apply"]) == 0
-                assert "wrote 2 suggestion(s)" in buf.getvalue() and "cites MI-" in buf.getvalue()
-                assert opened == [True, True, False], opened
-                cur.execute("select ai_suggestion, ai_confidence, verified, status from market_items where id = %s", (A,))
-                assert cur.fetchone() == ({"brand": "Brand Q", "model": "Q65", "sightings": [f"MI-{o['o1']}", f"MI-{o['o2']}"]},
-                                          Decimal("0.700"), False, "new")
-                cur.execute("select item_id, meta -> 'ai_suggestion' from market_observations where id = %s", (o["o5"],))
-                item_id, reading = cur.fetchone()
-                assert item_id is None and reading["verified"] is False and reading["label"] == "Unverified"
-                assert reading["suggestion"] == {"brand": "Brand Z", "sightings": [f"MI-{o['o5']}"]}
-                cur.execute("select event, actor, detail from market_item_decisions where item_id = %s", (A,))
-                assert cur.fetchall() == [("edit", "ai-head", {"ai_suggestion": {"to": "Unverified", "confidence": 0.7,
-                                                                                  "sightings": [o["o1"], o["o2"]]}})]
-                cur.execute("select count(*) from audit_log where user_email = 'ai-head' and event = 'market_intel.ai_suggestion'")
-                assert cur.fetchone()[0] == 1
-                v = _view_rows(cur)
-                assert v[("market_unidentified", o["o5"], "2026-10-14", None)]["ai_reading"] == "unverified"
-                # a reviewer verifies the item: the AI never writes over it again
-                cur.execute("update market_items set verified = true where id = %s", (A,))
-                path.write_text(json.dumps([{"item_id": A, "observation_ids": [o["o1"]], "suggestion": {"brand": "Brand X"},
-                                             "confidence": 0.9}]), encoding="utf-8")
-                with redirect_stdout(io.StringIO()):
-                    assert ah.main(["suggest", str(path), "--apply"]) == 0
-                cur.execute("select ai_suggestion ->> 'model' from market_items where id = %s", (A,))
-                assert cur.fetchone()[0] == "Q65"
-                assert _view_rows(cur)[("market_item", A, "2026-10-11", None)]["ai_reading"] == "verified"
+                raw = (Path(tmp) / "market_intel.json").read_text(encoding="utf-8")
+        pack = json.loads(raw)
+        entries = {(e["row_type"], e.get("item_id") or e.get("observation_id")): e for e in pack["items"] + pack["to_identify"]}
+        assert not {("unassigned", o["o11"]), ("unassigned", o["o12"])} & set(entries), "case sightings are the office's"
+        e5 = entries[("unassigned", o["o5"])]
+        assert e5["observation_ids"] == [o["o5"]] and e5["needs_identification"] is True
+        assert e5["photos"] == [{"observation_id": o["o5"], "url": "https://signed.invalid/market/2026/10/o5.webp"}]
+        assert not any("people" in p[1] or "receipt" in p[1] or "o11" in p[1] for p in signed), signed
+        if ("item", A) in entries:
+            assert set(entries[("item", A)]["observation_ids"]) == {o["o1"], o["o2"], o["o3"], o["o4"]}
+            assert entries[("item", A)]["title"] == "Brand Q 65W charger, ask [number]"
+        for leak in ("3300 0001", "Shop Beta", '"competitor"'):
+            assert leak not in raw, leak
+        # suggestions: --by first; a dry run writes nothing; the case sighting is refused; then stored Unverified
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market_suggestions.json"
+            path.write_text(json.dumps([
+                {"item_id": A, "observation_ids": [o["o1"], o["o2"]], "suggestion": {"brand": "Brand Q", "model": "Q65"},
+                 "confidence": 0.7},
+                {"observation_id": o["o5"], "observation_ids": [o["o5"]], "suggestion": {"brand": "Brand Z"}, "confidence": 0.4},
+                {"observation_id": o["o11"], "observation_ids": [o["o11"]], "suggestion": {"brand": "Brand Y"}, "confidence": 0.4},
+                {"item_id": A, "observation_ids": [o["o5"]], "suggestion": {"brand": "Brand Q"}, "confidence": 0.5},
+            ]), encoding="utf-8")
+            out = _apply_suggest(conn, ah, ["suggest", str(path), "--apply"], opened)
+            assert "--apply needs --by" in out
+            out = _apply_suggest(conn, ah, ["suggest", str(path)], opened)                   # dry run
+            assert f"sighting MI-{o['o11']} is a quality report on case {ids['C1']}" in out, out
+            cur.execute("select ai_suggestion from market_items where id = %s", (A,))
+            assert cur.fetchone()[0] == {"brand": "Brand Q"}, "a dry run writes nothing"
+            out = _apply_suggest(conn, ah, ["suggest", str(path), "--apply", "--by", "owner@example.com"], opened)
+            assert "wrote 2 suggestion(s)" in out and "cites MI-" in out, out
+            assert opened == [True, True, False], opened
+            cur.execute("select ai_suggestion, ai_confidence, verified, status from market_items where id = %s", (A,))
+            assert cur.fetchone() == ({"brand": "Brand Q", "model": "Q65", "sightings": [f"MI-{o['o1']}", f"MI-{o['o2']}"]},
+                                      Decimal("0.700"), False, "new")
+            cur.execute("select item_id, meta -> 'ai_suggestion' from market_observations where id = %s", (o["o5"],))
+            item_id, reading = cur.fetchone()
+            assert item_id is None and reading["verified"] is False and reading["label"] == "Unverified"
+            assert reading["suggestion"] == {"brand": "Brand Z", "sightings": [f"MI-{o['o5']}"]}
+            cur.execute("select meta from market_observations where id = %s", (o["o11"],))
+            assert cur.fetchone()[0] is None, "a quality sighting never gets a reading"
+            cur.execute("select event, actor, detail from market_item_decisions where item_id = %s", (A,))
+            assert cur.fetchall() == [("edit", "ai-head", {"ai_suggestion": {"to": "Unverified", "confidence": 0.7,
+                                                                              "sightings": [o["o1"], o["o2"]],
+                                                                              "approved_by": "owner@example.com"}})]
+            cur.execute("select detail ->> 'approved_by' from audit_log where user_email = 'ai-head' "
+                        "and event = 'market_intel.ai_suggestion'")
+            assert [r[0] for r in cur.fetchall()] == ["owner@example.com"]
+            assert _view_rows(cur)[("market_unidentified", o["o5"], "2026-10-14", None)]["ai_reading"] == "unverified"
+            # the SQL guards on their own (plan_writes bypassed): never a case sighting, never over a verified reading
+            stray = {"observation_id": o["o11"], "observation_ids": [o["o11"]], "confidence": 0.3,
+                     "store": {"suggestion": {"brand": "Brand Y"}, "verified": False}}
+            assert ah.write_suggestions(cur, [stray], "owner@example.com") == 0
+            cur.execute("select meta from market_observations where id = %s", (o["o11"],))
+            assert cur.fetchone()[0] is None
+            cur.execute("update market_observations set meta = jsonb_set(meta, '{ai_suggestion,verified}', 'true') "
+                        "where id = %s", (o["o5"],))
+            over = {"observation_id": o["o5"], "observation_ids": [o["o5"]], "confidence": 0.9,
+                    "store": {"suggestion": {"brand": "Brand W"}, "verified": False}}
+            assert ah.write_suggestions(cur, [over], "owner@example.com") == 0
+            cur.execute("select meta -> 'ai_suggestion' -> 'suggestion' ->> 'brand' from market_observations where id = %s",
+                        (o["o5"],))
+            assert cur.fetchone()[0] == "Brand Z"
+            path.write_text(json.dumps([{"observation_id": o["o5"], "observation_ids": [o["o5"]],
+                                         "suggestion": {"brand": "Brand W"}, "confidence": 0.9}]), encoding="utf-8")
+            out = _apply_suggest(conn, ah, ["suggest", str(path), "--apply", "--by", "owner@example.com"], opened)
+            assert "a person verified its reading" in out and "wrote 0 suggestion(s)" in out, out
+            assert _view_rows(cur)[("market_unidentified", o["o5"], "2026-10-14", None)]["ai_reading"] == "verified"
+        # r8m's reverse with r8n in place: no r8m column is pinned, so it drops them and r8n keeps answering; the
+        # quality sightings fall back to a report (o12: SKU-C) and a photo to identify (o11), the total holds
+        cur.execute("set local yq.r8m_drop = 'yes'")
+        cur.execute(R8M_REVERSE.read_text(encoding="utf-8"))
+        cur.execute("""select count(*) from information_schema.columns where table_schema = 'public'
+                         and ((table_name = 'market_observations' and column_name = 'case_id')
+                              or (table_name = 'market_photos' and column_name = 'role'))""")
+        assert cur.fetchone()[0] == 0
+        v = _view_rows(cur)
+        assert not any(k[0] == "market_case" for k in v) and _market_total(v) == 9
+        assert v[("market_report", None, "2026-10-14", "SKU-C")]["observation_ids"] == [o["o6"], o["o7"], o["o12"]]
+        assert ("market_unidentified", o["o11"], "2026-10-14", None) in v
+        cur.execute(mig)                       # and its self-check passes without r8m
+        # the trap: r7b_market_intel's reverse stops while r8n's view reads the Market Intel tables
+        cur.execute("savepoint mi_reverse")
+        try:
+            cur.execute(R7B_MARKET_INTEL_REVERSE.read_text(encoding="utf-8"))
+            raise AssertionError("r7b_market_intel's reverse must stop while r8n's view is in place")
+        except psycopg.errors.DependentObjectsStillExist:
+            cur.execute("rollback to savepoint mi_reverse")
         # the reverse: r7b's view again (twice), with its grants, the browser roles shut out after the re-create
         cur.execute(rev)
         cur.execute(rev)
@@ -1076,7 +1325,7 @@ def _():
                               has_table_privilege('anon', 'public.v_agent_market_signals', 'SELECT')""")
         assert cur.fetchone() == (True, True, False)
         cur.execute(mig)                       # and forward again over the r7b body
-        assert sum(r["n"] for k, r in _view_rows(cur).items() if k[0].startswith("market_")) == 7
+        assert _market_total(_view_rows(cur)) == 9
         print(f"  replay: ok on {dsn.rsplit('/', 1)[-1]}")
     finally:
         conn.rollback()

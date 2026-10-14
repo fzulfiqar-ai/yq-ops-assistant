@@ -1689,6 +1689,22 @@ def _():
         assert fake.rows("supplier_actions") == [] and fake.rows("supplier_action_cases") == []
 
 
+@test("move: a safety sighting moved from an alerted case onto another takes it onto the Safety tab with the alert claim — no second e-mail, now or from the sweep")
+def _():
+    from app import market_quality as mq, shop_jobs
+    fake, mail = _qdb(), _Mail()
+    with _qenv(fake, mail):
+        s = _cap("rep1@example.com", [], kind="complaint", yq_item_code="P-22", issue_type_id="2", note="hot")
+        other = _seed_case(fake, yq_item_code="E-05", issue_type_id=1, safety=False,
+                           updated_at=(NOW - timedelta(hours=1)).isoformat())
+        out = mq.move_observation(s["observation_id"], other["id"], "clerk@example.com", "member")
+        assert out["changed"] and _case(fake, other["id"])["safety"] is True and mq.alert_claimed(other["id"])
+        assert shop_jobs.market_safety_sweep(NOW + timedelta(hours=2))["alerted"] == []
+    assert len(mail.calls) == 1, "the problem was alerted once, under its first case"
+    claim = [e for e in fake.rows("market_case_events") if e["case_id"] == other["id"] and e["event"] == "safety_alert"]
+    assert claim[0]["detail"]["carried_from"] == s["case"]["id"]
+
+
 @test("minor: the thumbnail backfill passes over a photo it cannot make and goes on to the next ones")
 def _():
     from app import market_intel as mi

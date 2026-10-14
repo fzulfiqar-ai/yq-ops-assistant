@@ -286,7 +286,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
     setOpen(true)
     // "Which product?" opens with the list already there: warm it while the camera is up
     const s = fromSelected()
-    const hint = s ? { phone: s.phone, name: s.name } : null
+    const hint = s ? { phone: s.phone } : null
     void qc.prefetchQuery({ queryKey: productsQueryKey(hint, ''), queryFn: () => fetchProducts('', hint), staleTime: 5 * 60_000 })
     // the camera opens in the same tap (a user gesture), the sheet waits behind it
     if (photos.length < MAX_PHOTOS) cameraRef.current?.click()
@@ -365,7 +365,8 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
   const categories = listCats.length ? listCats : CATEGORIES
   const brandNames = (lists?.brands || []).filter((b) => b.active !== false && !b.merged_into).map((b) => b.name)
   const hasLabelPhoto = photos.some((p) => p.role === 'label_batch')
-  const shopHint = shop ? { phone: shop.phone, name: shop.name } : null
+  // the products route knows the shop by its phone only (GET /market-intel/products?shop_phone=)
+  const shopHint = shop ? { phone: shop.phone } : null
 
   const canSave =
     stage === 'edit' &&
@@ -897,7 +898,7 @@ function WhichProduct({
   onPick: (p: MiProduct) => void
   onChange: () => void
   onNotSure: () => void
-  shop: { phone?: string | null; name?: string | null } | null
+  shop: { phone?: string | null } | null
   namePlaceholder: string
 }) {
   return (
@@ -944,6 +945,8 @@ function WhichProduct({
 function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings; lang: CaptureLang; safety: boolean }) {
   const meta = RESULT[card.result] || RESULT.saved_for_review
   const isCase = Boolean(card.case?.id || card.case_id)
+  // the API says when his report joined an open case of the same product and issue (case.joined)
+  const joined = Boolean(card.case?.joined)
   return (
     <div className="space-y-3" aria-live="polite">
       {card.safety_alerted ? (
@@ -965,8 +968,8 @@ function ResultCard({ card, S, lang, safety }: { card: MiCard; S: CaptureStrings
             <CheckCircle2 size={22} aria-hidden="true" />
           </span>
           <div className="min-w-0">
-            <div className="font-display text-[17px] font-bold leading-tight">{S.reportReceived}</div>
-            <div className="mt-0.5 text-[12.5px] opacity-90">{S.reportReceivedBody}</div>
+            <div className="font-display text-[17px] font-bold leading-tight">{joined ? S.joinedTitle : S.reportReceived}</div>
+            <div className="mt-0.5 text-[12.5px] opacity-90">{joined ? S.joinedBody(Number(card.case?.shops || 0)) : S.reportReceivedBody}</div>
           </div>
         </div>
       ) : (

@@ -880,11 +880,7 @@ def link_case(obs: dict, plan: dict, *, found: dict | None, yq_item: dict | None
             case = _fold_into(case, older[0], obs, actor)
             joined = True
     case = {**case, **refresh_case(int(case["id"]))}
-    alerted = False
-    if plan["safety"]:
-        if claim_alert(int(case["id"]), actor, obs["id"]):
-            _later(defer, send_safety_alert, int(case["id"]), int(obs["id"]))
-        alerted = alert_claimed(int(case["id"]))
+    alerted = _claim_and_send(int(case["id"]), actor, int(obs["id"]), defer) if plan["safety"] else False
     return _card_part(case, issue, joined=joined,
                       title=case_title(yq_item, obs.get("yq_item_code"), f, issue)), alerted
 
@@ -974,11 +970,7 @@ def finish_capture(obs: dict, *, now: datetime, defer=None, actor: str = FINISH_
     if safety:
         case = _set_safety(case, actor, observation_id=int(obs["id"]))
     case = {**case, **refresh_case(int(case["id"]))}
-    alerted = False
-    if safety:
-        if claim_alert(int(case["id"]), actor, int(obs["id"])):
-            _later(defer, send_safety_alert, int(case["id"]), int(obs["id"]))
-        alerted = alert_claimed(int(case["id"]))
+    alerted = _claim_and_send(int(case["id"]), actor, int(obs["id"]), defer) if safety else False
     return _card_part(case, issue, joined=obs.get("result") == "seen_before", title=case_title(item, code, f, issue)), \
         alerted
 
@@ -1043,6 +1035,15 @@ def _later(defer, fn, *args) -> None:
         log.warning("market quality: safety alert not scheduled: %s", e)
 
 
+def _claim_and_send(case_id: int, actor: str, observation_id, defer) -> bool:
+    """Claim the case's one alert; the caller that wins sends it (after the answer when `defer`). Returns True:
+    once claim_alert has returned, the case holds its claim — this caller's or the one that beat it — which is
+    what safety_alerted reports. A claim that could not be written at all raises (the phone retries)."""
+    if claim_alert(case_id, actor, observation_id):
+        _later(defer, send_safety_alert, case_id, observation_id)
+    return True
+
+
 def alert_claimed(case_id: int) -> bool:
     """Does this case hold its safety-alert claim (the one 'queued' safety_alert event)?"""
     rows = (_c().table("market_case_events").select("id,detail").eq("case_id", int(case_id)).eq("event", "safety_alert")
@@ -1053,8 +1054,9 @@ def alert_claimed(case_id: int) -> bool:
 def claim_alert(case_id: int, actor: str, observation_id, **extra) -> bool:
     """Claim the case's ONE safety alert by inserting the claim (a 'safety_alert' event, email 'queued');
     True = this caller won and sends the e-mail. The database allows one claim per case
-    (market_case_events_one_alert_claim_idx): a unique violation means another sighting, a reviewer or the
-    sweep claimed it first — and should that index ever be missing, the older of two claims still wins."""
+    (market_case_events_one_alert_claim_idx): a claim that loses a race to another phone, a reviewer or the
+    sweep is a unique violation, read here as "already claimed" (never a failed capture) — and should that
+    index ever be missing, the older of two claims still wins."""
     try:
         mine = case_event(case_id, "safety_alert", actor,
                           detail={"email": "queued", "observation_id": observation_id, **extra})
@@ -1600,11 +1602,7 @@ def update_case(case_id: int, changes: dict, actor: str, role: str, *, defer=Non
         _, raised = _raise_evidence(case, want_level, actor, "verified" if moved and new == "verified" else "reviewer")
         if raised:
             fields.append("evidence_level")
-    alerted = False
-    if upd.get("safety") is True:
-        if claim_alert(int(case_id), actor, None):
-            _later(defer, send_safety_alert, int(case_id), None)
-        alerted = alert_claimed(int(case_id))
+    alerted = _claim_and_send(int(case_id), actor, None, defer) if upd.get("safety") is True else False
     now_row = _case(case_id) or {}
     return {"ok": True, "changed": bool(upd) or raised, "case_id": int(case_id),
             "status": now_row.get("status", upd.get("status", cur)),
@@ -1749,7 +1747,9 @@ def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
 
 def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
     """POST /market-intel/observations/{id}/move (reviewers): put one sighting on another case (or, for a
-    sighting on no case yet — an old complaint — on a case). Both cases are recounted, both histories say so."""
+    sighting on no case yet — an old complaint — on a case). Both cases are recounted, both histories say so.
+    Like a merge, the sighting carries its photo's evidence and its safety flag (the case it joins goes on the
+    Safety tab; no second e-mail: the problem was alerted already)."""
     _reviewer(role)
     _need()
     got = _c().table("market_observations").select("*").eq("id", int(obs_id)).limit(1).execute().data or []
@@ -1768,6 +1768,10 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
         case_event(src_id, "move", actor, detail={"observation_id": int(obs_id), "to_case": int(dst["id"])})
     if _has_photo(int(obs_id)):
         dst, _ = _raise_evidence(dst, 2, actor, "photo", observation_id=int(obs_id))
+    if obs.get("safety_flag"):
+        dst = _set_safety(dst, actor, observation_id=int(obs_id))
+        if src_id and alert_claimed(src_id):          # alerted already: the claim moves along, no second e-mail
+            claim_alert(int(dst["id"]), actor, int(obs_id), carried_from=src_id)
     refresh_case(int(dst["id"]))
     if src_id:
         refresh_case(src_id)

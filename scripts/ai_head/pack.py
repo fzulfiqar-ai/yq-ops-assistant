@@ -806,7 +806,7 @@ FILE_NOTES = {
     "merchants.csv": "merchant movement: new / reactivated / at_risk / due / dormant with reason codes",
     "followups_holdout.csv": "follow-ups vs holdout: early readout per rep",
     "items.csv": "every catalog item: stock, velocity, landed cost, restock asks",
-    "market_signals.csv": "restock requests and Market Intel sightings (items, reports, photos to identify) of the last 5 weeks (reports, not facts)",
+    "market_signals.csv": "restock requests and Market Intel sightings (items, quality cases, reports, photos to identify) of the last 5 weeks (reports, not facts)",
     "focus_lines_week.csv": "Focus sales lines of the review week (drill-down)",
     "insights_history.csv": "what earlier reviews proposed and what the owner decided",
     "verify_numbers.txt": "python -m scripts.verify_numbers output (only with --verify)",
@@ -1050,9 +1050,15 @@ def monthly_context(rows: list[dict], month: str, items: list[dict], view) -> di
                 "from v_agent_search_demand where zero_result and day between %s and %s "
                 "group by term having count(distinct day - extract(dow from day)::int) >= 2 order by searches desc",
                 first, last) or []
+    # repeated field requests: a photo nobody has named is not a request (market_unidentified out); a row with
+    # neither a SKU nor a label groups as itself (signal:ref_id), never with every other unnamed row. Shops and
+    # reps are the item's own distinct counts (R8n's item_shops / item_reps; a sum of per-day distinct shops
+    # counts one shop seen on three days as three), read through to_jsonb so this also runs on R7b's view
+    # (no such columns: NULL)
     asks = view("v_agent_market_signals",
-                "select signal, coalesce(item_code, label) as what, sum(n) as reports, sum(sources) as sources "
-                "from v_agent_market_signals where day between %s and %s "
+                "select signal, coalesce(item_code, label, signal || ':' || ref_id) as what, sum(n) as reports, "
+                "max((to_jsonb(v) ->> 'item_shops')::int) as shops, max((to_jsonb(v) ->> 'item_reps')::int) as reps "
+                "from v_agent_market_signals v where day between %s and %s and signal <> 'market_unidentified' "
                 "group by 1, 2 having sum(n) >= 2 order by reports desc", first, last) or []
     stm = view("v_agent_statements", "select * from v_agent_statements where period = %s order by rep", month) or []
     return {"month": month, "first": first, "last": last,
