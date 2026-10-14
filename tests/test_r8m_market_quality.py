@@ -42,6 +42,13 @@ Covered:
     moved to another supplier takes its open cases along and suppliers never pool; My reports name the
     issue; a lost race leaves no orphan; the backfill moves past a broken photo; the storekeeper reads
     masked; and the stand-in itself refuses an unknown column and a second claim;
+  * after the final re-review — a claim whose e-mail was lost (a failed request drops its background task)
+    is sent by the safety sweep ten minutes on, once: one sender per case even with two sweeps at once, a
+    carried claim waits for its first case, at most three tries and then a word on the case; a reviewer's
+    flag reads the case before it claims; the open case of a supplier merged into another takes the next
+    sighting; the evidence a case may reach follows its history; merges and moves land on open cases only;
+    an answer that fails after its move puts it back, and the same answer again is safe; a closed case is
+    read-only until an admin reopens it;
   * the code — Python 3.11 grammar, no nested f-string, no 3-decimal amount of 1,000 or more.
 """
 from __future__ import annotations
@@ -702,7 +709,8 @@ def _():
         g = _seed_case(fake, evidence_level=4, status="closed", verification_method="sample_inspected")
         offer = lambda case, who="clerk": R._client().get(f"/market-intel/cases/{case['id']}",  # noqa: E731
                                                           headers=R._h(who)).json()["case"]["evidence_next"]
-        assert (offer(d), offer(e), offer(f), offer(g), offer(d, "mgmt")) == ([2], [], [4], [5], [])
+        # g: a closed case is read-only (only an admin's reopen), so nothing is offered on it
+        assert (offer(d), offer(e), offer(f), offer(g), offer(d, "mgmt")) == ([2], [], [4], [], [])
         # verifying a case already at 4 keeps 4 (it only ever rises); not substantiated never gets 3 by hand
         h = _seed_case(fake, evidence_level=4)
         mq.update_case(h["id"], {"status": "verified", "verification_method": "several_shops", "verification_reason": "4 shops"},
@@ -1763,6 +1771,278 @@ def _():
     assert len(mail.calls) == 1, "the problem was alerted once, under its first case"
     claim = [e for e in fake.rows("market_case_events") if e["case_id"] == other["id"] and e["event"] == "safety_alert"]
     assert claim[0]["detail"]["carried_from"] == s["case"]["id"]
+
+
+# ── the final re-review (N1-N6a) ───────────────────────────────────────────────
+
+def _alert_lines(fake, case_id) -> list:
+    return [email for event, email in _events(fake, case_id) if event == "safety_alert"]
+
+
+@test("final review N1: a claim whose e-mail was lost (the request failed after the claim, so its background task never ran) is sent by the safety sweep ORPHAN_AFTER later — once, and never while it may still be on its way")
+def _():
+    from app import market_intel as mi, market_quality as mq, shop_jobs
+    fake, mail = _qdb(), _Mail()
+    clock = [NOW]
+    with _qenv(fake, mail), R._Patched((mi, "_now", lambda: clock[0])):
+        c = _seed_case(fake, status="under_review", updated_at=NOW.isoformat())
+        lost: list = []                                   # the background tasks of a request that then failed
+        out = mq.update_case(c["id"], {"safety": True}, "clerk@example.com", "member",
+                             defer=lambda fn, *a: lost.append(fn))
+        assert out["safety_alerted"] and len(lost) == 1 and mail.calls == []
+        early = shop_jobs.market_safety_sweep(NOW + timedelta(minutes=5))
+        assert early["resent"] == [] and mail.calls == [], "five minutes on, the e-mail may still be on its way"
+        clock[0] = NOW + timedelta(minutes=11)
+        sw = shop_jobs.market_safety_sweep(clock[0])
+        assert sw["resent"] == [c["id"]] and len(mail.calls) == 1 and "error" not in sw, sw
+        assert shop_jobs.market_safety_sweep(clock[0] + timedelta(hours=1))["resent"] == [] and len(mail.calls) == 1
+        assert mq.update_case(c["id"], {"safety": True}, "clerk@example.com", "member")["changed"] is False
+    assert len(mail.calls) == 1 and _alert_lines(fake, c["id"]) == ["queued", "resend", "sent"]
+
+
+@test("final review N1: two safety sweeps at once (overlapping ticks) send a lost e-mail once — each try is taken with a conditional write on the case row as that sweep read it")
+def _():
+    from app import market_intel as mi, market_quality as mq
+    fake, mail = _qdb(), _Mail()
+    clock = [NOW]
+    with _qenv(fake, mail), R._Patched((mi, "_now", lambda: clock[0])):
+        c = _seed_case(fake, status="under_review", updated_at=NOW.isoformat())
+        mq.update_case(c["id"], {"safety": True}, "clerk@example.com", "member", defer=lambda fn, *a: None)
+        clock[0] = NOW + timedelta(minutes=11)
+        real, started, other = mq._take_send, [], []
+
+        def racing(row):
+            if not started:                               # the other sweep runs between this one's read and write
+                started.append(row["id"])
+                other.append(mq.sweep_safety(clock[0]))
+            return real(row)
+        with R._Patched((mq, "_take_send", racing)):
+            first = mq.sweep_safety(clock[0])
+    assert other[0]["resent"] == [c["id"]] and first["resent"] == [] and len(mail.calls) == 1, (other, first)
+    assert _alert_lines(fake, c["id"]) == ["queued", "resend", "sent"]
+
+
+@test("final review N1: a claim a merge carried waits for its first case — that case's e-mail went: nothing more; it was lost and the case merged away: the target sends it, once")
+def _():
+    from app import market_intel as mi, market_quality as mq
+    for lost in (False, True):
+        fake, mail = _qdb(), _Mail()
+        clock = [NOW]
+        with _qenv(fake, mail), R._Patched((mi, "_now", lambda: clock[0])):
+            src = _seed_case(fake, status="under_review", updated_at=NOW.isoformat())
+            dst = _seed_case(fake, yq_item_code="E-05", status="under_review", updated_at=NOW.isoformat())
+            mq.update_case(src["id"], {"safety": True}, "clerk@example.com", "member",
+                           defer=(lambda fn, *a: None) if lost else None)
+            mq.merge_case(src["id"], dst["id"], "clerk@example.com", "member")
+            assert mq._claim_event(dst["id"])["detail"]["carried_from"] == src["id"]
+            clock[0] = NOW + timedelta(minutes=11)
+            sw = mq.sweep_safety(clock[0])
+            again = mq.sweep_safety(clock[0] + timedelta(hours=1))
+        assert sw["resent"] == ([dst["id"]] if lost else []) and again["resent"] == [], (lost, sw)
+        assert len(mail.calls) == 1, (lost, mail.calls)
+
+
+@test("final review N1: a lost e-mail is tried at most RESEND_LIMIT times without an outcome; then the sweep says so once — on the case's timeline and in its error")
+def _():
+    from app import market_intel as mi, market_quality as mq
+    fake, mail = _qdb(), _Mail()
+    clock = [NOW]
+    with _qenv(fake, mail), R._Patched((mi, "_now", lambda: clock[0]),
+                                       (mq, "send_safety_alert", lambda *a: {"emailed": False})):   # no outcome line
+        c = _seed_case(fake, status="under_review", updated_at=NOW.isoformat())
+        mq.update_case(c["id"], {"safety": True}, "clerk@example.com", "member", defer=lambda fn, *a: None)
+        outs = []
+        for i in range(1, 6):
+            clock[0] = NOW + timedelta(minutes=11 * i)
+            outs.append(mq.sweep_safety(clock[0]))
+    assert mq.RESEND_LIMIT == 3 and [len(o["resent"]) for o in outs] == [1, 1, 1, 0, 0], outs
+    assert [bool(o.get("error")) for o in outs] == [False, False, False, True, False], outs
+    assert _alert_lines(fake, c["id"]) == ["queued", "resend", "resend", "resend", "gave_up"]
+
+
+@test("final review N1: a reviewer's safety flag reads the case BEFORE it claims — a read that fails leaves no claim behind (the request fails whole), and the sweep claims and sends it")
+def _():
+    from app import market_intel as mi, market_quality as mq
+    fake, mail = _qdb(), _Mail()
+    with _qenv(fake, mail), R._Patched((mi, "_now", lambda: NOW)):
+        c = _seed_case(fake, status="under_review", updated_at=NOW.isoformat())
+        real, seen = mq._case, []
+
+        def flaky(cid):
+            seen.append(cid)
+            if len(seen) == 2:                            # the read after the change
+                raise RuntimeError("transient: connection reset")
+            return real(cid)
+        with R._Patched((mq, "_case", flaky)):
+            try:
+                mq.update_case(c["id"], {"safety": True}, "clerk@example.com", "member", defer=lambda fn, *a: None)
+                raise AssertionError("the read must fail")
+            except RuntimeError as e:
+                assert "connection reset" in str(e)
+        assert _case(fake, c["id"])["safety"] is True and not mq.alert_claimed(c["id"]) and mail.calls == []
+        sw = mq.sweep_safety(NOW + timedelta(minutes=3))
+    assert sw["alerted"] == [c["id"]] and len(mail.calls) == 1 and _alert_lines(fake, c["id"]) == ["queued", "sent"]
+
+
+@test("final review N2: after a supplier is merged into another, a sighting of the product and issue joins the open case that still names the merged supplier — no second case, no second e-mail; another supplier's stays apart")
+def _():
+    sups = [dict(s) for s in SUPPLIERS]
+    sups[2].update(merged_into=1, active=False)          # Supplier Z merged into Supplier X
+    fake, mail = _qdb(suppliers=sups), _Mail()
+    from app import market_quality as mq
+    with _qenv(fake, mail):
+        old = _seed_case(fake, yq_item_code="P-22", issue_type_id=2, brand_id=1, supplier_id=3, status="under_review",
+                         safety=True)
+        mq.claim_alert(old["id"], "rep1@example.com", None)            # alerted when it was reported
+        card = _cap("rep1@example.com", [], kind="complaint", yq_item_code="P-22", issue_type_id="2", brand_id="1",
+                    note="hot again")
+        assert card["case"]["id"] == old["id"] and card["case"]["joined"] and card["safety_alerted"]
+        assert len(fake.rows("market_cases")) == 1 and mail.calls == []
+        y = _cap("rep2@example.com", [], kind="complaint", yq_item_code="P-22", issue_type_id="2", brand_id="2",
+                 note="hot too")
+    assert y["case"]["id"] != old["id"] and len(mail.calls) == 1, "Supplier Y's product: its own case and alert"
+
+
+@test("final review N3: the evidence a case may reach follows its HISTORY, whatever its status — closed straight from Verified stays at 3 (never asked of a supplier, never resolved); closed after Resolved allows 5, and a reopened case keeps what it went through")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    with _qenv(fake):
+        a = _seed_case(fake, evidence_level=1)
+        mq.update_case(a["id"], {"status": "verified", "verification_method": "photos_sufficient",
+                                 "verification_reason": "clear photos"}, "clerk@example.com", "member")
+        mq.update_case(a["id"], {"status": "closed"}, "clerk@example.com", "member")
+        assert mq.evidence_cap(_case(fake, a["id"])) == 3
+        offer = R._client().get(f"/market-intel/cases/{a['id']}", headers=R._h("clerk")).json()["case"]["evidence_next"]
+        assert offer == []
+        R._raises(lambda: mq.update_case(a["id"], {"evidence_level": 5}, "clerk@example.com", "member"), "read-only", 409)
+        mq.update_case(a["id"], {"status": "under_review", "reason": "it came back"}, "boss@example.com", "admin")
+        R._raises(lambda: mq.update_case(a["id"], {"evidence_level": 4}, "clerk@example.com", "member"),
+                  "supplier was asked", 409)
+        b = _seed_case(fake, evidence_level=3, status="verified", verification_method="sample_inspected")
+        _seed_action(fake, b["id"], supplier_response="Replacing the batch", resolution_check="New batch tested")
+        for st in ("action_requested", "resolved", "closed"):
+            mq.update_case(b["id"], {"status": st}, "clerk@example.com", "member")
+        assert mq.evidence_cap(_case(fake, b["id"])) == 5
+        mq.update_case(b["id"], {"status": "under_review", "reason": "back again"}, "boss@example.com", "admin")
+        assert mq.evidence_cap(_case(fake, b["id"])) == 5
+        assert mq.update_case(b["id"], {"evidence_level": 5}, "clerk@example.com", "member")["evidence_level"] == 5
+    assert _case(fake, a["id"])["evidence_level"] == 3
+
+
+@test("final review N4: a merge or a move never lands on a closed or not-substantiated case (409, nothing changes) — an open safety case never drops off the Safety tab that way")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    with _qenv(fake):
+        a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        for st in ("not_substantiated", "closed"):
+            dst = _seed_case(fake, status=st, evidence_level=1)
+            src = _seed_case(fake, status="submitted", evidence_level=2, safety=True, yq_item_code="E-05")
+            R._raises(lambda s=src, d=dst: mq.merge_case(s["id"], d["id"], "clerk@example.com", "member"),
+                      "takes no sightings", 409)
+            assert (_case(fake, src["id"])["status"], _case(fake, src["id"])["merged_into"]) == ("submitted", None)
+            assert _case(fake, dst["id"])["safety"] is False
+            R._raises(lambda d=dst: mq.move_observation(a["observation_id"], d["id"], "clerk@example.com", "member"),
+                      "takes no sightings", 409)
+        assert next(o for o in fake.rows("market_observations") if o["id"] == a["observation_id"])["case_id"] == a["case"]["id"]
+    assert not [e for e in fake.rows("market_case_events") if e["event"] in ("merge", "move")]
+
+
+@test("final review N5: an answer that fails after its move puts the move back (the question stays open, no photo row, the upload removed); the rep's retry goes through, once")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    with _qenv(fake):
+        a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        cid, oid = a["case"]["id"], a["observation_id"]
+        mq.ask_question(cid, "Which batch?", "clerk@example.com", "member")
+        files = set(fake.storage.objects)
+        fake.fail[("insert", "market_case_events")] = RuntimeError("transient: connection reset")   # the answer line
+        R._raises(lambda: mq.answer(oid, "Batch 2608", ("l.jpg", _jpg(1)), "rep1@example.com"), "try again", 503)
+        row = _case(fake, cid)
+        assert (row["status"], row["status_reason"], row["changed_by"]) == \
+            ("more_info_required", "question to the rep", "clerk@example.com")
+        assert fake.rows("market_photos") == [] and set(fake.storage.objects) == files
+        mine = R._client().get("/market-intel/mine", headers=R._h("rep1")).json()["observations"][0]
+        assert mine["open_question"] == "Which batch?"
+        out = mq.answer(oid, "Batch 2608", ("l.jpg", _jpg(1)), "rep1@example.com")
+        assert out == {"ok": True, "observation_id": oid, "case_status_words": "Being looked at", "photo": True}
+    ev = [(e["event"], e.get("to_status")) for e in fake.rows("market_case_events") if e["case_id"] == cid]
+    assert ev.count(("answer", None)) == 1 and ev.count(("status", "under_review")) == 1, ev
+
+
+@test("final review N5: the same answer sent again (the phone resent it, or the attempt stopped after writing it) is answered as saved and finishes what was left out — never a 409; a case left moved without the answer is resumed; a different answer is still refused")
+def _():
+    from app import market_quality as mq
+    fake = _qdb()
+    with _qenv(fake):
+        a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        cid, oid = a["case"]["id"], a["observation_id"]
+        mq.ask_question(cid, "Which batch?", "clerk@example.com", "member")
+        real, failed = mq.case_event, []
+
+        def flaky(case_id, event, actor, **kw):
+            if event == "status" and kw.get("to_status") == "under_review" and not failed:
+                failed.append(1)
+                raise RuntimeError("transient: connection reset")
+            return real(case_id, event, actor, **kw)
+        with R._Patched((mq, "case_event", flaky)):
+            try:
+                mq.answer(oid, "Batch 2608", ("l.jpg", _jpg(1)), "rep1@example.com")
+                raise AssertionError("the status line must fail")
+            except RuntimeError:
+                pass
+        assert _case(fake, cid)["status"] == "under_review" and _case(fake, cid)["evidence_level"] == 1
+        again = mq.answer(oid, "Batch 2608", ("l.jpg", _jpg(1)), "rep1@example.com")
+        assert again == {"ok": True, "observation_id": oid, "case_status_words": "Being looked at", "photo": True,
+                         "replayed": True}
+        assert mq.answer(oid, "  Batch   2608 ", None, "rep1@example.com")["replayed"], "the same words"
+        R._raises(lambda: mq.answer(oid, "Batch 2610", None, "rep1@example.com"), "no open question", 409)
+        assert _case(fake, cid)["evidence_level"] == 2, "the answer's photo counts, once the retry finished it"
+        # the move stayed although the answer was never written (the undo failed too): the retry resumes it
+        b = _cap("rep2@example.com", [], kind="complaint", yq_item_code="E-05", issue_type_id="1")
+        bid, boid = b["case"]["id"], b["observation_id"]
+        mq.ask_question(bid, "Which shop?", "clerk@example.com", "member")
+        fake.fail[("insert", "market_case_events")] = RuntimeError("transient: connection reset")
+        with R._Patched((mq, "_undo_answer", lambda *a, **k: None)):
+            R._raises(lambda: mq.answer(boid, "The corner shop", None, "rep2@example.com"), "try again", 503)
+        assert _case(fake, bid)["status"] == "under_review"
+        R._raises(lambda: mq.answer(oid, "x", None, "rep2@example.com"), "only the rep", 403)
+        out = mq.answer(boid, "The corner shop", None, "rep2@example.com")
+        assert out == {"ok": True, "observation_id": boid, "case_status_words": "Being looked at", "photo": False}
+    for case_id in (cid, bid):
+        ev = [(e["event"], e.get("to_status")) for e in fake.rows("market_case_events") if e["case_id"] == case_id]
+        assert ev.count(("answer", None)) == 1 and ev.count(("status", "under_review")) == 1, (case_id, ev)
+    assert len([p for p in fake.rows("market_photos") if p["observation_id"] == oid]) == 1
+
+
+@test("final review N6a: a CLOSED case is read-only — no field, supplier, safety flag (no e-mail), verification or evidence change, no merge away, no sighting moved out — until an admin reopens it (on its own, with a reason)")
+def _():
+    from app import market_quality as mq
+    fake, mail = _qdb(), _Mail()
+    with _qenv(fake, mail):
+        a = _cap("rep1@example.com", [], kind="complaint", yq_item_code="C-10", issue_type_id="1")
+        cid = a["case"]["id"]
+        mq.update_case(cid, {"status": "verified", "verification_method": "sample_inspected",
+                             "verification_reason": "sample failed"}, "clerk@example.com", "member")
+        mq.update_case(cid, {"status": "closed"}, "clerk@example.com", "member")
+        before = dict(_case(fake, cid))
+        for body in ({"supplier_id": 2}, {"safety": True}, {"title": "Another title"}, {"assignee": "clerk"},
+                     {"verification_reason": "more samples failed"}, {"evidence_level": 4}):
+            R._raises(lambda b=body: mq.update_case(cid, b, "clerk@example.com", "member"), "read-only", 409)
+        R._raises(lambda: mq.update_case(cid, {"status": "under_review", "reason": "back", "title": "x"},
+                                         "boss@example.com", "admin"), "read-only", 409)
+        R._raises(lambda: mq.update_case(cid, {"status": "under_review", "reason": "back"}, "clerk@example.com",
+                                         "member"), "only an admin", 403)
+        open_ = _seed_case(fake, yq_item_code="E-05")
+        R._raises(lambda: mq.merge_case(cid, open_["id"], "clerk@example.com", "member"), "read-only", 409)
+        R._raises(lambda: mq.move_observation(a["observation_id"], open_["id"], "clerk@example.com", "member"),
+                  "read-only", 409)
+        assert _case(fake, cid) == before and mail.calls == [] and not mq.alert_claimed(cid)
+        out = mq.update_case(cid, {"status": "under_review", "reason": "it came back"}, "boss@example.com", "admin")
+        assert out["status"] == "under_review"
+        assert mq.update_case(cid, {"title": "Another title"}, "clerk@example.com", "member")["changed"]
 
 
 @test("minor: the thumbnail backfill passes over a photo it cannot make and goes on to the next ones")
