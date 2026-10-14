@@ -793,12 +793,19 @@ def _later(defer, fn, *args) -> None:
 
 def claim_alert(case_id: int, actor: str, observation_id) -> bool:
     """True when this case never had a safety alert; the claim (a 'safety_alert' event, e-mail queued) is
-    written here, so a second safety sighting on the same case sends nothing."""
+    written here, so a second safety sighting on the same case sends nothing. The database holds one claim
+    per case (market_case_events_one_alert_claim_idx): a claim that loses a race to another phone or a
+    reviewer is a unique violation, read here as "already claimed" (never a failed capture)."""
     got = (_c().table("market_case_events").select("id").eq("case_id", int(case_id)).eq("event", "safety_alert")
            .limit(1).execute().data)
     if got:
         return False
-    case_event(case_id, "safety_alert", actor, detail={"email": "queued", "observation_id": observation_id})
+    try:
+        case_event(case_id, "safety_alert", actor, detail={"email": "queued", "observation_id": observation_id})
+    except Exception as e:  # noqa: BLE001
+        if mi._unique_violation(e):
+            return False
+        raise
     return True
 
 
@@ -1443,7 +1450,9 @@ def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
 
 def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
     """POST /market-intel/observations/{id}/move (reviewers): put one sighting on another case (or, for a
-    sighting on no case yet — an old complaint — on a case). Both cases are recounted, both histories say so."""
+    sighting on no case yet — an old complaint — on a case). Both cases are recounted, both histories say so.
+    Like a merge, the sighting carries its photo's evidence and its safety flag (the case it joins goes on the
+    Safety tab; no second e-mail: the problem was alerted already)."""
     _reviewer(role)
     _need()
     got = _c().table("market_observations").select("*").eq("id", int(obs_id)).limit(1).execute().data or []
@@ -1462,6 +1471,8 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
         case_event(src_id, "move", actor, detail={"observation_id": int(obs_id), "to_case": int(dst["id"])})
     if _has_photo(int(obs_id)):
         dst = _raise_evidence(dst, 2, actor, "photo", observation_id=int(obs_id))
+    if obs.get("safety_flag"):
+        dst = _set_safety(dst, actor, observation_id=int(obs_id))
     refresh_case(int(dst["id"]))
     if src_id:
         refresh_case(src_id)
