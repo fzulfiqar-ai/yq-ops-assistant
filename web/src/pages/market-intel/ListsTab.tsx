@@ -559,6 +559,12 @@ function IssueRow({ t }: { t: MiIssueType }) {
         )}
         <span className="font-mono text-[11.5px] text-muted-foreground">{t.code}</span>
         <ActiveBadge active={t.active} />
+        {/* a chip a rep taps in Spotted: without its Arabic words the Arabic sheet shows the English */}
+        {!t.label_ar && (t.kind === 'quality' || t.kind === 'packaging') && (
+          <span title="Reps who use Spotted in Arabic see the English label">
+            <Badge tone="amber">No Arabic label</Badge>
+          </span>
+        )}
         <button type="button" onClick={() => setEdit((v) => !v)} className={cn(BTN_GHOST, 'ml-auto')}>{edit ? 'Close' : 'Edit'}</button>
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-muted-foreground">

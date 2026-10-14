@@ -210,7 +210,11 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
             <option value="">All suppliers</option>
             {(lists?.suppliers || []).map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
           </select>
-          <input type="month" aria-label="Month" value={fMonth} onChange={(e) => setFMonth(e.target.value)} className={cn(INPUT, 'w-44')} />
+          {/* named, as the Cases dates are: an empty month box alone reads "--------- ----" */}
+          <label className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+            Month
+            <input type="month" aria-label="Month" value={fMonth} onChange={(e) => setFMonth(e.target.value)} className={cn(INPUT, 'w-44')} />
+          </label>
           {(fSupplier || fMonth) && (
             <button type="button" onClick={() => { setFSupplier(''); setFMonth('') }} className="h-10 rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">
               Clear
@@ -226,7 +230,7 @@ export function ReportsTab({ roles, lists }: { roles: MiRoles; lists: MiLists | 
             {fSupplier || fMonth ? 'No report for this supplier or month.' : can.build ? 'No reports yet. Build the first one above.' : 'No reports yet. The office builds them.'}
           </Empty>
         ) : (
-          <ul className="grid gap-2.5 lg:grid-cols-2">
+          <ul className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
             {reports.map((r) => {
               const n = downloadCount(r)
               return (
@@ -343,6 +347,12 @@ const TILES: [string, string][] = [
 const NOT_TILES = new Set(['version', 'month', 'edition', 'period', 'supplier', 'rules', 'new', 'recurring', 'by_issue',
   'insufficient_observation_ids', 'action_ids', 'narrative_source', 'built_at'])
 
+/** A rule the API states ("... in >= 2 cases or from >= 3 shops ...") as a sentence: "... in 2 or more cases ..." */
+function ruleText(t: string): string {
+  const s = t.replace(/>=\s*(\d+)/g, '$1 or more').replace(/<=\s*(\d+)/g, '$1 or fewer').trim()
+  return `${s.charAt(0).toUpperCase()}${s.slice(1)}${/[.!?]$/.test(s) ? '' : '.'}`
+}
+
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
@@ -424,7 +434,7 @@ function CountsView({ counts, edition }: { counts: Record<string, unknown>; edit
       {rules.length > 0 && (
         <ul className="space-y-0.5 text-[11.5px] text-muted-foreground">
           {rules.map((t) => (
-            <li key={t}>{t.charAt(0).toUpperCase() + t.slice(1)}.</li>
+            <li key={t}>{ruleText(t)}</li>
           ))}
         </ul>
       )}
@@ -435,7 +445,8 @@ function CountsView({ counts, edition }: { counts: Record<string, unknown>; edit
 const STATE_GROUPS: { state: MiReportRowState; title: string; note: string }[] = [
   { state: 'included', title: 'In the report', note: '' },
   { state: 'insufficient', title: 'Insufficient evidence: listed, not counted', note: 'No photo, evidence level 1 and a single report. Tick one to count it anyway.' },
-  { state: 'excluded', title: 'Left out', note: 'Taken out of this report by hand. Tick one to put it back.' },
+  // excluded = not in the draft's rows: taken out by hand, or reported after the draft was built (supplier_reports.assemble)
+  { state: 'excluded', title: 'Left out', note: 'Not in this report: taken out by hand, or reported after the draft was built. Tick one to put it in.' },
 ]
 
 function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: string; row: MiReportRow; editable: boolean; inReport: boolean; onToggle: () => void }) {

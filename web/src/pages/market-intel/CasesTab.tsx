@@ -19,7 +19,7 @@ import {
   type MiLists,
 } from '@/lib/marketIntel'
 import { Cover, Empty, Loading, NotAvailableYet, Pager, Tabs } from './ui'
-import { CASE_STATUS_TONE, dayText, INPUT, qs, SELECT } from './util'
+import { CASE_STATUS_TONE, dayText, FILTER, INPUT, qs } from './util'
 
 /**
  * The Cases tab (release r8m, plan F3.3 "Review queue v2"): quality and packaging reports grouped into
@@ -106,33 +106,34 @@ export function CasesTab({ lists }: { lists: MiLists | null }) {
         ]}
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <select aria-label="Status" value={f.status} onChange={(e) => set('status')(e.target.value)} className={SELECT}>
+      {/* phones: two filters a row, each a full cell; wider: one row that wraps */}
+      <div className="mb-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+        <select aria-label="Status" value={f.status} onChange={(e) => set('status')(e.target.value)} className={FILTER}>
           <option value="">Any status</option>
           {CASE_STATUSES.map((s) => <option key={s} value={s}>{CASE_STATUS_LABEL[s]}</option>)}
         </select>
-        <select aria-label="Issue" value={f.issue_type_id} onChange={(e) => set('issue_type_id')(e.target.value)} className={SELECT}>
+        <select aria-label="Issue" value={f.issue_type_id} onChange={(e) => set('issue_type_id')(e.target.value)} className={FILTER}>
           <option value="">Any issue</option>
           {issueTypes.map((t) => <option key={t.id} value={String(t.id)}>{t.label_en}{t.active === false ? ' (inactive)' : ''}</option>)}
         </select>
-        <select aria-label="Supplier" value={f.supplier_id} onChange={(e) => set('supplier_id')(e.target.value)} className={SELECT}>
+        <select aria-label="Supplier" value={f.supplier_id} onChange={(e) => set('supplier_id')(e.target.value)} className={FILTER}>
           <option value="">Any supplier</option>
           {(lists?.suppliers || []).map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
         </select>
-        <select aria-label="Brand" value={f.brand_id} onChange={(e) => set('brand_id')(e.target.value)} className={SELECT}>
+        <select aria-label="Brand" value={f.brand_id} onChange={(e) => set('brand_id')(e.target.value)} className={FILTER}>
           <option value="">Any brand</option>
           {(lists?.brands || []).map((b) => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
         </select>
-        <label className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+        <label className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground">
           From
-          <input type="date" aria-label="From" value={f.from} onChange={(e) => set('from')(e.target.value)} className={cn(INPUT, 'w-auto')} />
+          <input type="date" aria-label="From" value={f.from} onChange={(e) => set('from')(e.target.value)} className={cn(INPUT, 'min-w-0 flex-1 sm:w-auto sm:flex-none')} />
         </label>
-        <label className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+        <label className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground">
           To
-          <input type="date" aria-label="To" value={f.to} onChange={(e) => set('to')(e.target.value)} className={cn(INPUT, 'w-auto')} />
+          <input type="date" aria-label="To" value={f.to} onChange={(e) => set('to')(e.target.value)} className={cn(INPUT, 'min-w-0 flex-1 sm:w-auto sm:flex-none')} />
         </label>
         {filtered && (
-          <button type="button" onClick={() => { setF(NO_FILTERS); setOffset(0) }} className="h-10 rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">
+          <button type="button" onClick={() => { setF(NO_FILTERS); setOffset(0) }} className="h-10 justify-self-start rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">
             Clear
           </button>
         )}
@@ -148,7 +149,7 @@ export function CasesTab({ lists }: { lists: MiLists | null }) {
         </Empty>
       ) : (
         <>
-          <ul className={cn('grid gap-2.5 lg:grid-cols-2', casesQ.isFetching && 'opacity-70')}>
+          <ul className={cn('grid grid-cols-1 gap-2.5 lg:grid-cols-2', casesQ.isFetching && 'opacity-70')}>
             {data.rows.map((r) => (
               <li key={`${r.id}-${r.observation_id ?? ''}`}>
                 <CaseCard r={r} />
