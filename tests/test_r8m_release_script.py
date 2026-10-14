@@ -324,7 +324,7 @@ def _():
     assert "--apply" not in lines[0], "the dry run comes first"
     assert "'--apply', '--limit', '5'" in lines[1]
     assert "'--apply'))" in lines[2] and "'--apply'))" in lines[3] and "--limit" not in lines[2] + lines[3]
-    schema = imp.index("Test-OutputHas '^schema: the R7b tables with every r8m column'")
+    schema = imp.index("Test-OutputHas '^schema: the R7b tables with the r8m photo columns'")
     assert runs[0] < schema < runs[1], "r8m must be applied before anything is copied"
     zero = imp.index("Test-OutputHas '^created: 0 sightings'")
     assert zero > runs[3] and "Test-OutputHas '^completed \\('" in imp[runs[3]:]
@@ -334,7 +334,7 @@ def _():
     assert runs[3] < th[0], "the thumbnails after the import"
     # the words the script reads are the importer's and the backfill's own
     importer = _read(ROOT / "scripts" / "market_intel_import.py")
-    for said in ('say("schema: the R7b tables with every r8m column (client_observed_at, thumb_path, role, sha256)"',
+    for said in ('say("schema: the R7b tables with the r8m photo columns (thumb_path, role, sha256)" if not missing',
                  'verb = "created" if self.apply else "to create"',
                  "say(f\"{verb}: {_n(len(self.created), 'sighting')}\"",
                  'return f"{n} {word}" + ("" if n == 1 else "s")',
@@ -532,7 +532,7 @@ def _():
         assert fake not in out, (s, out)
     for s in ("Rehearsal OK: every statement ran; nothing was committed.", "created: 0 sightings",
               "dep-d1abc2def3  live             0123456  merge: Market Intel v2", "  ok RENDER_API_KEY",
-              "order 12: token_hash unchanged", "schema: the R7b tables with every r8m column",
+              "order 12: token_hash unchanged", "schema: the R7b tables with the r8m photo columns",
               "Photos without a thumbnail: 3; flagged photos without a blurred copy: 0."):
         assert mask(s) == s, (s, mask(s))
 

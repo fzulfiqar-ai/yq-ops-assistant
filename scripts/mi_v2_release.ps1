@@ -639,7 +639,7 @@ function Invoke-PartImport {
 
   Step 'the old Product Finds and Field Notes: dry run (reads only; it opens every photo, a few minutes)'
   if ((Invoke-Py @('-m', 'scripts.market_intel_import')) -ne 0) { Fail 'the import dry run' }
-  if (-not (Test-OutputHas '^schema: the R7b tables with every r8m column')) { Stop-Part 2 'The r8m columns are not in the database yet: run -Part migrate first.' }
+  if (-not (Test-OutputHas '^schema: the R7b tables with the r8m photo columns')) { Stop-Part 2 'The r8m columns are not in the database yet: run -Part migrate first.' }
   $todo = Get-Count '^to create: (\d+) sighting'
   if ($todo -lt 0) { Fail 'the dry run summary could not be read' }
   $resume = Test-OutputHas '^to complete \('
