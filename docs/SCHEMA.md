@@ -484,6 +484,6 @@ finding cites `[MI-<observation id>]`, every action `[CA-<id>]`), `included_obse
   service role only.
 - `v_market_signals_agent` (R7b) — clusters + un-identified sightings, no rep, shop, note, login or path; `yq_readonly`.
 - `v_market_cases_agent` (R8m) — unmerged cases: status, evidence level, safety, severity, issue (id, kind, code, English
-  label), SKU, brand and supplier (id + name), batch, packaging version, verification method, first / last seen, counts,
+  label), SKU, brand and supplier (id + name), verification method, first / last seen, counts,
   `usable_photos` (not people-flagged), `open_actions` (open or responded), due date, created / changed; no title, note,
-  person, shop or photo path; `yq_readonly`.
+  batch or packaging text (free text a rep typed), person, shop or photo path; `yq_readonly`.
