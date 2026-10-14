@@ -806,7 +806,7 @@ FILE_NOTES = {
     "merchants.csv": "merchant movement: new / reactivated / at_risk / due / dormant with reason codes",
     "followups_holdout.csv": "follow-ups vs holdout: early readout per rep",
     "items.csv": "every catalog item: stock, velocity, landed cost, restock asks",
-    "market_signals.csv": "restock requests, product finds, field notes of the last 5 weeks (reports, not facts)",
+    "market_signals.csv": "restock requests and Market Intel sightings (items, reports, photos to identify) of the last 5 weeks (reports, not facts)",
     "focus_lines_week.csv": "Focus sales lines of the review week (drill-down)",
     "insights_history.csv": "what earlier reviews proposed and what the owner decided",
     "verify_numbers.txt": "python -m scripts.verify_numbers output (only with --verify)",

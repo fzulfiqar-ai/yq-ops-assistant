@@ -804,3 +804,27 @@ pre-hotfix default grants (every new object granted to anon / authenticated, so 
 
 Tests: `python -m tests.test_r8m_market_quality_replay` (in CI: the text pins; the replay SKIPs without
 `YQ_LOCAL_PG_R8M`, which must be a loopback address — anything else is refused before a connection is made).
+
+## Release R8n (14-Oct-2026, built, not applied): `r8n_ai_market_signals_migration.sql` — the Weekly AI Head reads Market Intel
+
+Why: `v_agent_market_signals` (R7b AI Head) still read the old `product_finds` / `field_notes`, so Market Intel sightings
+never reached the weekly AI review. R8n redefines the view on `market_items`, `market_observations` and `market_photos`
+(plus the unchanged restock rows): the same twelve columns first, then counts and masked labels only (no shop, rep,
+login, note, area, barcode, path or meta column; titles and brands through `ai_agent_mask`). Grants exactly R7b's:
+revoked from anon / authenticated, SELECT for `ai_head_ro` and `yq_readonly`. Additive, idempotent, no CASCADE, a
+self-check at the end. It reads no R8m object: apply it after R7b's Market Intel and AI Head files, before or after R8m.
+
+**Apply — from the MAIN project folder** (after the branch is on `main` and pulled), with the backup of the release:
+
+```
+python -m scripts.apply_sql scripts/r8n_ai_market_signals_migration.sql --rehearse
+python -m scripts.apply_sql scripts/r8n_ai_market_signals_migration.sql
+python -m scripts.audit_grants
+```
+
+**Reverse:** `python -m scripts.apply_sql scripts/r8n_ai_market_signals_reverse.sql` restores R7b's definition byte for
+byte. NOTE: re-running `r7b_ai_head_migration.sql` while R8n is in place fails loudly ("cannot drop columns from view"):
+run R8n's reverse first, then R7b AI Head, then R8n again.
+
+Tests: `python -m tests.test_r8n_ai_market_signals` (in CI: the text pins; the replay SKIPs without
+`YQ_LOCAL_PG_R8N`, a loopback address only).

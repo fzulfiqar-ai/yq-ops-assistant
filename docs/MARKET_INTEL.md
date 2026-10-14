@@ -64,8 +64,8 @@ The result card, decided in this order (nothing ever merges on fuzzy evidence):
 4. text and no match → **New market find** (a New item);
 5. a photo and no text → **Saved: office will identify** (no item until the office identifies it).
 
-A photo within Hamming 8 of a stored one is flagged "near-duplicate" (also catches old WhatsApp photos once the import
-ran with `--with-phash`). Counts are always DISTINCT shops and reps.
+A photo within Hamming 8 of a stored one is flagged "near-duplicate" (the import of the old WhatsApp finds hashes every
+photo it copies, so they count too). Counts are always DISTINCT shops and reps.
 
 Idempotency: the phone makes a UUID per capture; the server stores it UNIQUE. A retry returns the first card and writes
 nothing. With no signal the capture waits in the page's queue and is retried every 20 s and when the phone is back online,
@@ -105,9 +105,10 @@ shop or photo path) is readable by the same read-only role for a later cases sec
 ## The old boards
 
 `/finds` and `/field-notes` still open (hidden from the nav). `scripts/market_intel_import.py` copies the 259 finds + 2
-notes in as `source='import'` (dry run by default): one sighting per find / note, photos referenced where they are,
-item-less (the "Finds library" tab), stable ids so a re-run writes nothing. The public `/f/{token}` finds board is
-retired (plan §18.8): the link answers "no longer valid".
+notes in as `source='import'` (dry run by default; `--apply --limit 5` for a trial; refused from a worktree): one
+sighting per find / note, each photo processed like a live capture and copied with a 320 px thumbnail under
+`market/YYYY/MM/imp-…`, item-less (the "Finds library" tab), stable ids so a re-run writes nothing. The public
+`/f/{token}` finds board is retired (plan §18.8): the link answers "no longer valid".
 
 ---
 
