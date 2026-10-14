@@ -1024,10 +1024,11 @@ def _():
     main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     mi_at = main.index("_register_market_intel(app, limiter)")
     sr_at = main.index("_register_supplier_reports(app, limiter)")
-    assert mi_at < sr_at and main[mi_at:sr_at].count("\n") == 1, "the line right after Market Intel's registration"
+    assert mi_at < sr_at and main[mi_at:sr_at].count("\n") <= 3, "registered right after Market Intel (and its v2 modules)"
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     api = ci.split("\n  web:\n", 1)[0]
-    assert "python -m tests.test_r7b_market_intel\n          python -m tests.test_r8m_supplier_reports\n" in api
+    # in the api job's Market Intel step, after the v1 suite (the v2 suites share that step)
+    assert api.index("python -m tests.test_r7b_market_intel\n") < api.index("python -m tests.test_r8m_supplier_reports\n")
     step = api.split("python -m tests.test_r8m_supplier_reports", 1)[0].rsplit("- name:", 1)[1]
     assert "SUPABASE_URL: https://ci.invalid" in step
 

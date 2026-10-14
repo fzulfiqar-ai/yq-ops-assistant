@@ -69,6 +69,7 @@ SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 READ_ONLY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/auth/password"),
     ("POST", "/market-intel/items/{item_id}/approve"),
+    ("POST", "/market-intel/supplier-reports/{report_id}/approve"),   # Market Intel v2: management approves the workbook
 })
 # The AI surfaces run agents, free-text SQL and uploads: never a read-only login's, GET included.
 READ_ONLY_DENIED_PREFIXES: tuple[str, ...] = ("/agents", "/ask", "/orchestrate", "/assistant", "/field-notes",

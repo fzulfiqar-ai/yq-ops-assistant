@@ -348,8 +348,9 @@ def _():
 @test("auth: read_only_refuses — reads pass, writes are refused, the own password is allowed, the AI surfaces never")
 def _():
     from app.auth import READ_ONLY_WRITE_ALLOWLIST, read_only_refuses
-    # R7b: management approves a Market Intel action (plan §7) — the one decision it makes
-    assert READ_ONLY_WRITE_ALLOWLIST == {("POST", "/auth/password"), ("POST", "/market-intel/items/{item_id}/approve")}
+    # R7b: management approves a Market Intel action (plan §7); Market Intel v2: and the monthly supplier workbook
+    assert READ_ONLY_WRITE_ALLOWLIST == {("POST", "/auth/password"), ("POST", "/market-intel/items/{item_id}/approve"),
+                                         ("POST", "/market-intel/supplier-reports/{report_id}/approve")}
     for meth in ("GET", "HEAD", "OPTIONS", "get"):
         assert not read_only_refuses(meth, "/shop/orders"), meth
     for meth in ("POST", "PUT", "PATCH", "DELETE"):
