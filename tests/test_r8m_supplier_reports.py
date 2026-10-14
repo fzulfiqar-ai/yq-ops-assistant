@@ -1,0 +1,1051 @@
+"""Market Intel v2, Phase 2: the monthly supplier workbook (app/supplier_reports.py and its routes).
+
+    python -m tests.test_r8m_supplier_reports
+
+Same lightweight runner as tests/test_r7b_market_intel.py, on ITS in-memory PostgREST + Storage
+stand-in (imported, not copied), wrapped here for what this module reads with: .lt() and a range()
+that honours its offset (every read is paged). SUPABASE_URL, SUPABASE_KEY and DATABASE_URL are pinned
+to ci.invalid BEFORE any import, so nothing here can reach a database, a bucket or the network. Every
+supplier, brand, shop, rep, product, phone and amount is invented.
+
+Covered:
+  * the month: a Bahrain calendar month (a sighting at 01:30 on the 1st is that month's), YYYY-MM
+    parsing, a month that has not started refused; paged reads past 1,000 rows;
+  * which sightings belong to a supplier: the case's supplier first, then the case's brand's, the
+    sighting's own supplier, its brand's (merged suppliers and brands followed); never another
+    supplier's; a case found not substantiated left out; a merged supplier's own report refused;
+  * counts by issue type, new vs recurring (>= 2 cases or >= 3 shops in the 90 days that end with the
+    month; a case 100 days old does not count), the insufficient-evidence rule, open actions;
+  * the narrative: every sentence about a finding cites real [MI-...] ids of this supplier, every
+    action line its [CA-...]; the insufficient-evidence paragraph; the internal edition's lines;
+  * edits (a draft only; ids checked; a narrative citing an id not in the report refused; a narrative
+    edited by hand kept), approve (supersedes the earlier approved report of the same supplier, month
+    and edition, and re-checks the rows first), download (approved only; {at, by, sha256} logged on
+    the row and in audit_log; the same data gives the same bytes; a download that cannot be recorded
+    is never served);
+  * the workbook opened with openpyxl: sheet names, header rows, embedded 640 px JPEGs and thumbnails,
+    "photo not available", and a privacy scan of every cell of the supplier edition (no shop, customer
+    or rep name, no contact, no amount, no BHD, no price / cost / margin column, no other supplier's
+    ids, no people-flagged or receipt photo);
+  * roles on every route: reps and storekeepers 403; management reads and downloads, approves once
+    the route is on the read-only allowlist, and its other writes are refused centrally;
+  * before the r8m migration every route answers 503 with the hint, and so does a table missing
+    half-way.
+"""
+from __future__ import annotations
+
+import os
+
+os.environ["SUPABASE_URL"] = "https://ci.invalid"
+os.environ["SUPABASE_KEY"] = "ci-key"
+os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
+
+import tests.test_r7b_market_intel as R  # noqa: E402  first: stdout, sys.path and the fake are set up there
+
+import hashlib  # noqa: E402
+import io  # noqa: E402
+import re  # noqa: E402
+import traceback  # noqa: E402
+import uuid  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+ROOT = R.ROOT
+TESTS: list[tuple[str, object]] = []
+
+
+def test(name):
+    def deco(fn):
+        TESTS.append((name, fn))
+        return fn
+    return deco
+
+
+NOW = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+SEP = "2026-09"
+
+
+# ── the r7b stand-in, plus .lt() and range() offsets ───────────────────────────
+
+class _Q(R._Query):
+    def __init__(self, db, table):
+        super().__init__(db, table)
+        self.off = 0
+
+    def lt(self, col, val):
+        self.filters.append(("lt", col, val))
+        return self
+
+    def range(self, a, b):
+        self.off, self.lim = int(a), int(b) - int(a) + 1
+        return self
+
+    def _match(self, row: dict) -> bool:
+        for kind, col, val in self.filters:
+            if kind == "lt" and (row.get(col) is None or not str(row.get(col)) < str(val)):
+                return False
+        return super()._match(row)            # the base reads "lt" as no filter
+
+    def execute(self):
+        if self.op != "select" or not self.off:
+            return super().execute()
+        lim, self.lim = self.lim, None
+        res = super().execute()
+        rows = res.data[self.off:self.off + lim] if lim else res.data[self.off:]
+        return SimpleNamespace(data=rows, count=res.count)
+
+
+class _DB(R._FakeDB):
+    def table(self, name):
+        return _Q(self, name)
+
+
+class _env(R._env):
+    """r7b's environment (the fake behind every client, tokens = the e-mail's local part, the limiter
+    off, the catalog served from memory) plus this module's client and a fixed clock."""
+
+    def __enter__(self):
+        fake = super().__enter__()
+        from app import supplier_reports as sr
+        self.sr = sr
+        self.p2 = R._Patched((sr, "get_client", lambda: fake), (sr, "_now", lambda: NOW))
+        self.p2.__enter__()
+        sr.forget_probe()
+        return fake
+
+    def __exit__(self, *exc):
+        self.p2.__exit__(*exc)
+        self.sr.forget_probe()
+        return super().__exit__(*exc)
+
+
+# ── an invented world: supplier X (the subject), supplier Y, a supplier merged into X ──
+
+USERS = [
+    {"email": "boss@example.com", "role": "admin", "features": [], "status": "active"},
+    {"email": "clerk@example.com", "role": "member", "features": ["Dashboard", "Market Intel"], "status": "active"},
+    {"email": "mgmt@example.com", "role": "management", "features": ["Dashboard", "Sales", "Market Intel"],
+     "status": "active"},
+    {"email": "rep1@example.com", "role": "salesman", "features": ["Catalog", "Shop Orders", "Market Intel"],
+     "status": "active"},
+    {"email": "rep3@example.com", "role": "salesman", "features": ["Catalog", "Shop Orders"], "status": "active"},
+    {"email": "store@example.com", "role": "storekeeper", "features": ["Storekeeper", "Market Intel"],
+     "status": "active"},
+]
+SALESMEN = [{"id": 1, "name": "Rep One", "focus_name": "Rep One - Acc", "referral_code": "rep-one", "is_active": True,
+             "user_email": "rep1@example.com"},
+            {"id": 2, "name": "Rep Two", "focus_name": None, "referral_code": "rep-two", "is_active": True,
+             "user_email": "rep2@example.com"}]
+SHOPS = [{"id": i, "phone": f"9730000000{i}", "name": f"Owner {n}", "shop": f"Shop {n}", "area": "Manama"}
+         for i, n in ((1, "Alpha"), (2, "Beta"), (3, "Gamma"), (4, "Delta"), (5, "Epsilon"))]
+CUSTOMERS = [{"id": 1, "name": "Focus Trader Kappa"}]
+SUPPLIERS = [{"id": 1, "name": "Supplier X", "code": "SUPX", "active": True, "merged_into": None},
+             {"id": 2, "name": "Supplier Y", "code": "SUPY", "active": True, "merged_into": None},
+             {"id": 3, "name": "Supplier Old", "code": "SUPO", "active": False, "merged_into": 1}]
+BRANDS = [{"id": 10, "name": "Brand X", "supplier_id": 1, "aliases": [], "active": True, "merged_into": None},
+          {"id": 11, "name": "Brand Y", "supplier_id": 2, "aliases": [], "active": True, "merged_into": None},
+          {"id": 12, "name": "Brand X Old", "supplier_id": None, "aliases": [], "active": False, "merged_into": 10}]
+TYPES = [{"id": i, "kind": k, "code": c, "label_en": lab, "label_ar": None, "safety_default": s, "fields": [],
+          "active": True, "sort": i}
+         for i, k, c, lab, s in ((100, "quality", "not_charging", "Not charging", False),
+                                 (101, "quality", "cable_breaks", "Cable breaks", False),
+                                 (102, "packaging", "print_fading", "Print fading", False),
+                                 (103, "quality", "loose_connector", "Loose connector", False),
+                                 (104, "quality", "swelling", "Swelling or heat", True),
+                                 (105, "competitor", "competitor_price", "Competitor price", False),
+                                 (106, "demand", "customer_asked", "Customer asked for", False))]
+CATALOG = {"items": {c: {"item_code": c, "display_name": n, "category": "CABLE", "brand": "Brand X"}
+                     for c, n in (("C10", "Cable C10 Type-C"), ("C11", "Cable C11 Lightning"), ("P22", "Power Bank P22"),
+                                  ("E05", "Earphone E05"), ("E06", "Earphone E06"), ("B30", "Battery Case B30"),
+                                  ("B31", "Battery Pack B31"), ("Y99", "Charger Y99"), ("Y98", "Cable Y98"))}}
+
+
+def _case(cid, sku, itype, **kw):
+    row = {"id": cid, "yq_item_code": sku, "issue_type_id": itype, "brand_id": None, "supplier_id": None,
+           "status": "submitted", "evidence_level": 1, "safety": False, "title": f"{sku} problem", "obs_count": 1,
+           "merged_into": None, "batch_ref": None, "packaging_version": None}
+    row.update(kw)
+    return row
+
+
+CASES = [
+    _case(1, "C10", 100, supplier_id=1, status="verified", evidence_level=3, obs_count=5),
+    _case(2, "P22", 102, brand_id=10, status="under_review", evidence_level=2, packaging_version="v2"),
+    _case(3, "E05", 103, supplier_id=1),                                   # one report, no photo: insufficient
+    _case(4, "B30", 101, status="under_review", evidence_level=2),         # its supplier: the sighting's (merged)
+    _case(5, "B30", 101, supplier_id=1, status="closed", evidence_level=3),  # July: the second case
+    _case(6, "E05", 103, supplier_id=1),                                   # June: older than 90 days
+    _case(7, "C10", 101, supplier_id=1, status="not_substantiated", evidence_level=2),
+    _case(8, "C11", 100, supplier_id=1, evidence_level=2),                 # the office linked it to X
+    _case(9, "Y99", 100, supplier_id=2, evidence_level=2),
+    _case(10, "Y98", 101, supplier_id=2, evidence_level=2),
+    _case(11, "B31", 104, supplier_id=1, status="under_review", evidence_level=2, safety=True),
+    _case(12, "E06", 103, supplier_id=1, obs_count=2),
+    _case(13, "C10", 100, merged_into=1),
+]
+
+
+def _o(oid, when, **kw):
+    row = {"id": oid, "client_uuid": str(uuid.uuid4()), "source": "rep", "kind": "complaint", "observed_at": when,
+           "created_at": when, "created_by": "rep1@example.com", "salesman_id": 1, "item_id": None, "case_id": None,
+           "shop_customer_id": None, "shop_name": None, "area": "Manama", "title": None, "brand": None,
+           "competitor": None, "category": None, "note": None, "price_bhd": None, "demand_level": None,
+           "demand_qty": None, "barcode_raw": None, "yq_item_code": None, "issue_type_id": None, "report_basis": None,
+           "qty_affected": None, "batch_ref": None, "packaging_version": None, "safety_flag": False, "brand_id": None,
+           "supplier_id": None, "brand_text": None, "supplier_text": None, "signal": None}
+    row.update(kw)
+    return row
+
+
+NOTE_101 = ("Shop Alpha owner says Rep One sold it; call +973 3900 1234; paid 2.500 BD. "
+            "Supplier Y makes a better one.")
+OBS = [
+    # supplier X, September (Bahrain): the findings
+    _o(101, "2026-09-03T08:00:00+00:00", case_id=1, yq_item_code="C10", issue_type_id=100, shop_customer_id=1,
+       note=NOTE_101, report_basis="customer_said", qty_affected=2, batch_ref="2608"),
+    _o(102, "2026-09-05T08:00:00+00:00", case_id=1, yq_item_code="C10", issue_type_id=100, shop_customer_id=2,
+       note="Focus Trader Kappa returned 3 pieces", created_by="rep2@example.com", salesman_id=2),
+    _o(103, "2026-09-08T08:00:00+00:00", case_id=1, yq_item_code="C10", issue_type_id=100, shop_customer_id=3,
+       report_basis="rep_saw"),
+    _o(104, "2026-09-09T08:00:00+00:00", case_id=13, yq_item_code="C10", issue_type_id=100, shop_customer_id=1),
+    _o(111, "2026-08-31T22:30:00+00:00", case_id=2, yq_item_code="P22", issue_type_id=102, shop_customer_id=1,
+       packaging_version="v2", note="Owner Alpha called about the faded box"),
+    _o(112, "2026-09-12T08:00:00+00:00", case_id=2, yq_item_code="P22", issue_type_id=102, shop_customer_id=2,
+       packaging_version="v2"),
+    _o(121, "2026-09-14T08:00:00+00:00", case_id=3, yq_item_code="E05", issue_type_id=103, shop_customer_id=4),
+    _o(131, "2026-09-16T08:00:00+00:00", case_id=4, yq_item_code="B30", issue_type_id=101, shop_customer_id=5,
+       supplier_id=3),
+    _o(141, "2026-09-18T08:00:00+00:00", case_id=8, yq_item_code="C11", issue_type_id=100, shop_customer_id=4,
+       supplier_id=2),
+    _o(151, "2026-09-20T08:00:00+00:00", case_id=11, yq_item_code="B31", issue_type_id=104, shop_name="Shop Zeta",
+       safety_flag=True, note="Seen at Shop Zeta, the pack was hot"),
+    _o(161, "2026-09-22T08:00:00+00:00", case_id=12, yq_item_code="E06", issue_type_id=103, shop_customer_id=1),
+    _o(162, "2026-09-24T08:00:00+00:00", case_id=12, yq_item_code="E06", issue_type_id=103, shop_customer_id=5),
+    # supplier X, September: market sightings (the internal edition only)
+    _o(171, "2026-09-25T08:00:00+00:00", kind="competitor_price", issue_type_id=105, brand_id=12, shop_customer_id=2,
+       title="Rival cable seen", competitor="Rival Co", price_bhd="1.250", note="Shop Beta stocks it"),
+    _o(181, "2026-09-26T08:00:00+00:00", kind="shop_asked", issue_type_id=106, supplier_id=1, shop_customer_id=3,
+       title="Asked for C10 in white", demand_qty=20),
+    # never in X's September report
+    _o(191, "2026-09-10T08:00:00+00:00", case_id=7, yq_item_code="C10", issue_type_id=101, shop_customer_id=2),
+    _o(201, "2026-09-11T08:00:00+00:00", case_id=9, yq_item_code="Y99", issue_type_id=100, shop_customer_id=1),
+    _o(202, "2026-09-13T08:00:00+00:00", case_id=10, yq_item_code="Y98", issue_type_id=101, shop_customer_id=2,
+       supplier_id=1),
+    _o(203, "2026-09-15T08:00:00+00:00", kind="competitor_price", brand_id=11, title="Rival charger",
+       price_bhd="2.750"),
+    _o(301, "2026-07-20T09:00:00+00:00", case_id=5, yq_item_code="B30", issue_type_id=101, shop_customer_id=2),
+    _o(311, "2026-06-20T09:00:00+00:00", case_id=6, yq_item_code="E05", issue_type_id=103, shop_customer_id=1),
+    _o(321, "2026-09-30T21:30:00+00:00", case_id=1, yq_item_code="C10", issue_type_id=100, shop_customer_id=4),
+    _o(331, "2026-09-17T08:00:00+00:00", kind="complaint", brand="Brand X", note="v1 complaint, no links"),
+]
+X_FINDINGS = {101, 102, 103, 104, 111, 112, 121, 131, 141, 151, 161, 162}
+X_COUNTED = X_FINDINGS - {121}
+X_MARKET = {171, 181}
+NEVER_IN_X = {191, 201, 202, 203, 301, 311, 321, 331}
+
+ACTIONS = [
+    {"id": 1, "supplier_id": 1, "request": "Replace 24 units of B30, batch 2608", "owner": "Office Lead",
+     "due_date": "2026-10-15", "status": "open", "supplier_response": None, "resolution_check": None,
+     "created_at": "2026-09-18T07:00:00+00:00", "updated_at": "2026-09-18T07:00:00+00:00"},
+    {"id": 2, "supplier_id": 2, "request": "Supplier Y matter", "owner": "Office Lead", "due_date": None,
+     "status": "open", "supplier_response": None, "resolution_check": None,
+     "created_at": "2026-09-10T07:00:00+00:00", "updated_at": "2026-09-10T07:00:00+00:00"},
+    {"id": 3, "supplier_id": None, "request": "Check the print on packaging v2 for Shop Beta", "owner": "Office Lead",
+     "due_date": "2026-10-20", "status": "responded",
+     "supplier_response": "We will check the ink. Write to qa@supplier-x.example", "resolution_check": None,
+     "created_at": "2026-09-20T07:00:00+00:00", "updated_at": "2026-09-28T07:00:00+00:00"},
+    {"id": 4, "supplier_id": 1, "request": "An old matter", "owner": None, "due_date": None, "status": "resolved",
+     "supplier_response": "Done", "resolution_check": "Checked",
+     "created_at": "2026-07-01T07:00:00+00:00", "updated_at": "2026-08-10T07:00:00+00:00"},
+    {"id": 5, "supplier_id": 1, "request": "Relabel the E06 boxes", "owner": "Office Lead", "due_date": "2026-09-30",
+     "status": "resolved", "supplier_response": "Relabelled", "resolution_check": "Checked ten boxes",
+     "created_at": "2026-09-02T07:00:00+00:00", "updated_at": "2026-09-25T07:00:00+00:00"},
+]
+LINKS = [{"action_id": 1, "case_id": 4}, {"action_id": 1, "case_id": 5}, {"action_id": 2, "case_id": 9},
+         {"action_id": 3, "case_id": 2}, {"action_id": 5, "case_id": 12}]
+
+# photos: colour = identity. RED is the people photo, YELLOW the receipt; neither may reach a supplier.
+RED, YELLOW = (220, 20, 20), (235, 215, 30)
+PHOTOS = [
+    # id, observation, role, people, colour, stored as: "master" | "thumb" (only the 320 px thumbnail) | None
+    (1, 101, "product", False, (40, 160, 60), "master"),
+    (2, 101, "product", True, RED, "master"),
+    (3, 111, "packaging", False, (30, 60, 200), "master"),
+    (4, 111, "receipt", False, YELLOW, "master"),
+    (5, 112, "label_batch", False, (120, 40, 160), "master"),
+    (6, 131, "product", False, (90, 90, 90), None),
+    (7, 141, "product", False, (0, 150, 150), "thumb"),
+    (8, 151, "product", False, (240, 140, 20), "master"),
+    (9, 171, "product", False, (150, 150, 150), "master"),
+    (10, 191, "product", False, (100, 60, 20), "master"),
+    (11, 201, "product", False, (250, 150, 200), "master"),
+]
+CAPTION_1 = "Cable end burnt, seen at Shop Alpha"
+SHA_5 = "ab" * 32
+
+
+def _picture(colour, size=(800, 600)) -> tuple[bytes, str]:
+    from PIL import Image, features
+    img = Image.new("RGB", size, colour)
+    buf = io.BytesIO()
+    if features.check("webp"):
+        img.save(buf, format="WEBP", quality=80)
+        return buf.getvalue(), ".webp"
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), ".jpg"
+
+
+def _world(**over) -> _DB:
+    tables = {"user_roles": USERS, "salesmen": SALESMEN, "shop_customers": SHOPS, "customers": CUSTOMERS,
+              "audit_log": [], "suppliers": SUPPLIERS, "brands": BRANDS, "market_issue_types": TYPES,
+              "market_cases": CASES, "market_observations": OBS, "market_photos": [], "supplier_actions": ACTIONS,
+              "supplier_action_cases": LINKS, "supplier_reports": [], "market_items": [], "app_settings": []}
+    tables.update(over)
+    fake = _DB(tables)
+    for pid, oid, role, people, colour, stored in PHOTOS:
+        data, ext = _picture(colour)
+        path, thumb = f"market/2026/09/p{pid}{ext}", f"market/2026/09/p{pid}-t320{ext}"
+        fake.tables["market_photos"].append(
+            {"id": pid, "observation_id": oid, "bucket": "finds", "path": path, "thumb_path": thumb,
+             "position": pid, "role": role, "has_people_flag": people, "sha256": SHA_5 if pid == 5 else None,
+             "caption": CAPTION_1 if pid == 1 else None, "blurred_path": None})
+        if stored == "master":
+            fake.storage.objects[("finds", path)] = (data, {})
+        elif stored == "thumb":
+            fake.storage.objects[("finds", thumb)] = (_picture(colour, (320, 240))[0], {})
+    return fake
+
+
+def _sr():
+    from app import supplier_reports as sr
+    return sr
+
+
+def _build(edition="supplier", supplier_id=1, month=SEP, actor="clerk@example.com", role="member"):
+    return _sr().build_draft(supplier_id, month, edition, actor, role)
+
+
+def _raises(fn, want: str, status: int | None = None):
+    sr = _sr()
+    try:
+        fn()
+    except sr.SupplierReportError as e:
+        assert want.lower() in str(e).lower(), (want, str(e))
+        if status is not None:
+            assert e.status == status, (status, e.status, str(e))
+        return e
+    raise AssertionError(f"expected SupplierReportError containing {want!r}")
+
+
+def _book(data: bytes):
+    from openpyxl import load_workbook
+    return load_workbook(io.BytesIO(data))
+
+
+def _cells(wb) -> list[str]:
+    out = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            out += [str(v) for v in row if v is not None]
+    return out
+
+
+def _head(ws) -> list:
+    return [c.value for c in ws[1]]
+
+
+def _colours(ws) -> list[tuple]:
+    from PIL import Image
+    out = []
+    for im in ws._images:
+        pic = Image.open(io.BytesIO(im._data()))
+        out.append((pic.format, pic.size, pic.convert("RGB").resize((1, 1)).getpixel((0, 0))))
+    return out
+
+
+def _near(c, want, tol=40) -> bool:
+    return all(abs(a - b) <= tol for a, b in zip(c, want))
+
+
+def _ids(text: str, prefix: str) -> set[int]:
+    return {int(x) for x in re.findall(rf"\b{prefix}-(\d+)\b", text)}
+
+
+FINDING_PREFIXES = ("Recurring:", "New:", "Insufficient evidence:", "We ask:", "Competitor:", "Demand:")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. the month, paging, the scrubber
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("month: YYYY-MM to the first day; junk refused; a month that has not started refused (Bahrain time)")
+def _():
+    from datetime import date
+    sr = _sr()
+    assert sr.parse_month("2026-9", now=NOW) == date(2026, 9, 1) and sr.parse_month("2026-09-01", now=NOW) == date(2026, 9, 1)
+    assert sr.parse_month("2026-10", now=NOW) == date(2026, 10, 1)          # the current month (a preview)
+    for bad in ("2026-13", "Sept 2026", "", "2023-12", "2026/09"):
+        _raises(lambda b=bad: sr.parse_month(b, now=NOW), "YYYY-MM")
+    _raises(lambda: sr.parse_month("2026-11", now=NOW), "not started")
+    assert sr.parse_month("2026-11", now=NOW, future_ok=True) == date(2026, 11, 1)
+    # 31 Oct 21:30 UTC is already 1 November in Bahrain
+    assert sr.parse_month("2026-11", now=datetime(2026, 10, 31, 21, 30, tzinfo=timezone.utc)) == date(2026, 11, 1)
+    start, end = sr.month_bounds(date(2026, 12, 1))
+    assert start.isoformat() == "2026-12-01T00:00:00+03:00" and end.isoformat() == "2027-01-01T00:00:00+03:00"
+
+
+@test("reads: paged 1,000 at a time past PostgREST's cap (2,345 rows come back, in three reads)")
+def _():
+    fake = _world(suppliers=[{"id": i, "name": f"S{i}", "code": None, "merged_into": None} for i in range(1, 2346)])
+    with _env(fake, CATALOG):
+        sr = _sr()
+        rows = sr._all(lambda: sr._q("suppliers"))
+    assert len(rows) == 2345 and len({r["id"] for r in rows}) == 2345
+    assert sum(1 for c in fake.calls if c[0] == "select" and c[1] == "suppliers") == 3
+
+
+@test("scrubber: contacts, amounts, shop / customer / rep / other-supplier names out; generic words and its own supplier kept")
+def _():
+    sr = _sr()
+    s = sr.Scrubber(reps=["Rep One"], shops=["Shop Alpha", "Shop Alpha Two", "Cash Customer", "Al-Noor Mobiles"],
+                    others=["Supplier Y"], keep=["Supplier X"])
+    assert s("Shop Alpha Two and shop alpha met REP ONE") == "[shop] and [shop] met field team"
+    assert s("call +973 3900 1234 or owner@shop.example") == "call [number] or [email]"
+    assert s("paid 2.500 BD, BHD 3 and 500 fils; price 4.5") == "paid [amount], [amount] and [amount]; price [amount]"
+    assert s("cash customer at the counter") == "cash customer at the counter"
+    assert s("Supplier X is better than Supplier Y") == "Supplier X is better than [another supplier]"
+    assert s("Shopping alphabet soup") == "Shopping alphabet soup", "whole words only"
+    assert s("Sold by Al-Noor  Mobiles") == "Sold by [shop]"
+    assert s("sold 20 units, failure rate 5") == "sold 20 units, failure rate [amount]", "a quantity is not an amount"
+    assert s(None) is None and s("") == "" and s(12) == 12
+    # the report's own supplier survives even when another supplier's name is part of it
+    own = sr.Scrubber(others=["Brightline"], shops=["Trading"], keep=["Brightline Trading", "BLT"])
+    assert own("Brightline Trading (BLT) vs Brightline; Brightline Trading again") == \
+        "Brightline Trading (BLT) vs [another supplier]; Brightline Trading again"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. the draft: membership, counts, the rules, the narrative
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("draft: only supplier X's September findings (case first, then brand, sighting, its brand; merges followed); not substantiated, October, Y's and unlinked left out")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        out = _build()
+    rows = out["rows"]
+    assert set(rows) == {"product_issues", "packaging"}, "a supplier edition has no competitor / demand rows"
+    got = {r["id"]: r for k in rows for r in rows[k]}
+    assert set(got) == X_FINDINGS, sorted(set(got) ^ X_FINDINGS)
+    assert not (set(got) & NEVER_IN_X) and not (set(got) & X_MARKET)
+    assert {r["id"] for r in rows["packaging"]} == {111, 112}
+    assert got[111]["date"] == "2026-09-01", "22:30 UTC on 31 Aug is 1 September in Bahrain"
+    assert got[121]["state"] == "insufficient" and all(got[i]["state"] == "included" for i in X_COUNTED)
+    assert got[104]["case_id"] == 1, "a sighting on a merged case is read on the case it was merged into"
+    rep = out["report"]
+    assert rep["status"] == "draft" and rep["month"] == SEP and rep["edition"] == "supplier" and rep["supplier_id"] == 1
+    assert rep["included_observation_ids"] == sorted(X_COUNTED)
+    assert rep["insufficient_observation_ids"] == [121]
+    assert out["rebuilt"] is False
+    stored = fake.rows("supplier_reports")
+    assert len(stored) == 1 and stored[0]["status"] == "draft" and stored[0]["month"] == "2026-09-01"
+    assert stored[0]["created_by"] == "clerk@example.com" and stored[0]["included_observation_ids"] == sorted(X_COUNTED)
+
+
+@test("draft: counts by issue type, new vs recurring (>= 2 cases or >= 3 shops in 90 days), verified, safety, photos, open actions")
+def _():
+    with _env(_world(), CATALOG):
+        out = _build()
+    c = out["report"]["counts"]
+    assert (c["reports"], c["product_issues"], c["packaging"], c["shops"]) == (11, 9, 2, 6), c
+    assert (c["verified"], c["unverified"], c["safety"], c["photos"]) == (4, 7, 1, 6), c
+    assert c["new"] == {"problems": 4, "reports": 6} and c["recurring"] == {"problems": 2, "reports": 5}, c
+    assert (c["insufficient"], c["insufficient_observation_ids"], c["excluded"]) == (1, [121], 0)
+    assert (c["open_actions"], c["action_ids"]) == (2, [1, 3, 5]), "Y's action and one resolved in August are not listed"
+    assert (c["competitor"], c["demand"]) == (0, 0) and c["narrative_source"] == "template"
+    assert c["month"] == SEP and c["period"]["from"] == "2026-09-01" and c["period"]["to"] == "2026-09-30"
+    issues = [(b["label"], b["kind"], b["reports"], b["shops"], b["verified"], b["recurring"]) for b in c["by_issue"]]
+    assert issues == [("Not charging", "quality", 5, 4, 4, True), ("Loose connector", "quality", 2, 2, 0, False),
+                      ("Print fading", "packaging", 2, 2, 0, False), ("Cable breaks", "quality", 1, 1, 0, True),
+                      ("Swelling or heat", "quality", 1, 1, 0, False)], issues
+    groups = {(g["sku"], g["issue"]["label"]): g for g in out["groups"]}
+    # C10: one case (13 was merged into 1) but three shops -> recurring; B30: a second case in July -> recurring
+    assert groups[("C10", "Not charging")]["recurring"] and groups[("C10", "Not charging")]["reports"] == 4
+    assert groups[("B30", "Cable breaks")]["recurring"]
+    # E06: two reports from two shops in one case -> new (and not "insufficient": not a single report)
+    assert not groups[("E06", "Loose connector")]["recurring"] and groups[("E06", "Loose connector")]["reports"] == 2
+    # E05: its June case is 100+ days before the month's end -> a single report, no photo, level 1
+    assert ("E05", "Loose connector") not in groups
+    row = next(r for r in out["rows"]["product_issues"] if r["id"] == 101)
+    assert (row["finding"], row["evidence_label"], row["status"], row["basis"]) == \
+        ("Verified", "Inspected & verified by YQ", "Verified by YQ", "Customer said")
+    assert (row["qty"], row["batch_ref"], row["recurring"]) == (2, "2608", True)
+    row = next(r for r in out["rows"]["product_issues"] if r["id"] == 141)
+    assert (row["finding"], row["evidence_label"]) == ("Unverified report", "Evidence submitted")
+    assert [p["ref"] for p in next(r for r in out["rows"]["packaging"] if r["id"] == 111)["photos"]] == ["PH-3"], \
+        "the receipt photo is not a supplier's"
+
+
+@test("narrative: every sentence about a finding cites real ids of supplier X; actions cite CA ids; the insufficient paragraph")
+def _():
+    with _env(_world(), CATALOG):
+        out = _build()
+    text = out["report"]["narrative"]
+    lines = text.split("\n")
+    assert lines[0] == "Supplier X: September 2026."
+    assert lines[1] == ("Field reports counted this month: 11 (9 product issues, 2 packaging) from 6 shops; "
+                        "4 verified by YQ; 1 flagged as a possible safety issue."), lines[1]
+    finding = [ln for ln in lines if ln.startswith(FINDING_PREFIXES)]
+    assert len(finding) == 6 + 1 + 1, finding         # 6 problems, the insufficient paragraph, We ask
+    for ln in finding:
+        ids = _ids(ln, "MI")
+        assert ids, f"no id: {ln}"
+        assert ids <= X_FINDINGS, (ln, ids - X_FINDINGS)
+    cited = _ids(text, "MI")
+    assert cited == X_FINDINGS, "every counted report and the insufficient one is cited somewhere"
+    assert not (cited & (NEVER_IN_X | X_MARKET))
+    acts = [ln for ln in lines if ln.startswith("Open action")]
+    assert len(acts) == 2 and all(_ids(ln, "CA") for ln in acts)
+    assert _ids(text, "CA") == {1, 3}, "the resolved action is on the sheet, not in the narrative"
+    assert lines[2].startswith('Recurring: "Not charging" on C10 (Cable C10 Type-C), batch "2608": 4 reports from '
+                               "3 shops [MI-101] [MI-102] [MI-103] [MI-104]; 1 case from 3 shops in the last 90 days; "
+                               "4 verified by YQ"), lines[2]
+    assert any(ln.startswith('Recurring: "Cable breaks" on B30') and "2 cases from 2 shops in the last 90 days" in ln
+               for ln in lines)
+    assert any(ln.startswith('New: "Swelling or heat" on B31') and "flagged as a possible safety issue" in ln
+               for ln in lines)
+    assert any(ln.startswith('New: "Print fading" on P22') and 'packaging version "v2"' in ln for ln in lines)
+    assert ('Insufficient evidence: one report of "Loose connector" on E05 (Earphone E05) [MI-121]; no photo, a single '
+            "report and not verified, so not included in the counts.") in lines
+    assert ('Open action [CA-1]: "Replace 24 units of B30, batch 2608", due 15 Oct 2026; awaiting your response since '
+            "18 Sep 2026; linked reports [MI-131].") in lines
+    assert any(ln.startswith('Open action [CA-3]: "Check the print on packaging v2 for [shop]"') and
+               "your response is in" in ln and ln.endswith("[MI-111] [MI-112].") for ln in lines)
+    assert lines[-1] == ('We ask: the root cause and a corrective plan for "Not charging" on C10 (Cable C10 Type-C) '
+                         "[MI-101]."), "B30 already has an open action; the new problems are not verified"
+    for secret in ("Shop Beta", "Rep One", "BHD", "Supplier Y"):
+        assert secret not in text, secret
+
+
+@test("draft: the internal edition adds the competitor and demand sightings (rows, counts, cited lines); Y's never")
+def _():
+    with _env(_world(), CATALOG):
+        out = _build("internal")
+    assert set(out["rows"]) == {"product_issues", "packaging", "competitor", "demand"}
+    assert [r["id"] for r in out["rows"]["competitor"]] == [171] and [r["id"] for r in out["rows"]["demand"]] == [181]
+    comp, dem = out["rows"]["competitor"][0], out["rows"]["demand"][0]
+    assert comp["price_seen"] == "1.250" and comp["competitor"] == "Rival Co" and comp["note"] == "[shop] stocks it"
+    assert dem["qty"] == 20 and dem["source"] == "Field team" and dem["asked_for"] == "Asked for C10 in white"
+    c = out["report"]["counts"]
+    assert (c["competitor"], c["demand"], c["reports"]) == (1, 1, 11)
+    assert out["report"]["included_observation_ids"] == sorted(X_COUNTED | X_MARKET)
+    lines = out["report"]["narrative"].split("\n")
+    assert lines[0] == "Supplier X: September 2026. Internal edition: for YQ only, not for the supplier."
+    assert "Competitor: 1 sighting of competing products this month [MI-171]." in lines
+    assert "Demand: 1 request for this range this month [MI-181]." in lines
+    assert [r["id"] for r in out["rows"]["packaging"][0]["photos"]] == [3, 4], "the receipt is internal-only"
+    assert not (_ids(out["report"]["narrative"], "MI") & NEVER_IN_X)
+
+
+@test("draft: supplier Y's report holds Y's rows only (the case's supplier beats the sighting's)")
+def _():
+    with _env(_world(), CATALOG):
+        out = _build(supplier_id=2)
+        internal = _build("internal", supplier_id=2)
+    got = {r["id"] for k in out["rows"] for r in out["rows"][k]}
+    assert got == {201, 202}, got
+    assert {r["id"] for r in internal["rows"]["competitor"]} == {203}
+    assert not (_ids(out["report"]["narrative"], "MI") & (X_FINDINGS | X_MARKET))
+    assert out["report"]["counts"]["action_ids"] == [2]
+
+
+@test("draft: a rebuild updates the same draft; unknown or merged supplier, bad edition, future month refused; only reviewers build")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        first = _build()
+        again = _build(actor="boss@example.com", role="admin")
+        assert again["report"]["id"] == first["report"]["id"] and again["rebuilt"] is True
+        assert len(fake.rows("supplier_reports")) == 1 and fake.rows("supplier_reports")[0]["updated_by"] == "boss@example.com"
+        other = _build("internal")
+        assert other["report"]["id"] != first["report"]["id"] and len(fake.rows("supplier_reports")) == 2
+        _raises(lambda: _build(supplier_id=99), "does not exist", 404)
+        e = _raises(lambda: _build(supplier_id=3), "merged into Supplier X", 409)
+        assert "build that supplier's report" in str(e)
+        _raises(lambda: _build("public"), "edition", 400)
+        _raises(lambda: _build(month="2026-11"), "not started", 400)
+        for role in ("management", "salesman", "storekeeper"):
+            _raises(lambda r=role: _build(role=r), "only the office", 403)
+        assert sr.build_draft(1, SEP, "supplier", "clerk@example.com", "member")["report"]["id"] == first["report"]["id"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. edits, approval, supersede
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("edit: excluding a row recounts and rewrites a template narrative; a weak row can be included; ids outside the report refused")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        rid = _build()["report"]["id"]
+        out = sr.update_draft(rid, {"included_observation_ids": sorted(X_COUNTED - {102})}, "clerk@example.com", "member")
+        assert out["report"]["counts"]["reports"] == 10 and "[MI-102]" not in out["report"]["narrative"]
+        assert next(r for r in out["rows"]["product_issues"] if r["id"] == 102)["state"] == "excluded"
+        assert out["report"]["counts"]["excluded"] == 1
+        out = sr.update_draft(rid, {"included_observation_ids": sorted(X_COUNTED | {121})}, "clerk@example.com", "member")
+        c = out["report"]["counts"]
+        assert c["reports"] == 12 and c["insufficient"] == 0 and "Insufficient evidence" not in out["report"]["narrative"]
+        for foreign in (201, 191, 321, 171):         # Y's, not substantiated, October, a market row in a supplier copy
+            _raises(lambda f=foreign: sr.update_draft(rid, {"included_observation_ids": [101, f]}, "clerk@example.com",
+                                                      "member"), f"MI-{foreign}", 400)
+        _raises(lambda: sr.update_draft(rid, {"included_observation_ids": ["x"]}, "clerk@example.com", "member"),
+                "numbers", 400)
+        assert fake.rows("supplier_reports")[0]["included_observation_ids"] == sorted(X_COUNTED | {121})
+
+
+@test("edit: a narrative citing an id outside the report is refused; a hand-edited narrative is kept when rows change")
+def _():
+    with _env(_world(), CATALOG):
+        sr = _sr()
+        rid = _build()["report"]["id"]
+        _raises(lambda: sr.update_draft(rid, {"narrative": "New: see [MI-201]."}, "clerk@example.com", "member"),
+                "MI-201", 400)
+        _raises(lambda: sr.update_draft(rid, {"narrative": "Open action [CA-2]: Y's."}, "clerk@example.com", "member"),
+                "CA-2", 400)
+        text = "Supplier X: September 2026.\r\nNew: a hand-written line [MI-101] [MI-121].\n\nOpen action [CA-1]: due soon."
+        out = sr.update_draft(rid, {"narrative": text}, "clerk@example.com", "member")
+        assert out["report"]["narrative_source"] == "edited"
+        assert out["report"]["narrative"] == ("Supplier X: September 2026.\nNew: a hand-written line [MI-101] [MI-121]."
+                                              "\n\nOpen action [CA-1]: due soon.")
+        out = sr.update_draft(rid, {"included_observation_ids": sorted(X_COUNTED - {103})}, "clerk@example.com",
+                              "member")
+        assert out["report"]["narrative"].startswith("Supplier X: September 2026.\nNew: a hand-written line")
+        assert any("edited by hand" in w for w in out["warnings"])
+        _raises(lambda: sr.update_draft(rid, {"narrative": "x" * (sr.MAX_NARRATIVE + 1)}, "clerk@example.com",
+                                        "member"), "limited", 400)
+
+
+@test("approve: a draft only; approving a newer one supersedes the earlier approved (same supplier, month, edition only); edits refused after")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        a = _build()["report"]["id"]
+        internal = _build("internal")["report"]["id"]
+        sr.approve(internal, "clerk@example.com", "member")
+        got = sr.approve(a, "clerk@example.com", "member")
+        assert got["status"] == "approved" and got["superseded"] == [] and got["approved_by"] == "clerk"
+        _raises(lambda: sr.approve(a, "clerk@example.com", "member"), "only a draft", 409)
+        _raises(lambda: sr.update_draft(a, {"narrative": "x"}, "clerk@example.com", "member"), "only a draft", 409)
+        b = _build()["report"]["id"]
+        assert b != a, "an approved report is never rebuilt: a new draft starts"
+        got = sr.approve(b, "mgmt@example.com", "management")
+        assert got["superseded"] == [a]
+        status = {r["id"]: r["status"] for r in fake.rows("supplier_reports")}
+        assert status == {a: "superseded", internal: "approved", b: "approved"}, status
+        row = next(r for r in fake.rows("supplier_reports") if r["id"] == b)
+        assert row["approved_by"] == "mgmt@example.com" and row["approved_at"] == NOW.isoformat()
+        _raises(lambda: sr.approve(b, "rep1@example.com", "salesman"), "only the office or management", 403)
+
+
+@test("approve: the rows are re-checked first: a sighting moved to another supplier since the draft stops it")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        rid = _build()["report"]["id"]
+        next(c for c in fake.tables["market_cases"] if c["id"] == 8)["supplier_id"] = 2
+        e = _raises(lambda: sr.approve(rid, "clerk@example.com", "member"), "MI-141", 409)
+        assert "no longer belongs" in str(e)
+        assert fake.rows("supplier_reports")[0]["status"] == "draft"
+        preview = sr.get_report(rid, "member")
+        assert any("MI-141" in w for w in preview["warnings"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. the workbook
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _approved(fake, edition="supplier", supplier_id=1):
+    sr = _sr()
+    rid = _build(edition, supplier_id=supplier_id)["report"]["id"]
+    sr.approve(rid, "clerk@example.com", "member")
+    return rid
+
+
+@test("download: an approved report only; the .xlsx has the supplier edition's five sheets and their header rows")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        rid = _build()["report"]["id"]
+        _raises(lambda: sr.download(rid, "clerk@example.com", "member"), "only an approved report", 409)
+        sr.approve(rid, "clerk@example.com", "member")
+        got = sr.download(rid, "clerk@example.com", "member")
+    assert got["filename"] == "YQ-supplier-report-SUPX-2026-09-supplier.xlsx"
+    wb = _book(got["data"])
+    assert wb.sheetnames == ["Summary", "Product issues", "Packaging", "Evidence", "Corrective actions"]
+    assert _head(wb["Product issues"]) == ["ID", "Date", "SKU", "Product", "Issue", "Finding", "Description", "Qty",
+                                           "Batch / packaging", "Basis", "Evidence level", "Status", "Photo",
+                                           "Evidence refs"]
+    assert _head(wb["Packaging"]) == ["ID", "Date", "SKU", "Product", "Issue", "Finding", "Description", "Qty",
+                                      "Batch / packaging", "Packaging version", "Basis", "Evidence level", "Status",
+                                      "Photo", "Evidence refs"]
+    assert _head(wb["Evidence"]) == ["Photo ref", "Report ID", "SKU", "Issue", "Role", "Caption", "SHA-256 (short)",
+                                     "Photo"]
+    assert _head(wb["Corrective actions"]) == ["Action", "Request", "Owner", "Due", "Supplier response", "YQ check",
+                                               "Status", "Days open", "Linked reports"]
+    ws = wb["Product issues"]
+    ids = [ws.cell(row=r, column=1).value for r in range(2, ws.max_row + 1)]
+    assert ids == [f"MI-{i}" for i in (101, 102, 103, 104, 131, 141, 151, 161, 162, 121)], ids
+    last = [c.value for c in ws[ws.max_row]]
+    assert last[5] == "Insufficient evidence (not counted)" and last[12] == "no photo"
+    first = {h: v for h, v in zip(_head(ws), [c.value for c in ws[2]])}
+    assert first["Description"] == ("[shop] owner says field team sold it; call [number]; paid [amount]. "
+                                    "[another supplier] makes a better one."), first["Description"]
+    assert (first["Finding"], first["Evidence level"], first["Evidence refs"], first["Qty"]) == \
+        ("Verified", "Inspected & verified by YQ", "PH-1", 2)
+    row131 = {h: v for h, v in zip(_head(ws), [c.value for c in ws[6]])}
+    assert row131["ID"] == "MI-131" and row131["Photo"] == "photo not available"
+    assert [c.value for c in wb["Packaging"][2]][9] == "v2"
+    actions = [[c.value for c in r] for r in wb["Corrective actions"].iter_rows(min_row=2)]
+    assert [r[0] for r in actions] == ["CA-1", "CA-3", "CA-5"]
+    assert actions[0][7] == 26, "open since 18 Sep, as of the approval (14 Oct)"
+    assert actions[1][4] == "We will check the ink. Write to [email]" and actions[2][7] == 23
+    summary = _cells(wb)
+    assert "Supplier X: product feedback, September 2026" in summary
+    assert "Supplier X: September 2026." in summary
+
+
+@test("download: thumbnails and 640 px JPEGs are embedded; a photo that cannot be fetched reads 'photo not available'; the thumbnail stands in for a lost master")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        rid = _approved(fake)
+        data = _sr().download(rid, "clerk@example.com", "member")["data"]
+    wb = _book(data)
+    ev = wb["Evidence"]
+    refs = [ev.cell(row=r, column=1).value for r in range(2, ev.max_row + 1)]
+    assert refs == ["PH-3", "PH-1", "PH-5", "PH-6", "PH-7", "PH-8"], refs
+    by_ref = {ev.cell(row=r, column=1).value: [c.value for c in ev[r]] for r in range(2, ev.max_row + 1)}
+    assert by_ref["PH-6"][7] == "photo not available"
+    assert by_ref["PH-5"][6] == "abababababab" and by_ref["PH-7"][6] == "-", "a stored sha256; none from a thumbnail"
+    master_1 = fake.storage.objects[("finds", next(p["path"] for p in fake.rows("market_photos") if p["id"] == 1))][0]
+    assert by_ref["PH-1"][6] == hashlib.sha256(master_1).hexdigest()[:12]
+    assert by_ref["PH-1"][5] == "Cable end burnt, seen at [shop]"
+    pics = _colours(ev)
+    assert len(pics) == 5 and all(fmt == "JPEG" for fmt, _s, _c in pics)
+    assert sorted(max(size) for _f, size, _c in pics) == [320, 640, 640, 640, 640], "640 px; the thumbnail-only one 320"
+    thumbs = _colours(wb["Product issues"]) + _colours(wb["Packaging"])
+    assert len(thumbs) == 5 and all(max(size) <= 160 for _f, size, _c in thumbs)
+    assert any(_near(col, (0, 150, 150)) for _f, _s, col in pics), "PH-7 came from its 320 px thumbnail"
+
+
+@test("privacy: every cell of the supplier edition is free of shop, customer and rep names, contacts, amounts, BHD, prices, other suppliers' ids and people / receipt photos")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        rid = _approved(fake)
+        data = _sr().download(rid, "clerk@example.com", "member")["data"]
+    wb = _book(data)
+    cells = _cells(wb)
+    text = "\n".join(cells)
+    forbidden = ["Shop Alpha", "Shop Beta", "Shop Gamma", "Shop Delta", "Shop Epsilon", "Shop Zeta", "Owner Alpha",
+                 "Focus Trader Kappa", "Rep One", "Rep Two", "rep1@example.com", "rep2", "qa@supplier-x.example",
+                 "3900 1234", "2.500", "1.250", "2.750", "Supplier Y", "SUPY", "Brand Y", "Rival", "Supplier Old"]
+    for word in forbidden:
+        assert word.lower() not in text.lower(), word
+    assert not re.search(r"(?i)\bbhd\b|\bbd\b|\bdinar", text), "no currency anywhere"
+    assert not re.search(r"(?i)\b(price|cost|margin)s?\b", text), re.findall(r"(?i).{20}\b(?:price|cost|margin).{20}", text)
+    assert _ids(text, "MI") <= X_FINDINGS and not (_ids(text, "MI") & (NEVER_IN_X | X_MARKET))
+    assert _ids(text, "CA") == {1, 3, 5} and _ids(text, "PH") == {1, 3, 5, 6, 7, 8}
+    for ws in wb.worksheets:
+        for _f, _s, col in _colours(ws):
+            assert not _near(col, RED), f"a people-flagged photo on {ws.title}"
+            assert not _near(col, YELLOW), f"a receipt photo on {ws.title}"
+    assert "[shop]" in text and "field team" in text and "[number]" in text and "[amount]" in text
+    assert wb.properties.creator == "YQ Bahrain"
+
+
+@test("download: the internal edition adds Competitor and Demand (a competitor's price allowed there), still no names, never a people photo")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        rid = _approved(fake, "internal")
+        got = _sr().download(rid, "clerk@example.com", "member")
+    wb = _book(got["data"])
+    assert got["filename"].endswith("-2026-09-internal.xlsx")
+    assert wb.sheetnames == ["Summary", "Product issues", "Packaging", "Evidence", "Corrective actions", "Competitor",
+                             "Demand"]
+    assert _head(wb["Competitor"]) == ["ID", "Date", "Product seen", "Brand", "Competitor", "Category",
+                                       "Price seen (BHD)", "YQ SKU", "Note", "Area", "Photo"]
+    assert _head(wb["Demand"]) == ["ID", "Date", "Source", "Asked for", "YQ SKU", "Qty asked", "Demand level", "Note",
+                                   "Area"]
+    comp = [c.value for c in wb["Competitor"][2]]
+    assert comp[0] == "MI-171" and comp[6] == "1.250" and comp[8] == "[shop] stocks it"
+    assert [c.value for c in wb["Demand"][2]][:6] == ["MI-181", "2026-09-26", "Field team", "Asked for C10 in white",
+                                                      None, 20]
+    text = "\n".join(_cells(wb))
+    for word in ("Shop Alpha", "Shop Beta", "Rep One", "Supplier Y", "3900 1234"):
+        assert word not in text, word
+    colours = [col for ws in wb.worksheets for _f, _s, col in _colours(ws)]
+    assert any(_near(c, YELLOW) for c in colours), "the receipt is in the internal edition"
+    assert not any(_near(c, RED) for c in colours), "a people photo never is"
+    assert "Competitor sightings" in text and "Demand requests" in text
+
+
+@test("download: logged on the row ({at, by, sha256}) and in audit_log; the same data gives the same bytes; a download that cannot be logged is never served")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        rid = _approved(fake)
+        c = R._client()
+        r1 = c.get(f"/market-intel/supplier-reports/{rid}/download", headers=R._h("clerk"))
+        assert r1.status_code == 200, r1.text[:200]
+        assert r1.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
+        assert 'filename="YQ-supplier-report-SUPX-2026-09-supplier.xlsx"' in r1.headers["content-disposition"]
+        sha = hashlib.sha256(r1.content).hexdigest()
+        row = next(r for r in fake.rows("supplier_reports") if r["id"] == rid)
+        assert row["file_sha256"] == sha
+        assert row["downloads"] == [{"at": NOW.isoformat(), "by": "clerk@example.com", "sha256": sha}]
+        audit = [a for a in fake.rows("audit_log") if a["event"] == "market_intel.supplier_report.download"]
+        assert len(audit) == 1 and audit[0]["detail"]["sha256"] == sha and audit[0]["user_email"] == "clerk@example.com"
+        r2 = c.get(f"/market-intel/supplier-reports/{rid}/download", headers=R._h("mgmt"))
+        assert r2.status_code == 200 and r2.content == r1.content, "the same approved report and data, the same file"
+        row = next(r for r in fake.rows("supplier_reports") if r["id"] == rid)
+        assert [d["by"] for d in row["downloads"]] == ["clerk@example.com", "mgmt@example.com"]
+        preview = c.get(f"/market-intel/supplier-reports/{rid}", headers=R._h("clerk")).json()["report"]
+        assert preview["file_sha256"] == sha and [d["by"] for d in preview["downloads"]] == ["clerk", "mgmt"]
+        # the log cannot be written: nothing is served, nothing is recorded
+        fake.fail[("update", "supplier_reports")] = RuntimeError("database unavailable")
+        try:
+            sr.download(rid, "boss@example.com", "admin")
+            raise AssertionError("served without a log")
+        except RuntimeError as e:
+            assert "unavailable" in str(e)
+        assert len(next(r for r in fake.rows("supplier_reports") if r["id"] == rid)["downloads"]) == 2
+
+
+@test("download: a control character in an admin-typed label or a formula-like note never breaks or arms the file")
+def _():
+    types = [dict(t, label_en="Not\x07 charging") if t["id"] == 100 else t for t in TYPES]
+    obs = [dict(o, note='=HYPERLINK("http://example.invalid","x")') if o["id"] == 102 else o for o in OBS]
+    fake = _world(market_issue_types=types, market_observations=obs)
+    with _env(fake, CATALOG):
+        rid = _approved(fake)
+        data = _sr().download(rid, "clerk@example.com", "member")["data"]
+    wb = _book(data)
+    ws = wb["Product issues"]
+    row = {h: c for h, c in zip(_head(ws), ws[3])}
+    assert row["ID"].value == "MI-102" and row["Issue"].value == "Not charging"
+    assert row["Description"].value.startswith("=HYPERLINK") and row["Description"].data_type == "s", "text, not a formula"
+
+
+@test("download: a superseded report and a draft are refused; a row moved to another supplier since approval stops the download")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        old = _approved(fake)
+        new = _approved(fake)
+        _raises(lambda: sr.download(old, "clerk@example.com", "member"), "superseded", 409)
+        assert sr.download(new, "clerk@example.com", "member")["bytes"] > 0
+        next(c for c in fake.tables["market_cases"] if c["id"] == 11)["supplier_id"] = 2
+        _raises(lambda: sr.download(new, "clerk@example.com", "member"), "MI-151", 409)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. the routes: roles, shapes, before the migration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("routes: every /market-intel/supplier-reports route is behind feature:Market Intel and nothing else")
+def _():
+    from fastapi.routing import APIRoute
+    import app.main as m
+    from app import auth
+    found = {}
+    for r in m.app.routes:
+        if isinstance(r, APIRoute) and r.path.startswith("/market-intel/supplier-reports"):
+            for meth in r.methods:
+                gates = []
+                for dep in r.dependant.dependencies:
+                    c = dep.call
+                    gates.append("user" if c is auth.get_current_user else
+                                 f"feature:{c.feature}" if getattr(c, "feature", None) else f"?{c}")
+                found[(meth, r.path)] = gates
+    want = {("POST", "/market-intel/supplier-reports"), ("GET", "/market-intel/supplier-reports"),
+            ("GET", "/market-intel/supplier-reports/{report_id}"), ("PATCH", "/market-intel/supplier-reports/{report_id}"),
+            ("POST", "/market-intel/supplier-reports/{report_id}/approve"),
+            ("GET", "/market-intel/supplier-reports/{report_id}/download")}
+    assert set(found) == want, set(found) ^ want
+    assert all(g == ["feature:Market Intel"] for g in found.values()), found
+    assert _sr().APPROVE_ROUTE == "/market-intel/supplier-reports/{report_id}/approve"
+
+
+@test("roles: reps and a storekeeper holding the page get 403 everywhere; without the page 403 too; nothing is written")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        rid = _approved(fake)
+        c = R._client()
+        before = len(fake.writes())
+        for tok in ("rep1", "store", "rep3"):
+            calls = [c.post("/market-intel/supplier-reports", headers=R._h(tok), json={"supplier_id": 1, "month": SEP}),
+                     c.get("/market-intel/supplier-reports", headers=R._h(tok)),
+                     c.get(f"/market-intel/supplier-reports/{rid}", headers=R._h(tok)),
+                     c.patch(f"/market-intel/supplier-reports/{rid}", headers=R._h(tok), json={"narrative": "x"}),
+                     c.post(f"/market-intel/supplier-reports/{rid}/approve", headers=R._h(tok)),
+                     c.get(f"/market-intel/supplier-reports/{rid}/download", headers=R._h(tok))]
+            assert all(r.status_code == 403 for r in calls), (tok, [(r.status_code, r.text[:80]) for r in calls])
+            if tok == "rep3":
+                assert "Market Intel" in calls[1].text
+            else:
+                assert "office and management" in calls[1].text or "office" in calls[0].text
+        assert len(fake.writes()) == before, fake.writes()[before:]
+
+
+@test("roles: management reads and downloads; building and editing are refused centrally (read_only); approving needs the allowlist entry")
+def _():
+    from app import auth
+    fake = _world()
+    with _env(fake, CATALOG):
+        sr = _sr()
+        c = R._client()
+        rid = c.post("/market-intel/supplier-reports", headers=R._h("clerk"),
+                     json={"supplier_id": 1, "month": SEP, "edition": "supplier"}).json()["report"]["id"]
+        lst = c.get("/market-intel/supplier-reports", headers=R._h("mgmt"))
+        assert lst.status_code == 200 and lst.json()["count"] == 1
+        caps = lst.json()["capabilities"]
+        assert caps["can_build"] is False and caps["can_edit"] is False and caps["can_download"] is True
+        one = c.get(f"/market-intel/supplier-reports/{rid}", headers=R._h("mgmt"))
+        assert one.status_code == 200 and "Shop Alpha" not in one.text and "3900 1234" not in one.text
+        for r in (c.post("/market-intel/supplier-reports", headers=R._h("mgmt"), json={"supplier_id": 1, "month": SEP}),
+                  c.patch(f"/market-intel/supplier-reports/{rid}", headers=R._h("mgmt"), json={"narrative": "x"})):
+            assert r.status_code == 403 and r.json()["detail"]["code"] == "read_only", r.text[:200]
+        entry = ("POST", sr.APPROVE_ROUTE)
+        if entry not in auth.READ_ONLY_WRITE_ALLOWLIST:      # until app/auth.py lists the route
+            r = c.post(f"/market-intel/supplier-reports/{rid}/approve", headers=R._h("mgmt"))
+            assert r.status_code == 403 and r.json()["detail"]["code"] == "read_only"
+            assert c.get("/market-intel/supplier-reports", headers=R._h("mgmt")).json()["capabilities"]["can_approve"] is False
+        with R._Patched((auth, "READ_ONLY_WRITE_ALLOWLIST", auth.READ_ONLY_WRITE_ALLOWLIST | {entry})):
+            assert c.get("/market-intel/supplier-reports", headers=R._h("mgmt")).json()["capabilities"]["can_approve"] is True
+            r = c.post(f"/market-intel/supplier-reports/{rid}/approve", headers=R._h("mgmt"))
+            assert r.status_code == 200 and r.json()["status"] == "approved", r.text[:200]
+        d = c.get(f"/market-intel/supplier-reports/{rid}/download", headers=R._h("mgmt"))
+        assert d.status_code == 200 and d.content[:2] == b"PK"
+        assert [a["event"] for a in fake.rows("audit_log") if a["event"].startswith("market_intel.supplier_report")] == \
+            ["market_intel.supplier_report.build", "market_intel.supplier_report.approve",
+             "market_intel.supplier_report.download"]
+
+
+@test("routes: a reviewer's full round trip — build, list with filters and paging, preview, edit, approve, download")
+def _():
+    fake = _world()
+    with _env(fake, CATALOG):
+        c = R._client()
+        b = c.post("/market-intel/supplier-reports", headers=R._h("clerk"), json={"supplier_id": 1, "month": SEP})
+        assert b.status_code == 200, b.text[:300]
+        body = b.json()
+        assert body["capabilities"] == {"can_build": True, "can_edit": True, "can_approve": True, "can_download": True}
+        rid = body["report"]["id"]
+        assert set(body) >= {"report", "rows", "groups", "actions", "live_counts", "warnings", "rebuilt"}
+        row = next(r for r in body["rows"]["product_issues"] if r["id"] == 101)
+        assert row["photos"][0]["thumb_url"].startswith("https://signed.example/finds/market/2026/09/p1-t320")
+        assert row["photos"][0]["caption"] == "Cable end burnt, seen at [shop]" and row["photos_withheld"] == 1
+        assert not any(k.startswith("_") for r in body["rows"]["product_issues"] for k in r)
+        assert c.post("/market-intel/supplier-reports", headers=R._h("clerk"),
+                      json={"supplier_id": 1, "month": SEP, "edition": "internal"}).status_code == 200
+        lst = c.get("/market-intel/supplier-reports?supplier_id=1&month=2026-09", headers=R._h("clerk")).json()
+        assert lst["count"] == 2 and {r["edition"] for r in lst["rows"]} == {"supplier", "internal"}
+        assert all("narrative" not in r and r["supplier"]["name"] == "Supplier X" for r in lst["rows"])
+        assert c.get("/market-intel/supplier-reports?edition=internal", headers=R._h("clerk")).json()["count"] == 1
+        page = c.get("/market-intel/supplier-reports?limit=1&offset=1", headers=R._h("clerk")).json()
+        assert page["count"] == 2 and len(page["rows"]) == 1
+        assert c.get("/market-intel/supplier-reports?status=approved", headers=R._h("clerk")).json()["count"] == 0
+        assert c.get("/market-intel/supplier-reports?edition=public", headers=R._h("clerk")).status_code == 400
+        p = c.patch(f"/market-intel/supplier-reports/{rid}", headers=R._h("clerk"),
+                    json={"included_observation_ids": sorted(X_COUNTED - {161, 162})})
+        assert p.status_code == 200 and p.json()["report"]["counts"]["reports"] == 9
+        bad = c.patch(f"/market-intel/supplier-reports/{rid}", headers=R._h("clerk"), json={"narrative": "[MI-999]"})
+        assert bad.status_code == 400 and "MI-999" in bad.json()["detail"]
+        assert c.get("/market-intel/supplier-reports/999", headers=R._h("clerk")).status_code == 404
+        assert c.get(f"/market-intel/supplier-reports/{rid}/download", headers=R._h("clerk")).status_code == 409
+        a = c.post(f"/market-intel/supplier-reports/{rid}/approve", headers=R._h("clerk"))
+        assert a.status_code == 200 and a.json()["approved_by"] == "clerk"
+        d = c.get(f"/market-intel/supplier-reports/{rid}/download", headers=R._h("boss"))
+        assert d.status_code == 200
+        cells = "\n".join(_cells(_book(d.content)))
+        assert "MI-161" not in cells and "MI-101" in cells
+        events = [a["event"] for a in fake.rows("audit_log")]
+        assert events.count("market_intel.supplier_report.build") == 2 and "market_intel.supplier_report.edit" in events
+
+
+@test("before the migration: every route answers 503 with the hint (a rep still 403); a table missing half-way is 503 too and forgets the probe")
+def _():
+    sr = _sr()
+    fake = _world()
+    fake.missing = {"supplier_reports"}
+    with _env(fake, CATALOG):
+        c = R._client()
+        calls = [c.post("/market-intel/supplier-reports", headers=R._h("clerk"), json={"supplier_id": 1, "month": SEP}),
+                 c.get("/market-intel/supplier-reports", headers=R._h("clerk")),
+                 c.get("/market-intel/supplier-reports/1", headers=R._h("mgmt")),
+                 c.patch("/market-intel/supplier-reports/1", headers=R._h("clerk"), json={"narrative": "x"}),
+                 c.post("/market-intel/supplier-reports/1/approve", headers=R._h("clerk")),
+                 c.get("/market-intel/supplier-reports/1/download", headers=R._h("clerk"))]
+        for r in calls:
+            assert r.status_code == 503 and r.json()["detail"] == sr.MISSING_HINT, (r.status_code, r.text[:200])
+        assert c.get("/market-intel/supplier-reports", headers=R._h("rep1")).status_code == 403
+        assert sr.available() is False
+    fake = _world()
+    fake.missing = {"market_cases"}
+    with _env(fake, CATALOG):
+        _raises(lambda: _build(), "not set up yet", 503)
+        assert sr._probe["ok"] is False and sr._probe["until"] == 0.0
+    fake = _world()
+    fake.missing = {"customers"}                    # an optional name list: the report still builds
+    with _env(fake, CATALOG):
+        assert _build()["report"]["counts"]["reports"] == 11
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. pins
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@test("pins: never e-mailed; registered right after Market Intel; CI runs this suite in the api job")
+def _():
+    for rel in ("app/supplier_reports.py", "app/supplier_reports_api.py"):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        for word in ("emailer", "send_html", "notify", "smtp", "resend"):
+            assert word not in src.lower(), (rel, word)
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    mi_at = main.index("_register_market_intel(app, limiter)")
+    sr_at = main.index("_register_supplier_reports(app, limiter)")
+    assert mi_at < sr_at and main[mi_at:sr_at].count("\n") == 1, "the line right after Market Intel's registration"
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    api = ci.split("\n  web:\n", 1)[0]
+    assert "python -m tests.test_r7b_market_intel\n          python -m tests.test_r8m_supplier_reports\n" in api
+    step = api.split("python -m tests.test_r8m_supplier_reports", 1)[0].rsplit("- name:", 1)[1]
+    assert "SUPABASE_URL: https://ci.invalid" in step
+
+
+def main() -> int:
+    passed = failed = 0
+    for name, fn in TESTS:
+        try:
+            fn()
+            print(f"PASS  {name}")
+            passed += 1
+        except Exception:  # noqa: BLE001
+            print(f"FAIL  {name}")
+            traceback.print_exc()
+            failed += 1
+    print(f"\n{passed} passed, {failed} failed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
