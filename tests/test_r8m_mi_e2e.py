@@ -169,12 +169,7 @@ UNIQUE = {
 
 # A mismatch this suite meets that is another builder's to fix (reported, never hidden): the read is let
 # through and recorded, and main() prints it as a NOTE while it is still met.
-KNOWN_GAPS = {
-    ("order", "supplier_action_cases", "id"):
-        "app/supplier_reports.py: _by('supplier_action_cases', ...) pages through _all(), which orders by id; "
-        "that table has no id column (its key is action_id + case_id), so PostgREST answers 42703 and "
-        "_tables() turns it into 503 'not set up yet' (lines 522 and 527)",
-}
+KNOWN_GAPS: dict = {}          # the supplier_action_cases order (no id column) was fixed in app/supplier_reports.py
 
 
 def _pg(code: str, message: str) -> RuntimeError:
@@ -297,6 +292,7 @@ class _DB(R._FakeDB):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 NOW = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+APPROVE_AT = datetime(2026, 11, 8, 6, 0, tzinfo=timezone.utc)   # October's approval opens 7 days after it ends
 MONTH = "2026-10"
 SHOP_A = {"id": 11, "name": "Shop Alpha", "phone": "97330000011", "area": "Manama"}
 SHOP_B = {"id": 12, "name": "Shop Beta", "phone": "97330000012", "area": "Muharraq"}
@@ -897,11 +893,19 @@ def _():
         assert listed["capabilities"]["can_build"] is False
         refused = c.patch(f"/market-intel/supplier-reports/{W.report}", headers=R._h("mgmt"), json={"narrative": "x"})
         assert refused.status_code == 403 and refused.json()["detail"]["code"] == "read_only"
-        a = _ok(c.post(f"/market-intel/supplier-reports/{W.report}/approve", headers=R._h("mgmt")))
-        assert (a["status"], a["approved_by"], a["superseded"]) == ("approved", "mgmt", [])
-        d = c.get(f"/market-intel/supplier-reports/{W.report}/download", headers=R._h("clerk"))
-        assert d.status_code == 200, d.text[:300]
-        preview = _ok(c.get(f"/market-intel/supplier-reports/{W.report}", headers=R._h("mgmt")))
+        early = c.post(f"/market-intel/supplier-reports/{W.report}/approve", headers=R._h("mgmt"))
+        assert early.status_code in (400, 409), (early.status_code, early.text[:200])   # the month is not over yet
+        from app import supplier_reports as sr
+        real_now = sr._now
+        sr._now = lambda: APPROVE_AT
+        try:
+            a = _ok(c.post(f"/market-intel/supplier-reports/{W.report}/approve", headers=R._h("mgmt")))
+            assert (a["status"], a["approved_by"], a["superseded"]) == ("approved", "mgmt", [])
+            d = c.get(f"/market-intel/supplier-reports/{W.report}/download", headers=R._h("clerk"))
+            assert d.status_code == 200, d.text[:300]
+            preview = _ok(c.get(f"/market-intel/supplier-reports/{W.report}", headers=R._h("mgmt")))
+        finally:
+            sr._now = real_now
     assert d.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
     assert 'filename="YQ-supplier-report-SUPX-2026-10-supplier.xlsx"' in d.headers["content-disposition"]
     W.xlsx = d.content
