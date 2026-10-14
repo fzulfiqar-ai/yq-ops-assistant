@@ -1,36 +1,70 @@
-"""The weekly AI Head's Market Intel step (plan §18.6 / §18.9 / §19 step 9), run on the owner's PC.
+"""The weekly AI Head's Market Intel step (plan §18.6 / §18.9 / §19 step 9; Market Intel v2 Part F1 / F8),
+run on the owner's PC.
 
     python -m scripts.market_intel_ai_head pack                  # read only: exports/ai_head/<date>/market_intel.json
-    python -m scripts.market_intel_ai_head pack --photos         # + short-lived signed photo URLs for the top items
+    python -m scripts.market_intel_ai_head pack --photos         # + short-lived signed photo URLs
     python -m scripts.market_intel_ai_head suggest FILE.json     # dry run: what would be written
     python -m scripts.market_intel_ai_head suggest FILE.json --apply
 
 pack — reads v_market_signals_agent (no rep, shop, note, login or photo path in it) over a read-only
-connection, ranks the open clusters by DISTINCT shops x recency (+ marketplace demand), and writes a
-dated JSON under exports/ (gitignored). --photos adds, for the top items only, signed URLs (1 hour)
-to their photos, never a people-flagged one; that needs the service key already in .env and never
-sends a photo anywhere — Claude Code reads them from the owner's machine.
+connection, ranks the open clusters and the un-identified sightings by DISTINCT shops x recency
+(+ marketplace demand), and writes a dated JSON under exports/ (gitignored). Every row names the
+sightings it rests on (`observation_ids`, newest first), which a finding cites as [MI-<id>]. The
+photo-only sightings (no item, no YQ product) that the ranking leaves out follow in `to_identify`,
+newest first, so each one can get a reading too. --photos adds, for every listed row, signed URLs
+(1 hour) to its photos, each with its observation ID, never a people-flagged one; that needs the
+service key already in .env and never sends a photo anywhere — Claude Code reads them from the
+owner's machine.
 
-suggest — the AI Head's reading of those photos goes back as `ai_suggestion` + `ai_confidence` with
-verified = false: shown as "Unverified" on the item until a reviewer marks it verified. An item a
-person already verified is never overwritten. Every write leaves a decision row (actor 'ai-head').
-FILE is a JSON list: [{"item_id": 12, "suggestion": {"brand": ..., "model": ..., "spec": ...,
-"visible_text": ...}, "confidence": 0.62}]. Nothing else about the item changes: no status, no merge
-(merges are proposed in the report and approved by a person on the board).
+suggest — the AI Head's reading of those photos goes back as an UNVERIFIED suggestion, never as fact:
+  an item      `ai_suggestion` + `ai_confidence` with verified = false, shown as "Unverified" on the item
+               until a reviewer marks it verified; an item a person verified (or merged) is never
+               written; a decision row records it (actor 'ai-head');
+  a sighting   a photo-only sighting's meta.ai_suggestion (verified false, label "Unverified"), only while
+               it is still unidentified; an audit_log row records it. The office identifies it.
+Every suggestion cites the sightings it rests on — `observation_ids`, each one of its target's own
+sightings (an item's, or the photo-only sighting itself) — and the stored reading carries them as
+"sightings": ["MI-101", ...]. A reading with a phone number or an email in it is refused (a barcode,
+8-14 digits, goes under "barcode"). Nothing else changes: no status, no identification, no merge (those
+are proposed in the report and decided by a person on the board).
+FILE is a JSON list:
+  [{"item_id": 12, "observation_ids": [101, 105],
+    "suggestion": {"brand": ..., "model": ..., "spec": ..., "visible_text": ...}, "confidence": 0.62},
+   {"observation_id": 230, "observation_ids": [230], "suggestion": {...}, "confidence": 0.4}]
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 MAX_SUGGESTION_BYTES = 4000
+MAX_CITED = 50                      # observation IDs one suggestion may cite
+CITE_KEY = "sightings"              # the stored reading's citations: filled from observation_ids, never by the file
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# plan Part F8: the four labels a Market Intel finding carries in any report
+LABELS = {
+    "Verified fact": "a person verified it on the board (an item's verified = true); the AI Head never sets it",
+    "Unverified report": "what a rep saw or a shop said: a report until two shops or reps corroborate it "
+                         "(plan §18.9) or a person verifies it",
+    "AI suggestion": "the AI Head's reading of the photos, citing the sightings it rests on as [MI-<id>]; "
+                     "stored Unverified by `suggest`",
+    "Recommended action": "what the AI Head proposes; a person decides",
+}
+SUGGEST_FORMAT = [
+    {"item_id": 12, "observation_ids": [101, 105],
+     "suggestion": {"brand": "...", "model": "...", "spec": "...", "visible_text": "..."}, "confidence": 0.62},
+    {"observation_id": 230, "observation_ids": [230], "suggestion": {"brand": "...", "model": "..."}, "confidence": 0.4},
+]
+_CITED = re.compile(r"(?:MI-)?(\d{1,12})", re.I)
 
 
 def _ts(v) -> datetime | None:
@@ -63,9 +97,65 @@ def rank(rows: list[dict], now: datetime, top: int = 20) -> list[dict]:
     return out[: max(1, top)]
 
 
+def to_identify(rows: list[dict]) -> list[dict]:
+    """Photo-only sightings — no item, no YQ product, at least one photo without people — newest first:
+    the ones the AI Head is asked to name. The ranking alone can leave them out (one sighting, no shop)."""
+    out = [r for r in rows if r.get("row_type") == "unassigned" and not r.get("yq_item_code")
+           and int(r.get("usable_photos") or 0) > 0]
+    out.sort(key=lambda r: (-(_ts(r.get("last_seen")) or EPOCH).timestamp(), -int(r.get("observation_id") or 0)))
+    return out
+
+
+def _key(r: dict) -> tuple[str, int]:
+    """A pack row's identity: ('item', item_id) for a cluster, ('obs', observation_id) for a sighting."""
+    if r.get("row_type") == "item" and r.get("item_id") is not None:
+        return ("item", int(r["item_id"]))
+    return ("obs", int(r.get("observation_id") or 0))
+
+
+def _cited_ids(v) -> list[int] | None:
+    """[101, 105] or ["MI-101", "MI-105"] -> [101, 105] (ascending, once each); None when malformed."""
+    if not isinstance(v, list) or not 1 <= len(v) <= MAX_CITED:
+        return None
+    out: set[int] = set()
+    for x in v:
+        if isinstance(x, bool):
+            return None
+        if isinstance(x, int):
+            n = x
+        elif isinstance(x, str) and _CITED.fullmatch(x.strip()):
+            n = int(_CITED.fullmatch(x.strip()).group(1))
+        else:
+            return None
+        if n <= 0:
+            return None
+        out.add(n)
+    return sorted(out)
+
+
+def _carries_contact(v, key: str | None = None) -> bool:
+    """A phone-like run of digits or an email anywhere in a reading (app.ai_insights.has_contact, the
+    rule the views and the insights loader share). A barcode is a product code, not a phone: 8 to 14
+    digits and nothing else, under the key "barcode"."""
+    from app.ai_insights import has_contact
+    if isinstance(v, dict):
+        return any(has_contact(str(k)) or _carries_contact(x, str(k)) for k, x in v.items())
+    if isinstance(v, list):
+        return any(_carries_contact(x, key) for x in v)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        v = str(v)
+    if isinstance(v, str):
+        return not (key == "barcode" and re.fullmatch(r"\d{8,14}", v.strip())) and has_contact(v)
+    return False
+
+
 def validate_suggestions(raw) -> tuple[list[dict], list[str]]:
-    """(clean rows, problems). A row needs an integer item_id, a non-empty JSON object under 4 KB and
-    a confidence between 0 and 1."""
+    """(clean rows, problems). A row names ONE target — item_id (a cluster) or observation_id (a
+    photo-only sighting) — and carries a non-empty JSON object under 4 KB, with no phone number or
+    email in it, and a confidence between 0 and 1. observation_ids, the sightings the reading rests on
+    (101 or "MI-101", at most 50), is checked for shape here and against the database by cite_problem()
+    before anything is written: a suggestion that cites nothing, or cites another target's sightings,
+    is never stored."""
     ok: list[dict] = []
     bad: list[str] = []
     if not isinstance(raw, list):
@@ -75,17 +165,29 @@ def validate_suggestions(raw) -> tuple[list[dict], list[str]]:
         if not isinstance(r, dict):
             bad.append(f"{where}: not an object")
             continue
+        has_item, has_obs = r.get("item_id") is not None, r.get("observation_id") is not None
+        if has_item == has_obs:
+            bad.append(f"{where}: name one target, item_id (a cluster) or observation_id (a photo-only sighting)")
+            continue
+        key = "item_id" if has_item else "observation_id"
         try:
-            item_id = int(r.get("item_id"))
+            target = int(r.get(key))
         except (TypeError, ValueError):
-            bad.append(f"{where}: item_id must be a number")
+            bad.append(f"{where}: {key} must be a number")
             continue
         s = r.get("suggestion")
         if not isinstance(s, dict) or not s:
             bad.append(f"{where}: suggestion must be a non-empty object")
             continue
+        if CITE_KEY in s:
+            bad.append(f"{where}: '{CITE_KEY}' is filled from observation_ids; leave it out of the suggestion")
+            continue
         if len(json.dumps(s, ensure_ascii=False)) > MAX_SUGGESTION_BYTES:
             bad.append(f"{where}: suggestion is over {MAX_SUGGESTION_BYTES} bytes")
+            continue
+        if _carries_contact(s):
+            bad.append(f"{where}: the suggestion carries a phone number or an email address (a barcode goes "
+                       f"under \"barcode\", digits only)")
             continue
         try:
             conf = float(r.get("confidence"))
@@ -95,8 +197,41 @@ def validate_suggestions(raw) -> tuple[list[dict], list[str]]:
         if not 0 <= conf <= 1:
             bad.append(f"{where}: confidence must be between 0 and 1")
             continue
-        ok.append({"item_id": item_id, "suggestion": s, "confidence": round(conf, 3)})
+        row = {key: target, "suggestion": s, "confidence": round(conf, 3)}
+        if r.get("observation_ids") is not None:
+            ids = _cited_ids(r.get("observation_ids"))
+            if ids is None:
+                bad.append(f"{where}: observation_ids must list 1 to {MAX_CITED} observation IDs (101 or \"MI-101\")")
+                continue
+            row["observation_ids"] = ids
+        ok.append(row)
     return ok, bad
+
+
+def cite_problem(row: dict, own: set[int], where: str) -> str | None:
+    """Why a suggestion may not be stored for want of evidence, or None. It cites at least one
+    sighting, and only its own target's: an item's sightings, or the photo-only sighting itself (a
+    reading rests on the photos the pack showed)."""
+    ids = row.get("observation_ids") or []
+    if not ids:
+        return f"{where}: cites no sighting (list the observation IDs whose photos you read in observation_ids)"
+    foreign = [i for i in ids if i not in own]
+    if foreign:
+        return f"{where}: cites " + ", ".join(f"MI-{i}" for i in foreign[:5]) + ", not one of its own sightings"
+    return None
+
+
+def stored_suggestion(row: dict) -> dict:
+    """The reading as stored: the AI Head's object plus the sightings it cites ("MI-<id>"), so the item
+    card shows the evidence beside the reading (Part F8: an AI suggestion carries its observation IDs)."""
+    return {**row["suggestion"], CITE_KEY: [f"MI-{i}" for i in row.get("observation_ids") or []]}
+
+
+def sighting_reading(row: dict, at: str) -> dict:
+    """What a photo-only sighting stores under meta.ai_suggestion: the shape the item page serves
+    (suggestion, confidence, verified, label), plus who and when."""
+    return {"suggestion": stored_suggestion(row), "confidence": row["confidence"], "verified": False,
+            "label": "Unverified", "by": "ai-head", "at": at}
 
 
 def _connect(read_only: bool):
@@ -109,6 +244,7 @@ def _connect(read_only: bool):
     conn = psycopg.connect(url)
     if read_only:
         conn.read_only = True
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ     # one snapshot for every read
     return conn
 
 
@@ -118,40 +254,200 @@ def _rows(cur, sql: str, params=None) -> list[dict]:
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def _sign(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """1-hour signed URLs from the private bucket (app.market_intel.sign_many, with the service key)."""
+    from app.market_intel import sign_many
+    return sign_many(pairs)
+
+
+def _citations(cur, rows: list[dict], cap: int) -> dict[tuple[str, int], list[int]]:
+    """The sightings each listed row rests on, newest first: an item's own (at most `cap`), or the
+    photo-only sighting itself."""
+    out = {_key(r): [int(r["observation_id"])] for r in rows
+           if r.get("row_type") == "unassigned" and r.get("observation_id") is not None}
+    items = sorted({k[1] for k in map(_key, rows) if k[0] == "item"})
+    if items:
+        for o in _rows(cur, "select id, item_id from market_observations where item_id = any(%s) "
+                            "order by observed_at desc, id desc", (items,)):
+            lst = out.setdefault(("item", int(o["item_id"])), [])
+            if len(lst) < max(1, cap):
+                lst.append(int(o["id"]))
+    return out
+
+
+def _photo_links(cur, rows: list[dict], per_row: int) -> dict[tuple[str, int], list[dict]]:
+    """1-hour signed links to the listed rows' photos — items and photo-only sightings alike — newest
+    sighting first, at most `per_row` each, never a photo flagged with people:
+    {row: [{"observation_id": 101, "url": ...}]}."""
+    keys = [_key(r) for r in rows]
+    items = sorted({k[1] for k in keys if k[0] == "item"})
+    sightings = sorted({k[1] for k in keys if k[0] == "obs"})
+    if not items and not sightings:
+        return {}
+    found = _rows(cur, "select o.id as observation_id, o.item_id, p.bucket, p.path from market_photos p "
+                       "join market_observations o on o.id = p.observation_id "
+                       "where (o.item_id = any(%s) or o.id = any(%s)) and not p.has_people_flag "
+                       "order by o.observed_at desc, o.id desc, p.position, p.id", (items, sightings))
+    item_set, obs_set = set(items), set(sightings)
+    per: dict[tuple[str, int], list[tuple[int, str, str]]] = {}
+    for p in found:
+        oid, iid = int(p["observation_id"]), p.get("item_id")
+        if iid is not None and int(iid) in item_set:
+            k = ("item", int(iid))
+        elif oid in obs_set:
+            k = ("obs", oid)
+        else:
+            continue
+        lst = per.setdefault(k, [])
+        if len(lst) < max(1, per_row):
+            lst.append((oid, p["bucket"], p["path"]))
+    signed = _sign([(b, path) for lst in per.values() for _, b, path in lst]) if per else {}
+    return {k: [{"observation_id": oid, "url": signed[(b, path)]} for oid, b, path in lst if (b, path) in signed]
+            for k, lst in per.items()}
+
+
+def _plain(v):
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, Decimal):
+        return str(v)
+    return v
+
+
+def _entry(r: dict, cites: dict, photos: dict, with_photos: bool) -> dict:
+    k = _key(r)
+    e = {key: _plain(v) for key, v in r.items()}
+    e["observation_ids"] = cites.get(k, [])
+    e["label"] = "Unverified report"
+    e["corroborated"] = int(r.get("shops") or 0) >= 2 or int(r.get("reps") or 0) >= 2
+    e["needs_identification"] = r.get("row_type") == "unassigned" and not r.get("yq_item_code")
+    if with_photos:
+        e["photos"] = photos.get(k, [])
+    return e
+
+
 def cmd_pack(args) -> int:
     now = datetime.now(timezone.utc)
     with _connect(read_only=True) as conn:
         cur = conn.cursor()
         rows = _rows(cur, "select * from v_market_signals_agent")
         top = rank(rows, now, args.top)
-        photos: dict[int, list[str]] = {}
-        if args.photos:
-            ids = [int(r["item_id"]) for r in top if r.get("item_id")]
-            paths = _rows(cur, "select o.item_id, p.bucket, p.path from market_photos p "
-                               "join market_observations o on o.id = p.observation_id "
-                               "where o.item_id = any(%s) and not p.has_people_flag order by p.id desc", (ids,)) if ids else []
-            from app.market_intel import sign_many
-            per_item: dict[int, list[tuple[str, str]]] = {}
-            for p in paths:
-                lst = per_item.setdefault(int(p["item_id"]), [])
-                if len(lst) < args.per_item:
-                    lst.append((p["bucket"], p["path"]))
-            signed = sign_many([bp for lst in per_item.values() for bp in lst])
-            photos = {i: [signed[bp] for bp in lst if bp in signed] for i, lst in per_item.items()}
+        listed = {_key(r) for r in top}
+        identify = [r for r in to_identify(rows) if _key(r) not in listed][: max(0, args.identify)]
+        cites = _citations(cur, top + identify, args.cite)
+        photos = _photo_links(cur, top + identify, args.per_item) if args.photos else {}
         conn.rollback()
     out_dir = Path(args.out or ROOT / "exports" / "ai_head" / date.today().isoformat())
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {"generated_at": now.isoformat(), "source": "v_market_signals_agent", "ranking": "distinct shops x recency",
                "photo_urls_expire_in": "1 hour" if args.photos else None,
-               "items": [{**{k: (v.isoformat() if isinstance(v, datetime) else (str(v) if hasattr(v, "quantize") else v))
-                             for k, v in r.items()}, "photo_urls": photos.get(int(r["item_id"]), []) if r.get("item_id") else []}
-                         for r in top],
+               "labels": LABELS,
+               "cite": "every finding cites the sightings it rests on as [MI-<id>], from the row's observation_ids",
+               "suggest": "write readings as a JSON list like suggest_format (observation_ids = the sightings whose "
+                          "photos you read; never a phone, an email or a person's name); "
+                          "`python -m scripts.market_intel_ai_head suggest FILE` is a dry run, and --apply stores "
+                          "them Unverified, only after the owner's yes",
+               "suggest_format": SUGGEST_FORMAT,
+               "items": [_entry(r, cites, photos, args.photos) for r in top],
+               "to_identify": [_entry(r, cites, photos, args.photos) for r in identify],
                "totals": {"clusters": sum(1 for r in rows if r.get("row_type") == "item"),
-                          "unidentified": sum(1 for r in rows if r.get("row_type") == "unassigned")}}
+                          "unidentified": sum(1 for r in rows if r.get("row_type") == "unassigned"),
+                          "photo_only": len(to_identify(rows))}}
     path = out_dir / "market_intel.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"wrote {path} ({len(top)} ranked of {len(rows)} rows{', with photo links' if args.photos else ''})")
+    print(f"wrote {path} ({len(top)} ranked + {len(identify)} to identify, of {len(rows)} rows"
+          f"{', with photo links' if args.photos else ''})")
     return 0
+
+
+def plan_writes(cur, rows: list[dict], at: str) -> list[dict]:
+    """The validated rows that may be stored, each with what it stores (`store`); prints why every other
+    row is left alone. Reads only."""
+    item_ids = sorted({r["item_id"] for r in rows if "item_id" in r})
+    obs_ids = sorted({r["observation_id"] for r in rows if "observation_id" in r})
+    items = {int(x["id"]): x for x in _rows(cur, "select id, title, status, verified, ai_suggestion, ai_confidence "
+                                                 "from market_items where id = any(%s)", (item_ids,))} if item_ids else {}
+    own: dict[int, set[int]] = {}
+    if item_ids:
+        for o in _rows(cur, "select id, item_id from market_observations where item_id = any(%s)", (item_ids,)):
+            own.setdefault(int(o["item_id"]), set()).add(int(o["id"]))
+    seen = {int(x["id"]): x for x in _rows(cur, "select id, item_id, meta from market_observations where id = any(%s)",
+                                           (obs_ids,))} if obs_ids else {}
+    todo: list[dict] = []
+    for r in rows:
+        if "item_id" in r:
+            it, where = items.get(r["item_id"]), f"item {r['item_id']}"
+            if not it:
+                print(f"  skipped: {where} does not exist")
+                continue
+            if it["status"] == "merged":
+                print(f"  skipped: {where} was merged into another item; read that one instead")
+                continue
+            if it["verified"]:
+                print(f"  skipped: {where} ({it['title']}) was verified by a person; left as it is")
+                continue
+            why = cite_problem(r, own.get(r["item_id"], set()), where)
+            if why:
+                print("  skipped:", why)
+                continue
+            store = stored_suggestion(r)
+            if it["ai_suggestion"] == store and it["ai_confidence"] is not None \
+                    and round(float(it["ai_confidence"]), 3) == r["confidence"]:
+                print(f"  unchanged: {where} already carries this suggestion")
+                continue
+        else:
+            ob, where = seen.get(r["observation_id"]), f"sighting MI-{r['observation_id']}"
+            if not ob:
+                print(f"  skipped: {where} does not exist")
+                continue
+            if ob["item_id"] is not None:
+                print(f"  skipped: {where} was identified meanwhile (item {ob['item_id']}); read the item instead")
+                continue
+            why = cite_problem(r, {r["observation_id"]}, where)
+            if why:
+                print("  skipped:", why)
+                continue
+            store = sighting_reading(r, at)
+            meta = ob.get("meta")
+            stored = meta.get("ai_suggestion") if isinstance(meta, dict) else None
+            if isinstance(stored, dict) and stored.get("suggestion") == store["suggestion"] \
+                    and stored.get("confidence") == r["confidence"]:
+                print(f"  unchanged: {where} already carries this suggestion")
+                continue
+        todo.append({**r, "store": store})
+    return todo
+
+
+def write_suggestions(cur, todo: list[dict]) -> int:
+    """Store each reading Unverified. Only ai_suggestion / ai_confidence / verified = false (an item) or
+    meta.ai_suggestion (a photo-only sighting) change: never a status, an item_id or a merge. Each
+    write repeats its guard in the WHERE, so an item a person verified or merged meanwhile, or a sighting
+    the office identified meanwhile, is left alone. Returns how many were stored."""
+    n = 0
+    for r in todo:
+        cites = r.get("observation_ids") or []
+        if "item_id" in r:
+            cur.execute("update market_items set ai_suggestion = %s::jsonb, ai_confidence = %s, verified = false, "
+                        "updated_at = now(), updated_by = 'ai-head' where id = %s and not verified and status <> 'merged'",
+                        (json.dumps(r["store"], ensure_ascii=False), r["confidence"], r["item_id"]))
+            if cur.rowcount:
+                cur.execute("insert into market_item_decisions (item_id, event, actor, actor_role, detail) "
+                            "values (%s, 'edit', 'ai-head', 'ai_head', %s::jsonb)",
+                            (r["item_id"], json.dumps({"ai_suggestion": {"to": "Unverified", "confidence": r["confidence"],
+                                                                          "sightings": cites}})))
+                n += 1
+        else:
+            cur.execute("update market_observations set meta = coalesce(meta, '{}'::jsonb) "
+                        "|| jsonb_build_object('ai_suggestion', %s::jsonb) "
+                        "where id = %s and item_id is null and (meta is null or jsonb_typeof(meta) = 'object')",
+                        (json.dumps(r["store"], ensure_ascii=False), r["observation_id"]))
+            if cur.rowcount:
+                cur.execute("insert into audit_log (user_email, event, detail) "
+                            "values ('ai-head', 'market_intel.ai_suggestion', %s::jsonb)",
+                            (json.dumps({"observation_id": r["observation_id"], "to": "Unverified",
+                                         "confidence": r["confidence"], "sightings": cites}),))
+                n += 1
+    return n
 
 
 def cmd_suggest(args) -> int:
@@ -162,38 +458,22 @@ def cmd_suggest(args) -> int:
     if not rows:
         print("nothing to write")
         return 1 if problems else 0
+    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _connect(read_only=not args.apply) as conn:
         cur = conn.cursor()
-        items = {r["id"]: r for r in _rows(cur, "select id, title, verified, ai_suggestion, ai_confidence "
-                                                "from market_items where id = any(%s)", ([r["item_id"] for r in rows],))}
-        todo = []
-        for r in rows:
-            it = items.get(r["item_id"])
-            if not it:
-                print(f"  skipped: item {r['item_id']} does not exist")
-            elif it["verified"]:
-                print(f"  skipped: item {r['item_id']} ({it['title']}) was verified by a person; left as it is")
-            elif it["ai_suggestion"] == r["suggestion"] and it["ai_confidence"] is not None \
-                    and round(float(it["ai_confidence"]), 3) == r["confidence"]:
-                print(f"  unchanged: item {r['item_id']} already carries this suggestion")
-            else:
-                todo.append(r)
+        todo = plan_writes(cur, rows, at)
         for r in todo:
-            print(f"  item {r['item_id']}: confidence {r['confidence']:.2f} -> {json.dumps(r['suggestion'], ensure_ascii=False)[:120]}")
+            what = f"item {r['item_id']}" if "item_id" in r else f"sighting MI-{r['observation_id']}"
+            print(f"  {what}: confidence {r['confidence']:.2f}, citing "
+                  + ", ".join(f"MI-{i}" for i in r["observation_ids"])
+                  + " -> " + json.dumps(r["suggestion"], ensure_ascii=False)[:120])
         if not args.apply:
             print(f"\nDry run: {len(todo)} suggestion(s) would be written as Unverified. Re-run with --apply.")
             conn.rollback()
             return 0
-        for r in todo:
-            cur.execute("update market_items set ai_suggestion = %s::jsonb, ai_confidence = %s, verified = false, "
-                        "updated_at = now(), updated_by = 'ai-head' where id = %s and not verified",
-                        (json.dumps(r["suggestion"], ensure_ascii=False), r["confidence"], r["item_id"]))
-            if cur.rowcount:
-                cur.execute("insert into market_item_decisions (item_id, event, actor, actor_role, detail) "
-                            "values (%s, 'edit', 'ai-head', 'ai_head', %s::jsonb)",
-                            (r["item_id"], json.dumps({"ai_suggestion": {"to": "Unverified", "confidence": r["confidence"]}})))
+        written = write_suggestions(cur, todo)
         conn.commit()
-    print(f"\nwrote {len(todo)} suggestion(s), all Unverified until a reviewer marks them verified.")
+    print(f"\nwrote {written} suggestion(s), all Unverified until a reviewer marks them verified.")
     return 0
 
 
@@ -202,7 +482,9 @@ def parse_args(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pack", help="read-only ranked export of the market signals")
     p.add_argument("--top", type=int, default=20)
-    p.add_argument("--photos", action="store_true", help="add 1-hour signed photo links for the top items")
+    p.add_argument("--identify", type=int, default=20, help="photo-only sightings listed beyond the ranking")
+    p.add_argument("--cite", type=int, default=25, help="observation IDs listed per item (newest first)")
+    p.add_argument("--photos", action="store_true", help="add 1-hour signed photo links for every listed row")
     p.add_argument("--per-item", type=int, default=4)
     p.add_argument("--out", default=None)
     s = sub.add_parser("suggest", help="write the AI Head's readings as Unverified suggestions")
