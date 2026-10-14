@@ -14,8 +14,8 @@
 -- one capture and the one evidence store and adds a quality track next to the opportunity clusters
 -- (market_items keeps demand, competitor and trend sightings):
 --
---   suppliers              admin list: who makes or sells us the product. Deactivated or merged, never
---                          deleted while anything points at it.
+--   suppliers              admin list: who makes or sells us the product. Deactivated or merged rather than
+--                          deleted: a delete is refused while a case, sighting, action or report uses it.
 --   brands                 admin list: brand -> supplier, aliases (a rename keeps the old name), merges.
 --   market_issue_types     admin list: kind (quality / packaging / demand / competitor / other), a slug
 --                          code, English + Arabic labels, a safety default and the extra capture fields
@@ -32,7 +32,7 @@
 --                          the same supplier, month and edition -> superseded), the narrative with its
 --                          [MI-<id>] references, the sightings included, counts, approver, the file's
 --                          sha256 and every download.
---   v_market_cases_agent   the open (unmerged) cases with codes, counts and dates only: no title, note,
+--   v_market_cases_agent   every case not merged into another (any status) with codes, counts and dates only: no title, note,
 --                          person, shop or photo path. Granted to yq_readonly for the weekly AI Head.
 --
 -- Existing tables only gain columns, each nullable or with a constant default (no row is rewritten):
@@ -67,6 +67,22 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'yq_readonly') then
     raise exception 'r8m_market_quality: the role yq_readonly is missing (scripts/views.sql creates it); this file grants it the agent view';
   end if;
+  -- A first apply (no market_cases yet) adopts nothing: IF NOT EXISTS would silently keep a table or a
+  -- column of the same name made by hand (the dashboard, an experiment), and the reverse would later drop it.
+  if to_regclass('public.market_cases') is null then
+    if to_regclass('public.suppliers') is not null or to_regclass('public.brands') is not null
+       or to_regclass('public.market_issue_types') is not null or to_regclass('public.market_case_events') is not null
+       or to_regclass('public.supplier_actions') is not null or to_regclass('public.supplier_action_cases') is not null
+       or to_regclass('public.supplier_reports') is not null or to_regclass('public.v_market_cases_agent') is not null then
+      raise exception 'r8m_market_quality: a table or view of this release exists although market_cases does not (made by hand?): look at it before applying';
+    end if;
+    if exists (select 1 from information_schema.columns where table_schema = 'public' and (
+         (table_name = 'market_observations' and column_name in ('case_id', 'issue_type_id', 'report_basis', 'qty_affected', 'batch_ref', 'packaging_version', 'safety_flag', 'client_observed_at', 'brand_id', 'supplier_id', 'brand_text', 'supplier_text'))
+         or (table_name = 'market_photos' and column_name in ('role', 'sha256', 'thumb_path', 'caption', 'blurred_path'))
+         or (table_name = 'catalog_items' and column_name = 'barcode'))) then
+      raise exception 'r8m_market_quality: a column of this release exists although market_cases does not (made by hand?): look at it before applying';
+    end if;
+  end if;
 end $$;
 
 -- ── 1. suppliers ─────────────────────────────────────────────────────────────
@@ -90,7 +106,7 @@ revoke all on table suppliers from anon, authenticated;
 revoke all on sequence suppliers_id_seq from anon, authenticated;
 
 comment on table suppliers is
-  'Market Intel v2 (R8m): admin-managed supplier list. One active row per name (any case); a duplicate is merged (merged_into) and deactivated, never deleted while a brand, case, sighting, action or report points at it.';
+  'Market Intel v2 (R8m): admin-managed supplier list. One active row per name (any case); a duplicate is merged (merged_into) and deactivated rather than deleted: a delete is refused while a case, sighting, action or report uses it, and a brand pointing at it loses that link.';
 
 -- ── 2. brands ────────────────────────────────────────────────────────────────
 create table if not exists brands (
@@ -224,7 +240,7 @@ comment on table market_case_events is
   'Append-only (trigger): every Market Intel case change, question, answer, link, move, merge, supplier action and safety alert with who and when.';
 
 create or replace function market_case_events_no_rewrite() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = '' as $$
 begin
   if tg_op = 'TRUNCATE' then
     raise exception 'market_case_events is append-only (it cannot be truncated)'
@@ -305,6 +321,10 @@ create table if not exists supplier_reports (
   constraint supplier_reports_month_first_day check (extract(day from month) = 1)
 );
 create index if not exists supplier_reports_supplier_month_idx on supplier_reports (supplier_id, month desc, edition, status);
+-- one approved report per supplier, month and edition: two approvals racing can never both stand (the API
+-- supersedes the older one first, then approves; the loser of a race gets a unique violation)
+create unique index if not exists supplier_reports_one_approved_idx on supplier_reports (supplier_id, month, edition)
+  where status = 'approved';
 alter table supplier_reports enable row level security;
 revoke all on table supplier_reports from anon, authenticated;
 revoke all on sequence supplier_reports_id_seq from anon, authenticated;

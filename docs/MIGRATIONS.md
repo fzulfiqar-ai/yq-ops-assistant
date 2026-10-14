@@ -748,7 +748,8 @@ Order: after R7b. Apply it before, or together with, the API release that brings
 none of these columns, so the API running today keeps working after the apply.
 
 **Apply — from the MAIN project folder, never from a worktree** (a worktree finds the project folder's `.env`, which is
-production), at a quiet hour (the file sets `lock_timeout` 2 s, so a busy `catalog_items` makes it fail fast, never wait):
+production), after the branch that brings this file is merged to `main` and pulled there (`git pull --ff-only`), at a
+quiet hour (the file sets `lock_timeout` 2 s: it waits at most 2 s for each lock, then fails with nothing applied):
 
 ```
 python -m scripts.db_backup --all --out business_data/backups/<date>_pre-r8m
@@ -769,13 +770,13 @@ python -m scripts.apply_sql scripts/r8m_market_quality_reverse.sql ; python -m s
 ```
 
 It REFUSES while any R8m table holds a row or any sighting / photo / catalog row holds an R8m value (a true safety flag,
-a photo role other than product, a thumbnail, a barcode…). To drop them anyway, back them up first and give the switch
-in the SAME session as the file (`apply_sql` opens a session of its own, so use one psql session or the Supabase SQL
-editor):
+a photo role other than product, a thumbnail, a barcode…). The check and every drop are one statement (a DO block), so
+a refusal, or a lock that does not come within 2 s, drops nothing, whatever the client. To drop them anyway, back them
+up first and give the switch in the SAME session as the file (`apply_sql` opens a session of its own), exactly so:
 
 ```
 python -m scripts.db_backup --tables suppliers,brands,market_issue_types,market_cases,market_case_events,supplier_actions,supplier_action_cases,supplier_reports,market_observations,market_photos,catalog_items
-set yq.r8m_drop = 'yes';   -- then the reverse file, in that same session
+psql "<DATABASE_URL>" -X -1 -v ON_ERROR_STOP=1 -c "set local yq.r8m_drop = 'yes'" -f scripts/r8m_market_quality_reverse.sql
 ```
 
 It drops the view, the eight tables, the trigger function, the 18 columns and R8m's indexes, and never an R7b object

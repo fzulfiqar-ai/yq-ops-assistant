@@ -209,7 +209,7 @@ blocks the capture. A safety case should be reviewed within one business day.
 - **Categories** come from the existing category master the catalog uses.
 
 Nothing is seeded by the migration (the repository is public): an admin adds the first suppliers, brands and issue types
-on the Lists page. A list entry in use is deactivated or merged, never deleted (the database refuses the delete). Each
+on the Lists page. A list entry in use is deactivated or merged rather than deleted (for a supplier, a delete is refused while a case, sighting, action or report uses it; a brand that points at it, and a duplicate merged into it, lose that link instead (set null)). Each
 sighting keeps the brand and supplier as linked or typed at capture time (`brand_text`, `supplier_text`), so history
 reads the same after a rename or merge.
 
@@ -247,7 +247,10 @@ automatically**: management sends an approved workbook by hand.
 - Batch and packaging version are optional free text.
 - Warranty: not built.
 - Retention (policy only, no automatic deletion job in this release): 3 years for verified or actioned cases, 12 months
-  for not-substantiated ones, photos with people deleted at closure.
+  for not-substantiated ones, photos with people deleted at closure. The case timeline is permanent: no role, not even
+  the service role, can change or delete its rows, and a case with a timeline cannot be deleted. Applying a retention
+  rule later therefore needs a reviewed one-off migration that the owner runs. Merging cases adds 'merge' events and
+  never rewrites old ones. A restore from a backup goes into an empty database, as the restore drill does.
 - Verifiers: `REVIEW_ROLES`; supplier-report approvals: `APPROVE_ROLES`.
 - Safety alerts: e-mail to the emailer's default recipients plus the Safety tab.
 - Storage: 320 px WebP thumbnails now; archiving older masters (local encrypted store or R2) later.

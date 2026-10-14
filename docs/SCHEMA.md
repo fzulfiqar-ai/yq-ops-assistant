@@ -421,7 +421,7 @@ DELETE and TRUNCATE.
 
 ### suppliers  *(R8m — admin list)*
 `name` (not null, not blank; one ACTIVE row per `lower(btrim(name))`), `code`, `active` (default true), `merged_into`
-(FK→suppliers, set null), audit columns. Never deleted while a brand, case, sighting, action or report points at it.
+(FK→suppliers, set null), audit columns. Deactivate or merge rather than delete: a delete is refused while a case, sighting, action or report uses it; a brand that points at it, and a duplicate merged into it, lose that link instead (set null).
 
 ### brands  *(R8m — admin list)*
 `name` (not null, not blank), `supplier_id` (FK→suppliers, **set null**), `aliases text[]` (default `{}`; a rename adds

@@ -14,7 +14,9 @@
 -- case or issue link, a basis, a quantity, a batch, a packaging version, a phone capture time, a brand
 -- or supplier link or snapshot, a safety flag that is true, a photo role other than 'product', a sha256,
 -- a thumbnail, a caption, a blurred copy, a barcode), this file REFUSES, so a routine reverse can never
--- lose them. To drop them anyway, back them up first and say so in the same session (one psql session
+-- lose them. The check and every drop are ONE statement (a DO block): whatever the client, a refusal drops
+-- nothing and a failure half-way (a lock that does not come within 2 s) drops nothing either.
+-- To drop them anyway, back them up first and say so in the same session (one psql session
 -- or the Supabase SQL editor: apply_sql opens a session of its own, so the switch cannot reach it):
 --   python -m scripts.db_backup --tables suppliers,brands,market_issue_types,market_cases,market_case_events,supplier_actions,supplier_action_cases,supplier_reports,market_observations,market_photos,catalog_items
 --   set yq.r8m_drop = 'yes';   -- then run this file in that same session
@@ -78,7 +80,6 @@ begin
   if n > 0 and coalesce(current_setting('yq.r8m_drop', true), '') <> 'yes' then
     raise exception 'r8m_market_quality reverse: % R8m row(s) / value(s) would be lost (suppliers, brands, issue types, cases and their timeline, supplier actions and reports, or the quality fields on sightings, photos and the catalog barcode). Back them up (python -m scripts.db_backup --tables suppliers,brands,market_issue_types,market_cases,market_case_events,supplier_actions,supplier_action_cases,supplier_reports,market_observations,market_photos,catalog_items) and run SET yq.r8m_drop = ''yes'' in this session to drop them.', n;
   end if;
-end $$;
 
 drop view if exists v_market_cases_agent;
 
@@ -122,6 +123,7 @@ drop table if exists market_cases;
 drop table if exists market_issue_types;
 drop table if exists brands;
 drop table if exists suppliers;
+end $$;
 
 do $$
 declare

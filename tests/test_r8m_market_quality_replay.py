@@ -259,6 +259,18 @@ def _():
     assert "set yq.r8m_drop = 'yes';" in rev, "the header says how to drop anyway"
 
 
+@test("reverse: every drop runs inside the guard's DO block (one statement: a refusal or a lock timeout drops nothing)")
+def _():
+    body = _sql_body(_read(REVERSE))
+    outside = _outside_do(body).lower()
+    assert "drop " not in outside and "alter table" not in outside, "a drop outside the guarded block"
+    guard = next(b for b in _do_blocks(body) if "yq.r8m_drop" in b)
+    assert guard.index("raise exception") < guard.lower().index("drop view if exists v_market_cases_agent")
+    for needle in ("drop table if exists suppliers", "alter table if exists market_observations",
+                   "drop function if exists market_case_events_no_rewrite"):
+        assert needle in guard.lower(), needle
+
+
 @test("reverse: drops exactly the columns the migration adds (never R7b's yq_item_code), every table after what references it, no CASCADE, nothing of R7b's")
 def _():
     mig = _sql_body(_read(MIGRATION))
@@ -473,6 +485,13 @@ def _replay(conn, psycopg) -> None:
     # ── 0. a minimal schema, R7b, R8m twice ──
     cur.execute(MINIMAL_SCHEMA)
     cur.execute(r7b)
+    for made_by_hand in ("create table suppliers (id int)", "alter table catalog_items add column barcode text",
+                         "alter table market_photos add column thumb_path text"):
+        cur.execute("savepoint by_hand")
+        cur.execute(made_by_hand)
+        _refused(cur, mig, None, E.RaiseException, contains="made by hand")
+        cur.execute("rollback to savepoint by_hand")
+    _step("a first apply refuses to adopt a table or a column of the same name made by hand")
     cur.execute(mig)
     cur.execute(mig)                                          # idempotent
     assert sum("r8m_market_quality: ok" in n for n in notices) == 2, notices
@@ -636,6 +655,17 @@ def _replay(conn, psycopg) -> None:
     )
     for sql, params, exc in bad:
         _refused(cur, sql, params, exc)
+    cur.execute("savepoint one_approved")
+    cur.execute("insert into supplier_reports (supplier_id, month, status) values (%s, '2026-11-01', 'approved')", (sa,))
+    _refused(cur, "insert into supplier_reports (supplier_id, month, status) values (%s, '2026-11-01', 'approved')", (sa,),
+             E.UniqueViolation)
+    cur.execute("insert into supplier_reports (supplier_id, month, status) values (%s, '2026-11-01', 'superseded'), "
+                "(%s, '2026-11-01', 'superseded')", (sa, sa))                 # superseded ones may pile up
+    cur.execute("insert into supplier_reports (supplier_id, month, edition, status) values "
+                "(%s, '2026-11-01', 'internal', 'approved')", (sa,))           # the other edition is its own
+    cur.execute("rollback to savepoint one_approved")
+    _step("one approved report per supplier, month and edition: a second is refused; superseded ones and the "
+          "other edition are not")
     cur.execute("insert into suppliers (name, active) values ('supplier alpha', false)")       # an inactive duplicate is fine
     cur.execute("insert into supplier_reports (supplier_id, month, edition) values (%s, '2026-10-01', 'internal')", (sa,))
     _step(f"{len(bad)} bad values refused (statuses, evidence 1-5, severity, methods, kinds, slugs, fields, roles, "
