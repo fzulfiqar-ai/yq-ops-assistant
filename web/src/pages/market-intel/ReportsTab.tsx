@@ -445,8 +445,7 @@ function CountsView({ counts, edition }: { counts: Record<string, unknown>; edit
 const STATE_GROUPS: { state: MiReportRowState; title: string; note: string }[] = [
   { state: 'included', title: 'In the report', note: '' },
   { state: 'insufficient', title: 'Insufficient evidence: listed, not counted', note: 'No photo, evidence level 1 and a single report. Tick one to count it anyway.' },
-  // excluded = not in the draft's rows: taken out by hand, or reported after the draft was built (supplier_reports.assemble)
-  { state: 'excluded', title: 'Left out', note: 'Not in this report: taken out by hand, or reported after the draft was built. Tick one to put it in.' },
+  { state: 'excluded', title: 'Left out', note: 'Taken out of this report by hand. Tick one to put it back.' },
 ]
 
 function FindingRow({ sheet, row, editable, inReport, onToggle }: { sheet: string; row: MiReportRow; editable: boolean; inReport: boolean; onToggle: () => void }) {
