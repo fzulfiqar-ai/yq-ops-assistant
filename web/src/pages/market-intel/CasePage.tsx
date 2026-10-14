@@ -272,7 +272,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
               <Badge tone={CASE_STATUS_TONE[c.status] || 'grey'}>{statusText}</Badge>
             </section>
           )}
-          <EvidencePanel key={`ev-${c.evidence_level}`} c={c} canEdit={canEdit} onDone={ok} onError={fail} />
+          <EvidencePanel key={`ev-${c.evidence_level}`} c={c} canEdit={canEdit && c.status !== 'closed'} onDone={ok} onError={fail} />
           {c.verification_method && (
             <section className={CARD}>
               <h2 className="mb-1.5 flex items-center gap-1.5 font-display text-[15px] font-bold">
@@ -305,7 +305,7 @@ function CaseView({ d, c, roles, lists, raw, onRaw }: { d: MiCaseDetail; c: MiCa
               <AskRepForm caseId={c.id} onDone={ok} onError={fail} />
             </section>
           )}
-          <ActionsPanel c={c} actions={actions} canEdit={canEdit} lists={lists} onDone={ok} onError={fail} />
+          <ActionsPanel c={c} actions={actions} canEdit={canEdit && c.status !== 'closed'} lists={lists} onDone={ok} onError={fail} />
           {canMove && <MergePanel c={c} suggestions={suggestions} onMerged={(into) => { ok(`Merged into case ${into}.`); navigate(`/market-intel/cases/${into}`) }} onError={fail} />}
           {roles.admin && observations.some((o) => (o.photos || []).some((p) => p.has_people || p.has_people_flag)) && (
             <section className={CARD}>
@@ -780,6 +780,8 @@ function eventText(e: MiCaseEvent): { title: string; body: string; quote?: boole
       if (mail === 'sent') return { title: 'Safety alert e-mailed to the manager', body: '' }
       if (mail === 'not_sent') return { title: 'Safety alert NOT e-mailed', body: detailText(d, 'reason'), alarm: true }
       if (mail === 'queued') return { title: 'Safety alert queued for the manager', body: '' }
+      if (mail === 'resend') return { title: 'Safety alert sent again (the first try had no answer)', body: '' }
+      if (mail === 'gave_up') return { title: 'Safety alert NOT e-mailed: the system gave up after 3 tries. Tell the manager.', body: '', alarm: true }
       return { title: 'Safety alert', body: '' }
     }
     default:

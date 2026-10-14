@@ -567,6 +567,9 @@ export function safetyMail(events: MiCaseEvent[] | null | undefined): { state: '
     } else if (mail === 'not_sent') {
       state = 'not_sent'
       reason = typeof e.detail?.reason === 'string' ? e.detail.reason : null
+    } else if (mail === 'gave_up') {                       // the sweep tried 3 times with no outcome
+      state = 'not_sent'
+      reason = 'the system gave up after 3 tries'
     } else if (mail === 'queued' && state === null) {
       state = 'queued'
     }
