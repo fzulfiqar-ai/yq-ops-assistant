@@ -1946,6 +1946,14 @@ def _():
             R._raises(lambda d=dst: mq.move_observation(a["observation_id"], d["id"], "clerk@example.com", "member"),
                       "takes no sightings", 409)
         assert next(o for o in fake.rows("market_observations") if o["id"] == a["observation_id"])["case_id"] == a["case"]["id"]
+        # ...and a not-substantiated case keeps its sightings too (reopened first, by any reviewer, with a reason)
+        ns = _cap("rep2@example.com", [], kind="complaint", yq_item_code="E-05", issue_type_id="1")
+        mq.update_case(ns["case"]["id"], {"status": "not_substantiated", "reason": "works when tested"},
+                       "clerk@example.com", "member")
+        R._raises(lambda: mq.merge_case(ns["case"]["id"], a["case"]["id"], "clerk@example.com", "member"),
+                  "keeps its sightings", 409)
+        R._raises(lambda: mq.move_observation(ns["observation_id"], a["case"]["id"], "clerk@example.com", "member"),
+                  "keeps its sightings", 409)
     assert not [e for e in fake.rows("market_case_events") if e["event"] in ("merge", "move")]
 
 

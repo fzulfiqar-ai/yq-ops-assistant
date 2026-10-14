@@ -1990,16 +1990,26 @@ def _takes_sightings(dst: dict) -> None:
                                "takes no sightings. Pick an open case (or reopen that one first).", 409)
 
 
+def _keeps_sightings(src: dict) -> None:
+    """...and a closed or not-substantiated case keeps its sightings: it is not merged away and none is moved
+    out until it is reopened — a closed one by an admin (CLOSED_READ_ONLY), a not-substantiated one by a
+    reviewer, with a reason. (The case page offers no merge or move on such a case.)"""
+    if src.get("status") == "closed":
+        raise MarketIntelError(CLOSED_READ_ONLY, 409)
+    if src.get("status") == "not_substantiated":
+        raise MarketIntelError("A not-substantiated case keeps its sightings: reopen it first (Not substantiated → "
+                               "Under review, with a reason).", 409)
+
+
 def merge_case(case_id: int, into_id, actor: str, role: str) -> dict:
     """POST /market-intel/cases/{id}/merge (reviewers): this case duplicates `into_id`, an OPEN case. Its
     sightings and supplier actions move there, it closes as merged (merged_into), the target keeps the higher
     evidence level and the safety flag — and the alert claim: a problem already alerted is not e-mailed again,
-    by a later sighting or the safety sweep. Both are recounted and both histories say so. A closed case is
-    not merged away (read-only until an admin reopens it)."""
+    by a later sighting or the safety sweep. Both are recounted and both histories say so. A closed or
+    not-substantiated case is not merged away (_keeps_sightings)."""
     _reviewer(role)
     src = _open_case_for_change(case_id)
-    if src.get("status") == "closed":
-        raise MarketIntelError(CLOSED_READ_ONLY, 409)
+    _keeps_sightings(src)
     dst = _live(_case(_id(into_id, "case")))
     if not dst:
         raise MarketIntelError("The case to merge into does not exist.", 404)
@@ -2036,8 +2046,8 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
     """POST /market-intel/observations/{id}/move (reviewers): put one sighting on another OPEN case (or, for a
     sighting on no case yet — an old complaint — on a case). Both cases are recounted, both histories say so.
     Like a merge, the sighting carries its photo's evidence and its safety flag (the case it joins goes on the
-    Safety tab; no second e-mail: the problem was alerted already). A closed case keeps its sightings
-    (read-only until an admin reopens it)."""
+    Safety tab; no second e-mail: the problem was alerted already). A closed or not-substantiated case keeps
+    its sightings (_keeps_sightings)."""
     _reviewer(role)
     _need()
     got = _c().table("market_observations").select("*").eq("id", int(obs_id)).limit(1).execute().data or []
@@ -2052,8 +2062,8 @@ def move_observation(obs_id: int, case_id, actor: str, role: str) -> dict:
         return {"ok": True, "changed": False, "observation_id": int(obs_id), "case_id": int(dst["id"])}
     _takes_sightings(dst)
     src = _case(src_id) if src_id else None
-    if src and src.get("status") == "closed" and not src.get("merged_into"):
-        raise MarketIntelError(CLOSED_READ_ONLY, 409)          # a closed case keeps its sightings
+    if src and not src.get("merged_into"):
+        _keeps_sightings(src)                                  # (a merged-away case's sighting may still move)
     _c().table("market_observations").update({"case_id": int(dst["id"])}).eq("id", int(obs_id)).execute()
     case_event(int(dst["id"]), "move", actor, detail={"observation_id": int(obs_id), "from_case": src_id})
     if src_id:
