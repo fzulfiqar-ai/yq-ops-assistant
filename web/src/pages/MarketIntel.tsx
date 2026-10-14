@@ -54,7 +54,7 @@ import {
   type ReadyPhoto,
 } from '@/lib/marketIntel'
 import { Cover, Empty, Fact, Loading, NotReady, Pager, PhotoTile, Tabs } from './market-intel/ui'
-import { INPUT, qs, SELECT, sinceDay, useMiRoles } from './market-intel/util'
+import { FILTER, INPUT, qs, SELECT, sinceDay, useMiRoles } from './market-intel/util'
 
 /* the office's v2 tabs load on their first open: a rep's phone never downloads them */
 const CasesTab = lazy(() => import('./market-intel/CasesTab').then((m) => ({ default: m.CasesTab })))
@@ -135,61 +135,67 @@ function ClusterCard({ c, onOpen, showMine }: { c: MiCluster; onOpen?: () => voi
       </div>
     </>
   )
+  // flex-col: a grid row stretches every card to the tallest, and a <button> centres its content
+  // vertically — the photos of one row sat at different heights
   return onOpen ? (
-    <button type="button" onClick={onOpen} className="overflow-hidden rounded-2xl border border-border bg-card text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+    <button type="button" onClick={onOpen} className="flex flex-col overflow-hidden rounded-2xl border border-border bg-card text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       {body}
     </button>
   ) : (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">{body}</div>
+    <div className="flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm">{body}</div>
   )
 }
 
-function SightingRow({ o, action, showBy = true, words }: { o: MiObservation; action?: ReactNode; showBy?: boolean; words?: string | null }) {
+/** `below`: full-width under the row (the answer box: on a phone the text column beside the photo is too narrow for it) */
+function SightingRow({ o, action, below, showBy = true, words }: { o: MiObservation; action?: ReactNode; below?: ReactNode; showBy?: boolean; words?: string | null }) {
   const photo = o.photos[0]
   const people = Boolean(photo && (photo.has_people || photo.has_people_flag))
   const status = words || o.status_label
   const issue = o.issue_type?.label_en || o.issue_label
   return (
-    <li className="flex gap-3 rounded-2xl border border-border bg-card p-3">
-      <div className="h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-muted">
-        {people ? (
-          <span className="grid h-full w-full place-items-center bg-muted text-[11px] text-muted-foreground">People</span>
-        ) : (
-          <Cover url={photo?.thumb_url || photo?.url} alt={o.title || o.kind_label} />
-        )}
-      </div>
-      <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Badge tone="grey">{o.kind_label}</Badge>
-          {status && <Badge tone={o.open_question ? 'amber' : o.item_status ? STATUS_TONE[o.item_status] : 'accent'}>{status}</Badge>}
-          {issue && <Badge tone="accent">{issue}</Badge>}
-          {o.safety_flag && <Badge tone="rose">Safety</Badge>}
-          {o.near_duplicate_of ? <Badge tone="amber">Photo seen before</Badge> : null}
-          {o.photos.length > 1 && <span className="text-[11px] text-muted-foreground">{o.photos.length} photos</span>}
-        </div>
-        <div className="line-clamp-2 text-[13.5px] font-semibold leading-snug">{o.item_title || o.title || o.note || 'Photo only'}</div>
-        {o.note && (o.item_title || o.title) && <div className="line-clamp-2 text-[12.5px] text-muted-foreground">{o.note}</div>}
-        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-muted-foreground">
-          <span>{shortDate(o.client_observed_at || o.observed_at)}</span>
-          {o.price_bhd && <span className="font-semibold tabular-nums text-foreground">BHD {o.price_bhd}</span>}
-          {o.shop_name && (
-            <span className="inline-flex items-center gap-1">
-              <Store size={11} aria-hidden="true" /> {o.shop_name}
-              {o.area ? ` · ${o.area}` : ''}
-            </span>
+    <li className="rounded-2xl border border-border bg-card p-3">
+      <div className="flex gap-3">
+        <div className="h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-muted">
+          {people ? (
+            <span className="grid h-full w-full place-items-center bg-muted text-[11px] text-muted-foreground">People</span>
+          ) : (
+            <Cover url={photo?.thumb_url || photo?.url} alt={o.title || o.kind_label} />
           )}
-          {showBy && o.by && (
-            <span className="inline-flex items-center gap-1">
-              <UserRound size={11} aria-hidden="true" /> {o.by}
-            </span>
-          )}
-          {o.demand_level && <span>Demand: {o.demand_level}{o.demand_qty ? ` (${o.demand_qty})` : ''}</span>}
-          {!o.demand_level && o.demand_qty ? <span>Qty {o.demand_qty}</span> : null}
-          {o.qty_affected ? <span>{o.qty_affected} affected</span> : null}
-          {o.barcode && <span className="tabular-nums">Barcode {o.barcode}</span>}
         </div>
-        {action}
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Badge tone="grey">{o.kind_label}</Badge>
+            {status && <Badge tone={o.open_question ? 'amber' : o.item_status ? STATUS_TONE[o.item_status] : 'accent'}>{status}</Badge>}
+            {issue && <Badge tone="accent">{issue}</Badge>}
+            {o.safety_flag && <Badge tone="rose">Safety</Badge>}
+            {o.near_duplicate_of ? <Badge tone="amber">Photo seen before</Badge> : null}
+            {o.photos.length > 1 && <span className="text-[11px] text-muted-foreground">{o.photos.length} photos</span>}
+          </div>
+          <div className="line-clamp-2 text-[13.5px] font-semibold leading-snug">{o.item_title || o.title || o.note || 'Photo only'}</div>
+          {o.note && (o.item_title || o.title) && <div className="line-clamp-2 text-[12.5px] text-muted-foreground">{o.note}</div>}
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px] text-muted-foreground">
+            <span>{shortDate(o.client_observed_at || o.observed_at)}</span>
+            {o.price_bhd && <span className="font-semibold tabular-nums text-foreground">BHD {o.price_bhd}</span>}
+            {o.shop_name && (
+              <span className="inline-flex items-center gap-1">
+                <Store size={11} aria-hidden="true" /> {o.shop_name}
+                {o.area ? ` · ${o.area}` : ''}
+              </span>
+            )}
+            {showBy && o.by && (
+              <span className="inline-flex items-center gap-1">
+                <UserRound size={11} aria-hidden="true" /> {o.by}
+              </span>
+            )}
+            {o.demand_level && <span>Demand: {o.demand_level}{o.demand_qty ? ` (${o.demand_qty})` : ''}</span>}
+            {!o.demand_level && o.demand_qty ? <span>Qty {o.demand_qty}</span> : null}
+            {o.qty_affected ? <span>{o.qty_affected} affected</span> : null}
+            {o.barcode && <span className="tabular-nums">Barcode {o.barcode}</span>}
+          </div>
+          {action}
+        </div>
       </div>
+      {below}
     </li>
   )
 }
@@ -201,6 +207,8 @@ function RepSignals() {
   const mineQ = useQuery({ queryKey: ['mi-mine'], queryFn: () => apiGet<MiMine>('/market-intel/mine') })
   const teamQ = useQuery({ queryKey: ['mi-board', 'rep'], queryFn: () => apiGet<MiBoard>('/market-intel/items'), enabled: tab === 'team' })
   const asked = (mineQ.data?.observations || []).filter((o) => o.open_question).length
+  // the reports the office asked about first ("Answer below"), the rest newest first as the API sends them
+  const reports = [...(mineQ.data?.observations || [])].sort((a, b) => Number(Boolean(b.open_question)) - Number(Boolean(a.open_question)))
   return (
     <div className="mx-auto max-w-5xl px-4 pb-24 pt-4 lg:px-8 lg:py-8">
       <div className="mb-4">
@@ -236,19 +244,14 @@ function RepSignals() {
           </Empty>
         ) : (
           <ul className="space-y-2.5">
-            {mineQ.data.observations.map((o) => (
+            {reports.map((o) => (
               <SightingRow
                 key={o.id}
                 o={o}
                 showBy={false}
                 words={o.case_status_words}
-                action={
-                  o.open_question ? (
-                    <AnswerBox obs={o} />
-                  ) : o.item_shops && o.item_shops > 1 ? (
-                    <div className="text-[11.5px] font-semibold text-primary">Seen in {o.item_shops} shops</div>
-                  ) : undefined
-                }
+                action={!o.open_question && o.item_shops && o.item_shops > 1 ? <div className="text-[11.5px] font-semibold text-primary">Seen in {o.item_shops} shops</div> : undefined}
+                below={o.open_question ? <AnswerBox obs={o} /> : undefined}
               />
             ))}
           </ul>
@@ -337,7 +340,7 @@ function AnswerBox({ obs }: { obs: MiObservation }) {
   }
 
   return (
-    <div className="mt-2 space-y-2 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] p-3">
+    <div className="mt-3 space-y-2 rounded-xl border border-[#f1dfb8] bg-[#fdf8ee] p-3">
       <p className="text-[13px] leading-snug text-[#7a4d0a]">
         <span className="font-bold">The office asks:</span> {obs.open_question}
       </p>
@@ -355,7 +358,7 @@ function AnswerBox({ obs }: { obs: MiObservation }) {
         {photo ? (
           <span className="relative">
             <img src={photo.url} alt="Your photo" className="h-14 w-14 rounded-lg border border-[#E2DCEA] object-cover" />
-            <button type="button" onClick={dropPhoto} aria-label="Remove the photo" className="absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full bg-[#1A1428] text-white ring-2 ring-white">
+            <button type="button" onClick={dropPhoto} aria-label="Remove the photo" className="absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full bg-[#1A1428] text-white ring-2 ring-white after:absolute after:-inset-2.5">
               <X size={12} aria-hidden="true" />
             </button>
           </span>
@@ -483,40 +486,42 @@ function OfficeBoard() {
 
           {tab === 'board' && (
             <>
-              <div className="mb-4 flex flex-wrap items-center gap-2">
-                <div className="relative min-w-[200px] flex-1">
+              {/* phones: the search on its own row, the filters two by two; wider: the search a row of its own (beside
+                  seven filters it was squeezed and its placeholder cut), the filters in one row */}
+              <div className="mb-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+                <div className="relative col-span-2 sm:basis-full">
                   <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
                   <input value={f.q} onChange={(e) => set('q')(e.target.value)} placeholder="Search name, brand, YQ code or barcode" aria-label="Search" className={cn(INPUT, 'pl-9')} />
                 </div>
-                <select aria-label="Kind" value={f.kind} onChange={(e) => set('kind')(e.target.value)} className={SELECT}>
+                <select aria-label="Kind" value={f.kind} onChange={(e) => set('kind')(e.target.value)} className={FILTER}>
                   <option value="">All kinds</option>
                   {KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
                 </select>
-                <select aria-label="Status" value={f.status} onChange={(e) => set('status')(e.target.value)} className={SELECT}>
+                <select aria-label="Status" value={f.status} onChange={(e) => set('status')(e.target.value)} className={FILTER}>
                   <option value="">Open and decided</option>
                   {(facets.statuses || []).map((s) => <option key={s.value} value={s.value}>{s.label} ({s.count})</option>)}
                 </select>
-                <select aria-label="Category" value={f.category} onChange={(e) => set('category')(e.target.value)} className={SELECT}>
+                <select aria-label="Category" value={f.category} onChange={(e) => set('category')(e.target.value)} className={FILTER}>
                   <option value="">All categories</option>
                   {(facets.categories || []).map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
-                <select aria-label="Brand" value={f.brand} onChange={(e) => set('brand')(e.target.value)} className={SELECT}>
+                <select aria-label="Brand" value={f.brand} onChange={(e) => set('brand')(e.target.value)} className={FILTER}>
                   <option value="">All brands</option>
                   {(facets.brands || []).map((b) => <option key={b} value={b}>{b}</option>)}
                 </select>
-                <select aria-label="Rep" value={f.rep} onChange={(e) => set('rep')(e.target.value)} className={SELECT}>
+                <select aria-label="Rep" value={f.rep} onChange={(e) => set('rep')(e.target.value)} className={FILTER}>
                   <option value="">All reps</option>
                   {(facets.reps || []).map((r) => <option key={r.id} value={String(r.id)}>{r.name}</option>)}
                 </select>
-                <select aria-label="Area" value={f.area} onChange={(e) => set('area')(e.target.value)} className={SELECT}>
+                <select aria-label="Area" value={f.area} onChange={(e) => set('area')(e.target.value)} className={FILTER}>
                   <option value="">All areas</option>
                   {(facets.areas || []).map((a) => <option key={a} value={a}>{a}</option>)}
                 </select>
-                <select aria-label="Seen" value={f.since} onChange={(e) => set('since')(e.target.value)} className={SELECT}>
+                <select aria-label="Seen" value={f.since} onChange={(e) => set('since')(e.target.value)} className={FILTER}>
                   {SINCE.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </select>
                 {filtered && (
-                  <button type="button" onClick={() => { setF(NO_FILTERS); setPage(0) }} className="h-10 rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">Clear</button>
+                  <button type="button" onClick={() => { setF(NO_FILTERS); setPage(0) }} className="h-10 justify-self-start rounded-xl px-3 text-[13px] font-semibold text-primary hover:bg-accent">Clear</button>
                 )}
               </div>
               {boardQ.isError ? (
@@ -559,7 +564,7 @@ function OfficeBoard() {
                   <h2 className="mb-2 font-display text-[15px] font-bold">Photos to identify</h2>
                   {reviewQ.data?.unassigned.length ? (
                     <>
-                      <ul className="grid gap-2.5 lg:grid-cols-2">
+                      <ul className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
                         {reviewQ.data.unassigned.map((o) => (
                           <SightingRow key={o.id} o={o} action={roles.review ? <IdentifyButton onClick={() => setIdentify(o)} /> : undefined} />
                         ))}
@@ -591,7 +596,7 @@ function OfficeBoard() {
                 <p className="mb-3 text-[12.5px] text-muted-foreground">
                   The {libQ.data.count} sightings copied from the old Finds board and Field Notes, kept as a baseline: new photos are checked against them for near-duplicates.
                 </p>
-                <ul className="grid gap-2.5 lg:grid-cols-2">
+                <ul className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
                   {libQ.data.unassigned.map((o) => (
                     <SightingRow key={o.id} o={o} action={roles.review ? <IdentifyButton onClick={() => setIdentify(o)} /> : undefined} />
                   ))}

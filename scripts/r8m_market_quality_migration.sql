@@ -394,8 +394,7 @@ select c.id                          as case_id,
        b.name                        as brand,
        c.supplier_id,
        s.name                        as supplier,
-       c.batch_ref, c.packaging_version,
-       c.verification_method,
+       c.verification_method,           -- (no batch / packaging text: free text a rep typed)
        c.first_seen, c.last_seen, c.obs_count, c.shop_count,
        (select count(*)
           from market_photos p join market_observations o on o.id = p.observation_id
@@ -412,7 +411,7 @@ where c.merged_into is null;
 revoke all on v_market_cases_agent from anon, authenticated;
 
 comment on view v_market_cases_agent is
-  'Market Intel v2 for the weekly AI Head (R8m): unmerged cases with status, evidence, safety, issue, SKU, brand, supplier, counts and dates: no title, note, person, shop or photo path. Granted to yq_readonly.';
+  'Market Intel v2 for the weekly AI Head (R8m): unmerged cases with status, evidence, safety, issue, SKU, brand, supplier, counts and dates: no title, note, batch or packaging text, person, shop or photo path. Granted to yq_readonly.';
 
 -- ── 12. read-only role: the agent view only (plain statement: the role exists in production) ──
 grant select on v_market_cases_agent to yq_readonly;
