@@ -215,6 +215,11 @@ def _():
     raises(ValueError, lambda: gitinfo._git(ROOT, "commit", "-m", "x"))
     assert ":(exclude)scripts/ops" in gitinfo.ENGINE_PATHS and "requirements.lock" in gitinfo.ENGINE_PATHS
     assert not any(p.endswith(".sql") or "docs" in p for p in gitinfo.ENGINE_PATHS)
+    # the owner-side programs (the writer, the sender, the secrets and backup tools) never ship with the API:
+    # a commit of them must not make the load check ask for a deploy
+    engine = set(gitinfo._lines(gitinfo._git(ROOT, "ls-files", "--", *gitinfo.ENGINE_PATHS)))
+    assert "scripts/refresh.py" in engine and "app/main.py" in engine
+    assert not any(p.startswith(("scripts/yq_", "scripts/ops/")) for p in engine), sorted(engine)
 
 
 # ── status ────────────────────────────────────────────────────────────────────

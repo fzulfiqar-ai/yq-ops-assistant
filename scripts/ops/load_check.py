@@ -73,7 +73,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -102,6 +102,11 @@ SYSTEM_FILES = ("desktop.ini", "thumbs.db", ".ds_store")
 AUTO_SYNC = "price-book auto-sync"          # what app/catalog.py writes in catalog_items.updated_by
 BOOK_STEMS = {"MA_base": "MASellingPriceBook", "modern_trade": "ModernTradeSellerBook"}
 OFFSET_FILE = "status.offset"
+DELIVERY_OFFSET_FILE = "delivery.offset"     # the delivery rows `load status` has shown
+TIMING_SHOWN_FILE = "timing.shown"           # the load-time line is shown once
+DELIVERY_WAIT_S = 600        # a finished load reads RUNNING at delivery for at most this long (the writer allows 480 s)
+SEND_RETRY = "python -m scripts.yq_send --run {run}"     # the writer's SEND_LINE: the e-mail again, nothing reloaded
+DELIVERY_ENDS = ("ended", "sent", "test_sent", "not_sent", "failed")   # rows that close a queued delivery
 # Register rules of this check (scripts/ops/alerts.py keeps the register).
 #   EVENT_RULES     something changed between two loads. Listed from the first time it is found
 #                   (never a baseline) and never cleared by a later check: the item stays open
@@ -197,6 +202,8 @@ Q_CANDIDATES = (
     "select distinct sku_code from selling_prices where price_book = 'MA_base' and coalesce(rate_bhd, 0) > 0 "
     "and sku_code is not null and trim(sku_code) <> ''"
 )
+# the stock snapshots loaded after a day: one per load, so the loads since the last loaded profitability report
+Q_SNAPSHOTS_SINCE = "select count(distinct as_of_date)::int as n from stock_balance where as_of_date > %s::date"
 
 
 class Stop(Exception):
@@ -453,6 +460,12 @@ def preflight(dev: bool, deps: Deps) -> dict:
     if state == "unreadable":
         raise Stop(f"The load lock could not be read ({lock.get('error')}), so it cannot be told whether a load is "
                    "running. Nothing was checked: try again in a moment.")
+    away = lock.get("elsewhere")
+    if away and state in ("running", "interrupted"):
+        # the folder syncs through OneDrive: a lock taken on another PC is settled on that PC, never here
+        raise Stop(f"The load lock was taken on another PC ({away}) for run {run}, at {lock.get('step')}. Nothing is "
+                   f"checked, resumed or cleared from this PC: finish that load on {away}. If that PC can no longer "
+                   "run it, ask Claude to clear the lock by hand.")
     if state == "interrupted" and run.startswith(status.REHEARSAL_PREFIX):
         state, left = "none", run                # a rehearsal has no go line to hand over and nothing to resume
     if state == "interrupted" and run == "?":
@@ -1075,6 +1088,27 @@ def profit_before(plan: dict | None) -> tuple[bool | None, str]:
     return any(v.get("verdict") == "hold_back" for v in rows), iso(dates.get("product_profitability"))
 
 
+ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
+
+
+def ordinal(n) -> str:
+    """1 -> 'first' ... 10 -> 'tenth', then '11th' and so on."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "next"
+    return ORDINALS[n - 1] if 1 <= n <= len(ORDINALS) else f"{n}th"
+
+
+def _pct(x) -> float | None:
+    """A share as a percentage with two decimals, for plan.json."""
+    return None if x is None else float(round(Decimal(x) * 100, 2))
+
+
+def _money(x) -> str | None:
+    return None if x is None else str(fmt.q3(x))
+
+
 def second_hold(hold: bool, as_on: str, anchors: dict, before: tuple[bool | None, str] = (None, "")) -> bool | None:
     """Is this the second load in a row that holds the profitability report back?
       None   the report is held and is not newer than what the load before saw: the same drop is
@@ -1558,6 +1592,7 @@ class Check:
         self.before: tuple[bool | None, str] = (None, "")    # the load before: profit_before()
         self.stock: dict | None = None
         self.profit: dict | None = None
+        self.profit_evidence: dict | None = None     # what the profitability step found (plan.json: profitability)
         self.books: dict[str, dict] = {}
         self.summary: dict = {}
         self.targets: dict = {}
@@ -1567,6 +1602,10 @@ class Check:
         self.step = 0
         self.failed: dict | None = None              # the last load, when it failed after it began to write
         self.retired: dict = {}                      # the earlier checks of this folder this one replaced
+        self.timings: dict[str, float] = {}          # seconds per part of the check (plan.json: timings)
+        from scripts.ops.gridmemo import GridMemo
+        # one parse per report file (YQ_CHECK_NO_MEMO=1 parses every read again: a diagnostic switch)
+        self.grids = GridMemo(memo=os.environ.get("YQ_CHECK_NO_MEMO") != "1")
 
     # ── small tools ───────────────────────────────────────────────────────────
     def done(self, line: str) -> None:
@@ -1610,33 +1649,40 @@ class Check:
         return f"the {name} stops (see its line)" if kind in self.inv["files"] else f"no {name} in this drop"
 
     # ── the steps, in order ───────────────────────────────────────────────────
+    def timed(self, name: str, fn, *args):
+        """Run one part of the check and add its seconds to self.timings (plan.json: timings)."""
+        t = time.perf_counter()
+        try:
+            return fn(*args)
+        finally:
+            self.timings[name] = round(self.timings.get(name, 0.0) + time.perf_counter() - t, 2)
+
     def go(self, drop_arg: str | None) -> dict:
         self.main = str(config.get("warehouses.main"))
         self.aliases = dict(config.get("warehouses.aliases"))
         self.gap_max = config.number("load.profit_gap_max")
         self.blank_max = config.number("load.blank_cost_share_max")
         self.bridge = dict(config.get("items.bridge_exceptions"))
-        self.failed = last_failed_load(self.deps)    # said first, whatever the check then finds
-        self.step_preflight()
-        self.step_folder(drop_arg)
-        self.step_staging()
+        self.failed = self.timed("failed_load", last_failed_load, self.deps)   # said first, whatever the check finds
+        self.timed("preflight", self.step_preflight)
+        self.timed("folder", self.step_folder, drop_arg)
+        self.timed("staging", self.step_staging)
         try:
-            self.session = self.deps.session()
+            self.session = self.timed("connect", self.deps.session)
         except Exception as exc:  # noqa: BLE001  (the message may name the database address: never printed)
             raise Stop(f"The database could not be reached ({type(exc).__name__}). Nothing was changed. Try again "
                        "in a minute.") from None
         try:
-            self.read_anchors()
-            self.older_reports()
-            self.read_ledger()
-            self.step_stock_balance()
-            self.step_profitability()
-            self.step_price_books()
-            self.step_preview()
-            self.step_ledger()
-            self.loader_guards()
-            self.step_catalog()
-            return self.finish()
+            # the report parser is loaded by now (the folder step reads the title blocks): from here on each
+            # file's grid is parsed once (gridmemo)
+            with self.grids.active():
+                for name, step in (("anchors", self.read_anchors), ("older", self.older_reports),
+                                   ("ledger_read", self.read_ledger), ("stock_balance", self.step_stock_balance),
+                                   ("profitability", self.step_profitability), ("price_books", self.step_price_books),
+                                   ("preview", self.step_preview), ("ledger_compare", self.step_ledger),
+                                   ("guards", self.loader_guards), ("catalog", self.step_catalog)):
+                    self.timed(name, step)
+                return self.finish()
         finally:
             try:
                 self.session.close()
@@ -1926,23 +1972,55 @@ class Check:
                           f"{fmt.pct(self.gap_max, 1)})")
             self.row("product_profitability", "load", reason, dst.name)
         second = second_hold(held, as_on, anchors, self.before)
+        loads = None
         if second is not None:              # None: this drop is already loaded, the register stays as it is
             found: list[dict] = []
             if second:
                 short = (v.get("ledger_cost") or Decimal(0)) - (v.get("report_cost") or Decimal(0))
+                loads = self.loads_held(anchors.get("profit_as_of"))
+                kept = iso(anchors.get("profit_as_of"))
+                since = (date.fromisoformat(kept) + timedelta(days=1)).isoformat() if kept else ""
+                moved = (f"; {v['still']} of the {v['moved']} items sold since {fmt.day(kept)} show no cost movement"
+                         if v.get("moved") else "")
                 found.append({"key": alerts.make_key("profit_held", as_on), "level": "ACT",
-                              "title": "Profitability report held back twice in a row: cost of sales looks unposted "
-                                       "in Focus",
-                              "detail": "; ".join(v["why"])
-                                        + f"; production's report is as on {fmt.day(anchors.get('profit_as_of'))}",
-                              "who": None, "due": None, "bhd": short if short > 0 else None, "evidence": []})
+                              "title": ("Ask accounts to post cost of sales in Focus for the invoices since "
+                                        + (fmt.day(since) if since else "the last loaded report")
+                                        + ", then export the profitability report again"),
+                              "detail": "; ".join(v["why"]) + moved
+                                        + f"; not loaded for {loads} loads; production's report is as on "
+                                        + fmt.day(kept),
+                              "who": "Accounts", "due": None, "bhd": short if short > 0 else None, "evidence": []})
                 self.flag("profit_held_twice")
-                self.checks.append("Profitability: held back for the second load in a row: one item for the action "
-                                   "list (cost of sales looks unposted in Focus).")
+                self.checks.append(f"Profitability: held back for the {ordinal(loads)} load in a row: one item for the "
+                                   "action list (cost of sales looks unposted in Focus: accounts post it, then the "
+                                   "report is exported again).")
             self.records["profit_held"] = found
         self.profit = v
+        self.profit_evidence = {
+            "as_on": as_on, "held": held, "verdict": "hold_back" if held else "load", "why": list(v["why"]),
+            "gap_pct": _pct(v.get("gap")), "limit_pct": _pct(self.gap_max),
+            "ledger_cost_bhd": _money(v.get("ledger_cost")), "report_cost_bhd": _money(v.get("report_cost")),
+            "previous_day": v.get("previous_day"), "previous_gap_pct": _pct(v.get("previous_gap")),
+            "items_sold_since": v.get("moved"), "with_no_cost_movement": v.get("still"),
+            "blank_cost_share_pct": _pct((v.get("blank") or {}).get("share")), "items": v.get("items"),
+            "matched": v.get("matched"), "loads_held": loads, "production_as_of": iso(anchors.get("profit_as_of")),
+            "line": line}
         gap = f" (gap {fmt.pct(v['gap'], 1)}, limit {fmt.pct(self.gap_max, 1)})" if v.get("gap") is not None else ""
         self.done("Profitability: " + WORDS["hold_back" if held else "load"] + gap + ".")
+
+    def loads_held(self, kept) -> int:
+        """How many loads in a row have held the profitability report back, this one included: the stock
+        snapshots loaded after production's report date (each load brings one) and this check. Asked only
+        when second_hold() said this is at least the second, so never fewer than two."""
+        day = iso(kept)
+        n = 0
+        if day:
+            rows = self.q(Q_SNAPSHOTS_SINCE, [day])
+            try:
+                n = int((rows or [{}])[0].get("n") or 0)
+            except (TypeError, ValueError):
+                n = 0
+        return max(2, n + 1)
 
     # 6 ── price book
     def step_price_books(self) -> None:
@@ -2461,7 +2539,9 @@ class Check:
                 "data_date": data_date, "staging": str(staging), "staged": staged_names, "stops": list(self.stops),
                 "flags": list(self.flags), "guards": list(self.guards),
                 "supersedes": list(self.retired.get("retired") or []),
-                "not_loaded": [o["name"] for o in inv["others"]] + [f["name"] + "/" for f in inv["folders"]]}
+                "not_loaded": [o["name"] for o in inv["others"]] + [f["name"] + "/" for f in inv["folders"]],
+                "profitability": self.profit_evidence,
+                "timings": dict(self.timings, parse=self.grids.summary(), total=round(sum(self.timings.values()), 2))}
         self.files.append(str(loadplan.write_plan(plan)))
         if token:
             self.files.append(str(loadplan.write_go_cmd(run, token, paths.CODE_ROOT)))
@@ -2580,6 +2660,9 @@ def run_check(args, deps: Deps | None = None) -> dict:
 
 EVENT_WORDS = {"started": "started", "step_start": "started", "step_ok": "done", "step_failed": "FAILED",
                "note": "note", "finished": "FINISHED", "failed": "FAILED"}
+# The delivery journal's rows (loads/<run>/delivery.jsonl): an e-mail that did not go is never a FAILED load.
+DELIVERY_WORDS = {"queued": "started", "sent": "e-mail sent", "test_sent": "TEST e-mail sent", "not_sent": "not sent",
+                  "failed": "e-mail NOT sent"}
 JOURNAL_SAYS = ("text", "why", "next")      # the fields the writer fills for the owner (scripts/yq_load_go.py)
 
 
@@ -2605,7 +2688,7 @@ def journal_line(row: dict) -> str:
     except ValueError:
         clock = at[11:19] or "--:--:--"
     event = str(row.get("event") or "")
-    word = EVENT_WORDS.get(event, event)
+    word = EVENT_WORDS.get(event) or DELIVERY_WORDS.get(event.removeprefix("delivery_"), event)
     if event == "step_failed" and row.get("stops") is False:
         word = "needs a look (the load went on)"
     elif event == "finished" and row.get("result") == "ok_needs_look":
@@ -2617,11 +2700,44 @@ def journal_line(row: dict) -> str:
     return f"  {clock}  {head}" + (f" - {said}" if said else "")
 
 
+def _open_delivery_age(run: str, closers: tuple, now: datetime | None = None) -> float | None:
+    """Seconds since the last 'queued' row of the run's delivery journal when no row of `closers` came
+    after it; None when there is no such row. An unreadable time counts as old."""
+    rows = loadplan.delivery_read(run)
+    queued = [i for i, r in enumerate(rows) if r.get("event") == "queued"]
+    if not queued or any(r.get("event") in closers for r in rows[queued[-1] + 1:]):
+        return None
+    try:
+        return ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(str(rows[queued[-1]].get("at")))).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def delivery_pending(run: str, now: datetime | None = None) -> bool:
+    """Is the delivery of this finished load still being made: a 'queued' row with no 'ended' row after
+    it (the writer's last word, which carries the `Delivery:` line), younger than DELIVERY_WAIT_S? An
+    older one was cut off: see delivery_cut_off."""
+    age = _open_delivery_age(run, ("ended",), now)
+    return age is not None and age <= DELIVERY_WAIT_S
+
+
+def delivery_cut_off(run: str, now: datetime | None = None) -> bool:
+    """A delivery that was queued and never closed, older than DELIVERY_WAIT_S: the PC slept or the
+    worker was ended before the e-mail went. A send by hand afterwards closes it too (DELIVERY_ENDS).
+    `load status` says so, with its retry, which reloads nothing."""
+    age = _open_delivery_age(run, DELIVERY_ENDS, now)
+    return age is not None and age > DELIVERY_WAIT_S
+
+
 def run_state(run: str, now: datetime | None = None) -> tuple[str, str | None]:
     """(RUNNING | FINISHED | FAILED | INTERRUPTED | NOT STARTED, step). The journal says whether the
-    run started and how it ended; the lock says whether its worker is still alive."""
+    run started and how it ended; the lock says whether its worker is still alive. A load that has
+    finished reads RUNNING at 'delivery' while its brief and e-mail are being made (deliver_after of
+    the writer): the skill then follows it a little longer, and shows the brief that was made."""
     result = loadplan.run_result(run)
     step = loadplan.last_step(run)
+    if result == "FINISHED" and delivery_pending(run, now):
+        return "RUNNING", "delivery"
     if result in ("FINISHED", "FAILED"):
         return result, step
     lock = lock_now()
@@ -2648,6 +2764,74 @@ def run_state(run: str, now: datetime | None = None) -> tuple[str, str | None]:
 
 def state_text(state: str, step: str | None) -> str:
     return state + (f" at {step or 'start'}" if state in ("RUNNING", "FAILED", "INTERRUPTED") else "")
+
+
+def _delivery_windows(rows: list[dict]) -> list[tuple[int, int | None]]:
+    """(queued, ended) row indexes of each delivery the writer ran after the load; None = not ended yet."""
+    out, start = [], None
+    for i, r in enumerate(rows):
+        if r.get("event") == "queued":
+            if start is not None:
+                out.append((start, None))
+            start = i
+        elif r.get("event") == "ended" and start is not None:
+            out.append((start, i))
+            start = None
+    if start is not None:
+        out.append((start, None))
+    return out
+
+
+def new_delivery_lines(run: str) -> list[str]:
+    """The rows of the run's delivery journal no earlier call has shown: what became of its brief and its
+    e-mail after the load closed. Of a delivery the writer runs (deliver_after: 'queued' ... 'ended') only
+    its first and its last row are shown: the last one is the `Delivery:` line, and the rows in between
+    (the brief, the sender's own row) wait unshown until it is written. A send by hand (scripts/yq_send.py)
+    shows its own row."""
+    rows = loadplan.delivery_read(run)
+    mark = loadplan.run_dir(run) / DELIVERY_OFFSET_FILE
+    try:
+        shown = int(mark.read_text(encoding="utf-8").strip() or 0) if mark.is_file() else 0
+    except ValueError:
+        shown = 0
+    shown = min(max(shown, 0), len(rows))
+    windows = _delivery_windows(rows)
+    working = delivery_pending(run) and windows and windows[-1][1] is None
+    out, upto = [], shown
+    for i in range(shown, len(rows)):
+        r, event = rows[i], rows[i].get("event")
+        inside = next(((s, e) for s, e in windows if s < i and (e is None or i <= e)), None)
+        if inside and inside[1] is None:
+            if working and inside == windows[-1]:
+                break                               # the writer is still at work: its last row says what became of it
+            inside = None                           # it was cut off: each row says for itself what became of the e-mail
+        upto = i + 1
+        if event == "ended":
+            out.append("  " + " ".join(str(r.get("text") or "").split()))      # the `Delivery:` line, as written
+        elif event == "queued" or (event in DELIVERY_WORDS and not inside):
+            out.append(delivery_line(dict(r, step="delivery", event="delivery_" + str(event))))
+    if upto != shown and loadplan.run_dir(run).is_dir():
+        paths.write_text(mark, f"{upto}\n")
+    return out
+
+
+def delivery_line(row: dict) -> str:
+    """One row of the delivery journal, like journal_line, but its `next` (the line that sends the e-mail
+    again) is left as written, with no full stop after it: it is run as it stands."""
+    nxt = " ".join(str(row.get("next") or "").split())
+    return journal_line(dict(row, next=None)) + (" " + nxt if nxt else "")
+
+
+def timing_line(run: str) -> str | None:
+    """One line on how long a closed load took, from its closing row (the writer keeps the seconds of
+    every step there)."""
+    closing = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
+    if not closing or not isinstance(closing[-1].get("timings"), dict):
+        return None
+    t, total = closing[-1]["timings"], closing[-1].get("total_seconds")
+    parts = [f"{k} {round(float(v))} s" for k, v in t.items() if isinstance(v, (int, float))]
+    head = f"  Load time: {round(float(total) / 60, 1)} min" if isinstance(total, (int, float)) else "  Load time"
+    return head + " (" + ", ".join(parts) + ")"
 
 
 def new_journal_lines(run: str) -> list[str]:
@@ -2684,8 +2868,16 @@ def run_status(args, deps: Deps | None = None) -> dict:
                 "text": f"'{run}' is not a run name (ddmmyy_HHMM).", "state": None, "run": run}
     lines: list[str] = []
     began = deps.clock()
+    timed = False
     while True:
         lines += new_journal_lines(run)
+        if not timed and loadplan.run_result(run) in ("FINISHED", "FAILED"):
+            said = timing_line(run)
+            if said and not (loadplan.run_dir(run) / TIMING_SHOWN_FILE).is_file():
+                lines.append(said)
+                paths.write_text(loadplan.run_dir(run) / TIMING_SHOWN_FILE, "1\n")
+            timed = True
+        lines += new_delivery_lines(run)
         state, step = run_state(run)
         waited = deps.clock() - began
         final = (state in ("FINISHED", "FAILED", "INTERRUPTED")
@@ -2693,6 +2885,9 @@ def run_status(args, deps: Deps | None = None) -> dict:
         if not getattr(args, "wait", False) or final or waited >= WAIT_MAX_S:
             break
         deps.pause(WAIT_POLL_S)
+    if state == "FINISHED" and delivery_cut_off(run):
+        lines.append("  Delivery: cut off before the e-mail went (the PC slept, or the load's window was closed). "
+                     f"Nothing was reloaded. Its retry: {SEND_RETRY.format(run=run)}")
     text = [f"Load {run}"]
     newer = (read_plan_of(run) or {}).get("superseded_by")
     if newer and state == "NOT STARTED":

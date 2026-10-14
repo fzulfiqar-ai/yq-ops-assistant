@@ -395,6 +395,8 @@ class FakeSession:
             return [{"ok": True}]
         if "from ingest_batches" in s:
             return []
+        if s.startswith("select count(distinct as_of_date)::int as n from stock_balance where as_of_date >"):
+            return [{"n": d.get("snapshots_since", 1)}]
         raise AssertionError("a statement the stand-in does not know: " + s[:90])
 
     def close(self) -> None:
@@ -2952,6 +2954,56 @@ def _():
         assert res["state"] == "INTERRUPTED" and deps.ticks == 0 and res["exit"] == 2
 
 
+@test("status after a load: RUNNING at delivery while the e-mail is made, then its one Delivery line; a cut-off one says its retry")
+def _():
+    run = "070126_0930"
+    said = "Delivery: e-mail sent to 1 address(es) (full, auto): YQ brief"
+    with data_root():
+        loadplan.journal_append(run, "started")
+        loadplan.journal_append(run, "finished", result="ok", text="Loaded and published.")
+        loadplan.delivery_append(run, "queued", text="Preparing the brief and the e-mail.")
+        res = status_of("--run", run)
+        lines = res["text"].splitlines()
+        assert lines[-1] == "RUNNING at delivery" and res["exit"] == 0 and res["state"] == "RUNNING", lines
+        assert lines[-2].endswith("delivery: started - Preparing the brief and the e-mail."), lines
+        loadplan.delivery_append(run, "pack", kind="full", manifest="x/manifest.json")
+        loadplan.delivery_append(run, "sent", kind="full", how="auto", text="The full e-mail went to 1 address(es).")
+        res = status_of("--run", run)                   # the sender's own row waits for the writer's last word
+        assert res["text"].splitlines()[1:] == ["  (no new journal line)", "RUNNING at delivery"], res["text"]
+        loadplan.delivery_append(run, "ended", text=said)
+        res = status_of("--run", run)
+        assert res["text"].splitlines()[1:] == ["  " + said, "FINISHED"] and res["exit"] == 0, res["text"]
+        assert status_of("--run", run)["text"].splitlines()[1:] == ["  (no new journal line)", "FINISHED"]
+        # a send by hand afterwards (scripts/yq_send.py) shows its own row, worded as an e-mail, never as a load
+        loadplan.delivery_append(run, "failed", why="the mail service did not take it: HTTP 401",
+                                 text="The e-mail could not be sent.", next=f"Its retry: {lc.SEND_RETRY.format(run=run)}")
+        line = status_of("--run", run)["text"].splitlines()[1]
+        assert line.endswith("delivery: e-mail NOT sent - The e-mail could not be sent. the mail service did not take it: "
+                             f"HTTP 401. Its retry: python -m scripts.yq_send --run {run}"), line
+        assert "FAILED" not in line
+    with data_root():                                   # the PC slept while the e-mail was made: cut off, and said so
+        loadplan.journal_append(run, "started")
+        loadplan.journal_append(run, "finished", result="ok", text="Loaded and published.")
+        old = (datetime.now(timezone.utc) - timedelta(seconds=lc.DELIVERY_WAIT_S + 60)).isoformat(timespec="seconds")
+        loadplan.delivery_append(run, "queued", at=old, text="Preparing the brief and the e-mail.")
+        assert lc.delivery_cut_off(run) and not lc.delivery_pending(run)
+        res = status_of("--run", run)
+        lines = res["text"].splitlines()
+        assert lines[-1] == "FINISHED" and res["exit"] == 0, lines
+        assert lines[-2] == ("  Delivery: cut off before the e-mail went (the PC slept, or the load's window was closed). "
+                             f"Nothing was reloaded. Its retry: python -m scripts.yq_send --run {run}"), lines
+        assert status_of("--run", run)["text"].splitlines()[-2].startswith("  Delivery: cut off")   # until it is sent
+        loadplan.delivery_append(run, "sent", kind="full", how="by hand", text="The full e-mail went to 1 address(es).")
+        assert not lc.delivery_cut_off(run)
+        res = status_of("--run", run)
+        assert "cut off" not in res["text"] and "delivery: e-mail sent - The full e-mail went" in res["text"], res["text"]
+    with data_root():                                   # a rehearsal's delivery: one ended row, nothing pending
+        loadplan.journal_append(run, "finished", result="ok")
+        loadplan.delivery_append(run, "ended", text="Delivery: (rehearsal) a real load would now write the brief.")
+        assert lc.run_state(run)[0] == "FINISHED" and not lc.delivery_cut_off(run)
+        assert "  Delivery: (rehearsal) a real load would now write the brief." in status_of("--run", run)["text"]
+
+
 @test("progress lines go to the screen as the check runs, and to stderr when one JSON object is asked for")
 def _():
     deps = lc.Deps()
@@ -3041,6 +3093,93 @@ def _():
         assert proof["units"] == lc.dec(block["sub_units"]) and fmt.q3(proof["value"]) == fmt.q3(block["sub_value"])
         assert proof["items"] == len([r for r in rows if r["warehouse_name"] == main]) > 0
     assert loadplan.sha256_file(src) == before
+
+
+# ── 14-Oct-2026: the profitability evidence, the count of holds, the check's timings, another PC's lock ──
+
+@test("a held report: the action says what accounts must do and since when; the loads are counted; the plan keeps the evidence")
+def _():
+    with data_root() as root:
+        make_drop(root, profit=SHORT_COST)
+        res, _ = check("070126", deps=FakeDeps(FakeSession(anchors=BEFORE_LOAD, snapshots_since=2)))
+        text = res["text"]
+        assert "held back for the third load in a row" in text, text      # two snapshots since the report + this one
+        item = [r for r in alerts.open_items() if r["rule"] == "profit_held"][0]
+        assert item["title"].startswith("Ask accounts to post cost of sales in Focus for the invoices since Fri 02 Jan")
+        assert item["title"].endswith("then export the profitability report again") and item["who"] == "Accounts"
+        assert "not loaded for 3 loads" in item["detail"] and "production's report is as on" in item["detail"]
+        plan = loadplan.read_plan(res["run"])
+        ev = plan["profitability"]
+        assert ev["held"] is True and ev["verdict"] == "hold_back" and ev["loads_held"] == 3
+        assert ev["gap_pct"] > ev["limit_pct"] > 0 and ev["production_as_of"] == "2026-01-01"
+        assert ev["ledger_cost_bhd"] and ev["report_cost_bhd"] and ev["line"].startswith("Profitability: ")
+        timings = plan["timings"]
+        assert {"preflight", "folder", "staging", "profitability", "preview", "total"} <= set(timings), timings
+        assert timings["parse"]["memo"] is True and timings["parse"]["files"], timings["parse"]
+        assert all(r["parsed"] == 1 for r in timings["parse"]["files"].values()), "a file was parsed twice"
+    assert [lc.ordinal(n) for n in (1, 2, 3, 10, 11)] == ["first", "second", "third", "tenth", "11th"]
+
+
+@test("one parse per report file: the plan is the same with the memo on and off")
+def _():
+    def plan_of(memo: bool) -> dict:
+        with data_root() as root:
+            make_drop(root, profit=SHORT_COST)
+            old = os.environ.pop("YQ_CHECK_NO_MEMO", None)
+            try:
+                if not memo:
+                    os.environ["YQ_CHECK_NO_MEMO"] = "1"
+                res, _ = check("070126", deps=FakeDeps(FakeSession(anchors=BEFORE_LOAD)))
+            finally:
+                os.environ.pop("YQ_CHECK_NO_MEMO", None)
+                if old is not None:
+                    os.environ["YQ_CHECK_NO_MEMO"] = old
+            plan = loadplan.read_plan(res["run"])
+            parse = plan.pop("timings")["parse"]
+            for key in ("run", "created_at", "staging", "token", "token_parts", "drop"):
+                plan.pop(key, None)
+            return {"plan": plan, "parse": parse}
+    on, off = plan_of(True), plan_of(False)
+    assert on["plan"] == off["plan"], "the memo changed what the check found"
+    assert off["parse"]["memo"] is False and on["parse"]["memo"] is True
+    assert sum(r["parsed"] for r in on["parse"]["files"].values()) <= sum(r["parsed"] for r in off["parse"]["files"].values())
+    from scripts import ingest as ing
+    assert ing.read_grid.__module__ == "scripts.ingest", "the original parser was put back"
+    # the memo itself (the preview of the tests parses nothing, so it is driven here directly)
+    from scripts.ops.gridmemo import GridMemo
+    with data_root() as root:
+        drop = make_drop(root)
+        ledger = next(drop.glob("Stock_ledger*"))
+        twin = root / "twin.xlsx"
+        shutil.copyfile(ledger, twin)                 # the staged copy: another path, the same content
+        memo = GridMemo(memo=True)
+        with memo.active():
+            first, again, other = ing.read_grid(ledger), ing.read_grid(ledger), ing.read_grid(twin)
+            first.iat[0, 0] = "changed by one caller"
+            assert again.iat[0, 0] != "changed by one caller" != other.iat[0, 0], "each caller has its own copy"
+            twin.write_bytes(next(drop.glob("Stock_balance*")).read_bytes())    # the file changed: parsed again
+            changed = ing.read_grid(twin)
+        assert len(changed) != len(again)
+        reads = memo.summary()["files"]
+        assert reads[ledger.name] == {"parsed": 1, "served": 1, "seconds": reads[ledger.name]["seconds"]}
+        assert reads["twin.xlsx"]["served"] == 1 and reads["twin.xlsx"]["parsed"] == 1
+        assert ing.read_grid.__module__ == "scripts.ingest"
+        off_memo = GridMemo(memo=False)
+        with off_memo.active():
+            ing.read_grid(ledger), ing.read_grid(ledger)
+        assert off_memo.summary()["files"][ledger.name]["parsed"] == 2
+
+
+@test("a lock taken on another PC stops the check: no GO line, nothing resumed or cleared from this PC")
+def _():
+    with data_root() as root:
+        make_drop(root)
+        for state in ("running", "interrupted"):
+            deps = FakeDeps(lock_state=lambda st=state: {"state": st, "run": "060126_0900", "step": "refresh",
+                                                         "elsewhere": "OTHER-PC"})
+            res, _ = check("070126", deps=deps)
+            assert res["exit"] == 2 and res["token"] is None and "GO:" not in res["text"], res["text"]
+            assert "taken on another PC (OTHER-PC)" in res["text"] and "finish that load on OTHER-PC" in res["text"]
 
 
 def main() -> int:

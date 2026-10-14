@@ -1,4 +1,4 @@
-"""python -m scripts.ops brief [window] [rep:<name>] [top:N] [again]     (the command behind /yq-brief)
+"""python -m scripts.ops brief [window] [rep:<name>] [top:N] [again] [team]     (the command behind /yq-brief)
 
     (nothing)     the full brief, one screen: latest day, last 3 days, last 7 days, last full week,
                   month to date and pace, accounts, reps, stock, and what to do today
@@ -10,6 +10,8 @@
                   (without it the answer is then two lines: the data date and what is waiting)
     top:N         rows in the account and product tables of a window (the same as --top N; when
                   both are given the word wins)
+    team          on its own: the team message the last load made (exports/ops/<D>/delivery/<run>/
+                  whatsapp.txt), as it was made, to copy into the salesmen's group; nothing is worked out
     The words and the options may come in any order: `brief mtd rep:Van A`, `brief rep:Van A mtd`
     and `brief --top 20 mtd rep:Van A` are one request.
 
@@ -651,8 +653,11 @@ def read_overview() -> dict:
     reader = metrics.Reader(q=db.rpc, qp=db.rpc_params)
     payload = metrics.overview("mtd", reader=reader, use_cache=False)
     active = {str(r.get("salesman")): r.get("is_active") for r in reader.get("attainment") or []}
+    # the rows the overview already read (no further read): the delivery's rep table and push list use them
     return {"payload": payload, "active": active,
-            "margin_report_date": (reader.get("anchor") or {}).get("margin_report_date")}
+            "margin_report_date": (reader.get("anchor") or {}).get("margin_report_date"),
+            "rows": {"attainment": reader.get("attainment"), "stock": reader.get("stock"),
+                     "movers": reader.get("movers")}}
 
 
 def _tile(payload: dict | None, key: str) -> dict | None:
@@ -1020,7 +1025,7 @@ def stock_section(tile: dict | None, have_overview: bool) -> tuple[dict, list[st
 
 
 def today_section(attention: list[dict] | None, unavailable: list[str], data_date: str, warnings: list[str],
-                  profit: str | None = None) -> tuple[dict, list[str]]:
+                  profit: str | None = None, record: bool = True) -> tuple[dict, list[str]]:
     """DO TODAY: the attention list goes on the register, then at most five open items.
 
     The register is updated only when the list is whole. When a source the list is worked out from
@@ -1038,7 +1043,7 @@ def today_section(attention: list[dict] | None, unavailable: list[str], data_dat
         warnings.append("the Command Centre could not read: " + ", ".join(needed)
                         + "; the action list was left as it stood")
         lines.append("(part of the Command Centre did not answer: the list below is as it stood)")
-    else:
+    elif record:
         recorded = record_attention(attention, data_date, profit)
     if other:
         warnings.append("the Command Centre could not read: " + ", ".join(other) + " (the action list does not use it)")
@@ -1097,10 +1102,13 @@ def _header(d: date, state: dict, rep: str | None, middle: str | None = None) ->
 
 
 def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
-               exported: date | None = None) -> tuple[list[str], dict, list[str], dict]:
+               exported: date | None = None, *, record: bool = True,
+               enrich: bool = False) -> tuple[list[str], dict, list[str], dict]:
     """The one-screen brief. Returns (lines, facts, warnings, state patch). `latest` is the latest
     full sale day: D, or on a part day the loaded sale day before it. `exported` is the day the
-    reports were exported, when anything says (export_day)."""
+    reports were exported, when anything says (export_day). record=False (a delivery preview) leaves
+    the action register as it stands; enrich=True (the delivery) adds facts['enriched'] for the
+    e-mail (scripts/ops/enrich.py), and changes no line of the screen."""
     warnings: list[str] = []
     full_to = full_until(d, latest, exported)            # the last complete calendar day
     sat = full_week_end(full_to)                         # ... and the Saturday that ends the last complete week
@@ -1229,9 +1237,12 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     profit = profit_basis(fmt.as_date((overview or {}).get("margin_report_date")), d, state)
     attention = _attention(payload) if payload else None
     today_f, today_l = today_section(attention, list((payload or {}).get("unavailable") or []), d.isoformat(),
-                                     warnings, profit)
+                                     warnings, profit, record=record)
     facts["do_today"] = dict(today_f, profit_basis=profit)
     lines += [""] + today_l
+    if enrich:
+        from scripts.ops import enrich as enrich_mod
+        facts["enriched"] = enrich_mod.build(d, overview, dim_rows)
     # the brief counts as read only when the whole screen was there: the Command Centre answered and its
     # attention list went on the register. Otherwise the next /yq-brief prints the screen again, not two lines.
     if today_f.get("recorded") is not None:
@@ -1382,8 +1393,81 @@ def file_stem(window: str | None, rep: str | None) -> str:
     return stem + (f"-rep-{_slug(rep) or alerts.ref_hash(rep)}" if rep else "")
 
 
+def latest_full_day(d: date, anchors: dict, state: dict) -> tuple[date | None, bool, date]:
+    """(the export day, is D a part day, the latest full sale day) for the brief of data date D."""
+    exported = export_day(d, anchors, state)
+    part = exported == d                    # the reports were exported on D itself: D may not be complete
+    latest = d
+    if part:
+        prev = fmt.as_date((db.rpc_params(PREV_DAY_SQL, [d.isoformat()]) or [{}])[0].get("prev_day"))
+        if prev is None:
+            part = False
+        else:
+            latest = prev
+    return exported, part, latest
+
+
+def save_screen(d: date, stem: str, text: str, facts: dict) -> list:
+    """exports/ops/<D>/<stem>.txt and .json: what the screen said, and its facts."""
+    folder = paths.exports_dir(d)
+    return [paths.write_text(folder / f"{stem}.txt", text + "\n"),
+            paths.write_text(folder / f"{stem}.json", json.dumps(_jsonable(facts), indent=1, ensure_ascii=False) + "\n")]
+
+
+def full_screen(*, record: bool = True, enrich: bool = False) -> dict:
+    """The full brief exactly as /yq-brief works it out, for the delivery (scripts/ops/deliver.py):
+    {d, text, facts, warnings, patch}. Nothing is written here; the caller saves the screen and the
+    state patch (record=False, a preview, records nothing and stamps nothing)."""
+    anchors = status.anchors()
+    d = fmt.as_date(anchors.get("focus_to"))
+    if d is None:
+        raise BriefInput("No sales are loaded yet: there is nothing to brief.")
+    state = status.read_state()
+    exported, part, latest = latest_full_day(d, anchors, state)
+    lines, facts, warnings, patch = full_brief(d, latest, part, state, None, exported, record=record, enrich=enrich)
+    facts["warnings"] = warnings
+    return {"d": d, "text": "\n".join(_guarded(ln).rstrip() for ln in lines), "facts": facts,
+            "warnings": warnings, "patch": patch}
+
+
+def unshown_brief(d: date, state: dict) -> str | None:
+    """The brief a load's delivery made right after the load (state brief_unshown), while it has not
+    been shown in the chat: the first plain /yq-brief after a load shows it as it was made, with one
+    line on top, instead of the two 'nothing new' lines. None when there is none to show."""
+    kept = state.get("brief_unshown")
+    if not isinstance(kept, dict) or kept.get("data_date") != d.isoformat() or kept.get("run") != _load_run(state):
+        return None
+    try:
+        text = paths.exports_dir(d).joinpath("brief.txt").read_text(encoding="utf-8").rstrip("\n")
+    except OSError:
+        return None
+    head = (f"(Made at {kept.get('at') or '?'} right after load {kept.get('run')}; the e-mail carries the same "
+            "figures. For a brief worked out anew: /yq-brief again)")
+    return head + "\n" + text
+
+
+TEAM_WORD = "team"
+
+
+def team_message() -> str:
+    """The team message the last load's delivery made (exports/ops/<D>/delivery/<run>/whatsapp.txt), as it
+    was made; one line on top says where it came from. Nothing is worked out here."""
+    run = _load_run(status.read_state())
+    base = paths.exports_dir()
+    found = sorted(base.glob(f"*/delivery/{run}/whatsapp.txt")) if (run and base.is_dir()) else []
+    if not found:
+        return ("No team message yet: it is made right after each load (the e-mail carries it too). After the "
+                "next /yq-load, type /yq-brief team.")
+    text = found[-1].read_text(encoding="utf-8").rstrip("\n")
+    return (f"Team message of load {run}: copy the block below into the team group (or open whatsapp.html in "
+            f"{found[-1].parent} to change it first).\n" + text)
+
+
 def run(args) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
+    words = [w.lower() for raw in (getattr(args, "spec", None) or []) for w in str(raw).split()]
+    if words == [TEAM_WORD]:
+        return dict(out, text=team_message(), flags={"team": True})
     try:
         window, typed_rep, again_word, top_word = parse_spec(getattr(args, "spec", None))
     except BriefInput as exc:
@@ -1399,18 +1483,14 @@ def run(args) -> dict:
     state = status.read_state()
     is_full = window is None and typed_rep is None
     if is_full and not again and is_nothing_new(d, state):
+        stored = unshown_brief(d, state)
+        if stored is not None:              # the brief the load's delivery made, shown once in the chat
+            status.write_state({"brief_unshown": None})
+            return dict(out, text=stored, flags={"open": status.register_counts(), "stored": True})
         return dict(out, text="\n".join(_guarded(ln) for ln in nothing_new(d, state)),
                     flags={"open": status.register_counts()})
 
-    exported = export_day(d, anchors, state)
-    part = exported == d                    # the reports were exported on D itself: D may not be complete
-    latest = d
-    if part:
-        prev = fmt.as_date((db.rpc_params(PREV_DAY_SQL, [d.isoformat()]) or [{}])[0].get("prev_day"))
-        if prev is None:
-            part = False
-        else:
-            latest = prev
+    exported, part, latest = latest_full_day(d, anchors, state)
 
     try:
         rep = resolve_rep(typed_rep, [r.get("rep") for r in db.rpc(REP_NAMES_SQL)]) if typed_rep else None
@@ -1424,9 +1504,7 @@ def run(args) -> dict:
 
     text = "\n".join(_guarded(ln).rstrip() for ln in lines)
     facts["warnings"] = warnings
-    folder, stem = paths.exports_dir(d), file_stem(window, rep)
-    files = [paths.write_text(folder / f"{stem}.txt", text + "\n"),
-             paths.write_text(folder / f"{stem}.json", json.dumps(_jsonable(facts), indent=1, ensure_ascii=False) + "\n")]
+    files = save_screen(d, file_stem(window, rep), text, facts)
     if patch:
         status.write_state(patch)
     flags = {"open": status.register_counts()}

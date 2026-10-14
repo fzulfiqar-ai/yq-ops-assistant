@@ -145,6 +145,7 @@ EXIT_OK, EXIT_ERROR, EXIT_REFUSED, EXIT_CHECK_AGAIN, EXIT_NO_ANSWER = 0, 1, 2, 3
 BOX_TIMEOUT_S = 540                 # the skill's tool call lasts 600 s at most
 BOX_MIN_READ_S = 3                  # a Yes sooner than this after the box opened was a stray key, not an answer
 BOX_SHOWS = 3                       # how often the box is shown before such answers end it as 'too_fast'
+BOX_REOPEN_PAUSE_S = 2              # the box comes back this long after a Yes that came too soon
 HEARTBEAT_S = 10                    # scripts.ops.status calls a lock stale after 120 s
 START_WAIT_S = 10                   # the launcher waits this long for the worker's first journal line
 RETRY_PAUSE_S = 30                  # before the one identical re-run of a failed load stage
@@ -152,9 +153,13 @@ REUSE_MAX_S = 3600                  # a resume reuses a backup or before-snapsho
 NEW_RUNS_PER_LOAD = 2               # ingest_runs rows of one refresh: the loader's and its own
 FIELD = 160                         # no sentence of the journal is longer (`load status` shows a field whole)
 BACKUP_TIMEOUT_S, GATE_TIMEOUT_S, RECONCILE_TIMEOUT_S = 1800, 900, 1800      # read-only steps only
+DELIVER_TIMEOUT_S, SEND_TIMEOUT_S = 300, 180    # after the load: the brief and its e-mail (deliver_after)
+SEND_LINE = "python -m scripts.yq_send --run {run}"     # the line that sends a load's e-mail again (reloads nothing)
 REHEARSAL_PREFIX = "000000_"        # not a date, so no drop folder can ever spell it
 REHEARSAL_SECONDS = 180
 NONCE_ENV = "YQ_LOAD_GO_NONCE"           # the one-time word the launcher hands its worker (never on disk)
+BACKUP_PASSWORD_ENV = "YQ_BACKUP_PASSWORD"     # scripts/yq_secrets.py reads it; no engine child gets it
+BACKUP_MARKER = "backup.json"                  # business_data/ops: since when the backups are encrypted
 BREAKAWAY_ENV = "YQ_LOAD_GO_BREAKAWAY"   # "1" when the worker was started outside the editor's job
 for _own in (NONCE_ENV, BREAKAWAY_ENV):  # in the worker these two are in the copy made above: they are the
     LAUNCH_ENV.pop(_own, None)           # launcher's words to its worker, no part of anybody's environment
@@ -162,10 +167,15 @@ BAHRAIN = timezone(timedelta(hours=3))
 PROFIT_KIND = "product_profitability"    # the profitability report, as the load check names it in plan.json
 
 # Production's scheduler reads the ledger on every quarter-hour (UTC) and runs its daily agents at
-# 08:00 Bahrain. A load starts 1 to 5 minutes after a tick, so the next one is at least 10 minutes
-# away, and never inside the morning window.
+# 08:00 Bahrain. A load starts 1 to 9 minutes after a tick and never inside the morning window. The
+# window closes earlier when the last refresh on record was slow (start_until_s): the refresh it
+# starts must end TICK_MARGIN_S before the next tick. A refresh takes about three minutes, so a
+# start at 9 minutes ends at about 12, three minutes before the next tick.
 TICK_S = 900
-START_FROM_S, START_UNTIL_S = 60, 300
+START_FROM_S, START_UNTIL_S = 60, 540
+START_UNTIL_MIN_S = 300             # the window never closes before this (the rule of the first loads)
+TICK_MARGIN_S = 120                 # a refresh ends at least this long before the next tick
+REFRESH_ASSUMED_S = 240             # what a refresh is taken to need while no slower one is on record
 QUIET_FROM, QUIET_UNTIL = (7, 50), (8, 20)
 TICK_TRIES = 4                      # token checks that may outlast the quiet moment before the load gives up
 
@@ -372,7 +382,7 @@ def _show_box(title: str, text: str, timeout_ms: int) -> int:
 
 
 def windows_box(title: str, text: str, timeout_s: float = BOX_TIMEOUT_S, *, show=None,
-                clock: Callable[[], float] = time.monotonic) -> str:
+                clock: Callable[[], float] = time.monotonic, pause: Callable[[float], None] | None = None) -> str:
     """The owner's confirmation: 'yes', 'no', 'timeout', 'closed', 'too_fast' or 'unavailable'.
     Only 'yes' loads.
 
@@ -380,14 +390,19 @@ def windows_box(title: str, text: str, timeout_s: float = BOX_TIMEOUT_S, *, show
     A key typed for another window at that moment would start a load nobody has read. So a Yes
     that comes within BOX_MIN_READ_S of the box opening does not count: the box is shown again and
     says why. After BOX_SHOWS such answers it is 'too_fast', which loads nothing. (Enter and the
-    space bar fall on No, the default button.) `show` and `clock` are given by tests only."""
+    space bar fall on No, the default button.) Before it is shown again it waits BOX_REOPEN_PAUSE_S:
+    a box that came back at once under the pointer took the second click of a double click as one
+    more Yes too soon, and so on. `show`, `clock` and `pause` are given by tests only."""
     if show is None:
         if os.name != "nt":
             return "unavailable"
         show = _show_box
+        pause = pause or time.sleep
     deadline = clock() + float(timeout_s)
     note = ""
-    for _ in range(BOX_SHOWS):
+    for shown in range(BOX_SHOWS):
+        if shown and pause is not None:
+            pause(BOX_REOPEN_PAUSE_S)
         left = deadline - clock()
         if left <= 0:
             return "timeout"
@@ -400,7 +415,7 @@ def windows_box(title: str, text: str, timeout_s: float = BOX_TIMEOUT_S, *, show
         if said != "yes" or clock() - opened >= BOX_MIN_READ_S:
             return said
         note = (f"A Yes came within {int(BOX_MIN_READ_S)} seconds of this box opening, before it could be read: "
-                "it did not count.\nRead the lines below, then answer.\n\n")
+                "it did not count.\nRead the lines below, then click your answer once.\n\n")
     return "too_fast"
 
 
@@ -548,8 +563,8 @@ def child_env(base=None) -> dict:
     So an engine step runs here exactly as it runs when it is started by hand."""
     env = dict(LAUNCH_ENV if base is None else base)
     env["PYTHONUTF8"] = "1"
-    for name in ("PYTHONIOENCODING", NONCE_ENV, BREAKAWAY_ENV):
-        env.pop(name, None)
+    for name in ("PYTHONIOENCODING", NONCE_ENV, BREAKAWAY_ENV, BACKUP_PASSWORD_ENV):
+        env.pop(name, None)                  # (no engine step needs the backup password: this worker packs)
     return env
 
 
@@ -558,7 +573,9 @@ def run_child(argv: list, *, cwd: Path, env: dict, log: Callable[[str], None] | 
     """Run one child to its end. Output is read as BYTES and decoded here (UTF-8, replacement):
     an em dash or a stray cp1252 byte in a report line can never stop the worker. `seen` is told
     the child's process id as it starts and None when it has ended (the worker writes it into the
-    lock: see loader_alive)."""
+    lock: see loader_alive). Each line the log gets carries the time it arrived and the seconds
+    since the child started: the worker log is where a slow part of a step shows."""
+    started = time.monotonic()
     proc = subprocess.Popen([str(a) for a in argv], cwd=str(cwd), env=env, shell=False,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             close_fds=True)
@@ -580,7 +597,8 @@ def run_child(argv: list, *, cwd: Path, env: dict, log: Callable[[str], None] | 
             text = raw.decode("utf-8", errors="replace")
             parts.append(text)
             if log is not None:
-                log("  | " + text.rstrip("\r\n"))
+                stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                log(f"  | {stamp}Z +{time.monotonic() - started:4.0f}s " + text.rstrip("\r\n"))
         code = proc.wait()
     finally:
         if timer is not None:
@@ -682,7 +700,9 @@ class LockFile:
                 self._set_aside(replacing)
             self.data.setdefault("started", self._now())
             self.data.setdefault("step", "start")
-            self.data.update(pid=os.getpid(), pid_created=process_created(os.getpid()))
+            # host: the folder syncs through OneDrive, and a lock that arrives from another PC is never
+            # judged by the process ids of this one (status.host_elsewhere)
+            self.data.update(pid=os.getpid(), pid_created=process_created(os.getpid()), host=status.this_host())
             try:
                 fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
@@ -930,6 +950,16 @@ def _held_words(lock: dict, nothing: str) -> str:
     return f"A {what} is running (run {held_by}, at {at}). {nothing}: follow it with {FOLLOW_LINE}"
 
 
+def _elsewhere_words(lock: dict, host: str, nothing: str) -> str:
+    """Why nothing starts, resumes or is cleared while the lock was taken on another PC. The folder
+    syncs through OneDrive, so the lock file can arrive here from that PC; whether its worker is
+    alive can only be seen there, and a lock is never judged dead on a guess."""
+    held_by, at = str(lock.get("run") or "?"), str(lock.get("step") or "start")
+    return (f"The load lock was taken on another PC ({host}) for run {held_by}, at {at}. {nothing} and nothing is "
+            f"resumed or cleared from this PC: finish or resume that load on {host}. If that PC can no longer run "
+            "it, ask Claude to clear the lock by hand.")
+
+
 def _orphan_words(lock: dict, pid: int, nothing: str) -> str:
     """Why nothing starts or resumes while the engine program of a worker that is gone still runs."""
     held_by, step = str(lock.get("run") or "?"), str(lock.get("child_step") or lock.get("step") or "?")
@@ -1156,9 +1186,11 @@ def attention_lines(plan: dict) -> list[str]:
     return out
 
 
-def box_text(run: str, plan: dict, *, resume_step: str | None = None, rehearsal: bool = False) -> tuple[str, str]:
+def box_text(run: str, plan: dict, *, resume_step: str | None = None, rehearsal: bool = False,
+             notes: list[str] | None = None) -> tuple[str, str]:
     """(title, text) of the Yes/No box: the folder, one line per file with its decision, what the
-    check flagged (ATTENTION), the options that change what a Yes does, the expected figures."""
+    check flagged (ATTENTION), the options that change what a Yes does, the expected figures, and
+    `notes`: what the plan cannot say (will the backup be encrypted, what goes out after the load)."""
     title = f"YQ load {run[:6]}" + (" (REHEARSAL)" if rehearsal else "")
     lines: list[str] = []
     if rehearsal:
@@ -1188,7 +1220,10 @@ def box_text(run: str, plan: dict, *, resume_step: str | None = None, rehearsal:
         lines += ["", "After the load you should see:"] + ["- " + _short(ln, 150) for ln in exp[:10]]
         if len(exp) > 10:
             lines.append(f"(+{len(exp) - 10} more: see the table in the chat)")
-    lines += ["", "Yes = load now. No = nothing changes."]
+    if notes:
+        lines += [""] + [_short(n, 150) for n in notes]
+    lines += ["", f"Read first: a Yes in the first {int(BOX_MIN_READ_S)} seconds is not counted. Then click once.",
+              "Yes = load now. No = nothing changes."]
     return title, "\n".join(lines)
 
 
@@ -1216,15 +1251,41 @@ def token_moved(plan: dict, deps: "Deps", with_fingerprint: bool) -> list[str]:
     if local and old.get("head") == new.get("head"):
         return [f"this folder's programs (changed on this PC and not committed: {local})"]
     if not with_fingerprint:
-        return loadplan.moved_parts(dict(old, fingerprint={}), dict(new, fingerprint={}))
+        # this run's own refresh has moved the fingerprint: what another load wrote meanwhile is read
+        # from the database's own records instead (loadplan.foreign_writes, SELECT only)
+        return (loadplan.moved_parts(dict(old, fingerprint={}), dict(new, fingerprint={}))
+                + list(deps.foreign_writes(plan)))
     if loadplan.token_of(new) == plan.get("token"):
         return []
     return loadplan.moved_parts(old, new) or ["the plan of this run (its token is not the one its own parts give)"]
 
 
-def tick_wait_seconds(now: datetime) -> float:
-    """0 when a load may start now, else the seconds until it may: 1 to 5 minutes after a
-    quarter-hour (UTC), and never from 07:50 to 08:20 Bahrain."""
+def start_until_s(last_refresh_s=None) -> int:
+    """The last second after a quarter-hour tick at which a load may start. The refresh it starts
+    must end TICK_MARGIN_S before the next tick, counted at 1.25 times the last refresh on record
+    (and never less than REFRESH_ASSUMED_S); the window never closes later than START_UNTIL_S nor
+    earlier than START_UNTIL_MIN_S. Nothing on record (the first load) counts as REFRESH_ASSUMED_S."""
+    try:
+        took = max(0.0, float(last_refresh_s)) if last_refresh_s is not None else 0.0
+    except (TypeError, ValueError):
+        took = 0.0
+    need = max(float(REFRESH_ASSUMED_S), 1.25 * took)
+    return int(min(START_UNTIL_S, max(START_UNTIL_MIN_S, TICK_S - TICK_MARGIN_S - need)))
+
+
+def last_refresh_seconds(read_state: Callable[[], dict]) -> float | None:
+    """How long the refresh of the last load took (state.json last_load.refresh_seconds), if known."""
+    try:
+        last = read_state().get("last_load")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    seconds = last.get("refresh_seconds") if isinstance(last, dict) else None
+    return seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None
+
+
+def tick_wait_seconds(now: datetime, until_s: int = START_UNTIL_S) -> float:
+    """0 when a load may start now, else the seconds until it may: from 1 minute to `until_s` seconds
+    after a quarter-hour (UTC), and never from 07:50 to 08:20 Bahrain."""
     start = now.astimezone(timezone.utc)
     t = start
     for _ in range(6):
@@ -1238,7 +1299,7 @@ def tick_wait_seconds(now: datetime) -> float:
         if into < START_FROM_S:
             t = t + timedelta(seconds=START_FROM_S - into)
             continue
-        if into > START_UNTIL_S:
+        if into > until_s:
             t = t + timedelta(seconds=TICK_S - into + START_FROM_S)
             continue
         break
@@ -1278,6 +1339,11 @@ class Deps:
     wait_for_tick: bool = True
     start_wait_s: float = START_WAIT_S
     heartbeat_s: float = HEARTBEAT_S
+    # (plan) -> what another load wrote to the database after this run's check (loadplan.foreign_writes)
+    foreign_writes: Callable[[dict], list] = lambda plan: []
+    # () -> lines of the box the plan cannot give (the backup's encryption, the e-mail after the load)
+    box_notes: Callable[[], list] = lambda: []
+    deliver: bool = False                                # after the load: the brief and its e-mail (real_deps)
 
 
 def _real_prepare() -> None:
@@ -1301,6 +1367,13 @@ def _real_parts(plan: dict, with_fingerprint: bool, root: Path) -> dict:
         return loadplan.collect_parts(drop, run, root, live, session)
 
 
+def _real_foreign_writes(plan: dict) -> list[str]:
+    """loadplan.foreign_writes through the read-only session."""
+    from scripts.ops import db
+    with db.session() as session:
+        return loadplan.foreign_writes(session, str(plan.get("run") or ""), plan)
+
+
 def _real_ingest_runs(after_id: int | None) -> tuple[int, int]:
     """(the newest ingest_runs id, the rows written above `after_id`), through the read-only session."""
     from scripts.ops import db
@@ -1317,13 +1390,91 @@ def _real_backup_root() -> Path:
     return Path(nightly_backup.backup_root())
 
 
+def backup_marker() -> str | None:
+    """Since which day the pre-load backups are encrypted (business_data/ops/backup.json), or None."""
+    try:
+        data = json.loads((paths.ops_dir() / BACKUP_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return str(data.get("encrypted_since") or "") or None if isinstance(data, dict) else None
+
+
+def mark_encrypted(day: str) -> None:
+    """The first encrypted backup: from now on a plain one is refused (archive_refusal)."""
+    paths.write_text(paths.ops_dir() / BACKUP_MARKER, json.dumps({"encrypted_since": day}) + "\n")
+
+
+def archive_refusal(password: str | None, exe: str | None, encrypted_since: str | None) -> str | None:
+    """Why the pre-load backup may not be packed, or None when it may. Once a backup password exists on
+    this PC, or once a backup has been encrypted (state.json backup_encrypted_since), a plain archive is
+    never made again: the load stops at its backup instead, before anything is written. (The day is
+    kept in business_data/ops/backup.json: state.json says only what loads did.)"""
+    if password and not exe:
+        return "7-Zip is not installed, so the backup cannot be encrypted: install 7-Zip, then type /yq-load again"
+    if not password and encrypted_since:
+        return (f"the backup password is no longer found on this PC (backups are encrypted since {encrypted_since}): "
+                "set it again, then type /yq-load again")
+    return None
+
+
 def _real_archive(folder: Path, dest: Path, stamp: str) -> tuple[Path, bool]:
+    """Pack the backup (7-Zip AES-256 when the password is set: scripts/yq_secrets.py says where it is
+    read), refuse a plain archive once encryption has begun (archive_refusal), and read the archive back
+    whole before the step goes on to delete the plain folder. Raises on any doubt."""
     from scripts import nightly_backup as nb
-    archive, encrypted = nb.make_archive(folder, dest, stamp, password=os.environ.get(nb.PASSWORD_ENV) or None,
-                                         exe=nb.find_7z())
+    from scripts import yq_secrets
+    from scripts.yq_backup import read_back
+    password, _source = yq_secrets.backup_password(LAUNCH_ENV)
+    exe = nb.find_7z()
+    refused = archive_refusal(password, exe, backup_marker())
+    if refused:
+        raise RuntimeError(refused)
+    archive, encrypted = nb.make_archive(folder, dest, stamp, password=password, exe=exe)
+    whole, said = read_back(Path(archive), password if encrypted else None, exe)
+    if not whole:
+        try:
+            Path(archive).unlink()
+        except OSError:
+            pass
+        raise RuntimeError(f"the packed backup did not read back whole ({said})")
     if encrypted and (dest / nb.WARNING_FILE).exists():
         (dest / nb.WARNING_FILE).unlink()
     return Path(archive), bool(encrypted)
+
+
+def delivery_words() -> str:
+    """The box's line on what goes out after the load (business_data/ops/delivery.json)."""
+    try:
+        conf = json.loads((paths.ops_dir() / "delivery.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        conf = {}
+    if not isinstance(conf, dict):
+        conf = {}
+    mode = str(conf.get("mode") or "off").lower()
+    if mode == "off":
+        return "No e-mail after this load (delivery is off)."
+    to = conf.get("test_to" if mode == "test" else "to") or []
+    n = 1 if isinstance(to, str) else len(to)
+    what = "a TEST copy of the brief" if mode == "test" else "the brief"
+    return f"Afterwards, if every check passes: {what} by e-mail to {n} address(es), with the team message."
+
+
+def _real_box_notes() -> list[str]:
+    out: list[str] = []
+    try:
+        from scripts import nightly_backup as nb
+        from scripts import yq_secrets
+        password, _source = yq_secrets.backup_password(LAUNCH_ENV)
+        refused = archive_refusal(password, nb.find_7z(), backup_marker())
+        if refused:
+            out.append("ATTENTION: " + refused + ".")
+        elif not password:
+            out.append("ATTENTION: the backup before this load will NOT be encrypted: no backup password is set "
+                       "on this PC.")
+    except Exception:  # noqa: BLE001  (the box shows all the same; the backup step says the rest)
+        pass
+    out.append(delivery_words())
+    return out
 
 
 class RealRunner:
@@ -1356,7 +1507,8 @@ def real_deps(run: str, plan: dict, root: Path = ROOT) -> Deps:
         clean_dir=root / "data" / "clean", published_dir=paths.published_dir,
         superseded_dir=paths.staging_dir() / "superseded", read_state=status.read_state,
         write_state=status.write_state, box=windows_box, spawn=spawn_worker, settings_files=settings_files(root),
-        linked_worktree=lambda: gitinfo.is_linked_worktree(root), prepare=_real_prepare)
+        linked_worktree=lambda: gitinfo.is_linked_worktree(root), prepare=_real_prepare,
+        foreign_writes=_real_foreign_writes, box_notes=_real_box_notes, deliver=True)
 
 
 # ── the rehearsal's world ─────────────────────────────────────────────────────────────────────
@@ -1450,7 +1602,8 @@ def rehearsal_deps(run: str, plan: dict, root: Path = ROOT) -> Deps:
         published_dir=lambda as_on: box / "published" / f"Focus ERP {as_on.isoformat()}",
         superseded_dir=box / "superseded", read_state=read_state, write_state=write_state, box=windows_box,
         spawn=spawn_worker, settings_files=settings_files(root),
-        linked_worktree=lambda: gitinfo.is_linked_worktree(root), prepare=None, wait_for_tick=False)
+        linked_worktree=lambda: gitinfo.is_linked_worktree(root), prepare=None, wait_for_tick=False,
+        deliver=True)                        # it only says what a real load would deliver (deliver_after)
 
 
 def deps_for(run: str, plan: dict, root: Path = ROOT) -> Deps:
@@ -1639,6 +1792,9 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
     result, dead, resume = loadplan.run_result(run), None, False
     if lock is not None:
         held_by, at = str(lock.get("run") or "?"), str(lock.get("step") or "start")
+        away = status.host_elsewhere(lock)   # taken on another PC: its processes cannot be looked at from here
+        if away:
+            raise Refusal(_elsewhere_words(lock, away, "Nothing was started"))
         if worker_alive(lock):               # a load's worker, or a rehearsal's: nothing starts beside it
             raise Refusal(_held_words(lock, "Nothing was started"))
         orphan = loader_alive(lock)          # the worker is gone and the loader it started is not
@@ -1728,7 +1884,8 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
                       + "; ".join(odd) + "). Nothing was started: type /yq-load.")
 
     # the owner's confirmation
-    title, text = box_text(run, plan, resume_step=stopped_at if resume else None, rehearsal=rehearsal)
+    title, text = box_text(run, plan, resume_step=stopped_at if resume else None, rehearsal=rehearsal,
+                           notes=deps.box_notes())
     answer = "yes" if no_box else str(deps.box(title, text, BOX_TIMEOUT_S))
     if answer != "yes":
         # at the RESUME box of a load that had begun, "nothing loaded" would not be true of the database
@@ -1880,6 +2037,10 @@ class Job:
         self.verified = False                            # did this worker's refresh load AND verify?
         self.step = "start"
         self.t0 = deps.now()
+        self.began_at = self.t0                          # the whole run, for the timing line of its closing row
+        self.timings: dict[str, float] = {}              # seconds per step, as journalled (one load's profile)
+        # the last second after a tick at which this load may start its refresh (start_until_s)
+        self.tick_until = start_until_s(last_refresh_seconds(deps.read_state))
         self.needs_look: list[str] = []
         self.pre_gate: Path | None = None
         self.result: dict = {}
@@ -1892,6 +2053,11 @@ class Job:
         text = fields.get("text")
         if text and self.deps.rehearsal and "REHEARSAL" not in text:
             text = fields["text"] = "(rehearsal) " + text      # no line of a rehearsal reads like a real load
+        took = fields.get("seconds")
+        if event in ("step_ok", "step_failed") and fields.get("step") and isinstance(took, (int, float)):
+            # seconds count from the step's start: a step that ran twice (the refresh) keeps its whole time
+            step = str(fields["step"])
+            self.timings[step] = max(self.timings.get(step, 0.0), round(float(took), 1))
         written = journal(self.run, event, **fields)
         self.deps.log(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {event}"
                       + (f" {fields['step']}" if fields.get("step") else "") + (f": {text}" if text else ""))
@@ -1899,6 +2065,11 @@ class Job:
 
     def seconds(self) -> float:
         return round(max(0.0, (self.deps.now() - self.t0).total_seconds()), 1)
+
+    def timing_fields(self) -> dict:
+        """The run's profile for its closing row: seconds per step and in all (`load status` prints it)."""
+        total = round(max(0.0, (self.deps.now() - self.began_at).total_seconds()), 1)
+        return {"timings": dict(self.timings) or None, "total_seconds": total}
 
     def _lock_step(self, step: str) -> str:
         return step + (" (rehearsal)" if self.deps.rehearsal else "")
@@ -1960,7 +2131,7 @@ class Job:
         if whole and d.wait_for_tick:
             waited = 0.0
             while True:
-                wait = tick_wait_seconds(d.now())
+                wait = tick_wait_seconds(d.now(), self.tick_until)
                 if wait <= 0:
                     break
                 nap = min(wait, 30.0)
@@ -2088,7 +2259,7 @@ class Job:
             text = f"{pre}LOAD FAILED at {step}. The database holds this load, or part of it."
         closed = self.j("failed", launch=self.launch_tag, result=result, check_again=again or None, step=step,
                         written=bool(self.written), text=text, why=why, next=nxt, metrics=fields.get("metrics"),
-                        moved=fields.get("moved"))
+                        moved=fields.get("moved"), **self.timing_fields())
         if closed or not self.written:
             self.lock.release()
         else:
@@ -2112,7 +2283,8 @@ class Job:
                 + ": ask Claude to look into the 'needs a look' lines above."
         for _ in range(3):                   # the row that says FINISHED is tried for a minute, not 20 seconds
             if self.j("finished", launch=self.launch_tag, result="ok" if not look else "ok_needs_look",
-                      needs_look=look or None, data_date=data_date, published=published, text=text, next=nxt):
+                      needs_look=look or None, data_date=data_date, published=published, text=text, next=nxt,
+                      **self.timing_fields()):
                 break
         else:
             # the load IS whole (verified, and state.json has its result): a lock left behind would
@@ -2120,6 +2292,49 @@ class Job:
             self.deps.log("(the line that says FINISHED could not be written; state.json holds this load's result)")
         self.lock.release()
         return EXIT_OK
+
+    # after the load
+    def deliver_after(self) -> None:
+        """Once the load has CLOSED (its last row is in the journal and its lock is gone): the brief, the
+        management e-mail and the team message (python -m scripts.ops deliver), then the e-mail itself
+        (python -m scripts.yq_send). It never changes the load: not its exit code, its journal or its lock;
+        a run that is closed is never resumed, so nothing here can load anything again. What happens is
+        written to the run's delivery journal (loadplan.delivery_append), and `load status` shows it. A
+        load that stopped before it wrote gets nothing; a rehearsal only says what a real load would do."""
+        run, d = self.run, self.deps
+        if not d.deliver:
+            return
+        try:
+            closing = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
+        except OSError:
+            closing = []
+        if not closing or (closing[-1].get("event") == "failed" and not closing[-1].get("written")):
+            return
+        if d.rehearsal:
+            loadplan.delivery_append(run, "ended", text="Delivery: (rehearsal) a real load would now write the brief "
+                                                        "and send the e-mail.")
+            return
+        loadplan.delivery_append(run, "queued", pid=os.getpid(), text="Preparing the brief and the e-mail.")
+        awake = d.keep_awake(True)
+        try:
+            pack = d.runner("deliver", [sys.executable, "-X", "utf8", "-m", "scripts.ops", "deliver", "--run", run],
+                            DELIVER_TIMEOUT_S)
+            if pack.code != 0 or pack.timed_out:
+                said = f"Delivery: the brief could not be prepared{_why(pack)}. Its retry: {SEND_LINE.format(run=run)}"
+            else:
+                sent = d.runner("send", [sys.executable, "-X", "utf8", "-m", "scripts.yq_send", "--run", run, "--auto"],
+                                SEND_TIMEOUT_S)
+                said = next((ln.strip() for ln in reversed(sent.text.splitlines())
+                             if ln.strip().startswith("Delivery:")), "")
+                if not said:
+                    said = (f"Delivery: the e-mail program gave no answer{_why(sent)}. Its retry: "
+                            f"{SEND_LINE.format(run=run)}")
+        except Exception as exc:  # noqa: BLE001
+            said = (f"Delivery: an unexpected error ({type(exc).__name__}). Its retry: {SEND_LINE.format(run=run)}")
+        finally:
+            if awake:
+                d.keep_awake(False)
+        loadplan.delivery_append(run, "ended", text=said)
 
     # the steps
     def step_token(self):
@@ -2189,10 +2404,15 @@ class Job:
         except (Exception, SystemExit) as exc:  # noqa: BLE001
             _remove_tree(folder)
             raise Stop("backup", f"the backup could not be packed ({_short(str(exc), 200)})") from None
-        plain_gone = _remove_tree(folder)
+        plain_gone = _remove_tree(folder)    # only now: the archive has been read back whole (deps.archive)
         pruned = prune_archives(base, keep)
+        if encrypted and not d.rehearsal and not backup_marker():
+            try:
+                mark_encrypted(day)          # from now on a plain backup is refused (archive_refusal)
+            except OSError:
+                pass
         text = ("Backup of every table packed, "
-                + ("encrypted" if encrypted else "UNENCRYPTED (no backup password set)")
+                + ("encrypted and read back" if encrypted else "UNENCRYPTED (no backup password set) and read back")
                 + f": {Path(archive).name}. Kept: the newest {keep}.")
         if not plain_gone:
             self.j("note", step="backup", text=_short(f"The plain backup folder could not be removed: {folder}", FIELD))
@@ -2233,21 +2453,22 @@ class Job:
         return text, fields
 
     def step_wait_tick(self):
-        d = self.deps
+        d, until = self.deps, self.tick_until
         self._check_token()
-        first = tick_wait_seconds(d.now())
+        first = tick_wait_seconds(d.now(), until)
         if not d.wait_for_tick:
             return (f"A real load would wait {round(first)} s here for a quiet moment between two production "
                     "ticks; a rehearsal does not."), {"waited_seconds": 0, "would_wait_seconds": round(first)}
         if first > 0:
             self.j("note", step="wait_tick", text=f"Waiting about {max(1, round(first / 60))} min: a load starts "
-                   "1 to 5 minutes after production's quarter-hour tick and never from 07:50 to 08:20 Bahrain.")
+                   f"1 to {until // 60} minutes after production's quarter-hour tick and never from 07:50 to 08:20 "
+                   "Bahrain.")
         # The step ends only on a token check that is followed AT ONCE by a quiet moment. The check
         # itself can be slow (the live site or the database answering late): when it has eaten the
         # quiet moment, the next one is waited for and the token is checked again.
         waited, fresh, late = 0.0, True, 0   # fresh: the token was checked and no time has passed since
         while True:
-            wait = tick_wait_seconds(d.now())
+            wait = tick_wait_seconds(d.now(), until)
             if wait > 0:
                 fresh = False
                 nap = min(wait, 30.0)
@@ -2263,9 +2484,9 @@ class Job:
             fresh, late = True, late + 1
         if waited:
             return (f"Waited {round(waited / 60, 1)} min for a quiet moment between two production ticks; the "
-                    "table still holds."), {"waited_seconds": round(waited), "checks": late + 1}
-        return ("No wait needed: production's next tick is at least 10 minutes away. The table still holds.",
-                {"waited_seconds": 0, "checks": 1})
+                    "table still holds."), {"waited_seconds": round(waited), "checks": late + 1, "until_s": until}
+        return (f"No wait needed: production's next tick is at least {(TICK_S - until) // 60} minutes away. The "
+                "table still holds.", {"waited_seconds": 0, "checks": 1, "until_s": until})
 
     def step_refresh(self):
         d = self.deps
@@ -2397,6 +2618,8 @@ class Job:
         last = {"run": self.run, "finished_at": d.now().astimezone(BAHRAIN).isoformat(timespec="seconds"),
                 "data_date": self.result.get("data_as_of"), "published": self.published,
                 "result": "ok" if not look else "ok, needs a look: " + ", ".join(look)}
+        if self.timings.get("refresh") and not d.rehearsal:
+            last["refresh_seconds"] = self.timings["refresh"]       # the next load's start window (start_until_s)
         # since which report day the profitability report is held back (the brief says "held back
         # since" from it): only a load knows, so it is written down here and carried from load to load
         try:
@@ -2474,7 +2697,13 @@ def worker(run: str, *, deps: Deps | None = None, nonce: str | None = None, pare
         lockfile.release()
         return EXIT_ERROR
     lockfile.update(pid=os.getpid(), pid_created=process_created(os.getpid()))      # the hand-over
-    return Job(run, plan, deps, lockfile, word_sha[:8], outside_job).run_all()
+    job = Job(run, plan, deps, lockfile, word_sha[:8], outside_job)
+    code = job.run_all()
+    try:
+        job.deliver_after()
+    except Exception:  # noqa: BLE001  (the load is closed: what becomes of its e-mail never changes its result)
+        deps.log(traceback.format_exc())
+    return code
 
 
 # ── the rehearsal ─────────────────────────────────────────────────────────────────────────────

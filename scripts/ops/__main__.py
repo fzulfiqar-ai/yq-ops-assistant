@@ -19,6 +19,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "selftest": ("scripts.ops.selftest", "the engine's own checks (--repo-clean before a commit, --live for the read-only proof)"),
     "load": ("scripts.ops.load_check", "check a Focus drop folder (read-only) / follow a running load"),
     "brief": ("scripts.ops.sales", "sales brief: latest day, 3 days, 7 days, month, what to do today"),
+    "deliver": ("scripts.ops.deliver", "after a load: the brief, the management e-mail and the team text, as files"),
     "watch": ("scripts.ops.checks", "the action list: things to check"),
     "moves": ("scripts.ops.moves", "storekeeper and van movement audit"),
     "stock": ("scripts.ops.stock", "stock cover, order list, fast movers, ageing"),
@@ -27,7 +28,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "kpi": ("scripts.ops.kpi", "KPI scorecard and the evidence log"),
     "check": ("scripts.ops.textcheck", "check the numbers in a drafted text against computed facts"),
 }
-NO_BANNER = {"load", "selftest"}        # they report the lock themselves
+NO_BANNER = {"load", "selftest", "deliver"}     # they report the lock or the load themselves
 
 
 def _utf8() -> None:

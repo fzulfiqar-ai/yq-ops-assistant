@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
+import platform
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -70,6 +72,21 @@ def pid_alive(pid: int) -> bool:
 REHEARSAL_PREFIX = "000000_"       # a rehearsal's run name (scripts/yq_load_go.py --rehearse)
 
 
+def this_host() -> str:
+    """This PC's name, as the lock records it (upper case, one space between words)."""
+    return " ".join(str(os.environ.get("COMPUTERNAME") or platform.node() or "").split()).upper()
+
+
+def host_elsewhere(lock: dict | None) -> str | None:
+    """The name of the PC that took this lock when it is not this one, else None. The project
+    folder syncs through OneDrive, so a lock file can arrive from another PC: its process ids mean
+    nothing here, and such a lock is never judged dead, resumed or cleared on this PC. A lock that
+    names no PC (one written before the lock carried it) is read as this PC's."""
+    host = " ".join(str((lock or {}).get("host") or "").split()).upper()
+    here = this_host()
+    return host if host and here and host != here else None
+
+
 def read_lock() -> dict | None:
     """The lock file as a dict, None when there is none. The load's worker replaces the file every
     10 seconds (temp file + rename) and Windows refuses a read that meets that instant, so the read
@@ -99,7 +116,9 @@ def lock_state(now: datetime | None = None) -> dict:
     """{'state': 'none' | 'running' | 'interrupted', 'run', 'step'}: interrupted = the lock's
     process is gone, or its heartbeat is older than HEARTBEAT_STALE_S. The dead lock of a REHEARSAL
     is not an interrupted load (a rehearsal never reaches the database): it reads 'none' with
-    'rehearsal_left' naming it, and the next real load clears it."""
+    'rehearsal_left' naming it, and the next real load clears it. A lock taken on another PC
+    (host_elsewhere) carries 'elsewhere' with that PC's name: its process cannot be looked at from
+    here, so its heartbeat alone says running or interrupted, and nothing on this PC settles it."""
     lock = read_lock()
     if lock is None:
         return {"state": "none"}
@@ -111,13 +130,17 @@ def lock_state(now: datetime | None = None) -> dict:
             age = (now - datetime.fromisoformat(str(beat))).total_seconds()
         except (TypeError, ValueError):
             age = None
-    alive = pid_alive(int(lock.get("pid") or 0))
+    away = host_elsewhere(lock)
+    alive = True if away else pid_alive(int(lock.get("pid") or 0))
     stale = age is None or age > HEARTBEAT_STALE_S
     state = "running" if (alive and not stale) else "interrupted"
     run, step = lock.get("run"), lock.get("step") or "start"
-    if state == "interrupted" and str(run or "").startswith(REHEARSAL_PREFIX):
+    if state == "interrupted" and str(run or "").startswith(REHEARSAL_PREFIX) and not away:
         return {"state": "none", "rehearsal_left": run, "step": step}
-    return {"state": state, "run": run, "step": step}
+    out = {"state": state, "run": run, "step": step}
+    if away:
+        out["elsewhere"] = away
+    return out
 
 
 def when(text) -> datetime | None:

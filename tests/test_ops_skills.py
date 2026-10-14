@@ -736,6 +736,12 @@ class NothingStarts:
     def collect_parts(self, plan, with_fingerprint):
         return dict(EMPTY_PARTS)
 
+    def foreign_writes(self, plan):                          # nothing else wrote to the database since the check
+        return []
+
+    def box_notes(self):                                     # no line about the backup or the e-mail in the box
+        return []
+
     def box(self, title, text, timeout_s):
         return "no"
 
@@ -1326,6 +1332,43 @@ def _():
     assert "a rehearsal included" in flat(page_part(2))
 
 
+@test("after the load: the skill, the page and CLAUDE.md act on the words the writer, the sender and the status print")
+def _():
+    writer, sender = read(WRITER_FILE), read(ROOT / "scripts" / "yq_send.py")
+    load, brief, page = read(SKILLS / "yq-load" / "SKILL.md"), read(SKILLS / "yq-brief" / "SKILL.md"), flat(read(PAGE))
+    # the state `load status` reads while the e-mail is made, and the line it ends on
+    assert load_check.state_text("RUNNING", "delivery") == "RUNNING at delivery"
+    assert 'return "RUNNING", "delivery"' in read(OPS / "load_check.py")
+    # every last word of the writer and of the sender starts with `Delivery:`; each failure carries its retry
+    assert writer.count('said = f"Delivery: ') + writer.count('said = (f"Delivery: ') >= 3, "the writer's Delivery lines"
+    assert 'text="Delivery: (rehearsal)' in writer and sender.count('say(f"Delivery: ') >= 3
+    assert writer.count("Its retry: ") >= 3 and writer.count("{SEND_LINE.format(run=run)}") >= 3
+    assert sender.count("Its retry: {retry_line(run)}") >= 3
+    consts = module_constants(WRITER_FILE)
+    assert consts["SEND_LINE"] == load_check.SEND_RETRY == "python -m scripts.yq_send --run {run}"
+    assert 'return f"python -m {MODULE} --run {run}"' in sender and 'MODULE = "scripts.yq_send"' in sender
+    # an e-mail that did not go is never worded like a load that failed
+    assert "FAILED" not in " ".join(load_check.DELIVERY_WORDS.values())
+    # the retry the skill runs on his word is never pre-approved, and no rule of the skill names the sender
+    for p in skill_files():
+        _problems, fm, _block, _body, _text = parse_skill(p.read_bytes())
+        for entry in fm["allowed-tools"]:
+            assert "yq_send" not in entry and not rule_matches(entry, load_check.SEND_RETRY.format(run=RUN)), entry
+    assert "yq_send" not in load and "yq_send" not in brief          # the skills never spell the sender
+    # the team message: the brief's own word, the page's and CLAUDE.md's
+    assert module_constants(BRIEF_FILE)["TEAM_WORD"] == "team"
+    assert "`/yq-brief team`" in page and "`/yq-brief team`" in read(ROOT / "CLAUDE.md")
+    assert "A load's e-mail goes once: never send it again, or send anything to WhatsApp, unless he asks for exactly " \
+           "that." in read(ROOT / "CLAUDE.md")
+    # what the page says each file and command is, as the programs name them
+    for needle in ("`delivery.json`", "`backup.json`", "`drills.jsonl`", "`delivery.jsonl`", "`email.html`",
+                   "`whatsapp.txt`", "`whatsapp.html`", "`manifest.json`", "`legacy\\`"):
+        assert needle in page, needle
+    for name in ("delivery.json", "backup.json", "drills.jsonl"):
+        assert name in read(ROOT / "scripts" / "yq_load_go.py") + read(ROOT / "scripts" / "yq_backup.py") + sender, name
+    assert "--test" in sender and "--resend" in sender and "--auto" in sender
+
+
 @test("the rehearsal on the page is the one the writer runs: its command, its option, its length, its last line")
 def _():
     consts, options, source = module_constants(WRITER_FILE), source_options(WRITER_FILE), read(WRITER_FILE)
@@ -1508,6 +1551,13 @@ MUST_CONTAIN = {
         "if a line says that something needs a look, tell him which",
         "the data is loaded: name the metric the script names and do not go again",
         "typing /yq-load resumes it", "NOT STARTED: the load did not begin", "no deploy is needed",
+        # after the load: the e-mail, said in one sentence; its retry only on his word; never a second copy
+        "`RUNNING at delivery` means the load is done and its brief and e-mail are being made: keep following",
+        "Say in one sentence what the line that starts `Delivery:` says",
+        "after a load it is the brief the load made, the figures of the e-mail",
+        "A line that holds `Its retry: `", "the e-mail did not go, and the load is not touched by that",
+        "sends it again and loads nothing: run it only when he says so, and only if it starts with `python`",
+        "Never send a load's e-mail a second time unless he asks for exactly that",
     ],
     "yq-brief": [
         "python -m scripts.ops brief $ARGUMENTS", "python -m scripts.ops status", "600000", "no pipe",
@@ -1519,6 +1569,9 @@ MUST_CONTAIN = {
         "at most three lines", "no number that is not on the screen", "Never accuse anyone", "to check",
         "two lines (the data date and what is waiting)", "run it again with `again` added",
         "say that it arrives in a later phase",
+        # the team message: his to copy, shown as it was made, never sent from here
+        "`team` on its own for the team message", "in one code block of its own, unchanged, and add nothing",
+        "Never send it anywhere yourself",
     ],
 }
 
@@ -1804,6 +1857,18 @@ OPS_DOC_SAYS = (
     "after which the check's last line is that run's own go line, so the resume is Step 2 unchanged",
     "Its name list is `business_data/ops/denylist.json`",
     "with an invented list in a temporary folder, and never reads yours",
+    # the e-mail and the team message: set up once, sent once, never by a program to WhatsApp
+    "**Also once: the backup password and the e-mail.**", "`cmdkey /generic:YQ_BACKUP_PASSWORD /user:yq /pass`",
+    "`cmdkey /generic:YQ_RESEND_API_KEY /user:resend /pass`", "a load without the password is refused before it "
+    "writes anything", "Each backup is read back whole before the load goes on", "a load's e-mail goes once",
+    "They post nothing to WhatsApp", "the team message is sent by you", "You send it yourself",
+    # the two safety gaps of phase 1, closed, and what is left of the second
+    "a row of `ingest_runs` that is not this run's, or an upload batch in `audit_log`, closes the cut-off load",
+    "a lock from another PC is never judged, resumed or cleared on this one",
+    "two PCs that start a load within OneDrive's sync delay of each other",
+    # the seam after the load
+    "`RUNNING at delivery`", "A line that holds `Its retry: ` is followed by the line that sends the e-mail again; "
+    "it loads nothing", "Nothing of it changes the load's result, journal or lock",
 )
 OPS_DOC_NO_LONGER = (
     "it offers to carry on from where it stopped", "double-click the `go.cmd` it names",
@@ -1812,6 +1877,9 @@ OPS_DOC_NO_LONGER = (
     "asks you before every load", "asks before every load",
     # the resume is no longer read from a file: the check hands the go line over
     "and otherwise from `business_data/ops/loads/<run>/go.cmd`",
+    # the two limits of phase 1 are closed; the commands send the e-mail after a load now
+    "Two limits are known and left for a later step", "A resume does not look at the database",
+    "send anything (a message, an e-mail, a workbook)",
 )
 
 

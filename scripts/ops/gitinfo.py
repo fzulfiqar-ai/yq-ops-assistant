@@ -6,7 +6,9 @@ imports subprocess, os.system or os.popen).
 
 "Is this checkout the live engine?" is answered on the ENGINE paths only: the Python under app/
 and scripts/ and the two requirement files the API image is built from. SQL migration files, docs
-and the ops skills themselves do not ship with an API deploy, so they never block a load.
+and the ops skills themselves do not ship with an API deploy, so they never block a load. Nor do
+the owner-side programs scripts/yq_*.py (the load's writer, the brief's sender, the secrets and
+backup tools): nothing in the API runs them.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from pathlib import Path
 VERBS = ("rev-parse", "merge-base", "diff", "status", "cat-file", "ls-files")
 ENGINE_PATHS = (
     ":(glob)app/**/*.py", ":(glob)scripts/**/*.py", "requirements.txt", "requirements.lock",
-    ":(exclude)scripts/ops", ":(exclude)scripts/yq_load_go.py",
+    ":(exclude)scripts/ops", ":(exclude,glob)scripts/yq_*.py",
 )
 
 

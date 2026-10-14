@@ -211,6 +211,89 @@ def journal_read(run: str) -> list[dict]:
     return rows
 
 
+FOREIGN_RUNS_SQL = "select id, coalesce(file, '') as file from ingest_runs where id > %s order by id"
+FOREIGN_EVENTS_SQL = (
+    "select event, ts::text as at from audit_log where ts > %s::timestamptz "
+    "and event in ('ingest', 'ingest_markers', 'ingest_purge', 'ingest.batch_commit', 'ingest.batch_undo') order by ts"
+)
+LOADER_RUN_PREFIX = "Focus refresh ("          # scripts/load_supabase.py, whoever ran the loader
+
+
+def own_refresh_prefix(run: str) -> str:
+    """How this run's own refresh names itself in ingest_runs (scripts/refresh.py: refresh <folder> (...),
+    and the folder it refreshes is business_data/staging/<run>)."""
+    return f"refresh {run} ("
+
+
+def foreign_writes(session, run: str, plan: dict) -> list[str]:
+    """What another load wrote to the database after this run's check, in plain words ([] = nothing).
+    SELECT only. Asked where the fingerprint can no longer be compared, because this run's own refresh
+    has moved it (a resume, or the re-run of a load stage): a Data-page upload or a batch import in
+    between would otherwise be overwritten inside the resumed files' dates.
+      ingest_runs   every refresh records itself: a row after the check's own last id that names
+                    another folder (refresh _upload (...) is the Data page) or a batch import. The
+                    loader's own row (Focus refresh (...)) names no folder and is not counted: an
+                    interrupted refresh of this very run may have left one.
+      audit_log     the Data page and the batch importer log every upload, purge, commit and undo;
+                    any after the check counts, even one that stopped before it wrote its run row."""
+    fp = (plan.get("token_parts") or {}).get("fingerprint") or {}
+    out: list[str] = []
+    try:
+        since = int(fp.get("ingest_runs"))
+    except (TypeError, ValueError):
+        since = None
+    if since is not None:
+        own = own_refresh_prefix(run)
+        for row in session.q(FOREIGN_RUNS_SQL, (since,)):
+            name = " ".join(str(row.get("file") or "").split())
+            if name.startswith(own) or name.startswith(LOADER_RUN_PREFIX):
+                continue
+            if name.startswith(("refresh ", "batch ")):
+                out.append(f"another load wrote to the database after this check ({name[:70]})")
+    created = str(plan.get("created_at") or "")
+    if created:
+        for row in session.q(FOREIGN_EVENTS_SQL, (created,)):
+            out.append(f"an upload on the Data page or a batch import after this check ({row.get('event')}, "
+                       f"{str(row.get('at') or '')[:16]})")
+    return out[:6]
+
+
+def delivery_file(run: str) -> Path:
+    return run_dir(run) / "delivery.jsonl"
+
+
+def delivery_append(run: str, event: str, **fields) -> dict:
+    """One line of what happened to a load's brief after the load closed (event: queued, pack,
+    sent, test_sent, not_sent, failed, ended). Kept apart from the load's journal on purpose: a
+    load's journal ends with its closing row, and nothing that happens to its e-mail can change
+    what the load was. Written by the worker, `python -m scripts.ops deliver` and scripts/yq_send.py,
+    one after the other, never two at once."""
+    row = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "event": event}
+    row.update({k: v for k, v in fields.items() if v is not None})
+    f = delivery_file(run)
+    if not paths.allowed_output(f):
+        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {f}")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "a", encoding="utf-8", newline="\n") as out:
+        out.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+    return row
+
+
+def delivery_read(run: str) -> list[dict]:
+    f = delivery_file(run)
+    if not f.is_file():
+        return []
+    rows = []
+    for line in f.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
 def run_result(run: str) -> str:
     """NOT_STARTED | RUNNING | FINISHED | FAILED from the journal alone (the lock tells
     INTERRUPTED: see scripts.ops.status.lock_state)."""

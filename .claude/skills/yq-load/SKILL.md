@@ -1,6 +1,6 @@
 ---
 name: "yq-load"
-description: "Checks the Focus reports in a dated drop folder, shows one table of what would load, then, after Furqan clicks Yes in a Windows box, loads them, verifies and prints the brief. Only Furqan starts it, by typing /yq-load."
+description: "Checks the Focus reports in a dated drop folder, shows one table of what would load, then, after Furqan clicks Yes in a Windows box, loads them, verifies, prints the brief and e-mails it. Only Furqan starts it, by typing /yq-load."
 argument-hint: "[ddmmyy]"
 disable-model-invocation: true
 allowed-tools:
@@ -38,10 +38,11 @@ In the same turn, when the output ends with a `GO: ` line, first tell him a Yes/
 - Exit code 1 or 2, or anything else: show the last lines unchanged and wait.
 
 ## Step 3. Follow
-Run `python -m scripts.ops load status --wait` again and again until its last line says FINISHED, FAILED, INTERRUPTED or NOT STARTED. Show only the new lines each time.
+Run `python -m scripts.ops load status --wait` again and again until its last line says FINISHED, FAILED, INTERRUPTED or NOT STARTED. Show only the new lines each time. `RUNNING at delivery` means the load is done and its brief and e-mail are being made: keep following.
 
 ## Step 4. Finish
-- FINISHED: if a line says that something needs a look, tell him which. Then run `python -m scripts.ops brief` and show it.
+- FINISHED: if a line says that something needs a look, tell him which. Say in one sentence what the line that starts `Delivery:` says. Then run `python -m scripts.ops brief` and show it: after a load it is the brief the load made, the figures of the e-mail.
+- A line that holds `Its retry: ` (FINISHED or FAILED): the e-mail did not go, and the load is not touched by that. The text after `Its retry: ` sends it again and loads nothing: run it only when he says so, and only if it starts with `python`. Never send a load's e-mail a second time unless he asks for exactly that.
 - FAILED: show the last lines. If the verify failed, the data is loaded: name the metric the script names and do not go again.
 - INTERRUPTED: show the last lines and tell him that typing /yq-load resumes it (Step 1). Nothing else loads until then.
 - NOT STARTED: the load did not begin. Show the lines, say nothing was loaded and wait.

@@ -12,8 +12,8 @@ changes the live database except the load, and the load asks you every time. Fin
 
 | You type | When | You get |
 |---|---|---|
-| `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. |
-| `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. |
+| `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. Then it e-mails you the brief and makes the team message (section 2 sets the e-mail up). |
+| `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
 | Ask in plain words: *where do things stand?* | Before you start, or when something looks stuck. | Five lines: the data dates and the last load; this folder against the live site; the load lock; reports waiting; open items on the action list. (Claude runs `python -m scripts.ops status`.) |
 
 `/yq-brief` on its own is the whole morning screen. Name a window (`day`, `3d`, `7d`, `week`,
@@ -21,7 +21,8 @@ changes the live database except the load, and the load asks you every time. Fin
 one salesman (`rep:<name>`) to see just that, in detail: the total, each salesman, the largest
 accounts and products (`top:<N>` sets how many of them). `week` is this week so far; `last-week` is
 the last full week. If nothing new has been loaded since your last brief it prints two lines; type
-`/yq-brief again` for the whole screen anyway.
+`/yq-brief again` for the whole screen anyway. `/yq-brief team` prints the team message the last load
+made, in a block you can copy into the salesmen's group (section 4 says what it holds).
 
 The rest of the routine (the weekly and monthly workbooks, the movement and stock checks, the full
 action list, the KPI scorecard) follows in later phases. This table gets a row for each one when it
@@ -43,7 +44,8 @@ load the reports, it answers with the line to type.
    says so.
 4. Keep the PC plugged in and awake until it says the load finished, and do not upload on the Data
    page meanwhile. If Claude tells you to keep the Claude Code window open, do: on this PC the load
-   would stop with it. The load then prints your brief. The portal follows by itself within minutes;
+   would stop with it. The load then prints your brief, e-mails it to you and makes the team message
+   (the line that starts `Delivery:` says what went out). The portal follows by itself within minutes;
    nothing needs deploying.
 5. If a command opens with `LOAD INTERRUPTED` or `LAST LOAD FAILED`, type `/yq-load`. Section 3 says
    what each of the two means.
@@ -110,9 +112,21 @@ finished, the third trial is already answered: on this PC a load stops when that
 A rehearsal that was cut off needs nothing from you: it changed nothing, and the next load clears its
 lock.
 
-**Also once: the backup password.** The database is backed up before every load. Set the backup
-password (ask Claude for the command, or see `docs/BACKUPS.md`); until then each of those backups is
-kept unencrypted on this PC.
+**Also once: the backup password and the e-mail.** The database is backed up before every load. Set
+the backup password once, in a Command Prompt: `cmdkey /generic:YQ_BACKUP_PASSWORD /user:yq /pass` (it
+asks for the password and shows nothing as you type). Keep a copy of it away from this PC: without it
+no backup can be read. Until it is set, each backup is kept unencrypted on this PC and the Windows box
+says so on a line that starts `ATTENTION`; once one backup has been encrypted, a load without the
+password is refused before it writes anything. Each backup is read back whole before the load goes on.
+
+The e-mail after each load needs two things. First a sending key of the mail service, Resend (a key
+with *Sending access* only, on the company's sending domain), set the same way:
+`cmdkey /generic:YQ_RESEND_API_KEY /user:resend /pass` (paste the key when it asks). Then the file
+`business_data/ops/delivery.json`, which Claude writes with you: the sender, who gets the e-mail, the
+test address, and `mode`: `test` for the first days (every e-mail goes to the test address only,
+marked TEST), then `on`; `off` stops it. Ask Claude for one test e-mail of the last load before you
+switch it on. The key is never written in a file or shown on the screen, and that file is never
+committed.
 
 ## 3. What the load check's decisions mean
 
@@ -230,6 +244,27 @@ one of two lines, and the load check says the same in its own words:
   brief. The full list, and marking an item done or explained, come with a later command. An item
   you have explained then stays off the list until it has grown by more than a quarter, has become
   more pressing, or names a voucher or an invoice that was not there when you explained it.
+- **The e-mail after a load.** The brief's own figures, worked out once for the chat and the e-mail
+  alike, and what a chat screen has no room for: each salesman's month beside the same days last
+  month and against his first tier (for you alone), items in stock to push, shops due a re-order,
+  money owed by age, orders waiting, what the load checked and how long it took. Only a load that
+  wrote data sends one: after a clean load the whole brief; after one where something needs a look,
+  or one that failed after it began to write, a short note with no figure. A load that wrote nothing
+  sends nothing, and a load's e-mail goes once.
+- **Actions.** The e-mail lists up to five, the most worthwhile first. Each says why, what it is worth
+  (an amount or a count, and what that rests on), the next step, who does it and by when. What it is
+  worth, how sure that is, how soon it is due and how much work it is set the order. *ACTION* is what
+  the figures say; *TO CHECK* means something differs and the reason is not known: a question, never a
+  finding.
+- **NOT EVIDENCED.** A figure the portal holds no data for (shop visits, calls, quotations, the stock
+  in the vans, and discounts for as long as Focus exports none) reads *NOT EVIDENCED*. It is never
+  guessed.
+- **The team message.** Written for the salesmen's group: the team's latest day and month against
+  your KPI step, what is still needed per working day, items in stock to push, today's priorities and
+  the end-of-day ask. Salesmen are named only to praise them, never beside a figure. It never holds a
+  customer's or a shop's name, money owed, a tier, a commission or a salesman's own figure: a message
+  that would is not made, and the e-mail says why. You send it yourself: copy it from
+  `/yq-brief team`, or press *Open in WhatsApp* in the e-mail, choose the group and send.
 
 ## 5. Where things are kept
 
@@ -240,20 +275,24 @@ public.
 | Folder | What is in it |
 |---|---|
 | `Uplaods/<ddmmyy>/` | Your drop folders. The commands only read them; they never change a file in them. |
-| `business_data/ops/` | The commands' own notes: `config.json` (limits and KPI steps you can change), `state.json` (last load, last brief), `LOCK` (exists only while a load runs, or when one was cut off), `alerts.jsonl` (the action list) and `loads/<run>/` (for each check: what you were shown, `go.cmd`, and a journal of the steps once it loads). Later commands add `explained.json`, `kpi_log.jsonl` and `golden/`. |
+| `business_data/ops/` | The commands' own notes: `config.json` (limits and KPI steps you can change), `state.json` (last load, last brief), `LOCK` (exists only while a load runs, or when one was cut off), `alerts.jsonl` (the action list), `delivery.json` (who gets the e-mail, and whether it is on), `backup.json` (the day backups began to be encrypted), `drills.jsonl` (each restore drill and its result) and `loads/<run>/` (for each check: what you were shown, `go.cmd`, a journal of the steps once it loads, and `delivery.jsonl`, what became of its e-mail). Later commands add `explained.json`, `kpi_log.jsonl` and `golden/`. |
 | `business_data/staging/<run>/` | The copies a load works from. The copies of a check that a newer check of the same folder retired, and a loaded set that a newer load of the same day replaced, are in `superseded/`. |
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
-| `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date. They carry customer and salesman names, which is one more reason they stay out of git. |
+| `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
 | `exports/reports/weekly/` and `exports/reports/monthly/` | The workbooks, once those commands exist. |
-| `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load. Outside OneDrive (see `docs/BACKUPS.md`). |
+| `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, and in `legacy\` the older backups that sat in OneDrive, encrypted. Outside OneDrive (see `docs/BACKUPS.md`). |
 
 ## 6. What these commands cannot do
 
 - Time from a Stock Request to the Stock Issue: Focus exports no request vouchers.
 - Who entered a voucher, and when: Focus exports no user or time on a voucher.
 - Anything about counted stock, until someone counts it.
-- Version 1 also does not run by itself on a schedule, send anything (a message, an e-mail, a
-  workbook), store briefs in the portal, draft purchase orders or make PDFs.
+- They send one thing: the e-mail after a load, to the addresses in `business_data/ops/delivery.json`.
+  They post nothing to WhatsApp. WhatsApp's own business service posts only to small groups (up to 8
+  people) and only for a verified business account, and a program that drives WhatsApp Web breaks
+  its rules and can get the number banned: the team message is sent by you (section 4).
+- They do not run by themselves on a schedule, store briefs in the portal, draft purchase orders or
+  make PDFs.
 
 ## 7. For the developer
 
@@ -300,10 +339,30 @@ public.
   Windows job of its own, so ending it ends its loader too, and the lock names the loader while it
   runs; a load that had begun keeps its lock until its closing line is in the journal;
   `LAST LOAD FAILED` stays until a load finishes, whatever was checked or rehearsed in between.
-  Two limits are known and left for a later step. A resume does not look at the database, so an
-  upload on the Data page between an interruption and its resume would be overwritten inside the
-  resumed files' dates: nothing else is loaded while a load reads `INTERRUPTED`. And the lock is
-  judged by a process on this PC: the project folder is used for loads from one computer only.
+  A resume does not compare the database's fingerprint, but it reads what was written since the
+  check (`loadplan.foreign_writes`): a row of `ingest_runs` that is not this run's, or an upload
+  batch in `audit_log`, closes the cut-off load, and a new check is needed. The lock names the PC it
+  was taken on: a lock from another PC is never judged, resumed or cleared on this one, and the check
+  stops and names that PC. What is left: two PCs that start a load within OneDrive's sync delay of
+  each other. Closing that needs a lock in the database that the portal's upload takes as well, a
+  change of the portal for later.
+- **After the load** (`Job.deliver_after` in `scripts/yq_load_go.py`): once the closing row is in the
+  journal and the lock is gone, the worker runs `python -m scripts.ops deliver --run <run>` (the brief,
+  the e-mail and the team message, worked out once), then `python -m scripts.yq_send --run <run> --auto`,
+  and writes one row that starts `Delivery:`. Nothing of it changes the load's result, journal or
+  lock: its rows are in `loads/<run>/delivery.jsonl`. Until that row is written, `load status` reads
+  `RUNNING at delivery`, for up to ten minutes; then it shows the `Delivery:` line, and the brief
+  prints the stored brief once. A line that holds `Its retry: ` is followed by the line that sends the
+  e-mail again; it loads nothing. `scripts/yq_send.py` is the one program that sends: exit code 0 sent
+  or nothing to send, 1 not sent (recorded, with its retry), 2 refused (the e-mail went already, and
+  `--resend` asks at the Windows box first; or a newer load is on record). `--test` sends to the test
+  address only and never counts as sent. `scripts/ops` imports none of `scripts/yq_send.py`,
+  `scripts/yq_secrets.py` and `scripts/yq_backup.py` (`tests/test_ops_readonly.py`), and the engine
+  paths that decide a deploy leave out every `scripts/yq_*.py`.
+- **Backups** (`scripts/yq_backup.py`): `drill` restores the newest pre-load archive into a
+  throwaway PostgreSQL on this PC (the database address must be on this PC; the schema is read from
+  production, read-only) and compares every table's rows with the archive's manifest; `legacy` packs
+  the old plain backups, reads each one back and only then deletes the plain copy.
 - **Adding a skill:** a new folder with the same rules, one row in section 1, one line in
   `CLAUDE.md`, then `python -m tests.test_ops_skills` and `python -m tests.test_ops_readonly`.
 - **Before a commit:** `python -m scripts.ops selftest --repo-clean`. It refuses a staged file outside

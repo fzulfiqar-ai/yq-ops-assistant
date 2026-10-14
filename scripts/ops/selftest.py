@@ -20,8 +20,9 @@ from scripts.ops import config, gitinfo, paths
 
 # Paths a commit of this work may touch (prefix match). Anything else staged fails --repo-clean.
 ALLOWED_PATHS = (
-    ".claude/skills/yq-", "scripts/ops/", "scripts/yq_load_go.py", "tests/test_ops_", "docs/OPS_SKILLS.md",
-    "docs/FOCUS_EXPORT.md", "CLAUDE.md", ".gitignore", ".github/workflows/ci.yml", "requirements-dev.txt",
+    ".claude/skills/yq-", "scripts/ops/", "scripts/yq_load_go.py", "scripts/yq_send.py", "scripts/yq_secrets.py",
+    "scripts/yq_backup.py", "tests/test_ops_", "docs/OPS_SKILLS.md", "docs/FOCUS_EXPORT.md", "CLAUDE.md",
+    ".gitignore", ".github/workflows/ci.yml", "requirements-dev.txt",
 )
 # Names that are places or system words, already public in this repository: never treated as a leak.
 GENERIC_NAMES = {

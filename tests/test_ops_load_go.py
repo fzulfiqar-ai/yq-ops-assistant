@@ -58,6 +58,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
@@ -1396,7 +1397,7 @@ def _():
         left = sorted(p.name for p in base.iterdir())
         assert left == ["notes.txt", "yq-backup_2025-12-03_0230.7z", "yq-backup_2025-12-03_pre-data-031225_0900.7z", mine.name], left
         row = h.rows("step_ok", "backup")[0]
-        assert row["kept"] == 2 and row["pruned"] == 2 and "packed, encrypted: yq-backup_2026-01-01" in row["text"]
+        assert row["kept"] == 2 and row["pruned"] == 2 and "packed, encrypted and read back: yq-backup_2026-01-01" in row["text"]
     with data_root() as root:                    # no password: the journal says UNENCRYPTED
         h = Harness(root)
         h.deps.archive = lambda folder, dest, stamp: (h.w.archive(folder, dest, stamp)[0], False)
@@ -1540,44 +1541,74 @@ def _():
         assert h.rows("failed")[0]["written"] is False and h.clock.sleeps == [1, 1, 1, 1]
 
 
-@test("the tick rule: a start 1 to 5 minutes after a quarter-hour, a wait otherwise, never 07:50 to 08:20 Bahrain")
+@test("the tick rule: a start 1 to 9 minutes after a quarter-hour, a wait otherwise, never 07:50 to 08:20 Bahrain")
 def _():
     def at(h, m, s=0):
         return datetime(2026, 1, 1, h, m, s, tzinfo=timezone.utc)
 
     for h_, m, s, want in ((9, 1, 0, 0), (9, 3, 0, 0), (9, 5, 0, 0), (9, 16, 0, 0), (9, 50, 0, 0), (9, 0, 0, 60),
-                           (9, 0, 30, 30), (9, 5, 1, 659), (9, 7, 0, 540), (9, 14, 59, 61), (9, 59, 59, 61),
-                           (4, 49, 0, 0), (4, 46, 0, 0), (4, 50, 0, 2460), (5, 0, 0, 1860), (5, 20, 0, 660),
-                           (5, 20, 1, 659), (5, 31, 0, 0), (4, 36, 0, 600)):
+                           (9, 0, 30, 30), (9, 5, 1, 0), (9, 7, 0, 0), (9, 9, 0, 0), (9, 9, 1, 419), (9, 10, 0, 360),
+                           (9, 14, 59, 61), (9, 59, 59, 61), (4, 49, 0, 0), (4, 46, 0, 0), (4, 50, 0, 1801),
+                           (5, 0, 0, 1201), (5, 20, 0, 1), (5, 20, 1, 0), (5, 31, 0, 0), (4, 36, 0, 0)):
         assert yq.tick_wait_seconds(at(h_, m, s)) == want, (h_, m, s, yq.tick_wait_seconds(at(h_, m, s)), want)
+    # after a slow refresh the window closes earlier: at 300 s it is the rule of the first loads
+    for h_, m, s, want in ((9, 5, 0, 0), (9, 5, 1, 659), (9, 7, 0, 540), (4, 50, 0, 2460), (5, 20, 1, 659)):
+        assert yq.tick_wait_seconds(at(h_, m, s), 300) == want, (h_, m, s, want)
 
     def allowed(t) -> bool:
         local = t.astimezone(yq.BAHRAIN)
         quiet = (7, 50, 0) <= (local.hour, local.minute, local.second) <= (8, 20, 0)
         into = (t.minute % 15) * 60 + t.second
-        return 60 <= into <= 300 and not quiet
+        return 60 <= into <= 540 and not quiet
 
     t = at(0, 0)
     for _ in range(24 * 60 * 2):                 # every half minute of a day
         wait = yq.tick_wait_seconds(t)
         assert (wait == 0) == allowed(t), t
         assert allowed(t + timedelta(seconds=wait)), (t, wait)
-        assert wait <= 41 * 60, (t, wait)
+        assert wait <= 31 * 60, (t, wait)
         t += timedelta(seconds=30)
     assert yq.tick_wait_seconds(datetime(2026, 1, 1, 12, 3, tzinfo=yq.BAHRAIN)) == 0      # any time zone is read right
+
+
+@test("the start window closes earlier after a slow refresh, never later than 9 minutes nor earlier than 5")
+def _():
+    assert yq.start_until_s(None) == 540 == yq.START_UNTIL_S                 # nothing on record: 240 s assumed
+    assert yq.start_until_s(167) == 540                                      # the refreshes of the first loads
+    assert yq.start_until_s(300) == 405                                      # 900 - 120 - 1.25 x 300
+    assert yq.start_until_s(500) == 300 == yq.START_UNTIL_MIN_S              # very slow: the first rule, never less
+    assert yq.start_until_s("junk") == 540 and yq.start_until_s(-5) == 540
+    # a refresh that starts at the last allowed second ends TICK_MARGIN_S before the next tick at least
+    for took in (60, 167, 240, 300, 400):
+        until = yq.start_until_s(took)
+        assert until + took + yq.TICK_MARGIN_S <= yq.TICK_S or until == yq.START_UNTIL_MIN_S, (took, until)
+    assert yq.last_refresh_seconds(lambda: {"last_load": {"refresh_seconds": 155.1}}) == 155.1
+    assert yq.last_refresh_seconds(lambda: {"last_load": {"refresh_seconds": True}}) is None
+    assert yq.last_refresh_seconds(lambda: {}) is None
+
+    def broken():
+        raise OSError("held")
+    assert yq.last_refresh_seconds(broken) is None
+    with data_root() as root:                    # the load reads the window from the last load's refresh time
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 6, 0, tzinfo=timezone.utc))
+        h.deps.read_state = lambda: {"last_load": {"refresh_seconds": 500}}
+        assert h.load() == 0
+        row = h.rows("step_ok", "wait_tick")[0]
+        assert row["until_s"] == 300 and row["waited_seconds"] == 600, row          # 09:06 is past 5 minutes: 09:16
 
 
 @test("the worker waits for the quiet moment and checks the token again after the wait")
 def _():
     with data_root() as root:
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         assert h.load() == 0
-        assert sum(h.clock.sleeps) == 540 and max(h.clock.sleeps) <= 30
+        assert sum(h.clock.sleeps) == 360 and max(h.clock.sleeps) <= 30
         assert h.clock.now() == datetime(2026, 1, 1, 9, 16, 0, tzinfo=timezone.utc)
         row = h.rows("step_ok", "wait_tick")[0]
-        assert row["waited_seconds"] == 540 and row["seconds"] == 540.0 and "the table still holds" in row["text"]
-        assert row["checks"] == 2
-        assert h.rows("note", "wait_tick") and "07:50 to 08:20 Bahrain" in h.rows("note", "wait_tick")[0]["text"]
+        assert row["waited_seconds"] == 360 and row["seconds"] == 360.0 and "the table still holds" in row["text"]
+        assert row["checks"] == 2 and row["until_s"] == 540
+        note = h.rows("note", "wait_tick")
+        assert note and "07:50 to 08:20 Bahrain" in note[0]["text"] and "1 to 9 minutes" in note[0]["text"]
         t = h.w.trace
         checks = [i for i, x in enumerate(t) if x.startswith("token:")]
         assert len(checks) == 4 and checks[3] == t.index("run:refresh") - 2          # ... token, runs:None, run:refresh
@@ -1586,13 +1617,13 @@ def _():
         assert h.load() == 0 and h.clock.sleeps == []
         assert h.rows("step_ok", "wait_tick")[0]["checks"] == 1 and h.rows("step_ok", "wait_tick")[0]["waited_seconds"] == 0
     with data_root() as root:                    # something changes during the wait: nothing is loaded
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         h.clock.on_sleep = lambda: h.w.fingerprint.update(stock_balance=[5, 5])
         assert h.go() == 0 and h.work() == 3
         assert "run:refresh" not in h.w.trace and h.rows("failed")[0]["result"] == "check_again"
-    with data_root() as root:                    # the morning window
+    with data_root() as root:                    # the morning window: the first second after 08:20 Bahrain
         h = Harness(root, start=datetime(2026, 1, 1, 4, 55, 0, tzinfo=timezone.utc))
-        assert h.load() == 0 and h.clock.now() == datetime(2026, 1, 1, 5, 31, 0, tzinfo=timezone.utc)
+        assert h.load() == 0 and h.clock.now() == datetime(2026, 1, 1, 5, 20, 1, tzinfo=timezone.utc)
 
 
 def slow_checks(h: Harness, slow: dict) -> None:
@@ -1615,7 +1646,7 @@ def _():
         return seen
 
     with data_root() as root:                    # the check after the wait takes ten minutes
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         slow_checks(h, {4: 600})                 # 1 launcher, 2 token step, 3 before the wait, 4 after it
         seen = started_at(h)
         assert h.load() == 0
@@ -1626,7 +1657,7 @@ def _():
         checks = [i for i, x in enumerate(t) if x.startswith("token:")]
         assert len(checks) == 5 and checks[4] == t.index("run:refresh") - 2, t
         row = h.rows("step_ok", "wait_tick")[0]
-        assert row["checks"] == 3 and row["waited_seconds"] == 540 + 300 and "the table still holds" in row["text"]
+        assert row["checks"] == 3 and row["waited_seconds"] == 360 + 300 and "the table still holds" in row["text"]
     with data_root() as root:                    # the FIRST check of the step is the slow one: it ends in a quiet moment or waits
         h = Harness(root, start=datetime(2026, 1, 1, 9, 1, 0, tzinfo=timezone.utc))
         slow_checks(h, {3: 200})                 # 09:01:00 -> 09:04:20, still inside the quiet moment
@@ -1634,18 +1665,18 @@ def _():
         assert h.load() == 0 and seen["at"] == datetime(2026, 1, 1, 9, 4, 20, tzinfo=timezone.utc)
         assert h.rows("step_ok", "wait_tick")[0]["checks"] == 1
     with data_root() as root:
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 4, 0, tzinfo=timezone.utc))
-        slow_checks(h, {3: 200})                 # 09:04:00 -> 09:07:20: the moment is gone, the next is waited for
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 8, 0, tzinfo=timezone.utc))
+        slow_checks(h, {3: 200})                 # 09:08:00 -> 09:11:20: the moment is gone, the next is waited for
         seen = started_at(h)
         assert h.load() == 0 and seen["at"] == datetime(2026, 1, 1, 9, 16, 0, tzinfo=timezone.utc)
         assert yq.tick_wait_seconds(seen["at"]) == 0 and h.rows("step_ok", "wait_tick")[0]["checks"] == 2
     with data_root() as root:                    # something moved while a slow check ate the moment: found by the next check
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         slow_checks(h, {4: 600})
         h.clock.on_sleep = lambda: h.w.fingerprint.update(orders=[11, 100]) if h.clock.now().minute >= 26 else None
         assert h.go() == 0 and h.work() == 3 and "run:refresh" not in h.w.trace
     with data_root() as root:                    # every check too slow: the load gives up, nothing written
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         slow_checks(h, {n: 600 for n in range(4, 40)})
         assert h.go() == 0 and h.work() == 1
         assert "run:refresh" not in h.w.trace and h.runner.labels() == ["backup", "pre_gate"]
@@ -1995,6 +2026,76 @@ def _():
         assert len(rows) == 1 and rows[0]["text"] == "third time lucky" and "nothing" not in rows[0]
 
 
+@test("after the load has closed: the brief, then the e-mail, then one Delivery line; nothing of it changes the load")
+def _():
+    said = "Delivery: e-mail sent to 1 address(es) (full, auto): YQ brief"
+    retry = "Its retry: python -m scripts.yq_send --run " + RUN
+    with data_root() as root:
+        h = Harness(root)
+        h.deps.deliver = True
+        seen = {}
+
+        def at_deliver():
+            seen["lock"], seen["last"] = paths.lock_file().exists(), loadplan.journal_read(RUN)[-1]["event"]
+        h.runner.hooks["deliver"] = at_deliver
+        h.runner.script["deliver"] = [yq.Child(0, "written: exports/ops/2026-01-01/delivery\n")]
+        h.runner.script["send"] = [yq.Child(0, "a line before\n" + said + "\n")]
+        assert h.load() == 0
+        assert seen == {"lock": False, "last": "finished"}, seen          # the load had closed and unlocked first
+        assert h.runner.labels()[-2:] == ["deliver", "send"], h.runner.labels()
+        assert h.runner.argv("deliver")[-5:] == ["-m", "scripts.ops", "deliver", "--run", RUN]
+        assert h.runner.argv("send")[-5:] == ["-m", "scripts.yq_send", "--run", RUN, "--auto"]
+        timeouts = {c[0]: c[2] for c in h.runner.calls}
+        assert timeouts["deliver"] == yq.DELIVER_TIMEOUT_S and timeouts["send"] == yq.SEND_TIMEOUT_S
+        rows = loadplan.delivery_read(RUN)
+        assert [r["event"] for r in rows] == ["queued", "ended"] and rows[-1]["text"] == said, rows
+        assert loadplan.journal_read(RUN)[-1]["event"] == "finished"      # the load's journal ends on its closing row
+    for answer, starts in (([yq.Child(1, "Traceback\nKeyError: x\n")], "Delivery: the brief could not be prepared "
+                                                                         "(exit code 1; its last line: KeyError: x)"),
+                           (None, "Delivery: the e-mail program gave no answer (exit code 1; it ran out of time)"),
+                           ("raise", "Delivery: an unexpected error (OSError)")):
+        with data_root() as root:
+            h = Harness(root)
+            h.deps.deliver = True
+            if answer == "raise":
+                h.runner.script["deliver"] = [yq.Child(0, "")]
+
+                def boom():
+                    raise OSError("the disk")
+                h.runner.hooks["send"] = boom
+            elif answer:
+                h.runner.script["deliver"] = answer
+            else:
+                h.runner.script["deliver"] = [yq.Child(0, "")]
+                h.runner.script["send"] = [yq.Child(1, "", timed_out=True)]
+            assert h.load() == 0, starts                                  # the load's own result, whatever the e-mail did
+            last = loadplan.delivery_read(RUN)[-1]
+            assert last["event"] == "ended" and last["text"].startswith(starts), last["text"]
+            assert last["text"].endswith(". " + retry), last["text"]
+            assert loadplan.run_result(RUN) == "FINISHED"
+    with data_root() as root:                                             # nothing written: no brief, no e-mail
+        h = Harness(root)
+        h.deps.deliver = True
+        h.runner.script["backup"] = [yq.Child(1, "No space left on the disk.\n")]
+        assert h.load() != 0
+        assert "deliver" not in h.runner.labels() and loadplan.delivery_read(RUN) == []
+    with data_root() as root:                                             # tests and harnesses deliver nothing
+        h = Harness(root)
+        assert h.deps.deliver is False and h.load() == 0
+        assert "deliver" not in h.runner.labels() and loadplan.delivery_read(RUN) == []
+    with data_root():                                                     # a rehearsal only says what would happen
+        loadplan.journal_append(RUN, "finished", result="ok")
+        calls = []
+        deps = SimpleNamespace(rehearsal=True, deliver=True, runner=lambda *a: calls.append(a), keep_awake=lambda on: True)
+        yq.Job.deliver_after(SimpleNamespace(run=RUN, deps=deps))
+        rows = loadplan.delivery_read(RUN)
+        assert calls == [] and [r["event"] for r in rows] == ["ended"] and "(rehearsal)" in rows[0]["text"], rows
+    # the line `load status` and the sender print to retry it is the writer's own
+    from scripts.ops import load_check
+    from scripts import yq_send
+    assert yq.SEND_LINE == load_check.SEND_RETRY and yq.SEND_LINE.format(run=RUN) == yq_send.retry_line(RUN)
+
+
 @test("the real providers: only reads that scripts.ops.db accepts, each session closed, the live site asked once")
 def _():
     with data_root() as root:
@@ -2009,6 +2110,12 @@ def _():
                     return [{"ok": True}]
                 if "ingest_batches" in sql:
                     return [{"id": 4}]
+                if "from audit_log" in sql:
+                    return [{"event": "ingest", "at": "2026-01-01 09:20:00+00"}]
+                if "coalesce(file" in sql:
+                    return [{"id": 8, "file": "refresh 010126_0900 (data as of 2025-12-31)"},
+                            {"id": 9, "file": "Focus refresh (data as of 2025-12-31)"},
+                            {"id": 10, "file": "refresh _upload (data as of 2026-01-01)"}]
                 if "new_rows" in sql:
                     return [{"new_rows": 2, "max_id": 9}]
                 if "ingest_runs" in sql:
@@ -2042,6 +2149,10 @@ def _():
             assert yq._real_ingest_runs(7) == (9, 2)
             assert seen["sql"][-1] == ("select count(*) as new_rows, coalesce(max(id), 0) as max_id from ingest_runs where id > %s", (7,))
             assert seen["open"] == seen["closed"] == 3
+            # a resume reads what another load wrote meanwhile: one session, SELECTs the guard accepts
+            foreign = yq._real_foreign_writes(dict(w.plan, token_parts={"fingerprint": {"ingest_runs": 7}}))
+            assert seen["open"] == seen["closed"] == 4 and len(foreign) == 2, foreign
+            assert "refresh _upload" in foreign[0] and "Data page" in foreign[1]
         finally:
             db.session, db.health = real_session, real_health
         relative = dict(w.plan, drop="Uplaods/010126")              # a plan may name the drop folder either way
@@ -2357,7 +2468,7 @@ def _():
 @test("a resume of a load that had begun, ended by the worker's own token check: closed, and never 'nothing was written'")
 def _():
     with data_root() as root:                    # (b) he opens a report in Excel during the tick wait
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         interrupted(h, upto="refresh")
         h.w.newest_run = 8
         assert h.go() == 0 and "RESUME" in h.box.shown[0][1]
@@ -2383,7 +2494,7 @@ def _():
         assert "CHECK AGAIN at token" in h.out[-1] and MAY_HOLD in h.out[-1] and not says_nothing_was_written(h.said())
         assert h.rows("failed")[-1]["result"] == "failed" and h.rows("failed")[-1]["written"] is True
     with data_root() as root:                    # a FIRST go ended the same way: nothing was written, and that is said
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         assert h.go() == 0
         h.clock.on_sleep = lambda: (h.w.drop / "~$Stock_balance1.xlsx").write_bytes(b"open in Excel")
         assert h.work() == 3
@@ -2640,7 +2751,7 @@ def _():
         assert status.failed_load() == {"run": RUN, "step": "refresh"}
         assert status.interrupted_banner() == last_failed("refresh")          # INTERRUPTED became FAILED: never silence
     with data_root() as root:                    # ... or closed by its resumed worker's own check, at the step where it stood
-        h = Harness(root, start=datetime(2026, 1, 1, 9, 7, 0, tzinfo=timezone.utc))
+        h = Harness(root, start=datetime(2026, 1, 1, 9, 10, 0, tzinfo=timezone.utc))
         interrupted(h, upto="refresh")
         assert h.go() == 0
         h.clock.on_sleep = lambda: (h.w.drop / "~$Stock_balance1.xlsx").write_bytes(b"open in Excel")
@@ -2674,11 +2785,11 @@ def _():
         "Checking that nothing changed since the table was shown.",
         "Files, programs and database are as the table showed. The loader's work folder (data/clean) is empty.",
         "Making sure there is a backup of every table from before the load.",
-        f"Backup of every table packed, encrypted: {backup}. Kept: the newest 2.",
+        f"Backup of every table packed, encrypted and read back: {backup}. Kept: the newest 2.",
         "Making sure there is a before-snapshot of the records a load must never change.",
         f"Before-snapshot written: {before}.",
         "Checking once more that nothing changed, then waiting for a quiet moment between two production ticks.",
-        "No wait needed: production's next tick is at least 10 minutes away. The table still holds.",
+        "No wait needed: production's next tick is at least 6 minutes away. The table still holds.",
         "Loading the reports and verifying their totals: from this line on the database is being changed.",
         "Loaded and verified. Sales data to 2025-12-31.",
         "Comparing the portal's numbers with the Focus reports.",
@@ -3446,8 +3557,9 @@ def _():
             while not isinstance(up, ast.Call):
                 up = parent[up]
             uses.append(ast.unparse(up))
-    assert sorted(uses) == sorted(["dict(os.environ)", "os.environ.pop(NONCE_ENV, '')", "os.environ.pop(BREAKAWAY_ENV, '')",
-                                   "os.environ.get(nb.PASSWORD_ENV)"]), uses
+    # (the backup password is read by scripts/yq_secrets.py from LAUNCH_ENV, Credential Manager or the registry)
+    assert sorted(uses) == sorted(["dict(os.environ)", "os.environ.pop(NONCE_ENV, '')",
+                                   "os.environ.pop(BREAKAWAY_ENV, '')"]), uses
     for node in ast.walk(tree):                  # every Popen of the file names its environment, and none is os.environ
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen":
             env = [k.value for k in node.keywords if k.arg == "env"]
@@ -3455,7 +3567,7 @@ def _():
     assert yq.NONCE_ENV not in yq.LAUNCH_ENV and yq.BREAKAWAY_ENV not in yq.LAUNCH_ENV
 
 
-@test("the writer starts processes in two places only, never through a shell, and runs four engine programs")
+@test("the writer starts processes in two places only, never through a shell; the engine programs, then the delivery")
 def _():
     tree = writer_tree()
     owners: dict[str, int] = {}
@@ -3470,7 +3582,9 @@ def _():
     assert set(owners) == {"run_child", "spawn_worker"}, owners
     strings = code_strings(tree)
     modules = sorted({s for s in strings if s.startswith("scripts.") and " " not in s})
-    assert modules == ["scripts.db_backup", "scripts.prod_gate", "scripts.reconcile_check"], modules
+    # the three engine programs of the load, then (after it has closed) the brief and the e-mail
+    assert modules == ["scripts.db_backup", "scripts.ops", "scripts.prod_gate", "scripts.reconcile_check",
+                       "scripts.yq_send"], modules
     assert sum("from scripts.refresh import refresh" in s for s in strings) == 1          # inside the child's program
     for s in strings:
         for bad in ("--restore", "--yes", "--allow-newer", "--force", "apply_sql", "apply_migration", "load_supabase",
@@ -3500,7 +3614,8 @@ def _():
     assert sorted(callers("child_env")) == ["RealRunner", "spawn_worker"] and callers("worker_python") == ["spawn_worker"]
     assert callers("copy_file", "paths") == ["publish_folder"], "the loaded set is copied by the guarded copy only"
     assert callers("copy2", "shutil") == [] and callers("copy", "shutil") == [] and callers("copytree", "shutil") == []
-    assert sorted(callers("session", "db")) == ["_real_ingest_runs", "_real_parts"] and callers("health", "db") == ["_real_parts"]
+    assert sorted(callers("session", "db")) == ["_real_foreign_writes", "_real_ingest_runs", "_real_parts"]
+    assert callers("health", "db") == ["_real_parts"]
     assert callers("rpc", "db") == [] and callers("rpc_params", "db") == [] and callers("install", "db") == []
     spawn = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "spawn_worker"][0]
     text = ast.get_source_segment(src, spawn)
@@ -3694,7 +3809,7 @@ def _():
         h.runner.script["refresh"] = [five_minutes_unverified]
         assert h.load() == 0, h.rows()[-1]
         local = starts[1].astimezone(yq.BAHRAIN)
-        assert (local.hour, local.minute) >= (8, 21) and yq.tick_wait_seconds(starts[1]) == 0, starts
+        assert (local.hour, local.minute, local.second) > (8, 20, 0) and yq.tick_wait_seconds(starts[1]) == 0, starts
     # ... while a load stage that failed part-way is run again at once: half a ledger is the worse thing to leave
     with data_root() as root:
         h = Harness(root)
@@ -4012,6 +4127,161 @@ def _():
     for s in code_strings(tree):
         assert s.isascii(), f"a non-ASCII character in the string {s[:50]!r}"
     assert max(len(ln) for ln in src.splitlines()) <= 120
+
+
+# ── measuring a load, the box after a Yes too soon, the lock's PC (14-Oct-2026) ─────────────────
+
+@test("every line a child prints reaches the worker log with its time and the seconds since the child started")
+def _():
+    import re
+    with tempfile.TemporaryDirectory() as tmp:
+        log: list[str] = []
+        child = yq.run_child([sys.executable, "-c", "print('one', flush=True); print('two', flush=True)"],
+                             cwd=Path(tmp), env=yq.child_env(), log=log.append)
+        assert child.code == 0 and child.text.splitlines() == ["one", "two"], "the text the steps read is unchanged"
+        stamp = re.compile(r"^  \| \d\d:\d\d:\d\dZ \+ *\d+s (one|two)$")
+        assert len(log) == 2 and all(stamp.match(ln) for ln in log), log
+
+
+@test("the closing row carries the run's profile, seconds per step and in all; the refresh time is kept for the next load")
+def _():
+    with data_root() as root:
+        h = Harness(root)
+        h.runner.hooks["backup"] = lambda: setattr(h.clock, "t", h.clock.t + timedelta(seconds=60))
+        h.runner.hooks["refresh"] = lambda: setattr(h.clock, "t", h.clock.t + timedelta(seconds=155))
+        assert h.load() == 0
+        fin = h.rows("finished")[0]
+        assert fin["timings"]["backup"] == 60.0 and fin["timings"]["refresh"] == 155.0, fin["timings"]
+        assert set(fin["timings"]) == set(loadplan.STEPS) and fin["total_seconds"] == 215.0, fin
+        assert status.read_state()["last_load"]["refresh_seconds"] == 155.0
+    with data_root() as root:                    # a run closed as failed carries its profile too
+        h = Harness(root)
+        h.runner.script["backup"] = [yq.Child(1, "boom\n")]
+        assert h.go() == 0 and h.work() == 1
+        failed = h.rows("failed")[0]
+        assert "backup" in failed["timings"] and "total_seconds" in failed
+        assert "refresh_seconds" not in (status.read_state().get("last_load") or {})
+
+
+@test("a Yes too soon: the box comes back after a short pause, says why and asks for one click; the box text says so first")
+def _():
+    t, shows, pauses = [100.0], [], []
+    answers = [(6, 0.5), (6, 9.0)]
+
+    def show(title, text, timeout_ms):
+        button, took = answers.pop(0)
+        shows.append((text, timeout_ms))
+        t[0] += took
+        return button
+
+    def pause(seconds):
+        pauses.append(seconds)
+        t[0] += seconds
+    said = yq.windows_box("YQ load 010126", "the table", 540, show=show, clock=lambda: t[0], pause=pause)
+    assert said == "yes" and pauses == [yq.BOX_REOPEN_PAUSE_S] == [2]
+    assert shows[1][0].startswith("A Yes came within 3 seconds") and "click your answer once" in shows[1][0]
+    assert shows[1][1] == 540000 - 500 - 2000, "the pause comes out of the one time budget"
+    with data_root() as root:
+        w = World(root)
+        lines = yq.box_text(RUN, w.plan)[1].splitlines()
+        assert lines[-2] == "Read first: a Yes in the first 3 seconds is not counted. Then click once."
+        assert lines[-1] == "Yes = load now. No = nothing changes."
+
+
+@test("the lock names its PC; a lock taken on another PC is never judged, resumed or cleared here")
+def _():
+    with data_root() as root:
+        h = Harness(root)
+        assert h.go() == 0
+        assert status.read_lock()["host"] == status.this_host() != ""
+    with data_root() as root:                    # another PC's lock: its process number means nothing here
+        h = Harness(root)
+        lock = interrupted(h, upto="refresh")["lock"]
+        paths.write_text(paths.lock_file(), json.dumps(dict(lock, host="OTHER-PC")))
+        assert h.go() == 2
+        assert "another PC (OTHER-PC)" in h.said() and "Nothing was started" in h.said(), h.said()
+        assert paths.lock_file().exists() and h.spawn.calls == [] and h.runner.calls == [] and h.box.shown == []
+        st = status.lock_state()
+        assert st["elsewhere"] == "OTHER-PC" and st["state"] == "interrupted"     # its heartbeat is old
+        fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        paths.write_text(paths.lock_file(), json.dumps(dict(lock, host="OTHER-PC", heartbeat=fresh)))
+        assert status.lock_state()["state"] == "running", "a live heartbeat from that PC reads as running"
+    with data_root() as root:                    # a lock that names no PC (written before this change) is this PC's
+        h = Harness(root)
+        interrupted(h, upto="pre_gate")
+        assert status.host_elsewhere(status.read_lock()) is None
+        assert h.go() == 0 and "RESUME" in h.box.shown[0][1]
+    assert status.host_elsewhere({"host": status.this_host().lower()}) is None, "the same PC in another case"
+    assert status.host_elsewhere({"host": "  "}) is None and status.host_elsewhere(None) is None
+
+
+@test("a resume reads what another load wrote meanwhile: a Data-page upload or a batch import closes it, its own rows do not")
+def _():
+    upload = ["another load wrote to the database after this check (refresh _upload (data as of 2026-01-01))"]
+    with data_root() as root:                    # the launcher's own check of the resume
+        h = Harness(root)
+        interrupted(h, upto="refresh")
+        h.deps.foreign_writes = lambda plan: list(upload)
+        assert h.go() == 3, h.out
+        closing = h.rows("failed")[-1]
+        assert closing["written"] is True and closing["check_again"] is True and closing["moved"] == upload
+        assert status.failed_load() == {"run": RUN, "step": "refresh"} and not paths.lock_file().exists()
+        assert h.spawn.calls == [] and h.runner.calls == []
+    with data_root() as root:                    # ... or the resumed worker's own check, before the refresh runs again
+        h = Harness(root)
+        interrupted(h, upto="refresh")
+        later: list = []
+        h.deps.foreign_writes = lambda plan: list(later)
+        assert h.go() == 0
+        later += upload
+        assert h.work() == 3 and "run:refresh" not in h.w.trace
+        assert h.rows("failed")[-1]["written"] is True and h.rows("failed")[-1]["moved"] == upload
+    with data_root() as root:                    # nothing foreign: the resume goes on as before
+        h = Harness(root)
+        interrupted(h, upto="refresh")
+        asked: list = []
+        h.deps.foreign_writes = lambda plan: asked.append(plan["run"]) or []
+        assert h.go() == 0 and h.work() == 0 and asked and set(asked) == {RUN}
+    with data_root() as root:                    # a first go compares the whole fingerprint: the records are not asked
+        h = Harness(root)
+        asked = []
+        h.deps.foreign_writes = lambda plan: asked.append(1) or []
+        assert h.load() == 0 and asked == []
+
+
+@test("foreign writes: the rows of this run's refresh and of the loader are its own; another folder, a batch, an upload log are not")
+def _():
+    class Rows:
+        def __init__(self, runs, events):
+            self.runs, self.events, self.sql = runs, events, []
+
+        def q(self, sql, params=None):
+            db.check_sql(sql)
+            self.sql.append((sql, params))
+            return self.events if "audit_log" in sql else self.runs
+    plan = {"run": RUN, "created_at": "2026-01-01T09:00:00+00:00", "token_parts": {"fingerprint": {"ingest_runs": 7}}}
+    own = [{"id": 8, "file": f"refresh {RUN} (data as of 2025-12-31)"}, {"id": 9, "file": "Focus refresh (data as of x)"}]
+    assert loadplan.foreign_writes(Rows(own, []), RUN, plan) == []
+    other = own + [{"id": 10, "file": "refresh _upload (data as of 2026-01-01)"},
+                   {"id": 11, "file": "batch 4 committed by owner (data as of 2026-01-01)"},
+                   {"id": 12, "file": "refresh 020126_0900 (data as of 2026-01-01)"}]
+    said = loadplan.foreign_writes(Rows(other, [{"event": "ingest", "at": "2026-01-01 09:30"}]), RUN, plan)
+    assert len(said) == 4 and "refresh _upload" in said[0] and "batch 4" in said[1] and "020126_0900" in said[2]
+    assert "ingest" in said[3]
+    rows = Rows(own, [])
+    loadplan.foreign_writes(rows, RUN, plan)
+    assert rows.sql[0][1] == (7,) and rows.sql[1][1] == ("2026-01-01T09:00:00+00:00",)
+    assert loadplan.foreign_writes(Rows(other, []), RUN, {"run": RUN}) == [], "no fingerprint, no check time: nothing to compare"
+    # the texts it reads are the ones the programs write: a change there must fail here first
+    refresh = (ROOT / "scripts" / "refresh.py").read_text(encoding="utf-8")
+    loader = (ROOT / "scripts" / "load_supabase.py").read_text(encoding="utf-8")
+    batch = (ROOT / "app" / "ingest_batch_api.py").read_text(encoding="utf-8")
+    assert 'f"refresh {Path(src_path).name} (data as of {data_date})"' in refresh
+    assert '"file": f"Focus refresh (data as of {data_date})"' in loader and loadplan.LOADER_RUN_PREFIX == "Focus refresh ("
+    assert 'f"batch {batch_id} committed by {actor} (data as of {d})"' in batch
+    main_py = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    for event in ('"ingest"', '"ingest_markers"', '"ingest_purge"'):
+        assert f"log_event(user.email, {event}" in main_py or f"log_event(admin.email, {event}" in main_py, event
 
 
 def main() -> int:

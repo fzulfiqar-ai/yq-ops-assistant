@@ -9,12 +9,13 @@
 - A rehearsal of the load, when he asks for one in plain words, is in `docs/OPS_SKILLS.md`, section 2: it loads nothing.
 
 ## Skills (`.claude/skills/`)
-- `/yq-load [ddmmyy]`: check a drop folder, ask, load, verify, brief. Owner only.
-- `/yq-brief [window] [rep:<name>]`: sales brief and what to do today. Asked whether the data is up to date or what is waiting, it runs `python -m scripts.ops status` (read-only).
+- `/yq-load [ddmmyy]`: check a drop folder, ask, load, verify, brief, then the e-mail. Owner only.
+- `/yq-brief [window] [rep:<name>]`: sales brief and what to do today; `/yq-brief team` prints the team message for him to copy. Asked whether the data is up to date or what is waiting, it runs `python -m scripts.ops status` (read-only).
 - More skills arrive in later phases and are listed here once they exist.
 
 ## Standing rules
 - When a command opens with `LOAD INTERRUPTED` or `LAST LOAD FAILED`, tell the owner first: typing /yq-load in the main folder is what settles it. Never clear a lock or a load's folder unless he asks for exactly that.
+- A load's e-mail goes once: never send it again, or send anything to WhatsApp, unless he asks for exactly that.
 - `docs/CLAUDE.md`: the standing orders (stack, data rules, migrations).
 - `docs/OPS_SKILLS.md`: what each command does, the one-time settings block, definitions.
 - This repository is public: no names, phone numbers, ID numbers, prices or totals in anything committed.
