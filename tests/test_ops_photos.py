@@ -263,6 +263,30 @@ def _():
     assert yp.local_name("odd bucket", "a.png", set()).startswith("files/_odd/")
 
 
+@test("a key that is the folder of another key (market/x, market/x/y.png) gets a hashed name; no order or case can break a write")
+def _():
+    for first, second in (("market/x", "market/x/y.png"), ("market/x/y.png", "market/x"), ("Market/X/y.png", "market/x"),
+                          ("a/b/c/d.png", "a/b"), ("a", "a/b/c/d.png"), ("a/b", "A")):
+        used: set[str] = set()
+        one = yp.local_name("finds", first, used)
+        two = yp.local_name("finds", second, used)
+        assert one == "files/finds/" + first, (first, one)
+        assert two.startswith("files/_odd/"), (first, second, two)
+    # whatever the keys, every name can be written on a real disk and no two are the same file on Windows
+    rng = random.Random(7)
+    parts = ["a", "A", "b", "x.png", "X.PNG"]
+    for _trial in range(200):
+        keys = sorted({"/".join(rng.choice(parts) for _ in range(rng.randint(1, 4))) for _ in range(rng.randint(2, 8))})
+        used = set()
+        names = [yp.local_name("finds", key, used) for key in keys]
+        assert len({n.lower() for n in names}) == len(names), (keys, names)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in names:
+                target = Path(tmp) / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"x")                                  # FileExistsError before the fix
+
+
 # ── without --apply ──────────────────────────────────────────────────────────
 
 @test("without --apply: counts per bucket, rows, rows without an object, objects without a row; nothing else happens")
@@ -386,7 +410,7 @@ def _():
         text = "\n".join(said)
         assert code == 0, said
         assert "PHOTO ARCHIVE PASSED" in text and "1 match the sha256 in the database, 4 have none to compare, 0 differ" in text, text
-        final = photos_folder(root) / "2026-10-15_photos.7z"
+        final = photos_folder(root) / "2026-10-15_0930_photos.7z"
         assert final.is_file() and final.read_bytes() == b"stand-in archive"
         assert sorted(p.name for p in photos_folder(root).iterdir()) == [final.name], "no work folder, no staging file left"
         folder, staging, password, exe = pack.calls[0]
@@ -413,7 +437,7 @@ def _():
         rows = drill_rows(root)
         assert len(rows) == 1
         row = rows[0]
-        assert row["kind"] == "photos" and row["result"] == "passed" and row["archive"] == "2026-10-15_photos.7z"
+        assert row["kind"] == "photos" and row["result"] == "passed" and row["archive"] == "2026-10-15_0930_photos.7z"
         assert (row["objects"], row["checked"], row["no_checksum"], row["mismatches"], row["missing"], row["errors"],
                 row["orphans"]) == (5, 1, 4, 0, 0, 0, 1), row
         assert isinstance(row["seconds"], float) and row["password_from"] == "process_environment"
@@ -423,17 +447,22 @@ def _():
             assert key[1] not in json.dumps(row), "the log row holds counts, never a path"
 
 
-@test("--out puts the archive and the work folder in that folder; a second run the same day replaces the first")
+@test("--out puts the archive and the work folder in that folder; every run makes its own archive and replaces none")
 def _():
     with data_root() as root:
         out = root / "elsewhere" / "photo-copies"
         code, said, pack, _src = run_archive(root, out=out)
-        assert code == 0 and (out / "2026-10-15_photos.7z").is_file() and pack.calls[0][0].parent == out.resolve()
+        assert code == 0 and (out / "2026-10-15_0930_photos.7z").is_file() and pack.calls[0][0].parent == out.resolve()
         assert not (root / "store").exists()
-        (out / "2026-10-15_photos.7z").write_bytes(b"first")
-        code, said, pack, _src = run_archive(root, out=out, now=LATER)
-        assert code == 0 and (out / "2026-10-15_photos.7z").read_bytes() == b"stand-in archive"
-        assert sorted(p.name for p in out.iterdir()) == ["2026-10-15_photos.7z"]
+        (out / "2026-10-15_0930_photos.7z").write_bytes(b"first")
+        code, said, pack, _src = run_archive(root, out=out, now=LATER)               # a quarter of an hour later
+        assert code == 0 and (out / "2026-10-15_0945_photos.7z").read_bytes() == b"stand-in archive"
+        for number in (2, 3):                                                          # the very same minute, twice more
+            code, said, pack, _src = run_archive(root, out=out, now=NOW)
+            assert code == 0 and (out / f"2026-10-15_0930_photos_{number}.7z").read_bytes() == b"stand-in archive", said
+        assert (out / "2026-10-15_0930_photos.7z").read_bytes() == b"first", "an earlier archive is never replaced"
+        assert sorted(p.name for p in out.iterdir()) == ["2026-10-15_0930_photos.7z", "2026-10-15_0930_photos_2.7z",
+                                                          "2026-10-15_0930_photos_3.7z", "2026-10-15_0945_photos.7z"]
 
 
 @test("a missing object, a row without an object, a sha256 that differs, a download that fails and a short download are reported")
@@ -458,7 +487,7 @@ def _():
         assert re.search(r"error\s+field-notes:notes/cc33\.jpg.*storage lists 10000", text), text
         assert src.downloads.count(LEGACY_FIND) == yp.RETRIES, "retried, then given up"
         assert src.downloads.count(gone) == 1, "a missing object is not retried"
-        final = photos_folder(root) / "2026-10-15_photos.7z"
+        final = photos_folder(root) / "2026-10-15_0930_photos.7z"
         assert final.is_file(), "the archive is made all the same: everything that could be read is in it"
         manifest = json.loads((pack.keep / "manifest.json").read_text(encoding="utf-8"))
         kinds = sorted(p["type"] for p in manifest["problems"])
@@ -484,7 +513,7 @@ def _():
 @test("a pack that fails leaves no work folder or staging file, spares an earlier archive, and is recorded as failed")
 def _():
     with data_root() as root:
-        old = photos_folder(root) / "2026-10-15_photos.7z"
+        old = photos_folder(root) / "2026-10-15_0930_photos.7z"                       # made in this very minute
         old.parent.mkdir(parents=True)
         old.write_bytes(b"yesterday's good archive")
         quoting = f"7-Zip could not pack the photos (exit 2) while running 7z a -p{PASSWORD}"      # a tool that quotes its command line
@@ -494,26 +523,193 @@ def _():
         assert old.read_bytes() == b"yesterday's good archive"
         assert [p.name for p in photos_folder(root).iterdir()] == [old.name]
         row = drill_rows(root)[0]
-        assert row["result"] == "failed" and "could not pack" in row["why"]
+        assert row["result"] == "failed" and "could not pack" in row["why"] and row["archive"] is None
         assert PASSWORD not in json.dumps(row) and PASSWORD not in text, "the password is masked even in an error text"
 
 
-@test("an object key that would climb out of the work folder is stored under a hashed name, inside it")
+def many(n: int) -> dict:
+    """n invented photos (all the same kind of key)."""
+    return {("finds", f"p/{i:02d}.png"): png((i, i, i)) for i in range(n)}
+
+
+@test("every download fails (key rotated, network down): the run stops after a few objects, exit 2, nothing packed or replaced")
 def _():
     with data_root() as root:
-        evil = {("finds", "../../escape.png"): png((1, 2, 3)), ("finds", "ok/fine.png"): png((4, 5, 6)),
-                ("finds", "Case.png"): png((7, 8, 9)), ("finds", "case.png"): png((10, 11, 12))}
-        src = FakeSource(evil, refs=[])
+        objects = many(9)
+        store = photos_folder(root)
+        store.mkdir(parents=True)
+        this_minute, yesterday = store / "2026-10-15_0930_photos.7z", store / "2026-10-14_0900_photos.7z"
+        this_minute.write_bytes(b"a good archive made in this very minute")
+        yesterday.write_bytes(b"yesterday's")
+        src = FakeSource(objects, refs=[], failing={k: 99 for k in objects})
         code, said, pack, _s = run_archive(root, src)
+        text = "\n".join(said)
+        assert code == 2, text
+        assert "PHOTO ARCHIVE FAILED" in text and f"{yp.ABORT_AFTER} downloads in a row failed" in text, text
+        assert "No archive was made" in text and "the archive was made" not in text and "PROBLEMS" not in text, text
+        assert len(src.downloads) == yp.ABORT_AFTER * yp.RETRIES, "five objects, each tried three times, then it stops"
+        assert pack.calls == [], "nothing was packed"
+        assert this_minute.read_bytes() == b"a good archive made in this very minute" and yesterday.read_bytes() == b"yesterday's"
+        assert sorted(p.name for p in store.iterdir()) == [yesterday.name, this_minute.name], "no work folder, no new archive"
+        row = drill_rows(root)[0]
+        assert row["result"] == "failed" and row["archive"] is None and row["objects"] == 0, row
+
+
+@test("storage refuses the key (401 / 403): the run stops at the first object, without retries, exit 2")
+def _():
+    class Refusing(FakeSource):
+        def download(self, bucket, path):
+            self.downloads.append((bucket, path))
+            raise yp.SourceRefused("storage refused the key (HTTP 401)")
+    with data_root() as root:
+        src = Refusing()
+        code, said, pack, _s = run_archive(root, src)
+        text = "\n".join(said)
+        assert code == 2 and "PHOTO ARCHIVE FAILED: storage refused the key (HTTP 401)" in text, text
+        assert "No archive was made" in text and "the archive was made" not in text, text
+        assert len(src.downloads) == 1 and pack.calls == [] and not list(photos_folder(root).glob("*.7z"))
+        assert drill_rows(root)[0]["result"] == "failed"
+
+
+@test("a run with download errors never replaces an archive: it gets a name of its own")
+def _():
+    with data_root() as root:
+        store = photos_folder(root)
+        store.mkdir(parents=True)
+        first = store / "2026-10-15_0930_photos.7z"
+        first.write_bytes(b"a good archive made in this very minute")
+        src = FakeSource(failing={MASTER: 99, NOTE: 99})                         # two of the five cannot be read
+        code, said, pack, _s = run_archive(root, src)
+        text = "\n".join(said)
+        assert code == 1 and "PROBLEMS (2)" in text, text
+        assert first.read_bytes() == b"a good archive made in this very minute", "the earlier archive is untouched"
+        assert sorted(p.name for p in store.iterdir()) == [first.name, "2026-10-15_0930_photos_2.7z"]
+        assert "2026-10-15_0930_photos_2.7z" in text and drill_rows(root)[0]["archive"] == "2026-10-15_0930_photos_2.7z"
+
+
+@test("objects are listed but not one can be downloaded: nothing is archived (exit 2), even below the stop limit")
+def _():
+    with data_root() as root:
+        objects = many(3)
+        assert len(objects) < yp.ABORT_AFTER
+        for src in (FakeSource(objects, refs=[], failing={k: 99 for k in objects}),      # every download fails
+                    FakeSource(objects, refs=[], missing=set(objects))):                  # listed, but all gone
+            code, said, pack, _s = run_archive(root, src)
+            assert code == 2 and "none of the 3 listed object(s) could be downloaded" in "\n".join(said), said
+            assert "No archive was made" in "\n".join(said) and pack.calls == []
+        assert not list(photos_folder(root).glob("*.7z"))
+        assert [r["result"] for r in drill_rows(root)] == ["failed", "failed"]
+
+
+@test("failures that are not in a row do not stop the run: a photo that downloads, or a missing object, resets the count")
+def _():
+    n = yp.ABORT_AFTER - 1                                                         # one less than the stop limit
+    objects = many(2 * n + 2)
+    keys = sorted(objects)
+    with data_root() as root:
+        failing = {k: 99 for k in keys[:n] + keys[n + 1:2 * n + 1]}                # n failures, a good photo, n failures, a good photo
+        code, said, pack, src = run_archive(root, FakeSource(objects, refs=[], failing=failing))
+        assert code == 1 and f"PROBLEMS ({2 * n})" in "\n".join(said), said
+        assert len(src.downloads) == 2 * n * yp.RETRIES + 2 and pack.calls, "every object was tried"
+        failing = {k: 99 for k in keys[:n] + keys[n + 1:2 * n + 1]}                # the middle one is listed but gone instead
+        code, said, pack, src = run_archive(root, FakeSource(objects, refs=[], failing=failing, missing={keys[n]}), now=LATER)
+        assert code == 1 and f"PROBLEMS ({2 * n + 1})" in "\n".join(said), said
+        assert "downloads in a row" not in "\n".join(said), "2n failures with a missing object between are not a run of them"
+
+
+@test("keys market/x and market/x/y.png together no longer crash the run: both are archived, the clashing one under a hashed name")
+def _():
+    with data_root() as root:
+        objects = {("finds", "market/x"): png((1, 1, 1)), ("finds", "market/x/y.png"): png((2, 2, 2)),
+                   ("finds", "Market/X/z.png"): png((3, 3, 3))}
+        code, said, pack, _s = run_archive(root, FakeSource(objects, refs=[]))
         assert code == 0, said
         manifest = json.loads((pack.keep / "manifest.json").read_text(encoding="utf-8"))
         names = {e["path"]: e["file"] for e in manifest["files"]}
-        assert names["../../escape.png"].startswith("files/_odd/") and names["ok/fine.png"] == "files/finds/ok/fine.png"
-        assert len(set(n.lower() for n in names.values())) == 4, "no two files with the same name on Windows"
+        assert set(names) == {key[1] for key in objects}, "the original keys stay in the manifest"
+        assert len({n.lower() for n in names.values()}) == 3 and sum(n.startswith("files/_odd/") for n in names.values()) >= 1
+        for (bucket, path), data in objects.items():
+            assert (pack.keep / names[path]).read_bytes() == data
+
+
+@test("a listed object with an unsafe name is an error (exit 1): never requested, and not counted as a failed download")
+def _():
+    class Picky(FakeSource):
+        def download(self, bucket, path):
+            if path == LEGACY_FIND[1]:
+                self.downloads.append((bucket, path))
+                raise yp.UnsafeKey("has a surprise")                          # the source's own check says no
+            return super().download(bucket, path)
+    unsafe = ["../../functions/v1/x", "a.png?x", "a/../b.png", "x%2Fy.png", "a\\b.png", "/abs.png"]
+    assert len(unsafe) > yp.ABORT_AFTER, "more of them than the stop limit: they are no failed downloads"
+    with data_root() as root:
+        objects = store_objects()
+        for key in unsafe:
+            objects[("finds", key)] = b"must never be fetched"
+        src = Picky(objects, refs=[])
+        code, said, pack, _s = run_archive(root, src)
+        text = "\n".join(said)
+        assert code == 1, text
+        assert not [d for d in src.downloads if d[1] in unsafe], "not one request for them"
+        assert src.downloads.count(LEGACY_FIND) == 1, "an unsafe name is not retried"
+        assert text.count("object name refused") == len(unsafe) + 1 and f"PROBLEMS ({len(unsafe) + 1})" in text, text
+        assert "refused: has a surprise" in text and "starts with '/'" in text and "'..'" in text, text
+        manifest = json.loads((pack.keep / "manifest.json").read_text(encoding="utf-8"))
+        assert len(manifest["files"]) == 4 and sorted({p["type"] for p in manifest["problems"]}) == ["error"]
+        assert drill_rows(root)[0]["errors"] == len(unsafe) + 1
+
+
+@test("the password is masked before an error text is squeezed and cut, so no piece of it survives (archive, verify, _clean)")
+def _():
+    secret = "zq7  two spaces\nand-k9x\\tail"                      # a run of spaces, a newline and a backslash in it
+    pieces = ("zq7", "two spaces", "and-k9x", "k9x", "tail", "-pzq7")
+    filler = "x" * 130
+    texts = [f"7-Zip failed: {filler} -p{secret} and then some more words",               # the 160-character cut falls inside it
+             f"{filler[:60]} Command {['7z', 'a', '-p' + secret]!r} failed {filler}",       # as a list shows it: backslash doubled
+             f"-p{secret}"]
+    squeezed_then_cut = " ".join(texts[0].split())[:160]
+    assert "-pzq7" in squeezed_then_cut, "the first text really is one the old order of work (squeeze, cut, then mask) leaked from"
+    for text in texts:
+        out = yp._clean(yp.PhotoError(text), secret)
+        assert not any(p in out for p in pieces), out
+        assert len(out) <= 160, out
+    assert all("<password>" in yp._clean(yp.PhotoError(t), secret) for t in texts[1:]), "masked, not just cut away"
+    assert yp._clean(ValueError("plain failure"), None) == "ValueError: plain failure"
+    with data_root() as root:                                                            # the whole path of a failed pack
+        code, said, pack, _s = run_archive(root, password=secret, pack=FakePack(root / "kept", fail=texts[0]))
+        blob = "\n".join(said) + json.dumps(drill_rows(root))
+        assert code == 2 and "PHOTO ARCHIVE FAILED" in blob and not any(p in blob for p in pieces), blob
+        archive = root / "x_photos.7z"                                                   # and verify's failure messages
+        archive.write_bytes(b"x")
+
+        def unpack_fails(a, dest, pw, exe):
+            raise OSError(texts[0])
+        said = []
+        with with_secrets(root, secret), patched((yb, "read_back", lambda a, pw, exe: (True, "Files: 1")), (yb, "unpack", unpack_fails)):
+            assert yp.verify(archive, 5, said.append, now=LATER) == 1
+        assert "VERIFY FAILED" in "\n".join(said) and not any(p in "\n".join(said) for p in pieces), said
+
+
+@test("a name the file system cannot hold goes under a hashed name inside the work folder; a name that climbs out is refused")
+def _():
+    with data_root() as root:
+        evil = {("finds", "../../escape.png"): png((1, 2, 3)), ("finds", "ok/fine.png"): png((4, 5, 6)),
+                ("finds", "Case.png"): png((7, 8, 9)), ("finds", "case.png"): png((10, 11, 12)),
+                ("finds", "con.png"): png((13, 14, 15)), ("finds", "a b.png"): png((16, 17, 18))}
+        src = FakeSource(evil, refs=[])
+        code, said, pack, _s = run_archive(root, src)
+        text = "\n".join(said)
+        assert code == 1 and "object name refused" in text and "../../escape.png" in text, text         # listed as an error
+        assert ("finds", "../../escape.png") not in src.downloads, "never requested"
+        manifest = json.loads((pack.keep / "manifest.json").read_text(encoding="utf-8"))
+        names = {e["path"]: e["file"] for e in manifest["files"]}
+        assert "../../escape.png" not in names and names["ok/fine.png"] == "files/finds/ok/fine.png"
+        assert names["con.png"].startswith("files/_odd/") and names["a b.png"].startswith("files/_odd/")
+        assert len(set(n.lower() for n in names.values())) == 5, "no two files with the same name on Windows"
         written = {p.relative_to(pack.keep).as_posix() for p in pack.keep.rglob("*") if p.is_file()}
         assert written == set(names.values()) | {"manifest.json"}
         outside = [p for p in (root / "store").rglob("*") if p.is_file()]
-        assert [p.name for p in outside] == ["2026-10-15_photos.7z"], "nothing written outside the work folder"
+        assert [p.name for p in outside] == ["2026-10-15_0930_photos.7z"], "nothing written outside the work folder"
         assert not (root / "store" / "escape.png").exists() and not (root / "escape.png").exists()
 
 
@@ -592,7 +788,7 @@ def _():
         said: list[str] = []
         with with_secrets(root, exe=exe):
             assert yp.archive(True, None, FakeSource(objects), said.append, now=NOW, sleep=nosleep) == 0, said
-            final = photos_folder(root) / "2026-10-15_photos.7z"
+            final = photos_folder(root) / "2026-10-15_0930_photos.7z"
             assert final.is_file() and sorted(p.name for p in photos_folder(root).iterdir()) == [final.name]
             ok, info = yb.read_back(final, PASSWORD, exe)
             assert ok and "Files: 6" in info, info                         # five photos and manifest.json
@@ -620,17 +816,21 @@ def payload(root: Path) -> Path:
     return folder
 
 
-def run_verify(root: Path, folder: Path, sample=5, password=PASSWORD):
-    """verify() on a prepared folder: 7-Zip's read-back and unpacking are stand-ins that hand the folder over."""
+def run_verify(root: Path, folder: Path, sample=5, password=PASSWORD, stuck=False):
+    """verify() on a prepared folder: 7-Zip's read-back and unpacking are stand-ins that hand the folder over.
+    With stuck=True the unpacked copy cannot be deleted (rmtree does nothing) and is left for the test to look at."""
     archive = root / "some_photos.7z"
     archive.write_bytes(b"stand-in")
     said: list[str] = []
     n = sum(1 for p in folder.rglob("*") if p.is_file())
-    stubs = (yb, "read_back", lambda a, pw, exe: (True, f"Files: {n}")), \
-        (yb, "unpack", lambda a, dest, pw, exe: shutil.copytree(folder, dest, dirs_exist_ok=True))
+    stubs = [(yb, "read_back", lambda a, pw, exe: (True, f"Files: {n}")),
+             (yb, "unpack", lambda a, dest, pw, exe: shutil.copytree(folder, dest, dirs_exist_ok=True))]
+    if stuck:
+        stubs.append((yp.shutil, "rmtree", lambda *args, **kwargs: None))
     with with_secrets(root, password), patched(*stubs):
         code = yp.verify(archive, sample, said.append, rng=random.Random(3), now=LATER)
-    assert not list(photos_folder(root).glob("verify_*")), "the unpacked copy is always deleted"
+    if not stuck:
+        assert not list(photos_folder(root).glob("verify_*")), "the unpacked copy is always deleted"
     return code, "\n".join(said)
 
 
@@ -709,6 +909,49 @@ def _():
         shutil.copytree(pack.keep, wrapped / "inner")
         code, text = run_verify(root, wrapped)
         assert code == 0 and "records 1 problem(s)" in text, text
+
+
+@test("verify fails an archive whose manifest records download errors (photos missing from it), and only notes the other problems")
+def _():
+    with data_root() as root:
+        code, _said, pack, _s = run_archive(root, FakeSource(failing={LEGACY_FIND: 99}))          # one photo could not be read
+        assert code == 1
+        folder = root / "with-errors"
+        shutil.copytree(pack.keep, folder)
+        code, text = run_verify(root, folder)
+        assert code == 1 and "records 1 download error(s)" in text and "VERIFY FAILED" in text and "VERIFY PASSED" not in text, text
+        assert "Checked 4 file(s) against the manifest: 4 match" in text, "what is in the archive is whole all the same"
+        # the same archive with its error problem taken out of the manifest passes: only the errors decide
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        manifest["problems"] = [dict(p, type="missing") for p in manifest["problems"]]
+        (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        code, text = run_verify(root, folder)
+        assert code == 0 and "records 1 problem(s)" in text and "download error" not in text, text
+
+
+@test("verify says so when the unpacked copy could not be deleted, also when it stops early")
+def _():
+    with data_root() as root:
+        folder = payload(root)
+
+        def clear():
+            for left in photos_folder(root).glob("verify_*"):
+                shutil.rmtree(left)
+        code, text = run_verify(root, folder, stuck=True)                         # all is well, but the copy sticks
+        assert code == 0 and "could not be deleted" in text and "UNENCRYPTED" in text, text
+        assert len(list(photos_folder(root).glob("verify_*"))) == 1
+        clear()
+        (folder / "manifest.json").unlink()                                        # an early stop: there is no manifest
+        code, text = run_verify(root, folder, stuck=True)
+        assert code == 1 and "no manifest.json" in text and "could not be deleted" in text and "UNENCRYPTED" in text, text
+        clear()
+        (folder / "manifest.json").write_text("{ this is not json", encoding="utf-8")        # another early stop
+        code, text = run_verify(root, folder, stuck=True)
+        assert code == 1 and "VERIFY FAILED" in text and "could not be deleted" in text, text
+        assert text.count("could not be deleted") == 1, "said once"
+        clear()
+        code, text = run_verify(root, folder)                                     # and when it can be deleted, nothing is said
+        assert "could not be deleted" not in text
 
 
 @test("verify needs the password and 7-Zip, an archive that exists, and an unpacking folder that is not synced")
@@ -931,6 +1174,123 @@ def _():
         db.uninstall()
 
 
+@test("the real source: 401 / 403 in any body, and a client that cannot be built, are refusals (never retried); 500 is a failure")
+def _():
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rsplit("/", 1)[-1]
+        if name == "gateway401.png":                  # the API gateway's body has no 'error' or 'statusCode': the SDK trips on it
+            return httpx.Response(401, json={"message": "Invalid API key"})
+        if name == "json403.png":
+            return httpx.Response(403, json={"statusCode": "403", "error": "Unauthorized", "message": "bad key"})
+        if name == "text401.png":
+            return httpx.Response(401, text="unauthorized", headers={"content-type": "text/plain"})
+        if name == "boom.png":
+            return httpx.Response(500, json={"statusCode": "500", "error": "internal", "message": "Internal error"})
+        return httpx.Response(200, content=b"ok")
+    db.uninstall()
+    client = db.install(inner=httpx.MockTransport(handler), url="https://ci.invalid", key="ci-key")
+    try:
+        src = yp.SupabaseSource(FakeSession(), lambda: client)
+        for name, status in (("gateway401.png", "401"), ("json403.png", "403"), ("text401.png", "401")):
+            try:
+                yp.fetch(src, "finds", f"d/{name}", sleep=nosleep)
+            except yp.SourceRefused as exc:
+                assert f"HTTP {status}" in str(exc) and "ci-key" not in str(exc) and "ci.invalid" not in str(exc), str(exc)
+            else:
+                raise AssertionError(f"{name}: not a refusal")
+        try:
+            src.download("finds", "d/boom.png")
+        except yp.DownloadFailed as exc:
+            assert "storage said 500" in str(exc)
+        else:
+            raise AssertionError("a 500 is a failure, not a refusal")
+        assert src.download("finds", "d/ok.png") == b"ok"
+    finally:
+        db.uninstall()
+    built: list[int] = []
+
+    def no_client():
+        built.append(1)
+        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are not set (postgresql://u:secret@db.invalid:5432/x)")
+    src = yp.SupabaseSource(FakeSession(), no_client)
+    try:
+        yp.fetch(src, "finds", "d/ok.png", sleep=nosleep)
+    except yp.SourceRefused as exc:
+        assert "could not be built" in str(exc) and "secret" not in str(exc) and "db.invalid" not in str(exc), str(exc)
+    else:
+        raise AssertionError("a client that cannot be built is a refusal")
+    assert built == [1], "asked once: not retried"
+
+
+REFUSED_KEYS = [
+    "", "/abs.png", "//host/x.png", "../../functions/v1/x", "a/../b.png", "a/./b.png", "./a.png", "..", ".", "a//b.png",
+    "a/b/", "a.png?x", "a.png#frag", "a\\b.png", "a\tb.png", "a\nb.png", "a\x00b.png", "a\x7fb.png", "\x85x.png",
+    "a%20b.png", "a%2Fb.png", "%2e%2e/x", "a/%2e%2e/b", "a%e2%82%ac.png", " lead.png", "a:b.png", "1a:b.png", "C:/x.png",
+    "http://evil.example/x.png",
+]
+ORDINARY_KEYS = [
+    "market/2026/10/0123456789abcdef0123456789abcdef.webp", "market/2026/10/0123456789abcdef-t320.webp",
+    "market/2026/10/0123456789abcdef-blur.webp", "market/2026/10/imp-12-1.webp", "finds/0123456789abcdef.jpg", "notes/ab.jpeg",
+    "a b.png", "caf\u00e9.png", "\u0627\u0644.png", "100%.png", "a%.png", "%zz.png", "a%2g", "a;b.png", "a+b.png", "a&b=c.png",
+    "a@b.png", "a[1].png", "a{1}.png", "a|b.png", "a^b.png", "a`b.png", "a'b.png", 'a"b.png', "a<b>.png", "a*b.png",
+    "a,b.png", "a!b.png", "a$b.png", "a(b).png", "a~b.png", "a=b.png", "-lead.png", ".hidden", "a..b.png", "..a",
+    "a/..b/c.png", "a/b..", "a/...", "trail.png ", "x/a:b.png", "a b/c d.png", "A.PNG", "\u2028x.png", "\ufeffx.png",
+]
+
+
+@test("unsafe_key: a name the SDK would turn into another address is refused, with a reason; ordinary names and buckets are not")
+def _():
+    for key in REFUSED_KEYS:
+        why = yp.unsafe_key("finds", key)
+        assert why and isinstance(why, str), f"{key!r} was not refused"
+    for key in ORDINARY_KEYS:
+        assert yp.unsafe_key("finds", key) is None, f"{key!r} was refused: {yp.unsafe_key('finds', key)}"
+    assert yp.unsafe_key("field-notes", "notes/ab.jpeg") is None
+    for bucket in ("orders", "catalog", "finds/..", "", "FINDS"):
+        assert yp.unsafe_key(bucket, "a.png"), f"bucket {bucket!r} was accepted"
+    reasons = {key: yp.unsafe_key("finds", key) for key in ("/abs.png", "../../functions/v1/x", "a.png?x", "a.png#f", "a\\b.png",
+                                                              "a\x00b.png", "a%2Fb.png")}
+    assert "starts with '/'" in reasons["/abs.png"] and "'..'" in reasons["../../functions/v1/x"], reasons
+    assert "'?'" in reasons["a.png?x"] and "'#'" in reasons["a.png#f"] and "backslash" in reasons["a\\b.png"], reasons
+    assert "control character" in reasons["a\x00b.png"] and "escape" in reasons["a%2Fb.png"], reasons
+
+
+@test("the rule matches the SDK: an allowed name is requested at exactly its own address, a refused name is never requested")
+def _():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, content=b"x")
+    extra = ["%", "%4", "%%", "a%2", "x_y:z.png", "a b:c.png", "\u00fc:b.png", "\U0001F600.png", "a\u0301.png", "dir/", "a..",
+             "a/b:c.png", "tab\tx.png", "nl\nx.png", "del\x7fx.png", "nul\x00x.png", "%2e%2e", "a/%2E%2E/b", "a b/../c.png"]
+    db.uninstall()
+    client = db.install(inner=httpx.MockTransport(handler), url="https://ci.invalid", key="ci-key")
+    try:
+        src = yp.SupabaseSource(FakeSession(), lambda: client)
+        for key in REFUSED_KEYS + ORDINARY_KEYS + extra:
+            seen.clear()
+            if yp.unsafe_key("finds", key):
+                try:
+                    src.download("finds", key)
+                except yp.UnsafeKey:
+                    pass
+                else:
+                    raise AssertionError(f"{key!r} was fetched")
+                assert seen == [], (key, seen)
+            else:
+                assert src.download("finds", key) == b"x"
+                assert seen == ["/storage/v1/object/finds/" + key], f"{key!r} went to {seen}"
+        seen.clear()
+        try:
+            src.download("orders", "a.png")
+        except yp.UnsafeKey:
+            pass
+        assert seen == [], "a bucket outside the two photo buckets is never asked"
+    finally:
+        db.uninstall()
+
+
 @test("the whole production wiring: fake database rows, the real read-only client over an in-memory storage, the archive, verify")
 def _():
     objects = store_objects()
@@ -967,7 +1327,7 @@ def _():
                 assert "1 match the sha256 in the database, 4 have none to compare, 0 differ" in text, text
                 assert "ci-key" not in text and PASSWORD not in text and "ci.invalid" not in text
                 assert drill_rows(root)[0]["objects"] == 5
-                final = photos_folder(root) / "2026-10-15_photos.7z"
+                final = photos_folder(root) / "2026-10-15_0930_photos.7z"
                 assert final.is_file() and sorted(p.name for p in photos_folder(root).iterdir()) == [final.name]
                 if exe:
                     said = []
@@ -1007,17 +1367,37 @@ def _():
 
 # ── the module itself ────────────────────────────────────────────────────────
 
-@test("the module can neither write to storage nor to the database, and sends nothing")
+# every verb with which Storage (upload, update, remove, move, copy, signed links, buckets), PostgREST (insert, update,
+# upsert, delete, rpc, table) or a database cursor can be written to, or a message sent
+WRITE_VERBS = {"upload", "update", "remove", "move", "copy", "create_signed_url", "create_signed_urls", "create_signed_upload_url",
+               "upload_to_signed_url", "create_bucket", "update_bucket", "empty_bucket", "delete_bucket", "insert", "upsert",
+               "delete", "rpc", "table", "execute", "executemany", "commit", "list", "list_v2", "send", "sendmail", "post", "put",
+               "patch"}
+HARMLESS = {("row", "update"), ("h", "update"), ("sys.path", "insert")}      # a dict of counts, a running hash, the import path
+
+
+def write_calls(source: str) -> list[str]:
+    """Every call of one of those verbs in the source, except the three harmless ones above."""
+    return sorted(ast.unparse(n.func) for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in WRITE_VERBS
+                  and (ast.unparse(n.func.value), n.func.attr) not in HARMLESS)
+
+
+@test("the module can neither write to storage nor to the database, and sends nothing (update and every write verb are forbidden)")
 def _():
-    tree = ast.parse((ROOT / "scripts" / "yq_photos.py").read_text(encoding="utf-8"))
-    # PostgREST writes are client.table(..).insert/update/delete/upsert(..).execute(): with no .table(), .rpc() or
-    # .execute() in the module none of them can be spelt (dict.update and sys.path.insert are not those)
-    writes = {"upload", "remove", "move", "copy", "upsert", "delete", "create_signed_url", "create_signed_urls",
-              "create_bucket", "update_bucket", "empty_bucket", "delete_bucket", "rpc", "table", "execute",
-              "executemany", "commit", "list", "send", "sendmail", "post", "put", "patch"}
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
-    bad = sorted({n.func.attr for n in calls if n.func.attr in writes})
-    assert not bad, f"scripts/yq_photos.py calls {bad}"
+    for snippet in ('client.storage.from_("b").upload("p", b"x")', 'client.storage.from_("b").update("p", b"x")',
+                    'client.storage.from_("b").remove(["p"])', 'client.storage.from_("b").move("a", "b")',
+                    'client.storage.from_("b").copy("a", "b")', 'client.storage.from_("b").create_signed_url("p", 5)',
+                    'client.storage.from_("b").upload_to_signed_url("p", "t", b"x")', 'c.table("t").insert({}).execute()',
+                    'c.table("t").update({}).eq("a", 1)', 'c.table("t").delete()', 'cur.execute("select 1")',
+                    "something.update(x)", "other.insert(0, x)"):
+        assert write_calls(snippet), f"the check does not see: {snippet}"
+    for fine in ("row.update(a=1)", "h.update(block)", 'sys.path.insert(0, "x")', "used.add(1)", "ids.setdefault(a, [])",
+                 'client.storage.from_("b").download("p")'):
+        assert not write_calls(fine), f"the check refuses: {fine}"
+    source = (ROOT / "scripts" / "yq_photos.py").read_text(encoding="utf-8")
+    assert write_calls(source) == [], f"scripts/yq_photos.py calls {write_calls(source)}"
+    tree = ast.parse(source)
     storage = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "storage"]
     assert len(storage) == 1, "storage is touched in one place only: SupabaseSource.download"
     imported = set()
