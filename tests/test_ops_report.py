@@ -675,6 +675,18 @@ def _():
     assert build.default_month(date(2026, 4, 7)) == "2026-03" and build.default_month(date(2026, 1, 3)) == "2025-12"
 
 
+@test("command: names a spreadsheet reads as one (capitals) or as a pattern are said, and the controls catch the sum")
+def _():
+    rows = world_rows() + [line(date(2026, 3, 5), 40, 1, "shop one", ITEMS["X01"], 1, 1.1, VAN_A),
+                           line(date(2026, 3, 6), 41, 1, "Shop Six", "X77 Box 10*20*30MM (VFAN)", 1, 1.1, VAN_A)]
+    with data_root(last_load=LAST_LOAD):
+        out = build.run(Args(), source=FakeSource(rows))
+    assert not out["ok"] and out["exit"] == 2, out["text"]
+    assert "CHECKS TO LOOK AT: Customers sheet" in out["text"], out["text"]       # SUMIFS adds the two spellings
+    assert "Note: two customer names differ only in capitals" in out["text"]
+    assert "Note: an item name holds * ? or ~" in out["text"]
+
+
 @test("command: without the Upcoming cards the build goes on and says so")
 def _():
     b, m, _f = build.build_month(MONTH, FakeSource(upcoming_fails=True), prepared_on=date(2026, 4, 8),

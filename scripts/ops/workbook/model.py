@@ -338,6 +338,7 @@ def build(period: Period, rows: list[dict], *, category_names: dict | None = Non
                 warnings.append(f"two {label} names differ only in capitals; the sheet adds them together")
             seen[k] = n
             if any(ch in n for ch in "*?~"):
-                warnings.append(f"a {label} name holds * ? or ~, which a spreadsheet reads as a pattern")
+                warnings.append(f"{'an' if label[0] in 'aeiou' else 'a'} {label} name holds * ? or ~, which a "
+                                "spreadsheet reads as a pattern: check that sheet's total against the Data sheet")
     return Model(period, lines, items, reps, categories, products, not_counted, customers, names,
-                 dict(upcoming), warnings, empty)
+                 dict(upcoming), list(dict.fromkeys(warnings)), empty)

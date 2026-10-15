@@ -264,6 +264,8 @@ def run(args, source: Source | None = None) -> dict:
     except ReportInput as exc:
         return dict(out, ok=False, text=str(exc), flags={"ready": True, "month": month}, exit=2)
     path = target_path(model.period, draft=True)
+    if not paths.allowed_output(path):                # the workbook goes under exports/ of the data root, nowhere else
+        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
     book.save(path)
     checks = control_values(book)
     compare_lines = None
