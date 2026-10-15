@@ -54,7 +54,7 @@ FIXTURE = {
     "brief.rep_share_min": 0.5, "brief.silent_business_days": 5, "brief.bulk_invoice_bhd": 100,
     "stock.lead_time_days": 10, "stock.display_items": [], "items.bridge_exceptions": {},
     "items.not_accessories": [], "warehouses.main": "Main Store", "warehouses.aliases": {},
-    "warehouses.not_counted": [],
+    "warehouses.not_counted": [], "report.category_names": {}, "report.prepared_by": "",
 }
 
 

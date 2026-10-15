@@ -35,9 +35,16 @@ KEYS: dict[str, tuple[str, str]] = {
     "warehouses.main": ("str", "name of the main store in Focus"),
     "warehouses.aliases": ("dict", "warehouse name as one report spells it -> the name used everywhere else"),
     "warehouses.not_counted": ("list", "warehouses whose stock never counts (damage, samples, consignment)"),
+    "report.category_names": ("dict", "monthly report: the Categories row for an item code the code rule does "
+                                      "not know, keyed by the code itself or by the category on its Upcoming or "
+                                      "catalog card; empty until the owner names one"),
+    "report.prepared_by": ("str", "monthly report: the name on 'Prepared by' (empty: the line reads 'Prepared')"),
 }
 
 _TYPES = {"number": (int, float), "int": (int,), "str": (str,), "list": (list,), "dict": (dict,)}
+# Keys with a default in code: an empty table or an empty text, never a threshold. A config.json without
+# them reads the default, so they are not "missing"; once present they must have their type.
+DEFAULTS: dict[str, object] = {"report.category_names": {}, "report.prepared_by": ""}
 _cfg: dict | None = None
 
 
@@ -65,6 +72,13 @@ def load(force: bool = False) -> dict:
 def get(key: str):
     if key not in KEYS:
         raise KeyError(f"config: '{key}' is not a known key (add it to scripts/ops/config.py KEYS)")
+    if key in DEFAULTS:
+        try:
+            cfg = load()
+        except ConfigMissing:
+            cfg = {}
+        if key not in cfg:
+            return json.loads(json.dumps(DEFAULTS[key]))          # a fresh copy of the default
     cfg = load()
     if key not in cfg:
         raise ConfigMissing(f"config missing: '{key}' ({KEYS[key][1]}) is not in {paths.config_file()}")
@@ -99,9 +113,9 @@ def kpi_step(month: str) -> Decimal | None:
 
 
 def missing_keys() -> list[str]:
-    """Keys of KEYS absent from config.json (selftest prints them)."""
+    """Keys of KEYS absent from config.json (selftest prints them); a key with a default never is."""
     try:
         cfg = load()
     except ConfigMissing:
-        return sorted(KEYS)
-    return sorted(k for k in KEYS if k not in cfg)
+        return sorted(k for k in KEYS if k not in DEFAULTS)
+    return sorted(k for k in KEYS if k not in cfg and k not in DEFAULTS)
