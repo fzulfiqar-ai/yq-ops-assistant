@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -61,7 +61,7 @@ import {
   type MiReportBasis,
   type ReadyPhoto,
 } from '@/lib/marketIntel'
-import { useCustomers, useSelectedCustomer } from '@/pages/sales/lib'
+import { useCustomers, useSelectedCustomer, useShopBook } from '@/pages/sales/lib'
 
 /**
  * "Spotted" — the one-tap market capture (release R7b, plan §18.1; v2 in release r8m, plan F3). A
@@ -212,9 +212,8 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
   const dict = useDictation()
   const S = CAPTURE_STRINGS[lang]
 
-  const customersQ = useCustomers(open && pickShop)
   // the admin's lists (issue chips, brands, categories): an API or a database without them leaves the v1 sheet
-  const listsQ = useQuery({ queryKey: ['mi-lists'], queryFn: () => fetchLists(), enabled: open, staleTime: 10 * 60_000, retry: (n, e) => !notReady(e) && n < 1 })
+  const listsQ = useQuery({ queryKey: ['mi-lists'], queryFn: () => fetchLists(), enabled: open, staleTime: 60_000, retry: (n, e) => !notReady(e) && n < 1 })
   const lists = listsQ.data?.available ? listsQ.data : null
   const allowed = !!me && (me.role === 'admin' || (me.features || []).includes('Market Intel')) && !isReadOnly(me)
   const showOn = office ? OFFICE_SHOW_ON : SHOW_ON
@@ -820,24 +819,7 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
                     </button>
                   </div>
                 ) : pickShop ? (
-                  <select
-                    aria-label={S.pickShopAria}
-                    className={FIELD}
-                    value=""
-                    onChange={(e) => {
-                      const c = (customersQ.data || [])[Number(e.target.value)]
-                      if (c) setShop({ name: String(c.shop || c.name || ''), area: String(c.area || ''), phone: String(c.phone || '') })
-                      setPickShop(false)
-                    }}
-                  >
-                    <option value="">{customersQ.isLoading ? S.loadingShops : S.pickShop}</option>
-                    {(customersQ.data || []).map((c, i) => (
-                      <option key={`${c.phone}-${i}`} value={i}>
-                        {c.shop || c.name}
-                        {c.area ? ` · ${c.area}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <ShopPicker S={S} onPick={(s) => { setShop(s); setPickShop(false) }} onCancel={() => setPickShop(false)} />
                 ) : (
                   <button type="button" onClick={() => setPickShop(true)} className="flex h-11 w-full items-center gap-2 rounded-xl border border-dashed border-[#D9CCE6] px-3 text-[13.5px] font-medium text-[#6b6480] hover:bg-[#FAF7FC]">
                     <MapPin size={16} aria-hidden="true" /> {S.addShop}
@@ -870,6 +852,107 @@ export function MarketCapture({ office = false }: { office?: boolean }) {
  * How many units are affected: 1 to 9999 in 44 px steps (the shop's Stepper reads "remove" at its
  * minimum, which means nothing here), the number readable in both directions.
  */
+/** Every shop of his book (Focus and the app), searched by name, area or phone, or a new shop typed in:
+ * a new one is kept on the report by its name and area only (nothing is added to his book). */
+function ShopPicker({ S, onPick, onCancel }: { S: CaptureStrings; onPick: (s: Shop) => void; onCancel: () => void }) {
+  const bookQ = useShopBook()
+  const customersQ = useCustomers()
+  const [q, setQ] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+  const [area, setArea] = useState('')
+
+  const shops = useMemo(() => {
+    const out: Shop[] = []
+    const seen = new Set<string>()
+    const add = (n: string, a: string, phone: string) => {
+      const nm = n.trim()
+      const digits = phone.replace(/\D/g, '')
+      const keys = [`n:${nm.toLowerCase()}`, ...(digits ? [`p:${digits}`] : [])]
+      if (!nm || keys.some((k) => seen.has(k))) return
+      keys.forEach((k) => seen.add(k))
+      out.push({ name: nm, area: a.trim(), phone })
+    }
+    for (const b of bookQ.data?.shops || []) add(b.name || b.focus_name || '', b.area || '', b.phone || '')
+    for (const c of customersQ.data || []) add(String(c.shop || c.name || ''), String(c.area || ''), String(c.phone || ''))
+    return out
+  }, [bookQ.data, customersQ.data])
+
+  const needle = q.trim().toLowerCase()
+  const digits = q.replace(/\D/g, '')
+  const hits = needle
+    ? shops.filter((s) => `${s.name} ${s.area}`.toLowerCase().includes(needle) || (digits.length >= 3 && s.phone.replace(/\D/g, '').includes(digits)))
+    : shops
+  const loading = !shops.length && (bookQ.isLoading || customersQ.isLoading)
+
+  if (adding) {
+    return (
+      <div className="space-y-2 rounded-xl border border-[#E2DCEA] bg-white p-2.5">
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={160} placeholder={S.newShopName} aria-label={S.newShopName} className={FIELD} />
+        <input value={area} onChange={(e) => setArea(e.target.value)} maxLength={80} placeholder={S.newShopArea} aria-label={S.newShopArea} className={FIELD} />
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setAdding(false)} className="h-11 flex-1 rounded-xl border border-[#E2DCEA] bg-white text-[13.5px] font-semibold text-[#4B2C66] hover:bg-[#F7F3FA]">
+            {S.cancelPick}
+          </button>
+          <button
+            type="button"
+            disabled={!name.trim()}
+            onClick={() => onPick({ name: name.trim(), area: area.trim(), phone: '' })}
+            className="h-11 flex-1 rounded-xl bg-[#6D4091] text-[13.5px] font-semibold text-white hover:bg-[#5A3478] disabled:opacity-45"
+          >
+            {S.useNewShop}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2 rounded-xl border border-[#E2DCEA] bg-white p-2.5">
+      <div className="flex items-center gap-2">
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={S.searchShops} aria-label={S.searchShops} enterKeyHint="search" className={FIELD} />
+        <button type="button" onClick={onCancel} aria-label={S.cancelPick} className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-[#6b6480] hover:bg-[#F3EDF8]">
+          <X size={15} aria-hidden="true" />
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={() => { setName(q.trim()); setAdding(true) }}
+        className="flex h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-dashed border-[#D9CCE6] px-3 text-[13.5px] font-semibold text-[#6D4091] hover:bg-[#FAF7FC]"
+      >
+        <Plus size={16} className="shrink-0" aria-hidden="true" />
+        <span className="min-w-0 truncate">
+          {S.newShop}
+          {q.trim() && <span className="font-normal text-[#4B2C66]"> · <bdi>{q.trim()}</bdi></span>}
+        </span>
+      </button>
+      {loading ? (
+        <p className="px-1 text-[12.5px] text-[#6b6480]">{S.loadingShops}</p>
+      ) : hits.length ? (
+        <ul aria-label={S.pickShopAria} className="max-h-64 overflow-y-auto overscroll-contain">
+          {hits.slice(0, 200).map((s) => (
+            <li key={`${s.name}|${s.phone}`}>
+              <button type="button" onClick={() => onPick(s)} className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-start hover:bg-[#F7F3FA]">
+                <Store size={15} className="shrink-0 text-[#824FAB]" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#1A1428]">
+                  <bdi>{s.name}</bdi>
+                  {s.area && (
+                    <span className="ms-1.5 font-normal text-[#6b6480]">
+                      · <bdi>{s.area}</bdi>
+                    </span>
+                  )}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="px-1 text-[12.5px] text-[#6b6480]">{S.noShopMatch}</p>
+      )}
+    </div>
+  )
+}
+
 function QtyStepper({ value, onChange, labelledBy, less, more }: { value: number; onChange: (n: number) => void; labelledBy: string; less: string; more: string }) {
   const btn = 'grid h-11 w-11 place-items-center rounded-xl text-[#6D4091] transition hover:bg-[#EEE8F4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6D4091]/60 disabled:opacity-35'
   return (

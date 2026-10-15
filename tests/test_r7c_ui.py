@@ -1053,6 +1053,26 @@ def _():
     assert '"below_minimum":' in pipe
 
 
+@test("rep phone (15-Oct): typing keeps the keyboard up, Spotted picks any shop or a new one, the shop cards fit")
+def _():
+    # a parent's new onClose on every keystroke must not re-run the open effect (its focus step drops the keyboard)
+    sheet = _read("web/src/components/ui/sheet.tsx")
+    assert "const close = useCallback(() => onCloseRef.current(), [])" in sheet
+    assert "}, [open, close])" in sheet and "[onClose])\n\n  useEffect(() => {\n    if (!open) return" not in sheet
+    cap = _read("web/src/components/MarketCapture.tsx")
+    assert "useCustomers(open && pickShop)" not in cap and "<select" not in cap.split("function ShopPicker(", 1)[1]
+    picker = cap.split("function ShopPicker(", 1)[1].split("\nfunction ", 1)[0]
+    assert "useShopBook()" in picker and "useCustomers()" in picker
+    assert "onPick({ name: name.trim(), area: area.trim(), phone: '' })" in picker
+    assert "queryKey: ['mi-lists'], queryFn: () => fetchLists(), enabled: open, staleTime: 60_000" in cap
+    strings = _read("web/src/lib/marketCaptureStrings.ts")
+    for key in ("searchShops", "noShopMatch", "newShop", "newShopName", "newShopArea", "useNewShop", "cancelPick"):
+        assert strings.count(f"  {key}:") == 3, key  # the type, English, Arabic
+    shops = _read("web/src/pages/sales/Customers.tsx")
+    assert '<ul className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">' in shops
+    assert '<li className="min-w-0 rounded-2xl' in shops
+
+
 def main() -> int:
     passed = failed = 0
     for name, fn in TESTS:

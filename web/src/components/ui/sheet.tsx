@@ -63,7 +63,13 @@ export function Sheet({ open, onClose, title, subtitle, variant = 'dialog', chil
   const restoreRef = useRef<HTMLElement | null>(null)
   const titleId = useId()
   const descId = useId()
-  const close = useCallback(() => onClose(), [onClose])
+  // the newest onClose, read when it fires: a parent's new handler on every render (each keystroke)
+  // must not re-run the open effect below, whose focus step would close a phone's keyboard
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
+  const close = useCallback(() => onCloseRef.current(), [])
 
   useEffect(() => {
     if (!open) return

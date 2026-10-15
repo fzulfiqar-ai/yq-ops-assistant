@@ -83,6 +83,13 @@ export interface CaptureStrings {
   pickShopAria: string
   loadingShops: string
   pickShop: string
+  searchShops: string
+  noShopMatch: string
+  newShop: string
+  newShopName: string
+  newShopArea: string
+  useNewShop: string
+  cancelPick: string
   camera: string
   another: string
   gallery: string
@@ -204,6 +211,13 @@ const en: CaptureStrings = {
   pickShopAria: 'Pick the shop',
   loadingShops: 'Loading your shops…',
   pickShop: 'Pick one of your shops',
+  searchShops: 'Search your shops',
+  noShopMatch: 'No shop matches. Add it as a new shop.',
+  newShop: 'New shop',
+  newShopName: 'Shop name',
+  newShopArea: 'Area (optional)',
+  useNewShop: 'Use this shop',
+  cancelPick: 'Cancel',
   camera: 'Camera',
   another: 'Another',
   gallery: 'Gallery',
@@ -352,6 +366,13 @@ const ar: CaptureStrings = {
   pickShopAria: 'اختر المحل',
   loadingShops: 'جارٍ تحميل محلاتك…',
   pickShop: 'اختر أحد محلاتك',
+  searchShops: 'ابحث في محلاتك',
+  noShopMatch: 'لا يوجد محل مطابق. أضفه كمحل جديد.',
+  newShop: 'محل جديد',
+  newShopName: 'اسم المحل',
+  newShopArea: 'المنطقة (اختياري)',
+  useNewShop: 'استخدم هذا المحل',
+  cancelPick: 'إلغاء',
   camera: 'الكاميرا',
   another: 'صورة أخرى',
   gallery: 'المعرض',

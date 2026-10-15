@@ -28,12 +28,12 @@ function ShopCard({ s, onRestock }: { s: BookShop; onRestock: (s: BookShop) => v
   const wa = waLink(s.phone, `Hello${s.contact_name ? ` ${s.contact_name.split(' ')[0]}` : ''}, YQ here.`)
   const tel = telLink(s.phone)
   return (
-    <li className="rounded-2xl border border-border bg-card p-3.5">
+    <li className="min-w-0 rounded-2xl border border-border bg-card p-3.5">
       <div className="flex items-start gap-3">
         <span className={cn('grid h-11 w-11 shrink-0 place-items-center rounded-full font-display text-[13px] font-bold', s.due ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground')}>{initials(s.name)}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-[15px] font-semibold leading-tight">{s.name}</span>
+            <span className="min-w-0 truncate text-[15px] font-semibold leading-tight">{s.name}</span>
             <StatusBadge shop={s} />
           </div>
           <div className="mt-0.5 truncate text-[12px] text-muted-foreground">{[s.contact_name, s.area, s.phone ? phoneLabel(s.phone) : 'no phone on file'].filter(Boolean).join(' · ')}</div>
@@ -46,7 +46,7 @@ function ShopCard({ s, onRestock }: { s: BookShop; onRestock: (s: BookShop) => v
         </div>
       </div>
       <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] gap-1.5">
-        <button type="button" onClick={() => orderAgain(customerOf(s))} className="inline-flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl bg-primary px-2 text-[12.5px] font-semibold text-primary-foreground">
+        <button type="button" onClick={() => orderAgain(customerOf(s))} className="inline-flex h-10 min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap rounded-xl bg-primary px-2 text-[12.5px] font-semibold text-primary-foreground">
           <RotateCcw size={14} aria-hidden="true" /> Order again
         </button>
         <button
@@ -195,7 +195,7 @@ export default function Customers() {
               )}
             </div>
           ) : (
-            <ul className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            <ul className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
               {rows.map((s) => <ShopCard key={s.key} s={s} onRestock={setRestock} />)}
             </ul>
           )}
