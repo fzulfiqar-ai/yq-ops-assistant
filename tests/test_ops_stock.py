@@ -197,7 +197,14 @@ def world() -> Book:
 
 ON_HAND = {"A": 394, "B": 20, "C": 50, "N": 36, "DISP": 5}
 SELL_RATE = {"A": 1, "B": 5, "C": 2, "N": 6, "DISP": 1}        # BHD a unit in the stock balance
-LANDED = {"CA1": "0.4", "SN4": "3.2", "DS1": "10.0", "FO5": "1.4"}
+# The receipts' landed costs (mrn_landed_costs: id, code, cost, receipt date, doc) and the pricing sheet
+# (purchase_costs: id, code, cost). The winners: CA1 0.4 (the latest receipt, though not the highest id), SN4 3.2
+# (one date: the higher id), HG3 none (a cost of nought); on the sheet DS1 10.0 (the newest row) and FO5 1.4, and
+# CA1's 0.45 is never used (it has an MRN cost). CB2 and HG3 take their receipt rate.
+MRN_ROWS = [(9, "ca1", "0.3", "2025-02-01", "T-25-02-1"), (5, "CA1", "0.4", "2026-01-10", "T-26-01-1"),
+            (3, "SN4", "3.1", "2026-03-01", "T-26-03-1"), (4, "SN4", "3.2", "2026-03-01", "T-26-03-1"),
+            (7, "HG3", "0", "2025-02-01", "T-25-02-1")]
+SHEET_ROWS = [(20, "CA1", "0.45"), (21, "DS1", "9.5"), (25, "DS1", "10.0"), (22, "FO5", "1.4"), (23, "HG3", "0")]
 PORTAL_COST = {"A": 0.45, "B": 2.4, "C": None, "N": 3.1, "DISP": 9.0}
 INVOICES = [  # (number, date, model, quantity)
     ("INV-1", "2025-01-01", "ITEM-A", 1000), ("INV-1", "2025-01-01", "ITEM-C", 50), ("INV-1", "2025-01-01", "DISP-01", 5),
@@ -235,15 +242,17 @@ def stock_cost_rows() -> list[dict]:
 class World:
     """The reads of the command, answered from the invented world. Every statement must be a read."""
 
-    def __init__(self, book: Book | None = None, snapshot=None, landed=None, invoices=None, portal_cost=None,
+    def __init__(self, book: Book | None = None, snapshot=None, mrn=None, sheet=None, invoices=None, portal_cost=None,
                  fail: dict | None = None):
         self.book = book or world()
         self.snapshot = snapshot if snapshot is not None else snapshot_rows()
-        self.landed = dict(LANDED if landed is None else landed)
+        self.mrn = list(MRN_ROWS if mrn is None else mrn)
+        self.sheet = list(SHEET_ROWS if sheet is None else sheet)
         self.invoices = INVOICES if invoices is None else invoices
         self.portal_cost = stock_cost_rows() if portal_cost is None else portal_cost
         self.fail = dict(fail or {})
         self.sql: list[str] = []
+        self.pg: list[str] = []                      # what went to the read-only session (the rest: the read RPC)
 
     def rpc(self, sql: str) -> list[dict]:
         db.check_sql(sql)
@@ -260,6 +269,9 @@ class World:
             return [{"sku_code": CODES[k], "item_name": NAMES[k]} for k in NAMES]
         if sql == stock.SUPPLIER_SQL:
             return [{"invoice_no": n, "invoice_date": d, "model": m, "qty": str(q)} for n, d, m, q in self.invoices]
+        if sql == stock.MRN_SQL:
+            return [{"id": i, "code": c.upper(), "cost": v, "effective_date": d, "doc_no": doc}
+                    for i, c, v, d, doc in self.mrn]
         raise AssertionError(f"a statement the stand-in does not know: {sql[:70]}")
 
     def session(self, **_kw):
@@ -269,10 +281,11 @@ class World:
             def q(self, sql, params=None):
                 db.check_sql(sql)
                 world_.sql.append(sql)
+                world_.pg.append(sql)
                 if sql in world_.fail:
                     raise world_.fail[sql]
-                assert sql == stock.LANDED_SQL, sql[:70]
-                return [{"code": c, "cost": v, "effective_date": "2026-01-01"} for c, v in world_.landed.items()]
+                assert sql == stock.SHEET_SQL, sql[:70]
+                return [{"id": i, "code": c.upper(), "cost": v} for i, c, v in world_.sheet]
 
             def __enter__(self):
                 return self
@@ -500,6 +513,58 @@ def _():
     assert m.facts["lead"]["basis"] == "config" and m.facts["lead"]["days"] == 50
 
 
+# ── at cost ───────────────────────────────────────────────────────────────────
+
+@test("at cost: the MRN landed cost (the latest receipt date, then the highest id), the pricing sheet only where no MRN")
+def _():
+    got = stock.mrn_costs([
+        {"id": 9, "code": "ca1", "cost": "0.3", "effective_date": "2025-02-01", "doc_no": "R-OLD"},
+        {"id": 5, "code": "CA1", "cost": "0.4", "effective_date": "2026-01-10", "doc_no": "R-NEW"},
+        {"id": 3, "code": "SN4", "cost": "3.1", "effective_date": "2026-03-01"},
+        {"id": 4, "code": "SN4", "cost": "3.2", "effective_date": "2026-03-01"},
+        {"id": 7, "code": "HG3", "cost": "0", "effective_date": "2026-03-01"},
+        {"id": 2, "code": "UND", "cost": "1.0", "effective_date": None},
+        {"id": 1, "code": "UND", "cost": "1.5", "effective_date": "2025-01-01"},
+        {"id": 11, "code": "NUL", "cost": "2.0", "effective_date": None},
+        {"id": 12, "code": "NUL", "cost": "2.5", "effective_date": None},
+        {"id": 13, "code": None, "cost": "9.0", "effective_date": "2026-01-01"}])
+    assert got["CA1"]["cost"] == Decimal("0.4") and got["CA1"]["doc_no"] == "R-NEW"   # the date wins over a higher id
+    assert got["SN4"]["cost"] == Decimal("3.2")                                         # one date: the higher id
+    assert got["UND"]["cost"] == Decimal("1.5") and got["NUL"]["cost"] == Decimal("2.5")   # undated last (NULLS LAST)
+    assert set(got) == {"CA1", "SN4", "UND", "NUL"}                                    # nought and no code: never
+    sheet = stock.sheet_costs([{"id": 21, "code": "DS1", "cost": "9.5"}, {"id": 25, "code": "ds1", "cost": "10.0"},
+                               {"id": 26, "code": "DS1", "cost": "0"}, {"id": 23, "code": "HG3", "cost": "0"}])
+    assert sheet == {"DS1": {"cost": Decimal("10.0"), "id": 25}}, sheet                # the newest row with a cost
+    with data_root():
+        m, _inp = model_of()
+    src = {key: (item(m, key).cost_source, item(m, key).cost) for key in ("A", "B", "C", "N", "F", "DISP")}
+    assert src == {"A": ("mrn", Decimal("0.4")), "N": ("mrn", Decimal("3.2")), "DISP": ("sheet", Decimal("10.0")),
+                   "F": ("sheet", Decimal("1.4")), "B": ("receipt", Decimal("2.5")), "C": ("receipt", Decimal("0.8"))}, src
+    assert m.facts["cost_basis"] == {"mrn": 2, "sheet": 2, "receipt": 2, "none": 0}    # every accessory item
+    head = m.facts["headline"]
+    assert (head["cost_mrn_items"], head["cost_sheet_items"], head["cost_receipt_items"], head["uncosted_items"]) \
+        == (2, 1, 2, 0)                                                                 # the items held
+    with data_root():
+        reorder, ageing = run(World(), "reorder")["text"], run(World(), "ageing")["text"]
+    assert "BHD 162.500 at cost (the latest receipt rate where neither: 1 item)." in reorder, reorder
+    # the ageing counts its own items (the display item is left out of it): A and ITEM-N on MRN, B and C on receipts
+    assert "BHD at landed cost (MRN; the latest receipt rate where neither: 2 items), by the days since" in ageing, ageing
+
+
+@test("the MRN rule is the portal's own: v_product_economics takes mrn_landed_costs first, newest receipt, then id")
+def _():
+    text = " ".join((ROOT / "scripts" / "r7d_margin_exvat_migration.sql").read_text(encoding="utf-8").lower().split())
+    view = text[text.index("create or replace view v_product_economics as"):]
+    view = view[:view.index(") c on true")]
+    mrn, sheet = view.index("from mrn_landed_costs m"), view.index("from purchase_costs p")
+    assert mrn < sheet and "'mrn'::text as cost_source" in view[:mrn] and "0 as pri" in view[:mrn]
+    assert "where upper(m.sku_code) = upper(pl.sku_code) and coalesce(m.landed_cost_bhd, 0) > 0" in view
+    assert "order by x.pri, x.cost_effective_date desc nulls last, x.id desc limit 1" in view
+    for word in ("mrn_landed_costs", "effective_date", "doc_no", " id"):
+        assert word in stock.MRN_SQL, word                         # what mrn_costs() needs to apply that order
+    assert "purchase_costs" in stock.SHEET_SQL and " id" in stock.SHEET_SQL
+
+
 # ── KPI 1 ─────────────────────────────────────────────────────────────────────
 
 @test("KPI 1: aggregate cover at cost, the share above the band, last month's end, new arrivals apart")
@@ -602,8 +667,9 @@ def _():
     assert out["ok"] and out["data_date"] == D.isoformat() and out["command"] == "stock"
     assert "STOCK  main store, Main Store: stock as on Sun 15 Mar, ledger to Sun 15 Mar" in text
     assert "  5 items, 505 units, BHD 815.000 at selling price (the portal's figures)" in text
-    # 394 x 0.4 + 20 x 2.5 + 50 x 0.8 + 36 x 3.2 + 5 x 10 (landed for A, N, the display; receipt rate for B, C)
-    assert "  At cost BHD 412.800 (latest landed cost on 3 items, the latest receipt rate on 2)" in text
+    # 394 x 0.4 + 20 x 2.5 + 50 x 0.8 + 36 x 3.2 + 5 x 10 (MRN for A and N, the sheet for the display, receipt rate B, C)
+    assert ("  At landed cost BHD 412.800 (MRN; the pricing sheet where no MRN: 1 item; the latest receipt rate where "
+            "neither: 2 items)") in text, text
     assert ("  The portal at cost: BHD 381.900 (Focus average cost, else the latest landed cost; 1 item without a cost "
             "there)") in text
     assert "The ledger agrees with the stock balance on all 5 items (Sun 15 Mar)." in text
@@ -641,6 +707,10 @@ def _():
         assert text.startswith("ITEM  CA1: ITEM-A Cable Alpha") and "rank 1 (a fast mover)" in text
         new = run(World(), "SN4")["text"]
         assert "0.13* a day" in new and "the rate divides by 30" in new
+        assert "(MRN landed cost 3.200 a unit, receipt T-26-03-1 of Sun 01 Mar)" in new, new
+        sheet = run(World(), "DS1")["text"]
+        assert "(the pricing sheet 10.000 a unit: no MRN landed cost for DS1)" in sheet, sheet
+        assert "neither an MRN landed cost nor a pricing-sheet cost for CB2" in run(World(), "CB2")["text"]
         many = run(World(), "item")["text"]
         assert many.startswith("5 items answer to 'item': type one of these codes"), many[:80]
         out = run(World(), "zz-9")
@@ -681,20 +751,33 @@ def _():
 @test("the reads: every statement is a read; a failed optional read costs its own part, named under the screen")
 def _():
     for sql in (stock.SNAPSHOT_SQL, stock.PORTAL_WAREHOUSE_SQL, stock.PRICE_BOOK_SQL, stock.SUPPLIER_SQL,
-                stock.LANDED_SQL, metrics.STOCK_SQL):
+                stock.MRN_SQL, stock.SHEET_SQL, metrics.STOCK_SQL):
         db.check_sql(sql)
     w = World()
     with data_root():
         run(w)
-    assert stock.LANDED_SQL in w.sql and w.sql.count(stock.SNAPSHOT_SQL) == 1          # purchase_costs: the session
-    w = World(fail={stock.SUPPLIER_SQL: RuntimeError("down"), stock.LANDED_SQL: RuntimeError("down")})
+    assert w.sql.count(stock.SNAPSHOT_SQL) == 1
+    assert w.pg == [stock.SHEET_SQL] and stock.MRN_SQL in w.sql      # purchase_costs on the session; the MRN on the RPC
+    # the MRN landed costs not read: the sheet stands in for A (0.45), and ITEM-N, which the sheet lacks, takes its
+    # receipt rate: 394 x 0.45 + 36 x 3 + 5 x 10 + 20 x 2.5 + 50 x 0.8
+    w = World(fail={stock.MRN_SQL: RuntimeError("down")})
+    with data_root():
+        text = run(w)["text"]
+    assert "Not read this time: the MRN landed costs (mrn_landed_costs) (RuntimeError)." in text
+    assert ("The MRN landed costs could not be read: the pricing sheet stands in where it has the item, else the "
+            "latest receipt rate.") in text
+    assert ("At landed cost BHD 425.300 (the pricing sheet where no MRN: 2 items; the latest receipt rate where "
+            "neither: 3 items)") in text, text
+    w = World(fail={stock.SUPPLIER_SQL: RuntimeError("down"), stock.MRN_SQL: RuntimeError("down"),
+                    stock.SHEET_SQL: RuntimeError("down")})
     with data_root():
         text = run(w)["text"]
     assert "Not read this time: the supplier invoices (lead time) (RuntimeError)." in text
-    assert "Not read this time: the landed costs (purchase_costs) (RuntimeError)." in text
-    assert "The landed costs could not be read: every cost here is the latest receipt rate." in text
+    assert "Not read this time: the pricing sheet (purchase_costs) (RuntimeError)." in text
+    assert "The pricing sheet could not be read: an item with no MRN landed cost takes the latest receipt rate." in text
     assert "lead time 50 days (config: too few supplier invoices matched to a receipt to measure it)" in text
-    assert "At cost BHD 445.000" in text          # 394 x 0.5 + 20 x 2.5 + 50 x 0.8 + 36 x 3 + 5 x 10, receipt rates
+    # 394 x 0.5 + 20 x 2.5 + 50 x 0.8 + 36 x 3 + 5 x 10, every one a receipt rate: no landed cost was read
+    assert "  At cost BHD 445.000 (the latest receipt rate where neither: 5 items)" in text, text
     w = World(fail={stock.SNAPSHOT_SQL: RuntimeError("down")})
     with data_root():
         raises(RuntimeError, lambda: run(w))                                             # the snapshot is required
@@ -737,7 +820,7 @@ def _():
                  "value_bhd": str(r["total_value_bhd"] or 0), "as_of_date": str(r["as_of_date"] or "")}
                 for r in ingest.parse_stock_balance(ingest.read_grid(balance), balance.name)]
         inp = stock.Inputs(rows=led.rows, ledger_note="(real files)", snapshot=snap, portal_warehouses=portal_rows(snap),
-                           landed={}, price_book=None, invoices=None, promises=None)
+                           mrn={}, sheet={}, price_book=None, invoices=None, promises=None)
         m = stock.build(inp, stock.settings())
         t1 = time.perf_counter()
         f = m.facts

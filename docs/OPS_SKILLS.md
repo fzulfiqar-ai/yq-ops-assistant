@@ -214,7 +214,8 @@ one of two lines, and the load check says the same in its own words:
   items left out, ex-VAT, up to the *data date*, which is the last day with loaded sales (never
   today). Returns are not deducted. B2C is the two retail outlets; everyone else is B2B. Weeks run
   Sunday to Saturday. The sales pace counts the working days, Sunday to Thursday. "At cost" has one
-  meaning everywhere: the latest landed cost, else the latest receipt rate. A line on another basis
+  meaning everywhere: the latest landed cost (the real one, from the goods-received notes, the MRN;
+  the pricing sheet only where an item has no MRN landed cost), else the latest receipt rate. A line on another basis
   says so: the item for products selling below cost reads Focus's own cost of sales, so it prints the
   date of the profitability report and, when a load held a newer report back, *held back since* that
   day.
@@ -302,9 +303,14 @@ one of two lines, and the load check says the same in its own words:
   page's read of the newest stock balance). The stock ledger's balance of the main store is set
   beside them item by item, and an item where the two differ is listed *to check*. The vans and the
   two outlets come with the movement audit, in a later phase.
-- **At cost** is the latest landed cost of the item's code, else the latest supplier receipt's rate,
-  as everywhere. The portal's own figure (Focus average cost, else the latest landed cost) is printed
-  beside it when the two differ. An item with neither is counted apart, never valued at nothing.
+- **At landed cost** is the real landed cost of the item's code from the goods-received notes (the
+  MRN, uploaded on the Orders page): the same receipt the portal costs from, its latest receipt (and
+  of two on one date, the later entry). Only where a code has no MRN landed cost does the pricing
+  sheet stand in (its newest row), and where neither has the code, the latest supplier receipt's rate.
+  Every figure at cost says which: for example *at landed cost (MRN; the pricing sheet where no MRN:
+  some items)*, with the count of items on each basis. The portal's own figure (Focus average cost,
+  else the latest landed cost) is printed beside it when the two differ. An item with no cost at all
+  is counted apart, never valued at nothing.
 - **Units sold** are the Sales Invoice units of every warehouse (the vans and the outlets sell; the
   main store issues to them), customer returns not deducted.
 - **Daily rate and cover.** An item's rate is the units sold in the last 90 days divided by the days

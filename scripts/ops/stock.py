@@ -32,11 +32,15 @@ main-store balance is set beside the snapshot item by item, and a difference is 
     hand ÷ the daily rate (no rate: "no sale in the window"). A rate that rests on fewer days in stock
     than that is starred on every screen (Rate.floored, FLOOR_NOTE): it can understate the demand of
     an item that was out most of the window, and the screen says so rather than hide it.
-  * At cost = the latest landed cost (purchase_costs.landed_cost_bhd, the newest row = MAX(id) per
-    item code, read on the read-only session: the read RPC may not see that table), else the latest
-    supplier receipt's rate in the ledger (its Material Receipt Note line). An item with neither is
-    counted apart, never valued at nought. The portal's figure is on its own basis (Focus average
-    cost, else the latest landed cost) and is printed beside it when the two differ.
+  * At landed cost (the owner, 15-Oct-2026) = the real landed cost of the code's goods-received note
+    (mrn_landed_costs, the MRN XML), the row the portal itself costs from (mrn_costs: v_product_economics'
+    rule, the latest receipt date, then the highest id); only where a code has no MRN landed cost, the
+    pricing sheet (purchase_costs, its newest row = MAX(id), read on the read-only session: the read RPC
+    may not see that table); where neither has the code, the latest supplier receipt's rate in the
+    ledger (its Material Receipt Note line). An item with none is counted apart, never valued at
+    nought. Every figure at cost names its basis and how many items rest on each (cost_words). The
+    portal's figure is on its own basis (Focus average cost, else the latest landed cost) and is
+    printed beside it when the two differ.
   * Item code: the price book writes the code and the stock name of an item, and the ledger names an
     item "<stock name> <code>"; an item missing from the price book takes the stock-balance name
     (items.Bridge) and the rest of its ledger name as its code.
@@ -142,16 +146,20 @@ PRICE_BOOK_SQL = ("SELECT DISTINCT sku_code, item_name FROM selling_prices "
 SUPPLIER_SQL = ("SELECT invoice_no, invoice_date::text AS invoice_date, upper(model) AS model, "
                 "COALESCE(qty, 0)::text AS qty FROM supplier_prices "
                 "WHERE invoice_no IS NOT NULL AND invoice_date IS NOT NULL AND model IS NOT NULL")
-# The cost source of truth (docs/CLAUDE.md, data rules 1 and 2): the newest row per item code is MAX(id).
-LANDED_SQL = ("select distinct on (upper(sku_code)) upper(sku_code) as code, landed_cost_bhd::text as cost, "
-              "effective_date::text as effective_date from purchase_costs "
-              "where sku_code is not null and landed_cost_bhd > 0 order by upper(sku_code), id desc")
+# The real landed cost of a receipt (the goods-received notes' MRN XML): every row, and mrn_costs() picks the one
+# the portal costs from. The read RPC can see this table.
+MRN_SQL = ("SELECT id, upper(sku_code) AS code, landed_cost_bhd::text AS cost, effective_date::text AS effective_date, "
+           "doc_no FROM mrn_landed_costs WHERE sku_code IS NOT NULL")
+# The pricing sheet, for an item with no MRN landed cost: every row, and sheet_costs() keeps the newest per code
+# (MAX(id), docs/CLAUDE.md data rule 2). The read RPC may not see this table: it is read on the read-only session.
+SHEET_SQL = ("select id, upper(sku_code) as code, landed_cost_bhd::text as cost from purchase_costs "
+             "where sku_code is not null")
 
 BASIS_LINES = (
     "Basis: accessories (items that ever moved in the main store); units sold = Sales Invoice units in every "
     "warehouse, customer returns not deducted.",
-    "At cost = the latest landed cost, else the latest supplier receipt's rate; the portal's figure is Focus "
-    "average cost, else the latest landed cost.",
+    "At landed cost = the code's latest goods-received note (MRN), else the pricing sheet (its newest row), else the "
+    "latest receipt rate; the portal's figure is Focus average cost, else the latest landed cost.",
 )
 
 
@@ -295,7 +303,8 @@ class Inputs:
     portal_warehouses: list[dict]          # the portal's own read per warehouse
     portal_cost: dict | None = None        # metrics.stock_cost_summary of the Command Centre's stock rows
     price_book: list[dict] | None = None   # {sku_code, item_name}
-    landed: dict | None = None             # folded code -> {cost, effective_date}
+    mrn: dict | None = None                # code -> {cost, effective_date, doc_no, id}: mrn_costs(); None = not read
+    sheet: dict | None = None              # code -> {cost, id}: sheet_costs(); None = not read
     invoices: list[dict] | None = None     # supplier_prices lines
     promises: list[dict] | None = None     # KPI-log promise lines; None when the log is not there
     unread: list[str] = field(default_factory=list)
@@ -323,11 +332,47 @@ def read_promises() -> list[dict] | None:
     return list(newest.values())
 
 
-def read_landed() -> dict[str, dict]:
+def code_key(code) -> str:
+    """An item code as the portal compares one: upper(sku_code) = upper(code), the ends trimmed."""
+    return str(code or "").strip().upper()
+
+
+def mrn_costs(rows) -> dict[str, dict]:
+    """{code: {cost, effective_date, doc_no, id}}: per item code, the receipt the portal itself costs from
+    (v_product_economics in scripts/r7d_margin_exvat_migration.sql: mrn_landed_costs first, a landed cost
+    above nought, ordered by effective_date desc nulls last, then id desc). The effective date is the
+    receipt's date in the ledger (scripts/mrn_dates_migration.sql), so the latest receipt wins; an undated
+    row comes after every dated one; on one date, the higher id."""
+    best: dict[str, tuple] = {}
+    for r in rows or []:
+        code, cost = code_key(r.get("code")), fmt.dec(r.get("cost"))
+        if not code or cost <= 0:
+            continue
+        day = fmt.as_date(r.get("effective_date"))
+        rid = int(fmt.dec(r.get("id")))
+        rank = (day is not None, day or date.min, rid)
+        if code not in best or rank > best[code][0]:
+            best[code] = (rank, {"cost": cost, "effective_date": day, "doc_no": r.get("doc_no"), "id": rid})
+    return {code: value for code, (_rank, value) in best.items()}
+
+
+def sheet_costs(rows) -> dict[str, dict]:
+    """{code: {cost, id}}: the pricing sheet's newest row per item code (MAX(id), docs/CLAUDE.md data rule 2)
+    among those with a cost above nought. Used only where a code has no MRN landed cost."""
+    best: dict[str, dict] = {}
+    for r in rows or []:
+        code, cost = code_key(r.get("code")), fmt.dec(r.get("cost"))
+        if not code or cost <= 0:
+            continue
+        rid = int(fmt.dec(r.get("id")))
+        if code not in best or rid > best[code]["id"]:
+            best[code] = {"cost": cost, "id": rid}
+    return best
+
+
+def read_sheet() -> dict[str, dict]:
     with db.session() as s:
-        rows = s.q(LANDED_SQL)
-    return {fold(r.get("code")): {"cost": fmt.dec(r.get("cost")), "effective_date": r.get("effective_date")}
-            for r in rows if fold(r.get("code"))}
+        return sheet_costs(s.q(SHEET_SQL))
 
 
 def gather(prefer: str = "auto") -> Inputs:
@@ -343,7 +388,8 @@ def gather(prefer: str = "auto") -> Inputs:
         ("the portal's figure at cost", "portal_cost", lambda: metrics.stock_cost_summary(db.rpc(metrics.STOCK_SQL))),
         ("the price book (item codes)", "price_book", lambda: db.rpc(PRICE_BOOK_SQL)),
         ("the supplier invoices (lead time)", "invoices", lambda: db.rpc(SUPPLIER_SQL)),
-        ("the landed costs (purchase_costs)", "landed", read_landed),
+        ("the MRN landed costs (mrn_landed_costs)", "mrn", lambda: mrn_costs(db.rpc(MRN_SQL))),
+        ("the pricing sheet (purchase_costs)", "sheet", read_sheet),
         ("the KPI log (goods on order)", "promises", read_promises),
     )
     for words, name, read in parts:
@@ -365,7 +411,8 @@ class Item:
     on_hand: Decimal = ZERO        # main store, end of D (ledger)
     sell_value: Decimal = ZERO     # the snapshot's selling value in the main store
     cost: Decimal | None = None
-    cost_source: str | None = None     # 'landed' | 'receipt' | None
+    cost_source: str | None = None     # 'mrn' | 'sheet' | 'receipt' | None (COST_SOURCES)
+    cost_ref: dict | None = None       # the MRN row costed from: {cost, effective_date, doc_no, id}
     receipts: list = field(default_factory=list)   # [(date, voucher, units, value)] main-store receipts, oldest first
     sales: dict = field(default_factory=dict)      # {date: units sold that day, every warehouse}
     last_sale: date | None = None
@@ -467,6 +514,34 @@ def band_of(days: int | None, limits: tuple) -> int:
         if days <= limit:
             return i
     return len(limits)
+
+
+COST_SOURCES = ("mrn", "sheet", "receipt")
+
+
+def basis_counts(group) -> dict[str, int]:
+    """{mrn, sheet, receipt, none}: how many of these items are costed on each basis."""
+    out = dict.fromkeys(COST_SOURCES + ("none",), 0)
+    for it in group:
+        out[it.cost_source if it.cost_source in COST_SOURCES else "none"] += 1
+    return out
+
+
+def cost_words(counts: dict, none_sell=None) -> tuple[str, str]:
+    """(label, basis) for a figure at cost: 'at landed cost' when an MRN or a pricing-sheet cost is in it,
+    else 'at cost'; the basis names each part, e.g. 'MRN; the pricing sheet where no MRN: 3 items'."""
+    parts = []
+    if counts.get("mrn"):
+        parts.append("MRN")
+    if counts.get("sheet"):
+        parts.append(f"the pricing sheet where no MRN: {_plural(counts['sheet'], 'item')}")
+    if counts.get("receipt"):
+        parts.append(f"the latest receipt rate where neither: {_plural(counts['receipt'], 'item')}")
+    if counts.get("none"):
+        parts.append(f"{_plural(counts['none'], 'item')} without a cost"
+                     + (f", BHD {fmt.bhd(none_sell)} at selling price" if none_sell is not None else ""))
+    label = "at landed cost" if counts.get("mrn") or counts.get("sheet") else "at cost"
+    return label, "; ".join(parts) or "nothing to value"
 
 
 def receipt_rate(it: Item) -> Decimal | None:
@@ -699,12 +774,14 @@ def build(inp: Inputs, cfg: Settings) -> Model:
             differ.append({"item": it.name, "snapshot": snap, "ledger": mine})
     negative = [it.name for it in model_items.values() if it.on_hand < 0]
 
-    # costs: the latest landed cost, else the latest receipt rate
-    landed = inp.landed or {}
+    # costs: the code's MRN landed cost, else the pricing sheet, else the latest receipt rate (the owner, 15-Oct-2026)
+    mrn, sheet = inp.mrn or {}, inp.sheet or {}
     for it in model_items.values():
-        hit = landed.get(fold(it.code)) if it.code else None
-        if hit and hit["cost"] > 0:
-            it.cost, it.cost_source = hit["cost"], "landed"
+        key = code_key(it.code)
+        if key and key in mrn:
+            it.cost, it.cost_source, it.cost_ref = mrn[key]["cost"], "mrn", mrn[key]
+        elif key and key in sheet:
+            it.cost, it.cost_source = sheet[key]["cost"], "sheet"
         else:
             rr = receipt_rate(it)
             if rr is not None:
@@ -712,8 +789,12 @@ def build(inp: Inputs, cfg: Settings) -> Model:
 
     plannable = [it for it in model_items.values() if not it.display]
     on_order = apply_promises(plannable, inp.promises)
-    if inp.landed is None:
-        notes.append("The landed costs could not be read: every cost here is the latest receipt rate.")
+    if inp.mrn is None:
+        notes.append("The MRN landed costs could not be read: the pricing sheet stands in where it has the item, else "
+                     "the latest receipt rate.")
+    if inp.sheet is None:
+        notes.append("The pricing sheet could not be read: an item with no MRN landed cost takes the latest receipt "
+                     "rate.")
 
     # fast movers: units over the RANK_MONTHS full months before the month
     def ranking(month_first: date) -> tuple[list[Item], date, date, bool]:
@@ -889,8 +970,9 @@ def build(inp: Inputs, cfg: Settings) -> Model:
     mine_cost = sum((it.on_hand * it.cost for it in held if it.cost is not None), ZERO)
     mine_uncosted = [it for it in held if it.cost is None]
     head["cost_bhd"] = fmt.q3(mine_cost)
-    head["cost_landed_items"] = sum(1 for it in held if it.cost_source == "landed")
-    head["cost_receipt_items"] = sum(1 for it in held if it.cost_source == "receipt")
+    held_basis = basis_counts(held)
+    head["cost_mrn_items"], head["cost_sheet_items"] = held_basis["mrn"], held_basis["sheet"]
+    head["cost_receipt_items"] = held_basis["receipt"]
     head["uncosted_items"] = len(mine_uncosted)
     head["uncosted_sell_bhd"] = fmt.q3(sum((it.sell_value for it in mine_uncosted), ZERO))
     pc = inp.portal_cost
@@ -914,6 +996,7 @@ def build(inp: Inputs, cfg: Settings) -> Model:
                    "display_items": len(display_held), "display_units": head["display_units"],
                    "main_units": sum((it.on_hand for it in held), ZERO), "oldest": old_items},
         "defaults_used": list(cfg.defaults_used), "unread": list(inp.unread),
+        "cost_basis": basis_counts(model_items.values()),
     }
     return Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
                  facts=facts, notes=notes, warnings=warnings)
@@ -974,15 +1057,9 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
                      "at selling price (the portal's figures)")
     else:
         lines.append("  The portal holds no stock of the main store in its newest snapshot.")
-    if h["cost_receipt_items"] or h["uncosted_items"]:
-        basis = (f"latest landed cost on {_plural(h['cost_landed_items'], 'item')}, the latest receipt rate on "
-                 f"{h['cost_receipt_items']}")
-    else:
-        basis = f"latest landed cost on all {_plural(h['cost_landed_items'], 'item')}"
-    if h["uncosted_items"]:
-        basis += (f"; {_plural(h['uncosted_items'], 'item')} without either, BHD {fmt.bhd(h['uncosted_sell_bhd'])} "
-                  "at selling price")
-    lines.append(f"  At cost BHD {fmt.bhd(h['cost_bhd'])} ({basis})")
+    label, basis = cost_words({"mrn": h["cost_mrn_items"], "sheet": h["cost_sheet_items"],
+                               "receipt": h["cost_receipt_items"], "none": h["uncosted_items"]}, h["uncosted_sell_bhd"])
+    lines.append(f"  {label[0].upper() + label[1:]} BHD {fmt.bhd(h['cost_bhd'])} ({basis})")
     if h["portal_cost_bhd"] is None:
         lines.append("  The portal's figure at cost was not read this time.")
     elif h["portal_cost_bhd"] == h["cost_bhd"]:
@@ -1015,7 +1092,9 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
 
     k = f["kpi_cover"]
     now, last = k["now"], k["last"]
-    lines += ["", f"COVER  KPI 1 band {k['low']} to {k['high']} days, at cost; new arrivals apart"]
+    valued = [it for it in model.items if not it.display and not is_new(it, d)]
+    label, basis = cost_words(basis_counts(valued))
+    lines += ["", f"COVER  KPI 1 band {k['low']} to {k['high']} days, {label} ({basis}); new arrivals apart"]
     if now["days"] is None:
         lines.append("  No item with a cost sold in the window: cover cannot be worked out.")
     else:
@@ -1044,10 +1123,9 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
     else:
         units = sum((x["qty"] for x in order), ZERO)
         value = sum((x["cost_bhd"] for x in order if x["cost_bhd"] is not None), ZERO)
-        uncosted = sum(1 for x in order if x["cost_bhd"] is None)
+        label, basis = cost_words(basis_counts(x["item"] for x in order))
         lines.append(f"  {_plural(len(order), 'item')} below {f['trigger_days']} days of cover; ordered up to "
-                     f"{f['fill_days']} days: {fmt.units(units)} units, BHD {fmt.bhd(value)} at cost"
-                     + (f" ({uncosted} without a cost)" if uncosted else ""))
+                     f"{f['fill_days']} days: {fmt.units(units)} units, BHD {fmt.bhd(value)} {label} ({basis})")
         top = order[:HEADLINE_ROWS]
         rows = [[short(x["item"].name, 36), x["item"].code or "", fmt.units(x["item"].on_hand),
                  rate_text(x["rate"].rate, x["rate"].floored), days_text(x["cover"]), fmt.units(x["qty"]),
@@ -1114,9 +1192,9 @@ def reorder_lines(model: Model, ledger_note: str) -> list[str]:
             lines.append(FLOOR_NOTE)
         units = sum((x["qty"] for x in order), ZERO)
         value = sum((x["cost_bhd"] for x in order if x["cost_bhd"] is not None), ZERO)
-        uncosted = sum(1 for x in order if x["cost_bhd"] is None)
-        lines.append(f"  Total: {_plural(len(order), 'item')}, {fmt.units(units)} units, BHD {fmt.bhd(value)} at cost"
-                     + (f" ({uncosted} without a cost)." if uncosted else "."))
+        label, basis = cost_words(basis_counts(x["item"] for x in order))
+        lines.append(f"  Total: {_plural(len(order), 'item')}, {fmt.units(units)} units, BHD {fmt.bhd(value)} {label} "
+                     f"({basis}).")
         lines.append(f"  (In stock = days of the last {RATE_DAYS} the main store held the item at the day's end; "
                      "Fast = its rank among the fast movers.)")
 
@@ -1169,7 +1247,8 @@ def ageing_lines(model: Model, ledger_note: str) -> list[str]:
     ag = f["ageing"]
     lines = [f"AGEING  main store, ledger to {fmt.day(d)}: units on hand allocated to supplier receipts, newest "
              "first; a return from a van never makes stock younger",
-             f"  BHD at cost, by the days since the item last sold (any warehouse)"]
+             "  BHD {} ({}), by the days since the item last sold (any warehouse)".format(*cost_words(basis_counts(
+                 it for it in model.items if it.on_hand > 0 and not it.display)))]
     head = ["Age", "Items", "Units", "At cost"] + list(SALE_BANDS) + ["Suggested"]
     rows = []
     for i, r in enumerate(ag["rows"]):
@@ -1209,6 +1288,23 @@ def ageing_lines(model: Model, ledger_note: str) -> list[str]:
     return lines
 
 
+def item_cost_words(it: Item) -> str:
+    """One item's value at cost and the basis of its unit cost."""
+    if it.cost is None:
+        return "no cost on file (neither an MRN landed cost, a pricing-sheet cost nor a receipt rate)"
+    value = f"BHD {fmt.bhd(max(it.on_hand, ZERO) * it.cost)}"
+    unit = f"{fmt.bhd(it.cost)} a unit"
+    code = it.code or "this item"
+    if it.cost_source == "mrn":
+        ref = it.cost_ref or {}
+        doc = f", receipt {ref['doc_no']}" if ref.get("doc_no") else ""
+        when = f" of {fmt.day(ref['effective_date'])}" if doc and ref.get("effective_date") else ""
+        return f"at landed cost {value} (MRN landed cost {unit}{doc}{when})"
+    if it.cost_source == "sheet":
+        return f"at landed cost {value} (the pricing sheet {unit}: no MRN landed cost for {code})"
+    return f"at cost {value} (the latest receipt rate {unit}: neither an MRN landed cost nor a pricing-sheet cost for {code})"
+
+
 def find_items(model: Model, query: str) -> list[Item]:
     """The item a code names: its Focus item code; else the items whose model code it is; else the
     items whose name holds it."""
@@ -1242,11 +1338,8 @@ def item_lines(model: Model, query: str, ledger_note: str) -> list[str]:
     rates = f["fast"]["rates"]
     r = rates.get(it.ledger_name) or rate_at(it, model.series_start, d)
     lines = [f"ITEM  {it.code or '(no code)'}: {it.name}" + ("  (a display item)" if it.display else "")]
-    cost = ("no cost on file" if it.cost is None else
-            f"at cost BHD {fmt.bhd(max(it.on_hand, ZERO) * it.cost)} "
-            f"({'latest landed cost' if it.cost_source == 'landed' else 'latest receipt rate'} {fmt.bhd(it.cost)} a unit)")
     lines.append(f"  Main store, end of {fmt.day(d)}: {fmt.units(it.on_hand)} units; BHD {fmt.bhd(it.sell_value)} at "
-                 f"selling price in the stock balance; {cost}")
+                 f"selling price in the stock balance; {item_cost_words(it)}")
     lines.append(f"  Sold in the last {RATE_DAYS} days: {fmt.units(r.sold)} units, in stock at the end of "
                  f"{r.days_in_stock} of those days: {rate_text(r.rate, r.floored)} a day; cover "
                  f"{days_text(cover_of(max(it.on_hand, ZERO), r.rate))}" + (" days" if r.rate > 0 else ""))
