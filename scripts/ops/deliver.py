@@ -155,7 +155,7 @@ def run(args) -> dict:
     if kind == "full" and not preview:
         why = stale_reason(name, state)
         if why:
-            loadplan.delivery_append(name, "pack", kind="refused", text=f"Not prepared: {why}.")
+            loadplan.delivery_append(name, "pack", kind="refused", why=why, text=f"Not prepared: {why}.")
             return dict(out, ok=False, exit=2, flags={"kind": "refused"},
                         text=f"Delivery of run {name}: NOT prepared: {why}. Its brief would show other figures than "
                              "this load's, so nothing is sent for it.")

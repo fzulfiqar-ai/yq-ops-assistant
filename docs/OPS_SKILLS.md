@@ -263,7 +263,8 @@ one of two lines, and the load check says the same in its own words:
   wrote data sends one: after a clean load the whole brief; after one where something needs a look,
   or one that failed after it began to write, a short note with no figure. A load that wrote nothing
   sends nothing, and a load's e-mail goes once. The full e-mail goes once for each data set, too:
-  loading the same Focus files again sends no second one, and that load's delivery record reads
+  loading the same Focus files again, with the same options and the same loader programs, sends no
+  second one, and that load's delivery record reads
   `skipped: same data as run <run>`. Sending it again is deliberate, never automatic (section 7).
 - **Actions.** The e-mail lists up to five, the most worthwhile first. Each says why, what it is worth
   (an amount or a count, and what that rests on), the next step, who does it and by when. What it is
@@ -388,7 +389,8 @@ public.
   `scripts/yq_secrets.py` and `scripts/yq_backup.py` (`tests/test_ops_readonly.py`), and the engine
   paths that decide a deploy leave out every `scripts/yq_*.py`.
 - **One e-mail for each data set.** The full management e-mail of a data set goes once. When a load's
-  Focus files give the same data as an earlier load, the delivery step sends nothing and writes
+  Focus files, options, expected effect and loader programs are the same as those of the last e-mail
+  sent, the delivery step sends nothing and writes
   `skipped: same data as run <run>` in that load's `delivery.jsonl`; `--resend` stays the deliberate
   way to send again, and it asks at the Windows box first. A short note about a load that needs a look
   is held back the same way; the note about a failed load always goes, because the database may then

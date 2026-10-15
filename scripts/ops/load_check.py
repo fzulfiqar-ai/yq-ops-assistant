@@ -311,7 +311,8 @@ class Deps:
         return status.lock_state()
 
     def failed_load(self) -> dict | None:
-        return status.failed_load()
+        self.unread_journals: list[str] = []         # runs whose journal could not be read (failed_load_state)
+        return status.failed_load(self.unread_journals)
 
     def read_params(self, sql: str, params: list) -> list[dict]:
         return db.rpc_params(sql, params)
@@ -545,18 +546,26 @@ def preflight(dev: bool, deps: Deps) -> dict:
     return out
 
 
-def last_failed_load(deps: Deps) -> dict | None:
-    """{run, step} of the last load when it was closed as FAILED after it had begun to write and
-    nothing has been loaded since (scripts.ops.status.failed_load), else None. Asked only while no
-    lock is held: a load that is running or was cut off is said by the lock. It never stops a
-    check, so a file that cannot be read at this moment answers None."""
+def failed_load_state(deps: Deps) -> tuple[dict | None, str | None]:
+    """({run, step} of the last load when it was closed as FAILED after it had begun to write and nothing has
+    been loaded since (scripts.ops.status.failed_load), else None; why that could not be told, else None).
+    Asked only while no lock is held: a load that is running or was cut off is said by the lock. It never
+    stops a check. A journal that cannot be read at this moment (OneDrive holds it, or it is damaged) is
+    "could not tell", never "no failed load": the check then never ends "nothing new" (what_is_new)."""
     try:
         if lock_now(deps).get("state") != "none":
-            return None
+            return None, None
         failed = deps.failed_load()
-    except (OSError, ValueError, AttributeError, TypeError):      # a journal that is broken says nothing here
-        return None
-    return failed if isinstance(failed, dict) and failed.get("run") else None
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        return None, f"the load journals could not be read ({type(exc).__name__})"
+    unread = [str(r) for r in (getattr(deps, "unread_journals", None) or [])]
+    failed = failed if isinstance(failed, dict) and failed.get("run") else None
+    return failed, (f"the journal of run {listed(unread, 3)} could not be read" if unread else None)
+
+
+def last_failed_load(deps: Deps) -> dict | None:
+    """The failed load alone (failed_load_state): a file that cannot be read at this moment answers None."""
+    return failed_load_state(deps)[0]
 
 
 def failed_line(failed: dict, starts: bool) -> str:
@@ -1783,6 +1792,7 @@ class Check:
         self.today: str | None = None
         self.step = 0
         self.failed: dict | None = None              # the last load, when it failed after it began to write
+        self.failed_unsure: str | None = None        # why that could not be told (failed_load_state)
         self.retired: dict = {}                      # the earlier checks of this folder this one replaced
         self.timings: dict[str, float] = {}          # seconds per part of the check (plan.json: timings)
         self.preview_parts: dict | None = None       # the preview's seconds per report and helper (querytime)
@@ -1850,7 +1860,8 @@ class Check:
         self.gap_max = config.number("load.profit_gap_max")
         self.blank_max = config.number("load.blank_cost_share_max")
         self.bridge = dict(config.get("items.bridge_exceptions"))
-        self.failed = self.timed("failed_load", last_failed_load, self.deps)   # said first, whatever the check finds
+        # said first, whatever the check finds; "could not tell" is kept apart from "none failed"
+        self.failed, self.failed_unsure = self.timed("failed_load", failed_load_state, self.deps)
         self.timed("preflight", self.step_preflight)
         self.timed("folder", self.step_folder, drop_arg)
         self.timed("staging", self.step_staging)
@@ -2720,6 +2731,8 @@ class Check:
         out: list[str] = []
         if self.failed:
             out.append("the last load failed after it had begun to write: a load replaces it")
+        if self.failed_unsure:                       # it could not be told: never "nothing new" on that
+            out.append("whether the last load failed could not be told (" + self.failed_unsure + ")")
         if not self.staged:
             out.append("nothing is staged")
         rewritten: dict[str, int] = {}
@@ -2836,6 +2849,10 @@ class Check:
         self.stops = [f"{r['label']}: {r['reason']}" for k in KIND_ORDER for r in [self.rows.get(k)]
                       if r and r["verdict"] == "stop"] + self.stops
         data_date = self.report_day
+        if self.failed_unsure:
+            reason = self.failed_unsure[0].upper() + self.failed_unsure[1:]
+            self.checks.append(f"{reason} (open in another program, or damaged): whether the last load failed is not "
+                               "known, so the folder is not taken as loaded already.")
         # what makes this drop more than "nothing new", worked out BEFORE the fingerprint is read again: the
         # one read it may make (folded_noise) is then inside the window moved_meanwhile watches
         self.new_in_drop = self.what_is_new()

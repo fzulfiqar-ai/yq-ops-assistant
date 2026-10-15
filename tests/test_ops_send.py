@@ -582,6 +582,104 @@ def _():
             assert got == said, (kind, look, made, mode, last, got)
 
 
+def engine_trees(folder: Path) -> tuple[str, str, str]:
+    """Three git trees in a throwaway repository (plumbing only: no commit, no hook, no signature): a start, the
+    start with a doc, a skills module and the sender changed (no engine file: scripts/ops/gitinfo.py ENGINE_PATHS),
+    and the start with the loader changed."""
+    def git(*args, data=None):
+        return subprocess.run(["git", "-C", str(folder), *args], input=data, capture_output=True, text=True,
+                              check=True).stdout.strip()
+    git("init", "-q")
+
+    def tree(files: dict) -> str:
+        git("read-tree", "--empty")
+        for path, body in files.items():
+            git("update-index", "--add", "--cacheinfo", f"100644,{git('hash-object', '-w', '--stdin', data=body)},{path}")
+        return git("write-tree")
+    start = {"scripts/loader.py": "x = 1\n", "docs/a.md": "one\n", "scripts/ops/brief.py": "y = 1\n"}
+    return (tree(start),
+            tree(dict(start, **{"docs/a.md": "two\n", "scripts/ops/brief.py": "y = 2\n", "scripts/yq_send.py": "z\n"})),
+            tree(dict(start, **{"scripts/loader.py": "x = 2\n"})))
+
+
+@test("the programs are the engine files and the options as the box reads them: a docs commit or 'skip' is the same")
+def _():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        start, docs, loader = engine_trees(Path(tmp))
+        assert ys.same_programs(start, docs, Path(tmp)) and not ys.same_programs(start, loader, Path(tmp))
+        assert not ys.same_programs(start, "--output=x", Path(tmp)), "only a commit id is handed to git"
+        assert not ys.same_programs("a" * 40, "c" * 40), "commits git does not know are other programs"
+        real = ys.GIT_ROOT
+        ys.GIT_ROOT = Path(tmp)
+        try:
+            for head, goes in ((docs, False), (loader, True)):
+                with data_root():
+                    settings()
+                    loaded(RUN, head=start)
+                    assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+                    loaded(OTHER, head=head)
+                    opener = Opener()
+                    assert send_of(OTHER, opener=opener) == ys.EXIT_OK and bool(opener.requests) is goes, head
+        finally:
+            ys.GIT_ROOT = real
+    with data_root():                                   # the price book left out by default or on his word: the same
+        settings()
+        loaded(RUN, options=dict(OPTIONS, pricebook=None))
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER, options=dict(OPTIONS, pricebook="skip", dev=None))
+        opener = Opener()
+        assert send_of(OTHER, opener=opener) == ys.EXIT_OK and opener.requests == []
+
+
+@test("a delivery.json or a journal row of the wrong shape never keeps a failure from being recorded")
+def _():
+    with data_root():
+        settings(to=5)                                   # not a list of addresses
+        loaded(RUN)
+        code, said = main_says("--run", RUN)
+        retry = f"Its retry: python -m scripts.yq_send --run {RUN}"
+        assert code == ys.EXIT_ERROR and "TypeError" in said and said.rstrip().endswith(retry), said
+        assert rows_of(RUN, "failed")[-1]["next"] == retry
+    with data_root():
+        settings()
+        planned(RUN)
+        loadplan.journal_append(RUN, "finished", result="ok", needs_look=5, text="LOAD FINISHED.")
+        status.write_state({"last_load": {"run": OTHER}})
+        assert ys.no_retry_needed(RUN) is None
+
+
+@test("no brief made yet and the deliver command would refuse it for another reason: no retry, and why")
+def _():
+    later_failed = ("No retry: a later load (run 151026_0920) failed after it began to write, so this load's brief "
+                    "cannot be made now.")
+    written = ("No retry: the database was written after this load (a Data-page upload or another load), so this "
+               "load's brief cannot be made now.")
+    with data_root():                                   # a later load failed after it began to write
+        settings(mode="maybe")
+        planned(RUN)
+        loadplan.journal_append(RUN, "finished", result="ok", text="LOAD FINISHED.")
+        status.write_state({"last_load": {"run": RUN}})
+        loadplan.journal_append(OTHER, "failed", result="failed", written=True, step="refresh", text="LOAD FAILED.",
+                                at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds"))
+        assert ys.no_retry_needed(RUN) == later_failed
+        code, said = main_says("--run", RUN)
+        assert code == ys.EXIT_ERROR and said.rstrip().endswith(later_failed) and "Its retry" not in said, said
+    with data_root():                                   # the deliver command refused it already: its row says why
+        settings()
+        planned(RUN)
+        loadplan.journal_append(RUN, "finished", result="ok", text="LOAD FINISHED.")
+        status.write_state({"last_load": {"run": RUN}})
+        loadplan.delivery_append(RUN, "pack", kind="refused", why="the database was written after this load (a "
+                                 "Data-page upload or another load)", text="Not prepared: the database was written.")
+        assert ys.no_retry_needed(RUN) == written
+    with data_root():                                   # the brief was made: the retry sends it, whatever came later
+        settings()
+        loaded(RUN)
+        loadplan.journal_append(OTHER, "failed", result="failed", written=True, step="refresh", text="LOAD FAILED.",
+                                at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds"))
+        assert ys.no_retry_needed(RUN) is None
+
+
 @test("a test copy never counts as the data set's e-mail and is never held back; a data set that cannot be told goes")
 def _():
     with data_root():

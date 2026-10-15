@@ -3,14 +3,18 @@
 The sender (scripts/yq_send.py, another program: no module of scripts/ops imports it) refuses to send an
 older load's full brief. Offering its retry line there would only lead to that refusal, so the status says
 why there is none, in the sender's own words. This is the sender's no_retry_needed, read from the same files.
-No retry is offered for run R exactly when all three hold:
-  1. state.json's last_load names another run than R, or none;
-  2. R's e-mail is a full brief: the kind its manifest names, or, with no manifest yet, what the deliver
-     command makes of R's closing row (finished, and neither reconcile nor post_gate needs a look);
-  3. delivery.json sends: its mode is not off (a file the sender refuses counts as on: once it is put
-     right, it sends for real), and not test while R's manifest exists (a test copy is never refused).
-Where a file cannot be read, the retry is offered, as it always was. tests/test_ops_load.py runs this rule
-and the sender's side by side, so the two cannot drift apart unseen."""
+No retry is offered for run R when its e-mail is a full brief (the kind its manifest names, or, with no
+manifest yet, what the deliver command makes of R's closing row: finished, and neither reconcile nor
+post_gate needs a look) and delivery.json sends (its mode is not off; a file the sender refuses counts as
+on: once it is put right, it sends for real), and either
+  1. state.json's last_load names another run than R, or none, unless only test copies go of a brief
+     already made (a test copy is never refused as an older load's); or
+  2. R is the last load on record, its brief is not made yet, and the deliver command would refuse to
+     make it now (brief_refused): a later load failed after it began to write, or R's last 'pack' row
+     says the deliver command refused it already, and why.
+Where a file cannot be read, the retry is offered, as it always was (a journal that is not text makes the
+failed load "could not tell", and that offers the retry too). tests/test_ops_load.py runs this rule and the
+sender's side by side, so the two cannot drift apart unseen."""
 from __future__ import annotations
 
 import json
@@ -87,6 +91,21 @@ def email_kind(run: str) -> tuple[str | None, bool]:
     return ("failed" if closing[-1].get("written") else "none"), False
 
 
+def brief_refused(run: str) -> str | None:
+    """Why the deliver command would refuse to make this load's brief now, for the last load on record, where it
+    can be told from the files: a later load failed after it began to write (status.failed_load, read as the
+    sender reads it), or the deliver command refused it already and its last 'pack' row says why. None otherwise."""
+    failed = status.failed_load()
+    if failed and failed.get("run") != run:
+        return (f"No retry: a later load (run {failed.get('run')}) failed after it began to write, so this load's "
+                "brief cannot be made now.")
+    pack = next((r for r in reversed(loadplan.delivery_read(run)) if r.get("event") == "pack"), None)
+    if pack and pack.get("kind") == "refused":
+        why = str(pack.get("why") or "").strip().rstrip(".")
+        return f"No retry: {why or 'the deliver command refused it'}, so this load's brief cannot be made now."
+    return None
+
+
 def no_retry_needed(run: str) -> str | None:
     """Why no retry of this load's e-mail is offered, in the sender's words; None where the retry is the line to
     offer, and whenever a file cannot be read."""
@@ -94,13 +113,17 @@ def no_retry_needed(run: str) -> str | None:
         last = status.read_state().get("last_load")
         last = last if isinstance(last, dict) else {}
         other = str(last.get("run") or "")
-        if other == run:
-            return None
         kind, made = email_kind(run)
         if kind != "full":
             return None
         mode = delivery_mode()
-        if mode == "off" or (mode == "test" and made):
+        if mode == "off":
+            return None
+        if not made and other == run:        # the retry would ask the deliver command for the brief first
+            refused = brief_refused(run)
+            if refused:
+                return refused
+        if other == run or (mode == "test" and made):
             return None
         closing = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
     except (OSError, ValueError, AttributeError, TypeError):

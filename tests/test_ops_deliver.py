@@ -426,7 +426,8 @@ def _():
                 res = deliver.run(args())
                 assert res["ok"] is False and res["exit"] == 2 and said in res["text"], res["text"]
                 assert yq_load_go.DELIVER_REFUSED in res["text"], "the writer would offer a retry that is refused"
-                assert [r["kind"] for r in loadplan.delivery_read(RUN) if r["event"] == "pack"] == ["refused"]
+                packs = [r for r in loadplan.delivery_read(RUN) if r["event"] == "pack"]
+                assert [r["kind"] for r in packs] == ["refused"] and said in packs[0]["why"], packs   # the sender reads why
                 assert fake.calls == [] and not (paths.exports_dir(date(2026, 10, 14)) / "delivery" / RUN).exists()
                 assert deliver.run(args(preview=True))["ok"], "a preview is no delivery: it is always made"
                 fake.calls.clear()

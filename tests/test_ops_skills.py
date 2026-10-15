@@ -1562,6 +1562,7 @@ MUST_CONTAIN = {
         "leave the price book out", "--pricebook skip",
         "load profitability anyway", "--with-profitability", "replace on purpose", "--replace-ok",
         "partial on purpose", "--partial-ok", "only when he says it", "NEEDS YOUR DECISION",
+        "when the output ends with a `GO: ` line, add that No at the box lets him answer first",
         # step 2: the box, and one line for every way the go can end
         "GO: ", "Yes loads, No changes nothing", "run exactly the text after `GO: `",
         "Exit code 0 (it says `load started`): go to Step 3",

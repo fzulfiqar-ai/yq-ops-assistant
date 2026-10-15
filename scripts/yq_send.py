@@ -54,7 +54,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import yq_secrets  # noqa: E402
-from scripts.ops import loadplan, paths, status  # noqa: E402  (none of them opens a connection)
+from scripts.ops import gitinfo, loadplan, paths, status  # noqa: E402  (none of them opens a connection)
 
 API = "https://api.resend.com/emails"
 TIMEOUT_S = 30
@@ -62,6 +62,8 @@ DELIVER_TIMEOUT_S = 300
 MODULE = "scripts.yq_send"
 EXIT_OK, EXIT_ERROR, EXIT_REFUSED = 0, 1, 2
 LOOK_STEPS = ("reconcile", "post_gate")      # scripts/ops/deliver.py LOOK_STEPS: these needing a look make a note
+GIT_ROOT = ROOT                              # the checkout whose history holds the commits the checks record
+_COMMIT = re.compile(r"[0-9a-f]{7,40}")
 _ADDRESS = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[A-Za-z]{2,}$")
 _SENDER = re.compile(r"^(?:[^<>@]*<)?([^@\s<>,;]+@[^@\s<>,;]+\.[A-Za-z]{2,})>?$")
 
@@ -97,30 +99,51 @@ def delivery_kind(run: str) -> tuple[str | None, bool]:
     return ("failed" if closing[-1].get("written") else "none"), False
 
 
+def brief_refused(run: str) -> str | None:
+    """Why the deliver command would refuse to make this load's brief now, for the last load on record, where this
+    program can tell (scripts/ops/deliver.py stale_reason, which also asks the database): a later load failed after
+    it began to write, or the deliver command refused it already and its 'pack' row says why (the database was
+    written after this load, say: that never comes undone). None otherwise."""
+    failed = status.failed_load()
+    if failed and failed.get("run") != run:
+        return (f"No retry: a later load (run {failed.get('run')}) failed after it began to write, so this load's "
+                "brief cannot be made now.")
+    pack = next((r for r in reversed(loadplan.delivery_read(run)) if r.get("event") == "pack"), None)
+    if pack and pack.get("kind") == "refused":
+        why = str(pack.get("why") or "").strip().rstrip(".")
+        return f"No retry: {why or 'the deliver command refused it'}, so this load's brief cannot be made now."
+    return None
+
+
 def no_retry_needed(run: str) -> str | None:
-    """Why no retry of this load's e-mail is offered: exactly where the retry (retry_line) would be refused as an
-    older load's brief. That is where its e-mail is a full brief (delivery_kind) and state.json's last_load names
-    another run or none, unless delivery.json sends nothing (off) or only test copies of a brief already made (a
-    test copy is never refused for it; a brief not made yet the deliver command refuses all the same). None
-    everywhere else, and when a file cannot be read: the retry is then offered, as it always was. (A load closed
-    as failed never becomes the last load on record, and its note is never refused.)"""
+    """Why no retry of this load's e-mail is offered: where the retry (retry_line) would be refused. Its e-mail is a
+    full brief (delivery_kind) and delivery.json is not off (a file the sender refuses counts as on), and either
+    state.json's last_load names another run or none, unless only test copies go of a brief already made (a test
+    copy is never refused as an older load's; a brief not made yet the deliver command refuses all the same), or
+    this is the last load but its brief is not made yet and the deliver command would refuse it (brief_refused).
+    None everywhere else, and when a file cannot be read or has the wrong shape: the retry is then offered, as it
+    always was. (A load closed as failed never becomes the last load on record, and its note is never refused.)"""
     try:
         last = status.read_state().get("last_load")
         last = last if isinstance(last, dict) else {}
         other = str(last.get("run") or "")
-        if other == run:
-            return None
         kind, made = delivery_kind(run)
         if kind != "full":
             return None
         try:
             mode = settings()["mode"]
-        except Failed:
-            mode = "on"                      # once delivery.json is put right, it sends for real
-        if mode == "off" or (mode == "test" and made):
+        except (Failed, TypeError, AttributeError):
+            mode = "on"                      # a file it refuses: once it is put right, it sends for real
+        if mode == "off":
+            return None
+        if not made and other == run:        # the retry asks the deliver command for the brief first
+            refused = brief_refused(run)
+            if refused:
+                return refused
+        if other == run or (mode == "test" and made):
             return None
         closing = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError, TypeError):
         return None
     if not other:
         return "No retry: no load is on record as the last load, so this load's brief cannot be sent."
@@ -309,8 +332,26 @@ def data_set(run: str) -> dict | None:
     expected = plan.get("expected")
     if isinstance(expected, dict):
         expected = {k: v for k, v in expected.items() if k != "lines"}
+    from scripts.yq_load_go import option_flags      # the options as the box reads them ('skip' is no option)
     return {"data_date": str(plan.get("data_date") or ""), "reports": sorted(taken), "expected": expected,
-            "options": plan.get("options"), "programs": str(parts.get("head") or "")}
+            "options": sorted(option_flags(plan)), "programs": str(parts.get("head") or "")}
+
+
+def same_programs(a: str, b: str, root: Path | None = None) -> bool:
+    """Did two checks load with the same engine: the same commit, or two commits whose engine files do not differ
+    (scripts/ops/gitinfo.py ENGINE_PATHS: the loader, the app, the requirements; a commit of docs, of the skills'
+    modules, of the web pages or of the tests changes nothing that is loaded)? Where git cannot tell (a commit it
+    does not know, a head with changes not committed) they count as different: the e-mail then goes."""
+    if a == b:
+        return True
+    if not (_COMMIT.fullmatch(a or "") and _COMMIT.fullmatch(b or "")):
+        return False
+    try:
+        cp = subprocess.run(["git", "-C", str(root or GIT_ROOT), "diff", "--quiet", a, b, "--", *gitinfo.ENGINE_PATHS],
+                            shell=False, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return cp.returncode == 0
 
 
 def _in_time_order(run: str) -> str:
@@ -353,8 +394,11 @@ def same_data_sent(run: str) -> dict | None:
     last = last_sent(run)
     if last is None or last.get("kind") != "full":
         return None
-    mine = data_set(run)
-    return last if mine is not None and mine == data_set(str(last["run"])) else None
+    mine, theirs = data_set(run), data_set(str(last["run"]))
+    if mine is None or theirs is None:
+        return None
+    programs = same_programs(mine.pop("programs"), theirs.pop("programs"))
+    return last if mine == theirs and programs else None
 
 
 def went_at(row: dict) -> str:

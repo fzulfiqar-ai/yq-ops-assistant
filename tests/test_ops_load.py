@@ -3110,7 +3110,7 @@ def _():
     assert "shutil" not in imported and "json" not in imported, imported
     for gone in ("_allowed_output", "rule_has_run", "NO_BASELINE", "shutil.", ".unlink("):
         assert gone not in src, gone
-    for used in ("paths.allowed_output(", "paths.copy_file(", "paths.remove_file(", "status.failed_load()"):
+    for used in ("paths.allowed_output(", "paths.copy_file(", "paths.remove_file(", "status.failed_load("):
         assert used in src, used
     records = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "alerts.record"]
     assert len(records) == 1 and sorted(k.arg for k in records[0].keywords) == ["baseline", "clear_missing"], "one call"
@@ -3734,16 +3734,26 @@ def _():
     lost = f"No retry: the last load on record is run {newer}, not this one, so this load's brief cannot be sent."
     nobody = "No retry: no load is on record as the last load, so this load's brief cannot be sent."
 
-    def world(last="newer", closing="finished", look=(), manifest=None, delivery="on") -> None:
+    def world(last="newer", closing="finished", look=(), manifest=None, delivery="on", later_failed=None,
+              pack_refused=None) -> None:
         loadplan.journal_append(run, "started")
         if closing == "finished":
             loadplan.journal_append(run, "finished", result="ok", needs_look=list(look))
         else:
             loadplan.journal_append(run, "failed", result="failed", step="post_gate", written=True)
         loadplan.delivery_append(run, "queued", at=old, text="Preparing the brief and the e-mail.")
-        finished_at = {"newer": later, "lost": "2026-01-01T09:00:00+03:00", "this": later}.get(last)
+        if pack_refused is not None:                  # the deliver command refused this brief already, and said why
+            loadplan.delivery_append(run, "pack", kind="refused", why=pack_refused)
+        finished_at = {"newer": later, "lost": "2026-01-01T09:00:00+03:00", "this": later,
+                       "this_early": "2026-01-01T09:00:00+03:00"}.get(last)
         if last:
-            status.write_state({"last_load": {"run": run if last == "this" else newer, "finished_at": finished_at}})
+            status.write_state({"last_load": {"run": run if last.startswith("this") else newer, "finished_at": finished_at}})
+        if later_failed == "readable":                # a later load, closed as failed after it began to write
+            loadplan.journal_append(newer, "started", at=later)
+            loadplan.journal_append(newer, "failed", at=later, result="failed", step="refresh", written=True)
+        elif later_failed == "not text":              # ... and one whose journal cannot be read: could not tell
+            loadplan.journal_append(newer, "started", at=later)
+            loadplan.journal_file(newer).write_bytes(b"\xff\xfe not text\n")
         f = paths.ops_dir() / "delivery.json"
         if delivery == "broken":
             paths.write_text(f, "{not json")
@@ -3773,6 +3783,20 @@ def _():
         ("no manifest, the gate needs a look: a note, not a brief", {"look": ("post_gate",)}, None),
         ("no manifest, only the publish needs a look: a full brief", {"look": ("publish",)}, needed),
         ("a load closed as failed: its note is never refused", {"closing": "failed"}, None),
+        # this load IS the last on record and its brief is not made yet: the deliver command would refuse it when ...
+        ("... a later load failed after it began to write", {"last": "this_early", "later_failed": "readable"},
+         f"No retry: a later load (run {newer}) failed after it began to write, so this load's brief cannot be made now."),
+        ("... it refused this brief already, and said why", {"last": "this", "pack_refused": "the database was written "
+                                                                                               "after this load."},
+         "No retry: the database was written after this load, so this load's brief cannot be made now."),
+        ("... it refused this brief already, saying nothing", {"last": "this", "pack_refused": ""},
+         "No retry: the deliver command refused it, so this load's brief cannot be made now."),
+        ("... but its brief is made already: the retry stays", {"last": "this", "manifest": "full",
+                                                                 "pack_refused": "anything"}, None),
+        ("... but a later load's journal cannot be read: could not tell, the retry is offered",
+         {"last": "this_early", "later_failed": "not text"}, None),
+        ("... and delivery is off: nothing is sent at all", {"last": "this_early", "later_failed": "readable",
+                                                            "delivery": "off"}, None),
     )
     for what, kw, answer in cases:
         with data_root():
@@ -3811,6 +3835,45 @@ def _():
     assert (args.drop, args.again, args.pricebook) == ("070126", "again", "load") and lc.drop_asked(args) == ("070126", None)
     assert lc.drop_asked(parser.parse_intermixed_args(["check"])) == (None, None)
     assert lc.drop_asked(parser.parse_intermixed_args(["check", "again"])) == (None, None)
+
+
+@test("a journal that cannot be read at that moment: whether a load failed is not known, so never 'Nothing new'")
+def _():
+    failed = "060126_0900"
+    with data_root() as root:
+        make_drop(root)
+        status.write_state({"last_load": dict(LAST_LOAD)})
+        loadplan.journal_append(failed, "started")                     # a load closed as failed at its reconcile
+        loadplan.journal_append(failed, "step_start", step="reconcile")
+        loadplan.journal_append(failed, "failed", step="reconcile", result="failed", written=True)
+        real = loadplan.journal_read
+
+        def held_by_onedrive(run: str) -> list[dict]:
+            if run == failed:
+                raise PermissionError(13, "in use")
+            return real(run)
+        loadplan.journal_read = held_by_onedrive
+        try:
+            res, _ = check("070126", deps=already_loaded())             # everything else is loaded already
+        finally:
+            loadplan.journal_read = real
+        text, lines = res["text"], res["text"].splitlines()
+        assert res["ok"] and res["token"] and lines[-1].startswith("GO: ") and "Nothing new" not in text, text
+        assert (f"- The journal of run {failed} could not be read (open in another program, or damaged): whether the "
+                "last load failed is not known, so the folder is not taken as loaded already.") in lines, text
+        plan = loadplan.read_plan(res["run"])
+        assert plan["nothing_new"] is False and any("could not be told" in why for why in plan["new_in_drop"]), plan
+        # readable again: the failed load is found and said first, and the check ends with its GO line as before
+        res, _ = check("070126", deps=already_loaded())
+        assert res["text"].startswith(f"The last load (run {failed}) failed at reconcile") and res["token"], res["text"]
+        assert "could not be read" not in res["text"]
+
+    def unreadable():
+        raise PermissionError(13, "in use")
+    assert lc.failed_load_state(FakeDeps(failed_load=unreadable)) == (
+        None, "the load journals could not be read (PermissionError)"), "could not tell is not 'no failed load'"
+    with data_root():
+        assert lc.failed_load_state(FakeDeps()) == (None, None)        # nothing to read: nothing failed, and that is known
 
 
 @test("a journal that is broken or holds a line that is no row: the check passes over it and runs to its end")

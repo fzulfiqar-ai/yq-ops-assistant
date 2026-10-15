@@ -152,14 +152,19 @@ def when(text) -> datetime | None:
     return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
 
 
-def failed_load() -> dict | None:
+def failed_load(unreadable: list | None = None) -> dict | None:
     """The newest load that was CLOSED as failed after its refresh had begun (the database may hold
     part of it), while no load has finished since. None otherwise.
 
     Every real run's journal is read, not the newest folder's alone: a later check that never
     loaded (he answered No, or it stopped), a rehearsal, or a run that was closed before it wrote
     anything changes nothing in the database, so none of them may take the banner away. Only a
-    load that FINISHED after the failure does."""
+    load that FINISHED after the failure does.
+
+    `unreadable`, when given, collects the runs whose journal could not be read (held by another
+    program at this moment, or not text): None then means "none failed" only when it stays empty.
+    The load check needs that difference (its "nothing new" must never miss a failed load); for any
+    other caller such a journal says nothing, as before."""
     from scripts.ops import loadplan
     last = read_state().get("last_load")
     good = when(last.get("finished_at")) if isinstance(last, dict) else None
@@ -172,7 +177,14 @@ def failed_load() -> dict | None:
         try:
             rows = loadplan.journal_read(run)
         except OSError:
+            if unreadable is not None:
+                unreadable.append(run)
             continue                          # a journal held by another program this moment says nothing
+        except ValueError:
+            if unreadable is None:
+                raise                         # as it always did, for a caller that does not ask
+            unreadable.append(run)
+            continue
         for row in rows:
             at = when(row.get("at"))
             if at is None:
