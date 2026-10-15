@@ -2283,17 +2283,17 @@ def _():
     for name in gone:                                   # __main__ itself reports it, and runs nothing
         code, said = run_cli([name])
         assert code == 1 and said.strip() == f"'{name}' is not built yet.", (name, code, said)
-    # the finder bites (with the lists given, so these do not move when a command is built): the old lines are
-    # caught; the commands and skills that exist, and the Command Centre, are not
-    here, away = ["brief", "status", "load"], ["watch", "stock", "moves"]
-    assert dead_pointers("(+2 more: /yq-watch)", here, away, skills) == ["/yq-watch"]
-    assert dead_pointers("2 older items counted once: /yq-watch", here, away, skills) == ["/yq-watch"]
-    assert dead_pointers("see /yq-week and /yq-month", here, [], skills) == ["/yq-week", "/yq-month"]
-    assert dead_pointers("run python -m scripts.ops stock", here, away, skills) == ["scripts.ops stock"]
-    assert dead_pointers("run python -m scripts.ops frobnicate", here, [], skills) == ["scripts.ops frobnicate"]
-    assert dead_pointers("the Moves command lists them", here, away, skills) == ["Moves command"]
+    # the finder bites (with the lists given, skills too, so these do not move when a command or a skill is built):
+    # the old lines are caught; the commands and skills that exist, and the Command Centre, are not
+    here, away, these = ["brief", "status", "load"], ["watch", "stock", "moves"], {"yq-brief", "yq-load"}
+    assert dead_pointers("(+2 more: /yq-watch)", here, away, these) == ["/yq-watch"]
+    assert dead_pointers("2 older items counted once: /yq-watch", here, away, these) == ["/yq-watch"]
+    assert dead_pointers("see /yq-week and /yq-month", here, [], these) == ["/yq-week", "/yq-month"]
+    assert dead_pointers("run python -m scripts.ops stock", here, away, these) == ["scripts.ops stock"]
+    assert dead_pointers("run python -m scripts.ops frobnicate", here, [], these) == ["scripts.ops frobnicate"]
+    assert dead_pointers("the Moves command lists them", here, away, these) == ["Moves command"]
     assert dead_pointers("type /yq-brief again, or /yq-load; python -m scripts.ops status; the stock Command Centre",
-                         here, away, skills) == []
+                         here, away, these) == []
     texts: dict[str, str] = {}
     with data_root() as root:
         alerts.record("xfer_open", older_items(2), "2026-01-19")           # another rule's first run: older items

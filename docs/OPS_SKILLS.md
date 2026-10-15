@@ -14,6 +14,7 @@ changes the live database except the load, and the load asks you every time. Fin
 |---|---|---|
 | `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. Then it e-mails you the brief and makes the team message (section 2 sets the e-mail up). |
 | `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
+| `/yq-month` or `/yq-month <YYYY-MM>` | Once a month is whole: after the first load of the next month. With no month it takes the last whole month. | Your monthly Sales Report workbook, laid out like your September one (Dashboard, Salesmen, Categories, Products, Customers, Daily, Data, Notes), in `exports/reports/monthly/`, and a short screen of what it checked. Its ten comment lines are marked DRAFT until a later phase adds the step where you approve them. |
 | Ask in plain words: *where do things stand?* | Before you start, or when something looks stuck. | Five lines: the data dates and the last load; this folder against the live site; the load lock; reports waiting; open items on the action list. (Claude runs `python -m scripts.ops status`.) |
 
 `/yq-brief` on its own is the whole morning screen. Name a window (`day`, `3d`, `7d`, `week`,
@@ -24,9 +25,20 @@ the last full week. If nothing new has been loaded since your last brief it prin
 `/yq-brief again` for the whole screen anyway. `/yq-brief team` prints the team message the last load
 made, in a block you can copy into the salesmen's group (section 4 says what it holds).
 
-The rest of the routine (the weekly and monthly workbooks, the movement and stock checks, the full
-action list, the KPI scorecard) follows in later phases. This table gets a row for each one when it
-exists. After a new command is added, type `/reload-skills` (or restart Claude Code) so it appears.
+`/yq-month` builds a month only when it is whole: a load finished on or after the first day of the next
+month, and Focus data that reaches the month's last days. Before that it says what it waits for and
+writes nothing. Every figure in the workbook is a formula over the Data sheet (the month's day-book lines
+and the month before's: accessories only, the zero-value lines kept and left out of the counts), and the
+file carries the values too, so it reads right in a phone preview. The Notes sheet checks the Data sheet
+against the database and every sheet's total against the Data sheet; a difference is printed as
+`CHECKS TO LOOK AT`. An item code the category rule does not know (the WEKOME models, for example) takes
+the category of its Upcoming or catalog card through `report.category_names` in `config.json`; with no
+entry it falls to Other, and the screen says so. A second build of a month never replaces the first: it
+gets the next free name.
+
+The rest of the routine (the weekly workbook, the movement and stock checks, the full action list, the
+KPI scorecard) follows in later phases. This table gets a row for each one when it exists. After a new
+command is added, type `/reload-skills` (or restart Claude Code) so it appears.
 
 `/yq-load` is yours alone: Claude does not start it by itself. If you ask Claude in plain words to
 load the reports, it answers with the line to type.
@@ -294,7 +306,7 @@ public.
 | `business_data/staging/<run>/` | The copies a load works from. The copies of a check that a newer check of the same folder retired, and a loaded set that a newer load of the same day replaced, are in `superseded/`. |
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
 | `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
-| `exports/reports/weekly/` and `exports/reports/monthly/` | The workbooks, once those commands exist. |
+| `exports/reports/monthly/` and `exports/reports/weekly/` | The workbooks: the monthly one from `/yq-month` (named for its month, with `DRAFT` while its comment lines wait for you; a second build of a month gets the next free name), the weekly one in a later phase. Each monthly build also leaves a short record in `exports/ops/<data-date>/`. |
 | `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, and in `legacy\` the older backups that sat in OneDrive, encrypted. Outside OneDrive (see `docs/BACKUPS.md`). |
 
 ## 6. What these commands cannot do
@@ -337,6 +349,13 @@ public.
   no pipe), relays the output unchanged and types no number of its own. Each `SKILL.md` stays under
   70 lines and `CLAUDE.md` under 30. The commands themselves are in `scripts/ops` (read-only by
   construction, see `tests/test_ops_readonly.py`).
+- **The workbook engine** is `scripts/ops/workbook/`: the period model, the day-book lines tidied as your
+  September file has them, the category rule of its Notes sheet, a small formula evaluator (every formula
+  is written with the value it computes, never with a second copy of the arithmetic) and the eight
+  sheets. `python -m scripts.ops report month <YYYY-MM> --compare "<file>"` rebuilds a month and compares
+  it with a reference file (your September one) on every sheet but Notes (formulas, kinds of value, values, print
+  areas, filters, panes and the counts of rules and charts), the comment cells set aside;
+  `tests/test_ops_report.py` runs the same comparison when `YQ_OPS_GOLDEN=1` is set.
 - **The seam with the load programs.** `/yq-load` acts on what they print, and on nothing else:
   the last line `GO: ...` of a check, and the line above it that starts
   `If Claude may not start it: double-click` (a check that stops exits with code 2 and prints no go

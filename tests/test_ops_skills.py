@@ -92,6 +92,7 @@ SKILLS = ROOT / ".claude" / "skills"
 OPS = ROOT / "scripts" / "ops"
 WRITER_FILE = ROOT / "scripts" / "yq_load_go.py"       # the only writer: read as text here
 BRIEF_FILE = OPS / "sales.py"                          # the brief: read as text here (it imports the portal)
+REPORT_FILE = OPS / "workbook" / "build.py"             # the monthly report: read as text here too
 PAGE = ROOT / "docs" / "OPS_SKILLS.md"
 BOM = b"\xef\xbb\xbf"
 FRONT = re.compile(r"\A---\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
@@ -104,6 +105,9 @@ OTHER_KNOWN_KEYS = {"when_to_use", "arguments", "user-invocable", "disallowed-to
                     "shell", "metadata", "license", "compatibility"}
 CODE_RUNNING_KEYS = {"hooks", "context", "agent", "background"}      # hooks run code; context/agent fork
 OWNER_ONLY = {"yq-load"}
+# the command each skill is for (the load skill also runs the brief, which the check above has always asked of it)
+SKILL_COMMAND = {"yq-load": "python -m scripts.ops brief", "yq-brief": "python -m scripts.ops brief",
+                 "yq-month": "python -m scripts.ops report month"}
 SHADOWS = ("weekly-review", "monthly-review")       # the commands a same-named skill would hide
 DESCRIPTION_CAP = 1536                              # Claude Code cuts description + when_to_use here
 MAX_LINES = 70                                      # a SKILL.md stays under this many lines
@@ -481,7 +485,8 @@ def _():
     assert rule_matches("Bash(python *)", loadplan.go_line(RUN, SEAM_TOKEN))
 
 
-MY_FILES = (".claude/skills/yq-load/SKILL.md", ".claude/skills/yq-brief/SKILL.md", "CLAUDE.md", "docs/OPS_SKILLS.md",
+MY_FILES = (".claude/skills/yq-load/SKILL.md", ".claude/skills/yq-brief/SKILL.md", ".claude/skills/yq-month/SKILL.md",
+            "CLAUDE.md", "docs/OPS_SKILLS.md",
             "docs/FOCUS_EXPORT.md", ".gitignore", "requirements-dev.txt", "tests/test_ops_skills.py")
 
 
@@ -933,6 +938,29 @@ def _():
     # no figure of the average on the page: the brief prints the system's own
     assert "the average month of the last 12 months" in defs and "This page gives no figure for that average" in defs
     assert re.search(r"add_months\(\w+, -12\)", src), "the brief no longer averages the last 12 months"
+
+
+@test("the words of /yq-month are the ones the report prints, and the page describes it")
+def _():
+    src = read(REPORT_FILE)
+    _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-month" / "SKILL.md").read_bytes())
+    assert fm["argument-hint"] == "[YYYY-MM]" and "a month is written `YYYY-MM`" in body
+    usage = (ast.get_docstring(ast.parse(src)) or "").splitlines()[0]
+    assert usage.startswith("python -m scripts.ops report month [YYYY-MM]"), usage
+    for said, in_skill in (("the month is not whole yet", "the month is not whole yet"),
+                           ("CHECKS TO LOOK AT: ", "`CHECKS TO LOOK AT`"),
+                           ('f"Note: {w}."', "`Note:`"),
+                           ("DRAFT: the ten comment lines (five Highlights, five Points to note) and three notes beside "
+                            "the tables", "five Highlights, five Points to note) and three notes beside the tables"),
+                           ("arrives in a later phase", "arrives in a later phase"),
+                           (' - DRAFT" if draft', "a DRAFT")):
+        assert said in src, f"the report no longer says: {said}"
+        assert in_skill in body, f"the skill does not act on: {in_skill}"
+    assert "never over an existing file" in src and "the first is never overwritten" in body
+    assert "yq-month" in skill_folders() and "`/yq-month" in read(ROOT / "CLAUDE.md")
+    intro = flat(page_part(1))
+    assert "| `/yq-month` or `/yq-month <YYYY-MM>` |" in read(PAGE) and "`report.category_names`" in intro
+    assert "a second build of a month gets the next free name" in flat(page_part(5))
 
 
 @test("the status prints the five lines the page lists, in that order")
@@ -1490,8 +1518,8 @@ def _():
             for command in MUST_NOT_MATCH:
                 assert not rule_matches(entry, command), (p.parent.name, entry, command)
         # ... and the entries do cover what the skill is for, so the test above is not vacuous
-        assert any(rule_matches(e, "python -m scripts.ops brief") for e in fm["allowed-tools"]
-                   if e.startswith("Bash(")), p.parent.name
+        own = SKILL_COMMAND.get(p.parent.name, "python -m scripts.ops brief")
+        assert any(rule_matches(e, own) for e in fm["allowed-tools"] if e.startswith("Bash(")), (p.parent.name, own)
 
 
 @test("only yq-load is owner-only (disable-model-invocation: true)")
@@ -1607,6 +1635,21 @@ MUST_CONTAIN = {
         "`team` on its own for the team message", "in one code block of its own, unchanged, and add nothing",
         "Never send it anywhere yourself",
     ],
+    "yq-month": [
+        "python -m scripts.ops report month $ARGUMENTS", "python -m scripts.ops status", "600000", "no pipe",
+        "Add no word or option he did not ask for", "Run nothing else that loads, writes or deploys",
+        "Show the output unchanged, in a code block", "type no number yourself",
+        "If the output opens with LOAD INTERRUPTED or LAST LOAD FAILED, say so first, in plain words, and point him "
+        "to /yq-load", "Change nothing yourself",
+        # a part month: said, and never built another way
+        "If it says the month is not whole yet", "never build a part month another way",
+        # the DRAFT: the comment lines are not his to fill in, and the file is not touched or sent
+        "The file it names is a DRAFT", "the ten comment lines (five Highlights, five Points to note)",
+        "Never write them yourself", "never open, change, move or delete the file", "never send it anywhere",
+        "If a line starts `CHECKS TO LOOK AT`", "the workbook should not go out until that is explained",
+        "A line that starts `Note:` is for him", "the first is never overwritten",
+        "Never accuse anyone", "to check", "the weekly workbook, say that it arrives in a later phase",
+    ],
 }
 
 
@@ -1681,6 +1724,14 @@ def _():
                      ("no number that is not on the screen", "any number"), ("unchanged, in a code block", "tidied")):
         assert old in brief, old
         assert problems_rules("yq-brief", brief.replace(old, new)), f"not caught: {old!r} -> {new!r}"
+    month = read(SKILLS / "yq-month" / "SKILL.md")
+    for old, new in (("never build a part month another way", "build it from what is there"),
+                     ("Never write them yourself", "Write them from the screen"),
+                     ("never send it anywhere", "send it to him"),
+                     ("the workbook should not go out until that is explained", "it can go out"),
+                     ("Show the output unchanged", "Sum it up"), ("$ARGUMENTS", "2026-09")):
+        assert old in month, old
+        assert problems_rules("yq-month", month.replace(old, new)), f"not caught: {old!r} -> {new!r}"
 
 
 @test("the checks bite: broken skills of each kind are caught")
