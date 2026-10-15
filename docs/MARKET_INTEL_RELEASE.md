@@ -187,7 +187,8 @@ release ignores them. Each piece asks YES; anything else skips that piece and go
    must show the earlier commit.
 3. **Database**, only when Claude says so: the reverses in the right order, **r8n first, then r8m**, each rehearsed
    before it is applied, each followed by the grant audit.
-   - The r8n reverse puts the AI review's view back as it was. It touches no data.
+   - The r8n reverse puts the AI review's view back as it was. It touches no data. While r8n is in place, re-running
+     `r7b_ai_head_migration.sql` fails: reverse r8n first, run R7b AI Head, then apply r8n again.
    - The r8m reverse REFUSES while r8m holds any data: lists, cases, reports and, once the import has run, the capture
      times of the imported finds and the photo thumbnails. That refusal is its protection, and nothing is changed.
      Leave the database as it is (the earlier code ignores it); dropping that data anyway is a decision for Claude
@@ -217,4 +218,8 @@ Then tell Claude what happened.
    sightings reach it now, cited as `[MI-<id>]`.
 6. **The first supplier report**, at the start of next month: build the draft, approve it, download it and send it by
    hand (it is never e-mailed automatically).
-7. Keep `business_data\releases\<date>_mi_v2.log` and the folder `business_data\backups\<date>_pre-mi-v2`.
+7. Keep `business_data\releases\<date>_mi_v2.log` and the backup of the release, the folder `<date>_pre-mi-v2`. The script
+   writes that folder under `business_data\backups\`; move it to `%LOCALAPPDATA%\yq-backups\release\<date>_pre-mi-v2`
+   (see `docs/BACKUPS.md`), where the backup of the 14-Oct-2026 release is kept. The script's own restore piece looks only
+   under `business_data\backups\`, so from the moved folder a restore is done with Claude:
+   `python -m scripts.db_backup --verify <folder>`, then `--restore`.

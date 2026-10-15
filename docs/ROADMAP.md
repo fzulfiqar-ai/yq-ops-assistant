@@ -1,3 +1,5 @@
+> Ops skills status and order of work (15-Oct-2026): see docs/STATUS.md. This roadmap predates them.
+
 # ROADMAP.md — vision recorded, NOT built in v1
 
 v1 is the operations Q&A assistant only (Phases 0 → 2.5). Build nothing below until

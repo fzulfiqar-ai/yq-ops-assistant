@@ -18,4 +18,5 @@
 - A load's e-mail goes once: never send it again, or send anything to WhatsApp, unless he asks for exactly that.
 - `docs/CLAUDE.md`: the standing orders (stack, data rules, migrations).
 - `docs/OPS_SKILLS.md`: what each command does, the one-time settings block, definitions.
+- `docs/STATUS.md`: where the work stands, open items and the order of work.
 - This repository is public: no names, phone numbers, ID numbers, prices or totals in anything committed.

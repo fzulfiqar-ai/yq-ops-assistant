@@ -10,9 +10,16 @@ and demonstrate capability to management.
 
 ## Stack (FINAL — no substitutes)
 - **Supabase** — Postgres + Auth + RLS (the database + auth).
-- **FastAPI** backend on **Railway** via **Docker**.
-- **Streamlit** dashboard on **Streamlit Cloud**.
-- **n8n** self-hosted for orchestration / webhooks / scheduling.
+- **FastAPI** backend on **Render** via **Docker** (`render.yaml` and the `Dockerfile`: the free plan, one uvicorn
+  worker, the Singapore region next to the database; served as `https://api.yqmarketplace.com`). Deploys are
+  deliberate, never on push: `python -m scripts.render_deploy` (docs/RELEASE.md, docs/DEPLOY_RENDER.md).
+- **Web** — the React/Vite portal (`ops.yqmarketplace.com`) and the YQ Marketplace (`yqmarketplace.com`) are served by
+  **Cloudflare Workers** static assets (`web/wrangler.portal.jsonc`, `web/wrangler.market.jsonc`), deployed by
+  `.github/workflows/cf-deploy.yml` after CI passes or by `python -m scripts.deploy_cf`; Vercel only redirects the old
+  addresses. The **Streamlit** dashboard (`dashboard/ui.py`) is the local dashboard; its libraries are in
+  `requirements-dev.txt`, not in the API image.
+- **Scheduling** — the `yq-keepwarm` **Cloudflare Worker** (cron triggers) keeps the API warm and calls its scheduler
+  endpoints. **n8n** (workflows in `n8n_workflows/`) is not hosted at present (docs/DEPLOY_RENDER.md).
 
 ## AI (NO Anthropic, NO paid APIs)
 All model calls go through `app/llm_router.py` — a rotation of ~10 **FREE** providers:
@@ -78,8 +85,10 @@ a dependency error — that deletes the enriched views. Edit `VIEWS_SQL` in
 `scripts/migrate_views.py`, never `scripts/views.sql` directly.
 
 ## Data freshness (no Focus API)
-Focus ERP (FocusX) has no API. Data comes from Excel exports dropped into `Focus ERP Data/`.
-v1 = manual export + `scripts/ingest.py`. Phase 3 = n8n email-to-ingest or watched-folder.
+Focus ERP (FocusX) has no API. Data comes from Excel exports the owner drops into a dated folder
+(`Uplaods/<ddmmyy>/`) and loads with `/yq-load` (checked, confirmed at a Windows box, then loaded by
+`scripts/yq_load_go.py`; see docs/OPS_SKILLS.md) or through the portal's Data page. An automated feed
+(scheduled export, e-mail-to-ingest) is roadmap only.
 True real-time would need a read-only SQL link to the Focus DB (needs IT) — roadmap only.
 
 ## YQ Shop (15-Sep-2026)
@@ -93,7 +102,7 @@ Owner prices come from the price book only — to load the owner's workbook pric
 
 ## YQ Marketplace (16-Sep-2026)
 The shop, enhanced, as the merchant front door: `web/src/MarketApp.tsx` + `web/src/market/**` built with
-`VITE_APP=market` for a second Vercel project; token-less API `/public/market*`, `/public/rep/{slug}`;
+`VITE_APP=market` as a second Cloudflare Workers site; token-less API `/public/market*`, `/public/rep/{slug}`;
 merchant identity (`shop_customers`), attribution (`shop.resolve_salesman`), lifecycle
 Received→Confirmed→Preparing→On the way→Delivered, assignment queue, storekeeper pick list. Read
 `docs/MARKETPLACE.md` and `docs/SHOP.md § Marketplace` before touching any of it. After every migration

@@ -3,14 +3,16 @@
 Product Finds and Field Notes merged into one capture (plan §18), then extended in v2 with a quality track: issue
 types, cases with a verification workflow, a safety flag, supplier actions and a monthly supplier workbook (plan Part F).
 v2 is described in [§ v2](#v2--quality-capture-review-and-the-supplier-workbook-release-r8m) below; the one-page guide
-for reps is `docs/MARKET_INTEL_HOWTO.md`.
+for reps is `docs/MARKET_INTEL_HOWTO.md` and the release steps are in `docs/MARKET_INTEL_RELEASE.md`. Release R8n then
+rebuilt the weekly AI review's market view on these tables (see [The weekly AI Head](#the-weekly-ai-head-plan-189)).
 
 Code: `app/market_intel.py` (logic), `app/market_intel_api.py` (routes), `web/src/components/MarketCapture.tsx` (the
 Spotted button), `web/src/pages/MarketIntel.tsx` (the board, My signals / My reports), `web/src/lib/marketIntel.ts`
 (shapes, resize, retry queue). v2 adds `app/market_quality.py` + `app/market_quality_api.py` (lists, cases, actions) and
 `app/supplier_reports.py` + `app/supplier_reports_api.py` (the workbook). Schema: `scripts/r7b_market_intel_migration.sql`
-and `scripts/r8m_market_quality_migration.sql` (tables in `docs/SCHEMA.md`, apply steps in `docs/MIGRATIONS.md`). Tests:
-`python -m tests.test_r7b_market_intel`, `python -m tests.test_r8m_market_quality_replay`.
+and `scripts/r8m_market_quality_migration.sql` (tables in `docs/SCHEMA.md`, apply steps in `docs/MIGRATIONS.md`); the AI
+review's view is rebuilt by `scripts/r8n_ai_market_signals_migration.sql` (reverse:
+`scripts/r8n_ai_market_signals_reverse.sql`). Tests: the eight suites listed under [Tests](#tests) at the end.
 
 ## Who does what
 
@@ -101,6 +103,19 @@ items (never a people-flagged photo). Claude Code reads them on the owner's PC a
 **Unverified** until a reviewer presses "Mark verified"; an item a person verified is never overwritten; no status or
 merge is ever set by it. From R8m, `v_market_cases_agent` (cases with codes, counts and dates; no title, note, person,
 shop or photo path) is readable by the same read-only role for a later cases section of the pack.
+
+**What the weekly review reads (R8n).** The review's pack (`scripts/ai_head/pack.py`) reads `v_agent_market_signals`,
+which R7b built on the old Product Finds and Field Notes boards, so a sighting captured in Market Intel never reached it.
+`scripts/r8n_ai_market_signals_migration.sql` (reverse: `scripts/r8n_ai_market_signals_reverse.sql`) rebuilds that view
+on the Market Intel v2 tables (`market_items`, `market_observations`, `market_photos`): per Bahrain day, rows for the
+restock requests, the Market Intel items, the quality cases, the reports on one of our products and the photos still to be
+identified. It holds counts and masked labels only (no shop, rep, note, area, barcode or photo path; a photo flagged with
+people and a receipt never count as a usable photo). The first twelve columns keep their R7b names and order, and ten are
+appended. The view is readable by the AI review login (`ai_head_ro`) and `yq_readonly`, and by no one on the public key.
+R8n applies before or after R8m, once R7b's Market Intel and AI Head files are in. Two traps once it is in place, each
+failing loudly with nothing changed: re-running `r7b_ai_head_migration.sql` fails ("cannot drop columns from view"), so
+reverse R8n first, then run R7b AI Head, then apply R8n again; and `r7b_market_intel_reverse.sql` cannot drop the Market
+Intel tables the view reads, so reverse R8n (and R8m) first. Apply, rehearse and reverse: `docs/MIGRATIONS.md`, Release R8n.
 
 ## The old boards
 
@@ -263,4 +278,22 @@ New tables `suppliers`, `brands`, `market_issue_types`, `market_cases`, `market_
 `market_observations` (case and issue links, basis, quantity, batch, packaging version, safety flag, phone capture time,
 brand / supplier links and snapshots), `market_photos` (role, sha256, thumbnail, caption, blurred copy) and
 `catalog_items` (`barcode`). Column-level detail: `docs/SCHEMA.md` § Market Intelligence. Apply, rehearse and reverse:
-`docs/MIGRATIONS.md` § Release R8m.
+`docs/MIGRATIONS.md` § Release R8m. R8n adds no table: it only redefines the view `v_agent_market_signals` (see
+[The weekly AI Head](#the-weekly-ai-head-plan-189)).
+
+## Tests
+
+Eight suites cover Market Intel. Each runs from the project folder as `python -m tests.<name>`, needs no database, network
+or `.env` (the Supabase and database addresses are pinned to `ci.invalid` before any import), and all eight run in CI (the
+`api` job of `.github/workflows/ci.yml`).
+
+| Suite | What it covers |
+|---|---|
+| `tests/test_r7b_market_intel.py` | v1: the page and its permissions, capture and photos, the "seen before" key, the board, decisions, demand signals; the in-memory PostgREST and Storage stand-in the other suites borrow |
+| `tests/test_r8m_market_quality.py` | v2 phases 0 and 1: lists, the product picker, quality capture and cases, the workflow, the safety alert, My reports |
+| `tests/test_r8m_supplier_reports.py` | v2 phase 2: the monthly supplier workbook |
+| `tests/test_r8m_market_intel_import.py` | the import of the old Product Finds and Field Notes: dry run, apply, a re-run |
+| `tests/test_r8m_market_quality_replay.py` | the r8m migration and its reverse, read as text; a replay on a throwaway local PostgreSQL (skipped without `YQ_LOCAL_PG_R8M`) |
+| `tests/test_r8n_ai_market_signals.py` | the r8n migration and its reverse, read as text; the AI pack's readers; a replay (skipped without `YQ_LOCAL_PG_R8N`) |
+| `tests/test_r8m_mi_e2e.py` | the four v2 modules together on one stand-in held to the real schema |
+| `tests/test_r8m_release_script.py` | the release script and its runbook, read as text (never run) |

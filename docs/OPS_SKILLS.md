@@ -35,18 +35,22 @@ load the reports, it answers with the line to type.
 1. Put the daily Focus reports in the dated folder (see `docs/FOCUS_EXPORT.md`): the price book when
    prices change and, with the first load of a new month, the Ledger report of the month just ended.
 2. Type `/yq-load`. Read the table. If a line asks for a decision, answer it in words (section 3).
+   When everything this load would apply is already in the portal, the check ends with
+   `Nothing new in <ddmmyy> ... No load needed.` and prints no go line: there is nothing to start.
+   Reports held back or left out are named just above it, with the words that load them.
 3. Once you have pasted the block in section 2, Claude Code first asks you to approve the load:
    answer **Yes**. Then a Windows box titled `YQ load <ddmmyy>` lists the folder, one line per file
    and the figures expected after the load. What the check flagged is there too, on lines that start
    `ATTENTION`, and anything you asked for on purpose, on a line that starts `ON YOUR WORD`. **Yes**
    loads. **No**, closing the box, or no answer changes nothing. A **Yes** in the first three
    seconds does not count (it could be a key you typed for another window): the box comes back and
-   says so.
+   says so. Read it, then click once. If every showing of the box gets such a Yes, nothing is loaded
+   and the message ends `Type /yq-load <ddmmyy> again.`
 4. Keep the PC plugged in and awake until it says the load finished, and do not upload on the Data
    page meanwhile. If Claude tells you to keep the Claude Code window open, do: on this PC the load
    would stop with it. The load then prints your brief, e-mails it to you and makes the team message
-   (the line that starts `Delivery:` says what went out). The portal follows by itself within minutes;
-   nothing needs deploying.
+   (the line that starts `Delivery:` says what went out). Loading the same Focus files again sends no
+   second e-mail (section 4). The portal follows by itself within minutes; nothing needs deploying.
 5. If a command opens with `LOAD INTERRUPTED` or `LAST LOAD FAILED`, type `/yq-load`. Section 3 says
    what each of the two means.
 6. If Claude says it may not start the load, it names a file for you to double-click: `go.cmd`, in
@@ -118,6 +122,7 @@ asks for the password and shows nothing as you type). Keep a copy of it away fro
 no backup can be read. Until it is set, each backup is kept unencrypted on this PC and the Windows box
 says so on a line that starts `ATTENTION`; once one backup has been encrypted, a load without the
 password is refused before it writes anything. Each backup is read back whole before the load goes on.
+`docs/BACKUPS.md` says where the password is looked for and how a backup is proved to restore.
 
 The e-mail after each load needs two things. First a sending key of the mail service, Resend (a key
 with *Sending access* only, on the company's sending domain), set the same way:
@@ -161,6 +166,13 @@ the check runs again.
 - A file or the database changed while the check ran: run it again.
 - The live site or the database did not answer, or a load or a rehearsal is still running: wait a
   minute, then run it again.
+
+**Nothing new.** When everything this load would apply is already loaded, the check ends with
+`Nothing new in <ddmmyy>: everything this load would apply is already loaded (last load ...). No load needed.`
+and prints no go line. Just above it, `Not part of this load:` lists each report that is held back,
+left out or waiting for your decision, with the words that load it (for example "load profitability
+anyway" or "load the price book"); saying them runs the check again with that option, and then a go
+line follows as usual.
 
 **One check, one run.** Every check is a *run*, named `<ddmmyy>_<HHMM>`: its copies of the reports,
 its table and its go line belong together. Only the newest check of a folder counts. A new check of
@@ -250,7 +262,9 @@ one of two lines, and the load check says the same in its own words:
   money owed by age, orders waiting, what the load checked and how long it took. Only a load that
   wrote data sends one: after a clean load the whole brief; after one where something needs a look,
   or one that failed after it began to write, a short note with no figure. A load that wrote nothing
-  sends nothing, and a load's e-mail goes once.
+  sends nothing, and a load's e-mail goes once. The full e-mail goes once for each data set, too:
+  loading the same Focus files again sends no second one, and that load's delivery record reads
+  `skipped: same data as run <run>`. Sending it again is deliberate, never automatic (section 7).
 - **Actions.** The e-mail lists up to five, the most worthwhile first. Each says why, what it is worth
   (an amount or a count, and what that rests on), the next step, who does it and by when. What it is
   worth, how sure that is, how soon it is due and how much work it is set the order. *ACTION* is what
@@ -293,6 +307,9 @@ public.
   its rules and can get the number banned: the team message is sent by you (section 4).
 - They do not run by themselves on a schedule, store briefs in the portal, draft purchase orders or
   make PDFs.
+- The portal's Stock moves page still pairs issues and receipts by voucher number, so its Pending and
+  van figures are not to be used until that page is fixed (phase 2b). The movement check of a later
+  phase is built on the stock ledger instead.
 
 ## 7. For the developer
 
@@ -359,17 +376,36 @@ public.
   up to ten minutes; then it shows the `Delivery:` line, and the brief prints the stored brief once. A
   line that holds `Its retry: ` is followed by the line that sends the e-mail again; it loads nothing.
   A retry never makes a full brief from figures that are no longer that load's: once a newer load is
-  on record, a later load failed, or anything was written to the database since, it is refused.
+  on record, a later load failed, or anything was written to the database since, it is refused. When a
+  newer load has finished, the line reads instead:
+  `No retry is needed: a newer load (run <run>) has its own e-mail.`
+  A line that starts `No retry:` says why that load's brief can no longer be sent (another load is on
+  record as the last one); there is nothing to run.
   `scripts/yq_send.py` is the one program that sends: exit code 0 sent or nothing to send, 1 not sent
   (recorded, with its retry), 2 refused (that load's e-mail went already, to any list of addresses, and
   `--resend` asks at the Windows box first; or it is not that load's own brief any more). `--test`
   sends to the test address only and never counts as sent. `scripts/ops` imports none of `scripts/yq_send.py`,
   `scripts/yq_secrets.py` and `scripts/yq_backup.py` (`tests/test_ops_readonly.py`), and the engine
   paths that decide a deploy leave out every `scripts/yq_*.py`.
+- **One e-mail for each data set.** The full management e-mail of a data set goes once. When a load's
+  Focus files give the same data as an earlier load, the delivery step sends nothing and writes
+  `skipped: same data as run <run>` in that load's `delivery.jsonl`; `--resend` stays the deliberate
+  way to send again, and it asks at the Windows box first. A short note about a load that needs a look
+  is held back the same way; the note about a failed load always goes, because the database may then
+  hold part of that load.
+- **A check with nothing new** ends on `Nothing new in <ddmmyy> ... No load needed.` and prints no go
+  line, so there is no go to run; the same holds when the only difference is a line waiting for a
+  decision whose default leaves it out. One allowance only: a row the loader adds up from two or more
+  lines of the file may differ from the stored row beyond the sixth decimal place in the added-up
+  figures (rounding); every other cell must match exactly. `load check <ddmmyy> again` is read as
+  `load check <ddmmyy>`; any other extra word is refused with what to type.
+- **Check timings**: the preview step prints one line per report with the seconds it took, and
+  `plan.json` keeps them under `timings.preview_parts` (set `YQ_CHECK_NO_TIMING=1` to turn this off).
 - **Backups** (`scripts/yq_backup.py`): `drill` restores the newest pre-load archive into a
   throwaway PostgreSQL on this PC (the database address must be on this PC; the schema is read from
   production, read-only) and compares every table's rows with the archive's manifest; `legacy` packs
-  the old plain backups, reads each one back and only then deletes the plain copy.
+  the old plain backups, reads each one back and only then deletes the plain copy. `docs/BACKUPS.md`
+  lists every subcommand.
 - **Adding a skill:** a new folder with the same rules, one row in section 1, one line in
   `CLAUDE.md`, then `python -m tests.test_ops_skills` and `python -m tests.test_ops_readonly`.
 - **Before a commit:** `python -m scripts.ops selftest --repo-clean`. It refuses a staged file outside
