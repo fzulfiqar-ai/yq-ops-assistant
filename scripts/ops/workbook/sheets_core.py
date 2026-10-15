@@ -1015,8 +1015,8 @@ def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> dict:
              "The salesman, product and customer lists are fixed for this report. Products and Customers can be "
              "sorted or filtered; the Dashboard picks its top ten by rank, so it is not affected.",
              "The commentary and footnotes on the Dashboard are written text. They do not change if the data changes.",
-             f"This file covers {mdl.MONTHS[p.prev_start.month - 1]} and {p.long} only. Next month's report will be "
-             f"a new file.")
+             f"This file covers {p.prev_long if p.prev_start.year != p.start.year else mdl.MONTHS[p.prev_start.month - 1]}"
+             f" and {p.long} only. Next month's report will be a new file.")
     for k, text in enumerate(about):
         r = about_head + 1 + k
         ws.merge(r, 1, r, 7, f"{k + 1}.  {text}", "para")

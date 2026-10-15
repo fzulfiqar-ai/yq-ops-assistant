@@ -532,6 +532,26 @@ def _():
     assert value(b, "Categories", f"B{6 + len(m.categories) + 4 + 2 + S}") == "Total"
 
 
+@test("sheets: a January report reaches back into December of the year before")
+def _():
+    rows = []
+    for r in world_rows():
+        r = dict(r)
+        d = date.fromisoformat(r["sale_date"])
+        r["sale_date"] = (date(2025, 12, d.day) if d.month == 2 else date(2026, 1, d.day)).isoformat()
+        r["invoice_no"] = r["invoice_no"].replace("-02-", "-12-").replace("-03-", "-01-")
+        rows.append(r)
+    b, m, _f = build.build_month("2026-01", FakeSource(rows, to=date(2026, 2, 5)), prepared_on=date(2026, 2, 6),
+                                 category_names=NAMES)
+    assert m.period.span_text() == "1 December 2025 to 31 January 2026"
+    assert value(b, "Notes", "C62") == "Dec 2025" and value(b, "Notes", "C61") == "Jan 2026"
+    assert value(b, "Dashboard", "B5") == "January 2026 compared with December 2025"
+    assert value(b, "Notes", "C6") == fx.serial(date(2025, 12, 1))
+    text = " ".join(str(c.value) for c in b.get("Notes").cells.values() if c.kind == "s")
+    assert "This file covers December 2025 and January 2026 only" in text
+    assert not [c for ws in b.sheets for c in ws.cells.values() if c.kind == "f" and isinstance(c.value, fx.Err)]
+
+
 # ── the file ───────────────────────────────────────────────────────────────────────────────────
 
 @test("file: written through a temporary name, never over an existing file; the next free name; a valid workbook")
