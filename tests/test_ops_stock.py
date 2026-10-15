@@ -1,0 +1,776 @@
+"""Ops engine: stock planning (python -m scripts.ops stock), on a synthetic world.
+
+    python -m tests.test_ops_stock
+
+Same lightweight runner as the other suites (no pytest). No database, no network, no .env:
+SUPABASE_URL, SUPABASE_KEY and DATABASE_URL are pinned to ci.invalid BEFORE any import and
+scripts.ops.db is imported first. The stock ledger is a list of movements built here (the reader and
+parser of the workbook are tested in tests/test_ops_moves.py); db.rpc, db.session and
+ledger.for_audit are replaced by stand-ins that answer from the same invented world, and every
+statement they are handed must pass the read-only gate (db.check_sql). All names and numbers are
+invented; every folder is a temporary one.
+
+The world (the data date D is Sun 15 Mar 2026; the rate window is the 90 days to it):
+  * ITEM-A, a steady seller: two units a day in a van, every day, from 1 Feb 2025; the main store
+    issues two a day. Two supplier receipts (1 Feb 2025, 10 Jan 2026) and a van return (1 Mar 2026):
+    394 on hand, two a day, cover 197 days; its units sit on the January receipt (200) and the old
+    one (194), the van return never making any of them younger.
+  * ITEM-B: sold out last June, received again on 30 Jan: in stock on 45 of the 90 days and sold one
+    a day on them (a rate of 1.0); 20 on hand, so it is on the order list.
+  * ITEM-C: 50 units since 1 Feb 2025 and never sold (no cost on file but its receipt rate).
+  * ITEM-N: a new arrival (first received 1 Mar): 4 sold, so its rate rests on the 30-day floor.
+  * ITEM-F: a fast mover by last year's sales, out of stock since September.
+  * DISP-01: a display item (config), in the headline and nowhere else.
+  * SIM-01: moves only in another store, so it is no accessory.
+The figures below are worked out by hand from those lines (the comments show the sums).
+
+Covered:
+  * the words (reorder, ageing, a code of two words) and the settings: the two optional keys take the
+    plan's default and are named, while config.get still refuses them to every other command;
+  * the daily rate (units sold in every warehouse ÷ days in stock, never under 30), cover, new
+    arrivals, the floor's star;
+  * the order list: listed below lead time + low, filled to lead time + high, less goods on order;
+    "goods on order not deducted" until a promise line is logged; a promise counts until a receipt
+    is dated after it; closed and unknown lines;
+  * the lead time: an invoice beside the receipt holding the same quantity of the most of its models
+    (never before it, never too long after), the median of the newest ten, the config value below
+    three;
+  * KPI 1: aggregate cover at cost, the share above the band, last month's end, the bands by count
+    and value with new arrivals apart;
+  * fast movers: the ranking over the twelve months before the month, availability (a day counts
+    when the day-end balance covers a day of sales), the wider basis, out all month;
+  * ageing: newest receipt first, van returns never reset age, units no receipt explains, the bands
+    add up to the main store, crossed with the last sale, a suggested action on every band;
+  * the headline equals the portal (the portal's own statement, word for word), the two figures at
+    cost side by side or one when they agree, the ledger set beside the snapshot;
+  * one item, a model code that several items share, an unknown code;
+  * the whole command: files under exports/ only, a failed read costs its own part, the wording
+    guard, no long digit run, every statement a read;
+  * the real loaded ledger and stock balance files, when they are on this machine (SKIP otherwise).
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+import traceback
+from datetime import date, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+os.environ["SUPABASE_URL"] = "https://ci.invalid"
+os.environ["SUPABASE_KEY"] = "ci-key"
+os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
+
+from scripts.ops import db  # noqa: E402  (first, as every command does)
+from scripts.ops import __main__ as cli  # noqa: E402
+from scripts.ops import config, fmt, ledger, paths, stock  # noqa: E402
+
+from app import metrics, reports  # noqa: E402
+
+TESTS: list[tuple[str, object]] = []
+
+# The project folder (the main checkout when this is a code worktree): only the last test reads it.
+REAL_ROOT = paths.data_root()
+
+NINE = re.compile(r"(?<![0-9])[0-9]{9}(?![0-9])")            # shaped like a personal ID number
+LONG = re.compile(r"(?<![0-9])[0-9]{15,}(?![0-9])")          # shaped like a card or account number
+
+MAIN, VAN, VAN_B, SIM_STORE = "Main Store", "Van A - Acc WH", "Van B - Acc WH", "Sim Store"
+D = date(2026, 3, 15)
+FIXTURE = {
+    "warehouses.main": MAIN, "warehouses.aliases": {}, "warehouses.not_counted": [],
+    "items.bridge_exceptions": {}, "items.not_accessories": [],
+    "stock.lead_time_days": 50, "stock.display_items": ["DS1"], "stock.fast_movers": 2,
+    "stock.cover_kpi_days": [30, 45],
+}
+NAMES = {"A": "ITEM-A Cable Alpha", "B": "ITEM-B Charger Beta", "C": "ITEM-C Holder Gamma",
+         "N": "ITEM-N Speaker New", "F": "ITEM-F Fan Out", "DISP": "DISP-01 Counter Display"}
+CODES = {"A": "CA1", "B": "CB2", "C": "HG3", "N": "SN4", "F": "FO5", "DISP": "DS1"}
+SIM = "SIM-01 Starter Pack SP9"
+
+
+def L(key: str) -> str:
+    """The ledger's name of an item: its stock name, a space, its code."""
+    return f"{NAMES[key]} {CODES[key]}"
+
+
+def test(name):
+    def deco(fn):
+        TESTS.append((name, fn))
+        return fn
+    return deco
+
+
+def raises(kind, fn) -> Exception:
+    try:
+        fn()
+    except kind as exc:
+        return exc
+    raise AssertionError(f"expected {kind.__name__}")
+
+
+def days(first: date, last: date):
+    d = first
+    while d <= last:
+        yield d
+        d += timedelta(days=1)
+
+
+# ── movements ──────────────────────────────────────────────────────────────────
+
+class Book:
+    """Movements in the shape scripts.ops.ledger gives them."""
+
+    def __init__(self):
+        self.rows: list[dict] = []
+        self.n = 0
+
+    def _row(self, item, day, vtype, wh, voucher, qin=0, qout=0, vin=0, vout=0, to_wh=None):
+        self.rows.append({"item": item, "date": day, "voucher": voucher, "vtype": vtype, "wh": wh, "to_wh": to_wh,
+                          "qty_in": Decimal(str(qin)), "qty_out": Decimal(str(qout)), "value_in": Decimal(str(vin)),
+                          "value_out": Decimal(str(vout)), "narr": None})
+
+    def receipt(self, item, day, units, value, voucher, wh=MAIN):
+        self._row(item, day, ledger.SUPPLIER_RECEIPT, wh, voucher, qin=units, vin=value)
+        return self
+
+    def issue(self, item, day, units, to=VAN):
+        self.n += 1
+        self._row(item, day, ledger.ISSUE, MAIN, f"SIO:T-{self.n}", qout=units, to_wh=to)
+        self._row(item, day, ledger.RECEIVE, to, f"STRV:T-{self.n}", qin=units)
+        return self
+
+    def back(self, item, day, units, frm=VAN):
+        """A van sends units back to the main store: no supplier receipt."""
+        self.n += 1
+        self._row(item, day, ledger.ISSUE, frm, f"SIO:T-{self.n}", qout=units, to_wh=MAIN)
+        self._row(item, day, ledger.RECEIVE, MAIN, f"STRV:T-{self.n}", qin=units)
+        return self
+
+    def sale(self, item, day, units, wh=VAN):
+        self.n += 1
+        self._row(item, day, ledger.SALE, wh, f"SI:T-{self.n}", qout=units)
+        return self
+
+
+def world() -> Book:
+    b = Book()
+    # the first shipment: ITEM-A, ITEM-C and the display item on one receipt
+    b.receipt(L("A"), date(2025, 2, 1), 1000, 500, "MRN:T-25-02-1")
+    b.receipt(L("C"), date(2025, 2, 1), 50, 40, "MRN:T-25-02-1")
+    b.receipt(L("DISP"), date(2025, 2, 1), 5, 50, "MRN:T-25-02-1")
+    b.receipt(SIM, date(2025, 2, 1), 1000, 100, "MRN:T-25-02-9", wh=SIM_STORE)
+    b.sale(SIM, date(2025, 2, 2), 10, wh=SIM_STORE)
+    for day in days(date(2025, 2, 1), D):                       # ITEM-A: two a day, 408 days
+        b.issue(L("A"), day, 2).sale(L("A"), day, 2)
+    b.receipt(L("A"), date(2026, 1, 10), 200, 100, "MRN:T-26-01-1")
+    b.back(L("A"), date(2026, 3, 1), 10)                        # 1000 + 200 + 10 - 816 = 394
+    # ITEM-F: 400 received, two a day for 200 days, out since 16 Sep 2025
+    b.receipt(L("F"), date(2025, 3, 1), 400, 600, "MRN:T-25-03-1")
+    for day in days(date(2025, 3, 1), date(2025, 9, 16)):
+        b.issue(L("F"), day, 2).sale(L("F"), day, 2)
+    # ITEM-B: 30 in June, sold out; 100 on 30 Jan, one a day since, and 35 to the second van on 1 Feb
+    b.receipt(L("B"), date(2025, 6, 1), 30, 60, "MRN:T-25-06-1")
+    for day in days(date(2025, 6, 1), date(2025, 6, 30)):
+        b.issue(L("B"), day, 1).sale(L("B"), day, 1)
+    b.receipt(L("B"), date(2026, 1, 30), 100, 250, "MRN:T-26-01-2")
+    for day in days(date(2026, 1, 30), D):
+        b.issue(L("B"), day, 1).sale(L("B"), day, 1)
+    b.issue(L("B"), date(2026, 2, 1), 35, to=VAN_B)             # 100 - 45 - 35 = 20
+    # ITEM-N: new on 1 Mar, four sold
+    b.receipt(L("N"), date(2026, 3, 1), 40, 120, "MRN:T-26-03-1")
+    b.issue(L("N"), date(2026, 3, 5), 1).sale(L("N"), date(2026, 3, 5), 1)
+    b.issue(L("N"), date(2026, 3, 10), 3).sale(L("N"), date(2026, 3, 10), 3)
+    return b
+
+
+ON_HAND = {"A": 394, "B": 20, "C": 50, "N": 36, "DISP": 5}
+SELL_RATE = {"A": 1, "B": 5, "C": 2, "N": 6, "DISP": 1}        # BHD a unit in the stock balance
+LANDED = {"CA1": "0.4", "SN4": "3.2", "DS1": "10.0", "FO5": "1.4"}
+PORTAL_COST = {"A": 0.45, "B": 2.4, "C": None, "N": 3.1, "DISP": 9.0}
+INVOICES = [  # (number, date, model, quantity)
+    ("INV-1", "2025-01-01", "ITEM-A", 1000), ("INV-1", "2025-01-01", "ITEM-C", 50), ("INV-1", "2025-01-01", "DISP-01", 5),
+    ("INV-2", "2025-01-20", "ITEM-F", 400), ("INV-3", "2025-04-22", "ITEM-B", 30),
+    ("INV-4", "2025-11-26", "ITEM-A", 200), ("INV-4", "2025-11-26", "ITEM-B", 100),
+    ("INV-5", "2026-02-01", "ITEM-N", 40), ("INV-6", "2026-02-20", "ITEM-Z", 10),
+]
+
+
+def snapshot_rows(on_hand: dict | None = None) -> list[dict]:
+    held = dict(ON_HAND, **(on_hand or {}))
+    return [{"item_name": NAMES[k], "warehouse_name": MAIN, "net_qty": str(q), "value_bhd": str(q * SELL_RATE[k]),
+             "as_of_date": D.isoformat()} for k, q in held.items() if q]
+
+
+def portal_rows(snap: list[dict]) -> list[dict]:
+    """What the portal's statement returns for these rows (one per warehouse; numbers as JSON numbers)."""
+    acc: dict[str, dict] = {}
+    for r in snap:
+        a = acc.setdefault(r["warehouse_name"], {"warehouse_name": r["warehouse_name"], "value_bhd": 0.0, "qty": 0.0,
+                                                 "items": 0})
+        a["value_bhd"] += float(r["value_bhd"])
+        a["qty"] += float(r["net_qty"])
+        a["items"] += 1
+    return sorted(acc.values(), key=lambda a: -a["value_bhd"])
+
+
+def stock_cost_rows() -> list[dict]:
+    """The Command Centre's stock rows (metrics.STOCK_SQL) for the same snapshot."""
+    return [{"item_name": NAMES[k], "division": "Accessories", "status": "healthy", "current_stock": q,
+             "sell_value_bhd": q * SELL_RATE[k], "sold_90d": 0, "days_cover": None, "cost_bhd": PORTAL_COST[k],
+             "cost_source": "focus_avg" if PORTAL_COST[k] else None} for k, q in ON_HAND.items()]
+
+
+class World:
+    """The reads of the command, answered from the invented world. Every statement must be a read."""
+
+    def __init__(self, book: Book | None = None, snapshot=None, landed=None, invoices=None, portal_cost=None,
+                 fail: dict | None = None):
+        self.book = book or world()
+        self.snapshot = snapshot if snapshot is not None else snapshot_rows()
+        self.landed = dict(LANDED if landed is None else landed)
+        self.invoices = INVOICES if invoices is None else invoices
+        self.portal_cost = stock_cost_rows() if portal_cost is None else portal_cost
+        self.fail = dict(fail or {})
+        self.sql: list[str] = []
+
+    def rpc(self, sql: str) -> list[dict]:
+        db.check_sql(sql)
+        self.sql.append(sql)
+        if sql in self.fail:
+            raise self.fail[sql]
+        if sql == stock.SNAPSHOT_SQL:
+            return [dict(r) for r in self.snapshot]
+        if sql == stock.PORTAL_WAREHOUSE_SQL:
+            return portal_rows(self.snapshot)
+        if sql == metrics.STOCK_SQL:
+            return self.portal_cost
+        if sql == stock.PRICE_BOOK_SQL:
+            return [{"sku_code": CODES[k], "item_name": NAMES[k]} for k in NAMES]
+        if sql == stock.SUPPLIER_SQL:
+            return [{"invoice_no": n, "invoice_date": d, "model": m, "qty": str(q)} for n, d, m, q in self.invoices]
+        raise AssertionError(f"a statement the stand-in does not know: {sql[:70]}")
+
+    def session(self, **_kw):
+        world_ = self
+
+        class Session:
+            def q(self, sql, params=None):
+                db.check_sql(sql)
+                world_.sql.append(sql)
+                if sql in world_.fail:
+                    raise world_.fail[sql]
+                assert sql == stock.LANDED_SQL, sql[:70]
+                return [{"code": c, "cost": v, "effective_date": "2026-01-01"} for c, v in world_.landed.items()]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Session()
+
+    def for_audit(self, prefer="auto"):
+        rows = self.book.rows
+        led = ledger.Ledger(rows=rows, source="Stock_ledger_test.xlsx", first_date=ledger.first_date(rows),
+                            last_date=ledger.last_date(rows), sha=None, origin="file")
+        return led, {"source": "file", "parity": None,
+                     "note": "The stock ledger is read from the file Stock_ledger_test.xlsx: it agrees with what the "
+                             "portal holds."}
+
+
+TEMP_ROOTS: list[Path] = []           # the data roots data_root() made; the command runs in none other
+
+
+class data_root:
+    def __init__(self, cfg: dict | None = None, drop: tuple = ()):
+        self.cfg = {k: v for k, v in dict(FIXTURE, **(cfg or {})).items() if k not in drop}
+
+    def __enter__(self) -> Path:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self._tmp.name).resolve()
+        paths.set_data_root(self.root)
+        paths.write_text(paths.config_file(), json.dumps(self.cfg))
+        config.use(None)
+        TEMP_ROOTS.append(self.root)
+        return self.root
+
+    def __exit__(self, *exc):
+        TEMP_ROOTS.remove(self.root)
+        paths.set_data_root(None)
+        config.use(None)
+        self._tmp.cleanup()
+        return False
+
+
+def in_temp_root() -> None:
+    """The command reads config.json and writes its screens under the data root: in a test that is a
+    temporary one, never the project folder."""
+    assert TEMP_ROOTS and paths.data_root() == TEMP_ROOTS[-1], "a test ran the command outside data_root()"
+
+
+class standing_in:
+    def __init__(self, w: World):
+        self.w = w
+
+    def __enter__(self):
+        self.saved = (db.rpc, db.session, ledger.for_audit)
+        db.rpc, db.session, ledger.for_audit = self.w.rpc, self.w.session, self.w.for_audit
+        return self.w
+
+    def __exit__(self, *exc):
+        db.rpc, db.session, ledger.for_audit = self.saved
+        return False
+
+
+class Args:
+    def __init__(self, *spec, ledger_="auto"):
+        self.spec, self.ledger, self.json, self.data_root = list(spec), ledger_, False, None
+
+
+def run(w: World | None = None, *spec) -> dict:
+    in_temp_root()
+    with standing_in(w or World()):
+        return stock.run(Args(*spec))
+
+
+def model_of(w: World | None = None):
+    in_temp_root()
+    with standing_in(w or World()):
+        cfg = stock.settings()
+        inp = stock.gather()
+        return stock.build(inp, cfg), inp
+
+
+def item(model, key: str):
+    return next(it for it in model.items if it.ledger_name == L(key))
+
+
+# ── words and settings ────────────────────────────────────────────────────────
+
+@test("the words: nothing is the headline, reorder and ageing are views, anything else is an item code (spaces kept)")
+def _():
+    assert stock.parse_spec([]) == ("headline", None)
+    assert stock.parse_spec(["reorder"]) == ("reorder", None) and stock.parse_spec(["REORDER"]) == ("reorder", None)
+    assert stock.parse_spec(["ageing"]) == ("ageing", None) and stock.parse_spec(["aging"]) == ("ageing", None)
+    assert stock.parse_spec(["X05", "UC"]) == ("item", "X05 UC") and stock.parse_spec(["X05 UC"]) == ("item", "X05 UC")
+    assert stock.parse_spec(["reorder", "now"]) == ("item", "reorder now")
+    assert "stock" in cli.COMMANDS and cli.COMMANDS["stock"][0] == "scripts.ops.stock"
+
+
+@test("settings: the two optional keys take the plan's default and are named; config.get still refuses them elsewhere")
+def _():
+    with data_root(drop=("stock.fast_movers", "stock.cover_kpi_days")):
+        cfg = stock.settings()
+        assert (cfg.fast_n, cfg.low, cfg.high) == (stock.FAST_MOVERS_DEFAULT, *stock.COVER_KPI_DEFAULT)
+        assert set(cfg.defaults_used) == {"stock.fast_movers", "stock.cover_kpi_days"}
+        assert cfg.lead_default == 50 and cfg.display == frozenset({"ds1"})
+        assert not set(config.missing_keys()) & config.OPTIONAL            # selftest stays clean on the owner's PC
+        raises(config.ConfigMissing, lambda: config.get("stock.fast_movers"))  # no silent default for anyone else
+    with data_root():
+        cfg = stock.settings()
+        assert (cfg.fast_n, cfg.low, cfg.high, cfg.defaults_used) == (2, 30, 45, ())
+    for bad in ([45, 30], [30], [0, 45], [30, "45"], "30-45"):
+        with data_root({"stock.cover_kpi_days": bad}):
+            raises(config.ConfigMissing, stock.settings)
+    with data_root({"stock.lead_time_days": 0}):
+        raises(config.ConfigMissing, stock.settings)
+    with data_root(drop=("stock.lead_time_days",)):
+        assert "stock.lead_time_days" in config.missing_keys()
+        raises(config.ConfigMissing, stock.settings)                      # the lead time is never defaulted
+    # the optional keys with no default in config.py are these two (the report's empty defaults are the others)
+    assert config.OPTIONAL - set(config.DEFAULTS) == {"stock.fast_movers", "stock.cover_kpi_days"}
+    assert set(config.DEFAULTS) <= config.OPTIONAL <= set(config.KEYS)
+
+
+# ── the rate, cover and the order list ────────────────────────────────────────
+
+@test("the daily rate: units sold in every warehouse ÷ the days in stock in the main store, never fewer than 30")
+def _():
+    with data_root():
+        m, _inp = model_of()
+    rates = m.facts["fast"]["rates"]
+    a, b, n = rates[L("A")], rates[L("B")], rates[L("N")]
+    assert (a.sold, a.days_in_stock, a.rate) == (180, 90, 2)               # sold in the van, never in the main store
+    assert (b.sold, b.days_in_stock, b.rate) == (45, 45, 1)                # out for 45 days: they do not count
+    assert (n.sold, n.days_in_stock) == (4, 15) and n.rate == Decimal(4) / 30 and n.floored
+    assert not a.floored and not b.floored
+    assert rates[L("C")].rate == 0 and rates[L("F")].rate == 0
+    assert L("DISP") not in rates                                          # display items are not planned
+    assert SIM not in {it.ledger_name for it in m.items}                   # never in the main store: no accessory
+    assert item(m, "A").on_hand == 394 and item(m, "B").on_hand == 20
+
+
+@test("the order list: below lead time + low it is listed, filled to lead time + high, in whole units, at cost")
+def _():
+    with data_root():
+        m, _inp = model_of()
+    f = m.facts
+    assert f["lead"]["days"] == 40 and f["trigger_days"] == 70 and f["fill_days"] == 85
+    assert [x["item"].ledger_name for x in f["order"]] == [L("B")]         # A covers 197 days, C, F sell nothing
+    x = f["order"][0]
+    assert x["cover"] == 20 and x["qty"] == 65                             # 85 x 1 - 20
+    assert x["cost_bhd"] == Decimal("162.500") and item(m, "B").cost_source == "receipt"   # 65 x 250/100
+    # a rate that is not whole: the quantity is rounded up
+    w = world()
+    w.sale(L("B"), D, 1)                                                    # 46 sold: 46/45 a day
+    with data_root():
+        m2, _ = model_of(World(book=w))
+    q = next(x for x in m2.facts["order"] if x["item"].ledger_name == L("B"))["qty"]
+    assert q == 67, q                                                       # 85 x 46/45 - 20 = 66.9 -> 67
+    with data_root({"stock.display_items": ["CB2"]}):
+        m3, _ = model_of()
+    assert not m3.facts["order"]                                            # a display item is never ordered
+
+
+@test("goods on order: not deducted until a promise is logged; one counts until a receipt is dated after it")
+def _():
+    with data_root() as root:
+        text = run(World())["text"]
+        assert "goods on order not deducted" in text
+        log = root / "business_data" / "ops" / "kpi_log.jsonl"
+        lines = [
+            {"id": 1, "kind": "promise", "ref": "p1", "item_code": "cb2", "qty": 30, "event_date": "2026-03-01"},
+            {"id": 2, "kind": "promise", "ref": "p2", "item_code": "CB2", "qty": 50, "event_date": "2026-01-01"},
+            {"id": 3, "kind": "promise", "ref": "p3", "item_code": "CB2", "qty": 99, "event_date": "2026-03-02",
+             "state": "closed"},
+            {"id": 4, "kind": "promise", "ref": "p4", "item_code": "NOPE-9", "qty": 5, "event_date": "2026-03-02"},
+            {"id": 5, "kind": "quote", "ref": "q1", "item_code": "CB2", "qty": 500},
+        ]
+        paths.write_text(log, "\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+        with standing_in(World()):
+            m = stock.build(stock.gather(), stock.settings())
+        oo = m.facts["on_order"]
+        assert (oo["logged"], oo["counted"], oo["unmatched"]) == (3, 1, 1), oo   # p2 arrived on 30 Jan; p3 closed
+        assert item(m, "B").on_order == 30
+        assert m.facts["order"][0]["qty"] == 35                             # 85 - 20 - 30
+        out = run(World(), "reorder")["text"]
+        assert "goods on order deducted (1 promise line of the KPI log)" in out
+        assert "1 promise line of the KPI log matches no item, to check." in out
+
+
+@test("the lead time: an invoice beside the receipt that holds the same quantity of the most of its models")
+def _():
+    rec = {"R1": {"date": date(2026, 1, 10), "codes": {"M1": Decimal(10), "M2": Decimal(5)}},
+           "R2": {"date": date(2026, 2, 1), "codes": {"M1": Decimal(10), "M2": Decimal(5), "M3": Decimal(7)}},
+           "R0": {"date": date(2025, 12, 1), "codes": {"M1": Decimal(10), "M2": Decimal(5), "M3": Decimal(7)}}}
+
+    def inv(number, day, *models):
+        return [{"invoice_no": number, "invoice_date": day, "model": m, "qty": str(q)} for m, q in models]
+
+    got = stock.measure_lead_times(inv("I1", "2025-12-20", ("M1", 10), ("M2", 5), ("M3", 7)), rec)
+    assert [(g["receipt"], g["days"], g["same"]) for g in got] == [("R2", 43, 3)]     # R0 is before it: never
+    got = stock.measure_lead_times(inv("I2", "2025-12-20", ("M1", 10), ("M2", 5)), rec)
+    assert [g["receipt"] for g in got] == ["R1"]                                     # a tie: the earlier one
+    assert stock.measure_lead_times(inv("I3", "2025-12-20", ("M1", 10), ("M2", 6), ("M3", 8)), rec) == []  # 1 of 3
+    assert stock.measure_lead_times(inv("I4", "2025-04-01", ("M1", 10)), rec) == []  # more than LEAD_MAX_DAYS
+    assert [g["receipt"] for g in stock.measure_lead_times(inv("I4", "2025-06-01", ("M1", 10)), rec)] == ["R0"]
+    two = inv("I5", "2025-12-20", ("M1", 4), ("M1", 6), ("M2", 5))                   # one model on two lines
+    assert [g["same"] for g in stock.measure_lead_times(two, rec)] == [2]
+    # fewer than three: the config value; three or more: the median of the newest ten
+    shots = [{"days": n, "receipt_date": date(2025, 1, 1) + timedelta(days=i), "invoice_date": None, "invoice": str(i)}
+             for i, n in enumerate([90, 10, 20, 30, 40, 50, 60, 70, 80, 15, 25, 35])]
+    assert stock.lead_time(shots[:2], 56) == {"days": 56, "basis": "config", "shown": shots[:2], "default": 56}
+    assert stock.lead_time(shots[:3], 56)["days"] == 20                              # 10, 20, 90
+    four = stock.lead_time(shots[:4], 56)
+    assert four["days"] == 25 and four["basis"] == "measured"                        # (20 + 30) / 2
+    ten = stock.lead_time(shots, 56)
+    assert [s["invoice"] for s in ten["shown"]] == [str(i) for i in range(2, 12)]    # the newest ten
+    assert ten["days"] == 38                                                          # 35 and 40 -> 37.5 -> 38
+    with data_root():
+        m, _inp = model_of()
+    lead = m.facts["lead"]
+    assert lead["basis"] == "measured" and lead["days"] == 40                         # 28, 31, 40, 40, 45
+    assert [x["receipt"] for x in lead["shown"]] == ["MRN:T-25-02-1", "MRN:T-25-03-1", "MRN:T-25-06-1",
+                                                     "MRN:T-26-01-1", "MRN:T-26-03-1"]
+    with data_root():
+        m, _inp = model_of(World(invoices=INVOICES[:4]))
+    assert m.facts["lead"]["basis"] == "config" and m.facts["lead"]["days"] == 50
+
+
+# ── KPI 1 ─────────────────────────────────────────────────────────────────────
+
+@test("KPI 1: aggregate cover at cost, the share above the band, last month's end, new arrivals apart")
+def _():
+    with data_root():
+        m, _inp = model_of()
+    k = m.facts["kpi_cover"]
+    # now: A 394 x 0.4 + B 20 x 2.5 + C 50 x 0.8 = 247.6 against a day of 2 x 0.4 + 1 x 2.5 = 3.3
+    assert k["now"]["value"] == Decimal("247.6") and k["now"]["days"] == Decimal("247.6") / Decimal("3.3")
+    assert k["now"]["above_value"] == Decimal("197.6") and k["now"]["new_items"] == 1    # A and C; ITEM-N apart
+    # 28 Feb: A 414, B 35, C 50 (ITEM-N not yet received): 293.1 against 3.3
+    assert k["last_month_end"] == date(2026, 2, 28) and k["last"]["value"] == Decimal("293.1")
+    assert k["last"]["days"] == Decimal("293.1") / Decimal("3.3")
+    bands = {b["band"]: (b["items"], b["units"], b["value"]) for b in m.facts["bands"] if b["items"]}
+    assert bands == {"under 30 days": (1, 20, Decimal("50.0")), "over 180 to 365": (1, 394, Decimal("157.6")),
+                     "no sale in 90 days": (1, 50, Decimal("40.0")), "new arrivals (apart)": (1, 36, Decimal("115.2"))}
+    assert sum(b["units"] for b in m.facts["bands"]) == 505 - 5                          # the main store less display
+    with data_root():
+        text = run(World())["text"]
+    assert "Aggregate cover 75 days (on Sat 28 Feb: 89 days, -14); 79.8% of the value is above 45 days" in text, text
+    assert "The last supplier receipt (MRN:T-26-03-1, Sun 01 Mar) holds 10.0 months of sales of its items" in text
+
+
+# ── fast movers ───────────────────────────────────────────────────────────────
+
+@test("fast movers: last year's best sellers by units; a day counts when its end covers a day of sales")
+def _():
+    with data_root():
+        m, _inp = model_of()
+    fa = m.facts["fast"]
+    assert [it.ledger_name for it in fa["list"]] == [L("A"), L("F")]                    # 730 and 400 units
+    assert (fa["rank_first"], fa["rank_last"]) == (date(2025, 3, 1), date(2026, 2, 28)) and not fa["partial"]
+    assert item(m, "B").rank == 3 and item(m, "B").sold_rank == 60 and item(m, "N").rank is None
+    now, last = fa["now"], fa["last"]
+    assert (now["available"], now["sku_days"], now["days"]) == (15, 30, 15)             # A every day, F never
+    assert [it.ledger_name for it in now["out_all"]] == [L("F")]
+    assert (now["wide_items"], now["wide_available"], now["wide_sku_days"]) == (3, 45, 45)   # A, B and ITEM-N
+    assert (last["available"], last["sku_days"]) == (28, 56) and [it.ledger_name for it in last["out_all"]] == [L("F")]
+    # a day-end balance below one day of sales does not count: ITEM-B down to 1 unit with a rate of 2
+    it = stock.Item(ledger_name="x", name="x", code="x", series=[Decimal(5), Decimal(1), Decimal(0), Decimal(2)])
+    assert stock.available_days(it, date(2026, 1, 1), date(2026, 1, 1), date(2026, 1, 4), Decimal(2)) == 2
+    assert stock.available_days(it, date(2026, 1, 1), date(2026, 1, 1), date(2026, 1, 4), Decimal("0.2")) == 3
+    with data_root():
+        text = run(World())["text"]
+    for line in ("FAST MOVERS  the 2 best sellers by units, Mar 2025 to Feb 2026",
+                 "This month so far: 50.0% of SKU-days available (every item that sold: 100.0%)",
+                 "Feb 2026 (that month's fast movers): 50.0% of SKU-days available (every item that sold: 100.0%)",
+                 "Out all of Feb 2026: ITEM-F Fan Out", "Out every day this month: ITEM-F Fan Out"):
+        assert line in text, line
+
+
+# ── ageing ────────────────────────────────────────────────────────────────────
+
+@test("ageing: newest receipt first, a van return never makes stock younger, the bands add up to the main store")
+def _():
+    receipts = [(date(2025, 2, 1), "R1", Decimal(1000), ZERO_V), (date(2026, 1, 10), "R2", Decimal(200), ZERO_V)]
+    assert stock.allocate(Decimal(394), receipts) == [(date(2026, 1, 10), "R2", Decimal(200)),
+                                                     (date(2025, 2, 1), "R1", Decimal(194))]
+    assert stock.allocate(Decimal(1300), receipts)[-1] == (None, None, Decimal(100))     # no receipt explains these
+    assert stock.allocate(Decimal(0), receipts) == [] and stock.allocate(Decimal(-3), receipts) == []
+    with data_root():
+        m, _inp = model_of()
+    ag = m.facts["ageing"]
+    rows = {r["band"]: (len(r["items"]), r["units"], r["value"]) for r in ag["rows"] if r["units"]}
+    # up to 90 days: A 200 (10 Jan; the 10 returned on 1 Mar are NOT young), B 20, ITEM-N 36
+    assert rows == {"up to 90 days": (3, 256, Decimal("245.2")), "over 365 days": (2, 244, Decimal("117.6"))}, rows
+    assert ag["units"] + ag["display_units"] == ag["main_units"] == 505
+    sold30, never = 0, 3
+    assert ag["cells"][3][never]["units"] == 50 and ag["cells"][3][sold30]["units"] == 194   # C never sold; A today
+    assert [x["item"].ledger_name for x in ag["oldest"]] == [L("A"), L("C")]
+    with data_root():
+        text = run(World(), "ageing")["text"]
+        head = run(World())["text"]
+    assert "The bands add up to 505 units, the same as the main store's 505 units." in text
+    assert "display items (left out)" in text
+    for action in (stock.AGE_ACTIONS[0], stock.AGE_ACTIONS[3]):
+        assert action in text
+    assert "still selling: order no more until it runs down" in text and "clear it: mark it down" in text
+    assert "AGEING  32.4% of the value at cost has been in stock over 180 days" in head          # 117.6 / 362.8
+
+
+ZERO_V = Decimal(0)
+
+
+# ── the headline ──────────────────────────────────────────────────────────────
+
+@test("the headline is the portal's: its own statement word for word, the main store's row; at cost side by side")
+def _():
+    seen: list[str] = []
+    saved = reports.exec_sql
+    reports.exec_sql = lambda sql, *a, **kw: seen.append(sql) or []
+    try:
+        reports.stock_by_warehouse()
+    finally:
+        reports.exec_sql = saved
+    assert seen == [stock.PORTAL_WAREHOUSE_SQL], "the Inventory page reads the stock per warehouse differently now"
+    with data_root():
+        out = run(World())
+    text = out["text"]
+    assert out["ok"] and out["data_date"] == D.isoformat() and out["command"] == "stock"
+    assert "STOCK  main store, Main Store: stock as on Sun 15 Mar, ledger to Sun 15 Mar" in text
+    assert "  5 items, 505 units, BHD 815.000 at selling price (the portal's figures)" in text
+    # 394 x 0.4 + 20 x 2.5 + 50 x 0.8 + 36 x 3.2 + 5 x 10 (landed for A, N, the display; receipt rate for B, C)
+    assert "  At cost BHD 412.800 (latest landed cost on 3 items, the latest receipt rate on 2)" in text
+    assert ("  The portal at cost: BHD 381.900 (Focus average cost, else the latest landed cost; 1 item without a cost "
+            "there)") in text
+    assert "The ledger agrees with the stock balance on all 5 items (Sun 15 Mar)." in text
+    assert "Display items: 1 item, 5 units, left out of cover, the order list and the ageing." in text
+    assert "Vans and outlets: not counted here yet" in text and stock.vans_beside(None) == []
+    assert "ORDER LIST  lead time 40 days, measured on the last 5 supplier invoices (config 50); goods on order not " \
+           "deducted" in text
+    assert "1 item below 70 days of cover; ordered up to 85 days: 65 units, BHD 162.500 at cost" in text
+    # the same figure on both bases: one line
+    same = [dict(r, cost_bhd=float(c) if c is not None else None) for r, c in
+            zip(stock_cost_rows(), ["0.4", "2.5", "0.8", "3.2", "10.0"])]
+    with data_root():
+        text = run(World(portal_cost=same))["text"]
+    assert "The portal's figure at cost is the same." in text and "The portal at cost:" not in text
+    # the ledger and the snapshot disagree on one item: said, to check
+    with data_root():
+        text = run(World(snapshot=snapshot_rows({"A": 393})))["text"]
+    assert "The ledger differs from the stock balance on 1 item, to check: ITEM-A Cable Alpha" in text
+    assert "  5 items, 504 units" in text                                                  # the headline stays the portal's
+
+
+# ── one item ──────────────────────────────────────────────────────────────────
+
+@test("one item: by its code, a model code several items share lists them, an unknown code is one sentence")
+def _():
+    with data_root():
+        text = run(World(), "cb2")["text"]
+        assert text.startswith("ITEM  CB2: ITEM-B Charger Beta")
+        assert "Main store, end of Sun 15 Mar: 20 units; BHD 100.000 at selling price" in text
+        assert "latest receipt rate 2.500 a unit" in text
+        assert "Sold in the last 90 days: 45 units, in stock at the end of 45 of those days: 1.00 a day; cover 20 days" in text
+        assert "Order list: order 65 units (BHD 162.500 at cost)" in text
+        assert "MRN:T-26-01-2" in text and "MRN:T-25-06-1" in text
+        text = run(World(), "item-a")["text"]
+        assert text.startswith("ITEM  CA1: ITEM-A Cable Alpha") and "rank 1 (a fast mover)" in text
+        new = run(World(), "SN4")["text"]
+        assert "0.13* a day" in new and "the rate divides by 30" in new
+        many = run(World(), "item")["text"]
+        assert many.startswith("5 items answer to 'item': type one of these codes"), many[:80]
+        out = run(World(), "zz-9")
+        assert not out["ok"] and out["exit"] == 1 and "No accessory item has the code 'zz-9'" in out["text"]
+        disp = run(World(), "DS1")["text"]
+        assert "(a display item)" in disp and "Order list: display items are left out." in disp
+
+
+# ── the whole command ─────────────────────────────────────────────────────────
+
+@test("the command: files under exports/ only, its facts parse, the words are careful, no long digit run")
+def _():
+    with data_root() as root:
+        before = {p for p in root.rglob("*") if p.is_file()}
+        outs = [run(World(), *spec) for spec in ((), ("reorder",), ("ageing",), ("CB2",))]
+        after = {p for p in root.rglob("*") if p.is_file()} - before
+        folder = root / "exports" / "ops" / D.isoformat()
+        assert after == {folder / f"{stem}.{ext}" for stem in ("stock", "stock-reorder", "stock-ageing", "stock-item-cb2")
+                         for ext in ("txt", "json")}, sorted(str(p) for p in after)
+        for out in outs:
+            assert out["ok"] and out["files"] and all(Path(f).parent == folder for f in out["files"])
+            text = out["text"]
+            assert not NINE.search(text) and not LONG.search(text)
+            for line in text.splitlines():
+                fmt.careful(line)
+        facts = json.loads((folder / "stock.json").read_text(encoding="utf-8"))
+        assert facts["headline"]["units"] == "505" and facts["lead"]["days"] == 40 and facts["view"] == "headline"
+        assert facts["order"][0]["code"] == "CB2" and facts["order"][0]["qty"] == "65"
+        assert (folder / "stock.txt").read_text(encoding="utf-8").rstrip("\n") == outs[0]["text"]
+        assert outs[0]["flags"] == {"view": "headline", "order_items": 1, "lead_basis": "measured",
+                                    "goods_on_order": False}
+        reorder = outs[1]["text"]
+        assert "No purchase order is drafted." in reorder
+        assert "LEAD TIME  40 days: the median of the last 5 supplier invoices to their receipt" in reorder
+        assert "INV-4" in reorder and "1 of 2 models same quantity" in reorder and "INV-6" not in reorder
+
+
+@test("the reads: every statement is a read; a failed optional read costs its own part, named under the screen")
+def _():
+    for sql in (stock.SNAPSHOT_SQL, stock.PORTAL_WAREHOUSE_SQL, stock.PRICE_BOOK_SQL, stock.SUPPLIER_SQL,
+                stock.LANDED_SQL, metrics.STOCK_SQL):
+        db.check_sql(sql)
+    w = World()
+    with data_root():
+        run(w)
+    assert stock.LANDED_SQL in w.sql and w.sql.count(stock.SNAPSHOT_SQL) == 1          # purchase_costs: the session
+    w = World(fail={stock.SUPPLIER_SQL: RuntimeError("down"), stock.LANDED_SQL: RuntimeError("down")})
+    with data_root():
+        text = run(w)["text"]
+    assert "Not read this time: the supplier invoices (lead time) (RuntimeError)." in text
+    assert "Not read this time: the landed costs (purchase_costs) (RuntimeError)." in text
+    assert "The landed costs could not be read: every cost here is the latest receipt rate." in text
+    assert "lead time 50 days (config: too few supplier invoices matched to a receipt to measure it)" in text
+    assert "At cost BHD 445.000" in text          # 394 x 0.5 + 20 x 2.5 + 50 x 0.8 + 36 x 3 + 5 x 10, receipt rates
+    w = World(fail={stock.SNAPSHOT_SQL: RuntimeError("down")})
+    with data_root():
+        raises(RuntimeError, lambda: run(w))                                             # the snapshot is required
+    with data_root(drop=("stock.fast_movers", "stock.cover_kpi_days")):
+        text = run(World())["text"]
+    assert "(config 'stock.fast_movers' and 'stock.cover_kpi_days' not set in config.json: the plan's default is used)" \
+        in text
+
+
+@test("an empty ledger is one sentence; the module never imports a client or names the writer")
+def _():
+    with data_root():
+        out = run(World(book=Book()))
+    assert not out["ok"] and out["exit"] == 1 and "No stock ledger is loaded" in out["text"]
+    src = (ROOT / "scripts" / "ops" / "stock.py").read_text(encoding="utf-8")
+    for word in ("import psycopg", "import httpx", "supabase", "subprocess", "yq_load_go", ".table(", "insert", "upsert"):
+        assert word not in src, word
+
+
+# ── the real files (read-only; SKIP when they are not on this machine) ────────
+
+@test("real files (SKIP without a loaded folder): ledger = stock balance on every item, the ageing adds up, the list holds")
+def _():
+    base = REAL_ROOT / "business_data"
+    folders = sorted((p for p in base.glob("Focus ERP 20*") if p.is_dir()), key=lambda p: p.name) if base.is_dir() else []
+    book = ledger.find_file(folders[-1]) if folders else None
+    balance = next((p for p in folders[-1].iterdir() if p.is_file() and not p.name.startswith("~$")
+                    and "stock_balance" in p.name.lower()), None) if folders else None
+    cfg_file = base / "ops" / "config.json"
+    if book is None or balance is None or not cfg_file.is_file():
+        print("  SKIP: no loaded Focus folder with a stock ledger and a stock balance on this machine")
+        return
+    real_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    plan_defaults = tuple(k for k in config.OPTIONAL if k not in real_cfg)     # as on the owner's PC
+    from scripts import ingest                              # pandas, only here
+    with data_root(real_cfg, drop=plan_defaults):           # the cache goes to a temporary folder
+        t0 = time.perf_counter()
+        led = ledger.load(book)
+        snap = [{"item_name": r["item_name"], "warehouse_name": r["warehouse_name"], "net_qty": str(r["net_qty"] or 0),
+                 "value_bhd": str(r["total_value_bhd"] or 0), "as_of_date": str(r["as_of_date"] or "")}
+                for r in ingest.parse_stock_balance(ingest.read_grid(balance), balance.name)]
+        inp = stock.Inputs(rows=led.rows, ledger_note="(real files)", snapshot=snap, portal_warehouses=portal_rows(snap),
+                           landed={}, price_book=None, invoices=None, promises=None)
+        m = stock.build(inp, stock.settings())
+        t1 = time.perf_counter()
+        f = m.facts
+        chk = f["ledger_check"]
+        main_units = sum(Decimal(r["net_qty"]) for r in snap if ledger.is_main(r["warehouse_name"]))
+        assert not chk["differ"] and not chk["unknown_snapshot_items"], (len(chk["differ"]), chk["unknown_snapshot_items"][:3])
+        assert f["headline"]["units"] == main_units == f["ageing"]["main_units"]
+        assert f["ageing"]["units"] + f["ageing"]["display_units"] == main_units, "the ageing does not add up"
+        assert sum(b["units"] for b in f["bands"]) + f["ageing"]["display_units"] == main_units
+        assert all(x["qty"] > 0 and x["cover"] < f["trigger_days"] for x in f["order"])
+        text = "\n".join(stock.headline_lines(m, inp.ledger_note) + stock.reorder_lines(m, inp.ledger_note)
+                         + stock.ageing_lines(m, inp.ledger_note))
+        assert not NINE.search(text) and not LONG.search(text)
+        print(f"    {len(m.items)} accessory items, {chk['agree']} agree with the stock balance, "
+              f"{len(f['order'])} on the order list, ageing adds up; {t1 - t0:.1f}s")
+
+
+def main() -> int:
+    passed = failed = 0
+    for name, fn in TESTS:
+        try:
+            fn()
+            print(f"PASS  {name}")
+            passed += 1
+        except Exception:  # noqa: BLE001
+            print(f"FAIL  {name}")
+            traceback.print_exc()
+            failed += 1
+    paths.set_data_root(None)
+    config.use(None)
+    print(f"\n{passed} passed, {failed} failed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

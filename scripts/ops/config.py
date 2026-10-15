@@ -28,6 +28,10 @@ KEYS: dict[str, tuple[str, str]] = {
     "brief.bulk_invoice_bhd": ("number", "an invoice at or above this ex-VAT value is a bulk order"),
     "stock.lead_time_days": ("int", "days from supplier invoice to receipt"),
     "stock.display_items": ("list", "item codes left out of cover, ageing and dead stock (display, packaging)"),
+    "stock.fast_movers": ("int", "fast movers: how many best sellers by units, over the year of full months "
+                                 "before the month"),
+    "stock.cover_kpi_days": ("list", "KPI one's band of stock cover in days, [low, high]: an item is ordered when "
+                                     "its cover falls below lead time + low, up to lead time + high"),
     "items.bridge_exceptions": ("dict", "ledger item name -> the name the stock balance / day book has for "
                                         "it, where the longest-prefix rule needs help; a target that report "
                                         "does not have leaves the item in the unmapped block"),
@@ -42,9 +46,15 @@ KEYS: dict[str, tuple[str, str]] = {
 }
 
 _TYPES = {"number": (int, float), "int": (int,), "str": (str,), "list": (list,), "dict": (dict,)}
-# Keys with a default in code: an empty table or an empty text, never a threshold. A config.json without
-# them reads the default, so they are not "missing"; once present they must have their type.
+# Keys config.json may lack (added after it was first written): one list, OPTIONAL. Absent, they are not
+# "missing" (missing_keys() never names one, so the selftest stays clean); once present they must have their
+# type. Two ways to stand in for one:
+#  * DEFAULTS: a default in code, an empty table or an empty text, never a threshold; get() returns it.
+#  * every other OPTIONAL key: get() still stops with ConfigMissing, so no other command gets a silent value;
+#    the command that reads it carries the approved plan's default and says so on its screen (names only
+#    here, never a value).
 DEFAULTS: dict[str, object] = {"report.category_names": {}, "report.prepared_by": ""}
+OPTIONAL = frozenset({"stock.fast_movers", "stock.cover_kpi_days", *DEFAULTS})
 _cfg: dict | None = None
 
 
@@ -113,9 +123,10 @@ def kpi_step(month: str) -> Decimal | None:
 
 
 def missing_keys() -> list[str]:
-    """Keys of KEYS absent from config.json (selftest prints them); a key with a default never is."""
+    """Keys of KEYS absent from config.json, the OPTIONAL ones aside (selftest prints them); with no
+    config.json at all, every key but those."""
     try:
         cfg = load()
     except ConfigMissing:
-        return sorted(k for k in KEYS if k not in DEFAULTS)
-    return sorted(k for k in KEYS if k not in cfg and k not in DEFAULTS)
+        cfg = {}
+    return sorted(k for k in KEYS if k not in cfg and k not in OPTIONAL)

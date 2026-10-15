@@ -55,6 +55,7 @@ FIXTURE = {
     "stock.lead_time_days": 10, "stock.display_items": [], "items.bridge_exceptions": {},
     "items.not_accessories": [], "warehouses.main": "Main Store", "warehouses.aliases": {},
     "warehouses.not_counted": [], "report.category_names": {}, "report.prepared_by": "",
+    "stock.fast_movers": 3, "stock.cover_kpi_days": [10, 20],
 }
 
 
