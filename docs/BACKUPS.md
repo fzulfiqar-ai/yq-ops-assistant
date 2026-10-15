@@ -27,9 +27,9 @@ long password, stores it, shows it once in a Windows box for you to write down, 
 already stored. Or type `cmdkey /generic:YQ_BACKUP_PASSWORD /user:yq /pass` in a Command Prompt and enter your own (it shows
 nothing as you type). Keep a copy of the password away from this PC: without it no archive can be opened on another PC.
 
-The daily backup (next section) is started by `scripts/yq_nightly.py`, which looks for the password in the same places
-and hands it to the backup job alone, in that job's own environment (never on a command line, never written anywhere).
-Nothing needs to be set with `setx`.
+The daily backup (next section) is started by `scripts/yq_nightly.py`, which looks for the password in the same places.
+The password goes only to the backup job, in that job's own environment, and from there to 7-Zip; it never goes to a log,
+a file or the screen. Nothing needs to be set with `setx`.
 
 ## The daily backup (release R7d, audit SEC-19)
 
@@ -40,18 +40,24 @@ plain copy, and keeps the newest archive of each of the last 14 days and of each
 
 It is started by the starter, `python -m scripts.yq_nightly`, run from the project folder:
 
-1. From a code worktree (`.claude/worktrees`) it refuses and ends with exit code 3.
-2. It reads the backup password from Credential Manager (stored once, above) and looks for 7-Zip. Without either it does
+1. It refuses, with exit code 3, when it is started from a code worktree (`.claude/worktrees`) or with a Python that a
+   scheduled task would lose: a virtual environment, or the Microsoft Store Python (its folder changes with each update).
+2. It removes the plain work folders (`work_<date>_<time>`) that an earlier run of the backup left in the backup folder
+   when it did not finish (a failure, the PC going to sleep, a closed window). A folder written to in the last 15 minutes
+   is left in place; nothing named otherwise, and no link, is ever touched.
+3. It reads the backup password from Credential Manager (stored once, above) and looks for 7-Zip. Without either it does
    not start the backup, so no unencrypted copy is ever made: it adds a line to the log and ends with exit code 2, which
    Task Scheduler shows as a failed run.
-3. It starts `python -X utf8 -m scripts.nightly_backup` in the project folder, with the password in that program's own
-   environment only, shows its output as it comes and ends with its exit code.
-4. It adds one line to `nightly.log` (below).
+4. It starts `python -X utf8 -m scripts.nightly_backup` in the project folder, with the password in that program's own
+   environment only, shows its output as it comes and ends with its exit code. A backup still running after 50 minutes
+   is stopped, with the 7-Zip it started (the task's own limit is one hour).
+5. It removes the plain work folder of its own run, if the run did not finish.
+6. It adds one line to `nightly.log` (below).
 
 `python -m scripts.yq_nightly --dry-run` runs the backup's own dry run instead: where the archive would go, whether it
-would be encrypted and what would be pruned. It writes nothing and logs no line. (Started on its own without the password
-or 7-Zip, `scripts/nightly_backup.py` writes a `.zip` with a warning file, `UNENCRYPTED-BACKUP-WARNING.txt`, next to it
-and ends with exit code 2; the starter never starts it that way.)
+would be encrypted and what would be pruned, and which leftover work folders would be removed. It writes nothing and logs
+no line. (Started on its own without the password or 7-Zip, `scripts/nightly_backup.py` writes a `.zip` with a warning
+file, `UNENCRYPTED-BACKUP-WARNING.txt`, next to it and ends with exit code 2; the starter never starts it that way.)
 
 ### The scheduled task `YQ Daily Backup`
 
@@ -73,14 +79,16 @@ To set it up once, in a PowerShell window in the project folder, with 7-Zip inst
 ### The last runs
 
 - `nightly.log` in `%LOCALAPPDATA%\yq-backups` holds one line per run: when it started and ended, the exit code, and the
-  archive's name with the place the password came from (the place, never the password), or why nothing was made. The
-  newest lines: `Get-Content $env:LOCALAPPDATA\yq-backups\nightly.log -Tail 5` in PowerShell.
+  archive's name with the place the password came from (the place, never the password), or why nothing was made; and the
+  names (only) of any work folders it removed or left in place. The newest lines:
+  `Get-Content $env:LOCALAPPDATA\yq-backups\nightly.log -Tail 5` in PowerShell.
 - `schtasks /Query /TN "YQ Daily Backup" /V /FO LIST` shows the last run time, its result and the next run time.
 - Task Scheduler (`taskschd.msc`), Task Scheduler Library, `YQ Daily Backup`: the History tab lists the runs once
   "Enable All Tasks History" is on (in the Actions pane on the right).
 
-Exit codes: 0 done and encrypted; 1 failed (the log line says why); 2 no encrypted backup was made (the password or 7-Zip
-is missing; the log line says which); 3 started from a code worktree.
+Exit codes: 0 done and encrypted; 1 failed, or stopped after 50 minutes (the log line says why); 2 no encrypted backup was
+made (the password or 7-Zip is missing; the log line says which); 3 refused: started from a code worktree, or with a
+virtual environment or the Microsoft Store Python.
 
 ## The backup before every load
 

@@ -316,7 +316,7 @@ def _():
     assert selftest.scan_text("value " + "76543" + ".210", [])
     for fine in ("999.500", "1,234.50", "version 3.1.5", "0.001", "row 1234 of 5678", "12,345 lines"):
         assert not selftest.scan_text(fine, []), fine
-    assert all(p.endswith(("/", ".py", ".md", ".yml", ".txt", "-", "_", ".gitignore", ".env.example"))
+    assert all(p.endswith(("/", ".py", ".md", ".yml", ".txt", ".cmd", "-", "_", ".gitignore", ".env.example"))
                for p in selftest.ALLOWED_PATHS)
     assert not any(p.startswith(("web", "app/")) for p in selftest.ALLOWED_PATHS)
 
