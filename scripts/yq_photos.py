@@ -10,12 +10,15 @@
         (%LOCALAPPDATA%\\yq-backups\\photos\\work_<stamp>), hashed (sha256) and compared with the sha256 the
         database recorded at capture, where it recorded one. manifest.json lists every object (bucket, path,
         size, sha256, db_sha256, match). The folder is packed with the backup password (7-Zip AES-256, file
-        names hidden: the settings of scripts/nightly_backup.py) into <date>_photos.7z, the archive is read
-        back (7-Zip's own test, file count compared) and the work folder is deleted. A row of
-        business_data/ops/drills.jsonl records the run (counts only). Refused without the backup password or
-        7-Zip, in a folder OneDrive syncs, and when the drive is too full.
+        names hidden: the settings of scripts/nightly_backup.py) into <date>_<HHMM>_photos.7z (a run never
+        replaces an earlier archive: the same minute again becomes _2, _3), the archive is read back (7-Zip's
+        own test, file count compared) and the work folder is deleted. A row of business_data/ops/drills.jsonl
+        records the run (counts only). Refused without the backup password or 7-Zip, in a folder OneDrive
+        syncs, and when the drive is too full.
         Exit 0: all clean. 1: the archive was made but a photo is missing in storage, differs from the sha256
-        in its database row or could not be downloaded; they are listed. 2: nothing was archived.
+        in its database row or could not be downloaded, or its name was one the Storage client would turn into
+        another address (never requested); they are listed. 2: nothing was archived, also when storage refuses
+        the key or keeps failing (ABORT_AFTER downloads in a row), or when no photo at all could be downloaded.
 
     python -m scripts.yq_photos verify <archive> [--sample 5]
         The restore drill for an archive: it is unpacked into a work folder, every file is checked against its
@@ -38,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,7 +57,8 @@ BUCKETS = ("finds", "field-notes")           # the two private photo buckets (ap
 MANIFEST = "manifest.json"
 FILES_DIR = "files"
 PLACEHOLDER = ".emptyFolderPlaceholder"      # what Supabase leaves in an "empty folder": not a photo
-RETRIES = 3
+RETRIES = 3                                  # tries of one object (a failure is retried, a missing object is not)
+ABORT_AFTER = 5                              # objects in a row that fail all their tries: storage or the network is down
 MARGIN = 64 * 1024 * 1024                    # free space wanted on top of two copies of the photos
 IMAGE_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".gif")
 SHOWN = 50                                   # problems printed; all of them are in the manifest
@@ -71,6 +76,15 @@ class ObjectMissing(Exception):
 
 class DownloadFailed(Exception):
     """An object could not be read, even after the retries."""
+
+
+class SourceRefused(PhotoError):
+    """Storage will not serve this program at all (the key is refused with 401 / 403, or the client could not be
+    built): trying the next object cannot help, the run stops."""
+
+
+class UnsafeKey(Exception):
+    """An object name the Storage client would turn into another address (or object) than its own: never requested."""
 
 
 # ── small helpers (pure) ──────────────────────────────────────────────────────
@@ -101,9 +115,23 @@ def _mask(text) -> str:
     return re.sub(r"(?i)\b(?:postgres(?:ql)?|https?)://\S+", "<address>", " ".join(str(text).split()))
 
 
-def _clean(exc: BaseException) -> str:
-    """An error for the owner's screen: class name and a short text with any address masked."""
-    return f"{type(exc).__name__}: {_mask(exc)}"[:160]
+def _secret_forms(secret) -> list[str]:
+    """The ways a secret can stand in an error text: as it is, as a list or a string shows it (backslashes doubled,
+    a newline written \\n) and as JSON shows it. Longest first."""
+    if not secret:
+        return []
+    return sorted({f for f in (secret, repr(secret)[1:-1], json.dumps(secret)[1:-1]) if f}, key=len, reverse=True)
+
+
+def _clean(exc: BaseException, secret=None) -> str:
+    """An error for the owner's screen. The secret is masked FIRST, on the raw text: squeezing the spaces or cutting
+    at 160 characters before it could leave a piece of it (or a spelling that no longer matches). Then any address is
+    masked, the text made one line and cut. A PhotoError is already a sentence; any other error gets its class name."""
+    text = str(exc)
+    for form in _secret_forms(secret):
+        text = text.replace(form, "<password>")
+    prefix = "" if isinstance(exc, PhotoError) else f"{type(exc).__name__}: "
+    return (prefix + _mask(text))[:160]
 
 
 _PLAIN_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
@@ -116,20 +144,75 @@ def _plain(segment: str) -> bool:
             and segment.split(".")[0].lower() not in _RESERVED)
 
 
+def _clashes(rel: str, used: set[str]) -> bool:
+    """True when `rel` cannot be a file beside the names already given out: it is one of them (letter case aside), it
+    is the folder of one (a name cannot be a file and a folder, as with the keys 'x' and 'x/y.png'), or it lies in a
+    folder that is already a file. `used` holds files as 'a/b' and folders as 'a/' (lower-cased)."""
+    low = rel.lower()
+    if low in used or low + "/" in used:
+        return True
+    pieces = low.split("/")
+    return any("/".join(pieces[:i]) in used for i in range(1, len(pieces)))
+
+
+def _claim(rel: str, used: set[str]) -> None:
+    low = rel.lower()
+    used.add(low)
+    pieces = low.split("/")
+    for i in range(1, len(pieces)):
+        used.add("/".join(pieces[:i]) + "/")
+
+
 def local_name(bucket: str, path: str, used: set[str]) -> str:
     """Where an object goes inside the archive: files/<bucket>/<path> when every part of that is a plain
     name any system accepts (letters, digits, '_', '-', '.'), else files/_odd/<hash of the key><extension>.
-    Two keys that differ only in letter case would be one file on Windows: the second gets the hashed name.
-    `used` (lower-cased names so far) is updated. The real key is always in the manifest."""
+    A key that would clash with another (the same file in another letter case, or a file that is also the folder of
+    another key: 'market/x' and 'market/x/y.png') gets the hashed name too, so no order of keys can fail a write.
+    `used` (lower-cased names and folders so far) is updated. The real key is always in the manifest."""
     parts = [bucket, *str(path).split("/")]
     rel = "/".join([FILES_DIR, *parts])
-    if not all(_plain(p) for p in parts) or len(rel) > MAX_LOCAL or rel.lower() in used:
+    if not all(_plain(p) for p in parts) or len(rel) > MAX_LOCAL or _clashes(rel, used):
         ext = Path(str(path)).suffix
         ext = ext.lower() if re.fullmatch(r"\.[A-Za-z0-9]{1,8}", ext or "") else ""
         digest = hashlib.sha1(f"{bucket}/{path}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
-        rel = f"{FILES_DIR}/_odd/{digest}{ext}"
-    used.add(rel.lower())
+        rel, n = f"{FILES_DIR}/_odd/{digest}{ext}", 2
+        while _clashes(rel, used):                                    # the same key twice: never overwrite a file
+            rel, n = f"{FILES_DIR}/_odd/{digest}-{n}{ext}", n + 1
+    _claim(rel, used)
     return rel
+
+
+_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def unsafe_key(bucket: str, path: str) -> str | None:
+    """Why an object must not be requested, or None. The Storage client writes the name into the address as if it were
+    part of a URL: it drops a '?' or '#' tail, decodes %XX, resolves '.', '..' and '//', reads a leading 'scheme:',
+    strips a leading space and the tab and new line, so such a name asks for ANOTHER object, or sends the service key to
+    another path of the same host ('../../functions/v1/x'). Measured against the pinned client (the test walks a long
+    list of names through it); everything else (spaces, accents, a lone '%', 'a..b') arrives exactly as written."""
+    if bucket not in BUCKETS:
+        return "not one of the photo buckets"
+    key = str(path)
+    if not key:
+        return "empty name"
+    if key.startswith("/"):
+        return "starts with '/'"
+    if key.startswith(" "):
+        return "starts with a space"
+    if any(unicodedata.category(c) == "Cc" for c in key):
+        return "has a control character"
+    for char, words in (("?", "has a '?'"), ("#", "has a '#'"), ("\\", "has a backslash")):
+        if char in key:
+            return words
+    if _ESCAPE.search(key):
+        return "has a '%XX' escape (the client would decode it)"
+    parts = key.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return "has an empty, '.' or '..' part"
+    if ":" in parts[0]:
+        return "has ':' in its first part (the client would read a scheme)"
+    return None
 
 
 def _not_found(exc: BaseException) -> bool:
@@ -148,6 +231,21 @@ def _reason(exc: BaseException) -> str:
     if message:
         return f"storage said {getattr(exc, 'status', '?')}: {_mask(message)[:60]}"
     return type(exc).__name__
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """The HTTP status behind a failed Storage call. The SDK raises StorageApiError (with .status) when the answer's body
+    has the fields it expects; for any other body (the API gateway's, a plain page) it fails with another error from
+    inside its own handler, so the chain of causes is walked for the error that carries the response."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        for value in (getattr(exc, "status", None), getattr(getattr(exc, "response", None), "status_code", None)):
+            code = _int(value)
+            if code:
+                return code
+        exc = exc.__cause__ or exc.__context__
+    return None
 
 
 # ── what the database and storage hold ────────────────────────────────────────
@@ -257,23 +355,36 @@ class SupabaseSource:
         return {"objects": objects, "refs": refs, "tables": tables, "notes": notes + more}
 
     def download(self, bucket: str, path: str) -> bytes:
+        """One object's bytes. Raises UnsafeKey (a name the client would send elsewhere: nothing is requested),
+        SourceRefused (the client cannot be built, or storage answers 401 / 403: the run stops), ObjectMissing
+        (storage says there is no such object) or DownloadFailed (anything else)."""
+        why = unsafe_key(bucket, path)
+        if why:
+            raise UnsafeKey(why)
         try:
             if self._client is None:
                 self._client = self._factory()
+        except Exception as exc:  # noqa: BLE001  (a missing key or address, a library that will not start)
+            raise SourceRefused(f"the storage client could not be built ({_clean(exc)})") from None
+        try:
             return bytes(self._client.storage.from_(bucket).download(path))
         except Exception as exc:  # noqa: BLE001
             if _not_found(exc):
                 raise ObjectMissing("object not found") from None
+            status = _http_status(exc)
+            if status in (401, 403):
+                raise SourceRefused(f"storage refused the key (HTTP {status})") from None
             raise DownloadFailed(_reason(exc)) from None
 
 
 def fetch(source, bucket: str, path: str, tries: int = RETRIES, sleep=time.sleep) -> bytes:
-    """One object, retried on a failure. A missing object is not retried: it is not there."""
+    """One object, retried on a failure. A missing object, an unsafe name and a refusal are not retried: trying again
+    cannot change the answer."""
     last = "download failed"
     for attempt in range(1, tries + 1):
         try:
             return source.download(bucket, path)
-        except ObjectMissing:
+        except (ObjectMissing, UnsafeKey, PhotoError):
             raise
         except DownloadFailed as exc:
             last = str(exc)
@@ -370,6 +481,15 @@ def space_refusal(dest: Path, total_bytes: int) -> str | None:
         return (f"not enough free space on the drive of {dest}: about {fmt_bytes(need)} are needed, "
                 f"{fmt_bytes(free)} are free")
     return None
+
+
+def free_name(dest: Path, stem: str) -> Path:
+    """<dest>/<stem>.7z, or <stem>_2.7z, <stem>_3.7z ... when that exists: a run never replaces an earlier archive,
+    whatever it holds (a run that could read nothing must not overwrite a good one made a minute before)."""
+    path, n = dest / f"{stem}.7z", 2
+    while path.exists():
+        path, n = dest / f"{stem}_{n}.7z", n + 1
+    return path
 
 
 def pack(folder: Path, archive: Path, password: str, exe: str) -> str:
@@ -470,8 +590,7 @@ def _apply(source, inv: dict, dest: Path, password: str, pw_from: str, exe: str,
         return 2
     stamp = now.strftime("%Y%m%d_%H%M%S")
     work, staging = dest / f"work_{stamp}", dest / f"work_{stamp}.7z"
-    final = dest / f"{now:%Y-%m-%d}_{KIND}.7z"
-    row = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": KIND, "archive": final.name,
+    row = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": KIND, "archive": None,
            "password_from": pw_from, "objects": 0, "bytes": 0, "rows": sum(t["rows"] for t in inv["tables"].values()),
            "checked": 0, "no_checksum": 0, "mismatches": 0, "missing": 0, "errors": 0, "orphans": len(inv["orphans"])}
     entries: list[dict] = []
@@ -484,20 +603,34 @@ def _apply(source, inv: dict, dest: Path, password: str, pw_from: str, exe: str,
         used: set[str] = set()
         total = inv["total_objects"]
         say(f"Downloading {total:,} object(s) into {work} ...")
+        failed_in_a_row = 0
         for n, obj in enumerate(inv["objects"], 1):
             bucket, path = obj["bucket"], obj["path"]
             refs = inv["by_key"].get((bucket, path), [])
             tags = [f"{r['source']}#{r['id']}" for r in refs]
             where = {"bucket": bucket, "path": path, "source": refs[0]["source"] if refs else None,
                      "id": refs[0]["id"] if refs else None}
+            refused = unsafe_key(bucket, path)             # checked here too: no source may be trusted with a name like that
+            if refused:
+                problems.append({"type": "error", **where, "detail": f"object name refused: {refused}"})
+                continue
             try:
                 data = fetch(source, bucket, path, sleep=sleep)
             except ObjectMissing:
+                failed_in_a_row = 0                         # storage answered: the connection and the key are fine
                 problems.append({"type": "missing", **where, "detail": "storage lists the object but cannot serve it"})
+                continue
+            except UnsafeKey as exc:
+                problems.append({"type": "error", **where, "detail": f"object name refused: {exc}"})
                 continue
             except DownloadFailed as exc:
                 problems.append({"type": "error", **where, "detail": f"could not be downloaded ({exc})"})
+                failed_in_a_row += 1
+                if failed_in_a_row >= ABORT_AFTER:
+                    raise PhotoError(f"{failed_in_a_row} downloads in a row failed ({exc}): storage or the network is "
+                                     "not answering") from None
                 continue
+            failed_in_a_row = 0
             sha = hashlib.sha256(data).hexdigest()
             dbs = sorted({d for d in (_norm_sha(r.get("sha256")) for r in refs) if d})
             match = (all(d == sha for d in dbs)) if dbs else None
@@ -517,6 +650,10 @@ def _apply(source, inv: dict, dest: Path, password: str, pw_from: str, exe: str,
                                  "detail": f"{len(data)} bytes downloaded, storage lists {obj['size']}"})
             if n % 250 == 0:
                 say(f"  {n:,} of {total:,}")
+        if total and not entries:                           # a manifest and no photo is no archive of these photos
+            by_type = {kind: sum(1 for p in problems if p["type"] == kind) for kind in ("missing", "error")}
+            raise PhotoError(f"none of the {total} listed object(s) could be downloaded ({by_type['missing']} not in "
+                             f"storage, {by_type['error']} failed or refused)")
         row.update(objects=len(entries), checked=sum(1 for e in entries if e["match"] is True),
                    no_checksum=sum(1 for e in entries if e["match"] is None),
                    mismatches=sum(1 for p in problems if p["type"] == "mismatch"),
@@ -529,10 +666,12 @@ def _apply(source, inv: dict, dest: Path, password: str, pw_from: str, exe: str,
         (work / MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
         say(f"Packing {len(entries):,} photo(s) and the manifest, encrypted ...")
         said = pack(work, staging, password, exe)
+        final = free_name(dest, f"{now:%Y-%m-%d_%H%M}_{KIND}")      # never an earlier archive's name
         os.replace(staging, final)
+        row["archive"] = final.name
         say(f"Archive: {final} ({fmt_bytes(final.stat().st_size)}, AES-256, file names hidden); read back whole ({said}).")
     except (PhotoError, OSError, subprocess.SubprocessError) as exc:
-        why = _clean(exc).replace(password, "<password>")           # 7-Zip's own errors can quote its command line
+        why = _clean(exc, password)                                 # 7-Zip's own errors can quote its command line
     finally:
         shutil.rmtree(work, ignore_errors=True)
         try:
@@ -666,20 +805,27 @@ def verify(path: Path, sample: int = 5, say=print, rng=None, now: datetime | Non
         manifest = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
         say(f"2. Unpacked into {work}")
         faults = check_folder(root, manifest, sample, rng or random.Random(), say)
-        known = manifest.get("problems") or []
-        if known:
-            say(f"5. Note: the manifest records {len(known)} problem(s) found when the archive was made "
+        known = [p for p in (manifest.get("problems") or []) if isinstance(p, dict)]
+        errors = [p for p in known if p.get("type") == "error"]
+        if errors:                                          # photos the archive was made without: it is not a whole copy
+            say(f"5. The manifest records {len(errors)} download error(s) made when the archive was built: those photos "
+                "are not in it (or not whole). Make a new archive once storage answers.")
+            faults += len(errors)
+        if len(known) > len(errors):
+            say(f"5. Note: the manifest records {len(known) - len(errors)} problem(s) found when the archive was made "
                 "(a photo missing in storage, or differing from its database sha256).")
     except (yb.DrillError, OSError, ValueError, KeyError, AttributeError) as exc:
-        say(f"VERIFY FAILED: {_clean(exc)}")
+        say(f"VERIFY FAILED: {_clean(exc, password)}")
         return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    gone = "The unpacked copy has been deleted." if not work.exists() else f"WARNING: {work} could not be deleted."
+        if work.exists():                                   # said on every way out, an early stop included
+            say(f"WARNING: the unpacked copy {work} could not be deleted. It holds UNENCRYPTED photos: delete it.")
+    gone = " The unpacked copy has been deleted." if not work.exists() else ""
     if faults:
-        say(f"VERIFY FAILED: {faults} fault(s). {gone}")
+        say(f"VERIFY FAILED: {faults} fault(s).{gone}")
         return 1
-    say(f"VERIFY PASSED in {round(time.monotonic() - t0, 1)} s. {gone}")
+    say(f"VERIFY PASSED in {round(time.monotonic() - t0, 1)} s.{gone}")
     return 0
 
 
@@ -696,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--out", help="the folder for the archive and the work folder "
                                  "(default: %%LOCALAPPDATA%%\\yq-backups\\photos)")
     v = sub.add_parser("verify", help="unpack an archive, check every file against its manifest, open some photos")
-    v.add_argument("archive", help="the <date>_photos.7z to check")
+    v.add_argument("archive", help="the <date>_<HHMM>_photos.7z to check")
     v.add_argument("--sample", type=int, default=5, help="photos to open with Pillow (default 5)")
     args = ap.parse_args(argv)
     if args.cmd == "archive":
