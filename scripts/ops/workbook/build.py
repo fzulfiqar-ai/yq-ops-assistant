@@ -27,13 +27,11 @@ placeholders until the approval step of a later phase writes them; the file name
 from __future__ import annotations
 
 import json
-import re
-from datetime import date
+from datetime import date, timedelta
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
 from scripts.ops import config, fmt, paths, status
-from scripts.ops.workbook import golden, model as mdl, sheets_core
-from scripts.ops.workbook.book import a1
+from scripts.ops.workbook import book as bk, formula as fx, golden, model as mdl, sheets_core
 
 COMMAND = "report"
 REPORT_NAME = "YQ Bahrain - Mobile Accessories Sales Report - {label}"
@@ -41,7 +39,7 @@ BASIS_SQL = "v.division NOT IN ('SIM', 'Devices')"
 LINES_SQL = (
     "SELECT v.line_id, v.invoice_no, v.line_no, v.sale_date::text AS sale_date, v.customer_account, "
     "v.customer_name, v.item_name, v.quantity, v.rate_bhd, v.gross_bhd, v.net_bhd, v.salesman_raw, "
-    "v.salesman_resolved, v.narration, v.category_name FROM v_sales v "
+    "v.salesman_resolved, v.narration, v.category_name, v.discount_bhd, v.vat_amount_bhd FROM v_sales v "
     f"WHERE v.sale_date BETWEEN $1::date AND $2::date AND {BASIS_SQL} ORDER BY v.sale_date, v.invoice_no, v.line_no"
 )
 # the same months added up on their own: the Notes sheet's check that no line was lost on the way
@@ -54,7 +52,6 @@ TOTALS_SQL = (
 ANCHOR_SQL = ("SELECT (SELECT MAX(sale_date) FROM v_sales)::text AS focus_to, "
               "(SELECT MAX(loaded_at) FROM v_agent_data_trust WHERE source = 'focus_upload')::text AS uploaded_at")
 UPCOMING_SQL = "SELECT model_code, category FROM shop_upcoming_items WHERE category IS NOT NULL"
-CONTROL_LABELS = ("Day book lines", "Quantity, all lines", "Gross, including VAT (BHD)", "Net sales, excluding VAT (BHD)")
 
 
 class ReportInput(ValueError):
@@ -123,13 +120,17 @@ def ready(month: str, data_to: date | None, loaded_at) -> dict:
 
 
 def last_load_time(state: dict, anchors: dict):
+    """(time, where it comes from): the later of the last /yq-load on record (state.json) and the newest
+    successful upload the database records (a Data-page upload is a load too)."""
     last = state.get("last_load") if isinstance(state.get("last_load"), dict) else {}
-    when = last.get("finished_at") if last else None
-    if when:
-        return when, "the last load on record"
+    found = []
+    if last and last.get("finished_at"):
+        found.append((str(last["finished_at"]), "as recorded by /yq-load"))
     if anchors.get("uploaded_at"):
-        return anchors["uploaded_at"], "the newest successful upload in the database"
-    return None, "no load on record"
+        found.append((str(anchors["uploaded_at"]), "the newest successful upload in the database"))
+    if not found:
+        return None, "none on record"
+    return max(found, key=lambda x: (fmt.as_date(x[0]) or date.min, x[0]))
 
 
 # ── the build ──────────────────────────────────────────────────────────────────────────────────
@@ -140,27 +141,25 @@ def target_path(period: mdl.Period, draft: bool):
     for k in range(1, 100):
         name = base + (f" ({k})" if k > 1 else "") + ".xlsx"
         p = folder / name
-        if not p.exists():
+        if not bk.exists(p):
             return p
     raise FileExistsError(f"ninety-nine copies of {base} already exist in {folder}")
 
 
 def control_values(book) -> dict:
-    """The Notes sheet's checks, as evaluated: every difference must be nil."""
-    notes = book.get("Notes")
-    out: dict[str, list] = {"export": [], "sheets": [], "unmapped": [], "db": [], "narration": None}
-    for (r, c), cell in notes.cells.items():
-        if cell.kind == "s" and cell.value in CONTROL_LABELS:
-            out["export"].append((cell.value, notes.cells[(r, 6)].value))
-        if cell.kind == "s" and cell.value in ("Salesmen", "Categories", "Products", "Customers", "Daily") and c == 1:
-            out["sheets"].append((cell.value, notes.cells[(r, 2)].value, notes.cells[(r, 3)].value))
-        if cell.kind == "s" and cell.value == "Day book lines with no category":
-            out["unmapped"] = [notes.cells[(r, 2)].value, notes.cells[(r, 3)].value]
-        if cell.kind == "s" and cell.value == "Day book (Data sheet) less v_sales":
-            out["db"] = [notes.cells[(r, 2)].value, notes.cells[(r, 3)].value]
-        if cell.kind == "s" and cell.value == "Narrations on the Data sheet with an ID number":
-            out["narration"] = notes.cells[(r, 4)].value
-    return out
+    """The Notes sheet's checks as evaluated (every difference must be nil), read where the sheet put them."""
+    notes, where = book.get("Notes"), book.controls
+
+    def at(ref: str):
+        r, c = fx.parse_cell(ref)
+        cell = notes.cells.get((r, c))
+        return None if cell is None else cell.value
+
+    return {"export": [(label, at(ref)) for label, ref in where.get("export", [])],
+            "sheets": [(label, at(a), at(b)) for label, a, b in where.get("sheets", [])],
+            "unmapped": [at(ref) for ref in where.get("unmapped", [])],
+            "db": [at(ref) for ref in where.get("db", [])],
+            "narration": at(where["narration"]) if where.get("narration") else None}
 
 
 def build_month(month: str, source: Source, *, prepared_on: date, prepared_by: str = "",
@@ -175,6 +174,9 @@ def build_month(month: str, source: Source, *, prepared_on: date, prepared_by: s
     except Exception as exc:  # noqa: BLE001  (without the cards an unknown code reads Other; the screen says so)
         upcoming, upcoming_note = {}, f"the Upcoming cards could not be read ({type(exc).__name__})"
     model = mdl.build(period, rows, category_names=category_names, upcoming=upcoming)
+    if not model.products or not model.reps:
+        raise ReportInput(f"No accessory sales are loaded for {period.prev_long} or {period.long}: there is nothing "
+                          "to report.")
     if upcoming_note:
         model.warnings.append(upcoming_note)
     facts = sheets_core.Facts(totals=totals, prepared_on=prepared_on, prepared_by=prepared_by)
@@ -185,12 +187,8 @@ def build_month(month: str, source: Source, *, prepared_on: date, prepared_by: s
     return book, model, facts
 
 
-def _money(x) -> str:
-    return fmt.bhd(x, 2)
-
-
-def report_text(model: mdl.Model, book, path, checks: dict, ready_why: str, data_to: date | None,
-                loaded: str, compare_lines: list[str] | None) -> tuple[list[str], bool]:
+def report_text(model: mdl.Model, book, path, checks: dict, data_to: date | None, loaded: str,
+                compare_lines: list[str] | None) -> tuple[list[str], bool]:
     p = model.period
     lines: list[str] = []
     ok = True
@@ -202,7 +200,7 @@ def report_text(model: mdl.Model, book, path, checks: dict, ready_why: str, data
     lines.append(f"File: {path}")
     lines.append("Sheets: " + ", ".join(ws.name for ws in book.sheets) + ".")
     lines.append(f"Lines {len(model.lines):,} ({p.prev_short} {prev_n:,}, {p.short} {cur_n:,}); net sales ex-VAT "
-                 f"{p.prev_short} {_money(prev_net)}, {p.short} {_money(cur_net)} BHD.")
+                 f"{p.prev_short} {fmt.bhd(prev_net)}, {p.short} {fmt.bhd(cur_net)} BHD.")
     bad = [label for label, diff in checks["export"] if diff not in (0, 0.0)]
     bad += [f"{name} sheet" for name, d1, d2 in checks["sheets"] if d1 not in (0, 0.0) or d2 not in (0, 0.0)]
     bad += ["Data sheet against v_sales"] if any(d not in (0, 0.0) for d in checks["db"]) else []
@@ -231,7 +229,7 @@ def report_text(model: mdl.Model, book, path, checks: dict, ready_why: str, data
     return lines, ok
 
 
-def run(args) -> dict:
+def run(args, source: Source | None = None) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
     try:
         kind, month = parse_spec(getattr(args, "spec", None))
@@ -240,7 +238,7 @@ def run(args) -> dict:
         return dict(out, ok=False, text=str(exc), exit=1)
     if kind == "week":
         return dict(out, ok=False, text="The weekly report (/yq-week) arrives in a later phase.", exit=1)
-    source = Source()
+    source = source or Source()
     anchors = source.anchors()
     data_to = fmt.as_date(anchors.get("focus_to"))
     if data_to is None:
@@ -251,13 +249,20 @@ def run(args) -> dict:
     loaded_at, loaded_from = last_load_time(state, anchors)
     gate = ready(month, data_to, loaded_at)
     if not gate["ready"]:
-        text = (f"The {mdl.Period.month(month).long} report is not built: the month is not whole yet. "
-                f"{gate['why'][0].upper() + gate['why'][1:]} (load time from {loaded_from}).")
+        nxt = gate["last"] + timedelta(days=1)
+        reach = gate["last"] - timedelta(days=2)
+        text = (f"The {mdl.Period.month(month).long} report is not built: the month is not whole yet. It needs a load "
+                f"on or after {fmt.day_long(nxt)} and Focus data to {fmt.day_long(reach)} or later; the last load "
+                f"({loaded_from}) was on {fmt.day_long(gate['last_upload']) if gate['last_upload'] else 'no day on record'}"
+                f" and the data reaches {fmt.day_long(gate['focus_as_of'])}.")
         return dict(out, ok=False, text=text, flags={"ready": False, "month": month}, exit=2)
     prepared_by = args.prepared_by if getattr(args, "prepared_by", None) is not None else config.get("report.prepared_by")
     names = config.get("report.category_names")
-    book, model, _facts = build_month(month, source, prepared_on=prepared_on, prepared_by=prepared_by,
-                                      category_names=names)
+    try:
+        book, model, _facts = build_month(month, source, prepared_on=prepared_on, prepared_by=prepared_by,
+                                          category_names=names)
+    except ReportInput as exc:
+        return dict(out, ok=False, text=str(exc), flags={"ready": True, "month": month}, exit=2)
     path = target_path(model.period, draft=True)
     book.save(path)
     checks = control_values(book)
@@ -269,7 +274,7 @@ def run(args) -> dict:
         compare_lines = golden.summary(res)
         flags["golden_ok"] = res.ok
     loaded = f"loaded {str(loaded_at)[:16].replace('T', ' ')}" if loaded_at else "no load time on record"
-    text_lines, ok = report_text(model, book, path, checks, gate["why"], data_to, loaded, compare_lines)
+    text_lines, ok = report_text(model, book, path, checks, data_to, loaded, compare_lines)
     record = {"month": month, "data_date": data_to.isoformat(), "file": str(path), "built_on": prepared_on.isoformat(),
               "draft": True, "checks_ok": ok, "lines": len(model.lines),
               "golden_ok": flags.get("golden_ok")}
@@ -282,11 +287,3 @@ def run(args) -> dict:
     out["files"].insert(0, str(path))
     return dict(out, ok=ok, text="\n".join(text_lines), flags=flags, exit=0 if ok else 2)
 
-
-def safe_cell(ref: str) -> str:
-    """Normalise a typed cell reference (for messages)."""
-    m = re.fullmatch(r"\$?([A-Za-z]{1,3})\$?(\d+)", ref.strip())
-    return f"{m.group(1).upper()}{m.group(2)}" if m else ref
-
-
-__all__ = ["add_arguments", "run", "build_month", "Source", "default_month", "parse_spec", "a1"]

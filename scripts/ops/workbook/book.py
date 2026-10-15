@@ -125,6 +125,7 @@ class Book:
         self.names: dict[str, str] = {}               # name -> 'Sheet!$A$1:$A$9'
         self.properties: dict = {}
         self.commentary: dict[str, list[str]] = {}    # sheet -> the cells that hold written words
+        self.controls: dict = {}                      # the Notes sheet's checks: where they are
         self._by_name: dict[str, Sheet] = {}
         self._dense: dict[tuple[str, int], list] = {}
         self._frontier: dict[tuple[str, int], int] = {}
@@ -233,16 +234,16 @@ class Book:
         """Write the workbook to `target` through a temporary file in the same folder. A target that
         exists is never replaced: the caller picks a new name."""
         target = Path(target)
-        if target.exists():
+        if exists(target):
             raise FileExistsError(f"{target} exists: a report is never overwritten")
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix="~build-", suffix=".xlsx", dir=str(target.parent))
+        fd, tmp = tempfile.mkstemp(prefix="~build-", suffix=".xlsx", dir=_long(target.parent))
         os.close(fd)
         try:
             self._write(Path(tmp))
-            if target.exists():
+            if exists(target):
                 raise FileExistsError(f"{target} appeared while the report was written: not replaced")
-            os.replace(tmp, target)
+            os.replace(tmp, _long(target))
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -335,6 +336,20 @@ class Book:
             chart = style.build_chart(wb, spec)
             xs.insert_chart(r, c, chart, dict(insert))
         _page_setup(xs, page)
+
+
+def _long(path: Path) -> str:
+    """A path Windows accepts beyond its 260-character limit (the report's name is long)."""
+    text = str(Path(path).resolve())
+    prefix = "\\\\?\\"                       # the extended-length form: \\?\C:\...
+    if os.name == "nt" and len(text) >= 200 and not text.startswith(prefix):
+        return prefix + text
+    return text
+
+
+def exists(path) -> bool:
+    """Is there a file at `path` (a long path too)?"""
+    return os.path.exists(_long(Path(path)))
 
 
 def cached(v):

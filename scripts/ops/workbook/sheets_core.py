@@ -139,6 +139,25 @@ def _units(n: float) -> str:
     return f"{int(n):,}" if float(n).is_integer() else f"{n:,.2f}"
 
 
+_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+          "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty")
+
+
+def words(n: int, capital: bool = False) -> str:
+    """A small count as a word, the way the Notes sheet writes it ('Eleven invoices', 'ten of them')."""
+    text = _WORDS[n] if 0 <= n < len(_WORDS) else f"{n:,}"
+    return text[:1].upper() + text[1:] if capital else text
+
+
+def issuers_of(model: mdl.Model, items: set, outlets) -> str:
+    """Who issued the lines of these items: 'the YQ Roadshow' (an outlet takes 'the'), 'Van A and Van B'."""
+    names: list[str] = []
+    for ln in model.lines:
+        if ln.item in items and ln.rep not in names:
+            names.append(ln.rep)
+    return _join([("the " + r) if r in outlets else r for r in names])
+
+
 # ── the book ───────────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -177,7 +196,7 @@ def build(model: mdl.Model, facts: Facts, commentary: Commentary | None = None) 
     _customers(cust, model, lay, commentary)
     _daily(daily, model)
     _data(data, model, lay)
-    _notes(notes, model, lay, facts)
+    book.controls = _notes(notes, model, lay, facts)
     book.commentary = {"Dashboard": [f"B{15 + i}" for i in range(5)] + [f"K{15 + i}" for i in range(5)] + ["K54", "B73"],
                        "Customers": [f"B{ex(lay.cust_total) + 2}"]}
     return book
@@ -204,8 +223,7 @@ def _page(ws: Sheet, **kw) -> None:
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────────────────────
 
-def _dashboard(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts, words: Commentary) -> None:
-    p = model.period
+def _dashboard(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts, said: Commentary) -> None:
     ws.col(0, 0, 2.28515625)
     ws.col(1, 8, 10.28515625)
     ws.col(9, 9, 3.42578125)
@@ -262,7 +280,7 @@ def _dashboard(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts, words: Co
     ws.merge(13, 1, 13, 8, "Highlights", "section")
     ws.merge(13, 10, 13, 17, "Points to note", "section")
     for i in range(5):
-        h, pt = words.highlight(i), words.point(i)
+        h, pt = said.highlight(i), said.point(i)
         ws.merge(14 + i, 1, 14 + i, 8, h, "comment")
         ws.merge(14 + i, 10, 14 + i, 17, pt, "comment")
         ws.row(14 + i, comment_height(h, pt))
@@ -306,7 +324,7 @@ def _dashboard(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts, words: Co
     ws.formula(52, 15, f"Products!G{ex(lay.prod_total)}", "mini_total_int")
     ws.formula(52, 16, f"Products!H{ex(lay.prod_total)}", "mini_total_int")
     ws.formula(52, 17, "Q53-P53", "mini_total_change")
-    ws.merge(53, 10, 54, 17, words.note("products_note"), "mini_note")
+    ws.merge(53, 10, 54, 17, said.note("products_note"), "mini_note")
 
     # top accounts (rows 57 to 74) and the customer base, week of month (columns K to R)
     ws.merge(56, 1, 56, 8, f"Top {TOP_N} accounts", "section")
@@ -344,7 +362,7 @@ def _dashboard(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts, words: Co
     ws.formula(71, 6, f"Customers!E{ex(lay.cust_total)}", "mini_total_int")
     ws.formula(71, 7, f"Customers!F{ex(lay.cust_total)}", "mini_total_int")
     ws.formula(71, 8, "H72-G72", "mini_total_change")
-    ws.merge(72, 1, 73, 8, words.note("accounts_note"), "mini_note")
+    ws.merge(72, 1, 73, 8, said.note("accounts_note"), "mini_note")
 
     ws.merge(58, 10, 58, 14, None, "mini_th")
     ws.text(58, 15, "Accounts", "mini_th_r")
@@ -426,12 +444,7 @@ def footnotes(model: mdl.Model, facts: Facts) -> list[str]:
     second = "Units, invoices and accounts cover accessories only."
     if model.not_counted:
         codes = _join([it.code for it in model.not_counted])
-        issuers = []
-        names = {it.item for it in model.not_counted}
-        for ln in model.lines:
-            if ln.item in names and ln.rep not in issuers:
-                issuers.append(ln.rep)
-        said = _join([("the " + r) if r in facts.outlets else r for r in issuers])
+        said = issuers_of(model, {it.item for it in model.not_counted}, facts.outlets)
         prev_units = sum(it.prev_qty for it in model.not_counted)
         cur_units = sum(it.cur_qty for it in model.not_counted)
         parts = []
@@ -783,7 +796,7 @@ def _products(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
 
 # ── Customers ──────────────────────────────────────────────────────────────────────────────────
 
-def _customers(ws: Sheet, model: mdl.Model, lay: Layout, words: Commentary) -> None:
+def _customers(ws: Sheet, model: mdl.Model, lay: Layout, said: Commentary) -> None:
     ws.default_row = 18
     for c1, c2, w in ((0, 0, 2.28515625), (1, 1, 57.140625), (2, 2, 11.42578125), (3, 3, 21.42578125),
                       (4, 8, 12.5703125), (9, 9, 17.140625), (10, 10, 10), (11, 11, 52.85546875)):
@@ -833,7 +846,7 @@ def _customers(ws: Sheet, model: mdl.Model, lay: Layout, words: Commentary) -> N
     ws.formula(r, 8, f"SUM(I{f1}:I{l1})", "total_int")
     ws.formula(r + 1, 1, '"Customer names are as recorded in the ERP. Filter Status on """&PrevShort&" only"" to list '
                          'the accounts not invoiced in "&CurLong&"."', "note")
-    ws.text(r + 2, 1, words.note("customers_note"), "note")
+    ws.text(r + 2, 1, said.note("customers_note"), "note")
     for rule in style.change_rules():
         ws.cond(f"G{f1}:G{tot}", rule)
     _page(ws, landscape=True, fit=(1, 0), freeze=(5, 2), autofilter=f"B5:L{l1}", print_area=f"A1:J{ex(r + 2)}",
@@ -959,7 +972,7 @@ def _data(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
 
 # ── Notes ──────────────────────────────────────────────────────────────────────────────────────
 
-def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> None:
+def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> dict:
     p = model.period
     ws.default_row = 18
     ws.col(0, 0, 2.28515625)
@@ -1025,7 +1038,6 @@ def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> None:
     # the control totals start where the Sep file has them when the basis has its eleven paragraphs
     ctl = max(defs_head + 1 + len(defs) + 1, 40)
     ws.text(ctl, 1, "Control totals", "subhead")
-    _controls(ws, ctl + 1, lay, facts)
     ws.text(57, 1, "Month names used in the headings", "subhead")
     months = ("CHOOSE(MONTH(CurMonth),\"Jan\",\"Feb\",\"Mar\",\"Apr\",\"May\",\"Jun\",\"Jul\",\"Aug\",\"Sep\",\"Oct\","
               "\"Nov\",\"Dec\")")
@@ -1043,58 +1055,75 @@ def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> None:
         ws.text(r, 1, label, "td")
         ws.formula(r, 2, formula, "calc_text")
         ws.merge(r, 3, r, 7, help_text, "help")
-    _engine_controls(ws, 66, model, lay, facts)
+    controls = _controls(ws, ctl + 1, lay, facts)
+    controls.update(_engine_controls(ws, 66, model, lay, facts))
     _page(ws, landscape=True, scale=72, breaks=[defs_head])
+    return controls
 
 
 def basis_paragraphs(model: mdl.Model, facts: Facts) -> list[str]:
+    """The Notes sheet's basis of preparation, from the data and the rules in force (numbered by the sheet)."""
     p = model.period
+    prev_name, cur_day = mdl.MONTHS[p.prev_start.month - 1], f"{p.end.day} {mdl.MONTHS[p.end.month - 1]}"
     invoices = len({ln.invoice for ln in model.lines})
+    vat = "VAT is taken as Gross less Taxable."
+    if {"Discount", "VAT Amount"} <= set(model.empty_columns):
+        vat = "The Discount and VAT Amount columns of the export were empty, so " + vat
     out = [f"Source is the ERP sales day book for {COMPANY}, {p.span_text()} ({len(model.lines):,} lines, "
            f"{invoices:,} invoices). The lines are on the Data sheet.",
-           "Net sales is the Taxable column, which excludes 10% VAT. Gross is the invoiced value including VAT. "
-           "VAT is taken as Gross less Taxable.",
+           f"Net sales is the Taxable column, which excludes 10% VAT. Gross is the invoiced value including VAT. {vat}",
            "The day book covers sales invoices only, so any sales returns are not deducted."]
-    credit = {}
+    credit: dict[str, list] = {}
     for ln in model.lines:
-        if "credit note" in ln.narration.lower():
+        if "credit note" in (ln.narration_seen or "").lower():
             credit.setdefault(ln.invoice, [ln.sale_date, 0.0])
             credit[ln.invoice][1] += ln.net
     if credit:
-        on_last = sum(1 for d, _n in credit.values() if d == p.end)
-        net = sum(n for _d, n in credit.values())
-        tail = f", {on_last} of them dated {p.end.day} {mdl.MONTHS[p.end.month - 1]}" if on_last else ""
-        out.append(f"{len(credit)} invoice{'s carry' if len(credit) != 1 else ' carries'} \"credit note\" in the "
-                   f"narration (BHD {net:,.0f} net{tail}). They are sales invoices in the day book and are included in "
-                   f"sales.")
+        n = len(credit)
+        on_last = sum(1 for d, _x in credit.values() if d == p.end)
+        net = sum(x for _d, x in credit.values())
+        tail = (f", {'all' if on_last == n else words(on_last)} of them dated {cur_day}" if on_last and n > 1
+                else f", dated {cur_day}" if on_last else "")
+        verb = "invoices carry" if n != 1 else "invoice carries"
+        out.append(f"{words(n, capital=True)} {verb} \"credit note\" in the narration (BHD {net:,.0f} net{tail}). "
+                   f"{'They are sales invoices' if n != 1 else 'It is a sales invoice'} in the day book and "
+                   f"{'are' if n != 1 else 'is'} included in sales.")
     outlets = [r for r in model.reps if r in facts.outlets]
     out.append(f"Salesman or outlet is the warehouse the invoice was issued from, with \"{mdl.WH_SUFFIX}\" removed."
-               + (f" {_join(outlets)} {'is an outlet rather than a salesman' if len(outlets) == 1 else 'are outlets rather than salesmen'}."
-                  if outlets else ""))
+               + ((f" {_join(outlets)} " + ("is an outlet rather than a salesman." if len(outlets) == 1
+                                            else "are outlets rather than salesmen.")) if outlets else ""))
     out.append(cats.rule_paragraph(model.category_names))
     if model.not_counted:
-        lines_n = sum(1 for ln in model.lines if ln.item in {it.item for it in model.not_counted})
+        items = {it.item for it in model.not_counted}
+        lines_n = sum(1 for ln in model.lines if ln.item in items)
         units = sum(it.prev_qty + it.cur_qty for it in model.not_counted)
         codes = _join([it.code for it in model.not_counted])
-        out.append(f"{codes} items carry no value in the day book ({lines_n:,} lines, {_units(units)} units). They are "
-                   "not accessory sales, so they are left out of units, invoice counts and product counts.")
+        out.append(f"{codes} handsets issued through {issuers_of(model, items, facts.outlets)} carry no value in the day "
+                   f"book ({lines_n:,} lines, {_units(units)} units). They are not accessories, so they are left out "
+                   "of units, invoice counts and product counts.")
     spellings = {ln.raw_customer for ln in model.lines if mdl.CASH_SPELLING.match(ln.raw_customer)}
     out.append(f"An account is any customer other than {mdl.CASH_ACCOUNT}, which covers unnamed cash sales."
-               + (f" The {len(spellings)} spellings of {mdl.CASH_ACCOUNT} in the ERP are treated as one."
+               + (f" The {words(len(spellings))} spellings of {mdl.CASH_ACCOUNT} in the ERP are treated as one."
                   if len(spellings) > 1 else ""))
     out.append("Customer names are as recorded in the ERP and similar names are not merged.")
-    out.append(f"\"{p.short} only\" on the Customers sheet means no invoice in {mdl.MONTHS[p.prev_start.month - 1]}. "
-               "Earlier months are outside this extract, so some of these accounts may have bought before "
-               f"{mdl.MONTHS[p.prev_start.month - 1]}.")
-    masked = sum(1 for ln in model.lines if ln.narration_masked)
+    out.append(f"\"{p.short} only\" on the Customers sheet means no invoice in {prev_name}. Earlier months are "
+               f"outside this extract, so some of these accounts may have bought before {prev_name}.")
+    masked = [ln for ln in model.lines if ln.narration_masked]
     if masked:
-        out.append(f"{masked:,} narration{'s hold' if masked != 1 else ' holds'} customer ID numbers. These are not "
-                   "carried into the Data sheet.")
+        nc = {it.item for it in model.not_counted}
+        if all(ln.item in nc for ln in masked):
+            out.append("The narration on the handset invoices holds customer ID numbers. These are not carried into "
+                       "the Data sheet.")
+        else:
+            out.append(f"{words(len(masked), capital=True)} narration{'s hold' if len(masked) != 1 else ' holds'} "
+                       "customer ID numbers. These are not carried into the Data sheet.")
     return out
 
 
-def _controls(ws: Sheet, top: int, lay: Layout, facts: Facts) -> None:
-    """Rows top.. : the Data sheet against v_sales, then each sheet's total less the Data sheet."""
+def _controls(ws: Sheet, top: int, lay: Layout, facts: Facts) -> dict:
+    """Rows top.. : the Data sheet against v_sales, then each sheet's total less the Data sheet. Returns the
+    cells that must read nil, by check (what build.py reads back after the evaluation)."""
+    found: dict[str, list] = {"export": [], "sheets": [], "unmapped": []}
     ws.text(top, 1, "Data sheet against the export file", "th")
     ws.formula(top, 2, "PrevLabel", "th_r")
     ws.formula(top, 3, "CurLabel", "th_r")
@@ -1120,6 +1149,7 @@ def _controls(ws: Sheet, top: int, lay: Layout, facts: Facts) -> None:
         ws.formula(r, 4, f"C{n}+D{n}", fmt)
         ws.put(r, 5, typed, in_fmt)
         ws.formula(r, 6, f"ROUND(E{n}-F{n},2)", diff_fmt)
+        found["export"].append((label, f"G{n}"))
         if help_text:
             ws.text(r, 7, help_text, "help")
         else:
@@ -1159,6 +1189,7 @@ def _controls(ws: Sheet, top: int, lay: Layout, facts: Facts) -> None:
         ws.text(r, 1, label, "td")
         ws.formula(r, 2, f"ROUND({prev_ref}-SUMIFS(d_Net,d_Month,PrevMonth),2)", "diff_money")
         ws.formula(r, 3, f"ROUND({cur_ref}-SUMIFS(d_Net,d_Month,CurMonth),2)", "diff_money")
+        found["sheets"].append((label, f"C{ex(r)}", f"D{ex(r)}"))
         for c in (4, 5, 6):
             ws.blank(r, c, "td")
         if help_text:
@@ -1172,9 +1203,11 @@ def _controls(ws: Sheet, top: int, lay: Layout, facts: Facts) -> None:
     for c in (4, 5, 6):
         ws.blank(r, c, "td")
     ws.text(r, 7, "A count here would mean an item is missing from the Products sheet.", "help")
+    found["unmapped"] = [f"C{ex(r)}", f"D{ex(r)}"]
+    return found
 
 
-def _engine_controls(ws: Sheet, top: int, model: mdl.Model, lay: Layout, facts: Facts) -> None:
+def _engine_controls(ws: Sheet, top: int, model: mdl.Model, lay: Layout, facts: Facts) -> dict:
     """The two controls the ops engine adds: the day book equals v_sales month by month, and no narration
     on the Data sheet holds an ID number."""
     t = facts.totals
@@ -1207,3 +1240,4 @@ def _engine_controls(ws: Sheet, top: int, model: mdl.Model, lay: Layout, facts: 
     ws.text(r, 1, "Narrations on the Data sheet with an ID number", "td")
     ws.formula(r, 4, f'COUNTIF({narr},"*~*~*~*~*~*~*?")', "int_plain")
     ws.text(r, 7, "Should be 0: a masked ID number is six or more stars before its last three digits.", "help")
+    return {"db": [f"C{ex(top + 3)}", f"D{ex(top + 3)}"], "narration": f"E{ex(top + 5)}"}

@@ -120,6 +120,7 @@ class Line:
     card_category: str | None = None          # the catalog card's category (v_sales.category_name)
     raw_customer: str = ""
     narration_masked: bool = False
+    narration_seen: str = ""                  # the narration as v_sales gives it (IDs masked): read, never written
 
     @property
     def month(self) -> date:
@@ -172,6 +173,7 @@ def tidy(rows: list[dict]) -> list[Line]:
             card_category=(str(r["category_name"]) if r.get("category_name") else None),
             raw_customer=raw_cust,
             narration_masked=masked,
+            narration_seen=narr,
         ))
     lines.sort(key=lambda ln: (ln.sale_date, _invoice_key(ln.invoice), ln.invoice, ln.line_no))
     return lines
@@ -205,6 +207,7 @@ class Model:
     category_names: dict = field(default_factory=dict)
     upcoming: dict = field(default_factory=dict)       # code -> Upcoming card category
     warnings: list[str] = field(default_factory=list)
+    empty_columns: list[str] = field(default_factory=list)   # day-book columns empty on every line
 
 
 SUPPLIER_TAG = re.compile(r"\s*\((?:VFAN|WEKOME|WK)\).*$", re.I)
@@ -260,6 +263,8 @@ def build(period: Period, rows: list[dict], *, category_names: dict | None = Non
     names = dict(category_names or {})
     upcoming = {str(k).strip().casefold(): v for k, v in (upcoming or {}).items()}
     lines = [ln for ln in tidy(rows) if period.prev_start <= ln.sale_date <= period.end]
+    empty = [label for label, key in (("Discount", "discount_bhd"), ("VAT Amount", "vat_amount_bhd"))
+             if rows and all(r.get(key) in (None, "") for r in rows)]
     warnings: list[str] = []
 
     # items and their categories
@@ -335,4 +340,4 @@ def build(period: Period, rows: list[dict], *, category_names: dict | None = Non
             if any(ch in n for ch in "*?~"):
                 warnings.append(f"a {label} name holds * ? or ~, which a spreadsheet reads as a pattern")
     return Model(period, lines, items, reps, categories, products, not_counted, customers, names,
-                 dict(upcoming), warnings)
+                 dict(upcoming), warnings, empty)
