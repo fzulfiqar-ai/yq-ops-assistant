@@ -21,8 +21,8 @@ from scripts.ops import config, gitinfo, paths
 # Paths a commit of this work may touch (prefix match). Anything else staged fails --repo-clean.
 ALLOWED_PATHS = (
     ".claude/skills/yq-", "scripts/ops/", "scripts/yq_load_go.py", "scripts/yq_send.py", "scripts/yq_secrets.py",
-    "scripts/yq_backup.py", "tests/test_ops_", "docs/OPS_SKILLS.md", "docs/FOCUS_EXPORT.md", "CLAUDE.md",
-    ".gitignore", ".github/workflows/ci.yml", "requirements-dev.txt",
+    "scripts/yq_backup.py", "scripts/yq_photos.py", "tests/test_ops_", "docs/OPS_SKILLS.md", "docs/FOCUS_EXPORT.md",
+    "CLAUDE.md", ".gitignore", ".github/workflows/ci.yml", "requirements-dev.txt",
     # the continuation record and the docs the 15-Oct hardening pack brought current
     "docs/STATUS.md", "docs/BACKUPS.md", "docs/ROADMAP.md", "docs/CLAUDE.md", "docs/MARKET_INTEL.md",
     "docs/MARKET_INTEL_RELEASE.md", ".env.example",
