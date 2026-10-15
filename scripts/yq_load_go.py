@@ -155,6 +155,11 @@ FIELD = 160                         # no sentence of the journal is longer (`loa
 BACKUP_TIMEOUT_S, GATE_TIMEOUT_S, RECONCILE_TIMEOUT_S = 1800, 900, 1800      # read-only steps only
 DELIVER_TIMEOUT_S, SEND_TIMEOUT_S = 300, 180    # after the load: the brief and its e-mail (deliver_after)
 SEND_LINE = "python -m scripts.yq_send --run {run}"     # the line that sends a load's e-mail again (reloads nothing)
+# a brief the deliver command REFUSED (exit 2 with these words: the database no longer holds this load as it left it,
+# scripts/ops/deliver.py stale_reason): a retry would be refused the same way, so none is offered
+DELIVER_REFUSED = "NOT prepared:"
+NO_BRIEF_RETRY = ("No retry: the database no longer holds this load as it left it, so no brief of it can be made "
+                  "(the next load sends its own e-mail).")
 REHEARSAL_PREFIX = "000000_"        # not a date, so no drop folder can ever spell it
 REHEARSAL_SECONDS = 180
 NONCE_ENV = "YQ_LOAD_GO_NONCE"           # the one-time word the launcher hands its worker (never on disk)
@@ -906,18 +911,20 @@ def _lock_unreadable(exc: OSError, nothing: str) -> str:
             f"may be running. {nothing}: try again in a minute.")
 
 
-def _closed_or_kept(dead: dict | None, began: bool, closed: bool, tell_state: bool = True) -> str:
+def _closed_or_kept(dead: dict | None, began: bool, closed: bool, tell_state: bool = True, folder: str = "") -> str:
     """An interrupted load that can never be resumed is closed by a row in its journal, and only
     then does its dead lock go. A load that had BEGUN keeps the lock while that row could not be
     written (the journal sits in a synced folder; another program may hold the file): without the
-    row nothing would say any more that the database may hold part of it. -> what the owner is told."""
+    row nothing would say any more that the database may hold part of it. -> what the owner is told
+    (`folder`: the drop folder the line sends him back to, folder_word)."""
     if closed or not began:
         if dead is not None:
             _clear_dead_lock(dead)
         state = " " + MAY_HOLD if began and tell_state else ""
         return "The interrupted load is closed: it cannot be resumed." + state
     return ("The interrupted load could not be closed: its journal cannot be written at this moment (another "
-            f"program holds the file). It stays INTERRUPTED. {MAY_HOLD} Try /yq-load again in a minute.")
+            f"program holds the file). It stays INTERRUPTED. {MAY_HOLD} Try /yq-load {folder or '<ddmmyy>'} "
+            "again in a minute.")
 
 
 def _began(run: str, rows: list[dict] | None = None) -> bool:
@@ -1051,6 +1058,23 @@ def plan_stops(plan: dict) -> list[str]:
 def drop_path(plan: dict) -> Path:
     p = Path(str(plan.get("drop") or ""))
     return p if p.is_absolute() else paths.data_root() / p
+
+
+def folder_word(plan: dict | None) -> str:
+    """The drop folder as he types it after /yq-load: the plan's folder when its name is a plain ddmmyy, the form
+    /yq-load takes; else the words <ddmmyy>, for him to fill in (a folder named otherwise, or a set in a
+    sub-folder, is not one that /yq-load <ddmmyy> would find)."""
+    name = Path(str((plan or {}).get("drop") or "")).name
+    return name if len(name) == 6 and paths.drop_date(name) is not None else "<ddmmyy>"
+
+
+def again_line(plan: dict | None, run: str, lead: str = "") -> str:
+    """The words that send him back once nothing was loaded: 'type /yq-load <ddmmyy> again.' with the folder named
+    (folder_word: he once typed "/yq-load again" just as a line said it), or for a rehearsal 'ask for the
+    rehearsal again.' (he asks for one in words: docs/OPS_SKILLS.md, section 2). `lead` opens the sentence."""
+    rehearsal = run.startswith(REHEARSAL_PREFIX) or bool((plan or {}).get("rehearsal"))
+    words = "ask for the rehearsal again." if rehearsal else f"type /yq-load {folder_word(plan)} again."
+    return f"{lead} {words}" if lead else words[:1].upper() + words[1:]
 
 
 def _iso_dates(values) -> list[date]:
@@ -1468,11 +1492,11 @@ def archive_refusal(password: str | None, exe: str | None, encrypted_since: str 
     this PC, or once a backup has been encrypted (state.json backup_encrypted_since), a plain archive is
     never made again: the load stops at its backup instead, before anything is written. (The day is
     kept in business_data/ops/backup.json: state.json says only what loads did.)"""
-    if password and not exe:
-        return "7-Zip is not installed, so the backup cannot be encrypted: install 7-Zip, then type /yq-load again"
+    if password and not exe:                 # (the box and the backup step say it: nothing follows the command)
+        return "7-Zip is not installed, so the backup cannot be encrypted: install 7-Zip, then type /yq-load"
     if not password and encrypted_since:
         return (f"the backup password is no longer found on this PC (backups are encrypted since {encrypted_since}): "
-                "set it again, then type /yq-load again")
+                "set it again, then type /yq-load")
     return None
 
 
@@ -1798,6 +1822,17 @@ def _delivery_row(run: str, event: str, **fields) -> bool:
     return False
 
 
+def _no_retry(run: str) -> str | None:
+    """Why no retry of this load's e-mail is offered where one would itself be refused (a newer load is on
+    record: it has its own e-mail), or None: scripts/yq_send.py no_retry_needed, the sender's own rule. When
+    that cannot be asked, the retry is offered, as it always was."""
+    try:
+        from scripts.yq_send import no_retry_needed
+        return no_retry_needed(run)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _why(child: Child) -> str:
     last = next((ln.strip() for ln in reversed(child.text.splitlines()) if ln.strip()), "")
     out = f" (exit code {child.code}"
@@ -1914,13 +1949,13 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
                              text="This interrupted load cannot be resumed: a newer check replaced its table."
                                   + (" " + MAY_HOLD if began else ""),
                              why=_sentence(f"the check of run {newer} replaced this one"), next="Type /yq-load.")
-            say(_closed_or_kept(dead, began, closed))
+            say(_closed_or_kept(dead, began, closed, folder=folder_word(plan)))
         raise Refusal(_replaced_words(newer))
 
     stops = plan_stops(plan)
     if stops:
         raise Refusal(f"The load check of run {run} said STOP ({_short('; '.join(stops), 120)}): nothing can be "
-                      "loaded from it. Type /yq-load again once that is settled.")
+                      "loaded from it. " + again_line(plan, run, "Once that is settled,"))
     if not plan.get("token"):
         raise Refusal(f"The load check of run {run} gave no token, so there is nothing to go from. "
                       "Nothing was loaded: type /yq-load.")
@@ -1929,7 +1964,8 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
     if hits:
         lines = [f'  delete the entry "{entry}" from {f}' for f, entry in hits]
         raise Refusal("Refused: a Claude Code permission rule would let a load start without asking you. "
-                      "Nothing was loaded.\n" + "\n".join(lines) + "\nThen type /yq-load again.")
+                      "Nothing was loaded.\n" + "\n".join(lines)
+                      + "\n" + again_line(plan, run, "Then"))
     if unreadable:
         raise Refusal("Refused: a Claude Code settings file cannot be read, so the load cannot be sure that no "
                       "rule pre-approves it: " + "; ".join(unreadable) + ". Nothing was loaded.")
@@ -1955,7 +1991,7 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
                              text="This interrupted load cannot be resumed: something changed since its table was "
                                   "shown." + (" " + MAY_HOLD if refresh_started else ""),
                              why=_sentence("this changed: " + "; ".join(moved)), next="Type /yq-load for a new check.")
-            say(_closed_or_kept(dead, refresh_started, closed, tell_state=False))
+            say(_closed_or_kept(dead, refresh_started, closed, tell_state=False, folder=folder_word(plan)))
         raise CheckAgain(moved, written=refresh_started)
 
     # the options and the loader's marker files must tell one story: the box shows the options
@@ -1976,9 +2012,9 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
             raise NoAnswer(f"You answered No: {nothing}")
         if answer == "unavailable":
             raise NoAnswer(f"The Yes/No box could not be shown on this screen: no answer, {nothing}")
-        if answer == "too_fast":
+        if answer == "too_fast":             # the folder is named: he once typed "/yq-load again" as it stood
             raise NoAnswer("Yes came at once every time the box opened, before it could be read. That is no answer: "
-                           f"{nothing} Type /yq-load again.")
+                           f"{nothing} " + again_line(plan, run))
         raise NoAnswer(f"no answer, {nothing}" if begun else "no answer, nothing loaded")
 
     # take the lock, start the worker, hand the lock over. The one-time word goes to the worker in
@@ -2400,18 +2436,23 @@ class Job:
         try:
             pack = d.runner("deliver", [sys.executable, "-X", "utf8", "-m", "scripts.ops", "deliver", "--run", run],
                             DELIVER_TIMEOUT_S)
-            if pack.code != 0 or pack.timed_out:
-                said = f"Delivery: the brief could not be prepared{_why(pack)}. Its retry: {SEND_LINE.format(run=run)}"
+            if pack.code == 2 and not pack.timed_out and DELIVER_REFUSED in pack.text:
+                # the deliver command REFUSED: a retry would be refused the same way, so none is offered
+                said = f"Delivery: no brief was made for this load{_why(pack)}. " + (_no_retry(run) or NO_BRIEF_RETRY)
+            elif pack.code != 0 or pack.timed_out:
+                said = (f"Delivery: the brief could not be prepared{_why(pack)}. "
+                        + (_no_retry(run) or f"Its retry: {SEND_LINE.format(run=run)}"))
             else:
                 sent = d.runner("send", [sys.executable, "-X", "utf8", "-m", "scripts.yq_send", "--run", run, "--auto"],
                                 SEND_TIMEOUT_S)
                 said = next((ln.strip() for ln in reversed(sent.text.splitlines())
                              if ln.strip().startswith("Delivery:")), "")
                 if not said:
-                    said = (f"Delivery: the e-mail program gave no answer{_why(sent)}. Its retry: "
-                            f"{SEND_LINE.format(run=run)}")
+                    said = (f"Delivery: the e-mail program gave no answer{_why(sent)}. "
+                            + (_no_retry(run) or f"Its retry: {SEND_LINE.format(run=run)}"))
         except Exception as exc:  # noqa: BLE001
-            said = (f"Delivery: an unexpected error ({type(exc).__name__}). Its retry: {SEND_LINE.format(run=run)}")
+            said = (f"Delivery: an unexpected error ({type(exc).__name__}). "
+                    + (_no_retry(run) or f"Its retry: {SEND_LINE.format(run=run)}"))
         finally:
             if awake:
                 d.keep_awake(False)

@@ -402,6 +402,8 @@ def _():
 
 @test("deliver refuses a full brief once the database no longer holds the load: a newer load, a failed one, a write")
 def _():
+    from scripts import yq_load_go, yq_send     # they read the refusal by its word, and the kind by the same rule
+    assert yq_send.LOOK_STEPS == deliver.LOOK_STEPS
     real, real_newest = sales.full_screen, deliver.newest_ingest_run
     fake = FakeBrief()
     sales.full_screen = fake
@@ -423,6 +425,7 @@ def _():
                 deliver.newest_ingest_run = lambda: 9
                 res = deliver.run(args())
                 assert res["ok"] is False and res["exit"] == 2 and said in res["text"], res["text"]
+                assert yq_load_go.DELIVER_REFUSED in res["text"], "the writer would offer a retry that is refused"
                 assert [r["kind"] for r in loadplan.delivery_read(RUN) if r["event"] == "pack"] == ["refused"]
                 assert fake.calls == [] and not (paths.exports_dir(date(2026, 10, 14)) / "delivery" / RUN).exists()
                 assert deliver.run(args(preview=True))["ok"], "a preview is no delivery: it is always made"

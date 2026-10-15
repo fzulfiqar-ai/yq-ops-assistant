@@ -1,4 +1,4 @@
-"""python -m scripts.ops load check [ddmmyy] [--pricebook load|skip] [--with-profitability]
+"""python -m scripts.ops load check [ddmmyy] [again] [--pricebook load|skip] [--with-profitability]
                                     [--replace-ok] [--partial-ok] [--dev]
 python -m scripts.ops load status [--run RUN] [--wait]
 
@@ -13,6 +13,25 @@ nothing stops it, a token and the GO line of the writer (scripts/yq_load_go.py, 
 The check changes nothing in the database: every read goes through scripts/ops/db.py. Its own files
 go to business_data/staging/<run>/ and business_data/ops/loads/<run>/ (both git-ignored). The
 owner's folder is only read.
+
+NOTHING NEW. A drop that is already loaded is checked in full like any other. When the check finds
+that every report the load would apply has nothing to insert, change, remove or bring back, and that
+nothing else a load does would change anything (the stock ledger voucher by voucher, the sales by day
+and salesman, the catalog sync, a last load that failed), it ends with the line "Nothing new in
+<ddmmyy>: everything this load would apply is already loaded ... No load needed." instead of a token:
+no GO line, no go.cmd (on 15-Oct-2026 one drop was loaded twice, and the second load sent a second
+e-mail). The reports that are not part of the load (held back, left out, or waiting for his decision,
+whose default is to leave them out) are named just above that line, with the words that load them:
+he says them, the check runs again with that option, and then it has something to load. A row the
+loader FOLDS from two lines of one key (FOLDED) is the one place the preview cannot see equality: the
+loader adds the lines up in floating point, the preview in exact decimals, so such a row reads as
+rewritten on every check of the same file. It is no change when it equals production's row in every
+column, the figures that are added up differing only beyond the sixth decimal place (folded_noise);
+everything else is compared exactly, by the preview. Any difference anywhere and the check ends as it
+always did.
+
+The preview's seconds are kept per report (scripts/ops/querytime.py): one progress line as each
+report's comparison is done, and plan.json timings.preview_parts.
 
 The steps, one printed line each as it finishes:
   1 preflight      the project folder (not a code worktree), the programs equal the live site, the
@@ -48,6 +67,9 @@ token, no GO line and no go.cmd, records nothing on the action register (a check
 records nothing either: it may be looking at a broken file) and replaces no earlier check: a dev
 run adds its own two folders and changes nothing else.
 
+The word `again` after the folder is taken and ignored (the load program's too-fast answer says
+"Type /yq-load <ddmmyy> again.", so he may type it); any other word there is refused.
+
 An earlier load that was cut off (a lock whose worker is gone) stops the check at once: nothing new
 is checked, and the last line is that load's own GO line, which is what resumes it (a dev run names
 the run and prints no GO line). The dead lock of a REHEARSAL is not that: a rehearsal never reaches
@@ -74,7 +96,7 @@ import threading
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from scripts.ops import db  # noqa: F401  (first: it guards every channel before an app module loads)
@@ -137,6 +159,27 @@ DB_WORDS = {"orders": "invoices", "order_lines": "sales lines", "stock_movements
 
 KIND_ORDER = ("order_lines", "orders", "stock_movements", "stock_balance", "receivables",
               "product_profitability", "selling_prices:MA_base", "selling_prices:modern_trade", "ledger_entries")
+# the table each report loads into (app.ingest_batch: the preview's target); both price books are one table
+KIND_TARGET = {"order_lines": "order_lines", "orders": "orders", "stock_movements": "stock_movements",
+               "stock_balance": "stock_balance", "receivables": "ar_ageing",
+               "product_profitability": "product_profitability", "selling_prices:MA_base": "selling_prices",
+               "selling_prices:modern_trade": "selling_prices"}
+# The snapshot tables whose rows the loader FOLDS when Focus lists one key on two lines (scripts/load_supabase.py:
+# two accounts under one name in the receivables, one item twice in one warehouse of the stock balance), and the
+# figures it then adds up (the stock balance averages its rate). The loader adds in floating point, the preview in
+# exact decimals: production's folded row can differ from the file's in the last digits of these figures only.
+FOLDED = {"ar_ageing": ("balance_bhd", "bucket_0_30", "bucket_31_60", "bucket_61_90", "bucket_91_120",
+                        "bucket_121_150", "bucket_151_180", "bucket_181_210", "bucket_over_210", "total_bhd"),
+          "stock_balance": ("net_qty", "total_value_bhd", "selling_rate_bhd")}
+FOLD_DEFAULTS = {"stock_balance": {"warehouse_name": "(unassigned)"}}     # as the loader fills a blank key part
+# One millionth: more than float rounding leaves on such a sum or mean, far less than a fils, a unit or any rate
+# Focus prints (three decimals at most)
+FOLD_NOISE = Decimal("0.000001")
+FOLD_NOUN = {"ar_ageing": "one account", "stock_balance": "one item in one warehouse"}
+# The reports that can sit outside a load and the owner's words that put them in it (the skill's Step 1 gives
+# each with its option: --with-profitability, --pricebook load)
+OPTION_SAY = {"product_profitability": "load profitability anyway", "selling_prices:MA_base": "load the price book",
+              "selling_prices:modern_trade": "load the price book"}
 DAILY = KIND_ORDER[:6]
 ALWAYS_STAGED = ("order_lines", "orders", "stock_movements", "receivables")
 LABEL = {
@@ -149,6 +192,9 @@ WORDS = {"load": "LOAD", "trim": "LOAD (main-store block only)", "hold_back": "H
          "needs_decision": "NEEDS YOUR DECISION", "not_loaded": "NOT LOADED", "stop": "STOP"}
 # What a blocking code of the preview means here (see read_preview).
 HARD_CODES = ("db_diff_failed", "empty_report", "snapshot_without_date", "sales_join_below_80", "check_failed")
+# The first words of the last line of a check that finds nothing new to load: /yq-load acts on them
+# (.claude/skills/yq-load/SKILL.md, Step 1), and nothing after that line is a GO line.
+NOTHING_NEW_HEAD = "Nothing new in"
 SIDE_EFFECTS = (
     "it sorts the items into their categories again and syncs the catalog with the price book (see Catalog above);",
     "it adds a name alias for every new Focus item name;",
@@ -202,8 +248,11 @@ Q_CANDIDATES = (
     "select distinct sku_code from selling_prices where price_book = 'MA_base' and coalesce(rate_bhd, 0) > 0 "
     "and sku_code is not null and trim(sku_code) <> ''"
 )
-# the stock snapshots loaded after a day: one per load, so the loads since the last loaded profitability report
-Q_SNAPSHOTS_SINCE = "select count(distinct as_of_date)::int as n from stock_balance where as_of_date > %s::date"
+# the days production holds a stock or a receivables snapshot for, after a day, each with its kind: a load made
+# by hand leaves no journal, only its data (held_in_a_row)
+Q_SNAPSHOT_DAYS = ("select distinct 'stock_balance' as k, as_of_date::text as d from stock_balance where as_of_date > "
+                   "%s::date union select distinct 'ar_ageing' as k, as_of_date::text as d from ar_ageing "
+                   "where as_of_date > %s::date")
 
 
 class Stop(Exception):
@@ -505,7 +554,7 @@ def last_failed_load(deps: Deps) -> dict | None:
         if lock_now(deps).get("state") != "none":
             return None
         failed = deps.failed_load()
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError, TypeError):      # a journal that is broken says nothing here
         return None
     return failed if isinstance(failed, dict) and failed.get("run") else None
 
@@ -767,7 +816,11 @@ def retire_earlier(new_run: str, drop: Path, deps: Deps) -> dict:
     held = str(lock.get("run") or "") if lock.get("state") != "none" else ""
     now = deps.now()
     for old in earlier_runs(new_run):
-        if old == held or loadplan.run_result(old) != "NOT_STARTED":
+        try:
+            started = loadplan.run_result(old) != "NOT_STARTED"
+        except (OSError, ValueError):
+            started = True                                 # a journal that cannot be read: never touched
+        if old == held or started:
             continue
         plan = read_plan_of(old)
         if plan is None:
@@ -1129,6 +1182,62 @@ def second_hold(hold: bool, as_on: str, anchors: dict, before: tuple[bool | None
     return bool(last and iso(anchors.get("profit_as_of")) < last)
 
 
+def finished_held_loads() -> tuple[dict[str, bool], set[str]]:
+    """(data day -> did the load of that day hold its profitability report back, the snapshot days these loads
+    brought) for every load the writer FINISHED (a 'finished' row in its journal; a rehearsal never counts). A
+    day loaded twice is one entry, and the later load answers. A load whose drop brought no report held nothing
+    back (profit_before). The snapshot days are each load's day and the as-on dates of the stock balance and the
+    receivables it loaded, which can be another day. A journal or a plan that cannot be read is passed over."""
+    base = paths.loads_dir()
+    found: dict[str, tuple[str, bool]] = {}
+    brought: set[str] = set()
+    for folder in (base.iterdir() if base.is_dir() else []):
+        run = folder.name
+        if not folder.is_dir() or not loadplan.is_run(run) or run.startswith(status.REHEARSAL_PREFIX):
+            continue
+        try:
+            ends = [str(r.get("at") or "") for r in loadplan.journal_read(run)
+                    if isinstance(r, dict) and r.get("event") == "finished"]
+            plan = read_plan_of(run) if ends else None
+            day = iso((plan or {}).get("data_date"))
+            if not day:
+                continue
+            held, _day = profit_before(plan)
+            dates = plan.get("as_on") if isinstance(plan.get("as_on"), dict) else {}
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue                          # held by another program this moment, or broken: it says nothing
+        brought |= {day} | {iso(dates.get(k)) for k in ("stock_balance", "receivables") if iso(dates.get(k))}
+        if day not in found or max(ends) > found[day][0]:
+            found[day] = (max(ends), bool(held))
+    return {d: held for d, (_at, held) in found.items()}, brought
+
+
+def held_in_a_row(day: str, kept: str, loads: dict[str, bool], snapshots, explained=()) -> int:
+    """How many loads in a row hold the profitability report back, the drop as on `day` counted once:
+    the loads after production's report date `kept`, newest first, for as long as each one held its
+    report back. `loads`: day -> held, the writer's finished loads; `explained`: the snapshot days those
+    loads brought (finished_held_loads); `snapshots`: the days production holds a snapshot for, per kind
+    ({kind: [days]}). A snapshot day that no finished load explains is a load made by hand: production's
+    report stayed where it was, so it reads as held. One such load leaves one snapshot of each kind, and
+    their dates may differ, so they count once per load, not per kind: as many as the kind that has the
+    most of them (its days give the places). Without a report date in production the snapshots say
+    nothing (they would count every load ever made)."""
+    days = {d: bool(h) for d, h in loads.items() if (not kept or d > kept) and d < day}
+    if kept:
+        known = set(explained) | set(loads)
+        kinds = snapshots.values() if isinstance(snapshots, dict) else [snapshots]
+        by_hand = max((sorted({d for d in ds if kept < d < day and d not in known}) for ds in kinds),
+                      key=lambda ds: (len(ds), ds[-1] if ds else ""), default=[])
+        for d in by_hand:
+            days.setdefault(d, True)
+    n = 1
+    for d in sorted(days, reverse=True):
+        if not days[d]:
+            break
+        n += 1
+    return n
+
+
 # ── step 6: price book ────────────────────────────────────────────────────────
 
 def is_general(row: dict) -> bool:
@@ -1332,7 +1441,8 @@ def read_preview(summary: dict, exceptions: list[dict]) -> dict:
         a = t.get("actions") or {}
         out["actions"][target] = {"inserted": int(a.get("inserted", 0)), "updated": int(a.get("updated", 0)),
                                   "unchanged": int(a.get("unchanged", 0)),
-                                  "removed": int(a.get("deleted", a.get("voided", 0)))}
+                                  # a price book voids its rows, every other table deletes them: either way removed
+                                  "removed": int(a.get("deleted") or 0) + int(a.get("voided") or 0)}
     for target in ("orders", "order_lines"):
         t = targets.get(target) or {}
         for sample in ("updated_sample", "removed_sample"):
@@ -1513,6 +1623,78 @@ def catalog_line(effect: dict) -> str:
     return "Catalog: the sync that follows the load would " + "; ".join(bits) + "."
 
 
+# ── nothing new: a folded row ─────────────────────────────────────────────────
+
+def key_of(row: dict, keys, defaults: dict | None = None) -> tuple:
+    """A row's natural key as the loader matches it: each part as trimmed text (a blank part as the loader
+    fills it, `defaults`), a date part as its day."""
+    out: list[str] = []
+    for k in keys:
+        v = row.get(k)
+        if v is None and defaults:
+            v = defaults.get(k)
+        text = "" if v is None else (v.isoformat() if isinstance(v, (date, datetime)) else str(v)).strip()
+        out.append(text[:10] if k.endswith("_date") else text)
+    return tuple(out)
+
+
+def folded_keys(target: str, raw_rows: list[dict]) -> set[tuple]:
+    """The keys of `target` that the report lists on more than one line: the loader folds each of them into
+    one row (FOLDED). A table the loader never folds has none."""
+    if target not in FOLDED:
+        return set()
+    from app.ingest_batch import TARGETS
+    keys, defaults = TARGETS[target]["keys"], FOLD_DEFAULTS.get(target)
+    seen = Counter(key_of(r, keys, defaults) for r in raw_rows if str(r.get(keys[0]) or "").strip())
+    return {k for k, n in seen.items() if n > 1}
+
+
+def same_cell(file_value, db_value, folded_figure: bool) -> bool:
+    """Is one cell of a file row the same as production's, as the preview compares them (`is distinct
+    from`)? Blank equals only blank; a day its day; text its text; a number its number exactly, and in a
+    figure the loader adds up for a folded row (`folded_figure`), to within one millionth (FOLD_NOISE).
+    Anything that is not a finite number on either side of a number is never the same (and never an error)."""
+    if file_value is None or db_value is None:
+        return file_value is None and db_value is None
+    if isinstance(db_value, (date, datetime)):
+        return iso(file_value) == db_value.isoformat()[:10]
+    if isinstance(db_value, (Decimal, int, float)) and not isinstance(db_value, bool):
+        if isinstance(file_value, bool):
+            return False
+        try:
+            a, b = Decimal(str(file_value)), Decimal(str(db_value))
+            if not (a.is_finite() and b.is_finite()):
+                return False
+            return abs(a - b) < FOLD_NOISE if folded_figure else a == b
+        except (InvalidOperation, ValueError, ArithmeticError):
+            return False
+    return str(file_value) == str(db_value)
+
+
+def noise_line(target: str, n: int) -> str:
+    """The check line for the folded rows of a table that are no change (worded for any figure: an amount, a
+    quantity or a rate)."""
+    one = n == 1
+    return (f"{LABEL_BY_TARGET.get(target, target)}: {plural(n, 'row')} the preview counts as rewritten "
+            + ("is one" if one else "are rows") + " the loader adds up from two or more lines of "
+            + FOLD_NOUN.get(target, "one key") + (", and it differs" if one else ", and they differ")
+            + " from what is loaded only beyond the sixth decimal place (the loader keeps such a sum with "
+              "floating-point rounding): not a change.")
+
+
+def last_load_words() -> str:
+    """' (last load <run> at <day> <HH:MM>)' from state.json, or '' when no load is on record here."""
+    try:
+        last = status.read_state().get("last_load") or {}
+    except OSError:
+        return ""
+    run = str(last.get("run") or "") if isinstance(last, dict) else ""
+    if not loadplan.is_run(run):
+        return ""
+    at = status.when(last.get("finished_at"))
+    return f" (last load {run}" + (f" at {at.astimezone(status.BAHRAIN).strftime('%a %d %b %H:%M')}" if at else "") + ")"
+
+
 # ── older than what is loaded; the register ───────────────────────────────────
 
 def older_reason(mine: str, held: str, what: str) -> str:
@@ -1603,6 +1785,11 @@ class Check:
         self.failed: dict | None = None              # the last load, when it failed after it began to write
         self.retired: dict = {}                      # the earlier checks of this folder this one replaced
         self.timings: dict[str, float] = {}          # seconds per part of the check (plan.json: timings)
+        self.preview_parts: dict | None = None       # the preview's seconds per report and helper (querytime)
+        self.ledger_cmp: dict | None = None          # step 8's counts: changed, removed, backdated, new
+        self.catalog: dict | None = None             # step 9: what the catalog sync would switch
+        self.noise: dict[str, int] = {}              # target -> its folded rows that are no change (folded_noise)
+        self.new_in_drop: list[str] = []             # what makes this drop more than "nothing new" (what_is_new)
         from scripts.ops.gridmemo import GridMemo
         # one parse per report file (YQ_CHECK_NO_MEMO=1 parses every read again: a diagnostic switch)
         self.grids = GridMemo(memo=os.environ.get("YQ_CHECK_NO_MEMO") != "1")
@@ -1973,11 +2160,18 @@ class Check:
             self.row("product_profitability", "load", reason, dst.name)
         second = second_hold(held, as_on, anchors, self.before)
         loads = None
+        if held:                            # this hold counted with the held loads before it (loads_held)
+            loads = 1 if second is False else self.loads_held(anchors.get("profit_as_of"), self.report_day)
+            if second:
+                loads = max(2, loads)       # second_hold has it from the load before: never fewer than two
+        if second is None and loads and loads > 1:
+            # this drop is already loaded: counted as itself, and the register is left exactly as it is
+            self.checks.append(f"Profitability: held back for the {ordinal(loads)} load in a row (this drop is already "
+                               "loaded: the action list stays as it is).")
         if second is not None:              # None: this drop is already loaded, the register stays as it is
             found: list[dict] = []
             if second:
                 short = (v.get("ledger_cost") or Decimal(0)) - (v.get("report_cost") or Decimal(0))
-                loads = self.loads_held(anchors.get("profit_as_of"))
                 kept = iso(anchors.get("profit_as_of"))
                 since = (date.fromisoformat(kept) + timedelta(days=1)).isoformat() if kept else ""
                 moved = (f"; {v['still']} of the {v['moved']} items sold since {fmt.day(kept)} show no cost movement"
@@ -2008,19 +2202,19 @@ class Check:
         gap = f" (gap {fmt.pct(v['gap'], 1)}, limit {fmt.pct(self.gap_max, 1)})" if v.get("gap") is not None else ""
         self.done("Profitability: " + WORDS["hold_back" if held else "load"] + gap + ".")
 
-    def loads_held(self, kept) -> int:
-        """How many loads in a row have held the profitability report back, this one included: the stock
-        snapshots loaded after production's report date (each load brings one) and this check. Asked only
-        when second_hold() said this is at least the second, so never fewer than two."""
-        day = iso(kept)
-        n = 0
-        if day:
-            rows = self.q(Q_SNAPSHOTS_SINCE, [day])
-            try:
-                n = int((rows or [{}])[0].get("n") or 0)
-            except (TypeError, ValueError):
-                n = 0
-        return max(2, n + 1)
+    def loads_held(self, kept, day: str) -> int:
+        """How many loads in a row have held the profitability report back, the drop as on `day` counted
+        once whether or not it is loaded already (held_in_a_row): the loads the writer finished, each day
+        once, and for a load made by hand (it left no journal) the snapshot days production holds after
+        its report date. Loads are counted, not snapshot dates: a held load whose drop brought no stock
+        balance, or one that gave a date again, counts all the same."""
+        kept = iso(kept)
+        snapshots: dict[str, list[str]] = {}
+        for r in (self.q(Q_SNAPSHOT_DAYS, [kept, kept]) if kept else []):
+            if r.get("d"):
+                snapshots.setdefault(str(r.get("k") or ""), []).append(iso(r.get("d")))
+        loads, explained = finished_held_loads()
+        return held_in_a_row(day, kept, loads, snapshots, explained)
 
     # 6 ── price book
     def step_price_books(self) -> None:
@@ -2109,15 +2303,25 @@ class Check:
         as_on, staged = self.inv["as_on"], self.staged
 
         def hook(target, row):
-            if target in ("orders", "order_lines"):
+            # the sales rows for the loader's guards; the rows of a table the loader folds for folded_noise
+            if target in ("orders", "order_lines") or target in FOLDED:
                 self.captured.setdefault(target, []).append(row)
             return row
 
         preview_dir = allowed_output(loadplan.run_dir(self.run) / "preview")
+        # the preview's own backend inside a timing proxy (scripts/ops/querytime.py): seconds per report, and a
+        # line as each report is compared. YQ_CHECK_NO_TIMING=1 hands the backend over bare (a diagnostic switch)
+        backend, timer = self.session.backend, None
+        if os.environ.get("YQ_CHECK_NO_TIMING") != "1":
+            from scripts.ops.querytime import TimedBackend
+            backend = timer = TimedBackend(self.session.backend, targets=LABEL_BY_TARGET, on_report=self.compared)
         try:
-            result = self.deps.preview(self.staging, self.session.backend, preview_dir, self.today, hook)
+            result = self.deps.preview(self.staging, backend, preview_dir, self.today, hook)
         except Exception as exc:  # noqa: BLE001
             raise Stop(f"The preview against the database failed ({plain_error(exc)}). Nothing was changed.") from None
+        finally:
+            if timer is not None:
+                self.preview_parts = timer.timing_summary()
         self.files.append(str(preview_dir))
         summary = self.summary = result.get("summary") or {}
         targets = self.targets = summary.get("targets") or {}
@@ -2219,6 +2423,11 @@ class Check:
                   + ("invoices " + counts("orders") if "orders" in staged else self.absent("orders"))
                   + ("; lines " + counts("order_lines") if "order_lines" in staged else "") + ".")
 
+    def compared(self, target: str, seconds: float, ok: bool) -> None:
+        """One progress line as the preview's comparison of a report is done (querytime.TimedBackend)."""
+        self.deps.say(f"      preview: {LABEL_BY_TARGET.get(target, target)} compared in {seconds:.1f} s"
+                      + ("" if ok else " (the comparison failed)"))
+
     def sales_guards(self) -> dict[str, list[str]]:
         """The loader's own span and salesman guards, fed with the rows production holds inside the
         file's dates."""
@@ -2259,6 +2468,8 @@ class Check:
         tally = (f"changed {len(cmp['changed'])}, removed {len(cmp['removed'])}, entered with an earlier date "
                  f"{len(cmp['backdated'])}")
         differ = len(cmp["changed"]) + len(cmp["removed"]) + len(cmp["backdated"])
+        self.ledger_cmp = {"changed": len(cmp["changed"]), "removed": len(cmp["removed"]),
+                           "backdated": len(cmp["backdated"]), "new": int(cmp["new"])}
         self.row("stock_movements", "load", f"{len(rows):,} movements to {fmt.day(hi)}: nothing missing; "
                  f"{plural(differ, 'voucher')} to check", self.staged["stock_movements"].name)
         self.checks.append(f"Stock ledger: every item ({cmp['items']}), warehouse ({cmp['warehouses']}) and voucher type "
@@ -2496,12 +2707,139 @@ class Check:
                        "another load or upload was at work. Run the check again")
         return out
 
+    def what_is_new(self) -> list[str]:
+        """What keeps this drop from being "nothing new", in short words ([] = nothing at all: every report
+        the load would apply matches production row for row, and nothing else a load does would change
+        anything: the stock ledger voucher by voucher, the sales by day and salesman, the catalog sync, a
+        last load that failed after it had begun to write). A line that waits for his decision is not part
+        of the load by default (its default leaves it out), so it is named, not counted (not_in_load). Asked
+        when the steps are done and before the database's fingerprint is read again, so the one read it may
+        make (folded_noise, and only when nothing else is new) is inside what moved_meanwhile watches."""
+        if self.stops:
+            return ["the check stops"]
+        out: list[str] = []
+        if self.failed:
+            out.append("the last load failed after it had begun to write: a load replaces it")
+        if not self.staged:
+            out.append("nothing is staged")
+        rewritten: dict[str, int] = {}
+        for target in dict.fromkeys(KIND_TARGET[k] for k in KIND_ORDER if k in self.staged and k in KIND_TARGET):
+            a = (self.targets.get(target) or {}).get("actions")
+            label = LABEL_BY_TARGET.get(target, target)
+            if not (isinstance(a, dict) and {"inserted", "updated", "unchanged"} <= set(a)
+                    and ("deleted" in a or "voided" in a)):
+                out.append(f"{label}: not compared by the preview")      # empty or partial counts prove nothing
+                continue
+            moved = {word: n for word, n in (("new", int(a.get("inserted") or 0)),
+                                             ("removed", int(a.get("deleted") or 0) + int(a.get("voided") or 0)),
+                                             ("back in force", int(a.get("revived") or 0))) if n}
+            changed = int(a.get("updated") or 0)
+            if moved:
+                out.append(f"{label}: " + ", ".join(f"{n:,} {word}" for word, n in moved.items())
+                           + (f", {changed:,} changed" if changed else ""))
+            elif changed:
+                rewritten[target] = changed              # perhaps a folded row only: looked at last
+        if "stock_movements" in self.staged:
+            c = self.ledger_cmp
+            if c is None:
+                out.append("Stock ledger: not compared voucher by voucher")
+            elif any(c.values()):
+                out.append("Stock ledger: " + ", ".join(f"{n:,} {word}" for word, n in c.items() if n))
+        if self.pv.get("invoices"):
+            out.append(f"{plural(len(self.pv['invoices']), 'invoice')} differ from what is loaded")
+        sales = self.summary.get("sales") or {}
+        if "order_lines" in self.staged and (sales.get("per_day_changed") or sales.get("per_salesman_changed")):
+            out.append("sales by day or by salesman differ from what is loaded")
+        effect = self.catalog
+        if effect is None:
+            out.append("Catalog: not compared")
+        elif effect["off"] or effect["on"] or effect["new"]:
+            out.append("Catalog: the sync after a load would change it")
+        for target, n in rewritten.items():
+            if not out and self.folded_noise(target) == n:
+                self.noise[target] = n
+            else:
+                out.append(f"{LABEL_BY_TARGET.get(target, target)}: {n:,} changed")
+        return out
+
+    def not_in_load(self) -> list[str]:
+        """The reports of the table that are not part of this load, each with the words that put it in
+        (OPTION_SAY): held back, left out, or waiting for his decision (whose default leaves it out). A price
+        book that is the same as the live one has nothing to load, and is named as such."""
+        out: list[str] = []
+        for kind in KIND_ORDER:
+            r = self.rows.get(kind)
+            if not r or r["verdict"] not in ("hold_back", "leave_out", "needs_decision"):
+                continue
+            say = OPTION_SAY.get(kind)
+            book = self.books.get(kind.split(":", 1)[1]) if kind.startswith("selling_prices:") else None
+            if r["verdict"] == "hold_back":
+                line = f"{r['label']}: {r['decision']}." + (f" To load it anyway, say: {say}." if say else "")
+            elif r["verdict"] == "needs_decision":
+                line = (f"{r['label']}: {r['decision']} (left out unless you say load)."
+                        + (f" To load it, say: {say}." if say else ""))
+            elif book is not None and not book.get("items"):
+                line = f"{r['label']}: {r['decision']} (the same as the live price book: nothing to load)."
+            else:
+                line = f"{r['label']}: {r['decision']} (left out on your word)." + (f" To load it, say: {say}." if say else "")
+            out.append(line)
+        return out
+
+    def folded_noise(self, target: str) -> int | None:
+        """The rows of `target` the preview counts as rewritten, when each of them is a row the loader folds
+        from two or more lines of the report (FOLDED) and equals production's row in every column the
+        preview compares: exactly, and in the figures the loader adds up to within a millionth of a dinar
+        (same_cell). Then their number: they are no change, the load would write the same sums again.
+        None when that cannot be shown for every one of them: they stay changes, as the preview says. Reads
+        production's rows of the file's snapshot day(s), one read each."""
+        t = self.targets.get(target) or {}
+        updated = int((t.get("actions") or {}).get("updated") or 0)
+        sample = t.get("updated_sample") or []
+        cols = [c for c in (t.get("payload_cols") or []) if c != "source_file"]
+        scope = t.get("scope") or {}
+        kind = next((k for k, tg in KIND_TARGET.items() if tg == target and k in self.staged), None)
+        if target not in FOLDED or kind is None or not updated or updated > len(sample) or not cols:
+            return None
+        from app.ingest_batch import TARGETS
+        from scripts import ingest as ing
+        cfg = TARGETS[target]
+        if scope.get("kind") != "partition" or list(scope.get("cols") or []) != list(cfg["partition"]):
+            return None
+        keys, defaults = cfg["keys"], FOLD_DEFAULTS.get(target)
+        wanted = {key_of(r, keys, defaults) for r in sample}
+        path = self.staged[kind]
+        parse = ing.parse_receivables if target == "ar_ageing" else ing.parse_stock_balance
+        try:
+            folded = folded_keys(target, parse(ing.read_grid(path), path.name))
+        except Exception:  # noqa: BLE001  (a copy the parser cannot read again proves nothing)
+            return None
+        if len(wanted) != updated or not wanted <= folded:
+            return None
+        mine = {key_of(r, keys, defaults): r for r in self.captured.get(target) or []}
+        held: dict[tuple, dict] = {}
+        where = " and ".join(f"{c}::text = %s" for c in cfg["partition"])
+        for part in scope.get("partitions") or []:
+            if len(part) != len(cfg["partition"]):
+                return None
+            for r in self.q(f"select * from {target} where {where}", [str(x) for x in part]):
+                held[key_of(r, keys, defaults)] = r
+        figures = set(FOLDED[target])
+        for key in wanted:
+            f, p = mine.get(key), held.get(key)
+            if f is None or p is None or not all(same_cell(f.get(c), p.get(c), c in figures) for c in cols):
+                return None
+        return updated
+
     def finish(self) -> dict:
         opt, inv, run, staging = self.options, self.inv, self.run, self.staging
         self.not_received()
         self.stops = [f"{r['label']}: {r['reason']}" for k in KIND_ORDER for r in [self.rows.get(k)]
                       if r and r["verdict"] == "stop"] + self.stops
         data_date = self.report_day
+        # what makes this drop more than "nothing new", worked out BEFORE the fingerprint is read again: the
+        # one read it may make (folded_noise) is then inside the window moved_meanwhile watches
+        self.new_in_drop = self.what_is_new()
+        self.checks += [noise_line(target, n) for target, n in self.noise.items()]
         parts = None
         try:
             parts = loadplan.collect_parts(inv["drop"], run, paths.CODE_ROOT, self.pre.get("live") or "", self.session)
@@ -2520,8 +2858,12 @@ class Check:
         if odd:
             self.flag("marker_mismatch")
             self.stops += odd
+        # nothing new: the whole check ran and found nothing for a load to do, so it issues no token
+        nothing_new = not self.stops and not self.new_in_drop
+        if nothing_new:
+            self.flag("nothing_new")
         register_lines = self.record_items(data_date)
-        token = loadplan.token_of(parts) if (parts and not self.stops and not opt["dev"]) else None
+        token = loadplan.token_of(parts) if (parts and not self.stops and not opt["dev"] and not nothing_new) else None
         staged_names = sorted(p.name for p in staging.iterdir() if p.is_file())
         if self.failed:
             self.flag("last_load_failed")
@@ -2532,6 +2874,12 @@ class Check:
         # options: what the owner said; the marker files in staging tell the same story (marker_story).
         # supersedes: the earlier checks of this folder that this one replaced (each of their plans
         # names this run under superseded_by).
+        # nothing_new / new_in_drop: what_is_new; timings.preview_parts: the preview's seconds per report
+        # and per helper (scripts/ops/querytime.py).
+        timings = dict(self.timings, parse=self.grids.summary())
+        if self.preview_parts is not None:
+            timings["preview_parts"] = self.preview_parts
+        timings["total"] = round(sum(self.timings.values()), 2)
         plan = {"run": run, "drop": str(inv["drop"]), "created_at": self.deps.now().isoformat(timespec="seconds"),
                 "verdicts": [self.rows[k] for k in KIND_ORDER if k in self.rows], "expected": self.expected,
                 "options": opt, "token": token, "token_parts": parts if token else None,
@@ -2540,8 +2888,8 @@ class Check:
                 "flags": list(self.flags), "guards": list(self.guards),
                 "supersedes": list(self.retired.get("retired") or []),
                 "not_loaded": [o["name"] for o in inv["others"]] + [f["name"] + "/" for f in inv["folders"]],
-                "profitability": self.profit_evidence,
-                "timings": dict(self.timings, parse=self.grids.summary(), total=round(sum(self.timings.values()), 2))}
+                "profitability": self.profit_evidence, "nothing_new": nothing_new,
+                "new_in_drop": list(self.new_in_drop), "timings": timings}
         self.files.append(str(loadplan.write_plan(plan)))
         if token:
             self.files.append(str(loadplan.write_go_cmd(run, token, paths.CODE_ROOT)))
@@ -2550,14 +2898,26 @@ class Check:
         out += [f"LOAD CHECK  {inv['drop'].name}  (run {run}, reports as on {fmt.day_long(data_date)})"
                 + ("  [DEV RUN]" if opt["dev"] else ""), "", self.table_text(), "", "Checks"]
         out += [line if line.startswith("    ") else "- " + line for line in self.checks + register_lines]
-        out += ["", "After the load you should see"] + ["- " + line for line in self.expected["lines"]]
-        out += ["", "A load also does this, every time"] + ["- " + line for line in SIDE_EFFECTS]
+        if nothing_new:                    # no load follows: what production holds, and nothing a load would do
+            out += ["", "Production already holds (the same as these reports)"]
+            out += ["- " + line for line in self.expected["lines"]]
+            aside = self.not_in_load()     # ... and what stays outside it, with the words that put it in
+            if aside:
+                out += ["", "Not part of this load:"] + ["- " + line for line in aside]
+        else:
+            out += ["", "After the load you should see"] + ["- " + line for line in self.expected["lines"]]
+            out += ["", "A load also does this, every time"] + ["- " + line for line in SIDE_EFFECTS]
         out.append("")
         if self.stops:
             self.flag("stop")
             out.append("STOP: this drop cannot be loaded as it is.")
             out += ["- " + (s if s.endswith(("?", "!")) else s.rstrip(".") + ".") for s in self.stops]
             out.append("No token was issued. Nothing was changed.")
+        elif nothing_new:
+            if opt["dev"]:
+                self.flag("dev")
+            out.append(f"{NOTHING_NEW_HEAD} {inv['drop'].name}: everything this load would apply is already loaded"
+                       f"{last_load_words()}. No load needed.")
         elif opt["dev"]:
             self.flag("dev")
             out.append("DEV RUN: nothing stops this drop, but a dev run issues no token and no GO line. To load, run the "
@@ -2626,12 +2986,16 @@ def run_check(args, deps: Deps | None = None) -> dict:
     check only reads."""
     deps = deps or Deps()
     deps.quiet = bool(getattr(args, "json", False))
+    drop, wrong = drop_asked(args)
+    if wrong:
+        return {"ok": False, "command": "load", "data_date": None, "text": "LOAD CHECK: STOP\n" + wrong,
+                "flags": ["stop"], "files": [], "warnings": [], "exit": 2, "run": None, "token": None}
     check = Check(options_of(args), deps)
     box: dict = {}
 
     def work() -> None:
         try:
-            box["result"] = check.go(getattr(args, "drop", None))
+            box["result"] = check.go(drop)
         except Stop as stop:
             box["result"] = stopped(check, stop)
         except BaseException as exc:  # noqa: BLE001  (raised again in the caller's thread)
@@ -2724,7 +3088,7 @@ def delivery_pending(run: str, now: datetime | None = None) -> bool:
 def delivery_cut_off(run: str, now: datetime | None = None) -> bool:
     """A delivery that was queued and never closed, older than DELIVERY_WAIT_S: the PC slept or the
     worker was ended before the e-mail went. A send by hand afterwards closes it too (DELIVERY_ENDS).
-    `load status` says so, with its retry, which reloads nothing."""
+    `load status` says so, with its retry, which reloads nothing (or why there is none: scripts/ops/noretry.py)."""
     age = _open_delivery_age(run, DELIVERY_ENDS, now)
     return age is not None and age > DELIVERY_WAIT_S
 
@@ -2887,8 +3251,10 @@ def run_status(args, deps: Deps | None = None) -> dict:
             break
         deps.pause(WAIT_POLL_S)
     if state in ("FINISHED", "FAILED") and delivery_cut_off(run):
+        # no retry where the sender would refuse it (an older load's brief), in its words: scripts/ops/noretry.py
+        from scripts.ops.noretry import no_retry_needed
         lines.append("  Delivery: cut off before the e-mail went (the PC slept, or the load's window was closed). "
-                     f"Nothing was reloaded. Its retry: {SEND_RETRY.format(run=run)}")
+                     "Nothing was reloaded. " + (no_retry_needed(run) or f"Its retry: {SEND_RETRY.format(run=run)}"))
     text = [f"Load {run}"]
     newer = (read_plan_of(run) or {}).get("superseded_by")
     if newer and state == "NOT STARTED":
@@ -2906,9 +3272,31 @@ def run_status(args, deps: Deps | None = None) -> dict:
 
 # ── the command ───────────────────────────────────────────────────────────────
 
+AGAIN = "again"      # the writer's too-fast answer says "Type /yq-load <ddmmyy> again.": he may type the word too
+
+
+def drop_asked(args) -> tuple[str | None, str | None]:
+    """(the drop folder a check is for, why the words cannot be taken) from the words after `check`. Taken: no
+    word (the latest folder); the folder (ddmmyy, or a path); the folder and then the one word 'again', in any
+    case, which is ignored; 'again' alone, which is /yq-load alone (he once typed exactly that after "Type
+    /yq-load to check again."). Refused, with what to type: 'again' first and anything after it ('again again',
+    'again <ddmmyy>'), and any other word after the folder. Nothing is guessed."""
+    drop, extra = getattr(args, "drop", None), getattr(args, AGAIN, None)
+    first_is_again = drop is not None and str(drop).strip().lower() == AGAIN
+    if extra is not None and first_is_again:
+        return None, ("'again' comes after the folder: type /yq-load <ddmmyy> again, or /yq-load alone for the latest "
+                      "folder. Nothing was checked.")
+    if extra is not None and str(extra).strip().lower() != AGAIN:
+        return None, (f"'{str(extra)[:40]}' is not a word the check takes after the folder (only '{AGAIN}' is). "
+                      "Nothing was checked.")
+    return (None if first_is_again else drop), None
+
+
 def add_arguments(parser) -> None:
     parser.add_argument("action", choices=("check", "status"), help="check a drop folder, or follow a running load")
     parser.add_argument("drop", nargs="?", help="check: the drop folder as ddmmyy (default: the latest) or a path")
+    parser.add_argument(AGAIN, nargs="?", help="check: the word 'again' after the folder (as the load program's "
+                                               "answer words it): taken and ignored; no other word is")
     parser.add_argument("--pricebook", choices=("load", "skip"),
                         help="check: the owner's decision on the price book (load it / leave it out)")
     parser.add_argument("--with-profitability", action="store_true",

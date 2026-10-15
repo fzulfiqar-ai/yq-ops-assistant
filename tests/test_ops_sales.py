@@ -53,10 +53,15 @@ Covered:
     done item rests until its facts change;
   * two lines when there is no new data; files only under exports/ and business_data/; the state;
     money to the fils; the wording guard; no long digit run; the statements themselves; the
-    brief still prints under the banner of a load that failed.
+    brief still prints under the banner of a load that failed;
+  * no pointer to a command that is not built: what the brief, the register's lines, the e-mail, the
+    notes and the skill tell a reader to type is a command or a skill that exists (the commands
+    scripts/ops/__main__.py lists, the skills in .claude/skills), and what is left over when the
+    register has more open items than a line holds is a count, never a pointer.
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -84,7 +89,7 @@ import httpx  # noqa: E402
 
 from scripts.ops import db  # noqa: E402  (first, as every command does)
 from scripts.ops import __main__ as cli  # noqa: E402
-from scripts.ops import alerts, config, fmt, paths, sales, status  # noqa: E402
+from scripts.ops import actions, alerts, config, fmt, paths, render, sales, status  # noqa: E402
 
 from app import metrics, reports  # noqa: E402
 
@@ -1483,7 +1488,7 @@ def _():
         # the row that reads the profitability report carries a star; its basis is the line under the table
         assert block[3].split(None, 2) == ["A3", "ACT", "1 item selling below cost *"], block[3]
         assert block[6] == "* A3: Focus cost of sales, profitability report of Wed 21 Jan"
-        assert block[7] == "(+2 more: /yq-watch)" and len(block) == 8
+        assert block[7] == "(+2 more open)" and len(block) == 8
         assert max(len(ln) for ln in block) <= 120, "the table stays inside the window"
         assert out["flags"] == {"open": {"ACT": 3, "CHECK": 4},
                                 "recorded": {"new": 7, "same": 0, "cleared": 0, "baseline": 0, "explained": 0}}
@@ -1510,7 +1515,7 @@ def _():
         alerts.record("xfer_open", old, "2026-01-19")                  # that rule's first run: its baseline
         items = seven_items()[:2]
         text = brief(World(), overview=command_centre(attention=items))["text"]
-        assert text.splitlines()[-1] == "2 older items counted once: /yq-watch"
+        assert text.splitlines()[-1] == "2 older items counted once, not listed"
         assert "SIO:X-26-01-1" not in text, "a baseline item is counted, not listed"
         assert len(alerts.open_items()) == 2
         # the Command Centre answered in part: the list is left as it stood and the screen says so
@@ -1540,7 +1545,7 @@ def _():
         assert state["brief_targets_shown"] == "2026-01-20", "the four figures were on that screen: shown once is shown"
         # the next plain /yq-brief: the whole screen, with the reps, the stock and the attention list this time
         out = brief(world, overview=command_centre(attention=seven_items()))
-        assert out["text"].startswith("YQ ACCESSORIES BRIEF - data to Tue 20 Jan") and "(+2 more: /yq-watch)" in out["text"]
+        assert out["text"].startswith("YQ ACCESSORIES BRIEF - data to Tue 20 Jan") and "(+2 more open)" in out["text"]
         assert out["flags"]["recorded"]["new"] == 7 and status.read_state()["last_brief_data_date"] == "2026-01-20"
         assert len(brief(world, overview=command_centre(attention=seven_items()))["text"].splitlines()) == 2
     with data_root():
@@ -1666,7 +1671,7 @@ def _():
         # the row is not among the five listed: no line under the table for a row that is not on it
         many = [attn(f"k{n}", "alert", f"item {n}", 100.0 - n) for n in range(5)] + items[:1]
         text = brief(World(), overview=command_centre(attention=many, margin_report_date="2026-01-12"))["text"]
-        assert today(text)[-1] == "(+1 more: /yq-watch)" and "*" not in "".join(today(text))
+        assert today(text)[-1] == "(+1 more open)" and "*" not in "".join(today(text))
         assert alerts.current()["attn|below_cost"]["title"].endswith("older than the data to Tue 20 Jan)")
     # only a title that ends with the words this module adds is taken apart
     whole = "1 item selling below cost (Focus cost of sales, profitability report of Mon 12 Jan)"
@@ -2159,6 +2164,169 @@ def _():
                 assert code == 0 and out.splitlines()[0] == said and "nothing new since the last brief" in out
         finally:
             status.interrupted_banner = kept
+
+
+# ── no pointer to a command that is not built ───────────────────────────────────────────────────
+
+ENRICHED = {                     # what scripts/ops/enrich.py adds for the e-mail, in its shape (invented rows)
+    "team": [{"salesman": VAN_A, "name": "Van A", "mtd_bhd": "280.000", "change_pct": 5.0, "invoices": 14, "shops": 1,
+              "last_invoice": "2026-01-20", "business_days_since_invoice": 0, "target_bhd": "100.000",
+              "achieved_pct": 280.0, "needed_per_business_day_bhd": "0.000", "shops_due": 0},
+             {"salesman": VAN_B, "name": "Van B", "mtd_bhd": "60.000", "change_pct": None, "invoices": 6, "shops": 1,
+              "last_invoice": "2026-01-08", "business_days_since_invoice": 8, "target_bhd": "100.000",
+              "achieved_pct": 60.0, "needed_per_business_day_bhd": "5.714", "shops_due": 1}],
+    "push": [{"item": "ITEM-01 Cable", "units_30_days": 40, "units_30_before": 10, "bhd_30_days": "200.000",
+              "rise_bhd": "150.000", "in_stock": 300, "days_cover": 120}],
+    "movers": {"rising": [], "falling": []},
+    "receivables": {"total_bhd": "500.000", "accounts": 4, "over_90_pct": 12.5, "over_90_bhd": "62.500",
+                    "top_overdue": [{"account": "Shop 1", "overdue_bhd": "40.000", "over_90_bhd": "20.000",
+                                     "last_receipt": "2026-01-01"}]},
+    "orders": {"orders": 2, "bhd": "40.000", "oldest_hours": 30},
+    "shops_due": {"due": 1, "lapsed": 0, "monthly_value_bhd": "60.000", "by_rep": {VAN_B: 1},
+                  "shops": [{"shop": "Shop 2", "rep": VAN_B, "days_since": 40, "usual_gap_days": 14.0,
+                             "monthly_value_bhd": "60.000"}]},
+    "discounts": {"evidenced": False, "why": "the Focus sales export carries no discount values"},
+    "stock_shape": None, "not_read": [],
+}
+LOAD_ROW = {"run": "210126_0910", "result": "ok", "as_on": {"stock_balance": "2026-01-21", "receivables": "2026-01-21"},
+            "verify": "passed", "reconcile": "matched", "gate": "passed", "timings": {}, "total_seconds": 300.0}
+MADE_ON = date(2026, 1, 21)
+
+
+def older_items(n: int) -> list[dict]:
+    """Items of another rule, found on that rule's first run: the register counts them once, it does not list them."""
+    return [{"key": f"xfer_open|SIO:X-26-01-{k}", "level": "CHECK", "title": "Transfer not received yet: to check",
+             "detail": "", "bhd": "5", "evidence": [f"SIO:X-26-01-{k}"]} for k in range(1, n + 1)]
+
+
+def the_email(world: World, overview: dict) -> dict:
+    """The management e-mail of the invented world, as the delivery makes it: the brief's own facts (a preview,
+    so the register stays as it is), the ranked actions, the team text; both parts of it, and what went in."""
+    with standing_in(world, overview):
+        shown = sales.full_screen(record=False)
+    facts = dict(shown["facts"], enriched=json.loads(json.dumps(ENRICHED)))
+    top, every = actions.ranked(facts, shown["d"])
+    team = render.team_text(facts, MADE_ON)
+    return {"facts": facts, "top": top, "every": every, "team": team,
+            "html": render.email_html(facts, top, every, LOAD_ROW, team, MADE_ON),
+            "text": render.email_text(facts, top, every, LOAD_ROW, team, MADE_ON)}
+
+
+def commands_by_state() -> tuple[list[str], list[str]]:
+    """(built, not built) among the commands scripts/ops/__main__.py lists. A command that is not built is the one
+    __main__ answers with "'x' is not built yet": the module it names is not there."""
+    built, gone = [], []
+    for name, (module, _about) in cli.COMMANDS.items():
+        try:
+            there = importlib.util.find_spec(module) is not None
+        except ModuleNotFoundError:                     # a package above the module is not there either
+            there = False
+        (built if there else gone).append(name)
+    return built, gone
+
+
+def skills_on_disk() -> set[str]:
+    return {p.parent.name for p in (ROOT / ".claude" / "skills").glob("yq-*/SKILL.md")}
+
+
+def dead_pointers(text: str, built: list[str], gone: list[str], skills: set[str]) -> list[str]:
+    """Where `text` sends a reader to something that is not there: a /yq-<word> that is no skill, a
+    `scripts.ops <word>` line for a command that is not built, or "the <command> command" for one that is not."""
+    found = [f"/{s}" for s in re.findall(r"/(yq-[a-z]+)", text) if s not in skills]
+    found += [f"scripts.ops {w}" for w in re.findall(r"scripts\.ops\s+([a-z]+)", text) if w not in built]
+    for name in gone:
+        found += re.findall(rf"\b{name}\s+command\b(?!\s+centre)", text, re.I)
+    return found
+
+
+@test("the full list is not built: the register and the e-mail say how many more there are and point nowhere")
+def _():
+    with data_root():
+        brief(World(), overview=command_centre(attention=seven_items()))
+        items = alerts.open_items()
+        assert len(items) == 7
+        cut = alerts.render(items, limit=3).splitlines()
+        assert cut[-1] == "(+4 more open)" and sum(1 for ln in cut if ln.startswith("A")) == 3, cut
+        for whole in (alerts.render(items).splitlines(), alerts.render(items, limit=7).splitlines()):
+            assert not whole[-1].startswith("(+"), "a list that fits says nothing of the rest"
+        assert alerts.render(items, limit=6).splitlines()[-1] == "(+1 more open)"
+        assert alerts.render([]) == "Nothing open."
+        # the e-mail: the five that rank first, and a count of the others
+        mail = the_email(World(), command_centre(attention=seven_items()))
+        assert len(mail["top"]) == actions.TOP and mail["every"] - len(mail["top"]) >= 2
+        n = mail["every"] - len(mail["top"])
+        assert f"({n} more on the action list)" in mail["text"].splitlines(), mail["text"]
+        assert f">{n} more on the action list.</p>" in mail["html"]
+        for body in (mail["text"], mail["html"]):
+            assert "Claude Code)" not in body and "action list:" not in body, "the count points nowhere"
+        shown = render.email_text(mail["facts"], mail["top"], len(mail["top"]), LOAD_ROW, None, MADE_ON)
+        assert "more on the action list" not in shown, "nothing is left over when every action is on the e-mail"
+        assert "Nothing is open on the action list." in render.email_text(mail["facts"], [], 0, LOAD_ROW, None, MADE_ON)
+    with data_root():
+        # the older items (another rule's first finds) are a count too: one is "item", not "items"
+        alerts.record("xfer_open", older_items(1), "2026-01-19")
+        text = brief(World(), overview=command_centre(attention=seven_items()[:2]))["text"]
+        assert text.splitlines()[-1] == "1 older item counted once, not listed" and "more open" not in text
+        assert "SIO:X-26-01-1" not in text, "a baseline item is counted, not listed"
+    # the skill no longer waits for a screen to name a command that is not built, and says what to tell him instead
+    skill = (ROOT / ".claude" / "skills" / "yq-brief" / "SKILL.md").read_text(encoding="utf-8")
+    assert "If the screen names a command that is not built yet" not in skill
+    assert "say that it arrives in a later phase" in skill and "/yq-watch" not in skill
+
+
+@test("nothing a person reads points at a command that is not built: brief, register, e-mail, notes, skill")
+def _():
+    built, gone = commands_by_state()
+    skills = skills_on_disk()
+    assert {"status", "brief", "load", "deliver"} <= set(built) and not set(built) & set(gone), (built, gone)
+    assert {"yq-brief", "yq-load"} <= skills, skills
+    for name in gone:                                   # __main__ itself reports it, and runs nothing
+        code, said = run_cli([name])
+        assert code == 1 and said.strip() == f"'{name}' is not built yet.", (name, code, said)
+    # the finder bites (with the lists given, so these do not move when a command is built): the old lines are
+    # caught; the commands and skills that exist, and the Command Centre, are not
+    here, away = ["brief", "status", "load"], ["watch", "stock", "moves"]
+    assert dead_pointers("(+2 more: /yq-watch)", here, away, skills) == ["/yq-watch"]
+    assert dead_pointers("2 older items counted once: /yq-watch", here, away, skills) == ["/yq-watch"]
+    assert dead_pointers("see /yq-week and /yq-month", here, [], skills) == ["/yq-week", "/yq-month"]
+    assert dead_pointers("run python -m scripts.ops stock", here, away, skills) == ["scripts.ops stock"]
+    assert dead_pointers("run python -m scripts.ops frobnicate", here, [], skills) == ["scripts.ops frobnicate"]
+    assert dead_pointers("the Moves command lists them", here, away, skills) == ["Moves command"]
+    assert dead_pointers("type /yq-brief again, or /yq-load; python -m scripts.ops status; the stock Command Centre",
+                         here, away, skills) == []
+    texts: dict[str, str] = {}
+    with data_root() as root:
+        alerts.record("xfer_open", older_items(2), "2026-01-19")           # another rule's first run: older items
+        (root / "Uplaods" / "220126").mkdir(parents=True)                  # a drop folder waits to be loaded
+        world = World()
+        centre = command_centre(attention=seven_items(), team=[rep_row("Van B", "2026-01-08", 8)],
+                                sold_out=[{"item": "ITEM-08 Thing", "qty_60": 4, "net_60_bhd": 16.5}])
+        texts["the full brief"] = brief(world, overview=centre)["text"]
+        assert "(+2 more" in texts["the full brief"] and "older items counted once" in texts["the full brief"]
+        texts["the brief, nothing new"] = brief(world)["text"]             # two lines: the data date, what is waiting
+        assert len(texts["the brief, nothing new"].splitlines()) == 2
+        for spec in (("mtd",), ("7d", "rep:Van A"), ("rep:Van A",), ("fortnight",), ("2026-13",), ("again",)):
+            texts["brief " + " ".join(spec)] = brief(world, *spec, overview=centre)["text"]
+        texts["no team message yet"] = sales.team_message()
+        items = alerts.open_items()
+        texts["the register, cut"] = alerts.render(items, limit=2)
+        texts["the register, whole"] = alerts.render(items)
+        mail = the_email(world, centre)
+        texts["the e-mail"], texts["the e-mail, plain text"] = mail["html"], mail["text"]
+        assert mail["every"] > len(mail["top"]), "the line that says how many more is among them"
+        texts["the e-mail, nothing open"] = (render.email_html(mail["facts"], [], 0, LOAD_ROW, None, MADE_ON)
+                                             + render.email_text(mail["facts"], [], 0, LOAD_ROW, None, MADE_ON))
+        texts["the e-mail, no names"] = render.email_html(mail["facts"], mail["top"], mail["every"], LOAD_ROW,
+                                                          mail["team"], MADE_ON, test=True, names=False)
+        texts["the team message"] = mail["team"]
+        texts["the team message page"] = render.whatsapp_page(mail["team"], MADE_ON)
+        for kind in ("look", "failed"):
+            texts[f"the note, {kind}"] = (render.note_text(kind, "210126_0910", ["reconcile"])
+                                          + render.note_html(kind, "210126_0910", ["reconcile"]))
+    texts["the skill"] = (ROOT / ".claude" / "skills" / "yq-brief" / "SKILL.md").read_text(encoding="utf-8")
+    assert all(text.strip() for text in texts.values()), [label for label, text in texts.items() if not text.strip()]
+    caught = {label: dead_pointers(text, built, gone, skills) for label, text in texts.items()}
+    assert not any(caught.values()), {label: found for label, found in caught.items() if found}
 
 
 SALESMEN = [{"id": 1, "name": "Van A", "focus_name": "Van A", "is_active": True, "referral_code": None},

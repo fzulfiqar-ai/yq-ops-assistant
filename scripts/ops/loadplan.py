@@ -199,15 +199,19 @@ def journal_append(run: str, event: str, **fields) -> dict:
 
 
 def journal_read(run: str) -> list[dict]:
+    """The journal's rows, in order. A line that is no JSON object is no row and is passed over (as in
+    delivery_read); a file that is not UTF-8 text raises ValueError (UnicodeDecodeError), as it always did."""
     f = journal_file(run)
     if not f.is_file():
         return []
     rows = []
     for line in f.read_text(encoding="utf-8").splitlines():
         try:
-            rows.append(json.loads(line))
+            row = json.loads(line)
         except ValueError:
             continue
+        if isinstance(row, dict):
+            rows.append(row)
     return rows
 
 

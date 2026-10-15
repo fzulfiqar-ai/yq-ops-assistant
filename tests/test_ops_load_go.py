@@ -30,7 +30,10 @@ Covered:
     the disk, beside a running load, or by another process than the launcher loads nothing; inside a
     Windows virtual environment the worker is still the launcher's own child;
   * the box: the check's ATTENTION lines under the file lines, the options that change what a Yes
-    does; a marker file it would not show is refused;
+    does; a marker file it would not show is refused; a line that sends him back to /yq-load names
+    the folder (/yq-load <ddmmyy>), never "/yq-load again";
+  * after the load: the retry of its e-mail is offered only where it would be accepted (a brief the
+    deliver command refused, or a newer load on record, has none: that load has its own e-mail);
   * a worker kept inside the editor's job: the owner is told to keep the window open;
   * a live worker with a stale heartbeat: its own sentence with what he can do, no circle with
     `load status`; a rehearsal's lock: dead = cleared, alive = nothing starts beside it;
@@ -2119,6 +2122,75 @@ def _():
     assert yq.SEND_LINE == load_check.SEND_RETRY and yq.SEND_LINE.format(run=RUN) == yq_send.retry_line(RUN)
 
 
+@test("after the load: a retry is offered only where it would be accepted; a newer load has its own e-mail")
+def _():
+    newer = "020126_0900"
+
+    def finished_since():                       # another load finished while this one's brief was being made
+        at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds")
+        status.write_state({"last_load": {"run": newer, "finished_at": at}})
+    refused = yq.Child(2, "Delivery of run 010126_0900: NOT prepared: the database was written after this load (a "
+                          "Data-page upload or another load). Its brief would show other figures than this load's, so "
+                          "nothing is sent for it.\n")
+    no_retry = f"No retry is needed: a newer load (run {newer}) has its own e-mail."
+    for answer, hook, starts, ends in (
+            (refused, None, "Delivery: no brief was made for this load (exit code 2; its last line: Delivery of run ",
+             yq.NO_BRIEF_RETRY),
+            (refused, finished_since, "Delivery: no brief was made for this load (exit code 2", no_retry),
+            (yq.Child(1, "Traceback\nKeyError: x\n"), finished_since, "Delivery: the brief could not be prepared (exit "
+                                                                      "code 1; its last line: KeyError: x)", no_retry)):
+        with data_root() as root:
+            h = Harness(root)
+            h.deps.deliver = True
+            paths.write_text(paths.ops_dir() / "delivery.json", json.dumps(        # delivery on, as on the PC
+                {"mode": "on", "from": "YQ <reports@mail.example.invalid>", "to": ["owner@example.invalid"]}))
+            h.runner.script["deliver"] = [answer]
+            if hook:
+                h.runner.hooks["deliver"] = hook
+            assert h.load() == 0 and loadplan.run_result(RUN) == "FINISHED"      # the load's own result, whatever
+            last = loadplan.delivery_read(RUN)[-1]
+            assert last["event"] == "ended" and last["text"].startswith(starts), last["text"]
+            assert last["text"].endswith(" " + ends) and "Its retry" not in last["text"], last["text"]
+            assert "send" not in h.runner.labels(), "the e-mail was tried without its brief"
+    assert yq.NO_BRIEF_RETRY.startswith("No retry: ") and "next load sends its own e-mail" in yq.NO_BRIEF_RETRY
+    with data_root() as root:                    # exit code 2 without the deliver command's refusal (a usage error): a failure
+        h = Harness(root)
+        h.deps.deliver = True
+        h.runner.script["deliver"] = [yq.Child(2, "usage: python -m scripts.ops deliver\nerror: unrecognized arguments\n")]
+        assert h.load() == 0
+        last = loadplan.delivery_read(RUN)[-1]["text"]
+        assert last.startswith("Delivery: the brief could not be prepared (exit code 2; its last line: error: "), last
+        assert last.endswith(f". Its retry: python -m scripts.yq_send --run {RUN}"), last
+    assert yq.DELIVER_REFUSED == "NOT prepared:"     # the deliver command's own word (tests/test_ops_deliver.py)
+
+
+@test("a line that sends him back to /yq-load names the folder: he once typed '/yq-load again' as a line said it")
+def _():
+    assert yq.folder_word({"drop": "C:/x/Uplaods/151026"}) == "151026"
+    for drop in ("C:/x/Uplaods/151026 (2)", "C:/x/Uplaods/151026/second set", "D:/elsewhere/reports", "", None):
+        assert yq.folder_word({"drop": drop}) == "<ddmmyy>", drop      # not what /yq-load <ddmmyy> would find
+    assert yq.folder_word(None) == "<ddmmyy>"
+    assert yq.again_line({"drop": "C:/x/Uplaods/151026"}, "151026_0900") == "Type /yq-load 151026 again."
+    assert yq.again_line({"drop": "C:/x/Uplaods/151026"}, "151026_0900", "Then") == "Then type /yq-load 151026 again."
+    rehearsal = {"rehearsal": True, "drop": "C:/x/business_data/ops/loads/000000_1027/drop"}
+    assert yq.again_line(rehearsal, "000000_1027") == "Ask for the rehearsal again."   # he asks for one in words
+    assert yq.again_line(rehearsal, "000000_1027", "Then") == "Then ask for the rehearsal again."
+    with data_root() as root:                    # the check said STOP
+        h = Harness(root)
+        h.w.write_plan(stops=["Stock ledger: a guard would refuse it"])
+        assert h.go() == 2 and h.said().endswith("Once that is settled, type /yq-load 010126 again."), h.said()
+    with data_root() as root:                    # a permission rule would start a load without asking him
+        f = root / ".claude" / "settings.local.json"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"permissions": {"allow": ["Bash(python *)"]}}), encoding="utf-8")
+        h = Harness(root, settings=[f])
+        assert h.go() == 2 and h.said().endswith("\nThen type /yq-load 010126 again."), h.said()
+    for refused in (yq.archive_refusal("pw", None, None), yq.archive_refusal(None, "7z.exe", "2026-10-15")):
+        assert refused.endswith(", then type /yq-load"), refused      # (the box and the backup step): nothing after it
+    said = [s for s in code_strings(writer_tree()) if "/yq-load again" in s]     # what the writer says, not its notes
+    assert said == [], f"a line names no folder before 'again': {said}"
+
+
 @test("the real providers: only reads that scripts.ops.db accepts, each session closed, the live site asked once")
 def _():
     with data_root() as root:
@@ -3693,7 +3765,7 @@ def _():
         h = Harness(root, answer="too_fast")
         assert h.go() == 4
         assert h.out == ["Yes came at once every time the box opened, before it could be read. That is no answer: "
-                         "nothing loaded. Type /yq-load again."], h.out
+                         "nothing loaded. Type /yq-load 010126 again."], h.out         # the folder, named
         h.assert_nothing_started()
     with data_root() as root:                    # No at the RESUME box of a load that had begun: the database is not as it was
         h = Harness(root, answer="no")
@@ -4046,6 +4118,7 @@ def _():
             yq.journal = real_journal
         assert status.read_lock()["word_sha"] == "old-word" and h.rows("failed") == []
         assert "It stays INTERRUPTED" in h.said() and MAY_HOLD in h.said() and not says_nothing_was_written(h.said())
+        assert "Try /yq-load 010126 again in a minute." in h.said(), h.said()          # the folder, named
         h.out.clear()                            # the next /yq-load can write the row: closed, unlocked, LAST LOAD FAILED
         assert h.go() == 3 and "The interrupted load is closed: it cannot be resumed." in h.said()
         assert not paths.lock_file().exists() and status.interrupted_banner() == last_failed("refresh")

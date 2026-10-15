@@ -902,7 +902,7 @@ def _():
     # the action list's own rule for an item he has explained (scripts/ops/alerts.py), and where its full list is
     assert alerts.REOPEN_GROWTH * 4 == 1 and "until it has grown by more than a quarter" in defs
     assert "has become more pressing, or names a voucher or an invoice that was not there" in defs
-    assert "more:" in read(OPS / "alerts.py") and "when more are open, the screen says how many" in defs
+    assert "more open)" in read(OPS / "alerts.py") and "when more are open, the screen says how many" in defs
     assert "The full list, and marking an item done or explained, come with a later command" in defs
     assert "yq-watch" not in skill_folders(), "the action-list skill exists now: section 4 still says it comes later"
     # ... and so are the words of a line
@@ -1206,6 +1206,32 @@ def _():
     assert "It runs the same line, so the same Yes/No box opens, and it waits for a key at the end" in page
     assert "the `go.cmd` the check named" not in skill and "the `go.cmd` it names" not in page   # no path was named
     assert f"loads/{RUN}/go.cmd" not in skill and RUN not in page                # placeholders, never a real run
+
+
+@test("a check that finds nothing new ends on the line Step 1 acts on, with no GO line; a cut-off e-mail after a newer "
+      "load offers no retry, in the sender's words, and Step 4 says what to do")
+def _():
+    skill = read(SKILLS / "yq-load" / "SKILL.md")
+    step1, step4 = section(skill, "Step 1"), section(skill, "Step 4")
+    head = load_check.NOTHING_NEW_HEAD
+    assert head == "Nothing new in" and f"The last line starts `{head} <ddmmyy>`" in step1, step1
+    src = read(OPS / "load_check.py")
+    assert "f\"{NOTHING_NEW_HEAD} {inv['drop'].name}: everything this load would apply is already loaded\"" in src
+    assert "and not nothing_new) else None" in src, "a check that finds nothing new must make no token"
+    # (the real check, run on a drop that is loaded already, is tests/test_ops_load.py's: it ends on that line)
+    # the words the check names a report outside the load with are his spoken words of Step 1, for that option
+    for kind, words in load_check.OPTION_SAY.items():
+        flag = SPOKEN[words]
+        assert f'"{words}"' in step1 and flag.split()[0] in options_of(load_check.add_arguments), (kind, words)
+        assert (kind == "product_profitability") == (flag == "--with-profitability"), (kind, flag)
+    # the cut-off e-mail: the status's words are the sender's own (tests/test_ops_load.py runs the two rules side
+    # by side), and Step 4 says what to do with each
+    rule, sender = read(OPS / "noretry.py"), read(ROOT / "scripts" / "yq_send.py")
+    for said in ("No retry is needed: a newer load (run {other}) has its own e-mail.",
+                 "No retry: the last load on record is run {other}, not this one, so this load's brief cannot be sent.",
+                 "No retry: no load is on record as the last load, so this load's brief cannot be sent."):
+        assert said in rule and said in sender, said
+    assert "`No retry is needed`" in step4 and "`No retry:`" in step4 and "there is nothing to run" in step4, step4
 
 
 # -- following a load: the last line of `load status` ---------------------------------------------
@@ -1526,6 +1552,11 @@ MUST_CONTAIN = {
         "other commands open with `LAST LOAD FAILED` for the same thing", "tell him that first",
         "say plainly that the last load stopped after it had begun to write, so the database may hold part of it",
         "this /yq-load starts a new load that replaces it, once the output ends with a `GO: ` line",
+        # ... nothing new to load: said plainly, what is not part of the load named, his words still apply to it
+        "The last line starts `Nothing new in <ddmmyy>`", "everything this load would apply is already loaded",
+        "Tell him that plainly (no box opens and no e-mail goes)",
+        "If the output lists what is not part of this load, name those lines too",
+        "his words below still load them, through Step 1 again",
         # ... any other stop waits for his words
         "Say why in the script's words, then stop", "load the price book", "--pricebook load",
         "leave the price book out", "--pricebook skip",
@@ -1558,6 +1589,8 @@ MUST_CONTAIN = {
         "A line that holds `Its retry: `", "the e-mail did not go, and the load is not touched by that",
         "sends it again and loads nothing: run it only when he says so, and only if it starts with `python`",
         "Never send a load's e-mail a second time unless he asks for exactly that",
+        "says `No retry is needed` (a newer load has its own e-mail) or `No retry:` (this load's brief can no longer be "
+        "sent)", "say what the line says, in one sentence; there is nothing to run",
     ],
     "yq-brief": [
         "python -m scripts.ops brief $ARGUMENTS", "python -m scripts.ops status", "600000", "no pipe",
@@ -1629,6 +1662,10 @@ def _():
         ("not in the background", "in the background"),
         ("Never edit, move or delete", "Tidy"),
         ("$ARGUMENTS", "$ARGUMENTS $ARGUMENTS"),
+        ("Tell him that plainly (no box opens and no e-mail goes)", "Tell him to load it again"),
+        ("name those lines too", "leave those lines out"),
+        ("his words below still load them, through Step 1 again", "nothing else can load them"),
+        ("there is nothing to run", "run the retry anyway"),
     )
     for old, new in turned:
         assert old in load, old

@@ -1059,11 +1059,11 @@ def today_section(attention: list[dict] | None, unavailable: list[str], data_dat
         if basis is not None and n < DO_TODAY:
             under.append(f"* {row.get('id')}: {basis}")
     rendered = alerts.render(table, limit=DO_TODAY).splitlines()
-    more = [rendered.pop()] if under and rendered[-1].startswith("(+") else []     # "(+2 more: /yq-watch)" stays last
+    more = [rendered.pop()] if under and rendered[-1].startswith("(+") else []     # "(+2 more open)" stays last
     lines += rendered + under + more
     older = sum(int(b["count"]) for b in alerts.baseline_summary())
-    if older:
-        lines.append(f"{_plural(older, 'older item')} counted once: /yq-watch")
+    if older:       # a count and no pointer: no command lists the register yet (nor the older items)
+        lines.append(f"{_plural(older, 'older item')} counted once, not listed")
     facts = {"recorded": recorded, "open": [{k: r.get(k) for k in ("id", "key", "level", "title", "detail", "bhd",
                                                                  "count", "evidence", "first_seen")} for r in items],
              "older_items": older, "not_answered": needed + other}

@@ -23,6 +23,9 @@ ALLOWED_PATHS = (
     ".claude/skills/yq-", "scripts/ops/", "scripts/yq_load_go.py", "scripts/yq_send.py", "scripts/yq_secrets.py",
     "scripts/yq_backup.py", "tests/test_ops_", "docs/OPS_SKILLS.md", "docs/FOCUS_EXPORT.md", "CLAUDE.md",
     ".gitignore", ".github/workflows/ci.yml", "requirements-dev.txt",
+    # the continuation record and the docs the 15-Oct hardening pack brought current
+    "docs/STATUS.md", "docs/BACKUPS.md", "docs/ROADMAP.md", "docs/CLAUDE.md", "docs/MARKET_INTEL.md",
+    "docs/MARKET_INTEL_RELEASE.md", ".env.example",
 )
 # Names that are places or system words, already public in this repository: never treated as a leak.
 GENERIC_NAMES = {

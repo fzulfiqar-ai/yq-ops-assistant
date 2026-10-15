@@ -21,9 +21,18 @@ No second copy: a 'sent' row in the run's delivery journal (business_data/ops/lo
 the same kind and the same recipients refuses a second send; --resend asks at the box first. Each request
 also carries an Idempotency-Key, so a retry of one attempt can never deliver two copies.
 
+One full e-mail per data set: when the newest e-mail that went for real (a 'sent' row in any load's delivery
+journal; a test copy is 'test_sent' and never counts) is the full brief of the very data of this load
+(data_set: the data date, the sha256 of each Focus report the load took, and the figures, options and
+programs of its check, as plan.json recorded them), nothing is sent and the row reads "skipped: same data as
+run <run>". The note that such a load needs a look would only repeat it, and is held back the same way. The
+note of a load that failed after it began to write always goes (the database may hold part of it), and the
+brief after such a note goes too, whatever its data. --resend still sends, after a Yes at the box.
+
 Every outcome is a row of that journal and state.json's last_delivery. Exit codes: 0 sent, or nothing to do
-(off, nothing to deliver); 1 error (recorded; nothing is reloaded, and the line that retries it is printed);
-2 refused (a copy went already, a newer load exists, No at the box).
+(off, nothing to deliver, the same data went already); 1 error (recorded; nothing is reloaded, and the line
+that retries it is printed, or why none is needed); 2 refused (a copy went already, a newer load exists, No
+at the box).
 """
 from __future__ import annotations
 
@@ -52,6 +61,7 @@ TIMEOUT_S = 30
 DELIVER_TIMEOUT_S = 300
 MODULE = "scripts.yq_send"
 EXIT_OK, EXIT_ERROR, EXIT_REFUSED = 0, 1, 2
+LOOK_STEPS = ("reconcile", "post_gate")      # scripts/ops/deliver.py LOOK_STEPS: these needing a look make a note
 _ADDRESS = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[A-Za-z]{2,}$")
 _SENDER = re.compile(r"^(?:[^<>@]*<)?([^@\s<>,;]+@[^@\s<>,;]+\.[A-Za-z]{2,})>?$")
 
@@ -66,6 +76,59 @@ class Failed(Exception):
 
 def retry_line(run: str) -> str:
     return f"python -m {MODULE} --run {run}"
+
+
+def delivery_kind(run: str) -> tuple[str | None, bool]:
+    """(the kind of this load's e-mail, whether its brief is made): the kind its manifest names, else what the
+    deliver command will make of the load's closing row (scripts/ops/deliver.py kind_of: full, look, failed or
+    none). The kind is None when the manifest cannot be read."""
+    manifest = find_manifest(run)
+    if manifest is not None:
+        try:
+            return str(json.loads(manifest.read_text(encoding="utf-8")).get("kind") or ""), True
+        except (OSError, ValueError, AttributeError):
+            return None, True
+    closing = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
+    if not closing:
+        return "none", False
+    if closing[-1].get("event") == "finished":
+        look = [s for s in (closing[-1].get("needs_look") or []) if s in LOOK_STEPS]
+        return ("look" if look else "full"), False
+    return ("failed" if closing[-1].get("written") else "none"), False
+
+
+def no_retry_needed(run: str) -> str | None:
+    """Why no retry of this load's e-mail is offered: exactly where the retry (retry_line) would be refused as an
+    older load's brief. That is where its e-mail is a full brief (delivery_kind) and state.json's last_load names
+    another run or none, unless delivery.json sends nothing (off) or only test copies of a brief already made (a
+    test copy is never refused for it; a brief not made yet the deliver command refuses all the same). None
+    everywhere else, and when a file cannot be read: the retry is then offered, as it always was. (A load closed
+    as failed never becomes the last load on record, and its note is never refused.)"""
+    try:
+        last = status.read_state().get("last_load")
+        last = last if isinstance(last, dict) else {}
+        other = str(last.get("run") or "")
+        if other == run:
+            return None
+        kind, made = delivery_kind(run)
+        if kind != "full":
+            return None
+        try:
+            mode = settings()["mode"]
+        except Failed:
+            mode = "on"                      # once delivery.json is put right, it sends for real
+        if mode == "off" or (mode == "test" and made):
+            return None
+        closing = [r for r in loadplan.journal_read(run) if r.get("event") in ("finished", "failed")]
+    except (OSError, ValueError):
+        return None
+    if not other:
+        return "No retry: no load is on record as the last load, so this load's brief cannot be sent."
+    theirs = status.when(last.get("finished_at"))
+    mine = status.when(closing[-1].get("at")) if closing else None
+    if theirs is not None and mine is not None and theirs < mine:        # this load's own record of itself was lost
+        return f"No retry: the last load on record is run {other}, not this one, so this load's brief cannot be sent."
+    return f"No retry is needed: a newer load (run {other}) has its own e-mail."
 
 
 # ── what is set up ───────────────────────────────────────────────────────────────────────────────
@@ -197,10 +260,12 @@ def record(run: str, event: str, **fields) -> bool:
             break
         except OSError:
             time.sleep(0.25 * (attempt + 1))
+    last = {"run": run, "event": event, "at": datetime.now(status.BAHRAIN).isoformat(timespec="seconds"),
+            "kind": fields.get("kind")}
+    if fields.get("same_as"):                # skipped: the data set's e-mail went with that load
+        last.update(same_as=fields["same_as"], reason=fields.get("reason"))
     try:
-        status.write_state({"last_delivery": {"run": run, "event": event,
-                                              "at": datetime.now(status.BAHRAIN).isoformat(timespec="seconds"),
-                                              "kind": fields.get("kind")}})
+        status.write_state({"last_delivery": last})
     except OSError:
         pass
     return written
@@ -215,13 +280,103 @@ def already_sent(run: str, kind: str) -> dict | None:
     return None
 
 
+# ── one full e-mail per data set ─────────────────────────────────────────────────────────────────
+
+def data_set(run: str) -> dict | None:
+    """What a load put in the database, as its check recorded it in plan.json: the data date; the size and sha256
+    of each Focus report it took (a line of the table with a staged copy) as the report lay in the drop folder
+    (token_parts.drop: never a staged copy, which the check makes anew for some reports, such as the stock balance
+    trimmed to the main store); the figures the check expected (expected, less its lines of words); the check's
+    options (a price book loaded or left out, the profitability report loaded anyway, a replace or a partial on
+    purpose); and the programs that loaded it (token_parts.head). The same files loaded by other programs or with
+    other options write other figures, so they are other data. A report the load did not take is no part of it.
+    None when the plan does not say (no plan, a check with no token, nothing taken)."""
+    try:
+        plan = loadplan.read_plan(run)
+    except (OSError, ValueError):
+        return None
+    parts = plan.get("token_parts") if isinstance(plan, dict) else None
+    drop = parts.get("drop") if isinstance(parts, dict) else None
+    if not isinstance(drop, dict):
+        return None
+    taken = []
+    for line in plan.get("verdicts") or []:
+        meta = drop.get(str(line.get("file") or "")) if isinstance(line, dict) and line.get("staged") else None
+        if isinstance(meta, dict) and meta.get("sha256"):
+            taken.append(f"{meta['sha256']} {meta.get('size')}")
+    if not taken:
+        return None
+    expected = plan.get("expected")
+    if isinstance(expected, dict):
+        expected = {k: v for k, v in expected.items() if k != "lines"}
+    return {"data_date": str(plan.get("data_date") or ""), "reports": sorted(taken), "expected": expected,
+            "options": plan.get("options"), "programs": str(parts.get("head") or "")}
+
+
+def _in_time_order(run: str) -> str:
+    """ddmmyy_HHMM as yymmddHHMM: run names in the order of their days and minutes."""
+    return run[4:6] + run[2:4] + run[:2] + run[7:]
+
+
+def last_sent(but: str) -> dict | None:
+    """The newest e-mail that went for real, of any load but `but`: a 'sent' row of any kind (the full brief or a
+    note; a test copy is 'test_sent' and never counts) in the loads' own delivery journals, the newest by its
+    time, then by its run's day and minute, then by its place in the journal (two sends in one second): its row,
+    with its run in it. A journal that cannot be read (held by another program, not UTF-8) is passed over: an old
+    broken file never stops a send."""
+    base = paths.loads_dir()
+    try:
+        folders = list(base.iterdir()) if base.is_dir() else []
+    except OSError:
+        folders = []
+    best, best_key = None, None
+    for folder in folders:
+        run = folder.name
+        if run == but or not loadplan.is_run(run) or run.startswith(status.REHEARSAL_PREFIX):
+            continue
+        try:
+            rows = loadplan.delivery_read(run)
+        except (OSError, ValueError):
+            continue
+        for i, row in enumerate(rows):
+            at = status.when(row.get("at")) if row.get("event") == "sent" else None
+            if at is not None and (best_key is None or (at, _in_time_order(run), i) > best_key):
+                best, best_key = dict(row, run=run), (at, _in_time_order(run), i)
+    return best
+
+
+def same_data_sent(run: str) -> dict | None:
+    """The newest e-mail that went for real (last_sent), when it is a full brief of the very data of this load:
+    this load's e-mail would only repeat it. None when the newest is a note (a load that failed after it began
+    to write, say: the e-mail after it must say what the database holds now), when it carried other data, when
+    none went, or when either data set cannot be told (the e-mail then goes, as it always did)."""
+    last = last_sent(run)
+    if last is None or last.get("kind") != "full":
+        return None
+    mine = data_set(run)
+    return last if mine is not None and mine == data_set(str(last["run"])) else None
+
+
+def went_at(row: dict) -> str:
+    """When the e-mail of a row went, on the Bahrain clock ('15 Oct at 09:10')."""
+    t = status.when(row.get("at"))
+    return t.astimezone(status.BAHRAIN).strftime("%d %b at %H:%M") if t else str(row.get("at") or "")[:16]
+
+
 def confirm_resend(run: str, row: dict, box=None) -> bool:
-    """The same Windows box as the load (its rule: a Yes in the first seconds does not count)."""
+    """The same Windows box as the load (its rule: a Yes in the first seconds does not count). `row` is the
+    'sent' row of this load's own e-mail, or that of the load whose full e-mail carried the same data (its
+    run is in the row: same_data_sent)."""
     if box is None:
         from scripts.yq_load_go import windows_box as box
     at = str(row.get("at") or "")[:16].replace("T", " ")
-    text = (f"The brief of load {run} was e-mailed already ({at} UTC).\n\nSend it once more, to the same "
-            "address(es)?\n\nYes = send again. No = nothing is sent.")
+    other = str(row.get("run") or run)
+    if other != run:
+        text = (f"Load {run} holds the same data as load {other}, whose brief was e-mailed already ({at} UTC).\n\n"
+                f"Send the brief of load {run} all the same?\n\nYes = send it. No = nothing is sent.")
+    else:
+        text = (f"The brief of load {run} was e-mailed already ({at} UTC).\n\nSend it once more, to the same "
+                "address(es)?\n\nYes = send again. No = nothing is sent.")
     return box(f"YQ e-mail {run[:6]}", text, 120) == "yes"
 
 
@@ -258,7 +413,17 @@ def send(run: str, *, test: bool = False, resend: bool = False, auto: bool = Fal
     if sent_before and not resend:
         raise Refused(f"the e-mail of run {run} went already ({str(sent_before.get('at'))[:16]} UTC); to send it once "
                       f"more: {retry_line(run)} --resend")
-    if resend and sent_before and not confirm_resend(run, sent_before, box):
+    # one full e-mail per data set: a load of the very data whose full e-mail went already sends nothing, nor its
+    # note that a check needs a look. A failed load's note always goes: the database may hold part of that load.
+    # (A test copy never counts, and is never held back.)
+    same = None if (test or sent_before or kind == "failed") else same_data_sent(run)
+    if same and not resend:
+        other = str(same["run"])
+        record(run, "not_sent", kind=kind, reason=f"skipped: same data as run {other}", same_as=other,
+               text=f"Skipped: same data as run {other}, whose e-mail went on {went_at(same)}: no e-mail was sent.")
+        say(f"Delivery: no e-mail was sent: the data matches run {other} (its e-mail went on {went_at(same)}).")
+        return EXIT_OK
+    if resend and (sent_before or same) and not confirm_resend(run, sent_before or same, box):
         raise Refused("No at the box: nothing was sent")
     key = (key_reader or yq_secrets.resend_key)()
     if not key:
@@ -311,15 +476,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Delivery: NOT sent: {exc}.")
         return EXIT_REFUSED
     except Failed as exc:
+        no_retry = no_retry_needed(run)      # a retry that would itself be refused is never offered
         record(run, "failed", why=str(exc)[:200], text="The e-mail could not be sent.",
-               next=f"Its retry: {retry_line(run)}")
-        print(f"Delivery: NOT sent: {exc}. Nothing was reloaded. Its retry: {retry_line(run)}")
+               next=no_retry or f"Its retry: {retry_line(run)}")
+        print(f"Delivery: NOT sent: {exc}. Nothing was reloaded. " + (no_retry or f"Its retry: {retry_line(run)}"))
         return EXIT_ERROR
     except Exception as exc:  # noqa: BLE001  (recorded, whatever it was; the key is in no message)
+        no_retry = no_retry_needed(run)
         record(run, "failed", why=f"{type(exc).__name__}", text="The e-mail could not be sent.",
-               next=f"Its retry: {retry_line(run)}")
+               next=no_retry or f"Its retry: {retry_line(run)}")
         print(f"Delivery: NOT sent: an unexpected error ({type(exc).__name__}). Nothing was reloaded. "
-              f"Its retry: {retry_line(run)}")
+              + (no_retry or f"Its retry: {retry_line(run)}"))
         return EXIT_ERROR
 
 

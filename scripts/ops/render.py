@@ -536,7 +536,7 @@ def email_html(facts: dict, actions: list[dict], more: int, load: dict, team: st
                 f'Why: {esc(a["why"] or "-")}<br>Expected effect: {esc(a["impact"])}<br>'
                 f'Next step: {esc(a["next_step"])} · Who: {esc(a["owner"])} · By: {esc(a["due_text"])}</div>')
         if more > len(actions):
-            parts.append(_p(f"{more - len(actions)} more on the action list (/yq-brief in Claude Code).", muted=True))
+            parts.append(_p(f"{more - len(actions)} more on the action list.", muted=True))     # a count, no pointer
         parts.append(_p("ACTION = what the figures say. TO CHECK = something differs and the reason is not known: "
                         "a question, never a conclusion.", muted=True))
     else:
@@ -643,7 +643,7 @@ def email_text(facts: dict, actions: list[dict], more: int, load: dict, team: st
     if not actions:
         out.append("Nothing is open on the action list.")
     elif more > len(actions):
-        out.append(f"({more - len(actions)} more on the action list: /yq-brief in Claude Code)")
+        out.append(f"({more - len(actions)} more on the action list)")
     due = (facts.get("enriched") or {}).get("shops_due") or {}
     if due.get("due"):
         out += ["", f"SHOPS DUE A RE-ORDER: {due['due']}"]

@@ -17,6 +17,12 @@ Covered:
     retried once with the same Idempotency-Key; no key on the PC says how to set it; a file that changed since
     the brief wrote it is refused; a newer load on record refuses an older load's brief;
   * a load that wrote nothing has nothing to send; the settings are checked (mode, addresses);
+  * one full e-mail per data set: a load of the very Focus files whose full e-mail went already sends nothing
+    and its record reads "skipped: same data as run <run>" (journal and state.json); changed data, another data
+    date go; a staged copy the check made itself or a report the load did not take changes nothing; a test copy
+    never counts and is never held back; a "needs a look" note on that data is held back too, a failed load's
+    note always goes; --resend asks at the box, naming the load whose e-mail carried the data;
+  * the retry after a failure is printed only where it would be accepted: a newer load has its own e-mail;
   * the file itself (AST): it imports no database driver, no app module and no other way to send.
 """
 from __future__ import annotations
@@ -31,7 +37,7 @@ import sys
 import tempfile
 import traceback
 import urllib.error
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -143,6 +149,72 @@ def no_key_anywhere(root: Path) -> None:
     for f in root.rglob("*"):
         if f.is_file():
             assert KEY not in f.read_text(encoding="utf-8", errors="replace"), f"the key is in {f}"
+
+
+# ── loads with their data (one full e-mail per data set) ─────────────────────────────────────────
+
+OTHER, LATER = "151026_0920", "151026_0940"          # the same folder checked and loaded again, minutes later
+SALES, STOCK, PROFIT = "Sales_day_book1.xlsx", "Stock_balance1.xlsx", "Profit1.xlsx"
+REPORTS = {SALES: b"sales as exported", STOCK: b"stock, every warehouse", PROFIT: b"profitability as exported"}
+EXPECTED = {"sales_to": "2026-10-15", "invoices": 7, "stock": {"items": 3}, "lines": ["Sales to Thu 15 Oct: 7 invoices."]}
+OPTIONS = {"dev": False, "pricebook": None, "with_profitability": False, "replace_ok": False, "partial_ok": False}
+
+
+def fingerprint(body: bytes) -> dict:
+    return {"size": len(body), "sha256": "sha256:" + hashlib.sha256(body).hexdigest()}
+
+
+def planned(run: str, reports: dict | None = None, data_date: str = "2026-10-15",
+            trimmed: bytes = b"stock, main store block", expected: dict | None = None, options: dict | None = None,
+            head: str = "a" * 40) -> None:
+    """The check's record of a load (plan.json, as scripts/ops/load_check.py writes it): each report of the drop
+    folder with its size and sha256 (token_parts.drop); the copies it staged (token_parts.staging), where the stock
+    balance trimmed to the main store is the check's own copy, made anew by every check; the table, in which the
+    report held back has no staged copy; the figures it expects, its options and the programs (token_parts.head)."""
+    reports = dict(REPORTS if reports is None else reports)
+    verdicts = [{"file": SALES, "kind": "order_lines", "verdict": "load", "staged": SALES},
+                {"file": STOCK, "kind": "stock_balance", "verdict": "trim", "staged": "Main_store_" + STOCK},
+                {"file": PROFIT, "kind": "product_profitability", "verdict": "hold_back", "staged": None}]
+    staging = {SALES: fingerprint(reports[SALES]), "Main_store_" + STOCK: fingerprint(trimmed)}
+    loadplan.write_plan({"run": run, "data_date": data_date, "token": "invented", "verdicts": verdicts,
+                         "expected": dict(EXPECTED if expected is None else expected),
+                         "options": dict(OPTIONS if options is None else options),
+                         "token_parts": {"drop": {n: fingerprint(b) for n, b in reports.items()}, "staging": staging,
+                                         "head": head, "live": "b" * 12,
+                                         "fingerprint": {"orders": [1, int(run[-4:])]}}})   # each check sees its own
+
+
+def loaded(run: str, kind: str = "full", **plan) -> None:
+    """A load that closed and whose delivery was prepared: its plan, its closing row, its manifest. A load that
+    finished is the last load on record; one that failed after it began to write never becomes it."""
+    planned(run, **plan)
+    if kind == "failed":
+        loadplan.journal_append(run, "failed", result="failed", written=True, step="refresh", text="LOAD FAILED.")
+        last = str((status.read_state().get("last_load") or {}).get("run") or "")
+    else:
+        loadplan.journal_append(run, "finished", result="ok", text="LOAD FINISHED.")
+        last = run
+    delivery(kind=kind, run=run, last_run=last)
+
+
+def send_of(run: str, **kw) -> int:
+    kw.setdefault("key_reader", lambda: KEY)
+    kw.setdefault("say", lambda s: None)
+    return ys.send(run, **kw)
+
+
+def rows_of(run: str, event=None):
+    return [r for r in loadplan.delivery_read(run) if event is None or r.get("event") == event]
+
+
+def main_says(*argv) -> tuple[int, str]:
+    out = io.StringIO()
+    try:
+        stdout, sys.stdout = sys.stdout, out
+        code = ys.main(list(argv))
+    finally:
+        sys.stdout = stdout
+    return code, out.getvalue()
 
 
 @test("off: nothing is sent and that is said; no settings file at all is off too")
@@ -369,6 +441,249 @@ def _():
                 raise AssertionError(f"accepted {bad}")
             except ys.Failed:
                 pass
+
+
+@test("one full e-mail per data set: the same Focus files loaded again send nothing, and the record says whose it was")
+def _():
+    with data_root():
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK and rows_of(RUN, "sent")
+        loaded(OTHER, trimmed=b"stock, main store block, trimmed anew")      # the same files; the check's own copy is new
+        opener, said = Opener(), []
+        assert send_of(OTHER, opener=opener, say=said.append, auto=True) == ys.EXIT_OK
+        assert opener.requests == [], "the same data went out twice"
+        assert len(said) == 1 and said[0].startswith(f"Delivery: no e-mail was sent: the data matches run {RUN} (its "
+                                                     "e-mail went on "), said
+        row = rows_of(OTHER)[-1]
+        assert row["event"] == "not_sent" and row["reason"] == f"skipped: same data as run {RUN}", row
+        assert row["same_as"] == RUN and row["kind"] == "full" and row["text"].startswith("Skipped: same data as run ")
+        assert not rows_of(OTHER, "sent")
+        last = status.read_state()["last_delivery"]
+        assert (last["run"], last["event"], last["same_as"]) == (OTHER, "not_sent", RUN), last
+        assert last["reason"] == f"skipped: same data as run {RUN}"
+        # the data set: the data date and each report the load took, as it lay in the drop folder
+        mine = ys.data_set(OTHER)
+        assert mine == ys.data_set(RUN) and mine["data_date"] == "2026-10-15" and len(mine["reports"]) == 2, mine
+        assert not any(fingerprint(b"stock, main store block, trimmed anew")["sha256"] in r for r in mine["reports"])
+        assert not any(fingerprint(REPORTS[PROFIT])["sha256"] in r for r in mine["reports"]), "a report held back counted"
+        assert any(fingerprint(REPORTS[STOCK])["sha256"] in r for r in mine["reports"]), "the trimmed report's own file"
+
+
+@test("other data is sent: a changed report, another data date; a report the load did not take changes nothing")
+def _():
+    for change, goes in (({"reports": dict(REPORTS, **{SALES: b"sales with one more invoice"})}, True),
+                         ({"data_date": "2026-10-16"}, True),
+                         ({"reports": dict(REPORTS, **{PROFIT: b"profitability exported again"})}, False)):
+        with data_root():
+            settings()
+            loaded(RUN)
+            assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+            loaded(OTHER, **change)
+            opener = Opener()
+            assert send_of(OTHER, opener=opener) == ys.EXIT_OK
+            assert bool(opener.requests) is goes and bool(rows_of(OTHER, "sent")) is goes, change
+
+
+@test("the same files loaded again after a fix or with other options are other data: other figures, options, programs")
+def _():
+    for change in ({"expected": dict(EXPECTED, stock={"items": 4})},          # the stock trimmed another way now
+                   {"options": dict(OPTIONS, with_profitability=True)},        # the profitability report loaded anyway
+                   {"options": dict(OPTIONS, pricebook="load")},               # the price book loaded this time
+                   {"options": dict(OPTIONS, partial_ok=True)},
+                   {"head": "c" * 40}):                                        # other programs (a parser fix)
+        with data_root():
+            settings()
+            loaded(RUN)
+            assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+            loaded(OTHER, **change)
+            opener = Opener()
+            assert send_of(OTHER, opener=opener) == ys.EXIT_OK and len(opener.requests) == 1, change
+    with data_root():                                   # the check's lines of words are no part of it
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER, expected=dict(EXPECTED, lines=["Sales to Thu 15 Oct: the same, worded another way."]))
+        opener = Opener()
+        assert send_of(OTHER, opener=opener) == ys.EXIT_OK and opener.requests == []
+
+
+@test("only the newest e-mail that went counts: after a failed load's note the same data goes again; so after other data")
+def _():
+    with data_root():                                   # A full -> C fails after it began to write, its note goes -> B
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER, kind="failed")
+        assert send_of(OTHER, opener=Opener()) == ys.EXIT_OK and rows_of(OTHER, "sent")[0]["kind"] == "failed"
+        loaded(LATER)                                   # the repair: the same files, loaded whole
+        opener = Opener()
+        assert send_of(LATER, opener=opener) == ys.EXIT_OK and len(opener.requests) == 1, "the last e-mail said FAILED"
+    with data_root():                                   # A (data D) at 09:00, then C (other data) at 09:20, then B (D)
+        settings()
+        a, c = "151026_0950", "151026_0910"             # C is the newer e-mail, though its name sorts first
+        loaded(a)
+        loaded(c, reports=dict(REPORTS, **{SALES: b"sales with one more invoice"}))
+        loaded(LATER)
+        loadplan.delivery_append(a, "sent", kind="full", at="2026-10-15T06:00:00+00:00")
+        loadplan.delivery_append(c, "sent", kind="full", at="2026-10-15T06:20:00+00:00")
+        opener = Opener()
+        assert send_of(LATER, opener=opener) == ys.EXIT_OK and len(opener.requests) == 1, "an older e-mail decided it"
+    with data_root():                                   # A (D), C (other data), B (D) inside one second
+        settings()
+        loaded(RUN)
+        loaded(OTHER, reports=dict(REPORTS, **{SALES: b"sales with one more invoice"}))
+        loaded(LATER)
+        for run in (RUN, OTHER):
+            loadplan.delivery_append(run, "sent", kind="full", at="2026-10-15T06:00:00+00:00")
+        assert ys.last_sent(LATER)["run"] == OTHER, "a tie goes to the later run"
+        opener = Opener()
+        assert send_of(LATER, opener=opener) == ys.EXIT_OK and len(opener.requests) == 1
+
+
+@test("a delivery journal that cannot be read (not UTF-8, broken lines) is passed over: it never stops a send")
+def _():
+    with data_root():
+        settings()
+        old = "011026_0900"
+        loadplan.run_dir(old).mkdir(parents=True)
+        (loadplan.run_dir(old) / "delivery.jsonl").write_bytes(b'\xff\xfe not text\n{"event": "sent", broken\n')
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK and rows_of(RUN, "sent")
+        assert ys.last_sent(OTHER)["run"] == RUN
+        loaded(OTHER)
+        opener = Opener()
+        assert send_of(OTHER, opener=opener) == ys.EXIT_OK and opener.requests == [], "the same data went twice"
+
+
+@test("no retry is offered exactly where the retry would be refused as an older load's brief")
+def _():
+    newer = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat(timespec="seconds")
+    no_retry = f"No retry is needed: a newer load (run {OTHER}) has its own e-mail."
+    nobody = "No retry: no load is on record as the last load, so this load's brief cannot be sent."
+    for kind, look, made, mode, last, said in (
+            ("full", None, True, "on", OTHER, no_retry),
+            ("look", None, True, "on", OTHER, None),             # a note: never refused as an older load's
+            ("full", ["post_gate"], False, "on", OTHER, None),   # no brief made yet: a check needing a look makes a note
+            ("full", ["publish"], False, "on", OTHER, no_retry),  # ... a publish that needs a look does not
+            ("full", None, True, "test", OTHER, None),           # a test copy of a brief that is made is never refused
+            ("full", None, False, "test", OTHER, no_retry),      # ... the deliver command refuses to make it
+            ("full", None, True, "off", OTHER, None),            # off: nothing is refused, nothing is sent
+            ("full", None, True, "on", RUN, None),               # the last load on record: its retry goes
+            ("full", None, True, "on", "", nobody)):
+        with data_root():
+            settings(mode)
+            planned(RUN)
+            loadplan.journal_append(RUN, "finished", result="ok", needs_look=look, text="LOAD FINISHED.")
+            if made:
+                delivery(kind=kind, run=RUN, last_run=RUN)
+            status.write_state({"last_load": {"run": last, "finished_at": newer} if last else {}})
+            got = ys.no_retry_needed(RUN)
+            assert got == said, (kind, look, made, mode, last, got)
+
+
+@test("a test copy never counts as the data set's e-mail and is never held back; a data set that cannot be told goes")
+def _():
+    with data_root():
+        settings("test")
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK and rows_of(RUN, "test_sent") and not rows_of(RUN, "sent")
+        settings()
+        loaded(OTHER)
+        real = Opener()
+        assert send_of(OTHER, opener=real) == ys.EXIT_OK and real.requests[0]["body"]["to"] == ["owner@example.invalid"]
+        loaded(LATER)
+        test_copy = Opener()
+        assert send_of(LATER, opener=test_copy, test=True) == ys.EXIT_OK and len(test_copy.requests) == 1
+        assert rows_of(LATER, "test_sent") and not rows_of(LATER, "not_sent")
+    with data_root():
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER)
+        (loadplan.run_dir(OTHER) / "plan.json").unlink()            # nothing says what this load took: it goes
+        opener = Opener()
+        assert ys.data_set(OTHER) is None and send_of(OTHER, opener=opener) == ys.EXIT_OK and opener.requests
+
+
+@test("--resend stays the deliberate way: the box names the load whose e-mail carried the data; No sends nothing")
+def _():
+    with data_root():
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER)
+        assert send_of(OTHER, opener=Opener()) == ys.EXIT_OK and rows_of(OTHER, "not_sent")
+        shown, answer = [], ["no"]
+
+        def box(title, text, timeout):
+            shown.append(text)
+            return answer[0]
+        try:
+            send_of(OTHER, opener=Opener(), resend=True, box=box)
+            raise AssertionError("No at the box sent it")
+        except ys.Refused:
+            pass
+        assert len(shown) == 1 and f"the same data as load {RUN}" in shown[0] and not rows_of(OTHER, "sent"), shown
+        answer[0] = "yes"
+        again = Opener()
+        assert send_of(OTHER, opener=again, resend=True, box=box) == ys.EXIT_OK and len(again.requests) == 1
+        assert [r["how"] for r in rows_of(OTHER, "sent")] == ["resend"] and len(shown) == 2
+        try:
+            send_of(OTHER, opener=Opener())                 # once it went, the run's own rule holds as before
+            raise AssertionError("a second copy went")
+        except ys.Refused as exc:
+            assert "went already" in str(exc)
+
+
+@test("a short note: 'needs a look' on the very data whose full e-mail went is held back; a failed load's goes")
+def _():
+    with data_root():
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER, kind="look")                           # the same files again, and this time a check needs a look
+        opener = Opener()
+        assert send_of(OTHER, opener=opener) == ys.EXIT_OK and opener.requests == []
+        assert rows_of(OTHER)[-1]["reason"] == f"skipped: same data as run {RUN}"
+        loaded(LATER, kind="failed")                         # the same files, and the load failed after it began to write
+        note = Opener()
+        assert send_of(LATER, opener=note) == ys.EXIT_OK and len(note.requests) == 1, "the database may hold part of it"
+        assert rows_of(LATER, "sent")[0]["kind"] == "failed" and not rows_of(LATER, "not_sent")
+    with data_root():                                        # other data: a note goes as it always did
+        settings()
+        loaded(RUN)
+        assert send_of(RUN, opener=Opener()) == ys.EXIT_OK
+        loaded(OTHER, kind="look", reports=dict(REPORTS, **{SALES: b"sales, exported later"}))
+        note = Opener()
+        assert send_of(OTHER, opener=note) == ys.EXIT_OK and len(note.requests) == 1
+        assert rows_of(OTHER, "sent")[0]["kind"] == "look"
+
+
+@test("main(): after a failure the retry is printed only where it would be accepted; a newer load has its own e-mail")
+def _():
+    retry = f"Its retry: python -m scripts.yq_send --run {RUN}"
+    with data_root():
+        settings(mode="maybe")                               # delivery.json is wrong: nothing goes until it is put right
+        loaded(RUN)
+        code, said = main_says("--run", RUN)
+        assert code == ys.EXIT_ERROR and said.rstrip().endswith(retry) and ys.no_retry_needed(RUN) is None, said
+        since = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat(timespec="seconds")
+        status.write_state({"last_load": {"run": OTHER, "finished_at": since}})       # another load finished since
+        code, said = main_says("--run", RUN)
+        no_retry = f"No retry is needed: a newer load (run {OTHER}) has its own e-mail."
+        assert code == ys.EXIT_ERROR and said.rstrip().endswith(no_retry) and "Its retry" not in said, said
+        assert rows_of(RUN, "failed")[-1]["next"] == no_retry and ys.no_retry_needed(RUN) == no_retry
+        before = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+        status.write_state({"last_load": {"run": "141026_0900", "finished_at": before}})   # this load's own record was lost
+        said = ys.no_retry_needed(RUN)
+        assert said.startswith("No retry: the last load on record is run 141026_0900, not this one") and "newer" not in said
+    with data_root():                                        # a load that failed never becomes the last load on record
+        settings(mode="maybe")
+        status.write_state({"last_load": {"run": "141026_0900", "finished_at": "2026-10-14T10:20:00+03:00"}})
+        loaded(RUN, kind="failed")
+        code, said = main_says("--run", RUN)
+        assert code == ys.EXIT_ERROR and said.rstrip().endswith(retry) and ys.no_retry_needed(RUN) is None, said
 
 
 @test("the file itself: no database driver, no app module, no other way to send; ASCII strings; secrets by name only")

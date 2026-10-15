@@ -316,7 +316,8 @@ def _():
     assert selftest.scan_text("value " + "76543" + ".210", [])
     for fine in ("999.500", "1,234.50", "version 3.1.5", "0.001", "row 1234 of 5678", "12,345 lines"):
         assert not selftest.scan_text(fine, []), fine
-    assert all(p.endswith(("/", ".py", ".md", ".yml", ".txt", "-", "_", ".gitignore")) for p in selftest.ALLOWED_PATHS)
+    assert all(p.endswith(("/", ".py", ".md", ".yml", ".txt", "-", "_", ".gitignore", ".env.example"))
+               for p in selftest.ALLOWED_PATHS)
     assert not any(p.startswith(("web", "app/")) for p in selftest.ALLOWED_PATHS)
 
 
@@ -435,7 +436,7 @@ def _():
         order = [r["key"] for r in alerts.open_items()]
         assert order == ["r|3", "r|2", "r|1", "r|4"], order
         text = alerts.render(alerts.open_items(), limit=2)
-        assert text.splitlines()[0].startswith("ID") and "(+2 more: /yq-watch)" in text
+        assert text.splitlines()[0].startswith("ID") and "(+2 more open)" in text
         assert "50.000" in text and alerts.render([]) == "Nothing open."
         assert status.register_counts() == {"ACT": 2, "CHECK": 3}
 

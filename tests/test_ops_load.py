@@ -295,19 +295,34 @@ def plain_report(path: Path, title: str, header: list[str], as_on: str | None = 
     return path
 
 
-def make_drop(root: Path, name: str = "070126", leave_out: tuple = (), **kw) -> Path:
-    """A full drop: the six daily reports, a price book and a Ledger export."""
+def receivables_file(path: Path, rows, as_on: str | None = AS_ON) -> Path:
+    """The customer ageing in the layout scripts.ingest.parse_receivables reads: per account its balance,
+    the eight buckets (the 0-30 one carries it all) and the total."""
+    from scripts import ingest as ing
+    wb, ws = sheet("Customer summary ageing by due date", as_on,
+                   list(ing.EXPECTED_HEADERS["receivables"]) + ["Account Code", "Group Name"])
+    for i, (account, balance) in enumerate(rows):
+        put(ws, 7 + i, [account, balance, balance, 0, balance, balance, balance, 0, 0, 0, 0, 0, 0, 0, balance,
+                        None, "Debtors"])
+    put(ws, 7 + len(rows), ["Grand Total", sum(b for _a, b in rows)])
+    wb.save(path)
+    return path
+
+
+def make_drop(root: Path, name: str = "070126", leave_out: tuple = (), as_on: str = AS_ON, **kw) -> Path:
+    """A full drop: the six daily reports, a price book and a Ledger export, each titled as on `as_on`."""
     drop = root / "Uplaods" / name
     drop.mkdir(parents=True)
     builders = {
-        "order_lines": lambda p: plain_report(p, "Sales day book", ["Date", "Voucher"]),
-        "orders": lambda p: plain_report(p, "Summary sales register", ["Date", "Invoice"]),
-        "stock_movements": lambda p: ledger_file(p, kw.get("ledger", LEDGER)),
-        "stock_balance": lambda p: stock_balance_file(p, kw.get("stock", STOCK), sub_total_off=kw.get("sub_total_off", 0)),
-        "receivables": lambda p: plain_report(p, "Customer summary ageing", ["Account", "Balance Amount"]),
-        "product_profitability": lambda p: profit_file(p, kw.get("profit", PROFIT)),
+        "order_lines": lambda p: plain_report(p, "Sales day book", ["Date", "Voucher"], as_on=as_on),
+        "orders": lambda p: plain_report(p, "Summary sales register", ["Date", "Invoice"], as_on=as_on),
+        "stock_movements": lambda p: ledger_file(p, kw.get("ledger", LEDGER), as_on=as_on),
+        "stock_balance": lambda p: stock_balance_file(p, kw.get("stock", STOCK), as_on=as_on,
+                                                      sub_total_off=kw.get("sub_total_off", 0)),
+        "receivables": lambda p: plain_report(p, "Customer summary ageing", ["Account", "Balance Amount"], as_on=as_on),
+        "product_profitability": lambda p: profit_file(p, kw.get("profit", PROFIT), as_on=as_on),
         "selling_prices:MA_base": lambda p: price_file(p, kw.get("prices", PRICES)),
-        "ledger_entries": lambda p: plain_report(p, "Ledger", ["Date", "Voucher"]),
+        "ledger_entries": lambda p: plain_report(p, "Ledger", ["Date", "Voucher"], as_on=as_on),
     }
     for kind, build in builders.items():
         if kind not in leave_out:
@@ -340,11 +355,27 @@ def db_ledger(ledger=LEDGER, upto: str = "2026-01-05") -> list[dict]:
     return out
 
 
+class FakeBackend:
+    """The preview's backend as the stand-in preview uses it (FakeDeps.via_backend): every call is
+    recorded; a diff answers with the actions its first parameter carries, anything else with no rows."""
+
+    mode, read_only, stage_source = "fake", True, "param"
+
+    def __init__(self):
+        self.asked: list[tuple[str, list]] = []
+
+    def query(self, sql, params=None):
+        self.asked.append((" ".join(str(sql).split())[:40], list(params or [])))
+        if "jsonb_array_elements" in sql:
+            return [json.loads(params[0])]
+        return []
+
+
 class FakeSession:
     """Answers the check's reads from canned rows; every statement passes the real read-only guard."""
 
-    def __init__(self, **over):
-        self.backend = object()
+    def __init__(self, backend=None, **over):
+        self.backend = backend if backend is not None else object()
         self.closed = False
         self.seen: list[str] = []
         self.data = {
@@ -359,6 +390,8 @@ class FakeSession:
             "book": [{"sku_code": c} for c in ("C1", "C2", "C3")],
             "candidates": [{"sku_code": c} for c in ("C1", "C2", "C3")],
             "count": {"n": 10, "max_id": 99},
+            "snapshot_days": [],                      # the days production holds a stock or receivables snapshot for
+            "partitions": {},                         # target -> production's rows of the file's snapshot day
         }
         self.data.update(over)
 
@@ -395,8 +428,15 @@ class FakeSession:
             return [{"ok": True}]
         if "from ingest_batches" in s:
             return []
-        if s.startswith("select count(distinct as_of_date)::int as n from stock_balance where as_of_date >"):
-            return [{"n": d.get("snapshots_since", 1)}]
+        if s.startswith("select distinct 'stock_balance' as k, as_of_date::text as d from stock_balance where as_of_date > "
+                        "%s::date union select distinct 'ar_ageing' as k"):
+            # a list: both snapshot kinds on those days (one load brings both); a dict: the days of each kind
+            days = d["snapshot_days"]
+            kinds = days if isinstance(days, dict) else {"stock_balance": days, "ar_ageing": days}
+            return [{"k": k, "d": day} for k, ds in kinds.items() for day in sorted(set(ds)) if day > str(params[0])]
+        for target in ("ar_ageing", "stock_balance"):
+            if s.startswith(f"select * from {target} where "):
+                return [dict(r) for r in d["partitions"].get(target, [])]
         raise AssertionError("a statement the stand-in does not know: " + s[:90])
 
     def close(self) -> None:
@@ -430,6 +470,7 @@ class FakeDeps(lc.Deps):
         self.stock_view: dict | None = None           # the preview's stock-per-warehouse comparison
         self.loaded_rows: dict = {}                   # target -> rows production already holds in the file's scope
         self.previewed: list[list[str]] = []
+        self.via_backend = False                      # the stand-in preview asks its backend, as the real one does
         self.on_pause = None
         self.ticks = 0.0
         self.pauses: list[float] = []                 # every pause the check asked for, in seconds
@@ -486,7 +527,9 @@ class FakeDeps(lc.Deps):
 
     def preview(self, folder, backend, out_dir, today, row_hook):
         from scripts import ingest as ing
-        assert backend is self.the_session.backend and today == DAY
+        from scripts.ops import querytime
+        # the session's own backend, handed over as it is or inside the check's timing proxy
+        assert querytime.unwrap(backend) is self.the_session.backend and today == DAY
         self.previewed.append(sorted(p.name for p in Path(folder).iterdir()))
         targets: dict = {}
         for p in sorted(Path(folder).iterdir()):
@@ -494,8 +537,15 @@ class FakeDeps(lc.Deps):
             target = TARGET_OF.get(kind) or ("selling_prices" if (kind or "").startswith("selling_prices") else None)
             if target is None:
                 continue
-            actions = {"inserted": 2, "updated": 0, "unchanged": 5, "deleted": 0}
+            # the preview's own shapes: a price book voids and revives rows, every other table deletes them
+            actions = ({"inserted": 2, "updated": 0, "unchanged": 5, "voided": 0, "revived": 0} if target == "selling_prices"
+                       else {"inserted": 2, "updated": 0, "unchanged": 5, "deleted": 0})
             actions.update(self.actions.get(target, {}))
+            if self.via_backend:                      # as app.ingest_batch._target_diff asks: columns, then the diff
+                backend.query("select column_name, data_type from information_schema.columns where table_name = $1",
+                              [target])
+                actions = backend.query("with s as (select value as row from jsonb_array_elements($1::jsonb)) select 1",
+                                        [json.dumps(actions), target])[0]
             targets[target] = {"file_rows": 7, "actions": actions, "scope": dict(SPAN),
                                "db_rows": self.loaded_rows.get(target, 0),
                                "db_sums": {"balance_bhd": "150.500"} if self.loaded_rows.get(target) else {},
@@ -503,6 +553,9 @@ class FakeDeps(lc.Deps):
         for target, rows in self.hook_rows.items():
             for r in rows:
                 row_hook(target, r)
+        if self.via_backend:                          # and one helper, as _sales_comparisons asks
+            backend.query("select line_date::text as d from order_lines where line_date between $1::date and $2::date",
+                          [SPAN["from"], SPAN["to"]])
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return {"summary": {"targets": targets, "sales": self.sales, "stock": self.stock_view,
                             "receivables": {"focus_grand_total": "140.250", "rows_sum": "150.500"}},
@@ -3101,9 +3154,10 @@ def _():
 def _():
     with data_root() as root:
         make_drop(root, profit=SHORT_COST)
-        res, _ = check("070126", deps=FakeDeps(FakeSession(anchors=BEFORE_LOAD, snapshots_since=2)))
+        loads_before = ["2026-01-03", "2026-01-05"]          # two loads since the report (by hand: their snapshots)
+        res, _ = check("070126", deps=FakeDeps(FakeSession(anchors=BEFORE_LOAD, snapshot_days=loads_before)))
         text = res["text"]
-        assert "held back for the third load in a row" in text, text      # two snapshots since the report + this one
+        assert "held back for the third load in a row" in text, text      # two loads since the report + this one
         item = [r for r in alerts.open_items() if r["rule"] == "profit_held"][0]
         assert item["title"].startswith("Ask accounts to post cost of sales in Focus for the invoices since Fri 02 Jan")
         assert item["title"].endswith("then export the profitability report again") and item["who"] == "Accounts"
@@ -3180,6 +3234,613 @@ def _():
             res, _ = check("070126", deps=deps)
             assert res["exit"] == 2 and res["token"] is None and "GO:" not in res["text"], res["text"]
             assert "taken on another PC (OTHER-PC)" in res["text"] and "finish that load on OTHER-PC" in res["text"]
+
+
+# ── 15-Oct-2026: nothing new to load, the count of held loads, the preview's seconds per report ──
+
+LOADED = {"today": DAY, "sales_to": "2026-01-06", "stock_as_of": DAY, "ar_as_of": DAY, "profit_as_of": DAY,
+          "moves_to": "2026-01-06"}
+SAME = {"inserted": 0, "updated": 0, "unchanged": 7, "deleted": 0}
+LAST_LOAD = {"run": "070126_0900", "finished_at": "2026-01-07T09:05:00+03:00"}
+NOTHING_NEW = ("Nothing new in 070126: everything this load would apply is already loaded (last load 070126_0900 at "
+               "Wed 07 Jan 09:05). No load needed.")
+SAME_BOOK = "- Price book: LEAVE OUT (the same as the live price book: nothing to load)."
+
+
+def already_loaded(session: dict | None = None, **over) -> FakeDeps:
+    """A check of the 7-Jan drop after its load: production holds every row of every report (the stock ledger
+    to its last voucher), and the preview finds nothing to insert, change or remove anywhere."""
+    deps = FakeDeps(FakeSession(**dict({"anchors": dict(LOADED), "ledger": db_ledger(upto="2026-01-06")}, **(session or {}))))
+    deps.actions = {t: dict(SAME) for t in ("order_lines", "orders", "stock_movements", "stock_balance", "ar_ageing",
+                                            "product_profitability")}
+    deps.actions["selling_prices"] = {"inserted": 0, "updated": 0, "unchanged": 7, "voided": 0, "revived": 0}
+    deps.loaded_rows = {"ar_ageing": 7}
+    for key, value in over.items():
+        if key == "actions":
+            for target, change in value.items():
+                deps.actions[target].update(change)
+        else:
+            setattr(deps, key, value)
+    return deps
+
+
+@test("an already-loaded drop: the whole check runs, then it ends 'Nothing new': no GO line, no token, no go.cmd")
+def _():
+    with data_root() as root:
+        drop = make_drop(root)
+        before = snapshot_of(drop)
+        status.write_state({"last_load": dict(LAST_LOAD)})
+        res, deps = check("070126", deps=already_loaded())
+        text, lines = res["text"], res["text"].splitlines()
+        assert res["ok"] and res["exit"] == 0 and res["token"] is None, text
+        assert lines[-1] == NOTHING_NEW, lines[-1]
+        assert not [ln for ln in lines if ln.startswith("GO: ")] and "Token " not in text and "double-click" not in text
+        assert "nothing_new" in res["flags"] and not {"token", "stop", "dev"} & set(res["flags"]), res["flags"]
+        assert not (loadplan.run_dir(res["run"]) / "go.cmd").exists()
+        plan = loadplan.read_plan(res["run"])
+        assert plan["token"] is None and plan["token_parts"] is None and plan["stops"] == []
+        assert plan["nothing_new"] is True and plan["new_in_drop"] == [], plan["new_in_drop"]
+        # the full check ran: its nine steps, the table and every comparison; only its end is another
+        assert [ln[:5] for ln in deps.steps] == [f"[{i}/9]" for i in range(1, 10)], deps.steps
+        table = table_of(text)
+        assert table[shown("orders")] == "LOAD" and table[shown("stock_balance")] == "LOAD (main-store block only)"
+        assert table[shown("selling_prices:MA_base")] == "LEAVE OUT" and table[shown("product_profitability")] == "LOAD"
+        assert "Invoices: 0 new, 0 changed, 0 removed. Lines: 0 new, 0 changed, 0 removed." in text
+        assert "Sales by day and by salesman: the file equals what is loaded." in text
+        assert "changed 0, removed 0, entered with an earlier date 0, new 0" in text and "switch nothing" in text
+        # no load follows, so neither what a load would show nor what it also does is said
+        assert "After the load you should see" not in text and "A load also does this" not in text
+        assert "Production already holds (the same as these reports)" in text and "Sales to Tue 06 Jan" in text
+        # what is not part of the load is named, just above the last line
+        assert lines[-4:-1] == ["Not part of this load:", SAME_BOOK, ""], lines[-6:]
+        assert snapshot_of(drop) == before and deps.the_session.closed
+        fmt.careful(text)
+        # a developer's proof run says the same and issues nothing either
+        res, _ = check("070126", "--dev", deps=already_loaded(worktree=True, site={"state": "behind"}))
+        assert res["text"].splitlines()[-1] == NOTHING_NEW and res["token"] is None, res["text"]
+        assert {"dev", "nothing_new"} <= set(res["flags"]) and "GO:" not in res["text"]
+    with data_root() as root:                     # no load on record on this PC: the line leaves the last load out
+        make_drop(root, leave_out=("selling_prices:MA_base",))
+        res, _ = check("070126", deps=already_loaded())
+        lines = res["text"].splitlines()
+        assert lines[-1] == ("Nothing new in 070126: everything this load would apply is already loaded. "
+                             "No load needed."), res["text"]
+        assert "Not part of this load" not in res["text"], "nothing held back or left out: no such list"
+
+
+@test("loaded already, the profitability report held back (the real 15-Oct shape): nothing new, and the held report named")
+def _():
+    held = dict(LOADED, profit_as_of="2026-01-01")                # production's report: older, held back since
+    with data_root() as root:
+        make_drop(root, profit=SHORT_COST)
+        status.write_state({"last_load": dict(LAST_LOAD)})
+        loads = ["2026-01-03", "2026-01-05", DAY]                 # two loads by hand before this drop's own load
+        res, _ = check("070126", deps=already_loaded(session={"anchors": held, "snapshot_days": loads}))
+        text, lines = res["text"], res["text"].splitlines()
+        assert table_of(text)[shown("product_profitability")] == "HOLD BACK", text
+        assert lines[-1] == NOTHING_NEW and res["token"] is None and "GO:" not in text, text
+        assert lines[-5:-1] == ["Not part of this load:",
+                                "- Profitability report: HOLD BACK. To load it anyway, say: load profitability anyway.",
+                                SAME_BOOK, ""], lines[-6:]
+        assert "held back for the third load in a row (this drop is already loaded: the action list stays as it is)" in text
+        # on his word the report is part of the load, and the check ends as today
+        deps = already_loaded(session={"anchors": held}, actions={"product_profitability": {"inserted": 3, "unchanged": 0}})
+        res, _ = check("070126", "--with-profitability", deps=deps)
+        assert res["token"] and res["text"].splitlines()[-1].startswith("GO: ") and "Nothing new" not in res["text"]
+
+
+@test("a drop whose only difference is a line for his decision: its default loads nothing, so 'Nothing new' and his words")
+def _():
+    newer_prices = PRICES + [("Charger two", "C2", None, None, "Van A", "1/5/2026", "12/31/2030", 2.0)]
+    with data_root() as root:
+        make_drop(root, prices=newer_prices)
+        status.write_state({"last_load": dict(LAST_LOAD)})
+        res, _ = check("070126", deps=already_loaded())
+        text, lines = res["text"], res["text"].splitlines()
+        assert table_of(text)[shown("selling_prices:MA_base")] == "NEEDS YOUR DECISION", text
+        assert lines[-1] == NOTHING_NEW and res["token"] is None and "GO:" not in text, text
+        assert ("- Price book: NEEDS YOUR DECISION (left out unless you say load). To load it, say: load the price book."
+                in lines), lines[-6:]
+        assert not (loadplan.run_dir(res["run"]) / "go.cmd").exists()
+        # he says "load the price book": the book is part of the load, and the check ends as today
+        res, _ = check("070126", "--pricebook", "load",
+                       deps=already_loaded(actions={"selling_prices": {"inserted": 1, "unchanged": 6}}))
+        assert res["token"] and res["text"].splitlines()[-1].startswith("GO: ") and "Nothing new" not in res["text"]
+        # left out on his word, it is named with the words that load it after all
+        res, _ = check("070126", "--pricebook", "skip", deps=already_loaded())
+        assert res["text"].splitlines()[-1] == NOTHING_NEW, res["text"]
+        assert "- Price book: LEAVE OUT (left out on your word). To load it, say: load the price book." in res["text"]
+
+
+@test("one difference anywhere and the check ends as today: the table, the token and the GO line")
+def _():
+    other = [{"item_code": c, "is_active": True, "hidden": False, "updated_by": lc.AUTO_SYNC} for c in ("C1", "C2", "C3", "C9")]
+    day_changed = {"key": "2026-01-06", "db_rows": 3, "file_rows": 3, "file_gross": "10.000", "db_gross": "9.000"}
+    rep_changed = {"key": "Van A", "db_rows": 3, "file_rows": 3, "file_gross": "10.000", "db_gross": "9.000"}
+    cases = {
+        "a receivables row rewritten": ((), {}, already_loaded(actions={"ar_ageing": {"updated": 1, "unchanged": 6}})),
+        "a stock snapshot not loaded yet": ((), {}, already_loaded(actions={"stock_balance": {"inserted": 3, "unchanged": 0}})),
+        "an invoice that went": ((), {}, already_loaded(actions={"orders": {"deleted": 1}})),
+        "a price row that comes back": (("--pricebook", "load"), {},
+                                        already_loaded(actions={"selling_prices": {"revived": 1}})),
+        "a price row voided, nothing else": (("--pricebook", "load"), {},
+                                             already_loaded(actions={"selling_prices": {"voided": 1}})),
+        "a voucher production lacks": ((), {}, already_loaded(session={"ledger": db_ledger(upto="2026-01-05")})),
+        "a catalog switch": ((), {}, already_loaded(session={"catalog": other})),
+        "a day's sales differ, nothing else": ((), {}, already_loaded(
+            sales={"per_day_changed": [day_changed], "per_salesman_changed": []})),
+        "a salesman's sales differ, nothing else": ((), {}, already_loaded(
+            sales={"per_day_changed": [], "per_salesman_changed": [rep_changed]})),
+        "a report the preview did not compare": ((), {}, already_loaded(samples={"orders": {"actions": {}}})),
+        "the last load failed after it had begun to write": ((), {"failed": True}, already_loaded()),
+    }
+    for name, (options, drop_kw, deps) in cases.items():
+        with data_root() as root:
+            failed = drop_kw.pop("failed", False)
+            make_drop(root, **drop_kw)
+            status.write_state({"last_load": dict(LAST_LOAD)})
+            if failed:
+                loadplan.journal_append("070126_0901", "started", pid=0)
+                loadplan.journal_append("070126_0901", "step_start", step="refresh")
+                loadplan.journal_append("070126_0901", "failed", result="failed", step="refresh", written=True)
+            res, _ = check("070126", *options, deps=deps)
+            lines = res["text"].splitlines()
+            assert res["ok"] and res["token"] and lines[-1] == "GO: " + loadplan.go_line(res["run"], res["token"]), (name, res["text"])
+            assert "Nothing new" not in res["text"] and "nothing_new" not in res["flags"], name
+            assert "After the load you should see" in res["text"] and "A load also does this, every time" in res["text"]
+            assert loadplan.read_plan(res["run"])["nothing_new"] is False and loadplan.read_plan(res["run"])["new_in_drop"], name
+            assert (loadplan.run_dir(res["run"]) / "go.cmd").is_file(), name
+
+
+AGEING = [("Shop A", 0.1), ("Shop A", 0.2), ("Shop B", 1.5)]       # Focus lists Shop A twice: the loader adds the two up
+FOLDED_COLUMNS = ("balance_bhd", "bucket_0_30", "total_bhd")      # the columns of Shop A's two lines that are not zero
+
+
+def ageing_loaded(root: Path, stored: dict, updated: tuple = ("Shop A",)) -> FakeDeps:
+    """The drop with a receivables report the real parser reads, checked after its load: production holds the
+    rows the loader wrote (Shop A as the loader's float sum of its two lines, unless `stored` says otherwise),
+    and the preview counts the accounts of `updated` as rewritten."""
+    from app.ingest_batch import prepare
+    from scripts import ingest as ing
+    drop = make_drop(root)
+    path = receivables_file(drop / NAMES["receivables"], AGEING)
+    prepared, notes = prepare("ar_ageing", ing.parse_receivables(ing.read_grid(path), path.name))
+    assert notes["aggregated_same_name"] == 1 and len(prepared) == 2
+    loader_sum = Decimal(repr(0.1 + 0.2))                         # what pandas adds up and PostgREST stores
+    assert loader_sum != Decimal("0.3")
+    rows = []
+    for i, r in enumerate(prepared):
+        row = {k: (Decimal(str(v)) if isinstance(v, float) else v) for k, v in r.items()}
+        row.update(id=i + 1, as_of_date=datetime(2026, 1, 7).date(), imported_at="2026-01-07T09:01:00+00:00")
+        if r["account"] == "Shop A":
+            row.update({c: loader_sum for c in FOLDED_COLUMNS})
+        row.update(stored.get(r["account"], {}))
+        rows.append(row)
+    deps = already_loaded(session={"partitions": {"ar_ageing": rows}},
+                          actions={"ar_ageing": {"updated": len(updated), "unchanged": 2 - len(updated)}})
+    deps.samples = {"ar_ageing": {"updated_sample": [{"account": a, "as_of_date": DAY} for a in updated],
+                                  "payload_cols": list(prepared[0]),
+                                  "scope": {"kind": "partition", "cols": ["as_of_date"], "partitions": [[DAY]]}}}
+    deps.hook_rows = {"ar_ageing": prepared}
+    status.write_state({"last_load": dict(LAST_LOAD)})
+    return deps
+
+
+@test("a receivables row the loader adds up from two lines of one account: its float rounding is no change, a fils is")
+def _():
+    with data_root() as root:                     # 151026, re-checked after its load: "0 new, 1 rewritten, 0 removed"
+        res, deps = check("070126", deps=ageing_loaded(root, {}))
+        text = res["text"]
+        assert res["text"].splitlines()[-1] == NOTHING_NEW and res["token"] is None, text
+        assert "(that day is already loaded, with the same total: 0 new, 1 rewritten, 0 removed)" in text   # the table as it was
+        assert ("Receivables: 1 row the preview counts as rewritten is one the loader adds up from two or more lines of "
+                "one account, and it differs from what is loaded only beyond the sixth decimal place (the loader keeps "
+                "such a sum with floating-point rounding): not a change.") in text, text
+        asked = [s for s in deps.the_session.seen if s.startswith("select * from ar_ageing")]
+        assert asked == ["select * from ar_ageing where as_of_date::text = %s"], asked
+    with data_root() as root:                     # production's sum is one fils off: that is a change
+        res, _ = check("070126", deps=ageing_loaded(root, {"Shop A": {"balance_bhd": Decimal("0.301")}}))
+        assert res["token"] and res["text"].splitlines()[-1].startswith("GO: "), res["text"]
+        assert "Nothing new" not in res["text"] and "beyond the sixth decimal place" not in res["text"]
+    with data_root() as root:                     # a row the loader does not add up is compared exactly, as by the preview
+        res, _ = check("070126", deps=ageing_loaded(root, {"Shop B": {"balance_bhd": Decimal(repr(1.5 + 1e-15))}},
+                                                    updated=("Shop B",)))
+        assert res["token"] and "Nothing new" not in res["text"], res["text"]
+    with data_root() as root:                     # more rows counted as rewritten than the preview's sample names
+        deps = ageing_loaded(root, {})
+        deps.actions["ar_ageing"].update(updated=2, unchanged=0)
+        res, _ = check("070126", deps=deps)
+        assert res["token"] and "Nothing new" not in res["text"], res["text"]
+    with data_root() as root:                     # a text column that differs on the folded row is a change too
+        res, _ = check("070126", deps=ageing_loaded(root, {"Shop A": {"group_name": "Other"}}))
+        assert res["token"] and "Nothing new" not in res["text"], res["text"]
+    with data_root() as root:                     # the stock balance: one item twice in the main store, its rate averaged
+        from app.ingest_batch import prepare
+        from scripts import ingest as ing
+        blocks = [("Van A", [("Cable one C1", 10, 1.5)]),
+                  (MAIN, [("Cable one C1", 10, 1.1), ("Cable one C1", 20, 2.2), ("Charger two C2", 40, 2.5),
+                          ("Holder three C3", 20, 0.75)])]
+        drop = make_drop(root, stock=blocks)
+        path = drop / NAMES["stock_balance"]
+        raw = [r for r in ing.parse_stock_balance(ing.read_grid(path), path.name) if r["warehouse_name"] == MAIN]
+        prepared, notes = prepare("stock_balance", raw)
+        assert notes["aggregated_same_item"] == 1 and prepared[0]["item_name"] == "Cable one C1"
+        stored = []
+        for i, r in enumerate(prepared):
+            row = {k: (Decimal(str(v)) if isinstance(v, float) else v) for k, v in r.items()}
+            row.update(id=i + 1, as_of_date=datetime(2026, 1, 7).date())
+            stored.append(row)
+        stored[0]["selling_rate_bhd"] = Decimal(repr((1.1 + 2.2) / 2))          # the loader's float mean of the two rates
+        assert stored[0]["selling_rate_bhd"] != Decimal(str(prepared[0]["selling_rate_bhd"]))
+        deps = already_loaded(session={"partitions": {"stock_balance": stored}},
+                              actions={"stock_balance": {"updated": 1, "unchanged": 2}})
+        deps.samples = {"stock_balance": {
+            "updated_sample": [{"item_name": "Cable one C1", "warehouse_name": MAIN, "as_of_date": DAY}],
+            "payload_cols": list(prepared[0]),
+            "scope": {"kind": "partition", "cols": ["as_of_date", "warehouse_name"], "partitions": [[DAY, MAIN]]}}}
+        deps.hook_rows = {"stock_balance": prepared}
+        status.write_state({"last_load": dict(LAST_LOAD)})
+        res, deps = check("070126", deps=deps)
+        assert res["text"].splitlines()[-1] == NOTHING_NEW, res["text"]
+        assert ("Stock balance: 1 row the preview counts as rewritten is one the loader adds up from two or more lines "
+                "of one item in one warehouse") in res["text"], res["text"]
+        asked = [s for s in deps.the_session.seen if s.startswith("select * from stock_balance")]
+        assert asked == ["select * from stock_balance where as_of_date::text = %s and warehouse_name::text = %s"], asked
+    rows = [{"account": "Shop A", "as_of_date": DAY}, {"account": "Shop A", "as_of_date": DAY}, {"account": "Shop B"}]
+    assert lc.folded_keys("ar_ageing", rows) == {("Shop A", DAY)} and lc.folded_keys("orders", rows) == set()
+    blank = [{"item_name": "Cable one", "warehouse_name": None, "as_of_date": DAY},
+             {"item_name": "Cable one", "warehouse_name": "(unassigned)", "as_of_date": DAY + "T00:00:00"}]
+    assert lc.folded_keys("stock_balance", blank) == {("Cable one", "(unassigned)", DAY)}     # as the loader fills it
+    assert lc.same_cell(Decimal("0.3"), Decimal(repr(0.1 + 0.2)), True) and not lc.same_cell(Decimal("0.3"), Decimal("0.301"), True)
+    assert not lc.same_cell(Decimal("0.3"), Decimal(repr(0.1 + 0.2)), False), "outside a folded sum: exact"
+    assert lc.same_cell("2026-01-07", datetime(2026, 1, 7).date(), False) and not lc.same_cell(None, Decimal(0), True)
+    for odd in (float("nan"), "NaN", "sNaN", float("inf"), "x", True):     # not a number: never the same, never an error
+        assert not lc.same_cell(odd, Decimal("1.5"), True) and not lc.same_cell(odd, Decimal("1.5"), False), odd
+    assert not lc.same_cell(Decimal("1.5"), Decimal("NaN"), True) and not lc.same_cell(float("inf"), Decimal("Infinity"), True)
+    assert "decimal place" in lc.noise_line("stock_balance", 2) and "dinar" not in lc.noise_line("stock_balance", 2)
+
+
+@test("held back for the Nth load in a row: a load by hand, then three loads (the last one twice) count 2, 3, 4, 4, 4")
+def _():
+    kept = "2026-01-01"                           # production's profitability report: as on this day, held back since
+    short = [("Cable one", 300, 50), ("Charger two", 200, 50), ("Holder three", 100, 25)]     # short on every day
+    with data_root() as root:
+        days = ["2026-01-02"]                     # a load made by hand: its snapshot is in production, it left no journal
+        said, counted = [], []
+        for name, loads in (("030126", 1), ("050126", 1), ("070126", 1), ("070126", 1), ("070126", 0)):
+            day = paths.drop_date(name).isoformat()
+            if not (root / "Uplaods" / name).is_dir():
+                make_drop(root, name, as_on=f"{name[:2]}/{name[2:4]}/20{name[4:]}", profit=short)
+            anchors = {"today": DAY, "sales_to": "2026-01-01", "stock_as_of": max(days), "ar_as_of": max(days),
+                       "profit_as_of": kept, "moves_to": "2026-01-01"}
+            res, _ = check(name, deps=FakeDeps(FakeSession(anchors=anchors, snapshot_days=list(days))))
+            assert res["token"] and table_of(res["text"])[shown("product_profitability")] == "HOLD BACK", res["text"]
+            m = re.search(r"held back for the (\w+) load in a row", res["text"])
+            said.append(m.group(1) if m else None)
+            counted.append(loadplan.read_plan(res["run"])["profitability"]["loads_held"])
+            if loads:                             # the writer loads it: its journal ends 'finished', state.json names it
+                loadplan.journal_append(res["run"], "started", pid=0)
+                loadplan.journal_append(res["run"], "finished", result="ok")
+                status.write_state({"last_load": {"run": res["run"], "finished_at": "2026-01-07T10:00:00+03:00"}})
+                days.append(day)
+        assert said == ["second", "third", "fourth", "fourth", "fourth"], said
+        assert counted == [2, 3, 4, 4, 4], counted
+        # a re-check of a loaded drop counts it once and leaves the action list as it is
+        res_text = res["text"]
+        assert "held back for the fourth load in a row (this drop is already loaded: the action list stays as it is)" in res_text
+        # a state: each new hold replaced the one before it, and the re-checks neither added nor cleared one
+        assert [r["key"] for r in alerts.open_items() if r["rule"] == "profit_held"] == ["profit_held|2026-01-07"]
+    # the rule itself: newest first, while each load held its report back; one entry per day; this drop once
+    def both(*days) -> dict:
+        return {"stock_balance": list(days), "ar_ageing": list(days)}
+    assert lc.held_in_a_row("2026-01-07", kept, {"2026-01-03": True, "2026-01-05": True}, both("2026-01-02")) == 4
+    assert lc.held_in_a_row("2026-01-07", kept, {"2026-01-03": True, "2026-01-05": False}, both("2026-01-02")) == 1
+    assert lc.held_in_a_row("2026-01-07", kept, {"2026-01-05": True, "2026-01-07": True}, both("2026-01-07")) == 2
+    assert lc.held_in_a_row("2026-01-07", "2026-01-04", {"2026-01-03": True}, both("2026-01-02", "2026-01-06")) == 2
+    assert lc.held_in_a_row("2026-01-07", "", {"2026-01-05": True}, both("2026-01-02")) == 2, "no report date: no snapshot counts"
+    # one load counts once, whatever its snapshots: a load whose stock balance was as on the day before its other
+    # reports (its plan says so) ...
+    split = {"stock_balance": ["2026-01-04"], "ar_ageing": ["2026-01-05"]}
+    assert lc.held_in_a_row("2026-01-07", kept, {"2026-01-05": True}, split, {"2026-01-04", "2026-01-05"}) == 2
+    # ... and a load by hand whose two snapshots carry two days: one load, not one per kind of snapshot
+    assert lc.held_in_a_row("2026-01-07", kept, {}, split) == 2
+    assert lc.held_in_a_row("2026-01-07", kept, {}, {"stock_balance": ["2026-01-03", "2026-01-05"],
+                                                     "ar_ageing": ["2026-01-03", "2026-01-05"]}) == 3
+    assert lc.held_in_a_row("2026-01-07", kept, {}, {"stock_balance": ["2026-01-03"], "ar_ageing": []}) == 2
+
+
+from app.ingest_batch import Backend as _PreviewBackend  # noqa: E402  (after scripts.ops.db, as every command does)
+
+
+class ParamBackend(_PreviewBackend):
+    """A read-only backend as the check's (app.ingest_batch.PgBackend, read_only): the rows are handed to the diff
+    as a parameter; every query is recorded and answered with canned rows."""
+    mode, read_only, stage_source = "fake", True, "param"
+    MONEY = ("gross_bhd", "taxable_bhd", "balance_bhd", "net_qty", "total_value_bhd", "received_qty", "issued_qty",
+             "net_amount_bhd", "rate_bhd")
+
+    def __init__(self):
+        self.mem: dict = {}
+        self.asked: list = []
+
+    def tables_ready(self):
+        return False
+
+    def stage(self, batch_id, target, rows):
+        self.mem[target] = rows
+        return len(rows)
+
+    def staged(self, batch_id, target):
+        return self.mem.get(target, [])
+
+    def query(self, sql, params=None):
+        self.asked.append((" ".join(sql.split())[:60], [str(p)[:40] for p in params or []]))
+        if "information_schema.columns" in sql:
+            return [{"column_name": c, "data_type": "numeric" if c.endswith(("_bhd", "_qty")) else "text"}
+                    for c in (self.mem.get(params[0]) or [{}])[0]]
+        if "jsonb_array_elements" in sql:
+            n = len(self.mem.get(params[1]) or [])
+            return [{"removed": 0, "updated": 1, "revived": 0, "unchanged": n - 1, "inserted": 0, "db_rows": n,
+                     **{f"db_sum_{m}": "1.000" for m in self.MONEY},
+                     "removed_sample": None, "updated_sample": json.dumps([{"k": params[1]}])}]
+        if "from order_lines" in sql:
+            return [{"d": "2026-01-06", "w": "Van A", "n": 1, "g": "10.000", "t": "9.000"}]
+        return []
+
+
+@test("the preview's timing proxy: the real preview finds the same through it; the seconds go to each report and helper")
+def _():
+    from app.ingest_batch import Parsed, build_preview, prepare
+    from scripts.ops import querytime
+
+    def parsed() -> Parsed:
+        p = Parsed(folder="x")
+        p.rows["orders"], _n = prepare("orders", [{"invoice_no": "INV-1", "order_date": "2026-01-06", "gross_bhd": 10.0}])
+        p.rows["order_lines"], _n = prepare("order_lines", [{"invoice_no": "INV-1", "line_no": 1, "line_date": "2026-01-06",
+                                                             "gross_bhd": 10.0, "taxable_bhd": 9.0, "warehouse_name": "Van A",
+                                                             "item_name": "Cable one"}])
+        p.rows["ar_ageing"], _n = prepare("ar_ageing", [{"account": "Shop A", "balance_bhd": 4.5, "as_of_date": DAY}])
+        p.rows["stock_balance"], _n = prepare("stock_balance", [{"item_name": "Cable one", "warehouse_name": MAIN,
+                                                                 "net_qty": 5.0, "selling_rate_bhd": 1.5,
+                                                                 "total_value_bhd": 7.5, "as_of_date": DAY,
+                                                                 "source_file": "f"}])
+        p.as_on = {"stock_balance": DAY, "ar_ageing": DAY}
+        return p
+
+    def run(timed: bool):
+        be, told, ticks = ParamBackend(), [], iter(range(100_000))
+        p = parsed()
+        for target, rows in p.rows.items():
+            be.stage(0, target, rows)
+        use = (querytime.TimedBackend(be, targets=lc.LABEL_BY_TARGET, on_report=lambda *a: told.append(a),
+                                      clock=lambda: float(next(ticks)))     # each reading of the clock: one second on
+               if timed else be)
+        summary, exceptions = build_preview(p, use, 0, today=DAY)
+        summary.pop("generated_at", None)
+        return summary, exceptions, be.asked, use, told
+
+    plain, timed = run(False), run(True)
+    assert plain[0] == timed[0] and plain[1] == timed[1], "the proxy changed what the preview found"
+    assert plain[2] == timed[2] and len(plain[2]) > 8, "the proxy changed what the database was asked"
+    parts = timed[3].timing_summary()
+    assert parts["reports"] == {t: 2.0 for t in parsed().rows}, parts      # its column lookup and its diff: a second each
+    assert {"sales_comparisons", "stock_snapshot", "item_checks", "mrn_checks"} <= set(parts["helpers"]), parts
+    assert parts["queries"] == len(timed[2]) and parts["seconds"] == float(len(timed[2]))
+    assert timed[4] == [(t, 2.0, True) for t in parsed().rows], timed[4]   # one line per report, as each diff answers
+    # every other attribute is the backend's own, and an attribute set on the proxy is set on the backend
+    proxy, be = timed[3], querytime.unwrap(timed[3])
+    assert proxy.mode == "fake" and proxy.stage_source == "param" and proxy.read_only is True and proxy.mem is be.mem
+    proxy.extra = 7
+    assert be.extra == 7 and querytime.unwrap(be) is be and not hasattr(be, "_timed_state")
+
+    class Down(ParamBackend):
+        def query(self, sql, params=None):
+            raise RuntimeError("statement timeout")
+    told: list = []
+    down = querytime.TimedBackend(Down(), targets={"orders"}, on_report=lambda *a: told.append(a))
+    err = raises(RuntimeError, lambda: down.query("select 1", ["[]", "orders"]))
+    assert str(err) == "statement timeout" and [(t, ok) for t, _s, ok in told] == [("orders", False)]
+    assert down.timing_summary()["queries"] == 1 and down.timing_summary()["reports"].keys() == {"orders"}
+    def cannot_print(*_args):
+        raise OSError("the screen is gone")
+    loud = querytime.TimedBackend(ParamBackend(), targets={"orders"}, on_report=cannot_print)
+    assert loud.query("select 1", ["[]", "orders"]) == [], "a progress line that fails never reaches the preview"
+
+
+@test("the timing proxy around the real run_preview (parse, stage, compare, write its files): the same with it and without")
+def _():
+    from app.ingest_batch import run_preview
+    from scripts.ops import querytime
+    with data_root() as root:
+        folder = root / "reports"
+        folder.mkdir()
+        stock_balance_file(folder / NAMES["stock_balance"])          # the layouts the real parsers read
+        ledger_file(folder / NAMES["stock_movements"])
+        profit_file(folder / NAMES["product_profitability"])
+        receivables_file(folder / NAMES["receivables"], AGEING)
+
+        def run(timed: bool):
+            be, told, ticks = ParamBackend(), [], iter(range(100_000))
+            use = (querytime.TimedBackend(be, targets=lc.LABEL_BY_TARGET, on_report=lambda *a: told.append(a),
+                                          clock=lambda: float(next(ticks))) if timed else be)
+            out = root / ("timed" if timed else "plain")
+            res = run_preview(folder, use, actor="ops_load_check", persist=False, out_dir=out, today=DAY)
+            res["summary"].pop("generated_at", None)
+            written = sorted(p.name for p in out.iterdir()) if out.is_dir() else []
+            return res, be.asked, use, told, written
+        plain, timed = run(False), run(True)
+        assert plain[0]["summary"] == timed[0]["summary"] and plain[0]["exceptions"] == timed[0]["exceptions"]
+        assert plain[0]["batch_id"] is None is timed[0]["batch_id"] and plain[4] == timed[4] and plain[4], plain[4]
+        assert plain[1] == timed[1] and len(plain[1]) >= 8, "the proxy changed what the database was asked"
+        targets = set(plain[0]["summary"]["targets"])
+        assert targets == {"stock_balance", "stock_movements", "product_profitability", "ar_ageing"}, targets
+        parts = timed[2].timing_summary()
+        assert parts["reports"] == {t: 2.0 for t in targets} and parts["queries"] == len(timed[1]), parts
+        assert [t for t, _s, _ok in timed[3]] == list(plain[0]["summary"]["targets"]), timed[3]   # one line per report
+
+
+@test("the check's preview goes through the timing proxy: the plan is the same with it and without, its seconds are kept")
+def _():
+    def plan_of(timed: bool):
+        with data_root() as root:
+            make_drop(root)
+            old = os.environ.pop("YQ_CHECK_NO_TIMING", None)
+            try:
+                if not timed:
+                    os.environ["YQ_CHECK_NO_TIMING"] = "1"
+                res, deps = check("070126", deps=FakeDeps(FakeSession(backend=FakeBackend()), via_backend=True))
+            finally:
+                os.environ.pop("YQ_CHECK_NO_TIMING", None)
+                if old is not None:
+                    os.environ["YQ_CHECK_NO_TIMING"] = old
+            plan = loadplan.read_plan(res["run"])
+            timings = plan.pop("timings")
+            for key in ("run", "created_at", "staging", "token", "token_parts", "drop"):
+                plan.pop(key, None)
+            return plan, timings, deps, res
+    on, off = plan_of(True), plan_of(False)
+    assert on[0] == off[0], "the timing proxy changed what the check found"
+    assert on[2].the_session.backend.asked == off[2].the_session.backend.asked, "... or what the database was asked"
+    assert on[3]["token"] and off[3]["token"] and on[3]["text"].splitlines()[-1].startswith("GO: ")
+    parts = on[1]["preview_parts"]
+    order = ["ar_ageing", "stock_balance", "product_profitability", "order_lines", "stock_movements", "orders"]
+    assert set(parts["reports"]) == set(order) and parts["queries"] == 2 * len(order) + 1, parts
+    assert list(parts["helpers"]) == ["preview"], parts               # the stand-in preview asks its one helper itself
+    assert "preview_parts" not in off[1] and {"preview", "total"} <= set(on[1]) <= set(off[1]) | {"preview_parts"}
+    lines = [ln for ln in on[2].lines if ln.startswith("      preview: ")]
+    assert [re.sub(r" compared in [0-9]+\.[0-9] s$", "", ln) for ln in lines] == [
+        "      preview: " + lc.LABEL_BY_TARGET[t] for t in order], lines
+    assert not [ln for ln in off[2].lines if ln.startswith("      preview: ")]
+    assert [ln[:5] for ln in on[2].steps] == [f"[{i}/9]" for i in range(1, 10)]
+    step7 = next(i for i, ln in enumerate(on[2].lines) if ln.startswith("[7/9]"))
+    assert all(on[2].lines.index(ln) < step7 for ln in lines), "each report's line comes as it is done, before step 7's"
+
+
+DELIVERY_ON = {"mode": "on", "from": "YQ Ops <ops@example.invalid>", "to": ["owner@example.invalid"],
+               "test_to": ["tester@example.invalid"]}
+
+
+@test("the retry of a cut-off e-mail: `load status` offers none exactly where the sender would refuse it, in its words")
+def _():
+    os.environ["YQ_SECRETS_OFF"] = "1"
+    from scripts import yq_send as ys                 # the sender itself, only to hold the two rules side by side
+    from scripts.ops import noretry
+    run, newer = "070126_0930", "080126_0930"
+    old = (datetime.now(timezone.utc) - timedelta(seconds=lc.DELIVERY_WAIT_S + 60)).isoformat(timespec="seconds")
+    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds")
+    cut = ("  Delivery: cut off before the e-mail went (the PC slept, or the load's window was closed). "
+           "Nothing was reloaded. ")
+    needed = f"No retry is needed: a newer load (run {newer}) has its own e-mail."
+    lost = f"No retry: the last load on record is run {newer}, not this one, so this load's brief cannot be sent."
+    nobody = "No retry: no load is on record as the last load, so this load's brief cannot be sent."
+
+    def world(last="newer", closing="finished", look=(), manifest=None, delivery="on") -> None:
+        loadplan.journal_append(run, "started")
+        if closing == "finished":
+            loadplan.journal_append(run, "finished", result="ok", needs_look=list(look))
+        else:
+            loadplan.journal_append(run, "failed", result="failed", step="post_gate", written=True)
+        loadplan.delivery_append(run, "queued", at=old, text="Preparing the brief and the e-mail.")
+        finished_at = {"newer": later, "lost": "2026-01-01T09:00:00+03:00", "this": later}.get(last)
+        if last:
+            status.write_state({"last_load": {"run": run if last == "this" else newer, "finished_at": finished_at}})
+        f = paths.ops_dir() / "delivery.json"
+        if delivery == "broken":
+            paths.write_text(f, "{not json")
+        elif delivery == "bad_address":
+            paths.write_text(f, json.dumps(dict(DELIVERY_ON, mode="off", to=["not an address"])))
+        elif delivery is not None:
+            paths.write_text(f, json.dumps(dict(DELIVERY_ON, mode=delivery)))
+        if manifest is not None:
+            paths.write_text(paths.exports_dir() / DAY / "delivery" / run / "manifest.json",
+                             "not json" if manifest == "broken" else json.dumps({"kind": manifest}))
+
+    cases = (                                         # (what, the world, the answer: None = the retry is offered)
+        ("a newer load finished since", {}, needed),
+        ("this load is the last on record", {"last": "this"}, None),
+        ("no load on record at all", {"last": None}, nobody),
+        ("the last load on record finished before this one", {"last": "lost"}, lost),
+        ("delivery is off", {"delivery": "off"}, None),
+        ("no delivery.json: off", {"delivery": None}, None),
+        ("a delivery.json that cannot be read counts as on", {"delivery": "broken"}, needed),
+        ("a delivery.json the sender refuses counts as on, its mode off or not", {"delivery": "bad_address"}, needed),
+        ("test mode, the brief not made yet", {"delivery": "test"}, needed),
+        ("test mode, the brief made: a test copy is never refused", {"delivery": "test", "manifest": "full"}, None),
+        ("the manifest says full", {"manifest": "full"}, needed),
+        ("the manifest says look", {"manifest": "look"}, None),
+        ("a manifest that cannot be read", {"manifest": "broken"}, None),
+        ("no manifest, the reconcile needs a look: a note, not a brief", {"look": ("reconcile",)}, None),
+        ("no manifest, the gate needs a look: a note, not a brief", {"look": ("post_gate",)}, None),
+        ("no manifest, only the publish needs a look: a full brief", {"look": ("publish",)}, needed),
+        ("a load closed as failed: its note is never refused", {"closing": "failed"}, None),
+    )
+    for what, kw, answer in cases:
+        with data_root():
+            world(**kw)
+            mine, theirs = noretry.no_retry_needed(run), ys.no_retry_needed(run)
+            assert mine == theirs == answer, (what, mine, theirs)
+            line = status_of("--run", run)["text"].splitlines()[-2]
+            assert line == cut + (answer or f"Its retry: python -m scripts.yq_send --run {run}"), (what, line)
+    # (scripts/ops keeps its own copy of the rule: no module of it imports the sender, tests/test_ops_readonly.py)
+
+
+@test("`load check <ddmmyy> again`: the word 'again' after the folder is taken and ignored; any other word is refused")
+def _():
+    with data_root() as root:
+        make_drop(root)
+        res, _ = check("070126", "again")
+        assert res["ok"] and res["token"] and res["run"].startswith("070126_"), res["text"]
+        res, _ = check("Again")                                      # on its own: the latest folder, as with no word
+        assert res["ok"] and res["token"] and res["text"].startswith("LOAD CHECK  070126  "), res["text"]
+        res, _ = check("070126", "now")
+        assert res["exit"] == 2 and res["token"] is None and res["run"] is None, res["text"]
+        assert res["text"] == ("LOAD CHECK: STOP\n'now' is not a word the check takes after the folder (only 'again' "
+                               "is). Nothing was checked."), res["text"]
+        first = ("LOAD CHECK: STOP\n'again' comes after the folder: type /yq-load <ddmmyy> again, or /yq-load alone for "
+                 "the latest folder. Nothing was checked.")
+        for words in (("again", "again"), ("again", "070126"), ("AGAIN", "x")):
+            res, _ = check(*words)
+            assert res["exit"] == 2 and res["token"] is None and res["text"] == first, (words, res["text"])
+        assert len(live_runs()) == 1, "a refused line checks nothing and stages nothing"
+    # the entry point's own parser (words and options in any order, scripts/ops/__main__.py) takes it as well
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-root")
+    parser.add_argument("--json", action="store_true")
+    lc.add_arguments(parser)
+    args = parser.parse_intermixed_args(["check", "070126", "--pricebook", "load", "again", "--json"])
+    assert (args.drop, args.again, args.pricebook) == ("070126", "again", "load") and lc.drop_asked(args) == ("070126", None)
+    assert lc.drop_asked(parser.parse_intermixed_args(["check"])) == (None, None)
+    assert lc.drop_asked(parser.parse_intermixed_args(["check", "again"])) == (None, None)
+
+
+@test("a journal that is broken or holds a line that is no row: the check passes over it and runs to its end")
+def _():
+    def finished(run: str, day: str, held: bool = True, as_on: dict | None = None) -> None:
+        loadplan.write_plan({"run": run, "drop": "x", "data_date": day, "token": "t",
+                             "verdicts": [{"kind": "product_profitability", "verdict": "hold_back" if held else "load"}],
+                             "as_on": as_on or {"stock_balance": day, "receivables": day}})
+        loadplan.journal_append(run, "started")
+        loadplan.journal_append(run, "finished", result="ok")
+    with data_root() as root:
+        finished("050126_0900", "2026-01-05", as_on={"stock_balance": "2026-01-04", "receivables": "2026-01-05"})
+        finished("030126_0900", "2026-01-03", held=False)
+        finished(status.REHEARSAL_PREFIX + "0900", "2026-01-06")                    # a rehearsal never counts
+        loadplan.write_plan({"run": "060126_0900", "drop": "x", "data_date": "2026-01-06", "verdicts": []})  # never loaded
+        for run, junk in (("040126_0900", b"\xff\xfe not text\n"), ("070126_0815", b"\x80\x81\n"),
+                          ("020126_0900", b'[1, 2]\n"a line"\n7\n')):
+            loadplan.write_plan({"run": run, "drop": "x", "data_date": paths.drop_date(run[:6]).isoformat(), "token": "t",
+                                 "verdicts": [{"kind": "product_profitability", "verdict": "hold_back"}]})
+            loadplan.journal_file(run).write_bytes(junk)
+        loadplan.journal_append("020126_0900", "finished", result="ok")           # one good row after the junk
+        assert loadplan.journal_read("020126_0900") == [r for r in loadplan.journal_read("020126_0900") if isinstance(r, dict)]
+        loads, explained = lc.finished_held_loads()
+        assert loads == {"2026-01-05": True, "2026-01-03": False, "2026-01-02": True}, loads
+        assert {"2026-01-04", "2026-01-05", "2026-01-03", "2026-01-02"} <= explained, explained
+        # a whole check over these journals: a report held back is counted, nothing breaks
+        make_drop(root, profit=SHORT_COST)
+        res, _ = check("070126", deps=FakeDeps(FakeSession(anchors=BEFORE_LOAD)))
+        assert res["ok"] and res["token"] and table_of(res["text"])[shown("product_profitability")] == "HOLD BACK", res["text"]
+        assert "held back for the second load in a row" in res["text"], res["text"]      # the 05-Jan load held its own
 
 
 def main() -> int:
