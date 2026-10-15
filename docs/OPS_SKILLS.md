@@ -359,7 +359,7 @@ public.
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
 | `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
 | `exports/reports/monthly/` and `exports/reports/weekly/` | The workbooks: the monthly one from `/yq-month` (named for its month, with `DRAFT` while its comment lines wait for you; a second build of a month gets the next free name), the weekly one in a later phase. Each monthly build also leaves a short record in `exports/ops/<data-date>/`. |
-| `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, and in `legacy\` the older backups that sat in OneDrive, encrypted. Outside OneDrive (see `docs/BACKUPS.md`). |
+| `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, in `legacy\` the older backups that sat in OneDrive, encrypted, and in `photos\` the encrypted copy of the Market Intel photos. Outside OneDrive (see `docs/BACKUPS.md`). |
 
 ## 6. What these commands cannot do
 
@@ -479,8 +479,15 @@ public.
   production, read-only) and compares every table's rows with the archive's manifest; `legacy` packs
   the old plain backups, reads each one back and only then deletes the plain copy. `docs/BACKUPS.md`
   lists every subcommand.
+- **The photo archive** (`scripts/yq_photos.py`, run by hand on this PC): `archive` counts the Market
+  Intel photos in storage and the rows that point at them, and changes nothing; `archive --apply`
+  downloads every photo, checks each one against the checksum the database recorded, and keeps one
+  encrypted archive with its manifest in `%LOCALAPPDATA%\yq-backups\photos\`; `verify <archive>` is its
+  restore drill. An `--apply` run that starts the download leaves a row with `"kind": "photos"` in
+  `drills.jsonl`. `docs/BACKUPS.md` says more.
 - **Adding a skill:** a new folder with the same rules, one row in section 1, one line in
-  `CLAUDE.md`, then `python -m tests.test_ops_skills` and `python -m tests.test_ops_readonly`.
+  `CLAUDE.md`, its command in `SKILL_COMMAND` of `tests/test_ops_skills.py`, then
+  `python -m tests.test_ops_skills` and `python -m tests.test_ops_readonly`.
 - **Before a commit:** `python -m scripts.ops selftest --repo-clean`. It refuses a staged file outside
   this work's paths, one that holds a name read from the loaded Focus files, and one that holds an
   amount of a thousand or more written with three decimals. Its name list is

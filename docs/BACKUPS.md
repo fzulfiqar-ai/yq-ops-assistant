@@ -1,4 +1,4 @@
-# Backups: the nightly job, the backup before every load, the restore drill
+# Backups: the nightly job, the backup before every load, the restore drill, the photo archive
 
 A backup here is a copy of every table of the live database (one CSV file per table and a `manifest.json`), kept on the
 office PC in `%LOCALAPPDATA%\yq-backups`. That folder is never inside OneDrive (the nightly job refuses a OneDrive folder;
@@ -10,6 +10,7 @@ office PC in `%LOCALAPPDATA%\yq-backups`. That folder is never inside OneDrive (
 | `preload\` | `yq-backup_<date>_pre-data-<run>.7z`, taken before each load; the newest few are kept (`load.backup_keep` in `business_data/ops/config.json`) | `/yq-load` (`scripts/yq_load_go.py`) |
 | `legacy\` | `<name>.7z`, the older backups that sat in `business_data/backups`, packed one at a time | `python -m scripts.yq_backup legacy --apply` |
 | `release\` | one backup for each release, such as `2026-10-14_pre-mi-v2` (a CSV per table and `manifest.json`, packed with `pack`) | moved here after a release (a release script writes its backup under `business_data/backups/` first), or made here with `python -m scripts.db_backup --all --out <a folder here>` |
+| `photos\` | `<date>_photos.7z`, an encrypted copy of the Market Intel photos with a manifest of every file (below) | `python -m scripts.yq_photos archive --apply` |
 
 ## The backup password
 
@@ -99,6 +100,32 @@ came from. Exit code: 0 passed, 1 failed, 2 no archive to drill.
   (`manifest.json` and one CSV per table, for example a release backup under `release\`) into a `.7z` beside it with the
   backup password, reads the archive back, and only then deletes the original. Without `--apply` it only says what it
   would do. A packed archive can be checked with `python -m scripts.yq_backup drill --archive <file>`.
+
+## The photo archive: `scripts/yq_photos.py`
+
+The photos of Market Intel, and those of the older Product Finds and Field Notes boards, are kept in two private storage
+buckets of the live project. `scripts/yq_photos.py` keeps an encrypted copy of them on this PC. It only reads production:
+the rows and the list of objects through the read-only database session of `scripts/ops/db.py`, the photos through the
+same read-only client.
+
+- `python -m scripts.yq_photos archive` only looks: for each bucket, the objects and their size, the database rows that
+  point at a photo, the rows whose photo storage does not hold and the objects no row points at. Nothing is downloaded,
+  written or changed.
+- `python -m scripts.yq_photos archive --apply [--out <folder>]` downloads every object into a work folder under
+  `photos\`, takes the checksum of each one and compares it with the checksum the database recorded when the photo was
+  taken (where it recorded one), and lists every object in `manifest.json`. The folder is packed into
+  `photos\<date>_photos.7z` with the backup password and the settings of the nightly job, the archive is read back with
+  7-Zip's own test and its file count compared, and only then is the work folder deleted. It is refused without the
+  backup password or 7-Zip, in a folder OneDrive syncs, inside the code folder, and on a drive without room for the
+  copy. Exit code: 0 all clean; 1 the archive was made, but a photo is missing from storage, differs from its database
+  checksum or could not be downloaded (each one is listed); 2 nothing was archived.
+- `python -m scripts.yq_photos verify <archive> [--sample <n>]` is its restore drill: it reads the archive back,
+  unpacks it outside OneDrive, checks every file against the manifest (checksum and size), opens a few photos at random
+  and deletes the unpacked copy. Exit code: 0 the copy is whole, 1 it is not, 2 not run.
+
+An `archive --apply` run that starts the download leaves a row in `business_data/ops/drills.jsonl` with
+`"kind": "photos"`: the time, the archive's name, `passed`, `problems` or `failed` (with the reason), the name (never the
+value) of the place the password came from, and counts only.
 
 ## Restoring
 

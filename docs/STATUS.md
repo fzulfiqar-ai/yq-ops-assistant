@@ -13,12 +13,13 @@ criteria, is in the owner's plans folder (its path is in Claude's project memory
   (`docs/MARKET_INTEL_HOWTO.md`, `docs/MARKET_INTEL_RELEASE.md`).
 - Real loads so far: the drops 111026, 141026 and 151026. Each load's journal is in `business_data/ops/loads/`
   (git-ignored).
+- Done (15-Oct-2026): H, the phase 1 hardening pack, is live: one full e-mail per data set, a check that finds nothing
+  new ends without a GO line, the brief points only at built commands, the check shows how long each report takes,
+  `pack` for plain backups, and the documents brought current.
 
 ## In progress
 
-- H, the phase 1 hardening pack (15-Oct-2026): no second full e-mail for the same data; "nothing new" ends the check
-  without a GO line; the brief's pointers name only commands that are built; counter and wording fixes; the seconds each
-  report takes, shown in the check; `pack` for plain backups; the documents.
+- /yq-month, /yq-stock and the photo archive are built and tested; merged to main when the owner says go.
 
 ## Not built (the engine prints "not built yet")
 
