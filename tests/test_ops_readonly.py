@@ -298,7 +298,7 @@ FORBIDDEN_IMPORTS = (
     "app.outreach", "app.social_publish", "app.llm_router", "app.shop_notify", "scripts.refresh",
     "scripts.apply_sql", "scripts.apply_migration", "scripts.render_deploy", "scripts.deploy_render",
     "scripts.deploy_cf", "scripts.deploy_web", "scripts.send_digest", "scripts.yq_load_go",
-    "scripts.yq_send", "scripts.yq_secrets", "scripts.yq_backup",
+    "scripts.yq_send", "scripts.yq_secrets", "scripts.yq_backup", "scripts.yq_nightly",
     "requests", "smtplib", "socket", "ftplib", "telnetlib",
 )
 # scripts.load_supabase holds the loader AND its pure guards: only these names may be imported.
@@ -410,14 +410,15 @@ def _():
 
 @test("the sender and the secret stores stay outside the package: no module of it reads a secret or sends")
 def _():
-    for name in ("yq_send.py", "yq_secrets.py", "yq_backup.py"):
+    for name in ("yq_send.py", "yq_secrets.py", "yq_backup.py", "yq_nightly.py"):
         assert not (OPS / name).exists(), name
     for f in package_files():
         text = f.read_text(encoding="utf-8")
         for word in ("CredRead", "winreg", "api.resend.com", "YQ_RESEND_API_KEY", "YQ_BACKUP_PASSWORD"):
             assert word not in text, f"{f.name} names {word}: secrets and sending live in scripts/yq_*.py"
         for module, names in imports_of(ast.parse(text)):
-            assert not any(m in module or m in names for m in ("yq_send", "yq_secrets", "yq_backup")), f.name
+            assert not any(m in module or m in names
+                           for m in ("yq_send", "yq_secrets", "yq_backup", "yq_nightly")), f.name
 
 
 def main() -> int:
