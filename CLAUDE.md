@@ -11,6 +11,7 @@
 ## Skills (`.claude/skills/`)
 - `/yq-load [ddmmyy]`: check a drop folder, ask, load, verify, brief, then the e-mail. Owner only.
 - `/yq-brief [window] [rep:<name>]`: sales brief and what to do today; `/yq-brief team` prints the team message for him to copy. Asked whether the data is up to date or what is waiting, it runs `python -m scripts.ops status` (read-only).
+- `/yq-month [YYYY-MM]`: the monthly sales workbook (the layout of his September one) for a whole month, under `exports/reports/monthly/`; its comment lines stay DRAFT for now.
 - More skills arrive in later phases and are listed here once they exist.
 
 ## Standing rules
