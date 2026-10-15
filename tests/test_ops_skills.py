@@ -92,6 +92,7 @@ SKILLS = ROOT / ".claude" / "skills"
 OPS = ROOT / "scripts" / "ops"
 WRITER_FILE = ROOT / "scripts" / "yq_load_go.py"       # the only writer: read as text here
 BRIEF_FILE = OPS / "sales.py"                          # the brief: read as text here (it imports the portal)
+STOCK_FILE = OPS / "stock.py"                          # the stock command: read as text too, for the same reason
 PAGE = ROOT / "docs" / "OPS_SKILLS.md"
 BOM = b"\xef\xbb\xbf"
 FRONT = re.compile(r"\A---\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
@@ -104,6 +105,7 @@ OTHER_KNOWN_KEYS = {"when_to_use", "arguments", "user-invocable", "disallowed-to
                     "shell", "metadata", "license", "compatibility"}
 CODE_RUNNING_KEYS = {"hooks", "context", "agent", "background"}      # hooks run code; context/agent fork
 OWNER_ONLY = {"yq-load"}
+OWN_COMMAND = {"yq-stock": "stock"}                 # the command a skill is for, where it is not the brief
 SHADOWS = ("weekly-review", "monthly-review")       # the commands a same-named skill would hide
 DESCRIPTION_CAP = 1536                              # Claude Code cuts description + when_to_use here
 MAX_LINES = 70                                      # a SKILL.md stays under this many lines
@@ -482,7 +484,8 @@ def _():
 
 
 MY_FILES = (".claude/skills/yq-load/SKILL.md", ".claude/skills/yq-brief/SKILL.md", "CLAUDE.md", "docs/OPS_SKILLS.md",
-            "docs/FOCUS_EXPORT.md", ".gitignore", "requirements-dev.txt", "tests/test_ops_skills.py")
+            "docs/FOCUS_EXPORT.md", ".gitignore", "requirements-dev.txt", "tests/test_ops_skills.py",
+            ".claude/skills/yq-stock/SKILL.md")
 
 
 @test("every file of this work is on the list `selftest --repo-clean` allows to be committed")
@@ -933,6 +936,43 @@ def _():
     # no figure of the average on the page: the brief prints the system's own
     assert "the average month of the last 12 months" in defs and "This page gives no figure for that average" in defs
     assert re.search(r"add_months\(\w+, -12\)", src), "the brief no longer averages the last 12 months"
+
+
+@test("the words of /yq-stock are the ones the stock command reads and prints, and the page's counts are its own")
+def _():
+    consts, source = module_constants(STOCK_FILE), read(STOCK_FILE)
+    _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-stock" / "SKILL.md").read_bytes())
+    # the hint: the two view words the command reads, then an item code; its usage line says the same
+    words = re.findall(r"\[([^\]]+)\]", fm["argument-hint"])[0].split("|")
+    assert words[-1] == "<code>" and set(words[:-1]) == set(consts["VIEW_WORDS"].values()), words
+    assert set(words[:-1]) <= set(consts["VIEW_WORDS"]), "the hint names a word the command does not read"
+    usage = (ast.get_docstring(ast.parse(source)) or "").splitlines()[0]
+    assert usage.startswith("python -m scripts.ops stock [reorder | ageing | <item code>]"), usage
+    assert fm["allowed-tools"] == ["Bash(python -m scripts.ops stock *)", "PowerShell(python -m scripts.ops stock *)"]
+    # what the skill acts on, in the command's own words
+    for said in ("goods on order not deducted", "No purchase order is drafted.", ", to check", 'text + ("*" if floored'):
+        assert said in source, f"the stock command no longer says: {said}"
+    assert "goods on order not deducted" in body and "A rate marked with a star" in body
+    # the page's definitions carry the command's own counts and settings
+    defs, words_of = flat(page_part(4)), {3: "three", 10: "ten"}
+    for needle in (f"the units sold in the last {consts['RATE_DAYS']} days divided by the days",
+                   f"never fewer than {consts['RATE_MIN_DAYS']}",
+                   f"rests on fewer than {consts['RATE_MIN_DAYS']} days in stock",
+                   f"New arrivals are items first received in the last {consts['RATE_DAYS']} days",
+                   f"over the {consts['RANK_MONTHS']} full months before the month",
+                   f"up to {consts['AGE_LIMITS'][0]} days, up to {consts['AGE_LIMITS'][1]}, up to a year, over a year",
+                   f"above it up to {consts['COVER_LIMITS'][0]} days, up to {consts['COVER_LIMITS'][1]}, up to a year",
+                   f"With at least {words_of[consts['LEAD_MIN']]} shipments matched",
+                   f"the median of the last {words_of[consts['LEAD_SHOWN']]}",
+                   "*goods on order not deducted*", "No purchase order is drafted",
+                   "A return from a van is no receipt, so it never makes stock younger"):
+        assert needle in defs, f"section 4 does not say: {needle}"
+    assert consts["AGE_LIMITS"][2] == consts["COVER_LIMITS"][2] == 365, "the page calls the last band 'a year'"
+    for key in ("stock.lead_time_days", "stock.cover_kpi_days", "stock.fast_movers", "stock.display_items"):
+        assert key in config.KEYS and f"`{key}`" in defs, key
+    assert {"stock.fast_movers", "stock.cover_kpi_days"} <= config.OPTIONAL
+    assert "the plan's value stands in and the screen names the key" in defs
+    assert "the plan's default is used" in source
 
 
 @test("the status prints the five lines the page lists, in that order")
@@ -1464,7 +1504,8 @@ def _():
             for command in MUST_NOT_MATCH:
                 assert not rule_matches(entry, command), (p.parent.name, entry, command)
         # ... and the entries do cover what the skill is for, so the test above is not vacuous
-        assert any(rule_matches(e, "python -m scripts.ops brief") for e in fm["allowed-tools"]
+        own = OWN_COMMAND.get(p.parent.name, "brief")
+        assert any(rule_matches(e, f"python -m scripts.ops {own}") for e in fm["allowed-tools"]
                    if e.startswith("Bash(")), p.parent.name
 
 
@@ -1573,6 +1614,22 @@ MUST_CONTAIN = {
         "`team` on its own for the team message", "in one code block of its own, unchanged, and add nothing",
         "Never send it anywhere yourself",
     ],
+    "yq-stock": [
+        "python -m scripts.ops stock $ARGUMENTS", "600000", "no pipe", "Add a word only when he asked for it",
+        "`reorder` for the whole order list", "`ageing` for the ageing table", "or an item's code for that item",
+        "ask which one he means and run it again with that code",
+        "Run nothing else that loads, writes or deploys", "Show the screen unchanged, in a code block",
+        "type no number yourself",
+        "If the output opens with LOAD INTERRUPTED or LAST LOAD FAILED, say so first, in plain words, and point him "
+        "to /yq-load", "Change nothing yourself",
+        "at most three lines", "no number that is not on the screen",
+        # the order list is a suggestion: no purchase order, nothing to a supplier, and what it does not allow for
+        "draft no purchase order and write to no supplier", "When the screen says goods on order not deducted",
+        "its quantities do not yet allow for goods already on their way",
+        "Never present an estimate as a fact", "A rate marked with a star rests on few days in stock",
+        "keep those words when you repeat a figure",
+        "Never accuse anyone", "to check", "it comes with the movement audit, in a later phase",
+    ],
 }
 
 
@@ -1643,6 +1700,22 @@ def _():
                      ("no number that is not on the screen", "any number"), ("unchanged, in a code block", "tidied")):
         assert old in brief, old
         assert problems_rules("yq-brief", brief.replace(old, new)), f"not caught: {old!r} -> {new!r}"
+
+
+@test("the /yq-stock rules check bites: a rule turned round or dropped is caught")
+def _():
+    text = read(SKILLS / "yq-stock" / "SKILL.md")
+    assert not problems_rules("yq-stock", text)
+    for old, new in (("draft no purchase order and write to no supplier", "draft the purchase order for him"),
+                     ("Never present an estimate as a fact", "Round the figures off"),
+                     ("its quantities do not yet allow for goods already on their way", "the list is complete"),
+                     ("A rate marked with a star rests on few days in stock", "A rate is a rate"),
+                     ("say so first, in plain words, and point him to /yq-load", "carry on"),
+                     ("Run nothing else that loads, writes or deploys", "Fix what looks wrong"),
+                     ("no number that is not on the screen", "any number"), ("Never accuse anyone", "Name who did it"),
+                     ("$ARGUMENTS", "$ARGUMENTS $ARGUMENTS")):
+        assert old in text, old
+        assert problems_rules("yq-stock", text.replace(old, new)), f"not caught: {old!r} -> {new!r}"
 
 
 @test("the checks bite: broken skills of each kind are caught")
@@ -2155,6 +2228,8 @@ DESIGN_NUMBERS = {
     "60": "the days of sales that show a sold-out item was still asked for (the Command Centre's rule)",
     "70": "the line cap of a SKILL.md",
     "600000": "the tool timeout, in milliseconds",
+    "90": "the days behind an item's daily rate (the stock command); its first band of age and of cover",
+    "180": "the stock command's second band of age and of cover",
 }
 A_NUMBER = re.compile(r"\d[\d,.]*\d|\d")
 VALUE_SHAPES = (("an amount in BHD", re.compile(r"\bBHD\s*\d")), ("a percentage", re.compile(r"\d\s*%")),

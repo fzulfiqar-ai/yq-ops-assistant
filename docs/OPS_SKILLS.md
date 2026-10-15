@@ -14,6 +14,7 @@ changes the live database except the load, and the load asks you every time. Fin
 |---|---|---|
 | `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. Then it e-mails you the brief and makes the team message (section 2 sets the e-mail up). |
 | `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
+| `/yq-stock`, `/yq-stock reorder`, `/yq-stock ageing` or `/yq-stock <code>` | When you plan an order. Or ask in plain words: what should I order, what is running out, how many days of stock do I hold, which stock is old. | The main store's stock as the portal shows it and at cost, the days of cover against KPI 1, the order list (what to order and how much, and the lead time it rests on), how often the fast movers were in stock, and the ageing in one line. `reorder` shows the whole order list, the supplier invoices the lead time is measured on and the fast movers with their sales ranking; `ageing` the ageing table; an item's code that one item. No purchase order is drafted (section 4 says how each figure is worked out). |
 | Ask in plain words: *where do things stand?* | Before you start, or when something looks stuck. | Five lines: the data dates and the last load; this folder against the live site; the load lock; reports waiting; open items on the action list. (Claude runs `python -m scripts.ops status`.) |
 
 `/yq-brief` on its own is the whole morning screen. Name a window (`day`, `3d`, `7d`, `week`,
@@ -24,8 +25,8 @@ the last full week. If nothing new has been loaded since your last brief it prin
 `/yq-brief again` for the whole screen anyway. `/yq-brief team` prints the team message the last load
 made, in a block you can copy into the salesmen's group (section 4 says what it holds).
 
-The rest of the routine (the weekly and monthly workbooks, the movement and stock checks, the full
-action list, the KPI scorecard) follows in later phases. This table gets a row for each one when it
+The rest of the routine (the weekly and monthly workbooks, the movement checks, the full action
+list, the KPI scorecard) follows in later phases. This table gets a row for each one when it
 exists. After a new command is added, type `/reload-skills` (or restart Claude Code) so it appears.
 
 `/yq-load` is yours alone: Claude does not start it by itself. If you ask Claude in plain words to
@@ -236,9 +237,9 @@ one of two lines, and the load check says the same in its own words:
   month, or when he has had no invoice for more than the set number of business days, which is the
   Command Centre's own rule (both settings are in `config.json`).
 - **Stock.** Items that are sold out although they were still asked for in the last 60 days: the
-  Command Centre's list of sold-out items with demand. Warnings about items that will run out within
-  the lead time of a new order (the lead time is in `config.json`) come with the stock command, in a
-  later phase.
+  Command Centre's list of sold-out items with demand. What to order before an item runs out, and
+  how many days of stock you hold, is on `/yq-stock` (its definitions follow this list); the brief
+  gains its warnings in a later phase.
 - **Do today.** At most five open items of the action list, the most pressing first; when more are
   open, the screen says how many. The Command Centre's attention items are put on that list by the
   brief. The full list, and marking an item done or explained, come with a later command. An item
@@ -265,6 +266,57 @@ one of two lines, and the load check says the same in its own words:
   figure. It never holds a customer's or a shop's name, money owed, a tier, a commission or a
   salesman's own figure: a message that would is not made, and the e-mail says why. You send it yourself: copy it from
   `/yq-brief team`, or press *Open in WhatsApp* in the e-mail, choose the group and send.
+
+### Stock (`/yq-stock`)
+
+- **The main store** is the Focus *Accessories Warehouse* (`warehouses.main` in `config.json`). An
+  item counts when it has ever moved there, so SIM packs are out by that rule, never by a word in a
+  name. The headline's items, units and selling value are the portal's own figures (the Inventory
+  page's read of the newest stock balance). The stock ledger's balance of the main store is set
+  beside them item by item, and an item where the two differ is listed *to check*. The vans and the
+  two outlets come with the movement audit, in a later phase.
+- **At cost** is the latest landed cost of the item's code, else the latest supplier receipt's rate,
+  as everywhere. The portal's own figure (Focus average cost, else the latest landed cost) is printed
+  beside it when the two differ. An item with neither is counted apart, never valued at nothing.
+- **Units sold** are the Sales Invoice units of every warehouse (the vans and the outlets sell; the
+  main store issues to them), customer returns not deducted.
+- **Daily rate and cover.** An item's rate is the units sold in the last 90 days divided by the days
+  of those on which the main store held it at the end of the day, never fewer than 30. A rate marked
+  with a star rests on fewer than 30 days in stock, so it may understate the demand of an item that
+  was out most of the time. Cover is the units on hand divided by the rate.
+- **KPI 1, cover.** The aggregate cover is the stock at cost divided by the daily cost of sales at
+  the same costs, with display items and new arrivals left out; beside it, the share of that value
+  on items above the top of your KPI band, and the same figure on the last day of last month (at
+  today's costs). New arrivals are items first received in the last 90 days: their rate is too
+  short to judge, so they are a band of their own. The bands are by count and value: below the KPI
+  band, inside it, above it up to 90 days, up to 180, up to a year, over a year, and no sale in the
+  last 90 days.
+- **The order list.** An item that sold in the last 90 days is listed when its cover is below the
+  lead time plus the low end of your KPI band; the quantity brings it to the lead time plus the top
+  of the band, less what is on order, in whole units. Goods on order are the promise lines you log,
+  one per item from a proforma or a packing list, each counted until a receipt of that item is dated
+  after it; until one is logged the list says *goods on order not deducted*. No purchase order is
+  drafted.
+- **The lead time** is measured: each supplier invoice on file (the proforma invoices uploaded on the
+  Orders page) is set beside the main store's receipt, on or after its date, that holds the same
+  quantity of most of its models (at least half of them); the days between the two are that
+  shipment's lead time. With at least three
+  shipments matched, the lead time is the median of the last ten, and the screen lists them with
+  their basis; otherwise it is `stock.lead_time_days` from `config.json`, and the screen says so.
+- **Fast movers** are your best sellers by units over the 12 full months before the month (how many:
+  `stock.fast_movers`). Their availability is the share of SKU-days on which the main store's
+  day-end balance was above nothing and covered at least one day of that item's rate; beside it the
+  same for every item that sold (the wider basis), and the fast movers that were out on every day
+  of the month.
+- **Ageing.** The main store's units are placed on the item's supplier receipts, newest first, and
+  aged by the days since that receipt: up to 90 days, up to 180, up to a year, over a year, and no
+  receipt on file for units no receipt explains. A return from a van is no receipt, so it never
+  makes stock younger. Each band is crossed with the days since the item last sold and carries a
+  suggested action; the bands add up to the main store, display items on a row of their own.
+- **Your settings** for this command in `config.json`: `stock.lead_time_days`, `stock.cover_kpi_days`
+  (your KPI band, low and high), `stock.fast_movers` and `stock.display_items` (display and
+  packaging, left out of cover, the order list and the ageing). While one of the two newer keys is
+  missing, the plan's value stands in and the screen names the key.
 
 ## 5. Where things are kept
 

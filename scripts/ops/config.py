@@ -28,6 +28,10 @@ KEYS: dict[str, tuple[str, str]] = {
     "brief.bulk_invoice_bhd": ("number", "an invoice at or above this ex-VAT value is a bulk order"),
     "stock.lead_time_days": ("int", "days from supplier invoice to receipt"),
     "stock.display_items": ("list", "item codes left out of cover, ageing and dead stock (display, packaging)"),
+    "stock.fast_movers": ("int", "fast movers: how many best sellers by units, over the year of full months "
+                                 "before the month"),
+    "stock.cover_kpi_days": ("list", "KPI one's band of stock cover in days, [low, high]: an item is ordered when "
+                                     "its cover falls below lead time + low, up to lead time + high"),
     "items.bridge_exceptions": ("dict", "ledger item name -> the name the stock balance / day book has for "
                                         "it, where the longest-prefix rule needs help; a target that report "
                                         "does not have leaves the item in the unmapped block"),
@@ -38,6 +42,9 @@ KEYS: dict[str, tuple[str, str]] = {
 }
 
 _TYPES = {"number": (int, float), "int": (int,), "str": (str,), "list": (list,), "dict": (dict,)}
+# Keys added after config.json was first written. Absent, they stop nothing: the command that reads one carries
+# the approved plan's default and says so on its screen (names only here, never a value).
+OPTIONAL = frozenset({"stock.fast_movers", "stock.cover_kpi_days"})
 _cfg: dict | None = None
 
 
@@ -99,9 +106,9 @@ def kpi_step(month: str) -> Decimal | None:
 
 
 def missing_keys() -> list[str]:
-    """Keys of KEYS absent from config.json (selftest prints them)."""
+    """Keys of KEYS absent from config.json, the OPTIONAL ones aside (selftest prints them)."""
     try:
         cfg = load()
     except ConfigMissing:
         return sorted(KEYS)
-    return sorted(k for k in KEYS if k not in cfg)
+    return sorted(k for k in KEYS if k not in cfg and k not in OPTIONAL)
