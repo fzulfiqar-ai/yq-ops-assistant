@@ -7,7 +7,7 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 - Ops skills, phase 1 and its upgrade: `/yq-load` (check, then the Windows box, then the writer, then the e-mail) and
   `/yq-brief` (with the team message). The engine is `python -m scripts.ops`. The one program that writes to the database
-  is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (13
+  is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (14
   suites, all run in CI). Reference: `docs/OPS_SKILLS.md`; backups and the restore drill: `docs/BACKUPS.md`.
 - Done (15-Oct-2026): H, the phase 1 hardening pack: one full e-mail per data set, a check that finds nothing new ends
   without a GO line, the brief points only at built commands, the check shows how long each report takes, `pack` for
@@ -19,6 +19,8 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   (`python -m scripts.ops stock [reorder|ageing|<code>]`); values at the landed cost from goods-received notes, the
   pricing-sheet cost where an item has none.
 - The photo archive: `python -m scripts.yq_photos archive [--apply]` and `verify <archive>` (see `docs/BACKUPS.md`).
+- The daily database backup: `python -m scripts.yq_nightly`, started by the Task Scheduler task `YQ Daily Backup`
+  (Sunday to Thursday, while the owner is logged on; see `docs/BACKUPS.md`).
 - Market Intel v2 (migrations r8m and r8n). Reference: `docs/MARKET_INTEL.md` and the pages beside it
   (`docs/MARKET_INTEL_HOWTO.md`, `docs/MARKET_INTEL_RELEASE.md`).
 - Real loads so far: the drops 111026, 141026 and 151026. Each load's journal is in `business_data/ops/loads/`
@@ -26,7 +28,7 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- A daily database backup run by Task Scheduler (a starter that reads the backup password from Credential Manager).
+- Nothing; the next step waits for the owner's go.
 
 ## Not built (the engine prints "not built yet")
 
@@ -38,7 +40,7 @@ leaves a hook for the van columns that `/yq-moves` will fill.
 
 ## Order of work (each step needs the owner's go)
 
-The daily backup, then `/yq-moves` and `/yq-watch`, the phase 2b release (Stock Moves views and engine speed), P3b
+`/yq-moves` and `/yq-watch`, the phase 2b release (Stock Moves views and engine speed), P3b
 (`/yq-week`, the Stock and Movements sheets, the monthly comment lines), P4 (reconciliations and `/yq-kpi`), then Market
 Intel phases 3 and 4.
 

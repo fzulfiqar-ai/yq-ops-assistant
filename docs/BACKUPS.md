@@ -1,16 +1,16 @@
-# Backups: the nightly job, the backup before every load, the restore drill, the photo archive
+# Backups: the daily backup, the backup before every load, the restore drill, the photo archive
 
 A backup here is a copy of every table of the live database (one CSV file per table and a `manifest.json`), kept on the
-office PC in `%LOCALAPPDATA%\yq-backups`. That folder is never inside OneDrive (the nightly job refuses a OneDrive folder;
+office PC in `%LOCALAPPDATA%\yq-backups`. That folder is never inside OneDrive (the daily backup refuses a OneDrive folder;
 `YQ_BACKUP_DIR` can point it at another local folder) and nothing in it is ever uploaded.
 
 | Where in `%LOCALAPPDATA%\yq-backups` | What is there | Made by |
 |---|---|---|
-| the folder itself | `yq-backup_<date>_<time>.7z`, one archive each night, and `nightly.log` | `scripts/nightly_backup.py`, started by Task Scheduler once the one-time setup below is done |
+| the folder itself | `yq-backup_<date>_<time>.7z`, one archive each working day, and `nightly.log`, one line per run | `scripts/nightly_backup.py`, started by the scheduled task `YQ Daily Backup` through `scripts/yq_nightly.py` (below) |
 | `preload\` | `yq-backup_<date>_pre-data-<run>.7z`, taken before each load; the newest few are kept (`load.backup_keep` in `business_data/ops/config.json`) | `/yq-load` (`scripts/yq_load_go.py`) |
 | `legacy\` | `<name>.7z`, the older backups that sat in `business_data/backups`, packed one at a time | `python -m scripts.yq_backup legacy --apply` |
 | `release\` | one backup for each release, such as `2026-10-14_pre-mi-v2` (a CSV per table and `manifest.json`, packed with `pack`) | moved here after a release (a release script writes its backup under `business_data/backups/` first), or made here with `python -m scripts.db_backup --all --out <a folder here>` |
-| `photos\` | `<date>_photos.7z`, an encrypted copy of the Market Intel photos with a manifest of every file (below) | `python -m scripts.yq_photos archive --apply` |
+| `photos\` | `<date>_<HHMM>_photos.7z` (a run never replaces an archive), an encrypted copy of the Market Intel photos with a manifest of every file (below) | `python -m scripts.yq_photos archive --apply` |
 
 ## The backup password
 
@@ -28,33 +28,68 @@ long password, stores it, shows it once in a Windows box for you to write down, 
 already stored. Or type `cmdkey /generic:YQ_BACKUP_PASSWORD /user:yq /pass` in a Command Prompt and enter your own (it shows
 nothing as you type). Keep a copy of the password away from this PC: without it no archive can be opened on another PC.
 
-The nightly job (next section) is a separate program that reads the password from its own environment only, so a scheduled
-nightly job needs the password set for the Windows user as well (`setx`, in its setup). Use the same password for both.
+The daily backup (next section) is started by `scripts/yq_nightly.py`, which looks for the password in the same places.
+The password goes only to the backup job, in that job's own environment, and from there to 7-Zip; it never goes to a log,
+a file or the screen. Nothing needs to be set with `setx`.
 
-## The nightly backup (release R7d, audit SEC-19)
+## The daily backup (release R7d, audit SEC-19)
 
 `scripts/nightly_backup.py` takes a read-only snapshot of every table, the login list (no password hashes) and a list of
 the files in Supabase Storage, packs it into ONE archive encrypted with 7-Zip AES-256 (file names hidden too), deletes the
 plain copy, and keeps the newest archive of each of the last 14 days and of each of the last 8 weeks. It writes to
 `%LOCALAPPDATA%\yq-backups` — never OneDrive (a OneDrive folder is refused) — and never uploads anything.
 
-Without 7-Zip or without the password the job cannot make the `.7z`: it writes a `.zip` instead, leaves a warning file
-(`UNENCRYPTED-BACKUP-WARNING.txt`) next to it and ends with exit code 2, which Task Scheduler shows as a failed run.
+It is started by the starter, `python -m scripts.yq_nightly`, run from the project folder:
 
-### One-time setup (the owner, in a Command Prompt on the office PC)
+1. It refuses, with exit code 3, when it is started from a code worktree (`.claude/worktrees`) or with a Python that a
+   scheduled task would lose: a virtual environment, or the Microsoft Store Python (its folder changes with each update).
+2. It removes the plain work folders (`work_<date>_<time>`) that an earlier run of the backup left in the backup folder
+   when it did not finish (a failure, the PC going to sleep, a closed window). A folder written to in the last 15 minutes
+   is left in place; nothing named otherwise, and no link, is ever touched.
+3. It reads the backup password from Credential Manager (stored once, above) and looks for 7-Zip. Without either it does
+   not start the backup, so no unencrypted copy is ever made: it adds a line to the log and ends with exit code 2, which
+   Task Scheduler shows as a failed run.
+4. It starts `python -X utf8 -m scripts.nightly_backup` in the project folder, with the password in that program's own
+   environment only, shows its output as it comes and ends with its exit code. A backup still running after 50 minutes
+   is stopped, with the 7-Zip it started (the task's own limit is one hour).
+5. It removes the plain work folder of its own run, if the run did not finish.
+6. It adds one line to `nightly.log` (below).
 
-1. Install 7-Zip (https://www.7-zip.org).
-2. Set the password for your Windows user, so that the scheduled task can read it. Keep it in the password manager and not
-   in `.env`, which sits in OneDrive:
+`python -m scripts.yq_nightly --dry-run` runs the backup's own dry run instead: where the archive would go, whether it
+would be encrypted and what would be pruned, and which leftover work folders would be removed. It writes nothing and logs
+no line. (Started on its own without the password or 7-Zip, `scripts/nightly_backup.py` writes a `.zip` with a warning
+file, `UNENCRYPTED-BACKUP-WARNING.txt`, next to it and ends with exit code 2; the starter never starts it that way.)
 
-       setx YQ_BACKUP_PASSWORD "a long passphrase"
+### The scheduled task `YQ Daily Backup`
 
-3. Schedule it every night at 02:30 (Bahrain), as yourself:
+Sunday to Thursday at 13:05, as the owner and only while he is logged on (Credential Manager belongs to his Windows user;
+a locked screen counts as logged on), starting in the project folder. A run missed while the PC was off or asleep starts
+as soon as it is back; a run still going after an hour is stopped. While it runs, its window is minimised to the taskbar;
+it closes by itself when the backup is done.
 
-       schtasks /Create /TN "YQ nightly backup" /SC DAILY /ST 02:30 /RL LIMITED /F /TR "\"C:\Users\<you>\OneDrive - YqBahrain\Desktop\YQ Bahrain Mobile Accessories\scripts\nightly_backup.cmd\""
+To set it up once, in a PowerShell window in the project folder, with 7-Zip installed and the password stored (above):
 
-   Check it once by hand: `python -m scripts.nightly_backup --dry-run`, then `schtasks /Run /TN "YQ nightly backup"`
-   and look at `%LOCALAPPDATA%\yq-backups\nightly.log`.
+1. `python -m scripts.yq_nightly --dry-run`: the backup's own dry run; it says `(encrypted: True)`.
+2. `python -m scripts.yq_nightly --print-task`: prints ONE command, filled in with this PC's Python and the project
+   folder; it creates nothing itself. Paste that line into the same window: it creates the task, or replaces one of the
+   same name. It is a `Register-ScheduledTask` command because `schtasks /Create` can set neither the folder a task
+   starts in nor the catch-up of a missed run.
+3. `schtasks /Run /TN "YQ Daily Backup"`, then, once the run is done, `schtasks /Query /TN "YQ Daily Backup" /V /FO LIST`:
+   Last Result 0, Logon Mode `Interactive only`, Start In the project folder.
+
+### The last runs
+
+- `nightly.log` in `%LOCALAPPDATA%\yq-backups` holds one line per run: when it started and ended, the exit code, and the
+  archive's name with the place the password came from (the place, never the password), or why nothing was made; and the
+  names (only) of any work folders it removed or left in place. The newest lines:
+  `Get-Content $env:LOCALAPPDATA\yq-backups\nightly.log -Tail 5` in PowerShell.
+- `schtasks /Query /TN "YQ Daily Backup" /V /FO LIST` shows the last run time, its result and the next run time.
+- Task Scheduler (`taskschd.msc`), Task Scheduler Library, `YQ Daily Backup`: the History tab lists the runs once
+  "Enable All Tasks History" is on (in the Actions pane on the right).
+
+Exit codes: 0 done and encrypted; 1 failed, or stopped after 50 minutes (the log line says why); 2 no encrypted backup was
+made (the password or 7-Zip is missing; the log line says which); 3 refused: started from a code worktree, or with a
+virtual environment or the Microsoft Store Python.
 
 ## The backup before every load
 
@@ -114,7 +149,7 @@ same read-only client.
 - `python -m scripts.yq_photos archive --apply [--out <folder>]` downloads every object into a work folder under
   `photos\`, takes the checksum of each one and compares it with the checksum the database recorded when the photo was
   taken (where it recorded one), and lists every object in `manifest.json`. The folder is packed into
-  `photos\<date>_photos.7z` with the backup password and the settings of the nightly job, the archive is read back with
+  `photos\<date>_<HHMM>_photos.7z` with the backup password and the settings of the nightly job, the archive is read back with
   7-Zip's own test and its file count compared, and only then is the work folder deleted. It is refused without the
   backup password or 7-Zip, in a folder OneDrive syncs, inside the code folder, and on a drive without room for the
   copy. Exit code: 0 all clean; 1 the archive was made, but a photo is missing from storage, differs from its database
