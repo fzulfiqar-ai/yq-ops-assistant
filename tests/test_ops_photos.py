@@ -931,6 +931,54 @@ def _():
         db.uninstall()
 
 
+@test("the whole production wiring: fake database rows, the real read-only client over an in-memory storage, the archive, verify")
+def _():
+    objects = store_objects()
+    served = {f"/storage/v1/object/{b}/{p}": data for (b, p), data in objects.items()}
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        data = served.get(request.url.path)
+        if data is None:
+            return httpx.Response(404, json={"statusCode": "404", "error": "not_found", "message": "Object not found"})
+        return httpx.Response(200, content=data)
+    rows = {
+        "market_photos": [{"id": 1, "bucket": MASTER[0], "path": MASTER[1], "thumb_path": THUMB[1], "blurred_path": None,
+                           "sha256": sha(objects[MASTER]).upper()}],
+        "product_finds": [{"id": 7, "image_path": LEGACY_FIND[1]}],
+        "field_notes": [{"id": 3, "image_path": NOTE[1]}],
+    }
+    listing = [{"bucket_id": b, "name": p, "size_bytes": str(len(d))} for (b, p), d in sorted(objects.items())]
+    exe = yb.find_7z()
+    db.uninstall()
+    client = db.install(inner=httpx.MockTransport(handler), url="https://ci.invalid", key="ci-key")
+    try:
+        with data_root() as root:
+            session = FakeSession(rows=rows, objects=listing)
+            said: list[str] = []
+            pack = patched() if exe else patched((yp, "pack", FakePack(root / "kept")))
+            with with_secrets(root, exe=exe or "7z.exe"), pack:
+                code = yp.archive(True, None, yp.SupabaseSource(session, lambda: client), said.append, now=NOW, sleep=nosleep)
+                text = "\n".join(said)
+                assert code == 0, text
+                assert session.closed is True and len(session.log) == 7, session.log      # 3 schema probes, 3 tables, the list
+                assert sorted(seen) == sorted(f"GET {p}" for p in served), "one plain GET per object, nothing else"
+                assert "1 match the sha256 in the database, 4 have none to compare, 0 differ" in text, text
+                assert "ci-key" not in text and PASSWORD not in text and "ci.invalid" not in text
+                assert drill_rows(root)[0]["objects"] == 5
+                final = photos_folder(root) / "2026-10-15_photos.7z"
+                assert final.is_file() and sorted(p.name for p in photos_folder(root).iterdir()) == [final.name]
+                if exe:
+                    said = []
+                    assert yp.verify(final, 5, said.append, rng=random.Random(2), now=LATER) == 0, said
+                    assert "Checked 5 file(s) against the manifest: 5 match" in "\n".join(said)
+                else:
+                    print("      note: 7-Zip is not installed here; the packing was a stand-in and verify was not run")
+    finally:
+        db.uninstall()
+
+
 @test("fetch retries a failure, not a missing object; the source of a dry run is never asked to download")
 def _():
     src = FakeSource(failing={MASTER: 1})
