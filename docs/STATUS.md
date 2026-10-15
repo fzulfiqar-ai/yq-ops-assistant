@@ -1,50 +1,62 @@
 # Ops status: where the work stands (continuation record)
 
-Last verified 15-Oct-2026 by a read-only audit. The master plan, with the backlog, the order of work and the acceptance
-criteria, is in the owner's plans folder (its path is in Claude's project memory), not in this repository.
+Last verified 15-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
+owner's plans folder (its path is in Claude's project memory), not in this repository.
 
 ## Live
 
 - Ops skills, phase 1 and its upgrade: `/yq-load` (check, then the Windows box, then the writer, then the e-mail) and
   `/yq-brief` (with the team message). The engine is `python -m scripts.ops`. The one program that writes to the database
-  is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (10
+  is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (13
   suites, all run in CI). Reference: `docs/OPS_SKILLS.md`; backups and the restore drill: `docs/BACKUPS.md`.
+- Done (15-Oct-2026): H, the phase 1 hardening pack: one full e-mail per data set, a check that finds nothing new ends
+  without a GO line, the brief points only at built commands, the check shows how long each report takes, `pack` for
+  plain backups, and the documents brought current.
+- `/yq-month`: the monthly sales workbook in the layout of the September report (`python -m scripts.ops report month
+  [YYYY-MM]`, whole months only, written as a DRAFT under `exports/reports/monthly/`). Its golden test rebuilds September
+  against the reference file (local only).
+- `/yq-stock`: stock headline, order list, fast-mover availability and ageing for the main store
+  (`python -m scripts.ops stock [reorder|ageing|<code>]`); values at the landed cost from goods-received notes, the
+  pricing-sheet cost where an item has none.
+- The photo archive: `python -m scripts.yq_photos archive [--apply]` and `verify <archive>` (see `docs/BACKUPS.md`).
 - Market Intel v2 (migrations r8m and r8n). Reference: `docs/MARKET_INTEL.md` and the pages beside it
   (`docs/MARKET_INTEL_HOWTO.md`, `docs/MARKET_INTEL_RELEASE.md`).
 - Real loads so far: the drops 111026, 141026 and 151026. Each load's journal is in `business_data/ops/loads/`
   (git-ignored).
-- Done (15-Oct-2026): H, the phase 1 hardening pack, is live: one full e-mail per data set, a check that finds nothing
-  new ends without a GO line, the brief points only at built commands, the check shows how long each report takes,
-  `pack` for plain backups, and the documents brought current.
 
 ## In progress
 
-- /yq-month, /yq-stock and the photo archive are built and tested; merged to main when the owner says go.
+- A daily database backup run by Task Scheduler (a starter that reads the backup password from Credential Manager).
 
 ## Not built (the engine prints "not built yet")
 
-`watch`, `moves`, `stock`, `report` (the week and month workbooks), `recon` and `kpi`; `check` (a drafted text against the
-computed figures) is registered and not built either. The specification is the approved ops-skills plan of 8-Oct-2026
-(the sections from /yq-watch to /yq-kpi, and "Build order"). Phase 2 groundwork exists: `scripts/ops/ledger.py` (the stock
-ledger as whole vouchers, the narration reduced to a hash) and `scripts/ops/items.py` (the item-name bridge), covered by
-`tests/test_ops_moves.py`.
+`watch`, `moves`, `recon`, `kpi`, the weekly workbook (`report week`) and `check` (a drafted text against the computed
+figures). The specification is the approved ops-skills plan of 8-Oct-2026 (the sections from /yq-watch to /yq-kpi, and
+"Build order"). Phase 2 groundwork exists: `scripts/ops/ledger.py` (the stock ledger as whole vouchers, the narration
+reduced to a hash) and `scripts/ops/items.py` (the item-name bridge), covered by `tests/test_ops_moves.py`; `/yq-stock`
+leaves a hook for the van columns that `/yq-moves` will fill.
 
 ## Order of work (each step needs the owner's go)
 
-H hardening, then MI1 photo archive, P3a `/yq-month` and `/yq-week`, P2 `/yq-stock`, `/yq-moves`, `/yq-watch`, the
-phase 2b release (Stock Moves views and engine speed), P3b, P4 reconciliations and `/yq-kpi`, MI3, MI4.
+The daily backup, then `/yq-moves` and `/yq-watch`, the phase 2b release (Stock Moves views and engine speed), P3b
+(`/yq-week`, the Stock and Movements sheets, the monthly comment lines), P4 (reconciliations and `/yq-kpi`), then Market
+Intel phases 3 and 4.
 
 ## Open items
 
-- The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release. It pairs issues and receipts by
-  voucher number, and van stock comes from a snapshot of the main store only. Use `/yq-moves` once it is built.
+- The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release. It pairs issues
+  and receipts by voucher number, and van stock comes from a snapshot of the main store only. Use `/yq-moves` once it is
+  built.
 - Profitability is held back at every load until Focus posts the cost of sales again.
-- Category rows for the WEKOME codes: an owner decision at the start of P3a.
+- `/yq-stock` questions for the owner: which lead time wins (measured or the configured default), what counts as goods on
+  order, which items are display stands, and the floor on the daily rate for items out of stock most of the period.
 
 ## Owner decisions (15-Oct-2026)
 
-- The KPI step stays as configured. The order after H is the monthly report, then stock, then moves.
+- The KPI step stays as configured. The order after H was the monthly report, then stock, then moves.
 - SIM transfers are left out of the storekeeper check (`/yq-moves` is accessories only).
+- The WEKOME codes take the approved Categories rows (set in the git-ignored config); a new Screen Protectors row.
+- `/yq-stock` values stock at the landed cost from goods-received notes, the pricing-sheet cost only where none exists.
 
 ## Rules that bite
 
