@@ -1569,6 +1569,62 @@ def ledger_compare(file_rows: list[dict], db_rows: list[dict], last_loaded: str 
             "file": f, "db": p, "items": len(fi), "warehouses": len(fw), "types": len(ft), "pairs": len(f)}
 
 
+def sim_line(item: str, line: tuple) -> bool:
+    """A ledger line (ledger_groups) that SIM never counts for (the owner, 18-Oct-2026): its item is
+    SIM, or every warehouse it names is. SIM is the name rule of the SIM division in v_sales, used as
+    it is: app/ is an engine path, and a change there would stop the next load until the API is
+    deployed again (gitinfo.ENGINE_PATHS)."""
+    from app.ingest_batch import _is_sim
+    if _is_sim(item):
+        return True
+    named = [w for w in (line[2], line[3]) if w]
+    return bool(named) and all(_is_sim(w) for w in named)
+
+
+def ledger_sim(cmp: dict) -> dict:
+    """ledger_compare's missing items, warehouses and voucher types, each one SIM when every loaded
+    line behind it is a SIM line: {"sim": {items, warehouses, types}, "other": {...}, "rows": the
+    loaded rows of the SIM lines behind them, which a load of the file takes away}."""
+    wanted = {"items": set(cmp["missing_items"]), "warehouses": set(cmp["missing_warehouses"]),
+              "types": set(cmp["missing_types"])}
+    plain: dict[str, set] = {k: set() for k in wanted}           # the ones with a line that is not SIM
+    rows = 0
+    for (_voucher, item), sig in cmp["db"].items():
+        for line, n in sig:
+            behind = [(k, key) for k, key in (("items", item), ("warehouses", line[2]), ("types", line[1]))
+                      if key in wanted[k]]
+            if not behind:
+                continue
+            if sim_line(item, line):
+                rows += n
+            else:
+                for k, key in behind:
+                    plain[k].add(key)
+    return {"sim": {k: sorted(wanted[k] - plain[k]) for k in wanted}, "other": {k: sorted(plain[k]) for k in wanted},
+            "rows": rows}
+
+
+def sim_words(sim: dict) -> str:
+    """'1 SIM item and 2 SIM warehouses' for ledger_sim's SIM part ('' when no SIM is missing)."""
+    parts = [plural(len(sim[k]), word) for k, word in (("items", "SIM item"), ("warehouses", "SIM warehouse"),
+                                                       ("types", "SIM voucher type")) if sim[k]]
+    return ", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else "".join(parts)
+
+
+def drop_sim_pairs(cmp: dict) -> tuple[dict, int]:
+    """ledger_compare's changed, removed and earlier-dated vouchers without the (voucher, item) pairs
+    made only of SIM lines, in production and in the file alike. SIM never counts: they are never
+    listed to check, whether an export left them out or brought them back. -> (cmp, how many went)"""
+    def only_sim(key: tuple) -> bool:
+        lines = [line for sig in (cmp["db"].get(key), cmp["file"].get(key)) if sig for line, _n in sig]
+        return bool(lines) and all(sim_line(key[1], line) for line in lines)
+    out, dropped = dict(cmp), 0
+    for kind in ("changed", "removed", "backdated"):
+        out[kind] = [key for key in cmp[kind] if not only_sim(key)]
+        dropped += len(cmp[kind]) - len(out[kind])
+    return out, dropped
+
+
 def lines_text(sig: tuple | None) -> str:
     if not sig:
         return "nothing"
@@ -2466,26 +2522,45 @@ class Check:
             return
         lo, hi = dates[0], dates[-1]
         cmp = ledger_compare(rows, self.q(Q_LEDGER, [lo, hi]), iso(self.anchors.get("moves_to")) or None)
-        missing = [(cmp["missing_items"], "item"), (cmp["missing_warehouses"], "warehouse"),
-                   (cmp["missing_types"], "voucher type")]
+        # what is missing only of SIM never stops it (the owner, 18-Oct-2026): SIM never counts
+        split = ledger_sim(cmp)
+        sim_gone = sim_words(split["sim"])
+        sim_verb = "is" if sum(len(v) for v in split["sim"].values()) == 1 else "are"
+        missing = [(split["other"]["items"], "item"), (split["other"]["warehouses"], "warehouse"),
+                   (split["other"]["types"], "voucher type")]
         if any(m for m, _ in missing):
             why = "; ".join(f"{plural(len(m), word)} loaded for these dates {'is' if len(m) == 1 else 'are'} not in the "
                             f"file ({listed(m, 4)})" for m, word in missing if m)
+            if sim_gone:
+                why += f" (besides {sim_gone}, which alone would not stop it: SIM never counts)"
             self.row("stock_movements", "stop", why + ". The loader replaces the file's whole date span, so these "
                      "movements would be lost: export the full Stock ledger again")
             self.done("Stock ledger: STOP ("
                       + ", ".join(f"{plural(len(m), word)} missing" for m, word in missing if m) + ").")
             return
+        cmp, sim_pairs = drop_sim_pairs(cmp)
         tally = (f"changed {len(cmp['changed'])}, removed {len(cmp['removed'])}, entered with an earlier date "
                  f"{len(cmp['backdated'])}")
         differ = len(cmp["changed"]) + len(cmp["removed"]) + len(cmp["backdated"])
         self.ledger_cmp = {"changed": len(cmp["changed"]), "removed": len(cmp["removed"]),
                            "backdated": len(cmp["backdated"]), "new": int(cmp["new"])}
-        self.row("stock_movements", "load", f"{len(rows):,} movements to {fmt.day(hi)}: nothing missing; "
+        nothing = f"nothing missing outside SIM; {sim_gone} {sim_verb} not in the file (SIM never counts)" if sim_gone \
+            else "nothing missing"
+        self.row("stock_movements", "load", f"{len(rows):,} movements to {fmt.day(hi)}: {nothing}; "
                  f"{plural(differ, 'voucher')} to check", self.staged["stock_movements"].name)
-        self.checks.append(f"Stock ledger: every item ({cmp['items']}), warehouse ({cmp['warehouses']}) and voucher type "
-                           f"({cmp['types']}) production holds for {span_text(lo, hi)} is in the file. Voucher by "
-                           f"voucher ({cmp['pairs']:,} voucher-and-item pairs): {tally}, new {cmp['new']:,}.")
+        self.checks.append(f"Stock ledger: {'outside SIM, ' if sim_gone else ''}every item ({cmp['items']}), warehouse "
+                           f"({cmp['warehouses']}) and voucher type ({cmp['types']}) production holds for "
+                           f"{span_text(lo, hi)} is in the file. Voucher by voucher ({cmp['pairs']:,} voucher-and-item "
+                           f"pairs): {tally}, new {cmp['new']:,}.")
+        if sim_gone:
+            self.flag("sim_ledger_out")
+            self.checks.append(f"Stock ledger, SIM: {sim_gone} {sim_verb} not in the file ("
+                               + listed(split["sim"]["items"] + split["sim"]["warehouses"] + split["sim"]["types"], 6)
+                               + f"): {plural(split['rows'], 'loaded row')} of theirs inside these dates go with this "
+                               "load and come back with an export that has them. SIM never counts.")
+        if sim_pairs:
+            self.checks.append(f"Stock ledger, SIM: {plural(sim_pairs, 'voucher-and-item pair')} made only of SIM lines "
+                               "differ from what is loaded; they are not listed to check (SIM never counts).")
         shown = ([("changed", k) for k in cmp["changed"]] + [("removed", k) for k in cmp["removed"]]
                  + [("earlier date", k) for k in cmp["backdated"]])
         if shown:
@@ -2501,7 +2576,8 @@ class Check:
                                "loaded rows are replaced). Focus recalculates its running balance on every export, so "
                                "the rows look changed although the vouchers are as listed above: expected.")
         self.records["voucher_changed"] = voucher_items(cmp)[:RECORD_MAX]
-        self.done(f"Stock ledger: nothing missing; vouchers {tally}.")
+        self.done(f"Stock ledger: nothing missing{f' outside SIM ({sim_gone} not in the file)' if sim_gone else ''}; "
+                  f"vouchers {tally}.")
 
     def loader_guards(self) -> None:
         """The loader's guards for the stock snapshot and for a staged price book (its sales guards

@@ -15,7 +15,8 @@ Covered:
     below the general price, a dropped key, a scheduled price, an end date, a status, and their
     edges: the export day itself, a price that ended yesterday, a scoped price equal to the general
     one), the stock ledger (missing item / warehouse / voucher type, changed, removed and
-    earlier-dated vouchers), the preview (an invoice that changed, one that lost a line, one whose
+    earlier-dated vouchers; what is missing only of SIM loads, and SIM vouchers are never listed to
+    check), the preview (an invoice that changed, one that lost a line, one whose
     header is gone; each blocking code; the loader's guards), the catalog;
   * older than what is loaded: a whole drop (stops at once: nothing compared, nothing recorded),
     one older report in a current folder, a report whose rows end before production's;
@@ -892,6 +893,77 @@ def _():
     assert "issued 50" in changed["detail"] and "issued 48" in changed["detail"] and changed["evidence"] == ["SIO:T-26-01-1"]
     # a name that holds a refused word never stops the register: the plain line is used
     assert lc.safe_words("Anti-theft lock L1: differs", "plain") == "plain" and lc.safe_words("fine", "plain") == "fine"
+
+
+SIM_ITEM, SIM_STORE, SIM_VAN = "Batelco starter pack S1", "SIM Warehouse", "Van A - SIM WH"
+# one SIM starter pack: received at the SIM store, issued to a rep's SIM van, sold there (LEDGER's layout)
+SIM_LEDGER = {SIM_ITEM: [
+    ("2026-01-02", "MRN:T-26-01-5", 40, None, None, SIM_STORE, None, "Material Receipt Note"),
+    ("2026-01-03", "SIO:T-26-01-5", None, 10, 10, SIM_STORE, SIM_VAN, "Stock Issue Voucher"),
+    ("2026-01-04", "SI:T-26-01-6", None, 2, 4, SIM_VAN, None, "Sales Invoice")]}
+
+
+def step_line(deps: FakeDeps, n: int) -> str:
+    """The check's own line for step n ("[n/9] ..."), wherever other lines (a wait for the next minute) put it."""
+    return next(ln for ln in deps.lines if ln.startswith(f"[{n}/"))
+
+
+def held_line(voucher: str, item: str, kind: str, wh: str, to_wh: str = "", got: int = 0, out: int = 1) -> dict:
+    """One line of production's stock ledger as the grouped read returns it."""
+    return {"voucher": voucher, "item_name": item, "d": "2026-01-04", "vt": kind, "w": wh, "tw": to_wh,
+            "rq": Decimal(got), "iq": Decimal(out), "n": 1}
+
+
+@test("stock ledger, SIM: a SIM item's line, or a line whose warehouses are all SIM, is SIM; one that touches another is not")
+def _():
+    def line(wh: str, to_wh: str = "") -> tuple:
+        return ("2026-01-03", "Stock Issue Voucher", wh, to_wh, Decimal(0), Decimal(1))
+    assert lc.sim_line(SIM_ITEM, line(MAIN))                           # the item is SIM, wherever it is
+    assert lc.sim_line("Cable one C1", line(SIM_VAN))                  # an accessory at a SIM van
+    assert lc.sim_line("Cable one C1", line(SIM_STORE, SIM_VAN))
+    assert not lc.sim_line("Cable one C1", line(MAIN, SIM_VAN))        # it leaves the main store
+    assert not lc.sim_line("Cable one C1", line(SIM_VAN, MAIN))
+    assert not lc.sim_line("Cable one C1", line("Van A")) and not lc.sim_line("Cable one C1", line(""))
+
+
+@test("stock ledger, SIM: a missing item, warehouse or voucher type is SIM when every loaded line behind it is a SIM line")
+def _():
+    file_rows = ledger_rows()
+    held = db_rows(file_rows) + db_ledger(SIM_LEDGER)
+    cmp = lc.ledger_compare(file_rows, held, "2026-01-06")
+    assert cmp["missing_items"] == [SIM_ITEM] and cmp["missing_warehouses"] == [SIM_STORE, SIM_VAN]
+    split = lc.ledger_sim(cmp)
+    assert split["sim"] == {"items": [SIM_ITEM], "warehouses": [SIM_STORE, SIM_VAN], "types": []}, split
+    assert split["other"] == {"items": [], "warehouses": [], "types": []} and split["rows"] == 3
+    # an accessory sent from the SIM van back to the main store: that line is no SIM line, so the van is not SIM
+    back = held_line("SIO:T-26-01-8", "Cable one C1", "Stock Issue Voucher", SIM_VAN, MAIN)
+    split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [back], "2026-01-06"))
+    assert split["other"]["warehouses"] == [SIM_VAN] and split["sim"]["warehouses"] == [SIM_STORE], split
+    # a voucher type only SIM lines carry is SIM; the same type on an accessory's line in a rep's van is not
+    sim_return = held_line("SRV:T-26-01-2", SIM_ITEM, "Sales Return", SIM_VAN, got=1, out=0)
+    split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [sim_return], "2026-01-06"))
+    assert split["sim"]["types"] == ["Sales Return"] and split["other"]["types"] == [], split
+    acc_return = held_line("SRV:T-26-01-3", "Cable one C1", "Sales Return", "Van A", got=1, out=0)
+    split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [sim_return, acc_return], "2026-01-06"))
+    assert split["other"]["types"] == ["Sales Return"] and split["sim"]["types"] == [], split
+
+
+@test("stock ledger, SIM: vouchers made only of SIM lines are never listed to check, whether they went or came back")
+def _():
+    file_rows = ledger_rows()
+    went = lc.ledger_compare(file_rows, db_rows(file_rows) + db_ledger(SIM_LEDGER), "2026-01-06")
+    assert len(went["removed"]) == 3
+    kept, pairs = lc.drop_sim_pairs(went)
+    assert kept["removed"] == [] and pairs == 3 and lc.voucher_items(kept) == []
+    # the next export that has them again: new to production and dated before its last movement
+    came = lc.ledger_compare(file_rows + ledger_rows(SIM_LEDGER), db_rows(file_rows), "2026-01-06")
+    assert len(came["backdated"]) == 3
+    kept, pairs = lc.drop_sim_pairs(came)
+    assert kept["backdated"] == [] and pairs == 3 and lc.voucher_items(kept) == []
+    # an accessory's voucher that went is still listed beside them
+    gone = [r for r in file_rows if r["voucher"] != "SI:T-26-01-2"]
+    kept, pairs = lc.drop_sim_pairs(lc.ledger_compare(gone, db_rows(file_rows) + db_ledger(SIM_LEDGER), "2026-01-06"))
+    assert kept["removed"] == [("SI:T-26-01-2", "Cable one C1")] and pairs == 3
 
 
 def blocking(code, target=None, count=None, items=None, message="m"):
@@ -2199,6 +2271,21 @@ def _():
         assert snapshot_of(drop) == before
 
 
+@test("a stock ledger that lacks only SIM loads: SIM never counts; the box is told, and no SIM voucher is listed to check")
+def _():
+    with data_root() as root:
+        make_drop(root)
+        res, deps = check("070126", deps=FakeDeps(FakeSession(ledger=db_ledger() + db_ledger(SIM_LEDGER))))
+        text = res["text"]
+        assert res["ok"] and res["token"] and table_of(text)[shown("stock_movements")] == "LOAD", text
+        assert text.splitlines()[-1].startswith("GO: ") and "sim_ledger_out" in res["flags"], res["flags"]
+        assert "nothing missing outside SIM; 1 SIM item and 2 SIM warehouses are not in the file (SIM never counts)" in text
+        assert f"({SIM_ITEM}, {SIM_STORE}, {SIM_VAN})" in text and "3 loaded rows of theirs" in text, text
+        assert "go with this load and come back with an export that has them" in text
+        assert "nothing missing outside SIM" in step_line(deps, 8), deps.lines
+        assert not [r for r in alerts.open_items(include_baseline=True) if r["key"].startswith("voucher_changed")]
+
+
 @test("a stock ledger that lacks what production holds stops; a price book that would switch off too much stops")
 def _():
     with data_root() as root:
@@ -2211,6 +2298,13 @@ def _():
         assert "1 item loaded for these dates is not in the file (Lamp four C4)" in text
         assert "export the full Stock ledger again" in text and res["token"] is None
         assert "STOP (1 item missing)" in deps.lines[7]
+        # the same with a SIM starter pack gone as well: still a STOP, named for what is not SIM
+        res, deps = check("070126", deps=FakeDeps(FakeSession(ledger=extra + db_ledger(SIM_LEDGER))))
+        text = res["text"]
+        assert res["exit"] == 2 and table_of(text)[shown("stock_movements")] == "STOP", text
+        assert "1 item loaded for these dates is not in the file (Lamp four C4)" in text
+        assert "besides 1 SIM item and 2 SIM warehouses, which alone would not stop it" in text, text
+        assert "STOP (1 item missing)" in step_line(deps, 8) and "sim_ledger_out" not in res["flags"]
 
         changed = db_ledger()
         changed[1] = dict(changed[1], iq=Decimal(60))                    # production holds 60, the file 50

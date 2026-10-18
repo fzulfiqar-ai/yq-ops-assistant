@@ -1,6 +1,6 @@
 # Ops status: where the work stands (continuation record)
 
-Last verified 15-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
+Last verified 18-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
 owner's plans folder (its path is in Claude's project memory), not in this repository.
 
 ## Live
@@ -12,6 +12,16 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 - Done (15-Oct-2026): H, the phase 1 hardening pack: one full e-mail per data set, a check that finds nothing new ends
   without a GO line, the brief points only at built commands, the check shows how long each report takes, `pack` for
   plain backups, and the documents brought current.
+- Done (18-Oct-2026), the owner's decision of that day:
+  - A Stock ledger that lacks only SIM now loads. SIM never counts, so those movements go with the
+    load and come back with the next export that has them. The box shows an ATTENTION line, and SIM
+    vouchers are never listed to check.
+  - Anything else missing still stops.
+  - The box says when a load that must wait will write (a WAIT line), and the wait's journal line
+    gives the time.
+  - The cause that morning: both stock reports of Focus came without the SIM starter packs, which
+    the Sales day book still had. That points to an export filter, or to a change to the items or to
+    the user's rights in Focus. Drop 181026 was loaded without its ledger.
 - `/yq-month`: the monthly sales workbook in the layout of the September report (`python -m scripts.ops report month
   [YYYY-MM]`, whole months only, written as a DRAFT under `exports/reports/monthly/`). Its golden test rebuilds September
   against the reference file (local only).
@@ -23,7 +33,7 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   (Sunday to Thursday, while the owner is logged on; see `docs/BACKUPS.md`).
 - Market Intel v2 (migrations r8m and r8n). Reference: `docs/MARKET_INTEL.md` and the pages beside it
   (`docs/MARKET_INTEL_HOWTO.md`, `docs/MARKET_INTEL_RELEASE.md`).
-- Real loads so far: the drops 111026, 141026 and 151026. Each load's journal is in `business_data/ops/loads/`
+- Real loads so far: the drops 111026, 141026, 151026 and 181026 (without its Stock ledger). Each load's journal is in `business_data/ops/loads/`
   (git-ignored).
 
 ## In progress
