@@ -39,7 +39,7 @@ In the same turn, when the output ends with a `GO: ` line, first tell him a Yes/
 - Exit code 1 or 2, or anything else: show the last lines unchanged and wait.
 
 ## Step 3. Follow
-Run `python -m scripts.ops load status --wait` again and again until its last line says FINISHED, FAILED, INTERRUPTED or NOT STARTED. Show only the new lines each time. `RUNNING at delivery` means the load has ended and its e-mail is being made: keep following.
+Run `python -m scripts.ops load status --wait` again and again until its last line says FINISHED, FAILED, INTERRUPTED or NOT STARTED. Show only the new lines each time. `RUNNING at delivery` means the load has ended and its e-mail is being made: keep following. `RUNNING at wait_tick` after a line `Waiting about N min, to write at about HH:MM` is the load waiting on purpose for a quiet moment (never in the half hour around production's 8 o'clock run): tell him at once at what time it will write, and keep following.
 
 ## Step 4. Finish
 - FINISHED: if a line says that something needs a look, tell him which. Say in one sentence what the line that starts `Delivery:` says. Then run `python -m scripts.ops brief` and show it: after a load it is the brief the load made, the figures of the e-mail.

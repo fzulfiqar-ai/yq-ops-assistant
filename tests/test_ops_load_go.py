@@ -944,6 +944,7 @@ def _():
 
 MIXED = "ATTENTION: the reports of this folder carry different as-on dates: are they one export?"
 OLDER = "ATTENTION: a report of this folder is older than what is already loaded: older figures would come back."
+SIM_OUT = "ATTENTION: the Stock ledger has no SIM movements: the loaded ones leave with this load (SIM never counts)."
 
 
 @test("the box shows what the check flagged, each line starting ATTENTION, under the file lines; a plan with no flag shows none")
@@ -978,10 +979,10 @@ def _():
     todays = ("mixed_dates", "replaced_earlier", "older_than_loaded", "hold_back", "profit_above_ledger",
               "profit_held_twice", "needs_decision", "price_scope", "invoices_changed", "vouchers_changed",
               "catalog_switch", "partial_drop", "moved_meanwhile", "marker_mismatch", "last_load_failed", "stop", "dev",
-              "token")
+              "token", "sim_ledger_out")
     assert set(todays) <= set(yq.ATTENTION_WORDS) | yq.ROUTINE_FLAGS, set(todays) - set(yq.ATTENTION_WORDS) - yq.ROUTINE_FLAGS
     assert yq.attention_lines({"flags": list(todays)}) == [
-        MIXED, OLDER, "ATTENTION: the last load failed after it had begun to write: this load replaces it."]
+        MIXED, OLDER, "ATTENTION: the last load failed after it had begun to write: this load replaces it.", SIM_OUT]
     # the shapes a flag may come in: its code word, a sentence, a sentence that already says ATTENTION
     assert yq.attention_lines({"flags": ["mixed_dates"]}) == [MIXED] == yq.attention_lines({"flags": ["Mixed-Dates"]})
     assert yq.attention_lines({"flags": ["the stock file is two days older than the sales file"]}) == [
@@ -1585,6 +1586,34 @@ def _():
     assert yq.tick_wait_seconds(datetime(2026, 1, 1, 12, 3, tzinfo=yq.BAHRAIN)) == 0      # any time zone is read right
 
 
+@test("the box says when a load that must wait will write, for a quick or a slow backup: at 07:46 and 07:55 Bahrain about 08:20 (the morning window), at 07:31 nothing")
+def _():
+    def at(h, m, s=0):
+        return datetime(2026, 1, 1, h, m, s, tzinfo=timezone.utc)
+
+    assert yq.BEFORE_WRITE_S == (120, 360) and yq.BEFORE_WRITE_STEP_S == 30 and yq.WAIT_NOTE_S == 300
+    assert yq.wait_note(at(4, 55)) == ("WAIT: a Yes now may not write until about 08:20 Bahrain (up to 25 min from now): "
+                                       "no load writes from 07:50 to 08:20 Bahrain (production's 8 o'clock run).")
+    # the review's case: after a quick backup a Yes at 07:46 would not wait, after a slow one it waits out the window
+    assert yq.wait_note(at(4, 46)) == ("WAIT: a Yes now may not write until about 08:20 Bahrain (up to 34 min from now): "
+                                       "no load writes from 07:50 to 08:20 Bahrain (production's 8 o'clock run).")
+    assert yq.wait_note(at(4, 31)) is None and yq.wait_note(NOON) is None      # every end of the backup is in a start window
+    # outside the morning window the tick rule alone can wait long enough to be told, with its own reason
+    assert yq.wait_note(at(7, 8)) == ("WAIT: a Yes now may not write until about 10:16 Bahrain (up to 8 min from now): "
+                                      "a load starts 1 to 9 minutes after production's quarter-hour tick.")
+    assert yq.wait_note(at(7, 12)) is None                                     # 2 min at most: not worth a line
+    assert "1 to 5 minutes" in yq.wait_note(at(7, 4), 300)                     # after a slow refresh the window is shorter
+    with data_root() as root:                    # the box itself: the line sits with the other notes, before the end
+        h = Harness(root, start=at(4, 55))
+        assert h.go() == 0, h.out
+        lines = h.box.shown[0][1].splitlines()
+        assert yq.wait_note(at(4, 55)) in lines and lines[-1] == "Yes = load now. No = nothing changes.", lines
+    with data_root() as root:
+        h = Harness(root, start=at(4, 31))
+        assert h.go() == 0, h.out
+        assert "WAIT:" not in h.box.shown[0][1]
+
+
 @test("the start window closes earlier after a slow refresh, never later than 9 minutes nor earlier than 5")
 def _():
     assert yq.start_until_s(None) == 540 == yq.START_UNTIL_S                 # nothing on record: 240 s assumed
@@ -1635,6 +1664,7 @@ def _():
         assert row["checks"] == 2 and row["until_s"] == 540
         note = h.rows("note", "wait_tick")
         assert note and "07:50 to 08:20 Bahrain" in note[0]["text"] and "1 to 9 minutes" in note[0]["text"]
+        assert note[0]["text"].startswith("Waiting about 6 min, to write at about 12:16: "), note[0]["text"]
         t = h.w.trace
         checks = [i for i, x in enumerate(t) if x.startswith("token:")]
         assert len(checks) == 4 and checks[3] == t.index("run:refresh") - 2          # ... token, runs:None, run:refresh
@@ -1650,6 +1680,7 @@ def _():
     with data_root() as root:                    # the morning window: the first second after 08:20 Bahrain
         h = Harness(root, start=datetime(2026, 1, 1, 4, 55, 0, tzinfo=timezone.utc))
         assert h.load() == 0 and h.clock.now() == datetime(2026, 1, 1, 5, 20, 1, tzinfo=timezone.utc)
+        assert "Waiting about 25 min, to write at about 08:20: " in h.rows("note", "wait_tick")[0]["text"]
 
 
 def slow_checks(h: Harness, slow: dict) -> None:

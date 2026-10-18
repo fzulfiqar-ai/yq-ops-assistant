@@ -67,6 +67,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -748,6 +749,12 @@ class NothingStarts:
 
     def box_notes(self):                                     # no line about the backup or the e-mail in the box
         return []
+
+    def now(self):                                           # the box's WAIT line reads the clock: two minutes after
+        return datetime(2026, 1, 1, 9, 2, tzinfo=timezone.utc)   # a tick, so a load would not wait and gets no line
+
+    def read_state(self):                                    # no load on record
+        return {}
 
     def box(self, title, text, timeout_s):
         return "no"

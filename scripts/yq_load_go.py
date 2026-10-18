@@ -185,6 +185,13 @@ TICK_MARGIN_S = 120                 # a refresh ends at least this long before t
 REFRESH_ASSUMED_S = 240             # what a refresh is taken to need while no slower one is on record
 QUIET_FROM, QUIET_UNTIL = (7, 50), (8, 20)
 TICK_TRIES = 4                      # token checks that may outlast the quiet moment before the load gives up
+# The box says when a load that must wait will write (18-Oct-2026: a load that sat out the morning
+# window looked hung). The wait is counted from the end of the backup and the before-snapshot, about
+# two and a half minutes on the loads of October but slower some days, so every end from 2 to 6
+# minutes is tried and the latest write time is told; a wait shorter than WAIT_NOTE_S gets no line.
+BEFORE_WRITE_S = (120, 360)
+BEFORE_WRITE_STEP_S = 30
+WAIT_NOTE_S = 300
 
 # Every load deletes and re-inserts the whole stock ledger. Once a refresh has begun, this is the
 # sentence for the state of the database, whatever ended the run afterwards.
@@ -211,6 +218,7 @@ ATTENTION_WORDS = {
     "mixed_dates": "the reports of this folder carry different as-on dates: are they one export?",
     "older_than_loaded": "a report of this folder is older than what is already loaded: older figures would come back.",
     "last_load_failed": "the last load failed after it had begun to write: this load replaces it.",
+    "sim_ledger_out": "the Stock ledger has no SIM movements: the loaded ones leave with this load (SIM never counts).",
 }
 # Flags that are no warning, or that the box shows on a line of their own already (the file's line,
 # an ON YOUR WORD line), or that the table lists as items to check, or that stop the check before
@@ -1265,7 +1273,7 @@ def box_text(run: str, plan: dict, *, resume_step: str | None = None, rehearsal:
         if len(exp) > 10:
             lines.append(f"(+{len(exp) - 10} more: see the table in the chat)")
     if notes:
-        lines += [""] + [_short(n, 150) for n in notes]
+        lines += [""] + [_short(n, 160) for n in notes]       # the morning window's WAIT line is up to 153 long
     lines += ["", f"Read first: a Yes in the first {int(BOX_MIN_READ_S)} seconds is not counted. Then click once.",
               "Yes = load now. No = nothing changes."]
     return title, "\n".join(lines)
@@ -1359,6 +1367,35 @@ def tick_wait_seconds(now: datetime, until_s: int = START_UNTIL_S) -> float:
             continue
         break
     return max(0.0, (t - start).total_seconds())
+
+
+def _quiet_words() -> str:
+    return f"{QUIET_FROM[0]:02d}:{QUIET_FROM[1]:02d} to {QUIET_UNTIL[0]:02d}:{QUIET_UNTIL[1]:02d}"
+
+
+def wait_note(now: datetime, until_s: int = START_UNTIL_S) -> str | None:
+    """The box's line on how late a Yes now may write, or None: the backup and the before-snapshot may
+    end anywhere in BEFORE_WRITE_S (tried every BEFORE_WRITE_STEP_S), tick_wait_seconds gives each end's
+    wait, and the latest write among the waits of WAIT_NOTE_S or more is told."""
+    waits = []                                   # (end of the backup, write) for each end that waits long
+    for s in range(BEFORE_WRITE_S[0], BEFORE_WRITE_S[1] + 1, BEFORE_WRITE_STEP_S):
+        ready = now + timedelta(seconds=s)
+        wait = tick_wait_seconds(ready, until_s)
+        if wait >= WAIT_NOTE_S:
+            waits.append((ready, ready + timedelta(seconds=wait)))
+    if not waits:
+        return None
+    at = max(end for _ready, end in waits).astimezone(BAHRAIN)
+    quiet = False
+    for ready, end in waits:
+        begin = ready.astimezone(BAHRAIN)
+        quiet_from = begin.replace(hour=QUIET_FROM[0], minute=QUIET_FROM[1], second=0, microsecond=0)
+        quiet_until = begin.replace(hour=QUIET_UNTIL[0], minute=QUIET_UNTIL[1], second=0, microsecond=0)
+        quiet = quiet or (begin <= quiet_until and end >= quiet_from)
+    why = (f"no load writes from {_quiet_words()} Bahrain (production's 8 o'clock run)" if quiet
+           else f"a load starts 1 to {until_s // 60} minutes after production's quarter-hour tick")
+    mins = round((at - now).total_seconds() / 60)
+    return f"WAIT: a Yes now may not write until about {at:%H:%M} Bahrain (up to {mins} min from now): {why}."
 
 
 # ── what the launcher and the worker are given ────────────────────────────────────────────────
@@ -2000,9 +2037,10 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
         raise Refusal(f"Refused: the table of run {run} and its staged folder do not agree on what a Yes would do ("
                       + "; ".join(odd) + "). Nothing was started: type /yq-load.")
 
-    # the owner's confirmation
+    # the owner's confirmation (a rehearsal never waits for a tick: no WAIT line)
+    waiting = None if rehearsal else wait_note(deps.now(), start_until_s(last_refresh_seconds(deps.read_state)))
     title, text = box_text(run, plan, resume_step=stopped_at if resume else None, rehearsal=rehearsal,
-                           notes=deps.box_notes())
+                           notes=([waiting] if waiting else []) + list(deps.box_notes()))
     answer = "yes" if no_box else str(deps.box(title, text, BOX_TIMEOUT_S))
     if answer != "yes":
         # at the RESUME box of a load that had begun, "nothing loaded" would not be true of the database
@@ -2583,9 +2621,10 @@ class Job:
             return (f"A real load would wait {round(first)} s here for a quiet moment between two production "
                     "ticks; a rehearsal does not."), {"waited_seconds": 0, "would_wait_seconds": round(first)}
         if first > 0:
-            self.j("note", step="wait_tick", text=f"Waiting about {max(1, round(first / 60))} min: a load starts "
-                   f"1 to {until // 60} minutes after production's quarter-hour tick and never from 07:50 to 08:20 "
-                   "Bahrain.")
+            at = (d.now() + timedelta(seconds=first)).astimezone(BAHRAIN)
+            self.j("note", step="wait_tick", text=f"Waiting about {max(1, round(first / 60))} min, to write at about "
+                   f"{at:%H:%M}: a load starts 1 to {until // 60} minutes after production's quarter-hour tick and "
+                   f"never from {_quiet_words()} Bahrain.")
         # The step ends only on a token check that is followed AT ONCE by a quiet moment. The check
         # itself can be slow (the live site or the database answering late): when it has eaten the
         # quiet moment, the next one is waited for and the token is checked again.
