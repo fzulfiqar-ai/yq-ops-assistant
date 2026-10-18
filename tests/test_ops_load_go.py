@@ -944,7 +944,7 @@ def _():
 
 MIXED = "ATTENTION: the reports of this folder carry different as-on dates: are they one export?"
 OLDER = "ATTENTION: a report of this folder is older than what is already loaded: older figures would come back."
-SIM_OUT = "ATTENTION: the Stock ledger has no SIM items: their movements leave with this load (SIM never counts)."
+SIM_OUT = "ATTENTION: the Stock ledger has no SIM movements: the loaded ones leave with this load (SIM never counts)."
 
 
 @test("the box shows what the check flagged, each line starting ATTENTION, under the file lines; a plan with no flag shows none")
@@ -1586,19 +1586,22 @@ def _():
     assert yq.tick_wait_seconds(datetime(2026, 1, 1, 12, 3, tzinfo=yq.BAHRAIN)) == 0      # any time zone is read right
 
 
-@test("the box says when a load that must wait will write: at 07:55 Bahrain about 08:20 (the morning window), at 07:31 nothing")
+@test("the box says when a load that must wait will write, for a quick or a slow backup: at 07:46 and 07:55 Bahrain about 08:20 (the morning window), at 07:31 nothing")
 def _():
     def at(h, m, s=0):
         return datetime(2026, 1, 1, h, m, s, tzinfo=timezone.utc)
 
-    assert yq.BEFORE_WRITE_S == 150 and yq.WAIT_NOTE_S == 300
-    assert yq.wait_note(at(4, 55)) == ("WAIT: a Yes now writes at about 08:20 Bahrain (in 25 min): no load writes from 07:50 "
-                                       "to 08:20 Bahrain (production's 8 o'clock run).")
-    assert yq.wait_note(at(4, 31)) is None and yq.wait_note(NOON) is None      # the backup ends inside a start window
+    assert yq.BEFORE_WRITE_S == (120, 360) and yq.BEFORE_WRITE_STEP_S == 30 and yq.WAIT_NOTE_S == 300
+    assert yq.wait_note(at(4, 55)) == ("WAIT: a Yes now may not write until about 08:20 Bahrain (up to 25 min from now): "
+                                       "no load writes from 07:50 to 08:20 Bahrain (production's 8 o'clock run).")
+    # the review's case: after a quick backup a Yes at 07:46 would not wait, after a slow one it waits out the window
+    assert yq.wait_note(at(4, 46)) == ("WAIT: a Yes now may not write until about 08:20 Bahrain (up to 34 min from now): "
+                                       "no load writes from 07:50 to 08:20 Bahrain (production's 8 o'clock run).")
+    assert yq.wait_note(at(4, 31)) is None and yq.wait_note(NOON) is None      # every end of the backup is in a start window
     # outside the morning window the tick rule alone can wait long enough to be told, with its own reason
-    assert yq.wait_note(at(7, 8)) == ("WAIT: a Yes now writes at about 10:16 Bahrain (in 8 min): a load starts 1 to 9 "
-                                      "minutes after production's quarter-hour tick.")
-    assert yq.wait_note(at(7, 12)) is None                                     # 1.5 min: not worth a line
+    assert yq.wait_note(at(7, 8)) == ("WAIT: a Yes now may not write until about 10:16 Bahrain (up to 8 min from now): "
+                                      "a load starts 1 to 9 minutes after production's quarter-hour tick.")
+    assert yq.wait_note(at(7, 12)) is None                                     # 2 min at most: not worth a line
     assert "1 to 5 minutes" in yq.wait_note(at(7, 4), 300)                     # after a slow refresh the window is shorter
     with data_root() as root:                    # the box itself: the line sits with the other notes, before the end
         h = Harness(root, start=at(4, 55))

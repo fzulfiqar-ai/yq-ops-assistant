@@ -187,8 +187,10 @@ QUIET_FROM, QUIET_UNTIL = (7, 50), (8, 20)
 TICK_TRIES = 4                      # token checks that may outlast the quiet moment before the load gives up
 # The box says when a load that must wait will write (18-Oct-2026: a load that sat out the morning
 # window looked hung). The wait is counted from the end of the backup and the before-snapshot, about
-# two and a half minutes on the loads of October; a wait shorter than WAIT_NOTE_S gets no line.
-BEFORE_WRITE_S = 150
+# two and a half minutes on the loads of October but slower some days, so every end from 2 to 6
+# minutes is tried and the latest write time is told; a wait shorter than WAIT_NOTE_S gets no line.
+BEFORE_WRITE_S = (120, 360)
+BEFORE_WRITE_STEP_S = 30
 WAIT_NOTE_S = 300
 
 # Every load deletes and re-inserts the whole stock ledger. Once a refresh has begun, this is the
@@ -216,7 +218,7 @@ ATTENTION_WORDS = {
     "mixed_dates": "the reports of this folder carry different as-on dates: are they one export?",
     "older_than_loaded": "a report of this folder is older than what is already loaded: older figures would come back.",
     "last_load_failed": "the last load failed after it had begun to write: this load replaces it.",
-    "sim_ledger_out": "the Stock ledger has no SIM items: their movements leave with this load (SIM never counts).",
+    "sim_ledger_out": "the Stock ledger has no SIM movements: the loaded ones leave with this load (SIM never counts).",
 }
 # Flags that are no warning, or that the box shows on a line of their own already (the file's line,
 # an ON YOUR WORD line), or that the table lists as items to check, or that stop the check before
@@ -1271,7 +1273,7 @@ def box_text(run: str, plan: dict, *, resume_step: str | None = None, rehearsal:
         if len(exp) > 10:
             lines.append(f"(+{len(exp) - 10} more: see the table in the chat)")
     if notes:
-        lines += [""] + [_short(n, 150) for n in notes]
+        lines += [""] + [_short(n, 160) for n in notes]       # the morning window's WAIT line is up to 153 long
     lines += ["", f"Read first: a Yes in the first {int(BOX_MIN_READ_S)} seconds is not counted. Then click once.",
               "Yes = load now. No = nothing changes."]
     return title, "\n".join(lines)
@@ -1372,20 +1374,28 @@ def _quiet_words() -> str:
 
 
 def wait_note(now: datetime, until_s: int = START_UNTIL_S) -> str | None:
-    """The box's line on when a Yes now would write, or None when the wait is short: from the end of
-    the backup and the before-snapshot (BEFORE_WRITE_S on), tick_wait_seconds decides."""
-    ready = now + timedelta(seconds=BEFORE_WRITE_S)
-    wait = tick_wait_seconds(ready, until_s)
-    if wait < WAIT_NOTE_S:
+    """The box's line on how late a Yes now may write, or None: the backup and the before-snapshot may
+    end anywhere in BEFORE_WRITE_S (tried every BEFORE_WRITE_STEP_S), tick_wait_seconds gives each end's
+    wait, and the latest write among the waits of WAIT_NOTE_S or more is told."""
+    waits = []                                   # (end of the backup, write) for each end that waits long
+    for s in range(BEFORE_WRITE_S[0], BEFORE_WRITE_S[1] + 1, BEFORE_WRITE_STEP_S):
+        ready = now + timedelta(seconds=s)
+        wait = tick_wait_seconds(ready, until_s)
+        if wait >= WAIT_NOTE_S:
+            waits.append((ready, ready + timedelta(seconds=wait)))
+    if not waits:
         return None
-    begin, at = ready.astimezone(BAHRAIN), (ready + timedelta(seconds=wait)).astimezone(BAHRAIN)
-    quiet_from = begin.replace(hour=QUIET_FROM[0], minute=QUIET_FROM[1], second=0, microsecond=0)
-    quiet_until = begin.replace(hour=QUIET_UNTIL[0], minute=QUIET_UNTIL[1], second=0, microsecond=0)
-    why = (f"no load writes from {_quiet_words()} Bahrain (production's 8 o'clock run)"
-           if begin <= quiet_until and at >= quiet_from
+    at = max(end for _ready, end in waits).astimezone(BAHRAIN)
+    quiet = False
+    for ready, end in waits:
+        begin = ready.astimezone(BAHRAIN)
+        quiet_from = begin.replace(hour=QUIET_FROM[0], minute=QUIET_FROM[1], second=0, microsecond=0)
+        quiet_until = begin.replace(hour=QUIET_UNTIL[0], minute=QUIET_UNTIL[1], second=0, microsecond=0)
+        quiet = quiet or (begin <= quiet_until and end >= quiet_from)
+    why = (f"no load writes from {_quiet_words()} Bahrain (production's 8 o'clock run)" if quiet
            else f"a load starts 1 to {until_s // 60} minutes after production's quarter-hour tick")
-    return (f"WAIT: a Yes now writes at about {at:%H:%M} Bahrain (in {round((at - now).total_seconds() / 60)} min): "
-            f"{why}.")
+    mins = round((at - now).total_seconds() / 60)
+    return f"WAIT: a Yes now may not write until about {at:%H:%M} Bahrain (up to {mins} min from now): {why}."
 
 
 # ── what the launcher and the worker are given ────────────────────────────────────────────────

@@ -19,9 +19,12 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   - Anything else missing still stops.
   - The box says when a load that must wait will write (a WAIT line), and the wait's journal line
     gives the time.
-  - The cause that morning: both stock reports of Focus came without the SIM starter packs, which
-    the Sales day book still had. That points to an export filter, or to a change to the items or to
-    the user's rights in Focus. Drop 181026 was loaded without its ledger.
+  - The cause, confirmed by the owner: the SIM items became Service items in Focus (the Sim group,
+    under Non Cogs Groups). Focus keeps Service items out of its stock reports, so both stock reports
+    lost them, history included, while the Sales day book kept them. Drop 181026 was loaded without
+    its ledger.
+  - SIM is told by the item's own name in whole words. The substring rule of v_sales also takes
+    salesmen's names, and the warehouses are named after salesmen.
 - `/yq-month`: the monthly sales workbook in the layout of the September report (`python -m scripts.ops report month
   [YYYY-MM]`, whole months only, written as a DRAFT under `exports/reports/monthly/`). Its golden test rebuilds September
   against the reference file (local only).

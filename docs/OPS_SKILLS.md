@@ -150,7 +150,7 @@ committed.
 
 | Decision | What it means | What you can say |
 |---|---|---|
-| **LOAD** | The file passed its checks and will be loaded as it is. Anything noticed on the way (an invoice changed or removed since the last export, a voucher entered back-dated) is listed under the table as an item *to check*; it does not stop the load. A Stock ledger that lacks only SIM (the SIM starter packs, and the SIM warehouses that hold only them) loads too: SIM never counts, so their movements inside the file's dates go with the load and come back with the next export that has them. The line says *nothing missing outside SIM*, and the box says it on an ATTENTION line. SIM vouchers are never listed *to check*. | Nothing. |
+| **LOAD** | The file passed its checks and will be loaded as it is. Anything noticed on the way (an invoice changed or removed since the last export, a voucher entered back-dated) is listed under the table as an item *to check*; it does not stop the load. A Stock ledger that lacks only SIM loads too: SIM never counts. Only SIM counts here: SIM items by their own name (Batelco, starter pack, SIM as a whole word), and the warehouses that held nothing else. Since October the SIM items are Service items in Focus, and Focus keeps Service items out of its stock reports, so every Stock ledger now lacks them; their movements inside the file's dates go with the load. The line says *nothing missing outside SIM*, the box says it on an ATTENTION line, and SIM vouchers are never listed *to check*. | Nothing. |
 | **LOAD (main-store block only)** | The stock file lists more warehouses than the portal counts. Only the main store's block (the Accessories Warehouse) is loaded, after the program has proved that the trimmed copy has that block's rows, units, value and date and equals Focus's own sub total. If it cannot prove that, it stops. | Nothing. |
 | **HOLD BACK** | The profitability report is not loaded this time: its cost of sales is short of the stock ledger's by more than the allowed gap, or too large a share of sales sits on items with a blank cost (both limits are in `config.json`), or the drop has no stock ledger to check it against. The portal keeps the margins it already has, and later screens say *held back since* a date. Held back twice in a row, it goes on the action list. | "load profitability anyway" |
 | **LEAVE OUT** | A price book that is not loaded: it is exactly what the portal already holds (no price added, changed or dropped), or you said to leave it out. | Nothing. |
@@ -178,16 +178,15 @@ the check runs again.
   (sales) or "partial on purpose" (stock).
 - The Stock ledger lacks an item, a warehouse or a voucher type that is already loaded for its dates.
   The loader replaces the file's whole date span, so those movements would be lost: export the full
-  Stock ledger again. What is missing only of SIM never stops it (see **LOAD**). When both stock
-  reports of Focus come without the SIM starter packs while the Sales day book still has them, that
-  is a filter of those reports, or a change to the items or to the user's rights in Focus, never a
-  wrong click.
+  Stock ledger again. What is missing only of SIM never stops it (see **LOAD**). An item made a
+  Service item in Focus leaves both stock reports, its history included, while the Sales day book
+  keeps it: that is what happened to the SIM items in October.
 - A file or the database changed while the check ran: run it again.
 - The live site or the database did not answer, or a load or a rehearsal is still running: wait a
   minute, then run it again.
 
 **Why a load can wait before it writes.** A load writes 1 to 9 minutes after production's
-quarter-hour tick, and never from ten to 8 until twenty past 8 Bahrain: production runs its daily
+quarter-hour tick (fewer after a slow refresh), and never from ten to 8 until twenty past 8 Bahrain: production runs its daily
 agents at 8 o'clock and reads the stock ledger that every load rewrites. A Yes five minutes before 8
 therefore writes at about twenty past. The box says so on a WAIT line, and while it waits `load status`
 shows *Waiting about N min, to write at about HH:MM*. That is by design, not a fault. For the report

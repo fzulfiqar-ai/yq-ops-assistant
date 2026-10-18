@@ -1546,7 +1546,8 @@ def ledger_groups(rows: list[dict], from_db: bool = False) -> dict[tuple, tuple]
 
 def ledger_compare(file_rows: list[dict], db_rows: list[dict], last_loaded: str | None) -> dict:
     """The file against production inside the file's own dates.
-      missing   items, warehouses and voucher types production holds there and the file lacks (STOP)
+      missing   items, warehouses and voucher types production holds there and the file lacks (STOP,
+                unless every loaded line behind them is a SIM item's: ledger_sim)
       changed, removed, backdated   (voucher, item) pairs; backdated = new, dated before production's
                                     last movement date
       new       pairs the file adds from that date on (the normal case)"""
@@ -1569,33 +1570,40 @@ def ledger_compare(file_rows: list[dict], db_rows: list[dict], last_loaded: str 
             "file": f, "db": p, "items": len(fi), "warehouses": len(fw), "types": len(ft), "pairs": len(f)}
 
 
-def sim_line(item: str, line: tuple) -> bool:
-    """A ledger line (ledger_groups) that SIM never counts for (the owner, 18-Oct-2026): its item is
-    SIM, or every warehouse it names is. SIM is the name rule of the SIM division in v_sales, used as
-    it is: app/ is an engine path, and a change there would stop the next load until the API is
-    deployed again (gitinfo.ENGINE_PATHS)."""
-    from app.ingest_batch import _is_sim
-    if _is_sim(item):
-        return True
-    named = [w for w in (line[2], line[3]) if w]
-    return bool(named) and all(_is_sim(w) for w in named)
+# What may leave the stock ledger without a stop (the owner, 18-Oct-2026: SIM never counts): the
+# movements of SIM items, told by the item's own name in whole words: a starter pack, or Batelco and
+# SIM together (the Sim group of Focus held exactly those eight items then). Not the repository's
+# looser SIM rules: the substring rule of v_sales also takes salesmen's names such as Qasim (the
+# warehouses are named after salesmen), and SIM as a word alone takes accessories that name the SIM
+# they serve (a cable with a SIM ejector); a rule that decides what a load may delete must not.
+# Since 18-Oct-2026 the SIM items are Service items in Focus, which keeps them out of its stock
+# reports altogether: every Stock ledger lacks them from then on.
+SIM_STARTER = re.compile(r"\bstarter\s*pack", re.I)
+SIM_CARRIER, SIM_WORD = re.compile(r"\bbatelco\b", re.I), re.compile(r"\bsim\b", re.I)
+
+
+def sim_item(name) -> bool:
+    text = str(name or "")
+    return bool(SIM_STARTER.search(text) or (SIM_CARRIER.search(text) and SIM_WORD.search(text)))
 
 
 def ledger_sim(cmp: dict) -> dict:
     """ledger_compare's missing items, warehouses and voucher types, each one SIM when every loaded
-    line behind it is a SIM line: {"sim": {items, warehouses, types}, "other": {...}, "rows": the
-    loaded rows of the SIM lines behind them, which a load of the file takes away}."""
+    line behind it is a SIM item's (a warehouse that held anything else is not): {"sim": {items,
+    warehouses, types}, "other": {...}, "rows": the loaded rows of those SIM lines, which a load of
+    the file takes away}."""
     wanted = {"items": set(cmp["missing_items"]), "warehouses": set(cmp["missing_warehouses"]),
               "types": set(cmp["missing_types"])}
     plain: dict[str, set] = {k: set() for k in wanted}           # the ones with a line that is not SIM
     rows = 0
     for (_voucher, item), sig in cmp["db"].items():
+        sim = sim_item(item)
         for line, n in sig:
             behind = [(k, key) for k, key in (("items", item), ("warehouses", line[2]), ("types", line[1]))
                       if key in wanted[k]]
             if not behind:
                 continue
-            if sim_line(item, line):
+            if sim:
                 rows += n
             else:
                 for k, key in behind:
@@ -1604,23 +1612,28 @@ def ledger_sim(cmp: dict) -> dict:
             "rows": rows}
 
 
-def sim_words(sim: dict) -> str:
-    """'1 SIM item and 2 SIM warehouses' for ledger_sim's SIM part ('' when no SIM is missing)."""
-    parts = [plural(len(sim[k]), word) for k, word in (("items", "SIM item"), ("warehouses", "SIM warehouse"),
-                                                       ("types", "SIM voucher type")) if sim[k]]
+SIM_PARTS = (("items", "SIM item", "SIM items", 12),
+             ("warehouses", "warehouse with only SIM items", "warehouses with only SIM items", 60),
+             ("types", "voucher type with only SIM items", "voucher types with only SIM items", 12))
+
+
+def sim_words(sim: dict, named: bool = False) -> str:
+    """'1 SIM item and 2 warehouses with only SIM items' for ledger_sim's SIM part ('' when none);
+    named: each part with its names, every warehouse shown (a warehouse is a rep's van)."""
+    parts = [plural(len(sim[k]), one, many) + (f" ({listed(sim[k], limit)})" if named else "")
+             for k, one, many, limit in SIM_PARTS if sim[k]]
+    if named:
+        return "; ".join(parts)
     return ", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else "".join(parts)
 
 
 def drop_sim_pairs(cmp: dict) -> tuple[dict, int]:
     """ledger_compare's changed, removed and earlier-dated vouchers without the (voucher, item) pairs
-    made only of SIM lines, in production and in the file alike. SIM never counts: they are never
-    listed to check, whether an export left them out or brought them back. -> (cmp, how many went)"""
-    def only_sim(key: tuple) -> bool:
-        lines = [line for sig in (cmp["db"].get(key), cmp["file"].get(key)) if sig for line, _n in sig]
-        return bool(lines) and all(sim_line(key[1], line) for line in lines)
+    of SIM items. SIM never counts: they are never listed to check, whether an export left them out
+    or brought them back. -> (cmp, how many went)"""
     out, dropped = dict(cmp), 0
     for kind in ("changed", "removed", "backdated"):
-        out[kind] = [key for key in cmp[kind] if not only_sim(key)]
+        out[kind] = [key for key in cmp[kind] if not sim_item(key[1])]
         dropped += len(cmp[kind]) - len(out[kind])
     return out, dropped
 
@@ -2554,13 +2567,13 @@ class Check:
                            f"pairs): {tally}, new {cmp['new']:,}.")
         if sim_gone:
             self.flag("sim_ledger_out")
-            self.checks.append(f"Stock ledger, SIM: {sim_gone} {sim_verb} not in the file ("
-                               + listed(split["sim"]["items"] + split["sim"]["warehouses"] + split["sim"]["types"], 6)
-                               + f"): {plural(split['rows'], 'loaded row')} of theirs inside these dates go with this "
-                               "load and come back with an export that has them. SIM never counts.")
+            self.checks.append(f"Stock ledger, SIM: not in the file: {sim_words(split['sim'], named=True)}. "
+                               f"{plural(split['rows'], 'loaded row')} of theirs inside these dates would go with a load "
+                               "of this file and come back with an export that has them (SIM never counts; Focus keeps "
+                               "Service items out of its stock reports).")
         if sim_pairs:
-            self.checks.append(f"Stock ledger, SIM: {plural(sim_pairs, 'voucher-and-item pair')} made only of SIM lines "
-                               "differ from what is loaded; they are not listed to check (SIM never counts).")
+            self.checks.append(f"Stock ledger, SIM: {plural(sim_pairs, 'voucher-and-item pair')} of SIM items differ "
+                               "from what is loaded; they are not listed to check (SIM never counts).")
         shown = ([("changed", k) for k in cmp["changed"]] + [("removed", k) for k in cmp["removed"]]
                  + [("earlier date", k) for k in cmp["backdated"]])
         if shown:

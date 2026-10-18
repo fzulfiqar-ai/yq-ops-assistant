@@ -914,19 +914,19 @@ def held_line(voucher: str, item: str, kind: str, wh: str, to_wh: str = "", got:
             "rq": Decimal(got), "iq": Decimal(out), "n": 1}
 
 
-@test("stock ledger, SIM: a SIM item's line, or a line whose warehouses are all SIM, is SIM; one that touches another is not")
+@test("stock ledger, SIM: an item is SIM when its name says starter pack, or Batelco and SIM (whole words); nothing else is")
 def _():
-    def line(wh: str, to_wh: str = "") -> tuple:
-        return ("2026-01-03", "Stock Issue Voucher", wh, to_wh, Decimal(0), Decimal(1))
-    assert lc.sim_line(SIM_ITEM, line(MAIN))                           # the item is SIM, wherever it is
-    assert lc.sim_line("Cable one C1", line(SIM_VAN))                  # an accessory at a SIM van
-    assert lc.sim_line("Cable one C1", line(SIM_STORE, SIM_VAN))
-    assert not lc.sim_line("Cable one C1", line(MAIN, SIM_VAN))        # it leaves the main store
-    assert not lc.sim_line("Cable one C1", line(SIM_VAN, MAIN))
-    assert not lc.sim_line("Cable one C1", line("Van A")) and not lc.sim_line("Cable one C1", line(""))
+    for name in (SIM_ITEM, "Batelco prepaid SIM S2", "Starter pack S3", "BATELCO STARTERPACK DATA D1",
+                 "Batelco Vanilla Sim V1"):
+        assert lc.sim_item(name), name
+    # v_sales's substring rule would take most of these: a salesman's name (warehouses are named after salesmen),
+    # plain words, an accessory that names the SIM it serves, a carrier's device that is no SIM
+    for name in ("Cable one C1", "Qasim cable Q1", "Van Qasim - Acc WH", "Simple charger S4", "Facsimile lead F1",
+                 "eSIM adapter E1", "Multi cable (Card Reader/Sim Ejector) X1", "Batelco router R1", "", None):
+        assert not lc.sim_item(name), name
 
 
-@test("stock ledger, SIM: a missing item, warehouse or voucher type is SIM when every loaded line behind it is a SIM line")
+@test("stock ledger, SIM: a missing item, warehouse or voucher type is SIM when every loaded line behind it is a SIM item's")
 def _():
     file_rows = ledger_rows()
     held = db_rows(file_rows) + db_ledger(SIM_LEDGER)
@@ -935,10 +935,18 @@ def _():
     split = lc.ledger_sim(cmp)
     assert split["sim"] == {"items": [SIM_ITEM], "warehouses": [SIM_STORE, SIM_VAN], "types": []}, split
     assert split["other"] == {"items": [], "warehouses": [], "types": []} and split["rows"] == 3
-    # an accessory sent from the SIM van back to the main store: that line is no SIM line, so the van is not SIM
+    # an accessory sent from the SIM van back to the main store: no SIM item's line, so the van is not SIM
     back = held_line("SIO:T-26-01-8", "Cable one C1", "Stock Issue Voucher", SIM_VAN, MAIN)
     split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [back], "2026-01-06"))
     assert split["other"]["warehouses"] == [SIM_VAN] and split["sim"]["warehouses"] == [SIM_STORE], split
+    # an accessory sold from the SIM van: the van held more than SIM, so its absence is no SIM matter either
+    sold = held_line("SI:T-26-01-7", "Cable one C1", "Sales Invoice", SIM_VAN)
+    split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [sold], "2026-01-06"))
+    assert split["other"]["warehouses"] == [SIM_VAN], split
+    # a rep's accessories van whose name holds "sim" inside a word is never taken for SIM
+    qasim = held_line("SI:T-26-01-8", "Cable one C1", "Sales Invoice", "Van Qasim")
+    split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [qasim], "2026-01-06"))
+    assert split["other"]["warehouses"] == ["Van Qasim"] and split["sim"]["warehouses"] == [SIM_STORE, SIM_VAN], split
     # a voucher type only SIM lines carry is SIM; the same type on an accessory's line in a rep's van is not
     sim_return = held_line("SRV:T-26-01-2", SIM_ITEM, "Sales Return", SIM_VAN, got=1, out=0)
     split = lc.ledger_sim(lc.ledger_compare(file_rows, held + [sim_return], "2026-01-06"))
@@ -960,10 +968,12 @@ def _():
     assert len(came["backdated"]) == 3
     kept, pairs = lc.drop_sim_pairs(came)
     assert kept["backdated"] == [] and pairs == 3 and lc.voucher_items(kept) == []
-    # an accessory's voucher that went is still listed beside them
+    # an accessory's voucher that went is still listed beside them, even one at a SIM van
     gone = [r for r in file_rows if r["voucher"] != "SI:T-26-01-2"]
-    kept, pairs = lc.drop_sim_pairs(lc.ledger_compare(gone, db_rows(file_rows) + db_ledger(SIM_LEDGER), "2026-01-06"))
-    assert kept["removed"] == [("SI:T-26-01-2", "Cable one C1")] and pairs == 3
+    at_van = held_line("SI:T-26-01-7", "Cable one C1", "Sales Invoice", SIM_VAN)
+    kept, pairs = lc.drop_sim_pairs(lc.ledger_compare(gone, db_rows(file_rows) + db_ledger(SIM_LEDGER) + [at_van],
+                                                      "2026-01-06"))
+    assert kept["removed"] == [("SI:T-26-01-2", "Cable one C1"), ("SI:T-26-01-7", "Cable one C1")] and pairs == 3
 
 
 def blocking(code, target=None, count=None, items=None, message="m"):
@@ -2279,11 +2289,22 @@ def _():
         text = res["text"]
         assert res["ok"] and res["token"] and table_of(text)[shown("stock_movements")] == "LOAD", text
         assert text.splitlines()[-1].startswith("GO: ") and "sim_ledger_out" in res["flags"], res["flags"]
-        assert "nothing missing outside SIM; 1 SIM item and 2 SIM warehouses are not in the file (SIM never counts)" in text
-        assert f"({SIM_ITEM}, {SIM_STORE}, {SIM_VAN})" in text and "3 loaded rows of theirs" in text, text
-        assert "go with this load and come back with an export that has them" in text
+        assert ("nothing missing outside SIM; 1 SIM item and 2 warehouses with only SIM items are not in the file "
+                "(SIM never counts)") in text, text
+        assert f"1 SIM item ({SIM_ITEM}); 2 warehouses with only SIM items ({SIM_STORE}, {SIM_VAN})" in text, text
+        assert ("3 loaded rows of theirs inside these dates would go with a load of this file and come back with an "
+                "export that has them") in text
         assert "nothing missing outside SIM" in step_line(deps, 8), deps.lines
         assert not [r for r in alerts.open_items(include_baseline=True) if r["key"].startswith("voucher_changed")]
+    with data_root() as root:                    # a rep's accessories van named with "sim" inside a word still stops
+        make_drop(root)
+        qasim = held_line("SI:T-26-01-8", "Cable one C1", "Sales Invoice", "Van Qasim")
+        res, deps = check("070126", deps=FakeDeps(FakeSession(ledger=db_ledger() + db_ledger(SIM_LEDGER) + [qasim])))
+        text = res["text"]
+        assert res["exit"] == 2 and table_of(text)[shown("stock_movements")] == "STOP", text
+        assert "1 warehouse loaded for these dates is not in the file (Van Qasim)" in text, text
+        assert "besides 1 SIM item and 2 warehouses with only SIM items, which alone would not stop it" in text
+        assert "sim_ledger_out" not in res["flags"] and res["token"] is None
 
 
 @test("a stock ledger that lacks what production holds stops; a price book that would switch off too much stops")
@@ -2303,7 +2324,7 @@ def _():
         text = res["text"]
         assert res["exit"] == 2 and table_of(text)[shown("stock_movements")] == "STOP", text
         assert "1 item loaded for these dates is not in the file (Lamp four C4)" in text
-        assert "besides 1 SIM item and 2 SIM warehouses, which alone would not stop it" in text, text
+        assert "besides 1 SIM item and 2 warehouses with only SIM items, which alone would not stop it" in text, text
         assert "STOP (1 item missing)" in step_line(deps, 8) and "sim_ledger_out" not in res["flags"]
 
         changed = db_ledger()
