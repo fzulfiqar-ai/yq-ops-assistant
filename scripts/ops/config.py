@@ -32,6 +32,11 @@ KEYS: dict[str, tuple[str, str]] = {
                                  "before the month"),
     "stock.cover_kpi_days": ("list", "KPI one's band of stock cover in days, [low, high]: an item is ordered when "
                                      "its cover falls below lead time + low, up to lead time + high"),
+    "stock.clear_target_days": ("int", "ageing: the days within which the stock left of an old or price-cut item "
+                                       "should sell at its pace (the owner's clear target)"),
+    "stock.suppliers": ("dict", "item code -> supplier, where neither the catalog's brand nor the last purchase "
+                                "order names the right one"),
+    "stock.supplier_aliases": ("dict", "a supplier as one source spells it -> the name used everywhere else"),
     "items.bridge_exceptions": ("dict", "ledger item name -> the name the stock balance / day book has for "
                                         "it, where the longest-prefix rule needs help; a target that report "
                                         "does not have leaves the item in the unmapped block"),
@@ -39,6 +44,7 @@ KEYS: dict[str, tuple[str, str]] = {
     "warehouses.main": ("str", "name of the main store in Focus"),
     "warehouses.aliases": ("dict", "warehouse name as one report spells it -> the name used everywhere else"),
     "warehouses.not_counted": ("list", "warehouses whose stock never counts (damage, samples, consignment)"),
+    "warehouses.damage": ("str", "name of the damage store in Focus, for the damage figures (empty: not set up)"),
     "report.category_names": ("dict", "monthly report: the Categories row for an item code the code rule does "
                                       "not know, keyed by the code itself or by the category on its Upcoming or "
                                       "catalog card; empty until the owner names one"),
@@ -53,8 +59,9 @@ _TYPES = {"number": (int, float), "int": (int,), "str": (str,), "list": (list,),
 #  * every other OPTIONAL key: get() still stops with ConfigMissing, so no other command gets a silent value;
 #    the command that reads it carries the approved plan's default and says so on its screen (names only
 #    here, never a value).
-DEFAULTS: dict[str, object] = {"report.category_names": {}, "report.prepared_by": ""}
-OPTIONAL = frozenset({"stock.fast_movers", "stock.cover_kpi_days", *DEFAULTS})
+DEFAULTS: dict[str, object] = {"report.category_names": {}, "report.prepared_by": "", "warehouses.damage": "",
+                               "stock.suppliers": {}, "stock.supplier_aliases": {}}
+OPTIONAL = frozenset({"stock.fast_movers", "stock.cover_kpi_days", "stock.clear_target_days", *DEFAULTS})
 _cfg: dict | None = None
 
 

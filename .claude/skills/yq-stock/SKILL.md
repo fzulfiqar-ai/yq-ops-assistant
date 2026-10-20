@@ -1,7 +1,7 @@
 ---
 name: "yq-stock"
 description: "Stock planning from the loaded Focus data, for the main store (the Accessories Warehouse): its stock as the portal shows it, at cost, the days of cover against KPI 1, the order list with the lead time it rests on, how often the fast movers were in stock, and how old the stock is; or one item's whole picture. Use it when Furqan asks in plain words what to order, what is running out or sold out, how many days of stock he holds, whether the best sellers are in stock, which stock is old or not selling, or how one item stands."
-argument-hint: "[reorder|ageing|<code>]"
+argument-hint: "[reorder|ageing|damage|file|<code>]"
 allowed-tools:
   - "Bash(python -m scripts.ops stock *)"
   - "PowerShell(python -m scripts.ops stock *)"

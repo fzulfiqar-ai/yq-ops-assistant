@@ -982,7 +982,7 @@ def _():
     assert words[-1] == "<code>" and set(words[:-1]) == set(consts["VIEW_WORDS"].values()), words
     assert set(words[:-1]) <= set(consts["VIEW_WORDS"]), "the hint names a word the command does not read"
     usage = (ast.get_docstring(ast.parse(source)) or "").splitlines()[0]
-    assert usage.startswith("python -m scripts.ops stock [reorder | ageing | <item code>]"), usage
+    assert usage.startswith("python -m scripts.ops stock [reorder | ageing | damage | file | <item code>]"), usage
     assert fm["allowed-tools"] == ["Bash(python -m scripts.ops stock *)", "PowerShell(python -m scripts.ops stock *)"]
     # what the skill acts on, in the command's own words
     for said in ("goods on order not deducted", "No purchase order is drafted.", ", to check", 'text + ("*" if floored'):

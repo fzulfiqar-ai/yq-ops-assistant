@@ -1,14 +1,18 @@
-"""python -m scripts.ops stock [reorder | ageing | <item code>]     (the command behind /yq-stock)
+"""python -m scripts.ops stock [reorder | ageing | damage | file | <item code>]     (the command behind /yq-stock)
 
     (nothing)   the headline: the main store's stock as the portal shows it (items, units, selling
                 value), at cost on two bases side by side when they differ, cover against KPI 1 (the
                 aggregate days, the share of value above the KPI band, the change on last month, the
                 bands by count and value, new arrivals apart), the order list in short, fast-mover
-                availability and the ageing in one line
-    reorder     the whole order list, the lead time it rests on (the last ten supplier invoices
-                matched to their receipt), and the fast movers with their sales ranking
+                availability, the ageing and its review in short, the damage store in short; and the
+                day's Stock & Order Plan workbook, made once per data date (scripts.ops.workbook.stock_book)
+    reorder     the whole order list with each item's supplier, the lead time it rests on (the last ten
+                supplier invoices matched to their receipt), and the fast movers with their sales ranking
     ageing      main-store units on their supplier receipts, newest first, in age bands, crossed with
-                the days since the item last sold, each band with a suggested action
+                the days since the item last sold, each band with a suggested action; then the ageing
+                review (scripts.ops.stock_review: pace, clear target, the price cuts' effect)
+    damage      the damage store in full (scripts.ops.stock_damage)
+    file        the headline, and a new workbook even when the day's one exists (the next free name)
     <code>      one item: its Focus item code (a model code several items share lists them)
 
 THE BASIS. The main store is config 'warehouses.main' (the Focus "Accessories Warehouse"); vans and
@@ -91,14 +95,17 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
+from pathlib import Path
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
-from scripts.ops import config, fmt, items, ledger, paths
+from scripts.ops import config, fmt, items, ledger, paths, stock_damage, stock_plan, stock_review, stockflow
 
 from app import metrics  # noqa: E402
 
 COMMAND = "stock"
-VIEW_WORDS = {"reorder": "reorder", "ageing": "ageing", "aging": "ageing"}
+VIEW_WORDS = {"reorder": "reorder", "ageing": "ageing", "aging": "ageing", "damage": "damage", "file": "file"}
+CLEAR_DAYS_DEFAULT = 90        # the plan's default while config.json has no 'stock.clear_target_days' (his 20-Oct rule)
+RAISE_PARTS = False            # tests set it: a part of the screen that fails raises instead of standing aside
 RATE_DAYS = 90                 # the window of an item's daily rate
 RATE_MIN_DAYS = 30             # ... divided by at least this many days in stock
 RANK_MONTHS = 12               # fast movers: best sellers over the full months before the month
@@ -119,11 +126,12 @@ ONE = Decimal(1)
 
 AGE_BANDS = ("up to 90 days", "91 to 180 days", "181 to 365 days", "over 365 days", "no receipt on file")
 SALE_BANDS = ("Sold in 30 days", "31 to 90", "91 to 180", "Over 180 or never")
+# The only lever on old stock is the sales team (the owner, 20-Oct-2026): no price cut, no bundle.
 AGE_ACTIONS = (
     "new stock: nothing to do yet",
     "offer it on every visit; order no more while it lasts",
-    "push it: a bundle, or a price that moves it",
-    "clear it: mark it down, bundle it, or ask the supplier to take it back",
+    "push it through the sales team: a weekly target in the ageing review",
+    "push it hard through the sales team: a weekly target in the ageing review",
     "to check: no supplier receipt on file explains these units",
 )
 
@@ -154,6 +162,16 @@ MRN_SQL = ("SELECT id, upper(sku_code) AS code, landed_cost_bhd::text AS cost, e
 # (MAX(id), docs/CLAUDE.md data rule 2). The read RPC may not see this table: it is read on the read-only session.
 SHEET_SQL = ("select id, upper(sku_code) as code, landed_cost_bhd::text as cost from purchase_costs "
              "where sku_code is not null")
+# Every item of the item master, active or not, with its brand (the supplier where nothing better says it).
+CATALOG_SQL = ("SELECT upper(item_code) AS code, display_name, category, brand, division, is_active, hidden "
+               "FROM catalog_items WHERE item_code IS NOT NULL")
+# The vendor of each code's newest purchase order (the PO PDFs loaded on the Orders page).
+PO_VENDOR_SQL = ("SELECT upper(item_code) AS code, vendor FROM v_po_price_history "
+                 "WHERE recency = 1 AND item_code IS NOT NULL AND vendor IS NOT NULL")
+# The price book's latest change of each code, the cuts only (the dealer book MA_base, as the price-cut review).
+PRICE_CUT_SQL = ("SELECT upper(sku_code) AS code, item_name, changed_on::text AS changed_on, "
+                 "prev_price_bhd::text AS was, current_price_bhd::text AS now FROM v_price_change "
+                 "WHERE current_price_bhd < prev_price_bhd")
 
 BASIS_LINES = (
     "Basis: accessories (items that ever moved in the main store); units sold = Sales Invoice units in every "
@@ -263,6 +281,11 @@ class Settings:
     high: int
     display: frozenset
     defaults_used: tuple = ()      # config.OPTIONAL keys config.json does not hold (the plan's default stood in)
+    clear_days: int = CLEAR_DAYS_DEFAULT   # ageing: the days the stock left should sell in (the owner's clear target)
+    damage: str = ""               # config 'warehouses.damage': the damage store ('' while it is not set up)
+    not_counted: tuple = ()        # config 'warehouses.not_counted': the stores outside the sellable pool
+    suppliers: dict = field(default_factory=dict)          # item code (upper) -> supplier, config 'stock.suppliers'
+    supplier_aliases: dict = field(default_factory=dict)   # a supplier's spelling (folded) -> its one name
 
 
 def settings() -> Settings:
@@ -289,8 +312,18 @@ def settings() -> Settings:
         raise config.ConfigMissing("config: 'stock.cover_kpi_days' is [low, high], two whole numbers of days, "
                                    "low above nought and below high")
     display = frozenset(fold(x) for x in config.get("stock.display_items") if fold(x))
+    clear = optional("stock.clear_target_days", CLEAR_DAYS_DEFAULT)
+    if clear <= 0:
+        raise config.ConfigMissing("config: 'stock.clear_target_days' must be a number of days above nought")
+    suppliers = {code_key(k): " ".join(str(v).split()) for k, v in config.get("stock.suppliers").items()
+                 if code_key(k) and str(v).strip()}
+    aliases = {fold(k): " ".join(str(v).split()) for k, v in config.get("stock.supplier_aliases").items()
+               if fold(k) and str(v).strip()}
     return Settings(lead_default=int(lead), fast_n=int(fast), low=int(band[0]), high=int(band[1]),
-                    display=display, defaults_used=tuple(used))
+                    display=display, defaults_used=tuple(used), clear_days=int(clear),
+                    damage=str(config.get("warehouses.damage") or "").strip(),
+                    not_counted=tuple(str(w) for w in config.get("warehouses.not_counted") if str(w or "").strip()),
+                    suppliers=suppliers, supplier_aliases=aliases)
 
 
 # ── the reads ─────────────────────────────────────────────────────────────────
@@ -307,6 +340,9 @@ class Inputs:
     sheet: dict | None = None              # code -> {cost, id}: sheet_costs(); None = not read
     invoices: list[dict] | None = None     # supplier_prices lines
     promises: list[dict] | None = None     # KPI-log promise lines; None when the log is not there
+    catalog: list[dict] | None = None      # catalog_items: every item of the item master; None = not read
+    po_vendor: dict | None = None          # code -> the vendor of its newest purchase order; None = not read
+    price_cuts: list[dict] | None = None   # v_price_change, the cuts: {code, item_name, changed_on, was, now}
     unread: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -375,6 +411,16 @@ def read_sheet() -> dict[str, dict]:
         return sheet_costs(s.q(SHEET_SQL))
 
 
+def po_vendors(rows) -> dict[str, str]:
+    """{code: vendor} of each code's newest purchase order (one row per code: recency 1)."""
+    out: dict[str, str] = {}
+    for r in rows or []:
+        code, vendor = code_key(r.get("code")), " ".join(str(r.get("vendor") or "").split())
+        if code and vendor:
+            out.setdefault(code, vendor)
+    return out
+
+
 def gather(prefer: str = "auto") -> Inputs:
     """Every read the command makes. The ledger and the snapshot are required; any other read that
     fails is named in `unread` and costs its own part of the screen."""
@@ -391,6 +437,9 @@ def gather(prefer: str = "auto") -> Inputs:
         ("the MRN landed costs (mrn_landed_costs)", "mrn", lambda: mrn_costs(db.rpc(MRN_SQL))),
         ("the pricing sheet (purchase_costs)", "sheet", read_sheet),
         ("the KPI log (goods on order)", "promises", read_promises),
+        ("the catalog (catalog_items)", "catalog", lambda: db.rpc(CATALOG_SQL)),
+        ("the purchase orders (an item's supplier)", "po_vendor", lambda: po_vendors(db.rpc(PO_VENDOR_SQL))),
+        ("the price book's changes (price cuts)", "price_cuts", lambda: db.rpc(PRICE_CUT_SQL)),
     )
     for words, name, read in parts:
         try:
@@ -675,6 +724,22 @@ class Model:
     facts: dict
     notes: list[str]
     warnings: list[str]
+    flows: stockflow.Flows | None = None     # the sellable pool, the damage store and the sellers of every item
+
+
+PART_WORDS = {"damage": "the damage figures", "review": "the ageing review", "plan": "the order plan"}
+
+
+def _part(model: Model, key: str, work) -> dict:
+    """One part of the facts (damage, review, plan): a part that fails stands aside, named among the
+    warnings, so the rest of the screen still prints (RAISE_PARTS: it raises instead)."""
+    try:
+        return work()
+    except Exception as exc:  # noqa: BLE001
+        if RAISE_PARTS:
+            raise
+        model.warnings.append(f"{PART_WORDS[key]} could not be worked out: {type(exc).__name__}: {exc}")
+        return {"error": type(exc).__name__}
 
 
 def _code_and_name(ledger_name: str, book: dict, stock_bridge: items.Bridge) -> tuple[str | None, str]:
@@ -998,8 +1063,13 @@ def build(inp: Inputs, cfg: Settings) -> Model:
         "defaults_used": list(cfg.defaults_used), "unread": list(inp.unread),
         "cost_basis": basis_counts(model_items.values()),
     }
-    return Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
-                 facts=facts, notes=notes, warnings=warnings)
+    fl = stockflow.flows(rows, model_items, cfg.damage, cfg.not_counted, d)
+    model = Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
+                  facts=facts, notes=notes, warnings=warnings, flows=fl)
+    facts["damage"] = _part(model, "damage", lambda: stock_damage.damage_facts(model, fl))
+    facts["review"] = _part(model, "review", lambda: stock_review.review_facts(model, fl, inp.price_cuts))
+    facts["plan"] = _part(model, "plan", lambda: stock_plan.plan_facts(model, fl, inp.catalog, inp.po_vendor))
+    return model
 
 
 # ── the screens ───────────────────────────────────────────────────────────────
@@ -1158,8 +1228,21 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
     over = ag["rows"][2]["value"] + ag["rows"][3]["value"]
     lines += ["", f"AGEING  {fmt.pct(over, ag['value'])} of the value at cost has been in stock over 180 days "
                   "(units on their newest supplier receipts). Full table: /yq-stock ageing"]
+    lines += _part_lines(model, "review", stock_review.headline_lines)
+    damage = _part_lines(model, "damage", stock_damage.headline_lines)
+    if damage:
+        lines += [""] + damage
     lines += _footer(model, ledger_note)
     return lines
+
+
+def _part_lines(model: Model, key: str, words) -> list[str]:
+    """A part's lines (words(facts)), or one line when that part could not be worked out this time."""
+    part = model.facts.get(key) or {}
+    if "error" in part:
+        return [f"  ({PART_WORDS[key][0].upper() + PART_WORDS[key][1:]} could not be worked out this time: "
+                f"{part['error']}.)"]
+    return list(words(part))
 
 
 def reorder_lines(model: Model, ledger_note: str) -> list[str]:
@@ -1178,16 +1261,18 @@ def reorder_lines(model: Model, ledger_note: str) -> list[str]:
         lines.append(f"  No item is below {f['trigger_days']} days of cover.")
     else:
         rows = []
+        plan = f.get("plan") or {}
         for n, x in enumerate(order, 1):
             it, r = x["item"], x["rate"]
-            rows.append([str(n), short(it.name, 34), it.code or "", fmt.units(it.on_hand),
-                         fmt.units(it.on_order) if it.on_order else "", fmt.units(r.sold), str(r.days_in_stock),
-                         rate_text(r.rate, r.floored), days_text(x["cover"]), fmt.units(x["qty"]),
-                         _cost_cell(x["cost_bhd"]), _date_short(it.last_receipt, d) if it.last_receipt else "none",
+            rows.append([str(n), short(it.name, 34), it.code or "", stock_plan.supplier_of(plan, it.ledger_name),
+                         fmt.units(it.on_hand), fmt.units(it.on_order) if it.on_order else "", fmt.units(r.sold),
+                         str(r.days_in_stock), rate_text(r.rate, r.floored), days_text(x["cover"]),
+                         fmt.units(x["qty"]), _cost_cell(x["cost_bhd"]),
+                         _date_short(it.last_receipt, d) if it.last_receipt else "none",
                          str(it.rank) if it.rank and it.rank <= model.cfg.fast_n else ""])
-        lines += _indent(fmt.grid(["#", "Item", "Code", "On hand", "On order", f"Sold {RATE_DAYS} d", "In stock",
-                                   "A day", "Cover", "Order", "At cost", "Last receipt", "Fast"], rows,
-                                  "rllrrrrrrrrlr"))
+        lines += _indent(fmt.grid(["#", "Item", "Code", "Supplier", "On hand", "On order", f"Sold {RATE_DAYS} d",
+                                   "In stock", "A day", "Cover", "Order", "At cost", "Last receipt", "Fast"], rows,
+                                  "rlllrrrrrrrrlr"))
         if any(x["rate"].floored for x in order):
             lines.append(FLOOR_NOTE)
         units = sum((x["qty"] for x in order), ZERO)
@@ -1277,15 +1362,24 @@ def ageing_lines(model: Model, ledger_note: str) -> list[str]:
             it = x["item"]
             since = x["since"]
             if since is None or since > SALE_LIMITS[1]:
-                action = "clear it: mark it down, bundle it, or ask the supplier to take it back"
+                action = "not selling: push it through the sales team (its weekly target is below)"
             else:
                 action = "still selling: order no more until it runs down"
             rows.append([short(it.name, 34), it.code or "", fmt.units(x["units"]), _cost_cell(x["value"]),
                          _date_short(it.last_sale, d), action])
         lines += _indent(fmt.grid(["Item", "Code", "Units over 180 d", "At cost", "Last sale", "Suggested"], rows,
                                   "llrrll"))
+    review = _part_lines(model, "review", lambda part: stock_review.review_lines(part, model))
+    if review:
+        lines += [""] + review
     lines += _footer(model, ledger_note)
     return lines
+
+
+def damage_view_lines(model: Model, ledger_note: str) -> list[str]:
+    """/yq-stock damage: the damage store in full (scripts.ops.stock_damage words it)."""
+    lines = _part_lines(model, "damage", lambda part: stock_damage.damage_lines(part, model))
+    return (lines or ["DAMAGE  nothing to show"]) + _footer(model, ledger_note)
 
 
 def item_cost_words(it: Item) -> str:
@@ -1380,6 +1474,8 @@ def item_lines(model: Model, query: str, ledger_note: str) -> list[str]:
         lines += _indent(fmt.grid(["Receipt", "Received", "Units", "Still on hand", "Age"], rows, "llrrr"), "    ")
     if chunks and chunks[-1][0] is None:
         lines.append(f"  {fmt.units(chunks[-1][2])} units on hand are explained by no receipt on file, to check.")
+    lines += _part_lines(model, "review", lambda part: stock_review.item_lines(part, it.ledger_name))
+    lines += _part_lines(model, "damage", lambda part: stock_damage.item_lines(part, it.ledger_name))
     lines += _footer(model, ledger_note)
     return lines
 
@@ -1414,7 +1510,11 @@ def facts_out(model: Model, view: str, query: str | None) -> dict:
     def item_row(it: Item) -> dict:
         return {"item": it.name, "code": it.code, "on_hand": it.on_hand, "cost": it.cost, "cost_source": it.cost_source}
 
-    out = {k: v for k, v in f.items() if k not in ("order", "fast", "ageing")}
+    out = {k: v for k, v in f.items() if k not in ("order", "fast", "ageing", "damage", "review", "plan")}
+    for key, as_json in (("damage", stock_damage.facts_json), ("review", stock_review.facts_json),
+                         ("plan", stock_plan.facts_json)):
+        part = f.get(key) or {}
+        out[key] = part if "error" in part else as_json(part)
     out["order"] = [dict(item_row(x["item"]), rate=x["rate"].rate, sold=x["rate"].sold,
                          days_in_stock=x["rate"].days_in_stock, cover=x["cover"], qty=x["qty"], cost_bhd=x["cost_bhd"])
                     for x in f["order"]]
@@ -1434,31 +1534,73 @@ def facts_out(model: Model, view: str, query: str | None) -> dict:
     return _jsonable(out)
 
 
+def day_file(model: Model, force: bool = False) -> dict:
+    """The day's Stock & Order Plan workbook (scripts.ops.workbook.stock_book), made at most once per data date
+    unless forced. Never raises: a workbook that cannot be made is one sentence, and the screen still prints."""
+    try:
+        from scripts.ops.workbook import stock_book
+    except ImportError as exc:
+        return {"path": None, "made": False, "made_at": None, "controls": [],
+                "error": f"the workbook engine could not be loaded ({type(exc).__name__})"}
+    try:
+        return stock_book.day_file(model, force=force)
+    except Exception as exc:  # noqa: BLE001  (the file is one part of the answer, never the answer)
+        if RAISE_PARTS:
+            raise
+        model.warnings.append(f"the workbook could not be made: {type(exc).__name__}: {exc}")
+        return {"path": None, "made": False, "made_at": None, "controls": [], "error": type(exc).__name__}
+
+
+def file_lines(book: dict) -> list[str]:
+    """The FILE line at the top of the screen: where the day's workbook is, or why there is none."""
+    if not book or book.get("built") is False:
+        return []
+    if book.get("error"):
+        return [f"FILE  not made this time: {book['error']}."]
+    path = Path(book["path"])
+    try:
+        shown = str(path.resolve().relative_to(paths.data_root().resolve()))
+    except ValueError:
+        shown = str(path)
+    when = "made now" if book.get("made") else f"made at {book.get('made_at') or '?'}; /yq-stock file makes a new one"
+    lines = [f"FILE  {shown} ({when})"]
+    lines += [f"  To check in the file: {c}" for c in book.get("controls") or []]
+    return lines + [""]
+
+
 def run(args) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
     view, query = parse_spec(getattr(args, "spec", None))
     cfg = settings()
     inp = gather(getattr(args, "ledger", "auto") or "auto")
+    book = None
     try:
         model = build(inp, cfg)
         if view == "reorder":
             lines = reorder_lines(model, inp.ledger_note)
         elif view == "ageing":
             lines = ageing_lines(model, inp.ledger_note)
+        elif view == "damage":
+            lines = damage_view_lines(model, inp.ledger_note)
         elif view == "item":
             lines = item_lines(model, query or "", inp.ledger_note)
         else:
             lines = headline_lines(model, inp.ledger_note)
+            book = day_file(model, force=view == "file")
+            lines = file_lines(book) + lines
     except StockInput as exc:
         return dict(out, ok=False, text=str(exc), exit=1)
     text = "\n".join(_guarded(ln).rstrip() for ln in lines)
-    stem = {"headline": "stock", "reorder": "stock-reorder", "ageing": "stock-ageing"}.get(view) \
-        or f"stock-item-{_slug(query or '')}"
+    stem = {"headline": "stock", "file": "stock", "reorder": "stock-reorder", "ageing": "stock-ageing",
+            "damage": "stock-damage"}.get(view) or f"stock-item-{_slug(query or '')}"
     folder = paths.exports_dir(model.d)
     facts = facts_out(model, view, query)
+    facts["file"] = {k: v for k, v in (book or {}).items() if k in ("path", "made", "made_at", "error")}
     files = [paths.write_text(folder / f"{stem}.txt", text + "\n"),
              paths.write_text(folder / f"{stem}.json", json.dumps(facts, indent=1, ensure_ascii=False) + "\n")]
     flags = {"view": view, "order_items": len(model.facts["order"]), "lead_basis": model.facts["lead"]["basis"],
              "goods_on_order": bool(model.facts["on_order"]["counted"])}
+    if book and book.get("path"):
+        flags["file"] = book["path"]
     return dict(out, data_date=model.d.isoformat(), text=text, flags=flags, files=[str(p) for p in files],
                 warnings=model.warnings)

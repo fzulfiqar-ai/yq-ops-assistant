@@ -87,13 +87,16 @@ NINE = re.compile(r"(?<![0-9])[0-9]{9}(?![0-9])")            # shaped like a per
 LONG = re.compile(r"(?<![0-9])[0-9]{15,}(?![0-9])")          # shaped like a card or account number
 
 MAIN, VAN, VAN_B, SIM_STORE = "Main Store", "Van A - Acc WH", "Van B - Acc WH", "Sim Store"
+DAMAGE, SAMPLES = "Damage Store", "Samples Store"
 D = date(2026, 3, 15)
 FIXTURE = {
-    "warehouses.main": MAIN, "warehouses.aliases": {}, "warehouses.not_counted": [],
+    "warehouses.main": MAIN, "warehouses.aliases": {}, "warehouses.not_counted": [DAMAGE, SAMPLES],
+    "warehouses.damage": DAMAGE,
     "items.bridge_exceptions": {}, "items.not_accessories": [],
     "stock.lead_time_days": 50, "stock.display_items": ["DS1"], "stock.fast_movers": 2,
-    "stock.cover_kpi_days": [30, 45],
+    "stock.cover_kpi_days": [30, 45], "stock.clear_target_days": 90,
 }
+stock.RAISE_PARTS = True              # a part that fails fails the test, never stands aside quietly
 NAMES = {"A": "ITEM-A Cable Alpha", "B": "ITEM-B Charger Beta", "C": "ITEM-C Holder Gamma",
          "N": "ITEM-N Speaker New", "F": "ITEM-F Fan Out", "DISP": "DISP-01 Counter Display"}
 CODES = {"A": "CA1", "B": "CB2", "C": "HG3", "N": "SN4", "F": "FO5", "DISP": "DS1"}
@@ -161,6 +164,23 @@ class Book:
     def sale(self, item, day, units, wh=VAN):
         self.n += 1
         self._row(item, day, ledger.SALE, wh, f"SI:T-{self.n}", qout=units)
+        return self
+
+    def to_damage(self, item, day, units, frm=MAIN, booked=True, booked_on=None):
+        """Units found damaged: issued from `frm` to the damage store; its receive leg only when `booked`
+        (on `booked_on`, else the same day)."""
+        self.n += 1
+        self._row(item, day, ledger.ISSUE, frm, f"SIO:T-{self.n}", qout=units, to_wh=DAMAGE)
+        if booked:
+            self._row(item, booked_on or day, ledger.RECEIVE, DAMAGE, f"STRV:T-{self.n}", qin=units)
+        return self
+
+    def move(self, item, day, units, frm, to, received=True):
+        """A transfer between any two stores; its receive leg only when `received`."""
+        self.n += 1
+        self._row(item, day, ledger.ISSUE, frm, f"SIO:T-{self.n}", qout=units, to_wh=to)
+        if received:
+            self._row(item, day, ledger.RECEIVE, to, f"STRV:T-{self.n}", qin=units)
         return self
 
 
@@ -239,17 +259,29 @@ def stock_cost_rows() -> list[dict]:
              "cost_source": "focus_avg" if PORTAL_COST[k] else None} for k, q in ON_HAND.items()]
 
 
+# The item master (catalog_items): every code of the world, and one the main store never held (an upcoming model).
+CATALOG_ROWS = [{"code": CODES[k], "display_name": NAMES[k], "category": cat, "brand": "VFAN", "division": "Accessories",
+                 "is_active": True, "hidden": k == "DISP"}
+                for k, cat in (("A", "Cables"), ("B", "Chargers"), ("C", "Holders"), ("N", "Speakers"), ("F", "Fans"),
+                               ("DISP", "Displays"))] + [
+    {"code": "ZN9", "display_name": "ZZ-NEW Speaker Upcoming", "category": "Speakers", "brand": "WEKOME",
+     "division": "Accessories", "is_active": True, "hidden": False}]
+
+
 class World:
     """The reads of the command, answered from the invented world. Every statement must be a read."""
 
     def __init__(self, book: Book | None = None, snapshot=None, mrn=None, sheet=None, invoices=None, portal_cost=None,
-                 fail: dict | None = None):
+                 fail: dict | None = None, catalog=None, po_vendor=None, cuts=None):
         self.book = book or world()
         self.snapshot = snapshot if snapshot is not None else snapshot_rows()
         self.mrn = list(MRN_ROWS if mrn is None else mrn)
         self.sheet = list(SHEET_ROWS if sheet is None else sheet)
         self.invoices = INVOICES if invoices is None else invoices
         self.portal_cost = stock_cost_rows() if portal_cost is None else portal_cost
+        self.catalog = [dict(r) for r in (CATALOG_ROWS if catalog is None else catalog)]
+        self.po_vendor = list(po_vendor or [])          # [(code, vendor)]
+        self.cuts = list(cuts or [])                    # [(code, item name, changed on, was, now)]
         self.fail = dict(fail or {})
         self.sql: list[str] = []
         self.pg: list[str] = []                      # what went to the read-only session (the rest: the read RPC)
@@ -272,6 +304,13 @@ class World:
         if sql == stock.MRN_SQL:
             return [{"id": i, "code": c.upper(), "cost": v, "effective_date": d, "doc_no": doc}
                     for i, c, v, d, doc in self.mrn]
+        if sql == stock.CATALOG_SQL:
+            return [dict(r) for r in self.catalog]
+        if sql == stock.PO_VENDOR_SQL:
+            return [{"code": c.upper(), "vendor": v} for c, v in self.po_vendor]
+        if sql == stock.PRICE_CUT_SQL:
+            return [{"code": c.upper(), "item_name": n, "changed_on": on, "was": str(was), "now": str(now)}
+                    for c, n, on, was, now in self.cuts]
         raise AssertionError(f"a statement the stand-in does not know: {sql[:70]}")
 
     def session(self, **_kw):
@@ -403,9 +442,21 @@ def _():
     with data_root(drop=("stock.lead_time_days",)):
         assert "stock.lead_time_days" in config.missing_keys()
         raises(config.ConfigMissing, stock.settings)                      # the lead time is never defaulted
-    # the optional keys with no default in config.py are these two (the report's empty defaults are the others)
-    assert config.OPTIONAL - set(config.DEFAULTS) == {"stock.fast_movers", "stock.cover_kpi_days"}
+    # the optional keys with no default in config.py are these three (the empty tables and texts are the others)
+    assert config.OPTIONAL - set(config.DEFAULTS) == {"stock.fast_movers", "stock.cover_kpi_days",
+                                                      "stock.clear_target_days"}
     assert set(config.DEFAULTS) <= config.OPTIONAL <= set(config.KEYS)
+    with data_root(drop=("stock.clear_target_days", "warehouses.damage")):
+        cfg = stock.settings()
+        assert cfg.clear_days == stock.CLEAR_DAYS_DEFAULT == 90 and "stock.clear_target_days" in cfg.defaults_used
+        assert cfg.damage == "" and cfg.suppliers == {} and cfg.supplier_aliases == {}   # empty defaults, no notice
+    with data_root({"stock.suppliers": {" ca1 ": " Local  Trader ", "": "x"},
+                    "stock.supplier_aliases": {"VFAN Co": "VFAN"}}):
+        cfg = stock.settings()
+        assert cfg.suppliers == {"CA1": "Local Trader"} and cfg.supplier_aliases == {"vfan co": "VFAN"}
+        assert cfg.damage == DAMAGE and cfg.not_counted == (DAMAGE, SAMPLES)
+    with data_root({"stock.clear_target_days": 0}):
+        raises(config.ConfigMissing, stock.settings)
 
 
 # ── the rate, cover and the order list ────────────────────────────────────────
@@ -642,11 +693,53 @@ def _():
     assert "display items (left out)" in text
     for action in (stock.AGE_ACTIONS[0], stock.AGE_ACTIONS[3]):
         assert action in text
-    assert "still selling: order no more until it runs down" in text and "clear it: mark it down" in text
+    assert "still selling: order no more until it runs down" in text and "not selling: push it through the sales team" in text
+    for word in ("mark it down", "bundle", "cut the price", "lower the price", "markdown"):   # the only lever is the
+        assert word not in text.lower(), word                                                 # sales team (20-Oct)
     assert "AGEING  32.4% of the value at cost has been in stock over 180 days" in head          # 117.6 / 362.8
 
 
 ZERO_V = Decimal(0)
+
+
+# ── the sellable pool and the damage store (scripts.ops.stockflow) ───────────
+
+@test("stockflow: the pool is main + vans + goods on the way; damage counts on the issue leg; booked and left apart")
+def _():
+    from scripts.ops import stockflow
+    x = "ITEM-X Test Flow XX1"
+    b = Book()
+    b.receipt(x, date(2026, 1, 1), 100, 50, "MRN:T-X-1")
+    b.move(x, date(2026, 1, 2), 30, MAIN, VAN)                          # inside the pool: nothing changes
+    b.sale(x, date(2026, 1, 3), 5, wh=VAN)                              # 95
+    b.move(x, date(2026, 1, 4), 10, MAIN, VAN_B, received=False)        # on its way: still in the pool
+    b.to_damage(x, date(2026, 1, 5), 4)                                 # from the main store, booked: 91
+    b.to_damage(x, date(2026, 1, 6), 3, frm=VAN, booked=False)          # from a van, never booked: 88
+    b.move(x, date(2026, 1, 7), 2, MAIN, SAMPLES)                       # out to the samples store: 86
+    b.move(x, date(2026, 1, 8), 1, SAMPLES, MAIN)                       # one comes back: 87
+    b._row(x, date(2026, 1, 9), ledger.ISSUE, MAIN, "SIO:T-NODEST", qout=1, to_wh=None)   # no destination: stays
+    b._row(x, date(2026, 1, 10), ledger.COUNT_SHORT, DAMAGE, "SH:T-1", qout=1)            # one written off there
+    b.sale("OTHER Item YY2", date(2026, 1, 3), 9, wh=VAN)               # an item not asked for: passed over
+    with data_root():
+        fl = stockflow.flows(b.rows, [x], DAMAGE, [DAMAGE, SAMPLES], date(2026, 1, 10))
+    f = fl.get(x)
+    assert fl.damage_store == DAMAGE and fl.damage_found and fl.no_destination == 1
+    assert set(fl.outside) == {DAMAGE, SAMPLES} and "OTHER Item YY2" not in fl.items
+    assert f.sellable_at(date(2025, 12, 31)) == 0 and f.sellable_at(date(2026, 1, 1)) == 100
+    assert f.sellable_at(date(2026, 1, 4)) == 95                        # the unreceived transfer stays in the pool
+    assert f.sellable_at(date(2026, 1, 10)) == 87, f.sellable_at(date(2026, 1, 10))
+    # the main store: 100 - 30 - 10 - 4 - 2 + 1 - 1 = 54 (every voucher there, receive legs included)
+    assert f.main_at(date(2026, 1, 10)) == 54
+    assert [(d_, src, u) for d_, src, u in f.sent_damage] == [(date(2026, 1, 5), "main", 4),
+                                                             (date(2026, 1, 6), "elsewhere", 3)]
+    assert f.sent_between(None, date(2026, 1, 10)) == 7 and f.sent_between(None, date(2026, 1, 10), "main") == 4
+    assert f.booked_between(None, date(2026, 1, 10)) == 4 and f.left_between(None, date(2026, 1, 10)) == 1
+    assert f.damage_at(date(2026, 1, 9)) == 4 and f.damage_at(date(2026, 1, 10)) == 3
+    assert f.sellers == {VAN: 5}
+    # no damage store set up: nothing is damage, and the store is outside the pool only if not_counted says so
+    with data_root():
+        fl2 = stockflow.flows(b.rows, [x], "", [], date(2026, 1, 10))
+    assert fl2.damage_store is None and not fl2.damage_found and fl2.get(x).sent_damage == []
 
 
 # ── the headline ──────────────────────────────────────────────────────────────
@@ -751,7 +844,8 @@ def _():
 @test("the reads: every statement is a read; a failed optional read costs its own part, named under the screen")
 def _():
     for sql in (stock.SNAPSHOT_SQL, stock.PORTAL_WAREHOUSE_SQL, stock.PRICE_BOOK_SQL, stock.SUPPLIER_SQL,
-                stock.MRN_SQL, stock.SHEET_SQL, metrics.STOCK_SQL):
+                stock.MRN_SQL, stock.SHEET_SQL, metrics.STOCK_SQL, stock.CATALOG_SQL, stock.PO_VENDOR_SQL,
+                stock.PRICE_CUT_SQL):
         db.check_sql(sql)
     w = World()
     with data_root():
