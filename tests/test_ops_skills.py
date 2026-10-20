@@ -732,6 +732,7 @@ class NothingStarts:
     files and the database are as the table showed them, and nothing in it can start. The Yes/No box is never
     shown (it answers No) and no worker can be spawned."""
     rehearsal = False
+    one_transaction = True                                   # the loader of a real load (its WAIT line's rule)
     prepare = None
     settings_files: list = []
 

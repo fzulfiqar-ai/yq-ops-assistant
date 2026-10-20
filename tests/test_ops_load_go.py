@@ -1745,6 +1745,148 @@ def _():
         assert not paths.lock_file().exists()
 
 
+def utc(h, m, s=0) -> datetime:
+    return datetime(2026, 1, 1, h, m, s, tzinfo=timezone.utc)
+
+
+@test("the one-transaction rule: a refresh starts at any moment but one that could still run when the 8 o'clock agents begin, until they are done")
+def _():
+    need = yq.REFRESH_ASSUMED_S                  # nothing on record: a refresh is taken to last 4 minutes
+    assert yq.refresh_need_s(None) == need and yq.refresh_need_s(300) == 375 and yq.refresh_need_s("junk") == need
+    # the agents' window is 07:59:45 (the clocks' margin) to 08:20:00 Bahrain = 04:59:45 to 05:20:00 UTC
+    for (h_, m, s), want in (((9, 0, 0), 0), ((9, 0, 30), 0), ((9, 10, 0), 0), ((9, 14, 59), 0), ((4, 49, 0), 0),
+                             ((4, 55, 44), 0), ((4, 55, 45), 1456), ((4, 56, 0), 1441), ((5, 0, 0), 1201),
+                             ((5, 19, 59), 2), ((5, 20, 0), 1), ((5, 20, 1), 0), ((5, 31, 0), 0), ((20, 59, 0), 0)):
+        got = yq.agents_wait_seconds(utc(h_, m, s), need)
+        assert got == want, (h_, m, s, got, want)
+    assert yq.agents_wait_seconds(utc(4, 51, 25), 500) == 1716 and yq.agents_wait_seconds(utc(4, 51, 24), 500) == 0
+    # the REST loader's rule is untouched, and the loader in use picks the rule
+    assert yq.start_wait_seconds(utc(9, 10), 540) == yq.tick_wait_seconds(utc(9, 10), 540) == 360
+    assert yq.start_wait_seconds(utc(9, 10), 540, one_transaction=True) == 0
+
+    a, b = utc(4, 59, 45), utc(5, 20)
+
+    def allowed(t) -> bool:
+        return not (t <= b and t + timedelta(seconds=need) >= a)
+
+    t = utc(0, 0)
+    for _ in range(24 * 60 * 2):                 # every half minute of a day
+        wait = yq.agents_wait_seconds(t, need)
+        assert (wait == 0) == allowed(t), t
+        assert allowed(t + timedelta(seconds=wait)), (t, wait)
+        assert wait <= 25 * 60, (t, wait)
+        t += timedelta(seconds=30)
+
+
+@test("the moments the one commit keeps out of: each quarter-hour tick from 15 s before to 90 s after, and the 8 o'clock agents")
+def _():
+    from scripts.load_txn import hold_seconds, parse_avoid     # the loader's own reading of the list
+    now = utc(9, 2)
+    av = yq.commit_avoid(now)
+    t0 = int(now.timestamp())
+    assert av == sorted(av) and all(b - a == yq.COMMIT_CLEAR_BEFORE_S + yq.COMMIT_CLEAR_AFTER_S for a, b in av)
+    ticks = [a + yq.COMMIT_CLEAR_BEFORE_S for a, _b in av]
+    assert ticks[0] == t0 - 120 and all(x % yq.TICK_S == 0 for x in ticks) and ticks[-1] >= t0 + yq.COMMIT_AVOID_S - 900
+    morning = yq.commit_avoid(utc(3, 30))       # 06:30 Bahrain: the agents' window lies inside the span
+    agents = (int(utc(4, 59, 45).timestamp()), int(utc(5, 20).timestamp()))
+    assert agents in morning and agents not in av
+    spec = yq.avoid_spec(av)
+    assert parse_avoid(spec) == (av, None)
+    # what the loader then does: a commit at 09:00:30 waits to 09:01:30, one at 08:59:50 too, one at 09:02 at once
+    assert hold_seconds(utc(9, 0, 30).timestamp(), av) == 60 and hold_seconds(utc(8, 59, 50).timestamp(), av) == 100
+    assert hold_seconds(utc(9, 2).timestamp(), av) == 0
+    # inside the agents' window it waits to its end (the start rule keeps a refresh from getting there)
+    assert hold_seconds(utc(5, 0, 30).timestamp(), morning) == 19 * 60 + 30
+
+
+@test("the worker with the one-transaction loader: no tick wait, the refresh child told so with the moments to keep out of, the agents waited out")
+def _():
+    with data_root() as root:                    # 09:10: the REST loader would wait six minutes; this one starts at once
+        h = Harness(root, start=utc(9, 10))
+        h.deps.one_transaction = True
+        assert h.load() == 0 and h.clock.sleeps == []
+        row = h.rows("step_ok", "wait_tick")[0]
+        assert row["text"] == ("No wait needed: the load writes in one transaction, at a moment clear of production's "
+                               "quarter-hour jobs. The table still holds."), row["text"]
+        assert row["one_transaction"] is True and row["waited_seconds"] == 0 and row["checks"] == 1 and "until_s" not in row
+        argv = h.runner.argv("refresh")
+        assert argv[3:6] == ["-c", yq.REFRESH_PROGRAM, str(h.w.staging)] and argv[6] == yq.ONE_TXN_ARG
+        assert argv[7] == yq.avoid_spec(yq.commit_avoid(utc(9, 10))), "the list is made when the child starts"
+        assert h.rows("finished")[0]["result"] == "ok"
+    with data_root() as root:                    # 07:56 Bahrain: a refresh now could straddle the agents: after 08:20
+        h = Harness(root, start=utc(4, 56))
+        h.deps.one_transaction = True
+        assert h.load() == 0 and h.clock.now() == utc(5, 20, 1)
+        assert h.rows("note", "wait_tick")[0]["text"] == (
+            "Waiting about 24 min, to write at about 08:20: production's 8 o'clock agents run from 08:00 to 08:20 Bahrain "
+            "and no load writes meanwhile.")
+        row = h.rows("step_ok", "wait_tick")[0]
+        assert row["text"] == "Waited 24.0 min for production's 8 o'clock agents; the table still holds." and row["checks"] == 2
+        assert row["waited_seconds"] == 1441 and yq.agents_wait_seconds(utc(5, 20, 1)) == 0
+    with data_root() as root:                    # 07:50: a refresh started now is over before the agents begin
+        h = Harness(root, start=utc(4, 50))
+        h.deps.one_transaction = True
+        assert h.load() == 0 and h.clock.sleeps == []
+    with data_root() as root:                    # a slow refresh on record starts the margin before 8 earlier
+        h = Harness(root, start=utc(4, 52))
+        h.deps.one_transaction = True
+        h.deps.read_state = lambda: {"last_load": {"refresh_seconds_recent": [90, 400]}}       # 1.25 x 400 = 500 s
+        assert h.load() == 0 and h.clock.now() == utc(5, 20, 1)
+        assert h.rows("step_ok", "wait_tick")[0]["need_s"] == 500
+    with data_root() as root:                    # a rehearsal says what a real one-transaction load would wait for
+        h = Harness(root, start=utc(4, 56))
+        h.deps.one_transaction, h.deps.wait_for_tick = True, False
+        assert h.load() == 0
+        assert h.rows("step_ok", "wait_tick")[0]["text"] == ("A real load would wait 1441 s here for production's "
+                                                             "8 o'clock agents; a rehearsal does not.")
+
+
+@test("the one-transaction re-run: a failed load stage left nothing, so the second run waits by the same rule; the box's WAIT line names the agents")
+def _():
+    def stage_fails(h, minutes):
+        def answer(argv):
+            h.clock.t += timedelta(minutes=minutes)
+            h.w.newest_run += 1                  # refresh's own error row
+            return yq.Child(2, refresh_line(ok=False, verify_ok=None, error="The load step failed.") + "\n")
+        return answer
+
+    with data_root() as root:                    # the first run fails at 07:56: the second waits for the agents
+        h = Harness(root, start=utc(4, 50))
+        h.deps.one_transaction = True
+        starts = []
+        h.runner.hooks["refresh"] = lambda: starts.append(h.clock.now())
+        h.runner.script["refresh"] = [stage_fails(h, 6)]
+        assert h.load() == 0, h.rows()[-1]
+        assert starts == [utc(4, 50), utc(5, 20, 1)], starts
+        assert [n["text"] for n in h.rows("note", "refresh")] == [
+            "Waited 23.5 min for production's 8 o'clock agents before the second run."]
+        first, second = [c[1] for c in h.runner.calls if c[0] == "refresh"]
+        assert first[:7] == second[:7] and first[7] != second[7], "the same load; the list moves with the clock"
+    with data_root() as root:                    # at noon there is nothing to wait for
+        h = Harness(root)
+        h.deps.one_transaction = True
+        h.runner.script["refresh"] = [stage_fails(h, 1)]
+        assert h.load() == 0 and h.rows("note", "refresh") == []
+    # the box: before 8 o'clock only, and the agents named
+    line = yq.wait_note(utc(4, 55), one_transaction=True)
+    assert line == ("WAIT: a Yes now may not write until about 08:20 Bahrain (up to 25 min from now): no load writes "
+                    "while production's 8 o'clock agents run (08:00 to 08:20)."), line
+    assert len(line) <= 160
+    assert yq.wait_note(utc(4, 46), one_transaction=True) is None       # every end of the backup still writes before 8
+    assert yq.wait_note(utc(4, 50), one_transaction=True) is not None   # a slow backup would end too close to 8
+    assert yq.wait_note(utc(7, 8), one_transaction=True) is None        # a quarter-hour tick is no wait for this loader
+    assert yq.wait_note(utc(7, 8)) is not None                          # ... for the REST loader it still is
+    with data_root() as root:                    # the box itself takes the rule of the loader in use
+        h = Harness(root, start=utc(4, 55))
+        h.deps.one_transaction = True
+        assert h.go() == 0, h.out
+        assert line in h.box.shown[0][1].splitlines()
+    with data_root() as root:
+        h = Harness(root, start=utc(7, 8))
+        h.deps.one_transaction = True
+        assert h.go() == 0 and "WAIT:" not in h.box.shown[0][1]
+
+
 @test("a load-stage failure is run once more, identically; ingest_runs is counted for the attempt that passed")
 def _():
     def stage_fails(h):
@@ -3349,6 +3491,19 @@ def _():
             assert child.code == (0 if mode == "ok" else 2)
             assert json.loads((t / "seen.json").read_text(encoding="utf-8")) == {"folder": "staging folder", "send": False}
             assert [ln for ln in child.text.splitlines() if ln.startswith("REFRESH_RESULT ")][-1].isascii()
+        # the one transaction: the two words reach the loader through the refresh's environment, and only then
+        (t / "scripts" / "refresh.py").write_text(
+            "import json, os\n"
+            "def refresh(folder=None, send=True):\n"
+            f"    open('env.json', 'w').write(json.dumps([os.environ.get({yq.ONE_TXN_ENV!r}), os.environ.get({yq.AVOID_ENV!r})]))\n"
+            "    return {'ok': True, 'data_as_of': None, 'error': None, 'loaded': {}, 'changes': {}, 'verify': {'ok': True}}\n",
+            encoding="utf-8")
+        env = {k: v for k, v in yq.child_env().items() if k not in (yq.ONE_TXN_ENV, yq.AVOID_ENV)}
+        for extra, want in ((["--one-transaction", "1760941890-1760941995"], ["1", "1760941890-1760941995"]),
+                            (["--one-transaction"], ["1", ""]), ([], [None, None])):
+            child = yq.run_child([sys.executable, "-X", "utf8", "-c", yq.REFRESH_PROGRAM, "staging folder"] + extra,
+                                 cwd=t, env=env)
+            assert child.code == 0 and json.loads((t / "env.json").read_text()) == want, (extra, child.text)
     assert yq.parse_refresh("noise\nREFRESH_RESULT not json\n") is None and yq.parse_refresh("no line") is None
     assert yq.parse_refresh("REFRESH_RESULT [1]\n") is None
 
@@ -3376,6 +3531,8 @@ def _():
         assert paths.drop_date("000000") is None, "a drop folder could spell the rehearsal's name"
         real = yq.deps_for(RUN, {})                                                 # built, never called: no connection
         assert type(real.runner) is yq.RealRunner and real.rehearsal is False and real.wait_for_tick is True
+        # a real load writes in one transaction (and takes its window); a rehearsal says what such a load would wait
+        assert yq.ONE_TRANSACTION is True and real.one_transaction is True and deps.one_transaction is True
         assert real.gates_dir == yq.ROOT / "business_data" / "gates" and real.clean_dir == yq.ROOT / "data" / "clean"
         assert real.staging == loadplan.staging_path(RUN) and real.backup_keep() == 2
         assert real.published_dir(datetime(2026, 1, 1).date()) == paths.published_dir(datetime(2026, 1, 1).date())
