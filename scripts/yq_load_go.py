@@ -37,7 +37,9 @@ THE WORKER (loadplan.STEPS; every step journalled; the lock's heartbeat every 10
   pre_gate   the before-snapshot (scripts.prod_gate). Failure: stop, nothing was written
   wait_tick  the token a third time, then a quiet moment between two production ticks. After a
              wait the token is checked again; the step ends only on a check that is followed at once
-             by a quiet moment (a slow check that outlasts it waits for the next one)
+             by a quiet moment (a slow check that outlasts it waits for the next one). With the
+             one-transaction loader (ONE_TRANSACTION) any moment is quiet but the 8 o'clock agents':
+             the loader keeps its one commit out of the quarter-hour jobs by itself (commit_avoid)
   refresh    scripts.refresh.refresh(staging, send=False) in a CHILD process. It passes on: ok,
              verify passed, no loader notice, ingest_runs grew by exactly 2 in that attempt. A
              load-stage failure is run once more, identically; so is a load whose verification
@@ -195,6 +197,25 @@ BEFORE_WRITE_S = (120, 360)
 BEFORE_WRITE_STEP_S = 30
 WAIT_NOTE_S = 300
 
+# Release 3 (20-Oct-2026): the loader writes every Focus table in ONE transaction (scripts/load_supabase.py
+# --one-transaction, scripts/load_txn.py), so production reads the old data or the new, never a half-replaced
+# ledger. While the load runs that way (ONE_TRANSACTION, Deps.one_transaction) the rules above give way to two:
+#  * no commit from COMMIT_CLEAR_BEFORE_S before a quarter-hour tick to COMMIT_CLEAR_AFTER_S after it, while
+#    keepwarm's calls run (the shop jobs, the daily agents' check, the event dispatch; the margin before the tick
+#    is for the two clocks): the loader holds its commit out of those moments itself, from the list this program
+#    hands its refresh child (commit_avoid), so the refresh may START at any time;
+#  * no refresh starts that could still be running when production's 8 o'clock agents begin, until they are done
+#    (AGENTS_FROM to AGENTS_UNTIL Bahrain), so one agent run never straddles the commit. How long they run is not
+#    measured yet: AGENTS_UNTIL keeps the old window's end until it is (agent_runs.ran_at of the scheduled runs).
+# False puts the REST loader and the rules above back together, with no deploy (this file is no engine file).
+ONE_TRANSACTION = True
+ONE_TXN_ARG = "--one-transaction"                   # the refresh child's word for it; scripts/load_supabase.py's own
+ONE_TXN_ENV, AVOID_ENV = "YQ_LOAD_ONE_TRANSACTION", "YQ_LOAD_COMMIT_AVOID"     # what scripts/load_txn.py reads
+COMMIT_CLEAR_BEFORE_S, COMMIT_CLEAR_AFTER_S = 15, 90
+AGENTS_FROM, AGENTS_UNTIL = (8, 0), (8, 20)
+COMMIT_AVOID_S = 3 * 3600                           # how far ahead the list of moments to avoid reaches
+REFRESH_NEED_MAX_S = 600                            # one slow refresh never moves the margin before 8 earlier than this
+
 # Every load deletes and re-inserts the whole stock ledger. Once a refresh has begun, this is the
 # sentence for the state of the database, whatever ended the run afterwards.
 MAY_HOLD = "The database may hold part of the interrupted load until the next load."
@@ -266,7 +287,10 @@ VERDICT_WORDS = {                   # the same words as the load check's table
 # verify_error is set when the verification could not RUN (the refresh then keeps an 'error' in its
 # verify result): nothing was compared, which is another thing than totals that differ.
 REFRESH_PROGRAM = (
-    "import json, sys\n"
+    "import json, os, sys\n"
+    f"if sys.argv[2:3] == [{ONE_TXN_ARG!r}]:\n"      # one transaction: the loader reads both words from its env
+    f"    os.environ[{ONE_TXN_ENV!r}] = '1'\n"
+    f"    os.environ[{AVOID_ENV!r}] = ''.join(sys.argv[3:4])\n"
     "from scripts.refresh import refresh\n"
     "res = refresh(sys.argv[1], send=False)\n"
     "verify = res.get('verify')\n"
@@ -582,6 +606,8 @@ def child_env(base=None) -> dict:
     env["PYTHONUTF8"] = "1"
     for name in ("PYTHONIOENCODING", NONCE_ENV, BREAKAWAY_ENV, BACKUP_PASSWORD_ENV):
         env.pop(name, None)                  # (no engine step needs the backup password; only the worker gets it)
+    for name in (ONE_TXN_ENV, AVOID_ENV):    # only the refresh child's own words ask for one transaction
+        env.pop(name, None)
     return env
 
 
@@ -1314,16 +1340,23 @@ def token_moved(plan: dict, deps: "Deps", with_fingerprint: bool) -> list[str]:
     return loadplan.moved_parts(old, new) or ["the plan of this run (its token is not the one its own parts give)"]
 
 
+def refresh_need_s(last_refresh_s=None) -> float:
+    """How long the next refresh is taken to last: 1.25 times the last refresh on record, never less
+    than REFRESH_ASSUMED_S (also what nothing on record, the first load, counts as) and never more
+    than REFRESH_NEED_MAX_S (a refresh that does run longer has its commit held by the loader)."""
+    try:
+        took = max(0.0, float(last_refresh_s)) if last_refresh_s is not None else 0.0
+    except (TypeError, ValueError):
+        took = 0.0
+    return min(float(REFRESH_NEED_MAX_S), max(float(REFRESH_ASSUMED_S), 1.25 * took))
+
+
 def start_until_s(last_refresh_s=None) -> int:
     """The last second after a quarter-hour tick at which a load may start. The refresh it starts
     must end TICK_MARGIN_S before the next tick, counted at 1.25 times the last refresh on record
     (and never less than REFRESH_ASSUMED_S); the window never closes later than START_UNTIL_S nor
     earlier than START_UNTIL_MIN_S. Nothing on record (the first load) counts as REFRESH_ASSUMED_S."""
-    try:
-        took = max(0.0, float(last_refresh_s)) if last_refresh_s is not None else 0.0
-    except (TypeError, ValueError):
-        took = 0.0
-    need = max(float(REFRESH_ASSUMED_S), 1.25 * took)
+    need = refresh_need_s(last_refresh_s)
     return int(min(START_UNTIL_S, max(START_UNTIL_MIN_S, TICK_S - TICK_MARGIN_S - need)))
 
 
@@ -1375,19 +1408,85 @@ def _quiet_words() -> str:
     return f"{QUIET_FROM[0]:02d}:{QUIET_FROM[1]:02d} to {QUIET_UNTIL[0]:02d}:{QUIET_UNTIL[1]:02d}"
 
 
-def wait_note(now: datetime, until_s: int = START_UNTIL_S) -> str | None:
+def _agents_words() -> str:
+    return f"{AGENTS_FROM[0]:02d}:{AGENTS_FROM[1]:02d} to {AGENTS_UNTIL[0]:02d}:{AGENTS_UNTIL[1]:02d}"
+
+
+def _agents_window(local: datetime) -> tuple[datetime, datetime]:
+    """[from, until] of production's 8 o'clock agents on the Bahrain day of `local`, with the clocks'
+    margin before it."""
+    a = local.replace(hour=AGENTS_FROM[0], minute=AGENTS_FROM[1], second=0, microsecond=0)
+    b = local.replace(hour=AGENTS_UNTIL[0], minute=AGENTS_UNTIL[1], second=0, microsecond=0)
+    return a - timedelta(seconds=COMMIT_CLEAR_BEFORE_S), b
+
+
+def agents_wait_seconds(now: datetime, need_s: float = REFRESH_ASSUMED_S) -> float:
+    """The one-transaction rule: 0 when a load may start its refresh now, else the seconds until it may.
+    A refresh (taken to last need_s) that would still be running when the 8 o'clock agents begin starts
+    the second after they are done; at any other moment it starts at once (its commit keeps out of the
+    quarter-hour jobs by itself, commit_avoid)."""
+    start = now.astimezone(timezone.utc)
+    t = start
+    for _ in range(3):
+        local = t.astimezone(BAHRAIN)
+        for days in (0, 1):
+            a, b = _agents_window(local + timedelta(days=days))
+            if t <= b and t + timedelta(seconds=float(need_s)) >= a:
+                t = (b + timedelta(seconds=1)).astimezone(timezone.utc)
+                break
+        else:
+            break
+    return max(0.0, (t - start).total_seconds())
+
+
+def start_wait_seconds(now: datetime, until_s: int = START_UNTIL_S, *, one_transaction: bool = False,
+                       need_s: float = REFRESH_ASSUMED_S) -> float:
+    """The wait before a refresh may start, by the rule of the loader in use: the one transaction's
+    (agents_wait_seconds) or the REST loader's (tick_wait_seconds)."""
+    if one_transaction:
+        return agents_wait_seconds(now, need_s)
+    return tick_wait_seconds(now, until_s)
+
+
+def commit_avoid(now: datetime, span_s: int = COMMIT_AVOID_S) -> list[tuple[int, int]]:
+    """The moments a one-transaction load must not commit in, from now to span_s ahead, as [start, end)
+    epoch seconds (UTC): every quarter-hour tick from COMMIT_CLEAR_BEFORE_S before it to
+    COMMIT_CLEAR_AFTER_S after it, and the 8 o'clock agents of every day in the span."""
+    t0 = int(now.astimezone(timezone.utc).timestamp())
+    first = t0 - t0 % TICK_S
+    out = [(tick - COMMIT_CLEAR_BEFORE_S, tick + COMMIT_CLEAR_AFTER_S)
+           for tick in range(first, t0 + span_s + 1, TICK_S)]
+    local = now.astimezone(BAHRAIN)
+    for days in range(0, span_s // 86400 + 2):
+        a, b = _agents_window(local + timedelta(days=days))
+        if b.timestamp() > t0 and a.timestamp() < t0 + span_s:
+            out.append((int(a.timestamp()), int(b.timestamp())))
+    return sorted(out)
+
+
+def avoid_spec(intervals: list[tuple[int, int]]) -> str:
+    """The text the refresh child hands the loader (scripts/load_txn.py parse_avoid reads it back)."""
+    return ",".join(f"{int(a)}-{int(b)}" for a, b in intervals)
+
+
+def wait_note(now: datetime, until_s: int = START_UNTIL_S, *, one_transaction: bool = False,
+              need_s: float = REFRESH_ASSUMED_S) -> str | None:
     """The box's line on how late a Yes now may write, or None: the backup and the before-snapshot may
-    end anywhere in BEFORE_WRITE_S (tried every BEFORE_WRITE_STEP_S), tick_wait_seconds gives each end's
+    end anywhere in BEFORE_WRITE_S (tried every BEFORE_WRITE_STEP_S), start_wait_seconds gives each end's
     wait, and the latest write among the waits of WAIT_NOTE_S or more is told."""
     waits = []                                   # (end of the backup, write) for each end that waits long
     for s in range(BEFORE_WRITE_S[0], BEFORE_WRITE_S[1] + 1, BEFORE_WRITE_STEP_S):
         ready = now + timedelta(seconds=s)
-        wait = tick_wait_seconds(ready, until_s)
+        wait = start_wait_seconds(ready, until_s, one_transaction=one_transaction, need_s=need_s)
         if wait >= WAIT_NOTE_S:
             waits.append((ready, ready + timedelta(seconds=wait)))
     if not waits:
         return None
     at = max(end for _ready, end in waits).astimezone(BAHRAIN)
+    mins = round((at - now).total_seconds() / 60)
+    if one_transaction:                          # the only long wait of this rule is the 8 o'clock agents'
+        return (f"WAIT: a Yes now may not write until about {at:%H:%M} Bahrain (up to {mins} min from now): no load "
+                f"writes while production's 8 o'clock agents run ({_agents_words()}).")
     quiet = False
     for ready, end in waits:
         begin = ready.astimezone(BAHRAIN)
@@ -1396,7 +1495,6 @@ def wait_note(now: datetime, until_s: int = START_UNTIL_S) -> str | None:
         quiet = quiet or (begin <= quiet_until and end >= quiet_from)
     why = (f"no load writes from {_quiet_words()} Bahrain (production's 8 o'clock run)" if quiet
            else f"a load starts 1 to {until_s // 60} minutes after production's quarter-hour tick")
-    mins = round((at - now).total_seconds() / 60)
     return f"WAIT: a Yes now may not write until about {at:%H:%M} Bahrain (up to {mins} min from now): {why}."
 
 
@@ -1431,6 +1529,7 @@ class Deps:
     log: Callable[[str], None] = _to_log
     keep_awake: Callable[[bool], bool] = keep_awake
     wait_for_tick: bool = True
+    one_transaction: bool = False                        # the loader writes in one transaction: its window (real_deps)
     start_wait_s: float = START_WAIT_S
     heartbeat_s: float = HEARTBEAT_S
     # (plan) -> what another load wrote to the database after this run's check (loadplan.foreign_writes)
@@ -1635,7 +1734,7 @@ def real_deps(run: str, plan: dict, root: Path = ROOT) -> Deps:
         superseded_dir=paths.staging_dir() / "superseded", read_state=status.read_state,
         write_state=status.write_state, box=windows_box, spawn=spawn_worker, settings_files=settings_files(root),
         linked_worktree=lambda: gitinfo.is_linked_worktree(root), prepare=_real_prepare,
-        foreign_writes=_real_foreign_writes, box_notes=_real_box_notes, deliver=True)
+        foreign_writes=_real_foreign_writes, box_notes=_real_box_notes, deliver=True, one_transaction=ONE_TRANSACTION)
 
 
 # ── the rehearsal's world ─────────────────────────────────────────────────────────────────────
@@ -1730,7 +1829,8 @@ def rehearsal_deps(run: str, plan: dict, root: Path = ROOT) -> Deps:
         superseded_dir=box / "superseded", read_state=read_state, write_state=write_state, box=windows_box,
         spawn=spawn_worker, settings_files=settings_files(root),
         linked_worktree=lambda: gitinfo.is_linked_worktree(root), prepare=None, wait_for_tick=False,
-        deliver=True)                        # it only says what a real load would deliver (deliver_after)
+        deliver=True,                        # it only says what a real load would deliver (deliver_after)
+        one_transaction=ONE_TRANSACTION)     # ... and how long a real load would wait (step_wait_tick)
 
 
 def deps_for(run: str, plan: dict, root: Path = ROOT) -> Deps:
@@ -2040,7 +2140,9 @@ def _launch(run: str, token: str, dev: bool, no_box: bool, deps: Deps | None, sa
                       + "; ".join(odd) + "). Nothing was started: type /yq-load.")
 
     # the owner's confirmation (a rehearsal never waits for a tick: no WAIT line)
-    waiting = None if rehearsal else wait_note(deps.now(), start_until_s(last_refresh_seconds(deps.read_state)))
+    took = None if rehearsal else last_refresh_seconds(deps.read_state)
+    waiting = None if rehearsal else wait_note(deps.now(), start_until_s(took), one_transaction=deps.one_transaction,
+                                               need_s=refresh_need_s(took))
     title, text = box_text(run, plan, resume_step=stopped_at if resume else None, rehearsal=rehearsal,
                            notes=([waiting] if waiting else []) + list(deps.box_notes()))
     answer = "yes" if no_box else str(deps.box(title, text, BOX_TIMEOUT_S))
@@ -2197,8 +2299,13 @@ class Job:
         self.t0 = deps.now()
         self.began_at = self.t0                          # the whole run, for the timing line of its closing row
         self.timings: dict[str, float] = {}              # seconds per step, as journalled (one load's profile)
-        # the last second after a tick at which this load may start its refresh (start_until_s)
-        self.tick_until = start_until_s(last_refresh_seconds(deps.read_state))
+        # the last second after a tick at which this load may start its refresh (start_until_s); with the
+        # one transaction, how long a refresh is taken to last before the 8 o'clock agents (refresh_need_s)
+        took = last_refresh_seconds(deps.read_state)
+        self.tick_until = start_until_s(took)
+        self.need_s = refresh_need_s(took)
+        self.one_txn = bool(deps.one_transaction)
+        self.refresh_run_s = 0.0                         # the refresh child's own run, the waits around it left out
         self.needs_look: list[str] = []
         self.pre_gate: Path | None = None
         self.result: dict = {}
@@ -2277,6 +2384,14 @@ class Job:
         else:
             self.lock.update(child_pid=None, child_created=None, child_step=None)
 
+    def _start_wait(self) -> float:
+        """The seconds until the refresh may start, by the rule of the loader this load uses."""
+        return start_wait_seconds(self.deps.now(), self.tick_until, one_transaction=self.one_txn, need_s=self.need_s)
+
+    def _one_txn_args(self) -> list[str]:
+        """The refresh child's words for the loader: one transaction, and the moments its commit keeps out of."""
+        return [ONE_TXN_ARG, avoid_spec(commit_avoid(self.deps.now()))] if self.one_txn else []
+
     def _before_rerun(self, whole: bool) -> None:
         """What holds before the one identical re-run of the load starts. The first run may have
         taken minutes (or the PC slept through it): the files and the two commits are compared
@@ -2284,20 +2399,23 @@ class Job:
         first run left the database WHOLE (the data loaded, only its verification could not run),
         the re-run waits for a quiet moment between two production ticks as the first run did;
         after a load stage that failed part-way it starts at once, because a half-loaded ledger is
-        the worse thing to leave standing."""
+        the worse thing to leave standing. With the one transaction a load stage that failed left
+        nothing, so the re-run waits by the same rule as the first run."""
         d = self.deps
-        if whole and d.wait_for_tick:
+        if (whole or self.one_txn) and d.wait_for_tick:
             waited = 0.0
             while True:
-                wait = tick_wait_seconds(d.now(), self.tick_until)
+                wait = self._start_wait()
                 if wait <= 0:
                     break
                 nap = min(wait, 30.0)
                 d.sleep(nap)
                 waited += nap
             if waited:
-                self.j("note", step="refresh", text=f"Waited {round(waited / 60, 1)} min for a quiet moment between "
-                                                    "two production ticks before the second run.")
+                what = ("production's 8 o'clock agents" if self.one_txn
+                        else "a quiet moment between two production ticks")
+                self.j("note", step="refresh", text=f"Waited {round(waited / 60, 1)} min for {what} before the second "
+                                                    "run.")
         self._check_token(with_fingerprint=False)
 
     def _snapshot(self, label: str, gate_label: str) -> tuple[Path | None, Child]:
@@ -2617,23 +2735,26 @@ class Job:
         return text, fields
 
     def step_wait_tick(self):
-        d, until = self.deps, self.tick_until
+        d, until, one = self.deps, self.tick_until, self.one_txn
         self._check_token()
-        first = tick_wait_seconds(d.now(), until)
+        first = self._start_wait()
         if not d.wait_for_tick:
-            return (f"A real load would wait {round(first)} s here for a quiet moment between two production "
-                    "ticks; a rehearsal does not."), {"waited_seconds": 0, "would_wait_seconds": round(first)}
+            what = "production's 8 o'clock agents" if one else "a quiet moment between two production ticks"
+            return (f"A real load would wait {round(first)} s here for {what}; a rehearsal does not."), {
+                "waited_seconds": 0, "would_wait_seconds": round(first)}
         if first > 0:
             at = (d.now() + timedelta(seconds=first)).astimezone(BAHRAIN)
+            why = (f"production's 8 o'clock agents run from {_agents_words()} Bahrain and no load writes meanwhile."
+                   if one else f"a load starts 1 to {until // 60} minutes after production's quarter-hour tick and "
+                               f"never from {_quiet_words()} Bahrain.")
             self.j("note", step="wait_tick", text=f"Waiting about {max(1, round(first / 60))} min, to write at about "
-                   f"{at:%H:%M}: a load starts 1 to {until // 60} minutes after production's quarter-hour tick and "
-                   f"never from {_quiet_words()} Bahrain.")
+                   f"{at:%H:%M}: {why}")
         # The step ends only on a token check that is followed AT ONCE by a quiet moment. The check
         # itself can be slow (the live site or the database answering late): when it has eaten the
         # quiet moment, the next one is waited for and the token is checked again.
         waited, fresh, late = 0.0, True, 0   # fresh: the token was checked and no time has passed since
         while True:
-            wait = tick_wait_seconds(d.now(), until)
+            wait = self._start_wait()
             if wait > 0:
                 fresh = False
                 nap = min(wait, 30.0)
@@ -2647,6 +2768,14 @@ class Job:
                                         "(the live site or the database answers slowly): the load was not started")
             self._check_token()              # the table must still hold right before the write
             fresh, late = True, late + 1
+        if one:                              # the loader keeps its commit out of the quarter-hour jobs itself
+            fields = {"waited_seconds": round(waited), "checks": late + 1, "one_transaction": True,
+                      "need_s": round(self.need_s)}
+            if waited:
+                return (f"Waited {round(waited / 60, 1)} min for production's 8 o'clock agents; the table still "
+                        "holds."), fields
+            return ("No wait needed: the load writes in one transaction, at a moment clear of production's "
+                    "quarter-hour jobs. The table still holds."), fields
         if waited:
             return (f"Waited {round(waited / 60, 1)} min for a quiet moment between two production ticks; the "
                     "table still holds."), {"waited_seconds": round(waited), "checks": late + 1, "until_s": until}
@@ -2664,7 +2793,10 @@ class Job:
             if attempt > 1:
                 self.j("step_start", step="refresh", attempt=attempt, text="The identical load runs once more.")
             self.written = True
-            child = d.runner("refresh", argv, None)          # never cut short: a half load is the worst outcome
+            # never cut short: a half load is the worst outcome
+            ran_from = d.now()
+            child = d.runner("refresh", argv + self._one_txn_args(), None)
+            self.refresh_run_s = max(self.refresh_run_s, (d.now() - ran_from).total_seconds())
             res = parse_refresh(child.text)
             loaded = (res or {}).get("loaded") or {}
             not_run = str((res or {}).get("verify_error") or "")       # the verification could not RUN
@@ -2790,13 +2922,16 @@ class Job:
                 "data_date": self.result.get("data_as_of"), "published": self.published,
                 "result": "ok" if not look else "ok, needs a look: " + ", ".join(look)}
         if self.timings.get("refresh") is not None and not d.rehearsal:
-            last["refresh_seconds"] = self.timings["refresh"]       # the next load's start window (start_until_s)
+            # the next load's window (start_until_s, refresh_need_s): the refresh child's own run, never the
+            # waits the worker made around it (the pause and the quiet moment before a second run)
+            took = round(self.refresh_run_s, 1)
+            last["refresh_seconds"] = took
             try:
                 earlier = (d.read_state().get("last_load") or {}).get("refresh_seconds_recent") or []
             except (OSError, ValueError, AttributeError, TypeError):
                 earlier = []
             earlier = [x for x in (earlier if isinstance(earlier, list) else []) if _seconds(x) is not None]
-            last["refresh_seconds_recent"] = (earlier + [self.timings["refresh"]])[-REFRESH_RECENT:]
+            last["refresh_seconds_recent"] = (earlier + [took])[-REFRESH_RECENT:]
         # since which report day the profitability report is held back (the brief says "held back
         # since" from it): only a load knows, so it is written down here and carried from load to load
         try:

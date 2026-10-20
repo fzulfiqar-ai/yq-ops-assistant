@@ -188,12 +188,16 @@ the check runs again.
 - The live site or the database did not answer, or a load or a rehearsal is still running: wait a
   minute, then run it again.
 
-**Why a load can wait before it writes.** A load writes 1 to 9 minutes after production's
-quarter-hour tick (fewer after a slow refresh), and never from ten to 8 until twenty past 8 Bahrain: production runs its daily
-agents at 8 o'clock and reads the stock ledger that every load rewrites. A Yes five minutes before 8
-therefore writes at about twenty past. The box says so on a WAIT line, and while it waits `load status`
-shows *Waiting about N min, to write at about HH:MM*. That is by design, not a fault. For the report
-before 8, say Yes by a quarter to 8.
+**Why a load can wait before it writes.** A load writes all its tables in one step, so the portal
+shows either the figures it had or the new ones, never half of each. It never takes that step in the
+minute and a half after production's quarter-hour tick, while production runs its scheduled jobs: if
+the step falls there, the load holds it back by itself, for two minutes at most. And no load starts
+from a few minutes before 8 (about five; up to ten after a slow load) until twenty past 8 Bahrain:
+production runs its daily agents at 8 o'clock, and they must read the same figures from start to end.
+A load that is still running at 8 holds its step until twenty past. A Yes five minutes before 8
+therefore writes at about twenty past. The box says so on a WAIT line, and while it waits `load status` shows
+*Waiting about N min, to write at about HH:MM*. That is by design, not a fault. For the report before
+8, say Yes by a quarter to 8.
 
 **Nothing new.** When everything this load would apply is already loaded, the check ends with
 `Nothing new in <ddmmyy>: everything this load would apply is already loaded (last load ...). No load needed.`
@@ -458,8 +462,20 @@ public.
   stops and names that PC; a lock that is no lock and was written in the last minutes is left alone
   too. What is left: two PCs that start a load within OneDrive's sync delay of each other, and an
   upload that runs at the very moment of a resume. Closing that needs a lock in the database that the
-  portal's upload takes as well, a change of the portal for later. The start window after a tick is
-  worked out from the slowest of the last five refreshes on record.
+  portal's upload takes as well, a change of the portal for later. The margin a load keeps before the
+  8 o'clock agents (and, with the older loader, the start window after a tick) is worked out from the
+  slowest of the last five refreshes on record.
+- **The load in one transaction** (`scripts/load_txn.py`, Release 3 of the load speed-up): the writer
+  starts its refresh with `--one-transaction`, and `scripts/load_supabase.py` then writes every Focus
+  table through one database session and commits once; on any error nothing is written. The loader's
+  rules are the same code on both paths (the span replaces and their guards, the ledger's range
+  replace, the price-book void, the audit rows). The writer hands the loader the moments it must not
+  commit in (each quarter-hour tick, from a few seconds before it to a minute and a half after it, and
+  the 8 o'clock agents), and the loader holds its commit until they pass. There is no fallback to the older loader
+  once one transaction is asked for. `ONE_TRANSACTION = False` in `scripts/yq_load_go.py` puts the older
+  loader and its window back together, with no deploy; the portal's Data page upload still uses the
+  older loader. `tests/test_ops_load_txn.py` holds the parity replay (set `YQ_LOCAL_PG_LOAD_TXN` to a
+  scratch PostgreSQL on this PC, and `YQ_LOAD_TXN_DROPS` to real drop folders to replay them as well).
 - **After the load** (`Job.deliver_after` in `scripts/yq_load_go.py`): once the closing row is in the
   journal and the lock is gone, the worker runs `python -m scripts.ops deliver --run <run>` (the brief,
   the e-mail and the team message, worked out once), then `python -m scripts.yq_send --run <run> --auto`,

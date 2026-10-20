@@ -8,27 +8,43 @@ Order:
 Upserts use each table's natural key (on_conflict) so re-running never double-counts
 (data rules 2/6 friendly). Requires the tables created by migrate_supabase.py.
 
-Usage:  python scripts/load_supabase.py [--staged <folder ingest read this run>]
+Usage:  python scripts/load_supabase.py [--staged <folder ingest read this run>] [--one-transaction]
         (scripts/refresh.py passes --staged; without it Focus price books are loaded but never void
          older rows -- see "Focus price books are snapshots" below. The folder may carry two marker
          files: REPLACE_OK and PARTIAL_OK -- see "Sales are replaced by the file's own date span".
          The Data page upload writes them from its two check boxes; a local run drops the files
          into the folder by hand. Every guard that fires prints a LOADER_NOTICE line that
          scripts/refresh.py carries into the briefing and the Data page.)
+
+ONE TRANSACTION (Release 3, 20-Oct-2026). With --one-transaction, or YQ_LOAD_ONE_TRANSACTION=1 in
+the environment (the load writer scripts/yq_load_go.py sets it for its refresh child), every table
+below is written through scripts/load_txn.py: one psycopg session on DATABASE_URL, one transaction,
+one commit, rolled back whole on any error, so production reads the old data or the new and never a
+half-replaced ledger. The rules of this file run unchanged on either path; what that client does
+differently is in its header. There is no fallback to REST once one transaction is asked for: a
+session that cannot be opened stops the load before anything is written, because the writer only
+relaxes its wait for a load that cannot be seen half-done. Without the flag (the Data page upload on
+the API, a refresh run by hand) the load is written through PostgREST, as before.
 """
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from scripts.load_txn import AVOID_ENV, ONE_TXN_ENV
+
 ROOT = Path(__file__).resolve().parents[1]
 CLEAN = ROOT / "data" / "clean"
 CHUNK = 500
+ONE_TXN_ARG = "--one-transaction"
 
 # ── Focus price books are snapshots (R1, 24-Sep-2026) ────────────────────────
 # A Focus price-book export is the WHOLE book at export time. Rows an earlier export of the same
@@ -233,6 +249,15 @@ def warehouse_set_guard(previous: set[str], new: set[str], partial_ok: bool = Fa
 NOTICE_PREFIX = "LOADER_NOTICE "
 
 
+def _guard(client):
+    """The calls this file tolerates failing (each sits in a try/except) run in a SAVEPOINT on the
+    one-transaction client, so a failure there undoes that call only, as a failed PostgREST request
+    did, and the load goes on; without it the error would abort the whole transaction. A REST
+    client has nothing to undo."""
+    sp = getattr(client, "savepoint", None)
+    return sp() if callable(sp) else contextlib.nullcontext()
+
+
 def _notice(kind: str, text: str, detail: dict | None = None) -> None:
     """One machine-readable line per thing the owner must see: scripts/refresh.py lifts these
     into the briefing and the /ingest response (the Data page), where only 'upserted' counts used
@@ -377,7 +402,8 @@ def snapshot_guard(stale: list[dict], live_focus: list[dict], file_skus: set[str
 def void_columns_present(client) -> bool:
     """True once selling_prices_void_migration.sql has added voided_at / void_reason."""
     try:
-        client.table("selling_prices").select("voided_at").limit(1).execute()
+        with _guard(client):
+            client.table("selling_prices").select("voided_at").limit(1).execute()
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -407,8 +433,9 @@ def _set_void(client, ids: list[int], voided_at: str | None, reason: str | None)
 
 def _audit(client, event: str, question: str, detail: dict) -> None:
     try:
-        client.table("audit_log").insert({"user_email": "load_supabase", "event": event,
-                                          "question": question, "detail": detail}).execute()
+        with _guard(client):
+            client.table("audit_log").insert({"user_email": "load_supabase", "event": event,
+                                              "question": question, "detail": detail}).execute()
     except Exception as e:  # noqa: BLE001
         print(f"  (audit_log not written: {str(e)[:120]})")
 
@@ -426,7 +453,8 @@ def _apply_pricebook_snapshot(client, loaded: list[dict], staged: set[str] | Non
     for book, b in sorted(all_books.items()):
         file = ", ".join(sorted(b["srcs"]))
         try:
-            voided = _fetch_book_rows(client, book, voided=True)
+            with _guard(client):
+                voided = _fetch_book_rows(client, book, voided=True)
         except Exception as e:  # noqa: BLE001
             msg = str(e)[:160]
             hint = " -- apply scripts/selling_prices_void_migration.sql" if "voided_at" in msg else ""
@@ -497,11 +525,15 @@ def _records(df: pd.DataFrame) -> list[dict]:
 
 
 def _upsert(client, table: str, records: list[dict], on_conflict: str) -> int:
-    n = 0
-    for i in range(0, len(records), CHUNK):
-        batch = records[i : i + CHUNK]
-        client.table(table).upsert(batch, on_conflict=on_conflict).execute()
-        n += len(batch)
+    bulk = getattr(client, "bulk_upsert", None)
+    if callable(bulk):                   # the one-transaction client: one COPY, then these CHUNK-row slices in order
+        n = int(bulk(table, records, on_conflict, chunk=CHUNK))
+    else:
+        n = 0
+        for i in range(0, len(records), CHUNK):
+            batch = records[i : i + CHUNK]
+            client.table(table).upsert(batch, on_conflict=on_conflict).execute()
+            n += len(batch)
     print(f"  upserted {table:24} {n:7}")
     return n
 
@@ -530,7 +562,11 @@ def _fetch_span(client, table: str, cols: str, datecol: str, lo: str, hi: str) -
 
 def _delete_span(client, table: str, datecol: str, dmin: str, dmax: str) -> int:
     """Delete every row with datecol in [dmin, dmax], month by month (a single PostgREST call
-    never has to return tens of thousands of rows). Returns the number removed."""
+    never has to return tens of thousands of rows). Returns the number removed. The
+    one-transaction client deletes the same windows in one statement."""
+    bulk = getattr(client, "delete_windows", None)
+    if callable(bulk):
+        return int(bulk(table, datecol, month_windows(dmin, dmax)))
     removed = 0
     for lo, hi in month_windows(dmin, dmax):
         try:
@@ -567,7 +603,8 @@ def _sales_span_plan(client, table: str, df: pd.DataFrame, datecol: str, replace
     if table == "orders":
         cols.append("gross_bhd")
     try:
-        db_rows = _fetch_span(client, table, ",".join(cols), datecol, dmin, dmax)
+        with _guard(client):
+            db_rows = _fetch_span(client, table, ",".join(cols), datecol, dmin, dmax)
     except Exception as e:  # noqa: BLE001 -- cannot see the span: never prune blind
         print(f"  !! {table}: could not read the database span {dmin}..{dmax} ({str(e)[:120]}); upsert only")
         res["skipped"] = f"span read failed: {str(e)[:120]}"
@@ -677,7 +714,8 @@ def _stock_balance_replace(client, sb: pd.DataFrame, partial_ok: bool) -> dict:
     for as_of in sorted({d for d, _ in pairs}):
         new_set = {w for d, w in pairs if d == as_of}
         try:
-            prev_date, prev_set = _previous_warehouses(client, as_of)
+            with _guard(client):
+                prev_date, prev_set = _previous_warehouses(client, as_of)
         except Exception as e:  # noqa: BLE001
             prev_date, prev_set = None, set()
             print(f"  (stock_balance: previous snapshot not readable: {str(e)[:100]})")
@@ -707,15 +745,67 @@ def main(argv: list[str] | None = None) -> int:
         staged = staged_files(staged_folder)
     replace_ok = marker_present(staged_folder, REPLACE_OK_MARKER) if staged_folder else False
     partial_ok = marker_present(staged_folder, PARTIAL_OK_MARKER) if staged_folder else False
+    one_txn = ONE_TXN_ARG in argv or os.environ.get(ONE_TXN_ENV) == "1"
     if not CLEAN.exists():
         print(f"ERROR: {CLEAN} not found. Run scripts/ingest.py first.")
         return 1
-    client = _client()
+    if one_txn:
+        from dotenv import load_dotenv
+
+        from scripts.load_txn import TxnClient, parse_avoid
+        load_dotenv(ROOT / ".env")           # this checkout's own .env (a set variable wins), never one further up
+        avoid, odd = parse_avoid(os.environ.get(AVOID_ENV))
+        try:
+            client = TxnClient.open()
+        except Exception as e:  # noqa: BLE001  (never a REST fallback: see the header)
+            print(f"ERROR: the one-transaction load could not open its database session ({str(e)[:200]}); "
+                  f"nothing was written.")
+            return 1
+    else:
+        client = _client()
     print("Loading data/clean/ -> Supabase\n" + "=" * 60)
+    if one_txn:
+        print("  (one transaction: nothing of this load is visible to anyone else until it commits)")
     if staged is not None:
         print(f"  (staged this run: {', '.join(sorted(staged)) or 'nothing'}"
               f"{'; REPLACE_OK' if replace_ok else ''}{'; PARTIAL_OK' if partial_ok else ''})")
+    if not one_txn:
+        _load_tables(client, staged, replace_ok, partial_ok)
+    else:
+        t0 = time.monotonic()
+        try:
+            try:
+                _load_tables(client, staged, replace_ok, partial_ok)
+            except BaseException as e:
+                client.rollback()
+                print(f"  !! one transaction ROLLED BACK ({type(e).__name__}: {str(e)[:160]}): nothing of this load "
+                      f"was written")
+                raise
+            if odd:
+                print(f"  (the moments to keep the commit out of could not be read: {odd}; it is made at once)")
+            try:
+                waited = client.commit(avoid)
+            except BaseException as e:
+                if not getattr(client, "commit_sent", True):     # stopped before the COMMIT went out (a hold cut short)
+                    client.rollback()
+                    print(f"  !! one transaction ROLLED BACK ({type(e).__name__}: {str(e)[:160]}): nothing of this "
+                          f"load was written")
+                else:                                            # e.g. the connection ended while the COMMIT was on its way
+                    print(f"  !! one transaction: the commit got no answer ({type(e).__name__}: {str(e)[:160]}); "
+                          f"the database holds this load whole or not at all: load it again to be sure")
+                raise
+        finally:
+            client.close()
+        print(f"  (one transaction: committed, {client.statements} statements in {time.monotonic() - t0:.1f} s"
+              + (f", {waited:.0f} s of them waiting for a clear moment" if waited else "") + ")")
+    print("=" * 60)
+    print("Load complete. Run scripts/reconcile_products.py to link item names -> SKUs.")
+    return 0
 
+
+def _load_tables(client, staged: set[str] | None, replace_ok: bool, partial_ok: bool) -> None:
+    """Every table of data/clean, in the order of the header, through `client` (PostgREST, or the
+    one transaction of scripts/load_txn.py), ending with the loader's own ingest_runs row."""
     # 1) products from price books
     sp = _read("selling_prices")
     if sp is not None:
@@ -846,7 +936,8 @@ def main(argv: list[str] | None = None) -> int:
                          "focus_total_bhd": r.get("focus_total_bhd"), "focus_over90_bhd": r.get("focus_over90_bhd"),
                          "rows_total_bhd": r.get("rows_total_bhd"), "source_file": r.get("source_file")})
         try:
-            _upsert(client, "ar_ageing_totals", recs, on_conflict="as_of_date")
+            with _guard(client):
+                _upsert(client, "ar_ageing_totals", recs, on_conflict="as_of_date")
         except Exception as e:  # noqa: BLE001
             print(f"  (ar_ageing_totals not written: {str(e)[:120]} -- apply scripts/economics_v2_migration.sql)")
             for r in recs:
@@ -858,21 +949,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Record the load for the "Data as of" freshness banner (best-effort).
     try:
-        latest = client.table("order_lines").select("line_date").order(
-            "line_date", desc=True).limit(1).execute().data
-        data_date = (latest or [{}])[0].get("line_date")
-        client.table("ingest_runs").insert({
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "status": "ok",
-            "file": f"Focus refresh (data as of {data_date})",
-            "rows_loaded": (ol is not None and len(ol)) or 0,
-        }).execute()
+        with _guard(client):
+            latest = client.table("order_lines").select("line_date").order(
+                "line_date", desc=True).limit(1).execute().data
+            data_date = (latest or [{}])[0].get("line_date")
+            client.table("ingest_runs").insert({
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "status": "ok",
+                "file": f"Focus refresh (data as of {data_date})",
+                "rows_loaded": (ol is not None and len(ol)) or 0,
+            }).execute()
     except Exception as e:
         print(f"  (ingest_runs not recorded: {e})")
-
-    print("=" * 60)
-    print("Load complete. Run scripts/reconcile_products.py to link item names -> SKUs.")
-    return 0
 
 
 if __name__ == "__main__":
