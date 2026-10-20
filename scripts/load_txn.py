@@ -47,10 +47,11 @@ from datetime import datetime, timezone
 
 ONE_TXN_ENV = "YQ_LOAD_ONE_TRANSACTION"      # "1": load_supabase writes through this client (no REST fallback)
 AVOID_ENV = "YQ_LOAD_COMMIT_AVOID"           # "start-end,..." epoch seconds (UTC) in which the commit is not made
-STATEMENT_TIMEOUT_S = 300                    # the slowest statement (the ledger's insert) takes seconds
-LOCK_TIMEOUT_S = 30                          # a lock held elsewhere fails the load fast: rollback, the writer runs it again
+STATEMENT_TIMEOUT_S = 600                    # the ledger's COPY carries ~30 MB: room for a slow uplink
+LOCK_TIMEOUT_S = 30                          # a lock held elsewhere fails the load fast: rolled back, run again
 IDLE_IN_TXN_S = 300                          # a loader that stops talking: the server rolls its transaction back
 HOLD_MAX_S = 1800                            # a commit is never held longer than this, whatever it is asked to avoid
+WORK_MEM = "32MB"                            # the ledger's insert sorts ~12 MB by file order: in memory, not on disk
 MAX_ROWS = 1000                              # PostgREST's db-max-rows on Supabase
 APPLICATION_NAME = "yq-load-one-transaction"
 
@@ -278,26 +279,27 @@ class TxnClient:
     @classmethod
     def open(cls, dsn: str | None = None, *, statement_timeout_s: int = STATEMENT_TIMEOUT_S,
              lock_timeout_s: int = LOCK_TIMEOUT_S, idle_s: int = IDLE_IN_TXN_S) -> "TxnClient":
-        """Connect, set the session's timeouts, and open THE transaction (a savepoint needs one: on an
-        idle connection psycopg's transaction() would BEGIN and COMMIT on its own)."""
+        """Connect and open THE transaction with its timeouts (a savepoint needs an open transaction: on
+        an idle connection psycopg's transaction() would BEGIN and COMMIT on its own). The timeouts are
+        SET LOCAL: they hold for this transaction whichever pooler mode DATABASE_URL names, and never
+        outlive it on a pooled backend."""
         import psycopg
         dsn = dsn or os.environ.get("DATABASE_URL")
         if not dsn:
             raise RuntimeError("DATABASE_URL is not set: the one-transaction load needs its own database session")
         # TCP keepalives as scripts/ops/db.py has them: a connection the pooler dropped is noticed in about a
-        # minute; no prepared statements (the pooler may hand a session's statements to another backend)
-        conn = psycopg.connect(dsn, autocommit=True, connect_timeout=30, application_name=APPLICATION_NAME,
+        # minute; no prepared statements (a transaction pooler may hand a session's statements to another backend)
+        conn = psycopg.connect(dsn, autocommit=False, connect_timeout=30, application_name=APPLICATION_NAME,
                                keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
                                prepare_threshold=None)
         try:
             with conn.cursor() as cur:
-                cur.execute(f"set statement_timeout = '{int(statement_timeout_s)}s'")
-                cur.execute(f"set lock_timeout = '{int(lock_timeout_s)}s'")
-                cur.execute(f"set idle_in_transaction_session_timeout = '{int(idle_s)}s'")
-            conn.autocommit = False
-            with conn.cursor() as cur:
                 cur.execute("select now()")                 # opens the transaction; every new row's imported_at
                 started = cur.fetchone()[0]
+                cur.execute(f"set local statement_timeout = '{int(statement_timeout_s)}s'")
+                cur.execute(f"set local lock_timeout = '{int(lock_timeout_s)}s'")
+                cur.execute(f"set local idle_in_transaction_session_timeout = '{int(idle_s)}s'")
+                cur.execute(f"set local work_mem = '{WORK_MEM}'")
         except BaseException:
             conn.close()
             raise

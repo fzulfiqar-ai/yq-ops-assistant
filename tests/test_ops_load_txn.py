@@ -906,6 +906,10 @@ def _():
     c = load_txn.TxnClient.open(_db(ONE_DB))
     watcher = psycopg.connect(_db(ONE_DB), autocommit=True)
     try:
+        # the transaction's own limits (SET LOCAL: they end with it, whatever pooler hands out the backend)
+        assert [c.fetch_one(f"show {g}") for g in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout",
+                                                   "work_mem")] == ["10min", "30s", "5min", "32MB"]
+        assert c.fetch_one("show transaction_read_only") == "off" and c.started_at is not None
         c.bulk_upsert("customers", [{"name": f"Shop {i} invented"} for i in range(50)], "name")
         assert c.table("customers").select("name").execute().data[0]["name"] == "Shop 0 invented"   # its own writes: seen
         assert watcher.execute("select count(*) from customers").fetchone()[0] == 0
