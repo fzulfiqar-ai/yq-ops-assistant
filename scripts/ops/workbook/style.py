@@ -3,7 +3,9 @@
 FORMATS reproduces that file's cell formats exactly (font, size, colour, borders, alignment and
 number format; Arial 10 underneath): 0 to 2 decimals, as his file has them. New sheets (stock,
 movements, KPI) use three decimals. A sheet builder names a format; book.py turns the name into an
-XlsxWriter format once.
+XlsxWriter format once. The g_* and input_* formats at the end of FORMATS (grid tables with typed-in
+cells) and DXF_EXTRA (their conditional-format styles) are added for the stock workbook: they come
+after the Sep file's and change none of it.
 """
 from __future__ import annotations
 
@@ -104,10 +106,37 @@ FORMATS: dict[str, dict] = {
     'pct_plain': {'font_size': 9.5, 'font_color': '#0B0B0B', 'bottom': 1, 'bottom_color': '#E1E0D9', 'valign': 'vcenter', 'num_format': '0.0%'},
     'int_plain': {'font_size': 9.5, 'font_color': '#0B0B0B', 'bottom': 1, 'bottom_color': '#E1E0D9', 'valign': 'vcenter', 'num_format': 1},
     'calc_text': {'font_size': 9.5, 'font_color': '#0B0B0B', 'bottom': 1, 'bottom_color': '#E1E0D9', 'align': 'right', 'valign': 'vcenter'},
+    # Grid tables (the stock workbook; not in the Sep file): a thin grey border on all four sides, 9.5 body.
+    # 'border' comes first in each, so a 'top' after it (the totals) wins. The yellow cells are typed in.
+    'g_head': {'border': 1, 'border_color': '#C3C2B7', 'bold': True, 'font_size': 9.5, 'font_color': '#0B0B0B', 'bg_color': '#E1E0D9', 'text_wrap': True, 'valign': 'vcenter'},
+    'g_head_r': {'border': 1, 'border_color': '#C3C2B7', 'bold': True, 'font_size': 9.5, 'font_color': '#0B0B0B', 'bg_color': '#E1E0D9', 'text_wrap': True, 'align': 'right', 'valign': 'vcenter'},
+    'g_text': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter'},
+    'g_text_wrap': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'text_wrap': True, 'valign': 'vcenter'},
+    'g_int': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter', 'num_format': '#,##0;-#,##0;"–"'},
+    'g_dec2': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter', 'num_format': '#,##0.00;-#,##0.00;"–"'},
+    'g_money3': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter', 'num_format': '#,##0.000;-#,##0.000;"–"'},
+    'g_pct': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter', 'num_format': '0.0%'},
+    'g_date': {'border': 1, 'border_color': '#C3C2B7', 'font_size': 9.5, 'font_color': '#0B0B0B', 'align': 'right', 'valign': 'vcenter', 'num_format': 'd mmm yyyy'},
+    'g_total_int': {'border': 1, 'border_color': '#C3C2B7', 'top': 2, 'top_color': '#0B0B0B', 'bold': True, 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter', 'num_format': '#,##0;-#,##0;"–"'},
+    'g_total_money3': {'border': 1, 'border_color': '#C3C2B7', 'top': 2, 'top_color': '#0B0B0B', 'bold': True, 'font_size': 9.5, 'font_color': '#0B0B0B', 'valign': 'vcenter', 'num_format': '#,##0.000;-#,##0.000;"–"'},
+    'input_qty': {'border': 1, 'border_color': '#C3C2B7', 'bg_color': '#FFF2CC', 'font_size': 9.5, 'font_color': '#0000FF', 'valign': 'vcenter', 'num_format': '#,##0;-#,##0;"–"'},
+    'input_note': {'border': 1, 'border_color': '#C3C2B7', 'bg_color': '#FFF2CC', 'font_size': 9.5, 'font_color': '#0000FF', 'text_wrap': True, 'valign': 'vcenter'},
+    'input_dec2': {'border': 1, 'border_color': '#C3C2B7', 'bg_color': '#FFF2CC', 'font_size': 9.5, 'font_color': '#0000FF', 'valign': 'vcenter', 'num_format': '#,##0.00;-#,##0.00;"–"'},
+    'input_money3': {'border': 1, 'border_color': '#C3C2B7', 'bg_color': '#FFF2CC', 'font_size': 9.5, 'font_color': '#0000FF', 'valign': 'vcenter', 'num_format': '#,##0.000;-#,##0.000;"–"'},
 }
 
 # Conditional-format font colours (dxf): a value of "n/a" in grey, a rise in green, a fall in red.
 DXF = {"na": {"font_color": GREY}, "up": {"font_color": GREEN}, "down": {"font_color": RED}}
+
+# More conditional-format styles (dxf), for the grid tables: a tinted fill and/or a font colour. They are NOT in
+# DXF on purpose: a Book writes every name in DXF into its file, and the monthly report's file must not grow.
+# A book that uses one registers it by name: Book.dxf("cf_red"), then a rule with "format": "cf_red".
+DXF_EXTRA = {
+    "cf_red": {"bg_color": "#F8D7DA", "font_color": "#721C24"},
+    "cf_amber": {"bg_color": "#FFF3CD"},
+    "cf_green": {"bg_color": "#D4EDDA"},
+    "cf_grey": {"font_color": "#6C757D"},
+}
 
 
 def props(name: str) -> dict:

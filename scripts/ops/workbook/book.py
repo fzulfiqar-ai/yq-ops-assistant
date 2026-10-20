@@ -1,5 +1,5 @@
-"""The workbook model: cells, formats, merges, rules, sparklines, charts and page setup, kept in memory,
-every formula evaluated (scripts/ops/workbook/formula.py), then written once with XlsxWriter.
+"""The workbook model: cells, formats, merges, rules, data validations, sparklines, charts and page setup,
+kept in memory, every formula evaluated (scripts/ops/workbook/formula.py), then written once with XlsxWriter.
 
 A sheet builder never writes a number for a formula: it writes the formula, and Book.evaluate() works
 out the value from the formula text against the cells, so the cached value is what the formula says.
@@ -61,6 +61,8 @@ class Sheet:
     charts: list = field(default_factory=list)         # (row, col, chart spec, insert options)
     page: dict = field(default_factory=dict)
     tab_color: str | None = None
+    validations: list = field(default_factory=list)    # (r1, c1, r2, c2, options)
+    hidden_cols: list = field(default_factory=list)    # (c1, c2, stored width): written hidden
 
     # -- writing cells (0-based row and column)
     def put(self, r: int, c: int, value, fmt: str | None = None) -> None:
@@ -104,14 +106,22 @@ class Sheet:
         elif value is not None:
             self.put(r1, c1, value, fmt)
 
-    def col(self, c1: int, c2: int, stored_width: float) -> None:
-        self.cols.append((c1, c2, stored_width))
+    def col(self, c1: int, c2: int, stored_width: float, hidden: bool = False) -> None:
+        """A width for columns c1 to c2; hidden=True writes them hidden (the width stays for when they are shown)."""
+        (self.hidden_cols if hidden else self.cols).append((c1, c2, stored_width))
 
     def row(self, r: int, height: float) -> None:
         self.rows[r] = height
 
     def cond(self, ref: str, options: dict) -> None:
+        """A conditional-format rule. A "format" in the options names a style of style.DXF, or one the
+        book registered with Book.dxf()."""
         self.conds.append((ref, options))
+
+    def validate(self, r1: int, c1: int, r2: int, c2: int, options: dict) -> None:
+        """A data validation on a block of cells: XlsxWriter's data_validation options (validate, criteria,
+        value or source, input_message, error_message ...). It is written with the sheet."""
+        self.validations.append((r1, c1, r2, c2, dict(options)))
 
     def used_rows(self) -> int:
         return 1 + max((r for r, _c in self.cells), default=-1)
@@ -126,6 +136,7 @@ class Book:
         self.properties: dict = {}
         self.commentary: dict[str, list[str]] = {}    # sheet -> the cells that hold written words
         self.controls: dict = {}                      # the Notes sheet's checks: where they are
+        self.dxf_styles: dict[str, dict] = {}         # this book's own conditional-format styles: name -> properties
         self._by_name: dict[str, Sheet] = {}
         self._dense: dict[tuple[str, int], list] = {}
         self._frontier: dict[tuple[str, int], int] = {}
@@ -145,6 +156,20 @@ class Book:
     def define(self, name: str, ref: str) -> None:
         self.names[name] = ref.lstrip("=")
         self._ranges.pop(name, None)
+
+    def dxf(self, name: str, props: dict | None = None) -> None:
+        """Register a conditional-format style for THIS book, to be named in a rule: sheet.cond(ref,
+        {..., "format": name}). `props` are XlsxWriter format properties (a fill, a font colour, bold ...);
+        with none, the name is one of style.DXF_EXTRA (cf_red, cf_amber, cf_green, cf_grey). The three
+        styles of the monthly report (style.DXF) go into every file; these go only into a book that
+        registers them, after those, in the order they were registered."""
+        if name in style.DXF:
+            raise ValueError(f"{name!r} is a style of the monthly report: register this one under another name")
+        if props is None:
+            if name not in style.DXF_EXTRA:
+                raise KeyError(f"no conditional-format style named {name!r} in scripts/ops/workbook/style.py")
+            props = style.DXF_EXTRA[name]
+        self.dxf_styles[name] = dict(props)
 
     # -- the evaluator's cell source
     def name(self, name: str) -> fx.Range | None:
@@ -264,6 +289,16 @@ class Book:
             number = getattr(dxfs[name], "_get_dxf_index", None)
             if callable(number):
                 number()
+        for name, props in self.dxf_styles.items():     # this book's own styles: after those three, in order
+            dxfs[name] = wb.add_format(props)
+            number = getattr(dxfs[name], "_get_dxf_index", None)
+            if callable(number):
+                number()
+        for ws in self.sheets:                  # a rule that names a style nobody registered is said, not a bare KeyError
+            for ref, options in ws.conds:
+                if options.get("format") is not None and options["format"] not in dxfs:
+                    raise KeyError(f"{ws.name}!{ref}: the conditional-format style {options['format']!r} is not "
+                                   f"registered (Book.dxf)")
 
         def f(name):
             if name is None:
@@ -296,6 +331,8 @@ class Book:
             xs.set_default_row(ws.default_row)
         for c1, c2, stored in ws.cols:
             xs.set_column(c1, c2, user_width(stored))
+        for c1, c2, stored in ws.hidden_cols:   # hidden, with the width kept for when they are shown
+            xs.set_column(c1, c2, user_width(stored), None, {"hidden": True})
         for r1, c1, r2, c2 in ws.merges:
             # the merge is recorded first; the cell loop below then writes every cell of it, the
             # top-left one with its value or formula
@@ -328,6 +365,9 @@ class Book:
                 opts["multi_range"] = ref.strip()
                 first = ref.split()[0]
             xs.conditional_format(first, opts)
+        for r1, c1, r2, c2, options in ws.validations:
+            if xs.data_validation(r1, c1, r2, c2, dict(options)) != 0:     # XlsxWriter warns and skips: not here
+                raise ValueError(f"{ws.name}!{rng(r1, c1, r2, c2)}: the data validation was not accepted: {options}")
         for options in ws.sparklines:
             opts = dict(options)
             r, c = fx.parse_cell(opts.pop("location"))

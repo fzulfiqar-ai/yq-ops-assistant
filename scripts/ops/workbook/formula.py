@@ -11,14 +11,15 @@ It covers the subset of Excel the report uses, with Excel's own semantics where 
     wildcards * and ? (~ escapes them); a whole cell must match;
   * MATCH(x, range, 0) is an exact, case-blind match that honours wildcards in a text x;
   * numbers compare as Excel shows them, to 15 significant digits (so 0.1 + 0.2 = 0.3);
-  * ROUND and FIXED round half away from zero on the decimal value;
+  * ROUND and FIXED round half away from zero on the decimal value; ROUNDUP rounds away from zero on
+    the value taken to 15 significant digits first (so ROUNDUP((0.1+0.2)*10, 0) is 3, not 4);
   * errors (#N/A, #DIV/0!, #VALUE!, #REF!) are values: they flow through arithmetic and IFERROR
     catches them; blank is 0 in arithmetic and "" in text;
   * a range compared with, or divided into, a value gives an array (SUMPRODUCT(--(A>x)),
     LOOKUP(2, 1/(A=x), B)).
 
 Functions: SUM SUMIFS COUNTIFS COUNTIF COUNTA SUMPRODUCT INDEX MATCH LOOKUP IF IFERROR AND OR NOT
-ROUND FIXED DATE YEAR MONTH DAY EDATE CHOOSE SUBSTITUTE MIN MAX ABS. Anything else raises
+ROUND ROUNDUP FIXED DATE YEAR MONTH DAY EDATE CHOOSE SUBSTITUTE MIN MAX ABS. Anything else raises
 FormulaError, so a formula the evaluator does not know can never be written with a made-up value.
 
 Pure: no I/O, no eval(). The workbook model (scripts/ops/workbook/book.py) supplies the cells.
@@ -28,7 +29,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, ROUND_UP, Decimal, localcontext
 
 EPOCH = date(1899, 12, 30)          # Excel's day 0 in the 1900 system (serial 1 = 1 Jan 1900, after Feb 1900)
 
@@ -368,6 +369,17 @@ def excel_round(x: float, digits: int) -> float:
     q = Decimal(1).scaleb(-int(digits))
     d = Decimal(repr(float(x))).quantize(q, rounding=ROUND_HALF_UP)
     return float(d)
+
+
+def excel_roundup(x: float, digits: int) -> float:
+    """ROUNDUP: away from zero to `digits` places (a negative number rounds to tens, hundreds ...).
+    The value is first taken to 15 significant digits, as a spreadsheet holds it, so the noise of a
+    sum (0.1 + 0.2 is 0.30000000000000004) never lifts a whole number up a step."""
+    digits = max(-400, min(400, int(digits)))
+    with localcontext() as ctx:
+        ctx.prec = 800                      # room for any double at any of those digits
+        d = Decimal(repr(r15(float(x)))).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_UP)
+        return float(d) or 0.0              # never -0.0
 
 
 def wildcard_regex(pattern: str) -> re.Pattern:
@@ -833,6 +845,20 @@ class Evaluator:
         if isinstance(d, Err):
             return d
         return excel_round(x, int(d))
+
+    def fn_ROUNDUP(self, args, sheet):
+        if len(args) != 2:                  # Excel takes both: a formula with one would not open
+            raise FormulaError("ROUNDUP takes a number and a number of digits")
+        x = to_num(self._scalar(args[0], sheet))
+        d = to_num(self._scalar(args[1], sheet))
+        if isinstance(x, Err):
+            return x
+        if isinstance(d, Err):
+            return d
+        if not (math.isfinite(x) and math.isfinite(d)):
+            return NUM
+        out = excel_roundup(x, int(d))
+        return out if math.isfinite(out) else NUM
 
     def fn_FIXED(self, args, sheet):
         x = to_num(self._scalar(args[0], sheet))

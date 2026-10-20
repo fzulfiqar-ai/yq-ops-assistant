@@ -10,9 +10,10 @@ figure below is a sum a reader can redo by hand. Every folder is a temporary one
 
 Covered:
   * the formula evaluator: Excel's precedence, case-blind text, criteria with their operators and
-    wildcards, numbers compared as a spreadsheet shows them, rounding half away from zero, dates, the
-    array idioms the report uses (SUMPRODUCT ranks, LOOKUP(2, 1/(...))), errors as values, and a
-    formula it does not know refused instead of given a made-up value;
+    wildcards, numbers compared as a spreadsheet shows them, rounding half away from zero, ROUNDUP
+    away from zero on the value as it is shown, dates, the array idioms the report uses (SUMPRODUCT
+    ranks, LOOKUP(2, 1/(...))), errors as values, and a formula it does not know refused instead of
+    given a made-up value;
   * the category rule: the longest alphabetic prefix (TB is its own row, GN a power bank), an unknown
     code through the config name table (a code key wins over a card key), a no-value item in the
     handset row, Other only when nothing else, the Notes sentence from the rule in force;
@@ -25,6 +26,10 @@ Covered:
   * the file: written through a temporary name, never over an existing file, the next free name, a
     valid workbook; the comparison with a reference catches a changed value and sets aside what it
     is told to; no 9-digit or 15-plus-digit run in what the owner reads;
+  * the pieces added for the stock workbook, read back from a small invented grid with openpyxl: data
+    validations, a hidden column, a book's own conditional-format styles, the grid and input formats,
+    freeze panes and a filter, a ROUNDUP formula with its cached value; refused when a rule names a
+    style nobody registered; and the monthly file carrying none of them;
   * the command: the whole-month gate (not ready: nothing written), the week and a bad month refused
     in one sentence, a month with no sales refused, the build record, the text;
   * the real September file, when it is on this machine AND YQ_OPS_GOLDEN=1 is set (SKIP otherwise):
@@ -60,7 +65,7 @@ from scripts.ops import db  # noqa: E402,F401  (first, as every command does)
 from scripts.ops import config, paths, status  # noqa: E402
 from scripts.ops.workbook import book as bk  # noqa: E402
 from scripts.ops.workbook import build, categories as cats, formula as fx, golden, model as mdl  # noqa: E402
-from scripts.ops.workbook import sheets_core as sc  # noqa: E402
+from scripts.ops.workbook import sheets_core as sc, style  # noqa: E402
 
 TESTS: list[tuple[str, object]] = []
 MONTH = "2026-03"                      # the report month; February is the comparison month
@@ -272,6 +277,25 @@ def _():
     assert ev("DATE(2026,13,1)") == fx.serial(date(2027, 1, 1)) and ev(f"DAY(EDATE({jan31},1)-1)") == 27
     assert ev(f'CHOOSE(MONTH({jan31}),"Jan","Feb")&" "&YEAR({jan31})') == "Jan 2026"
     assert ev('SUBSTITUTE("Van A - Acc WH"," - Acc WH","")') == "Van A"
+
+
+@test("formulas: ROUNDUP goes away from zero on the value as a spreadsheet shows it; an error argument flows")
+def _():
+    assert ev("ROUNDUP(2.1,0)") == 3 and ev("ROUNDUP(2.0,0)") == 2 and ev("ROUNDUP(-2.1,0)") == -3
+    assert ev("ROUNDUP(0.0001,0)") == 1 and ev("ROUNDUP(1234.5,-2)") == 1300 and ev("ROUNDUP(3.14159,2)") == 3.15
+    assert ev("ROUNDUP(-1234.5,-2)") == -1300 and ev("ROUNDUP(-0.0001,0)") == -1 and ev("ROUNDUP(0,0)") == 0
+    assert ev("ROUNDUP((0.1+0.2)*10,0)") == 3                  # 3.0000000000000004 in binary, 3 as it is shown
+    assert ev("ROUNDUP(SUM(A1:A2)*10,0)", {"A1": 0.1, "A2": 0.2}) == 3
+    assert ev("ROUNDUP(0.7+0.1,1)") == 0.8 and ev("ROUNDUP(1.1*1.1,2)") == 1.21
+    assert ev("ROUNDUP(6.000000000000001,0)") == 6            # the 16th digit is noise ...
+    assert ev("ROUNDUP(6.00000000000001,0)") == 7             # ... the 15th is a real difference
+    assert ev("ROUNDUP(3.14159,2.9)") == 3.15 and ev('ROUNDUP("3.2",0)') == 4        # digits cut, numeric text read
+    assert ev("ROUNDUP(A1,0)", {"A1": None}) == 0 and ev("ROUNDUP(TRUE,0)") == 1
+    assert ev("ROUNDUP(1E30,0)") == 1e30 and ev("ROUNDUP(1.5,1000)") == 1.5          # big or many digits: no crash
+    assert ev("ROUNDUP(1.7976931348623157E308,-308)").code == "#NUM!"
+    assert ev("ROUNDUP(1/0,0)").code == "#DIV/0!" and ev("ROUNDUP(1,1/0)").code == "#DIV/0!"
+    assert ev('ROUNDUP("x",0)').code == "#VALUE!" and ev('ROUNDUP(1,"y")').code == "#VALUE!"
+    raises(fx.FormulaError, lambda: ev("ROUNDUP(3.2)"))       # Excel takes both arguments: not written with one
 
 
 @test("formulas: criteria carry their operator, whole-cell wildcards and case-blind text")
@@ -621,9 +645,178 @@ def _():
     assert "******" not in strings                                   # not even the masked form
 
 
+# ── the pieces added for the stock workbook ────────────────────────────────────────────────────
+
+GRID_FORMATS = ["g_head", "g_head_r", "g_text", "g_text_wrap", "g_int", "g_dec2", "g_money3", "g_pct", "g_date",
+                "g_total_int", "g_total_money3", "input_qty", "input_note", "input_dec2", "input_money3"]
+
+
+def grid_book() -> bk.Book:
+    """A small grid on invented codes: typed-in quantities, a hidden helper column, a status list, totals,
+    ROUNDUP formulas, rules in the new styles, a filter and frozen headings."""
+    b = bk.Book()
+    for name in style.DXF_EXTRA:
+        b.dxf(name)                                           # the styles of style.py, by name
+    b.dxf("cf_mine", {"bg_color": "#00FF00", "bold": True})  # and one of this book's own
+    ws = b.sheet("Grid")
+    ws.col(0, 0, 14)
+    ws.col(1, 1, 10)
+    ws.col(2, 2, 12, hidden=True)                             # a helper nobody needs to read
+    ws.col(3, 5, 12)
+    heads = [("Code", "g_head"), ("Qty", "g_head_r"), ("Helper", "g_head"), ("Cost", "g_head_r"),
+             ("Status", "g_head"), ("Note", "g_head")]
+    for c, (text, fmt) in enumerate(heads):
+        ws.text(3, c, text, fmt)
+    rows = [("T01", 5, "x", 1.2345, "ok"), ("T02", 0, "y", 2.5, "low"), ("T03", 12, "z", 0.5, "ok")]
+    for i, (code, qty, helper, cost, status) in enumerate(rows):
+        r = 4 + i
+        ws.text(r, 0, code, "g_text")
+        ws.put(r, 1, qty, "input_qty")
+        ws.text(r, 2, helper, "g_text")
+        ws.put(r, 3, cost, "g_money3")
+        ws.text(r, 4, status, "g_text")
+        ws.put(r, 5, None, "input_note")
+    ws.text(7, 0, "Total", "g_text")
+    ws.formula(7, 1, "SUM(B5:B7)", "g_total_int")
+    ws.formula(7, 3, "SUM(D5:D7)", "g_total_money3")
+    ws.formula(9, 1, "ROUNDUP(D5*10,0)", "g_int")             # 12.345 goes up to 13
+    ws.formula(9, 3, "ROUNDUP((0.1+0.2)*10,0)", "g_int")      # 3 as it is shown, not 4
+    ws.formula(9, 4, "ROUNDUP(1234.5,-2)", "g_dec2")          # 1300
+    ws.put(10, 0, 0.256, "g_pct")
+    ws.put(10, 1, date(2026, 10, 5), "g_date")
+    ws.put(10, 3, 2.5, "input_dec2")
+    ws.put(10, 4, 0.125, "input_money3")
+    ws.put(10, 5, "a note that wraps onto a second line", "g_text_wrap")
+    ws.cond("B5:B7", {"type": "cell", "criteria": "less than", "value": 1, "format": "cf_red"})
+    ws.cond("B5:B7", {"type": "cell", "criteria": "greater than", "value": 10, "format": "cf_green"})
+    ws.cond("E5:E7", {"type": "cell", "criteria": "equal to", "value": '"low"', "format": "cf_amber"})
+    ws.cond("F5:F7", {"type": "blanks", "format": "cf_grey"})
+    ws.cond("A5:A7", {"type": "cell", "criteria": "equal to", "value": '"T03"', "format": "cf_mine"})
+    ws.validate(4, 1, 6, 1, {"validate": "integer", "criteria": ">=", "value": 0, "error_title": "Quantity",
+                              "error_message": "Whole units, nought or more."})
+    ws.validate(4, 4, 6, 4, {"validate": "list", "source": ["ok", "low", "out"]})
+    ws.page.update({"freeze": (4, 1), "autofilter": "A4:F7"})      # frozen headings and a filter: the page keys
+    return b
+
+
+@test("grid: validation, a hidden column, a book's own conditional styles, the grid and input formats, freeze and filter")
+def _():
+    import openpyxl
+    b = grid_book()
+    assert b.evaluate() == []
+    with data_root() as root:
+        path = b.save(paths.reports_dir("stock") / "Grid test.xlsx")
+        assert path.parent == root / "exports" / "reports" / "stock"
+        ws = openpyxl.load_workbook(path)["Grid"]
+        shown = openpyxl.load_workbook(path, data_only=True)["Grid"]
+    assert ws.freeze_panes == "B5" and ws.auto_filter.ref == "A4:F7"
+    cols = ws.column_dimensions                                   # the hidden column keeps its width
+    assert cols["C"].hidden is True and cols["C"].width == 12
+    assert not cols["A"].hidden and cols["A"].width == 14 and not cols["D"].hidden and not cols["B"].hidden
+    dv = {str(v.sqref): v for v in ws.data_validations.dataValidation}
+    assert sorted(dv) == ["B5:B7", "E5:E7"], sorted(dv)
+    qty, status = dv["B5:B7"], dv["E5:E7"]
+    assert (qty.type, qty.operator, qty.formula1) == ("whole", "greaterThanOrEqual", "0")
+    assert qty.errorTitle == "Quantity" and qty.error == "Whole units, nought or more." and qty.showErrorMessage
+    assert status.type == "list" and status.formula1 == '"ok,low,out"'
+    rules = {(str(cf.sqref), r.operator or r.type): r.dxf for cf in ws.conditional_formatting for r in cf.rules}
+    assert len(rules) == 5, sorted(rules)
+    fill = lambda d: d.fill.bgColor.rgb  # noqa: E731
+    red = rules[("B5:B7", "lessThan")]
+    assert fill(red) == "FFF8D7DA" and red.font.color.rgb == "FF721C24"
+    assert fill(rules[("B5:B7", "greaterThan")]) == "FFD4EDDA" and fill(rules[("E5:E7", "equal")]) == "FFFFF3CD"
+    assert rules[("F5:F7", "containsBlanks")].font.color.rgb == "FF6C757D"
+    mine = rules[("A5:A7", "equal")]                              # the style only this book registered
+    assert fill(mine) == "FF00FF00" and mine.font.b
+    written = {(r, c): cell for (r, c), cell in b.get("Grid").cells.items() if cell.fmt in GRID_FORMATS}
+    assert {cell.fmt for cell in written.values()} == set(GRID_FORMATS)         # every new format is in use
+    for r, c in written:                                          # a thin grey border all round, 9.5 points
+        cell = ws[bk.a1(r, c)]
+        edge = cell.border
+        assert (edge.left.style, edge.right.style, edge.bottom.style) == ("thin", "thin", "thin"), bk.a1(r, c)
+        assert edge.top.style == ("medium" if written[(r, c)].fmt.startswith("g_total") else "thin"), bk.a1(r, c)
+        assert edge.left.color.rgb == "FFC3C2B7" and cell.font.sz == 9.5, bk.a1(r, c)
+    typed = ws["B5"]                                              # a typed-in quantity: yellow, blue, whole number
+    assert typed.fill.fill_type == "solid" and typed.fill.fgColor.rgb == "FFFFF2CC"
+    assert typed.font.color.rgb == "FF0000FF" and typed.number_format == '#,##0;-#,##0;"–"'
+    assert ws["F5"].fill.fgColor.rgb == "FFFFF2CC" and ws["F5"].alignment.wrap_text         # the note: yellow, wraps
+    assert ws["D11"].number_format == '#,##0.00;-#,##0.00;"–"' and ws["E11"].number_format == '#,##0.000;-#,##0.000;"–"'
+    assert ws["D11"].fill.fgColor.rgb == "FFFFF2CC" and ws["E11"].font.color.rgb == "FF0000FF"
+    assert ws["D5"].number_format == '#,##0.000;-#,##0.000;"–"' and ws["A11"].number_format == "0.0%"
+    assert ws["B11"].number_format == "d mmm yyyy" and ws["F11"].alignment.wrap_text
+    head = ws["A4"]
+    assert head.font.b and head.alignment.wrap_text and head.fill.fgColor.rgb == "FFE1E0D9"
+    assert ws["B4"].alignment.horizontal == "right" and head.alignment.horizontal is None
+    total = ws["B8"]
+    assert total.font.b and total.border.top.color.rgb == "FF0B0B0B" and ws["D8"].font.b
+    assert ws["D8"].number_format == '#,##0.000;-#,##0.000;"–"'
+    assert ws["B10"].value == "=ROUNDUP(D5*10,0)"                 # the formula stays a formula ...
+    assert shown["B10"].value == 13 and shown["D10"].value == 3 and shown["E10"].value == 1300      # ... with its value
+    assert shown["B8"].value == 17 and abs(shown["D8"].value - 4.2345) < 1e-9
+
+
+@test("grid: a rule naming a style nobody registered, a validation XlsxWriter would skip and a name clash are refused")
+def _():
+    import warnings
+    b = bk.Book()
+    ws = b.sheet("S")
+    ws.put(0, 0, 1)
+    ws.cond("A1", {"type": "cell", "criteria": "less than", "value": 1, "format": "cf_red"})     # never registered
+    with data_root() as root:
+        target = root / "exports" / "never.xlsx"
+        exc = raises(KeyError, lambda: b.save(target))
+        assert "S!A1" in str(exc) and "cf_red" in str(exc) and "Book.dxf" in str(exc), exc
+        assert not target.exists() and not list((root / "exports").iterdir())     # nothing written, no temp left
+        b.dxf("cf_red")
+        assert b.save(target) == target and target.is_file()                       # registered: the same book writes
+        ws.validate(1, 0, 1, 0, {"validate": "list", "source": ["a" * 300]})        # past Excel's 255 characters
+        later = root / "exports" / "later.xlsx"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")                       # XlsxWriter only warns and skips the rule
+            exc = raises(ValueError, lambda: b.save(later))
+        assert "S!A2" in str(exc) and "data validation" in str(exc), exc
+        assert not later.exists() and [p.name for p in (root / "exports").iterdir()] == ["never.xlsx"]
+    raises(ValueError, lambda: bk.Book().dxf("up", {"bg_color": "#FF0000"}))      # a style name of the monthly report
+    raises(KeyError, lambda: bk.Book().dxf("cf_unknown"))
+    two = bk.Book()
+    two.dxf("cf_amber")
+    two.dxf("cf_red")
+    assert list(two.dxf_styles) == ["cf_amber", "cf_red"]                         # kept in the order registered
+
+
+@test("grid: every new format has a thin grey border all round and 9.5 points; the conditional styles stay out of DXF")
+def _():
+    for name in GRID_FORMATS:
+        p = style.props(name)
+        assert list(p)[0] == "border" and p["border"] == 1 and p["border_color"] == "#C3C2B7", name   # first: a 'top' after it wins
+        assert p["font_size"] == 9.5, name
+        yellow_and_blue = p.get("bg_color") == "#FFF2CC" and p.get("font_color") == "#0000FF"
+        assert yellow_and_blue == name.startswith("input_"), name              # the typed-in cells, and only they
+    assert style.props("g_total_int")["top"] == 2 and style.props("g_total_money3")["bold"]
+    assert style.props("g_head")["text_wrap"] and style.props("g_head_r")["align"] == "right"
+    assert set(style.DXF) == {"na", "up", "down"}                                # the three that go into every file
+    assert set(style.DXF_EXTRA) == {"cf_red", "cf_amber", "cf_green", "cf_grey"}
+    assert style.DXF_EXTRA["cf_red"]["bg_color"] == "#F8D7DA" and "font_color" in style.DXF_EXTRA["cf_red"]
+    assert style.DXF_EXTRA["cf_amber"]["bg_color"] == "#FFF3CD" and style.DXF_EXTRA["cf_green"]["bg_color"] == "#D4EDDA"
+    assert style.DXF_EXTRA["cf_grey"]["font_color"] == "#6C757D"
+
+
+@test("grid: the monthly report's file carries none of it: three conditional styles, no hidden column, no validation")
+def _():
+    b, m, _f = built()
+    assert b.dxf_styles == {} and all(not ws.hidden_cols and not ws.validations for ws in b.sheets)
+    with data_root():
+        path = b.save(build.target_path(m.period, draft=True))
+        with zipfile.ZipFile(path) as z:
+            styles = z.read("xl/styles.xml").decode("utf-8")
+            sheets = [z.read(n).decode("utf-8") for n in z.namelist() if n.startswith("xl/worksheets/sheet")]
+    assert '<dxfs count="3">' in styles and len(sheets) == 8
+    assert not any("hidden=" in xml or "dataValidation" in xml for xml in sheets)
+
+
 # ── the command ────────────────────────────────────────────────────────────────────────────────
 
-LAST_LOAD = {"run": "080426_0900", "finished_at": "2026-04-08T09:00:00+03:00", "result": "ok", "data_date": "2026-04-07"}
+LAST_LOAD ={"run": "080426_0900", "finished_at": "2026-04-08T09:00:00+03:00", "result": "ok", "data_date": "2026-04-07"}
 
 
 @test("command: a whole month builds the DRAFT workbook and a record, and says what it checked")

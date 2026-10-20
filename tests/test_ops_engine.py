@@ -8,7 +8,8 @@ folder is a temporary one; all names and numbers are invented.
 
 Covered:
   * paths: the data root (flag, YQ_MAIN_CHECKOUT, a worktree's main checkout), drop folders ordered
-    by the date their name spells, outputs refused outside business_data/ and exports/;
+    by the date their name spells, outputs refused outside business_data/ and exports/, the stock
+    reports folder, append_lines (a guarded append of UTF-8 lines, synced to the disk);
   * config: a missing file or key stops with the key's name, types are checked, the monthly step in
     force, no number in the committed key list;
   * fmt: BHD to the fils half-up, shares and changes, the fixed-width table, the wording guard;
@@ -136,6 +137,55 @@ def _():
         assert not (root / "scripts").exists()
         assert paths.published_dir(date(2026, 1, 31)).name == "Focus ERP 2026-01-31"
         raises(ValueError, lambda: paths.reports_dir("daily"))
+
+
+@test("the stock workbooks have their folder; any other kind of report is still refused")
+def _():
+    with data_root() as root:
+        for kind in ("weekly", "monthly", "stock"):
+            assert paths.reports_dir(kind) == root / "exports" / "reports" / kind
+        exc = raises(ValueError, lambda: paths.reports_dir("x"))
+        assert "'stock'" in str(exc) and "'monthly'" in str(exc)
+        raises(ValueError, lambda: paths.reports_dir(""))
+        assert paths.allowed_output(paths.reports_dir("stock") / "a.xlsx")
+
+
+@test("append_lines adds UTF-8 lines with \\n ends, makes the folder, syncs after the flush, and keeps to the guard")
+def _():
+    with data_root() as root:
+        log = paths.ops_dir() / "stock" / "moves.log"
+        assert not log.parent.exists()
+        synced = []
+        real_fsync = os.fsync
+
+        def watching_fsync(fd):                # the bytes must be in the file already when the sync is asked for
+            synced.append(len(log.read_bytes()))
+            real_fsync(fd)
+
+        os.fsync = watching_fsync
+        try:
+            assert paths.append_lines(log, ["first", "café – second"]) == log
+            assert log.read_bytes() == "first\ncafé – second\n".encode("utf-8")
+            assert paths.append_lines(log, ["third"]) == log
+        finally:
+            os.fsync = real_fsync
+        assert log.read_bytes() == "first\ncafé – second\nthird\n".encode("utf-8")      # appended, never rewritten
+        assert b"\r" not in log.read_bytes()                                                      # \n on Windows too
+        assert synced == [len("first\ncafé – second\n".encode("utf-8")),
+                          len("first\ncafé – second\nthird\n".encode("utf-8"))], synced
+        assert paths.append_lines(log, []) == log and log.read_text(encoding="utf-8").count("\n") == 3
+        exports = paths.exports_dir() / "reports" / "stock" / "orders.log"          # exports/ is allowed too
+        paths.append_lines(exports, ["x"])
+        assert exports.read_text(encoding="utf-8") == "x\n"
+        raises(ValueError, lambda: paths.append_lines(log, ["two\nlines"]))          # a log is read line by line
+        raises(ValueError, lambda: paths.append_lines(log, ["ends with return\r"]))
+        assert log.read_text(encoding="utf-8").count("\n") == 3                      # a refused call writes nothing
+        for outside in (root / "scripts" / "leak.log", root / "Uplaods" / "010126" / "x.log", root / "CLAUDE.md"):
+            raises(PermissionError, lambda p=outside: paths.append_lines(p, ["x"]))
+            assert not outside.exists()
+        assert not (root / "scripts").exists() and not (root / "Uplaods").exists()        # not even the folder is made
+        raises(PermissionError, lambda: paths.append_lines(root / "business_data" / ".." / "leak.log", ["x"]))
+        assert not (root / "leak.log").exists()
 
 
 # ── config ────────────────────────────────────────────────────────────────────

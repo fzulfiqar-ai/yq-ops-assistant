@@ -84,9 +84,9 @@ def exports_dir(data_date: date | str | None = None) -> Path:
 
 
 def reports_dir(kind: str) -> Path:
-    """exports/reports/weekly or exports/reports/monthly (the workbooks he forwards)."""
-    if kind not in ("weekly", "monthly"):
-        raise ValueError("reports_dir: kind is 'weekly' or 'monthly'")
+    """exports/reports/weekly, monthly or stock (the workbooks he forwards)."""
+    if kind not in ("weekly", "monthly", "stock"):
+        raise ValueError("reports_dir: kind is 'weekly', 'monthly' or 'stock'")
     return data_root() / "exports" / "reports" / kind
 
 
@@ -194,4 +194,24 @@ def write_text(path: Path, text: str) -> Path:
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+    return path
+
+
+def append_lines(path: Path, lines: list[str]) -> Path:
+    """Append lines (UTF-8, "\\n" line ends) to a file under business_data/ or exports/ of the data root,
+    the folder and the file made when they are not there. The guard is write_text's. The lines are
+    flushed and synced to the disk before the file is closed. No locking: one writer at a time.
+    A line holding a line break is refused (it would be two lines in a log read line by line)."""
+    path = Path(path)
+    if not _allowed_output(path):
+        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
+    if any("\n" in s or "\r" in s for s in lines):
+        raise ValueError("append_lines: a line holds a line break")
+    if not lines:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write("".join(s + "\n" for s in lines))
+        f.flush()
+        os.fsync(f.fileno())
     return path
