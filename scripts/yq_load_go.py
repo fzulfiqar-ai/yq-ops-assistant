@@ -46,7 +46,9 @@ THE WORKER (loadplan.STEPS; every step journalled; the lock's heartbeat every 10
              load that is whole but unverified the quiet moment is waited for again. Verify
              failed (it ran and the totals differ): the run is closed FAILED and this staging is
              refused from then on (the data IS loaded; the journal says so)
-  reconcile  scripts.reconcile_check. Not passed: reported, the load goes on
+  reconcile  scripts.reconcile_check. After a refresh of this worker that verified, it is given that
+             refresh's run record (--verified-run) and leaves the report-by-report comparison to that
+             verify. Not passed: reported, the load goes on
   post_gate  the after-snapshot and its compare. Not passed: "gate needs a look", still published
   publish    staging -> business_data/Focus ERP <as-on date>/ (the marker of a partial export
              travels with the set, because verify reads it from the folder it checks; the
@@ -2190,6 +2192,7 @@ class Job:
         self.stopped_at = loadplan.last_step(run)
         self.written = self.resumed_after_write          # may the database hold (part of) this load?
         self.verified = False                            # did this worker's refresh load AND verify?
+        self.verified_run: int | None = None             # ... and its run record (the ingest_runs id it journals)
         self.step = "start"
         self.t0 = deps.now()
         self.began_at = self.t0                          # the whole run, for the timing line of its closing row
@@ -2719,6 +2722,7 @@ class Job:
                            loaded=loaded, ingest_runs=[before, after], new_runs=new_rows,
                            data_as_of=res.get("data_as_of"))
             self.result = res
+            self.verified_run = after
             text = "Loaded and verified." + (f" Sales data to {res['data_as_of']}." if res.get("data_as_of") else "")
             if attempt > 1:
                 text += " (It passed on the second run.)"
@@ -2727,8 +2731,13 @@ class Job:
         raise Stop("refresh", "the load did not run")      # not reachable: the loop returns or raises
 
     def step_reconcile(self):
-        child = self.deps.runner("reconcile", [sys.executable, "-X", "utf8", "-m", "scripts.reconcile_check",
-                                               str(self.deps.staging)], RECONCILE_TIMEOUT_S)
+        argv = [sys.executable, "-X", "utf8", "-m", "scripts.reconcile_check", str(self.deps.staging)]
+        if self.verified and self.verified_run:
+            # this worker's own refresh compared every report with the database moments ago, and it passed
+            # (the record its journal row names): the reconcile does not run that comparison a second time.
+            # Otherwise (no refresh of this worker passed) the reconcile compares everything itself.
+            argv += ["--verified-run", str(self.verified_run)]
+        child = self.deps.runner("reconcile", argv, RECONCILE_TIMEOUT_S)
         lines = child.text.splitlines()
         if child.code == 0 and any(ln.startswith("RECONCILED") for ln in lines):
             return "Reconciled: the portal's numbers match the Focus reports.", {}
