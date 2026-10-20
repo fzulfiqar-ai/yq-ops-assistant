@@ -9,10 +9,10 @@
 - A rehearsal of the load, when he asks for one in plain words, is in `docs/OPS_SKILLS.md`, section 2: it loads nothing.
 
 ## Skills (`.claude/skills/`)
-- `/yq-load [ddmmyy]`: check a drop folder, ask, load, verify, brief, then the e-mail. Owner only.
+- `/yq-load [ddmmyy]`: check a drop folder, ask, load, verify, brief, then the e-mail and the day's stock file. Owner only.
 - `/yq-brief [window] [rep:<name>]`: sales brief and what to do today; `/yq-brief team` prints the team message for him to copy. Asked whether the data is up to date or what is waiting, it runs `python -m scripts.ops status` (read-only).
 - `/yq-month [YYYY-MM]`: the monthly sales workbook (the layout of his September one) for a whole month, under `exports/reports/monthly/`; its comment lines stay DRAFT for now.
-- `/yq-stock [reorder|ageing|<code>]`: the main store's stock and cover, what to order, the fast movers in stock, ageing; one item by its code (read-only).
+- `/yq-stock [reorder|ageing|damage|file|<code>]`: the main store's stock and cover, what to order per supplier, the fast movers in stock, ageing and how the old and price-cut items sell, the damage store; the day's editable Stock & Order Plan workbook under `exports/reports/stock/` (once per data date); one item by its code (read-only).
 - More skills arrive in later phases and are listed here once they exist.
 
 ## Standing rules

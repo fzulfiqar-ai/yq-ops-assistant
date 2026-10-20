@@ -725,6 +725,7 @@ class Model:
     notes: list[str]
     warnings: list[str]
     flows: stockflow.Flows | None = None     # the sellable pool, the damage store and the sellers of every item
+    ledger_note: str = ""                    # where the stock ledger was read from, and why (the workbook's Notes)
 
 
 PART_WORDS = {"damage": "the damage figures", "review": "the ageing review", "plan": "the order plan"}
@@ -917,11 +918,13 @@ def build(inp: Inputs, cfg: Settings) -> Model:
             continue
         have = max(it.on_hand, ZERO) + it.on_order
         cover = have / r.rate
-        if cover >= trigger:
+        # the workbook works the same rule out again from the rate to six decimals (stock_plan's one rounding rule),
+        # so the screen and the file agree to the unit at a whole-number boundary
+        rate6 = stock_plan.round6(r.rate)
+        if stock_plan.round6(have - Decimal(trigger) * rate6) >= 0:
             continue
-        need = Decimal(fill) * r.rate - have
-        qty = need.to_integral_value(rounding=ROUND_CEILING)
-        order.append({"item": it, "rate": r, "cover": cover, "qty": qty,
+        qty = stock_plan.units_up(Decimal(fill) * rate6 - have)
+        order.append({"item": it, "rate": r, "cover": cover, "qty": qty, "rate6": rate6,
                       "cost_bhd": fmt.q3(qty * it.cost) if it.cost is not None else None})
     order.sort(key=lambda x: (x["cover"], -(x["cost_bhd"] or ZERO), x["item"].name))
 
@@ -1065,7 +1068,7 @@ def build(inp: Inputs, cfg: Settings) -> Model:
     }
     fl = stockflow.flows(rows, model_items, cfg.damage, cfg.not_counted, d)
     model = Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
-                  facts=facts, notes=notes, warnings=warnings, flows=fl)
+                  facts=facts, notes=notes, warnings=warnings, flows=fl, ledger_note=inp.ledger_note)
     facts["damage"] = _part(model, "damage", lambda: stock_damage.damage_facts(model, fl))
     facts["review"] = _part(model, "review", lambda: stock_review.review_facts(model, fl, inp.price_cuts))
     facts["plan"] = _part(model, "plan", lambda: stock_plan.plan_facts(model, fl, inp.catalog, inp.po_vendor))

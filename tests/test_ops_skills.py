@@ -1662,6 +1662,9 @@ MUST_CONTAIN = {
         "if a line says that something needs a look, tell him which",
         "the data is loaded: name the metric the script names and do not go again",
         "typing /yq-load resumes it", "NOT STARTED: the load did not begin", "no deploy is needed",
+        # after a finished load: the stock screen makes the day's workbook; its failure is never the load's
+        "Then run `python -m scripts.ops stock` and show its screen in a code block of its own",
+        "names it on its FILE line", "the load itself is done, and nothing is run again",
         # after the load: the e-mail, said in one sentence; its retry only on his word; never a second copy
         "`RUNNING at delivery` means the load has ended and its e-mail is being made: keep following",
         "Say in one sentence what the line that starts `Delivery:` says",
@@ -1716,6 +1719,12 @@ MUST_CONTAIN = {
         "Never present an estimate as a fact", "A rate marked with a star rests on few days in stock",
         "keep those words when you repeat a figure",
         "Never accuse anyone", "to check", "it comes with the movement audit, in a later phase",
+        # the new words, the day's workbook (his to edit and share), the owner's only lever, nobody named
+        "`damage` for the damage store in full", "`file` for a new workbook even though today's exists",
+        "The FILE line names the day's Stock & Order Plan workbook",
+        "Never open, change, move, copy or send the file yourself", "it is his to edit and share",
+        "never suggest a price cut, a markdown or a bundle", "never name a salesman or a van",
+        "damage is counted when it is sent to the damage store",
     ],
 }
 
@@ -1812,6 +1821,9 @@ def _():
                      ("say so first, in plain words, and point him to /yq-load", "carry on"),
                      ("Run nothing else that loads, writes or deploys", "Fix what looks wrong"),
                      ("no number that is not on the screen", "any number"), ("Never accuse anyone", "Name who did it"),
+                     ("never suggest a price cut, a markdown or a bundle", "suggest a price cut where it helps"),
+                     ("Never open, change, move, copy or send the file yourself", "Send the file to the team"),
+                     ("never name a salesman or a van", "name the van that sent it"),
                      ("$ARGUMENTS", "$ARGUMENTS $ARGUMENTS")):
         assert old in text, old
         assert problems_rules("yq-stock", text.replace(old, new)), f"not caught: {old!r} -> {new!r}"
@@ -2329,6 +2341,7 @@ DESIGN_NUMBERS = {
     "600000": "the tool timeout, in milliseconds",
     "90": "the days behind an item's daily rate (the stock command); its first band of age and of cover",
     "180": "the stock command's second band of age and of cover",
+    "120": "the days within which a price cut sets an item's pace (the ageing review)",
 }
 A_NUMBER = re.compile(r"\d[\d,.]*\d|\d")
 VALUE_SHAPES = (("an amount in BHD", re.compile(r"\bBHD\s*\d")), ("a percentage", re.compile(r"\d\s*%")),

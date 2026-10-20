@@ -1,6 +1,6 @@
 # Ops status: where the work stands (continuation record)
 
-Last verified 18-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
+Last verified 20-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
 owner's plans folder (its path is in Claude's project memory), not in this repository.
 
 ## Live
@@ -36,12 +36,28 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   (Sunday to Thursday, while the owner is logged on; see `docs/BACKUPS.md`).
 - Market Intel v2 (migrations r8m and r8n). Reference: `docs/MARKET_INTEL.md` and the pages beside it
   (`docs/MARKET_INTEL_HOWTO.md`, `docs/MARKET_INTEL_RELEASE.md`).
-- Real loads so far: the drops 111026, 141026, 151026 and 181026 (without its Stock ledger). Each load's journal is in `business_data/ops/loads/`
+- The faster load (20-Oct-2026, live on `main` and the API): the check compares the Stock ledger voucher by
+  voucher instead of in the engine preview and shows a short block (the whole check is in `check.txt`); the
+  gate snapshot, the backup, the reconcile and the verify batch their queries; and the load writes every Focus
+  table in one transaction (`scripts/load_txn.py`), so it waits only around production's 8 o'clock agents.
+  `ONE_TRANSACTION = False` in `scripts/yq_load_go.py` brings back the older loader, with no deploy.
+- Real loads so far: the drops 111026, 141026, 151026, 181026 (without its Stock ledger) and 201026. Each load's journal is in `business_data/ops/loads/`
   (git-ignored).
 
 ## In progress
 
-- Nothing; the next step waits for the owner's go.
+- The Stock & Order Plan (approved 20-Oct-2026), release 1: `/yq-stock` makes an editable workbook per data
+  date (the order list per supplier, every item with its status, the ageing review against the clear target
+  with the price cuts' effect, the damage store) and `/yq-load` ends by showing it; the damage store and the
+  ageing review on the screens. Release 2 (before the Eid order): the order rhythm, the season, the lead time
+  per supplier, a longer history for items sold out most of the window, goods on order logged when an order is
+  placed, and a team copy without costs.
+- The faster load's review follow-ups: the read-only test now refuses the loader (no deploy). The other four
+  change `scripts/load_txn.py` or `scripts/refresh.py`, so they go with the next API deploy: each temporary
+  table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
+  loader's own words up, so that a load that rolled back is journalled as writing nothing (today it reads
+  LAST LOAD FAILED, the careful reading, and the next /yq-load replaces it as before); and the refresh time
+  recorded without the commit's hold.
 
 ## Not built (the engine prints "not built yet")
 
@@ -63,8 +79,11 @@ Intel phases 3 and 4.
   and receipts by voucher number, and van stock comes from a snapshot of the main store only. Use `/yq-moves` once it is
   built.
 - Profitability is held back at every load until Focus posts the cost of sales again.
-- `/yq-stock` questions for the owner: which lead time wins (measured or the configured default), what counts as goods on
-  order, which items are display stands, and the floor on the daily rate for items out of stock most of the period.
+- `/yq-stock`, answered by the owner on 20-Oct-2026: the measured lead time wins (per supplier once it can be
+  measured); goods on order are logged when he says an order is placed; the order list counts the main store
+  only until `/yq-moves`; items out of stock most of the window take a longer history; the sales team is the
+  only lever on old stock. Still open: which items are display stands (the catalog's hidden items are the
+  candidates).
 
 ## Owner decisions (15-Oct-2026)
 

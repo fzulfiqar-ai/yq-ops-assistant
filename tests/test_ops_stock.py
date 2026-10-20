@@ -821,8 +821,12 @@ def _():
         outs = [run(World(), *spec) for spec in ((), ("reorder",), ("ageing",), ("CB2",))]
         after = {p for p in root.rglob("*") if p.is_file()} - before
         folder = root / "exports" / "ops" / D.isoformat()
+        books = {p for p in after if p.parent == root / "exports" / "reports" / "stock"}
+        after -= books
         assert after == {folder / f"{stem}.{ext}" for stem in ("stock", "stock-reorder", "stock-ageing", "stock-item-cb2")
                          for ext in ("txt", "json")}, sorted(str(p) for p in after)
+        # the headline makes the day's workbook once (the other views make none); the stub of P0 makes none at all
+        assert {p.name for p in books} <= {f"YQ Stock and Order Plan {D.isoformat()}.xlsx"}, sorted(p.name for p in books)
         for out in outs:
             assert out["ok"] and out["files"] and all(Path(f).parent == folder for f in out["files"])
             text = out["text"]
@@ -833,8 +837,10 @@ def _():
         assert facts["headline"]["units"] == "505" and facts["lead"]["days"] == 40 and facts["view"] == "headline"
         assert facts["order"][0]["code"] == "CB2" and facts["order"][0]["qty"] == "65"
         assert (folder / "stock.txt").read_text(encoding="utf-8").rstrip("\n") == outs[0]["text"]
-        assert outs[0]["flags"] == {"view": "headline", "order_items": 1, "lead_basis": "measured",
-                                    "goods_on_order": False}
+        flags = dict(outs[0]["flags"])
+        book = flags.pop("file", None)                 # the day's workbook, once its builder makes one
+        assert flags == {"view": "headline", "order_items": 1, "lead_basis": "measured", "goods_on_order": False}
+        assert book is None or Path(book).name == f"YQ Stock and Order Plan {D.isoformat()}.xlsx", book
         reorder = outs[1]["text"]
         assert "No purchase order is drafted." in reorder
         assert "LEAD TIME  40 days: the median of the last 5 supplier invoices to their receipt" in reorder

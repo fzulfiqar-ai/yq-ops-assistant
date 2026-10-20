@@ -12,10 +12,10 @@ changes the live database except the load, and the load asks you every time. Fin
 
 | You type | When | You get |
 |---|---|---|
-| `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. Then it e-mails you the brief and makes the team message (section 2 sets the e-mail up). |
+| `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. Then it e-mails you the brief and makes the team message (section 2 sets the e-mail up), and Claude shows the `/yq-stock` screen, which makes the day's Stock & Order Plan workbook. |
 | `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
 | `/yq-month` or `/yq-month <YYYY-MM>` | Once a month is whole: after the first load of the next month. With no month it takes the last whole month. | Your monthly Sales Report workbook, laid out like your September one (Dashboard, Salesmen, Categories, Products, Customers, Daily, Data, Notes), in `exports/reports/monthly/`, and a short screen of what it checked. Its ten comment lines are marked DRAFT until a later phase adds the step where you approve them. |
-| `/yq-stock`, `/yq-stock reorder`, `/yq-stock ageing` or `/yq-stock <code>` | When you plan an order. Or ask in plain words: what should I order, what is running out, how many days of stock do I hold, which stock is old. | The main store's stock as the portal shows it and at cost, the days of cover against KPI 1, the order list (what to order and how much, and the lead time it rests on), how often the fast movers were in stock, and the ageing in one line. `reorder` shows the whole order list, the supplier invoices the lead time is measured on and the fast movers with their sales ranking; `ageing` the ageing table; an item's code that one item. No purchase order is drafted (section 4 says how each figure is worked out). |
+| `/yq-stock`, `/yq-stock reorder`, `/yq-stock ageing`, `/yq-stock damage`, `/yq-stock file` or `/yq-stock <code>` | When you plan an order (it also runs at the end of every `/yq-load`). Or ask in plain words: what should I order, what is running out, how many days of stock do I hold, which stock is old, did the price cut work, how much stock is damaged. | The main store's stock as the portal shows it and at cost, the days of cover against KPI 1, the order list (what to order and how much, and the lead time it rests on), how often the fast movers were in stock, the ageing and how the old and price-cut items are selling, and the damage store, each in short. On its first line, the day's **Stock & Order Plan** workbook (`exports/reports/stock/`, one per data date). `reorder` shows the whole order list with each item's supplier, the supplier invoices the lead time is measured on and the fast movers with their sales ranking; `ageing` the ageing table and its review; `damage` the damage store in full; `file` a new workbook even when today's exists; an item's code that one item. No purchase order is drafted (section 4 says how each figure is worked out). |
 | Ask in plain words: *where do things stand?* | Before you start, or when something looks stuck. | Five lines: the data dates and the last load; this folder against the live site; the load lock; reports waiting; open items on the action list. (Claude runs `python -m scripts.ops status`.) |
 
 `/yq-brief` on its own is the whole morning screen. Name a window (`day`, `3d`, `7d`, `week`,
@@ -24,7 +24,10 @@ one salesman (`rep:<name>`) to see just that, in detail: the total, each salesma
 accounts and products (`top:<N>` sets how many of them). `week` is this week so far; `last-week` is
 the last full week. If nothing new has been loaded since your last brief it prints two lines; type
 `/yq-brief again` for the whole screen anyway. `/yq-brief team` prints the team message the last load
-made, in a block you can copy into the salesmen's group (section 4 says what it holds).
+made, in a block you can copy into the salesmen's group (section 4 says what it holds). After a
+normal `/yq-load` you need neither: the chat shows the brief the load made, and its e-mail holds the
+brief and the team message (with a button that opens WhatsApp). Type them for another window, one
+salesman, a second look later in the day, or when the e-mail did not go.
 
 `/yq-month` builds a month only when it is whole: a load finished on or after the first day of the next
 month, and Focus data that reaches the month's last days. Before that it says what it waits for and
@@ -36,6 +39,17 @@ against the database and every sheet's total against the Data sheet; a differenc
 the category of its Upcoming or catalog card through `report.category_names` in `config.json`; with no
 entry it falls to Other, and the screen says so. A second build of a month never replaces the first: it
 gets the next free name.
+
+The **Stock & Order Plan** workbook (`/yq-stock`, and at the end of every `/yq-load`) is yours to edit
+and share. One file is made per data date, named `YQ Stock and Order Plan <YYYY-MM-DD>.xlsx` in
+`exports/reports/stock/`; it is never overwritten, and `/yq-stock file` makes the next free name. Its
+sheets: Summary; **Order** (the order list grouped by supplier, with yellow cells for your quantity and
+your comment, a Final quantity that takes yours when you type one, and totals per supplier against a
+budget and a minimum order you can type in); **All items** (every item of the catalog and every item
+that ever moved in the main store, with its status); Fast movers; **Ageing** (the ageing review, with a
+yellow column for your action); **Damage** (with a yellow decision column); Notes. Every figure is a
+formula that carries its value, so it reads right on a phone, and the totals follow what you type.
+Claude never opens, changes or sends the file: share the file you have edited.
 
 The rest of the routine (the weekly workbook, the movement checks, the full action list, the KPI
 scorecard) follows in later phases. This table gets a row for each one when it exists. After a new
@@ -364,11 +378,42 @@ one of two lines, and the load check says the same in its own words:
   aged by the days since that receipt: up to 90 days, up to 180, up to a year, over a year, and no
   receipt on file for units no receipt explains. A return from a van is no receipt, so it never
   makes stock younger. Each band is crossed with the days since the item last sold and carries a
-  suggested action; the bands add up to the main store, display items on a row of their own.
+  suggested action; the bands add up to the main store, display items on a row of their own. The
+  only lever on old stock is the sales team (your own rule): no action suggests a price cut,
+  a markdown or a bundle.
+- **The ageing review** (`/yq-stock ageing`, and three lines on the plain screen) takes every item with
+  units over 180 days old, every item with no sale in the last 90 days, and every item whose dealer
+  price (the price book's MA_base) was cut in the last 180 days. Its stock to clear is the sellable
+  stock: the main store, the vans, the outlets and goods moving between them, from the stock ledger,
+  damage and samples left out. Its pace is the units a week since its last price cut when that was in
+  the last 120 days, else over the last 30 days; days to clear = that stock at that pace. Status:
+  *Cleared* (none left), *Not moving* (none sold at that pace), *On track* (clears within your clear
+  target, `stock.clear_target_days`, 90 days) or *Slow*. Slow and not moving items get *Push sales team:
+  N a week*, the stock divided by the clear target times seven, rounded up. For a price cut: the pace
+  in the 90 days before against the pace since, and the share of the stock at the cut sold since; one
+  line per cut date. The value over 180 days at each of the last six month ends shows whether old stock
+  is shrinking. Your workbook names the three stores that sold each item most in 90 days, so you know
+  whom to push; no screen names anyone.
+- **Damage** (`/yq-stock damage`, and a few lines on the plain screen) reads the damage store named in
+  `warehouses.damage`. Damage stock is its balance in the stock ledger, valued like the main store, and
+  its share is set against the main store's value. Damage is counted **when it is sent**: the units
+  issued to the damage store from any store, by the issue date, for every hundred units sold, month by
+  month; this month against the three whole months before says *rising* (above a fifth more),
+  *falling* (a fifth less) or *steady*, once at least five units were sent. Units sent and not booked
+  in the damage store seven days later are listed *to check*. An item whose rate is above twice the
+  company's (five units or more sent in 90 days) is marked to check with the supplier. Nothing here is
+  booked: claiming from the supplier, writing off, repairing or selling as B-grade is your decision.
+- **Suppliers.** An item's supplier is `stock.suppliers` in `config.json` when it names the code, else
+  the catalog's brand, else the vendor of its newest purchase order on the Orders page, else Other;
+  `stock.supplier_aliases` joins two spellings of one supplier. The order list counts the main store
+  only (your choice) until the movement audit counts the vans; the workbook shows the
+  units with the vans beside it, for information.
 - **Your settings** for this command in `config.json`: `stock.lead_time_days`, `stock.cover_kpi_days`
-  (your KPI band, low and high), `stock.fast_movers` and `stock.display_items` (display and
-  packaging, left out of cover, the order list and the ageing). While one of the two newer keys is
-  missing, the plan's value stands in and the screen names the key.
+  (your KPI band, low and high), `stock.fast_movers`, `stock.display_items` (display and
+  packaging, left out of cover, the order list and the ageing), `stock.clear_target_days` (your clear
+  target), `warehouses.damage` (the damage store), and `stock.suppliers` / `stock.supplier_aliases`.
+  While one of the three newer keys with a plan value is missing, the plan's value stands in and the
+  screen names the key.
 
 ## 5. Where things are kept
 
@@ -383,6 +428,7 @@ public.
 | `business_data/staging/<run>/` | The copies a load works from. The copies of a check that a newer check of the same folder retired, and a loaded set that a newer load of the same day replaced, are in `superseded/`. |
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
 | `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
+| `exports/reports/stock/` | The Stock & Order Plan workbooks from `/yq-stock` (and the end of each `/yq-load`): one per data date, `YQ Stock and Order Plan <YYYY-MM-DD>.xlsx`, never overwritten; `/yq-stock file` adds the next free name. |
 | `exports/reports/monthly/` and `exports/reports/weekly/` | The workbooks: the monthly one from `/yq-month` (named for its month, with `DRAFT` while its comment lines wait for you; a second build of a month gets the next free name), the weekly one in a later phase. Each monthly build also leaves a short record in `exports/ops/<data-date>/`. |
 | `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, in `legacy\` the older backups that sat in OneDrive, encrypted, and in `photos\` the encrypted copy of the Market Intel photos. Outside OneDrive (see `docs/BACKUPS.md`). |
 
@@ -476,6 +522,11 @@ public.
   loader and its window back together, with no deploy; the portal's Data page upload still uses the
   older loader. `tests/test_ops_load_txn.py` holds the parity replay (set `YQ_LOCAL_PG_LOAD_TXN` to a
   scratch PostgreSQL on this PC, and `YQ_LOAD_TXN_DROPS` to real drop folders to replay them as well).
+  Until `scripts/refresh.py` passes the loader's own words up (the next API deploy), a one-transaction
+  load that failed and rolled back is still journalled as failed after it had begun to write (LAST LOAD
+  FAILED), and the refresh time still includes the commit's hold. Both readings are the careful ones,
+  and the next /yq-load replaces such a load as before. `tests/test_ops_readonly.py` refuses any import
+  of `scripts.load_txn` in `scripts/ops`.
 - **After the load** (`Job.deliver_after` in `scripts/yq_load_go.py`): once the closing row is in the
   journal and the lock is gone, the worker runs `python -m scripts.ops deliver --run <run>` (the brief,
   the e-mail and the team message, worked out once), then `python -m scripts.yq_send --run <run> --auto`,

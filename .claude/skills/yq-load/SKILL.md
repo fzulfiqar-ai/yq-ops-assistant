@@ -1,6 +1,6 @@
 ---
 name: "yq-load"
-description: "Checks the Focus reports in a dated drop folder, shows one table of what would load, then, after Furqan clicks Yes in a Windows box, loads them, verifies, prints the brief and e-mails it. Only Furqan starts it, by typing /yq-load."
+description: "Checks the Focus reports in a dated drop folder, shows one table of what would load, then, after Furqan clicks Yes in a Windows box, loads them, verifies, prints the brief and e-mails it, and makes the day's Stock & Order Plan workbook. Only Furqan starts it, by typing /yq-load."
 argument-hint: "[ddmmyy]"
 disable-model-invocation: true
 allowed-tools:
@@ -10,6 +10,8 @@ allowed-tools:
   - "PowerShell(python -m scripts.ops brief *)"
   - "Bash(python -m scripts.ops status *)"
   - "PowerShell(python -m scripts.ops status *)"
+  - "Bash(python -m scripts.ops stock *)"
+  - "PowerShell(python -m scripts.ops stock *)"
 ---
 
 # /yq-load: check, ask, load, verify, brief
@@ -42,7 +44,7 @@ In the same turn, when the output ends with a `GO: ` line, first tell him a Yes/
 Run `python -m scripts.ops load status --wait` again and again until its last line says FINISHED, FAILED, INTERRUPTED or NOT STARTED. Show only the new lines each time. `RUNNING at delivery` means the load has ended and its e-mail is being made: keep following. `RUNNING at wait_tick` after a line `Waiting about N min, to write at about HH:MM` is the load waiting on purpose for a quiet moment (never in the half hour around production's 8 o'clock run): tell him at once at what time it will write, and keep following.
 
 ## Step 4. Finish
-- FINISHED: if a line says that something needs a look, tell him which. Say in one sentence what the line that starts `Delivery:` says. Then run `python -m scripts.ops brief` and show it: after a load it is the brief the load made, the figures of the e-mail.
+- FINISHED: if a line says that something needs a look, tell him which. Say in one sentence what the line that starts `Delivery:` says. Then run `python -m scripts.ops brief` and show it: after a load it is the brief the load made, the figures of the e-mail. Then run `python -m scripts.ops stock` and show its screen in a code block of its own: it makes the day's Stock & Order Plan workbook and names it on its FILE line; say in one sentence where the file is. If that screen fails, say so in one sentence: the load itself is done, and nothing is run again.
 - A line that holds `Its retry: ` (FINISHED or FAILED): the e-mail did not go, and the load is not touched by that. The text after `Its retry: ` sends it again and loads nothing: run it only when he says so, and only if it starts with `python`. Never send a load's e-mail a second time unless he asks for exactly that.
 - A cut-off `Delivery:` line that says `No retry is needed` (a newer load has its own e-mail) or `No retry:` (this load's brief can no longer be sent): say what the line says, in one sentence; there is nothing to run.
 - FAILED: show the last lines. If the verify failed, the data is loaded: name the metric the script names and do not go again.
