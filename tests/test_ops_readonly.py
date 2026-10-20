@@ -16,7 +16,8 @@ Covered:
   * the psycopg session is read-only before its first statement, asserted, closed when it is not;
   * check_sql refuses anything that is not one SELECT / WITH / SHOW;
   * the package itself (AST): who may import a client, a driver or subprocess; forbidden modules
-    and calls; scripts/ops/gitinfo.py runs only `git -C <root> <allowed verb>` with no shell.
+    (the one transaction's client scripts.load_txn among them, in every spelling) and calls;
+    scripts/ops/gitinfo.py runs only `git -C <root> <allowed verb>` with no shell.
 """
 from __future__ import annotations
 
@@ -295,7 +296,7 @@ MAY_IMPORT = {                      # module (prefix) -> files of scripts/ops al
 }
 FORBIDDEN_IMPORTS = (
     "app.agents", "app.ai", "app.events", "app.notify", "app.emailer", "app.escalation", "app.whatsapp",
-    "app.outreach", "app.social_publish", "app.llm_router", "app.shop_notify", "scripts.refresh",
+    "app.outreach", "app.social_publish", "app.llm_router", "app.shop_notify", "scripts.refresh", "scripts.load_txn",
     "scripts.apply_sql", "scripts.apply_migration", "scripts.render_deploy", "scripts.deploy_render",
     "scripts.deploy_cf", "scripts.deploy_web", "scripts.send_digest", "scripts.yq_load_go",
     "scripts.yq_send", "scripts.yq_secrets", "scripts.yq_backup", "scripts.yq_nightly",
@@ -336,20 +337,43 @@ def _():
                 assert not hit or f.name in allowed, f"{f.name} imports {module} ({names})"
 
 
+def forbidden_imports(tree: ast.AST, name: str) -> list[str]:
+    """What `tree` imports that no module of the package may: a writer, a sender or a deploy tool, in
+    any of the spellings import, import .. as, from .. import; the whole loader or a name of it that is
+    not one of its pure guards. [] = nothing."""
+    out: list[str] = []
+    for module, names in imports_of(tree):
+        for bad in FORBIDDEN_IMPORTS:
+            if module == bad or module.startswith(bad + "."):
+                out.append(f"{name} imports {module}")
+            if "." in bad:
+                parent, leaf = bad.rsplit(".", 1)
+                if module == parent and leaf in names:
+                    out.append(f"{name} imports {bad}")
+        if module == "scripts.load_supabase":
+            extra = set(names) - LOAD_SUPABASE_PURE
+            if extra:
+                out.append(f"{name} imports non-pure names from scripts.load_supabase: {sorted(extra)}")
+        if module == "scripts" and "load_supabase" in names:
+            out.append(f"{name} imports the whole loader")
+    return out
+
+
 @test("no module of the package imports a writer, a sender or a deploy tool")
 def _():
     for f in package_files():
-        tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
-        for module, names in imports_of(tree):
-            for bad in FORBIDDEN_IMPORTS:
-                assert not (module == bad or module.startswith(bad + ".")), f"{f.name} imports {module}"
-                if "." in bad:
-                    parent, leaf = bad.rsplit(".", 1)
-                    assert not (module == parent and leaf in names), f"{f.name} imports {bad}"
-            if module == "scripts.load_supabase":
-                extra = set(names) - LOAD_SUPABASE_PURE
-                assert not extra, f"{f.name} imports non-pure names from scripts.load_supabase: {sorted(extra)}"
-            assert not (module == "scripts" and "load_supabase" in names), f"{f.name} imports the whole loader"
+        found = forbidden_imports(ast.parse(f.read_text(encoding="utf-8"), filename=str(f)), f.name)
+        assert not found, found
+
+
+@test("the one-transaction loader (scripts.load_txn) is refused in every spelling, not even a pure name of it")
+def _():
+    for source in ("import scripts.load_txn", "import scripts.load_txn as txn", "from scripts import load_txn",
+                   "from scripts import refresh, load_txn", "from scripts.load_txn import TxnClient",
+                   "from scripts.load_txn import hold_seconds, parse_avoid"):
+        assert "x.py imports scripts.load_txn" in forbidden_imports(ast.parse(source), "x.py"), source
+    assert forbidden_imports(ast.parse("from scripts import load_supabase"), "x.py")
+    assert not forbidden_imports(ast.parse("from scripts.load_supabase import span_guard\nimport json"), "x.py")
 
 
 @test("no os.system / os.popen / os.kill, no eval or exec, no client builders outside db.py")
