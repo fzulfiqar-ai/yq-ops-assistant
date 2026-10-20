@@ -1,5 +1,6 @@
 """Backups: the encryption rule of the load's backup step, the read-back, the restore drill's guards and the
-packing of old plain backups (scripts/yq_load_go.py, scripts/yq_backup.py, scripts/yq_secrets.py).
+packing of old plain backups (scripts/yq_load_go.py, scripts/yq_backup.py, scripts/yq_secrets.py), and the
+snapshot itself (scripts/db_backup.py).
 
     python -m tests.test_ops_backup
 
@@ -25,7 +26,11 @@ Covered:
     dated like the source (an old backup still sorts as old), and only then is the plain copy deleted;
     without the password or 7-Zip, with a .7z already there or for anything that is not a plain
     backup it refuses and touches nothing; an archive that does not read back is removed and the plain
-    copy kept; a plain copy that cannot be deleted is reported (never claimed) and the exit code says so.
+    copy kept; a plain copy that cannot be deleted is reported (never claimed) and the exit code says so;
+  * the snapshot (scripts/db_backup.py, on a stand-in connection over invented tables): the columns of every
+    table come from one catalog query and every count and max from one statement, before one COPY per table,
+    all in one read-only REPEATABLE READ transaction; the CSVs, manifest.json and the printed lines are exactly
+    what the per-table queries wrote; a table name is quoted as an identifier in every statement.
 
 The backup store is a temporary folder for the whole run (YQ_BACKUP_DIR, pinned below): no test reads or
 writes this PC's real store.
@@ -33,9 +38,11 @@ writes this PC's real store.
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -65,6 +72,14 @@ from scripts.ops import config, paths, status  # noqa: E402
 from scripts import yq_backup as yb  # noqa: E402
 from scripts import yq_load_go as yq  # noqa: E402
 from scripts import yq_secrets  # noqa: E402
+
+import dotenv  # noqa: E402
+_load_dotenv = dotenv.load_dotenv
+dotenv.load_dotenv = lambda *a, **k: False      # scripts.db_backup reads the project's .env on import: never here
+try:
+    from scripts import db_backup  # noqa: E402
+finally:
+    dotenv.load_dotenv = _load_dotenv
 
 TESTS: list[tuple[str, object]] = []
 
@@ -713,6 +728,278 @@ def _():
         [row] = rows_written()
         assert row["result"] == "packed" and row["deleted"] is False and row["left"] == 2, row
         assert said[-1] == "0 of 1 plain backups are now only encrypted. Each of the others is named above.", said
+
+
+# ── the snapshot itself: scripts/db_backup.py on a stand-in database ─────────────────────────────────
+
+IDENT = r'"((?:[^"]|"")*)"'          # a quoted SQL identifier (an embedded double quote doubled)
+BRANCH = re.compile(r"select (\d+), count\(\*\), (max\(id\)::text|null::text), (max\(created_at\)::text|null::text) "
+                    r"from public\." + IDENT)
+
+
+def unquote(text: str) -> str:
+    return text.replace('""', '"')
+
+
+def stand_in_tables() -> dict:
+    """Invented tables of every shape the manifest records: an id that is bigint, integer, smallint, uuid or
+    absent; created_at of three types, all NULL or absent; an empty table; a name that needs quoting; values with
+    a comma, quotes, a line break and a NULL. {name: {"columns": [(name, type, nullable, has a default)],
+    "rows": [{column: value}]}}; every value is made here, at run time."""
+    def at(day: int, hour: int) -> str:                       # a timestamptz as the UTC session prints it
+        return f"2026-01-{day:02d} {hour:02d}:30:00+00"
+
+    notes = {1: "plain", 2: 'a comma, and "quotes"', 3: None, 10: "two\nlines"}
+    return {
+        "orders": {"columns": [("id", "bigint", False, True), ("created_at", "timestamp with time zone", False, True),
+                               ("note", "text", True, False), ("qty", "integer", False, False)],
+                   "rows": [{"id": i, "created_at": at(i, 9), "note": n, "qty": 2 * i} for i, n in notes.items()]},
+        "order_lines": {"columns": [("id", "integer", False, True), ("order_id", "bigint", False, False),
+                                    ("created_at", "timestamp without time zone", True, False)],
+                        "rows": [{"id": i, "order_id": 1 + i % 2, "created_at": f"2026-01-0{i} 10:00:00"}
+                                 for i in (1, 2, 3)]},
+        "app_settings": {"columns": [("key", "text", False, False), ("value", "jsonb", True, False),
+                                     ("updated_at", "timestamp with time zone", True, True)],
+                         "rows": [{"key": f"setting_{i}", "value": json.dumps({"n": i}), "updated_at": at(5, i)}
+                                  for i in range(3)]},
+        "uuid_items": {"columns": [("id", "uuid", False, True), ("created_at", "timestamp with time zone", True, False),
+                                   ("label", "text", True, False)],
+                       "rows": [{"id": f"00000000-0000-4000-8000-00000000000{i}", "created_at": None,
+                                 "label": "café"} for i in range(2)]},
+        "empty_log": {"columns": [("id", "smallint", False, True), ("created_at", "date", True, False)], "rows": []},
+        "audit_log": {"columns": [("id", "bigint", False, True), ("ts", "timestamp with time zone", False, True),
+                                  ("event", "text", True, False)],
+                      "rows": [{"id": 7 + i, "ts": at(6, i), "event": f"event {i}"} for i in range(4)]},
+        "Mixed Case": {"columns": [("id", "bigint", False, True), ("v", "numeric", True, False)],
+                       "rows": [{"id": i, "v": f"{i}.5"} for i in (4, 9)]},
+    }
+
+
+class StandInDb:
+    """A stand-in psycopg connection over invented tables. It answers every statement scripts/db_backup.py sends
+    (the catalog, the per-table counts and max values, the batched ones, COPY) from the same rows, as PostgreSQL
+    would, and records each one: one round trip each. Batched rows come back in reverse order (a parallel plan
+    promises none)."""
+
+    def __init__(self, tables: dict, views: dict | None = None, fks: list | None = None):
+        self.tables, self.views, self.fks = tables, views or {}, fks or []
+        self.sent: list[tuple[str, str]] = []           # (execute | copy, the statement on one line)
+        self.isolation_level = self.read_only = None
+        self.transactions, self.in_tx, self.outside_tx = 0, False, 0
+        self.tx_settings = None                         # (isolation level, read only) as the transaction began
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    @contextlib.contextmanager
+    def transaction(self):
+        self.transactions += 1
+        self.tx_settings = (self.isolation_level, self.read_only)
+        self.in_tx = True
+        try:
+            yield
+        finally:
+            self.in_tx = False
+
+    def cursor(self):
+        return StandInCursor(self)
+
+    def record(self, kind: str, sql) -> str:
+        text = " ".join(str(sql).split())
+        self.sent.append((kind, text))
+        self.outside_tx += not self.in_tx
+        return text
+
+    def max_text(self, t: str, col: str) -> str | None:
+        """max(col)::text: NULLs left out, None when there is no value."""
+        vals = [r[col] for r in self.tables[t]["rows"] if r[col] is not None]
+        return str(max(vals)) if vals else None
+
+    def csv_bytes(self, t: str) -> bytes:
+        """What COPY ... TO STDOUT (FORMAT csv, HEADER true) sends: the header, then one record per row."""
+        names = [c[0] for c in self.tables[t]["columns"]]
+        buf = io.StringIO()
+        out = csv.writer(buf, lineterminator="\n")
+        out.writerow(names)
+        out.writerows([[r[n] for n in names] for r in self.tables[t]["rows"]])
+        return buf.getvalue().encode("utf-8")
+
+    def answer(self, text: str, params) -> list[tuple]:
+        if text == "show transaction_read_only":
+            return [("on",)]
+        if text == "set local time zone 'UTC'":
+            return []
+        if "from information_schema.tables" in text:
+            return [(t,) for t in sorted(self.tables)]
+        if "from pg_constraint" in text:
+            return list(self.fks)
+        if "from information_schema.columns" in text:
+            rels = {**self.views, **self.tables}
+            if params:                                  # the per-table query: one table's columns
+                return [(n, ty, "YES" if nu else "NO", d) for n, ty, nu, d in rels.get(params[0], {}).get("columns", [])]
+            return [(t, n, ty, "YES" if nu else "NO", d) for t in sorted(rels) for n, ty, nu, d in rels[t]["columns"]]
+        m = re.fullmatch(r"select count\(\*\) from public\." + IDENT, text)
+        if m:
+            return [(len(self.tables[unquote(m.group(1))]["rows"]),)]
+        m = re.fullmatch(r"select max\((id|created_at)\)::text from public\." + IDENT, text)
+        if m:
+            return [(self.max_text(unquote(m.group(2)), m.group(1)),)]
+        branches = [BRANCH.fullmatch(part) for part in text.split(" union all ")]
+        if all(branches):
+            rows = []
+            for b in branches:
+                t = unquote(b.group(4))
+                rows.append((int(b.group(1)), len(self.tables[t]["rows"]),
+                             None if b.group(2) == "null::text" else self.max_text(t, "id"),
+                             None if b.group(3) == "null::text" else self.max_text(t, "created_at")))
+            return rows[::-1]
+        raise AssertionError(f"the stand-in does not know this statement: {text[:200]}")
+
+
+class StandInCursor:
+    def __init__(self, db: StandInDb):
+        self.db, self.rows = db, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.rows = self.db.answer(self.db.record("execute", sql), params)
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return list(self.rows)
+
+    def copy(self, sql):
+        text = self.db.record("copy", sql)
+        m = re.fullmatch(r"COPY public\." + IDENT + r" TO STDOUT WITH \(FORMAT csv, HEADER true\)", text)
+        assert m, f"the stand-in does not know this COPY: {text}"
+        data = self.db.csv_bytes(unquote(m.group(1)))
+        return contextlib.nullcontext(data[i:i + 5] for i in range(0, len(data), 5))     # in small chunks
+
+
+def stand_in() -> StandInDb:
+    return StandInDb(stand_in_tables(), views={"v_orders": {"columns": [("id", "bigint", True, False)]}},
+                     fks=[("order_lines_order_id_fkey", "order_lines", "orders", "c")])
+
+
+def run_backup(db: StandInDb, out: Path, tables: list[str] | None = None, all_tables: bool = True) -> tuple[dict, str]:
+    """scripts.db_backup.backup on the stand-in: (the manifest it wrote, what it printed)."""
+    real = (db_backup._conn, db_backup._git_sha)
+    db_backup._conn = lambda dsn_env="DATABASE_URL": db
+    db_backup._git_sha = lambda: "abc1234"
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(printed):
+            db_backup.backup(tables, out, all_tables=all_tables)
+    finally:
+        db_backup._conn, db_backup._git_sha = real
+    return json.loads((out / "manifest.json").read_text(encoding="utf-8")), printed.getvalue()
+
+
+def expected_manifest(db: StandInDb, names: list[str], taken_at: str) -> str:
+    """manifest.json as the per-table queries wrote it: per table rows, bytes, columns, then max_id for an integer
+    id and max_created_at when the table has a created_at column (null when there is no value)."""
+    tables = {}
+    for t in names:
+        cols = db.tables[t]["columns"]
+        entry = {"rows": len(db.tables[t]["rows"]), "bytes": len(db.csv_bytes(t)),
+                 "columns": [{"name": n, "type": ty, "nullable": nu, "has_default": d} for n, ty, nu, d in cols]}
+        types = {n: ty for n, ty, _, _ in cols}
+        if types.get("id") in ("bigint", "integer", "smallint"):
+            entry["max_id"] = db.max_text(t, "id")
+        if "created_at" in types:
+            entry["max_created_at"] = db.max_text(t, "created_at")
+        tables[t] = entry
+    return json.dumps({"taken_at": taken_at, "git": "abc1234", "snapshot": "repeatable read, read only, one transaction",
+                       "tables": tables,
+                       "fks": [{"name": a, "child": b, "parent": p, "on_delete": d} for a, b, p, d in db.fks]}, indent=2)
+
+
+@test("db_backup: the CSVs, manifest.json and the printed lines are exactly what the per-table queries wrote")
+def _():
+    db = stand_in()
+    names = sorted(db.tables)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "b"
+        manifest, printed = run_backup(db, out)
+        assert sorted(p.name for p in out.iterdir()) == sorted([f"{t}.csv" for t in names] + ["manifest.json"])
+        for t in names:
+            assert (out / f"{t}.csv").read_bytes() == db.csv_bytes(t), t
+        text = (out / "manifest.json").read_text(encoding="utf-8")
+        assert text == expected_manifest(db, names, manifest["taken_at"]), text
+        assert printed == ("".join(f"  {t:32s} {len(db.tables[t]['rows']):8d} rows -> {t}.csv\n" for t in names)
+                           + f"\nBackup complete: {out}  ({len(names)} tables, git abc1234, verify OK)\n"), printed
+        # the per-table queries (what --restore still sends) read the same values from the same stand-in
+        with db.cursor() as cur:
+            for t in names:
+                cols = db_backup._columns(cur, t)
+                cur.execute(f'select count(*) from public."{t}"')
+                assert manifest["tables"][t] == {"rows": cur.fetchone()[0], "bytes": (out / f"{t}.csv").stat().st_size,
+                                                 "columns": cols, **db_backup._maxes(cur, t, cols)}, t
+
+
+@test("db_backup: the columns of every table in one catalog query, every count and max in one statement, both "
+      "before one COPY per table, all in one read-only REPEATABLE READ transaction")
+def _():
+    import psycopg
+    db = stand_in()
+    with tempfile.TemporaryDirectory() as tmp:
+        run_backup(db, Path(tmp) / "b")
+    n = len(db.tables)
+    texts = [s for _, s in db.sent]
+    copies = [i for i, (kind, _) in enumerate(db.sent) if kind == "copy"]
+    catalog = [i for i, s in enumerate(texts) if "information_schema.columns" in s]
+    counted = [i for i, s in enumerate(texts) if "count(*)" in s]
+    assert len(copies) == n and len(catalog) == 1 and len(counted) == 1, texts
+    assert max(catalog + counted) < min(copies), "the columns, counts and max values come before the first COPY"
+    assert len(db.sent) == n + 6, f"{len(db.sent)} round trips for {n} tables: one COPY each and six more"
+    assert texts[:2] == ["show transaction_read_only", "set local time zone 'UTC'"], texts[:2]
+    assert db.transactions == 1 and db.outside_tx == 0, "every statement inside the one transaction"
+    assert db.tx_settings == (psycopg.IsolationLevel.REPEATABLE_READ, True), db.tx_settings
+
+
+@test("db_backup: a table name is quoted as an identifier in every statement (an embedded double quote doubled); "
+      "the batch answers by position, whatever order its rows come back in")
+def _():
+    assert db_backup._qi('Odd "Name"') == '"Odd ""Name"""' and db_backup._qi("orders") == '"orders"'
+    tables = stand_in_tables()
+    tables['Odd "Name"'] = tables.pop("orders")
+    db = StandInDb(tables)
+    names = ['Odd "Name"', "Mixed Case", "app_settings"]
+    with db.cursor() as cur:
+        got = db_backup._counts(cur, names, db_backup._all_columns(cur))
+    assert got == {'Odd "Name"': (4, {"max_id": "10", "max_created_at": db.max_text('Odd "Name"', "created_at")}),
+                   "Mixed Case": (2, {"max_id": "9"}), "app_settings": (3, {})}, got
+    [batch] = [s for _, s in db.sent if "count(*)" in s]
+    assert 'from public."Odd ""Name"""' in batch and 'from public."Mixed Case"' in batch, batch
+    assert db_backup._counts(db.cursor(), [], {}) == {} and len(db.sent) == 2, "no table: no statement"
+
+
+@test("db_backup: a table list keeps its order, names a table that is not there, backs a repeated one up once and "
+      "batches only the tables it backs up; with none left, no count statement is sent")
+def _():
+    db = stand_in()
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest, printed = run_backup(db, Path(tmp) / "b", ["orders", "not_a_table", "Mixed Case", "orders"], False)
+        assert list(manifest["tables"]) == ["orders", "Mixed Case"], list(manifest["tables"])
+        assert "  skip not_a_table: not a public table\n" in printed and "(2 tables, git abc1234, verify OK)" in printed
+        assert [s for k, s in db.sent if k == "copy"] == ['COPY public."orders" TO STDOUT WITH (FORMAT csv, HEADER true)',
+                                                         'COPY public."Mixed Case" TO STDOUT WITH (FORMAT csv, HEADER true)']
+        [batch] = [s for _, s in db.sent if "count(*)" in s]
+        assert batch.count(" union all ") == 1 and "app_settings" not in batch, batch
+        empty = stand_in()
+        manifest, printed = run_backup(empty, Path(tmp) / "c", ["not_a_table"], False)
+        assert manifest["tables"] == {} and "(0 tables, git abc1234, verify OK)" in printed, printed
+        assert not [s for _, s in empty.sent if "count(*)" in s], "an empty UNION ALL is never sent"
 
 
 def main() -> int:

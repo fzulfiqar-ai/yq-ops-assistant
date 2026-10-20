@@ -12,6 +12,8 @@ Backup
     Every table is read inside ONE read-only REPEATABLE READ transaction, so the files are a
     consistent snapshot (an order created mid-backup can never appear without its lines).
     The manifest records, per table: rows, bytes, column names/types, max(id), max(created_at).
+    The columns of every table come from one catalog query and every count and max from one
+    statement, before one COPY per table (20-Oct-2026: about 100 round trips instead of 400).
 
 Verify a backup folder (re-reads every CSV, compares with the manifest; no DB needed)
     python -m scripts.db_backup --verify business_data/backups/2026-09-24_prerollout
@@ -108,15 +110,55 @@ def _fks(cur) -> list[dict]:
     return [{"name": a, "child": b, "parent": p, "on_delete": d} for a, b, p, d in cur.fetchall()]
 
 
+def _qi(name: str) -> str:
+    """A table name as a quoted SQL identifier (an embedded double quote doubled)."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _all_columns(cur) -> dict[str, list[dict]]:
+    """_columns of every public table (and view) in ONE catalog query: {table: its columns, in order}."""
+    cur.execute("""select table_name, column_name, data_type, is_nullable,
+                          column_default is not null or is_identity = 'YES'
+                   from information_schema.columns where table_schema='public'
+                   order by table_name, ordinal_position""")
+    out: dict[str, list[dict]] = {}
+    for t, n, ty, nu, d in cur.fetchall():
+        out.setdefault(t, []).append({"name": n, "type": ty, "nullable": nu == "YES", "has_default": bool(d)})
+    return out
+
+
+def _max_exprs(cols: list[dict]) -> dict:
+    """What the manifest records beside the count, as SQL: max(id) for an integer id, and max(created_at)."""
+    types = {c["name"]: c["type"] for c in cols}
+    out = {}
+    if types.get("id") in ("bigint", "integer", "smallint"):
+        out["max_id"] = "max(id)::text"
+    if "created_at" in types:
+        out["max_created_at"] = "max(created_at)::text"
+    return out
+
+
 def _maxes(cur, t: str, cols: list[dict]) -> dict:
     out = {}
-    types = {c["name"]: c["type"] for c in cols}
-    if types.get("id") in ("bigint", "integer", "smallint"):
-        cur.execute(f'select max(id)::text from public."{t}"')
-        out["max_id"] = cur.fetchone()[0]
-    if "created_at" in types:
-        cur.execute(f'select max(created_at)::text from public."{t}"')
-        out["max_created_at"] = cur.fetchone()[0]
+    for key, expr in _max_exprs(cols).items():
+        cur.execute(f'select {expr} from public."{t}"')
+        out[key] = cur.fetchone()[0]
+    return out
+
+
+def _counts(cur, tables: list[str], cols: dict[str, list[dict]]) -> dict[str, tuple[int, dict]]:
+    """count(*) and the _maxes of every table in ONE statement (a UNION ALL; each branch carries its position,
+    so the order its rows come back in does not matter): {table: (rows, maxes as _maxes gives them)}."""
+    if not tables:
+        return {}
+    exprs = [_max_exprs(cols.get(t, [])) for t in tables]
+    cur.execute(" union all ".join(
+        f"select {i}, count(*), {e.get('max_id', 'null::text')}, {e.get('max_created_at', 'null::text')} "
+        f"from public.{_qi(t)}" for i, (t, e) in enumerate(zip(tables, exprs))))
+    out = {}
+    for i, n, max_id, max_created_at in cur.fetchall():
+        got = {"max_id": max_id, "max_created_at": max_created_at}
+        out[tables[i]] = (n, {k: got[k] for k in exprs[i]})
     return out
 
 
@@ -140,19 +182,19 @@ def backup(tables: list[str] | None, out: Path, all_tables: bool = False) -> Pat
                 base = tables if tables is not None else DEFAULT_TABLES + [t for t in live if t.startswith("shop_")]
                 wanted = list(dict.fromkeys(base))
             manifest["fks"] = _fks(cur)
+            columns = _all_columns(cur)
+            counts = _counts(cur, [t for t in wanted if t in live], columns)   # same snapshot as the COPYs
             for t in wanted:
                 if t not in live:
                     print(f"  skip {t}: not a public table")
                     continue
-                cols = _columns(cur, t)
+                cols = columns.get(t, [])
                 path = out / f"{t}.csv"
-                with path.open("wb") as fh, cur.copy(f'COPY public."{t}" TO STDOUT WITH (FORMAT csv, HEADER true)') as cp:
+                with path.open("wb") as fh, cur.copy(f"COPY public.{_qi(t)} TO STDOUT WITH (FORMAT csv, HEADER true)") as cp:
                     for chunk in cp:
                         fh.write(chunk)
-                cur.execute(f'select count(*) from public."{t}"')          # same snapshot as the COPY
-                n = cur.fetchone()[0]
-                manifest["tables"][t] = {"rows": n, "bytes": path.stat().st_size, "columns": cols,
-                                         **_maxes(cur, t, cols)}
+                n, maxes = counts[t]
+                manifest["tables"][t] = {"rows": n, "bytes": path.stat().st_size, "columns": cols, **maxes}
                 print(f"  {t:32s} {n:8d} rows -> {path.name}")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     bad = verify(out, quiet=True)
