@@ -212,6 +212,7 @@ ONE_TXN_ENV, AVOID_ENV = "YQ_LOAD_ONE_TRANSACTION", "YQ_LOAD_COMMIT_AVOID"     #
 COMMIT_CLEAR_BEFORE_S, COMMIT_CLEAR_AFTER_S = 15, 90
 AGENTS_FROM, AGENTS_UNTIL = (8, 0), (8, 20)
 COMMIT_AVOID_S = 3 * 3600                           # how far ahead the list of moments to avoid reaches
+REFRESH_NEED_MAX_S = 600                            # one slow refresh never moves the margin before 8 earlier than this
 
 # Every load deletes and re-inserts the whole stock ledger. Once a refresh has begun, this is the
 # sentence for the state of the database, whatever ended the run afterwards.
@@ -603,6 +604,8 @@ def child_env(base=None) -> dict:
     env["PYTHONUTF8"] = "1"
     for name in ("PYTHONIOENCODING", NONCE_ENV, BREAKAWAY_ENV, BACKUP_PASSWORD_ENV):
         env.pop(name, None)                  # (no engine step needs the backup password; only the worker gets it)
+    for name in (ONE_TXN_ENV, AVOID_ENV):    # only the refresh child's own words ask for one transaction
+        env.pop(name, None)
     return env
 
 
@@ -1337,12 +1340,13 @@ def token_moved(plan: dict, deps: "Deps", with_fingerprint: bool) -> list[str]:
 
 def refresh_need_s(last_refresh_s=None) -> float:
     """How long the next refresh is taken to last: 1.25 times the last refresh on record, never less
-    than REFRESH_ASSUMED_S (also what nothing on record, the first load, counts as)."""
+    than REFRESH_ASSUMED_S (also what nothing on record, the first load, counts as) and never more
+    than REFRESH_NEED_MAX_S (a refresh that does run longer has its commit held by the loader)."""
     try:
         took = max(0.0, float(last_refresh_s)) if last_refresh_s is not None else 0.0
     except (TypeError, ValueError):
         took = 0.0
-    return max(float(REFRESH_ASSUMED_S), 1.25 * took)
+    return min(float(REFRESH_NEED_MAX_S), max(float(REFRESH_ASSUMED_S), 1.25 * took))
 
 
 def start_until_s(last_refresh_s=None) -> int:
@@ -2298,6 +2302,7 @@ class Job:
         self.tick_until = start_until_s(took)
         self.need_s = refresh_need_s(took)
         self.one_txn = bool(deps.one_transaction)
+        self.refresh_run_s = 0.0                         # the refresh child's own run, the waits around it left out
         self.needs_look: list[str] = []
         self.pre_gate: Path | None = None
         self.result: dict = {}
@@ -2786,7 +2791,9 @@ class Job:
                 self.j("step_start", step="refresh", attempt=attempt, text="The identical load runs once more.")
             self.written = True
             # never cut short: a half load is the worst outcome
+            ran_from = d.now()
             child = d.runner("refresh", argv + self._one_txn_args(), None)
+            self.refresh_run_s = max(self.refresh_run_s, (d.now() - ran_from).total_seconds())
             res = parse_refresh(child.text)
             loaded = (res or {}).get("loaded") or {}
             not_run = str((res or {}).get("verify_error") or "")       # the verification could not RUN
@@ -2906,13 +2913,16 @@ class Job:
                 "data_date": self.result.get("data_as_of"), "published": self.published,
                 "result": "ok" if not look else "ok, needs a look: " + ", ".join(look)}
         if self.timings.get("refresh") is not None and not d.rehearsal:
-            last["refresh_seconds"] = self.timings["refresh"]       # the next load's start window (start_until_s)
+            # the next load's window (start_until_s, refresh_need_s): the refresh child's own run, never the
+            # waits the worker made around it (the pause and the quiet moment before a second run)
+            took = round(self.refresh_run_s, 1)
+            last["refresh_seconds"] = took
             try:
                 earlier = (d.read_state().get("last_load") or {}).get("refresh_seconds_recent") or []
             except (OSError, ValueError, AttributeError, TypeError):
                 earlier = []
             earlier = [x for x in (earlier if isinstance(earlier, list) else []) if _seconds(x) is not None]
-            last["refresh_seconds_recent"] = (earlier + [self.timings["refresh"]])[-REFRESH_RECENT:]
+            last["refresh_seconds_recent"] = (earlier + [took])[-REFRESH_RECENT:]
         # since which report day the profitability report is held back (the brief says "held back
         # since" from it): only a load knows, so it is written down here and carried from load to load
         try:

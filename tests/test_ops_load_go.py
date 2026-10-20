@@ -1753,6 +1753,10 @@ def utc(h, m, s=0) -> datetime:
 def _():
     need = yq.REFRESH_ASSUMED_S                  # nothing on record: a refresh is taken to last 4 minutes
     assert yq.refresh_need_s(None) == need and yq.refresh_need_s(300) == 375 and yq.refresh_need_s("junk") == need
+    # one slow refresh on record never moves the margin before 8 o'clock earlier than ten minutes
+    assert yq.refresh_need_s(1801) == yq.REFRESH_NEED_MAX_S == 600
+    assert yq.agents_wait_seconds(utc(4, 49, 44), 600) == 0 and yq.agents_wait_seconds(utc(4, 49, 45), 600) > 0
+    assert yq.start_until_s(1801) == yq.START_UNTIL_MIN_S        # the REST loader's rule keeps its own floor
     # the agents' window is 07:59:45 (the clocks' margin) to 08:20:00 Bahrain = 04:59:45 to 05:20:00 UTC
     for (h_, m, s), want in (((9, 0, 0), 0), ((9, 0, 30), 0), ((9, 10, 0), 0), ((9, 14, 59), 0), ((4, 49, 0), 0),
                              ((4, 55, 44), 0), ((4, 55, 45), 1456), ((4, 56, 0), 1441), ((5, 0, 0), 1201),
@@ -1862,6 +1866,10 @@ def _():
             "Waited 23.5 min for production's 8 o'clock agents before the second run."]
         first, second = [c[1] for c in h.runner.calls if c[0] == "refresh"]
         assert first[:7] == second[:7] and first[7] != second[7], "the same load; the list moves with the clock"
+        # the next load's estimate is the refresh child's own run (six minutes), never the waits around it
+        assert h.rows("finished")[0]["timings"]["refresh"] == 360 + yq.RETRY_PAUSE_S + 1411
+        last = status.read_state()["last_load"]
+        assert last["refresh_seconds"] == 360.0 and last["refresh_seconds_recent"][-1] == 360.0, last
     with data_root() as root:                    # at noon there is nothing to wait for
         h = Harness(root)
         h.deps.one_transaction = True
@@ -3498,7 +3506,8 @@ def _():
             f"    open('env.json', 'w').write(json.dumps([os.environ.get({yq.ONE_TXN_ENV!r}), os.environ.get({yq.AVOID_ENV!r})]))\n"
             "    return {'ok': True, 'data_as_of': None, 'error': None, 'loaded': {}, 'changes': {}, 'verify': {'ok': True}}\n",
             encoding="utf-8")
-        env = {k: v for k, v in yq.child_env().items() if k not in (yq.ONE_TXN_ENV, yq.AVOID_ENV)}
+        env = yq.child_env(dict(yq.child_env(), **{yq.ONE_TXN_ENV: "1", yq.AVOID_ENV: "1-2"}))
+        assert yq.ONE_TXN_ENV not in env and yq.AVOID_ENV not in env, "only the child's own words ask for it"
         for extra, want in ((["--one-transaction", "1760941890-1760941995"], ["1", "1760941890-1760941995"]),
                             (["--one-transaction"], ["1", ""]), ([], [None, None])):
             child = yq.run_child([sys.executable, "-X", "utf8", "-c", yq.REFRESH_PROGRAM, "staging folder"] + extra,

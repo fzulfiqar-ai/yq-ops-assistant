@@ -17,8 +17,9 @@ Local (SKIP unless YQ_LOCAL_PG_LOAD_TXN names a scratch cluster on THIS PC, e.g.
 postgresql://postgres@localhost:55731 -- the suite drops and creates its own two databases there,
 yq_load_txn_rest and yq_load_txn_one):
   * PARITY of the whole loader on invented drops: today's REST semantics (a PostgREST stand-in: one
-    transaction per request, the body through json_populate_recordset, the loader's own 500-row
-    chunks and month-by-month deletes) against the one transaction. Price books (void, revive, the
+    transaction per request, the body through json_to_recordset with the columns' types as PostgREST
+    v12 reads it, the loader's own 500-row chunks and month-by-month deletes) against the one
+    transaction (json_populate_record, in the same slices). Price books (void, revive, the
     mass-void guard), sales (prune, re-line, both span guards), REPLACE_OK / PARTIAL_OK, profitability,
     ledger, receivables, stock: every table, every id and the loader's output the same after every step;
   * a load that fails half-way leaves nothing behind on the one transaction (and part of it on REST);
@@ -207,27 +208,38 @@ def _():
     n = c.delete_windows("stock_movements", "move_date", [("2026-08-15", "2026-08-31"), ("2026-09-01", "2026-09-30")])
     assert n == 3 and conn.sql[-1][1] == ["2026-08-15", "2026-08-31", "2026-09-01", "2026-09-30"]
     assert conn.sql[-1][0].count(">= %s::date and") == 2 and " or " in conn.sql[-1][0]
-    # one upsert: a temp table that drops at commit, COPY in file order, one INSERT .. ON CONFLICT of every body column
+    # one upsert: a temp table that drops at commit, COPY in file order, then ONE server-side loop of the
+    # REST path's slices: INSERT .. ON CONFLICT of every body column, `chunk` rows at a time, in order
     conn.sql.clear()
-    rows = [{"voucher": "V1", "item_name": "I1", "received_qty": "2.0"}, {"voucher": "V2", "item_name": "I1", "received_qty": None}]
-    assert c.bulk_upsert("stock_movements", rows, "voucher,item_name") == 2
-    (create, _), (copy, sent), (insert, _) = conn.sql
-    assert create == "create temp table _load_rows_1 (ord bigint not null, j json not null) on commit drop"
-    assert copy == "copy _load_rows_1 (ord, j) from stdin" and sent == [(0, load_txn.body_json(rows[0])), (1, load_txn.body_json(rows[1]))]
-    assert insert == ('insert into public."stock_movements" ("voucher", "item_name", "received_qty") select _r."voucher", '
-                      '_r."item_name", _r."received_qty" from _load_rows_1 _s, json_populate_record(null::public."stock_movements", '
-                      '_s.j) _r order by _s.ord on conflict ("voucher", "item_name") do update set "voucher" = excluded."voucher", '
-                      '"item_name" = excluded."item_name", "received_qty" = excluded."received_qty"'), insert
+    rows = [{"voucher": f"V{i}", "item_name": "I1", "received_qty": "2.0" if i % 2 else None} for i in range(1201)]
+    assert c.bulk_upsert("stock_movements", rows, "voucher,item_name", chunk=500) == 1201
+    (create, _), (copy, sent), (loop, _) = conn.sql
+    assert create == "create temp table _load_rows_1 (ord bigint primary key, j json not null) on commit drop"
+    assert copy == "copy _load_rows_1 (ord, j) from stdin" and sent == [(i, load_txn.body_json(r)) for i, r in enumerate(rows)]
+    assert loop == ('do $load$ begin for _k in 0..1200 by 500 loop insert into public."stock_movements" ("voucher", '
+                    '"item_name", "received_qty") select _r."voucher", _r."item_name", _r."received_qty" from _load_rows_1 _s, '
+                    'json_populate_record(null::public."stock_movements", _s.j) _r where _s.ord >= _k and _s.ord < _k + 500 '
+                    'order by _s.ord on conflict ("voucher", "item_name") do update set "voucher" = excluded."voucher", '
+                    '"item_name" = excluded."item_name", "received_qty" = excluded."received_qty"; end loop; end $load$'), loop
     assert c.bulk_upsert("stock_movements", [], "voucher") == 0 and len(conn.sql) == 3          # nothing sent for no rows
+    raises(ValueError, lambda: c.bulk_upsert("stock_movements", rows[:1], ""))                 # a key is always named
+    raises(ValueError, lambda: c.bulk_upsert("stock_movements", rows[:1], "voucher", chunk=0))
+    assert len(conn.sql) == 3
     # the commit: at once outside the intervals; waited out inside them, the transaction kept open
     slept, said = [], []
     assert c.commit([(100, 200)], now=lambda: 50.0, sleep=slept.append, say=said.append) == 0 and conn.committed == 1
-    assert slept == [] and said == []
+    assert slept == [] and said == [] and c.commit_sent is True
     assert c.commit([(100, 200), (200, 260)], now=lambda: 150.0, sleep=slept.append, say=said.append) == 110
     assert slept == [110] and conn.committed == 2 and "waits 110 s" in said[0]
     assert conn.sql[-1][0] == "set local idle_in_transaction_session_timeout = '230s'"
     c.commit([(0, 10 ** 10)], now=lambda: 5.0, sleep=slept.append, say=said.append)
     assert slept[-1] == load_txn.HOLD_MAX_S                                             # never longer than this
+    # an aborted transaction is never committed (Postgres would answer COMMIT with a silent rollback)
+    bad = _Conn(SM_TYPES)
+    bad.info = types.SimpleNamespace(transaction_status=types.SimpleNamespace(name="INERROR"))
+    d = load_txn.TxnClient(bad)
+    exc = raises(RuntimeError, lambda: d.commit([], sleep=slept.append, say=said.append))
+    assert "the transaction is INERROR" in str(exc) and bad.committed == 0 and d.commit_sent is False
 
 
 # ── pure: the loader's seams ─────────────────────────────────────────────────────────────────
@@ -238,8 +250,8 @@ class _Bulk:
     def __init__(self):
         self.calls, self.guards = [], 0
 
-    def bulk_upsert(self, table, rows, on_conflict):
-        self.calls.append(("upsert", table, len(rows), on_conflict))
+    def bulk_upsert(self, table, rows, on_conflict, chunk=None):
+        self.calls.append(("upsert", table, len(rows), on_conflict, chunk))
         return len(rows)
 
     def delete_windows(self, table, col, windows):
@@ -260,7 +272,7 @@ def _():
     b = _Bulk()
     with contextlib.redirect_stdout(io.StringIO()) as out:
         assert ls._upsert(b, "order_lines", [{"invoice_no": str(i)} for i in range(1234)], "invoice_no,line_no") == 1234
-    assert b.calls == [("upsert", "order_lines", 1234, "invoice_no,line_no")]
+    assert b.calls == [("upsert", "order_lines", 1234, "invoice_no,line_no", ls.CHUNK)]        # REST's slices
     assert "upserted order_lines                 1234" in out.getvalue()               # the line refresh.py counts
     assert ls._delete_span(b, "stock_movements", "move_date", "2026-08-20", "2026-10-03") == 7
     assert b.calls[-1] == ("delete_windows", "stock_movements", "move_date",
@@ -285,11 +297,11 @@ class _FakeTxn:
     """TxnClient.open's stand-in for main(): no database, records what main() asks of it."""
     opened: list = []
 
-    def __init__(self, fail_on: str | None = None, commit_fails: bool = False):
+    def __init__(self, fail_on: str | None = None, commit_fails: bool = False, hold_cut: bool = False):
         self.fail_on, self.statements, self.committed, self.rolled, self.closed = fail_on, 5, None, 0, 0
-        self.upserts, self.commit_fails = [], commit_fails
+        self.upserts, self.commit_fails, self.hold_cut, self.commit_sent = [], commit_fails, hold_cut, False
 
-    def bulk_upsert(self, table, rows, on_conflict):
+    def bulk_upsert(self, table, rows, on_conflict, chunk=None):
         if table == self.fail_on:
             raise RuntimeError(f"the {table} insert failed")
         self.upserts.append(table)
@@ -310,6 +322,9 @@ class _FakeTxn:
         return q
 
     def commit(self, avoid=None, **k):
+        if self.hold_cut:                                # stopped while it held the commit: COMMIT never went out
+            raise TimeoutError("the hold was cut short")
+        self.commit_sent = True
         if self.commit_fails:
             raise ConnectionError("the server closed the connection")
         self.committed = list(avoid or [])
@@ -378,6 +393,14 @@ def _():
         assert t.closed == 1 and t.rolled == 0 and "nothing of this load was written" not in out.getvalue()
         assert "the commit got no answer (ConnectionError: the server closed the connection); the database holds this " \
                "load whole or not at all: load it again to be sure" in out.getvalue()
+        # ... but stopped while it held the commit (COMMIT never sent): rolled back, and it says nothing was written
+        with _patched_open(lambda: made.append(_FakeTxn(hold_cut=True)) or made[-1]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            raises(TimeoutError, lambda: ls.main(["--one-transaction"]))
+        t = made[-1]
+        assert t.rolled == 1 and t.closed == 1 and "no answer" not in out.getvalue()
+        assert "one transaction ROLLED BACK (TimeoutError: the hold was cut short): nothing of this load was written" \
+            in out.getvalue()
         # the environment asks for it too (as the writer's refresh child does); the avoid list reaches the commit
         os.environ[load_txn.ONE_TXN_ENV] = "1"
         os.environ[load_txn.AVOID_ENV] = "1760941890-1760941995"
@@ -605,16 +628,22 @@ class _RestRequest:
             return types.SimpleNamespace(data=[], count=cur.rowcount)
         body = json.dumps(self.payload if isinstance(self.payload, list) else [self.payload],
                           ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        rows = self.payload if isinstance(self.payload, list) else [self.payload]
+        cols = list(dict.fromkeys(k for r in rows for k in r))
+        # PostgREST v12 reads a body with json_to_recordset and the columns' types from its schema cache
+        # (the client reads it with json_populate_record: two functions, so the parity compares the two)
+        typed = dict(cur.execute("SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+                                 "WHERE a.attrelid = %s::regclass AND a.attnum > 0 AND NOT a.attisdropped",
+                                 (f"public.{self.t}",)).fetchall())
+        recordset = ("json_to_recordset(%s::json) AS pgrst_body("
+                     + ", ".join(f'"{c}" {typed[c]}' for c in cols) + ")")
         if self.op == "update":
             assert w, "safeupdate"
             sets = ", ".join(f'"{c}" = pgrst_body."{c}"' for c in self.payload)
-            cur.execute(f"UPDATE {t} SET {sets} FROM (SELECT * FROM json_populate_recordset(NULL::{t}, %s::json)) pgrst_body{w}",
-                        [body] + self.params)
+            cur.execute(f"UPDATE {t} SET {sets} FROM (SELECT * FROM {recordset}) pgrst_body{w}", [body] + self.params)
             return types.SimpleNamespace(data=[], count=cur.rowcount)
-        rows = self.payload if isinstance(self.payload, list) else [self.payload]
-        cols = list(dict.fromkeys(k for r in rows for k in r))
         sql = (f'INSERT INTO {t} ({", ".join(chr(34) + c + chr(34) for c in cols)}) SELECT '
-               f'{", ".join("pgrst_body." + chr(34) + c + chr(34) for c in cols)} FROM json_populate_recordset(NULL::{t}, %s::json) pgrst_body')
+               f'{", ".join("pgrst_body." + chr(34) + c + chr(34) for c in cols)} FROM {recordset}')
         if self.op == "upsert" and self.on_conflict:
             keys = [k.strip() for k in self.on_conflict.split(",")]
             sql += (f' ON CONFLICT ({", ".join(chr(34) + k + chr(34) for k in keys)}) DO UPDATE SET '
@@ -947,6 +976,82 @@ def _():
         c.close()
     with psycopg.connect(_db(ONE_DB)) as b:
         assert b.execute("select count(*) from customers").fetchone()[0] == 0
+
+
+@test("local: a key the file repeats -- in a later slice the later row wins on both paths; inside one slice both stop, the one transaction leaving nothing")
+def _():
+    if not _local():
+        return
+    import psycopg
+    _fresh(REST_DB, ONE_DB)
+
+    def register(n: int, repeat_at: int) -> list[dict]:
+        rows = [{"invoice_no": f"SI : {7000 + i}", "order_date": "2026-10-05", "customer_name": "Shop 1 invented",
+                 "gross_bhd": 1.5 + i, "salesman": REPS[i % 3], "payment_mode": "Cash", "sales_account_name": "Cash - Sales",
+                 "source_file": "Register1.xlsx"} for i in range(n)]
+        rows.insert(repeat_at, dict(rows[4], gross_bhd=99.25))         # invoice SI : 7004 listed twice
+        return rows
+
+    with _drop({"orders": register(1001, 1001)}, ["Register1.xlsx"]) as staged:     # the repeat in the third slice
+        _both(staged)
+    assert not _differences(), _differences()
+    for db in (REST_DB, ONE_DB):
+        with psycopg.connect(_db(db)) as c:
+            assert c.execute("select gross_bhd from orders where invoice_no = 'SI : 7004'").fetchone()[0] == 99.25, db
+    with psycopg.connect(_db(ONE_DB)) as c:
+        before = {t: _rows(c, t, True) for t in FOCUS}
+    with _drop({"orders": register(1001, 10)}, ["Register1.xlsx"]) as staged:       # the repeat in the first slice
+        rest_conn = psycopg.connect(_db(REST_DB), autocommit=True)
+        saved = ls._client
+        ls._client = lambda: _Rest(rest_conn)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                over_rest = raises(Exception, lambda: ls.main(["--staged", str(staged)]))
+        finally:
+            ls._client = saved
+            rest_conn.close()
+        real_open = load_txn.TxnClient.open
+        load_txn.TxnClient.open = classmethod(lambda cls, *a, **k: real_open.__func__(cls, _db(ONE_DB)))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                in_one = raises(Exception, lambda: ls.main(["--staged", str(staged), "--one-transaction"]))
+        finally:
+            load_txn.TxnClient.open = real_open
+    for exc in (over_rest, in_one):
+        assert "cannot affect row a second time" in str(exc), exc
+    with psycopg.connect(_db(ONE_DB)) as c:
+        assert {t: _rows(c, t, True) for t in FOCUS} == before
+
+
+@test("local: a failure in the middle of a COPY rolls back to its savepoint; an aborted transaction is never committed")
+def _():
+    if not _local():
+        return
+    import psycopg
+    _fresh(ONE_DB)
+    c = load_txn.TxnClient.open(_db(ONE_DB))
+    try:
+        c.bulk_upsert("customers", [{"name": "Shop A invented"}], "name")
+        with contextlib.suppress(Exception):
+            with c.savepoint():                  # the second row cannot be written as JSON: the COPY stops half-way
+                c.bulk_upsert("customers", [{"name": "Shop B invented"}, {"name": {"a", "set"}}], "name")
+        c.bulk_upsert("customers", [{"name": "Shop C invented"}], "name")       # the transaction goes on
+        assert c.commit([], sleep=lambda s: None, say=lambda s: None) == 0
+    finally:
+        c.close()
+    with psycopg.connect(_db(ONE_DB)) as b:
+        assert [r[0] for r in b.execute("select name from customers order by name")] == ["Shop A invented", "Shop C invented"]
+    c = load_txn.TxnClient.open(_db(ONE_DB))
+    try:
+        c.bulk_upsert("customers", [{"name": "Shop D invented"}], "name")
+        raises(Exception, lambda: c.run("select no_such_column from customers"))    # unguarded: the transaction aborts
+        exc = raises(RuntimeError, lambda: c.commit([], sleep=lambda s: None, say=lambda s: None))
+        assert "the transaction is INERROR" in str(exc) and c.commit_sent is False
+    finally:
+        c.rollback()
+        c.close()
+    with psycopg.connect(_db(ONE_DB)) as b:
+        assert b.execute("select count(*) from customers where name = 'Shop D invented'").fetchone()[0] == 0
 
 
 @test("opt-in: PARITY on real Focus drops (YQ_LOAD_TXN_DROPS), read in place, oldest first")

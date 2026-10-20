@@ -11,14 +11,16 @@ very code that runs on either path. What changes:
 
   * Nothing is visible to any other session until commit(): production reads the old data or the
     new, never a half-replaced ledger. Any error before the commit rolls everything back.
-  * An upsert is ONE statement per table (bulk_upsert): the rows are COPYed, as the JSON text a
-    PostgREST request carries, into a temp table that drops at commit, and then
+  * An upsert is three statements per table (bulk_upsert), whatever its size: the rows are COPYed, as
+    the JSON text a PostgREST request carries, into a temp table that drops at commit, and one
+    server-side loop then applies them in the loader's own 500-row slices, in file order:
         INSERT INTO t (cols) SELECT r.cols FROM tmp s, json_populate_record(NULL::t, s.j) r
-        ORDER BY s.ord ON CONFLICT (key) DO UPDATE SET col = EXCLUDED.col, ...
+        WHERE s.ord in the slice ORDER BY s.ord ON CONFLICT (key) DO UPDATE SET col = EXCLUDED.col, ...
     json_populate_record is the conversion PostgREST applies to a request body itself: a price
     book's price_tiers text stays a jsonb string, '5.0' stays numeric 5.0, a float keeps every digit.
-    ORDER BY keeps the file order, so new rows take their ids in the order the 500-row POSTs gave
-    them (an upsert consumes one id per row either way).
+    The slices are the 500-row POSTs: a key repeated in a later slice wins as it did over REST, a key
+    repeated inside one slice stops the load as it did over REST ("ON CONFLICT DO UPDATE command
+    cannot affect row a second time"), and new rows take their ids in the same order.
   * The ledger's month windows are deleted in ONE statement (delete_windows), same rows.
   * A call the loader tolerates failing (load_supabase._guard) runs in a SAVEPOINT: a failure there
     undoes that call only, as a failed PostgREST request did, and the load goes on.
@@ -27,10 +29,11 @@ very code that runs on either path. What changes:
   * The commit waits out the moments the writer names (YQ_LOAD_COMMIT_AVOID: production's
     quarter-hour jobs, the 8 o'clock agents), so no reader there sees the switch mid-run.
 
-One known difference: a natural key the file still carries twice after the loader's own folding,
-more than 500 rows apart, was "last one wins" over REST (two POSTs) and stops this path ("ON CONFLICT
-DO UPDATE command cannot affect row a second time"), which rolls everything back; inside one 500-row
-POST REST stopped the same way. The parity replay of the real drops found no such key.
+Known differences, both on failures only: a step that fails stops the whole load with nothing
+written (REST kept the requests that had passed); and a statement may take STATEMENT_TIMEOUT_S where
+a PostgREST request had the authenticator's 8 s, so a tolerated read that timed out over REST (the
+load then went on as "upsert only") succeeds here. Every new row of the load, and every audit and
+ingest_runs row, takes the transaction's start as its now() (REST: the time of its own request).
 
 Every value reaches SQL as a parameter or through the catalog: names pass ident(), filter values are
 cast to the column's own type read from pg_attribute, row values travel as JSON.
@@ -275,6 +278,7 @@ class TxnClient:
         self._types: dict[str, dict[str, str]] = {}
         self._n = 0
         self.statements = 0
+        self.commit_sent = False                             # set the moment the one COMMIT goes out
 
     @classmethod
     def open(cls, dsn: str | None = None, *, statement_timeout_s: int = STATEMENT_TIMEOUT_S,
@@ -320,11 +324,13 @@ class TxnClient:
             return row[0] if row else None
 
     def columns(self, table: str) -> dict[str, str]:
-        """{column: its type as format_type spells it} of public.<table>, read once."""
+        """{column: its base type as format_type spells it} of public.<table>, read once. No typmod: a
+        filter value is compared as PostgREST's untyped text is, never rounded to numeric(12,3) or cut
+        to varchar(n) first."""
         if table not in self._types:
             self.statements += 1
             with self.conn.cursor() as cur:
-                cur.execute("select a.attname, format_type(a.atttypid, a.atttypmod) from pg_attribute a "
+                cur.execute("select a.attname, format_type(a.atttypid, null) from pg_attribute a "
                             "where a.attrelid = to_regclass(%s) and a.attnum > 0 and not a.attisdropped "
                             "order by a.attnum", (f"public.{ident(table)}",))
                 found = {str(n): str(typ) for n, typ in cur.fetchall()}
@@ -364,31 +370,39 @@ class TxnClient:
                         f"select {', '.join('_b.' + ident(c) for c in cols)} "
                         f"from json_populate_recordset(null::public.{t}, %s::json) _b", [body_json(rows)])
 
-    def bulk_upsert(self, table: str, rows: list[dict], on_conflict: str, ignore_duplicates: bool = False) -> int:
-        """Every row of one table in ONE statement: COPY the rows (JSON text, in file order) into a temp
-        table that drops at commit, then one INSERT .. ON CONFLICT .. DO UPDATE of every column of the
-        body, as PostgREST's merge-duplicates writes it. Returns the rows sent."""
+    def bulk_upsert(self, table: str, rows: list[dict], on_conflict: str, ignore_duplicates: bool = False,
+                    chunk: int = 500) -> int:
+        """Every row of one table in three statements: COPY the rows (JSON text, in file order) into a temp
+        table that drops at commit, then one server-side loop of INSERT .. ON CONFLICT .. DO UPDATE of
+        every column of the body (PostgREST's merge-duplicates), one `chunk` of rows at a time, as the
+        REST path's POSTs of that size. Returns the rows sent."""
         rows = list(rows or [])
         if not rows:
             return 0
-        cols = payload_columns(rows)
         keys = [k.strip() for k in str(on_conflict or "").split(",") if k.strip()]
+        if not keys:
+            raise ValueError(f"an upsert of {table} names no conflict key (on_conflict)")
+        size = int(chunk)
+        if size < 1:
+            raise ValueError(f"not a slice size: {chunk!r}")
+        cols = payload_columns(rows)
         self._n += 1
         tmp = f"_load_rows_{self._n}"
         t = ident(table)
+        insert = (f"insert into public.{t} ({', '.join(ident(c) for c in cols)}) "
+                  f"select {', '.join('_r.' + ident(c) for c in cols)} "
+                  f"from {tmp} _s, json_populate_record(null::public.{t}, _s.j) _r "
+                  f"where _s.ord >= _k and _s.ord < _k + {size} order by _s.ord "
+                  f"on conflict ({', '.join(ident(k) for k in keys)}) do ")
+        insert += "nothing" if ignore_duplicates else (
+            "update set " + ", ".join(f"{ident(c)} = excluded.{ident(c)}" for c in cols))
         with self.conn.cursor() as cur:
-            cur.execute(f"create temp table {tmp} (ord bigint not null, j json not null) on commit drop")
+            cur.execute(f"create temp table {tmp} (ord bigint primary key, j json not null) on commit drop")
             with cur.copy(f"copy {tmp} (ord, j) from stdin") as cp:
                 for i, r in enumerate(rows):
                     cp.write_row((i, body_json(r)))
-            sql = (f"insert into public.{t} ({', '.join(ident(c) for c in cols)}) "
-                   f"select {', '.join('_r.' + ident(c) for c in cols)} "
-                   f"from {tmp} _s, json_populate_record(null::public.{t}, _s.j) _r order by _s.ord")
-            if keys:
-                sql += f" on conflict ({', '.join(ident(k) for k in keys)}) do "
-                sql += "nothing" if ignore_duplicates else (
-                    "update set " + ", ".join(f"{ident(c)} = excluded.{ident(c)}" for c in cols))
-            cur.execute(sql)
+            # one round trip: the slices run one after the other on the server, each seeing the ones before
+            cur.execute(f"do $load$ begin for _k in 0..{len(rows) - 1} by {size} loop {insert}; end loop; end $load$")
         self.statements += 3
         return len(rows)
 
@@ -406,7 +420,10 @@ class TxnClient:
     def commit(self, avoid=None, *, now=time.time, sleep=time.sleep, say=print) -> float:
         """THE commit. When it would land inside one of the `avoid` intervals (epoch seconds), it waits
         until the last of them ends first (HOLD_MAX_S at most); the transaction stays open meanwhile and
-        production keeps reading the data as it was. Returns the seconds it waited."""
+        production keeps reading the data as it was. A transaction that an error has aborted is never
+        committed (Postgres would answer a COMMIT there with a silent rollback): it raises. Sets
+        commit_sent the moment the COMMIT goes out. Returns the seconds it waited."""
+        self._healthy("commit")
         wait = min(hold_seconds(now(), avoid or []), float(HOLD_MAX_S))
         if wait > 0:
             until = datetime.fromtimestamp(now() + wait, timezone.utc)
@@ -415,8 +432,17 @@ class TxnClient:
             with self.conn.cursor() as cur:
                 cur.execute(f"set local idle_in_transaction_session_timeout = '{int(wait) + 120}s'")
             sleep(wait)
+            self._healthy("commit")
+        self.commit_sent = True
         self.conn.commit()
         return wait
+
+    def _healthy(self, what: str) -> None:
+        """The transaction is open and no error has aborted it, or this raises."""
+        state = getattr(getattr(getattr(self.conn, "info", None), "transaction_status", None), "name", "INTRANS")
+        if state != "INTRANS":
+            raise RuntimeError(f"no {what}: the transaction is {state} (an error aborted it, or it is closed); "
+                               f"nothing of this load was written")
 
     def rollback(self) -> None:
         try:

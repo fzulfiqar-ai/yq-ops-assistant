@@ -189,9 +189,10 @@ the check runs again.
 shows either the figures it had or the new ones, never half of each. It never takes that step in the
 minute and a half after production's quarter-hour tick, while production runs its scheduled jobs: if
 the step falls there, the load holds it back by itself, for two minutes at most. And no load starts
-from about five minutes before 8 until twenty past 8 Bahrain: production runs its daily agents at 8
-o'clock, and they must read the same figures from start to end. A Yes five minutes before 8 therefore
-writes at about twenty past. The box says so on a WAIT line, and while it waits `load status` shows
+from a few minutes before 8 (about five; up to ten after a slow load) until twenty past 8 Bahrain:
+production runs its daily agents at 8 o'clock, and they must read the same figures from start to end.
+A load that is still running at 8 holds its step until twenty past. A Yes five minutes before 8
+therefore writes at about twenty past. The box says so on a WAIT line, and while it waits `load status` shows
 *Waiting about N min, to write at about HH:MM*. That is by design, not a fault. For the report before
 8, say Yes by a quarter to 8.
 

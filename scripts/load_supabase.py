@@ -526,8 +526,8 @@ def _records(df: pd.DataFrame) -> list[dict]:
 
 def _upsert(client, table: str, records: list[dict], on_conflict: str) -> int:
     bulk = getattr(client, "bulk_upsert", None)
-    if callable(bulk):                   # the one-transaction client: every row in one statement, file order kept
-        n = int(bulk(table, records, on_conflict))
+    if callable(bulk):                   # the one-transaction client: one COPY, then these CHUNK-row slices in order
+        n = int(bulk(table, records, on_conflict, chunk=CHUNK))
     else:
         n = 0
         for i in range(0, len(records), CHUNK):
@@ -785,9 +785,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  (the moments to keep the commit out of could not be read: {odd}; it is made at once)")
             try:
                 waited = client.commit(avoid)
-            except BaseException as e:      # e.g. the connection ended while the COMMIT was on its way
-                print(f"  !! one transaction: the commit got no answer ({type(e).__name__}: {str(e)[:160]}); the "
-                      f"database holds this load whole or not at all: load it again to be sure")
+            except BaseException as e:
+                if not getattr(client, "commit_sent", True):     # stopped before the COMMIT went out (a hold cut short)
+                    client.rollback()
+                    print(f"  !! one transaction ROLLED BACK ({type(e).__name__}: {str(e)[:160]}): nothing of this "
+                          f"load was written")
+                else:                                            # e.g. the connection ended while the COMMIT was on its way
+                    print(f"  !! one transaction: the commit got no answer ({type(e).__name__}: {str(e)[:160]}); "
+                          f"the database holds this load whole or not at all: load it again to be sure")
                 raise
         finally:
             client.close()
