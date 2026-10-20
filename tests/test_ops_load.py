@@ -1650,6 +1650,33 @@ def _():
         assert lc.ledger_digest([]) == (0, ""), "no rows: the digest production's empty set gives"
 
 
+@test("the preview's copies: one that Windows still holds stays and the check ends as usual; a later check of the "
+      "folder removes copies left behind once their check cannot still be running")
+def _():
+    with data_root() as root:
+        make_drop(root)
+        real_remove = paths.remove_file
+
+        def held(path):                           # a scanner or an indexer holding the file
+            if lc.PREVIEW_IN in Path(path).parts:
+                raise PermissionError("[WinError 32] The process cannot access the file")
+            return real_remove(path)
+        paths.remove_file = held
+        try:
+            res, _ = check("070126")
+        finally:
+            paths.remove_file = real_remove
+        copies = loadplan.run_dir(res["run"]) / lc.PREVIEW_IN
+        assert res["ok"] and res["token"] and res["text"].splitlines()[-1].startswith("GO: "), res["text"]
+        assert copies.is_dir() and list(copies.iterdir()), "the held copies stay where they are"
+        check("070126")                           # moments later: that check may still be running, so they stay
+        assert copies.is_dir()
+        old = datetime.now(timezone.utc).timestamp() - lc.LEFTOVER_AFTER_S - 5
+        os.utime(copies, (old, old))
+        res3, _ = check("070126")
+        assert res3["token"] and not copies.exists(), "a later check of the folder puts them away"
+
+
 @test("the token follows the staged files, the drop and the database: any of them moving changes it")
 def _():
     with data_root() as root:

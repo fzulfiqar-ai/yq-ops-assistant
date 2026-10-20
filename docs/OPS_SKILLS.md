@@ -50,7 +50,7 @@ load the reports, it answers with the line to type.
 2. Type `/yq-load`. Read the table. If a line asks for a decision, answer it in words (section 3).
    The chat shows a short version: each long list stops after five lines, with a count. The whole
    check (every progress line, lists of up to twenty, what a load also does, the staged files) is
-   in the `check.txt` named on its second line, in the load's folder.
+   in the `check.txt` named just under its `LOAD CHECK` line, in the load's folder.
    When everything this load would apply is already in the portal, the check ends with
    `Nothing new in <ddmmyy> ... No load needed.` and prints no go line: there is nothing to start.
    Reports held back or left out are named just above it, with the words that load them.

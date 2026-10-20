@@ -260,6 +260,8 @@ Q_LEDGER = (
 # step 8's one read of the rows themselves, the preview's rule for the ledger (its dates, within its items): are
 # production's rows the file's rows? Their count and one md5 of their keys (voucher | item | row_hash; the hash covers
 # every column of a row) against the file's (ledger_digest). So the preview never has to send the ledger's rows.
+# The hash is of the raw cells: a stored rate or narration that a newer parser would write differently from the same
+# cells is not seen here (the preview's old "changed" count saw it); the next drop's load rewrites the span anyway.
 Q_LEDGER_SAME = (
     "select count(*) = %s and coalesce(md5(string_agg(k, E'\\n' order by k collate \"C\")), '') = %s as same from ("
     "select coalesce(voucher, '') || '|' || item_name || '|' || row_hash as k from stock_movements "
@@ -434,15 +436,32 @@ def allowed_output(path: Path) -> Path:
 
 
 def drop_folder(folder: Path) -> None:
-    """Remove a folder of this package's own copies (loads/<run>/preview_in/): its files, then the folder."""
+    """Remove a folder of this package's own copies (loads/<run>/preview_in/): its files, then the folder. Only
+    as far as Windows lets it: a copy that a scanner or an indexer still holds stays, and the check goes on (a
+    later check of the folder removes what is left: sweep_copies)."""
+    allowed_output(folder)
     if not folder.is_dir():
         return
     for path in folder.iterdir():
-        paths.remove_file(path)
+        try:
+            paths.remove_file(path)
+        except OSError:
+            pass
     try:
-        allowed_output(folder).rmdir()
+        folder.rmdir()
     except OSError:
-        pass                                     # an empty folder left in the run's folder harms nothing
+        pass
+
+
+def sweep_copies(run: str) -> None:
+    """The preview's copies an earlier check left behind (one cut off at its deadline, or one whose copy Windows
+    held), removed once that check cannot still be running."""
+    copies = loadplan.run_dir(run) / PREVIEW_IN
+    try:
+        if copies.is_dir() and time.time() - copies.stat().st_mtime >= LEFTOVER_AFTER_S:
+            drop_folder(copies)
+    except OSError:
+        pass
 
 
 def copy_checked(src: Path, dst: Path) -> str:
@@ -875,6 +894,7 @@ def retire_earlier(new_run: str, drop: Path, deps: Deps) -> dict:
     held = str(lock.get("run") or "") if lock.get("state") != "none" else ""
     now = deps.now()
     for old in earlier_runs(new_run):
+        sweep_copies(old)
         try:
             started = loadplan.run_result(old) != "NOT_STARTED"
         except (OSError, ValueError):
