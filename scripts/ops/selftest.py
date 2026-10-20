@@ -24,6 +24,7 @@ ALLOWED_PATHS = (
     "scripts/yq_backup.py", "scripts/yq_photos.py", "scripts/yq_nightly.py", "tests/test_ops_", "docs/OPS_SKILLS.md",
     "docs/FOCUS_EXPORT.md", "CLAUDE.md", ".gitignore", ".github/workflows/ci.yml", "requirements-dev.txt",
     "scripts/nightly_backup.cmd",       # the by-hand runner of the backup job: its comments point at the daily task
+    "scripts/reconcile_check.py",       # the load's reconcile step (an engine file: it ships with an API deploy)
     # the continuation record and the docs the 15-Oct hardening pack brought current
     "docs/STATUS.md", "docs/BACKUPS.md", "docs/ROADMAP.md", "docs/CLAUDE.md", "docs/MARKET_INTEL.md",
     "docs/MARKET_INTEL_RELEASE.md", ".env.example",

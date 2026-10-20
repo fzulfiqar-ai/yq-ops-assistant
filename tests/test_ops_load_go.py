@@ -418,7 +418,8 @@ def interrupted(h: Harness, upto: str = "refresh", step: str | None = None) -> d
     pre = w.gates / "2026-01-01_085900_pre-data-010126.json"
     pre.write_text(json.dumps({"tables": {}}), encoding="utf-8")
     done = {"token": {}, "backup": {"archive": str(archive), "encrypted": True}, "pre_gate": {"path": str(pre)},
-            "wait_tick": {"waited_seconds": 0}}
+            "wait_tick": {"waited_seconds": 0},
+            "refresh": {"attempt": 1, "data_as_of": "2025-12-31", "ingest_runs": [7, 9], "new_runs": 2}}
     yq.journal(w.run, "started", launch="oldlaunch", pid=DEAD_PID, resume=False, rehearsal=False, text="Load started.")
     for name in loadplan.STEPS:
         yq.journal(w.run, "step_start", step=name, text=yq.STEP_OPENS[name])
@@ -1383,7 +1384,9 @@ def _():
         assert h.runner.argv("pre_gate")[3:] == ["-m", "scripts.prod_gate", "snapshot", "--label", "pre-data-010126"]
         assert h.runner.argv("post_gate")[3:] == ["-m", "scripts.prod_gate", "snapshot", "--label", "post-data-010126"]
         assert h.runner.argv("refresh")[3:] == ["-c", yq.REFRESH_PROGRAM, str(h.w.staging)]
-        assert h.runner.argv("reconcile")[3:] == ["-m", "scripts.reconcile_check", str(h.w.staging)]
+        # the refresh verified in this worker: the reconcile is told so, with the record its journal row names
+        assert h.rows("step_ok", "refresh")[0]["ingest_runs"] == [7, 9]
+        assert h.runner.argv("reconcile")[3:] == ["-m", "scripts.reconcile_check", str(h.w.staging), "--verified-run", "9"]
         cmp_argv = h.runner.argv("compare")
         assert cmp_argv[3:6] == ["-m", "scripts.prod_gate", "compare"]
         assert cmp_argv[6].endswith("_pre-data-010126.json") and cmp_argv[7].endswith("_post-data-010126.json")
@@ -1958,6 +1961,49 @@ def _():
         h = Harness(root)
         h.runner.script["refresh"] = [verify_fails_with(h, "The data loaded, but these totals do not match the reports: Sales")]
         assert h.go() == 0 and h.work() == 1 and h.runner.labels().count("refresh") == 1
+
+
+@test("the reconcile is told the refresh verified only when THIS worker's refresh passed its verify, with the record "
+      "its journal row names; otherwise it compares every report itself")
+def _():
+    def told(h: Harness) -> list[str]:
+        argv = h.runner.argv("reconcile")
+        assert argv[3:6] == ["-m", "scripts.reconcile_check", str(h.w.staging)], argv
+        return argv[6:]
+
+    with data_root() as root:                    # verified at once: the record of the refresh that passed (7 -> 9)
+        h = Harness(root)
+        assert h.load() == 0
+        ran = h.rows("step_ok", "refresh")[0]["ingest_runs"]
+        assert ran == [7, 9] and told(h) == ["--verified-run", str(ran[1])]
+    with data_root() as root:                    # verified on the second run: that run's record, never the first one's
+        h = Harness(root)
+        h.runner.script["refresh"] = [cannot_verify(h)]
+        assert h.load() == 0
+        assert h.rows("step_ok", "refresh")[0]["ingest_runs"] == [9, 11] and told(h) == ["--verified-run", "11"]
+    with data_root() as root:                    # cut off at the reconcile, resumed: the whole load again, its new record
+        h = Harness(root)
+        interrupted(h, upto="reconcile")
+        h.w.newest_run = 9                       # the first worker's refresh wrote records 8 and 9
+        assert h.go() == 0, h.out
+        assert h.work() == 0, h.rows()[-1]
+        assert h.runner.labels() == ["refresh", "reconcile", "post_gate", "compare"], h.runner.labels()
+        assert [r["ingest_runs"] for r in h.rows("step_ok", "refresh")] == [[7, 9], [9, 11]]
+        assert told(h) == ["--verified-run", "11"]
+    with data_root() as root:                    # a worker whose own refresh has not passed: the whole reconcile, though an
+        h = Harness(root)                        # earlier worker of this run journalled a verified refresh
+        interrupted(h, upto="reconcile")
+        job = yq.Job(RUN, h.w.plan, h.deps, yq.LockFile(RUN, "a-word"), "testtag")
+        assert job.verified is False and yq._last_ok(loadplan.journal_read(RUN), "refresh")["ingest_runs"] == [7, 9]
+        assert job.step_reconcile()[0] == "Reconciled: the portal's numbers match the Focus reports."
+        assert told(h) == []
+    with data_root() as root:                    # told so, it differs all the same: a look, the load goes on and publishes
+        h = Harness(root)
+        h.runner.script["reconcile"] = [yq.Child(2, "Dashboard receivables   10.00   12.00  FAIL (20.00%)\n"
+                                                    "MISMATCHES FOUND — see WHY hints above.\n")]
+        assert h.load() == 0 and told(h) == ["--verified-run", "9"]
+        assert h.rows("finished")[0]["needs_look"] == ["reconcile"] and h.rows("step_failed", "reconcile")[0]["stops"] is False
+        assert paths.published_dir(datetime(2026, 1, 1).date()).is_dir()
 
 
 @test("a gate that does not pass still publishes and is journalled 'gate needs a look' with its FAIL lines")
