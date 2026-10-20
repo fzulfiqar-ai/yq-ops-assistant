@@ -57,24 +57,34 @@ def _conn():
     return c
 
 
+def _ident(name: str) -> str:
+    """A name read from the catalog as a quoted SQL identifier (an embedded double quote is doubled)."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def snapshot() -> dict:
+    # 12 statements whatever the number of tables and foreign keys (it was three or four a table and one a foreign
+    # key: 343 round trips, ~37 s on 20-Oct-2026). The JSON is what that code wrote, so old and new files compare.
     snap: dict = {"taken_at": datetime.now(timezone.utc).isoformat(), "tables": {}, "orders": {},
                   "customers": {}, "salesmen": {}, "targets": {}, "fk_orphans": {}, "money": {}}
     with _conn() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute("show transaction_read_only")
         assert cur.fetchone()[0] == "on", "gate session is not read-only"
-        cur.execute("select table_name from information_schema.tables "
-                    "where table_schema='public' and table_type='BASE TABLE' order by 1")
-        for (t,) in cur.fetchall():
-            cur.execute(f'select count(*) from public."{t}"')
-            n = cur.fetchone()[0]
-            cur.execute("select 1 from information_schema.columns where table_schema='public' "
-                        "and table_name=%s and column_name='id' and data_type in ('bigint','integer','smallint')", (t,))
-            mx = None
-            if cur.fetchone():
-                cur.execute(f'select max(id)::text from public."{t}"')
-                mx = cur.fetchone()[0]
-            snap["tables"][t] = {"rows": n, "max_id": mx}
+        # every table and whether it has an integer id, then each one's count and max(id) in ONE statement
+        # (a branch carries its place in the list: a parallel plan may return the branches in any order)
+        cur.execute("""select t.table_name, t.table_name in (select c.table_name from information_schema.columns c
+                                                             where c.table_schema='public' and c.column_name='id'
+                                                             and c.data_type in ('bigint','integer','smallint'))
+                       from information_schema.tables t
+                       where t.table_schema='public' and t.table_type='BASE TABLE' order by 1""")
+        tables = cur.fetchall()
+        if tables:
+            cur.execute(" union all ".join(
+                f"select {i}, count(*), {'max(id)::text' if has_id else 'null::text'} from public.{_ident(t)}"
+                for i, (t, has_id) in enumerate(tables)))
+            counted = {i: (n, mx) for i, n, mx in cur.fetchall()}
+            for i, (t, _has_id) in enumerate(tables):
+                snap["tables"][t] = {"rows": counted[i][0], "max_id": counted[i][1]}
 
         cur.execute("""select id, order_no, md5(coalesce(token,'')), created_at::text, status, customer_id,
                               salesman_id, issued_to_salesman_id, total_bhd, subtotal_bhd, discount_bhd,
@@ -116,7 +126,7 @@ def snapshot() -> dict:
             snap["targets"][f"{s}|{p}"] = {"team": tm, "tiers": [_dec(t1), _dec(t2), _dec(t3)],
                                             "rates": [str(k1), str(k2), str(k3)]}
 
-        # generic FK orphan check (single-column FKs)
+        # generic FK orphan check (single-column FKs): the constraints, then every orphan count in ONE statement
         cur.execute("""select c.conname, cl.relname, a.attname, pl.relname, pa.attname
                        from pg_constraint c
                        join pg_class cl on cl.oid=c.conrelid join pg_class pl on pl.oid=c.confrelid
@@ -124,30 +134,48 @@ def snapshot() -> dict:
                        join pg_attribute a on a.attrelid=c.conrelid and a.attnum=c.conkey[1]
                        join pg_attribute pa on pa.attrelid=c.confrelid and pa.attnum=c.confkey[1]
                        where c.contype='f' and n.nspname='public' and array_length(c.conkey,1)=1""")
-        for name, child, col, parent, pcol in cur.fetchall():
-            cur.execute(f'select count(*) from public."{child}" c where c."{col}" is not null and not exists '
-                        f'(select 1 from public."{parent}" p where p."{pcol}" = c."{col}")')
-            snap["fk_orphans"][name] = cur.fetchone()[0]
+        fks = cur.fetchall()
+        if fks:
+            cur.execute(" union all ".join(
+                f"select {i}, count(*) from public.{_ident(child)} c where c.{_ident(col)} is not null and not exists "
+                f"(select 1 from public.{_ident(parent)} p where p.{_ident(pcol)} = c.{_ident(col)})"
+                for i, (_name, child, col, parent, pcol) in enumerate(fks)))
+            orphans = dict(cur.fetchall())
+            for i, (name, *_key) in enumerate(fks):       # in the catalog's order: a name used twice keeps the later count
+                snap["fk_orphans"][name] = orphans[i]
 
-        # Focus-side money the reports show (to explain deltas after a data load)
-        cur.execute("select count(*), coalesce(sum(gross_bhd),0), coalesce(sum(taxable_bhd),0), max(line_date)::text from order_lines")
-        n, g, tx, mx = cur.fetchone()
-        snap["money"]["order_lines"] = {"rows": n, "gross": _dec(g), "taxable": _dec(tx), "max_date": mx}
-        cur.execute("select count(*), coalesce(sum(gross_bhd),0), max(order_date)::text from orders")
-        n, g, mx = cur.fetchone()
-        snap["money"]["orders"] = {"rows": n, "gross": _dec(g), "max_date": mx}
-        cur.execute("""select as_of_date::text, count(*), coalesce(sum(net_qty),0), coalesce(sum(total_value_bhd),0)
-                       from stock_balance where as_of_date = (select max(as_of_date) from stock_balance) group by 1""")
+        # Focus-side money the reports show (to explain deltas after a data load), in ONE statement of one row:
+        # a stock or receivables date with no row reads as nothing (the left joins), the books and statuses as arrays
+        cur.execute("""select ol.n, ol.gross, ol.taxable, ol.max_date, o.n, o.gross, o.max_date,
+                              sb.as_of, sb.n, sb.qty, sb.val, ar.as_of, ar.n, ar.total,
+                              sp.books, sp.ns, so.statuses, so.ns, so.totals
+                       from (select count(*) as n, coalesce(sum(gross_bhd),0) as gross,
+                                    coalesce(sum(taxable_bhd),0) as taxable, max(line_date)::text as max_date
+                             from order_lines) ol
+                       cross join (select count(*) as n, coalesce(sum(gross_bhd),0) as gross,
+                                          max(order_date)::text as max_date from orders) o
+                       left join (select as_of_date::text as as_of, count(*) as n, coalesce(sum(net_qty),0) as qty,
+                                         coalesce(sum(total_value_bhd),0) as val
+                                  from stock_balance where as_of_date = (select max(as_of_date) from stock_balance)
+                                  group by 1) sb on true
+                       left join (select as_of_date::text as as_of, count(*) as n, coalesce(sum(balance_bhd),0) as total
+                                  from ar_ageing where as_of_date = (select max(as_of_date) from ar_ageing)
+                                  group by 1) ar on true
+                       cross join (select array_agg(price_book order by price_book) as books,
+                                          array_agg(n order by price_book) as ns
+                                   from (select price_book, count(*) as n from selling_prices group by 1) x) sp
+                       cross join (select array_agg(status order by status) as statuses, array_agg(n order by status) as ns,
+                                          array_agg(total order by status) as totals
+                                   from (select status, count(*) as n, coalesce(sum(total_bhd),0) as total
+                                         from shop_orders group by 1) x) so""")
         r = cur.fetchone()
-        snap["money"]["stock_balance_latest"] = r and {"as_of": r[0], "rows": r[1], "qty": str(r[2]), "value": _dec(r[3])}
-        cur.execute("""select as_of_date::text, count(*), coalesce(sum(balance_bhd),0) from ar_ageing
-                       where as_of_date = (select max(as_of_date) from ar_ageing) group by 1""")
-        r = cur.fetchone()
-        snap["money"]["ar_latest"] = r and {"as_of": r[0], "rows": r[1], "total": _dec(r[2])}
-        cur.execute("select price_book, count(*) from selling_prices group by 1 order by 1")
-        snap["money"]["selling_prices"] = {pb: n for pb, n in cur.fetchall()}
-        cur.execute("select status, count(*), coalesce(sum(total_bhd),0) from shop_orders group by 1 order by 1")
-        snap["money"]["shop_orders_by_status"] = {s: [n, _dec(v)] for s, n, v in cur.fetchall()}
+        snap["money"]["order_lines"] = {"rows": r[0], "gross": _dec(r[1]), "taxable": _dec(r[2]), "max_date": r[3]}
+        snap["money"]["orders"] = {"rows": r[4], "gross": _dec(r[5]), "max_date": r[6]}
+        snap["money"]["stock_balance_latest"] = None if r[7] is None else {
+            "as_of": r[7], "rows": r[8], "qty": str(r[9]), "value": _dec(r[10])}
+        snap["money"]["ar_latest"] = None if r[11] is None else {"as_of": r[11], "rows": r[12], "total": _dec(r[13])}
+        snap["money"]["selling_prices"] = dict(zip(r[14] or [], r[15] or []))
+        snap["money"]["shop_orders_by_status"] = {s: [n, _dec(v)] for s, n, v in zip(r[16] or [], r[17] or [], r[18] or [])}
     snap["digest"] = hashlib.sha256(json.dumps(snap["orders"], sort_keys=True).encode()).hexdigest()[:16]
     return snap
 
