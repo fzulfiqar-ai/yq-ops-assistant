@@ -204,7 +204,7 @@ jobs:
         run: |
           set -o pipefail
           python -m compileall -q scripts/ops scripts/yq_load_go.py scripts/yq_send.py scripts/yq_secrets.py scripts/yq_backup.py scripts/yq_photos.py scripts/yq_nightly.py
-          for suite in readonly engine skills sales moves load load_go gate reconcile deliver send backup report stock photos nightly; do
+          for suite in readonly engine skills sales moves load load_go gate reconcile deliver send backup report stock photos nightly verify; do
             echo "== tests.test_ops_$suite"
             python -m tests.test_ops_$suite 2>&1 | tee "$RUNNER_TEMP/ops_suite.log" || {
               grep -E '^(FAIL|[[:space:]]+assert |[A-Za-z_.]*(Error|Exception)\b)' "$RUNNER_TEMP/ops_suite.log" \

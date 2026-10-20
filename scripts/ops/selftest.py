@@ -30,6 +30,7 @@ ALLOWED_PATHS = (
     # the continuation record and the docs the 15-Oct hardening pack brought current
     "docs/STATUS.md", "docs/BACKUPS.md", "docs/ROADMAP.md", "docs/CLAUDE.md", "docs/MARKET_INTEL.md",
     "docs/MARKET_INTEL_RELEASE.md", ".env.example",
+    "scripts/verify_numbers.py",        # load speed, release 2: verify reads through one read-only session
 )
 # Names that are places or system words, already public in this repository: never treated as a leak.
 GENERIC_NAMES = {
