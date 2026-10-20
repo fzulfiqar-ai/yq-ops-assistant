@@ -1617,6 +1617,9 @@ MUST_CONTAIN = {
         "Never run scripts.refresh, scripts.ingest, scripts.load_supabase or any deploy",
         "Never edit, move or delete anything in the drop folder", "Show script output unchanged, in a code block",
         "Type no number yourself", "`.claude/worktrees/`, run nothing", "Do not fix a stop yourself",
+        # step 1: the block the check prints last, without its progress lines (the whole check is in check.txt)
+        "from the line that starts `The last load` or `LOAD CHECK`, whichever comes first, to the last line",
+        "Leave out the progress lines above it", "is in the `check.txt` the block names",
         # step 1: an interrupted load is resumed by its own go line, which the check prints last
         "`LOAD INTERRUPTED at <step> (run <run>)`", "/yq-load is how he resumes it",
         "Do not check again and add no option", "The check prints that load's own `GO: ` line as its last line",

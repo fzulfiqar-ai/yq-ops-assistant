@@ -14,6 +14,12 @@ The check changes nothing in the database: every read goes through scripts/ops/d
 go to business_data/staging/<run>/ and business_data/ops/loads/<run>/ (both git-ignored). The
 owner's folder is only read.
 
+TWO BLOCKS. The chat shows a short block, which the assistant retypes before the owner's box opens:
+lists cut at CHAT_LIST_MAX with a count, and no list of what a load also does, of the staged files
+or of the token (the GO line carries it). The whole check (its progress lines, the lists to LIST_MAX
+and all of the above) is kept as loads/<run>/check.txt, which the short block names under its head
+line.
+
 NOTHING NEW. A drop that is already loaded is checked in full like any other. When the check finds
 that every report the load would apply has nothing to insert, change, remove or bring back, and that
 nothing else a load does would change anything (the stock ledger voucher by voucher, the sales by day
@@ -44,7 +50,9 @@ The steps, one printed line each as it finishes:
   5 profitability  held back when the report's cost of sales is short of the stock ledger's
   6 price book     compared key by key with the live rows of that book
   7 the preview    app.ingest_batch.run_preview, read-only: invoices, lines, days, the loader's guards
-  8 stock ledger   voucher by voucher against production (the loader replaces the file's whole span)
+                   (every staged report but the stock ledger: step 8 compares that one)
+  8 stock ledger   voucher by voucher against production (the loader replaces the file's whole span),
+                   and its rows in one read: their count and one digest (Q_LEDGER_SAME)
   9 catalog        what the catalog sync that follows every load would switch on or off
 
 Older reports are never loaded. A drop whose reports are all older than the last load stops at once
@@ -88,6 +96,7 @@ Not done here, on purpose: the options are kept in plan.json and never written t
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
@@ -106,7 +115,8 @@ STEPS = 9
 SIZE_PAUSE_S = 0.4            # between the two size readings of every report file
 DEADLINE_S = 540              # the tool call has 600 s: stop cleanly before it is cut
 SESSION_TIMEOUT_S = 300
-LIST_MAX = 20                 # vouchers or invoices listed before "and N more"
+LIST_MAX = 20                 # vouchers or invoices listed before "and N more" (check.txt)
+CHAT_LIST_MAX = 5             # ... in the block the chat shows
 RECORD_MAX = 200              # items of one rule put on the register by one check
 SCOPE_LOOKUPS_MAX = 40        # scoped price rows whose sales are looked up
 REPS_MAX = 6                  # salesmen listed with what the load changes for each
@@ -195,6 +205,11 @@ HARD_CODES = ("db_diff_failed", "empty_report", "snapshot_without_date", "sales_
 # The first words of the last line of a check that finds nothing new to load: /yq-load acts on them
 # (.claude/skills/yq-load/SKILL.md, Step 1), and nothing after that line is a GO line.
 NOTHING_NEW_HEAD = "Nothing new in"
+# The chat shows a short block (lists cut at CHAT_LIST_MAX, no SIDE_EFFECTS, staged files or token). The whole check,
+# its progress lines and lists to LIST_MAX included, is kept in the run's folder; this line, under the head line,
+# names it.
+WHOLE_CHECK = "The whole check, with the longer lists: business_data/ops/loads/{run}/check.txt"
+PREVIEW_IN = "preview_in"     # loads/<run>/preview_in/: what the preview compares, removed again after it
 SIDE_EFFECTS = (
     "it sorts the items into their categories again and syncs the catalog with the price book (see Catalog above);",
     "it adds a name alias for every new Focus item name;",
@@ -241,6 +256,14 @@ Q_LEDGER = (
     "coalesce(warehouse_name, '') as w, coalesce(to_warehouse_name, '') as tw, coalesce(received_qty, 0) as rq, "
     "coalesce(issued_qty, 0) as iq, count(*) as n from stock_movements where move_date between %s and %s "
     "group by 1, 2, 3, 4, 5, 6, 7, 8"
+)
+# step 8's one read of the rows themselves, the preview's rule for the ledger (its dates, within its items): are
+# production's rows the file's rows? Their count and one md5 of their keys (voucher | item | row_hash; the hash covers
+# every column of a row) against the file's (ledger_digest). So the preview never has to send the ledger's rows.
+Q_LEDGER_SAME = (
+    "select count(*) = %s and coalesce(md5(string_agg(k, E'\\n' order by k collate \"C\")), '') = %s as same from ("
+    "select coalesce(voucher, '') || '|' || item_name || '|' || row_hash as k from stock_movements "
+    "where move_date between %s and %s and item_name = any(%s::text[])) as s"
 )
 Q_CATALOG = "select item_code, is_active, coalesce(hidden, false) as hidden, updated_by from catalog_items"
 Q_BOOK = "select sku_code from v_price_list_by_book where price_book = 'MA_base'"
@@ -376,6 +399,21 @@ def plural(n: int, word: str, many: str | None = None) -> str:
     return f"{n:,} {word if n == 1 else (many or word + 's')}"
 
 
+class Cut:
+    """A line of the Checks whose list is cut where it is shown: at CHAT_LIST_MAX in the chat's block, at
+    LIST_MAX in check.txt. lines(limit) gives its line or lines at that length."""
+
+    def __init__(self, lines):
+        self.lines = lines
+
+
+def shown_checks(checks: list, limit: int) -> list[str]:
+    out: list[str] = []
+    for line in checks:
+        out += line.lines(limit) if isinstance(line, Cut) else [line]
+    return out
+
+
 def plain_error(exc: BaseException) -> str:
     """An error in words that are safe to print: a database or network error is named by its kind
     only (its message can spell the database address), anything else keeps its first words."""
@@ -393,6 +431,18 @@ def allowed_output(path: Path) -> Path:
     if not paths.allowed_output(path):
         raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
     return path
+
+
+def drop_folder(folder: Path) -> None:
+    """Remove a folder of this package's own copies (loads/<run>/preview_in/): its files, then the folder."""
+    if not folder.is_dir():
+        return
+    for path in folder.iterdir():
+        paths.remove_file(path)
+    try:
+        allowed_output(folder).rmdir()
+    except OSError:
+        pass                                     # an empty folder left in the run's folder harms nothing
 
 
 def copy_checked(src: Path, dst: Path) -> str:
@@ -1570,6 +1620,15 @@ def ledger_compare(file_rows: list[dict], db_rows: list[dict], last_loaded: str 
             "file": f, "db": p, "items": len(fi), "warehouses": len(fw), "types": len(ft), "pairs": len(f)}
 
 
+def ledger_digest(rows: list[dict]) -> tuple[int, str]:
+    """The file's side of Q_LEDGER_SAME: its rows' count and the md5 of their keys (voucher | item | row_hash),
+    sorted as collate "C" sorts them (by code point). No rows: (0, ""), what production's empty set gives."""
+    keys = sorted(f"{r.get('voucher') or ''}|{r.get('item_name')}|{r.get('row_hash')}" for r in rows)
+    if not keys:
+        return 0, ""
+    return len(keys), hashlib.md5("\n".join(keys).encode("utf-8")).hexdigest()
+
+
 # What may leave the stock ledger without a stop (the owner, 18-Oct-2026: SIM never counts): the
 # movements of SIM items, told by the item's own name in whole words: a starter pack, or Batelco and
 # SIM together (the Sim group of Focus held exactly those eight items then). Not the repository's
@@ -1866,6 +1925,8 @@ class Check:
         self.timings: dict[str, float] = {}          # seconds per part of the check (plan.json: timings)
         self.preview_parts: dict | None = None       # the preview's seconds per report and helper (querytime)
         self.ledger_cmp: dict | None = None          # step 8's counts: changed, removed, backdated, new
+        self.ledger_same: bool | None = None         # step 8: production's rows are the file's (Q_LEDGER_SAME)
+        self.said: list[str] = []                    # the progress lines, for check.txt
         self.catalog: dict | None = None             # step 9: what the catalog sync would switch
         self.noise: dict[str, int] = {}              # target -> its folded rows that are no change (folded_noise)
         self.new_in_drop: list[str] = []             # what makes this drop more than "nothing new" (what_is_new)
@@ -1874,9 +1935,14 @@ class Check:
         self.grids = GridMemo(memo=os.environ.get("YQ_CHECK_NO_MEMO") != "1")
 
     # ── small tools ───────────────────────────────────────────────────────────
+    def say(self, line: str) -> None:
+        """A progress line: printed as it comes, and kept for check.txt."""
+        self.said.append(line)
+        self.deps.say(line)
+
     def done(self, line: str) -> None:
         self.step += 1
-        self.deps.say(f"[{self.step}/{STEPS}] {line}")
+        self.say(f"[{self.step}/{STEPS}] {line}")
 
     def row(self, kind: str, verdict: str, reason: str, staged: str | None = None) -> None:
         path = self.inv["files"].get(kind)
@@ -2355,9 +2421,8 @@ class Check:
             self.flag("needs_decision")
         if items:
             self.checks.append(f"{LABEL[kind]} (exported {fmt.day(exported)}) against the live book, key by key:")
-            self.checks += ["    " + price_line(e) for e in items[:LIST_MAX]]
-            if len(items) > LIST_MAX:
-                self.checks.append(f"    and {len(items) - LIST_MAX} more rows")
+            self.checks.append(Cut(lambda limit: ["    " + price_line(e) for e in items[:limit]]
+                                   + ([f"    and {len(items) - limit} more rows"] if len(items) > limit else [])))
             if not_looked:
                 self.checks.append(f"    What was already sold at a scoped price was looked up for {SCOPE_LOOKUPS_MAX} of "
                                    f"the {len(scoped):,} scoped rows (those below the general price first); for the "
@@ -2395,13 +2460,16 @@ class Check:
         if os.environ.get("YQ_CHECK_NO_TIMING") != "1":
             from scripts.ops.querytime import TimedBackend
             backend = timer = TimedBackend(self.session.backend, targets=LABEL_BY_TARGET, on_report=self.compared)
+        into = allowed_output(loadplan.run_dir(self.run) / PREVIEW_IN)
         try:
-            result = self.deps.preview(self.staging, backend, preview_dir, self.today, hook)
+            self.fill_preview_folder(into)
+            result = self.deps.preview(into, backend, preview_dir, self.today, hook)
         except Exception as exc:  # noqa: BLE001
             raise Stop(f"The preview against the database failed ({plain_error(exc)}). Nothing was changed.") from None
         finally:
             if timer is not None:
                 self.preview_parts = timer.timing_summary()
+            drop_folder(into)
         self.files.append(str(preview_dir))
         summary = self.summary = result.get("summary") or {}
         targets = self.targets = summary.get("targets") or {}
@@ -2449,13 +2517,15 @@ class Check:
             if changed:
                 self.flag("invoices_changed")
                 names = sorted(changed)
-                unlisted = max(len(names) - LIST_MAX, 0)           # invoices the list is too short for
                 beyond = max(pv["more_invoices"], 0)               # rows the preview's own samples leave out
-                self.checks.append("    Invoices that differ from what was loaded (the load replaces them; each one is "
-                                   "for the action list, to check): "
-                                   + ", ".join(f"{i} ({changed[i]})" for i in names[:LIST_MAX])
-                                   + (f" and {plural(unlisted, 'more invoice')}" if unlisted else "")
-                                   + (f"; and {plural(beyond, 'more changed row')} not listed" if beyond else ""))
+
+                def invoices(limit: int) -> list[str]:
+                    unlisted = max(len(names) - limit, 0)          # invoices the list is too short for
+                    return ["    Invoices that differ from what was loaded (the load replaces them; each one is for "
+                            "the action list, to check): " + ", ".join(f"{i} ({changed[i]})" for i in names[:limit])
+                            + (f" and {plural(unlisted, 'more invoice')}" if unlisted else "")
+                            + (f"; and {plural(beyond, 'more changed row')} not listed" if beyond else "")]
+                self.checks.append(Cut(invoices))
             day = fmt.day(as_on.get("order_lines") or as_on.get("orders"))
             self.records["inv_changed"] = [
                 {"key": alerts.make_key("inv_changed", inv.replace("|", "/")), "level": "CHECK",
@@ -2503,10 +2573,21 @@ class Check:
                   + ("invoices " + counts("orders") if "orders" in staged else self.absent("orders"))
                   + ("; lines " + counts("order_lines") if "order_lines" in staged else "") + ".")
 
+    def fill_preview_folder(self, into: Path) -> None:
+        """What the preview compares: a copy of every staged file but the stock ledger, in the run's folder (the
+        staging folder itself stays as the token binds it). Step 8 compares the ledger, voucher by voucher and in
+        one read row by row (Q_LEDGER_SAME), so the preview never sends its rows to the database: that was most of
+        a check's time."""
+        ledger = self.staged.get("stock_movements")
+        into.mkdir(parents=True, exist_ok=True)      # an empty one too, as an empty staging folder was handed over
+        for path in sorted(self.staging.iterdir()):
+            if path.is_file() and path != ledger:
+                paths.copy_file(path, into / path.name)
+
     def compared(self, target: str, seconds: float, ok: bool) -> None:
         """One progress line as the preview's comparison of a report is done (querytime.TimedBackend)."""
-        self.deps.say(f"      preview: {LABEL_BY_TARGET.get(target, target)} compared in {seconds:.1f} s"
-                      + ("" if ok else " (the comparison failed)"))
+        self.say(f"      preview: {LABEL_BY_TARGET.get(target, target)} compared in {seconds:.1f} s"
+                 + ("" if ok else " (the comparison failed)"))
 
     def sales_guards(self) -> dict[str, list[str]]:
         """The loader's own span and salesman guards, fed with the rows production holds inside the
@@ -2552,6 +2633,9 @@ class Check:
                       + ", ".join(f"{plural(len(m), word)} missing" for m, word in missing if m) + ").")
             return
         cmp, sim_pairs = drop_sim_pairs(cmp)
+        count, digest = ledger_digest(rows)
+        same = self.q(Q_LEDGER_SAME, [count, digest, lo, hi, sorted({r["item_name"] for r in rows})])
+        self.ledger_same = bool(same and same[0].get("same"))
         tally = (f"changed {len(cmp['changed'])}, removed {len(cmp['removed'])}, entered with an earlier date "
                  f"{len(cmp['backdated'])}")
         differ = len(cmp["changed"]) + len(cmp["removed"]) + len(cmp["backdated"])
@@ -2578,12 +2662,14 @@ class Check:
                  + [("earlier date", k) for k in cmp["backdated"]])
         if shown:
             self.flag("vouchers_changed")
-            for what, (voucher, item) in shown[:LIST_MAX]:
-                self.checks.append(f"    {what}: {voucher or '(no number)'}, {item}: loaded as "
-                                   f"{lines_text(cmp['db'].get((voucher, item)))}; the file has "
-                                   f"{lines_text(cmp['file'].get((voucher, item)))}")
-            if len(shown) > LIST_MAX:
-                self.checks.append(f"    and {len(shown) - LIST_MAX} more (each one is for the action list, to check)")
+
+            def vouchers(limit: int) -> list[str]:
+                return [f"    {what}: {voucher or '(no number)'}, {item}: loaded as "
+                        f"{lines_text(cmp['db'].get((voucher, item)))}; the file has "
+                        f"{lines_text(cmp['file'].get((voucher, item)))}" for what, (voucher, item) in shown[:limit]] + (
+                    [f"    and {len(shown) - limit} more (each one is for the action list, to check)"]
+                    if len(shown) > limit else [])
+            self.checks.append(Cut(vouchers))
         if self.pv.get("ledger_bulk") is not None:
             self.checks.append(f"Stock ledger: the loader reloads the file's whole date span ({self.pv['ledger_bulk']:,} "
                                "loaded rows are replaced). Focus recalculates its running balance on every export, so "
@@ -2697,11 +2783,11 @@ class Check:
                             if rc.get("focus_grand_total") else "") + ".")
         else:
             lines.append(f"Receivables: not loaded; they stay as on {fmt.day(anchors.get('ar_as_of'))}.")
-        if "stock_movements" in staged:
-            t = targets.get("stock_movements") or {}
-            to = (t.get("scope") or {}).get("to")
-            out["stock_movements"] = {"rows": int(t.get("file_rows") or 0), "to": to}
-            lines.append(f"Stock movements to {fmt.day(to)}: {int(t.get('file_rows') or 0):,} rows.")
+        if "stock_movements" in staged:              # the preview never sees the ledger: the file's own rows
+            rows = self.ledger_rows or []
+            to = max((iso(r.get("move_date")) for r in rows if r.get("move_date")), default=None)
+            out["stock_movements"] = {"rows": len(rows), "to": to}
+            lines.append(f"Stock movements to {fmt.day(to)}: {len(rows):,} rows.")
         else:
             lines.append(f"Stock movements: not loaded; they stay as loaded to {fmt.day(anchors.get('moves_to'))}.")
         if "product_profitability" in staged:
@@ -2826,6 +2912,8 @@ class Check:
             out.append("nothing is staged")
         rewritten: dict[str, int] = {}
         for target in dict.fromkeys(KIND_TARGET[k] for k in KIND_ORDER if k in self.staged and k in KIND_TARGET):
+            if target == "stock_movements":
+                continue                             # never in the preview: step 8 compares it (below)
             a = (self.targets.get(target) or {}).get("actions")
             label = LABEL_BY_TARGET.get(target, target)
             if not (isinstance(a, dict) and {"inserted", "updated", "unchanged"} <= set(a)
@@ -2847,6 +2935,8 @@ class Check:
                 out.append("Stock ledger: not compared voucher by voucher")
             elif any(c.values()):
                 out.append("Stock ledger: " + ", ".join(f"{n:,} {word}" for word, n in c.items() if n))
+            elif self.ledger_same is not True:       # the vouchers are the same, a row's figures are not
+                out.append("Stock ledger: rows differ from what is loaded (their figures, not their vouchers)")
         if self.pv.get("invoices"):
             out.append(f"{plural(len(self.pv['invoices']), 'invoice')} differ from what is loaded")
         sales = self.summary.get("sales") or {}
@@ -3000,45 +3090,62 @@ class Check:
         if token:
             self.files.append(str(loadplan.write_go_cmd(run, token, paths.CODE_ROOT)))
 
-        out = [failed_line(self.failed, starts=bool(token)), ""] if self.failed else []
-        out += [f"LOAD CHECK  {inv['drop'].name}  (run {run}, reports as on {fmt.day_long(data_date)})"
-                + ("  [DEV RUN]" if opt["dev"] else ""), "", self.table_text(), "", "Checks"]
-        out += [line if line.startswith("    ") else "- " + line for line in self.checks + register_lines]
-        if nothing_new:                    # no load follows: what production holds, and nothing a load would do
-            out += ["", "Production already holds (the same as these reports)"]
-            out += ["- " + line for line in self.expected["lines"]]
-            aside = self.not_in_load()     # ... and what stays outside it, with the words that put it in
-            if aside:
-                out += ["", "Not part of this load:"] + ["- " + line for line in aside]
-        else:
-            out += ["", "After the load you should see"] + ["- " + line for line in self.expected["lines"]]
-            out += ["", "A load also does this, every time"] + ["- " + line for line in SIDE_EFFECTS]
-        out.append("")
         if self.stops:
             self.flag("stop")
-            out.append("STOP: this drop cannot be loaded as it is.")
-            out += ["- " + (s if s.endswith(("?", "!")) else s.rstrip(".") + ".") for s in self.stops]
-            out.append("No token was issued. Nothing was changed.")
-        elif nothing_new:
-            if opt["dev"]:
-                self.flag("dev")
-            out.append(f"{NOTHING_NEW_HEAD} {inv['drop'].name}: everything this load would apply is already loaded"
-                       f"{last_load_words()}. No load needed.")
         elif opt["dev"]:
             self.flag("dev")
-            out.append("DEV RUN: nothing stops this drop, but a dev run issues no token and no GO line. To load, run the "
-                       "check from the project folder.")
-        else:
+        elif not nothing_new:
             self.flag("token")
-            out.append(f"Staged in business_data/staging/{run}: " + listed(staged_names, 12) + ".")
-            out.append(f"Token {token}: it binds this table to the files, the programs and the database as they are now.")
-            where = go_cmd_line(run)
-            if where:
-                out.append(where)
-            out.append("GO: " + loadplan.go_line(run, token))
+        aside = self.not_in_load() if nothing_new else []
+
+        def block(limit: int, whole: bool) -> list[str]:
+            """The printed block: the chat's (lists cut at CHAT_LIST_MAX, the line that names check.txt under the
+            head line) or the whole one in check.txt (lists to LIST_MAX, what a load also does, staged, token)."""
+            out = [failed_line(self.failed, starts=bool(token)), ""] if self.failed else []
+            out.append(f"LOAD CHECK  {inv['drop'].name}  (run {run}, reports as on {fmt.day_long(data_date)})"
+                       + ("  [DEV RUN]" if opt["dev"] else ""))
+            if not whole:
+                out.append(WHOLE_CHECK.format(run=run))
+            out += ["", self.table_text(), "", "Checks"]
+            out += [line if line.startswith("    ") else "- " + line
+                    for line in shown_checks(self.checks, limit) + register_lines]
+            if nothing_new:                # no load follows: what production holds, and nothing a load would do
+                out += ["", "Production already holds (the same as these reports)"]
+                out += ["- " + line for line in self.expected["lines"]]
+                if aside:                  # ... and what stays outside it, with the words that put it in
+                    out += ["", "Not part of this load:"] + ["- " + line for line in aside]
+            else:
+                out += ["", "After the load you should see"] + ["- " + line for line in self.expected["lines"]]
+                if whole:
+                    out += ["", "A load also does this, every time"] + ["- " + line for line in SIDE_EFFECTS]
+            out.append("")
+            if self.stops:
+                out.append("STOP: this drop cannot be loaded as it is.")
+                out += ["- " + (s if s.endswith(("?", "!")) else s.rstrip(".") + ".") for s in self.stops]
+                out.append("No token was issued. Nothing was changed.")
+            elif nothing_new:
+                out.append(f"{NOTHING_NEW_HEAD} {inv['drop'].name}: everything this load would apply is already loaded"
+                           f"{last_load_words()}. No load needed.")
+            elif opt["dev"]:
+                out.append("DEV RUN: nothing stops this drop, but a dev run issues no token and no GO line. To load, run "
+                           "the check from the project folder.")
+            else:
+                if whole:
+                    out.append(f"Staged in business_data/staging/{run}: " + listed(staged_names, 12) + ".")
+                    out.append(f"Token {token}: it binds this table to the files, the programs and the database as they "
+                               "are now.")
+                where = go_cmd_line(run)
+                if where:
+                    out.append(where)
+                out.append("GO: " + loadplan.go_line(run, token))
+            return out
+
+        whole_check = allowed_output(loadplan.run_dir(run) / "check.txt")
+        self.files.append(str(paths.write_text(whole_check, "\n".join(self.said + block(LIST_MAX, True)) + "\n")))
         ok = not self.stops
-        return {"ok": ok, "command": "load", "data_date": data_date, "text": "\n".join(out), "flags": self.flags,
-                "files": self.files, "warnings": [], "exit": 0 if ok else 2, "run": run, "token": token}
+        return {"ok": ok, "command": "load", "data_date": data_date, "text": "\n".join(block(CHAT_LIST_MAX, False)),
+                "flags": self.flags, "files": self.files, "warnings": [], "exit": 0 if ok else 2, "run": run,
+                "token": token}
 
 
 def options_of(args) -> dict:

@@ -48,6 +48,9 @@ load the reports, it answers with the line to type.
 1. Put the daily Focus reports in the dated folder (see `docs/FOCUS_EXPORT.md`): the price book when
    prices change and, with the first load of a new month, the Ledger report of the month just ended.
 2. Type `/yq-load`. Read the table. If a line asks for a decision, answer it in words (section 3).
+   The chat shows a short version: each long list stops after five lines, with a count. The whole
+   check (every progress line, lists of up to twenty, what a load also does, the staged files) is
+   in the `check.txt` named on its second line, in the load's folder.
    When everything this load would apply is already in the portal, the check ends with
    `Nothing new in <ddmmyy> ... No load needed.` and prints no go line: there is nothing to start.
    Reports held back or left out are named just above it, with the words that load them.
@@ -492,6 +495,10 @@ public.
   `load check <ddmmyy>`; any other extra word is refused with what to type.
 - **Check timings**: the preview step prints one line per report with the seconds it took, and
   `plan.json` keeps them under `timings.preview_parts` (set `YQ_CHECK_NO_TIMING=1` to turn this off).
+  The preview compares every staged report except the Stock ledger, from copies in
+  `loads/<run>/preview_in/` that it removes again. The ledger is compared by the check's own step
+  8: voucher by voucher, then all its rows in one read (their count and one digest against the
+  database's). Sending the ledger's rows to the database took most of a check's time.
 - **Backups** (`scripts/yq_backup.py`): `drill` restores the newest pre-load archive into a
   throwaway PostgreSQL on this PC (the database address must be on this PC; the schema is read from
   production, read-only) and compares every table's rows with the archive's manifest; `legacy` packs

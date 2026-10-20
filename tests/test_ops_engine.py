@@ -72,7 +72,7 @@ class data_root:
     def __enter__(self) -> Path:
         # Windows: a scanner can hold a just-written file for a moment (WinError 145 on cleanup)
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()       # TEMP may be an 8.3 short name; set_data_root resolves
         paths.set_data_root(self.root)
         config.use(None)
         return self.root

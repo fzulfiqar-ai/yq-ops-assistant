@@ -413,6 +413,9 @@ class FakeSession:
             return d["orders"]
         if s.startswith("select distinct invoice_no, warehouse_name from order_lines"):
             return d["lines"]
+        if " as same from " in s:                    # step 8's one digest of the rows (ledger_same)
+            self.digest_params = list(params or [])
+            return [{"same": d.get("ledger_same", True)}]
         if "from stock_movements where move_date between" in s:
             return d["ledger"]
         if "from catalog_items" in s:
@@ -1567,7 +1570,7 @@ def _():
         staged = sorted(p.name for p in staging.iterdir())
         assert staged == sorted([NAMES["order_lines"], NAMES["orders"], NAMES["stock_movements"], NAMES["receivables"],
                                  NAMES["product_profitability"], "Main_Store_only_" + NAMES["stock_balance"]]), staged
-        assert deps.previewed == [staged], "the preview saw exactly what will load"
+        assert deps.previewed == [[n for n in staged if n != NAMES["stock_movements"]]], "what will load, but the ledger"
         for name in (NAMES["order_lines"], NAMES["stock_movements"]):
             assert loadplan.sha256_file(staging / name) == loadplan.sha256_file(drop / name)
         assert "never loaded by this command (as on Wed 07 Jan)" in text
@@ -1575,7 +1578,6 @@ def _():
         assert "entered with an earlier date 0, new 1" in text and "Loader guards: none is predicted to fire." in text
         assert "After the load you should see" in text and "Sales to Tue 06 Jan: 12 invoices, 12 lines in all." in text
         assert "BHD 150.500 on 7 accounts (Focus's own total: BHD 140.250)" in text
-        assert "demand forecast" in text and "Telegram" in text and "catalog" in text and "alias" in text
         assert "scripts/my_notes.py" in text and "scripts/ops/load_check.py" not in text      # untracked, named only
         lines = text.splitlines()
         assert lines[-1] == "GO: " + loadplan.go_line(run, token) and lines[-1].startswith("GO: python -m scripts.yq_load_go --run ")
@@ -1584,7 +1586,15 @@ def _():
         go_cmd = loadplan.run_dir(run) / "go.cmd"
         assert lines[-2] == f"If Claude may not start it: double-click {go_cmd}" and go_cmd.is_file(), lines[-2]
         assert go_cmd == root / "business_data" / "ops" / "loads" / run / "go.cmd"
-        assert lines[-3].startswith(f"Token {token}: ") and lines[-4].startswith(f"Staged in business_data/staging/{run}: ")
+        # the chat block stays short: what a load also does, the staged files and the token are in check.txt
+        assert lines[1] == lc.WHOLE_CHECK.format(run=run), lines[1]           # just under the head line
+        assert "A load also does this" not in text and "Staged in " not in text and "Token " not in text
+        whole = (loadplan.run_dir(run) / "check.txt").read_text(encoding="utf-8")
+        assert "demand forecast" in whole and "Telegram" in whole and "catalog" in whole and "alias" in whole
+        assert f"Token {token}: " in whole and f"Staged in business_data/staging/{run}: " in whole
+        assert whole.splitlines()[0].startswith("[1/9] "), "the progress lines open the whole check"
+        assert all(ln in whole.splitlines() for ln in lines if ln != lines[1]), "every line of the chat block is in it"
+        assert str(loadplan.run_dir(run) / "check.txt") in res["files"]
         assert res["flags"] == ["token"] and res["warnings"] == []
         cmd = go_cmd.read_text(encoding="utf-8")
         assert loadplan.go_line(run, token) in cmd and str(paths.CODE_ROOT) in cmd
@@ -1610,6 +1620,34 @@ def _():
             ("inv_changed", "first_run", 0), ("price_scope", "first_run", 0), ("profit_held", "first_run", 0),
             ("voucher_changed", "first_run", 0)], marks
         assert all(alerts.has_run(rule) for rule in lc.EVENT_RULES + lc.STATE_RULES)
+
+
+@test("the preview gets every staged report but the stock ledger, in copies it leaves no trace of; step 8 compares the "
+      "ledger voucher by voucher and, in one read, row by row")
+def _():
+    from app.ingest_batch import prepare
+    from scripts import ingest as ing
+    with data_root() as root:
+        drop = make_drop(root)
+        res, deps = check("070126")
+        run, text = res["run"], res["text"]
+        staged = sorted(p.name for p in loadplan.staging_path(run).iterdir())
+        assert NAMES["stock_movements"] in staged and res["token"], text
+        assert deps.previewed == [[n for n in staged if n != NAMES["stock_movements"]]], deps.previewed
+        assert not (loadplan.run_dir(run) / "preview_in").exists(), "the preview's copies are gone"
+        # the figures to expect come from the file itself: its 9 movements, the last on 6 Jan
+        rows = prepare("stock_movements", ing.parse_stock(ing.read_grid(drop / NAMES["stock_movements"]), "x"))[0]
+        assert len(rows) == 9 and "Stock movements to Tue 06 Jan: 9 rows." in text, text
+        assert loadplan.read_plan(run)["expected"]["stock_movements"] == {"rows": 9, "to": "2026-01-06"}
+        # one read compares the rows: their count and digest against production's rows of the file's dates and items
+        asked = [s for s in deps.the_session.seen if " as same from " in s]
+        assert len(asked) == 1 and "collate \"C\"" in asked[0], asked
+        n, digest, lo, hi, items = deps.the_session.digest_params
+        keys = sorted(f"{r.get('voucher') or ''}|{r['item_name']}|{r['row_hash']}" for r in rows)
+        import hashlib
+        assert n == 9 and digest == hashlib.md5("\n".join(keys).encode("utf-8")).hexdigest(), (n, digest)
+        assert (lo, hi) == ("2026-01-02", "2026-01-06") and sorted(items) == sorted(LEDGER), items
+        assert lc.ledger_digest([]) == (0, ""), "no rows: the digest production's empty set gives"
 
 
 @test("the token follows the staged files, the drop and the database: any of them moving changes it")
@@ -2044,9 +2082,12 @@ def _():
     with data_root() as root:                 # a marker that got into staging some other way stops the check
         make_drop(root)
 
+        def staging_of(folder) -> Path:          # the preview is handed loads/<run>/preview_in/
+            return loadplan.staging_path(Path(folder).parent.name)
+
         class Planted(FakeDeps):
             def preview(self, folder, *a, **k):
-                (Path(folder) / "PARTIAL_OK.txt").write_text("not asked for", encoding="utf-8")
+                (staging_of(folder) / "PARTIAL_OK.txt").write_text("not asked for", encoding="utf-8")
                 return super().preview(folder, *a, **k)
         res, _ = check("070126", deps=Planted())
         assert res["exit"] == 2 and res["token"] is None and "marker_mismatch" in res["flags"], res["text"]
@@ -2056,7 +2097,7 @@ def _():
 
         class Lost(FakeDeps):
             def preview(self, folder, *a, **k):
-                (Path(folder) / "REPLACE_OK").unlink()
+                (staging_of(folder) / "REPLACE_OK").unlink()
                 return super().preview(folder, *a, **k)
         res, _ = check("070126", "--replace-ok", deps=Lost())
         assert res["exit"] == 2 and res["token"] is None, res["text"]
@@ -2228,7 +2269,9 @@ def _():
         deps.actions = {"orders": {"updated": 25}}
         deps.samples = {"orders": {"updated_sample": many, "removed_sample": []}}
         res, _ = check("070126", deps=deps)
-        assert "INV-20 (changed) and 5 more invoices" in res["text"] and "INV-21" not in res["text"], res["text"]
+        whole = (loadplan.run_dir(res["run"]) / "check.txt").read_text(encoding="utf-8")
+        assert "INV-05 (changed) and 20 more invoices" in res["text"] and "INV-06" not in res["text"], res["text"]
+        assert "INV-20 (changed) and 5 more invoices" in whole and "INV-21" not in whole, whole
         assert len(alerts.open_items()) == 25
 
 
@@ -2519,7 +2562,7 @@ def _():
         assert "An older report is never loaded" in text and "export it again from Focus" in text
         staged = sorted(p.name for p in loadplan.staging_path(res["run"]).iterdir())
         assert staged == sorted([NAMES["orders"], NAMES["stock_movements"], "Main_Store_only_" + NAMES["stock_balance"]]), staged
-        assert deps.previewed == [staged], "the preview never sees an older report"
+        assert deps.previewed == [[n for n in staged if n != NAMES["stock_movements"]]], "nor an older report"
         assert "Invoices: 2 new, 0 changed, 0 removed. Lines: the sales day book stops (see its line)." in text
         assert deps.lines[4] == "[5/9] Profitability: STOP (older than what is loaded)."
         assert "Receivables: not loaded; they stay as on Wed 07 Jan." in text
@@ -2890,21 +2933,31 @@ def _():
         assert "ledger_entries" not in plan["as_on"]
 
 
-@test("long lists are cut after twenty with a count; a scoped price with no general price says so")
+@test("long lists: five in the chat, twenty in check.txt, each with a count; a scoped price with no general price says so")
 def _():
     with data_root() as root:
         vans = [("Zed nine", "Z9", None, None, f"Van {i:02d}", "1/5/2026", None, 1.0) for i in range(25)]
         make_drop(root, prices=PRICES + vans)
         gone = [{"voucher": f"SI:T-26-01-{50 + i}", "item_name": "Cable one C1", "d": "2026-01-04", "vt": "Sales Invoice",
                  "w": "Van A", "tw": "", "rq": Decimal(0), "iq": Decimal(1), "n": 1} for i in range(25)]
-        res, _ = check("070126", deps=FakeDeps(FakeSession(ledger=db_ledger() + gone)))
-        text = res["text"]
-        assert res["ok"] and "25 rows differ from the live book (25 added)" in text and "    and 5 more rows" in text
-        assert text.count("no general price in force") == 20 and "price_scope" not in res["flags"]
-        assert "pairs): changed 0, removed 25, entered with an earlier date 0" in text and text.count("    removed: SI:T-26-01-") == 20
-        assert "    and 5 more (each one is for the action list, to check)" in text
+        changed = {"updated_sample": [{"invoice_no": f"INV-{i:02d}"} for i in range(30)]}
+        res, _ = check("070126", deps=FakeDeps(FakeSession(ledger=db_ledger() + gone), samples={"orders": changed},
+                                               actions={"orders": {"updated": 30}}))
+        text, run = res["text"], res["run"]
+        whole = (loadplan.run_dir(run) / "check.txt").read_text(encoding="utf-8")
+        assert res["ok"] and "25 rows differ from the live book (25 added)" in text and "price_scope" not in res["flags"]
+        assert "pairs): changed 0, removed 25, entered with an earlier date 0" in text
+        for block, n, more in ((text, 5, 20), (whole, 20, 5)):
+            assert block.count("no general price in force") == n and f"    and {more} more rows" in block
+            assert block.count("    removed: SI:T-26-01-") == n
+            assert f"    and {more} more (each one is for the action list, to check)" in block
+            invoices = next(ln for ln in block.splitlines() if ln.startswith("    Invoices that differ"))
+            assert invoices.count("(changed)") == n and f" and {30 - n} more invoices" in invoices, invoices
+        assert text.splitlines()[1] == lc.WHOLE_CHECK.format(run=run)
         assert len([r for r in alerts.open_items(include_baseline=True) if r["rule"] == "voucher_changed"]) == 25
+        assert len([r for r in alerts.open_items(include_baseline=True) if r["rule"] == "inv_changed"]) == 30
         fmt.careful(text)
+        fmt.careful(whole)
 
 
 @test("--partial-ok lets a narrower stock balance through; an error that is not the check's own is raised, not hidden")
@@ -3481,6 +3534,7 @@ def _():
         "a price row voided, nothing else": (("--pricebook", "load"), {},
                                              already_loaded(actions={"selling_prices": {"voided": 1}})),
         "a voucher production lacks": ((), {}, already_loaded(session={"ledger": db_ledger(upto="2026-01-05")})),
+        "ledger rows that differ in their figures only": ((), {}, already_loaded(session={"ledger_same": False})),
         "a catalog switch": ((), {}, already_loaded(session={"catalog": other})),
         "a day's sales differ, nothing else": ((), {}, already_loaded(
             sales={"per_day_changed": [day_changed], "per_salesman_changed": []})),
@@ -3502,7 +3556,8 @@ def _():
             lines = res["text"].splitlines()
             assert res["ok"] and res["token"] and lines[-1] == "GO: " + loadplan.go_line(res["run"], res["token"]), (name, res["text"])
             assert "Nothing new" not in res["text"] and "nothing_new" not in res["flags"], name
-            assert "After the load you should see" in res["text"] and "A load also does this, every time" in res["text"]
+            whole = (loadplan.run_dir(res["run"]) / "check.txt").read_text(encoding="utf-8")
+            assert "After the load you should see" in res["text"] and "A load also does this, every time" in whole
             assert loadplan.read_plan(res["run"])["nothing_new"] is False and loadplan.read_plan(res["run"])["new_in_drop"], name
             assert (loadplan.run_dir(res["run"]) / "go.cmd").is_file(), name
 
@@ -3818,7 +3873,7 @@ def _():
     assert on[2].the_session.backend.asked == off[2].the_session.backend.asked, "... or what the database was asked"
     assert on[3]["token"] and off[3]["token"] and on[3]["text"].splitlines()[-1].startswith("GO: ")
     parts = on[1]["preview_parts"]
-    order = ["ar_ageing", "stock_balance", "product_profitability", "order_lines", "stock_movements", "orders"]
+    order = ["ar_ageing", "stock_balance", "product_profitability", "order_lines", "orders"]     # never the ledger
     assert set(parts["reports"]) == set(order) and parts["queries"] == 2 * len(order) + 1, parts
     assert list(parts["helpers"]) == ["preview"], parts               # the stand-in preview asks its one helper itself
     assert "preview_parts" not in off[1] and {"preview", "total"} <= set(on[1]) <= set(off[1]) | {"preview_parts"}
