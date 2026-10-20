@@ -20,11 +20,13 @@ Every item says VFAN (the catalog's brand) until config or a purchase order says
 
 Covered:
   * round6 / units_up at the boundaries;
-  * the supplier of an item: config, the catalog's brand, the newest purchase order, else Other; the aliases;
+  * the supplier of an item: config, the newest purchase order, the catalog's brand (VFAN for every catalogued
+    item, so an order's vendor must outrank it), else Other; the basis of each; the aliases; suppliers_of;
   * a catalog row of another division is left out; a blank division is an accessory; a code is a row once;
   * the order list by supplier ("Other" last, urgency kept inside a supplier) and the totals per supplier;
   * every item's row (the numbers, the sold windows, the age of the oldest unit, the vans, the damage store),
-    the sort, the status of each item and the rule's precedence, the boundary of Overstock;
+    the sort, the status of each item and the rule's precedence (a new arrival that has sold out, or has to be
+    ordered, shows as that), the boundary of Overstock;
   * a catalog that was not read; a category the catalog lacks; goods on order;
   * the screens and files: the Supplier column of /yq-stock reorder, the plan in stock.json, facts_json.
 """
@@ -36,7 +38,7 @@ import re
 import sys
 import traceback
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -145,50 +147,76 @@ def _():
 
 # ── the supplier ──────────────────────────────────────────────────────────────
 
-@test("the supplier of an item: config, then the catalog's brand, then the newest purchase order, else Other")
+@test("the supplier of an item: config, then the newest purchase order, then the catalog's brand, else Other")
 def _():
     m = build()
-    po = {"CB2": "Shenzhen Vendor", "HG3": "Shenzhen Vendor", "SN4": "Port Vendor"}
-    # the catalog's brand is VFAN for the whole world, and it beats a purchase order
-    plan = plan_of(m, CATALOG_ROWS, po)
+    # the catalog says VFAN for the whole world, as it does for every catalogued item: an order's vendor outranks it
+    plan = plan_of(m, CATALOG_ROWS, {"CB2": "Shenzhen Vendor", "HG3": "Shenzhen Vendor", "SN4": "Port Vendor"})
+    assert {k: sup(plan, k) for k in NAMES} == {
+        "A": ("VFAN", "catalog"), "B": ("Shenzhen Vendor", "purchase order"), "C": ("Shenzhen Vendor", "purchase order"),
+        "N": ("Port Vendor", "purchase order"), "F": ("VFAN", "catalog"), "DISP": ("VFAN", "catalog")}
+    # no purchase order read, or none for the code: the brand answers
+    plan = plan_of(m, CATALOG_ROWS, None)
     assert {k: sup(plan, k) for k in NAMES} == {k: ("VFAN", "catalog") for k in NAMES}
     # every rung of the ladder, in one go
+    po = {"CA1": "Order Vendor", "CB2": "Shenzhen Vendor", "SN4": "Port Vendor", "ZN9": "Late Vendor"}
     cat = catalog({"CB2": {"brand": None}, "HG3": {"brand": "   "}, "DS1": {"brand": "Acme"},
                    "FO5": {"division": "Devices"}}, drop=("SN4",))
     mc = with_cfg(m, suppliers={"CA1": "Local Trader"})
-    got = {k: sup(plan_of(mc, cat, po), k) for k in NAMES}
-    assert got == {"A": ("Local Trader", "config"),                # config beats the brand (VFAN) and any order
+    plan = plan_of(mc, cat, po)
+    got = {k: sup(plan, k) for k in NAMES}
+    assert got == {"A": ("Local Trader", "config"),                # config beats the order and the brand (VFAN)
                    "B": ("Shenzhen Vendor", "purchase order"),     # no brand: the vendor of the newest order
-                   "C": ("Shenzhen Vendor", "purchase order"),     # a brand of spaces is no brand
+                   "C": ("Other", "none"),                         # a brand of spaces is no brand; no order
                    "N": ("Port Vendor", "purchase order"),         # no catalog row at all
                    "F": ("Other", "none"),                         # a row of another division is no row; no order
-                   "DISP": ("Acme", "catalog")}, got
+                   "DISP": ("Acme", "catalog")}, got               # no order: the brand
+    # every row of all_items names the basis it rests on, the catalog code no item has included
+    assert {k: row(plan, CODES[k])["supplier_basis"] for k in NAMES} == {k: v[1] for k, v in got.items()}
+    assert {k: row(plan, CODES[k])["supplier"] for k in NAMES} == {k: v[0] for k, v in got.items()}
+    z = row(plan, "ZN9")
+    assert (z["supplier"], z["supplier_basis"]) == ("Late Vendor", "purchase order")     # an upcoming item that is ordered
+    z = row(plan_of(mc, cat, None), "ZN9")
+    assert (z["supplier"], z["supplier_basis"]) == ("WEKOME", "catalog")                  # not ordered: its brand
+    z = row(plan_of(with_cfg(m, suppliers={"ZN9": "Local Trader"}), cat, po), "ZN9")
+    assert (z["supplier"], z["supplier_basis"]) == ("Local Trader", "config")
     # no purchase orders read: the rung is skipped, and Other stands where nothing else answers
     got = {k: sup(plan_of(mc, cat, None), k) for k in NAMES}
     assert got["A"] == ("Local Trader", "config") and got["B"] == ("Other", "none") and got["N"] == ("Other", "none")
+    assert got["DISP"] == ("Acme", "catalog")
     # no catalog read at all: config and the orders still answer
     got = {k: sup(plan_of(mc, None, po), k) for k in NAMES}
     assert got == {"A": ("Local Trader", "config"), "B": ("Shenzhen Vendor", "purchase order"),
-                   "C": ("Shenzhen Vendor", "purchase order"), "N": ("Port Vendor", "purchase order"),
+                   "C": ("Other", "none"), "N": ("Port Vendor", "purchase order"),
                    "F": ("Other", "none"), "DISP": ("Other", "none")}, got
-    # supplier_of reads the same table (the reorder view uses it); an unknown name is Other
+    # stock reads the same ladder before there is a plan (suppliers_of), item by item
     plan = plan_of(mc, cat, po)
+    assert stock_plan.suppliers_of(m.items, mc.cfg, cat, po) == {
+        name: (s["name"], s["basis"]) for name, s in plan["suppliers"].items()}
+    assert stock_plan.suppliers_of(m.items, mc.cfg, None, None)[L("B")] == ("Other", "none")
+    # supplier_of reads the same table (the reorder view uses it); an unknown name is Other
     assert stock_plan.supplier_of(plan, L("A")) == "Local Trader"
     assert stock_plan.supplier_of(plan, L("B")) == "Shenzhen Vendor"
     assert stock_plan.supplier_of(plan, "no such item") == "Other" and stock_plan.supplier_of({}, L("A")) == "Other"
     assert stock_plan.supplier_of({"suppliers": {"x": {"name": "", "basis": "none"}}}, "x") == "Other"
+    # through the build: an order's vendor is the supplier on the order list's rows and in the plan alike
+    m3 = build(World(po_vendor=[("cb2", "Shenzhen Vendor")]))
+    assert m3.facts["order"][0]["supplier"] == m3.facts["plan"]["order"][0]["supplier"] == "Shenzhen Vendor"
+    assert m3.facts["plan"]["suppliers"][L("B")] == {"name": "Shenzhen Vendor", "basis": "purchase order"}
+    assert m3.facts["plan"]["suppliers"][L("A")] == {"name": "VFAN", "basis": "catalog"}
 
 
 @test("the names pass through config's aliases: spaces collapsed, the spelling folded, whichever rung named them")
 def _():
     m = build()
     aliases = {"vfan co": "VFAN", "shenzhen vendor": "Shenzhen Traders", "local trader": "Local Traders Ltd"}
-    cat = catalog({"CB2": {"brand": "  Vfan   CO "}, "HG3": {"brand": None}, "SN4": {"brand": "Acme    Works"}})
+    cat = catalog({"CB2": {"brand": "  Vfan   CO "}, "HG3": {"brand": "Elsewhere Brand"},
+                   "SN4": {"brand": "Acme    Works"}})
     mc = with_cfg(m, suppliers={" ca1 ": " local   TRADER "}, supplier_aliases=aliases)
     plan = plan_of(mc, cat, {"hg3": "SHENZHEN   Vendor"})
     assert sup(plan, "A") == ("Local Traders Ltd", "config")           # a key with spaces, a name in odd case
     assert sup(plan, "B") == ("VFAN", "catalog")                       # " Vfan   CO " is the alias "vfan co"
-    assert sup(plan, "C") == ("Shenzhen Traders", "purchase order")    # a code and a vendor in any case
+    assert sup(plan, "C") == ("Shenzhen Traders", "purchase order")    # a code and a vendor in any case; it beats the brand
     assert sup(plan, "N") == ("Acme Works", "catalog")                 # no alias: only the spaces are collapsed
     assert sup(plan, "F") == ("VFAN", "catalog")
     # a catalog code no item has is named the same way
@@ -246,6 +274,8 @@ def _():
     assert all(r["active"] is None and r["hidden"] is None and r["category"] == "" for r in plan["all_items"])
     assert sup(plan, "B") == ("Shenzhen Vendor", "purchase order")                         # the PO vendor, any case
     assert {sup(plan, k) for k in NAMES if k != "B"} == {("Other", "none")}
+    assert {r["code"]: r["supplier_basis"] for r in plan["all_items"]} == {
+        c: ("purchase order" if c == "CB2" else "none") for c in CODES.values()}
     assert plan["order"][0]["supplier"] == "Shenzhen Vendor"
     # the reads that failed are named under the screen, and the reorder view still prints
     with data_root():
@@ -285,16 +315,24 @@ def _():
 @test("the order list by supplier: alphabetical, Other last, the urgency order kept inside a supplier")
 def _():
     m = build(crowded(), {"stock.suppliers": {"CA1": "Alpha Supply", "SN4": "Alpha Supply"}})
-    # the order rule is stock's: by cover, most urgent first
-    assert [x["item"].code for x in m.facts["order"]] == ["CB2", "SN4", "CA1"]
+    # the order rule is stock's: by cover, most urgent first, each row naming its supplier by the same ladder
+    assert [(x["item"].code, x["supplier"]) for x in m.facts["order"]] == [
+        ("CB2", "VFAN"), ("SN4", "Alpha Supply"), ("CA1", "Alpha Supply")]
     assert [x["qty"] for x in m.facts["order"]] == [65, 6, 76]
+    # the plan holds those rows by supplier: VFAN after Alpha Supply, the most urgent first inside a supplier
+    plan = m.facts["plan"]
+    assert [(x["item"].code, x["supplier"]) for x in plan["order"]] == [
+        ("SN4", "Alpha Supply"), ("CA1", "Alpha Supply"), ("CB2", "VFAN")]
+    assert all(plan["suppliers"][x["item"].ledger_name]["name"] == x["supplier"] for x in m.facts["order"])
     before = [dict(x) for x in m.facts["order"]]
     cat = catalog({"CB2": {"brand": None}})                                       # ITEM-B has no brand: Other
     plan = plan_of(m, cat)
     assert [(x["item"].code, x["supplier"]) for x in plan["order"]] == [
         ("SN4", "Alpha Supply"), ("CA1", "Alpha Supply"), ("CB2", "Other")]       # B is the most urgent, and last
-    assert [dict(x) for x in m.facts["order"]] == before and all("supplier" not in x for x in m.facts["order"])
-    assert plan["order"][0]["cover"] == m.facts["order"][1]["cover"] and plan["order"][2]["qty"] == 65   # rows are copies
+    # the plan names the supplier from the catalog it is given, in its own copy of each row; stock's rows stay as built
+    assert [dict(x) for x in m.facts["order"]] == before and m.facts["order"][0]["supplier"] == "VFAN"
+    assert not any(p is q for p in plan["order"] for q in m.facts["order"])
+    assert plan["order"][0]["cover"] == m.facts["order"][1]["cover"] and plan["order"][2]["qty"] == 65
     assert plan["supplier_totals"] == [
         {"supplier": "Alpha Supply", "items": 2, "units": Decimal(82), "value": Decimal("49.600"), "uncosted": 0},
         {"supplier": "Other", "items": 1, "units": Decimal(65), "value": Decimal("162.500"), "uncosted": 0}]
@@ -344,14 +382,17 @@ def _():
     assert plan["built"] is True and plan["catalog_read"] is True
     assert plan["catalog_items"] == 7 and plan["catalog_only"] == 1
     # the six items and the catalog code no item has; VFAN before WEKOME; inside VFAN, the status order
-    assert [r["code"] for r in rows] == ["DS1", "SN4", "CB2", "FO5", "HG3", "CA1", "ZN9"]
-    assert [r["status"] for r in rows] == ["Display", "New arrival", "Order now", "No stock, no sale", "No sale 90 d",
+    assert [r["code"] for r in rows] == ["DS1", "CB2", "SN4", "FO5", "HG3", "CA1", "ZN9"]
+    assert [r["status"] for r in rows] == ["Display", "Order now", "New arrival", "No stock, no sale", "No sale 90 d",
                                            "Overstock", "Not in main store yet"]
     assert plan["statuses"] == {"Display": 1, "Not in main store yet": 1, "New arrival": 1, "Order now": 1,
                                 "No stock, no sale": 1, "No sale 90 d": 1, "Overstock": 1}
     assert list(plan["statuses"]) == [s for s in stock_plan.STATUS_ORDER if s in plan["statuses"]]
     assert sum(plan["statuses"].values()) == len(rows)
     assert [r["supplier"] for r in rows] == ["VFAN"] * 6 + ["WEKOME"]
+    assert [r["supplier_basis"] for r in rows] == ["catalog"] * 7             # nothing but the catalog's brand answers
+    assert stock_plan.STATUS_ORDER == ("Display", "Not in main store yet", "Sold out", "Order now", "New arrival",
+                                       "No stock, no sale", "No sale 90 d", "Overstock", "OK")
     old = date(2025, 2, 1)
     cols = ("main", "with_vans", "damage", "on_order", "sold_30", "sold_90", "sold_365", "value", "oldest_days",
             "last_sale", "last_receipt", "rank", "category", "active", "hidden", "name")
@@ -424,10 +465,11 @@ def _():
     fl = m.flows
     assert a["with_vans"] == fl.get(L("A")).sellable_at(D) - a["main"] and a["damage"] == fl.get(L("A")).damage_at(D)
     assert row(plan, "DS1")["damage"] == 0 and row(plan, "HG3")["with_vans"] == 0
-    assert row(plan, "CA1")["status"] == "Order now" and row(plan, "SN4")["status"] == "New arrival"   # the rule's order
-    assert plan["statuses"]["Order now"] == 2
-    # within a supplier: the status order, then the name (ITEM-A and ITEM-B are both Order now)
-    assert [r["code"] for r in plan["all_items"]] == ["DS1", "SN4", "CA1", "CB2", "FO5", "HG3", "ZN9"]
+    # ITEM-N is a new arrival, but it has to be ordered: it shows as that
+    assert row(plan, "CA1")["status"] == "Order now" and row(plan, "SN4")["status"] == "Order now"
+    assert plan["statuses"]["Order now"] == 3 and "New arrival" not in plan["statuses"]
+    # within a supplier: the status order, then the name (ITEM-A, ITEM-B and ITEM-N are all Order now)
+    assert [r["code"] for r in plan["all_items"]] == ["DS1", "CA1", "CB2", "SN4", "FO5", "HG3", "ZN9"]
 
 
 @test("the statuses the plain world lacks: Sold out, OK, and the rule's precedence; Overstock begins above 180 days")
@@ -436,15 +478,17 @@ def _():
     m = build(damaged(B=20, A=34, N=36))
     plan = m.facts["plan"]
     got = {r["code"]: r["status"] for r in plan["all_items"]}
-    assert got == {"CB2": "Sold out", "CA1": "OK", "SN4": "New arrival", "FO5": "No stock, no sale",
+    assert got == {"CB2": "Sold out", "SN4": "Sold out", "CA1": "OK", "FO5": "No stock, no sale",
                    "HG3": "No sale 90 d", "DS1": "Display", "ZN9": "Not in main store yet"}, got
     b, a = row(plan, "CB2"), row(plan, "CA1")
     assert b["main"] == 0 and b["cover"] == 0 and b["rate"].rate > 0 and b["value"] == 0   # sold out, with demand: cover 0
     assert a["main"] == 360 and a["cover"] == 180 and a["rate"].rate == 2                  # not above 180: OK
-    # Sold out and New arrival come before Order now, though both are on the order list
+    # Sold out outranks New arrival and Order now, though both items are on the order list as well
     listed = {x["item"].code for x in m.facts["order"]}
-    assert listed == {"CB2", "SN4"} and plan["statuses"]["Sold out"] == 1
-    assert [r["status"] for r in plan["all_items"]][:3] == ["Display", "New arrival", "Sold out"]
+    assert listed == {"CB2", "SN4"} and plan["statuses"]["Sold out"] == 2 and "New arrival" not in plan["statuses"]
+    assert row(plan, "SN4")["cover"] == 0 and stock.is_new(next(it for it in m.items if it.code == "SN4"), D)
+    assert [r["code"] for r in plan["all_items"]] == ["DS1", "CB2", "SN4", "FO5", "HG3", "CA1", "ZN9"]
+    assert [r["status"] for r in plan["all_items"]][:3] == ["Display", "Sold out", "Sold out"]
     # one more day of cover than 180 is Overstock
     plan = build(damaged(A=32)).facts["plan"]
     a = row(plan, "CA1")
@@ -452,6 +496,42 @@ def _():
     # and every status of the rule has been seen across the worlds
     seen = set(build().facts["plan"]["statuses"]) | set(build(damaged(B=20, A=34)).facts["plan"]["statuses"])
     assert seen == set(stock_plan.STATUS_ORDER), set(stock_plan.STATUS_ORDER) - seen
+
+
+@test("the status rule on items made by hand: the first that holds; a new arrival ranks below Sold out and Order now")
+def _():
+    young, aged = D - timedelta(days=10), D - timedelta(days=200)
+
+    def status(on_hand, rate, first=aged, listed=False, cover=None, display=False):
+        it = stock.Item(ledger_name="x", name="x", code="x", display=display, on_hand=Decimal(on_hand),
+                        receipts=[(first, "R1", Decimal(5), Decimal(5))])
+        r = None if rate is None else stock.Rate(sold=Decimal(rate) * 90, days_in_stock=90, rate=Decimal(rate))
+        return stock_plan._status(it, r, cover, {"x"} if listed else set(), D, stock)
+
+    table = [
+        ("a display item, though new, sold out and on the list", dict(on_hand=0, rate=1, first=young, listed=True,
+                                                                      display=True), "Display"),
+        ("new, none on hand, selling", dict(on_hand=0, rate=1, first=young), "Sold out"),
+        ("new, sold out and on the list", dict(on_hand=0, rate=1, first=young, listed=True), "Sold out"),
+        ("new, on the list", dict(on_hand=5, rate=1, first=young, listed=True, cover=Decimal(5)), "Order now"),
+        ("new, nothing to do", dict(on_hand=5, rate=1, first=young, cover=Decimal(5)), "New arrival"),
+        ("new, none on hand, nothing sold yet", dict(on_hand=0, rate=0, first=young), "New arrival"),
+        ("new, on hand, nothing sold yet", dict(on_hand=5, rate=0, first=young), "New arrival"),
+        ("new, no rate at all", dict(on_hand=5, rate=None, first=young), "New arrival"),
+        ("old, none on hand, selling", dict(on_hand=0, rate=1), "Sold out"),
+        ("old, below nought, selling", dict(on_hand=-3, rate=1), "Sold out"),
+        ("old, on the list", dict(on_hand=5, rate=1, listed=True, cover=Decimal(5)), "Order now"),
+        ("old, none on hand, no sale", dict(on_hand=0, rate=0), "No stock, no sale"),
+        ("old, none on hand, no rate at all", dict(on_hand=0, rate=None), "No stock, no sale"),
+        ("old, on hand, no sale", dict(on_hand=5, rate=0), "No sale 90 d"),
+        ("old, 181 days of cover", dict(on_hand=181, rate=1, cover=Decimal(181)), "Overstock"),
+        ("old, 180 days of cover", dict(on_hand=180, rate=1, cover=Decimal(180)), "OK"),
+        ("old, selling, not on the list", dict(on_hand=5, rate=1, cover=Decimal(5)), "OK"),
+    ]
+    for what, kw, want in table:
+        assert status(**kw) == want, (what, status(**kw))
+    assert stock.is_new(stock.Item(ledger_name="n", name="n", code="n", receipts=[(young, "R", Decimal(1), Decimal(1))]), D)
+    assert not stock.is_new(stock.Item(ledger_name="o", name="o", code="o", receipts=[(aged, "R", Decimal(1), Decimal(1))]), D)
 
 
 @test("goods on order show on the item and still count for the status; the order list is stock's own")
@@ -483,11 +563,15 @@ def _():
     line = next(ln for ln in text.splitlines() if "ITEM-B Charger Beta" in ln and "CB2" in ln)
     assert header.index("Code") < header.index("Supplier") < header.index("On hand")
     assert "VFAN" in line and "Other" not in line
-    # config's word is the one printed
-    with data_root({"stock.suppliers": {"CB2": "Local Trader"}}):
-        text = run(World(), "reorder")["text"]
+    # the vendor of the newest purchase order outranks the catalog's brand; config's word outranks both
+    with data_root():
+        text = run(World(po_vendor=[("cb2", "Shenzhen Vendor")]), "reorder")["text"]
     line = next(ln for ln in text.splitlines() if "ITEM-B Charger Beta" in ln and "CB2" in ln)
-    assert "Local Trader" in line and "VFAN" not in line
+    assert "Shenzhen Vendor" in line and "VFAN" not in line
+    with data_root({"stock.suppliers": {"CB2": "Local Trader"}}):
+        text = run(World(po_vendor=[("cb2", "Shenzhen Vendor")]), "reorder")["text"]
+    line = next(ln for ln in text.splitlines() if "ITEM-B Charger Beta" in ln and "CB2" in ln)
+    assert "Local Trader" in line and "VFAN" not in line and "Shenzhen Vendor" not in line
     plan = facts["plan"]
     assert "error" not in plan and plan["built"] is True and plan["catalog_read"] is True
     assert plan["catalog_items"] == 7 and plan["catalog_only"] == 1
@@ -502,6 +586,8 @@ def _():
         NAMES["DISP"], "DS1", "Display", None, None)
     assert (last["item"], last["code"], last["status"], last["catalog_only"]) == (
         "ZZ-NEW Speaker Upcoming", "ZN9", "Not in main store yet", True)
+    assert (first["supplier"], first["supplier_basis"], last["supplier"], last["supplier_basis"]) == (
+        "VFAN", "catalog", "WEKOME", "catalog")
     assert plan["suppliers"][L("B")] == {"name": "VFAN", "basis": "catalog"}
 
 
@@ -526,6 +612,8 @@ def _():
     assert len(rows) == len(plan["all_items"]) == 7
     assert rows["CA1"]["item"] == NAMES["A"] == rows["CA1"]["name"] and rows["CA1"]["damage"] == "300"
     assert rows["CA1"]["last_sale"] == D.isoformat() and rows["CA1"]["rank"] == 1 and rows["CA1"]["status"] == "Order now"
+    assert rows["CA1"]["supplier"] == "VFAN" and rows["CA1"]["supplier_basis"] == "catalog"
+    assert rows["ZN9"]["supplier"] == "WEKOME" and rows["ZN9"]["supplier_basis"] == "catalog"
     assert Decimal(rows["CA1"]["rate"]) == 2 and Decimal(rows["CA1"]["sold"]) == 180 and rows["CA1"]["days_in_stock"] == 90
     assert rows["DS1"]["rate"] is None and rows["DS1"]["sold"] is None and rows["DS1"]["days_in_stock"] is None
     assert rows["ZN9"]["item"] == "ZZ-NEW Speaker Upcoming" and rows["ZN9"]["catalog_only"] is True

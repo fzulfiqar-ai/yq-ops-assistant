@@ -95,6 +95,8 @@ FIXTURE = {
     "items.bridge_exceptions": {}, "items.not_accessories": [],
     "stock.lead_time_days": 50, "stock.display_items": ["DS1"], "stock.fast_movers": 2,
     "stock.cover_kpi_days": [30, 45], "stock.clear_target_days": 90,
+    # release 1's figures stand in every test that does not say otherwise: no rhythm, every lift 1.00
+    "stock.order_every_days": 0, "stock.season_lift": {str(m): 1 for m in range(1, 13)},
 }
 stock.RAISE_PARTS = True              # a part that fails fails the test, never stands aside quietly
 NAMES = {"A": "ITEM-A Cable Alpha", "B": "ITEM-B Charger Beta", "C": "ITEM-C Holder Gamma",
@@ -300,7 +302,8 @@ class World:
         if sql == stock.PRICE_BOOK_SQL:
             return [{"sku_code": CODES[k], "item_name": NAMES[k]} for k in NAMES]
         if sql == stock.SUPPLIER_SQL:
-            return [{"invoice_no": n, "invoice_date": d, "model": m, "qty": str(q)} for n, d, m, q in self.invoices]
+            return [{"invoice_no": n, "invoice_date": d, "model": m, "qty": str(q), "vendor": "VFAN"}
+                    for n, d, m, q in self.invoices]
         if sql == stock.MRN_SQL:
             return [{"id": i, "code": c.upper(), "cost": v, "effective_date": d, "doc_no": doc}
                     for i, c, v, d, doc in self.mrn]
@@ -444,7 +447,7 @@ def _():
         raises(config.ConfigMissing, stock.settings)                      # the lead time is never defaulted
     # the optional keys with no default in config.py are these three (the empty tables and texts are the others)
     assert config.OPTIONAL - set(config.DEFAULTS) == {"stock.fast_movers", "stock.cover_kpi_days",
-                                                      "stock.clear_target_days"}
+                                                      "stock.clear_target_days", "stock.order_every_days"}
     assert set(config.DEFAULTS) <= config.OPTIONAL <= set(config.KEYS)
     with data_root(drop=("stock.clear_target_days", "warehouses.damage")):
         cfg = stock.settings()
@@ -892,9 +895,132 @@ def _():
     with data_root():
         out = run(World(book=Book()))
     assert not out["ok"] and out["exit"] == 1 and "No stock ledger is loaded" in out["text"]
+    for module in ("stock.py", "stockflow.py", "stock_damage.py", "stock_review.py", "stock_plan.py", "stock_season.py",
+                   "stock_orders.py", "workbook/stock_book.py", "workbook/readback.py", "workbook/stock_team.py"):
+        f = ROOT / "scripts" / "ops" / module
+        if not f.is_file():
+            continue
+        src = f.read_text(encoding="utf-8")
+        for word in ("import psycopg", "import httpx", "supabase", "subprocess", "yq_load_go", ".table(", "insert",
+                     "upsert"):
+            assert word not in src, (module, word)
+
+
+# ── release 2: the rhythm, the season, goods on order, an order placed ───────
+
+class OptArgs(Args):
+    """The command's options as argparse gives them: --line (repeated), --date, --file, --commit."""
+
+    def __init__(self, *spec, line=(), date_=None, file=None, commit=None):
+        super().__init__(*spec)
+        self.line, self.date, self.file, self.commit = list(line), date_, file, commit
+
+
+def run_opts(w: World | None = None, *spec, **kw) -> dict:
+    in_temp_root()
+    with standing_in(w or World()):
+        return stock.run(OptArgs(*spec, **kw))
+
+
+@test("release 2: a monthly rhythm adds its days to the join and the fill (B: 40 + 30 + 30 = 100, ordered up to 115)")
+def _():
+    with data_root({"stock.order_every_days": 30}):
+        m, _inp = model_of()
+        text = run(World())["text"]
+    f = m.facts
+    (row,) = f["order"]
+    # ITEM-B: a rate of 1.00 a day, 20 on hand, nothing on the way: 115 x 1 - 20 = 95 (release 1: 85 - 20 = 65)
+    assert (row["item"].code, row["qty"], row["trig_days"], row["fill_days"], row["supplier"]) == ("CB2", 95, 100, 115,
+                                                                                                  "VFAN"), row
+    assert f["supplier_rules"]["VFAN"]["lead"] == 40 and f["supplier_rules"]["VFAN"]["every"] == 30
+    assert ("Rule: an item is listed when its demand reaches its stock and goods on the way within the lead time + 30 "
+            "days to the next order + 30 = 100 days, and ordered up to 115 days") in text, text
+    with data_root({"stock.order_every_days": 30, "stock.supplier_every_days": {"VFAN": 0}}):
+        m, _inp = model_of()
+    assert m.facts["order"][0]["qty"] == 65                     # a supplier's own rhythm wins over the setting
+    for bad in (-1, "30"):
+        with data_root({"stock.order_every_days": bad}):
+            raises(config.ConfigMissing, stock.settings)
+    with data_root({"stock.supplier_lead_days": {"VFAN": 0}}):
+        raises(config.ConfigMissing, stock.settings)
+
+
+@test("release 2: the season lifts each day's demand by its month (2.00 everywhere: B joins at 140 and takes 150)")
+def _():
+    with data_root({"stock.season_lift": {str(k): 2 for k in range(1, 13)}}):
+        m, _inp = model_of()
+        reorder = run(World(), "reorder")["text"]
+    (row,) = m.facts["order"]
+    # every day counts twice: fill 85 days -> 170 days of demand at 1.00 a day, less the 20 on hand = 150
+    assert (row["item"].code, row["qty"]) == ("CB2", 150), row
+    assert m.facts["season"]["applied"] and all(v["basis"] == "config" for v in m.facts["season"]["lifts"].values())
+    assert "SEASON  each month's lift" in reorder and "Apr 2.00 (set)" in reorder, reorder
+    assert "SUPPLIERS  each supplier's rule" in reorder and "VFAN" in reorder
+
+
+@test("release 2: goods on order count until the item's later receipts pay them, the oldest line first")
+def _():
+    with data_root():
+        paths.write_text(stock.kpi_log_file(), json.dumps(
+            {"kind": "promise", "ref": "vfan:2026-03-01:CB2", "supplier": "VFAN", "item_code": "CB2", "qty": "30",
+             "event_date": "2026-03-01", "logged_at": "2026-03-01T10:00:00", "state": "open", "source": "typed"}) + "\n")
+        m, _inp = model_of()
+        reorder = run(World(), "reorder")["text"]
+    b = item(m, "B")
+    # B's last receipt (30 Jan) is before the line: all 30 are due; 85 - (20 + 30) = 35 to order
+    assert b.on_order == 30 and m.facts["order"][0]["qty"] == 35 and m.facts["on_order"]["counted"] == 1
+    assert "goods on order deducted (1 promise line of the KPI log)" in reorder
+    assert "ON THE WAY  1 logged line with goods still due (deducted from the order list)" in reorder, reorder
+
+
+@test("release 2: ordered previews the lines and a token; only --commit with that token logs; cancel undoes it")
+def _():
+    lines = ["CB2=30", "CA1=10"]
+    with data_root():
+        prev = run_opts(World(), "ordered", "VFAN", line=lines, date_="2026-03-10")
+        assert prev["ok"] and prev["text"].startswith("ORDER PLACED  VFAN, ordered on "), prev["text"]
+        assert "Nothing is logged yet" in prev["text"] and not stock.kpi_log_file().exists()
+        token = re.search(r"--commit ([a-p]{12})", prev["text"]).group(1)
+        bad = run_opts(World(), "ordered", "VFAN", line=lines, date_="2026-03-10", commit="abcdefghijkl")
+        assert not bad["ok"] and "changed since the preview: nothing was logged" in bad["text"], bad["text"]
+        assert not stock.kpi_log_file().exists()
+        done = run_opts(World(), "ordered", "VFAN", line=lines, date_="2026-03-10", commit=token)
+        assert done["ok"] and "Logged: 2 lines in the KPI log" in done["text"], done["text"]
+        assert {r["item_code"] for r in stock.read_promises()} == {"CB2", "CA1"}
+        again = run_opts(World(), "ordered", "VFAN", line=lines, date_="2026-03-10")
+        assert "Nothing to log: the KPI log already holds this order as it is." in again["text"], again["text"]
+        m, _inp = model_of()
+        assert item(m, "B").on_order == 30 and item(m, "A").on_order == 10
+        # cancelled: the same preview and token; the lines no longer count
+        prev = run_opts(World(), "cancel", "VFAN", date_="2026-03-10")
+        assert prev["text"].startswith("ORDER CANCELLED  VFAN") and "cancelled" in prev["text"]
+        token = re.search(r"--commit ([a-p]{12})", prev["text"]).group(1)
+        assert "Logged: 2 lines" in run_opts(World(), "cancel", "VFAN", date_="2026-03-10", commit=token)["text"]
+        m, _inp = model_of()
+        assert item(m, "B").on_order == 0 and item(m, "A").on_order == 0
+        # the words that refuse: no supplier, a line not typed CODE=QTY, a date that is no date
+        for spec, kw, said in ((("ordered",), {"line": lines}, "Name the supplier"),
+                               (("ordered", "VFAN"), {"line": ["CB2"]}, "typed CODE=QTY"),
+                               (("ordered", "VFAN"), {"line": lines, "date_": "10-03-2026"}, "written YYYY-MM-DD")):
+            out = run_opts(World(), *spec, **kw)
+            assert not out["ok"] and said in out["text"], (spec, out["text"])
     src = (ROOT / "scripts" / "ops" / "stock.py").read_text(encoding="utf-8")
-    for word in ("import psycopg", "import httpx", "supabase", "subprocess", "yq_load_go", ".table(", "insert", "upsert"):
-        assert word not in src, word
+    assert "Nothing is ever sent to a supplier" in src or "never sent to a supplier" in src
+
+
+@test("a code worktree never makes the owner's day file: without a named data root it says why, the screen still prints")
+def _():
+    with data_root():
+        m, _inp = model_of()
+        saved = (paths.is_worktree, paths._override)
+        try:
+            paths.is_worktree = lambda: True
+            paths._override = None                      # as a run from a worktree finds the main folder by itself
+            res = stock.day_file(m)
+        finally:
+            paths.is_worktree, paths._override = saved
+        assert res["path"] is None and not res["made"] and "code worktree" in res["error"], res
+        assert stock.file_lines(res)[0].startswith("FILE  not made this time: this is a code worktree")
 
 
 # ── the real files (read-only; SKIP when they are not on this machine) ────────
@@ -930,7 +1056,10 @@ def _():
         assert f["headline"]["units"] == main_units == f["ageing"]["main_units"]
         assert f["ageing"]["units"] + f["ageing"]["display_units"] == main_units, "the ageing does not add up"
         assert sum(b["units"] for b in f["bands"]) + f["ageing"]["display_units"] == main_units
-        assert all(x["qty"] > 0 and x["cover"] < f["trigger_days"] for x in f["order"])
+        from scripts.ops import stock_season
+        lifts = f["season"]["lifts"]
+        assert all(x["qty"] > 0 and stock_season.joins(x["position"], x["rate6"], m.d, x["trig_days"], lifts)
+                   for x in f["order"])
         text = "\n".join(stock.headline_lines(m, inp.ledger_note) + stock.reorder_lines(m, inp.ledger_note)
                          + stock.ageing_lines(m, inp.ledger_note))
         assert not NINE.search(text) and not LONG.search(text)

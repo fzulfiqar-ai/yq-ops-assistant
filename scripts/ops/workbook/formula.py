@@ -366,8 +366,10 @@ def compare(op: str, a, b):
 
 
 def excel_round(x: float, digits: int) -> float:
+    """ROUND: half away from zero to `digits` places, on the value taken to 15 significant digits first, as a
+    spreadsheet holds it (5 x 1.2345 is 6.1724999999999994 as a double, and 6.1725 to Excel: 6.173)."""
     q = Decimal(1).scaleb(-int(digits))
-    d = Decimal(repr(float(x))).quantize(q, rounding=ROUND_HALF_UP)
+    d = Decimal(repr(r15(float(x)))).quantize(q, rounding=ROUND_HALF_UP)
     return float(d)
 
 

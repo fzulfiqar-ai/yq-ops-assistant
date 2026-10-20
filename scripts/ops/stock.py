@@ -98,13 +98,16 @@ from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
-from scripts.ops import config, fmt, items, ledger, paths, stock_damage, stock_plan, stock_review, stockflow
+from scripts.ops import (config, fmt, items, ledger, paths, stock_damage, stock_orders, stock_plan, stock_review,
+                         stock_season, stockflow)
 
 from app import metrics  # noqa: E402
 
 COMMAND = "stock"
 VIEW_WORDS = {"reorder": "reorder", "ageing": "ageing", "aging": "ageing", "damage": "damage", "file": "file"}
 CLEAR_DAYS_DEFAULT = 90        # the plan's default while config.json has no 'stock.clear_target_days' (his 20-Oct rule)
+EVERY_DAYS_DEFAULT = 30        # ... and no 'stock.order_every_days': he orders about monthly (20-Oct-2026)
+WINDOW_MAX_DAYS = 365          # a join or fill window never reaches past a year (the workbook caps it the same)
 RAISE_PARTS = False            # tests set it: a part of the screen that fails raises instead of standing aside
 RATE_DAYS = 90                 # the window of an item's daily rate
 RATE_MIN_DAYS = 30             # ... divided by at least this many days in stock
@@ -152,7 +155,7 @@ SNAPSHOT_SQL = (
 PRICE_BOOK_SQL = ("SELECT DISTINCT sku_code, item_name FROM selling_prices "
                   "WHERE sku_code IS NOT NULL AND item_name IS NOT NULL")
 SUPPLIER_SQL = ("SELECT invoice_no, invoice_date::text AS invoice_date, upper(model) AS model, "
-                "COALESCE(qty, 0)::text AS qty FROM supplier_prices "
+                "COALESCE(qty, 0)::text AS qty, vendor FROM supplier_prices "
                 "WHERE invoice_no IS NOT NULL AND invoice_date IS NOT NULL AND model IS NOT NULL")
 # The real landed cost of a receipt (the goods-received notes' MRN XML): every row, and mrn_costs() picks the one
 # the portal costs from. The read RPC can see this table.
@@ -286,6 +289,11 @@ class Settings:
     not_counted: tuple = ()        # config 'warehouses.not_counted': the stores outside the sellable pool
     suppliers: dict = field(default_factory=dict)          # item code (upper) -> supplier, config 'stock.suppliers'
     supplier_aliases: dict = field(default_factory=dict)   # a supplier's spelling (folded) -> its one name
+    every_days: int = EVERY_DAYS_DEFAULT                   # the order rhythm: days between two orders to a supplier
+    supplier_every: dict = field(default_factory=dict)     # supplier -> its own rhythm in days
+    supplier_lead: dict = field(default_factory=dict)      # supplier -> its lead time where none can be measured
+    season_lift: dict = field(default_factory=dict)        # month 1-12 -> a lift that stands in for last year's
+    pack_sizes: dict = field(default_factory=dict)         # item code (upper) -> units in a carton
 
 
 def settings() -> Settings:
@@ -319,11 +327,34 @@ def settings() -> Settings:
                  if code_key(k) and str(v).strip()}
     aliases = {fold(k): " ".join(str(v).split()) for k, v in config.get("stock.supplier_aliases").items()
                if fold(k) and str(v).strip()}
+    every = optional("stock.order_every_days", EVERY_DAYS_DEFAULT)
+    if every < 0:
+        raise config.ConfigMissing("config: 'stock.order_every_days' must be a number of days, nought or more")
+
+    def days_by_supplier(key: str, least: int) -> dict:
+        out = {}
+        for k, v in config.get(key).items():
+            name = " ".join(str(k).split())
+            if not name or isinstance(v, bool) or not isinstance(v, int) or v < least:
+                raise config.ConfigMissing(f"config: every entry of '{key}' is a supplier and a whole number of days "
+                                           f"({least} or more)")
+            out[aliases.get(fold(name), name)] = v
+        return out
+
+    packs = {}
+    for k, v in config.get("stock.pack_sizes").items():
+        if not code_key(k) or isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            raise config.ConfigMissing("config: every entry of 'stock.pack_sizes' is an item code and a whole number of "
+                                       "units, 1 or more")
+        packs[code_key(k)] = v
     return Settings(lead_default=int(lead), fast_n=int(fast), low=int(band[0]), high=int(band[1]),
                     display=display, defaults_used=tuple(used), clear_days=int(clear),
                     damage=str(config.get("warehouses.damage") or "").strip(),
                     not_counted=tuple(str(w) for w in config.get("warehouses.not_counted") if str(w or "").strip()),
-                    suppliers=suppliers, supplier_aliases=aliases)
+                    suppliers=suppliers, supplier_aliases=aliases, every_days=int(every),
+                    supplier_every=days_by_supplier("stock.supplier_every_days", 0),
+                    supplier_lead=days_by_supplier("stock.supplier_lead_days", 1),
+                    season_lift=dict(config.get("stock.season_lift")), pack_sizes=packs)
 
 
 # ── the reads ─────────────────────────────────────────────────────────────────
@@ -854,7 +885,24 @@ def build(inp: Inputs, cfg: Settings) -> Model:
                 it.cost, it.cost_source = rr, "receipt"
 
     plannable = [it for it in model_items.values() if not it.display]
-    on_order = apply_promises(plannable, inp.promises)
+    # the stores beside the main store, the damage store and the sellers, read once: the order rule (a longer history
+    # for an item out of stock most of the window) and the parts after the build read them
+    fl = stockflow.flows(rows, model_items, cfg.damage, cfg.not_counted, d)
+    # each item's supplier first: its lead time and its rhythm are the supplier's (the owner, 20-Oct-2026)
+    supplier_of = stock_plan.suppliers_of(plannable, cfg, inp.catalog, inp.po_vendor)
+    measured = measure_lead_times(inp.invoices, receipt_codes(rows))
+    lead = lead_time(measured, cfg.lead_default)
+    vendors = {str(r.get("invoice_no") or "").strip(): r.get("vendor") for r in inp.invoices or [] if r.get("vendor")}
+    leads = stock_season.lead_by_supplier(measured, vendors, cfg.supplier_lead, lead, cfg.lead_default,
+                                          cfg.supplier_aliases)
+
+    def lead_of(supplier) -> int:
+        return (leads.get(supplier) or leads[stock_season.OTHER])["days"]
+
+    # goods on order: the KPI log's promise lines, each item's later supplier receipts paying the oldest line first
+    on_order = stock_orders.fifo(plannable, inp.promises, d, lead_of)
+    for it in plannable:
+        it.on_order = on_order["on_order"].get(it.ledger_name, ZERO)
     if inp.mrn is None:
         notes.append("The MRN landed costs could not be read: the pricing sheet stands in where it has the item, else "
                      "the latest receipt rate.")
@@ -907,24 +955,60 @@ def build(inp: Inputs, cfg: Settings) -> Model:
     avail_now = availability(fast_now, m1, d, rates_d)
     avail_last = availability(fast_last, month_start(d, 1), e, rates_e)
 
-    # lead time and the order list
-    measured = measure_lead_times(inp.invoices, receipt_codes(rows))
-    lead = lead_time(measured, cfg.lead_default)
-    trigger, fill = lead["days"] + cfg.low, lead["days"] + cfg.high
+    # the season (the owner, 20-Oct-2026): each month's lift is last year's same month against today's pace,
+    # company-wide; a month whose fast movers were out of stock a fifth of the time or more is named (held down)
+    lifts = stock_season.measure_lifts(plannable, d, ledger.first_date(rows), cfg.season_lift)
+    held_down = []
+    for m, lf in sorted(lifts.items()):
+        if lf["basis"] == "last year":
+            first = date(lf["year"], m, 1)
+            share = stock_season.availability(fast_now, fl.items, first, min(month_start(first, -1) - timedelta(days=1), d))
+            if share is not None and share < stock_season.AVAILABILITY_WARN:
+                held_down.append(m)
+    season_on = any(lf["lift"] != stock_season.NEUTRAL for lf in lifts.values())
+
+    # the order rule of each supplier: its lead time + its rhythm + the KPI band (low to join, high to top up)
+    rules: dict[str, dict] = {}
+
+    def rule_of(supplier: str) -> dict:
+        if supplier not in rules:
+            row = leads.get(supplier) or leads[stock_season.OTHER]
+            every = int(cfg.supplier_every.get(supplier, cfg.every_days))
+            # a window never reaches past a year (the workbook caps it the same way)
+            rules[supplier] = {"lead": row["days"], "lead_basis": row["basis"], "every": every, "low": cfg.low,
+                               "high": cfg.high, "trig_days": min(row["days"] + every + cfg.low, WINDOW_MAX_DAYS),
+                               "fill_days": min(row["days"] + every + cfg.high, WINDOW_MAX_DAYS)}
+        return rules[supplier]
+
+    default_rule = rule_of(stock_season.OTHER)
+    trigger, fill = default_rule["trig_days"], default_rule["fill_days"]
+    for supplier, _basis in supplier_of.values():       # every supplier has its rule (an item added in the file too)
+        rule_of(supplier)
     order: list[dict] = []
     for it in plannable:
         r = rates_d[it.ledger_name]
         if r.rate <= 0:
             continue
+        used, basis = r.rate, f"{RATE_DAYS} days"
+        if r.floored:                                  # out of stock most of the window: a longer history
+            longer = stock_season.long_rate(it, fl.get(it.ledger_name), d)
+            if longer is not None and longer["rate"] > 0:
+                used, basis = longer["rate"], f"longer history from {longer['first'].isoformat()}"
+        supplier = supplier_of.get(it.ledger_name, (stock_plan.OTHER, "none"))[0]
+        rule = rule_of(supplier)
         have = max(it.on_hand, ZERO) + it.on_order
-        cover = have / r.rate
         # the workbook works the same rule out again from the rate to six decimals (stock_plan's one rounding rule),
         # so the screen and the file agree to the unit at a whole-number boundary
-        rate6 = stock_plan.round6(r.rate)
-        if stock_plan.round6(have - Decimal(trigger) * rate6) >= 0:
+        rate6 = stock_plan.round6(used)
+        if not stock_season.joins(have, rate6, d, rule["trig_days"], lifts):
             continue
-        qty = stock_plan.units_up(Decimal(fill) * rate6 - have)
-        order.append({"item": it, "rate": r, "cover": cover, "qty": qty, "rate6": rate6,
+        qty = stock_season.suggested(have, rate6, d, rule["fill_days"], lifts)
+        pack = cfg.pack_sizes.get(code_key(it.code))
+        if pack and pack > 1 and qty > 0:                # whole cartons
+            qty = (qty / pack).to_integral_value(rounding=ROUND_CEILING) * pack
+        order.append({"item": it, "rate": r, "cover": have / used, "qty": qty, "rate6": rate6, "rate_basis": basis,
+                      "supplier": supplier, "position": have, "trig_days": rule["trig_days"],
+                      "fill_days": rule["fill_days"], "pack": pack,
                       "cost_bhd": fmt.q3(qty * it.cost) if it.cost is not None else None})
     order.sort(key=lambda x: (x["cover"], -(x["cost_bhd"] or ZERO), x["item"].name))
 
@@ -1057,6 +1141,8 @@ def build(inp: Inputs, cfg: Settings) -> Model:
         "kpi_cover": {"now": kpi_now, "last_month_end": e, "last": kpi_last, "low": cfg.low, "high": cfg.high},
         "bands": bands, "last_receipt": last_mrn,
         "lead": lead, "trigger_days": trigger, "fill_days": fill, "order": order, "on_order": on_order,
+        "on_the_way": on_order, "leads": leads, "supplier_rules": rules,
+        "season": {"lifts": lifts, "warn": held_down, "applied": season_on},
         "fast": {"n": cfg.fast_n, "rank_first": rank_first, "rank_last": rank_last, "partial": rank_partial,
                  "last_partial": last_partial, "now": avail_now, "last": avail_last, "list": fast_now,
                  "rates": rates_d},
@@ -1066,7 +1152,6 @@ def build(inp: Inputs, cfg: Settings) -> Model:
         "defaults_used": list(cfg.defaults_used), "unread": list(inp.unread),
         "cost_basis": basis_counts(model_items.values()),
     }
-    fl = stockflow.flows(rows, model_items, cfg.damage, cfg.not_counted, d)
     model = Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
                   facts=facts, notes=notes, warnings=warnings, flows=fl, ledger_note=inp.ledger_note)
     facts["damage"] = _part(model, "damage", lambda: stock_damage.damage_facts(model, fl))
@@ -1110,6 +1195,94 @@ def _order_heading(model: Model) -> str:
     if oo["counted"]:
         return f"goods on order deducted ({_plural(oo['counted'], 'promise line')} of the KPI log)"
     return "goods on order not deducted"
+
+
+def _release2(model: Model) -> bool:
+    """The rhythm or the season is in play (release 2): the screens then say how the rule reads."""
+    f = model.facts
+    return model.cfg.every_days > 0 or bool(model.cfg.supplier_every) or bool((f.get("season") or {}).get("applied"))
+
+
+def _rule_line(model: Model) -> list[str]:
+    """One line on how an item joins the order list, once the rhythm or the season is in play."""
+    if not _release2(model):
+        return []
+    f = model.facts
+    rule = f["supplier_rules"][stock_season.OTHER]
+    season = ", with the season," if f["season"]["applied"] else ""
+    return [f"  Rule: an item is listed when its demand{season} reaches its stock and goods on the way within the lead "
+            f"time + {rule['every']} days to the next order + {rule['low']} = {rule['trig_days']} days, and ordered up "
+            f"to {rule['fill_days']} days (each supplier's rule on /yq-stock reorder)"]
+
+
+def _month_short(m: int) -> str:
+    return date(2000, m, 1).strftime("%b")
+
+
+def season_lines(model: Model) -> list[str]:
+    """SEASON: each month's lift (last year's month against the last 90 days' pace), when the season is in play."""
+    s = model.facts.get("season") or {}
+    if not s.get("applied"):
+        return []
+    d = model.d
+    months = [((d.month - 1 + k) % 12) + 1 for k in range(1, 13)]          # the twelve months after D's month
+    cells = []
+    for m in months:
+        lf = s["lifts"][m]
+        mark = "" if lf["basis"] == "last year" else (" (set)" if lf["basis"] == "config" else " (no data)")
+        cells.append(f"{_month_short(m)} {lf['lift']:.2f}{mark}")
+    lines = ["", f"SEASON  each month's lift: the same month a year back against the pace of the last {RATE_DAYS} days, "
+                 "company-wide; the order list counts each day's demand at its month's lift",
+             "  " + " · ".join(cells[:6]), "  " + " · ".join(cells[6:])]
+    if s.get("warn"):
+        names = ", ".join(_month_short(m) for m in s["warn"])
+        lines.append(f"  Held down by stock-outs (the fast movers were out a fifth of the time or more): {names}; "
+                     "their lifts may be low")
+    lines.append("  (config 'stock.season_lift' sets a month's lift by hand)")
+    return lines
+
+
+def supplier_rule_lines(model: Model) -> list[str]:
+    """SUPPLIERS: each supplier's lead time, rhythm and the days it joins and tops up at."""
+    if not _release2(model):
+        return []
+    rules = model.facts.get("supplier_rules") or {}
+    named = [(s, r) for s, r in sorted(rules.items()) if s != stock_season.OTHER]
+    if not named:
+        named = [("any supplier", rules[stock_season.OTHER])]
+    words = {"measured": "measured", "config": "set in config", "overall": "every supplier's measured",
+             "setting": "the setting"}
+    rows = [[s, str(r["lead"]), words.get(r["lead_basis"], r["lead_basis"]), str(r["every"]), str(r["trig_days"]),
+             str(r["fill_days"])] for s, r in named]
+    return ["", "SUPPLIERS  each supplier's rule (lead time + the days to its next order + the KPI band)"] + \
+        _indent(fmt.grid(["Supplier", "Lead time", "Basis", "Order every", "Join below", "Fill to"], rows, "lrlrrr"))
+
+
+def on_the_way_lines(model: Model, only: str | None = None) -> list[str]:
+    """ON THE WAY: the logged orders whose goods are not all received (one item when `only` names its ledger name)."""
+    ow = model.facts.get("on_the_way") or {}
+    lines_due = [x for x in ow.get("lines") or [] if x.get("due", ZERO) > 0
+                 and (only is None or x.get("ledger_name") == only)]
+    if not lines_due:
+        return []
+    rows = [[x.get("supplier") or "", _date_short(x["date"], model.d), x.get("code") or "", short(x.get("item_name") or "", 30),
+             fmt.units(x["qty"]), fmt.units(x["received"]), fmt.units(x["due"]), _date_short(x["expected_by"], model.d),
+             "late, to check" if x.get("late") else ("dated ahead" if x.get("future") else "")]
+            for x in lines_due]
+    head = ["", f"ON THE WAY  {_plural(len(rows), 'logged line')} with goods still due (deducted from the order list)"]
+    return head + _indent(fmt.grid(["Supplier", "Ordered on", "Code", "Item", "Ordered", "Received", "Due", "Expected by",
+                                    ""], rows, "llllrrrll"))
+
+
+def _rate_cell(x: dict) -> str:
+    """An order row's rate a day: the one its quantity rests on (a longer history marked ~, the 30-day floor *)."""
+    if str(x.get("rate_basis") or "").startswith("longer"):
+        return rate_text(x["rate6"]) + "~"
+    return rate_text(x["rate"].rate, x["rate"].floored)
+
+
+LONGER_NOTE = (f"  ~ out of stock most of the last {RATE_DAYS} days: the rate of a longer history (back to the first "
+               f"window holding {RATE_MIN_DAYS} days in stock, up to a year)")
 
 
 def _lead_words(model: Model) -> str:
@@ -1190,7 +1363,7 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
                      "at today's rates.")
 
     order = f["order"]
-    lines += ["", f"ORDER LIST  {_lead_words(model)}; {_order_heading(model)}"]
+    lines += ["", f"ORDER LIST  {_lead_words(model)}; {_order_heading(model)}"] + _rule_line(model)
     if not order:
         lines.append(f"  No item is below {f['trigger_days']} days of cover.")
     else:
@@ -1201,11 +1374,13 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
                      f"{f['fill_days']} days: {fmt.units(units)} units, BHD {fmt.bhd(value)} {label} ({basis})")
         top = order[:HEADLINE_ROWS]
         rows = [[short(x["item"].name, 36), x["item"].code or "", fmt.units(x["item"].on_hand),
-                 rate_text(x["rate"].rate, x["rate"].floored), days_text(x["cover"]), fmt.units(x["qty"]),
+                 _rate_cell(x), days_text(x["cover"]), fmt.units(x["qty"]),
                  _cost_cell(x["cost_bhd"])] for x in top]
         lines += _indent(fmt.grid(["Item", "Code", "On hand", "A day", "Cover", "Order", "At cost"], rows, "llrrrrr"))
-        if any(x["rate"].floored for x in top):
+        if any(x["rate"].floored and _rate_cell(x).endswith("*") for x in top):
             lines.append(FLOOR_NOTE)
+        if any(_rate_cell(x).endswith("~") for x in top):
+            lines.append(LONGER_NOTE)
         if len(order) > HEADLINE_ROWS:
             lines.append(f"  (+{len(order) - HEADLINE_ROWS} more: /yq-stock reorder)")
 
@@ -1251,10 +1426,13 @@ def _part_lines(model: Model, key: str, words) -> list[str]:
 def reorder_lines(model: Model, ledger_note: str) -> list[str]:
     f, d = model.facts, model.d
     lead = f["lead"]
+    every = f["supplier_rules"][stock_season.OTHER]["every"] if f.get("supplier_rules") else 0
+    rhythm = f" + {every} days to the next order" if every else ""
+    season = " (each day's demand at its month's season lift)" if (f.get("season") or {}).get("applied") else ""
     lines = [f"ORDER LIST  main store, ledger to {fmt.day(d)}: {_lead_words(model)}; {_order_heading(model)}",
-             f"  An item that sold in the last {RATE_DAYS} days is listed when its cover is below the lead time + "
-             f"{model.cfg.low} = {f['trigger_days']} days; the order brings it to the lead time + {model.cfg.high} = "
-             f"{f['fill_days']} days. No purchase order is drafted."]
+             f"  An item that sold in the last {RATE_DAYS} days is listed when its cover is below the lead time"
+             f"{rhythm} + {model.cfg.low} = {f['trigger_days']} days; the order brings it to the lead time{rhythm} + "
+             f"{model.cfg.high} = {f['fill_days']} days{season}. No purchase order is drafted."]
     oo = f["on_order"]
     if oo["unmatched"]:
         lines.append(f"  {_plural(oo['unmatched'], 'promise line')} of the KPI log "
@@ -1269,15 +1447,17 @@ def reorder_lines(model: Model, ledger_note: str) -> list[str]:
             it, r = x["item"], x["rate"]
             rows.append([str(n), short(it.name, 34), it.code or "", stock_plan.supplier_of(plan, it.ledger_name),
                          fmt.units(it.on_hand), fmt.units(it.on_order) if it.on_order else "", fmt.units(r.sold),
-                         str(r.days_in_stock), rate_text(r.rate, r.floored), days_text(x["cover"]),
+                         str(r.days_in_stock), _rate_cell(x), days_text(x["cover"]),
                          fmt.units(x["qty"]), _cost_cell(x["cost_bhd"]),
                          _date_short(it.last_receipt, d) if it.last_receipt else "none",
                          str(it.rank) if it.rank and it.rank <= model.cfg.fast_n else ""])
         lines += _indent(fmt.grid(["#", "Item", "Code", "Supplier", "On hand", "On order", f"Sold {RATE_DAYS} d",
                                    "In stock", "A day", "Cover", "Order", "At cost", "Last receipt", "Fast"], rows,
                                   "rlllrrrrrrrrlr"))
-        if any(x["rate"].floored for x in order):
+        if any(_rate_cell(x).endswith("*") for x in order):
             lines.append(FLOOR_NOTE)
+        if any(_rate_cell(x).endswith("~") for x in order):
+            lines.append(LONGER_NOTE)
         units = sum((x["qty"] for x in order), ZERO)
         value = sum((x["cost_bhd"] for x in order if x["cost_bhd"] is not None), ZERO)
         label, basis = cost_words(basis_counts(x["item"] for x in order))
@@ -1285,6 +1465,14 @@ def reorder_lines(model: Model, ledger_note: str) -> list[str]:
                      f"({basis}).")
         lines.append(f"  (In stock = days of the last {RATE_DAYS} the main store held the item at the day's end; "
                      "Fast = its rank among the fast movers.)")
+        longer = [x for x in order if str(x.get("rate_basis") or "").startswith("longer")]
+        if longer:
+            lines.append(f"  {_plural(len(longer), 'item')} out of stock most of the last {RATE_DAYS} days "
+                         f"{'takes' if len(longer) == 1 else 'take'} the rate of a longer history (back to the first "
+                         f"window holding {RATE_MIN_DAYS} days in stock, up to a year): "
+                         + ", ".join(x["item"].code or short(x["item"].name, 20) for x in longer[:8])
+                         + (" ..." if len(longer) > 8 else ""))
+    lines += supplier_rule_lines(model) + season_lines(model) + on_the_way_lines(model)
 
     lines += ["", f"LEAD TIME  {lead['days']} days: "
               + (f"the median of the last {_plural(len(lead['shown']), 'supplier invoice')} to their receipt; config "
@@ -1465,6 +1653,10 @@ def item_lines(model: Model, query: str, ledger_note: str) -> list[str]:
         lines.append(f"  Order list: not listed (cover at or above {f['trigger_days']} days).")
     if it.on_order:
         lines.append(f"  On order (KPI log): {fmt.units(it.on_order)} units.")
+    lines += on_the_way_lines(model, only=it.ledger_name)
+    if listed and str(listed.get("rate_basis") or "").startswith("longer"):
+        lines.append(f"  Its order uses the rate of a {listed['rate_basis']} ({rate_text(listed['rate6'])} a day): it was "
+                     f"in stock on fewer than {RATE_MIN_DAYS} of the last {RATE_DAYS} days.")
     now = f["fast"]["now"]
     here = available_days(it, model.series_start, now["first"], now["last"], r.rate)
     lines.append(f"  In stock with a day of sales at the day's end: {here} of {now['days']} days this month.")
@@ -1485,11 +1677,17 @@ def item_lines(model: Model, query: str, ledger_note: str) -> list[str]:
 
 # ── the command ───────────────────────────────────────────────────────────────
 
+ACTION_WORDS = ("ordered", "cancel", "team")    # a word and what follows it: an order placed, cancelled, the team copy
+
+
 def parse_spec(words) -> tuple[str, str | None]:
-    """(view, item query): headline, reorder, ageing, or item with the code typed."""
+    """(view, the rest): headline, reorder, ageing, damage, file; ordered / cancel with the supplier typed after it;
+    team; or item with the code typed."""
     tokens = [w for raw in (words or []) for w in str(raw).split()]
     if not tokens:
         return "headline", None
+    if tokens[0].lower() in ACTION_WORDS:
+        return tokens[0].lower(), " ".join(tokens[1:]) or None
     if len(tokens) == 1 and tokens[0].lower() in VIEW_WORDS:
         return VIEW_WORDS[tokens[0].lower()], None
     return "item", " ".join(tokens)
@@ -1497,9 +1695,162 @@ def parse_spec(words) -> tuple[str, str | None]:
 
 def add_arguments(parser) -> None:
     parser.add_argument("spec", nargs="*", metavar="word",
-                        help="reorder (the order list), ageing (the ageing table), or an item code")
+                        help="reorder, ageing, damage, file, ordered <supplier>, cancel <supplier>, team, or an item code")
     parser.add_argument("--ledger", choices=ledger.PREFER, default="auto",
                         help="where the stock ledger is read: auto (the file when it equals production), file, db")
+    parser.add_argument("--line", action="append", default=[], metavar="CODE=QTY",
+                        help="ordered: a line typed instead of the newest workbook's (may repeat)")
+    parser.add_argument("--date", default=None, metavar="YYYY-MM-DD",
+                        help="ordered / cancel: the day the order was placed (default today, Bahrain)")
+    parser.add_argument("--file", default=None, metavar="PATH",
+                        help="ordered / team: the workbook to read instead of the newest under exports/reports/stock")
+    parser.add_argument("--commit", default=None, metavar="TOKEN",
+                        help="ordered / cancel: log the lines the preview showed (its token); only after his yes")
+
+
+# ── an order placed, an order cancelled, the team copy ───────────────────────
+
+def _bahrain_now():
+    from datetime import datetime
+    from scripts.ops import status
+    return datetime.now(status.BAHRAIN)
+
+
+def _typed_lines(raw: list[str]) -> list[tuple[str, str]]:
+    """--line CODE=QTY, as typed (stock_orders checks each code and quantity)."""
+    out = []
+    for text in raw or []:
+        code, sep, qty = str(text).partition("=")
+        if not sep or not code.strip() or not qty.strip():
+            raise StockInput(f"A line is typed CODE=QTY, for example --line T17=300: {text!r} is not.")
+        out.append((code.strip(), qty.strip()))
+    return out
+
+
+def _order_source(args, supplier: str) -> dict:
+    """The lines of an order placed: typed (--line), or this supplier's final quantities in his newest workbook (or
+    --file): {pairs, sha, source, notes, problems}."""
+    import hashlib
+    typed = _typed_lines(getattr(args, "line", None))
+    if typed:
+        canon = "\n".join(f"{c.upper()}={q}" for c, q in typed)
+        return {"pairs": typed, "sha": hashlib.sha256(canon.encode("utf-8")).hexdigest(), "source": "typed",
+                "notes": [], "problems": []}
+    from scripts.ops.workbook import readback
+    path = Path(args.file) if getattr(args, "file", None) else readback.newest_plan(paths.reports_dir("stock"))
+    if path is None or not Path(path).is_file():
+        raise StockInput("No Stock & Order Plan workbook to read: type /yq-stock first (or name the lines with "
+                         "--line CODE=QTY).")
+    try:
+        plan = readback.read_plan(Path(path))
+    except readback.PlanFileError as exc:
+        raise StockInput(str(exc)) from None
+    notes = [f"  Read from {Path(path).name}, last saved {plan.get('saved_at') or '?'}."]
+    if plan.get("open_in_excel"):
+        notes.append("  The file is open in Excel: this is its last save. Save it first if you changed it since.")
+    pairs = [(c, str(q)) for c, q in readback.final_lines(plan, supplier)]
+    return {"pairs": pairs, "sha": plan["sha256"], "source": Path(path).name, "notes": notes,
+            "problems": list(plan.get("problems") or [])}
+
+
+def order_log_lines(model: Model, verb: str, supplier: str | None, args) -> list[str]:
+    """ordered <supplier>: the lines an order placed would log, with a token; with --commit <token> (only after his
+    yes) they are logged in the KPI log and count as on the way from the next screen. cancel <supplier>: the same for
+    a cancelled order. Nothing is ever sent to a supplier."""
+    supplier = " ".join(str(supplier or "").split())
+    if not supplier:
+        raise StockInput(f"Name the supplier: /yq-stock {verb} <supplier> (as the order list names it, for example "
+                         "VFAN).")
+    now = _bahrain_now()
+    today = now.date()
+    order_day = fmt.as_date(args.date) if getattr(args, "date", None) else today
+    if order_day is None:
+        raise StockInput(f"The date is written YYYY-MM-DD: {args.date!r} is not one.")
+    stamp = now.replace(microsecond=0).isoformat()
+    existing = read_promises() or []
+    names = {code_key(it.code): it.name for it in model.items if it.code}
+    if verb == "cancel":
+        cancel = stock_orders.cancel_lines(existing, supplier, order_day, stamp)
+        if not cancel:
+            raise StockInput(f"No open order of {supplier} dated {order_day.isoformat()} is in the KPI log.")
+        plan_w = {"write": [], "unchanged": [], "cancel": cancel}
+        pairs = [(row["item_code"], "0") for row in cancel]
+        source = {"sha": "cancel", "notes": [], "problems": []}
+        head = f"ORDER CANCELLED  {supplier}, ordered on {fmt.day_long(order_day)}: {_plural(len(cancel), 'line')}"
+    else:
+        source = _order_source(args, supplier)
+        pairs = source["pairs"]
+        if source["problems"]:                          # the file's own words first: nothing is worked out from it
+            return ([f"ORDER PLACED  {supplier}: the workbook needs fixing first (nothing can be logged while these "
+                     "stand):"] + source["notes"] + [f"    {p}" for p in source["problems"]])
+        if not pairs:
+            raise StockInput(f"The workbook holds no quantity for {supplier}: type the quantities in its Order sheet "
+                             "(or name the lines with --line CODE=QTY).")
+        try:
+            new = stock_orders.promise_lines(supplier, order_day, pairs, source["source"], stamp, today=today)
+        except ValueError as exc:
+            raise StockInput(str(exc)) from None
+        plan_w = stock_orders.plan_write(existing, new)
+        head = (f"ORDER PLACED  {supplier}, ordered on {fmt.day_long(order_day)}: {_plural(len(new), 'line')}, "
+                f"{fmt.units(sum((Decimal(q) for _c, q in pairs), ZERO))} units")
+    token = stock_orders.token(source["sha"], supplier, order_day, pairs)
+    lines = [head] + source["notes"]
+    shown = plan_w["write"] + plan_w["cancel"]
+    if shown:
+        rows = [[row["item_code"], short(names.get(code_key(row["item_code"]), ""), 40),
+                 fmt.units(Decimal(row["qty"])) if row.get("state") != stock_orders.CANCELLED else "cancelled"]
+                for row in shown]
+        lines += _indent(fmt.grid(["Code", "Item", "Units"], rows, "llr"))
+    if plan_w["unchanged"]:
+        lines.append(f"  {_plural(len(plan_w['unchanged']), 'line')} already logged as it is: nothing to change there.")
+    unknown = [c for c, _q in pairs if code_key(c) not in names]
+    if unknown and verb != "cancel":
+        lines.append("  Not an item of the main store, to check: " + ", ".join(unknown[:8]))
+    if source["problems"]:
+        lines.append("  Fix these in the file first (nothing can be logged while they stand):")
+        lines += [f"    {p}" for p in source["problems"]]
+        return lines
+    if not shown:
+        lines.append("  Nothing to log: the KPI log already holds this order as it is.")
+        return lines
+    commit = getattr(args, "commit", None)
+    if commit:
+        if commit != token:
+            raise StockInput("The file or the lines changed since the preview: nothing was logged. Run the preview "
+                             "again and log what it shows.")
+        n = stock_orders.append(kpi_log_file(), shown)
+        lines.append(f"  Logged: {_plural(n, 'line')} in the KPI log. From the next screen and file they count as on "
+                     "the way, until the supplier's receipts cover them.")
+        return lines
+    again = [f"python -m scripts.ops stock {verb} {supplier}"]
+    if getattr(args, "date", None):
+        again.append(f"--date {order_day.isoformat()}")
+    if getattr(args, "file", None):
+        again.append(f"--file \"{args.file}\"")
+    for c, q in _typed_lines(getattr(args, "line", None)):
+        again.append(f"--line {c}={q}")
+    again.append(f"--commit {token}")
+    lines += ["  Nothing is logged yet. Once he says yes, this logs exactly these lines:", "    " + " ".join(again)]
+    return lines
+
+
+def team_lines(model: Model, args) -> list[str]:
+    """team: the team copy of his newest workbook (or --file): his quantities and comments, no cost or value."""
+    from scripts.ops.workbook import readback, stock_team
+    path = Path(args.file) if getattr(args, "file", None) else readback.newest_plan(paths.reports_dir("stock"))
+    if path is None or not Path(path).is_file():
+        raise StockInput("No Stock & Order Plan workbook to copy: type /yq-stock first.")
+    res = stock_team.team_file(Path(path))
+    if res.get("error"):
+        return [f"TEAM COPY  not made this time: {res['error']}."]
+    made = Path(res["path"])
+    try:
+        shown = str(made.resolve().relative_to(paths.data_root().resolve()))
+    except ValueError:
+        shown = str(made)
+    return [f"TEAM COPY  {shown} (made now from {Path(path).name})",
+            "  Your quantities and comments, with a Team comment column; no cost, value, budget or salesman's name.",
+            "  Share this one with the team; keep your own file for costs."]
 
 
 def _slug(text: str) -> str:
@@ -1540,6 +1891,12 @@ def facts_out(model: Model, view: str, query: str | None) -> dict:
 def day_file(model: Model, force: bool = False) -> dict:
     """The day's Stock & Order Plan workbook (scripts.ops.workbook.stock_book), made at most once per data date
     unless forced. Never raises: a workbook that cannot be made is one sentence, and the screen still prints."""
+    if paths.is_worktree() and not paths.root_is_set():
+        # a code worktree reads the main folder's data, but its unfinished code never makes the owner's day file:
+        # build-once would hand that file to his next /yq-load (--data-root names another folder to try it in)
+        return {"path": None, "made": False, "made_at": None, "controls": [],
+                "error": "this is a code worktree, and the day's file belongs to the project folder (to try it, "
+                         "name another folder with --data-root)"}
     try:
         from scripts.ops.workbook import stock_book
     except ImportError as exc:
@@ -1585,6 +1942,10 @@ def run(args) -> dict:
             lines = ageing_lines(model, inp.ledger_note)
         elif view == "damage":
             lines = damage_view_lines(model, inp.ledger_note)
+        elif view in ("ordered", "cancel"):
+            lines = order_log_lines(model, view, query, args)
+        elif view == "team":
+            lines = team_lines(model, args)
         elif view == "item":
             lines = item_lines(model, query or "", inp.ledger_note)
         else:
@@ -1595,7 +1956,8 @@ def run(args) -> dict:
         return dict(out, ok=False, text=str(exc), exit=1)
     text = "\n".join(_guarded(ln).rstrip() for ln in lines)
     stem = {"headline": "stock", "file": "stock", "reorder": "stock-reorder", "ageing": "stock-ageing",
-            "damage": "stock-damage"}.get(view) or f"stock-item-{_slug(query or '')}"
+            "damage": "stock-damage", "ordered": "stock-ordered", "cancel": "stock-cancel",
+            "team": "stock-team"}.get(view) or f"stock-item-{_slug(query or '')}"
     folder = paths.exports_dir(model.d)
     facts = facts_out(model, view, query)
     facts["file"] = {k: v for k, v in (book or {}).items() if k in ("path", "made", "made_at", "error")}

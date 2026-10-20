@@ -37,6 +37,14 @@ KEYS: dict[str, tuple[str, str]] = {
     "stock.suppliers": ("dict", "item code -> supplier, where neither the catalog's brand nor the last purchase "
                                 "order names the right one"),
     "stock.supplier_aliases": ("dict", "a supplier as one source spells it -> the name used everywhere else"),
+    "stock.order_every_days": ("int", "the order rhythm: the days between two orders to a supplier (each order covers "
+                                      "them as well as the lead time)"),
+    "stock.supplier_every_days": ("dict", "supplier -> its own order rhythm in days, where it differs"),
+    "stock.supplier_lead_days": ("dict", "supplier -> its lead time in days, where none can be measured (a local "
+                                         "supplier, a new one)"),
+    "stock.season_lift": ("dict", "month number (January is one) -> the season lift that stands in for last year's "
+                                  "own figure"),
+    "stock.pack_sizes": ("dict", "item code -> units in a carton: a suggested order is rounded up to whole cartons"),
     "items.bridge_exceptions": ("dict", "ledger item name -> the name the stock balance / day book has for "
                                         "it, where the longest-prefix rule needs help; a target that report "
                                         "does not have leaves the item in the unmapped block"),
@@ -60,8 +68,10 @@ _TYPES = {"number": (int, float), "int": (int,), "str": (str,), "list": (list,),
 #    the command that reads it carries the approved plan's default and says so on its screen (names only
 #    here, never a value).
 DEFAULTS: dict[str, object] = {"report.category_names": {}, "report.prepared_by": "", "warehouses.damage": "",
-                               "stock.suppliers": {}, "stock.supplier_aliases": {}}
-OPTIONAL = frozenset({"stock.fast_movers", "stock.cover_kpi_days", "stock.clear_target_days", *DEFAULTS})
+                               "stock.suppliers": {}, "stock.supplier_aliases": {}, "stock.supplier_every_days": {},
+                               "stock.supplier_lead_days": {}, "stock.season_lift": {}, "stock.pack_sizes": {}}
+OPTIONAL = frozenset({"stock.fast_movers", "stock.cover_kpi_days", "stock.clear_target_days", "stock.order_every_days",
+                      *DEFAULTS})
 _cfg: dict | None = None
 
 

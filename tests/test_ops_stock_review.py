@@ -481,6 +481,88 @@ def _():
     assert f["batches"][0]["compared_items"] == 1 and f["batches"][0]["change"] == r["change"]
 
 
+FRESH_ITEMS = {"N": ("NEW-C Charger Fresh", "NC1"), "S": ("NEW-F Fan Steady", "NF2")}
+
+
+def fresh_world(cut_day: date) -> ReviewWorld:
+    """NC1: 55 received 1 Sep 2025 at 1.0; 10 sold 10 Jan, 10 on 20 Feb, 5 on 5 Mar, none since: 30 left; its price
+    cut on `cut_day`. NF2 (new, selling) sells on D, the ledger's last day."""
+    nc, nf = "NEW-C Charger Fresh NC1", "NEW-F Fan Steady NF2"
+    b = Book()
+    b.receipt(nc, date(2025, 9, 1), 55, 55, "MRN:N-25-09-1")
+    for day, units in ((date(2026, 1, 10), 10), (date(2026, 2, 20), 10), (date(2026, 3, 5), 5)):
+        b.issue(nc, day, units).sale(nc, day, units)
+    b.receipt(nf, date(2026, 3, 1), 20, 20, "MRN:N-26-03-1")
+    b.issue(nf, D, 2).sale(nf, D, 2)
+    return ReviewWorld(book=b, items=FRESH_ITEMS,
+                       cuts=[("NC1", "NEW-C Charger Fresh", cut_day.isoformat(), "2.000", "1.800")])
+
+
+@test("a cut on D-1 is too soon to judge: the 30-day pace sets the status; no share sold, no pace change")
+def _():
+    _m, f = review_of(fresh_world(date(2026, 3, 14)))                         # D - 1
+    (r,) = f["rows"]
+    # judged on the cut's 2 days it would read Not moving (none sold since) and a push of 3 every morning after
+    # a price-book load; on the 30 days (10 + 5 sold, 3.5 a week): 30 x 30 / 15 = 60 days, on track
+    assert (r["too_soon"], r["cut_age_days"], r["pace_basis"], r["pace_days"], r["pace_units"], r["pace_week"]) == \
+        (True, 1, "30 days", 30, 15, Decimal("3.5"))
+    assert (r["days_to_clear"], r["status"], r["push_week"], r["action"]) == (60, "On track", None, "Keep selling")
+    # the figures stay (30 at the cut, none sold since; 25 sold in the 90 days before, in stock on all of them), the
+    # verdicts do not
+    assert (r["stock_at_cut"], r["sold_since_cut"], r["before_units"], r["in_stock_before_days"]) == (30, 0, 25, 90)
+    assert (r["pct_sold"], r["change"]) == (None, None)
+    (b,) = f["batches"]
+    assert (b["too_soon"], b["age_days"], b["pct_sold"], b["change"], b["counts"]["On track"]) == (True, 1, None, None, 1)
+    with data_root():
+        head = run(fresh_world(date(2026, 3, 14)))["text"]
+        text = run(fresh_world(date(2026, 3, 14)), "ageing")["text"]
+        item = run(fresh_world(date(2026, 3, 14)), "NC1")["text"]
+    assert screen(head, "AGEING  ")[1:3] == [
+        "  Clear target 90 days at today's pace: 1 on track, 0 slow, 0 not moving, 0 cleared; nothing for the sales "
+        "team to push",
+        "  Price cut 14 Mar (1 item): too soon to judge the cut (1 day); 0 cleared, 1 on track, 0 slow, 0 not moving"], \
+        screen(head, "AGEING  ")[1:3]
+    batch_row = next(ln for ln in text.splitlines() if ln.startswith("    14 Mar "))
+    # before: 25 x 7 / 90 = 1.94 a week; no share and no pace since on 1 day
+    assert re.split(r"\s{2,}", batch_row.strip()) == ["14 Mar", "1", "0", "1", "0", "0", "30", "0", "0", "-", "1.9", "-",
+                                                      "too soon to judge"], batch_row
+    item_row = next(ln for ln in text.splitlines() if ln.startswith("    NEW-C Charger Fresh "))
+    assert re.split(r"\s{2,}", item_row.strip()) == ["NEW-C Charger Fresh", "NC1", "30", "30", "30", "3.5", "60",
+                                                     "On track", "14 Mar -10.0%", "1.9", "0 (too soon)",
+                                                     "Keep selling"], item_row
+    assert [ln for ln in item.splitlines() if ln.startswith(("  Ageing review:", "  Price cut "))] == [
+        "  Ageing review: On track; 30 units sellable (main store 30); 3.5 a week over the last 30 days; 60 days to "
+        "clear against the 90-day target; keep selling",
+        "  Price cut 14 Mar: 2.000 to 1.800 (-10.0%); too soon to judge the cut (1 day)"]
+    for word in BANNED + ("0.0x",):
+        assert word not in (head + text + item).lower(), word
+
+
+@test("the 14-day boundary: a cut 13 days before D is too soon to judge, 14 days before D sets the pace")
+def _():
+    _m, f = review_of(fresh_world(date(2026, 3, 2)))                          # D - 13
+    (r,) = f["rows"]
+    assert (r["too_soon"], r["cut_age_days"], r["pace_basis"], r["pace_days"], r["status"]) == \
+        (True, 13, "30 days", 30, "On track")
+    assert (r["sold_since_cut"], r["pct_sold"], r["change"]) == (5, None, None)          # 5 sold on 5 Mar: no verdict
+    assert f["batches"][0]["too_soon"] and f["batches"][0]["pct_sold"] is None
+    with data_root():
+        item = run(fresh_world(date(2026, 3, 2)), "NC1")["text"]
+    assert "  Price cut 02 Mar: 2.000 to 1.800 (-10.0%); too soon to judge the cut (13 days)" in item.splitlines(), item
+    _m, f = review_of(fresh_world(date(2026, 3, 1)))                          # D - 14
+    (r,) = f["rows"]
+    # since 1 Mar (15 days): 5 sold, 5 x 7 / 15 = 2.33 a week; 30 x 15 / 5 = 90 days: on track, just
+    assert (r["too_soon"], r["cut_age_days"], r["pace_basis"], r["pace_days"], r["pace_units"]) == \
+        (False, 14, "cut", 15, 5)
+    assert (r["pace_week"], r["days_to_clear"], r["status"]) == (Decimal(35) / 15, 90, "On track")
+    # before: 10 + 10 in 1 Dec .. 28 Feb (20, in stock on all 90 days): 20 x 7 / 90; (35 / 15) / (140 / 90) = 1.5;
+    # at the cut 55 - 20 = 35, 5 sold since: 5 / 35
+    assert (r["before_units"], r["stock_at_cut"], r["pct_sold"]) == (20, 35, Decimal(5) / 35)
+    assert r["change"] == (Decimal(35) / 15) / (Decimal(140) / 90) and str(r["change"])[:4] in ("1.50", "1.49")
+    b = f["batches"][0]
+    assert (b["too_soon"], b["age_days"], b["compared_items"], b["change"]) == (False, 14, 1, r["change"])
+
+
 @test("the cut's effect: a week in the 90 days before and since, the change, the stock at the cut, the share sold")
 def _():
     _m, f = review_of()
@@ -677,8 +759,9 @@ def _():
     for line in ("  1 price cut dated after Sun 15 Mar is left out until the ledger reaches it.",
                  "  Sellable = the main store, the vans, the outlets and goods moving between them; damage and samples "
                  "left out.",
-                 "  A week = units sold since the item's price cut when it fell in the last 120 days, else in the last 30 "
-                 "days; days to clear = sellable / that pace; push = sellable / 90 x 7 a week, rounded up.",
+                 "  A week = units sold since the item's price cut when it fell in the last 120 days and at least 14 days "
+                 "ago (a younger cut is too soon to judge), else in the last 30 days; days to clear = sellable / that "
+                 "pace; push = sellable / 90 x 7 a week, rounded up.",
                  "  Before a week = units a week in the 90 days before the cut ('not in stock before' when the item was "
                  "in stock on fewer than 30 of them); sold since cut = units sold since it, and their share of the "
                  "stock at the cut plus what was received since.",

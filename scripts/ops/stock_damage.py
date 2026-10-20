@@ -46,7 +46,10 @@ THE DEFINITIONS (the owner's, D = the ledger's last day; every figure a Decimal,
     movement" (sent_ever carries the second half of that test: units issued to a store that never booked
     anything are movement, and the check line says they are not in there).
   * Not booked = per item, units sent up to D-7 less units booked up to D, when above nought: an issue
-    has 7 days for its receive leg to be posted before it is listed.
+    has 7 days for its receive leg to be posted before it is listed. The bookings of D-6 to D are first
+    matched to the sends of D-6 to D (the smaller of the two is taken out of the booked units), so a
+    transfer sent and received this week never hides an older one that was not received; a booking those
+    sends cannot explain (a late receive leg, a return booked straight in) still clears older sends.
   * By item = items with units in the store or sent in the 90 days to D (D-89 to D). The quality check
     marks an item whose per 100 sold in those 90 days is above twice the company's with 5 or more units
     sent; the two rates are compared as printed (two decimals).
@@ -214,11 +217,16 @@ def damage_facts(model, fl) -> dict:
     facts["months"] = months
     facts["trend"] = _trend(months)
 
-    # sent and never booked in: an issue has GRACE_DAYS for its receive leg to be posted
+    # sent and never booked in: an issue has GRACE_DAYS for its receive leg to be posted. Booked is cumulative, so
+    # a transfer sent and received this week must not cancel an older one that was never received: the bookings of
+    # the grace window (D-6 to D) are matched to the sends of that window first, and only what those sends cannot
+    # explain clears an older send (a late receive leg of an old issue still does).
     cut = d - timedelta(days=GRACE_DAYS)
+    window = cut + timedelta(days=1)
     not_booked = []
     for it, f in pairs:
-        units = f.sent_between(None, cut) - f.booked_between(None, d)
+        explained = min(f.booked_between(window, d), f.sent_between(window, d))
+        units = f.sent_between(None, cut) - (f.booked_between(None, d) - explained)
         if units > 0:
             not_booked.append({"item": it, "units": units,
                                "last_sent": max((day for day, _src, _u in f.sent_damage if day <= cut), default=cut)})

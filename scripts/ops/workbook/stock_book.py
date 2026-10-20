@@ -6,19 +6,65 @@ CONTRACT (scripts.ops.stock relies on it)
   day_file(model, force=False) -> dict
       {"path": str | None, "made": bool, "made_at": "HH:MM" | None, "error": str | None, "controls": [str]}
       One file per data date under exports/reports/stock/, named "YQ Stock and Order Plan <YYYY-MM-DD>.xlsx":
-      when one exists (any "YQ Stock and Order Plan <date>*.xlsx" there, "~$" and "~build-" names aside) it is
-      not built again: made False, the newest such file and its modified time (Bahrain). force takes the next
-      free " (2)" ... " (99)", as the monthly report does. A failure (XlsxWriter missing, a formula the
-      evaluator refuses, a name taken, a folder that cannot be written) is one sentence in "error", never an
-      exception: the screen always prints. "controls" are controls(), one sentence each.
+      when one exists (any "YQ Stock and Order Plan <date>*.xlsx" there; "~$" and "~build-" names and the team
+      copies, " - Team" in the name, aside) and the latest of them (the highest copy number, then the latest
+      save: readback.newest_plan's order) carries today's figures stamp (Notes!B6, figures_digest), it is not
+      built again: made False, that file and the time it was made (Bahrain). When its stamp differs, or it holds
+      none (an older layout, a file that is no workbook), the next free name is built (made True) and the first
+      control line says why: "the figures changed since <made at>: a new file". Without openpyxl nothing can be
+      compared and the file stands. force takes the next free " (2)" ... " (99)", as the monthly report does. A
+      failure (XlsxWriter missing, a formula the evaluator refuses, a name taken, a folder that cannot be
+      written) is one sentence in "error", never an exception: the screen always prints. "controls" are
+      controls(), one sentence each.
+  figures_digest(model) -> str | None     the figures stamp: 16 hex digits (see the function)
+  read_stamp(path) -> (bool, str | None)  a made file's stamp, read with openpyxl
   build_book(model, made=None) -> Book
       The workbook in memory, NOT evaluated: a test can type into a yellow cell first, then evaluate().
   controls(book, model) -> list[str]
       The book evaluated, then every Order row's Suggested set against the screen's quantity, each supplier's
-      Items / Units / Value against the screen's sums over the same rows (Your qty blank), and every formula
+      Items / Units / Value against the screen's sums over the same rows (Your qty blank), in a release-2 file
+      each supplier's Join / Fill season days on Notes against stock_season.season_days, and every formula
       that came out as an error value. Nothing differs on a sound build: the list is empty.
-  LAYOUT_TAG "stock-plan v1" sits in Notes!B5 (TAG_SHEET, TAG_CELL): release 2 reads it back to know where
-  the owner's quantities and comments are.
+  release2(model) -> dict | None
+      Release 2's facts when scripts.ops.stock gave them (facts["season"] with its "lifts" and
+      facts["supplier_rules"]), else None: the file is then release 1's cell for cell, but for the figures stamp
+      (a hidden row) and the Ageing sheet's guarded paces (below).
+  The layout tag sits in Notes!B5 (TAG_SHEET, TAG_CELL): LAYOUT_TAG "stock-plan v1" without release 2's facts,
+  LAYOUT_TAG_V2 "stock-plan v2" with them. The file is read back by it (where the owner's quantities and
+  comments are): keep the Order sheet's header texts and the rows to add an item as they are. The figures stamp
+  sits in Notes!B6 (STAMP_CELL), its row hidden (height 0), in both layouts.
+
+RELEASE 2 (layout "stock-plan v2", the owner's decisions of 20-Oct-2026): the order rhythm (an order to a supplier
+about once a month), the season (a lift per calendar month) and goods on the way. An item joins when its demand
+from the data date reaches its position (Main stock, never below nought, + On the way) within lead + rhythm + the
+low end of the KPI band, each day's demand being the rate x the lift of that day's month; it is topped up to lead
++ rhythm + the high end of that demand. With no rhythm and every lift 1.00 it is release 1's rule.
+  facts["season"]          {"lifts": {1..12: {"lift": Decimal (2 dp), "basis", "days", "year"}}, "warn": [month],
+                            "applied": bool}
+  facts["supplier_rules"]  {supplier: {"lead", "lead_basis", "every", "low", "high"[, "trig_days", "fill_days"]},
+                            "*": the rule of any other supplier}; a supplier it does not name takes its own lead
+                            time from facts["leads"] and its rhythm from config 'stock.supplier_every_days' where
+                            they are set, else the "*" rule (stock.build fills the rules of the order's suppliers only)
+  facts["on_the_way"]      stock_orders.fifo(): {"lines", "logged", "counted", "unmatched", "log"}
+  order rows               + "rate_basis" ("90 days" | "longer history from <date>") and "pack" (units a carton)
+  Notes: the settings per supplier (rows 9 on, then one row "Any other supplier" for the "*" rule) gain Join
+  season days (H) and Fill season days (I) = SUMPRODUCT(the window's days in each calendar month, the lifts);
+  the LIFTS table (Jan to Dec in B to M, yellow, two decimals, a "Measured on" row and a "Stock-outs" row: "stock-
+  outs held this month down" for facts["season"]["warn"]); the window table: a fixed cell with the data date, then
+  each supplier's Join below and Fill to days in each month, formulas of that date, the settings and the month
+  (month_days: this year's and next year's month m against (d, d + MIN(days, 365)], so a window of up to a year is
+  exact even when d's own month comes round again). A yellow cell typed in recomputes this file only.
+  Order: Joins = AND(Rate > 0, ROUND(ROUND(Pos - Rate x Join season days, 8), 6) < 0); Suggested =
+  IF(Joins, ROUNDUP(MAX(ROUND(ROUND(Rate x Fill season days - Pos, 8), 6), 0), 0), 0), in whole cartons where
+  Carton is above 1 (rule_formulas). A 6-decimal rate times a 2-decimal season day count has 8 decimals: rounded
+  to 8 first, the evaluator's binary arithmetic gives Python's exact Decimal figure, then stock_plan's one rule
+  (round6, then up). The supplier lookups fall back to the "*" row: IFERROR(MATCH(...), its position), so a
+  Supplier cell typed over never shows #N/A. The columns Rate basis (U) and Carton (V) come after Comment; nothing
+  before them moves. All items: Supplier from (W, the row's "supplier_basis"; blank without it).
+  On the way (after Order): the logged lines still due, by supplier; one plain line when nothing is logged.
+  Ageing (both layouts): Before / Since a week as the screen guards them: "not in stock before" (in stock on fewer
+  than 30 of the 90 days before the cut), "too few before" (no pace to compare), "too soon" (a cut too recent);
+  a cut batch's Change in the same words; never a multiple read off a pace that says nothing.
 
 THE SHEETS (in this order; every table cell has a thin grid border, typed-in cells are yellow)
   Summary      the file, the stock (portal items and units, at selling price, at landed cost), KPI 1 cover,
@@ -33,7 +79,8 @@ THE SHEETS (in this order; every table cell has a thin grid border, typed-in cel
                screen's rule out again from the rate to six decimals and the supplier's Join below / Fill to
                on Notes (INDEX/MATCH), so they equal the screen to the unit; Final = Your qty, else
                Suggested; Value = Final x landed cost to the fils (the screen's rounding). Frozen below the
-               item header, a filter on the item table.
+               item header, a filter on the item table. Release 2: the season days and Rate basis, Carton.
+  On the way   (release 2 only) the orders he logged that are still due, by supplier (stock_orders.fifo).
   All items    plan["all_items"] (model.items when the plan is missing), with the item's landed cost (the
                add rows look it up); Status coloured. With vans never below nought (information only).
   Fast movers  facts["fast"]["list"] with the days available this month (stock.available_days).
@@ -41,13 +88,17 @@ THE SHEETS (in this order; every table cell has a thin grid border, typed-in cel
                batches, the six month ends; a yellow column for his action.
   Damage       the headline, the twelve months, the items (a yellow Decision list), what was never booked.
   Notes        the layout tag, the settings per supplier (yellow Lead days and Order every; the Order sheet
-               reads them), how every figure is worked out, what is estimated, where the data comes from.
+               reads them), release 2's lifts and windows, how every figure is worked out, what is estimated,
+               where the data comes from.
   A part that is missing, a stub (built False) or failed (an "error" key) is one plain line on its sheet.
 
 Only the workbook is written, and only under exports/ of the data root (paths.allowed_output).
 """
 from __future__ import annotations
 
+import calendar
+import hashlib
+import json
 import math
 import os
 import re
@@ -55,7 +106,7 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
-from scripts.ops import fmt, paths
+from scripts.ops import fmt, paths, stock_season
 from scripts.ops.workbook import book as bk
 from scripts.ops.workbook import formula as fx
 from scripts.ops.workbook import style
@@ -63,9 +114,22 @@ from scripts.ops.workbook.book import Book, Sheet
 
 TITLE = "YQ Bahrain — Stock & Order Plan"
 STEM = "YQ Stock and Order Plan {d}"
-LAYOUT_TAG = "stock-plan v1"
+LAYOUT_TAG = "stock-plan v1"                  # release 1's layout (no release-2 facts)
+LAYOUT_TAG_V2 = "stock-plan v2"               # the rhythm, the season and goods on the way
+LAYOUT_TAGS = (LAYOUT_TAG, LAYOUT_TAG_V2)
 TAG_SHEET, TAG_CELL = "Notes", "B5"
+STAMP_CELL = "B6"                             # the figures stamp (Notes, in a hidden row): day_file reads it back
+TEAM_MARK = " - Team"                         # readback.TEAM_MARK: a team copy's name holds it (never the day's file)
+ANY_SUPPLIER = "Any other supplier"           # release 2: the settings row of the "*" rule
 SHEETS = ("Summary", "Order", "All items", "Fast movers", "Ageing", "Damage", "Notes")
+SHEETS_V2 = ("Summary", "Order", "On the way", "All items", "Fast movers", "Ageing", "Damage", "Notes")
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+WINDOW_CAP = 365                              # a window counts at most a year of days
+WARN_WORDS = "stock-outs held this month down"
+EMPTY_LOG = ("Nothing logged yet: when you place an order, say so (/yq-stock ordered <supplier>) and it shows here "
+             "until the goods arrive.")
+LONGER_NOTE = ("~ out of stock most of the last 90 days: the rate of a longer history (back to the first window "
+               "holding 30 days in stock, up to a year).")      # stock.LONGER_NOTE, when that module has none
 COMPANY = "YQ Bahrain W.L.L"
 OTHER = "Other"                      # the supplier of an item nothing names (stock_plan.OTHER)
 ADD_ROWS = 15                        # rows under the order list to add an item by its code
@@ -78,6 +142,7 @@ DAMAGE_NOTES = (                     # stock_damage.NOTES, when that module does
     "Nothing here is booked: claiming from the supplier, writing off, repairing or selling as B-grade is your "
     "decision.",
 )
+Q2 = Decimal("0.01")
 Q3 = Decimal("0.001")
 Q6 = Decimal("0.000001")
 ZERO = Decimal(0)
@@ -86,15 +151,23 @@ ONE = Decimal(1)
 # The Order sheet's item table (0-based columns A to T)
 (O_SUPPLIER, O_CODE, O_ITEM, O_CATEGORY, O_FAST, O_MAIN, O_VANS, O_WAY, O_SOLD, O_RATE, O_STAR, O_COVER,
  O_JOINS, O_SUGGESTED, O_YOURS, O_FINAL, O_COST, O_VALUE, O_RECEIPT, O_COMMENT) = range(20)
+O_RATE_BASIS, O_CARTON = 20, 21       # release 2: after Comment (U, V)
 # ... and its By supplier block above it (columns C to J; Minimum check spans J:L)
 B_NAME, B_ITEMS, B_UNITS, B_VALUE, B_BUDGET, B_MIN, B_AGAINST, B_CHECK = range(2, 10)
-# The settings per supplier on Notes (columns A to G), the header on NOTES_SET_HEAD, one row per supplier after it
+# The settings per supplier on Notes (columns A to G; release 2 to I), the header on NOTES_SET_HEAD, one row per
+# supplier after it
 S_NAME, S_LEAD, S_EVERY, S_LOW, S_HIGH, S_JOIN, S_FILL = range(7)
+S_JSEASON, S_FSEASON = 7, 8           # release 2: Join season days, Fill season days
 NOTES_SET_HEAD = 7
+M_FIRST, M_LAST, M_TOTAL = 1, 12, 13  # release 2's month tables on Notes: Jan to Dec in B to M, a window's days in N
+# The On the way sheet (release 2), the header on W_HEAD
+(W_SUPPLIER, W_CODE, W_ITEM, W_DATE, W_QTY, W_RECEIVED, W_DUE, W_EXPECTED, W_LATE, W_REF) = range(10)
+W_HEAD = 4
 # The All items table (columns A to V), the header on ALL_HEAD
 (A_SUPPLIER, A_CODE, A_ITEM, A_CATEGORY, A_STATUS, A_MAIN, A_VANS, A_DAMAGE, A_WAY, A_SOLD30, A_SOLD90,
  A_SOLD365, A_RATE, A_COVER, A_COST, A_VALUE, A_OLDEST, A_LAST_SALE, A_LAST_RECEIPT, A_RANK, A_ACTIVE,
  A_HIDDEN) = range(22)
+A_SUPPLIER_FROM = 22                  # release 2: where the item's supplier comes from (after Hidden, W)
 ALL_HEAD = 4
 
 STATUS_STYLES = (("Sold out", "cf_red"), ("Order now", "cf_amber"), ("No stock, no sale", "cf_grey"),
@@ -227,12 +300,179 @@ def _safe(fn, default=None):
         return default
 
 
+# ── release 2 ─────────────────────────────────────────────────────────────────
+
+def release2(model) -> dict | None:
+    """Release 2's facts (see the module docstring), or None: without the season and the rules of the suppliers
+    the file is release 1's. {"lifts": the facts' lifts, "table": {month: the lift the rule uses}, "warn":
+    [month], "applied": bool, "rules": facts["supplier_rules"], "on_the_way": facts["on_the_way"] or None}."""
+    f = getattr(model, "facts", None) or {}
+    season, rules = f.get("season"), f.get("supplier_rules")
+    if not isinstance(season, dict) or not isinstance(rules, dict) or not rules:
+        return None
+    if isinstance(season.get("error"), str) or isinstance(rules.get("error"), str):
+        return None
+    lifts = season.get("lifts")
+    if not isinstance(lifts, dict):
+        return None
+    warn = set()
+    for m in season.get("warn") or []:
+        try:
+            if 1 <= int(m) <= 12:
+                warn.add(int(m))
+        except (TypeError, ValueError):
+            continue
+    return {"lifts": lifts, "table": {m: stock_season.lift_of(lifts, date(2000, m, 1)) for m in range(1, 13)},
+            "warn": sorted(warn), "applied": bool(season.get("applied")), "rules": rules,
+            "on_the_way": f.get("on_the_way")}
+
+
+def _named(table, name: str):
+    """The entry of a supplier in a {supplier: row} table, its letter case aside ("*" is never a supplier's)."""
+    if not isinstance(table, dict):
+        return None
+    key = name.casefold()
+    for s, row in table.items():
+        if s != stock_season.OTHER and isinstance(row, dict) and " ".join(str(s).split()).casefold() == key:
+            return row
+    return None
+
+
+def _rule_of(model, r2: dict, name: str) -> dict:
+    """A supplier's rule as the Notes sheet holds it: {"lead", "lead_basis", "every", "low", "high", "trig_days",
+    "fill_days"} (whole days). facts["supplier_rules"] of the supplier; else its own lead time (facts["leads"])
+    and rhythm (config, stock.Settings.supplier_every) where they are set over the rule of any other supplier
+    ("*"), as scripts.ops.stock works a supplier's rule out."""
+    f, cfg = model.facts, model.cfg
+    lead = f.get("lead") or {}
+
+    def whole(rule: dict) -> dict:
+        out = {"lead": int(rule.get("lead", lead.get("days", 0))),
+               "lead_basis": rule.get("lead_basis") or lead.get("basis"),
+               "every": int(rule.get("every", 0)), "low": int(rule.get("low", cfg.low)),
+               "high": int(rule.get("high", cfg.high))}
+        out["trig_days"] = int(rule.get("trig_days", out["lead"] + out["every"] + out["low"]))
+        out["fill_days"] = int(rule.get("fill_days", out["lead"] + out["every"] + out["high"]))
+        return out
+
+    own = _named(r2["rules"], name)
+    if own is not None:
+        return whole(own)
+    star = r2["rules"].get(stock_season.OTHER)
+    base = whole(star if isinstance(star, dict) else {"every": getattr(cfg, "every_days", 0)})
+    measured = _named(f.get("leads"), name)
+    every = next((v for s, v in (getattr(cfg, "supplier_every", None) or {}).items()
+                  if " ".join(str(s).split()).casefold() == name.casefold()), None)
+    if measured is None and every is None:
+        return base
+    out = dict(base)
+    if measured is not None and measured.get("days") is not None:
+        out["lead"], out["lead_basis"] = int(measured["days"]), measured.get("basis") or base["lead_basis"]
+    if every is not None:
+        out["every"] = int(every)
+    out["trig_days"] = out["lead"] + out["every"] + out["low"]
+    out["fill_days"] = out["lead"] + out["every"] + out["high"]
+    return out
+
+
+def _longer(x: dict) -> bool:
+    """The row's rate is the rate of a longer history (stock_season.long_rate), not the 90 days'."""
+    return str(x.get("rate_basis") or "").startswith("longer")
+
+
+# ── the figures stamp ─────────────────────────────────────────────────────────
+
+def _canon(x) -> str | None:
+    """A figure as one text whatever its type or trailing noughts (1, 1.0 and Decimal("1.00") are all "1")."""
+    if x is None or isinstance(x, (bool, str)):
+        return x if not isinstance(x, bool) else str(x)
+    if isinstance(x, (date, datetime)):
+        return x.isoformat()
+    try:
+        v = x if isinstance(x, Decimal) else Decimal(str(x))
+    except (ArithmeticError, ValueError):
+        return str(x)
+    return format(v.normalize(), "f") if v.is_finite() else str(v)
+
+
+def _digest(model) -> str:
+    r2 = release2(model)
+    lines, _from_plan = order_lines(model)
+    rows, _rows_from_plan = all_rows(model)
+    data: dict = {"layout": LAYOUT_TAG_V2 if r2 is not None else LAYOUT_TAG, "d": model.d.isoformat(), "order": [
+        [x["supplier"], x["item"].code or x["item"].ledger_name, _canon(x["qty"]),
+         _canon(max(x["item"].on_hand, ZERO) + x["item"].on_order), _canon(x["rate6"]), _canon(x["item"].cost),
+         _pack(x.get("pack")), x.get("rate_basis") or ""] for x in lines]}
+    if r2 is None:
+        f = model.facts
+        data["rule"] = [_canon(f["lead"]["days"]), _canon(f.get("trigger_days")), _canon(f.get("fill_days"))]
+    else:
+        names = _suppliers(lines, rows) + [stock_season.OTHER]
+        data["rules"] = [[s, [_rule_of(model, r2, s)[k] for k in ("lead", "every", "low", "high", "trig_days",
+                                                                  "fill_days")]] for s in names]
+        data["lifts"] = [_canon(r2["table"][m]) for m in range(1, 13)]
+        ow = r2.get("on_the_way")
+        data["way"] = ([[ln.get("ref"), ln.get("code"), _canon(ln.get("qty")), _canon(ln.get("received")),
+                         _canon(ln.get("due")), _canon(ln.get("date")), _canon(ln.get("expected_by"))]
+                        for ln in ow.get("lines") or [] if isinstance(ln, dict)]
+                       if isinstance(ow, dict) else None)
+    text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def figures_digest(model) -> str | None:
+    """The figures stamp: 16 hexadecimal digits of the sha256 of what the Order sheet rests on (the layout, the
+    data date, every order row's supplier, code, quantity, position, rate, landed cost, carton and rate basis, the
+    settings of every supplier the file names, and in release 2 the lifts and the goods on the way). A same-date
+    reload, an order logged or a cost loaded later moves it; the owner's typing never does (it is not in the
+    model). None when the facts are not what the contract says (stock.RAISE_PARTS: it raises)."""
+    return _safe(lambda: _digest(model), None)
+
+
+def read_stamp(path) -> tuple[bool, str | None]:
+    """(compared, stamp): the figures stamp of a workbook made before (Notes!B6, read with openpyxl). (True, None)
+    for a file that holds none (an older layout) or cannot be read as a workbook; (False, None) when openpyxl is
+    not installed, so nothing can be compared and the file stands."""
+    try:
+        import openpyxl
+    except ImportError:
+        return False, None
+    wb = None
+    try:
+        wb = openpyxl.load_workbook(bk._long(Path(path)), read_only=True, data_only=True)
+        if TAG_SHEET not in wb.sheetnames:
+            return True, None
+        value = wb[TAG_SHEET][STAMP_CELL].value
+        text = str(value).strip() if value is not None else ""
+        return True, (text or None)
+    except Exception:  # noqa: BLE001  (a file that is no workbook, or one half written: it holds no stamp)
+        return True, None
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _pack(value) -> int:
+    """Units a carton (config 'stock.pack_sizes'): a whole number, 0 for none."""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        v = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return 0
+    return int(v) if v.is_finite() and v == v.to_integral_value() and v > 0 else 0
+
+
 # ── the rows ──────────────────────────────────────────────────────────────────
 
 def order_lines(model) -> tuple[list[dict], bool]:
     """(lines, from the plan): the order list as the Order sheet holds it, one dict per row: supplier, item,
-    rate, rate6, cover, qty, cost_bhd. The plan's rows (by supplier) when the plan was worked out and holds
-    every row of facts["order"]; else facts["order"] as it is, every row under supplier Other."""
+    rate, rate6, cover, qty, cost_bhd, rate_basis, pack. The plan's rows (by supplier) when the plan was worked
+    out and holds every row of facts["order"]; else facts["order"] as it is, every row under supplier Other
+    (release 2: under the supplier the row names, whose rule its quantity rests on)."""
     base = model.facts.get("order") or []
     plan, _why = _part(model, "plan")
     rows = None
@@ -243,13 +483,15 @@ def order_lines(model) -> tuple[list[dict], bool]:
             rows = po
     from_plan = rows is not None
     if rows is None:
-        rows = [dict(x, supplier=OTHER) for x in base]
+        own = release2(model) is not None
+        rows = [dict(x, supplier=(x.get("supplier") or OTHER) if own else OTHER) for x in base]
     out = []
     for x in rows:
         r6 = x.get("rate6")
         out.append({"supplier": " ".join(str(x.get("supplier") or OTHER).split()) or OTHER, "item": x["item"],
                     "rate": x["rate"], "rate6": Decimal(r6) if r6 is not None else _round6(x["rate"].rate),
-                    "cover": x.get("cover"), "qty": Decimal(x["qty"]), "cost_bhd": x.get("cost_bhd")})
+                    "cover": x.get("cover"), "qty": Decimal(x["qty"]), "cost_bhd": x.get("cost_bhd"),
+                    "rate_basis": x.get("rate_basis"), "pack": x.get("pack")})
     return out, from_plan
 
 
@@ -337,23 +579,30 @@ def build_book(model, made: datetime | None = None) -> Book:
     if made is None:
         from scripts.ops import status
         made = datetime.now(status.BAHRAIN)
+    r2 = release2(model)
+    tag = LAYOUT_TAG_V2 if r2 is not None else LAYOUT_TAG
     book = Book()
     for name in ("cf_red", "cf_amber", "cf_green", "cf_grey"):
         book.dxf(name)
     book.properties = {"title": f"Stock & Order Plan {model.d.isoformat()}", "subject": "Stock and order plan",
-                       "company": COMPANY, "comments": f"layout {LAYOUT_TAG}",
+                       "company": COMPANY, "comments": f"layout {tag}",
                        "created": made.replace(tzinfo=None, microsecond=0)}
     tabs = {"Summary": style.BLUE, "Notes": style.MUTED}
-    sheets = {name: book.sheet(name, tab_color=tabs.get(name)) for name in SHEETS}
+    sheets = {name: book.sheet(name, tab_color=tabs.get(name)) for name in (SHEETS_V2 if r2 is not None else SHEETS)}
     lines, from_plan = order_lines(model)
     rows, rows_from_plan = all_rows(model)
     suppliers = _suppliers(lines, rows)
     lay = OrderLayout(suppliers, len(lines))
     set_rows = _settings_rows(suppliers)
     all_span = (ALL_HEAD + 1, ALL_HEAD + max(len(rows), 1))
-    _summary(sheets["Summary"], model, lay, lines, made)
-    _order(sheets["Order"], model, lay, lines, rows, set_rows, all_span, from_plan)
-    _all_items(sheets["All items"], model, rows, rows_from_plan)
+    _summary(sheets["Summary"], model, lay, lines, made, r2)
+    _order(sheets["Order"], model, lay, lines, rows, set_rows, all_span, from_plan, r2)
+    if r2 is not None:
+        ws = sheets["On the way"]
+        _title(ws, model, "The orders you logged (/yq-stock ordered) whose goods are still due, by supplier, until "
+                          "the main store's receipts cover them.")
+        _guarded(lambda sheet, m: _on_the_way(sheet, m, r2), ws, model, "Goods on the way")
+    _all_items(sheets["All items"], model, rows, rows_from_plan, r2)
     _fast(sheets["Fast movers"], model, lines)
     ws = sheets["Ageing"]
     _title(ws, model, "Old, unsold and price-cut items: their pace, how soon they clear, and what the sales team "
@@ -363,16 +612,21 @@ def build_book(model, made: datetime | None = None) -> Book:
     _title(ws, model, "The damage store: what it holds, what is sent to it for every 100 units sold, and what was "
                       "sent but never booked in.")
     _guarded(_damage, ws, model, "The damage figures")
-    _notes(sheets["Notes"], model, suppliers, set_rows, rows)
+    stamp = figures_digest(model) or ""
+    season = _notes(sheets["Notes"], model, suppliers, set_rows, rows, r2, stamp)
     book.controls = {"order": {"rows": list(lay.rows), "suppliers": dict(lay.block_rows), "total": lay.total,
                                "head": lay.head, "add": (lay.add_first, lay.add_last)},
-                     "settings": dict(set_rows), "all_items": all_span}
+                     "settings": dict(set_rows), "all_items": all_span, "stamp": stamp}
+    if r2 is not None:
+        book.controls["layout"] = tag
+        book.controls["order"]["columns"] = {"rate_basis": O_RATE_BASIS, "carton": O_CARTON}
+        book.controls["season"] = season
     return book
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: datetime) -> None:
+def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: datetime, r2: dict | None = None) -> None:
     st = _stock()
     f, cfg = model.facts, model.cfg
     ws.col(0, 0, 44)
@@ -413,8 +667,12 @@ def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: dateti
     line("Made at (Bahrain)", made.strftime("%a %d %b %Y, %H:%M"))
     line("Stock balance as on", model.stock_as_of, "g_date",
          None if model.stock_as_of else "No stock balance is on file.")
-    line("Layout", LAYOUT_TAG, note="Release 2 reads the file back by this tag: keep the sheets and columns where "
-                                    "they are.")
+    if r2 is None:
+        line("Layout", LAYOUT_TAG, note="Release 2 reads the file back by this tag: keep the sheets and columns "
+                                        "where they are.")
+    else:
+        line("Layout", LAYOUT_TAG_V2, note="/yq-stock ordered reads your quantities back by this tag: keep the sheets "
+                                           "and columns where they are.")
 
     h = f["headline"]
     section(f"Stock in the main store ({_main_name()})")
@@ -471,10 +729,23 @@ def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: dateti
          note="The screen's figures, before your quantities.")
     lead = f["lead"]
     line("Lead time, days", lead["days"], "g_int", _lead_basis(lead))
-    line("Joins below, days of sales", f["trigger_days"], "g_int",
-         f"The lead time + {cfg.low}, the low end of your KPI band (per supplier on the Notes sheet).")
-    line("Filled to, days of sales", f["fill_days"], "g_int", f"The lead time + {cfg.high}, the top of your KPI band.")
-    line("Goods on order", _on_order_words(f["on_order"]))
+    if r2 is None:
+        line("Joins below, days of sales", f["trigger_days"], "g_int",
+             f"The lead time + {cfg.low}, the low end of your KPI band (per supplier on the Notes sheet).")
+        line("Filled to, days of sales", f["fill_days"], "g_int",
+             f"The lead time + {cfg.high}, the top of your KPI band.")
+        line("Goods on order", _on_order_words(f["on_order"]))
+    else:
+        star = _rule_of(model, r2, stock_season.OTHER)
+        line("Order every, days", star["every"], "g_int",
+             "The order rhythm: the days to the next order to the supplier (each supplier's on the Notes sheet).")
+        line("Joins below, days of sales", star["trig_days"], "g_int",
+             f"The lead time + order every + {star['low']}, the low end of your KPI band; each day at its month's "
+             f"lift (per supplier on the Notes sheet).")
+        line("Filled to, days of sales", star["fill_days"], "g_int",
+             f"The lead time + order every + {star['high']}, the top of your KPI band.")
+        line("Season", "on" if r2["applied"] else "off", note=_season_words(r2))
+        line("Goods on the way", _way_words(r2.get("on_the_way")))
     r += 1
     _head(ws, r, 0, [("Supplier", False), ("Items", True), ("Units", True), ("Value, BHD", True)], None)
     r += 1
@@ -550,6 +821,39 @@ def _on_order_words(oo: dict) -> str:
     return "not deducted (none logged)"
 
 
+def _season_words(r2: dict) -> str:
+    """The season in a sentence: its lifts in short, or that every lift is 1.00."""
+    if not r2["applied"]:
+        return "Every lift is 1.00: a day is a day (the lifts are on the Notes sheet)."
+    lifts = ", ".join(f"{MONTHS[m - 1]} {r2['table'][m]:.2f}" for m in range(1, 13))
+    held = (f" Held down by stock-outs: {', '.join(MONTHS[m - 1] for m in r2['warn'])}." if r2["warn"] else "")
+    return f"Each day counts at its month's lift: {lifts} (Notes).{held}"
+
+
+def _due(x: dict) -> Decimal:
+    try:
+        return Decimal(x.get("due") or 0)
+    except (ArithmeticError, TypeError, ValueError):
+        return ZERO
+
+
+def _way_words(ow) -> str:
+    """Goods on the way in a few words (facts["on_the_way"], stock_orders.fifo)."""
+    if not isinstance(ow, dict) or isinstance(ow.get("error"), str) or "lines" not in ow:
+        return NOT_WORKED
+    lines = ow.get("lines") or []
+    if not lines and not ow.get("logged"):
+        return "nothing logged yet (/yq-stock ordered <supplier> logs an order you placed)"
+    due = [x for x in lines if _due(x) > 0]
+    if not due:
+        return f"every logged order has arrived ({_plural(len(lines), 'line')})"
+    words = f"{_plural(ow.get('counted') or 0, 'line')} still due, deducted (the On the way sheet)"
+    n = ow.get("unmatched") or 0
+    if n:
+        words += f"; {_plural(n, 'line')} {'matches' if n == 1 else 'match'} no item"
+    return words
+
+
 def _damage_this(damage: dict):
     tr = damage.get("trend") or {}
     if tr.get("this") is not None:
@@ -561,12 +865,15 @@ def _damage_this(damage: dict):
 # ── Order ─────────────────────────────────────────────────────────────────────
 
 def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dict], set_rows: dict,
-           all_span: tuple[int, int], from_plan: bool) -> None:
+           all_span: tuple[int, int], from_plan: bool, r2: dict | None = None) -> None:
     st = _stock()
     f, cfg = model.facts, model.cfg
     widths = {O_SUPPLIER: 14, O_CODE: 11, O_ITEM: 44, O_CATEGORY: 16, O_FAST: 9, O_MAIN: 11, O_VANS: 11, O_WAY: 11,
               O_SOLD: 11, O_RATE: 10, O_STAR: 3, O_COVER: 9, O_JOINS: 8, O_SUGGESTED: 11, O_YOURS: 10, O_FINAL: 10,
               O_COST: 11, O_VALUE: 12, O_RECEIPT: 12, O_COMMENT: 40}
+    if r2 is not None:
+        widths.update({O_RATE_BASIS: 28, O_CARTON: 8})
+    last_col = O_CARTON if r2 is not None else O_COMMENT
     for c, w in widths.items():
         ws.col(c, c, w)
     _title(ws, model, "What to order, by supplier. Type your quantity in a yellow cell (leave it blank to take the "
@@ -609,22 +916,31 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
     # the order list
     ws.text(lay.head - 1, 0, "Order list: type your quantity and a comment in the yellow cells; add an item in the "
                              "yellow Code cells under it", "subhead")
-    _head(ws, lay.head, 0, [("Supplier", False), ("Code", False), ("Item", False), ("Category", False),
-                            ("Fast", False), ("Main stock", True), ("With vans", True), ("On the way", True),
-                            ("Sold 90 d", True), ("A day", True), ("*", False), ("Cover days", True),
-                            ("Joins", False), ("Suggested", True), ("Your qty", True), ("Final", True),
-                            ("Landed cost", True), ("Value, BHD", True), ("Last receipt", True), ("Comment", False)])
+    labels = [("Supplier", False), ("Code", False), ("Item", False), ("Category", False),
+              ("Fast", False), ("Main stock", True), ("With vans", True), ("On the way", True),
+              ("Sold 90 d", True), ("A day", True), ("*", False), ("Cover days", True),
+              ("Joins", False), ("Suggested", True), ("Your qty", True), ("Final", True),
+              ("Landed cost", True), ("Value, BHD", True), ("Last receipt", True), ("Comment", False)]
+    if r2 is not None:
+        labels += [("Rate basis", False), ("Carton", True)]
+    _head(ws, lay.head, 0, labels)
     s1, s2 = min(set_rows.values()) + 1, max(set_rows.values()) + 1
+    if r2 is not None:
+        s2 += 1                               # the row of any other supplier ("*"), right after the suppliers'
     names = f"Notes!${_L(S_NAME)}${s1}:${_L(S_NAME)}${s2}"
-    joins_at = f"Notes!${_L(S_JOIN)}${s1}:${_L(S_JOIN)}${s2}"
-    fill_at = f"Notes!${_L(S_FILL)}${s1}:${_L(S_FILL)}${s2}"
+    join_col, fill_col = (S_JSEASON, S_FSEASON) if r2 is not None else (S_JOIN, S_FILL)
+    joins_at = f"Notes!${_L(join_col)}${s1}:${_L(join_col)}${s2}"
+    fill_at = f"Notes!${_L(fill_col)}${s1}:${_L(fill_col)}${s2}"
     by_item = {row["item"].ledger_name: row for row in rows if row.get("item") is not None}
     F, H, J, M, N, O, P, Q = (_L(c) for c in (O_MAIN, O_WAY, O_RATE, O_JOINS, O_SUGGESTED, O_YOURS, O_FINAL, O_COST))
+    V = _L(O_CARTON)
     for x, r in zip(lines, lay.rows):
         it, rate = x["item"], x["rate"]
         n = r + 1
         info = by_item.get(it.ledger_name) or {}
         match = f"MATCH({esc(f'${_L(O_SUPPLIER)}{n}')},{names},0)"
+        if r2 is not None:                    # a supplier Notes does not name takes the rule of any other supplier
+            match = f"IFERROR({match},{s2 - s1 + 1})"
         pos = f"MAX({F}{n},0)+{H}{n}"
         ws.text(r, O_SUPPLIER, x["supplier"], "g_text")
         _put(ws, r, O_CODE, it.code, "g_text")
@@ -641,17 +957,30 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
         _put(ws, r, O_WAY, it.on_order, "g_int")
         _put(ws, r, O_SOLD, rate.sold, "g_int")
         ws.put(r, O_RATE, float(x["rate6"]), "g_dec2")
-        _put(ws, r, O_STAR, "*" if rate.floored else None, "g_text")
+        if r2 is None:
+            _put(ws, r, O_STAR, "*" if rate.floored else None, "g_text")
+        else:
+            _put(ws, r, O_STAR, "~" if _longer(x) else ("*" if rate.floored else None), "g_text")
         _put(ws, r, O_COVER, x["cover"], "g_int")
-        ws.formula(r, O_JOINS, f"AND({J}{n}>0,ROUND({pos}-{J}{n}*INDEX({joins_at},{match}),6)<0)", "g_text")
-        ws.formula(r, O_SUGGESTED, f"IF({M}{n},ROUNDUP(ROUND({J}{n}*INDEX({fill_at},{match})-({pos}),6),0),0)",
-                   "g_int")
+        if r2 is None:
+            ws.formula(r, O_JOINS, f"AND({J}{n}>0,ROUND({pos}-{J}{n}*INDEX({joins_at},{match}),6)<0)", "g_text")
+            ws.formula(r, O_SUGGESTED, f"IF({M}{n},ROUNDUP(ROUND({J}{n}*INDEX({fill_at},{match})-({pos}),6),0),0)",
+                       "g_int")
+        else:
+            joins, suggested = rule_formulas(f"{J}{n}", pos, f"INDEX({joins_at},{match})", f"INDEX({fill_at},{match})",
+                                             f"{M}{n}", f"{V}{n}")
+            ws.formula(r, O_JOINS, joins, "g_text")
+            ws.formula(r, O_SUGGESTED, suggested, "g_int")
         ws.blank(r, O_YOURS, "input_qty")
         ws.formula(r, O_FINAL, f'IF({O}{n}="",{N}{n},{O}{n})', "g_int")
         _put(ws, r, O_COST, it.cost, "g_money3")
         ws.formula(r, O_VALUE, f'IF({Q}{n}="","",ROUND({P}{n}*{Q}{n},3))', "g_money3")
         _put(ws, r, O_RECEIPT, it.last_receipt, "g_date")
         ws.blank(r, O_COMMENT, "input_note")
+        if r2 is not None:
+            _put(ws, r, O_RATE_BASIS, x.get("rate_basis") or f"{st.RATE_DAYS} days", "g_text")
+            pack = _pack(x.get("pack"))
+            _put(ws, r, O_CARTON, pack if pack > 1 else None, "g_int")
 
     # add an item: its code typed in, the rest looked up on All items
     a1, a2 = all_span
@@ -688,10 +1017,22 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
         ws.formula(r, O_VALUE, f'IF(OR({Q}{n}="",{Q}{n}=0,{P}{n}=0),"",ROUND({P}{n}*{Q}{n},3))', "g_money3")
         ws.blank(r, O_RECEIPT, "g_date")
         ws.blank(r, O_COMMENT, "input_note")
+        if r2 is not None:
+            ws.blank(r, O_RATE_BASIS, "g_text")
+            ws.blank(r, O_CARTON, "g_int")
     ws.validate(lay.first, O_YOURS, lay.add_last, O_YOURS,
                 {"validate": "integer", "criteria": ">=", "value": 0, "input_title": "Your quantity",
                  "input_message": "Leave blank to take the suggested quantity.", "error_title": "Your quantity",
                  "error_message": "A whole number of units, nought or more."})
+
+    if r2 is not None:
+        r = lay.add_last + 2
+        for text in _order_notes_v2(model, r2, lines, from_plan):
+            ws.text(r, 0, text, "note")
+            r += 1
+        ws.page.update({"freeze": (lay.head + 1, 0), "autofilter": f"A{lay.head + 1}:{_L(last_col)}{lay.add_last + 1}",
+                        "landscape": True, "fit": (1, 0), "repeat_rows": (lay.head, lay.head)})
+        return
 
     # the rule in plain words, under the table
     r = lay.add_last + 2
@@ -722,17 +1063,151 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
                     "landscape": True, "fit": (1, 0), "repeat_rows": (lay.head, lay.head)})
 
 
+def rule_formulas(rate: str, pos: str, join_days: str, fill_days: str, joins: str, carton: str) -> tuple[str, str]:
+    """Release 2's Joins and Suggested of one Order row: (Joins, Suggested) formula texts from the references (or
+    expressions) of its rate, its position, its supplier's Join / Fill season days, its own Joins cell and its
+    Carton. The rate has 6 decimals and the season days 2, so their product has 8: rounded to 8 first, the binary
+    arithmetic gives the exact figure, then stock_plan's one rule (round6, then a whole unit up), in whole cartons
+    where Carton is above 1. Nought, never below, as stock_plan.units_up."""
+    units = f"ROUNDUP(MAX(ROUND(ROUND({rate}*{fill_days}-({pos}),8),6),0),0)"
+    return (f"AND({rate}>0,ROUND(ROUND({pos}-{rate}*{join_days},8),6)<0)",
+            f"IF({joins},IF({carton}>1,ROUNDUP({units}/{carton},0)*{carton},{units}),0)")
+
+
+def _order_notes_v2(model, r2: dict, lines: list[dict], from_plan: bool) -> list[str]:
+    """The rule in plain words under the Order sheet's table (release 2)."""
+    st = _stock()
+    star = _rule_of(model, r2, stock_season.OTHER)
+    lift = ", each day at its month's lift," if r2["applied"] else ""
+    cartons = any(_pack(x.get("pack")) > 1 for x in lines)
+    notes = []
+    if not lines:
+        notes.append("Nothing joins the order list today: no item's demand over its supplier's Join below days reaches "
+                     "its Main stock + On the way.")
+    notes += [
+        f"The order list: an item that sold in the last {st.RATE_DAYS} days joins when its demand over its supplier's "
+        f"Join below days{lift} reaches Main stock + On the way; Suggested tops it up to the demand of its Fill to "
+        "days, from its rate (A day), rounded up to a whole unit" + (
+            ", then to whole cartons (Carton, config 'stock.pack_sizes')" if cartons else "") + ".",
+        f"{ANY_SUPPLIER} (Notes) joins at lead time + order every + {star['low']} = {star['trig_days']} days and is "
+        f"filled to lead time + order every + {star['high']} = {star['fill_days']} days; each supplier's own days are "
+        "on the Notes sheet.",
+        "On the way = the goods of the orders you logged (/yq-stock ordered), until the main store's receipts of the "
+        "item dated after the order cover them: the On the way sheet lists them.",
+        "Lead days, Order every and the lifts are on the Notes sheet, per supplier: change one there and the season "
+        "days, Joins, Suggested and Final follow (this file only). Your qty replaces Suggested; the supplier totals "
+        "add up Final and Value.",
+        "A longer lead time or rhythm typed on Notes changes the quantities of these rows; items that would join only "
+        "come with the next file: tell Claude to keep the new setting.",
+        f"A Supplier cell typed over to a name the Notes sheet does not hold takes the rule of {ANY_SUPPLIER.lower()} "
+        "(Notes), and its units count in no supplier's total.",
+        f"Rate basis: the {st.RATE_DAYS} days, or a longer history for an item out of stock most of them (~). No "
+        "purchase order is drafted.",
+    ]
+    if any(x["rate"].floored and not _longer(x) for x in lines):
+        notes.append(st.FLOOR_NOTE.strip())
+    if any(_longer(x) for x in lines):
+        notes.append(str(getattr(st, "LONGER_NOTE", LONGER_NOTE)).strip())
+    if not from_plan:
+        notes.append(f"The order plan was {_part(model, 'plan')[1] or NOT_WORKED}: the items are under the supplier "
+                     "their rule rests on.")
+    return notes
+
+
 def _category(code) -> str | None:
     from scripts.ops.workbook import categories
     return categories.by_code(code or "") or None
 
 
+# ── On the way (release 2) ────────────────────────────────────────────────────
+
+def _on_the_way(ws: Sheet, _model, r2: dict) -> None:
+    """The logged lines still due (facts["on_the_way"], stock_orders.fifo), by supplier, then oldest first."""
+    for c, w in ((W_SUPPLIER, 14), (W_CODE, 11), (W_ITEM, 44), (W_DATE, 12), (W_QTY, 10), (W_RECEIVED, 11),
+                 (W_DUE, 10), (W_EXPECTED, 12), (W_LATE, 7), (W_REF, 30)):
+        ws.col(c, c, w)
+    ow = r2.get("on_the_way")
+    if not isinstance(ow, dict) or isinstance(ow.get("error"), str) or "lines" not in ow:
+        ws.text(W_HEAD, 0, f"Goods on the way were {NOT_WORKED}.", "note")
+        return
+    lines = list(ow.get("lines") or [])
+    if not lines and not ow.get("logged"):
+        ws.text(W_HEAD, 0, EMPTY_LOG, "note")
+        return
+    due = sorted((x for x in lines if _due(x) > 0),
+                 key=lambda x: (str(x.get("supplier") or "").casefold(), fmt.as_date(x.get("date")) or date.min,
+                                str(x.get("ref") or "")))
+    notes = []
+    r = W_HEAD
+    if due:
+        _head(ws, W_HEAD, 0, [("Supplier", False), ("Code", False), ("Item", False), ("Ordered on", True),
+                              ("Ordered", True), ("Received since", True), ("Still due", True), ("Expected by", True),
+                              ("Late", False), ("Ref", False)])
+        for r, x in enumerate(due, W_HEAD + 1):
+            for c, value, fmt_name in ((W_SUPPLIER, x.get("supplier"), "g_text"), (W_CODE, x.get("code"), "g_text"),
+                                       (W_ITEM, x.get("item_name") or "no item has this code", "g_text"),
+                                       (W_DATE, fmt.as_date(x.get("date")), "g_date"), (W_QTY, x.get("qty"), "g_int"),
+                                       (W_RECEIVED, x.get("received"), "g_int"), (W_DUE, x.get("due"), "g_int"),
+                                       (W_EXPECTED, fmt.as_date(x.get("expected_by")), "g_date"),
+                                       (W_LATE, "yes" if x.get("late") else None, "g_text"),
+                                       (W_REF, x.get("ref"), "g_text")):
+                _put(ws, r, c, value, fmt_name)
+        total = r + 1
+        ws.text(total, W_SUPPLIER, "Total", "g_total_int")
+        for c in range(W_CODE, W_REF + 1):
+            if c in (W_QTY, W_RECEIVED, W_DUE):
+                ws.formula(total, c, f"SUM({_L(c)}{W_HEAD + 2}:{_L(c)}{total})", "g_total_int")
+            else:
+                ws.blank(total, c, "g_total_int")
+        late = f"{_L(W_LATE)}{W_HEAD + 2}:{_L(W_LATE)}{total}"
+        ws.cond(late, {"type": "cell", "criteria": "equal to", "value": '"yes"', "format": "cf_red"})
+        ws.page.update({"freeze": (W_HEAD + 1, 0), "autofilter": f"A{W_HEAD + 1}:{_L(W_REF)}{total}",
+                        "landscape": True, "fit": (1, 0)})
+        r = total + 1
+        late_days = getattr(_orders(), "LATE_DAYS", None)
+        notes += [
+            "Received since = the main store's supplier receipts of the item dated after the order, the oldest order "
+            "paid first; Still due is what the Order sheet's On the way deducts.",
+            "Expected by = the order date + the supplier's lead time (the Notes sheet); Late = still due "
+            + (f"more than {late_days} days after that" if late_days is not None else "after that") + ", to check.",
+        ]
+        future = sum(1 for x in due if x.get("future"))
+        if future:
+            notes.append(f"{_plural(future, 'line')} dated after the data date: the ledger cannot hold "
+                         f"{'its' if future == 1 else 'their'} receipt yet.")
+        unmatched = sum(1 for x in due if not x.get("item_name"))
+        if unmatched:
+            notes.append(f"{_plural(unmatched, 'line')} {'matches' if unmatched == 1 else 'match'} no item of the "
+                         "main store by its code: due in full, deducted from nothing (check the code).")
+    elif lines:
+        notes.append(f"Every logged order has arrived: {_plural(len(lines), 'line')}, received in full.")
+    arrived = len(lines) - len(due)
+    if due and arrived:
+        notes.append(f"{_plural(arrived, 'logged line')} received in full {'is' if arrived == 1 else 'are'} not "
+                     "shown.")
+    unread = int(ow.get("logged") or 0) - len(lines)
+    if unread > 0:
+        notes.append(f"{_plural(unread, 'logged line')} could not be read (a quantity or an order date): not shown.")
+    r += 1
+    for text in notes:
+        ws.text(r, 0, text, "note")
+        r += 1
+
+
+def _orders():
+    from scripts.ops import stock_orders
+    return stock_orders
+
+
 # ── All items ─────────────────────────────────────────────────────────────────
 
-def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool) -> None:
+def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool, r2: dict | None = None) -> None:
     widths = {A_SUPPLIER: 14, A_CODE: 11, A_ITEM: 44, A_CATEGORY: 16, A_STATUS: 18, A_MAIN: 10, A_VANS: 10,
               A_DAMAGE: 9, A_WAY: 10, A_SOLD30: 9, A_SOLD90: 9, A_SOLD365: 9, A_RATE: 9, A_COVER: 9, A_COST: 11,
               A_VALUE: 12, A_OLDEST: 9, A_LAST_SALE: 12, A_LAST_RECEIPT: 12, A_RANK: 8, A_ACTIVE: 8, A_HIDDEN: 8}
+    if r2 is not None:
+        widths[A_SUPPLIER_FROM] = 15
+    last_col = A_SUPPLIER_FROM if r2 is not None else A_HIDDEN
     for c, w in widths.items():
         ws.col(c, c, w)
     _title(ws, model, "Every item of the catalog and every item that ever moved in the main store, with its status.")
@@ -743,12 +1218,15 @@ def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool) -> None:
     else:
         ws.text(3, 0, f"The order plan was {why or NOT_WORKED}: the items of the stock ledger, with no supplier and "
                       "no status.", "note")
-    _head(ws, ALL_HEAD, 0, [("Supplier", False), ("Code", False), ("Item", False), ("Category", False),
-                            ("Status", False), ("Main stock", True), ("With vans", True), ("Damage", True),
-                            ("On the way", True), ("Sold 30 d", True), ("Sold 90 d", True), ("Sold 12 m", True),
-                            ("A day", True), ("Cover", True), ("Landed cost", True), ("Value at cost", True),
-                            ("Oldest (days)", True), ("Last sale", True), ("Last receipt", True), ("Fast rank", True),
-                            ("Active", False), ("Hidden", False)])
+    labels = [("Supplier", False), ("Code", False), ("Item", False), ("Category", False),
+              ("Status", False), ("Main stock", True), ("With vans", True), ("Damage", True),
+              ("On the way", True), ("Sold 30 d", True), ("Sold 90 d", True), ("Sold 12 m", True),
+              ("A day", True), ("Cover", True), ("Landed cost", True), ("Value at cost", True),
+              ("Oldest (days)", True), ("Last sale", True), ("Last receipt", True), ("Fast rank", True),
+              ("Active", False), ("Hidden", False)]
+    if r2 is not None:
+        labels.append(("Supplier from", False))
+    _head(ws, ALL_HEAD, 0, labels)
     r = ALL_HEAD
     for r, row in enumerate(rows, ALL_HEAD + 1):
         it = row.get("item")
@@ -766,6 +1244,8 @@ def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool) -> None:
                  (A_LAST_SALE, row.get("last_sale"), "g_date"), (A_LAST_RECEIPT, row.get("last_receipt"), "g_date"),
                  (A_RANK, row.get("rank"), "g_int"), (A_ACTIVE, _yes(row.get("active")), "g_text"),
                  (A_HIDDEN, _yes(row.get("hidden")), "g_text"))
+        if r2 is not None:                  # config / catalog / purchase order / none (stock_plan); blank without it
+            cells += ((A_SUPPLIER_FROM, row.get("supplier_basis"), "g_text"),)
         for c, value, fmt_name in cells:
             _put(ws, r, c, value, fmt_name)
     last = max(r, ALL_HEAD + 1)
@@ -774,7 +1254,10 @@ def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool) -> None:
         ws.cond(status, {"type": "cell", "criteria": "equal to", "value": f'"{word}"', "format": name})
     ws.text(last + 2, 0, "With vans: information only (the vans, the outlets and goods on their way, from the stock "
                          "ledger); the order list counts the main store only.", "note")
-    ws.page.update({"freeze": (ALL_HEAD + 1, 0), "autofilter": f"A{ALL_HEAD + 1}:{_L(A_HIDDEN)}{last + 1}",
+    if r2 is not None:
+        ws.text(last + 3, 0, "Supplier from: where the item's supplier comes from: config ('stock.suppliers'), its "
+                             "newest purchase order, the catalog's brand, or none (Other).", "note")
+    ws.page.update({"freeze": (ALL_HEAD + 1, 0), "autofilter": f"A{ALL_HEAD + 1}:{_L(last_col)}{last + 1}",
                     "landscape": True, "fit": (1, 0), "repeat_rows": (ALL_HEAD, ALL_HEAD)})
 
 
@@ -866,7 +1349,7 @@ def _ageing(ws: Sheet, model) -> None:
                  (6, row.get("value"), "g_money3"), (7, row.get("pace_week"), "g_dec2"),
                  (8, _whole(row.get("days_to_clear")), "g_int"), (9, cut.get("date"), "g_date"),
                  (10, cut.get("was"), "g_money3"), (11, cut.get("now"), "g_money3"), (12, cut.get("pct"), "g_pct"),
-                 (13, row.get("before_week"), "g_dec2"), (14, _since_week(row), "g_dec2"),
+                 (13, _before_cell(row), "g_dec2"), (14, _since_cell(row), "g_dec2"),
                  (15, row.get("sold_since_cut"), "g_int"), (16, row.get("pct_sold"), "g_pct"),
                  (17, row.get("push_week"), "g_int"), (18, row.get("action"), "g_text"), (19, sellers, "g_text"))
         for c, value, fmt_name in cells:
@@ -895,12 +1378,14 @@ def _ageing(ws: Sheet, model) -> None:
         r += 1
         for b in batches:
             counts = b.get("counts") or {}
+            soon = bool(b.get("too_soon"))           # no share sold and no pace since on a few days (the screen's)
             cells = ((0, f"Cut of {_day(b['date'])}", "g_text"), (1, b.get("items"), "g_int"),
                      (2, counts.get("Not moving", 0), "g_int"), (3, counts.get("Slow", 0), "g_int"),
                      (4, counts.get("On track", 0), "g_int"), (5, counts.get("Cleared", 0), "g_int"),
-                     (6, b.get("stock_at_cut"), "g_int"), (7, b.get("sold"), "g_int"), (8, b.get("pct_sold"), "g_pct"),
-                     (9, b.get("before_week"), "g_dec2"), (10, b.get("since_week"), "g_dec2"),
-                     (11, b.get("change"), "g_dec2"))
+                     (6, b.get("stock_at_cut"), "g_int"), (7, b.get("sold"), "g_int"),
+                     (8, None if soon else b.get("pct_sold"), "g_pct"),
+                     (9, b.get("before_week"), "g_dec2"), (10, "too soon" if soon else b.get("since_week"), "g_dec2"),
+                     (11, _batch_change(b), "g_dec2"))
             for c, value, fmt_name in cells:
                 _put(ws, r, c, value, fmt_name)
             r += 1
@@ -927,6 +1412,10 @@ def _ageing(ws: Sheet, model) -> None:
                  "Slow and Not moving items.",
                  "Sellable = the main store, the vans, the outlets and goods moving between them; damage and samples "
                  "left out. Sold most by = the three stores that sold the item most in 90 days (your own file).",
+                 f"Before a week reads \"not in stock before\" when the item was in stock on fewer than "
+                 f"{_in_stock_before()} of the 90 days before its cut, and \"too few before\" when too few sold in "
+                 "them to compare; Since a week reads \"too soon\" for a cut too recent to judge: no pace multiple is "
+                 "read off those (the screen's rule).",
                  "The only lever is the sales team: no price cut, no bundle (your rule)."):
         ws.text(r, 0, text, "note")
         r += 1
@@ -944,6 +1433,45 @@ def _since_week(row: dict):
     if row.get("pace_basis") == "cut":
         return row.get("pace_week")
     return None
+
+
+def _in_stock_before() -> int:
+    """stock_review.IN_STOCK_BEFORE_DAYS: a pace before a cut counts only for an item in stock on that many days."""
+    from scripts.ops import stock_review
+    return int(getattr(stock_review, "IN_STOCK_BEFORE_DAYS", 30))
+
+
+def _before_cell(row: dict):
+    """Before a week, guarded as the screen guards it: no multiple can be read off a pace before that says
+    nothing. "not in stock before" (in stock on fewer than 30 of the 90 days before the cut), "too few before"
+    (no pace to compare: fewer than 13 sold in them), else the units a week. A too recent cut keeps its pace
+    before (its Since a week says "too soon")."""
+    if row.get("cut") is None:
+        return row.get("before_week")
+    days = row.get("in_stock_before_days")
+    if days is not None and days < _in_stock_before():
+        return "not in stock before"
+    if row.get("change") is None and not row.get("too_soon"):
+        return "too few before"
+    return row.get("before_week")
+
+
+def _since_cell(row: dict):
+    """Since a week, guarded: "too soon" for a cut younger than the review judges (stock_review.CUT_MIN_DAYS)."""
+    if row.get("cut") is not None and row.get("too_soon"):
+        return "too soon"
+    return _since_week(row)
+
+
+def _batch_change(b: dict):
+    """A cut batch's pace since over before, or the screen's words where there is none to give."""
+    if b.get("too_soon"):
+        return "too soon to judge"
+    if b.get("change") is not None:
+        return b["change"]
+    if not b.get("in_stock_before_items"):
+        return "not in stock before"
+    return "too few before"
 
 
 # ── Damage ────────────────────────────────────────────────────────────────────
@@ -1048,49 +1576,33 @@ def _damage(ws: Sheet, model) -> None:
 
 # ── Notes ─────────────────────────────────────────────────────────────────────
 
-def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[dict]) -> None:
+def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[dict],
+           r2: dict | None = None, stamp: str = "") -> dict | None:
+    """The Notes sheet. Release 2: where its season tables are (book.controls["season"]); else None."""
     st = _stock()
     f, cfg = model.facts, model.cfg
     lead = f["lead"]
     ws.col(0, 0, 30)
-    ws.col(1, 6, 13)
-    ws.col(7, 7, 40)
-    text_width = 6 * 13 + 40
+    if r2 is None:
+        ws.col(1, 6, 13)
+        ws.col(7, 7, 40)
+        text_width, text_last = 6 * 13 + 40, 7
+    else:
+        ws.col(M_FIRST, M_TOTAL, 11)
+        text_width, text_last = (M_LAST - M_FIRST + 1) * 11, M_LAST
     _title(ws, model, "How every figure is worked out, the settings per supplier, and what is estimated.")
     tr, tc = fx.parse_cell(TAG_CELL)
     ws.text(tr, tc - 1, "Layout of this file", "g_text")
-    ws.text(tr, tc, LAYOUT_TAG, "g_text")
-
-    ws.text(NOTES_SET_HEAD - 1, 0, "Settings per supplier (the Order sheet reads these cells)", "subhead")
-    _head(ws, NOTES_SET_HEAD, 0, [("Supplier", False), ("Lead days", True), ("Order every (days)", True),
-                                  ("Safety low (days)", True), ("Top up to (days)", True), ("Join below (days)", True),
-                                  ("Fill to (days)", True)])
-    for s in suppliers:
-        r = set_rows[s.casefold()]
-        n = r + 1
-        ws.text(r, S_NAME, s, "g_text")
-        ws.put(r, S_LEAD, int(lead["days"]), "input_qty")
-        ws.put(r, S_EVERY, 0, "input_qty")
-        ws.put(r, S_LOW, int(cfg.low), "g_int")
-        ws.put(r, S_HIGH, int(cfg.high), "g_int")
-        b, c, d, e = (f"{_L(k)}{n}" for k in (S_LEAD, S_EVERY, S_LOW, S_HIGH))
-        ws.formula(r, S_JOIN, f"{b}+{c}+{d}", "g_int")
-        ws.formula(r, S_FILL, f"{b}+{c}+{e}", "g_int")
-    s_first, s_last = min(set_rows.values()), max(set_rows.values())
-    ws.validate(s_first, S_LEAD, s_last, S_EVERY, {"validate": "integer", "criteria": ">=", "value": 0,
-                                                    "error_title": "Days",
-                                                    "error_message": "A whole number of days, nought or more."})
-    r = s_last + 1
-    basis_words = _lead_basis(lead)
-    for text in (f"Lead days start at the lead time the screen uses, {lead['days']} days: "
-                 f"{basis_words[0].lower() + basis_words[1:]}",
-                 "Safety low and Top up to are your KPI band (config 'stock.cover_kpi_days').",
-                 "Order every is 0 until release 2 adds the order rhythm. Join below = lead days + order every + "
-                 "safety low; Fill to = lead days + order every + top up to.",
-                 "Budget and Minimum order (Order sheet) are yours to type: Against budget = Value - Budget (above "
-                 "nought, in red: over the budget); Minimum check says when the value is below the minimum."):
-        ws.text(r, 0, text, "note")
-        r += 1
+    ws.text(tr, tc, LAYOUT_TAG if r2 is None else LAYOUT_TAG_V2, "g_text")
+    sr, sc = fx.parse_cell(STAMP_CELL)              # the figures stamp, in a row kept hidden (height 0)
+    ws.text(sr, sc - 1, "Figures stamp (a new file is made when they change)", "g_text")
+    ws.text(sr, sc, stamp, "g_text")
+    ws.row(sr, 0)
+    season = None
+    if r2 is not None:
+        r, season = _settings_v2(ws, model, suppliers, set_rows, r2)
+    else:
+        r = _settings_v1(ws, model, suppliers, set_rows)
 
     def block(title: str, entries) -> None:
         nonlocal r
@@ -1099,7 +1611,7 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
         r += 1
         for label, text in entries:
             ws.text(r, 0, label, "g_text_wrap")
-            ws.merge(r, 1, r, 7, text, "g_text_wrap")
+            ws.merge(r, 1, r, text_last, text, "g_text_wrap")
             h = _height(text, text_width)
             if h:
                 ws.row(r, h)
@@ -1115,7 +1627,7 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
     basis = [b.split(": ", 1)[1] if b.startswith("Basis: ") else b for b in st.BASIS_LINES]
     basis = [b[:1].upper() + b[1:] for b in basis]
     lead_words = _lead_basis(lead)
-    block("How each figure is worked out", (
+    how = [
         ("Items and units", basis[0] + " Display items (config 'stock.display_items') stay in the stock figures and "
                                        "are left out of cover, the order list, the fast movers and the ageing."),
         ("At landed cost", basis[1]),
@@ -1152,8 +1664,8 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
                    "units sent / units sold x 100. Units sent and not booked in the damage store 7 days later are "
                    "listed to check. Nothing here is booked: claiming from the supplier, writing off, repairing or "
                    "selling as B-grade is your decision."),
-    ))
-    block("What is estimated", (
+    ]
+    estimated = [
         ("A starred rate (*)", f"In stock on fewer than {st.RATE_MIN_DAYS} of the last {st.RATE_DAYS} days: the rate "
                                f"divides by {st.RATE_MIN_DAYS}, so it may understate the demand of an item that was out "
                                f"most of the window."),
@@ -1161,7 +1673,11 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
                    "makes stock younger; units no receipt explains are counted apart."),
         ("Damage", "Counted when it is sent, before the damage store books it in."),
         ("Lead time", "One lead time for every supplier until release 2 measures each one."),
-    ))
+    ]
+    if r2 is not None:
+        how, estimated = _how_v2(model, r2, how, estimated)
+    block("How each figure is worked out", how)
+    block("What is estimated", estimated)
     unread = f.get("unread") or []
     defaults = f.get("defaults_used") or []
     parts = [f"{words}: {why}" for key, words in (("plan", "The order plan"), ("review", "The ageing review"),
@@ -1182,6 +1698,254 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
         entries.append(("Note" if k == 0 else "", text))
     block("This file", entries)
     ws.page.update({"fit": (1, 0)})
+    return season
+
+
+def _settings_v1(ws: Sheet, model, suppliers: list[str], set_rows: dict) -> int:
+    """Release 1's settings per supplier and their notes; the next free row."""
+    f, cfg = model.facts, model.cfg
+    lead = f["lead"]
+    ws.text(NOTES_SET_HEAD - 1, 0, "Settings per supplier (the Order sheet reads these cells)", "subhead")
+    _head(ws, NOTES_SET_HEAD, 0, [("Supplier", False), ("Lead days", True), ("Order every (days)", True),
+                                  ("Safety low (days)", True), ("Top up to (days)", True), ("Join below (days)", True),
+                                  ("Fill to (days)", True)])
+    for s in suppliers:
+        r = set_rows[s.casefold()]
+        n = r + 1
+        ws.text(r, S_NAME, s, "g_text")
+        ws.put(r, S_LEAD, int(lead["days"]), "input_qty")
+        ws.put(r, S_EVERY, 0, "input_qty")
+        ws.put(r, S_LOW, int(cfg.low), "g_int")
+        ws.put(r, S_HIGH, int(cfg.high), "g_int")
+        b, c, d, e = (f"{_L(k)}{n}" for k in (S_LEAD, S_EVERY, S_LOW, S_HIGH))
+        ws.formula(r, S_JOIN, f"{b}+{c}+{d}", "g_int")
+        ws.formula(r, S_FILL, f"{b}+{c}+{e}", "g_int")
+    s_first, s_last = min(set_rows.values()), max(set_rows.values())
+    ws.validate(s_first, S_LEAD, s_last, S_EVERY, {"validate": "integer", "criteria": ">=", "value": 0,
+                                                    "error_title": "Days",
+                                                    "error_message": "A whole number of days, nought or more."})
+    r = s_last + 1
+    basis_words = _lead_basis(lead)
+    for text in (f"Lead days start at the lead time the screen uses, {lead['days']} days: "
+                 f"{basis_words[0].lower() + basis_words[1:]}",
+                 "Safety low and Top up to are your KPI band (config 'stock.cover_kpi_days').",
+                 "Order every is 0 until release 2 adds the order rhythm. Join below = lead days + order every + "
+                 "safety low; Fill to = lead days + order every + top up to.",
+                 "Budget and Minimum order (Order sheet) are yours to type: Against budget = Value - Budget (above "
+                 "nought, in red: over the budget); Minimum check says when the value is below the minimum."):
+        ws.text(r, 0, text, "note")
+        r += 1
+    return r
+
+
+LEAD_WORDS = {"measured": "measured on its own supplier invoices",
+              "config": "set in config ('stock.supplier_lead_days')",
+              "overall": "every supplier's measured lead time", "setting": "the setting ('stock.lead_time_days')"}
+
+
+def month_days(d_ref: str, days_ref: str, m: int) -> str:
+    """The formula of the days of calendar month m in the window (d, d + MIN(days, WINDOW_CAP)]: month m of d's year
+    and of the next one (a window of up to a year lies inside those two years), each MAX(0, MIN(its last day, the
+    window's last day) - MAX(its first day - 1, d)). DATE(y, m + 1, 0) is the last day of month m, DATE(y, m, 0) the
+    day before its first."""
+    end = f"{d_ref}+MIN({days_ref},{WINDOW_CAP})"
+    return "+".join(f"MAX(0,MIN(DATE({y},{m + 1},0),{end})-MAX(DATE({y},{m},0),{d_ref}))"
+                    for y in (f"YEAR({d_ref})", f"YEAR({d_ref})+1"))
+
+
+def _basis_text(lifts, m: int) -> str | None:
+    """What a month's lift rests on, in a few words: the month it was measured on (with its days when the ledger
+    holds fewer than the whole month), "no data", or "your setting"."""
+    row = lifts.get(m, lifts.get(str(m))) if isinstance(lifts, dict) else None
+    if not isinstance(row, dict):
+        return None
+    basis = row.get("basis")
+    if basis == "last year":
+        try:
+            year, days = int(row.get("year")), int(row.get("days"))
+        except (TypeError, ValueError):
+            return "last year"
+        whole = calendar.monthrange(year, m)[1]
+        return f"{MONTHS[m - 1]} {year}" + (f" ({days} d)" if 0 < days < whole else "")
+    if basis == "config":
+        return "your setting"
+    return str(basis) if basis else None
+
+
+def _settings_v2(ws: Sheet, model, suppliers: list[str], set_rows: dict, r2: dict) -> tuple[int, dict]:
+    """Release 2's settings per supplier (and a row for any other supplier), the lifts and the windows (see the
+    module docstring); (the next free row, where they are: book.controls["season"])."""
+    rules = {s.casefold(): _rule_of(model, r2, s) for s in suppliers}
+    rules[stock_season.OTHER] = _rule_of(model, r2, stock_season.OTHER)
+    rows_of = dict(set_rows)
+    rows_of[stock_season.OTHER] = max(set_rows.values()) + 1           # the "*" rule, after the suppliers
+    named = [(s, s.casefold()) for s in suppliers] + [(ANY_SUPPLIER, stock_season.OTHER)]
+
+    ws.text(NOTES_SET_HEAD - 1, 0, "Settings per supplier (the Order sheet reads these cells)", "subhead")
+    _head(ws, NOTES_SET_HEAD, 0, [("Supplier", False), ("Lead days", True), ("Order every (days)", True),
+                                  ("Safety low (days)", True), ("Top up to (days)", True), ("Join below (days)", True),
+                                  ("Fill to (days)", True), ("Join season days", True), ("Fill season days", True)])
+    s_first, s_last = min(rows_of.values()), max(rows_of.values())
+    ws.validate(s_first, S_LEAD, s_last, S_EVERY, {"validate": "integer", "criteria": ">=", "value": 0,
+                                                    "error_title": "Days",
+                                                    "error_message": "A whole number of days, nought or more."})
+    leads = "; ".join(f"{label} {rules[key]['lead']} days, {LEAD_WORDS.get(rules[key]['lead_basis'], 'the setting')}"
+                      for label, key in named)
+    r = s_last + 1
+    for text in (f"Lead days start at each supplier's lead time: {leads}.",
+                 "Order every starts at each supplier's order rhythm, the days to its next order (config "
+                 "'stock.order_every_days', about monthly; 'stock.supplier_every_days' for one supplier).",
+                 "Safety low and Top up to are your KPI band (config 'stock.cover_kpi_days').",
+                 "Join below = lead days + order every + safety low; Fill to = lead days + order every + top up to. "
+                 "Join season days and Fill season days count those days after the data date at their month's lift "
+                 "(the tables below): the Order sheet's Joins and Suggested read them.",
+                 f"{ANY_SUPPLIER}: the rule of a supplier this sheet does not name (a Supplier cell typed over on the "
+                 "Order sheet takes it; its units then count in no supplier's total).",
+                 "A change in a yellow cell (Lead days, Order every, a lift) recomputes this file only: a longer lead "
+                 "time or rhythm changes the quantities of the rows on the Order sheet, but items that would join only "
+                 "come with the next file, which takes the settings in config: tell Claude to keep the new setting "
+                 "(a lead time, a rhythm or a lift).",
+                 "Budget and Minimum order (Order sheet) are yours to type: Against budget = Value - Budget (above "
+                 "nought, in red: over the budget); Minimum check says when the value is below the minimum."):
+        ws.text(r, 0, text, "note")
+        r += 1
+
+    # the lifts: one per calendar month, the rule's own, two decimals
+    r += 1
+    ws.text(r, 0, "The season: a lift for each calendar month (the season days read these cells)", "subhead")
+    r += 1
+    head = r
+    _head(ws, head, 0, [("Month", False)] + [(name, True) for name in MONTHS])
+    lift_row, basis_row, warn_row = head + 1, head + 2, head + 3
+    ws.text(lift_row, 0, "Lift", "g_text")
+    ws.text(basis_row, 0, "Measured on", "g_text")
+    ws.text(warn_row, 0, "Stock-outs", "g_text")
+    for m in range(1, 13):
+        c = M_FIRST + m - 1
+        ws.put(lift_row, c, _n(r2["table"][m]), "input_dec2")
+        _put(ws, basis_row, c, _basis_text(r2["lifts"], m), "g_text_wrap")
+        _put(ws, warn_row, c, WARN_WORDS if m in r2["warn"] else None, "g_text_wrap")
+    ws.row(basis_row, 27)
+    if r2["warn"]:
+        ws.row(warn_row, 52)
+    ws.validate(lift_row, M_FIRST, lift_row, M_LAST,
+                {"validate": "decimal", "criteria": ">", "value": 0, "input_title": "Lift",
+                 "input_message": "1.00 leaves the month as it is; 1.20 counts a day of it as 1.2 days.",
+                 "error_title": "Lift", "error_message": "A number above nought, such as 1.00 or 1.25."})
+    ws.cond(f"{_L(M_FIRST)}{warn_row + 1}:{_L(M_LAST)}{warn_row + 1}",
+            {"type": "cell", "criteria": "equal to", "value": f'"{WARN_WORDS}"', "format": "cf_amber"})
+    lifts = f"${_L(M_FIRST)}${lift_row + 1}:${_L(M_LAST)}${lift_row + 1}"
+
+    # the windows: each supplier's Join below and Fill to days in each calendar month, formulas of the data date
+    r = warn_row + 2
+    ws.text(r, 0, "The days of each window in each calendar month, after the data date", "subhead")
+    r += 1
+    date_row = r
+    ws.text(date_row, 0, "Data date (the windows start the day after)", "g_text")
+    ws.put(date_row, M_FIRST, model.d, "g_date")
+    d_ref = f"${_L(M_FIRST)}${date_row + 1}"
+    r += 1
+    _head(ws, r, 0, [("Supplier: window", False)] + [(name, True) for name in MONTHS] + [("Days", True)])
+    r += 1
+    windows: dict[str, tuple[int, int]] = {}
+    for label_s, key in named:
+        n = rows_of[key] + 1
+        pair = []
+        for label, col in (("join below", S_JOIN), ("fill to", S_FILL)):
+            ws.text(r, 0, f"{label_s}: {label}", "g_text")
+            for m in range(1, 13):
+                ws.formula(r, M_FIRST + m - 1, month_days(d_ref, f"${_L(col)}${n}", m), "g_int")
+            ws.formula(r, M_TOTAL, f"SUM({_L(M_FIRST)}{r + 1}:{_L(M_LAST)}{r + 1})", "g_int")
+            pair.append(r)
+            r += 1
+        windows[key] = (pair[0], pair[1])
+
+    # the settings rows, which read the windows
+    for label_s, key in named:
+        row, rule = rows_of[key], rules[key]
+        n = row + 1
+        ws.text(row, S_NAME, label_s, "g_text")
+        ws.put(row, S_LEAD, rule["lead"], "input_qty")
+        ws.put(row, S_EVERY, rule["every"], "input_qty")
+        ws.put(row, S_LOW, rule["low"], "g_int")
+        ws.put(row, S_HIGH, rule["high"], "g_int")
+        b, c, d, e = (f"{_L(k)}{n}" for k in (S_LEAD, S_EVERY, S_LOW, S_HIGH))
+        ws.formula(row, S_JOIN, f"{b}+{c}+{d}", "g_int")
+        ws.formula(row, S_FILL, f"{b}+{c}+{e}", "g_int")
+        for col, w in ((S_JSEASON, windows[key][0]), (S_FSEASON, windows[key][1])):
+            ws.formula(row, col, f"SUMPRODUCT(${_L(M_FIRST)}${w + 1}:${_L(M_LAST)}${w + 1},{lifts})", "g_dec2")
+
+    r += 1
+    for text in (f"Lift = the company's units a day in that month last year (its latest occurrence in the twelve "
+                 f"months to the data date; the data date's own month up to it) over its units a day in the last "
+                 f"{_stock().RATE_DAYS} days, every item and every warehouse. 1.00 leaves a month as it is; 1.20 "
+                 f"counts a day of it as 1.2 days of today's pace.",
+                 "The lifts are last year's months against today's pace: the growth since then is inside them, so a "
+                 "month that was ordinary last year reads under 1.00 when sales have grown.",
+                 f"Measured on: the month a lift was measured on (its days when the ledger holds fewer); no data = "
+                 f"fewer than {stock_season.LIFT_MIN_DAYS} days of it in the ledger (1.00); your setting = config "
+                 f"'stock.season_lift'.",
+                 f"Stock-outs: \"{WARN_WORDS}\" = the best sellers were in stock on fewer than "
+                 f"{int(stock_season.AVAILABILITY_WARN * 100)}% of that month's days, so it sold less than it could: "
+                 f"its lift may be low.",
+                 f"The windows: the days of Join below and of Fill to after the data date "
+                 f"({_L(M_FIRST)}{date_row + 1}) that fall in each calendar month, from the data date and the "
+                 f"settings; a window counts at most {WINDOW_CAP} days. Season days = each month's days x its lift, "
+                 f"added up.",
+                 "Keep a number above nought in every lift: a lift left blank counts its month as nought."):
+        ws.text(r, 0, text, "note")
+        r += 1
+    return r, {"date": (date_row, M_FIRST), "head": head, "lifts": lift_row, "basis": basis_row, "warn": warn_row,
+               "months": (M_FIRST, M_LAST), "windows": windows, "settings": rows_of, "any": rows_of[stock_season.OTHER],
+               "rules": {key: (rule["trig_days"], rule["fill_days"]) for key, rule in rules.items()}}
+
+
+def _how_v2(model, r2: dict, how: list, estimated: list) -> tuple[list, list]:
+    """Release 2's words in the Notes blocks: the order list with the rhythm, the season and goods on the way, the
+    longer history, the lead time per supplier."""
+    st = _stock()
+    lead = model.facts["lead"]
+    late = getattr(_orders(), "LATE_DAYS", None)
+    own = {
+        "A day (the daily rate)": (
+            f"Units sold in the {st.RATE_DAYS} days to the data date / the days of that window on which the main "
+            f"store held the item at the day's end, never fewer than {st.RATE_MIN_DAYS}. An item in stock on fewer "
+            f"than {st.RATE_MIN_DAYS} of those days takes the rate of a longer history instead (back to the first "
+            f"window holding {st.RATE_MIN_DAYS} days in stock, up to a year: Rate basis, marked ~). The Order sheet "
+            f"holds the rate to six decimals, as the screen works the order out, so the two agree to the unit."),
+        "Order list": (
+            f"An item that sold in the last {st.RATE_DAYS} days joins when its demand over its supplier's Join below "
+            f"days reaches Main stock + On the way; Suggested tops it up to the demand of the Fill to days, rounded up "
+            f"to a whole unit (to whole cartons where config 'stock.pack_sizes' gives the units in a carton). The "
+            f"demand of a day = the daily rate x the lift of that day's month: the Order sheet reads the Join and Fill "
+            f"season days. No purchase order is drafted."),
+        "Lead time": (
+            f"Per supplier (the settings above): the median of its newest ten supplier invoices matched to a receipt "
+            f"when it has at least three; else config 'stock.supplier_lead_days'; else every supplier's measured lead "
+            f"time ({lead['days']} days now, {lead['basis']}); else the setting."),
+    }
+    how = [(label, own.get(label, text)) for label, text in how]
+    at = next(k for k, (label, _t) in enumerate(how) if label == "Order list") + 1
+    how[at:at] = [
+        ("The order rhythm", "Order every = the days to the next order to the supplier (about monthly): what is "
+                             "ordered now must last until the order after it arrives, so an item joins that much "
+                             "earlier and is filled for it too."),
+        ("The season", "Each calendar month has a lift (the table above): last year's same month against the pace of "
+                       "the last 90 days, company-wide. Its Stock-outs row names a month whose best sellers were out "
+                       "a fifth of the time or more: that month's lift may be held down."),
+        ("On the way", "The goods of the orders you logged (/yq-stock ordered <supplier>), each item's later supplier "
+                       "receipts paying the oldest order first; Expected by = the order date + the supplier's lead "
+                       "time" + (f", late more than {late} days after it" if late is not None else "") +
+                       f". Now: {_way_words(r2.get('on_the_way'))}."),
+    ]
+    estimated = [(label, text) for label, text in estimated if label != "Lead time"]
+    estimated[1:1] = [("A rate marked ~", "A longer history stands in for an item that was out of stock most of the "
+                                          "last 90 days: it reaches back to when the item last sold in stock.")]
+    estimated += [("Lead time", "A supplier with fewer than three matched invoices takes the lead time of config or of "
+                                "every supplier."),
+                  ("The season", "This year is taken to follow last year's months at today's pace; a month the "
+                                 "ledger does not hold has no lift of its own (1.00).")]
+    return how, estimated
 
 
 # ── the checks ────────────────────────────────────────────────────────────────
@@ -1240,6 +2004,26 @@ def controls(book: Book, model) -> list[str]:
                 if not _same(got, want, q):
                     screen = f"BHD {fmt.bhd(want)}" if money else fmt.units(want)
                     out.append(f"Order sheet: {name} {what} {_shown(got, money)} in the file, {screen} on the screen")
+    season = (book.controls or {}).get("season") if isinstance(book.controls, dict) else None
+    r2 = release2(model) if season else None
+    if r2 is not None:
+        # each supplier's season days (the month-day formulas and the lifts) against the screen's own sum
+        notes = book.get("Notes")
+        for key, row in (season.get("settings") or {}).items():
+            days = (season.get("rules") or {}).get(key)
+            if days is None:
+                continue
+            cell = notes.cells.get((row, S_NAME))
+            name = cell.value if cell is not None else key
+            for what, c, n in (("join", S_JSEASON, days[0]), ("fill", S_FSEASON, days[1])):
+                cell = notes.cells.get((row, c))
+                got = None if cell is None else cell.value
+                want = stock_season.season_days(model.d, n, r2["lifts"])
+                if not _same(got, want, Q2):
+                    shown = got.code if isinstance(got, fx.Err) else (
+                        fmt.bhd(_decimal(got), 2) if _decimal(got) is not None else repr(got))
+                    out.append(f"Notes sheet: {name} {what} season days {shown} in the file, {fmt.bhd(want, 2)} by the "
+                               "screen's rule")
     for e in errors[:5]:                            # "Order!M12 = #N/A (AND(...)" -> "Order!M12 came out as #N/A"
         where, _sep, rest = e.partition(" = ")
         out.append(f"{where} came out as {rest.split(' (', 1)[0]}")
@@ -1266,19 +2050,20 @@ def _mtime(p: Path) -> int:
 
 
 def existing(folder: Path, base: str) -> list[Path]:
-    """The day's workbooks already made ("<base>*.xlsx"; Excel's "~$" lock files and the engine's "~build-"
-    temporary files aside), oldest first (by modified time, then copy number)."""
+    """The day's workbooks already made ("<base>*.xlsx"; Excel's "~$" lock files, the engine's "~build-" temporary
+    files and the team copies, " - Team" in the name, aside), the latest last: by copy number, then by modified
+    time (readback.newest_plan's order, so the file named, compared and read back is the same one)."""
     if not folder.is_dir():
         return []
-    low = base.casefold()
+    low, team = base.casefold(), TEAM_MARK.casefold()
     found = []
     for p in folder.iterdir():
         name = p.name
-        if name.startswith("~$") or name.startswith("~build-"):
+        if name.startswith("~$") or name.startswith("~build-") or team in name.casefold():
             continue
         if name.casefold().startswith(low) and name.casefold().endswith(".xlsx") and p.is_file():
             found.append(p)
-    return sorted(found, key=lambda p: (_mtime(p), _copy_number(p.name), p.name))
+    return sorted(found, key=lambda p: (_copy_number(p.name), _mtime(p), p.name))
 
 
 def target_path(folder: Path, base: str) -> Path:
@@ -1327,9 +2112,17 @@ def day_file(model, force: bool = False) -> dict:
         made_before = existing(folder, base)
     except OSError as exc:
         return _failed(f"exports/reports/stock could not be read ({type(exc).__name__})")
+    changed = None
     if made_before and not force:
         newest = made_before[-1]
-        return {"path": str(newest), "made": False, "made_at": _clock(newest), "error": None, "controls": []}
+        # made once per data date, unless the figures the Order sheet rests on changed since (a same-date reload,
+        # an order logged, a cost loaded later): then the next free name, and a line says why
+        today = figures_digest(model)
+        compared, theirs = read_stamp(newest) if today else (False, None)
+        if not compared or theirs == today:
+            return {"path": str(newest), "made": False, "made_at": _clock(newest), "error": None, "controls": []}
+        changed = (f"the figures changed since {_clock(newest)}: a new file" if theirs else
+                   f"the file made at {_clock(newest)} carries no figures stamp (an older layout): a new file")
     try:
         import xlsxwriter  # noqa: F401  (Book.save needs it: say so before anything is built)
     except ImportError:
@@ -1361,4 +2154,6 @@ def day_file(model, force: bool = False) -> dict:
         return _failed(f"it could not be written in exports/reports/stock ({type(exc).__name__}{why})")
     except ValueError as exc:
         return _failed(f"the workbook engine refused it ({_short(exc)})")
+    if changed:
+        checks = [changed] + checks
     return {"path": str(target), "made": True, "made_at": made.strftime("%H:%M"), "error": None, "controls": checks}

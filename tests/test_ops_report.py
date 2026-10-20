@@ -281,6 +281,8 @@ def _():
 
 @test("formulas: ROUNDUP goes away from zero on the value as a spreadsheet shows it; an error argument flows")
 def _():
+    # ROUND as a spreadsheet holds the number: 15 significant digits first (5 x 1.2345 is 6.1724999... as a double)
+    assert ev("ROUND(5*1.2345,3)") == 6.173 and ev("ROUND(1.005,2)") == 1.01 and ev("ROUND(-2.5,0)") == -3
     assert ev("ROUNDUP(2.1,0)") == 3 and ev("ROUNDUP(2.0,0)") == 2 and ev("ROUNDUP(-2.1,0)") == -3
     assert ev("ROUNDUP(0.0001,0)") == 1 and ev("ROUNDUP(1234.5,-2)") == 1300 and ev("ROUNDUP(3.14159,2)") == 3.15
     assert ev("ROUNDUP(-1234.5,-2)") == -1300 and ev("ROUNDUP(-0.0001,0)") == -1 and ev("ROUNDUP(0,0)") == 0

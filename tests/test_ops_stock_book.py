@@ -29,16 +29,34 @@ Covered:
   * failures: XlsxWriter missing, a folder that cannot be written, a name taken while writing, a formula
     the evaluator refuses: one sentence, the screen still prints;
   * no van or person named on the Order, All items, Summary or Damage sheets (the Ageing sheet names the
-    stores that sold most: the owner's own file).
+    stores that sold most: the owner's own file);
+  * release 2 (the rhythm, the season, goods on the way: facts set by with_r2 as scripts.ops.stock gives them,
+    every order row worked out again with stock_season): no such facts, the file is release 1's; with them
+    the tag v2, eight sheets, Rate basis and Carton after Comment (the release-1 headers unchanged), Suggested
+    equal to stock_season's (controls() empty); Notes' settings per supplier and for any other supplier, the
+    yellow lifts with their basis and stock-out rows; each window's days in each month across a month end, a
+    year end, a leap February, the data date's month met again a year on and the 365-day cap; a lift, a lead
+    time or a rhythm typed in moving Suggested as stock_season does; a Supplier typed over taking the "*"
+    rule; whole cartons, a longer history, the rounding on half-way cases; the On the way sheet and its empty
+    line; the saved file read back with openpyxl;
+  * the figures stamp (Notes!B6, row hidden): the same figures keep the day's file, an order logged, a cost
+    loaded later or a file with no stamp make the next free name with a line; team copies are never the day's
+    file; the latest copy is the one named and compared;
+  * the Ageing sheet's guarded paces, All items' Supplier from, the Summary's release-2 lines, and the
+    command's own file with nothing to check.
 """
 from __future__ import annotations
 
+import calendar
+import copy
 import os
 import re
 import sys
+import time
 import traceback
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,7 +70,7 @@ os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 # scripts.ops.db first, as every command does.
 from tests.test_ops_stock import (  # noqa: E402
     CODES, D, LONG, NAMES, NINE, VAN, VAN_B, L, World, data_root, model_of, run, world)
-from scripts.ops import paths, status, stock  # noqa: E402
+from scripts.ops import fmt, paths, status, stock, stock_season  # noqa: E402
 from scripts.ops.workbook import book as bk  # noqa: E402
 from scripts.ops.workbook import formula as fx  # noqa: E402
 from scripts.ops.workbook import stock_book as sb  # noqa: E402
@@ -101,32 +119,159 @@ def damage_world():
 CUTS = [("HG3", NAMES["C"], "2026-02-01", "1.0", "0.8")]           # ITEM-C's dealer price cut by a fifth
 _SHARED: dict = {}
 
+# ── release 2's facts ─────────────────────────────────────────────────────────
+# The release-1 tests take the model as release 1 gave it (v1: no season, no rule per supplier, no goods on the
+# way); the release-2 tests set those facts themselves (with_r2), as scripts.ops.stock gives them, and work every
+# order row out again with stock_season, as scripts.ops.stock does: so they hold whatever stock.build adds.
+R2_KEYS = ("season", "supplier_rules", "on_the_way")
+LIFTS = {1: "0.80", 2: "0.90", 3: "1.00", 4: "1.15", 5: "1.30", 6: "1.05", 7: "0.95", 8: "1.10", 9: "1.20",
+         10: "1.25", 11: "1.40", 12: "1.60"}
+Q2 = Decimal("0.01")
+
+
+def v1(m):
+    """The model as release 1 gave it."""
+    for k in R2_KEYS:
+        m.facts.pop(k, None)
+    return m
+
+
+def v1_copy(model):
+    """A copy of the model as release 1 gave it (the screen keeps its own facts)."""
+    out = copy.copy(model)
+    out.facts = {k: v for k, v in model.facts.items() if k not in R2_KEYS}
+    return out
+
+
+def lifts_of(values: dict | None = None) -> dict:
+    """The lift rows as stock_season.measure_lifts gives them on D (15 Mar 2026): April to December measured on
+    2025, January to March on 2026 (March up to D: 15 days)."""
+    out = {}
+    for m, v in (values or LIFTS).items():
+        year = 2026 if m <= D.month else 2025
+        out[m] = {"lift": Decimal(v), "basis": "last year", "year": year,
+                  "days": D.day if m == D.month else calendar.monthrange(year, m)[1]}
+    return out
+
+
+def rule(lead: int, every: int, basis: str = "measured", low: int = 30, high: int = 45) -> dict:
+    return {"lead": lead, "lead_basis": basis, "every": every, "low": low, "high": high,
+            "trig_days": lead + every + low, "fill_days": lead + every + high}
+
+
+RULES = {"VFAN": rule(40, 30), "*": rule(40, 30, "overall")}           # VFAN joins at 100 days, fills to 115
+
+
+def way(code: str, supplier: str, on: date, qty, received=0, late=False, matched=True) -> dict:
+    """An on-the-way line as stock_orders.fifo gives it."""
+    key = next((k for k, c in CODES.items() if c == code), None)
+    qty, received = Decimal(qty), Decimal(received)
+    return {"ref": f"{supplier.lower()}:{on.isoformat()}:{code}", "supplier": supplier, "code": code,
+            "item_name": NAMES[key] if matched and key else None, "ledger_name": L(key) if matched and key else None,
+            "date": on, "qty": qty, "received": received, "due": qty - received,
+            "expected_by": on + timedelta(days=40), "late": late, "future": on > D}
+
+
+WAY = [way("CB2", "VFAN", date(2026, 3, 1), 30, 10),                  # 20 still due: on the way for CB2
+       way("CA1", "VFAN", date(2026, 2, 1), 40, 40),                  # received in full: not shown
+       way("HG3", "VFAN", date(2026, 3, 20), 5),                      # dated after D
+       way("ZN9", "WEKOME", date(2026, 1, 5), 12, late=True, matched=False)]   # no item of the main store
+
+
+def with_r2(m, lifts: dict | None = None, rules: dict | None = None, lines=(), warn=(12,), packs: dict | None = None,
+            longer: dict | None = None, leads: dict | None = None):
+    """Release 2's facts on a model of model_of(): the season, each supplier's rule (leads: facts["leads"], the
+    measured or configured lead time of a supplier the rules do not name), the goods on the way (each matched
+    line's units due on its item, as stock.build sets them), and every order row worked out again by
+    stock_season: joins, the quantity, whole cartons where packs names the code; longer = {code: (rate, first day)}
+    for a longer history. A row that no longer joins leaves the list, as on the screen."""
+    v1(m)
+    lifts = lifts_of() if lifts is None else lifts
+    rules = dict(RULES if rules is None else rules)
+    m.facts["season"] = {"lifts": lifts, "warn": list(warn), "applied": any(r["lift"] != 1 for r in lifts.values())}
+    m.facts["supplier_rules"] = rules
+    m.facts["leads"] = dict(leads or {})
+    m.facts["trigger_days"], m.facts["fill_days"] = rules["*"]["trig_days"], rules["*"]["fill_days"]
+    due: dict = {}
+    for ln in lines:
+        if ln["ledger_name"] and ln["due"] > 0:
+            due[ln["ledger_name"]] = due.get(ln["ledger_name"], Decimal(0)) + ln["due"]
+    m.facts["on_the_way"] = {"lines": list(lines), "on_order": due, "logged": len(lines),
+                             "counted": sum(1 for ln in lines if ln["ledger_name"] and ln["due"] > 0),
+                             "unmatched": sum(1 for ln in lines if not ln["ledger_name"]), "log": bool(lines)}
+    for it in m.items:
+        it.on_order = due.get(it.ledger_name, Decimal(0))
+    plan = m.facts["plan"]
+    supplier_of = {x["item"].ledger_name: x["supplier"] for x in plan["order"]}
+
+    def again(x: dict) -> dict | None:
+        it = x["item"]
+        r = rules.get(x.get("supplier") or supplier_of.get(it.ledger_name)) or rules["*"]
+        rate6, basis = x["rate6"], "90 days"
+        if longer and it.code in longer:
+            rate6, basis = stock.stock_plan.round6(longer[it.code][0]), f"longer history from {longer[it.code][1]}"
+        position = max(it.on_hand, Decimal(0)) + it.on_order
+        if not stock_season.joins(position, rate6, m.d, r["trig_days"], lifts):
+            return None
+        qty = stock_season.suggested(position, rate6, m.d, r["fill_days"], lifts)
+        pack = (packs or {}).get(it.code)
+        if pack and pack > 1 and qty > 0:
+            qty = (qty / pack).to_integral_value(rounding=ROUND_CEILING) * pack
+        return dict(x, qty=qty, rate6=rate6, rate_basis=basis, pack=pack,
+                    cost_bhd=fmt.q3(qty * it.cost) if it.cost is not None else None)
+
+    m.facts["order"] = [y for y in map(again, m.facts["order"]) if y is not None]
+    plan["order"] = [y for y in map(again, plan["order"]) if y is not None]
+    return m
+
+
+def built2(w: World | None = None, **r2):
+    """(model, book): a release-2 workbook in memory (with_r2's facts), not evaluated."""
+    with data_root():
+        m, _inp = model_of(w)
+        with_r2(m, **r2)
+        return m, sb.build_book(m, MADE)
+
+
+def month_count(day: date, n: int) -> list[int]:
+    """The days of each calendar month (January first) among day + 1 ... day + n, counted one day at a time."""
+    out = [0] * 12
+    for k in range(1, n + 1):
+        out[(day + timedelta(days=k)).month - 1] += 1
+    return out
+
 
 def shared() -> dict:
     """The damage world's day (with ITEM-C's price cut), run ONCE for the tests that only read its file (opening a
     workbook is the slow part): the screen, the files the run wrote (relative to the data root), the model, the
-    file re-opened twice (its formulas, its cached values), its sheets' XML and its shared strings."""
+    file re-opened twice (its formulas, its cached values), its sheets' XML and its shared strings. The file is
+    release 1's (the model's release-2 facts set aside for it): the release-2 file has tests of its own."""
     if not _SHARED:
-        with data_root() as root:
-            before = {p for p in root.rglob("*") if p.is_file()}
-            out = run(World(book=damage_world(), cuts=CUTS))
-            m, _inp = model_of(World(book=damage_world(), cuts=CUTS))
-            after = {p.relative_to(root) for p in root.rglob("*") if p.is_file() and p not in before}
-            path = Path(out["flags"]["file"])
-            assert path == folder(root) / FILE, path
-            wb, vb = opened(path)
-            with zipfile.ZipFile(path) as z:
-                xml = [z.read(n).decode("utf-8") for n in z.namelist() if n.startswith("xl/worksheets/sheet")]
-                strings = z.read("xl/sharedStrings.xml").decode("utf-8")
-        _SHARED.update(out=out, model=m, after=after, wb=wb, vb=vb, xml=xml, strings=strings)
+        saved = sb.day_file
+        sb.day_file = lambda model, force=False: saved(v1_copy(model), force=force)
+        try:
+            with data_root() as root:
+                before = {p for p in root.rglob("*") if p.is_file()}
+                out = run(World(book=damage_world(), cuts=CUTS))
+                m, _inp = model_of(World(book=damage_world(), cuts=CUTS))
+                after = {p.relative_to(root) for p in root.rglob("*") if p.is_file() and p not in before}
+                path = Path(out["flags"]["file"])
+                assert path == folder(root) / FILE, path
+                wb, vb = opened(path)
+                with zipfile.ZipFile(path) as z:
+                    xml = [z.read(n).decode("utf-8") for n in z.namelist() if n.startswith("xl/worksheets/sheet")]
+                    strings = z.read("xl/sharedStrings.xml").decode("utf-8")
+        finally:
+            sb.day_file = saved
+        _SHARED.update(out=out, model=v1(m), after=after, wb=wb, vb=vb, xml=xml, strings=strings)
     return _SHARED
 
 
 def built(w: World | None = None):
-    """(model, book): the workbook of a world in memory, not evaluated (inside a temporary data root)."""
+    """(model, book): the release-1 workbook of a world in memory, not evaluated (inside a temporary data root)."""
     with data_root():
         m, _inp = model_of(w)
-        return m, sb.build_book(m, MADE)
+        return v1(m), sb.build_book(v1(m), MADE)
 
 
 def first_line(out: dict) -> str:
@@ -227,7 +372,7 @@ def _():
 def _():
     with data_root({"stock.display_items": ["DS1", "CB2"]}):                  # CB2 a display item: nothing to order
         m, _inp = model_of()
-        book = sb.build_book(m, MADE)
+        book = sb.build_book(v1(m), MADE)
     assert m.facts["order"] == [] and sb.controls(book, m) == []
     pos = book.controls["order"]
     assert pos["rows"] == [] and pos["add"] == (pos["head"] + 1, pos["head"] + sb.ADD_ROWS)
@@ -528,6 +673,7 @@ def _():
 def _():
     with data_root():
         m, _inp = model_of()
+        v1(m)
         m.facts["plan"] = {"error": "KeyError"}
         m.facts["review"] = {"clear_days": 90, "rows": [], "built": False}
         m.facts["damage"] = {"set_up": False, "store": None, "found": False}
@@ -544,6 +690,7 @@ def _():
     assert not [k for k in book.get("Damage").cells if k[0] > 5]                 # nothing else on the sheet
     with data_root():
         m, _inp = model_of()
+        v1(m)
         m.facts["plan"] = {"built": False}
         m.facts["damage"] = {"error": "ValueError"}
         book = sb.build_book(m, MADE)
@@ -554,6 +701,7 @@ def _():
     # (stock.RAISE_PARTS, as in every test, makes it raise instead, so a test sees it)
     with data_root():
         m, _inp = model_of()
+    v1(m)
     m.facts["review"] = dict(m.facts["review"], rows=[{"bogus": 1}])
     with data_root():
         raises(KeyError, lambda: sb.build_book(m, MADE))
@@ -629,6 +777,440 @@ def _():
     finally:
         bk.Book.save, bk.Book.evaluate = saved_save, saved_eval
     assert paths.allowed_output(ROOT / "exports" / "x.xlsx") is not None    # the guard itself is paths'
+
+
+# ── release 2: the rhythm, the season, goods on the way ───────────────────────
+
+def order_head(book) -> list:
+    pos = book.controls["order"]
+    return [value(book, "Order", pos["head"], c) for c in range(0, sb.O_CARTON + 1)]
+
+
+R1_HEADERS = ["Supplier", "Code", "Item", "Category", "Fast", "Main stock", "With vans", "On the way", "Sold 90 d",
+              "A day", "*", "Cover days", "Joins", "Suggested", "Your qty", "Final", "Landed cost", "Value, BHD",
+              "Last receipt", "Comment"]
+
+
+@test("no release-2 facts: the file is release 1's (tag v1, seven sheets, Joins on Join below, Suggested 65)")
+def _():
+    m, book = built()
+    assert sb.release2(m) is None and [ws.name for ws in book.sheets] == list(sb.SHEETS)
+    assert value(book, "Notes", 4, 1) == "stock-plan v1" and "season" not in book.controls
+    r = book.controls["order"]["rows"][0]
+    assert order_head(book)[:20] == R1_HEADERS and order_head(book)[20:] == [None, None]
+    assert book.get("Order").cells[(r, sb.O_JOINS)].formula.startswith("AND(J12>0,ROUND(MAX(F12,0)+H12-J12*INDEX("
+                                                                       "Notes!$F$9:$F$10,")
+    assert sb.controls(book, m) == [] and value(book, "Order", r, sb.O_SUGGESTED) == 65
+
+
+@test("release 2: tag v2, eight sheets (On the way after Order), Rate basis and Carton after Comment; Suggested is "
+      "stock_season's (110 = 129.90 season days - 20), controls() empty, no formula an error")
+def _():
+    m, book = built2()
+    assert sb.release2(m) is not None and [ws.name for ws in book.sheets] == list(sb.SHEETS_V2)
+    assert value(book, "Notes", 4, 1) == sb.LAYOUT_TAG_V2 == "stock-plan v2"
+    assert order_head(book) == R1_HEADERS + ["Rate basis", "Carton"]
+    assert book.evaluate() == [] and sb.controls(book, m) == []
+    x = m.facts["order"][0]
+    want = stock_season.suggested(Decimal(20), x["rate6"], D, 115, m.facts["season"]["lifts"])
+    r = book.controls["order"]["rows"][0]
+    assert value(book, "Order", r, sb.O_SUGGESTED) == int(want) == int(x["qty"]) == 110
+    assert value(book, "Order", r, sb.O_JOINS) is True and value(book, "Order", r, sb.O_VALUE) == 275
+    assert value(book, "Order", r, sb.O_RATE_BASIS) == "90 days" and value(book, "Order", r, sb.O_CARTON) is None
+    f = book.get("Order").cells[(r, sb.O_SUGGESTED)].formula
+    assert "INDEX(Notes!$I$9:$I$11,IFERROR(MATCH(" in f and ",8),6),0),0)" in f, f      # Fill season days, 8 then 6
+    assert book.get("Order").cells[(r, sb.O_JOINS)].formula.startswith(
+        "AND(J12>0,ROUND(ROUND(MAX(F12,0)+H12-J12*INDEX(Notes!$H$9:$H$11,IFERROR(MATCH(")
+    vf = book.controls["order"]["suppliers"]["vfan"]
+    assert [value(book, "Order", vf, c) for c in (sb.B_ITEMS, sb.B_UNITS, sb.B_VALUE)] == [1, 110, 275]
+    notes = " ".join(str(value(book, "Order", rr, 0)) for rr in range(book.controls["order"]["add"][1] + 2,
+                                                                       book.controls["order"]["add"][1] + 12))
+    for words in ("each day at its month's lift", "items that would join only come with the next file: tell Claude "
+                  "to keep the new setting", "takes the rule of any other supplier", "No purchase order is drafted"):
+        assert words in notes, words
+    assert "Release 2 adds" not in notes
+
+
+@test("release 2: Notes holds the settings per supplier and for any other supplier, the yellow lifts (two decimals) "
+      "with their basis and stock-out rows, and the data date the windows count from")
+def _():
+    m, book = built2(leads={"WEKOME": {"days": 55, "basis": "config"}})
+    assert book.evaluate() == []
+    s = book.controls["season"]
+    rows = s["settings"]
+    assert rows == {"vfan": 8, "wekome": 9, "*": 10}, rows
+    assert [value(book, "Notes", 7, c) for c in range(9)] == [
+        "Supplier", "Lead days", "Order every (days)", "Safety low (days)", "Top up to (days)", "Join below (days)",
+        "Fill to (days)", "Join season days", "Fill season days"]
+    got = {k: [value(book, "Notes", r, c) for c in range(9)] for k, r in rows.items()}
+    assert got["vfan"][:7] == ["VFAN", 40, 30, 30, 45, 100, 115], got["vfan"]
+    assert [round(v, 6) for v in got["vfan"][7:]] == [114.95, 129.9], got["vfan"]     # 16 + 34.5 + 40.3 + 24.15 ...
+    assert got["wekome"][:7] == ["WEKOME", 55, 30, 30, 45, 115, 130], got["wekome"]    # its own lead (facts["leads"])
+    assert got["*"][:7] == [sb.ANY_SUPPLIER, 40, 30, 30, 45, 100, 115], got["*"]
+    notes = book.get("Notes")
+    for key, r in rows.items():
+        for c in (sb.S_LEAD, sb.S_EVERY):
+            assert notes.cells[(r, c)].fmt == "input_qty", (key, c)
+    lifts = [value(book, "Notes", s["lifts"], c) for c in range(sb.M_FIRST, sb.M_LAST + 1)]
+    assert lifts == [float(v) if Decimal(v) != int(Decimal(v)) else int(Decimal(v)) for v in LIFTS.values()], lifts
+    assert all(notes.cells[(s["lifts"], c)].fmt == "input_dec2" for c in range(sb.M_FIRST, sb.M_LAST + 1))
+    basis = [value(book, "Notes", s["basis"], c) for c in range(sb.M_FIRST, sb.M_LAST + 1)]
+    assert basis[:4] == ["Jan 2026", "Feb 2026", "Mar 2026 (15 d)", "Apr 2025"] and basis[11] == "Dec 2025", basis
+    warn = [value(book, "Notes", s["warn"], c) for c in range(sb.M_FIRST, sb.M_LAST + 1)]
+    assert warn[11] == "stock-outs held this month down" and warn[:11] == [None] * 11
+    dr, dc = s["date"]
+    assert value(book, "Notes", dr, dc) == fx.serial(D) and value(book, "Notes", dr, 0).startswith("Data date")
+    checks = [v for v in notes.validations if v[0] == s["lifts"]]
+    assert checks and checks[0][4]["validate"] == "decimal" and checks[0][4]["criteria"] == ">"
+    words = " ".join(str(c.value) for c in notes.cells.values() if isinstance(c.value, str))
+    for text in ("tell Claude to keep the new setting", "items that would join only come with the next file",
+                 "last year's months against today's pace", "a window counts at most 365 days",
+                 "Any other supplier: the rule of a supplier this sheet does not name"):
+        assert text in words, text
+
+
+@test("release 2: each window's days in each month are formulas of the data date (a month end, a year end, a leap "
+      "February, the data date's month met again a year on, the 365-day cap); season days = stock_season's")
+def _():
+    cases = ((D, 40, 30), (date(2026, 12, 20), 40, 30), (date(2028, 2, 10), 10, 0), (D, 300, 30), (D, 400, 30),
+             (date(2026, 1, 31), 0, 0))
+    for day, lead, every in cases:
+        m, book = built2()
+        s = book.controls["season"]
+        notes = book.get("Notes")
+        r = s["settings"]["vfan"]
+        notes.put(*s["date"], day, "g_date")
+        notes.put(r, sb.S_LEAD, lead, "input_qty")
+        notes.put(r, sb.S_EVERY, every, "input_qty")
+        assert book.evaluate() == []
+        lifts = m.facts["season"]["lifts"]
+        for w, n, c in ((s["windows"]["vfan"][0], lead + every + 30, sb.S_JSEASON),
+                        (s["windows"]["vfan"][1], lead + every + 45, sb.S_FSEASON)):
+            n = min(n, sb.WINDOW_CAP)
+            got = [value(book, "Notes", w, k) for k in range(sb.M_FIRST, sb.M_LAST + 1)]
+            assert got == month_count(day, n), (day, n, got, month_count(day, n))
+            assert all(isinstance(v, int) for v in got) and value(book, "Notes", w, sb.M_TOTAL) == n
+            season = Decimal(repr(value(book, "Notes", r, c))).quantize(Q2, rounding=ROUND_HALF_UP)
+            assert season == stock_season.season_days(day, n, lifts), (day, n, season)
+    # March met again: 16 days of March 2026 and 10 of March 2027 in a window of 360 days from 15 Mar 2026
+    assert month_count(D, 360)[2] == 26 and month_count(D, 365)[2] == 31
+
+
+@test("release 2: a lift, a Lead days or an Order every typed on Notes moves Suggested as stock_season works it out; "
+      "controls() names the difference")
+def _():
+    base = lifts_of()
+    april = {**base, 4: dict(base[4], lift=Decimal("2.00"))}
+    for edit, lifts, fill in (("lift", april, 115), ("lead", base, 135), ("every", base, 85)):
+        m, book = built2()
+        s = book.controls["season"]
+        notes = book.get("Notes")
+        if edit == "lift":
+            notes.put(s["lifts"], sb.M_FIRST + 3, 2.0, "input_dec2")              # April at 2.00
+        elif edit == "lead":
+            notes.put(s["settings"]["vfan"], sb.S_LEAD, 60, "input_qty")         # 60 + 30 + 45 = 135 days
+        else:
+            notes.put(s["settings"]["vfan"], sb.S_EVERY, 0, "input_qty")         # 40 + 0 + 45 = 85 days
+        checks = sb.controls(book, m)
+        x = m.facts["order"][0]
+        want = stock_season.suggested(Decimal(20), x["rate6"], D, fill, lifts)
+        r = book.controls["order"]["rows"][0]
+        assert value(book, "Order", r, sb.O_SUGGESTED) == int(want), (edit, value(book, "Order", r, sb.O_SUGGESTED))
+        assert int(want) == {"lift": 136, "lead": 129, "every": 80}[edit], (edit, want)
+        assert checks[0] == f"Order sheet: CB2 suggests {int(want)} in the file, 110 on the screen", checks
+        assert any(c.startswith("Notes sheet: VFAN fill season days") for c in checks), checks
+    # a season that leaves the item enough: it joins no more
+    m, book = built2()
+    notes = book.get("Notes")
+    for c in range(sb.M_FIRST, sb.M_LAST + 1):
+        notes.put(book.controls["season"]["lifts"], c, 0.01, "input_dec2")
+    sb.controls(book, m)
+    r = book.controls["order"]["rows"][0]
+    assert value(book, "Order", r, sb.O_JOINS) is False and value(book, "Order", r, sb.O_SUGGESTED) == 0
+
+
+@test("release 2: a Supplier typed over to a name Notes does not hold takes any other supplier's rule (no #N/A)")
+def _():
+    rules = {"VFAN": rule(40, 30), "*": rule(10, 0, "overall")}
+    m, book = built2(rules=rules)
+    r = book.controls["order"]["rows"][0]
+    book.get("Order").text(r, sb.O_SUPPLIER, "Nobody", "g_text")
+    checks = sb.controls(book, m)
+    lifts = m.facts["season"]["lifts"]
+    rate6 = m.facts["order"][0]["rate6"]
+    assert stock_season.joins(Decimal(20), rate6, D, 40, lifts)
+    want = stock_season.suggested(Decimal(20), rate6, D, 55, lifts)
+    assert value(book, "Order", r, sb.O_SUGGESTED) == int(want) == 43
+    assert not [c for c in checks if "#N/A" in c or "came out as" in c], checks
+    assert "Order sheet: VFAN items 0 in the file, 1 on the screen" in checks      # in no supplier's total
+
+
+@test("release 2: whole cartons, a longer history (Rate basis, ~) and a rate that is not whole: Suggested equals the "
+      "screen's to the unit")
+def _():
+    m, book = built2(packs={"CB2": 12})
+    r = book.controls["order"]["rows"][0]
+    assert m.facts["order"][0]["qty"] == 120 and sb.controls(book, m) == []     # 110 in cartons of 12
+    assert value(book, "Order", r, sb.O_SUGGESTED) == 120 and value(book, "Order", r, sb.O_CARTON) == 12
+    m, book = built2(longer={"CB2": (Decimal("1.5"), "2025-11-02")})
+    r = book.controls["order"]["rows"][0]
+    assert sb.controls(book, m) == [] and value(book, "Order", r, sb.O_SUGGESTED) == 175   # 1.5 x 129.90 - 20
+    assert value(book, "Order", r, sb.O_RATE_BASIS) == "longer history from 2025-11-02"
+    assert value(book, "Order", r, sb.O_STAR) == "~" and value(book, "Order", r, sb.O_RATE) == 1.5
+    after = book.controls["order"]["add"][1]
+    notes = [str(value(book, "Order", rr, 0)) for rr in range(after + 2, after + 14)]
+    assert any(t.startswith("~ out of stock most of the last 90 days") for t in notes), notes
+    w = world()
+    w.sale(L("B"), D, 1)                                                         # 46/45 a day: 1.022222
+    m, book = built2(World(book=w))
+    x = m.facts["order"][0]
+    assert x["rate6"] == Decimal("1.022222") and sb.controls(book, m) == []
+    assert value(book, "Order", book.controls["order"]["rows"][0], sb.O_SUGGESTED) == int(x["qty"])
+
+
+@test("release 2: the rule's rounding: rate x season days rounded to 8 decimals, then 6, then up, agrees with "
+      "Python's exact rule on half-way cases a single ROUND to 6 decimals misses")
+def _():
+    e8 = 10 ** 8
+    cases = []
+    for s in range(1001, 80000, 7):              # season days 10.01 to 800, two decimals
+        if s % 2 and s % 5:
+            r = (50 * pow(s, -1, e8)) % e8          # rate (6 decimals) x days = position + 0.0000005, exactly
+            if 0 < r <= 5_000_000 and r * s >= e8:
+                cases.append((Decimal(r) / 10 ** 6, Decimal(s) / 100, Decimal(r * s // e8)))
+    assert len(cases) > 100
+    for rate, days, pos in cases:
+        b = bk.Book()
+        ws = b.sheet("T")
+        for c, v in enumerate((float(rate), float(days), int(pos))):
+            ws.put(0, c, v)
+        joins, suggested = sb.rule_formulas("A1", "C1", "B1", "B1", "D1", "F1")
+        ws.formula(0, 3, joins)
+        ws.formula(0, 4, suggested)
+        assert b.evaluate() == []
+        want = stock.stock_plan.round6(pos - rate * days) < 0
+        assert ws.cells[(0, 3)].value is want, (rate, days, pos)
+        assert ws.cells[(0, 4)].value == (stock.stock_plan.units_up(rate * days - pos) if want else 0), (rate, days)
+
+
+@test("release 2: On the way lists the lines still due by supplier (late, dated ahead, matching no item) with a "
+      "total; nothing logged is one line; the Order sheet deducts the units due")
+def _():
+    m, book = built2(lines=WAY)
+    assert book.evaluate() == [] and sb.controls(book, m) == []
+    ws = book.get("On the way")
+    head = sb.W_HEAD
+    assert [value(book, "On the way", head, c) for c in range(10)] == [
+        "Supplier", "Code", "Item", "Ordered on", "Ordered", "Received since", "Still due", "Expected by", "Late",
+        "Ref"]
+    got = [[value(book, "On the way", r, c) for c in range(10)] for r in range(head + 1, head + 4)]
+    assert [g[:3] for g in got] == [["VFAN", "CB2", NAMES["B"]], ["VFAN", "HG3", NAMES["C"]],
+                                    ["WEKOME", "ZN9", "no item has this code"]], got
+    assert [g[4:7] for g in got] == [[30, 10, 20], [5, 0, 5], [12, 0, 12]]
+    assert got[0][3] == fx.serial(date(2026, 3, 1)) and got[0][7] == fx.serial(date(2026, 4, 10))
+    assert [g[8] for g in got] == [None, None, "yes"] and got[0][9] == "vfan:2026-03-01:CB2"
+    assert value(book, "On the way", head + 4, 0) == "Total"
+    assert [value(book, "On the way", head + 4, c) for c in (4, 5, 6)] == [47, 10, 37]
+    words = " ".join(str(c.value) for c in ws.cells.values() if isinstance(c.value, str))
+    for text in ("1 line dated after the data date", "1 line matches no item of the main store",
+                 "1 logged line received in full is not shown"):
+        assert text in words, text
+    r = book.controls["order"]["rows"][0]
+    assert value(book, "Order", r, sb.O_WAY) == 20 and value(book, "Order", r, sb.O_SUGGESTED) == 90   # 129.90 - 40
+    m, book = built2()
+    assert value(book, "On the way", head, 0) == sb.EMPTY_LOG and not [k for k in book.get("On the way").cells
+                                                                         if k[0] > head]
+    m, book = built2(lines=[way("CA1", "VFAN", date(2026, 2, 1), 40, 40)])
+    assert value(book, "On the way", head + 1, 0) == "Every logged order has arrived: 1 line, received in full."
+
+
+@test("release 2: the saved file: the tag in B5 and the figures stamp in B6 (its row hidden), lifts of two decimals "
+      "and whole month days cached, the Order headers, every formula with its value (openpyxl)")
+def _():
+    with data_root() as root:
+        m, _inp = model_of()
+        with_r2(m, lines=WAY)
+        res = sb.day_file(m)
+        assert res["made"] and res["controls"] == [], res
+        path = Path(res["path"])
+        wb, vb = opened(path)
+        with zipfile.ZipFile(path) as z:
+            xml = [z.read(n).decode("utf-8") for n in z.namelist() if n.startswith("xl/worksheets/sheet")]
+        assert sb.read_stamp(path) == (True, sb.figures_digest(m))
+    assert wb.sheetnames == list(sb.SHEETS_V2)
+    notes, values = wb["Notes"], vb["Notes"]
+    assert notes["B5"].value == "stock-plan v2" and notes["B6"].value == sb.figures_digest(m)
+    assert notes.row_dimensions[6].hidden and re.fullmatch(r"[0-9a-f]{16}", notes["B6"].value)
+    lift_row = next(r for r in range(1, 80) if notes[f"A{r}"].value == "Lift")
+    assert [values.cell(lift_row, c).value for c in range(2, 14)][3] == 1.15
+    join_row = next(r for r in range(1, 120) if notes[f"A{r}"].value == "VFAN: join below")
+    assert [values.cell(join_row, c).value for c in range(2, 15)] == [0, 0, 16, 30, 31, 23, 0, 0, 0, 0, 0, 0, 100]
+    assert values["H9"].value == 114.95 and values["I9"].value == 129.9
+    order = wb["Order"]
+    head = next(r for r in range(1, 40) if order[f"A{r}"].value == "Supplier" and order[f"B{r}"].value == "Code")
+    assert [order.cell(head, c).value for c in range(1, 23)] == R1_HEADERS + ["Rate basis", "Carton"]
+    assert vb["Order"][f"N{head + 1}"].value == 90 and order[f"U{head + 1}"].value == "90 days"
+    assert order[f"B{head + 2}"].fill.fgColor.rgb == YELLOW and order.auto_filter.ref.startswith(f"A{head}:V")
+    assert vb["On the way"]["G6"].value == 20 and wb["All items"]["W5"].value == "Supplier from"
+    formulas = 0
+    for text in xml:
+        for cell in re.findall(r"<c [^>]*>(.*?)</c>", text):
+            if "<f>" in cell:
+                formulas += 1
+                assert "<v>" in cell and not re.search(r"<v>#(N/A|VALUE!|REF!|DIV/0!|NUM!)</v>", cell), cell[:120]
+    assert formulas > 200                  # 3 settings rows x 4, 6 windows x 13 on Notes, the On the way totals ...
+
+
+@test("the figures stamp: the same figures keep the day's file; an order logged, a cost loaded later or a file "
+      "with no stamp make the next free name, with a line that says why")
+def _():
+    changed = re.compile(r"the figures changed since \d\d:\d\d: a new file")
+    with data_root() as root:
+        f = folder(root)
+        m, _inp = model_of()
+        first = sb.day_file(with_r2(m))
+        again = sb.day_file(with_r2(model_of()[0]))
+        assert first["made"] and not again["made"] and again["path"] == first["path"], again
+        logged = sb.day_file(with_r2(model_of()[0], lines=WAY))                 # an order logged: CB2 on the way
+        assert logged["made"] and Path(logged["path"]).name == SECOND, logged
+        assert changed.fullmatch(logged["controls"][0]) and logged["controls"][1:] == [], logged["controls"]
+        same = sb.day_file(with_r2(model_of()[0], lines=WAY))
+        assert not same["made"] and Path(same["path"]).name == SECOND
+        m = with_r2(model_of()[0], lines=WAY)
+        m.facts["order"][0]["item"].cost = Decimal("2.6")                       # the MRN cost loaded later
+        m.facts["order"][0]["cost_bhd"] = m.facts["plan"]["order"][0]["cost_bhd"] = fmt.q3(90 * Decimal("2.6"))
+        costed = sb.day_file(m)
+        assert costed["made"] and Path(costed["path"]).name == FILE.replace(".xlsx", " (3).xlsx")
+        assert changed.fullmatch(costed["controls"][0]), costed["controls"]
+        assert sorted(books(root)) == sorted([FILE, SECOND, FILE.replace(".xlsx", " (3).xlsx")])
+    with data_root() as root:
+        f = folder(root)
+        f.mkdir(parents=True)
+        (f / FILE).write_bytes(b"not a workbook")                               # no stamp to compare
+        res = sb.day_file(with_r2(model_of()[0]))
+        assert res["made"] and Path(res["path"]).name == SECOND
+        assert re.fullmatch(r"the file made at \d\d:\d\d carries no figures stamp \(an older layout\): a new file",
+                            res["controls"][0]), res["controls"]
+        had, saved = "openpyxl" in sys.modules, sys.modules.get("openpyxl")
+        sys.modules["openpyxl"] = None                                          # nothing can be read: the file stands
+        try:
+            assert sb.read_stamp(f / FILE) == (False, None)
+            m = with_r2(model_of()[0], lines=WAY)
+            assert not sb.day_file(m)["made"]
+        finally:
+            if had:
+                sys.modules["openpyxl"] = saved
+            else:
+                del sys.modules["openpyxl"]
+    m1, m2 = with_r2(built()[0]), with_r2(built()[0], lifts=lifts_of({**LIFTS, 4: "1.16"}))
+    assert sb.figures_digest(m1) != sb.figures_digest(m2)                      # a lift is in it
+    assert sb.figures_digest(built()[0]) != sb.figures_digest(m1)              # and the layout
+
+
+@test("team copies are never the day's file (no needless (2) after a team copy); the latest copy is the one named "
+      "and compared, whichever copy he saved last, as readback.newest_plan reads it")
+def _():
+    from scripts.ops.workbook import readback
+    assert sb.TEAM_MARK == readback.TEAM_MARK
+    with data_root() as root:
+        f = folder(root)
+        assert sb.day_file(with_r2(model_of()[0]))["made"]
+        stem = FILE[: -len(".xlsx")]
+        team = [f"{stem} - Team.xlsx", f"{stem} - Team (2).xlsx", f"{stem} (2) - Team.xlsx"]
+        for name in team:
+            (f / name).write_bytes(b"a team copy")                          # newer than the plan, and no stamp
+        res = sb.day_file(with_r2(model_of()[0]))
+        assert not res["made"] and Path(res["path"]).name == FILE, res
+        assert books(root) == sorted([FILE] + team)
+        assert [p.name for p in sb.existing(f, sb.STEM.format(d=D.isoformat()))] == [FILE]
+        assert Path(sb.day_file(with_r2(model_of()[0]), force=True)["path"]).name == SECOND
+        later = time.time() + 120
+        os.utime(f / FILE, (later, later))                                  # he saves the first copy after (2)
+        res = sb.day_file(with_r2(model_of()[0]))
+        assert not res["made"] and Path(res["path"]).name == SECOND, res   # (2): the latest copy, never a (3)
+        assert readback.newest_plan(f).name == SECOND and books(root) == sorted([FILE, SECOND] + team)
+
+
+@test("Ageing: Before / Since a week never read as a multiple: not in stock before, too few before, too soon; a cut "
+      "batch's change in the screen's words")
+def _():
+    with data_root():
+        m, _inp = model_of(World(book=damage_world(), cuts=CUTS))
+        v1(m)
+        review = m.facts["review"]
+        hg3 = next(r for r in review["rows"] if r["item"].code == "HG3")
+        assert hg3["change"] is None and hg3["in_stock_before_days"] >= 30            # nothing sold before its cut
+        review["rows"] = [hg3, dict(hg3, in_stock_before_days=10),
+                          dict(hg3, too_soon=True, before_week=Decimal("2.5"), since_week=Decimal("9")),
+                          dict(hg3, change=Decimal("1.5"), before_week=Decimal("2"), since_week=Decimal("3"))]
+        b = review["batches"][0]
+        review["batches"] = [b, dict(b, too_soon=True), dict(b, change=Decimal("1.5")),
+                             dict(b, in_stock_before_items=0, change=None)]
+        book = sb.build_book(m, MADE)
+    assert book.evaluate() == []
+    cells = [(value(book, "Ageing", r, 13), value(book, "Ageing", r, 14)) for r in range(6, 10)]
+    assert cells == [("too few before", 0), ("not in stock before", 0), (2.5, "too soon"), (2, 3)], cells
+    head = row_of(book, "Ageing", 0, "Price cuts in the last 180 days, by cut date") + 1
+    batch = [(value(book, "Ageing", r, 10), value(book, "Ageing", r, 11)) for r in range(head + 1, head + 5)]
+    assert [x[1] for x in batch] == ["too few before", "too soon to judge", 1.5, "not in stock before"], batch
+    assert batch[1][0] == "too soon" and value(book, "Ageing", head + 2, 8) is None
+
+
+@test("All items (release 2): Supplier from at the far right (W), blank where the plan does not give it")
+def _():
+    with data_root():
+        m, _inp = model_of()
+        with_r2(m)
+        for row in m.facts["plan"]["all_items"]:
+            row.pop("supplier_basis", None)
+            if row["code"] == "CB2":
+                row["supplier_basis"] = "config"
+        book = sb.build_book(m, MADE)
+    first, last = book.controls["all_items"]
+    assert value(book, "All items", sb.ALL_HEAD, sb.A_SUPPLIER_FROM) == "Supplier from"
+    got = {value(book, "All items", r, sb.A_CODE): value(book, "All items", r, sb.A_SUPPLIER_FROM)
+           for r in range(first, last + 1)}
+    assert got["CB2"] == "config" and {v for k, v in got.items() if k != "CB2"} == {None}, got
+    assert book.get("All items").page["autofilter"].startswith(f"A{sb.ALL_HEAD + 1}:W")
+    m, book = built()                                                           # release 1: no such column
+    assert value(book, "All items", sb.ALL_HEAD, sb.A_SUPPLIER_FROM) is None
+
+
+@test("Summary (release 2): the layout, the order rhythm, the season and the goods on the way")
+def _():
+    for lines, words in (((), "nothing logged yet (/yq-stock ordered <supplier> logs an order you placed)"),
+                         (WAY, "2 lines still due, deducted (the On the way sheet); 1 line matches no item")):
+        m, book = built2(lines=lines)
+        assert book.evaluate() == []
+
+        def at(label: str):
+            return value(book, "Summary", row_of(book, "Summary", 0, label), 1)
+
+        assert at("Layout") == "stock-plan v2" and at("Order every, days") == 30
+        assert (at("Joins below, days of sales"), at("Filled to, days of sales")) == (100, 115)   # the "*" rule
+        assert at("Season") == "on" and at("Goods on the way") == words
+        note = value(book, "Summary", row_of(book, "Summary", 0, "Season"), 2)
+        assert note.startswith("Each day counts at its month's lift: Jan 0.80, Feb 0.90"), note
+        assert "Held down by stock-outs: Dec" in note
+
+
+@test("the command's own file has nothing to check, whichever release its facts are; with release 2's it is v2")
+def _():
+    with data_root():
+        out = run(World(book=damage_world(), cuts=CUTS))
+        path = Path(out["flags"]["file"])
+        m, _inp = model_of(World(book=damage_world(), cuts=CUTS))
+        tag = sb.LAYOUT_TAG_V2 if sb.release2(m) is not None else sb.LAYOUT_TAG
+        compared, stamp = sb.read_stamp(path)
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True)
+        try:
+            names, got = list(wb.sheetnames), wb["Notes"]["B5"].value
+        finally:
+            wb.close()
+    assert "To check in the file" not in out["text"], out["text"][:600]
+    assert got == tag and compared and stamp == sb.figures_digest(m)
+    assert names == list(sb.SHEETS_V2 if tag == sb.LAYOUT_TAG_V2 else sb.SHEETS)
 
 
 def main() -> int:

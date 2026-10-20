@@ -979,8 +979,9 @@ def _():
     _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-stock" / "SKILL.md").read_bytes())
     # the hint: the two view words the command reads, then an item code; its usage line says the same
     words = re.findall(r"\[([^\]]+)\]", fm["argument-hint"])[0].split("|")
-    assert words[-1] == "<code>" and set(words[:-1]) == set(consts["VIEW_WORDS"].values()), words
-    assert set(words[:-1]) <= set(consts["VIEW_WORDS"]), "the hint names a word the command does not read"
+    heads = [w.split()[0] for w in words[:-1]]                # 'ordered <supplier>' is the word ordered and its supplier
+    assert words[-1] == "<code>" and set(heads) == set(consts["VIEW_WORDS"].values()) | set(consts["ACTION_WORDS"]), words
+    assert set(heads) <= set(consts["VIEW_WORDS"]) | set(consts["ACTION_WORDS"]), "the hint names a word the command does not read"
     usage = (ast.get_docstring(ast.parse(source)) or "").splitlines()[0]
     assert usage.startswith("python -m scripts.ops stock [reorder | ageing | damage | file | <item code>]"), usage
     assert fm["allowed-tools"] == ["Bash(python -m scripts.ops stock *)", "PowerShell(python -m scripts.ops stock *)"]
@@ -1725,6 +1726,11 @@ MUST_CONTAIN = {
         "Never open, change, move, copy or send the file yourself", "it is his to edit and share",
         "never suggest a price cut, a markdown or a bundle", "never name a salesman or a van",
         "damage is counted when it is sent to the damage store",
+        # an order placed or cancelled is logged only on his yes, by the line the preview printed, token untouched
+        "`ordered <supplier>` when he says he has placed an order with that supplier",
+        "Run that last line exactly as printed, only after he says yes", "never type or change its token yourself",
+        "If it says the file or the lines changed, run the preview again", "Nothing is ever sent to a supplier",
+        "`team` makes the team copy (no cost or value)", "never send it yourself",
     ],
 }
 

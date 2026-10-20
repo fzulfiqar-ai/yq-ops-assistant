@@ -29,6 +29,11 @@ def set_data_root(path) -> None:
     _override = Path(path).resolve() if path else None
 
 
+def root_is_set() -> bool:
+    """True when the data root was named (--data-root, or a test's set_data_root), not found by itself."""
+    return _override is not None
+
+
 def is_worktree() -> bool:
     """True when this checkout is a linked worktree under <main>/.claude/worktrees/."""
     return CODE_ROOT.parent.name == "worktrees" and CODE_ROOT.parent.parent.name == ".claude"

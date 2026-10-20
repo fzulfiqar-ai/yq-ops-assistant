@@ -18,6 +18,8 @@ CONTRACT (scripts.ops.stock and the workbook rely on it)
                "value": Decimal | None,                  # sellable x landed cost
                "last_sale": date | None,
                "cut": {"date": date, "was": Decimal, "now": Decimal, "pct": Decimal} | None,   # pct: (now-was)/was
+               "cut_age_days": int | None,               # D - the cut's date
+               "too_soon": bool,                         # cut under 14 days old: the 30-day pace, no verdict on it
                "pace_basis": "cut" | "30 days", "pace_days": int, "pace_units": Decimal, "pace_week": Decimal,
                "days_to_clear": Decimal | None,
                "status": "Cleared" | "Not moving" | "On track" | "Slow",
@@ -39,6 +41,7 @@ CONTRACT (scripts.ops.stock and the workbook rely on it)
                   "before_week": Decimal, "since_week": Decimal,     # summed over all its items
                   "in_stock_before_items": int,          # its items in stock on 30 of the 90 days before the cut
                   "compared_items": int, "compared_before_week": Decimal, "compared_since_week": Decimal,
+                  "age_days": int, "too_soon": bool,     # under 14 days old: no share sold, no change
                   "change": Decimal | None}],            # one per cut date in the last 180 days, newest first;
                                                          # change = compared since ÷ compared before
      "trend": [{"month_end": date, "over_180_value": Decimal, "value": Decimal, "share": Decimal | None,
@@ -61,8 +64,11 @@ DEFINITIONS (D = the ledger's last day; "the N days to D" = D-(N-1) to D, both i
     cut dated in the 180 days to D.
   * Sellable = stockflow's pool at the end of D: the main store, the vans, the outlets and goods moving between
     them; damage and samples left out (the basis of the owner's review). Main = the main store (the ledger).
-  * Pace: with a cut dated in the 120 days to D, the units sold from the cut to D over those days; else the
-    units sold in the 30 days to D over 30. A week = units x 7 / days. Days to clear = sellable / (units a day).
+  * Pace: with a cut dated in the 120 days to D and at least 14 days old (D - cut >= 14), the units sold from
+    the cut to D over those days; else the units sold in the 30 days to D over 30. A week = units x 7 / days.
+    Days to clear = sellable / (units a day). A cut younger than 14 days is too soon to judge: the 30-day pace
+    stands, and neither the item nor its batch shows a share sold or a pace change ("too soon to judge the
+    cut (N days)"); the batch's statuses rest on the 30-day pace.
   * Status: Cleared (no sellable stock), else Not moving (none sold in the pace window), else On track (clears
     within clear_days), else Slow. Push = sellable / clear_days x 7, to 6 decimals, then up to a whole unit,
     for Slow and Not moving only (90 -> 7, 91 -> 8 at 90 days).
@@ -93,6 +99,7 @@ Q1 = Decimal("0.1")
 
 PACE_DAYS = 30            # an item with no recent cut: its pace is the units sold in the 30 days to D
 CUT_PACE_DAYS = 120       # a cut dated in the 120 days to D sets the pace: the units sold since it
+CUT_MIN_DAYS = 14         # ... once it is 14 days old (D - cut): a younger cut is too soon to judge, the 30-day pace stands
 CUT_REVIEW_DAYS = 180     # a cut dated in the 180 days to D puts the item on the review and makes a batch
 BEFORE_DAYS = 90          # the pace before a cut: the units sold in the 90 days before it
 IN_STOCK_BEFORE_DAYS = 30  # ... compared with the pace since only for an item in stock on 30 of those days
@@ -107,8 +114,9 @@ STATUS_ORDER = (NOT_MOVING, SLOW, ON_TRACK, CLEARED)          # how the rows are
 
 EXPLAIN_LINES = (
     "  Sellable = the main store, the vans, the outlets and goods moving between them; damage and samples left out.",
-    f"  A week = units sold since the item's price cut when it fell in the last {CUT_PACE_DAYS} days, else in the "
-    f"last {PACE_DAYS} days; days to clear = sellable / that pace; push = sellable / {{clear}} x 7 a week, rounded up.",
+    f"  A week = units sold since the item's price cut when it fell in the last {CUT_PACE_DAYS} days and at least "
+    f"{CUT_MIN_DAYS} days ago (a younger cut is too soon to judge), else in the last {PACE_DAYS} days; days to clear = "
+    "sellable / that pace; push = sellable / {clear} x 7 a week, rounded up.",
     f"  Before a week = units a week in the {BEFORE_DAYS} days before the cut ('not in stock before' when the item was "
     f"in stock on fewer than {IN_STOCK_BEFORE_DAYS} of them); sold since cut = units sold since it, and their share of "
     "the stock at the cut plus what was received since.",
@@ -178,7 +186,9 @@ def _row(it, flow, d: date, clear: int, over_180: Decimal, cut: dict | None) -> 
     from scripts.ops import stock as _stock
     sellable = flow.sellable_at(d)
     left = max(sellable, ZERO)
-    if cut is not None and cut["date"] >= d - timedelta(days=CUT_PACE_DAYS - 1):
+    cut_age = (d - cut["date"]).days if cut is not None else None
+    too_soon = cut_age is not None and cut_age < CUT_MIN_DAYS
+    if cut is not None and not too_soon and cut["date"] >= d - timedelta(days=CUT_PACE_DAYS - 1):
         basis, first = "cut", cut["date"]
     else:
         basis, first = "30 days", d - timedelta(days=PACE_DAYS - 1)
@@ -197,12 +207,12 @@ def _row(it, flow, d: date, clear: int, over_180: Decimal, cut: dict | None) -> 
         in_stock_before = sum(1 for n in range(BEFORE_DAYS) if flow.sellable_at(first_before + timedelta(days=n)) > 0)
         sold_since = max(_stock.sold_between(it, day, d), ZERO)
         since_week = sold_since * SEVEN / ((d - day).days + 1)
-        if in_stock_before >= IN_STOCK_BEFORE_DAYS and before >= BEFORE_MIN_UNITS:
+        if not too_soon and in_stock_before >= IN_STOCK_BEFORE_DAYS and before >= BEFORE_MIN_UNITS:
             change = since_week / before_week
         stock_at_cut = flow.sellable_at(day - timedelta(days=1))
         received = sum((units for on, _voucher, units, _value in it.receipts if day <= on <= d), ZERO)
         available = max(stock_at_cut, ZERO) + received
-        pct_sold = sold_since / available if available > 0 else None
+        pct_sold = sold_since / available if available > 0 and not too_soon else None
 
     push = push_per_week(sellable, clear) if status in (SLOW, NOT_MOVING) else None
     if push is not None:
@@ -213,7 +223,7 @@ def _row(it, flow, d: date, clear: int, over_180: Decimal, cut: dict | None) -> 
                      key=lambda x: (-x[1], str(x[0])))[:SELLERS_KEPT]
     return {"item": it, "sellable": sellable, "main": it.on_hand, "over_180": over_180,
             "value": left * it.cost if it.cost is not None else None, "last_sale": it.last_sale,
-            "cut": dict(cut) if cut is not None else None,
+            "cut": dict(cut) if cut is not None else None, "cut_age_days": cut_age, "too_soon": too_soon,
             "pace_basis": basis, "pace_days": pace_days, "pace_units": units, "pace_week": pace_week,
             "days_to_clear": days_to_clear, "status": status,
             "before_week": before_week, "before_units": before if cut is not None else None,
@@ -278,8 +288,10 @@ def batches(rows: list[dict], d: date) -> list[dict]:
     out = []
     for day in sorted(by_date, reverse=True):
         b = by_date[day]
+        b["age_days"] = (d - day).days
+        b["too_soon"] = b["age_days"] < CUT_MIN_DAYS     # its statuses rest on the 30-day pace; no verdict yet
         available = b["stock_at_cut"] + b["received_since"]
-        b["pct_sold"] = b["sold"] / available if available > 0 else None
+        b["pct_sold"] = b["sold"] / available if available > 0 and not b["too_soon"] else None
         b["change"] = b["compared_since_week"] / b["compared_before_week"] if b["compared_items"] else None
         out.append(b)
     return out
@@ -381,8 +393,15 @@ def _sold_words(sold, stock_at_cut, received) -> str:
     return f"{fmt.pct(sold, available)} of the stock at the cut{extra} sold since"
 
 
+def _too_soon_words(age_days: int) -> str:
+    from scripts.ops import stock as _stock
+    return f"too soon to judge the cut ({_stock._plural(age_days, 'day')})"
+
+
 def _batch_pace(b: dict, cell: bool = False) -> str:
     """The batch's pace since against before: over the items it can be compared on (in stock and selling before)."""
+    if b["too_soon"]:
+        return "too soon to judge" if cell else _too_soon_words(b["age_days"])
     if b["change"] is not None:
         part = b["compared_items"] < b["items"]
         if cell:
@@ -397,8 +416,9 @@ def _batch_pace(b: dict, cell: bool = False) -> str:
 def _batch_words(b: dict, d: date) -> str:
     from scripts.ops import stock as _stock
     k = b["counts"]
-    return (f"Price cut {_stock._date_short(b['date'], d)} ({_stock._plural(b['items'], 'item')}): "
-            f"{_sold_words(b['sold'], b['stock_at_cut'], b['received_since'])}; {_batch_pace(b)}; "
+    verdict = (_batch_pace(b) if b["too_soon"]          # the statuses still stand, on the 30-day pace
+               else f"{_sold_words(b['sold'], b['stock_at_cut'], b['received_since'])}; {_batch_pace(b)}")
+    return (f"Price cut {_stock._date_short(b['date'], d)} ({_stock._plural(b['items'], 'item')}): {verdict}; "
             f"{k[CLEARED]} cleared, {k[ON_TRACK]} on track, {k[SLOW]} slow, {k[NOT_MOVING]} not moving")
 
 
@@ -449,6 +469,8 @@ def _sold_cell(r: dict) -> str:
     if r["cut"] is None:
         return ""
     sold, available = r["sold_since_cut"], _available(r["stock_at_cut"], r["received_since_cut"])
+    if r["too_soon"]:
+        return f"{fmt.units(sold)} (too soon)"
     return fmt.units(sold) + (f" ({fmt.pct(sold, available)})" if available > 0 else "")
 
 
@@ -477,10 +499,12 @@ def review_lines(facts: dict, model) -> list[str]:
         rows = []
         for b in facts["batches"]:
             k = b["counts"]
+            soon = b["too_soon"]                       # no share sold and no pace since on a few days
             rows.append([_stock._date_short(b["date"], d), str(b["items"]), str(k[CLEARED]), str(k[ON_TRACK]),
                          str(k[SLOW]), str(k[NOT_MOVING]), fmt.units(b["stock_at_cut"]), fmt.units(b["received_since"]),
-                         fmt.units(b["sold"]), fmt.pct(b["sold"], _available(b["stock_at_cut"], b["received_since"])),
-                         _week(b["before_week"]), _week(b["since_week"]), _batch_pace(b, cell=True)])
+                         fmt.units(b["sold"]),
+                         "-" if soon else fmt.pct(b["sold"], _available(b["stock_at_cut"], b["received_since"])),
+                         _week(b["before_week"]), "-" if soon else _week(b["since_week"]), _batch_pace(b, cell=True)])
         lines += _stock._indent(fmt.grid(["Price cut", "Items", "Cleared", "On track", "Slow", "Not moving",
                                           "Stock at cut", "Received since", "Sold since", "Sold", "Before a week",
                                           "Since a week", "Pace"], rows, "lrrrrrrrrrrrr"), "    ")
@@ -541,7 +565,10 @@ def item_lines(facts: dict, ledger_name: str) -> list[str]:
         first = f"  Ageing review: {row['status']}; {stock_words}; {pace}; {row['action'][0].lower()}{row['action'][1:]}"
     lines = [first]
     cut = row["cut"]
-    if cut is not None:
+    if cut is not None and row["too_soon"]:
+        lines.append(f"  Price cut {_stock._date_short(cut['date'], d)}: {fmt.bhd(cut['was'])} to {fmt.bhd(cut['now'])} "
+                     f"({fmt.pct(cut['now'] - cut['was'], cut['was'])}); {_too_soon_words(row['cut_age_days'])}")
+    elif cut is not None:
         if row["change"] is not None:
             pace = f"{_times(row['change'])} the pace of the {BEFORE_DAYS} days before"
         elif row["in_stock_before_days"] < IN_STOCK_BEFORE_DAYS:

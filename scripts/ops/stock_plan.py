@@ -15,18 +15,19 @@ CONTRACT (scripts.ops.stock and the workbook rely on it)
       fl         stockflow.Flows (with vans: sellable_at(d) - the main store; damage_at(d))
       catalog    catalog_items rows [{code, display_name, category, brand, division, is_active, hidden}] or None
       po_vendor  {code: vendor of its newest purchase order} or None
-    {"suppliers": {ledger name: {"name": str, "basis": "config" | "catalog" | "purchase order" | "none"}},
+    {"suppliers": {ledger name: {"name": str, "basis": "config" | "purchase order" | "catalog" | "none"}},
      "order": [order row of facts["order"] + {"supplier": str}],      # by supplier, then most urgent first
      "supplier_totals": [{"supplier", "items", "units", "value", "uncosted"}],
-     "all_items": [{"item": Item | None, "code", "name", "category", "supplier", "status",
+     "all_items": [{"item": Item | None, "code", "name", "category", "supplier", "supplier_basis", "status",
                     "main", "with_vans", "damage", "on_order", "sold_30", "sold_90", "sold_365",
                     "rate": Rate | None, "cover": Decimal | None, "value": Decimal | None,
                     "oldest_days": int | None, "last_sale", "last_receipt", "rank",
                     "active": bool | None, "hidden": bool | None, "catalog_only": bool}],
      "statuses": {status: count}, "catalog_items": int, "catalog_only": int, "catalog_read": bool}
-      Status, the first that holds: Display / Not in main store yet (catalog only) / New arrival / Sold out
-      (none on hand, sold in 90 days) / Order now (on the order list) / No stock, no sale / No sale 90 d /
-      Overstock (cover over 180 days) / OK.
+      Status, the first that holds (also the order they sort in): Display / Not in main store yet (catalog
+      only) / Sold out (none on hand, sold in 90 days) / Order now (on the order list) / New arrival / No
+      stock, no sale / No sale 90 d / Overstock (cover over 180 days) / OK.
+  suppliers_of(items, cfg, catalog, po_vendor) -> {ledger name: (supplier, basis)}      the same ladder, for stock
   supplier_of(facts, ledger_name) -> str
   facts_json(facts) -> dict
 
@@ -34,11 +35,14 @@ HOW IT DECIDES
   * The catalog counts only for the accessories: a row whose division is blank or "Accessories" (any
     case); a row of another division (devices) is left out of every figure. A code is a row once.
   * The supplier of an item is the first that answers: config 'stock.suppliers' (basis "config"), the
-    brand of its catalog row ("catalog"), the vendor of its newest purchase order ("purchase order"),
-    else "Other" ("none"). A name has its spaces collapsed and then passes through config
-    'stock.supplier_aliases' (the spelling is compared folded: case and spaces ignored). The catalog
-    brand defaults to VFAN, so most items say VFAN until config or a purchase order says otherwise.
-    A catalog code no item has moved in the main store is judged the same way.
+    vendor of its newest purchase order ("purchase order"), the brand of its catalog row ("catalog"),
+    else "Other" ("none"). The brand comes after the order because the catalog gives every catalogued
+    item the brand VFAN by default: it says who supplies an item only where nothing better does. A name
+    has its spaces collapsed and then passes through config 'stock.supplier_aliases' (the spelling is
+    compared folded: case and spaces ignored). A catalog code no item has moved in the main store is
+    judged the same way; every row of all_items names the basis it rests on (supplier_basis).
+  * A new arrival that has sold out, or has to be ordered, is shown as that (Sold out, Order now): the
+    first-received date only labels an item that needs nothing done.
   * The order list is facts["order"] with each row's supplier, by supplier name (alphabetical, "Other"
     last), the urgency order of facts["order"] kept inside a supplier; the totals follow that order.
   * all_items holds every model item (display items too) and every accessory code of the catalog that
@@ -49,7 +53,7 @@ HOW IT DECIDES
     daily rate counts them). cover = the main store's units over the daily rate (None without a rate);
     value = the main store's units at the item's unit cost (None where it has none). oldest_days = the
     age of the oldest unit on hand on its supplier receipt (None when no receipt explains it).
-    Sorted by supplier ("Other" last), then by the order of the statuses above, then by name.
+    Sorted by supplier ("Other" last), then by the order of the statuses above (STATUS_ORDER), then by name.
   * An item with no category in the catalog takes the category its code gives by itself
     (scripts.ops.workbook.categories.by_code), else none.
 """
@@ -62,10 +66,10 @@ Q6 = Decimal("0.000001")
 ZERO = Decimal(0)
 
 OTHER = "Other"                                    # the supplier of an item nothing names
-DISPLAY, NOT_YET, NEW, SOLD_OUT, ORDER_NOW, NO_STOCK, NO_SALE, OVERSTOCK, OK = (
-    "Display", "Not in main store yet", "New arrival", "Sold out", "Order now", "No stock, no sale", "No sale 90 d",
-    "Overstock", "OK")
-STATUS_ORDER = (DISPLAY, NOT_YET, NEW, SOLD_OUT, ORDER_NOW, NO_STOCK, NO_SALE, OVERSTOCK, OK)   # the rule's and the sort's
+# The statuses in the order of the rule (the first that holds) and of the sort.
+STATUS_ORDER = ("Display", "Not in main store yet", "Sold out", "Order now", "New arrival", "No stock, no sale",
+                "No sale 90 d", "Overstock", "OK")
+DISPLAY, NOT_YET, SOLD_OUT, ORDER_NOW, NEW, NO_STOCK, NO_SALE, OVERSTOCK, OK = STATUS_ORDER
 WINDOWS = (30, 90, 365)                            # sold_30, sold_90, sold_365: that many days to the data date
 ACCESSORY_DIVISIONS = ("", "accessories")          # a catalog division (folded) that counts as an accessory
 
@@ -129,8 +133,9 @@ def _accessories(catalog, code_key) -> dict | None:
 
 
 def _supplier_picker(cfg, book, po_vendor, st):
-    """pick(code key) -> (supplier name, basis): config, then the catalog's brand, then the newest purchase
-    order's vendor, else Other; each name collapsed and passed through the aliases."""
+    """pick(code key) -> (supplier name, basis): config, then the newest purchase order's vendor, then the
+    catalog's brand (VFAN for every catalogued item unless set), else Other; each name collapsed and passed
+    through the aliases."""
     fold, code_key = st.fold, st.code_key
     aliases = {fold(k): _clean(v) for k, v in (cfg.supplier_aliases or {}).items() if fold(k) and _clean(v)}
     configured = {code_key(k): _clean(v) for k, v in (cfg.suppliers or {}).items() if code_key(k) and _clean(v)}
@@ -142,7 +147,7 @@ def _supplier_picker(cfg, book, po_vendor, st):
 
     def pick(key: str) -> tuple[str, str]:
         brand = (book or {}).get(key, {}).get("brand")
-        for text, basis in ((configured.get(key), "config"), (brand, "catalog"), (ordered.get(key), "purchase order")):
+        for text, basis in ((configured.get(key), "config"), (ordered.get(key), "purchase order"), (brand, "catalog")):
             name = named(text)
             if name:
                 return name, basis
@@ -155,13 +160,13 @@ def _status(it, rate, cover, listed, d, st) -> str:
     """The first status that holds (STATUS_ORDER), for an item of the model."""
     if it.display:
         return DISPLAY
-    if st.is_new(it, d):
-        return NEW
     selling = rate is not None and rate.rate > 0
     if it.on_hand <= 0 and selling:
-        return SOLD_OUT
+        return SOLD_OUT                              # a new arrival that has sold out is sold out
     if it.ledger_name in listed:
-        return ORDER_NOW
+        return ORDER_NOW                             # ... and one that has to be ordered, to be ordered
+    if st.is_new(it, d):
+        return NEW
     if it.on_hand <= 0:
         return NO_STOCK                              # nothing on hand, and (Sold out came first) no sale
     if not selling:
@@ -172,6 +177,14 @@ def _status(it, rate, cover, listed, d, st) -> str:
 
 
 # ── the plan ──────────────────────────────────────────────────────────────────
+
+def suppliers_of(items, cfg, catalog, po_vendor) -> dict[str, tuple[str, str]]:
+    """{ledger name: (supplier, basis)} for these items, by the same ladder as plan_facts: the order rule reads
+    it first (each supplier has its own lead time and rhythm), before there is a plan to read it from."""
+    st = _stock()
+    pick = _supplier_picker(cfg, _accessories(catalog, st.code_key), po_vendor, st)
+    return {it.ledger_name: pick(st.code_key(it.code)) for it in items}
+
 
 def plan_facts(model, fl, catalog, po_vendor) -> dict:
     """The supplier of every item, the order list by supplier with its totals, and every item with its status
@@ -205,7 +218,7 @@ def plan_facts(model, fl, catalog, po_vendor) -> dict:
         category = (_clean(cat.get("category")) if cat is not None else "") or category_of(it.code) or ""
         rows.append({
             "item": it, "code": it.code or "", "name": it.name, "category": category,
-            "supplier": name, "status": _status(it, rate, cover, listed, d, st),
+            "supplier": name, "supplier_basis": basis, "status": _status(it, rate, cover, listed, d, st),
             "main": it.on_hand,
             "with_vans": (flow.sellable_at(d) - it.on_hand) if flow is not None else ZERO,
             "damage": flow.damage_at(d) if flow is not None else ZERO,
@@ -223,11 +236,11 @@ def plan_facts(model, fl, catalog, po_vendor) -> dict:
     only = sorted(key for key in (book or {}) if key not in moved)
     for key in only:
         cat = book[key]
-        name, _basis = pick(key)
+        name, basis = pick(key)
         rows.append({
             "item": None, "code": key, "name": _clean(cat.get("display_name")) or key,
             "category": _clean(cat.get("category")) or category_of(key) or "",
-            "supplier": name, "status": NOT_YET,
+            "supplier": name, "supplier_basis": basis, "status": NOT_YET,
             "main": ZERO, "with_vans": ZERO, "damage": ZERO, "on_order": ZERO,
             "sold_30": ZERO, "sold_90": ZERO, "sold_365": ZERO,
             "rate": None, "cover": None, "value": None, "oldest_days": None,

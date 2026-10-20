@@ -222,7 +222,7 @@ def _():
         "  This month: 3 sent to damage, nothing sold yet",
         "  To check: 3 units sent to damage were not booked in there after 7 days (1 item)",
         f"  Nothing has left the damage store since {fmt.day(date(2025, 11, 1))} 2025: no write-off, claim or return is "
-        "booked"], head                                                       # 1 Nov 2025: the year before D, so the year is printed
+        "booked"], head                                                       # 1 Nov 2025: the year before D
     lines = stock_damage.damage_lines(f, model)                              # no cost: "n/a"; nothing sold: no rate
     assert has_row(lines, "ITEM-S Test S", "TS", "9", "n/a", "0", "n/a")
     assert has_row(lines, "ITEM-T Test T", "TT", "0", "0.000", "3", "n/a")
@@ -343,7 +343,7 @@ def _():
 @test("not booked: units sent up to 7 days before D less units booked by D; a late receive leg is not listed")
 def _():
     d = date(2026, 3, 15)                             # D - 7 = Sun 8 Mar
-    it = {t: mk_item(t) for t in ("G0", "G1", "G2", "G3", "G4", "G5", "G6")}
+    it = {t: mk_item(t) for t in ("G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7")}
     b = Book()
     b.to_damage(it["G0"].ledger_name, date(2026, 3, 1), 5, booked=False)             # 5 sent on 1 Mar, never booked: listed
     b.to_damage(it["G1"].ledger_name, date(2026, 3, 8), 5, booked=False)             # sent on D - 7 exactly: listed
@@ -354,6 +354,7 @@ def _():
     b.to_damage(it["G4"].ledger_name, date(2026, 3, 14), 3, booked=False)             # 3 more, but too new to list
     b._row(it["G5"].ledger_name, date(2026, 3, 3), ledger.COUNT_OVER, DAMAGE, "EX:T-1", qin=3)   # booked, never sent
     b.to_damage(it["G6"].ledger_name, date(2026, 3, 12), 6, booked_on=date(2026, 3, 14))          # two days late: not listed
+    b.to_damage(it["G7"].ledger_name, date(2026, 3, 8), 4)                            # sent and booked on D - 7: cleared
     backwards = list(reversed(list(it.values())))                                      # the order must not decide the ties
     f, _m = facts_for(backwards, b, d)
     got = [(x["item"].code, x["units"], x["last_sent"]) for x in f["not_booked"]]
@@ -365,6 +366,59 @@ def _():
     # two days later the 9 Mar issue is a week old: G2 joins (4); G4 stays at 6 (D - 7 = 10 Mar: its 14 Mar issue is not due)
     f2, _m = facts_for(backwards, b, date(2026, 3, 17))
     assert [(x["item"].code, x["units"]) for x in f2["not_booked"]] == [("TG4", 6), ("TG0", 5), ("TG1", 5), ("TG2", 4)]
+
+
+@test("not booked: the week's bookings are matched to the week's sends first; a booked new transfer hides no old one")
+def _():
+    d = date(2026, 3, 15)                             # D - 7 = 8 Mar; the grace window is 9 Mar to 15 Mar, both included
+    tags = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8")
+    it = {t: mk_item(t) for t in tags}
+    name = {t: it[t].ledger_name for t in tags}
+    b = Book()
+    # R1, the review's case: 10 sent on D - 10 and never received; 10 sent on D - 3, received on D - 2. Sent up to
+    # D - 7 (10) less booked up to D (10) was 0 and hid it; the 10 booked this week belong to the 10 sent this week.
+    b.to_damage(name["R1"], date(2026, 3, 5), 10, booked=False)
+    b.to_damage(name["R1"], date(2026, 3, 12), 10, booked_on=date(2026, 3, 13))
+    # R2: the same 10 sent on D - 10, its own receive leg posted late, on D - 2; nothing sent this week: cleared
+    b.to_damage(name["R2"], date(2026, 3, 5), 10, booked_on=date(2026, 3, 13))
+    # R3: 10 old never received; 4 sent on D - 3 and received on D - 2, and 6 more booked straight in on D - 1 (a
+    # return): the week's sends explain 4 of the 10 booked, the other 6 clear older units, 4 stay listed
+    b.to_damage(name["R3"], date(2026, 3, 5), 10, booked=False)
+    b.to_damage(name["R3"], date(2026, 3, 12), 4, booked_on=date(2026, 3, 13))
+    b._row(name["R3"], date(2026, 3, 14), ledger.COUNT_OVER, DAMAGE, "EX:T-2", qin=6)
+    # R4: the window ends on D itself: sent on D - 1, received on D
+    b.to_damage(name["R4"], date(2026, 3, 5), 10, booked=False)
+    b.to_damage(name["R4"], date(2026, 3, 14), 10, booked_on=date(2026, 3, 15))
+    # R5: the window starts on D - 6: sent and received on 9 Mar
+    b.to_damage(name["R5"], date(2026, 3, 5), 10, booked=False)
+    b.to_damage(name["R5"], date(2026, 3, 9), 5)
+    # R6: D - 7 itself is old, not part of the window: sent and received on 8 Mar, nothing to list
+    b.to_damage(name["R6"], date(2026, 3, 8), 4)
+    # R7: 10 sent on D - 10 and received on D - 7 (the day before the window); 6 more sent this week, not yet booked
+    b.to_damage(name["R7"], date(2026, 3, 5), 10, booked_on=date(2026, 3, 8))
+    b.to_damage(name["R7"], date(2026, 3, 12), 6, booked=False)
+    # R8: 6 sent on 10 Feb and booked at once; 2 sent this week, not yet booked: the 6 are not unbooked for that
+    b.to_damage(name["R8"], date(2026, 2, 10), 6)
+    b.to_damage(name["R8"], date(2026, 3, 12), 2, booked=False)
+    f, model = facts_for(list(reversed(list(it.values()))), b, d)
+    got = [(x["item"].code, x["units"], x["last_sent"]) for x in f["not_booked"]]
+    # R1, R4 and R5 hold 10 each (by name), then R3's 4; the oldest issue of all four is 5 Mar
+    assert got == [("TR1", 10, date(2026, 3, 5)), ("TR4", 10, date(2026, 3, 5)), ("TR5", 10, date(2026, 3, 5)),
+                   ("TR3", 4, date(2026, 3, 5))], got
+    assert f["not_booked_units"] == 34
+    lines = stock_damage.damage_lines(f, model)
+    assert ("  To check: 34 units sent to damage were not booked in there after 7 days (4 items)"
+            in stock_damage.headline_lines(f))
+    assert ("NOT BOOKED  34 units of 4 items sent to damage over 7 days ago are not booked in the damage store: to check"
+            in lines)
+    assert has_row(lines, "ITEM-R1 Test R1", "TR1", "10", "05 Mar") and has_row(lines, "ITEM-R3 Test R3", "TR3", "4", "05 Mar")
+    table = lines[[i for i, ln in enumerate(lines) if ln.startswith("NOT BOOKED")][0]:]       # below its heading only
+    assert sorted(ln.split()[0] for ln in table if ln.strip().startswith("ITEM-R")) == [
+        "ITEM-R1", "ITEM-R3", "ITEM-R4", "ITEM-R5"]                                             # R2, R6, R7, R8 are not listed
+    # a week later the sends of this week are old themselves, and what stayed unbooked of them is listed
+    f2, _m = facts_for(list(it.values()), b, date(2026, 3, 22))
+    later = {x["item"].code: x["units"] for x in f2["not_booked"]}
+    assert later == {"TR1": 10, "TR3": 4, "TR4": 10, "TR5": 10, "TR7": 6, "TR8": 2}, later      # R7's 6 and R8's 2 are due now
 
 
 @test("nothing left: a write-off or a return to the main store ends it; with nothing booked there is no such line")
@@ -425,7 +479,8 @@ def _():
     assert has_row(lines, "ITEM-Y Test Y", "TY", "3", "01 Mar")
     assert lines[0].startswith("DAMAGE  Damage Store, ledger to Sun 15 Mar: ")     # D itself is in D's year
     # the edge of the year: 31 Dec 2025 has its year, 1 Jan 2026 has not
-    assert screens(date(2025, 12, 31), date(2026, 1, 2))[1][-1] == "  Nothing has left the damage store since Wed 31 Dec 2025" + tail
+    head = screens(date(2025, 12, 31), date(2026, 1, 2))[1]
+    assert head[-1] == "  Nothing has left the damage store since Wed 31 Dec 2025" + tail
     f, head, _l = screens(date(2026, 1, 1), date(2026, 1, 2))
     assert head[-1] == "  Nothing has left the damage store since Thu 01 Jan" + tail
     # facts with no data date to compare with (made by hand): the year is always printed
@@ -574,7 +629,7 @@ def _():
     assert len(f["by_item"]) == 17 and len(f["not_booked"]) == 17 and f["not_booked_units"] == 85
     assert sum(1 for ln in lines if ln.strip().startswith("ITEM-")) == 30 and lines.count("  (+2 more)") == 2
     assert any("ITEM-15 Test 15" in ln for ln in lines) and not any("ITEM-16 Test 16" in ln for ln in lines)
-    kept = stock_damage.facts_json(f)                                        # the file keeps every row, whatever the screen shows
+    kept = stock_damage.facts_json(f)                                        # the file keeps every row the screen cuts
     assert len(kept["by_item"]) == 17 and len(kept["not_booked"]) == 17
 
 

@@ -58,6 +58,8 @@ FIXTURE = {
     "warehouses.not_counted": [], "report.category_names": {}, "report.prepared_by": "",
     "stock.fast_movers": 3, "stock.cover_kpi_days": [10, 20], "stock.clear_target_days": 30,
     "stock.suppliers": {}, "stock.supplier_aliases": {}, "warehouses.damage": "",
+    "stock.order_every_days": 30, "stock.supplier_every_days": {}, "stock.supplier_lead_days": {},
+    "stock.season_lift": {}, "stock.pack_sizes": {},
 }
 
 

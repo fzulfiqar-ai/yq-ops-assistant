@@ -16,7 +16,7 @@ So the pool is
   + units issued from a store outside it to the pool,
 and a receive leg is never read for it. Goods issued and not yet received stay in the pool, which is
 what "goods moving between them" means. An issue that names no destination stays in the pool too, and
-is counted (no_destination) so a screen can say so.
+is counted (no_destination), for the record.
 
 THE DAMAGE STORE. Sent = units issued to it, from any store, by the issue date (the day someone found
 them damaged), with where they came from: the main store, or elsewhere (a van, an outlet, another

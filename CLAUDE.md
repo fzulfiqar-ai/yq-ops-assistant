@@ -1,5 +1,5 @@
 ## Where am I?
-- If the working folder path contains `.claude/worktrees/` (backslashes on Windows), this is a code worktree. The main-folder rules below do not apply: work on your branch as usual. Never run /yq-load, scripts.refresh, scripts.load_supabase, scripts.apply_sql or a deploy script from here: the main folder's `.env` is found automatically, so they would reach production.
+- If the working folder path contains `.claude/worktrees/` (backslashes on Windows), this is a code worktree. The main-folder rules below do not apply: work on your branch as usual. Never run /yq-load, scripts.refresh, scripts.load_supabase, scripts.apply_sql or a deploy script from here: the main folder's `.env` is found automatically, so they would reach production. A stock run here makes no day file unless `--data-root` names another folder (the file belongs to the main folder).
 - Otherwise, if this folder holds `business_data/` and the drop folder (`Uplaods/`, or `Uploads/`), it is the main project folder. It stays on branch `main`; code changes are made in worktrees.
 - Any other checkout (another clone, a worktree somewhere else) is a code checkout too: work on your branch as usual and run none of the commands named in the first rule.
 
