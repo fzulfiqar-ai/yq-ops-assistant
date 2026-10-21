@@ -10,7 +10,8 @@ the Data sheet is the week key, 7*ROUNDUP(A/7,0): the serial number of a Saturda
 it is the Saturday that ends the line's week, and the Salesmen sheet's five weekly columns add up on it.
 Accounts are counted with three flags on the Data sheet: once per account and week (the week, and the
 four weekly counts of the average), once per account and month (the month to date), once per account in
-the same days last month.
+the same days last month. Column V is v_sales' giveaway flag: such a line's type is Giveaway, so it counts in
+no units, invoices or accounts (as /yq-brief leaves it out), while its value stays in every total.
 
 THE IDIOM is the monthly report's (sheets_core.py): every position follows the list lengths, every figure
 is a formula written with the value book.evaluate() works out from it, the formats are the Sep 2026 file's.
@@ -169,6 +170,12 @@ class WeekFacts:
     kpi_step: float = 0           # the KPI step in force for the Saturday's month; nought when none is set
     parts: dict = field(default_factory=dict)       # name -> Part (PARTS)
     outlets: tuple = ("Causeway", "YQ Roadshow")
+    giveaways: frozenset = frozenset()              # line_key of each line v_sales marks is_giveaway
+
+
+def line_key(ln: mdl.Line) -> tuple:
+    """One day-book line, as the Data sheet holds it: its day, its invoice, its line number and its item."""
+    return (ln.sale_date, ln.invoice, ln.line_no, ln.item)
 
 
 # the parts of the file beside the sales, in the order of the Notes table
@@ -246,7 +253,7 @@ def build(model: mdl.Model, facts: WeekFacts) -> Book:
     _daily(ws["Daily"])
     _extra(ws["Stock"], facts.parts.get("stock"))
     _extra(ws["Movements"], facts.parts.get("movements"))
-    _data(ws["Data"], model, lay)
+    _data(ws["Data"], model, lay, facts.giveaways)
     book.controls = _notes(ws["Notes"], book, model, lay, facts)
     book.commentary = {}                        # the comment lines are formulas: nothing waits for an approval
     return book
@@ -830,7 +837,7 @@ def _customers(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
         ws.formula(r, 9, sumifs("d_InvFlag", "wk", cust_), "int")
         ws.formula(r, 10, sumifs("d_InvFlag", "prev", cust_), "int")
         ws.formula(r, 11, f'IF(C{n}="Cash","Cash",IF(AND(J{n}>0,K{n}>0),"Both",IF(J{n}>0,"This week only",IF(K{n}>0,'
-                          f'"Not this week","Other days only"))))', "status")
+                          f'"Not this week",IF(OR(H{n}>0,I{n}>0),"Other days only","No invoice counted")))))', "status")
         ws.formula(r, 12, f'IF(C{n}="Cash","",SUMPRODUCT(--($E${f1}:$E${l1}>E{n}),--($C${f1}:$C${l1}="Account"))'
                           f'+SUMPRODUCT(--($E${f1}:E{n}=E{n}),--($C${f1}:C{n}="Account")))', "rank")
         ws.text(r, 13, mdl.account_label(name), "ref_td")
@@ -844,7 +851,8 @@ def _customers(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
     ws.formula(r, 6, f"E{tot}-F{tot}", "total_money_change")
     ws.text(r + 1, 1, "Customer names are as recorded in the ERP. Status: Both = invoiced in the week and in the four "
                       "weeks before; Not this week = in the four weeks before only (filter on it to list them); Other "
-                      "days only = invoiced on the same days last month alone.", "note")
+                      "days only = invoiced on the same days last month alone; No invoice counted = giveaway or handset "
+                      "lines only.", "note")
     for rule in style.change_rules():
         ws.cond(f"G{f1}:G{tot}", rule)
     _page(ws, landscape=True, fit=(1, 0), freeze=(5, 2), autofilter=f"B5:N{l1}", print_area=f"A1:L{ex(r + 1)}",
@@ -1061,16 +1069,16 @@ DATA_HEADERS = (("Date", "th"), ("Invoice", "th"), ("Customer", "th"), ("Item", 
                 ("Salesman / outlet", "data_th_calc"), ("Category", "data_th_calc"), ("VAT", "data_th_calc_r"),
                 ("Line type", "data_th_calc_indent"), ("Units", "data_th_calc_r"), ("Invoice flag", "data_th_calc_r"),
                 ("Week account flag", "data_th_calc_r"), ("Month account flag", "data_th_calc_r"),
-                ("Same days last month account flag", "data_th_calc_r"))
+                ("Same days last month account flag", "data_th_calc_r"), ("Giveaway (v_sales)", "th_r"))
 
 
-def _data(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
+def _data(ws: Sheet, model: mdl.Model, lay: Layout, giveaways: frozenset = frozenset()) -> None:
     ws.default_row = 16
     for c1, c2, w in ((0, 0, 11.7109375), (1, 1, 17.7109375), (2, 2, 44.7109375), (3, 3, 78.7109375),
                       (4, 4, 7.7109375), (5, 5, 8.7109375), (6, 7, 10.7109375), (8, 8, 29.7109375),
                       (9, 9, 30.7109375), (10, 10, 11.7109375), (11, 11, 10.7109375), (12, 12, 20.7109375),
                       (13, 13, 23.7109375), (14, 14, 9.7109375), (15, 15, 13.7109375), (16, 16, 8.7109375),
-                      (17, 19, 9.7109375), (20, 20, 13.7109375)):
+                      (17, 19, 9.7109375), (20, 21, 13.7109375)):
         ws.col(c1, c2, w)
     ws.row(3, 33.75)
     p = model.period
@@ -1078,7 +1086,9 @@ def _data(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
     ws.text(1, 0, f"ERP export for {COMPANY}, {span_text(p.data_first, p.end)}. Columns A to J are the export, tidied: "
                   f"invoice prefix removed, {mdl.CASH_ACCOUNT} spelt one way, the three empty columns dropped and "
                   f"customer ID numbers left out of the narration. Columns K to U are calculated; K is the Saturday "
-                  f"that ends the line's week (7 x ROUNDUP(date / 7, 0)).", "sheet_sub")
+                  f"that ends the line's week (7 x ROUNDUP(date / 7, 0)). Column V is v_sales' giveaway flag (1: the "
+                  f"Giveaway division or a zero-priced line): such a line counts in no units, invoices or accounts.",
+            "sheet_sub")
     for c, (head, f) in enumerate(DATA_HEADERS):
         ws.text(3, c, head, f)
     for i, ln in enumerate(model.lines):
@@ -1099,7 +1109,7 @@ def _data(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
         ws.formula(r, 12, f'SUBSTITUTE(I{n},WhSuffix,"")', "data_text")
         ws.formula(r, 13, f'IFERROR(INDEX(p_Cat,MATCH(D{n},p_Item,0)),"Unmapped")', "data_text")
         ws.formula(r, 14, f"G{n}-H{n}", "data_money")
-        ws.formula(r, 15, f'IF(N{n}=HandsetCat,"Handset","Accessory")', "data_indent")
+        ws.formula(r, 15, f'IF(N{n}=HandsetCat,"Handset",IF(V{n}=1,"Giveaway","Accessory"))', "data_indent")
         ws.formula(r, 16, f'IF(P{n}="Accessory",E{n},0)', "data_int")
         ws.formula(r, 17, f'IF(P{n}="Accessory",IF(COUNTIFS($B$5:B{n},B{n},$P$5:P{n},"Accessory")=1,1,0),0)', "data_int")
         acct = f'OR(C{n}=CashAcct,P{n}<>"Accessory")'
@@ -1109,7 +1119,8 @@ def _data(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
                    "data_int")
         ws.formula(r, 20, f'IF(OR(C{n}=CashAcct,P{n}<>"Accessory",A{n}<LmStart,A{n}>LmEnd),0,IF(COUNTIFS($C$5:C{n},'
                           f'C{n},$A$5:A{n},">="&LmStart,$A$5:A{n},"<="&LmEnd,$P$5:P{n},"Accessory")=1,1,0))', "data_int")
-    _page(ws, landscape=True, fit=(1, 0), freeze=(4, 2), autofilter=f"A4:U{ex(lay.data_last)}", repeat_rows=(3,))
+        ws.put(r, 21, 1 if line_key(ln) in giveaways else 0, "data_int")
+    _page(ws, landscape=True, fit=(1, 0), freeze=(4, 2), autofilter=f"A4:V{ex(lay.data_last)}", repeat_rows=(3,))
 
 
 # ── Notes ──────────────────────────────────────────────────────────────────────────────────────
@@ -1182,6 +1193,14 @@ def basis_paragraphs(model: mdl.Model, facts: WeekFacts) -> list[str]:
         out.append(f"{_join([it.code for it in model.not_counted])} handsets issued through "
                    f"{sc.issuers_of(model, items, facts.outlets)} carry no value in the day book ({lines_n:,} lines). "
                    "They are not accessories, so they are left out of units, invoice counts and product counts.")
+    given = [ln for ln in model.lines if line_key(ln) in facts.giveaways
+             and model.items[ln.item].category != cats.HANDSET]          # the handsets have their own paragraph
+    if given:
+        n = len(given)
+        out.append(f"{sc.words(n, capital=True)} line{'s' if n != 1 else ''} v_sales marks as giveaways (the Giveaway "
+                   f"division, or a zero-priced line) {'are' if n != 1 else 'is'} on the Data sheet, line type Giveaway: "
+                   f"{'they count' if n != 1 else 'it counts'} in no units, invoices or accounts, as /yq-brief leaves "
+                   f"{'them' if n != 1 else 'it'} out.")
     spellings = {ln.raw_customer for ln in model.lines if mdl.CASH_SPELLING.match(ln.raw_customer)}
     out.append(f"An account is any customer other than {mdl.CASH_ACCOUNT}, which covers unnamed cash sales."
                + (f" The {sc.words(len(spellings))} spellings of {mdl.CASH_ACCOUNT} in the ERP are treated as one."
@@ -1258,8 +1277,8 @@ def _notes(ws: Sheet, book: Book, model: mdl.Model, lay: Layout, facts: WeekFact
     ws.text(r, 1, "Definitions", "subhead")
     r += 1
     for term, meaning in (("Net sales", "Taxable value of sales invoice lines in BHD, excluding VAT."),
-                          ("Units", "Quantity of accessory items invoiced."),
-                          ("Invoices", "Sales invoices with at least one accessory line."),
+                          ("Units", "Quantity of accessory items invoiced, giveaway lines left out."),
+                          ("Invoices", "Sales invoices with at least one accessory line that is not a giveaway."),
                           ("Average invoice", "Net sales divided by invoices."),
                           ("Average unit price", "Net sales divided by units."),
                           ("Accounts invoiced", "Accounts with an accessory invoice in the window; for the four-week "

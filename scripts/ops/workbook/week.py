@@ -21,29 +21,39 @@ DAY and the day before it is the last complete one. A week is complete when its 
 
 READS, all read-only, through a Source (tests hand run() a stand-in): the data dates; the loaded sale day before
 a part day; the lines from the first day any window reaches to the Saturday, through the month report's own
-statement (build.LINES_SQL: v_sales, division not SIM and not Devices, every line, the zero-value ones too);
-each window's totals in a statement of their own (the Notes sheet's controls against the database); the
-Upcoming cards (their categories); and for the parts beside the sales, the stock model of /yq-stock (the
-stock ledger), /yq-moves, the purchases reconciliation and the KPI log, each only when it is there.
+statement (build.LINES_SQL: v_sales, division not SIM and not Devices, every line, the zero-value ones too) with
+one column more, v_sales' is_giveaway (LINES_SQL here); each window's totals in a statement of their own (the
+Notes sheet's controls against the database); the Upcoming cards (their categories); and for the parts beside
+the sales, the stock model of /yq-stock (the stock ledger), /yq-moves, the purchases reconciliation and the KPI
+log, each only when it is there.
+
+GIVEAWAYS. A line v_sales marks is_giveaway (the Giveaway division, or a zero-priced line with units) stays on the
+Data sheet with its value, every line counting in the controls against v_sales, but its line type is Giveaway, so
+it counts in no units, invoices or accounts: /yq-brief leaves those lines out (sales.BASIS_SQL), and the week's
+tiles are the brief's last full week.
 
 THE PARTS beside the sales. Each one that cannot be worked out this time reads one line in the file, "Not worked
-out this time (...)", and the rest of the file stands:
+out this time (...)", is 0 in the Notes sheet's table of parts and false in the build record; the rest stands:
   * Stock and Movements: the shared sheets (scripts.ops.workbook.sheets_extra: stock_totals / moves_totals, then
     stock_sheet / movements_sheet(ws, totals, heading)). A function is called with the arguments it names out
-    of what this report hands over (offered()); it is built on a trial book and evaluated there first; a sheet
-    that names an item or a voucher number is refused, since the file is forwarded and carries totals only.
+    of what this report hands over (offered()); totals that carry an "error" (the shared functions never raise:
+    they say why there) are a part not worked out; a sheet is built on a trial book and evaluated there first;
+    a sheet that names an item or a voucher number is refused, since the file is forwarded and carries totals only.
   * Actions, counts only: the fast movers out of stock at the end of the Saturday, the order list per supplier
     and the late goods on the way (the stock model, as on its own day: stock.build takes the Saturday as as_of
     when it can); the receipts missing papers (scripts.ops.recon_blocks.purchases, its rows' status PAPERS
-    MISSING); the transfers to check (scripts.ops.moves.audit, then exceptions, counted by kind); the counts due
-    (the calendar: the third Sunday-to-Thursday day counted back from the month's last day, and the quarter-end
-    full count); the receipts with no incoming check logged (the KPI log's receipt_check lines, once its writer,
-    scripts.ops.kpi_log, is there).
+    MISSING); the transfers to check (scripts.ops.moves.audit, then exceptions, counted by moves' kinds, in the
+    shared sheets' words); the counts due (the calendar: the third Sunday-to-Thursday day counted back from the
+    month's last day, and the quarter-end full count); the receipts with no incoming check logged (the KPI log's
+    receipt_check lines, once its writer, scripts.ops.kpi_log, is there).
 
-WRITES: the workbook under exports/reports/weekly/ (never over an existing file: the next free name, up to
-" (99)") and the build record exports/ops/<data date>/report-week-<Saturday>.json, for KPI seven: {kind,
-week_ending, data_date, file, built_at, built_on, due_date (the first config kpi.weekly_due_weekday after the
-week, Sunday while config has none), on_time, checks_ok, lines, parts}. Nothing else.
+WRITES, only from the project folder or a folder named with --data-root (a code worktree is refused before anything
+is read: the week's file and its record belong to the project folder): the workbook under exports/reports/weekly/
+(never over an existing file: the next free name, up to " (99)") and the build record for KPI seven, {kind,
+week_ending, data_date, file, built_at, built_on, due_date (the first config kpi.weekly_due_weekday after the week,
+Sunday while config has none), on_time, checks_ok, lines, parts}, at exports/ops/<data date>/report-week-<Saturday>
+.json; a later build of the same week on the same data date never replaces it (KPI seven reads the first build)
+but takes the next free report-week-<Saturday>.<n>.json, n from 2. Nothing else.
 """
 from __future__ import annotations
 
@@ -53,16 +63,20 @@ import inspect
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
 from scripts.ops import config, fmt, paths, sales, status, stock
-from scripts.ops.workbook import book as bk, build, categories as cats, formula as fx, model as mdl, sheets_week as sw
+from scripts.ops.workbook import book as bk, build, categories as cats, formula as fx, model as mdl
+from scripts.ops.workbook import sheets_extra as sx, sheets_week as sw
 from scripts.ops.workbook.sheets_week import Part
 
 REPORT_NAME = "YQ Bahrain - Mobile Accessories Weekly Report - Week ending {day}"
-RECORD_NAME = "report-week-{sat}.json"
+RECORD_NAME = "report-week-{sat}.json"            # the first build's record; a later one: report-week-<sat>.<n>.json
+WORKTREE_REFUSAL = ("This is a code worktree: the weekly workbook and its build record belong to the project folder "
+                    "(to try it, name another folder with --data-root).")
 EXTRA_MODULE = "scripts.ops.workbook.sheets_extra"
 MOVES_MODULE = "scripts.ops.moves"
 RECON_MODULE = "scripts.ops.recon_blocks"
@@ -76,10 +90,12 @@ STOCK_PARTS = ("fast", "order", "late")
 # the shared sheets: sheet, totals function, sheet function, its name in a sentence
 EXTRA = {"stock": ("Stock", "stock_totals", "stock_sheet", "the stock totals"),
          "movements": ("Movements", "moves_totals", "movements_sheet", "the movement totals")}
-# the watch rules of /yq-moves (the plan's register keys), as the Actions sheet names them
-WATCH_KINDS = {"xfer_open": "Not received after the deadline", "xfer_twins": "Identical issues, one receipt",
-               "qty_diff": "Received in other quantities", "xfer_elsewhere": "Received in another store",
-               "rcpt_orphan": "Receipt with no issue"}
+# what is to check on the transfers, by moves.exceptions' kind (moves.EXCEPTION_KINDS, in its order), in the words
+# of the shared Movements sheet (sheets_extra.EXCEPTION_WORDS), which has no row for the damage store's kind
+TRANSFER_KINDS = ("not_received", "damage_not_booked", "twins", "qty_differs", "elsewhere", "orphan")
+TRANSFER_WORDS = {**sx.EXCEPTION_WORDS, "damage_not_booked": "Not booked in by the damage store by its deadline"}
+# the week's lines: the month report's statement with v_sales' giveaway flag beside them (GIVEAWAYS)
+LINES_SQL = build.LINES_SQL.replace(" FROM v_sales v ", ", v.is_giveaway FROM v_sales v ", 1)
 # a Focus voucher or invoice number: letters, then -YY-MM-N (SI-YQ-26-10-123, YQ-26-09-2, SIO:X-26-01-1)
 VOUCHER = re.compile(r"\b[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})*-\d{2}-\d{2}-\d+\b")
 ANCHOR_SQL = ("SELECT (SELECT MAX(sale_date) FROM v_sales)::text AS focus_to, "
@@ -167,6 +183,13 @@ class WeekSource(build.Source):
     def anchors(self) -> dict:
         rows = db.rpc(ANCHOR_SQL)
         return rows[0] if rows else {}
+
+    def lines(self, first: date, last: date) -> list[dict]:
+        """The month report's lines with v_sales' is_giveaway beside them (LINES_SQL)."""
+        if LINES_SQL == build.LINES_SQL:            # the month's statement changed shape: say so, never read without it
+            raise RuntimeError("the month report's lines statement no longer reads FROM v_sales v: the weekly report "
+                               "cannot add the giveaway flag to it")
+        return db.rpc_params(LINES_SQL, [first.isoformat(), last.isoformat()])
 
     def prev_day(self, d: date) -> date | None:
         """The loaded sale day before D (the latest full sale day when D is a part day)."""
@@ -334,6 +357,8 @@ def extra_part(kind: str, period: mdl.Period, d: date, forbidden: dict) -> Part:
     try:
         mod = _module(EXTRA_MODULE, "the shared stock and movement sheets are not built yet")
         totals = call_with(_function(mod, totals_name, "the shared sheet module"), offered(period, d))
+        if isinstance(totals, Mapping) and totals.get("error"):    # the shared functions never raise: they say why
+            raise NotYet(f"{what}: {' '.join(str(totals['error']).split()).rstrip('.')}")
         trial = bk.Book()
         ws = trial.sheet(sheet_name)
         _function(mod, writer_name, "the shared sheet module")(ws, totals, heading)
@@ -400,12 +425,16 @@ def papers_part(rows: list, first: date, last: date) -> Part:
 
 
 def transfers_part(found: list, period: mdl.Period) -> Part:
+    """moves.exceptions' items counted by kind, in moves' order of kinds and the shared sheets' words (a register
+    key of /yq-watch read as the kind it stands for; a kind neither knows, in its own words, after them)."""
     kinds: Counter = Counter()
     for x in found:
-        kind = x.get("kind") if isinstance(x, dict) else getattr(x, "kind", None)
-        kinds[WATCH_KINDS.get(str(kind), str(kind or "other").replace("_", " "))] += 1
-    return Part(True, data={"first": period.start, "last": period.end,
-                            "kinds": sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))})
+        kind = str((x.get("kind") if isinstance(x, Mapping) else getattr(x, "kind", None)) or "other").strip().lower()
+        kinds[sx.EXCEPTION_ALIASES.get(kind, kind)] += 1
+    order = {k: i for i, k in enumerate(TRANSFER_KINDS)}
+    rows = [(TRANSFER_WORDS.get(k, k.replace("_", " ").capitalize()), n)
+            for k, n in sorted(kinds.items(), key=lambda kv: (order.get(kv[0], len(order)), kv[0]))]
+    return Part(True, data={"first": period.start, "last": period.end, "kinds": rows})
 
 
 def _number(text) -> str:
@@ -485,8 +514,9 @@ def build_week(period: mdl.Period, source, *, d: date, prepared_on: date, prepar
     if upcoming_note:
         model.warnings.append(upcoming_note)
     parts = gather_parts(period, d, source, model)
+    giveaways = frozenset(sw.line_key(ln) for ln in mdl.tidy([r for r in rows if r.get("is_giveaway") is True]))
     facts = sw.WeekFacts(totals=totals, prepared_on=prepared_on, prepared_by=prepared_by,
-                         kpi_step=float(kpi_step or 0), parts=parts)
+                         kpi_step=float(kpi_step or 0), parts=parts, giveaways=giveaways)
     book = sw.build(model, facts)
     errors = book.evaluate()
     if errors:
@@ -504,6 +534,21 @@ def target_path(period: mdl.Period) -> Path:
         if not bk.exists(p):
             return p
     raise FileExistsError(f"ninety-nine copies of {base} already exist in {folder}")
+
+
+def record_path(d: date, sat: date) -> Path:
+    """Where this build's record goes: report-week-<sat>.json for the first build of the week on this data date,
+    else the next free report-week-<sat>.<n>.json (n from 2): a record is never replaced, so KPI seven reads the
+    week's first build (scripts.ops.kpi_log.records, oldest build first)."""
+    folder = paths.exports_dir(d)
+    first = folder / RECORD_NAME.format(sat=sat.isoformat())
+    if not bk.exists(first):
+        return first
+    for n in range(2, 1000):
+        p = folder / f"report-week-{sat.isoformat()}.{n}.json"
+        if not bk.exists(p):
+            return p
+    raise FileExistsError(f"a thousand build records of the week ending {sat.isoformat()} are in {folder}")
 
 
 def control_values(book) -> dict:
@@ -567,6 +612,9 @@ def report_text(model: mdl.Model, book, path, bad: list[str], parts: dict, d: da
 def run(args, saturday: date | None = None, source=None) -> dict:
     out = {"ok": True, "command": build.COMMAND, "data_date": None, "text": "", "flags": {}, "files": [],
            "warnings": []}
+    if paths.is_worktree() and not paths.root_is_set():
+        # a code worktree finds the project folder's data by itself: its file and record would land among his
+        return dict(out, ok=False, text=WORKTREE_REFUSAL, exit=1)
     try:
         prepared_on = (date.fromisoformat(args.prepared_on) if getattr(args, "prepared_on", None)
                        else status.today_bahrain())
@@ -612,8 +660,7 @@ def run(args, saturday: date | None = None, source=None) -> dict:
               "parts": {key: {"ok": part_.ok, "why": part_.why} for key, part_ in facts.parts.items()}}
     out["files"].append(str(path))
     try:
-        rec = paths.write_text(paths.exports_dir(d) / RECORD_NAME.format(sat=period.end.isoformat()),
-                               json.dumps(record, indent=1) + "\n")
+        rec = paths.write_text(record_path(d, period.end), json.dumps(record, indent=1) + "\n")
         out["files"].append(str(rec))
     except OSError as exc:
         out["warnings"].append(f"the build record was not written ({type(exc).__name__})")

@@ -103,7 +103,8 @@ def line(day: date, inv: int, no: int, cust: str, item: str, qty: int, rate: flo
             "sale_date": day.isoformat(), "customer_account": cust, "customer_name": cust, "item_name": item,
             "quantity": float(qty), "rate_bhd": rate if rate else None, "gross_bhd": gross if gross else None,
             "net_bhd": net, "salesman_raw": rep, "salesman_resolved": rep, "narration": narr,
-            "category_name": None, "discount_bhd": None, "vat_amount_bhd": None}
+            "category_name": None, "discount_bhd": None, "vat_amount_bhd": None,
+            "is_giveaway": not rate and not gross and qty > 0}           # v_sales' rule: a zero-priced line with units
 
 
 def world_rows() -> list[dict]:
@@ -126,6 +127,7 @@ def world_rows() -> list[dict]:
         line(d("2026-10-11"), 13, 1, "Shop One", t01, 5, 2.2, VAN_A),             # the week
         line(d("2026-10-11"), 13, 2, "Shop One", x01, 10, 1.1, VAN_A),
         line(d("2026-10-12"), 14, 1, "Shop Two", gn, 3, 5.5, VAN_B),
+        line(d("2026-10-13"), 20, 1, "Shop Six", x01, 3, 0, VAN_B),               # a giveaway of an item sold at a price
         line(d("2026-10-14"), 15, 1, "Shop One", gn, 1, 5.5, VAN_A),              # Shop One twice: one account
         line(d("2026-10-15"), 16, 1, "Cash Customer", t01, 2, 2.2, OUTLET),
         line(d("2026-10-16"), 17, 1, "Shop Five", x01, 4, 1.1, VAN_B),
@@ -228,8 +230,9 @@ class FakeSource(week.WeekSource):
         return self.model if self.model is not None else fake_stock_model(self.to, sat)
 
     def transfers(self, period, d):
-        self._maybe("transfers")
-        return [{"kind": "xfer_open"}, {"kind": "qty_diff"}, {"kind": "xfer_open"}]
+        self._maybe("transfers")                     # moves.exceptions' own kinds (moves.EXCEPTION_KINDS)
+        return [{"kind": "qty_differs"}, {"kind": "not_received"}, {"kind": "damage_not_booked"},
+                {"kind": "not_received"}]
 
     def papers(self, first, last):
         self._maybe("papers")
@@ -302,10 +305,10 @@ def extra_module(stock_text: str = "Main store", moves_text: str = "Van A", stoc
     """A stand-in for the shared sheet module: totals only, a formula check column on Movements that reads 0."""
     mod = types.ModuleType(EXTRA_NAME)
 
-    def stock_totals(as_of):
+    def stock_totals(model=None, *, as_of=None, window=None):     # the real one's signature; it never raises
         if stock_fails:
-            raise RuntimeError("no stock")
-        return {"as_of": as_of, "rows": [("Main store", 120, 345.5), ("Vans", 30, 80.25)]}
+            return {"error": "TimeoutError", "as_of": as_of, "store": "Main store"}
+        return {"as_of": as_of, "window": window, "rows": [("Main store", 120, 345.5), ("Vans", 30, 80.25)]}
 
     def stock_sheet(ws, totals, heading):
         ws.text(0, 1, heading, "sheet_title")
@@ -319,8 +322,10 @@ def extra_module(stock_text: str = "Main store", moves_text: str = "Van A", stoc
         ws.formula(6, 2, "SUM(C5:C6)", "total_int")
         ws.formula(6, 3, "SUM(D5:D6)" if not bad_formula else "1/0", "g_total_money3")
 
-    def moves_totals(first, last):
-        return {"first": first, "last": last, "rows": [(moves_text, 10, 7, 3)]}
+    def moves_totals(table=None, *, first=None, last=None):
+        if moves_text is None:                                   # the real one's answer when it cannot read the table
+            return {"first": first, "last": last, "stores": [], "error": "the movements module is not there yet"}
+        return {"first": first, "last": last, "rows": [(moves_text, 10, 7, 3)], "error": None}
 
     def movements_sheet(ws, totals, heading):
         ws.text(0, 1, heading, "sheet_title")
@@ -393,7 +398,7 @@ def hand(period: mdl.Period, w: str, rows=None) -> dict:
     rows = world_rows() if rows is None else rows
     a, b = window_days(period, w)
     rs = [r for r in rows if in_window(r, a, b)]
-    acc = [r for r in rs if r["item_name"] != ITEMS["PHONE"]]
+    acc = [r for r in rs if not r["is_giveaway"]]           # the brief's basis: the handsets are zero-priced too
     accounts = lambda group: {r["customer_account"] for r in group if r["customer_account"].lower() != "cash customer"}  # noqa: E731
     reps = lambda group: {r["salesman_raw"] for r in group if (r["net_bhd"] or 0) > 0}  # noqa: E731
     if w == "prev":                    # the four weeks before, as an average week
@@ -489,7 +494,7 @@ def _():
                 n += 1
                 assert not isinstance(cell.value, fx.Err), (ws.name, cell.formula, cell.value)
     assert n > 400, n
-    assert len(m.lines) == 19 and m.lines[0].sale_date == date(2026, 9, 11) and m.lines[-1].sale_date == SAT
+    assert len(m.lines) == 20 and m.lines[0].sale_date == date(2026, 9, 11) and m.lines[-1].sale_date == SAT
     assert b.commentary == {}                     # the comment lines are formulas: nothing is DRAFT
 
 
@@ -553,8 +558,8 @@ def _():
     assert value(b, "Daily", "D13") == 48 and value(b, "Daily", "E13") == 12.25
     status_of = {value(b, "Customers", f"B{6 + i}"): value(b, "Customers", f"L{6 + i}") for i in range(len(m.customers))}
     assert status_of == {mdl.CASH_ACCOUNT: "Cash", "Shop One": "Both", "Shop Two": "Both",
-                         "Shop Five": "This week only", "Shop Three": "Not this week", "Shop Four": "Not this week"}, \
-        status_of
+                         "Shop Five": "This week only", "Shop Three": "Not this week", "Shop Four": "Not this week",
+                         "Shop Six": "No invoice counted"}, status_of             # a giveaway is no invoice
     assert value(b, "Customers", "M7") == 1 and value(b, "Customers", "B7") == "Shop One"   # ranked by the week
 
 
@@ -571,7 +576,7 @@ def _():
     assert checks["unmapped"] == [0] and checks["narration"] == 0
     assert week.checks_ok(checks) == (True, [])
     row = find_row(b, "Notes", "B", "The week: day book lines")
-    assert value(b, "Notes", f"C{row}") == 7 and value(b, "Notes", f"D{row}") == 7 and value(b, "Notes", f"E{row}") == 0
+    assert value(b, "Notes", f"C{row}") == 8 and value(b, "Notes", f"D{row}") == 8 and value(b, "Notes", f"E{row}") == 0
     left = find_row(b, "Notes", "B", "Narrations left out (they hold an ID number)")
     assert value(b, "Notes", f"C{left}") == 2
     # a line lost between the database and the sheet: the windows that hold it say so
@@ -645,7 +650,9 @@ def _():
     assert f.parts["stock"].why == f.parts["movements"].why == "the shared stock and movement sheets are not built yet"
     assert parts_of(b) == {k: 0 if k in ("stock", "movements") else 1 for k in PART_KEYS}
     act = texts(b.get("Actions"))
-    assert "Supplier One" in act and "Not received after the deadline" in act and "Received in other quantities" in act
+    assert "Supplier One" in act and "Not received by its deadline" in act and "Received in other quantities" in act
+    assert "Not booked in by the damage store by its deadline" in act
+    assert not [t for t in act if "_" in t], act                     # no kind in its raw spelling (qty_differs)
     for fail, off in (({"transfers"}, {"transfers"}), ({"papers"}, {"papers"}), ({"receipt_checks"}, {"checks"}),
                       ({"stock_model"}, {"fast", "order", "late", "checks"})):
         _b, _m, f = built(FakeSource(fail=fail))
@@ -671,8 +678,20 @@ def _():
     assert f.parts["order"].data["suppliers"] == [("Supplier One", 2, 15), ("Supplier Two", 1, 7)]
     assert f.parts["late"].data["suppliers"] == [("Supplier Two", 1, 4)]            # due 0 is not late goods
     assert (f.parts["papers"].data["receipts"], f.parts["papers"].data["missing"]) == (3, 2)
-    assert f.parts["transfers"].data["kinds"] == [("Not received after the deadline", 2),
+    # moves' own kinds, in moves' order, in the shared Movements sheet's words (the damage store's kind its own)
+    assert f.parts["transfers"].data["kinds"] == [("Not received by its deadline", 2),
+                                                  ("Not booked in by the damage store by its deadline", 1),
                                                   ("Received in other quantities", 1)]
+    p = mdl.Period.week(SAT)
+    words = week.transfers_part([{"kind": k} for k in (*week.TRANSFER_KINDS, "xfer_open", "a_new_kind")], p).data
+    assert [w for w, _n in words["kinds"]] == ["Not received by its deadline",
+                                               "Not booked in by the damage store by its deadline",
+                                               "Identical issues, fewer receipts", "Received in other quantities",
+                                               "Received by another store", "A receipt with no issue", "A new kind"]
+    assert dict(words["kinds"])["Not received by its deadline"] == 2           # the register key is its kind
+    assert set(week.TRANSFER_WORDS) == set(week.TRANSFER_KINDS)                # every kind of moves has its words
+    from scripts.ops import moves
+    assert week.TRANSFER_KINDS == moves.EXCEPTION_KINDS
     # two receipts in the 60 days to the Saturday (one voucher shared by two items), one with its check logged
     assert (f.parts["checks"].data["receipts"], f.parts["checks"].data["unchecked"]) == (2, 1)
 
@@ -735,9 +754,17 @@ def _():
         assert "a forwarded sheet carries totals only" in f.parts[part].why, f.parts[part].why
         sheet = "Stock" if part == "stock" else "Movements"
         assert texts(b.get(sheet)) == [sw.NOT_WORKED.format(why=f.parts[part].why)], texts(b.get(sheet))
+    # the shared functions never raise: totals that carry an "error" are a part not worked out, on the sheet, in the
+    # Notes table of parts and (below) in the build record
     with stand_in(EXTRA_NAME, extra_module(stock_fails=True)):
-        _b, _m, f = built(extra=EXTRA_NAME)
-    assert f.parts["stock"].why == "the stock totals could not be worked out: RuntimeError" and f.parts["movements"].ok
+        b, _m, f = built(extra=EXTRA_NAME)
+    assert not f.parts["stock"].ok and f.parts["stock"].why == "the stock totals: TimeoutError" and f.parts["movements"].ok
+    assert texts(b.get("Stock")) == ["Not worked out this time (the stock totals: TimeoutError)."]
+    assert parts_of(b)["stock"] == 0 and parts_of(b)["movements"] == 1
+    with stand_in(EXTRA_NAME, extra_module(moves_text=None)):
+        b, _m, f = built(extra=EXTRA_NAME)
+    assert f.parts["movements"].why == "the movement totals: the movements module is not there yet" and f.parts["stock"].ok
+    assert parts_of(b)["movements"] == 0
     with stand_in(EXTRA_NAME, extra_module(bad_formula=True)):
         _b, m, f = built(extra=EXTRA_NAME)
     assert f.parts["stock"].why == "the stock totals: 1 formula(s) came out as an error value" and not m.warnings
@@ -798,7 +825,7 @@ def _():
             assert record["data_date"] == "2026-10-20" and record["file"] == str(path)
             assert record["built_at"] == "2026-10-18T09:30:00+03:00" and record["built_on"] == "2026-10-18"
             assert record["due_date"] == "2026-10-18" and record["on_time"] is True
-            assert record["checks_ok"] is True and record["lines"] == 19
+            assert record["checks_ok"] is True and record["lines"] == 20
             assert set(record["parts"]) == set(PART_KEYS) and record["parts"]["stock"]["ok"] is False
             assert record["parts"]["order"] == {"ok": True, "why": ""}
             text = out["text"]
@@ -875,6 +902,95 @@ def _():
         assert week.due_date(SAT) == (date(2026, 10, 24), "Saturday")       # the first one AFTER the week
 
 
+@test("command: from a code worktree with no --data-root it is refused before anything is read or written")
+def _():
+    saved = paths.is_worktree
+    src = FakeSource()
+    try:
+        paths.is_worktree = lambda: True
+        paths.set_data_root(None)                        # neither --data-root nor a test's root: the folder found itself
+        out = week.run(Args(), SAT, src)
+        assert out["exit"] == 1 and not out["ok"] and out["text"] == week.WORKTREE_REFUSAL, out
+        assert src.calls == [] and out["files"] == []    # not even the data dates were read
+        with data_root() as root, modules(EXTRA_MODULE=ABSENT):     # --data-root names a folder: it builds there
+            out = week.run(Args(), SAT, FakeSource())
+            assert out["exit"] == 0 and Path(out["files"][0]).parent == root / "exports" / "reports" / "weekly"
+    finally:
+        paths.is_worktree = saved
+        paths.set_data_root(None)
+
+
+@test("record: a later build of the same week keeps the first record (report-week-<sat>.<n>.json); KPI seven reads the first")
+def _():
+    from scripts.ops import kpi_log
+    saved = freeze(datetime(2026, 10, 18, 9, 0, tzinfo=BAHRAIN))        # Sunday: on time
+    try:
+        with data_root() as root, modules(EXTRA_MODULE=ABSENT):
+            first = week.run(Args(), SAT, FakeSource())
+            rec1 = Path(first["files"][1])
+            kept = rec1.read_text(encoding="utf-8")
+            week._now = lambda: datetime(2026, 10, 19, 9, 0, tzinfo=BAHRAIN)     # rebuilt on Monday: late
+            second = week.run(Args(), SAT, FakeSource())
+            third = week.run(Args(), SAT, FakeSource())
+            folder = root / "exports" / "ops" / "2026-10-20"
+            assert rec1 == folder / "report-week-2026-10-17.json" and rec1.read_text(encoding="utf-8") == kept
+            assert Path(second["files"][1]) == folder / "report-week-2026-10-17.2.json"
+            assert Path(third["files"][1]) == folder / "report-week-2026-10-17.3.json"
+            assert json.loads(Path(second["files"][1]).read_text(encoding="utf-8"))["on_time"] is False
+            recs = kpi_log.records("week", "2026-10-17")
+            assert [r["_file"] for r in recs] == ["2026-10-20/report-week-2026-10-17.json",
+                                                  "2026-10-20/report-week-2026-10-17.2.json",
+                                                  "2026-10-20/report-week-2026-10-17.3.json"], recs
+            assert recs[0]["_built"] == date(2026, 10, 18) and recs[0]["on_time"] is True    # what KPI seven reads
+            assert week.record_path(TO, SAT) == folder / "report-week-2026-10-17.4.json"
+    finally:
+        week._now = saved
+
+
+@test("giveaways: on the Data sheet with their value, line type Giveaway: no units, invoices or accounts (as the brief)")
+def _():
+    from scripts.ops import sales
+    assert week.LINES_SQL == build.LINES_SQL.replace(" FROM v_sales v ", ", v.is_giveaway FROM v_sales v ")
+    assert week.LINES_SQL != build.LINES_SQL and "NOT v.is_giveaway" in sales.BASIS_SQL
+    b, m, f = built()
+    gift = next(i for i, ln in enumerate(m.lines) if ln.customer == "Shop Six")
+    r = 5 + gift
+    assert value(b, "Data", f"V{r}") == 1 and value(b, "Data", f"P{r}") == "Giveaway", value(b, "Data", f"P{r}")
+    assert value(b, "Data", f"N{r}") == "Cables"                     # an item sold at a price elsewhere: its own row
+    assert (value(b, "Data", f"Q{r}"), value(b, "Data", f"R{r}"), value(b, "Data", f"S{r}")) == (0, 0, 0)
+    phone = next(i for i, ln in enumerate(m.lines) if ln.item == ITEMS["PHONE"])
+    assert value(b, "Data", f"V{5 + phone}") == 1 and value(b, "Data", f"P{5 + phone}") == "Handset"
+    assert sum(1 for i in range(len(m.lines)) if value(b, "Data", f"V{5 + i}") == 1) == 3
+    # the week: the giveaway's three units, its invoice and its account are not counted; its line is (the controls)
+    assert (table(b, "units", "wk"), table(b, "invoices", "wk"), table(b, "accounts", "wk")) == (25, 5, 3)
+    assert value(b, "Products", "B7") == "X01" and value(b, "Products", "E7") == 14      # 10 + 4 sold, 3 given
+    text = " ".join(str(c.value) for c in b.get("Notes").cells.values() if c.kind == "s")
+    assert "One line v_sales marks as giveaways (the Giveaway division, or a zero-priced line) is on the Data sheet, " \
+           "line type Giveaway: it counts in no units, invoices or accounts, as /yq-brief leaves it out." in text
+    # what the rows say decides, not the price: a flag the database does not set is no giveaway here
+    rows = world_rows()
+    for row in rows:
+        row["is_giveaway"] = False
+    b, m, _f = built(FakeSource(rows=rows))
+    assert table(b, "units", "wk") == 28 and table(b, "invoices", "wk") == 6
+    assert "v_sales marks as giveaways" not in " ".join(str(c.value) for c in b.get("Notes").cells.values()
+                                                        if c.kind == "s")
+
+
+@test("command: a shared sheet whose totals carry an error is not worked out on the screen and in the record")
+def _():
+    saved = freeze(datetime(2026, 10, 18, 9, 0, tzinfo=BAHRAIN))
+    try:
+        with data_root(), stand_in(EXTRA_NAME, extra_module(stock_fails=True)), modules(EXTRA_MODULE=EXTRA_NAME):
+            out = week.run(Args(), SAT, FakeSource())
+            record = json.loads(Path(out["files"][1]).read_text(encoding="utf-8"))
+        assert record["parts"]["stock"] == {"ok": False, "why": "the stock totals: TimeoutError"}
+        assert record["parts"]["movements"]["ok"] is True and out["flags"]["parts"]["stock"] is False
+        assert "Not worked out this time: Stock sheet (the stock totals: TimeoutError)." in out["text"]
+    finally:
+        week._now = saved
+
+
 @test("file: a valid workbook: eleven sheets, two charts, a sparkline per salesman, cached values; no long digit runs")
 def _():
     import warnings
@@ -895,7 +1011,7 @@ def _():
     assert [s.name for s in part.sheets] == list(sw.SHEETS)
     assert sum(s.charts for s in part.sheets) == 2 and sum(s.sparklines for s in part.sheets) == len(m.reps)
     assert shown["Dashboard"][f"D{sw.Dash.WIN + 1}"].value == 48 and shown["Salesmen"]["Q9"].value == 48
-    assert part.sheet("Data").autofilter.startswith("A4:U") and part.print_areas["Dashboard"].endswith("$S$74")
+    assert part.sheet("Data").autofilter.startswith("A4:V") and part.print_areas["Dashboard"].endswith("$S$74")
     assert not LONG_RUN.search(strings) and "******" not in strings
 
 
