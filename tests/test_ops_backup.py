@@ -1,13 +1,14 @@
-"""Backups: the encryption rule of the load's backup step, the read-back, the restore drill's guards and the
-packing of old plain backups (scripts/yq_load_go.py, scripts/yq_backup.py, scripts/yq_secrets.py), and the
-snapshot itself (scripts/db_backup.py).
+"""Backups: the encryption rule of the load's backup step, the read-back, the restore drill's guards, the
+packing of old plain backups and the backup before a release (scripts/yq_load_go.py, scripts/yq_backup.py,
+scripts/yq_secrets.py), and the snapshot itself (scripts/db_backup.py).
 
     python -m tests.test_ops_backup
 
 Same lightweight runner as the other suites (no pytest). No database: SUPABASE_URL, SUPABASE_KEY and
 DATABASE_URL are pinned to ci.invalid before any import; the restore drill itself (a throwaway PostgreSQL) is
-run by hand, never here: its guards are tested instead. No real secret: YQ_SECRETS_OFF=1. One test packs a
-folder of invented files with 7-Zip and reads it back; it prints SKIP where 7-Zip is not installed.
+run by hand, never here: its guards are tested instead, and the release's backup child is a stand-in that
+writes invented files (scripts.db_backup --all never runs here). No real secret: YQ_SECRETS_OFF=1. The tests
+that pack folders of invented files with 7-Zip and read them back print SKIP where 7-Zip is not installed.
 
 Covered:
   * the secrets are read from nowhere while YQ_SECRETS_OFF=1 (tests can never read this PC's);
@@ -27,6 +28,21 @@ Covered:
     without the password or 7-Zip, with a .7z already there or for anything that is not a plain
     backup it refuses and touches nothing; an archive that does not read back is removed and the plain
     copy kept; a plain copy that cannot be deleted is reported (never claimed) and the exit code says so;
+  * release (the backup before a release): a label that is not lower-case letters and digits with single
+    hyphens between them, no backup password or no 7-Zip, or that release's folder or .7z already there is
+    refused before anything (exit 2: nothing made, nothing touched, no backup started); the backup child is
+    `scripts.db_backup --all --out <store>\\release\\<day>_pre-<label>` with no password in its environment
+    (nor in the check's); the folder is checked, sealed while it is still there and only then deleted, and
+    the archive's path is the last line; a backup that does not complete (it fails, is stopped, Ctrl+C) is
+    removed, never left plain; one that does not match its manifest, lists no table, or cannot be sealed (7-Zip
+    does not start, the archive does not read back) is kept and named, with no archive or .partial left; a
+    plain folder that cannot be deleted is reported, never claimed; one row in drills.jsonl, no secret in it;
+  * unpack (a rollback's first step): only into a new or empty folder (by default a new one in the backup
+    store), never inside OneDrive or the project folder, and never for what is not a backup archive or for a
+    .7z without the password and 7-Zip (exit 2, nothing written); the files are checked against their
+    manifest and the folder holding manifest.json is the last line; a damaged archive, a wrong password, files
+    that do not match or no manifest leave nothing behind (exit 1); with 7-Zip, release then unpack gives back
+    every file byte for byte;
   * the snapshot (scripts/db_backup.py, on a stand-in connection over invented tables): the columns of every
     table come from one catalog query and every count and max from one statement, before one COPY per table,
     all in one read-only REPEATABLE READ transaction; the CSVs, manifest.json and the printed lines are exactly
@@ -728,6 +744,467 @@ def _():
         [row] = rows_written()
         assert row["result"] == "packed" and row["deleted"] is False and row["left"] == 2, row
         assert said[-1] == "0 of 1 plain backups are now only encrypted. Each of the others is named above.", said
+
+
+# ── the backup before a release (release) and its way back (unpack) ─────────────────────────────────────
+
+DAY = "2026-01-06"                                           # the day a test's release backup is taken
+MISSING_7Z = str(Path(STORE) / "no-7-zip-here" / "7z.exe")   # a 7-Zip that is "found" but can never start
+
+
+def backup_done(out: Path, ok: bool = True) -> str:
+    """The last line scripts.db_backup prints for a backup into `out`."""
+    return f"\nBackup complete: {out}  (1 tables, git abc1234, verify {'OK' if ok else 'FAILED on 1 table(s)'})\n"
+
+
+def whole_backup(rows: int = 2):
+    """The stand-in child of a backup that completes: the invented files of one plain backup, and db_backup's lines."""
+    def child(out: Path):
+        plain_backup(out, rows)
+        return 0, f"  orders {rows} rows -> orders.csv\n" + backup_done(out), ""
+    return child
+
+
+class release_world(pack_world):
+    """pack_world, with the release's backup child (scripts.db_backup --all --out <folder>, started through yb.run)
+    answered by a stand-in: `child(out)` writes into the folder and returns (exit code, stdout, stderr), or raises.
+    Every other command (the --verify check) runs for real. What each command was started with is kept in `calls`;
+    the 7-Zip found is one that can never start, unless a test asks for the real one ("found")."""
+
+    def __init__(self, password: str | None = PW, exe: str | None = MISSING_7Z, child=None):
+        super().__init__(password, exe)
+        self.child = child or whole_backup()
+        self.calls: list[tuple[list[str], dict | None]] = []
+
+    def __enter__(self) -> Path:
+        root = super().__enter__()
+        self._run = real = yb.run
+
+        def run(cmd, env=None, timeout=1800):
+            argv = [str(c) for c in cmd]
+            self.calls.append((argv, env))
+            if "--all" not in argv:
+                return real(cmd, env, timeout)
+            code, out, err = self.child(Path(argv[argv.index("--out") + 1]))
+            return subprocess.CompletedProcess(argv, code, out, err)
+        yb.run = run
+        return root
+
+    def __exit__(self, *exc):
+        yb.run = self._run
+        return super().__exit__(*exc)
+
+    def backups(self) -> list[list[str]]:
+        return [argv for argv, _env in self.calls if "--all" in argv]
+
+
+class stand_in_seal:
+    """yb.seal answered by a stand-in that writes the archive (a few bytes) and says what 7-Zip's test says; what it
+    was handed (the plain folder's files at that moment, the password, the archive) is kept in `seen`."""
+
+    def __enter__(self):
+        self.seen: list[dict] = []
+        self._real = yb.seal
+
+        def seal(folder, archive, password, exe, date=None, note=None):
+            self.seen.append({"files": sorted(p.name for p in folder.iterdir()), "password": password,
+                              "archive": archive})
+            archive.write_bytes(b"7z stand-in")
+            return "Files: 2"
+        yb.seal = seal
+        return self
+
+    def __exit__(self, *exc):
+        yb.seal = self._real
+        return False
+
+
+def release_paths(root: Path, label: str = "r9", day: str = DAY) -> tuple[Path, Path]:
+    """(the plain folder, the archive) of a release backup in a test's backup store."""
+    folder = root / "store" / "release" / f"{day}_pre-{label}"
+    return folder, folder.with_name(folder.name + ".7z")
+
+
+@test("release: the label is lower-case letters and digits with single hyphens between them, at most 40 characters; "
+      "any other is refused before anything (exit 2), on the command line too")
+def _():
+    for good in ("r9", "mi-v2", "r8m", "2b", "r9-2", "a" * 40):
+        assert yb.label_refusal(good) is None, good
+    for bad in ("", "R9", "r9_x", "r9 ", "-r9", "r9-", "r9--2", "mi v2", "r9/x", "..", "r9.1", "é9", "a" * 41, "r9\n"):
+        assert yb.label_refusal(bad), bad
+    w = release_world()
+    with w as root:
+        before = snapshot(root)
+        said: list[str] = []
+        assert yb.release("R9", say=said.append, today=DAY) == 2, said
+        assert said == ["Refused, nothing was made: the label 'R9' is not lower-case letters and digits with single "
+                        "hyphens between them (such as r9 or mi-v2), at most 40 characters."], said
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert yb.main(["release", "pre r9"]) == 2
+        assert "Refused, nothing was made: the label 'pre r9'" in out.getvalue(), out.getvalue()
+        assert snapshot(root) == before and not w.calls and not rows_written(), "nothing started, made or written"
+
+
+@test("release without the backup password, or without 7-Zip: refused before the backup (exit 2); nothing is made, "
+      "so nothing is left plain, and it says so")
+def _():
+    for password, exe, missing in ((None, MISSING_7Z, "no backup password"), (PW, None, "7-Zip is not installed")):
+        w = release_world(password=password, exe=exe)
+        with w as root:
+            before = snapshot(root)
+            said: list[str] = []
+            assert yb.release("r9", say=said.append, today=DAY) == 2, said
+            assert snapshot(root) == before and not w.calls and not rows_written(), "the backup never started"
+            assert said[-1].startswith("Refused, nothing was made: ") and missing in said[-1], said
+            assert said[-1].endswith("A release backup is only ever made encrypted: none was taken, so nothing is left "
+                                     "plain."), said
+
+
+@test("release: a backup of that release already there (its folder, its .7z, or both) is refused before anything "
+      "(exit 2), each with what to do; nothing is touched and the backup never starts")
+def _():
+    w = release_world()
+    with w as root:
+        rel = root / "store" / "release"
+        plain_backup(rel / f"{DAY}_pre-r9")                          # a whole backup made by hand
+        (rel / f"{DAY}_pre-mi-v2.7z").write_bytes(b"an archive made before")
+        (rel / f"{DAY}_pre-r8m.7z").write_bytes(b"an archive whose plain folder that run could not delete")
+        plain_backup(rel / f"{DAY}_pre-r8m")
+        (rel / f"{DAY}_pre-x1").write_bytes(b"a file of that name")
+        before = snapshot(root)
+        for label, words in (("r9", "If it is a whole backup (python -m scripts.db_backup --verify <it>), python -m "
+                                    "scripts.yq_backup pack <it> --apply encrypts it"),
+                             ("mi-v2", "this release was backed up today. Check that archive with python -m "
+                                       "scripts.yq_backup drill --archive <it>"),
+                             ("r8m", f"Its plain folder {DAY}_pre-r8m is next to it"),
+                             ("x1", "is already there")):
+            said: list[str] = []
+            assert yb.release(label, say=said.append, today=DAY) == 2, said
+            assert said[-1].startswith("Refused, nothing was made: ") and words in said[-1], (label, said)
+            assert f"another label (such as {label}-2)" in said[-1], said
+        assert snapshot(root) == before and not w.calls and not rows_written()
+
+
+@test("release: the backup child is scripts.db_backup --all --out <store>\\release\\<day>_pre-<label> without the "
+      "password in its environment; the folder is checked, sealed while it is still there, and only then deleted; "
+      "the archive's path is the last line; one row, no secret in it")
+def _():
+    w = release_world()
+    os.environ[yq_secrets.BACKUP_PASSWORD] = PW               # in this process's environment: no child may get it
+    try:
+        with w as root, stand_in_seal() as sealed:
+            folder, archive = release_paths(root)
+            said: list[str] = []
+            assert yb.release("r9", say=said.append, today=DAY) == 0, said
+            [argv] = w.backups()
+            assert argv == [sys.executable, "-X", "utf8", "-m", "scripts.db_backup", "--all", "--out",
+                            str(folder)], argv
+            assert "business_data" not in folder.relative_to(root).parts, "never where the OneDrive copy looks"
+            assert [a[a.index("-m") + 2] for a, _env in w.calls] == ["--all", "--verify"], w.calls
+            for _argv, env in w.calls:
+                assert env is not None and yq_secrets.BACKUP_PASSWORD not in env, "a child got the password"
+                assert env["DATABASE_URL"] == os.environ["DATABASE_URL"]
+            assert sealed.seen == [{"files": ["manifest.json", "orders.csv"], "password": PW, "archive": archive}]
+            assert archive.is_file() and not folder.exists(), said
+            text = "\n".join(said)
+            assert said[0].startswith(f"Release backup {DAY}_pre-r9: every table of the live database (only read) "
+                                      f"into {folder.parent} (outside OneDrive)") and "process_environment" in said[0]
+            assert "  1. Backed up every table (scripts.db_backup --all, read only): 1 table, 2 files, " in text, text
+            assert "  2. Every file matches its manifest (rows and columns)" in text, text
+            assert f"  3. Packed {archive.name} (" in text and "read it back with the password (Files: 2)" in text, text
+            assert "  4. Deleted the plain folder" in text, text
+            assert said[-2].endswith("only the encrypted copy is left."), said
+            assert said[-1] == str(archive), "the archive's path is the last line"
+            [row] = rows_written()
+            assert {k: row[k] for k in ("kind", "label", "source", "archive", "result", "deleted", "tables", "files",
+                                        "password_from")} == {
+                "kind": "release", "label": "r9", "source": folder.name, "archive": archive.name, "result": "packed",
+                "deleted": True, "tables": 1, "files": 2, "password_from": "process_environment"}, row
+            assert isinstance(row["seconds"], (int, float)) and PW not in (paths.ops_dir() / "drills.jsonl").read_text(
+                encoding="utf-8"), "no secret in the row"
+            out = io.StringIO()                                # the command line, as a release script runs it
+            with contextlib.redirect_stdout(out):
+                assert yb.main(["release", "r10"]) == 0
+            last = out.getvalue().splitlines()[-1]
+            assert last.endswith("_pre-r10.7z") and Path(last).is_file() and Path(last).parent == folder.parent, last
+            assert not Path(last[:-len(".7z")]).exists()
+    finally:
+        os.environ.pop(yq_secrets.BACKUP_PASSWORD, None)
+
+
+@test("release: a backup that does not complete (it fails, it is stopped, Ctrl+C) is removed, never left plain: "
+      "exit 1, the last line says so with the child's reason (no address in it), one row; the label can run again")
+def _():
+    def failing(out: Path):
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "orders.csv").write_text("id,total\n0,1.500\n", encoding="utf-8")       # what it wrote before it failed
+        return 1, "  orders 1 rows -> orders.csv\n", ("Traceback (most recent call last):\npsycopg.OperationalError: "
+                                                      "connection to postgresql://u:an-invented-secret@db.invalid:5432 "
+                                                      "failed\n")
+
+    def stopped(out: Path):
+        plain_backup(out)
+        raise subprocess.TimeoutExpired(["db_backup"], yb.RELEASE_TIMEOUT_S)
+
+    for child, words in ((failing, "exit 1: psycopg.OperationalError: connection to <address> failed"),
+                         (stopped, "it was stopped after 30 minutes")):
+        w = release_world(child=child)
+        with w as root, stand_in_seal() as sealed:
+            folder, archive = release_paths(root)
+            said: list[str] = []
+            assert yb.release("r9", say=said.append, today=DAY) == 1, said
+            assert not folder.exists() and not sealed.seen and not list(folder.parent.glob("*.7z*")), said
+            assert said[-1] == (f"RELEASE BACKUP NOT DONE: the backup did not complete ({words}). What it wrote was "
+                                "removed: nothing is left plain. Run this again once the cause is put right."), said
+            assert "an-invented-secret" not in "\n".join(said) + json.dumps(rows_written())
+            [row] = rows_written()
+            assert row["result"] == "failed" and row["deleted"] is False and words in row["why"], row
+            w.child = whole_backup()
+            said = []
+            assert yb.release("r9", say=said.append, today=DAY) == 0 and archive.is_file(), said
+
+    def interrupted(out: Path):
+        plain_backup(out)
+        raise KeyboardInterrupt
+    w = release_world(child=interrupted)
+    with w as root:
+        try:
+            yb.release("r9", say=[].append, today=DAY)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("Ctrl+C was swallowed")
+        assert not release_paths(root)[0].exists(), "a stopped backup is never left plain"
+
+
+@test("release: a backup that completed but does not match its manifest (by the check after it, or by its own), or "
+      "lists no table, is kept as it is and named, never sealed: exit 1, one row")
+def _():
+    def mismatch(out: Path, own_check: bool):
+        plain_backup(out)
+        (out / "manifest.json").write_text(json.dumps({"tables": {"orders": {"rows": 9}}}), encoding="utf-8")
+        return (1, backup_done(out, ok=False), "") if own_check else (0, backup_done(out), "")
+
+    def no_table(out: Path):
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "manifest.json").write_text(json.dumps({"tables": {}}), encoding="utf-8")
+        return 0, backup_done(out), ""
+
+    both = ["manifest.json", "orders.csv"]
+    own = "the backup's own check found files that do not match its manifest"
+    for child, why, files in ((lambda out: mismatch(out, False), "the files do not match their manifest", both),
+                              (lambda out: mismatch(out, True), own, both),
+                              (no_table, "the backup lists no table", ["manifest.json"])):
+        w = release_world(child=child)
+        with w as root, stand_in_seal() as sealed:
+            folder, archive = release_paths(root)
+            said: list[str] = []
+            assert yb.release("r9", say=said.append, today=DAY) == 1, said
+            assert sorted(p.name for p in folder.iterdir()) == files, "kept as it was"
+            assert not sealed.seen and not archive.exists() and not any("Every file matches" in s for s in said), said
+            assert said[-1] == (f"RELEASE BACKUP NOT DONE: {why}. The plain folder {folder} is kept (unencrypted, "
+                                f"outside OneDrive) for a look (python -m scripts.db_backup --verify {folder}); delete "
+                                "it before running this again."), said
+            [row] = rows_written()
+            assert (row["result"], row["why"], row["deleted"]) == ("failed", why, False), row
+
+
+@test("release: an archive that cannot be made (7-Zip does not start), or does not read back whole, leaves no archive "
+      "and no .partial, and keeps the plain folder, a whole backup, with the way to seal it later: exit 1 (SKIP "
+      "without 7-Zip for the read-back)")
+def _():
+    with release_world() as root:                              # a 7-Zip that cannot start
+        folder, archive = release_paths(root)
+        said: list[str] = []
+        assert yb.release("r9", say=said.append, today=DAY) == 1, said
+        assert sorted(p.name for p in folder.iterdir()) == ["manifest.json", "orders.csv"]
+        assert not list(folder.parent.glob("*.7z*")), "no archive, no .partial"
+        assert said[-1].startswith(f"RELEASE BACKUP NOT DONE: {archive.name} could not be made "
+                                   "(FileNotFoundError"), said
+        assert said[-1].endswith(f"The plain folder {folder} is kept (unencrypted, outside OneDrive), a whole backup: "
+                                 f"once the cause is put right, python -m scripts.yq_backup pack {folder} --apply "
+                                 "encrypts it and then deletes it."), said
+        assert rows_written()[-1]["result"] == "failed"
+    exe = yb.find_7z()
+    if not exe:
+        print("      SKIP: 7-Zip is not installed here")
+        return
+    with release_world(exe="found") as root:
+        folder, archive = release_paths(root)
+        real = yb.read_back
+        yb.read_back = lambda arch, password, exe_: (False, "7-Zip test failed (exit 2)")
+        try:
+            said = []
+            assert yb.release("r9", say=said.append, today=DAY) == 1, said
+        finally:
+            yb.read_back = real
+        assert sorted(p.name for p in folder.iterdir()) == ["manifest.json", "orders.csv"]
+        assert not list(folder.parent.glob("*.7z*")), "the archive that did not read back is gone, .partial too"
+        assert said[-1].startswith(f"RELEASE BACKUP NOT DONE: {archive.name} does not read back with all 2 files "
+                                   "(7-Zip test failed (exit 2)). The plain folder"), said
+
+
+@test("release: a plain folder that cannot be deleted after the seal (Access is denied) is reported, never claimed: "
+      "exit 1, the archive stays, the row says so")
+def _():
+    with release_world() as root, stand_in_seal():
+        folder, archive = release_paths(root)
+        real_once = yb._delete_once
+
+        def denied(p):
+            raise PermissionError(13, "Access is denied")
+        yb._delete_once = denied
+        try:
+            said: list[str] = []
+            assert yb.release("r9", say=said.append, today=DAY) == 1, said
+        finally:
+            yb._delete_once = real_once
+        assert archive.is_file() and sorted(p.name for p in folder.iterdir()) == ["manifest.json", "orders.csv"]
+        assert "could NOT be deleted: 2 of its files are still there (manifest.json, orders.csv)" in "\n".join(said)
+        assert said[-1] == (f"RELEASE BACKUP NOT DONE: the encrypted copy {archive} is made and read back, but the "
+                            "plain folder is still there (see above)."), said
+        [row] = rows_written()
+        assert (row["result"], row["deleted"], row["left"]) == ("packed", False, 2), row
+
+
+@test("unpack: refused before anything (exit 2, nothing written) into a folder that is not empty, a file, a folder "
+      "inside OneDrive or the project folder; for what is not a backup archive; for a .7z without the password or "
+      "7-Zip")
+def _():
+    with pack_world(exe=MISSING_7Z) as root, tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        z = plain_zip(tmp / "in" / f"{DAY}_pre-r9.zip")
+        full = tmp / "full"
+        full.mkdir()
+        (full / "x.txt").write_text("x", encoding="utf-8")
+        a_file = tmp / "a-file.txt"
+        a_file.write_text("x", encoding="utf-8")
+        code = ROOT / "restore-here-never-made"                    # the code folder: a public repository
+        before = snapshot(root), snapshot(tmp)
+        for archive, to, words in ((z, full, "is not empty: name a new folder, or an empty one"),
+                                   (z, a_file, "is a file, not a folder"),
+                                   (z, tmp / "OneDrive - YQ" / "restore", "is inside a synced folder (OneDrive)"),
+                                   (z, root / "business_data" / "restore", "is inside the project folder"),
+                                   (z, code, "is inside the code folder, a public repository"),
+                                   (tmp / "in" / "missing.7z", None, "is not a backup archive on this PC"),
+                                   (a_file, None, "is not a backup archive on this PC"),
+                                   (tmp / "in", None, "is not a backup archive on this PC")):
+            said: list[str] = []
+            assert yb.unpack_backup(archive, to, say=said.append) == 2, (archive, to, said)
+            assert len(said) == 1 and said[0].startswith("Refused, nothing was written: ") and words in said[0], said
+        assert (snapshot(root), snapshot(tmp)) == before and not code.exists() and not rows_written()
+    for password, exe, missing in ((None, MISSING_7Z, "no backup password"), (PW, None, "7-Zip is not installed")):
+        with pack_world(password=password, exe=exe) as root:
+            sz = root / "store" / "release" / f"{DAY}_pre-r9.7z"
+            sz.parent.mkdir(parents=True)
+            sz.write_bytes(b"7z")
+            before = snapshot(root)
+            said = []
+            assert yb.unpack_backup(sz, None, say=said.append) == 2 and missing in said[-1], said
+            assert snapshot(root) == before and not rows_written()
+
+
+@test("unpack: a plain zip into a named empty folder, or a new folder of the backup store, checked against its "
+      "manifest, the folder holding manifest.json the last line; a damaged archive, files that do not match their "
+      "manifest or no manifest leave nothing behind (exit 1)")
+def _():
+    with pack_world(exe=None) as root, tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        z = plain_zip(tmp / "in" / "yq-backup_2026-01-05_pre-data-050126_0900.zip", rows=3,
+                      inner="2026-01-05_pre-data/")
+        to = tmp / "restore"
+        to.mkdir()                                              # an empty folder, named with --to
+        said: list[str] = []
+        assert yb.unpack_backup(z, to, say=said.append) == 0, said
+        inner = to / "2026-01-05_pre-data"
+        assert os.path.samefile(said[-1], inner), said
+        assert {p.name: p.read_text(encoding="utf-8") for p in inner.iterdir()} == backup_files(3)
+        text = "\n".join(said)
+        assert f"  1. Read back {z.name}: 2 files, all whole" in text and "  2. Unpacked 2 files (1 table) into" in text
+        assert "  3. Every file matches its manifest (rows and columns)" in text, text
+        assert said[-2].startswith("  The restore: python -m scripts.db_backup --restore "), said
+        assert "it holds the backup unencrypted" in said[-2], said
+        [row] = rows_written()
+        assert {k: row[k] for k in ("kind", "archive", "folder", "result", "encrypted", "tables", "files")} == {
+            "kind": "unpack", "archive": z.name, "folder": to.name, "result": "unpacked", "encrypted": False,
+            "tables": 1, "files": 2}, row
+        out = io.StringIO()                                     # the command line, with no --to
+        with contextlib.redirect_stdout(out):
+            assert yb.main(["unpack", str(z)]) == 0
+        made = Path(out.getvalue().splitlines()[-1])
+        assert made.name == "2026-01-05_pre-data" and made.parent.name.startswith("unpack_"), made
+        assert os.path.samefile(made.parent.parent, root / "store"), "a new folder of the backup store"
+        bad = tmp / "in" / "damaged.zip"
+        bad.write_bytes(z.read_bytes()[:40])
+        wrong = tmp / "in" / "wrong.zip"
+        with zipfile.ZipFile(wrong, "w") as zz:                 # its manifest says 7 rows; the table holds 2
+            zz.writestr("orders.csv", backup_files(2)["orders.csv"])
+            zz.writestr("manifest.json", json.dumps({"tables": {"orders": {"rows": 7}}}))
+        loose = tmp / "in" / "loose.zip"
+        with zipfile.ZipFile(loose, "w") as zz:
+            zz.writestr("orders.csv", backup_files(2)["orders.csv"])
+        for archive, why, end in (
+                (bad, "the archive does not read back whole", "Nothing was written."),
+                (wrong, "the files do not match their manifest", "The unpacked copy was removed."),
+                (loose, "the archive holds no manifest.json at its top or one folder down: it is not a backup",
+                 "The unpacked copy was removed.")):
+            target = tmp / f"restore-{archive.stem}"
+            target.mkdir()
+            said = []
+            assert yb.unpack_backup(archive, target, say=said.append) == 1, said
+            assert said[-1] == f"UNPACK FAILED: {why}. {end}", said
+            assert target.is_dir() and not any(target.iterdir()), "the named empty folder is left as it was"
+            assert rows_written()[-1]["result"] == "failed" and rows_written()[-1]["why"] == why
+        said = []
+        assert yb.unpack_backup(wrong, None, say=said.append) == 1, said
+        assert [p.name for p in (root / "store").iterdir() if p.name.startswith("unpack_")] == [made.parent.name], \
+            "the new folder of the failed unpack is removed again"
+
+
+@test("release then unpack, with 7-Zip (SKIP without): the archive reads back only with the password and hides the "
+      "names; unpack gives every file back byte for byte in a new folder of the backup store; a wrong password "
+      "unpacks nothing")
+def _():
+    exe = yb.find_7z()
+    if not exe:
+        print("      SKIP: 7-Zip is not installed here")
+        return
+    written: dict[str, bytes] = {}
+
+    def child(out: Path):                                     # a whole backup, and the bytes it put on disk
+        answer = whole_backup(rows=50)(out)
+        written.update({p.name: p.read_bytes() for p in out.iterdir()})
+        return answer
+    with release_world(exe="found", child=child) as root:
+        folder, archive = release_paths(root, "mi-v2")
+        said: list[str] = []
+        assert yb.release("mi-v2", say=said.append, today=DAY) == 0, said
+        assert said[-1] == str(archive) and archive.is_file() and not folder.exists(), said
+        assert yb.read_back(archive, PW, exe) == (True, "Files: 2")
+        assert yb.read_back(archive, "a wrong password", exe)[0] is False
+        names_hidden(archive, exe)
+        said = []
+        assert yb.unpack_backup(archive, None, say=said.append) == 0, said
+        back = Path(said[-1])
+        assert back.name.startswith("unpack_") and os.path.samefile(back.parent, root / "store"), back
+        assert sorted(written) == ["manifest.json", "orders.csv"], written
+        assert {p.name: p.read_bytes() for p in back.iterdir()} == written, "every file back, byte for byte"
+        assert f"  1. Read back {archive.name} with the password: Files: 2" in said, said
+        real_pw = yq_secrets.backup_password
+        yq_secrets.backup_password = lambda env=None: ("a wrong password", "process_environment")
+        try:
+            said = []
+            assert yb.unpack_backup(archive, None, say=said.append) == 1, said
+        finally:
+            yq_secrets.backup_password = real_pw
+        assert said[-1] == ("UNPACK FAILED: the archive does not read back whole (a wrong password reads the same "
+                            "way). Nothing was written."), said
+        assert [p.name for p in (root / "store").iterdir() if p.name.startswith("unpack_")] == [back.name]
+        rows = rows_written()
+        assert [(r["kind"], r["result"]) for r in rows] == [("release", "packed"), ("unpack", "unpacked"),
+                                                            ("unpack", "failed")], rows
+        assert PW not in (paths.ops_dir() / "drills.jsonl").read_text(encoding="utf-8")
 
 
 # ── the snapshot itself: scripts/db_backup.py on a stand-in database ─────────────────────────────────

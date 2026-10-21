@@ -1,4 +1,4 @@
-# Backups: the daily backup, the backup before every load, the restore drill, the photo archive
+# Backups: the daily backup, the backup before every load and every release, the restore drill, the photo archive
 
 A backup here is a copy of every table of the live database (one CSV file per table and a `manifest.json`), kept on the
 office PC in `%LOCALAPPDATA%\yq-backups`. That folder is never inside OneDrive (the daily backup refuses a OneDrive folder;
@@ -9,14 +9,14 @@ office PC in `%LOCALAPPDATA%\yq-backups`. That folder is never inside OneDrive (
 | the folder itself | `yq-backup_<date>_<time>.7z`, one archive each working day, and `nightly.log`, one line per run | `scripts/nightly_backup.py`, started by the scheduled task `YQ Daily Backup` through `scripts/yq_nightly.py` (below) |
 | `preload\` | `yq-backup_<date>_pre-data-<run>.7z`, taken before each load; the newest few are kept (`load.backup_keep` in `business_data/ops/config.json`) | `/yq-load` (`scripts/yq_load_go.py`) |
 | `legacy\` | `<name>.7z`, the older backups that sat in `business_data/backups`, packed one at a time | `python -m scripts.yq_backup legacy --apply` |
-| `release\` | one backup for each release, such as `2026-10-14_pre-mi-v2` (a CSV per table and `manifest.json`, packed with `pack`) | moved here after a release (a release script writes its backup under `business_data/backups/` first), or made here with `python -m scripts.db_backup --all --out <a folder here>` |
+| `release\` | `<date>_pre-<label>.7z`, the backup taken before a release, such as `2026-10-21_pre-r9.7z`; an older release's backup may still be a plain folder (a CSV per table and `manifest.json`), such as `2026-10-14_pre-mi-v2`, which `pack` encrypts | `python -m scripts.yq_backup release <label>`, a release script's first part (below); the older plain folders were moved here after their release |
 | `photos\` | `<date>_<HHMM>_photos.7z` (a run never replaces an archive), an encrypted copy of the Market Intel photos with a manifest of every file (below) | `python -m scripts.yq_photos archive --apply` |
 
 ## The backup password
 
-Archives are encrypted with 7-Zip (AES-256, file names hidden too) and the backup password. The load, the restore drill
-and the packing commands (`legacy` and `pack`, below) look for the password in this order, and say only where they found
-it, never the password itself (`scripts/yq_secrets.py`):
+Archives are encrypted with 7-Zip (AES-256, file names hidden too) and the backup password. The load, the restore drill,
+the packing commands (`legacy` and `pack`) and the release backup (`release` and `unpack`), all below, look for the
+password in this order, and say only where they found it, never the password itself (`scripts/yq_secrets.py`):
 
 1. Windows Credential Manager, the generic credential `YQ_BACKUP_PASSWORD`;
 2. the Windows user environment (`HKCU\Environment`), read afresh each time, so a value set later with `setx` works at once;
@@ -132,9 +132,49 @@ came from. Exit code: 0 passed, 1 failed, 2 no archive to drill.
   pass is kept and named. Without `--apply` it only says what it would do. Afterwards empty the OneDrive recycle bin, which
   keeps deleted files for a while. The run leaves a row in `business_data/ops/drills.jsonl` too.
 - `python -m scripts.yq_backup pack <path> [<path> ...] [--apply]` encrypts a pre-load `.zip` archive or a backup folder
-  (`manifest.json` and one CSV per table, for example a release backup under `release\`) into a `.7z` beside it with the
-  backup password, reads the archive back, and only then deletes the original. Without `--apply` it only says what it
-  would do. A packed archive can be checked with `python -m scripts.yq_backup drill --archive <file>`.
+  (`manifest.json` and one CSV per table, for example an older release backup under `release\`) into a `.7z` beside it
+  with the backup password, reads the archive back, and only then deletes the original. Without `--apply` it only says
+  what it would do. A packed archive can be checked with `python -m scripts.yq_backup drill --archive <file>`.
+
+## The backup before a release: `release`, and `unpack` for a rollback
+
+`python -m scripts.yq_backup release <label>` is the backup a release script takes as its first part; the label names
+the release in lower-case letters and digits with single hyphens between them (`r9`, `mi-v2`). In one run it:
+
+1. backs up every table of the live database, only read, with `python -m scripts.db_backup --all` into
+   `release\<date>_pre-<label>` in the backup store: never under `business_data`, so the daily OneDrive copy of the
+   project folder never picks a plain copy up (the backup password is not in that program's environment);
+2. checks every file against its `manifest.json` (`python -m scripts.db_backup --verify`);
+3. packs the folder into `release\<date>_pre-<label>.7z` with the backup password (7-Zip AES-256, names hidden), as
+   `pack` does: made as `.7z.partial`, read back with the password and every file counted, and only then renamed;
+4. deletes the plain folder, and prints the archive's path as its last line.
+
+It refuses, with nothing made, without the backup password or 7-Zip (a release backup is never plain), and when that
+folder or its `.7z` is already there: a second backup of a release on the same day takes another label, such as `r9-2`.
+A backup that does not complete (a lost connection, a stop) is removed, since it is not a backup. One whose files do not
+match their manifest is kept for a look; one that could not be packed is kept too, a whole backup, which
+`pack <folder> --apply` encrypts later. A row with `"kind": "release"` goes to `business_data/ops/drills.jsonl`. Exit
+code: 0 only the encrypted copy is left; 1 it did not finish (its last line says what is left plain); 2 refused,
+nothing was made.
+
+A release script runs it once, after its own YES, stops unless the exit code is 0, and keeps the last line (the archive)
+for its rollback part. The archive can be checked at any time with `python -m scripts.yq_backup drill --archive <file>`.
+
+**A rollback** unpacks that archive first, then restores from the folder `unpack` prints:
+
+```
+python -m scripts.yq_backup unpack <archive> [--to <folder>]
+python -m scripts.db_backup --restore <folder> --tables <t1,t2,…>          # a dry run: the plan
+python -m scripts.db_backup --restore <folder> --tables <t1,t2,…> --yes    # one transaction
+```
+
+`unpack` reads the archive back with the password, unpacks it into a new, empty folder (by default a new
+`unpack_<date>_<time>_1` folder in the backup store; a folder named with `--to` must be new or empty, and outside
+OneDrive and the project folder), checks every file against its manifest and prints the folder that holds
+`manifest.json` as its last line. A copy that does not unpack whole, or does not match its manifest, is removed again.
+A plain `.zip` backup is unpacked the same way, without the password. The folder holds the backup unencrypted: delete
+it once the restore is done. A row with `"kind": "unpack"` goes to `drills.jsonl`. Exit code: 0 unpacked and checked;
+1 it did not unpack whole (its last line says what is left); 2 refused, nothing was written.
 
 ## The photo archive: `scripts/yq_photos.py`
 
@@ -164,10 +204,12 @@ value) of the place the password came from, and counts only.
 
 ## Restoring
 
-Extract the archive (`7z x yq-backup_<date>_<time>.7z -o<folder>`, it asks for the password), then use the guarded
-restore, which is a dry run unless `--yes`: `python -m scripts.db_backup --restore <folder> --tables <list>` (see its
-docstring and docs/MIGRATIONS.md, "Backup, restore and the preservation gate"). A folder under `release\` is already a
-backup folder: check it with `python -m scripts.db_backup --verify <folder>` and restore from it directly. The restore
-refuses to overwrite rows that are newer than the backup, and it is rolled back as a whole on any mismatch.
+Unpack the archive with `python -m scripts.yq_backup unpack <archive>` (above: it checks the files and prints the
+folder), or extract it by hand (`7z x yq-backup_<date>_<time>.7z -o<folder>`, it asks for the password), then use the
+guarded restore, which is a dry run unless `--yes`: `python -m scripts.db_backup --restore <folder> --tables <list>`
+(see its docstring and docs/MIGRATIONS.md, "Backup, restore and the preservation gate"). An older plain folder under
+`release\` is already a backup folder: check it with `python -m scripts.db_backup --verify <folder>` and restore from it
+directly. The restore refuses to overwrite rows that are newer than the backup, and it is rolled back as a whole on any
+mismatch. Delete an unpacked folder once the restore is done: it holds the backup unencrypted.
 
 Use these programs on the office PC only, not on a shared machine.

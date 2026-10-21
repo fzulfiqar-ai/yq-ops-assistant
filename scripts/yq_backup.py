@@ -33,14 +33,42 @@
         business_data/ops/drills.jsonl. Exit 0: every plain copy is gone; 1: one is left (refused, failed
         or not deleted); 2: refused, the backup password or 7-Zip is missing.
 
+    python -m scripts.yq_backup release <label>
+        The backup before a release (a release script's first part; the label is lower-case letters and
+        digits with single hyphens between them, such as r9 or mi-v2). Every table of the live database,
+        only read, by `python -m scripts.db_backup --all --out <the backup store>\\release\\<date>_pre-<label>`
+        as a child (never under business_data, so never in the daily OneDrive copy of the project folder;
+        the backup password is never in its environment), then `scripts.db_backup --verify` on that folder,
+        then sealed as pack seals a folder: <date>_pre-<label>.7z made as .partial, read back with the
+        password and every file counted, renamed, and only then the plain folder deleted. The archive's path
+        is the last line printed. Refused before anything is made without the backup password or 7-Zip (a
+        release backup is only ever encrypted), and when that folder or its .7z is already there. A backup
+        that did not complete is removed (it is not a backup); one that completed but does not match its
+        manifest, or could not be sealed, is kept and named. One row in business_data/ops/drills.jsonl (a
+        row that cannot be written is said and changes nothing else). Exit 0: only the encrypted copy is
+        left; 1: it did not finish (the last line says what is left plain); 2: refused, nothing was made.
+
+    python -m scripts.yq_backup unpack <archive> [--to <folder>]
+        A rollback's first step: a backup archive (a .7z with the password, or a plain .zip) read back,
+        unpacked into a new, empty folder (default: a new unpack_<date>_<time>_<n> folder in the backup
+        store, outside OneDrive; a folder named with --to must be new or empty, and outside OneDrive and
+        the project folder), and its files checked against its manifest (scripts.db_backup --verify). The
+        folder for `python -m scripts.db_backup --restore <folder> --tables ...` is the last line printed;
+        it holds the backup unencrypted, so it is deleted once the restore is done. A copy that does not
+        unpack whole or does not match its manifest is removed again. One row in drills.jsonl. Exit 0:
+        unpacked and checked; 1: it did not unpack whole (the last line says what is left); 2: refused,
+        nothing was written.
+
 Never writes to production: the restore's database address is forced to a loopback address the drill
-made, and any other address is refused before anything runs. The backup password comes from
-scripts/yq_secrets.py and is never printed (7-Zip gets it on its command line, as scripts/nightly_backup.py
-always has: a known limit on a PC that other people use).
+made, and any other address is refused before anything runs; a release backup only reads it. The backup
+password comes from scripts/yq_secrets.py and is never printed (7-Zip gets it on its command line, as
+scripts/nightly_backup.py always has: a known limit on a PC that other people use); the scripts.db_backup
+children of legacy, pack, release and unpack never have it in their environment.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -317,11 +345,19 @@ def partial_of(archive: Path) -> Path:
     return archive.with_name(archive.name + PARTIAL)
 
 
+def plain_env(base: dict | None = None) -> dict:
+    """A scripts.db_backup child's environment: this one's without the backup password, which only 7-Zip is given (on
+    its command line)."""
+    env = dict(os.environ if base is None else base)
+    env.pop(yq_secrets.BACKUP_PASSWORD, None)
+    return env
+
+
 def verify_folder(folder: Path) -> None:
     """Every file of a plain backup against its manifest (scripts.db_backup --verify, as the drill runs it).
     Raises DrillError when they differ, or when the check cannot run."""
     try:
-        v = run([sys.executable, "-X", "utf8", "-m", "scripts.db_backup", "--verify", str(folder)])
+        v = run([sys.executable, "-X", "utf8", "-m", "scripts.db_backup", "--verify", str(folder)], env=plain_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DrillError(f"the files could not be checked against their manifest ({type(exc).__name__})") from None
     if v.returncode != 0 or "Verify OK" not in v.stdout:
@@ -565,14 +601,14 @@ def survey(src: Path) -> dict:
         return {"refused": f"it cannot be read ({type(exc).__name__})"}
 
 
-def scratch_dir(stamp: str, n: int) -> Path:
-    """A new, empty folder in the backup store (outside OneDrive) to unpack a zip into; never one already there,
-    since it is deleted afterwards."""
+def scratch_dir(stamp: str, n: int, kind: str = "pack") -> Path:
+    """A new, empty folder in the backup store (outside OneDrive), <kind>_<stamp>_<n>: pack unpacks a zip into one,
+    unpack a backup for a restore. Never one already there (FileExistsError), since it is deleted afterwards."""
     try:
         root = backup_root()
     except SystemExit as exc:                        # scripts.nightly_backup refuses a store inside OneDrive
         raise DrillError(str(exc)) from None
-    tmp = root / f"pack_{stamp}_{n}"
+    tmp = root / f"{kind}_{stamp}_{n}"
     tmp.mkdir(parents=True, exist_ok=False)
     return tmp
 
@@ -735,6 +771,332 @@ def pack(sources: list[Path], apply: bool, say=print) -> int:
     return 0 if done == len(todo) and not unrecorded else 1
 
 
+# ── the backup before a release, sealed in the same run; unpacked again for a rollback ──────────────────
+
+LABEL = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+LABEL_MAX = 40
+RELEASE_TIMEOUT_S = 1800                 # the backup of every table takes about 5 minutes
+_ADDRESS = re.compile(r"(?i)\b(?:postgres(?:ql)?|https?)://\S+")
+
+
+class Unfinished(DrillError):
+    """The backup did not complete: what it wrote is not a backup."""
+
+
+def label_refusal(label: str) -> str | None:
+    """Why `label` cannot name a release backup, or None. It becomes part of a folder name: lower-case letters and
+    digits with single hyphens between them, at most LABEL_MAX characters."""
+    if len(label) <= LABEL_MAX and LABEL.fullmatch(label):
+        return None
+    return (f"the label {label[:60]!r} is not lower-case letters and digits with single hyphens between them (such as "
+            f"r9 or mi-v2), at most {LABEL_MAX} characters")
+
+
+def release_folder(label: str, day: str) -> Path:
+    """Where a release's backup is made: <the backup store>\\release\\<day>_pre-<label>, outside OneDrive and never
+    under business_data, so the daily OneDrive copy of the project folder never sees it. Raises SystemExit for a store
+    inside OneDrive (scripts.nightly_backup's rule)."""
+    return backup_root() / "release" / f"{day}_pre-{label}"
+
+
+def backup_argv(folder: Path) -> list[str]:
+    """The release's backup: every public table, in one read-only REPEATABLE READ snapshot, into `folder`."""
+    return [sys.executable, "-X", "utf8", "-m", "scripts.db_backup", "--all", "--out", str(folder)]
+
+
+def child_words(text: str) -> str:
+    """The last line a child printed, for the screen and drills.jsonl: one line, any web or database address
+    replaced, at most 200 characters."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return _ADDRESS.sub("<address>", lines[-1])[:200] if lines else "it printed nothing"
+
+
+def take_backup(folder: Path) -> None:
+    """scripts.db_backup --all into `folder`, as a child in the code folder (it reads the database address from its
+    environment, else from that folder's .env; the backup password is not in its environment). Raises Unfinished when
+    the backup did not complete (it failed, was stopped or did not start: what it wrote is not a backup), and
+    DrillError when it completed but its own check of the files against the manifest failed."""
+    try:
+        r = run(backup_argv(folder), env=plain_env(), timeout=RELEASE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise Unfinished(f"it was stopped after {RELEASE_TIMEOUT_S // 60} minutes") from None
+    except OSError as exc:
+        raise Unfinished(f"it could not be started ({type(exc).__name__})") from None
+    out, err = r.stdout or "", r.stderr or ""
+    done = [ln for ln in out.splitlines() if ln.startswith("Backup complete:")]
+    if not done:
+        raise Unfinished(f"exit {r.returncode}: {child_words(err if err.strip() else out)}")
+    if r.returncode != 0 or "verify OK" not in done[-1]:
+        raise DrillError("the backup's own check found files that do not match its manifest")
+
+
+def backup_size(folder: Path) -> tuple[int, int, int]:
+    """(the tables its manifest lists, its files, their bytes) of a plain backup folder."""
+    tables = manifest_tables((folder / "manifest.json").read_text(encoding="utf-8"))
+    found = [p for p in folder.rglob("*") if p.is_file()]
+    return tables, len(found), sum(p.stat().st_size for p in found)
+
+
+def _release_there(folder: Path, archive: Path, label: str) -> str | None:
+    """Why a release backup is refused because one of that name is already there, with what to do; or None."""
+    if os.path.lexists(archive):
+        also = (f" Its plain folder {folder.name} is next to it, which that run could not delete: delete it by hand."
+                if os.path.lexists(folder) else "")
+        return (f"{archive} is already there: this release was backed up today. Check that archive with python -m "
+                f"scripts.yq_backup drill --archive <it>, or give this backup another label (such as {label}-2).{also}")
+    if os.path.lexists(folder):
+        return (f"{folder} is already there. If it is a whole backup (python -m scripts.db_backup --verify <it>), "
+                "python -m scripts.yq_backup pack <it> --apply encrypts it; if a stopped run left it, delete it; or "
+                f"give this backup another label (such as {label}-2).")
+    return None
+
+
+def _close(row: dict, t0: float, last: str, say) -> None:
+    """The end of a release or an unpack: its row in drills.jsonl (one that cannot be written is said and changes
+    nothing else: the archive or the folder is what the run is for), then its last line."""
+    row.setdefault("seconds", round(time.monotonic() - t0, 1))
+    try:
+        record(row)
+    except OSError as exc:
+        say(f"  WARNING: the row of this run could not be written to business_data/ops/drills.jsonl "
+            f"({type(exc).__name__}).")
+    say(last)
+
+
+def release(label: str, say=print, today: str | None = None) -> int:
+    """The backup before a release (the module's docstring says how). Exit 0: only the encrypted copy is left and the
+    last line is its path; 1: it did not finish (the last line says what is left plain); 2: refused, nothing made."""
+    t0 = time.monotonic()
+    refused = label_refusal(label)
+    if refused:
+        say(f"Refused, nothing was made: {refused}.")
+        return 2
+    password, source = yq_secrets.backup_password()
+    exe = find_7z()
+    missing = _missing(password, exe)
+    if missing:
+        say(f"Refused, nothing was made: {missing}. A release backup is only ever made encrypted: none was taken, so "
+            "nothing is left plain.")
+        return 2
+    try:
+        folder = release_folder(label, today or datetime.now().strftime("%Y-%m-%d"))
+    except SystemExit as exc:                        # scripts.nightly_backup refuses a store inside OneDrive
+        say(f"Refused, nothing was made: {exc}")
+        return 2
+    archive = folder.with_name(folder.name + ".7z")
+    there = _release_there(folder, archive, label)
+    if not there:
+        try:
+            folder.parent.mkdir(parents=True, exist_ok=True)
+            folder.mkdir()                           # this run's own: another run started with the label is refused
+        except OSError as exc:
+            there = _release_there(folder, archive, label) or f"{folder} could not be made ({type(exc).__name__})."
+    if there:
+        say(f"Refused, nothing was made: {there}")
+        return 2
+    row: dict = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": "release", "label": label,
+                 "source": folder.name, "archive": archive.name, "deleted": False, "password_from": source}
+    say(f"Release backup {folder.name}: every table of the live database (only read) into {folder.parent} (outside "
+        f"OneDrive), checked against its manifest, packed with 7-Zip (AES-256, names hidden; the password from "
+        f"{source}), read back with the password, and only then the plain folder deleted.")
+    steps = [0]
+
+    def line(text: str) -> None:
+        steps[0] += 1
+        say(f"  {steps[0]}. {text}")
+
+    stage = "backup"
+    try:
+        take_backup(folder)
+        stage = "check"
+        tables, files, size = backup_size(folder)
+        row.update(tables=tables, files=files)
+        line(f"Backed up every table (scripts.db_backup --all, read only): {_n(tables, 'table')}, {_n(files, 'file')}, "
+             f"{size_words(size)}")
+        if not tables:
+            raise DrillError("the backup lists no table")
+        verify_folder(folder)
+        line("Every file matches its manifest (rows and columns)")
+        stage = "seal"
+        said = seal(folder, archive, password, exe, note=line)
+    except Unfinished as exc:
+        left = remove_plain(folder)
+        row.update(result="failed", why=f"the backup did not complete ({exc})"[:300])
+        if left:
+            row["left"] = len(left)
+            end = (f"What it wrote could NOT all be removed ({left_words(folder, left)}): delete {folder} by hand, it "
+                   "holds part of the backup unencrypted.")
+        else:
+            end = "What it wrote was removed: nothing is left plain. Run this again once the cause is put right."
+        _close(row, t0, f"RELEASE BACKUP NOT DONE: the backup did not complete ({exc}). {end}", say)
+        return 1
+    except (DrillError, OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        why = (str(exc) or type(exc).__name__).rstrip(".")
+        row.update(result="failed", why=why[:300])
+        if not os.path.lexists(folder):
+            end = "Nothing is left plain."
+        elif stage == "seal":
+            end = (f"The plain folder {folder} is kept (unencrypted, outside OneDrive), a whole backup: once the cause "
+                   f"is put right, python -m scripts.yq_backup pack {folder} --apply encrypts it and then deletes it.")
+        else:
+            end = (f"The plain folder {folder} is kept (unencrypted, outside OneDrive) for a look (python -m "
+                   f"scripts.db_backup --verify {folder}); delete it before running this again.")
+        _close(row, t0, f"RELEASE BACKUP NOT DONE: {why}. {end}", say)
+        return 1
+    except BaseException:
+        if stage == "backup":
+            remove_plain(folder)                     # a stopped backup is not a backup: never left plain
+        raise
+    try:
+        packed = size_words(archive.stat().st_size)
+    except OSError:                                  # only for the line below: never a reason to undo the seal
+        packed = "its size unknown"
+    line(f"Packed {archive.name} ({packed}) and read it back with the password ({said})")
+    left = remove_plain(folder)
+    row.update(result="packed", deleted=not left)
+    if left:
+        row["left"] = len(left)
+        line(f"The plain folder could NOT be deleted: {left_words(folder, left)}. Close what holds it (an Explorer "
+             "window, say), then delete it by hand: the encrypted copy is whole.")
+        _close(row, t0, f"RELEASE BACKUP NOT DONE: the encrypted copy {archive} is made and read back, but the plain "
+                        "folder is still there (see above).", say)
+        return 1
+    line("Deleted the plain folder")
+    row["seconds"] = round(time.monotonic() - t0, 1)
+    say(f"  Done in {row['seconds']} s: only the encrypted copy is left.")
+    _close(row, t0, str(archive), say)
+    return 0
+
+
+def unpack_target(to) -> Path:
+    """The folder named with --to, to unpack a backup into: new or empty, outside OneDrive and outside the project
+    folder (the code folder is a public repository, and the daily OneDrive copy picks the project folder up). Raises
+    DrillError with the reason it is refused."""
+    from scripts import nightly_backup
+    dest = Path(to).expanduser().resolve()
+    if nightly_backup.is_synced(dest):
+        raise DrillError(f"{dest} is inside a synced folder (OneDrive), and the unpacked backup is unencrypted: name a "
+                         "folder on this disk only")
+    for top, what in ((ROOT, "the code folder, a public repository"),
+                      (paths.data_root(), "the project folder, which the daily OneDrive copy picks up")):
+        base = Path(top).resolve()
+        if dest == base or base in dest.parents:
+            raise DrillError(f"{dest} is inside {what}: name a folder outside it")
+    if dest.exists() and not dest.is_dir():
+        raise DrillError(f"{dest} is a file, not a folder")
+    if dest.is_dir() and any(dest.iterdir()):
+        raise DrillError(f"{dest} is not empty: name a new folder, or an empty one")
+    return dest
+
+
+def new_unpack_folder(stamp: str) -> Path:
+    """unpack's own place when no --to is named: a new folder in the backup store, unpack_<stamp>_<n>."""
+    for n in range(1, 100):
+        try:
+            return scratch_dir(stamp, n, kind="unpack")
+        except FileExistsError:
+            continue
+    raise DrillError("no new folder could be made in the backup store")
+
+
+def unpacked_backup(top: Path) -> Path:
+    """The folder of an unpacked archive that holds its manifest.json: its top, or the one folder below it that does."""
+    try:
+        return backup_folder(top)
+    except DrillError:
+        raise DrillError("the archive holds no manifest.json at its top or one folder down: it is not a backup") \
+            from None
+
+
+def unpack_backup(archive: Path, to: Path | None = None, say=print) -> int:
+    """A backup archive -> a new, empty folder, checked against its manifest, for scripts.db_backup --restore (the
+    module's docstring says how). Exit 0: the last line is the folder; 1: it did not unpack whole (the last line says
+    what is left); 2: refused, nothing was written."""
+    t0 = time.monotonic()
+    archive = Path(os.path.abspath(archive))
+    encrypted = archive.suffix.lower() == ".7z"
+    if not (encrypted or archive.suffix.lower() == ".zip") or not archive.is_file():
+        say(f"Refused, nothing was written: {archive} is not a backup archive on this PC (a .7z, or a plain .zip).")
+        return 2
+    password, source = yq_secrets.backup_password() if encrypted else (None, None)
+    exe = find_7z() if encrypted else None
+    missing = _missing(password, exe) if encrypted else ""
+    if missing:
+        say(f"Refused, nothing was written: {missing}.")
+        return 2
+    try:
+        dest = unpack_target(to) if to is not None else None
+        if dest is None:
+            backup_root()                            # a store inside OneDrive is refused here, before anything
+    except SystemExit as exc:
+        say(f"Refused, nothing was written: {exc}")
+        return 2
+    except (DrillError, OSError) as exc:
+        say(f"Refused, nothing was written: {exc}.")
+        return 2
+    row: dict = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": "unpack",
+                 "archive": archive.name, "encrypted": encrypted, "password_from": source}
+    where = str(dest) if dest is not None else "a new folder in the backup store (outside OneDrive)"
+    say(f"Unpack {archive.name} into {where}, checked against its manifest, for a restore.")
+    steps = [0]
+
+    def line(text: str) -> None:
+        steps[0] += 1
+        say(f"  {steps[0]}. {text}")
+
+    made: Path | None = None
+    existed = False
+    try:
+        ok, said = read_back(archive, password, exe)
+        line(f"Read back {archive.name}{' with the password' if encrypted else ''}: {said}")
+        if not ok:
+            raise DrillError("the archive does not read back whole"
+                             + (" (a wrong password reads the same way)" if encrypted else ""))
+        if dest is None:
+            made = new_unpack_folder(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        else:
+            existed = dest.is_dir()
+            dest.mkdir(parents=True, exist_ok=True)
+            made = dest
+        unpack(archive, made, password, exe)
+        folder = unpacked_backup(made)
+        tables, files, _size = backup_size(folder)
+        line(f"Unpacked {_n(files, 'file')} ({_n(tables, 'table')}) into {made}")
+        if not tables:
+            raise DrillError("its manifest.json lists no table: it is not a backup")
+        verify_folder(folder)
+        line("Every file matches its manifest (rows and columns)")
+    except (DrillError, OSError, ValueError, KeyError, RuntimeError, zipfile.BadZipFile,
+            subprocess.TimeoutExpired) as exc:
+        why = (str(exc) or type(exc).__name__).rstrip(".")
+        row.update(result="failed", why=why[:300])
+        if made is None:
+            end = "Nothing was written."
+        else:
+            row["folder"] = made.name
+            left = remove_plain(made)
+            if left:
+                row["left"] = len(left)
+                end = (f"The unpacked copy could NOT all be removed ({left_words(made, left)}): delete {made} by hand, "
+                       "it holds the backup unencrypted.")
+            else:
+                end = "The unpacked copy was removed."
+                if existed:
+                    with contextlib.suppress(OSError):
+                        made.mkdir()                 # the empty folder that was named is left as it was
+        _close(row, t0, f"UNPACK FAILED: {why}. {end}", say)
+        return 1
+    except BaseException:
+        if made is not None:
+            remove_plain(made)                       # a stopped unpack never leaves the backup unencrypted
+        raise
+    row.update(result="unpacked", folder=made.name, tables=tables, files=files)
+    say(f"  The restore: python -m scripts.db_backup --restore {folder} --tables <t1,t2,...> (a dry run; --yes applies "
+        f"it). Delete {made} once it is done: it holds the backup unencrypted.")
+    _close(row, t0, str(folder), say)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -752,11 +1114,24 @@ def main(argv: list[str] | None = None) -> int:
                                      "manifest.json): each becomes <name>.7z next to it")
     pk.add_argument("paths", nargs="+", metavar="path", help="a plain pre-load .zip or a backup folder")
     pk.add_argument("--apply", action="store_true", help="do it (without it: say what would be done)")
+    rl = sub.add_parser("release", help="back up every table before a release, sealed encrypted in the backup store's "
+                                        "release folder; the archive's path is the last line")
+    rl.add_argument("label", help="the release, in lower-case letters and digits with single hyphens between (r9, "
+                                  "mi-v2)")
+    up = sub.add_parser("unpack", help="decrypt a backup archive into a new, empty folder and check it, for "
+                                       "scripts.db_backup --restore; the folder is the last line")
+    up.add_argument("archive", help="the .7z (or a plain .zip) to unpack")
+    up.add_argument("--to", help="a new or empty folder, outside OneDrive and the project folder (default: a new "
+                                 "folder in the backup store)")
     args = ap.parse_args(argv)
     if args.cmd == "drill":
         return drill(Path(args.archive) if args.archive else None, args.keep)
     if args.cmd == "pack":
         return pack([Path(p) for p in args.paths], args.apply)
+    if args.cmd == "release":
+        return release(args.label)
+    if args.cmd == "unpack":
+        return unpack_backup(Path(args.archive), Path(args.to) if args.to else None)
     return legacy(args.apply)
 
 
