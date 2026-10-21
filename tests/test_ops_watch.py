@@ -296,6 +296,10 @@ def _():
                    exc("damage_not_booked", issues=[sio(43)], to=DAMAGE, day=D, deadline=D + timedelta(7))]
         items, notes = checks.found_items(waiting + [not_received(44, deadline=D - timedelta(1))], D, {}, None)
         assert [it["key"] for rule in checks.MOVE_RULES for it in items[rule]] == [f"xfer_open|{sio(44)}"] and not notes
+        # to the damage store the deadline is the first day out of grace (pairing.within_grace, /yq-stock damage)
+        items, notes = checks.found_items([exc("damage_not_booked", issues=[sio(48)], to=DAMAGE, day=D - timedelta(7),
+                                               deadline=D)], D, {}, None)
+        assert [it["evidence"] for it in items["xfer_open"]] == [[sio(48)]] and not notes, (items["xfer_open"], notes)
         # the same exception as an object, one number alone where a list is expected, lines as mappings
         shaped = SimpleNamespace(**dict(not_received(45), issues=sio(45), lines=[{"item": ITEM_1, "units": 3}]))
         lone = dict(exc("orphan", receipt=strv(46), received_at=VAN_B), possible=sio(47))

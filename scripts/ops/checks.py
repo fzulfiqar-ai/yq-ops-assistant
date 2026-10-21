@@ -340,10 +340,13 @@ def _issues(exc: Mapping) -> list[str]:
 
 
 def _in_grace(exc: Mapping, d) -> bool:
-    """An issue whose deadline is the ledger's last day or later is not late yet: never 'not received after its
-    deadline', whatever the audit hands over."""
+    """An issue still inside its deadline is not late yet: never 'not received after its deadline', whatever the
+    audit hands over. Read as pairing.within_grace reads it: to the damage store while the ledger's last day is
+    before the deadline (/yq-stock damage lists it on that day), to any other store while it is on or before it."""
     due, day = fmt.as_date(exc.get("deadline")), fmt.as_date(d)
-    return due is not None and day is not None and due >= day
+    if due is None or day is None:
+        return False
+    return day < due if exc.get("kind") == "damage_not_booked" else day <= due
 
 
 def _late(exc: Mapping, d, rules) -> int | None:
