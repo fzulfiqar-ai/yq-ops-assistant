@@ -22,6 +22,6 @@ Run exactly `python -m scripts.ops report month $ARGUMENTS`: it starts with `pyt
 7. A second build of the same month gets a new name next to the first; the first is never overwritten.
 8. Never accuse anyone. An item is "to check": say what differs, never who is to blame.
 
-If he asks for the weekly workbook, say that it arrives in a later phase.
+If he asks for the weekly workbook or the weekly review, use /yq-week: it builds the week's workbook, then runs the weekly review of the same week.
 
 If he only asks whether the data is up to date or what is waiting, run `python -m scripts.ops status` instead and show it the same way.

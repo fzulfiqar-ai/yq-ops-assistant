@@ -14,6 +14,7 @@ changes the live database except the load, and the load asks you every time. Fin
 |---|---|---|
 | `/yq-load` or `/yq-load <ddmmyy>` | You have put Focus reports in a folder named with the date, for example `Uplaods/<ddmmyy>/`. With no date it takes the newest folder. | One table. Each file is marked: loaded; loaded in part (only the main-warehouse block of the stock file); not loaded this time; or a question for you. If a check fails the load stops and says why. After you click **Yes** it loads, verifies, and prints your brief. Then it e-mails you the brief and makes the team message (section 2 sets the e-mail up), and Claude shows the `/yq-stock` screen, which makes the day's Stock & Order Plan workbook. |
 | `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
+| `/yq-week` or `/yq-week <YYYY-MM-DD>` | Every Sunday, once the week to Saturday is loaded (your 90-day plan has the weekly report due on Sunday). With no date it takes the last full week; a date must be the Saturday the week ends on. | Your weekly sales workbook to forward, in `exports/reports/weekly/` (Dashboard, Salesmen, Categories, Products, Customers, Daily, Stock, Movements, Actions, Data, Notes), every tile in four windows (section 4), and a short screen of what it checked. Then Claude follows the AI weekly review (`/weekly-review`) for the same week: its report, and its Top 5 actions for your approval; nothing is stored until you answer. |
 | `/yq-month` or `/yq-month <YYYY-MM>` | Once a month is whole: after the first load of the next month. With no month it takes the last whole month. | Your monthly Sales Report workbook, laid out like your September one (Dashboard, Salesmen, Categories, Products, Customers, Daily, Data, Notes), in `exports/reports/monthly/`, and a short screen of what it checked. Its ten comment lines are marked DRAFT until a later phase adds the step where you approve them. |
 | `/yq-stock`, `/yq-stock reorder`, `/yq-stock ageing`, `/yq-stock damage`, `/yq-stock file` or `/yq-stock <code>` | When you plan an order (it also runs at the end of every `/yq-load`). Or ask in plain words: what should I order, what is running out, how many days of stock do I hold, which stock is old, did the price cut work, how much stock is damaged. | The main store's stock as the portal shows it and at cost, the days of cover against KPI 1, the order list (what to order and how much, and the lead time it rests on), how often the fast movers were in stock, the ageing and how the old and price-cut items are selling, and the damage store, each in short. On its first line, the day's **Stock & Order Plan** workbook (`exports/reports/stock/`, one per data date). `reorder` shows the whole order list with each item's supplier, the supplier invoices the lead time is measured on and the fast movers with their sales ranking; `ageing` the ageing table and its review; `damage` the damage store in full; `file` a new workbook even when today's exists; `team` the team copy of your newest workbook (no cost or value); `ordered <supplier>` when you have placed an order (it shows the lines and logs them only after your yes) and `cancel <supplier>` to undo one; an item's code that one item. No purchase order is drafted and nothing is sent to a supplier (section 4 says how each figure is worked out). |
 | `/yq-moves`, `/yq-moves mtd`, `/yq-moves <YYYY-MM>` or `/yq-moves rep:<name>` | When you want to see what went to the vans and outlets and came back, what was not received, or how one van's or outlet's stock moved. | Every transfer between the main store and the vans and outlets, paired by what its two vouchers hold (never by their numbers), with what became of it; each van's and outlet's stock from its opening to its closing, with a check that must read nought; the main store's line; and what is to check, in BHD at landed cost (section 4). The last seven days unless you name a window; `rep:<name>` shows one van or outlet with its own transfers. |
@@ -42,6 +43,14 @@ the category of its Upcoming or catalog card through `report.category_names` in 
 entry it falls to Other, and the screen says so. A second build of a month never replaces the first: it
 gets the next free name.
 
+`/yq-week` builds a week only when it is complete (its Saturday is a complete day of the data, the rule
+of section 4); before that it says which week is the last complete one and writes nothing, and the
+review does not start. The workbook is built the monthly way, from the same day-book lines, and carries
+totals only on its Stock, Movements and Actions sheets, so you can forward it. Once it is made, Claude
+follows `/weekly-review` for the same Saturday as that command file says: its own commands ask you as
+usual, and it writes the AI insights for the portal only after your answers. If the review stops, the
+workbook stands.
+
 The **Stock & Order Plan** workbook (`/yq-stock`, and at the end of every `/yq-load`) is yours to edit
 and share. One file is made per data date, named `YQ Stock and Order Plan <YYYY-MM-DD>.xlsx` in
 `exports/reports/stock/`; it is never overwritten, and `/yq-stock file` makes the next free name. Its
@@ -58,9 +67,8 @@ placed, with what is still due. `/yq-stock team` makes a team copy next to it, b
 typed in your file: your quantities and comments and a Team comment column, without any cost, value,
 budget or salesman's name. Claude never opens, changes or sends a file: share the one you choose.
 
-The rest of the routine (the weekly workbook and the KPI scorecard) follows in later phases. This
-table gets a row for each one when it exists. After a new
-command is added, type `/reload-skills` (or restart Claude Code) so it appears.
+The rest of the routine (the KPI scorecard) follows in a later phase; this table gets its row when it
+exists. After a new command is added, type `/reload-skills` (or restart Claude Code) so it appears.
 
 `/yq-load` is yours alone: Claude does not start it by itself. If you ask Claude in plain words to
 load the reports, it answers with the line to type.
@@ -490,6 +498,35 @@ one of two lines, and the load check says the same in its own words:
 - **Not checked yet:** sales below cost, and returns against last month's kickback tier; both come with
   the month-end release.
 
+### The weekly workbook (`/yq-week`)
+
+- **The week** runs Sunday to Saturday and is named by its Saturday. It is built only when its Saturday
+  is a complete day of the data (the last complete week, above); with no date it is the last full week,
+  the one `/yq-brief last-week` shows. The basis is the monthly workbook's: all accessories, B2B and the
+  two outlets, ex-VAT, the zero-value lines kept and left out of the counts.
+- **Four windows.** Every tile sets the week beside three others: the four weeks before, divided by four
+  (an average week); the same seven days one month back; and the month to date (the first of the
+  Saturday's month to the Saturday) against your KPI step, with what is still needed per working day to
+  the month end. The Notes sheet checks each window against the database, and every sheet's total
+  against the Data sheet; a difference is printed as `CHECKS TO LOOK AT`.
+- **The three comment lines** on the Dashboard are formulas over its own figures: the week against the
+  four-week average and the same days last month; the month to date against the KPI step; and the fast
+  movers, the order list and the receipts' papers. They need no approval, and they follow the figures.
+- **The Actions sheet** carries counts only, never an item's name or a voucher number: the fast movers out
+  of stock at the end of the Saturday; the order list per supplier; logged goods on order past their
+  expected day; the supplier receipts of the last sixty days missing a paper (the purchase order, the MRN
+  XML or the supplier invoice); the transfers to check, by kind, as `/yq-moves` finds them; the counts due
+  (the month-end count sheets, and the quarter-end full count); and the receipts with no incoming check
+  logged. The Stock and Movements sheets carry totals only. A part that cannot be worked out this time
+  reads one line, *Not worked out this time*, with its reason, and the rest of the file stands.
+- **Due on Sunday.** Your 90-day plan has the weekly report due on the Sunday after its week
+  (`kpi.weekly_due_weekday` in `config.json` names another day). Each build leaves a record in
+  `exports/ops/<data-date>/` with the day it was due and whether it was built on time: the evidence
+  KPI 7 counts.
+- **The AI weekly review** that follows is `/weekly-review`, as its command file says. It builds its own
+  read-only pack and counts B2B accessories only, the two outlets left out, so its sales figures are lower
+  than the workbook's. Its Top 5 actions reach the portal's AI insights only after your answers.
+
 ## 5. Where things are kept
 
 Everything in the first six rows sits in the project folder. None of it is in git: `.gitignore` covers
@@ -504,7 +541,7 @@ public.
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
 | `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
 | `exports/reports/stock/` | The Stock & Order Plan workbooks from `/yq-stock` (and the end of each `/yq-load`): one per data date, `YQ Stock and Order Plan <YYYY-MM-DD>.xlsx`, never overwritten; `/yq-stock file` adds the next free name. |
-| `exports/reports/monthly/` and `exports/reports/weekly/` | The workbooks: the monthly one from `/yq-month` (named for its month, with `DRAFT` while its comment lines wait for you; a second build of a month gets the next free name), the weekly one in a later phase. Each monthly build also leaves a short record in `exports/ops/<data-date>/`. |
+| `exports/reports/monthly/` and `exports/reports/weekly/` | The workbooks: the monthly one from `/yq-month` (named for its month, with `DRAFT` while its comment lines wait for you; a second build of a month gets the next free name), the weekly one from `/yq-week` (named for the Saturday its week ends on; a second build of a week gets the next free name too). Each build also leaves a short record in `exports/ops/<data-date>/`; a week's says the day it was due and whether it was built on time. |
 | `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, in `legacy\` the older backups that sat in OneDrive, encrypted, and in `photos\` the encrypted copy of the Market Intel photos. Outside OneDrive (see `docs/BACKUPS.md`). |
 
 ## 6. What these commands cannot do
@@ -553,7 +590,9 @@ public.
   sheets. `python -m scripts.ops report month <YYYY-MM> --compare "<file>"` rebuilds a month and compares
   it with a reference file (your September one) on every sheet but Notes (formulas, kinds of value, values, print
   areas, filters, panes and the counts of rules and charts), the comment cells set aside;
-  `tests/test_ops_report.py` runs the same comparison when `YQ_OPS_GOLDEN=1` is set.
+  `tests/test_ops_report.py` runs the same comparison when `YQ_OPS_GOLDEN=1` is set. `report week` builds
+  the weekly workbook from the same parts (`week.py` and `sheets_week.py`), with the Stock and Movements
+  sheets it shares with the month-end pack (`sheets_extra.py`).
 - **The seam with the load programs.** `/yq-load` acts on what they print, and on nothing else:
   the last line `GO: ...` of a check, and the line above it that starts
   `If Claude may not start it: double-click` (a check that stops exits with code 2 and prints no go

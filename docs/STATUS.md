@@ -7,8 +7,8 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 - Ops skills, phase 1 and its upgrade: `/yq-load` (check, then the Windows box, then the writer, then the e-mail) and
   `/yq-brief` (with the team message). The engine is `python -m scripts.ops`. The one program that writes to the database
-  is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (14
-  suites, all run in CI). Reference: `docs/OPS_SKILLS.md`; backups and the restore drill: `docs/BACKUPS.md`.
+  is `scripts/yq_load_go.py`; the one that sends the e-mail is `scripts/yq_send.py`. Tests: `tests/test_ops_*.py` (every
+  suite runs in CI). Reference: `docs/OPS_SKILLS.md`; backups and the restore drill: `docs/BACKUPS.md`.
 - Done (15-Oct-2026): H, the phase 1 hardening pack: one full e-mail per data set, a check that finds nothing new ends
   without a GO line, the brief points only at built commands, the check shows how long each report takes, `pack` for
   plain backups, and the documents brought current.
@@ -28,6 +28,12 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 - `/yq-month`: the monthly sales workbook in the layout of the September report (`python -m scripts.ops report month
   [YYYY-MM]`, whole months only, written as a DRAFT under `exports/reports/monthly/`). Its golden test rebuilds September
   against the reference file (local only).
+- `/yq-week` (21-Oct-2026): the weekly sales workbook for a whole Sunday-to-Saturday week (`python -m scripts.ops
+  report week [YYYY-MM-DD]`, the last full week by default, under `exports/reports/weekly/`): eleven sheets, every
+  tile in four windows (the week, the four weeks before, the same days last month, the month to date against the
+  KPI step), three comment lines as formulas, the Actions sheet (counts only) and the Stock and Movements sheets it
+  shares with the month-end pack (totals only); a build record with the due day for KPI 7. The skill then follows
+  `/weekly-review` for the same Saturday; its Top 5 is written to the portal only after the owner's answers.
 - `/yq-stock` with the Stock & Order Plan (21-Oct-2026): the screen and an editable workbook per data date under
   `exports/reports/stock/` (the order list per supplier, every item with its status, fast movers, the ageing review
   against the clear target with the price cuts' effect, the damage store, goods on the way, the settings and the
@@ -67,10 +73,9 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- Built on their own branches, released in this order (the plan of 21-Oct-2026): `/yq-week` (the weekly pack
-  with the AI review), the count sheets (`/yq-month prep` and `count`), the month-end pack (the Stock,
-  Movements, Reconciliation, KPI and KPI log sheets, the ten comment lines with their approval step, the four
-  reconciliations, `/yq-kpi`), then the phase 2b release.
+- Built on their own branches, released in this order (the plan of 21-Oct-2026): the count sheets (`/yq-month
+  prep` and `count`), the month-end pack (the Stock, Movements, Reconciliation, KPI and KPI log sheets, the ten
+  comment lines with their approval step, the four reconciliations, `/yq-kpi`), then the phase 2b release.
 - The faster load's review follow-ups are built and go with the phase 2b release's API deploy: each temporary
   table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
   loader's own words up, so that a load that rolled back is journalled as writing nothing; and the refresh
@@ -78,13 +83,13 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Not built (the engine prints "not built yet")
 
-`recon`, `kpi`, the weekly workbook (`report week`) and `check` (a drafted text against the computed figures) are
-not on `main` yet: they are built and wait for their releases (above). The specification is the approved ops-skills
-plan of 8-Oct-2026 (the sections from /yq-week to /yq-kpi, and "Build order").
+`recon`, `kpi` and `check` (a drafted text against the computed figures) are not on `main` yet: they are built and
+wait for their releases (above). The specification is the approved ops-skills plan of 8-Oct-2026 (the sections from
+/yq-week to /yq-kpi, and "Build order").
 
 ## Order of work (each step needs the owner's go)
 
-`/yq-week`, the count sheets, the month-end pack, the phase 2b release (the Stock Moves page by contents, van stock
+The count sheets, the month-end pack, the phase 2b release (the Stock Moves page by contents, van stock
 from the ledger, the narration mask, the four load follow-ups, the team-message Copy button), then Market Intel
 phases 3 and 4 once the rep reports are enough.
 

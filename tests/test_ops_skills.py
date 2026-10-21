@@ -111,7 +111,8 @@ OWNER_ONLY = {"yq-load"}
 # allowed-tools asks for it); the load skill also runs the brief, which that check has always asked of it
 SKILL_COMMAND = {"yq-load": "python -m scripts.ops brief", "yq-brief": "python -m scripts.ops brief",
                  "yq-month": "python -m scripts.ops report month", "yq-stock": "python -m scripts.ops stock",
-                 "yq-moves": "python -m scripts.ops moves", "yq-watch": "python -m scripts.ops watch"}
+                 "yq-moves": "python -m scripts.ops moves", "yq-watch": "python -m scripts.ops watch",
+                 "yq-week": "python -m scripts.ops report week"}
 SHADOWS = ("weekly-review", "monthly-review")       # the commands a same-named skill would hide
 DESCRIPTION_CAP = 1536                              # Claude Code cuts description + when_to_use here
 MAX_LINES = 70                                      # a SKILL.md stays under this many lines
@@ -491,7 +492,7 @@ def _():
 
 MY_FILES = (".claude/skills/yq-load/SKILL.md", ".claude/skills/yq-brief/SKILL.md", ".claude/skills/yq-month/SKILL.md",
             ".claude/skills/yq-stock/SKILL.md", ".claude/skills/yq-moves/SKILL.md", ".claude/skills/yq-watch/SKILL.md",
-            "CLAUDE.md", "docs/OPS_SKILLS.md",
+            ".claude/skills/yq-week/SKILL.md", "CLAUDE.md", "docs/OPS_SKILLS.md",
             "docs/FOCUS_EXPORT.md", ".gitignore", "requirements-dev.txt", "tests/test_ops_skills.py")
 
 
@@ -964,15 +965,94 @@ def _():
                            ('f"Note: {w}."', "`Note:`"),
                            ("DRAFT: the ten comment lines (five Highlights, five Points to note) and three notes beside "
                             "the tables", "five Highlights, five Points to note) and three notes beside the tables"),
-                           ("arrives in a later phase", "arrives in a later phase"),
+                           ('WEEK_MODULE = "scripts.ops.workbook.week"', "use /yq-week"),
                            (' - DRAFT" if draft', "a DRAFT")):
         assert said in src, f"the report no longer says: {said}"
         assert in_skill in body, f"the skill does not act on: {in_skill}"
+    # `report week` is handed to the weekly workbook's module, which is there: the weekly one is /yq-week, not later
+    assert (OPS / "workbook" / "week.py").is_file() and "yq-week" in skill_folders()
+    assert "arrives in a later phase" not in body
     assert "never over an existing file" in src and "the first is never overwritten" in body
     assert "yq-month" in skill_folders() and "`/yq-month" in read(ROOT / "CLAUDE.md")
     intro = flat(page_part(1))
     assert "| `/yq-month` or `/yq-month <YYYY-MM>` |" in read(PAGE) and "`report.category_names`" in intro
     assert "a second build of a month gets the next free name" in flat(page_part(5))
+
+
+WEEK_FILE = OPS / "workbook" / "week.py"                 # the weekly report: read as text (it imports the brief)
+REVIEW_FILE = ROOT / ".claude" / "commands" / "weekly-review.md"
+
+
+@test("the words of /yq-week are the ones the weekly report prints; the review it follows is the command as it stands")
+def _():
+    src, model_src = read(WEEK_FILE), read(OPS / "workbook" / "model.py")
+    _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-week" / "SKILL.md").read_bytes())
+    assert fm["argument-hint"] == "[YYYY-MM-DD]"
+    assert "a week is named by the Saturday it ends on, written `YYYY-MM-DD`" in body
+    usage = (ast.get_docstring(ast.parse(src)) or "").splitlines()[0]
+    assert usage.startswith("python -m scripts.ops report week [YYYY-MM-DD]"), usage
+    assert fm["allowed-tools"] == ["Bash(python -m scripts.ops report *)", "PowerShell(python -m scripts.ops report *)",
+                                   "Bash(python -m scripts.ops status *)", "PowerShell(python -m scripts.ops status *)"]
+    # what the skill acts on, in the program's own words
+    for said, in_skill in (("is not complete yet", "the week is not complete yet"),
+                           ('"CHECKS TO LOOK AT: "', "`CHECKS TO LOOK AT`"),
+                           ('"Not worked out this time: "', "`Not worked out this time`"),
+                           ('f"Note: {w}."', "`Note:`"),
+                           ('f"Due by {due_day}', "`Due by`"),
+                           ('f"File: {path}"', "The file it names"),
+                           ("the next free name", "the first is never overwritten"),
+                           ('f"Weekly sales report, {p.long}', "The screen's first line names the week")):
+        assert said in src, f"the weekly report no longer says: {said}"
+        assert in_skill in body, f"the skill does not act on: {in_skill}"
+    assert 'return f"the week ending {self.end.day}' in model_src          # how the first line names the Saturday
+    assert "a week is named by the Saturday it ends on" in model_src       # ... and its refusal of another day
+    # with no date: the brief's last full week, the one /yq-brief last-week shows
+    assert "sales.full_week_end(full_to)" in src and "the one /yq-brief last-week shows" in body
+    # the review: the command file as it stands, the Saturday as its argument, its own commands asked about as usual
+    review = read(REVIEW_FILE)
+    rfm = yaml.safe_load(FRONT.match(review).group(1))
+    assert rfm["argument-hint"] == "[--week-ending YYYY-MM-DD]", rfm
+    assert "python -m scripts.ai_head.pack --verify $ARGUMENTS" in review
+    assert "--week-ending" in source_options(ROOT / "scripts" / "ai_head" / "pack.py")
+    assert "Do nothing else until he answers" in review and "only after he has answered in this session" in review
+    # the skill neither spells the review's commands nor names its steps: the command file stays the one that does
+    for module in sorted(set(re.findall(r"python -m (scripts\.[\w.]+)", review))):
+        assert module not in body, f"the skill spells the review's command {module}"
+    steps = re.findall(r"\b[Ss]teps?\s+\d+\w*", body)
+    assert set(steps) == {"Step 1", "Step 2"}, steps                       # its own two steps, none of the review's
+    assert "§" not in body
+    # the basis the skill states: the review counts B2B accessories, the workbook every accessory line
+    assert "channel = 'B2B' and division = 'Accessories'" in read(ROOT / "scripts" / "ai_head" / "pack.py")
+    assert "BASIS_SQL = \"v.division NOT IN ('SIM', 'Devices')\"" in read(REPORT_FILE) and "build.LINES_SQL" in src
+    # the map and the page
+    assert "yq-week" in skill_folders() and "`/yq-week" in read(ROOT / "CLAUDE.md")
+    assert "| `/yq-week` or `/yq-week <YYYY-MM-DD>` |" in read(PAGE)
+    defs = flat(page_part(4))
+    consts = module_constants(OPS / "workbook" / "sheets_week.py")
+    assert consts["PAPERS_DAYS"] == 60 and "the supplier receipts of the last sixty days missing a paper" in defs
+    assert consts["AVERAGE_OF"] == 4 and "the four weeks before, divided by four" in defs
+    assert "kpi.weekly_due_weekday" in config.KEYS and "`kpi.weekly_due_weekday`" in defs
+    assert module_constants(WEEK_FILE)["DUE_DEFAULT"] == "Sunday" and "**Due on Sunday.**" in defs
+    assert "counts B2B accessories only, the two outlets left out" in defs
+    assert "a second build of a week gets the next free name too" in flat(page_part(5))
+
+
+@test("the /yq-week rules check bites: a rule turned round or dropped is caught")
+def _():
+    text = read(SKILLS / "yq-week" / "SKILL.md")
+    assert not problems_rules("yq-week", text)
+    for old, new in (("never build a part week another way", "build the days there are"),
+                     ("do not start Step 2", "go on to Step 2"),
+                     ("follow it unchanged, from its first step to its last", "follow the parts that fit"),
+                     ("only after his answers", "at once"),
+                     ("Never open, change, move, copy or send it", "Send it to the team"),
+                     ("If its pack fails, show the error and stop", "If its pack fails, query the database yourself"),
+                     ("the review counts B2B accessories while the workbook counts all accessories", "the two agree"),
+                     ("Its commands are not pre-approved here", "Its commands are pre-approved here"),
+                     ("say so first, in plain words, and point him to /yq-load", "carry on"),
+                     ("Show the output unchanged", "Sum it up"), ("$ARGUMENTS", "$ARGUMENTS $ARGUMENTS")):
+        assert old in text, old
+        assert problems_rules("yq-week", text.replace(old, new)), f"not caught: {old!r} -> {new!r}"
 
 
 @test("the words of /yq-stock are the ones the stock command reads and prints, and the page's counts are its own")
@@ -1705,7 +1785,32 @@ MUST_CONTAIN = {
         "Never write them yourself", "never open, change, move or delete the file", "never send it anywhere",
         "If a line starts `CHECKS TO LOOK AT`", "the workbook should not go out until that is explained",
         "A line that starts `Note:` is for him", "the first is never overwritten",
-        "Never accuse anyone", "to check", "the weekly workbook, say that it arrives in a later phase",
+        "Never accuse anyone", "to check", "If he asks for the weekly workbook or the weekly review, use /yq-week",
+    ],
+    "yq-week": [
+        "python -m scripts.ops report week $ARGUMENTS", "python -m scripts.ops status", "600000", "no pipe",
+        "Add no word or option he did not ask for", "Run nothing else that loads, writes or deploys",
+        "Show the output unchanged, in a code block", "type no number yourself",
+        "If the output opens with LOAD INTERRUPTED or LAST LOAD FAILED, say so first, in plain words, and point him "
+        "to /yq-load", "Change nothing yourself",
+        # a week that is not complete (or a day that is no Saturday): said, never built another way, no review
+        "If no file is named", "the week is not complete yet", "never build a part week another way",
+        "do not start Step 2",
+        "If a line starts `CHECKS TO LOOK AT`", "the workbook should not go out until that is explained",
+        "A line that starts `Not worked out this time`", "The rest of the file stands",
+        "A line that starts `Note:` is for him",
+        # the workbook is his to forward: never touched or sent from here, never overwritten
+        "The file it names is his to forward", "Never open, change, move, copy or send it",
+        "the first is never overwritten", "Never accuse anyone", "to check",
+        # then the weekly review of the same Saturday, the command file followed as it is
+        "The screen's first line names the week by the Saturday it ends on",
+        "read `.claude/commands/weekly-review.md` and follow it unchanged, from its first step to its last",
+        "with `--week-ending YYYY-MM-DD` as its argument, that Saturday in place of `YYYY-MM-DD`",
+        "Its commands are not pre-approved here: Claude Code asks before each one, as usual",
+        "writes the portal's AI insights only after his answers", "it sends nothing without his yes",
+        "If its pack fails, show the error and stop: the workbook and its build record stand as they are",
+        "Say once that the review counts B2B accessories while the workbook counts all accessories (B2B and the two "
+        "outlets)",
     ],
     "yq-stock": [
         "python -m scripts.ops stock $ARGUMENTS", "600000", "no pipe", "Add a word only when he asked for it",
@@ -2001,7 +2106,7 @@ def _():
     assert any("start with" in p for p in problems_claude_md("# Notes\n" + base, folders))
     assert any(".claude/worktrees" in p for p in problems_claude_md(base.replace(".claude/worktrees", "worktrees"), folders))
     assert any("scripts.load_supabase" in p for p in problems_claude_md(base.replace("scripts.load_supabase", "x"), folders))
-    assert any("no skill folder" in p for p in problems_claude_md(base + "\n- `/yq-" + "week`: later\n", folders))
+    assert any("no skill folder" in p for p in problems_claude_md(base + "\n- `/yq-" + "nosuch`: later\n", folders))
     assert any("does not list" in p for p in problems_claude_md(base.replace("/yq-brief", "/brief"), folders))
     # the file as it was reviewed: every folder that is not under .claude/worktrees was called the main folder
     holds = ("Otherwise, if this folder holds `business_data/` and the drop folder (`Uplaods/`, or `Uploads/`), it is the "
@@ -2215,7 +2320,7 @@ def _():
     assert any("not valid JSON" in p for p in problems_ops_doc(base.replace(
         '"PowerShell(python -m scripts.load_supabase*)"\n', '"PowerShell(python -m scripts.load_supabase*)",\n'), folders))
     assert any("NOT LOADED" in p for p in problems_ops_doc(base.replace("**NOT LOADED**", "NOT LOADED"), folders))
-    assert any("no skill folder" in p for p in problems_ops_doc(base + "\nType /yq-" + "week.\n", folders))
+    assert any("no skill folder" in p for p in problems_ops_doc(base + "\nType /yq-" + "nosuch.\n", folders))
     assert any("does not describe" in p for p in problems_ops_doc(base.replace("/yq-brief", "/brief"), folders))
     assert any("2. Paste once" in p for p in problems_ops_doc(base.replace("## 2. Paste once", "## Paste once"), folders))
     assert any("NEEDS YOUR DECISION" in p for p in problems_ops_doc(

@@ -193,18 +193,18 @@ jobs:
       # `shell: bash` is what makes a failed suite fail this step: GitHub runs an explicitly named bash
       # with -eo pipefail, its default shell without pipefail, and without it the status of
       # `suite | tee` is tee's, so the || branch never ran and a red suite passed the step.
-      # The monthly workbook (/yq-month) is written with XlsxWriter, a development-only library pinned in
-      # requirements-dev.txt and never in the API image: installed here for the report suite alone.
+      # The workbooks (/yq-month, /yq-week, /yq-stock) are written with XlsxWriter, a development-only library
+      # pinned in requirements-dev.txt and never in the API image: installed here for their suites alone.
       - name: XlsxWriter for the report suite (development only, not in the API image)
         run: pip install XlsxWriter==3.2.9
-      - name: Ops skills suites - read-only engine, load check, load writer, gate snapshot, reconcile, brief, delivery, sender, backups, report, stock (damage, review, plan, workbook, season, orders), photos (no DB)
+      - name: Ops skills suites - read-only engine, load check, load writer, gate snapshot, reconcile, brief, delivery, sender, backups, report, weekly pack, stock (damage, review, plan, workbook, season, orders), photos (no DB)
         shell: bash
         env:
           SUPABASE_URL: https://ci.invalid
         run: |
           set -o pipefail
           python -m compileall -q scripts/ops scripts/yq_load_go.py scripts/yq_send.py scripts/yq_secrets.py scripts/yq_backup.py scripts/yq_photos.py scripts/yq_nightly.py
-          for suite in readonly engine skills sales moves pairing position watch load load_go load_txn gate reconcile deliver send backup report stock stock_damage stock_review stock_plan stock_book stock_team stock_season stock_orders photos nightly verify; do
+          for suite in readonly engine skills sales moves pairing position watch load load_go load_txn gate reconcile deliver send backup report week sheets_extra stock stock_damage stock_review stock_plan stock_book stock_team stock_season stock_orders photos nightly verify; do
             echo "== tests.test_ops_$suite"
             python -m tests.test_ops_$suite 2>&1 | tee "$RUNNER_TEMP/ops_suite.log" || {
               grep -E '^(FAIL|[[:space:]]+assert |[A-Za-z_.]*(Error|Exception)\b)' "$RUNNER_TEMP/ops_suite.log" \
