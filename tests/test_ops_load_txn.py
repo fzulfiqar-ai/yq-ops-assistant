@@ -8,10 +8,13 @@ are pinned to ci.invalid before any import: a worktree would otherwise find the 
 through python-dotenv's find_dotenv. Every name and number here is invented.
 
 Pure (no database): the hold before the commit and the avoid list's text, identifiers, the request
-body text (httpx's own encoder), the SQL the client builds (on a recording connection), the loader's
-seams (_guard, one upsert per table, one ledger delete), main() asked for one transaction (no REST
-fallback when the session cannot open; rollback, close and the error raised when a table fails; the
-commit given the parsed avoid list), and the writer's flag and environment names.
+body text (httpx's own encoder), the SQL the client builds (on a recording connection: each upsert's
+temp table dropped once applied), open() (its limits, then the batch importer's own lock, and a lock
+it cannot get), the loader's seams (_guard, one upsert per table, one ledger delete), main() asked
+for one transaction (no REST fallback when the session cannot open; rollback, close and the error
+raised when a table fails; the commit given the parsed avoid list), scripts/refresh.py reading the
+loader's own words (written False after a rollback, never after a commit that got no answer; the
+seconds the commit was held), and the writer's flag and environment names.
 
 Local (SKIP unless YQ_LOCAL_PG_LOAD_TXN names a scratch cluster on THIS PC, e.g.
 postgresql://postgres@localhost:55731 -- the suite drops and creates its own two databases there,
@@ -24,7 +27,9 @@ yq_load_txn_rest and yq_load_txn_one):
     ledger, receivables, stock: every table, every id and the loader's output the same after every step;
   * a load that fails half-way leaves nothing behind on the one transaction (and part of it on REST);
   * nothing is visible to another session before the commit; the commit waits out an interval it is
-    told to avoid; a tolerated failure (a missing table) does not abort the transaction.
+    told to avoid; a tolerated failure (a missing table) does not abort the transaction;
+  * the batch importer's lock shows in pg_locks while the transaction is open and goes with it; a
+    second load waits for it no longer than its lock timeout; no temp table outlives its upsert.
 Opt-in (YQ_LOAD_TXN_DROPS = real drop folders separated by ';', read in place, oldest first): the same
 parity on real Focus exports, through scripts.ingest into a temporary folder.
 """
@@ -131,12 +136,16 @@ class _Cur:
 
     def execute(self, sql, params=None):
         self.conn.sql.append((" ".join(str(sql).split()), list(params or [])))
+        if self.conn.fail_on and self.conn.fail_on in sql:
+            raise RuntimeError(self.conn.fail_why)
         if "from pg_attribute" in sql:
             self._rows = [(c, t) for c, t in self.conn.types.items()]
         elif "json_agg" in sql:
             self._one = ("[]",)
         elif sql.startswith("select count(*)"):
             self._one = (0,)
+        elif sql == "select now()":
+            self._one = ("2026-01-01 09:00:00+00",)
         self.rowcount = 3
 
     def fetchall(self):
@@ -153,8 +162,10 @@ class _Cur:
 
 
 class _Conn:
-    def __init__(self, types_: dict):
-        self.types, self.sql, self.committed, self.rolled = types_, [], 0, 0
+    def __init__(self, types_: dict, fail_on: str | None = None,
+                 fail_why: str = "canceling statement due to lock timeout"):
+        self.types, self.sql, self.committed, self.rolled, self.closed = types_, [], 0, 0, False
+        self.fail_on, self.fail_why = fail_on, fail_why      # a statement that fails here (a lock held elsewhere, say)
 
     def cursor(self):
         return _Cur(self)
@@ -172,14 +183,15 @@ class _Conn:
         self.rolled += 1
 
     def close(self):
-        pass
+        self.closed = True
 
 
 SM_TYPES = {"id": "bigint", "move_date": "date", "item_name": "text", "received_qty": "numeric",
             "voided_at": "timestamp with time zone"}
 
 
-@test("the client's SQL: typed filters, PostgREST's 1000-row cap, safeupdate, one COPY + one INSERT .. ON CONFLICT per upsert")
+@test("the client's SQL: typed filters, PostgREST's 1000-row cap, safeupdate, one COPY + one INSERT .. ON CONFLICT per upsert, "
+      "its temp table dropped once applied")
 def _():
     conn = _Conn(SM_TYPES)
     c = load_txn.TxnClient(conn)
@@ -208,12 +220,14 @@ def _():
     n = c.delete_windows("stock_movements", "move_date", [("2026-08-15", "2026-08-31"), ("2026-09-01", "2026-09-30")])
     assert n == 3 and conn.sql[-1][1] == ["2026-08-15", "2026-08-31", "2026-09-01", "2026-09-30"]
     assert conn.sql[-1][0].count(">= %s::date and") == 2 and " or " in conn.sql[-1][0]
-    # one upsert: a temp table that drops at commit, COPY in file order, then ONE server-side loop of the
-    # REST path's slices: INSERT .. ON CONFLICT of every body column, `chunk` rows at a time, in order
+    # one upsert: a temp table, COPY in file order, ONE server-side loop of the REST path's slices (INSERT .. ON
+    # CONFLICT of every body column, `chunk` rows at a time, in order), then the temp table dropped: four statements
     conn.sql.clear()
     rows = [{"voucher": f"V{i}", "item_name": "I1", "received_qty": "2.0" if i % 2 else None} for i in range(1201)]
+    counted = c.statements
     assert c.bulk_upsert("stock_movements", rows, "voucher,item_name", chunk=500) == 1201
-    (create, _), (copy, sent), (loop, _) = conn.sql
+    (create, _), (copy, sent), (loop, _), (drop, _) = conn.sql
+    assert c.statements - counted == 4
     assert create == "create temp table _load_rows_1 (ord bigint primary key, j json not null) on commit drop"
     assert copy == "copy _load_rows_1 (ord, j) from stdin" and sent == [(i, load_txn.body_json(r)) for i, r in enumerate(rows)]
     assert loop == ('do $load$ begin for _k in 0..1200 by 500 loop insert into public."stock_movements" ("voucher", '
@@ -221,10 +235,14 @@ def _():
                     'json_populate_record(null::public."stock_movements", _s.j) _r where _s.ord >= _k and _s.ord < _k + 500 '
                     'order by _s.ord on conflict ("voucher", "item_name") do update set "voucher" = excluded."voucher", '
                     '"item_name" = excluded."item_name", "received_qty" = excluded."received_qty"; end loop; end $load$'), loop
-    assert c.bulk_upsert("stock_movements", [], "voucher") == 0 and len(conn.sql) == 3          # nothing sent for no rows
+    # its copy goes as soon as it is applied (the next table's never sits beside it), and only the session's own
+    assert drop == "drop table pg_temp._load_rows_1", drop
+    assert c.bulk_upsert("stock_movements", [], "voucher") == 0 and len(conn.sql) == 4          # nothing sent for no rows
     raises(ValueError, lambda: c.bulk_upsert("stock_movements", rows[:1], ""))                 # a key is always named
     raises(ValueError, lambda: c.bulk_upsert("stock_movements", rows[:1], "voucher", chunk=0))
-    assert len(conn.sql) == 3
+    assert len(conn.sql) == 4
+    c.bulk_upsert("stock_movements", rows[:2], "voucher,item_name")                             # the next one: its own name
+    assert conn.sql[4][0].startswith("create temp table _load_rows_2 ") and conn.sql[-1][0] == "drop table pg_temp._load_rows_2"
     # the commit: at once outside the intervals; waited out inside them, the transaction kept open
     slept, said = [], []
     assert c.commit([(100, 200)], now=lambda: 50.0, sleep=slept.append, say=said.append) == 0 and conn.committed == 1
@@ -297,9 +315,10 @@ class _FakeTxn:
     """TxnClient.open's stand-in for main(): no database, records what main() asks of it."""
     opened: list = []
 
-    def __init__(self, fail_on: str | None = None, commit_fails: bool = False, hold_cut: bool = False):
+    def __init__(self, fail_on: str | None = None, commit_fails: bool = False, hold_cut: bool = False, hold: float = 0.0):
         self.fail_on, self.statements, self.committed, self.rolled, self.closed = fail_on, 5, None, 0, 0
         self.upserts, self.commit_fails, self.hold_cut, self.commit_sent = [], commit_fails, hold_cut, False
+        self.hold = hold                                 # the seconds its commit says it waited for a clear moment
 
     def bulk_upsert(self, table, rows, on_conflict, chunk=None):
         if table == self.fail_on:
@@ -328,7 +347,7 @@ class _FakeTxn:
         if self.commit_fails:
             raise ConnectionError("the server closed the connection")
         self.committed = list(avoid or [])
-        return 0.0
+        return self.hold
 
     def rollback(self):
         self.rolled += 1
@@ -424,6 +443,186 @@ def _():
         finally:
             os.environ.pop(load_txn.AVOID_ENV, None)
         assert made[-1].committed == [] and "could not be read" in out.getvalue()
+
+
+@contextlib.contextmanager
+def _psycopg(connect):
+    """`import psycopg` inside TxnClient.open gets this stand-in: no driver, no database."""
+    saved = sys.modules.get("psycopg")
+    sys.modules["psycopg"] = types.SimpleNamespace(connect=connect)
+    try:
+        yield
+    finally:
+        if saved is None:
+            sys.modules.pop("psycopg", None)
+        else:
+            sys.modules["psycopg"] = saved
+
+
+@test("open(): the transaction, its four limits, then the batch importer's lock, in that order; a lock it cannot get closes "
+      "the session and the loader writes nothing")
+def _():
+    made, fail = [], [None]
+
+    def connect(dsn, **kw):
+        made.append(_Conn(SM_TYPES, fail_on=fail[0]))
+        made[-1].dsn, made[-1].kw = dsn, kw
+        return made[-1]
+    with _psycopg(connect):
+        c = load_txn.TxnClient.open("postgresql://load@localhost/invented")
+        conn = made[-1]
+        assert [s for s, _p in conn.sql] == [
+            "select now()", "set local statement_timeout = '600s'", "set local lock_timeout = '30s'",
+            "set local idle_in_transaction_session_timeout = '300s'", "set local work_mem = '32MB'",
+            "select pg_advisory_xact_lock(hashtext('yq_ingest_commit'))"], conn.sql
+        assert c.conn is conn and c.started_at == "2026-01-01 09:00:00+00" and c.statements == 0 and not conn.closed
+        assert conn.kw["autocommit"] is False and conn.kw["application_name"] == load_txn.APPLICATION_NAME
+        # a batch commit or undo holds the lock past the lock timeout: the session is closed and the error raised ...
+        fail[0] = "pg_advisory_xact_lock"
+        exc = raises(RuntimeError, lambda: load_txn.TxnClient.open("postgresql://load@localhost/invented"))
+        assert "lock timeout" in str(exc) and made[-1].closed and made[-1].committed == 0
+        assert made[-1].sql[-1][0] == load_txn.IMPORT_LOCK_SQL, "nothing is asked after the lock"
+        # ... and the loader asked for one transaction stops there: no REST, nothing written, said in its own words
+        def no_rest():
+            raise AssertionError("the REST client was asked for in a one-transaction load")
+        with _clean_folder({}), contextlib.redirect_stdout(io.StringIO()) as out:
+            saved = ls._client
+            ls._client = no_rest
+            try:
+                assert ls.main(["--one-transaction"]) == 1
+            finally:
+                ls._client = saved
+        assert ("ERROR: the one-transaction load could not open its database session (canceling statement due to lock "
+                "timeout); nothing was written.") in out.getvalue(), out.getvalue()
+        assert made[-1].closed and [s for s, _p in made[-1].sql][-1] == load_txn.IMPORT_LOCK_SQL
+    # the key is the batch importer's own: its two SQL functions take this very one before anything else
+    sql = (ROOT / "scripts" / "ingest_batches_migration.sql").read_text(encoding="utf-8")
+    took = "perform " + load_txn.IMPORT_LOCK_SQL.removeprefix("select ") + ";"
+    assert sql.count(took) == 2, took
+    for fn in ("ingest_commit", "ingest_undo"):
+        body = sql.split(f"create or replace function {fn}(", 1)[1]
+        assert body.split("\nbegin\n", 1)[1].lstrip().startswith(took), fn
+
+
+class _Ran:
+    """subprocess.run's answer, as scripts/refresh.py reads it."""
+
+    def __init__(self, code: int, stdout: str, stderr: str = ""):
+        self.returncode, self.stdout, self.stderr = code, stdout, stderr
+
+
+@contextlib.contextmanager
+def _refresh_world(loader: _Ran, runs: list):
+    """scripts.refresh.refresh() with its programs and its engine calls stood in for: no process is started, no
+    database is asked, and the checkout's data/clean is never touched. `loader` is the loader's answer; the run
+    records refresh() writes itself land in `runs`."""
+    from scripts import refresh as rf
+
+    class Client:
+        def table(self, name):
+            self.name = name
+            return self
+
+        def insert(self, row):
+            runs.append((self.name, row))
+            return self
+
+        def execute(self):
+            return types.SimpleNamespace(data=[])
+    stand_ins = {
+        "app.reports": types.SimpleNamespace(data_as_of=lambda: "2026-01-01"),
+        "app.database": types.SimpleNamespace(get_client=Client),
+        "app.ai": types.SimpleNamespace(flush_cache=lambda: None),
+        "app.catalog": types.SimpleNamespace(sync_from_price_book=lambda: None),
+        "app.agents": types.SimpleNamespace(run_agent=lambda name, **k: {"summary": "nothing new"}),
+        "app.events": types.SimpleNamespace(emit=lambda *a, **k: None),
+        "scripts.category_backfill": types.SimpleNamespace(backfill=lambda folder: None),
+        "scripts.alias_autofill": types.SimpleNamespace(autofill=lambda: {}, summary_line=lambda res: "no new aliases"),
+        "scripts.verify_numbers": types.SimpleNamespace(run_checks=lambda folder: (True, [])),
+    }
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in stand_ins}
+    parents = {}
+    for name, mod in stand_ins.items():
+        sys.modules[name] = mod
+        pkg, _, leaf = name.rpartition(".")
+        if pkg in sys.modules:                       # `from app import events` reads the package's attribute first
+            parents[(pkg, leaf)] = getattr(sys.modules[pkg], leaf, missing)
+            setattr(sys.modules[pkg], leaf, mod)
+    real_run, real_shutil = rf._run, rf.shutil
+    rf._run = lambda mod, *args: _Ran(0, "parsed\n") if mod == "scripts.ingest" else loader
+    rf.shutil = types.SimpleNamespace(rmtree=lambda *a, **k: None)
+    try:
+        yield rf
+    finally:
+        rf._run, rf.shutil = real_run, real_shutil
+        for (pkg, leaf), was in parents.items():
+            if was is missing:
+                delattr(sys.modules[pkg], leaf)
+            else:
+                setattr(sys.modules[pkg], leaf, was)
+        for name, was in saved.items():
+            if was is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = was
+
+
+@test("refresh.py passes the loader's own words up: written False after a rollback or a session that never opened, "
+      "never after a commit that got no answer; hold_s, the seconds the commit was held")
+def _():
+    from scripts import refresh as rf
+    sm = [{"item_name": "Item A1", "move_date": "2026-10-01", "voucher": "V : 1", "row_hash": "h1", "received_qty": "1"}]
+    stock = [{"item_name": "Item A1", "warehouse_name": "Store invented", "net_qty": "2", "selling_rate_bhd": "1.5",
+              "total_value_bhd": "3", "as_of_date": "2026-10-01", "source_file": "s.xlsx"}]
+
+    def refuse():
+        raise RuntimeError("connection refused")
+    said = {}
+    with _clean_folder({"stock_movements": sm, "stock_balance": stock}):
+        for tag, factory in (("refused", refuse), ("table", lambda: _FakeTxn(fail_on="stock_balance")),
+                             ("cut", lambda: _FakeTxn(hold_cut=True)), ("no_answer", lambda: _FakeTxn(commit_fails=True)),
+                             ("held", lambda: _FakeTxn(hold=60.0)), ("at_once", lambda: _FakeTxn())):
+            with _patched_open(factory), contextlib.redirect_stdout(io.StringIO()) as out:
+                try:
+                    ls.main(["--one-transaction"])
+                except Exception:  # noqa: BLE001  (a load that fails raises: the refresh reads its exit code)
+                    pass
+            said[tag] = out.getvalue()
+    # the loader's own lines, read the way scripts/refresh.py reads them
+    for tag in ("refused", "table", "cut"):
+        assert rf._loader_wrote(said[tag]) is False, (tag, said[tag][-300:])
+    for tag in ("no_answer", "held", "at_once"):
+        assert rf._loader_wrote(said[tag]) is None, tag
+    assert rf._loader_wrote(said["table"] + said["no_answer"]) is None, "a commit that got no answer is never 'nothing'"
+    assert rf._loader_wrote("  upserted orders 3\nLoad complete.\n") is None and rf._loader_wrote("") is None   # REST
+    assert rf._commit_hold(said["held"]) == 60.0 and rf._commit_hold(said["at_once"]) == 0.0
+    assert rf._commit_hold(said["refused"]) is None and rf._commit_hold("Load complete.\n") is None
+    held = []                                        # the line the real commit prints as its hold begins
+    assert load_txn.TxnClient(_Conn(SM_TYPES)).commit([(1760941890, 1760941995)], now=lambda: 1760941920.0,
+                                                      sleep=lambda s: None, say=held.append) == 75
+    assert rf._commit_hold(held[0]) == 75.0 and rf._commit_hold(held[0] + "\n" + said["no_answer"]) == 75.0
+    # refresh() itself returns them, on the path that stops at the load and on the path that goes on to its end
+    tb = "Traceback (most recent call last):\nRuntimeError: the stock_balance insert failed\n"
+    with tempfile.TemporaryDirectory() as folder:
+        for loader, written, hold in ((_Ran(1, said["table"], tb), False, None), (_Ran(1, said["refused"]), False, None),
+                                      (_Ran(1, held[0] + "\n" + said["no_answer"], tb), None, 75.0),
+                                      (_Ran(1, "  upserted orders 3\n", tb), None, None)):
+            runs: list = []
+            with _refresh_world(loader, runs) as r, contextlib.redirect_stdout(io.StringIO()):
+                res = r.refresh(folder, send=False)
+            assert res["ok"] is False and res["written"] is written and res["hold_s"] == hold, (res, loader.stdout[-200:])
+            assert res["error"] == rf._friendly("load", (loader.stderr or loader.stdout)[-600:]) and res["verify"] is None
+            assert [t for t, _row in runs] == ["ingest_runs"] and runs[0][1]["status"] == "error"   # its own record, as before
+        runs = []
+        with _refresh_world(_Ran(0, said["held"]), runs) as r, contextlib.redirect_stdout(io.StringIO()):
+            res = r.refresh(folder, send=False)
+        assert res["ok"] is True and res["written"] is True and res["hold_s"] == 60.0, res
+        assert res["loaded"] == {"Stock_ledger": 1, "Stock_balance_by_warehouse": 1} and runs[0][1]["status"] == "ok"
+        with _refresh_world(_Ran(0, said["at_once"]), []) as r, contextlib.redirect_stdout(io.StringIO()):
+            assert r.refresh(folder, send=False)["hold_s"] == 0.0
+    left = [name for name, mod in list(sys.modules.items()) if isinstance(mod, types.SimpleNamespace)]
+    assert left == [] and rf._run.__name__ == "_run" and rf.shutil is shutil, f"a stand-in was left behind: {left}"
 
 
 @test("the writer's words for the loader: its flag and the two environment names are the loader's own")
@@ -951,6 +1150,36 @@ def _():
         waited = c.commit([(int(t0) - 5, int(t0) + 3)], sleep=sleep, say=lambda _s: None)
         assert 2 <= waited <= 3.5 and seen_in_hold and seen_in_hold[0][1] == 0, (waited, seen_in_hold)
         assert watcher.execute("select count(*) from customers").fetchone()[0] == 50
+    finally:
+        c.close()
+        watcher.close()
+
+
+@test("local: the batch importer's lock is held from the open to the end of the transaction (pg_locks); a second load waits "
+      "for it no longer than its lock timeout; each upsert's temp table is gone once applied")
+def _():
+    if not _local():
+        return
+    import psycopg
+    _fresh(ONE_DB)
+    held_sql = ("select count(*) from pg_locks where locktype = 'advisory' and pid = %s and granted and objsubid = 1 "
+                "and ((classid::bigint << 32) | objid::bigint) = hashtext('yq_ingest_commit')::bigint")
+    free_sql = "select pg_try_advisory_xact_lock(hashtext('yq_ingest_commit'))"      # what ingest_commit would take
+    c = load_txn.TxnClient.open(_db(ONE_DB))
+    watcher = psycopg.connect(_db(ONE_DB), autocommit=True)
+    try:
+        pid = c.fetch_one("select pg_backend_pid()")
+        assert watcher.execute(held_sql, (pid,)).fetchone()[0] == 1, "the load's session holds the batch importer's lock"
+        assert watcher.execute(free_sql).fetchone()[0] is False, "a batch commit cannot take it meanwhile"
+        t0 = time.monotonic()                    # a second load waits for it, no longer than its lock timeout
+        exc = raises(Exception, lambda: load_txn.TxnClient.open(_db(ONE_DB), lock_timeout_s=1, statement_timeout_s=20))
+        assert "lock timeout" in str(exc) and time.monotonic() - t0 < 10, (str(exc), time.monotonic() - t0)
+        c.bulk_upsert("customers", [{"name": f"Shop {i} invented"} for i in range(3)], "name")
+        assert c.fetch_one("select count(*) from pg_class where relpersistence = 't' and relname like '\\_load\\_rows\\_%'") == 0
+        assert c.table("customers").select("name").execute().data[0]["name"] == "Shop 0 invented"   # its rows are applied
+        assert c.commit([], sleep=lambda s: None, say=lambda s: None) == 0
+        assert watcher.execute(held_sql, (pid,)).fetchone()[0] == 0, "the lock ends with the transaction"
+        assert watcher.execute(free_sql).fetchone()[0] is True
     finally:
         c.close()
         watcher.close()

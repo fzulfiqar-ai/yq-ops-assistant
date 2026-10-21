@@ -11,9 +11,14 @@ very code that runs on either path. What changes:
 
   * Nothing is visible to any other session until commit(): production reads the old data or the
     new, never a half-replaced ledger. Any error before the commit rolls everything back.
-  * An upsert is three statements per table (bulk_upsert), whatever its size: the rows are COPYed, as
-    the JSON text a PostgREST request carries, into a temp table that drops at commit, and one
-    server-side loop then applies them in the loader's own 500-row slices, in file order:
+  * The batch importer's lock (IMPORT_LOCK_SQL: the key its SQL functions ingest_commit and
+    ingest_undo take first, scripts/ingest_batches_migration.sql) is taken as the transaction opens
+    and held to its end: no batch is committed or undone in the middle of a load, and a load waits
+    LOCK_TIMEOUT_S at most for one that is (then it writes nothing and can be run again).
+  * An upsert is four statements per table (bulk_upsert), whatever its size: the rows are COPYed, as
+    the JSON text a PostgREST request carries, into a temp table, one server-side loop then applies
+    them in the loader's own 500-row slices, in file order, and the temp table is dropped at once (the
+    transaction never holds a copy of every table's rows at the same time):
         INSERT INTO t (cols) SELECT r.cols FROM tmp s, json_populate_record(NULL::t, s.j) r
         WHERE s.ord in the slice ORDER BY s.ord ON CONFLICT (key) DO UPDATE SET col = EXCLUDED.col, ...
     json_populate_record is the conversion PostgREST applies to a request body itself: a price
@@ -57,6 +62,9 @@ HOLD_MAX_S = 1800                            # a commit is never held longer tha
 WORK_MEM = "32MB"                            # the ledger's insert sorts ~12 MB by file order: in memory, not on disk
 MAX_ROWS = 1000                              # PostgREST's db-max-rows on Supabase
 APPLICATION_NAME = "yq-load-one-transaction"
+# the batch importer's lock: ingest_commit and ingest_undo take this very key first (one argument), so a batch and a
+# load never write at the same time; held until the transaction ends, waited for LOCK_TIMEOUT_S at most
+IMPORT_LOCK_SQL = "select pg_advisory_xact_lock(hashtext('yq_ingest_commit'))"
 
 _IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
 
@@ -286,7 +294,8 @@ class TxnClient:
         """Connect and open THE transaction with its timeouts (a savepoint needs an open transaction: on
         an idle connection psycopg's transaction() would BEGIN and COMMIT on its own). The timeouts are
         SET LOCAL: they hold for this transaction whichever pooler mode DATABASE_URL names, and never
-        outlive it on a pooled backend."""
+        outlive it on a pooled backend. Then the batch importer's lock (IMPORT_LOCK_SQL), under the lock
+        timeout: while a batch commit or undo holds it the open fails, and nothing is written."""
         import psycopg
         dsn = dsn or os.environ.get("DATABASE_URL")
         if not dsn:
@@ -304,6 +313,7 @@ class TxnClient:
                 cur.execute(f"set local lock_timeout = '{int(lock_timeout_s)}s'")
                 cur.execute(f"set local idle_in_transaction_session_timeout = '{int(idle_s)}s'")
                 cur.execute(f"set local work_mem = '{WORK_MEM}'")
+                cur.execute(IMPORT_LOCK_SQL)                # held to the commit or the rollback
         except BaseException:
             conn.close()
             raise
@@ -372,10 +382,11 @@ class TxnClient:
 
     def bulk_upsert(self, table: str, rows: list[dict], on_conflict: str, ignore_duplicates: bool = False,
                     chunk: int = 500) -> int:
-        """Every row of one table in three statements: COPY the rows (JSON text, in file order) into a temp
-        table that drops at commit, then one server-side loop of INSERT .. ON CONFLICT .. DO UPDATE of
-        every column of the body (PostgREST's merge-duplicates), one `chunk` of rows at a time, as the
-        REST path's POSTs of that size. Returns the rows sent."""
+        """Every row of one table in four statements: COPY the rows (JSON text, in file order) into a temp
+        table, then one server-side loop of INSERT .. ON CONFLICT .. DO UPDATE of every column of the body
+        (PostgREST's merge-duplicates), one `chunk` of rows at a time, as the REST path's POSTs of that
+        size, then the temp table is dropped: the next table's copy never sits beside it. Returns the rows
+        sent."""
         rows = list(rows or [])
         if not rows:
             return 0
@@ -403,7 +414,8 @@ class TxnClient:
                     cp.write_row((i, body_json(r)))
             # one round trip: the slices run one after the other on the server, each seeing the ones before
             cur.execute(f"do $load$ begin for _k in 0..{len(rows) - 1} by {size} loop {insert}; end loop; end $load$")
-        self.statements += 3
+            cur.execute(f"drop table pg_temp.{tmp}")     # applied: its copy goes now, never a table that is not ours
+        self.statements += 4
         return len(rows)
 
     def delete_windows(self, table: str, col: str, windows: list[tuple[str, str]]) -> int:

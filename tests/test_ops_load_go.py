@@ -33,7 +33,12 @@ Covered:
     does; a marker file it would not show is refused; a line that sends him back to /yq-load names
     the folder (/yq-load <ddmmyy>), never "/yq-load again";
   * after the load: the retry of its e-mail is offered only where it would be accepted (a brief the
-    deliver command refused, or a newer load on record, has none: that load has its own e-mail);
+    deliver command refused, or a newer load on record, has none: that load has its own e-mail); the
+    team message for the Command Centre (X1) only when its program is in the checkout, one row of its
+    own, whatever it does;
+  * a one-transaction load that rolled back: closed 'stopped and rolled back' with written false (no
+    LAST LOAD FAILED, no e-mail), and every case where an attempt may have written keeps the careful
+    words; the refresh time on record without the seconds the commit was held;
   * a worker kept inside the editor's job: the owner is told to keep the window open;
   * a live worker with a stale heartbeat: its own sentence with what he can do, no circle with
     `load status`; a rehearsal's lock: dead = cleared, alive = nothing starts beside it;
@@ -330,6 +335,9 @@ class Runner:
 
     def ok_compare(self, argv) -> yq.Child:
         return yq.Child(0, "compare a.json -> b.json\n  delta: orders: 10 -> 12 (+2)\n\nPASS: 0 failure(s), 1 explained delta(s)\n")
+
+    def ok_team_post(self, argv) -> yq.Child:
+        return yq.Child(0, "Team message: posted for the Command Centre.\n")
 
 
 class Harness:
@@ -3511,7 +3519,11 @@ def _():
             "    open('seen.json', 'w', encoding='utf-8').write(json.dumps({'folder': folder, 'send': send}))\n"
             "    if mode == 'ok':\n"
             "        return {'ok': True, 'data_as_of': '2025-12-31', 'error': None, 'detail': None, 'loaded': {'Sales_day_book': 40},\n"
-            "                'changes': {'loader': [], 'catalog': 'x'}, 'verify': {'ok': True, 'rows': []}, 'notified': {}}\n"
+            "                'changes': {'loader': [], 'catalog': 'x'}, 'verify': {'ok': True, 'rows': []}, 'notified': {},\n"
+            "                'written': True, 'hold_s': 42.0}\n"
+            "    if mode == 'rolled':\n"                                    # the loader's own words, passed up by the refresh
+            "        return {'ok': False, 'data_as_of': None, 'error': 'The load step failed.', 'loaded': {}, 'changes': {},\n"
+            "                'verify': None, 'written': False, 'hold_s': None}\n"
             "    if mode == 'verify':\n"
             "        return {'ok': False, 'data_as_of': '2025-12-31', 'error': 'totals do not match: Sales', 'loaded': {'a': 1},\n"
             "                'changes': {'loader': ['span replace skipped']}, 'verify': {'ok': False, 'rows': []}}\n"
@@ -3520,19 +3532,23 @@ def _():
             "        return {'ok': False, 'data_as_of': '2025-12-31', 'error': 'Verification could not run: ' + (why or 'unknown'),\n"
             "                'loaded': {'a': 1}, 'changes': {}, 'verify': {'ok': False, 'rows': [], 'error': why}}\n"
             "    return {'ok': False, 'data_as_of': None, 'error': 'The load step failed.', 'loaded': {}, 'changes': {}, 'verify': None}\n")
+    # written / hold_s: the refresh's own (scripts/refresh.py); a refresh that says neither gives None, never a guess
     want = {"ok": {"ok": True, "data_as_of": "2025-12-31", "error": None, "loaded": {"Sales_day_book": 40},
-                   "verify_ok": True, "verify_error": None, "loader_notices": []},
+                   "verify_ok": True, "verify_error": None, "loader_notices": [], "written": True, "hold_s": 42.0},
+            "rolled": {"ok": False, "data_as_of": None, "error": "The load step failed.", "loaded": {}, "verify_ok": None,
+                       "verify_error": None, "loader_notices": [], "written": False, "hold_s": None},
             "verify": {"ok": False, "data_as_of": "2025-12-31", "error": "totals do not match: Sales", "loaded": {"a": 1},
-                       "verify_ok": False, "verify_error": None, "loader_notices": ["span replace skipped"]},
+                       "verify_ok": False, "verify_error": None, "loader_notices": ["span replace skipped"],
+                       "written": None, "hold_s": None},
             # the verification could not RUN: told apart from totals that differ, even when the error has no words
             "not_run": {"ok": False, "data_as_of": "2025-12-31", "error": "Verification could not run: the database did not answer",
                         "loaded": {"a": 1}, "verify_ok": False, "verify_error": "the database did not answer",
-                        "loader_notices": []},
+                        "loader_notices": [], "written": None, "hold_s": None},
             "not_run_no_words": {"ok": False, "data_as_of": "2025-12-31", "error": "Verification could not run: unknown",
                                  "loaded": {"a": 1}, "verify_ok": False, "verify_error": "no detail given",
-                                 "loader_notices": []},
+                                 "loader_notices": [], "written": None, "hold_s": None},
             "load": {"ok": False, "data_as_of": None, "error": "The load step failed.", "loaded": {}, "verify_ok": None,
-                     "verify_error": None, "loader_notices": []}}
+                     "verify_error": None, "loader_notices": [], "written": None, "hold_s": None}}
     with tempfile.TemporaryDirectory() as tmp:
         t = Path(tmp)
         (t / "scripts").mkdir()
@@ -3926,9 +3942,9 @@ def _():
     assert set(owners) == {"run_child", "spawn_worker"}, owners
     strings = code_strings(tree)
     modules = sorted({s for s in strings if s.startswith("scripts.") and " " not in s})
-    # the three engine programs of the load, then (after it has closed) the brief and the e-mail
+    # the three engine programs of the load, then (after it has closed) the brief, the e-mail and the team message
     assert modules == ["scripts.db_backup", "scripts.ops", "scripts.prod_gate", "scripts.reconcile_check",
-                       "scripts.yq_send"], modules
+                       "scripts.yq_send", "scripts.yq_team_post"], modules
     assert sum("from scripts.refresh import refresh" in s for s in strings) == 1          # inside the child's program
     for s in strings:
         for bad in ("--restore", "--yes", "--allow-newer", "--force", "apply_sql", "apply_migration", "load_supabase",
@@ -4652,6 +4668,206 @@ def _():
     main_py = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     for event in ('"ingest"', '"ingest_markers"', '"ingest_purge"'):
         assert f"log_event(user.email, {event}" in main_py or f"log_event(admin.email, {event}" in main_py, event
+
+
+# ── the load follow-ups of the 2b release (21-Oct-2026) ──────────────────────────────────────────
+
+ROLLED_LINE = "  !! one transaction ROLLED BACK (RuntimeError: the stock_balance insert failed): nothing of this load was written"
+STOPPED = "LOAD STOPPED at refresh and rolled back: nothing was written to the database."
+HELD_PART = "LOAD FAILED at refresh. The database holds this load, or part of it."
+
+
+def rolled_back(h: Harness, minutes: float = 1):
+    """A refresh whose one transaction rolled back: the refresh's own error record is written, nothing of the load."""
+    def answer(argv):
+        h.clock.t += timedelta(minutes=minutes)
+        h.w.newest_run += 1
+        return yq.Child(2, ROLLED_LINE + "\n" + refresh_line(ok=False, verify_ok=None, error="The load step failed.",
+                                                             loaded={}, written=False) + "\n")
+    return answer
+
+
+def stage_failed(h: Harness, **changes):
+    """A load stage that failed without saying it wrote nothing (the older loader; a commit that got no answer)."""
+    def answer(argv):
+        h.w.newest_run += 1
+        return yq.Child(2, refresh_line(ok=False, verify_ok=None, error="The load step failed.", loaded={}, **changes)
+                        + "\n")
+    return answer
+
+
+@test("a one-transaction load that rolled back is closed 'stopped and rolled back': written false, no LAST LOAD FAILED, "
+      "no e-mail; every other case keeps the careful words")
+def _():
+    from scripts.ops import load_check
+    with data_root() as root:                    # both runs rolled back: nothing of this load is in the database
+        h = Harness(root)
+        h.deps.one_transaction = h.deps.deliver = True
+        h.runner.script["refresh"] = [rolled_back(h), rolled_back(h)]
+        assert h.go() == 0 and h.work() == 1
+        assert h.runner.labels() == ["backup", "pre_gate", "refresh", "refresh"], "run a third time, or delivered"
+        first = h.rows("step_failed", "refresh")[0]
+        assert first["text"] == ("The load stage stopped and rolled back, so nothing was written: the identical load runs "
+                                 "once more.") and first["rolled_back"] is True and first["stops"] is False
+        closing = h.rows()[-1]
+        assert closing["event"] == "failed" and closing["result"] == "failed" and closing["step"] == "refresh"
+        assert closing["written"] is False and closing["rolled_back"] is True and closing["text"] == STOPPED
+        assert closing["next"] == "Type /yq-load to check again." and "The load stage failed twice" in closing["why"]
+        assert status.failed_load() is None and status.interrupted_banner() is None and not paths.lock_file().exists()
+        assert loadplan.delivery_read(RUN) == [] and loadplan.run_result(RUN) == "FAILED"
+        res = load_check.run_status(SimpleNamespace(run=RUN, wait=False))      # what `load status` shows him
+        lines = res["text"].splitlines()
+        assert lines[-1] == "FAILED at refresh" and res["exit"] == 2 and any(STOPPED in ln for ln in lines), lines
+        assert "LAST LOAD FAILED" not in res["text"] and "may hold" not in res["text"], res["text"]
+        h.out.clear()
+        assert h.go() == 2 and "Type /yq-load for a new check." in h.said()        # a new check is the way on
+    with data_root() as root:                    # rolled back once, then the identical run passed: an ordinary finish
+        h = Harness(root)
+        h.deps.one_transaction = True
+        h.runner.script["refresh"] = [rolled_back(h)]
+        assert h.load() == 0 and h.rows("finished")[0]["result"] == "ok"
+        assert h.rows("step_failed", "refresh")[0]["rolled_back"] is True and h.rows("step_ok", "refresh")[0]["attempt"] == 2
+    with data_root() as root:                    # rolled back, then a check-again before the second run: nothing written
+        h = Harness(root)
+        h.deps.one_transaction = True
+        h.runner.script["refresh"] = [rolled_back(h)]
+        assert h.go() == 0
+        h.clock.on_sleep = lambda: (h.w.staging / "Sales_day_book1.xlsx").write_bytes(b"saved again meanwhile")
+        assert h.work() == 3
+        closing = h.rows()[-1]
+        assert closing["result"] == "check_again" and closing["written"] is False and status.failed_load() is None
+        assert closing["text"] == "CHECK AGAIN at refresh. Nothing was written."
+    careful = (
+        ("rolled back, then a commit that got no answer", True, lambda h: [rolled_back(h), stage_failed(h)]),
+        ("a load stage that may have written, then a rollback", True, lambda h: [stage_failed(h), rolled_back(h)]),
+        ("the data loaded unchecked, then a rollback", True, lambda h: [cannot_verify(h), rolled_back(h)]),
+        ("the older loader: its words are never read as nothing written", False,
+         lambda h: [rolled_back(h), rolled_back(h)]),
+    )
+    for tag, one_txn, script in careful:
+        with data_root() as root:
+            h = Harness(root)
+            h.deps.one_transaction = one_txn
+            h.runner.script["refresh"] = script(h)
+            assert h.go() == 0 and h.work() == 1, tag
+            closing = h.rows()[-1]
+            assert closing["written"] is True and "rolled_back" not in closing, (tag, closing)
+            assert closing["text"] == HELD_PART and status.failed_load() == {"run": RUN, "step": "refresh"}, tag
+            assert status.interrupted_banner() == last_failed("refresh"), tag
+    with data_root() as root:                    # a resume of a load that had begun: the cut-off run may have written
+        h = Harness(root)
+        h.deps.one_transaction = True
+        interrupted(h, upto="refresh")
+        h.runner.script["refresh"] = [rolled_back(h), rolled_back(h)]
+        assert h.go() == 0 and h.work() == 1
+        closing = h.rows()[-1]
+        assert closing["written"] is True and closing["text"] == HELD_PART and "rolled_back" not in closing
+        assert "rolled_back" not in h.rows("step_failed", "refresh")[0] and status.interrupted_banner() == last_failed("refresh")
+    with data_root() as root:                    # the words on a rollback with a result that contradicts them: careful
+        h = Harness(root)
+        h.deps.one_transaction = True
+        h.runner.script["refresh"] = [stage_failed(h, ok=True, written=False), stage_failed(h, ok=True, written=False)]
+        assert h.go() == 0 and h.work() == 1 and h.rows()[-1]["written"] is True
+
+
+@test("the refresh time kept for the next load leaves out the seconds the loader held its commit; the hold is journalled")
+def _():
+    def took(h, seconds, hold, code=0, **changes):
+        def answer(argv):
+            h.clock.t += timedelta(seconds=seconds)
+            h.w.newest_run += 2 if code == 0 else 1
+            return yq.Child(code, refresh_line(hold_s=hold, written=code == 0 or None, **changes) + "\n")
+        return answer
+
+    with data_root() as root:                    # 155 s, 60 of them held for production's jobs: 95 s on record
+        h = Harness(root)
+        h.deps.one_transaction = True
+        h.runner.script["refresh"] = [took(h, 155, 60.0)]
+        assert h.load() == 0
+        assert h.rows("step_ok", "refresh")[0]["commit_hold_s"] == 60
+        assert h.rows("finished")[0]["timings"]["refresh"] == 155.0, "the step's own time is what it took"
+        last = status.read_state()["last_load"]
+        assert last["refresh_seconds"] == 95.0 and last["refresh_seconds_recent"] == [95.0], last
+    with data_root() as root:                    # two runs: each run's hold comes off its own time; the longer counts
+        h = Harness(root)
+        h.deps.one_transaction = True
+        h.runner.script["refresh"] = [took(h, 360, 90.0, code=2, ok=False, verify_ok=None, error="The load step failed."),
+                                      took(h, 155, 60.0)]
+        assert h.load() == 0
+        assert h.rows("step_failed", "refresh")[0]["commit_hold_s"] == 90
+        assert status.read_state()["last_load"]["refresh_seconds"] == 270.0
+    for said in ("junk", -5, True, 999.0, None):  # no hold said, nonsense, or longer than the run: the run's own time
+        with data_root() as root:
+            h = Harness(root)
+            h.deps.one_transaction = True
+            h.runner.script["refresh"] = [took(h, 155, said)]
+            assert h.load() == 0, said
+            assert status.read_state()["last_load"]["refresh_seconds"] == 155.0, said
+            assert "commit_hold_s" not in h.rows("step_ok", "refresh")[0], said
+
+
+@test("X1 after the load: the team message goes to the Command Centre when its program is in the checkout; absent, "
+      "failing, out of time or raising, it changes nothing")
+def _():
+    said = "Delivery: e-mail sent to 1 address(es) (full, auto): YQ brief"
+
+    def delivered(root: Path, program: bool = True) -> Harness:
+        h = Harness(root)
+        h.deps.deliver = True
+        if program:                              # another package writes it; here a stand-in file marks it present
+            (root / "scripts").mkdir(parents=True, exist_ok=True)
+            (root / "scripts" / "yq_team_post.py").write_text("# a stand-in: the runner starts nothing\n", encoding="utf-8")
+        h.runner.script["deliver"] = [yq.Child(0, "written: exports/ops/2026-01-01/delivery\n")]
+        h.runner.script["send"] = [yq.Child(0, said + "\n")]
+        return h
+
+    with data_root() as root:                    # there: started once the Delivery line is written, one row of its own
+        h = delivered(root)
+        seen = {}
+
+        def at_post():
+            seen["lock"], seen["last"] = paths.lock_file().exists(), loadplan.journal_read(RUN)[-1]["event"]
+            seen["delivery"] = [r["event"] for r in loadplan.delivery_read(RUN)]
+        h.runner.hooks["team_post"] = at_post
+        assert h.load() == 0
+        assert seen == {"lock": False, "last": "finished", "delivery": ["queued", "ended"]}, seen
+        assert h.runner.labels()[-3:] == ["deliver", "send", "team_post"]
+        assert h.runner.argv("team_post")[1:] == ["-X", "utf8", "-m", "scripts.yq_team_post", "--run", RUN]
+        assert {c[0]: c[2] for c in h.runner.calls}["team_post"] == yq.TEAM_POST_TIMEOUT_S == 60
+        rows = loadplan.delivery_read(RUN)
+        assert [r["event"] for r in rows] == ["queued", "ended", "team_post"] and rows[1]["text"] == said
+        assert rows[2]["text"] == ("Team message: python -m scripts.yq_team_post ended (exit code 0; its last line: Team "
+                                   "message: posted for the Command Centre.)."), rows[2]
+        assert rows[2]["code"] == 0 and "timed_out" not in rows[2] and loadplan.run_result(RUN) == "FINISHED"
+    with data_root() as root:                    # not in this checkout: nothing started, nothing written about it
+        h = delivered(root, program=False)
+        assert h.load() == 0 and h.runner.labels()[-2:] == ["deliver", "send"]
+        assert [r["event"] for r in loadplan.delivery_read(RUN)] == ["queued", "ended"]
+    for answer, words in ((yq.Child(1, "Traceback\nRuntimeError: no such table\n"),
+                           "(exit code 1; its last line: RuntimeError: no such table)."),
+                          (yq.Child(1, "", timed_out=True), "(exit code 1; it ran out of time)."),
+                          ("raise", "could not be run (an unexpected error: OSError).")):
+        with data_root() as root:                # it fails, runs out of time or cannot start: the load and its e-mail stand
+            h = delivered(root)
+            if answer == "raise":
+                def boom():
+                    raise OSError("the disk")
+                h.runner.hooks["team_post"] = boom
+            else:
+                h.runner.script["team_post"] = [answer]
+            assert h.load() == 0, words
+            rows = loadplan.delivery_read(RUN)
+            assert [r["event"] for r in rows] == ["queued", "ended", "team_post"] and rows[1]["text"] == said, rows
+            assert rows[2]["text"].startswith("Team message: python -m scripts.yq_team_post ") and rows[2]["text"].endswith(
+                words), rows[2]["text"]
+            assert loadplan.run_result(RUN) == "FINISHED" and loadplan.journal_read(RUN)[-1]["event"] == "finished"
+            assert not paths.lock_file().exists() and status.read_state()["last_load"]["run"] == RUN
+    for deliver in (yq.Child(1, "Traceback\nKeyError: x\n"), yq.Child(2, "Delivery of run x: NOT prepared: stale.\n")):
+        with data_root() as root:                # no brief was made: there is no team message to post
+            h = delivered(root)
+            h.runner.script["deliver"] = [deliver]
+            assert h.load() == 0 and "team_post" not in h.runner.labels()
+            assert [r["event"] for r in loadplan.delivery_read(RUN)] == ["queued", "ended"]
 
 
 def main() -> int:

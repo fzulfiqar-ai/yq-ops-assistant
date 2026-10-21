@@ -154,7 +154,8 @@ def when(text) -> datetime | None:
 
 def failed_load(unreadable: list | None = None) -> dict | None:
     """The newest load that was CLOSED as failed after its refresh had begun (the database may hold
-    part of it), while no load has finished since. None otherwise.
+    part of it), while no load has finished since. None otherwise. A load whose one transaction
+    rolled back is closed with written false (scripts/yq_load_go.py): it wrote nothing, so it is none.
 
     Every real run's journal is read, not the newest folder's alone: a later check that never
     loaded (he answered No, or it stopped), a rehearsal, or a run that was closed before it wrote

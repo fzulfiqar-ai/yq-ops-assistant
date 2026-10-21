@@ -26,7 +26,8 @@ Covered:
     lock (running; interrupted: the cut-off load's own GO line is handed over as the last line, with
     the place of its go.cmd on the line before; the dead lock of a rehearsal and a lock that is no
     lock at all do not stop the check; a lock that cannot be read does), and a load that failed
-    after it had begun to write (the check runs as usual and its first line says so);
+    after it had begun to write (the check runs as usual and its first line says so; one whose one
+    transaction rolled back wrote nothing and is no such load);
   * one check counts for a folder: a second check replaces the first (one live staging folder, the
     first go.cmd gone, its plan names the second), a run that started, finished or failed and a
     check of another folder are never touched, a dev run replaces nothing, the left-over of a
@@ -1293,6 +1294,32 @@ def _():
         assert lc.last_failed_load(FakeDeps(failed_load=lambda: {"step": "refresh"})) is None       # names no run
         assert lc.failed_line({"run": "x", "step": None}, True) == ("The last load (run x) failed at ? after it had begun "
                                                                     "to write: this check starts a new load that replaces it.")
+
+
+@test("a load whose one transaction rolled back is no failed load: no line, the check runs as usual, and `load status` "
+      "shows its words and ends FAILED")
+def _():
+    stopped = "050126_0900"
+    words = "LOAD STOPPED at refresh and rolled back: nothing was written to the database."
+    with data_root() as root:
+        make_drop(root)
+        # the rows the writer (scripts/yq_load_go.py) leaves when the loader said its one transaction rolled back
+        loadplan.journal_append(stopped, "started", text="Load started.")
+        loadplan.journal_append(stopped, "step_start", step="refresh", text="Loading the reports.")
+        loadplan.journal_append(stopped, "step_failed", step="refresh", stops=True, text="The load stage failed twice.")
+        loadplan.journal_append(stopped, "failed", step="refresh", result="failed", written=False, rolled_back=True,
+                                text=words, why="The load stage failed twice.", next="Type /yq-load to check again.")
+        assert status.failed_load() is None and status.interrupted_banner() is None
+        assert lc.last_failed_load(FakeDeps()) is None
+        assert "LAST LOAD FAILED" not in status.run(argparse.Namespace(offline=True))["text"]
+        res, _ = check("070126")
+        assert res["ok"] and res["token"] and res["text"].startswith("LOAD CHECK  070126  "), res["text"]
+        assert "The last load" not in res["text"] and "last_load_failed" not in res["flags"]
+        said = status_of("--run", stopped)
+        lines = said["text"].splitlines()
+        assert lines[-1] == "FAILED at refresh" and said["exit"] == 2 and said["result"] == "failed"
+        assert any(words in ln and ln.endswith("Type /yq-load to check again.") for ln in lines), lines
+        assert "may hold part" not in said["text"], said["text"]
 
 
 # ── the folder ────────────────────────────────────────────────────────────────

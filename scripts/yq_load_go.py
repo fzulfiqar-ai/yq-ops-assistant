@@ -47,7 +47,11 @@ THE WORKER (loadplan.STEPS; every step journalled; the lock's heartbeat every 10
              run the files and the commits are compared with the table once more, and after a
              load that is whole but unverified the quiet moment is waited for again. Verify
              failed (it ran and the totals differ): the run is closed FAILED and this staging is
-             refused from then on (the data IS loaded; the journal says so)
+             refused from then on (the data IS loaded; the journal says so). With the one
+             transaction, an attempt whose loader says it ROLLED BACK (or never opened its session)
+             wrote nothing: while no earlier attempt of the run may have written, a run that stops
+             there is closed "stopped and rolled back", written false. The seconds the loader held
+             its commit are left out of the refresh time on record (the next load's window)
   reconcile  scripts.reconcile_check. After a refresh of this worker that verified, it is given that
              refresh's run record (--verified-run) and leaves the report-by-report comparison to that
              verify. Not passed: reported, the load goes on
@@ -75,14 +79,16 @@ INTERRUPTED = a lock whose process is gone. The next go for the same run is a RE
 commits are checked (not the fingerprint, which the interrupted load has moved), the journalled
 backup and before-snapshot are reused, the whole refresh runs again. While nothing was written, a
 backup or snapshot whose file is gone is simply taken again. Once a refresh has BEGUN the database
-may hold part of the load until a load finishes, and no sentence after that says otherwise: a
+may hold part of the load until a load finishes, and no sentence after that says otherwise (but the
+one-transaction loader's own words that it rolled back, in the worker that ran it: see refresh): a
 resume that cannot go on (its files or programs moved) is closed with those words, and a resume
 whose worker never got going keeps its lock, so the load stays INTERRUPTED and can be resumed.
 A run that is closed as failed after its refresh had begun carries step and written = true in its
 closing row: scripts.ops.status.failed_load() reads them, and every skill then opens with LAST
-LOAD FAILED until a load has finished. A load that had begun never loses its lock while that
-closing row is not on disk (the journal sits in a synced folder and a write can be refused): it
-then goes on reading INTERRUPTED, which is the careful one of the two.
+LOAD FAILED until a load has finished. A run closed "stopped and rolled back" carries written =
+false (and rolled_back = true): no LAST LOAD FAILED follows it. A load that had begun never loses
+its lock while that closing row is not on disk (the journal sits in a synced folder and a write
+can be refused): it then goes on reading INTERRUPTED, which is the careful one of the two.
 A lock whose process is ALIVE but silent (no heartbeat for two minutes) also reads INTERRUPTED in
 every skill; no second loader is started beside a live process, and the go says exactly that and
 what he can do about a worker that has truly hung.
@@ -158,6 +164,8 @@ NEW_RUNS_PER_LOAD = 2               # ingest_runs rows of one refresh: the loade
 FIELD = 160                         # no sentence of the journal is longer (`load status` shows a field whole)
 BACKUP_TIMEOUT_S, GATE_TIMEOUT_S, RECONCILE_TIMEOUT_S = 1800, 900, 1800      # read-only steps only
 DELIVER_TIMEOUT_S, SEND_TIMEOUT_S = 300, 180    # after the load: the brief and its e-mail (deliver_after)
+# ... then its team message for the Command Centre (X1, team_post_after): started only when this checkout holds it
+TEAM_POST_MODULE, TEAM_POST_FILE, TEAM_POST_TIMEOUT_S = "scripts.yq_team_post", "scripts/yq_team_post.py", 60
 SEND_LINE = "python -m scripts.yq_send --run {run}"     # the line that sends a load's e-mail again (reloads nothing)
 # a brief the deliver command REFUSED (exit 2 with these words: the database no longer holds this load as it left it,
 # scripts/ops/deliver.py stale_reason): a retry would be refused the same way, so none is offered
@@ -217,7 +225,8 @@ COMMIT_AVOID_S = 3 * 3600                           # how far ahead the list of 
 REFRESH_NEED_MAX_S = 600                            # one slow refresh never moves the margin before 8 earlier than this
 
 # Every load deletes and re-inserts the whole stock ledger. Once a refresh has begun, this is the
-# sentence for the state of the database, whatever ended the run afterwards.
+# sentence for the state of the database, whatever ended the run afterwards (but the one-transaction
+# loader's own words that it rolled back: Job.step_refresh).
 MAY_HOLD = "The database may hold part of the interrupted load until the next load."
 
 # The options of the load check that change what a Yes does, as plan["options"] holds them:
@@ -285,7 +294,9 @@ VERDICT_WORDS = {                   # the same words as the load check's table
 # The small program the refresh child runs. The worker never imports scripts.refresh itself: a
 # crash, an encoding error or a hang of the engine must not take the lock and the journal with it.
 # verify_error is set when the verification could not RUN (the refresh then keeps an 'error' in its
-# verify result): nothing was compared, which is another thing than totals that differ.
+# verify result): nothing was compared, which is another thing than totals that differ. written and
+# hold_s are the refresh's own (scripts/refresh.py): written false = the loader's words that nothing of
+# the load was written (its one transaction rolled back); hold_s = the seconds it held its commit.
 REFRESH_PROGRAM = (
     "import json, os, sys\n"
     f"if sys.argv[2:3] == [{ONE_TXN_ARG!r}]:\n"      # one transaction: the loader reads both words from its env
@@ -300,7 +311,8 @@ REFRESH_PROGRAM = (
     "       'loaded': res.get('loaded') or {},\n"
     "       'verify_ok': None if verify is None else bool(verify.get('ok')),\n"
     "       'verify_error': (str(verify.get('error') or '') or 'no detail given') if not_run else None,\n"
-    "       'loader_notices': [str(t) for t in (changes.get('loader') or [])]}\n"
+    "       'loader_notices': [str(t) for t in (changes.get('loader') or [])],\n"
+    "       'written': res.get('written'), 'hold_s': res.get('hold_s')}\n"
     "print('REFRESH_RESULT ' + json.dumps(out, default=str))\n"
     "sys.exit(0 if out['ok'] else 2)\n"
 )
@@ -966,7 +978,8 @@ def _closed_or_kept(dead: dict | None, began: bool, closed: bool, tell_state: bo
 def _began(run: str, rows: list[dict] | None = None) -> bool:
     """Has a refresh of this run ever started? Every load deletes and re-inserts the whole stock
     ledger, so from that journal line on the database may hold part of the load until a load
-    finishes: nothing said or journalled after it may claim that nothing was written."""
+    finishes: nothing said or journalled after it may claim that nothing was written (but the worker
+    that ran the refresh, on the one-transaction loader's own words that it rolled back: Job.step_refresh)."""
     rows = loadplan.journal_read(run) if rows is None else rows
     return any(r.get("event") == "step_start" and r.get("step") == "refresh" for r in rows)
 
@@ -2293,6 +2306,7 @@ class Job:
         self.reuse = {step: _last_ok(rows, step) for step in ("backup", "pre_gate")}
         self.stopped_at = loadplan.last_step(run)
         self.written = self.resumed_after_write          # may the database hold (part of) this load?
+        self.rolled_back = False                         # ... no: the one transaction rolled back (step_refresh)
         self.verified = False                            # did this worker's refresh load AND verify?
         self.verified_run: int | None = None             # ... and its run record (the ingest_runs id it journals)
         self.step = "start"
@@ -2499,7 +2513,8 @@ class Job:
         fields['state'] says what a refresh left when it loaded the data and did not pass: 'differs'
         (verified, and the totals differ) or 'unchecked' (the verification could not run).
         The row carries step and written: scripts.ops.status.failed_load() reads them, and while
-        written is true every skill opens with LAST LOAD FAILED until a load has finished."""
+        written is true every skill opens with LAST LOAD FAILED until a load has finished. A run whose
+        one transaction rolled back (step_refresh) is closed with written false and says so."""
         fields = dict(fields)
         notes = [str(n) for n in fields.pop("notes", None) or []]
         state = fields.pop("state", None)
@@ -2519,6 +2534,11 @@ class Job:
         elif again:
             text = f"{pre}CHECK AGAIN at {step}. Nothing was written."
             nxt = "Type /yq-load to check again."
+        elif not self.written and self.rolled_back:
+            # the loader's one transaction rolled back (its own words, passed up by the refresh) and no earlier
+            # attempt of this run may have written: nothing of this load is there, so no LAST LOAD FAILED follows
+            text = f"{pre}LOAD STOPPED at {step} and rolled back: nothing was written to the database."
+            nxt = "Type /yq-load to check again."
         elif not self.written:
             text = f"{pre}LOAD STOPPED at {step}. Nothing was written to the database."
             nxt = "Type /yq-load to check again."
@@ -2534,8 +2554,9 @@ class Job:
         else:
             text = f"{pre}LOAD FAILED at {step}. The database holds this load, or part of it."
         closed = self.j("failed", launch=self.launch_tag, result=result, check_again=again or None, step=step,
-                        written=bool(self.written), text=text, why=why, next=nxt, metrics=fields.get("metrics"),
-                        moved=fields.get("moved"), **self.timing_fields())
+                        written=bool(self.written), rolled_back=(self.rolled_back and not self.written) or None,
+                        text=text, why=why, next=nxt, metrics=fields.get("metrics"), moved=fields.get("moved"),
+                        **self.timing_fields())
         if closed or not self.written:
             self.lock.release()
         else:
@@ -2573,10 +2594,12 @@ class Job:
     def deliver_after(self) -> None:
         """Once the load has CLOSED (its last row is in the journal and its lock is gone): the brief, the
         management e-mail and the team message (python -m scripts.ops deliver), then the e-mail itself
-        (python -m scripts.yq_send). It never changes the load: not its exit code, its journal or its lock;
+        (python -m scripts.yq_send), then, when the brief was made, its team message for the Command Centre
+        (team_post_after). It never changes the load: not its exit code, its journal or its lock;
         a run that is closed is never resumed, so nothing here can load anything again. What happens is
         written to the run's delivery journal (loadplan.delivery_append), and `load status` shows it. A
-        load that stopped before it wrote gets nothing; a rehearsal only says what a real load would do."""
+        load that wrote nothing (it stopped before it wrote, or its one transaction rolled back) gets
+        nothing; a rehearsal only says what a real load would do."""
         run, d = self.run, self.deps
         if not d.deliver:
             return
@@ -2592,6 +2615,7 @@ class Job:
             return
         _delivery_row(run, "queued", pid=os.getpid(), text="Preparing the brief and the e-mail.")
         awake = d.keep_awake(True)
+        made = False                         # the deliver command made this load's brief (and its manifest)
         try:
             pack = d.runner("deliver", [sys.executable, "-X", "utf8", "-m", "scripts.ops", "deliver", "--run", run],
                             DELIVER_TIMEOUT_S)
@@ -2602,6 +2626,7 @@ class Job:
                 said = (f"Delivery: the brief could not be prepared{_why(pack)}. "
                         + (_no_retry(run) or f"Its retry: {SEND_LINE.format(run=run)}"))
             else:
+                made = True
                 sent = d.runner("send", [sys.executable, "-X", "utf8", "-m", "scripts.yq_send", "--run", run, "--auto"],
                                 SEND_TIMEOUT_S)
                 said = next((ln.strip() for ln in reversed(sent.text.splitlines())
@@ -2616,6 +2641,33 @@ class Job:
             if awake:
                 d.keep_awake(False)
         _delivery_row(run, "ended", text=said)
+        if made:
+            self.team_post_after()
+
+    def team_post_after(self) -> None:
+        """X1, after the e-mail step of a load whose brief was made: its team message for the Command Centre
+        (python -m scripts.yq_team_post), and only when this checkout holds that program. TEAM_POST_TIMEOUT_S
+        at most; what became of it is one row of the run's delivery journal (event team_post). Whatever it does
+        (it fails, runs out of time, is not there) changes nothing of the load, its journal, its lock, its
+        e-mail or the exit code: the `Delivery:` line is written before it starts."""
+        run, d = self.run, self.deps
+        try:
+            if not (Path(d.root) / TEAM_POST_FILE).is_file():
+                return                       # its package is not in this checkout: nothing is started, nothing said
+        except OSError:
+            return
+        awake = d.keep_awake(True)
+        try:
+            child = d.runner("team_post", [sys.executable, "-X", "utf8", "-m", TEAM_POST_MODULE, "--run", run],
+                             TEAM_POST_TIMEOUT_S)
+            _delivery_row(run, "team_post", code=child.code, timed_out=child.timed_out or None,
+                          text=_short(f"Team message: python -m {TEAM_POST_MODULE} ended{_why(child)}.", FIELD))
+        except Exception as exc:  # noqa: BLE001  (the load and its e-mail are done: this never reaches them)
+            _delivery_row(run, "team_post", text=f"Team message: python -m {TEAM_POST_MODULE} could not be run (an "
+                                                 f"unexpected error: {type(exc).__name__}).")
+        finally:
+            if awake:
+                d.keep_awake(False)
 
     # the steps
     def step_token(self):
@@ -2786,18 +2838,29 @@ class Job:
         d = self.deps
         argv = [sys.executable, "-X", "utf8", "-c", REFRESH_PROGRAM, str(d.staging)]
         unchecked = 0                        # runs that loaded the data and could not compare it with the reports
+        wrote = self.resumed_after_write     # may an attempt of this run have written (on a resume: the one cut off)?
         for attempt in (1, 2):
             if attempt > 1:
                 self._before_rerun(whole=unchecked > 0)      # stops (CHECK AGAIN) when the table no longer holds
             before = self._read(lambda: d.ingest_runs(None), "the run records could not be read before the load")[0]
             if attempt > 1:
                 self.j("step_start", step="refresh", attempt=attempt, text="The identical load runs once more.")
-            self.written = True
+            self.written, self.rolled_back = True, False
             # never cut short: a half load is the worst outcome
             ran_from = d.now()
             child = d.runner("refresh", argv + self._one_txn_args(), None)
-            self.refresh_run_s = max(self.refresh_run_s, (d.now() - ran_from).total_seconds())
+            ran_s = (d.now() - ran_from).total_seconds()
             res = parse_refresh(child.text)
+            # the seconds the loader held its one commit for production's jobs are no part of the refresh's own run
+            # (a hold longer than the whole run is no hold: the run's own time is then the careful one)
+            hold = _seconds((res or {}).get("hold_s")) or 0.0
+            hold = hold if hold <= ran_s else 0.0
+            self.refresh_run_s = max(self.refresh_run_s, ran_s - hold)
+            if self.one_txn and res is not None and res.get("written") is False and not res.get("ok") and not wrote:
+                # the loader's own words, passed up by the refresh: its one transaction rolled back (or its session
+                # never opened), and no earlier attempt of this run may have written: nothing of this load is there
+                self.written, self.rolled_back = False, True
+            wrote = wrote or self.written
             loaded = (res or {}).get("loaded") or {}
             not_run = str((res or {}).get("verify_error") or "")       # the verification could not RUN
             if res is not None and res.get("verify_ok") is False and not not_run:
@@ -2825,9 +2888,13 @@ class Job:
                 else:
                     why = str((res or {}).get("error") or "") or ("the load program gave no result" + _why(child))
                     first = "The load stage failed: the identical load runs once more."
+                    if self.rolled_back:
+                        first = ("The load stage stopped and rolled back, so nothing was written: the identical load "
+                                 "runs once more.")
                 if attempt == 1:
                     self.j("step_failed", step="refresh", attempt=1, stops=False, seconds=self.seconds(), loaded=loaded,
-                           text=first, why=_sentence(why))
+                           text=first, why=_sentence(why), rolled_back=self.rolled_back or None,
+                           commit_hold_s=round(hold) or None)
                     d.sleep(RETRY_PAUSE_S)
                     continue
                 if not_run:
@@ -2859,7 +2926,7 @@ class Job:
             if attempt > 1:
                 text += " (It passed on the second run.)"
             return text, {"attempt": attempt, "data_as_of": res.get("data_as_of"), "loaded": loaded,
-                          "ingest_runs": [before, after], "new_runs": new_rows}
+                          "ingest_runs": [before, after], "new_runs": new_rows, "commit_hold_s": round(hold) or None}
         raise Stop("refresh", "the load did not run")      # not reachable: the loop returns or raises
 
     def step_reconcile(self):
