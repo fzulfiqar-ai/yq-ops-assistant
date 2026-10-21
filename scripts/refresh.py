@@ -13,6 +13,10 @@ Pipeline (abort early on a bad gate — never load drifted data silently):
   6. notify              -> "Data refreshed as of X - N changes - verify PASS/FAIL" (Telegram+email).
   7. ingest_runs         -> record the run (status + data_as_of) for the freshness banner.
 
+The loader's own words on a one-transaction load are passed up in the result: `written` False when its
+transaction rolled back or its session never opened (nothing of the load was written), and `hold_s`,
+the seconds it held its commit for production's scheduled jobs (scripts/yq_load_go.py reads both).
+
 Text is kept ASCII so it prints safely on the Windows console.
 """
 from __future__ import annotations
@@ -82,6 +86,39 @@ def _loader_notices(stdout: str) -> list[dict]:
     return out
 
 
+# The loader's words when its one transaction ends without a commit (scripts/load_supabase.py main(); kept in sync
+# by tests/test_ops_load_txn.py): it ROLLED BACK, or its session never opened. Either way nothing of the load was
+# written. A commit that got no answer is neither: the database may hold that load whole, so it is never read so.
+_ROLLED_BACK = re.compile(r"^ *!! one transaction ROLLED BACK \(.*?\): nothing of this load was written$", re.M | re.S)
+_NOT_OPENED = re.compile(r"^ERROR: the one-transaction load could not open its database session \(.*?\); nothing was "
+                         r"written\.$", re.M | re.S)
+_NO_ANSWER = re.compile(r"^ *!! one transaction: the commit got no answer \(", re.M)
+# ... and the seconds it held its commit for production's scheduled jobs: its summary line, or the line of the hold
+_COMMITTED = re.compile(r"^ *\(one transaction: committed, \d+ statements in [\d.]+ s(?:, (\d+) s of them waiting "
+                        r"for a clear moment)?\)$", re.M)
+_HOLDS = re.compile(r"^ *\(one transaction: the commit waits (\d+) s, ", re.M)
+
+
+def _loader_wrote(said: str) -> bool | None:
+    """False when the loader's own words say that nothing of this load was written (its one transaction
+    rolled back, or its database session never opened); None otherwise, the careful reading: a load
+    stage that failed may have written part of the load, and one whose commit got no answer may hold it."""
+    said = said or ""
+    if _NO_ANSWER.search(said):
+        return None
+    return False if (_ROLLED_BACK.search(said) or _NOT_OPENED.search(said)) else None
+
+
+def _commit_hold(said: str) -> float | None:
+    """The seconds the one transaction held its commit (its summary line first, else the line it printed
+    as the hold began); None when the loader said neither (the older loader never holds)."""
+    done = _COMMITTED.search(said or "")
+    if done:
+        return float(done.group(1) or 0)
+    began = _HOLDS.search(said or "")
+    return float(began.group(1)) if began else None
+
+
 def _friendly(stage: str, tail: str) -> str:
     """Turn a subprocess failure into one sentence a non-engineer can act on. The raw tail is
     still returned separately as `detail`; it is no longer the headline the Data page shows."""
@@ -128,7 +165,10 @@ def _briefing(ok: bool, data_date, changes: dict, verify: dict | None, error: st
 
 def _finish(ok: bool, src_path: str, error: str | None, changes: dict,
             verify: dict | None, send: bool, detail: str | None = None,
-            loaded: dict | None = None) -> dict:
+            loaded: dict | None = None, written: bool | None = None, hold_s: float | None = None) -> dict:
+    """The run's result. `written`: False only on the loader's own words that nothing of this load was
+    written (_loader_wrote), True once the loader has ended well, None otherwise (nothing is claimed).
+    `hold_s`: the seconds the one transaction held its commit (_commit_hold), None when none was said."""
     data_date = None
     try:
         from app.reports import data_as_of
@@ -160,7 +200,8 @@ def _finish(ok: bool, src_path: str, error: str | None, changes: dict,
     except UnicodeEncodeError:  # Windows cp1252 console can't render some report chars
         print(out.encode("ascii", "replace").decode())
     return {"ok": ok, "data_as_of": data_date, "error": error, "detail": detail,
-            "loaded": loaded or {}, "changes": changes, "verify": verify, "notified": sent}
+            "loaded": loaded or {}, "changes": changes, "verify": verify, "notified": sent,
+            "written": written, "hold_s": hold_s}
 
 
 def refresh(folder: str | None = None, send: bool = True) -> dict:
@@ -186,10 +227,12 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
     r2 = _run("scripts.load_supabase", "--staged", src_path)
     loaded = _loaded_counts(r2.stdout)
     notices = _loader_notices(r2.stdout)
+    said = (r2.stdout or "") + "\n" + (r2.stderr or "")     # its whole output: the tail below may cut its words
+    hold_s = _commit_hold(said)
     if r2.returncode != 0:
         tail = (r2.stderr or r2.stdout or "")[-600:]
         return _finish(False, src_path, _friendly("load", tail), {"loader": [n["text"] for n in notices]}, None, send,
-                       detail=tail, loaded=loaded)
+                       detail=tail, loaded=loaded, written=_loader_wrote(said), hold_s=hold_s)
 
     # 3 - flush stale answer cache
     try:
@@ -281,7 +324,7 @@ def refresh(folder: str | None = None, send: bool = True) -> dict:
         bad = [r["metric"] for r in (verify or {}).get("rows", []) if not r.get("passed")]
         v_err = ("The data loaded, but these totals do not match the reports: " + "; ".join(bad)
                  if bad else "Verification could not run: " + str((verify or {}).get("error") or "unknown"))
-    return _finish(ok, src_path, v_err, changes, verify, send, loaded=loaded)
+    return _finish(ok, src_path, v_err, changes, verify, send, loaded=loaded, written=True, hold_s=hold_s)
 
 
 def main() -> int:
