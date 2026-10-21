@@ -48,7 +48,7 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_shop_search_terms`, `v_shop_rail_perf` | `r7d_analytics_views_migration.sql` (R7d, 27-Sep-2026; before that `marketplace_migration.sql` 9c / 9d) | not in the baseline. Re-running the marketplace file after R7d: `v_shop_search_terms` **silently** goes back to counting every keystroke (same five columns); `v_shop_rail_perf` **fails loudly** (it would drop 4 appended columns) — never force it |
 | `v_transfer_lines` | `r9_stock_moves_migration.sql` (release 2b) | not in the baseline — the Stock Issue / Stock Receive lines the API pairs by their contents with `scripts/ops/pairing.py`, the same code as `/yq-moves`; granted to the read role only, not on the AI allowlist |
 | `v_salesman_stock_recon` | `r9_stock_moves_migration.sql` (release 2b: rebuilt from the ledger, the old columns first and in order, new ones appended; before that `stock_transfer_migration.sql`) | not in the baseline. Re-running `stock_transfer_migration.sql` after 2b **silently** puts the old definition back (on hand from the stock file, which holds no van; the `ilike '%sim%'` trap), and its `drop view … cascade` takes the dependent views with it — never do it |
-| `team_messages` (table) | `r9_team_messages_migration.sql` (release 2b) | not a view: the team message of each load (data date, text, sha256), admin-only — RLS on, no policy, nothing granted to `anon` / `authenticated` |
+| `team_messages` (table) | `r9_team_messages_migration.sql` (release 2b) | not a view: the team message of each load (data date, text, sha256), read only by the API (the Command Centre: admin and management) — RLS on, no policy, nothing granted to `anon` / `authenticated` or the read role |
 | `v_transfer_flow` | dropped by `r9_transfer_flow_drop_migration.sql` (release 2b, after `moves portal` PASS); `r9_transfer_flow_drop_reverse.sql` recreates it (before that `daily_ops2_migration.sql`) | not in the baseline. Re-running `daily_ops2_migration.sql` after the drop quietly brings the view back — put it back only through the drop's reverse |
 
 ### The guard protects the file, not the statements
@@ -851,7 +851,7 @@ first (`apply_sql --rehearse`, always rolled back), applied after a YES, then `p
 | Order | File | When | What |
 |---|---|---|---|
 | 1 | `r9_stock_moves_migration.sql` | `-Part migrate`, before the API deploy | `v_transfer_lines` (the transfer lines the API pairs by their contents, the same code as `/yq-moves`); `v_salesman_stock_recon` rebuilt from the ledger (on hand = the ledger balance, the old columns first and in order); the narration data step: ID numbers masked in the stored stock rows and their `ingest_stage` / `ingest_replaced` copies, `row_hash` unchanged |
-| 2 | `r9_team_messages_migration.sql` | `-Part migrate` | `team_messages`, admin-only (RLS on, no policy, nothing granted to `anon` / `authenticated`) |
+| 2 | `r9_team_messages_migration.sql` | `-Part migrate` | `team_messages`, read only by the API for the Command Centre (admin and management); RLS on, no policy, nothing granted to `anon` / `authenticated` or the read role |
 | 3 | `r9_transfer_flow_drop_migration.sql` | `-Part migrate2`: after the API deploy, once `moves portal` printed PASS and the gate compare passed | drops `v_transfer_flow`; only an older API's `/stock/flow` read it |
 
 **Reverse** — the release script's rollback, in this order, by who reads what: `r9_transfer_flow_drop_reverse.sql`
@@ -866,4 +866,7 @@ Never re-run after 2b: `stock_transfer_migration.sql` (its `drop view … cascad
 `daily_ops2_migration.sql` (it brings `v_transfer_flow` back). The r9 files own these objects now (table above).
 
 Tests: `python -m tests.test_r9_release_script` pins the release script's order, its YES questions, the rehearse /
-apply / audit sequence and the rollback order, as text.
+apply / audit sequence and the rollback order, as text. `python -m tests.test_r9_stock_moves` pins the six files (in
+CI as text; the replay of each file and its reverse, twice, on a scratch PostgreSQL only with `YQ_LOCAL_PG_R9`, a
+loopback address). `python -m tests.test_r9_transfers` holds the API's pairing over `v_transfer_lines` equal to
+`/yq-moves`', and `python -m scripts.ops moves portal` is the proof on production after the deploy (`-Part verify`).

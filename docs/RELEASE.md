@@ -371,18 +371,21 @@ archive, the before-snapshot, the API deploy to roll back to and how far the tra
   of the release stays the rollback point.
 - **migrate** — `r9_stock_moves`: the view `v_transfer_lines`, `v_salesman_stock_recon` rebuilt from the ledger (its
   old columns kept) and the ID numbers in the stored stock narrations masked. **The narration mask cannot be undone**:
-  the encrypted backup keeps the old text. Then `r9_team_messages`: the admin-only table behind the Copy button. Each
-  file is rehearsed (it runs and is rolled back), applied after a second YES, then `audit_grants` must exit 0.
+  the encrypted backup keeps the old text. Then `r9_team_messages`: the table behind the Copy button (no login reads it
+  directly; the API shows it to the admin and management logins). Each file is rehearsed (it runs and is rolled back),
+  applied after a second YES, then `audit_grants` must exit 0.
 - **api** — writes down the deploy that is live (the rollback target), deploys the release commit to Render and waits
   until `/health` reports it. Then tell Claude: Claude pushes the web commit.
 - **web** — reads only. The cf-deploy run of the web commit (or the last one, when nothing under `web/` changed since)
   must be green with both deploy steps run, its build must be of the release commit or a later one, and the live
   marketplace and portal must carry that build id. When the portal's build id cannot be found, it asks you to look at
   ops.yqmarketplace.com/stock: the amber "Being corrected" notice must be gone.
-- **verify** — reads only. `/health` on the release; `python -m scripts.ops moves portal` must print PASS (the portal
-  pairs the transfers exactly as `/yq-moves` does for the same window); the gate snapshot after the release, compared
-  with the one taken at the backup (an unexplained change to an order, line or total is the stop rule, step 6). Then
-  three checks of your own in the portal, listed on the screen.
+- **verify** — reads only. `/health` on the release; `python -m scripts.ops moves portal` must print PASS: it reads
+  the view `v_transfer_lines` (read-only), pairs it with the API's own code and compares every voucher (its outcome,
+  its receipt or receipts) and every count with `/yq-moves`' own pairing, for the last 7 days and the whole ledger. A
+  FAIL names the first twenty vouchers that differ: do not run migrate2, tell Claude. Then the gate snapshot after the
+  release, compared with the one taken at the backup (an unexplained change to an order, line or total is the stop
+  rule, step 6). Then three checks of your own in the portal, listed on the screen.
 - **migrate2** — only once verify passed for the API that is live, and only while `/health` still shows the release
   (an older API reads `v_transfer_flow`): drops the old view.
 

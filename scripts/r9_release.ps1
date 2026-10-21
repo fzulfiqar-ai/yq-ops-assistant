@@ -88,9 +88,10 @@ $ENVFILE = Join-Path $ROOT '.env'
 $LOCK    = Join-Path $ROOT 'business_data\ops\LOCK'
 $GATES   = Join-Path $ROOT 'business_data\gates'
 # The migrations. -Part migrate, before the API deploy, in this order: r9_stock_moves (the view v_transfer_lines,
-# v_salesman_stock_recon rebuilt from the ledger, the narration mask), then r9_team_messages (the admin-only table
-# team_messages). -Part migrate2, once -Part verify passed: r9_transfer_flow_drop (v_transfer_flow goes). The
-# rollback reverses them the other way round: the drop first, then team_messages, then stock moves.
+# v_salesman_stock_recon rebuilt from the ledger, the narration mask), then r9_team_messages (the table team_messages,
+# which only the API reads: the Command Centre of the admin and management logins). -Part migrate2, once -Part verify
+# passed: r9_transfer_flow_drop (v_transfer_flow goes). The rollback reverses them the other way round: the drop first,
+# then team_messages, then stock moves.
 $R9_MOVES     = 'scripts\r9_stock_moves_migration.sql'
 $R9_TEAM      = 'scripts\r9_team_messages_migration.sql'
 $R9_DROP      = 'scripts\r9_transfer_flow_drop_migration.sql'
@@ -485,7 +486,8 @@ function Invoke-PartCheck {
 
   Step 'the release files are here'
   foreach ($f in @($R9_MOVES, $R9_MOVES_REV, $R9_TEAM, $R9_TEAM_REV, $R9_DROP, $R9_DROP_REV,
-                   'scripts\ops\pairing.py', 'scripts\ops\moves.py', 'app\transfer_audit.py', 'scripts\yq_team_post.py',
+                   'scripts\ops\pairing.py', 'scripts\ops\moves.py', 'scripts\ops\moves_portal.py', 'app\transfer_audit.py',
+                   'scripts\yq_team_post.py',
                    'scripts\yq_backup.py', 'scripts\apply_sql.py', 'scripts\audit_grants.py', 'scripts\db_backup.py',
                    'scripts\prod_gate.py', 'scripts\render_deploy.py')) {
     [void](Invoke-Git @('ls-files', '--error-unmatch', ($f -replace '\\', '/')))
@@ -598,7 +600,7 @@ function Invoke-PartMigrate {
   if (-not $arc -or -not (Test-Path -LiteralPath $arc -PathType Leaf)) { Stop-Part 2 'There is no backup of this release yet: run -Part backup first.' }
   Say ('  backup of this release: ' + $arc)
   Invoke-Migration 'r9_stock_moves' $R9_MOVES 'the new view v_transfer_lines, v_salesman_stock_recon rebuilt from the ledger (its old columns kept) and the ID numbers in the stored stock narrations masked. The mask cannot be undone; the backup keeps the old text, encrypted.'
-  Invoke-Migration 'r9_team_messages' $R9_TEAM 'the admin-only table team_messages (the team message behind the Copy button in the Command Centre).'
+  Invoke-Migration 'r9_team_messages' $R9_TEAM 'the table team_messages (the team message behind the Copy button in the Command Centre; only the API reads it).'
   Say 'Both migrations are applied and the grant audit is clean. Next: -Part api' Green
 }
 #endregion part:migrate

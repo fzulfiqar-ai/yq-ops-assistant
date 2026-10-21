@@ -6,8 +6,8 @@
 --
 -- One row per load run: after a load's delivery step, scripts/yq_team_post.py stores the team message that
 -- /yq-brief team prints (the text the owner copies to the salesmen's group) once its delivery manifest's checksum and
--- the privacy check have passed; GET /command/team-message (admin only, behind _require_command) reads the newest
--- row, and the Command Centre shows it with a Copy button. Nothing is ever sent from here.
+-- the privacy check have passed; GET /command/team-message (admin and management, behind _require_command) reads the
+-- newest row, and the Command Centre shows it with a Copy button. Nothing is ever sent from here.
 --   run         the load run the message was made for (the primary key: one message per run)
 --   data_date   the Focus data date the figures stand on
 --   text        the message as the owner copies it, trailing newline kept (salesmen's names and their figures)

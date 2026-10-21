@@ -83,7 +83,8 @@ SQL = {"R9_MOVES": r"scripts\r9_stock_moves_migration.sql", "R9_TEAM": r"scripts
        "R9_TEAM_REV": r"scripts\r9_team_messages_reverse.sql", "R9_MOVES_REV": r"scripts\r9_stock_moves_reverse.sql"}
 # the files of the other 2b packages (and of release A) that the check part looks for; they may not be merged here yet
 PENDING = {f.replace("\\", "/") for f in SQL.values()} | {"scripts/ops/pairing.py", "scripts/ops/moves.py",
-                                                          "app/transfer_audit.py", "scripts/yq_team_post.py"}
+                                                          "scripts/ops/moves_portal.py", "app/transfer_audit.py",
+                                                          "scripts/yq_team_post.py"}
 
 # Production commands: each must sit after a YES question (Confirm-Step / Ask-Yes) with no other production command
 # in between. A rehearsal counts: it runs on production, even though it always rolls back. The backup only reads
@@ -860,10 +861,13 @@ def _():
             assert re.fullmatch(lab.group(1), label), label
     else:
         print("        note: yq_backup release / unpack are not in this checkout yet (R1)")
-    # moves portal (E-OPS) prints PASS
-    mv = ROOT / "scripts" / "ops" / "moves.py"
-    if mv.is_file() and "portal" in _read(mv):
-        assert "PASS" in _read(mv), "moves portal prints the word the script reads"
+    # moves portal (release E): moves.py hands the word on to moves_portal.py, whose verdict line reads PASS or FAIL
+    mv, mp = ROOT / "scripts" / "ops" / "moves.py", ROOT / "scripts" / "ops" / "moves_portal.py"
+    if mp.is_file():
+        assert "moves_portal" in _read(mv) and 'PORTAL_WORD = "portal"' in _read(mv), "moves.py dispatches moves portal"
+        portal = _read(mp)
+        assert '{VERDICT} PASS - ' in portal and '{VERDICT} FAIL - ' in portal and 'VERDICT = "moves portal:"' in portal, \
+            "moves portal prints the words the script reads"
     else:
         print("        note: moves portal is not in this checkout yet (E-OPS)")
 
