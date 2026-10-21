@@ -75,6 +75,9 @@ WEEK = (date(2026, 3, 9), D)          # the seven days to D
 MOVES = "scripts.ops.moves"
 ABSENT = object()
 TWO_DATES = "the period is two dates, or 'YYYY-MM-DD..YYYY-MM-DD'"
+# The stock suite's FIXTURE sets stock.position_stores to [] (its pins stay main-store), so the model it builds carries
+# an order position that counts no store beside the main store: this, never MAIN_ONLY (a model with no position)
+NONE_COUNTED = "not counted (config 'stock.position_stores' names no store beside the main store)"
 # the weekly builder's own voucher pattern (scripts/ops/workbook/week.py VOUCHER) and a stricter one of our own
 VOUCHER = re.compile(r"\b[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})*-\d{2}-\d{2}-\d+\b")
 NUMBERED = re.compile(r"\b[A-Za-z]{1,6}\s*:\s*[A-Za-z0-9]+(?:-\d+)+\b")
@@ -282,7 +285,7 @@ def _():
     assert (t["rate_days"], t["rank_months"]) == (stock.RATE_DAYS, stock.RANK_MONTHS) == (90, 12)
     # 394 x 0.4 + 20 x 2.5 + 50 x 0.8 + 36 x 3.2 + 5 x 10, display items in
     assert t["main"] == {"items": 5, "units": 505, "value": Decimal("412.800"), "uncosted_items": 0}, t["main"]
-    assert t["beside"] is None and t["parts"]["position"] == sx.MAIN_ONLY
+    assert t["beside"] is None and t["parts"]["position"] == NONE_COUNTED
     k = f["kpi_cover"]
     c = t["cover"]
     assert c == {"days": fmt.q3(k["now"]["days"]), "low": 30, "high": 45, "value": fmt.q3(k["now"]["value"]),
@@ -312,7 +315,7 @@ def _():
                            "trend": None}, t["damage"]
     assert t["order"] == {"items": 1, "units": 65, "value": Decimal("162.500"), "uncosted_items": 0, "join_days": 70,
                           "fill_days": 85}, t["order"]
-    assert t["parts"] == {"position": sx.MAIN_ONLY, "damage": "ok", "review": "ok", "plan": "ok"}, t["parts"]
+    assert t["parts"] == {"position": NONE_COUNTED, "damage": "ok", "review": "ok", "plan": "ok"}, t["parts"]
     assert "error" not in t
     assert_clean_totals(t)
 
@@ -458,7 +461,7 @@ def _():
                                "counted": 46, "value": Decimal("23.400"), "uncosted": 2}, there["beside"]
     assert there["parts"]["position"] == "ok"
     whys = {"failed": "not worked out this time (RuntimeError)",
-            "none": "not counted (config 'stock.position_stores' names no store beside the main store)",
+            "none": NONE_COUNTED,
             "shape": "not worked out this time (KeyError)", "absent": sx.MAIN_ONLY}
     for name, why in whys.items():
         assert got[name]["beside"] is None and got[name]["parts"]["position"] == why, (name, got[name]["parts"])
@@ -490,7 +493,7 @@ def _():
         shape = totals_of(m)
     t = failed
     assert (t["review"], t["damage"]) == (None, None)
-    assert t["parts"] == {"position": sx.MAIN_ONLY, "review": "not worked out this time (KeyError)",
+    assert t["parts"] == {"position": NONE_COUNTED, "review": "not worked out this time (KeyError)",
                           "damage": "not worked out this time (ZeroDivisionError)",
                           "plan": "not worked out this time (TypeError)"}, t["parts"]
     assert t["order"]["items"] == 1                         # the order list is the model's own, the plan aside
