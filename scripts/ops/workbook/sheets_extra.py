@@ -1,20 +1,20 @@
 """The Stock and Movements sheets that the weekly and the month-end workbook share: totals only.
 
-Both workbooks are forwarded, so neither sheet names an item, a voucher or the cost of one item: every figure
-is a count, units or BHD, and every figure at cost names the basis it rests on. The figures are worked out first,
-into a plain dict (stock_totals, moves_totals), and the sheet is drawn from that dict (stock_sheet,
-movements_sheet): the weekly builder and the month-end pack work the figures out once, may read them for lines of
-their own, and lay out the same sheet. The report engine writes it (book.py): typed values, every formula written
-with the value Book.evaluate() works out for it, the grid formats of style.py (g_*), BHD to three decimals, units
-whole.
+Both workbooks are forwarded, so neither sheet names an item, a voucher, a store or the cost of one item: every
+figure is a count, units or BHD, and every figure at cost names the basis it rests on. The main store is "the main
+store"; the vans and the outlets are each counted together (a van is named after its salesman: each store's own
+figures stay on /yq-moves). The figures are worked out first, into a plain dict (stock_totals, moves_totals), and
+the sheet is drawn from that dict (stock_sheet, movements_sheet): the weekly builder and the month-end pack work the
+figures out once, may read them for lines of their own, and lay out the same sheet. The report engine writes it
+(book.py): typed values, every formula written with the value Book.evaluate() works out for it, the grid formats of
+style.py (g_*), BHD to three decimals, units whole.
 
 CONTRACT (the weekly builder, scripts.ops.workbook.week, and the month-end pack rely on it; the weekly builder
 passes keyword arguments by name: as_of to stock_totals, first and last to moves_totals)
   stock_totals(model=None, *, as_of=None, window=None) -> dict      never raises
       model   a stock Model: scripts.ops.stock.build(inp, cfg) (today), or build(inp, cfg, as_of=day), the stock at
-              the end of an earlier day (a closed week or month: the ledger cut there, the costs today's) - the
-              month-end pack's way. None: the model is built here, stock.build(stock.gather(), stock.settings(),
-              as_of=as_of) (the weekly builder's way)
+              the end of an earlier day (a closed week or month: the ledger cut there, the costs today's). None: the
+              model is built here, stock.build(stock.gather(), stock.settings(), as_of=as_of)
       as_of   a date or 'YYYY-MM-DD' (or None: the ledger's last day), only when model is None
       window  (first, last) as dates or 'YYYY-MM-DD', or 'YYYY-MM-DD..YYYY-MM-DD' (period_of), inside the model's
               day series (model.series_start to model.d): the fast movers' availability over that period too (the
@@ -23,9 +23,9 @@ passes keyword arguments by name: as_of to stock_totals, first and last to moves
     one sentence; a read or a setting that fails) or facts that are not the contract's shape give
     {"error": why, "as_of": the date asked, "store"}: the sheet then reads "The stock figures: not worked out this
     time (why)." Otherwise counts, units (Decimal) and BHD (Decimal, three decimals); no item name, no Item, no
-    voucher (the store's name is read from config here; the sheet functions read nothing):
+    voucher (config is read here; the sheet functions read nothing):
     {"as_of": date (the model's day), "ledger_to": date (the ledger's last day), "cut": bool (built as on an
-     earlier day), "store": str (config 'warehouses.main'),
+     earlier day), "store": str (config 'warehouses.main', for the caller: the sheet says "the main store"),
      "cost_label": "at landed cost" | "at cost", "at today's ..." when cut,
      "basis": str (the label and what it rests on, as the /yq-stock headline words it),
      "main":   {"items", "units", "value", "uncosted_items"}: the main store at the end of as_of, from the ledger
@@ -44,7 +44,8 @@ passes keyword arguments by name: as_of to stock_totals, first and last to moves
      "damage": {"units", "value", "uncosted_units", "month", "partial", "sold", "sent", "per100", "trend"} | None,
      "order":  {"items", "units", "value", "uncosted_items", "join_days", "fill_days"},
      "rate_days", "rank_months": the windows of the daily rate and the fast movers' ranking (stock's own),
-     "parts":  {"position", "damage", "review", "plan"[, "window" when one is asked]: OK or why}}
+     "parts":  {"position", "damage", "review", "plan"[, "window" when one is asked]: OK or why},
+     "screen": the names the sheet must never show (SCREEN below): the stores beside the main store that sold}
     A part that failed, is missing or is not set up is None (beside, review, damage, the window) and its why is in
     parts: "not worked out this time (<the error's type>)", "not set up (...)". The plan (the suppliers) is not on
     the Stock sheet: its state is in parts only. Shares are exact Decimals of the rounded figures, so the sheet's
@@ -53,39 +54,53 @@ passes keyword arguments by name: as_of to stock_totals, first and last to moves
 
   moves_totals(table=None, *, first=None, last=None) -> dict      never raises
       table   scripts.ops.moves.period_table(first, last): {"stores": [{"store", "kind" 'van' | 'outlet',
-              "units": {MOVE_KEYS}, "bhd": {MOVE_KEYS}, "uncosted_units"}], "totals": {...},
-              "counts": scripts.ops.pairing.summarise(...)}; and, when the module gives them, "exceptions"
-              [{"kind", "units", "bhd", ...}], "first", "last", "basis" - the month-end pack's way. None: the table
-              is read here, scripts.ops.moves.period_table(first, last), the module imported only now (it may not
-              be there yet: a module that is missing or raises is the failure below) - the weekly builder's way
+              "units": {MOVE_KEYS}, "bhd": {MOVE_KEYS} (exact: costs to six decimals, each check exactly nought),
+              "uncosted_units", ...}], "main": the main store's row, "counts": pairing.summarise(...),
+              "exceptions": moves.exceptions_by_kind (or the items themselves), "first", "last", "basis", ...}. None:
+              the table is read here, scripts.ops.moves.period_table(first, last), the module imported only now (a
+              module that is missing or raises is the failure below)
       first, last   the period, dates or 'YYYY-MM-DD'; with a table they stand in where it gives none of its own
     {"first", "last": date | None, "basis": str | None,
-     "stores": [{"store": the ledger's spelling less " - Acc WH" (as the month workbook names a salesman),
-                 "ledger_name", "kind", "units": {MOVE_KEYS}, "bhd": {MOVE_KEYS}, "uncosted_units"}]: vans, then
-                 outlets, each by name; every "check" worked out here from the row's own figures (CHECK below),
-     "total": {"units": {MOVE_KEYS}, "bhd": {MOVE_KEYS}, "uncosted_units"}: the sums of the rows,
+     "rows": [{"row": "main" | "vans" | "outlets" | "other", "label", "stores": how many stores it counts,
+               "units": {MOVE_KEYS}, "bhd": {MOVE_KEYS}, "uncosted_units"}]: the main store, every van together and
+               every outlet together (and every store of another kind together, only when the table holds one);
+               each figure to three decimals, every check worked out here (ROUNDING below),
+     "total": {"stores", "units", "bhd", "uncosted_units"}: the sums of the rows,
      "exceptions": [{"kind", "words", "count", "units", "bhd" | None}] by kind in EXCEPTIONS order (the module's
                  list summed by kind, else the pairing summary's counts and units, unvalued); None when the table
                  brings neither,
-     "unbalanced": int (rows whose units or BHD check is not nought), "note": str | None (the line the sheet adds),
-     "error": None | why}
-    A table that is not that shape, a figure that is not a number, no period to read one for, a module that is
-    missing or raises: "error" says why, stores [] and the sheet reads one line "The movements of the vans and
-    outlets: not worked out this time (why)." An exception's vouchers and items are never kept.
+     "unbalanced": int (STORES of the table whose exact units or BHD check is not nought: /yq-moves names them),
+     "note": str | None (the line the sheet adds), "error": None | why,
+     "screen": the names the sheet must never show (SCREEN below): every store of the table but the main store}
+    No store's own figures and no store's name are kept but the screen's. A table that is not that shape, a figure
+    that is not a number, no period to read one for, a module that is missing or raises: "error" says why, rows []
+    and the sheet reads one line "The movements of the vans and outlets: not worked out this time (why)." An
+    exception's vouchers and items are never kept.
 
   stock_sheet(ws, totals, heading) -> {name: ref}
   movements_sheet(ws, totals, heading) -> {name: ref}
       The sheet drawn on ws (an empty book.Sheet) from the totals, `heading` its title; the refs name the cells
-      another sheet may point at, absolute and with the sheet's name ("Stock!$B$7"). Totals that are None or carry
-      an "error" (stock_totals itself failed: the caller passes {"error": why}) are one line. The formulas: the
-      shares (IF(den>0, num/den, "")), the total rows (SUM), the over-180 value and the Movements check column
-      (ROUND(..., 3): 0 on a row that balances); every other figure is typed. Neither sheet names an item or a
-      voucher; Movements names the stores (vans and outlets), as the month workbook names salesmen.
+      another sheet may point at, absolute and with the sheet's name ("Stock!$B$7"). Totals that are None, carry an
+      "error" (stock_totals itself failed: the caller passes {"error": why}) or are not the contract's shape are
+      the title and one line, what was drawn undone. The formulas: the shares (IF(den>0, num/den, "")), the total
+      rows (SUM), the over-180 value and the Movements check column (ROUND(..., 3): 0 on a row that balances);
+      every other figure is typed.
+  names_a_store(ws, names) -> bool        a text cell of ws names one of `names` (SCREEN): the sheets' own screen,
+                                          for a caller's own screen too (the totals carry their "screen")
 
-THE CHECK (Movements, one row per store, in units and in BHD)
+THE CHECK (Movements, one row for the main store, the vans, the outlets, in units and in BHD)
   opening + received + customer_returns + counts + other
     - back_to_main - to_damage - to_other - not_received_yet - not_received - sold - closing = 0
-  issued_to (what other stores issued to the store) stands beside it: the store's own receipts are "received".
+  issued_to (what other stores issued to the row's stores) stands beside it: their own receipts are "received".
+ROUNDING. moves.period_table's BHD is exact (costs to six decimals): rounding each leg to the fils can leave a fils
+  over (0.123 + 0.123 - 0.247). A row is summed exactly from its stores, then each leg is rounded; when the exact
+  check is nought, the closing is the figure the rounded legs balance on, so the check reads 0 on the sheet as it
+  does in the table; when it is not, the closing is rounded as it is and the difference shows (red, and the note).
+SCREEN. The names of the stores beside the main store (a van's name as the ledger spells it and without its
+  " - Acc WH", an outlet's name; three letters or more), compared as whole words, case and spaces aside. A sheet
+  that would show one is the title and one line instead ("a store's name would be on it"). The main store's,
+  the damage store's and the other config stores' names are company stores: the sheets call them "the main
+  store", "the damage store" and never print a name, so the screen leaves them out.
 """
 from __future__ import annotations
 
@@ -96,13 +111,13 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from scripts.ops import fmt
-from scripts.ops.workbook import model as mdl
 from scripts.ops.workbook.book import Sheet, a1, aa
 
 OK = "ok"
 NOT_WORKED = "not worked out this time"
 NOT_SET_UP = "not set up (config 'warehouses.damage' names the damage store)"
 MAIN_ONLY = f"{NOT_WORKED} (this model counts the main store only)"
+NAMED = "a store's name would be on it"
 ZERO = Decimal(0)
 Q3 = Decimal("0.001")
 PART_ERRORS = (KeyError, TypeError, AttributeError, ValueError, IndexError, ArithmeticError)
@@ -116,33 +131,40 @@ MOVE_HEADS = {"opening": "Opening", "received": "Received", "issued_to": "Issued
               "to_damage": "To damage", "to_other": "To other stores", "not_received_yet": "Not received yet",
               "not_received": "Not received", "sold": "Sold", "customer_returns": "Customer returns",
               "counts": "Counts", "other": "Other", "closing": "Closing", "check": "Check"}
-KINDS = {"van": "Van", "outlet": "Outlet"}
-KIND_ORDER = {"van": 0, "outlet": 1}
+# The Movements sheet's rows: the main store, every van together, every outlet together; every store of another kind
+# together, only when the table holds one (moves.period_table holds vans and outlets).
+ROWS = (("main", "Main store"), ("vans", "Vans"), ("outlets", "Outlets"))
+OTHER_ROW = ("other", "Other stores")
+KIND_ROW = {"main": "main", "van": "vans", "outlet": "outlets"}
 
-# What is to check on the transfers, by kind (the pairing's outcomes, the watch rules' keys as aliases).
+# What is to check on the transfers, by kind (moves.EXCEPTION_KINDS' order; the watch rules' keys as aliases).
 EXCEPTIONS = (
     ("not_received", "Not received by its deadline"),
-    ("elsewhere", "Received by another store"),
-    ("qty_differs", "Received in other quantities"),
+    ("damage_not_booked", "Sent to the damage store, not booked in"),
     ("twins", "Identical issues, fewer receipts"),
+    ("qty_differs", "Received in other quantities"),
+    ("elsewhere", "Received by another store"),
     ("orphan", "A receipt with no issue"),
 )
 EXCEPTION_WORDS = dict(EXCEPTIONS)
 EXCEPTION_ALIASES = {"xfer_open": "not_received", "open": "not_received", "qty_diff": "qty_differs",
                      "xfer_elsewhere": "elsewhere", "xfer_twins": "twins", "twin_items": "twins",
                      "rcpt_orphan": "orphan", "orphans": "orphan"}
-SUMMARY_COUNTS = {"not_received": "not_received", "elsewhere": "elsewhere", "qty_differs": "qty_differs",
-                  "twins": "twin_items", "orphan": "orphans"}       # pairing.summarise()["counts"] key per kind
+SUMMARY_COUNTS = {"not_received": "not_received", "twins": "twin_items", "qty_differs": "qty_differs",
+                  "elsewhere": "elsewhere", "orphan": "orphans"}    # pairing.summarise()["counts"] key per kind
 
 # The Stock sheet: label (A), value (B), a note merged over C:F; the small tables use A to E.
 S_LABEL, S_VALUE, S_NOTE_FIRST, S_NOTE_LAST = 0, 1, 2, 5
 S_WIDTHS = ((0, 0, 46), (1, 4, 14), (5, 5, 36))
-# The Movements sheet: Store (A), Kind (B), the figures from C in MOVE_KEYS order; the BHD block adds Q.
-M_STORE, M_KIND, M_FIRST = 0, 1, 2
+# The Movements sheet: the row (A), how many stores it counts (B), the figures from C in MOVE_KEYS order; the BHD
+# block adds the units without a cost (Q).
+M_LABEL, M_COUNT, M_FIRST = 0, 1, 2
 M_COL = {k: M_FIRST + i for i, k in enumerate(MOVE_KEYS)}
 M_UNCOSTED = M_FIRST + len(MOVE_KEYS)
 FIRST_ROW = 4                         # the first row under the title, the sub-line and the purpose line
+SCREEN_MIN = 3                        # a name shorter than this is no name to screen ("A - Acc WH" is no "a")
 _SHEET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+_STORE_TAIL = re.compile(r"\s*-\s*(?:acc|sim)\s+wh\s*$", re.I)       # a van's (or its SIM store's) " - Acc WH"
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -168,9 +190,9 @@ def _reason(exc: BaseException) -> str:
     return " ".join(str(exc).split()) if isinstance(exc, Shape) and str(exc).strip() else type(exc).__name__
 
 
-def _dec(x, what: str = "a figure") -> Decimal:
-    """A quantity or BHD as these sheets hold it: a Decimal to three decimals, half up; blank is nought. Anything
-    that is not a number is a Shape error (the part then fails, never a silent nought)."""
+def _exact(x, what: str = "a figure") -> Decimal:
+    """A quantity or BHD exactly as given (a float as it is written); blank is nought. Anything that is not a number
+    is a Shape error (the part then fails, never a silent nought)."""
     if x is None or x == "":
         return ZERO
     if isinstance(x, bool):
@@ -184,9 +206,14 @@ def _dec(x, what: str = "a figure") -> Decimal:
             v = Decimal(str(x).replace(",", "").strip())
         if not v.is_finite():
             raise ArithmeticError
-        v = v.quantize(Q3, rounding=ROUND_HALF_UP)
     except ArithmeticError:
         raise Shape(f"{what} is not a number") from None
+    return v if v else ZERO
+
+
+def _dec(x, what: str = "a figure") -> Decimal:
+    """A quantity or BHD as these sheets hold it: _exact, then to three decimals, half up."""
+    v = _exact(x, what).quantize(Q3, rounding=ROUND_HALF_UP)
     return v if v else ZERO
 
 
@@ -277,7 +304,7 @@ def _main_name() -> str:
     try:
         from scripts.ops import config
         return str(config.get("warehouses.main"))
-    except Exception:  # noqa: BLE001  (a heading's words, never the figures)
+    except Exception:  # noqa: BLE001  (for the caller only: the sheet says "the main store")
         return "the main store"
 
 
@@ -300,18 +327,57 @@ def _failed_line(ws: Sheet, what: str, why) -> None:
     ws.text(FIRST_ROW, 0, _said(f"{what}: {why}."), "note")
 
 
-def _drawn(ws: Sheet, draw, what: str, heading: str, sub: str, purpose: str) -> dict:
-    """draw() on ws; totals that are not the shape the contract says (a key missing, a figure of the wrong kind)
-    undo what it wrote and leave the title and one line instead, so a sheet never stops the workbook."""
+# ── the screen: no store's name on a forwarded sheet ──────────────────────────
+
+def screen_names(names) -> tuple[str, ...]:
+    """The forms of these store names a sheet must never show (SCREEN in the module docstring), folded: each name
+    as it is spelt and without a van's " - Acc WH", of SCREEN_MIN letters or more, sorted."""
+    out: set[str] = set()
+    for raw in names or ():
+        name = " ".join(str(raw or "").split())
+        for form in (name, _STORE_TAIL.sub("", name)):
+            form = " ".join(form.split()).casefold()
+            if len(form) >= SCREEN_MIN:
+                out.add(form)
+    return tuple(sorted(out))
+
+
+def _screen_rx(names):
+    folded = sorted({" ".join(str(n or "").split()).casefold() for n in names or ()} - {""}, key=len, reverse=True)
+    if not folded:
+        return None
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(re.escape(n) for n in folded) + r")(?![a-z0-9])")
+
+
+def _names(text, rx) -> bool:
+    return rx is not None and isinstance(text, str) and bool(rx.search(" ".join(text.split()).casefold()))
+
+
+def names_a_store(ws: Sheet, names) -> bool:
+    """Does a text cell of ws name one of these stores (whole words, case and spaces aside)? names: as the totals'
+    "screen" holds them, or store names as the ledger spells them (screen_names makes their forms)."""
+    rx = _screen_rx(screen_names(names))
+    return rx is not None and any(_names(cell.value, rx) for cell in ws.cells.values())
+
+
+def _drawn(ws: Sheet, draw, what: str, heading: str, sub: str, purpose: str, screen=()) -> dict:
+    """draw() on ws; totals that are not the shape the contract says (a key missing, a figure of the wrong kind), or a
+    sheet that would name a store of the screen, undo what it wrote and leave the title and one line instead, so a
+    sheet never stops the workbook and never names a store."""
     before = (dict(ws.cells), list(ws.merges), list(ws.conds), dict(ws.rows), dict(ws.page), list(ws.validations))
     try:
-        return draw()
+        refs = draw()
+        if not names_a_store(ws, screen):
+            return refs
+        why = NAMED
     except PART_ERRORS as exc:
-        ws.cells, ws.merges, ws.conds = dict(before[0]), list(before[1]), list(before[2])
-        ws.rows, ws.page, ws.validations = dict(before[3]), dict(before[4]), list(before[5])
-        _title(ws, heading, sub, purpose)
-        _failed_line(ws, what, _reason(exc))
-        return {}
+        why = _reason(exc)
+    ws.cells, ws.merges, ws.conds = dict(before[0]), list(before[1]), list(before[2])
+    ws.rows, ws.page, ws.validations = dict(before[3]), dict(before[4]), list(before[5])
+    rx = _screen_rx(screen_names(screen))
+    _title(ws, what if _names(heading, rx) else heading, sub, purpose)
+    _failed_line(ws, what, why)
+    return {}
 
 
 # ── the stock totals ──────────────────────────────────────────────────────────
@@ -379,6 +445,20 @@ def _window(model, window, st) -> dict:
     total = days * len(fast)
     return {"first": first, "last": last, "days": days, "available": have, "sku_days": total,
             "share": _share(have, total)}
+
+
+def _stock_screen(model) -> tuple[str, ...]:
+    """The stores beside the main store that sold the model's items (stockflow's sellers: a van is named after its
+    salesman), for the Stock sheet's screen; the main store, a company store, left out."""
+    from scripts.ops import ledger
+    names: set[str] = set()
+    for flow in (getattr(getattr(model, "flows", None), "items", None) or {}).values():
+        names |= set(getattr(flow, "sellers", None) or {})
+    try:
+        names = {n for n in names if not ledger.is_main(n)}
+    except Exception:  # noqa: BLE001  (no main store in config: every seller is screened)
+        pass
+    return screen_names(names)
 
 
 _CONFIG_KEY = re.compile(r"'([a-z_]+(?:\.[a-z_]+)+)'")
@@ -499,6 +579,7 @@ def _totals_of(model, window, st) -> dict:
                     "uncosted_items": sum(1 for x in order if x.get("cost_bhd") is None),
                     "join_days": f.get("trigger_days"), "fill_days": f.get("fill_days")}
     out["parts"] = parts
+    out["screen"] = _stock_screen(model)
     return out
 
 
@@ -513,36 +594,68 @@ def _guard(work) -> tuple:
 # ── the movements totals ──────────────────────────────────────────────────────
 
 def _moves_failed(first, last, why) -> dict:
-    return {"first": fmt.as_date(first), "last": fmt.as_date(last), "basis": None, "stores": [], "total": None,
-            "exceptions": None, "unbalanced": 0, "note": _not_worked(why), "error": " ".join(str(why).split())}
+    return {"first": fmt.as_date(first), "last": fmt.as_date(last), "basis": None, "rows": [], "total": None,
+            "exceptions": None, "unbalanced": 0, "note": _not_worked(why), "error": " ".join(str(why).split()),
+            "screen": ()}
 
 
 def _check(figures: dict) -> Decimal:
     return sum((figures[k] for k in CHECK_PLUS), ZERO) - sum((figures[k] for k in CHECK_MINUS), ZERO)
 
 
-def _store_row(row) -> dict:
+def _store_figures(row, kind: str | None = None) -> dict:
+    """One store of the table, exactly as given: {name, row, units, bhd, uncosted_units, unbalanced}."""
     if not isinstance(row, Mapping):
         raise Shape("a store's row is not a table row")
     name = " ".join(str(row.get("store") or "").split())
     if not name:
         raise Shape("a store's row names no store")
-    kind = str(row.get("kind") or "").strip().lower() or "other"
-    out = {"store": name.replace(mdl.WH_SUFFIX, "").strip() or name, "ledger_name": name, "kind": kind}
+    kind = kind or str(row.get("kind") or "").strip().lower() or "other"
+    out = {"name": name, "row": KIND_ROW.get(kind, OTHER_ROW[0])}
     for block in ("units", "bhd"):
         given = row.get(block)
         if not isinstance(given, Mapping):
             raise Shape(f"a store's row has no {block}")
-        figures = {k: _dec(given.get(k), f"a store's {block}") for k in MOVE_KEYS if k != "check"}
-        figures["check"] = _check(figures)
-        out[block] = figures
-    out["uncosted_units"] = _dec(row.get("uncosted_units"), "a store's units not valued")
+        out[block] = {k: _exact(given.get(k), f"a store's {block}") for k in MOVE_KEYS if k != "check"}
+    out["uncosted_units"] = _exact(row.get("uncosted_units"), "a store's units not valued")
+    out["unbalanced"] = bool(_check(out["units"]) or _check(out["bhd"]))
+    return out
+
+
+def _rounded(exact: dict) -> dict:
+    """A row's figures to the fils (ROUNDING in the module docstring): each leg rounded; when the exact check is
+    nought, the closing is the figure the rounded legs balance on; else the closing rounded, and the difference
+    shows."""
+    out = {k: fmt.q3(exact[k]) for k in MOVE_KEYS if k not in ("closing", "check")}
+    if _check(exact):
+        out["closing"] = fmt.q3(exact["closing"])
+    else:
+        out["closing"] = (sum((out[k] for k in CHECK_PLUS), ZERO)
+                          - sum((out[k] for k in CHECK_MINUS if k != "closing"), ZERO))
+    out["check"] = _check(out)
+    return out
+
+
+def _rows_of(stores: list[dict]) -> list[dict]:
+    """The sheet's rows: the main store, every van together, every outlet together (every store of another kind
+    together, only when there is one), each summed exactly from its stores, then rounded."""
+    wanted = list(ROWS) + ([OTHER_ROW] if any(s["row"] == OTHER_ROW[0] for s in stores) else [])
+    out = []
+    for key, label in wanted:
+        mine = [s for s in stores if s["row"] == key]
+        row = {"row": key, "label": label, "stores": len(mine)}
+        for block in ("units", "bhd"):
+            exact = {k: sum((s[block][k] for s in mine), ZERO) for k in MOVE_KEYS if k != "check"}
+            row[block] = _rounded(exact)
+        row["uncosted_units"] = fmt.q3(sum((s["uncosted_units"] for s in mine), ZERO))
+        out.append(row)
     return out
 
 
 def _exceptions(table) -> list[dict] | None:
-    """What is to check, summed by kind: the module's own list (each entry's units and BHD; its vouchers and items
-    left behind), else the pairing summary's counts and units (no BHD). None when the table brings neither."""
+    """What is to check, summed by kind: the module's own list (moves.exceptions_by_kind's {kind, count, units, bhd},
+    or the exceptions themselves: their vouchers and items left behind), else the pairing summary's counts and units
+    (no BHD). None when the table brings neither."""
     given = table.get("exceptions")
     by_kind: dict[str, dict] = {}
 
@@ -578,7 +691,7 @@ def _exceptions(table) -> list[dict] | None:
 
 
 def _moves_module():
-    """scripts.ops.moves, imported only when the sheet is made (another release builds it)."""
+    """scripts.ops.moves, imported only when the sheet is made."""
     return importlib.import_module("scripts.ops.moves")
 
 
@@ -614,25 +727,29 @@ def _moves_of(table) -> dict:
         summary = table.get("counts") if isinstance(table.get("counts"), Mapping) else {}
         first = fmt.as_date(table.get("first") or summary.get("first"))
         last = fmt.as_date(table.get("last") or summary.get("last"))
-        stores = [_store_row(r) for r in table["stores"]]
-        stores.sort(key=lambda s: (KIND_ORDER.get(s["kind"], len(KIND_ORDER)), s["store"].casefold(), s["store"]))
-        total = {block: {k: sum((s[block][k] for s in stores), ZERO) for k in MOVE_KEYS} for block in ("units", "bhd")}
-        total["uncosted_units"] = sum((s["uncosted_units"] for s in stores), ZERO)
+        stores = [_store_figures(r) for r in table["stores"]]
+        screen = screen_names(s["name"] for s in stores if s["row"] != "main")
+        if table.get("main") is not None:
+            stores.append(_store_figures(table["main"], kind="main"))
+        rows = _rows_of(stores)
+        total = {block: {k: sum((r[block][k] for r in rows), ZERO) for k in MOVE_KEYS} for block in ("units", "bhd")}
+        total["stores"] = sum(r["stores"] for r in rows)
+        total["uncosted_units"] = sum((r["uncosted_units"] for r in rows), ZERO)
         exceptions = _exceptions(table)
         basis = table.get("basis")
-        unbalanced = sum(1 for s in stores if s["units"]["check"] or s["bhd"]["check"])
+        unbalanced = sum(1 for s in stores if s["unbalanced"])
     except Exception as exc:  # noqa: BLE001  (one part of the workbook, never the workbook)
         return _moves_failed(first, last, _reason(exc))
     notes = []
     if unbalanced:
-        notes.append(f"{_plural(unbalanced, 'store')} {'does' if unbalanced == 1 else 'do'} not balance: the Check "
-                     "column shows by how much, to check.")
+        notes.append(f"{_plural(unbalanced, 'store')} {'does' if unbalanced == 1 else 'do'} not balance: /yq-moves "
+                     "shows by how much, to check.")
     if total["uncosted_units"]:
         notes.append(f"{_plural(total['uncosted_units'], 'unit')} without a cost on file: counted in units, not "
                      "valued in BHD.")
     return {"first": first, "last": last, "basis": " ".join(basis.split()) if isinstance(basis, str) else None,
-            "stores": stores, "total": total, "exceptions": exceptions, "unbalanced": unbalanced,
-            "note": " ".join(notes) or None, "error": None}
+            "rows": rows, "total": total, "exceptions": exceptions, "unbalanced": unbalanced,
+            "note": " ".join(notes) or None, "error": None, "screen": screen}
 
 
 # ── the sheets ────────────────────────────────────────────────────────────────
@@ -682,26 +799,28 @@ class _Lines:
 
 def stock_sheet(ws: Sheet, totals, heading: str) -> dict:
     """The Stock sheet (see the module docstring); returns the refs of its figures by name. Never raises on the
-    totals: failed ones, or ones that are not the contract's shape, are the title and one line."""
+    totals: failed ones, or ones that are not the contract's shape, are the title and one line; so is a sheet that
+    would name a store of the totals' screen."""
     for c1, c2, width in S_WIDTHS:
         ws.col(c1, c2, width)
     _page(ws, landscape=False)
     given = totals if isinstance(totals, Mapping) else {}
     asked = fmt.as_date(given.get("as_of"))
-    sub = str(given.get("store") or "Main store") + (f" · stock as on {_day(asked)}" if asked else "")
-    purpose = "Totals only: no item is named on this sheet."
+    sub = "Main store" + (f" · stock as on {_day(asked)}" if asked else "")
+    purpose = "Totals only: no item and no store is named on this sheet."
     if not given or given.get("error"):
         _title(ws, heading, sub, purpose)
         _failed_line(ws, "The stock figures", given.get("error"))
         return {}
-    return _drawn(ws, lambda: _stock_body(ws, given, heading), "The stock figures", heading, sub, purpose)
+    return _drawn(ws, lambda: _stock_body(ws, given, heading), "The stock figures", heading, sub, purpose,
+                  given.get("screen") or ())
 
 
 def _stock_body(ws: Sheet, t: Mapping, heading: str) -> dict:
-    store = t.get("store") or "the main store"
-    _title(ws, heading, f"{store} · stock as on {_day(t['as_of'])} · stock ledger to {_day(t['ledger_to'])} · "
+    _title(ws, heading, f"Main store · stock as on {_day(t['as_of'])} · stock ledger to {_day(t['ledger_to'])} · "
                         f"{t['cost_label']}",
-           "Totals only: no item is named on this sheet. Every figure at cost names the basis it rests on.")
+           "Totals only: no item and no store is named on this sheet. Every figure at cost names the basis it rests "
+           "on.")
     w = _Lines(ws, note_width=14 * 3 + 36)
     parts = t.get("parts") or {}
 
@@ -709,7 +828,7 @@ def _stock_body(ws: Sheet, t: Mapping, heading: str) -> dict:
         w.words(f"{words}: {parts.get(key) or NOT_WORKED}.")
 
     m = t["main"]
-    w.section(f"Main store ({store}), end of {_day(t['as_of'])}")
+    w.section(f"Main store, end of {_day(t['as_of'])}")
     w.line("Items in stock", m["items"], key="main_items", note="Items with units above nought; display items in.")
     w.line("Units", m["units"], key="main_units")
     w.line("At cost, BHD", m["value"], "g_money3", key="main_value", note=t["basis"])
@@ -867,36 +986,39 @@ def _check_formula(r: int) -> str:
     return f"ROUND({plus}{minus},3)"
 
 
-def _moves_block(ws: Sheet, w: _Lines, totals: dict, block: str, title: str) -> None:
+def _moves_block(ws: Sheet, w: _Lines, totals: Mapping, block: str, title: str) -> None:
+    """One block of the Movements sheet (units, or BHD): a row per ROWS, the total row of SUMs, the check column."""
     fmt_name, total_fmt = ("g_int", "g_total_int") if block == "units" else ("g_money3", "g_total_money3")
     w.section(title)
-    heads = [("Store", False), ("Kind", False)] + [(MOVE_HEADS[k], True) for k in MOVE_KEYS]
+    heads = [("Where", False), ("Stores", True)] + [(MOVE_HEADS[k], True) for k in MOVE_KEYS]
     if block == "bhd":
         heads.append(("Units without a cost", True))
     w.head(heads)
     first = w.r
     last_col = M_UNCOSTED if block == "bhd" else M_COL["check"]
-    for s in totals["stores"]:
+    for row in totals["rows"]:
         r = w.r
-        ws.text(r, M_STORE, _said(s["store"]), "g_text")
-        ws.text(r, M_KIND, _said(KINDS.get(s["kind"], s["kind"].capitalize())), "g_text")
+        ws.text(r, M_LABEL, _said(row["label"]), "g_text")
+        _put(ws, r, M_COUNT, row["stores"], "g_int")
         for k in MOVE_KEYS:
             if k == "check":
                 ws.formula(r, M_COL[k], _check_formula(r), fmt_name)
             else:
-                _put(ws, r, M_COL[k], s[block][k], fmt_name)
+                _put(ws, r, M_COL[k], row[block][k], fmt_name)
+            w.refs[f"{block}_{row['row']}_{k}"] = ref(ws, r, M_COL[k])
         if block == "bhd":
-            _put(ws, r, M_UNCOSTED, s["uncosted_units"], "g_int")
+            _put(ws, r, M_UNCOSTED, row["uncosted_units"], "g_int")
         w.r += 1
     tot = w.r
-    ws.text(tot, M_STORE, "Total", "g_total_int")
-    ws.blank(tot, M_KIND, "g_total_int")
-    for c in range(M_FIRST, last_col + 1):
-        ws.formula(tot, c, f"SUM({a1(first, c)}:{a1(tot - 1, c)})", "g_total_int" if c == M_UNCOSTED else total_fmt)
+    ws.text(tot, M_LABEL, "Total", "g_total_int")
+    for c in range(M_COUNT, last_col + 1):
+        ws.formula(tot, c, f"SUM({a1(first, c)}:{a1(tot - 1, c)})",
+                   "g_total_int" if c in (M_COUNT, M_UNCOSTED) else total_fmt)
     ws.cond(f"{a1(first, M_COL['check'])}:{a1(tot, M_COL['check'])}",
             {"type": "cell", "criteria": "not equal to", "value": 0, "format": "down"})    # a check not 0: red
-    w.refs[f"{block}_checks"] = ref(ws, first, M_COL["check"], tot - 1)       # the stores' check cells
-    w.refs[f"{block}_rows"] = ref(ws, first, M_STORE, tot - 1, last_col)
+    w.refs[f"{block}_checks"] = ref(ws, first, M_COL["check"], tot - 1)       # the rows' check cells
+    w.refs[f"{block}_rows"] = ref(ws, first, M_LABEL, tot - 1, last_col)
+    w.refs[f"{block}_stores"] = ref(ws, tot, M_COUNT)
     for k in MOVE_KEYS:                                                         # the total row, by key
         w.refs[f"{block}_{k}"] = ref(ws, tot, M_COL[k])
     if block == "bhd":
@@ -906,31 +1028,33 @@ def _moves_block(ws: Sheet, w: _Lines, totals: dict, block: str, title: str) -> 
 
 def movements_sheet(ws: Sheet, totals, heading: str) -> dict:
     """The Movements sheet (see the module docstring); returns the refs of its totals by name. Never raises on the
-    totals: failed ones, or ones that are not the contract's shape, are the title and one line."""
-    ws.col(M_STORE, M_STORE, 24)
-    ws.col(M_KIND, M_KIND, 9)
+    totals: failed ones, or ones that are not the contract's shape, are the title and one line; so is a sheet that
+    would name a store of the totals' screen."""
+    ws.col(M_LABEL, M_LABEL, 16)
+    ws.col(M_COUNT, M_COUNT, 8)
     ws.col(M_FIRST, M_UNCOSTED, 11)
     _page(ws, landscape=True)
     given = totals if isinstance(totals, Mapping) else {}
-    sub = f"Vans and outlets · {_span(given.get('first'), given.get('last'))}"
-    purpose = "Totals per store: no item and no voucher is named on this sheet."
+    sub = f"The main store, the vans and the outlets · {_span(given.get('first'), given.get('last'))}"
+    purpose = "Totals only: the vans and the outlets each counted together; no store, item or voucher is named."
     what = "The movements of the vans and outlets"
-    if given.get("error") or not isinstance(given.get("stores"), list):
+    if given.get("error") or not isinstance(given.get("rows"), list):
         _title(ws, heading, sub, purpose)
         _failed_line(ws, what, given.get("error"))
         return {}
-    return _drawn(ws, lambda: _moves_body(ws, given, heading, purpose), what, heading, sub, purpose)
+    return _drawn(ws, lambda: _moves_body(ws, given, heading, sub, purpose), what, heading, sub, purpose,
+                  given.get("screen") or ())
 
 
-def _moves_body(ws: Sheet, t: Mapping, heading: str, purpose: str) -> dict:
-    basis = f" ({t['basis']})" if t.get("basis") else ""
-    _title(ws, heading, f"Vans and outlets · {_span(t['first'], t['last'])} · units, and BHD at landed cost on the "
-                        f"/yq-stock basis{basis}", purpose)
+def _moves_body(ws: Sheet, t: Mapping, heading: str, sub: str, purpose: str) -> dict:
+    basis = t.get("basis")
+    money = basis if isinstance(basis, str) and basis.startswith("at ") else (
+        "at landed cost on the /yq-stock basis" + (f" ({basis})" if basis else ""))
+    _title(ws, heading, f"{sub} · units, and BHD {money}", purpose)
     w = _Lines(ws, note_width=11 * 4)
-    if t["stores"]:
-        _moves_block(ws, w, t, "units", "Units")
-        _moves_block(ws, w, t, "bhd", "BHD at landed cost")
-    else:
+    _moves_block(ws, w, t, "units", "Units")
+    _moves_block(ws, w, t, "bhd", "BHD at landed cost, to the fils")
+    if not sum(r["stores"] for r in t["rows"] if r["row"] != "main"):
         w.words("No van or outlet held or moved stock in the period.")
 
     w.section("To check: the transfers")
@@ -962,9 +1086,13 @@ def _moves_body(ws: Sheet, t: Mapping, heading: str, purpose: str) -> dict:
     w.r += 1
     w.words("Check = opening + received + customer returns + counts + other - back to main - to damage - to other "
             "stores - not received yet - not received - sold - closing: 0 on every row.")
-    w.words("Issued to it: what other stores issued to the store; Received: what the store booked in itself. Issued "
-            "to it is not in the check.")
-    w.words("Not received yet: sent by the store and still inside its deadline; Not received: past it.")
+    w.words("Vans and Outlets count every van and every outlet together (Stores: how many); each store's own figures "
+            "are on /yq-moves.")
+    w.words("Issued to it: what other stores issued to the row's stores; Received: what they booked in themselves. "
+            "Issued to it is not in the check.")
+    w.words("Not received yet: sent and still inside its deadline; Not received: past it.")
+    w.words("BHD to the fils: the closing is the figure the rounded others balance on, so a fils of rounding never "
+            "shows as a difference.")
     if t.get("note"):
         w.words(t["note"])
     return w.refs

@@ -7,13 +7,15 @@ Same lightweight runner as tests/test_ops_stock.py, and ITS stand-ins (imported,
 ledger, the database stand-in that answers every read from it (World), the temporary data root and the model
 (model_of). Every stock_totals call runs inside a temporary data root (it reads config.json; totals_of() refuses
 to run anywhere else). The movements are an invented period table in the shape scripts.ops.moves.period_table
-gives it; the module itself is a stand-in put in sys.modules, or marked missing there. SUPABASE_URL, SUPABASE_KEY
-and DATABASE_URL are pinned to ci.invalid BEFORE any import: no database, no network, no .env. All names and
-numbers are invented; every folder is a temporary one.
+gives it (stores with exact BHD, the main store's row, the exceptions by kind); the module itself is a stand-in put
+in sys.modules, or marked missing there. SUPABASE_URL, SUPABASE_KEY and DATABASE_URL are pinned to ci.invalid
+BEFORE any import: no database, no network, no .env. All names and numbers are invented; every folder is a
+temporary one.
 
 The stock world is the stock suite's (D = Sun 15 Mar 2026): five items in the main store, 505 units, BHD 412.800
 at landed cost; ITEM-B on the order list (65 units, BHD 162.500); the fast movers ITEM-A (in stock) and ITEM-F (out
-since September). As on Sat 28 Feb: four items, 504 units, BHD 343.100 at today's costs.
+since September); its van "Van A - Acc WH" sold in the 90 days to D. As on Sat 28 Feb: four items, 504 units, BHD
+343.100 at today's costs.
 
 Covered:
   * stock_totals: every field of today's model; as on an earlier day built here from the reads (the weekly
@@ -24,16 +26,20 @@ Covered:
   * the parts: the vans and outlets of the order position (there, failed, none counted, absent), the review, the
     damage store (failed, missing, not set up) and the plan, each its "not worked out this time (...)" line;
   * stock_sheet: every figure typed, or a formula with its value (no error value); the refs; the formats; the one
-    line of totals that failed or are not the contract's shape (what was drawn undone);
-  * moves_totals: every field of an invented period table; the stores as the month workbook names salesmen, vans
-    then outlets; the totals the sums of the rows; exceptions summed by kind (the module's list, the pairing
-    summary, neither, none); the module read lazily, missing or raising; every malformed table one sentence that
-    names no voucher;
-  * movements_sheet: the check column reads 0 on every row of both blocks; the total row is the sum of the rows;
-    a row that does not balance shows by how much; no store, no exception, a failure;
-  * no item, code or voucher on either sheet or in either totals dict (every cell scanned, with the weekly
-    builder's own voucher pattern), every text through the wording guard; the weekly builder's call by keyword
-    names (its offered() hand-over); the saved file carries every formula with its value (openpyxl).
+    line of totals that failed or are not the contract's shape (what was drawn undone); the main store's name never
+    printed;
+  * moves_totals: totals only - a row for the main store, every van together and every outlet together (and other
+    stores together only when there are some), each the exact sum of its stores, the total their sums; BHD exact to
+    six decimals balances to the fils (the closing is the figure the rounded legs balance on) while a real
+    difference still shows, and every store that does not balance is counted; exceptions summed by kind (the
+    table's by-kind list, the exceptions themselves, the pairing summary, neither, none); the module read lazily,
+    missing or raising; every malformed table one sentence that names no voucher;
+  * movements_sheet: the three rows and their total, the check column reading 0 on every row of both blocks, the
+    total row the sum of the rows, a row that does not balance showing by how much, no van or outlet, a failure;
+  * the screens: no item, code, voucher or store's name on either sheet or in the totals' figures (every cell
+    scanned, with the weekly builder's own voucher pattern); a sheet that would name a store of its totals' screen
+    is the title and one line; names_a_store; every text through the wording guard; the weekly builder's call by
+    keyword names (its offered() hand-over); the saved file carries every formula with its value (openpyxl).
 """
 from __future__ import annotations
 
@@ -58,7 +64,7 @@ os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 
 # The stock suite's stand-ins. Importing it also sets stdout to UTF-8 and imports scripts.ops.db first.
 from tests.test_ops_stock import (  # noqa: E402
-    CODES, D, LONG, NAMES, NINE, TEMP_ROOTS, World, L, data_root, model_of, standing_in)
+    CODES, D, LONG, NAMES, NINE, TEMP_ROOTS, VAN, VAN_B, World, L, data_root, model_of, standing_in)
 from scripts.ops import fmt, paths, stock  # noqa: E402
 from scripts.ops.workbook import book as bk  # noqa: E402
 from scripts.ops.workbook import formula as fx  # noqa: E402
@@ -69,6 +75,7 @@ stock.RAISE_PARTS = True              # a part of the stock model that fails fai
 
 TESTS: list[tuple[str, object]] = []
 ZERO = Decimal(0)
+Q3 = Decimal("0.001")
 FEB = date(2026, 2, 28)               # a Saturday, a month end: the month pack's day, inside the ledger
 SAT = date(2026, 3, 14)               # the Saturday before D: the weekly builder's week, 8 to 14 March
 WEEK = (date(2026, 3, 9), D)          # the seven days to D
@@ -83,6 +90,11 @@ VOUCHER = re.compile(r"\b[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})*-\d{2}-\d{2}-\d+\b")
 NUMBERED = re.compile(r"\b[A-Za-z]{1,6}\s*:\s*[A-Za-z0-9]+(?:-\d+)+\b")
 CODE = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(sorted(CODES.values(), key=len, reverse=True)) + r")(?![A-Za-z0-9])",
                   re.I)
+# The movements' invented stores: two vans (named after invented salesmen) and an outlet; the main store's own name
+MOVE_VANS = ("Alpha Rep - Acc WH", "Beta Rep - Acc WH")
+MOVE_OUTLET = "Shop East"
+MOVE_MAIN = "Central Store"
+STORE_NAMES = MOVE_VANS + (MOVE_OUTLET, MOVE_MAIN, VAN, VAN_B, "Alpha Rep", "Beta Rep", "Van A", "Van B")
 
 
 def test(name):
@@ -151,24 +163,28 @@ def close(a, b) -> bool:
 
 
 def leaks(text: str) -> list[str]:
-    """What a forwarded text may never hold: an item's name or code, a voucher number, an ID-shaped number."""
+    """What a forwarded text may never hold: an item's name or code, a voucher number, an ID-shaped number, a store's
+    name (a van's, an outlet's: the invented ones of these tests; whole words)."""
     low = " ".join(str(text).split()).casefold()
     found = [n for n in list(NAMES.values()) + [L(k) for k in NAMES] if n.casefold() in low]
     for name, rx in (("code", CODE), ("voucher", VOUCHER), ("numbered", NUMBERED), ("nine", NINE), ("long", LONG)):
         if rx.search(str(text)):
             found.append(name)
+    found += [n for n in STORE_NAMES if re.search(r"(?<![a-z0-9])" + re.escape(n.casefold()) + r"(?![a-z0-9])", low)]
     return found
 
 
-def walk(x):
-    """Every value inside a totals dict, keys too."""
+def walk(x, skip=("screen",)):
+    """Every value inside a totals dict, keys too (the screen's names aside: they are what the sheet refuses)."""
     if isinstance(x, dict):
         for k, v in x.items():
+            if k in skip:
+                continue
             yield k
-            yield from walk(v)
+            yield from walk(v, skip)
     elif isinstance(x, (list, tuple)):
         for v in x:
-            yield from walk(v)
+            yield from walk(v, skip)
     else:
         yield x
 
@@ -194,37 +210,48 @@ def facts_of(m) -> str:
 
 def store(name: str, kind: str, rate: str, uncosted=0, closing=None, **figures) -> dict:
     """A store's row as moves.period_table gives it: its units (closing worked out so that it balances, unless
-    given), and its BHD at `rate` a unit."""
+    given), and its BHD exact at `rate` a unit (any number of decimals, as six-decimal costs give them)."""
     units = {k: Decimal(str(figures.get(k, 0))) for k in sx.MOVE_KEYS if k not in ("closing", "check")}
     balanced = sum((units[k] for k in sx.CHECK_PLUS), ZERO) - sum((units[k] for k in sx.CHECK_MINUS if k != "closing"),
                                                                   ZERO)
     units["closing"] = balanced if closing is None else Decimal(str(closing))
     units["check"] = balanced - units["closing"]
-    return {"store": name, "kind": kind, "units": units,
-            "bhd": {k: (v * Decimal(rate)).quantize(Decimal("0.001")) for k, v in units.items()},
-            "uncosted_units": Decimal(uncosted)}
+    return {"store": name, "kind": kind, "units": units, "bhd": {k: v * Decimal(rate) for k, v in units.items()},
+            "uncosted": {k: ZERO for k in sx.MOVE_KEYS}, "uncosted_units": Decimal(uncosted), "balanced": True}
 
 
 def stores() -> list[dict]:
-    return [store("Van B - Acc WH", "van", "0.5", opening=40, received=20, issued_to=22, back_to_main=5, to_damage=1,
+    return [store(MOVE_VANS[1], "van", "0.5", opening=40, received=20, issued_to=22, back_to_main=5, to_damage=1,
                   not_received_yet=2, sold=30, customer_returns=1),                      # closes on 23
-            store("Shop East", "outlet", "1.25", uncosted=3, opening=10, received=5, issued_to=5, not_received=1,
+            store(MOVE_OUTLET, "outlet", "1.25", uncosted=3, opening=10, received=5, issued_to=5, not_received=1,
                   sold=6, counts=-1),                                                     # closes on 7
-            store("Van A - Acc WH", "van", "2", opening=12, received=8, issued_to=8, to_other=2, sold=15)]  # on 3
+            store(MOVE_VANS[0], "van", "2", opening=12, received=8, issued_to=8, to_other=2, sold=15)]  # on 3
 
 
-# the module's own exceptions, with their vouchers and items (never to be kept), one kind by an alias
+def main_row() -> dict:
+    """The main store's row (moves.period_table's "main"): supplier receipts (other), returns from the vans."""
+    return store(MOVE_MAIN, "main", "0.75", opening=500, received=7, issued_to=7, other=120, to_other=35, to_damage=1,
+                 sold=4, customer_returns=2)                                            # closes on 589
+
+
+# moves.exceptions_by_kind: {kind, count, units, bhd (to the fils, None when none has a cost), uncosted}
+BY_KIND = [{"kind": "not_received", "count": 2, "units": Decimal(3), "bhd": Decimal("1.250"), "uncosted": Decimal(2)},
+           {"kind": "damage_not_booked", "count": 1, "units": Decimal(1), "bhd": None, "uncosted": Decimal(1)},
+           {"kind": "qty_differs", "count": 1, "units": Decimal(4), "bhd": Decimal("2.000"), "uncosted": ZERO}]
+# the exceptions themselves, with their vouchers and items (never to be kept); one kind by an alias
 EXCEPTION_ROWS = [
     {"kind": "xfer_open", "voucher": "SIO:X-26-03-7", "item": L("B"), "date": date(2026, 3, 10), "units": 1,
-     "bhd": "1.250"},
-    {"kind": "qty_differs", "voucher": "SIO:X-26-03-9", "item": L("A"), "units": 4, "bhd": "2"},
+     "bhd": "1.250", "from": MOVE_VANS[0]},
+    {"kind": "qty_differs", "voucher": "SIO:X-26-03-9", "item": L("A"), "units": 4, "bhd": "2", "to": MOVE_OUTLET},
     {"kind": "not_received", "voucher": "SIO:X-26-03-11", "item": L("C"), "units": 2, "bhd": None},
 ]
 
 
 def table(**extra) -> dict:
-    return dict({"first": WEEK[0], "last": WEEK[1], "stores": stores(), "totals": {},
-                 "exceptions": [dict(x) for x in EXCEPTION_ROWS]}, **extra)
+    return dict({"first": WEEK[0], "last": WEEK[1], "basis": "at landed cost (MRN; the pricing sheet where no MRN: 2 "
+                 "items)", "stores": stores(), "main": main_row(), "totals": {},
+                 "exceptions": [dict(x) for x in BY_KIND], "per_store_ok": True,
+                 "note": f"The stock ledger is read from the file Stock_ledger_test.xlsx ({MOVE_VANS[0]})"}, **extra)
 
 
 def summary(**counts) -> dict:
@@ -237,6 +264,10 @@ def summary(**counts) -> dict:
             "counts": {k: counts.get(k, 0) for k in keys},
             "outcomes": {o: {"vouchers": 1, "lines": 1, "units": Decimal(u)} for o, u in units.items()},
             "issues": {"vouchers": 9, "lines": 12, "units": Decimal(60)}}
+
+
+def sums(rows: list[dict], block: str) -> dict:
+    return {k: sum((r[block][k] for r in rows), ZERO) for k in sx.MOVE_KEYS}
 
 
 class moves_module:
@@ -316,6 +347,8 @@ def _():
     assert t["order"] == {"items": 1, "units": 65, "value": Decimal("162.500"), "uncosted_items": 0, "join_days": 70,
                           "fill_days": 85}, t["order"]
     assert t["parts"] == {"position": NONE_COUNTED, "damage": "ok", "review": "ok", "plan": "ok"}, t["parts"]
+    # the screen: the van that sold in the 90 days to D, as the ledger spells it and as its salesman; no main store
+    assert t["screen"] == ("van a", "van a - acc wh"), t["screen"]
     assert "error" not in t
     assert_clean_totals(t)
 
@@ -342,7 +375,7 @@ def _():
     assert_clean_totals(built)
     book, ws, refs = stock_book(built)
     assert at(book, refs["main_units"]) == 504 and at(book, refs["main_value"]) == 343.1
-    assert ws.cells[(1, 0)].value == ("Main Store · stock as on Sat 28 Feb 2026 · stock ledger to Sun 15 Mar 2026 · "
+    assert ws.cells[(1, 0)].value == ("Main store · stock as on Sat 28 Feb 2026 · stock ledger to Sun 15 Mar 2026 · "
                                       "at today's landed cost"), ws.cells[(1, 0)].value
     assert line_starting(ws, "As on Sat 28 Feb 2026: the stock ledger is cut at the end of that day (it runs to Sun 15 "
                              "Mar 2026); every unit is valued at today's cost.")
@@ -425,7 +458,7 @@ def _():
         assert_clean_sheet(ws)
     book, ws, refs = stock_book(after, "Stock at the end of Saturday 16 March")
     assert ws.cells[(0, 0)].value == "Stock at the end of Saturday 16 March"
-    assert ws.cells[(1, 0)].value == "Main Store · stock as on Mon 16 Mar 2026"
+    assert ws.cells[(1, 0)].value == "Main store · stock as on Mon 16 Mar 2026"
     # totals that are not the contract's shape: what was drawn is undone, the title and one line stand
     for nothing, why in ((None, ""), ({}, ""), ("not a dict", ""), ({"error": ""}, " (KeyError)"),
                          ({"as_of": D}, " (KeyError)"), (dict(good, main=None), " (TypeError)"),
@@ -434,7 +467,7 @@ def _():
         assert refs == {} and ws.cells[(4, 0)].value == f"The stock figures: not worked out this time{why}.", \
             (why, ws.cells[(4, 0)].value)
         assert not [k for k in ws.cells if k[0] > 4] and not ws.merges and not ws.conds, why
-    assert ws.cells[(1, 0)].value == "Main Store · stock as on Sun 15 Mar 2026"
+    assert ws.cells[(1, 0)].value == "Main store · stock as on Sun 15 Mar 2026"
 
 
 # ── the parts ─────────────────────────────────────────────────────────────────
@@ -460,8 +493,7 @@ def _():
     assert there["beside"] == {"stores": ["vans", "outlets", "transit"], "vans": 30, "outlets": 12, "transit": 4,
                                "counted": 46, "value": Decimal("23.400"), "uncosted": 2}, there["beside"]
     assert there["parts"]["position"] == "ok"
-    whys = {"failed": "not worked out this time (RuntimeError)",
-            "none": NONE_COUNTED,
+    whys = {"failed": "not worked out this time (RuntimeError)", "none": NONE_COUNTED,
             "shape": "not worked out this time (KeyError)", "absent": sx.MAIN_ONLY}
     for name, why in whys.items():
         assert got[name]["beside"] is None and got[name]["parts"]["position"] == why, (name, got[name]["parts"])
@@ -524,7 +556,7 @@ def _():
     heading = "Stock at the end of Sunday 15 March 2026"
     book, ws, refs = stock_book(t, heading)
     assert ws.cells[(0, 0)].value == heading and ws.cells[(0, 0)].fmt == "sheet_title"
-    assert ws.cells[(1, 0)].value == ("Main Store · stock as on Sun 15 Mar 2026 · stock ledger to Sun 15 Mar 2026 · "
+    assert ws.cells[(1, 0)].value == ("Main store · stock as on Sun 15 Mar 2026 · stock ledger to Sun 15 Mar 2026 · "
                                       "at landed cost")
     c, ag, rv = t["cover"], t["ageing"], t["review"]
     want = {"main_items": 5, "main_units": 505, "main_value": 412.8, "main_uncosted": 0,
@@ -567,54 +599,124 @@ def _():
     book, ws, refs = stock_book(t0)
     assert at(book, refs["cover_above_share"]) == "" and cell_of(book, refs["cover_days"]).kind == "b"
     assert line_starting(ws, "No item with a cost sold in the window")
+    # the main store's own name (config 'warehouses.main', the totals' "store") is never printed
+    book, ws, refs = stock_book(dict(t, store="Zeta Depot"))
+    assert refs and not [x for x in texts(ws) if "zeta" in x.casefold()]
 
 
 # ── moves_totals ──────────────────────────────────────────────────────────────
 
-@test("movement totals: every field; stores named as the month workbook names salesmen, vans then outlets; sums")
+@test("movement totals: the main store, the vans together, the outlets together, the total their sums; no store named")
 def _():
     given = table()
     mt = sx.moves_totals(given)
-    assert (mt["first"], mt["last"], mt["basis"], mt["error"], mt["unbalanced"]) == (WEEK[0], D, None, None, 0)
-    assert [(s["store"], s["ledger_name"], s["kind"]) for s in mt["stores"]] == [
-        ("Van A", "Van A - Acc WH", "van"), ("Van B", "Van B - Acc WH", "van"), ("Shop East", "Shop East", "outlet")]
-    # the month workbook's salesman: the warehouse less its " - Acc WH" (workbook.model.WH_SUFFIX)
-    assert [s["store"] for s in mt["stores"]] == [n.replace(mdl.WH_SUFFIX, "") for n in ("Van A - Acc WH",
-                                                                                          "Van B - Acc WH", "Shop East")]
-    by_name = {r["store"]: r for r in given["stores"]}
-    for s in mt["stores"]:
-        src = by_name[s["ledger_name"]]
-        assert s["units"] == src["units"] and s["bhd"] == src["bhd"], s["store"]
-        assert s["units"]["check"] == s["bhd"]["check"] == 0
-        assert s["uncosted_units"] == src["uncosted_units"]
+    assert (mt["first"], mt["last"], mt["error"], mt["unbalanced"]) == (WEEK[0], D, None, 0)
+    assert mt["basis"] == "at landed cost (MRN; the pricing sheet where no MRN: 2 items)"
+    assert [(r["row"], r["label"], r["stores"]) for r in mt["rows"]] == [
+        ("main", "Main store", 1), ("vans", "Vans", 2), ("outlets", "Outlets", 1)]
+    groups = {"main": [given["main"]], "vans": [s for s in given["stores"] if s["kind"] == "van"],
+              "outlets": [s for s in given["stores"] if s["kind"] == "outlet"]}
+    for r in mt["rows"]:
+        mine = groups[r["row"]]
+        assert r["units"] == sums(mine, "units"), r["row"]
+        assert r["bhd"] == {k: v.quantize(Q3) for k, v in sums(mine, "bhd").items()}, r["row"]    # exact to the fils
+        assert r["units"]["check"] == r["bhd"]["check"] == 0
+        assert r["uncosted_units"] == sum(s["uncosted_units"] for s in mine)
+    # Vans: 12 + 40 opening, 3 + 23 closing; their BHD at 2 and 0.5 a unit; the main store's at 0.75
+    vans = mt["rows"][1]
+    assert (vans["units"]["opening"], vans["units"]["closing"], vans["bhd"]["closing"]) == (52, 26, Decimal("17.500"))
+    assert mt["rows"][0]["units"]["closing"] == 589 and mt["rows"][0]["bhd"]["closing"] == Decimal("441.750")
     for block in ("units", "bhd"):
-        assert mt["total"][block] == {k: sum((r[block][k] for r in given["stores"]), ZERO) for k in sx.MOVE_KEYS}
-    assert mt["total"]["units"]["closing"] == 33 and mt["total"]["bhd"]["closing"] == Decimal("26.250")
-    assert mt["total"]["uncosted_units"] == 3
+        assert mt["total"][block] == sums(mt["rows"], block), block
+    assert (mt["total"]["stores"], mt["total"]["uncosted_units"]) == (4, 3)
     assert mt["exceptions"] == [
         {"kind": "not_received", "words": "Not received by its deadline", "count": 2, "units": 3,
          "bhd": Decimal("1.250")},
+        {"kind": "damage_not_booked", "words": "Sent to the damage store, not booked in", "count": 1, "units": 1,
+         "bhd": None},
         {"kind": "qty_differs", "words": "Received in other quantities", "count": 1, "units": 4, "bhd": Decimal(2)}]
     assert mt["note"] == "3 units without a cost on file: counted in units, not valued in BHD."
+    # the screen holds the vans and the outlet, as spelt and as their salesmen; never the main store
+    assert mt["screen"] == ("alpha rep", "alpha rep - acc wh", "beta rep", "beta rep - acc wh", "shop east")
     assert_clean_totals(mt)
-    assert "SIO:X-26-03-7" not in json.dumps(mt, default=str)
+    shown = json.dumps({k: v for k, v in mt.items() if k != "screen"}, default=str)
+    assert not [n for n in STORE_NAMES if n in shown], shown
     # the period from the arguments where the table has none; the table's own wins
     bare = {k: v for k, v in given.items() if k not in ("first", "last")}
     assert (sx.moves_totals(bare, first="2026-03-01", last="2026-03-31")["first"], sx.moves_totals(bare)["first"]) == (
         date(2026, 3, 1), None)
     assert sx.moves_totals(given, first="2026-03-01", last="2026-03-31")["first"] == WEEK[0]
-    # a table's basis words, any spacing
     assert sx.moves_totals(table(basis="  at landed cost   (MRN) "))["basis"] == "at landed cost (MRN)"
+    # no main store's row: its row stands at nought; a store of another kind: a row of its own, only then
+    plain = sx.moves_totals(table(main=None))
+    assert [r["stores"] for r in plain["rows"]] == [0, 2, 1] and plain["rows"][0]["units"]["closing"] == 0
+    other = sx.moves_totals(table(stores=stores() + [store("Spare Shelf", "other", "1", opening=4)]))
+    assert [r["label"] for r in other["rows"]] == ["Main store", "Vans", "Outlets", "Other stores"]
+    assert other["rows"][3]["stores"] == 1 and "spare shelf" in other["screen"]
 
 
-@test("exceptions: the pairing summary when the table brings no list; neither; none; no store at all")
+@test("BHD exact to six decimals: rounded to the fils it still balances; a real difference still shows, and is counted")
 def _():
+    keys = [k for k in sx.MOVE_KEYS if k != "check"]
+
+    def exact(name, cost: str, kind="van", **u) -> dict:
+        units = {k: Decimal(u.get(k, 0)) for k in keys}
+        return {"store": name, "kind": kind, "units": units, "bhd": {k: v * Decimal(cost) for k, v in units.items()},
+                "uncosted_units": 0}
+
+    # the reviewer's case: 0.1234565 a unit; 0.123 + 0.123 - 0.247 would read -0.001
+    one = sx.moves_totals({"first": WEEK[0], "last": D, "stores": [exact("Van Alpha - Acc WH", "0.1234565",
+                                                                         opening=1, received=1, closing=2)]})
+    vans = one["rows"][1]
+    assert (vans["bhd"]["opening"], vans["bhd"]["received"], vans["bhd"]["closing"], vans["bhd"]["check"]) == (
+        Decimal("0.123"), Decimal("0.123"), Decimal("0.246"), 0), vans["bhd"]
+    assert one["unbalanced"] == 0 and one["note"] is None
+    book, _ws, refs = moves_book(one)
+    assert column(book, refs["bhd_checks"]) == [0, 0, 0] and at(book, refs["bhd_check"]) == 0
+    assert column(book, refs["units_checks"]) == [0, 0, 0]
+    # many stores, many legs, a fils over in every one of them: every row and the total read 0
+    many = [exact(f"Van {n} - Acc WH", f"0.{n}23456{n}", opening=3 + n, received=2, sold=1 + n, back_to_main=1,
+                  closing=3) for n in range(1, 8)] + [
+        exact("Shop West", "1.0004995", kind="outlet", opening=7, received=1, counts=-1, closing=7)]
+    mt = sx.moves_totals({"first": WEEK[0], "last": D, "stores": many,
+                          "main": exact(MOVE_MAIN, "0.3333333", kind="main", opening=10, other=5, to_other=3,
+                                        closing=12)})
+    exact_closing = sum((s["bhd"]["closing"] for s in many if s["kind"] == "van"), ZERO)
+    assert mt["unbalanced"] == 0 and all(r["bhd"]["check"] == 0 and r["units"]["check"] == 0 for r in mt["rows"])
+    assert abs(mt["rows"][1]["bhd"]["closing"] - exact_closing) <= Decimal("0.005")       # the fils of rounding only
+    book, _ws, refs = moves_book(mt)
+    assert column(book, refs["bhd_checks"]) == [0, 0, 0] and at(book, refs["bhd_check"]) == 0
+    # a real difference: units one short, BHD one fils short, each in its own store
+    short = exact("Van Short - Acc WH", "0.5", opening=4, received=2, closing=5)              # 4 + 2 - 5 = 1
+    fils = exact("Shop Fils", "0.25", kind="outlet", opening=8, closing=8)
+    fils["bhd"]["closing"] -= Decimal("0.001")
+    bad = sx.moves_totals({"first": WEEK[0], "last": D, "stores": [short, fils]})
+    assert bad["unbalanced"] == 2 and bad["note"].startswith("2 stores do not balance: /yq-moves shows by how much")
+    assert bad["rows"][1]["units"]["check"] == 1 and bad["rows"][1]["bhd"]["check"] == Decimal("0.500")
+    assert bad["rows"][2]["units"]["check"] == 0 and bad["rows"][2]["bhd"]["check"] == Decimal("0.001")
+    book, _ws, refs = moves_book(bad)
+    assert column(book, refs["units_checks"]) == [0, 1, 0] and column(book, refs["bhd_checks"]) == [0, 0.5, 0.001]
+    # two vans out by +1 and -1: the Vans row sums to nought, and both are still counted as not balancing
+    up = exact("Van Up - Acc WH", "1", opening=2, closing=1)
+    down = exact("Van Down - Acc WH", "1", opening=2, closing=3)
+    both = sx.moves_totals({"first": WEEK[0], "last": D, "stores": [up, down]})
+    assert both["rows"][1]["units"]["check"] == 0 and both["unbalanced"] == 2
+
+
+@test("exceptions: the table's by-kind list, the exceptions themselves, the pairing summary, neither, none")
+def _():
+    items = sx.moves_totals(table(exceptions=[dict(x) for x in EXCEPTION_ROWS]))
+    assert items["exceptions"] == [
+        {"kind": "not_received", "words": "Not received by its deadline", "count": 2, "units": 3,
+         "bhd": Decimal("1.250")},
+        {"kind": "qty_differs", "words": "Received in other quantities", "count": 1, "units": 4, "bhd": Decimal(2)}]
+    assert not [v for x in EXCEPTION_ROWS for v in (x["voucher"], x["item"]) if v in json.dumps(items, default=str)]
     mt = sx.moves_totals(table(exceptions=None, counts=summary(received=5, late=1, elsewhere=1, in_grace=2,
                                                                not_received=2, twin_items=1, twin_slots=2, orphans=1)))
     assert mt["exceptions"] == [
         {"kind": "not_received", "words": "Not received by its deadline", "count": 2, "units": 9, "bhd": None},
-        {"kind": "elsewhere", "words": "Received by another store", "count": 1, "units": 4, "bhd": None},
         {"kind": "twins", "words": "Identical issues, fewer receipts", "count": 1, "units": 6, "bhd": None},
+        {"kind": "elsewhere", "words": "Received by another store", "count": 1, "units": 4, "bhd": None},
         {"kind": "orphan", "words": "A receipt with no issue", "count": 1, "units": 2, "bhd": None}], mt["exceptions"]
     book, ws, refs = moves_book(mt)
     assert (at(book, refs["exceptions_count"]), at(book, refs["exceptions_units"]), at(book, refs["exceptions_bhd"])) \
@@ -634,11 +736,11 @@ def _():
         assert mt["exceptions"] == [], mt["exceptions"]
         book, ws, refs = moves_book(mt)
         assert line_starting(ws, "Nothing to check on the transfers in the period.") and "exceptions_count" not in refs
-    none = sx.moves_totals(table(stores=[]))
-    assert none["stores"] == [] and none["total"]["units"]["closing"] == 0 and none["error"] is None
+    none = sx.moves_totals(table(stores=[], main=None))
+    assert [r["stores"] for r in none["rows"]] == [0, 0, 0] and none["total"]["units"]["closing"] == 0
     book, ws, refs = moves_book(none)
     assert line_starting(ws, "No van or outlet held or moved stock in the period.")
-    assert not [k for k in refs if k.startswith(("units_", "bhd_"))]
+    assert column(book, refs["units_checks"]) == [0, 0, 0]
 
 
 @test("the movements module, read lazily: there, missing, raising, without period_table; no period to read")
@@ -646,13 +748,13 @@ def _():
     with moves_module(lambda first, last: table(first=None, last=None)) as mod:
         mt = sx.moves_totals(first="2026-03-09", last=D)
     assert mod.calls == [WEEK] and (mt["first"], mt["last"]) == WEEK and mt["error"] is None, mod.calls
-    assert [s["store"] for s in mt["stores"]] == ["Van A", "Van B", "Shop East"]
+    assert [r["stores"] for r in mt["rows"]] == [1, 2, 1]
     cases = {}
     with moves_module(missing=True):
         cases["the movements module is not there yet"] = sx.moves_totals(first=WEEK[0], last=WEEK[1])
 
     def raising(first, last):
-        raise RuntimeError("SIO:X-26-03-7 of Van A could not be paired")
+        raise RuntimeError(f"SIO:X-26-03-7 of {MOVE_VANS[0]} could not be paired")
     with moves_module(raising):
         cases["RuntimeError"] = sx.moves_totals(first=WEEK[0], last=WEEK[1])
     with moves_module(bare=True):
@@ -660,13 +762,13 @@ def _():
     with moves_module(lambda first, last: "not a table"):
         cases["the movements table is not the shape it should be"] = sx.moves_totals(first=WEEK[0], last=WEEK[1])
     for why, mt in cases.items():
-        assert mt == {"first": WEEK[0], "last": WEEK[1], "basis": None, "stores": [], "total": None,
-                      "exceptions": None, "unbalanced": 0, "note": f"not worked out this time ({why})", "error": why}, \
+        assert mt == {"first": WEEK[0], "last": WEEK[1], "basis": None, "rows": [], "total": None, "exceptions": None,
+                      "unbalanced": 0, "note": f"not worked out this time ({why})", "error": why, "screen": ()}, \
             (why, mt)
         book, ws, refs = moves_book(mt)
         assert refs == {} and ws.cells[(4, 0)].value == (f"The movements of the vans and outlets: not worked out this "
                                                          f"time ({why})."), ws.cells[(4, 0)].value
-        assert ws.cells[(1, 0)].value == "Vans and outlets · 9 Mar to 15 Mar 2026"
+        assert ws.cells[(1, 0)].value == "The main store, the vans and the outlets · 9 Mar to 15 Mar 2026"
         assert_clean_sheet(ws)
     period = "no period to read: a first and a last day, the first on or before the last"
     with moves_module(lambda first, last: table()) as mod:
@@ -674,8 +776,8 @@ def _():
             assert sx.moves_totals(**args)["error"] == period, args
     assert mod.calls == []
     # totals that are not the contract's shape: the title and one line, what was drawn undone
-    for nothing, why in ((None, ""), ({"error": "RuntimeError"}, " (RuntimeError)"), ({"stores": "x"}, ""),
-                         ({"stores": [{"store": "Van A"}]}, " (KeyError)"),
+    for nothing, why in ((None, ""), ({"error": "RuntimeError"}, " (RuntimeError)"), ({"rows": "x"}, ""),
+                         ({"rows": [{"label": "Vans"}]}, " (KeyError)"),
                          (dict(sx.moves_totals(table()), exceptions=[{"words": "x"}]), " (KeyError)")):
         book, ws, refs = moves_book(nothing)
         assert refs == {} and ws.cells[(4, 0)].value == (f"The movements of the vans and outlets: not worked out this "
@@ -688,7 +790,7 @@ def _():
     bad_row = dict(stores()[0])
     cases = {
         "the movements table is not the shape it should be": [[], {"stores": None}, {"no": "stores"}],
-        "a store's row is not a table row": [table(stores=["SIO:X-26-03-7"])],
+        "a store's row is not a table row": [table(stores=["SIO:X-26-03-7"]), table(main="Central")],
         "a store's row names no store": [table(stores=[dict(bad_row, store="  ")])],
         "a store's row has no units": [table(stores=[dict(bad_row, units=None)])],
         "a store's row has no bhd": [table(stores=[dict(bad_row, bhd=[1, 2])])],
@@ -707,37 +809,37 @@ def _():
         for t in tables:
             mt = sx.moves_totals(t)
             assert mt["error"] == why and mt["note"] == f"not worked out this time ({why})", (why, mt["error"])
-            assert mt["stores"] == [] and not leaks(mt["note"]), mt["note"]
+            assert mt["rows"] == [] and not leaks(mt["note"]), mt["note"]
 
 
 # ── movements_sheet ───────────────────────────────────────────────────────────
 
-@test("the Movements sheet: the check column reads 0 on every row; the total row is the sum of the rows")
+@test("the Movements sheet: the main store, the vans, the outlets and their total; each check 0; no store named")
 def _():
     mt = sx.moves_totals(table())
     heading = "Movements in the week ending Sunday 15 March 2026"
     book, ws, refs = moves_book(mt, heading)
     assert ws.cells[(0, 0)].value == heading
-    assert ws.cells[(1, 0)].value == ("Vans and outlets · 9 Mar to 15 Mar 2026 · units, and BHD at landed cost on the "
-                                      "/yq-stock basis")
+    assert ws.cells[(1, 0)].value == ("The main store, the vans and the outlets · 9 Mar to 15 Mar 2026 · units, and BHD "
+                                      "at landed cost (MRN; the pricing sheet where no MRN: 2 items)")
     for block, fmt_name, total_fmt in (("units", "g_int", "g_total_int"), ("bhd", "g_money3", "g_total_money3")):
-        checks = column(book, refs[f"{block}_checks"])
-        assert checks == [0, 0, 0], (block, checks)
+        assert column(book, refs[f"{block}_checks"]) == [0, 0, 0], block
         rows = fx.parse_range(refs[f"{block}_rows"], "")
-        assert [ws.cells[(r, 0)].value for r in range(rows.r1, rows.r2 + 1)] == ["Van A", "Van B", "Shop East"]
-        assert [ws.cells[(r, 1)].value for r in range(rows.r1, rows.r2 + 1)] == ["Van", "Van", "Outlet"]
-        for r, s in zip(range(rows.r1, rows.r2 + 1), mt["stores"]):
+        assert [ws.cells[(r, 0)].value for r in range(rows.r1, rows.r2 + 1)] == ["Main store", "Vans", "Outlets"]
+        assert [ws.cells[(r, 1)].value for r in range(rows.r1, rows.r2 + 1)] == [1, 2, 1]
+        assert ws.cells[(rows.r2 + 1, 0)].value == "Total" and at(book, refs[f"{block}_stores"]) == 4
+        for r, row in zip(range(rows.r1, rows.r2 + 1), mt["rows"]):
             check = ws.cells[(r, sx.M_COL["check"])]
             assert check.kind == "f" and check.fmt == fmt_name and check.formula.startswith("ROUND("), check.formula
             # the check is the formula over the row's own cells: plus less minus, the closing among the minus
             plus = sum(book.value(ws.name, r, sx.M_COL[k]) for k in sx.CHECK_PLUS)
             minus = sum(book.value(ws.name, r, sx.M_COL[k]) for k in sx.CHECK_MINUS)
-            assert close(plus - minus, 0) and close(book.value(ws.name, r, sx.M_COL["closing"]),
-                                                    s[block]["closing"]), (block, s["store"])
+            assert close(plus - minus, 0), (block, row["row"])
             for k in sx.MOVE_KEYS:
                 if k != "check":
                     cell = ws.cells[(r, sx.M_COL[k])]
-                    assert cell.kind == "n" and cell.fmt == fmt_name and close(cell.value, s[block][k]), (block, k)
+                    assert cell.kind == "n" and cell.fmt == fmt_name and close(cell.value, row[block][k]), (block, k)
+                    assert close(at(book, refs[f"{block}_{row['row']}_{k}"]), row[block][k])
         for k in sx.MOVE_KEYS:
             total = cell_of(book, refs[f"{block}_{k}"])
             col = sx.M_COL[k]
@@ -749,39 +851,71 @@ def _():
                 and ref_.startswith(letter)]) == 2
     assert at(book, refs["uncosted_units"]) == 3
     assert (at(book, refs["exceptions_count"]), at(book, refs["exceptions_units"]),
-            close(at(book, refs["exceptions_bhd"]), 3.25)) == (3, 7, True)
+            close(at(book, refs["exceptions_bhd"]), 3.25)) == (4, 8, True)
     assert ws.page["landscape"] and ws.page["fit"] == (1, 0) and "Movements" in ws.page["footer"]
     assert line_starting(ws, "3 units without a cost on file")
+    assert line_starting(ws, "Vans and Outlets count every van and every outlet together")
     assert_clean_sheet(ws)
+    assert not sx.names_a_store(ws, list(STORE_NAMES))
 
 
 @test("a row that does not balance shows by how much: the check is the formula, not a typed nought")
 def _():
     rows = stores()
-    rows[0] = store("Van B - Acc WH", "van", "0.5", opening=40, received=20, back_to_main=5, to_damage=1,
+    rows[0] = store(MOVE_VANS[1], "van", "0.5", opening=40, received=20, back_to_main=5, to_damage=1,
                     not_received_yet=2, sold=30, customer_returns=1, closing=22)        # one unit short
     rows[0]["bhd"]["closing"] = Decimal("11.500")                                         # the BHD as it balanced
     rows[0]["units"]["check"] = rows[0]["bhd"]["check"] = ZERO                            # what a module may claim
     mt = sx.moves_totals(table(stores=rows))
-    van_b = next(s for s in mt["stores"] if s["store"] == "Van B")
-    assert (van_b["units"]["check"], van_b["bhd"]["check"]) == (1, 0)                      # worked out, never read
+    vans = mt["rows"][1]
+    assert (vans["units"]["check"], vans["bhd"]["check"]) == (1, 0)                       # worked out, never read
     assert mt["unbalanced"] == 1
-    assert mt["note"].startswith("1 store does not balance: the Check column shows by how much"), mt["note"]
+    assert mt["note"].startswith("1 store does not balance: /yq-moves shows by how much, to check."), mt["note"]
     book, ws, refs = moves_book(mt)
     assert column(book, refs["units_checks"]) == [0, 1, 0] and at(book, refs["units_check"]) == 1
     assert column(book, refs["bhd_checks"]) == [0, 0, 0]
     rows = stores()
-    rows[1]["units"]["sold"] += 2
-    rows[2]["bhd"]["opening"] += Decimal("0.004")
+    rows[1]["units"]["sold"] += 2                                                         # the outlet
+    rows[2]["bhd"]["opening"] += Decimal("0.004")                                          # a van
     mt = sx.moves_totals(table(stores=rows))
     assert mt["unbalanced"] == 2 and mt["note"].startswith("2 stores do not balance")
     book, _ws, refs = moves_book(mt)
-    assert column(book, refs["units_checks"]) == [0, 0, -2] and column(book, refs["bhd_checks"]) == [0.004, 0, 0]
+    assert column(book, refs["units_checks"]) == [0, 0, -2] and column(book, refs["bhd_checks"]) == [0, 0.004, 0]
 
 
 # ── what the sheets may never say ─────────────────────────────────────────────
 
-@test("no item, code or voucher on either sheet or in either totals; every text through the wording guard")
+@test("the sheets' own screen: a store's name never reaches either sheet; names_a_store")
+def _():
+    # a name the data could carry into a text (the basis words, a heading): the sheet is its title and one line
+    mt = sx.moves_totals(table(basis=f"at landed cost ({MOVE_VANS[0]})"))
+    book, ws, refs = moves_book(mt)
+    assert refs == {} and ws.cells[(4, 0)].value == ("The movements of the vans and outlets: not worked out this time "
+                                                     "(a store's name would be on it).")
+    assert not sx.names_a_store(ws, mt["screen"]) and not [k for k in ws.cells if k[0] > 4]
+    book, ws, refs = moves_book(sx.moves_totals(table()), "Movements of Beta Rep in the week")
+    assert refs == {} and ws.cells[(0, 0)].value == "The movements of the vans and outlets"       # its heading too
+    assert not sx.names_a_store(ws, list(STORE_NAMES))
+    with data_root():
+        m, _inp = model_of(World())
+        t = totals_of(m)
+    book, ws, refs = stock_book(dict(t, basis="at landed cost (the stock of Van A)"))
+    assert refs == {} and ws.cells[(4, 0)].value == ("The stock figures: not worked out this time (a store's name "
+                                                     "would be on it).")
+    book, ws, refs = stock_book(t)
+    assert refs and not sx.names_a_store(ws, t["screen"]) and not sx.names_a_store(ws, list(STORE_NAMES))
+    # names_a_store: whole words, case and spaces aside, a van also without its " - Acc WH"; short forms left out
+    probe = bk.Sheet("Probe")
+    probe.text(0, 0, "Sold by   ALPHA rep this week")
+    probe.text(1, 0, "Every van and every outlet")
+    assert sx.names_a_store(probe, ["Alpha Rep - Acc WH"]) and sx.names_a_store(probe, ["alpha rep"])
+    assert not sx.names_a_store(probe, ["Alp - Acc WH", "Van A - Acc WH", "Out", "A - Acc WH"])
+    assert sx.screen_names(["A - Acc WH", " Shop  East ", "Beta Rep - SIM WH"]) == (
+        "a - acc wh", "beta rep", "beta rep - sim wh", "shop east")
+    assert not sx.names_a_store(probe, []) and not sx.names_a_store(probe, None)
+
+
+@test("no item, code, voucher or store on either sheet or in either totals; every text through the wording guard")
 def _():
     with data_root():
         m, _inp = model_of(World())
@@ -790,18 +924,12 @@ def _():
     receipts = {v for it in m.items for (_d, v, _u, _x) in it.receipts}
     assert receipts and all(NUMBERED.search(v) for v in receipts)          # the pattern does find the world's vouchers
     for sheet in (stock_book(t)[1], moves_book(sx.moves_totals(table()))[1],
+                  moves_book(sx.moves_totals(table(exceptions=[dict(x) for x in EXCEPTION_ROWS])))[1],
                   moves_book(sx.moves_totals(table(exceptions=None, counts=summary(not_received=2))))[1]):
         assert_clean_sheet(sheet)
         everything = " | ".join(texts(sheet))
         assert not any(v in everything for v in receipts | {x["voucher"] for x in EXCEPTION_ROWS})
     assert_clean_totals(t)
-    # a word of the data that the guard refuses is blanked, never written
-    rows = [store("Leakproof Van - Acc WH", "van", "1", opening=1, closing=1)]
-    mt = sx.moves_totals(table(stores=rows, exceptions=[]))
-    assert mt["stores"][0]["store"] == "Leakproof Van"
-    book, ws, refs = moves_book(mt)
-    shown = fx.parse_range(refs["units_rows"], "")
-    assert ws.cells[(shown.r1, 0)].value == "--------- Van"
     src = (ROOT / "scripts" / "ops" / "workbook" / "sheets_extra.py").read_text(encoding="utf-8")
     for word in ("import psycopg", "import httpx", "supabase", "subprocess", "yq_load_go", ".table(", "insert",
                  "upsert", "db.rpc", "write_text"):
@@ -846,8 +974,8 @@ def _():
     for kind, totals, writer in (("Stock", st, sx.stock_sheet), ("Movements", mv, sx.movements_sheet)):
         trial = bk.Book()
         ws = trial.sheet(kind)
-        writer(ws, totals, f"{kind} in the week ending {SAT:%d %B %Y}")
-        assert trial.evaluate() == []
+        refs = writer(ws, totals, f"{kind} in the week ending {SAT:%d %B %Y}")
+        assert refs and trial.evaluate() == []
         assert_clean_sheet(ws)
 
 
