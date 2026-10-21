@@ -16,7 +16,9 @@ action and never a difference, and nothing reads as agreeing without its second 
      HELD_DAYS days unsold, from /yq-moves (scripts.ops.moves.books_only(as_of, held_days=30), read lazily: "not
      worked out this time" while it cannot give them). The stores are every van and outlet that held an accessory
      at the end of the month or moved one in it, and every one with a count of the month. The block: DIFFERS when a
-     store differs, else BOOKS ONLY when a store has no signed count (or there is none to count), else PROVEN.
+     store differs, else BOOKS ONLY when a store has no signed count (or there is none to count), else PROVEN; not
+     worked out (None) when the stores on the books cannot be worked out, since a store nobody counted could then be
+     missing from the list.
   3. SALES AND RECEIVABLES.
      invoicing   the load control: the day book = the register = v_sales for the month, invoice by invoice (lines
                  and BHD, VAT included: the day book's Gross, the register's Gross, v_sales.gross_bhd), from the
@@ -26,21 +28,26 @@ action and never a difference, and nothing reads as agreeing without its second 
      statement   the kickback statement as app.statements.build_rows(month) drafts it: the reps with a target, their
                  sales on the statement's basis, the tier reached and the kickback; returns not deducted (the
                  owner's rule while no Sales Return register is loaded).
-     collection  with the month-end Ledger export (scripts.ops.ledger_export.find(month), then read): per customer
-                 account, opening (its balance at the end of the month before) + sales invoices (SI) - receipts
-                 (RCTV) - returns (SRV) - credit notes (CN) +/- other entries = closing, as the export's own rows
-                 and running balance give them; the closing set beside the receivables ageing (ar_ageing) as on
-                 the month's last day, else the nearest one after it within AR_DAYS days (the Ledger is then read
-                 to that day when it reaches it). The customer accounts are the export's accounts that a
-                 receivables ageing has ever listed, and the ageing's own; accounts that differ are listed to
-                 check. The ageing prints a credit balance without its sign: a credit equal in amount agrees.
+     collection  with the month-end Ledger export (scripts.ops.ledger_export.find(month) in the drop folders, or the
+                 file `recon --ledger-file <path>` names: a Focus Ledger export as on the month's last day or later,
+                 any other refused with the reason; then read): per customer account, opening (its balance at the
+                 end of the month before) + sales invoices (SI) - receipts (RCTV) - returns (SRV) - credit notes (CN)
+                 = closing, as the export's own rows and running balance give them; the closing set beside the
+                 receivables ageing (ar_ageing) as on the month's last day, else the nearest one after it within
+                 AR_DAYS days (the Ledger is then read to that day when it reaches it). The customer accounts are the
+                 export's accounts that a receivables ageing has ever listed, and the ageing's own; accounts that
+                 differ are listed to check, and so is every account another entry moved (a journal, a payment: the
+                 identity has no term for it, shown as "other" in the totals). The ageing prints a credit balance
+                 without its sign: a credit equal in amount agrees.
      returns     with the export: the month's sales returns ex-VAT per salesman (the export's own SRV legs), set
                  against each rep's statement, and the reps whose kickback tier they would change (app.shop's own
                  tier rule) listed to check. Without it, net of returns is an estimate from returned units: the
                  stock ledger's Sales Return units of the month at each item's average ex-VAT selling price of the
                  month, and no tier is judged on an estimate.
-     The block: DIFFERS when the invoicing differs, an account differs or a tier would change; COLLECTION NOT
-     PROVEN without the export, or when it cannot be set beside an ageing; else PROVEN.
+     The block: DIFFERS when the invoicing differs, an account is to check or a tier would change; COLLECTION NOT
+     PROVEN without the export, or when it cannot be set beside an ageing; not worked out (None) when the
+     collection is proven but the invoicing was not set beside the files here (it stands on the load's own verify)
+     or a part could not be read; else PROVEN.
   4. PURCHASES. Every supplier receipt (Material Receipt Note) into the main store in the month, one row each: the
      purchase order on file (by the receipt's number, else the order whose model codes overlap the receipt's by at
      least PO_OVERLAP (Jaccard) and dated at most PO_DAYS days before it), the MRN XML on file (the Orders page's
@@ -50,10 +57,11 @@ action and never a difference, and nothing reads as agreeing without its second 
      the order, cost above or below the order are differences; a thin margin and an estimated cost are notes). A
      model code with several variants on the receipt reads "variant not provable from the PO". A row: PAPERS
      MISSING when a paper or a cost line is missing, or the MRN XML is filed where its order cannot read it (the
-     order shows nothing received): the paper first, since until it is there the rest cannot be told; else DIFFERS
-     (to check) when a flag says so, else PROVEN. Without the item codes the cost lines are not counted, never read
-     as missing. The block: DIFFERS when a row has a difference, else PAPERS MISSING when a row misses a paper,
-     else PROVEN (a month with no receipt: nothing is due).
+     order shows nothing received): the paper first, since until it is there the rest cannot be told (the order's
+     flags then stand as a note: a cost line not loaded reads as "short" there); else DIFFERS (to check) when a flag
+     says so, else PROVEN. Without the item codes the cost lines are not counted, never read as missing. The
+     block: DIFFERS when a row reads DIFFERS, else PAPERS MISSING when a row misses a paper, else PROVEN (a month
+     with no receipt: nothing is due).
 
 A part that cannot be worked out says so in one line and the rest stands; a block whose own reading fails reads
 "not worked out this time" (status None).
@@ -81,7 +89,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
-from scripts.ops import counts, fmt, items, ledger, ledger_export, sales, status
+from scripts.ops import counts, fmt, items, ledger, ledger_export, paths, sales, status
 from scripts.ops.workbook import model as mdl
 
 COMMAND = "recon"
@@ -213,6 +221,35 @@ def _store_label(store: str) -> str:
     return str(store or "").replace(mdl.WH_SUFFIX, "").strip()
 
 
+def named_file(text) -> Path:
+    """The file `recon --ledger-file` names: as typed (quotes taken off); a relative name that is not there is looked
+    for under the data root."""
+    raw = str(text).strip().strip('"').strip("'")
+    given = Path(raw)
+    if given.is_absolute() or given.exists():
+        return given
+    under = paths.data_root() / raw
+    return under if under.exists() else given
+
+
+def not_a_ledger(path: Path) -> str | None:
+    """None when the file reads as a Focus Ledger export (its header row is the Ledger's, as the parser checks it);
+    else why not, one sentence naming the file. A file that is not there is ledger_export.find's to say."""
+    if not Path(path).is_file():
+        return None
+    import pandas as pd
+    from scripts import ingest
+    try:
+        top = pd.read_excel(path, header=None, dtype=object, engine="openpyxl", nrows=ingest.HEADER_SCAN_ROWS)
+    except Exception as exc:  # noqa: BLE001  (its kind, never its text: that can quote a cell)
+        return (f"the file named, {Path(path).name}, could not be opened as a workbook ({type(exc).__name__}): name the "
+                ".xlsx export of Focus's Ledger report")
+    if ingest.header_row_index(top, "ledger_entries") is None:
+        return (f"the file named, {Path(path).name}, is not a Focus Ledger export (its header row is not the Ledger's: "
+                "Date, Voucher, Account, Debit, Credit, Balance ...): name the Ledger report of all accounts")
+    return None
+
+
 # ── the reads ─────────────────────────────────────────────────────────────────
 
 class Source:
@@ -220,8 +257,9 @@ class Source:
     ledger and the accessory table are read once per Source. Tests hand month_blocks, purchases and run a stand-in
     with the same methods."""
 
-    def __init__(self, prefer: str = "auto"):
+    def __init__(self, prefer: str = "auto", ledger_file=None):
         self.prefer = prefer or "auto"
+        self.ledger_file = ledger_file          # recon --ledger-file <path>: the month-end Ledger export, named
         self._ledger = None
         self._table = None
 
@@ -262,7 +300,13 @@ class Source:
         give = getattr(moves, "books_only", None)
         if not callable(give):
             raise NotYet("/yq-moves has no books_only yet")
-        return give(as_of, held_days=HELD_DAYS)
+        said = getattr(moves, "MovesInput", None)        # its own one-sentence refusal (per-store figures not proven)
+        try:
+            return give(as_of, held_days=HELD_DAYS)
+        except Exception as exc:
+            if isinstance(said, type) and isinstance(exc, said):
+                raise NotYet(str(exc).rstrip(".")) from None
+            raise
 
     # sales and receivables
     def sales_files(self) -> tuple[str | None, Path | None, Path | None]:
@@ -320,9 +364,19 @@ class Source:
         return None if tp is None else (int(tp["tier_reached"]), _q(tp["kickback_bhd"]))
 
     def ledger_export(self, month: str):
-        """(the Export, the sentence that says which file) or (None, why there is none). A file that is there and
-        cannot be read raises its own one-sentence error."""
-        path, why = ledger_export.find(month)
+        """(the Export, the sentence that says which file) or (None, why there is none). The drop folders are
+        searched (ledger_export.find), unless a file is named (recon --ledger-file <path>): then that file, wherever
+        it lies and whatever its name, when it is a Focus Ledger export as on the month's last day or later; any
+        other is refused, with the reason. A file that is there and cannot be read raises its own one-sentence
+        error."""
+        if self.ledger_file:
+            path = named_file(self.ledger_file)
+            refused = not_a_ledger(path)
+            if refused:
+                return None, refused
+            path, why = ledger_export.find(month, path=path)
+        else:
+            path, why = ledger_export.find(month)
         if path is None:
             return None, why
         return ledger_export.read(path), why
@@ -530,9 +584,14 @@ def books_view(answer, rules) -> dict:
     return out
 
 
-def vans_block(results: dict, stores: list[str], books: dict | None, books_note: str | None, rules, month: str,
+def vans_block(results: dict, stores: list[str] | None, books: dict | None, books_note: str | None, rules, month: str,
                as_of: date) -> dict:
-    """2. Each van and outlet: its signed count set beside its books, else its books only (see the module note)."""
+    """2. Each van and outlet: its signed count set beside its books, else its books only (see the module note).
+    `stores` None: the stores on the books could not be worked out, so only the counted ones are listed and the
+    block reads as not worked out (status None): a store nobody counted may be missing from it, so it is never
+    PROVEN."""
+    known = stores is not None
+    stores = stores or []
     by_canon: dict[str, str] = {}
     for name in stores:
         by_canon.setdefault(rules.canon(name), " ".join(str(name).split()))
@@ -562,13 +621,15 @@ def vans_block(results: dict, stores: list[str], books: dict | None, books_note:
             else:
                 row["why"] = f"its count of {fmt.day(v['count_date'])} has no line counted"
         rows.append(row)
-    if any(r["status"] == DIFFERS for r in rows):
+    if not known:
+        st = None
+    elif any(r["status"] == DIFFERS for r in rows):
         st = DIFFERS
     elif not rows or any(r["status"] == BOOKS_ONLY for r in rows):
         st = BOOKS_ONLY
     else:
         st = PROVEN
-    lines = _vans_lines(rows, books, books_note, month, as_of)
+    lines = _vans_lines(rows, books, books_note, month, as_of, known)
     totals = {k: sum((r["count"][k] or ZERO for r in rows if r["count"] and r["status"] != BOOKS_ONLY), ZERO)
               for k in ("short_units", "over_units", "short_bhd", "over_bhd")}
     totals["stores"] = len(rows)
@@ -577,8 +638,11 @@ def vans_block(results: dict, stores: list[str], books: dict | None, books_note:
     return {"status": st, "rows": rows, "books_note": books_note, "as_of": as_of, "totals": totals, "lines": lines}
 
 
-def _vans_lines(rows: list[dict], books: dict | None, books_note: str | None, month: str, as_of: date) -> list[str]:
+def _vans_lines(rows: list[dict], books: dict | None, books_note: str | None, month: str, as_of: date,
+                known: bool = True) -> list[str]:
     words = month_words(month)
+    if not known and not rows:
+        return [f"No van or outlet has a count of {words}, and the stores on the books could not be worked out."]
     if not rows:
         return [f"No van or outlet held an accessory at the end of {fmt.day_long(as_of)} or moved one in {words}: "
                 "nothing to count, and nothing set beside a count."]
@@ -918,22 +982,28 @@ def collection_part(export, why_file: str, first: date, last: date, ar_dates: li
         k = _fold(r["account"])
         seen.add(k)
         mine, theirs = r["ledger_at"], ar.get(k)
+        credit = False
         if mine is None:
-            to_check.append({"account": r["account"], "ledger": None, "ageing": theirs,
-                             "said": "the export states no balance"})
-            continue
-        if theirs is None and abs(mine) <= FILS:
+            said = "the export states no balance"
+        elif theirs is None:
+            said = None if abs(mine) <= FILS else "not in the ageing"
+        elif abs(mine - theirs) <= FILS:
+            said = None
+        elif mine < 0 and abs(-mine - theirs) <= FILS:
+            said, credit = None, True
+        else:
+            said = "differs"
+        # the identity has no "other" term: an account a journal, a payment or any other entry moved is to check,
+        # whatever the ageing says (a write-off reads as agreeing once it is posted on both sides)
+        if abs(r["other"]) > FILS:
+            moved = (f"BHD {fmt.bhd(abs(r['other']))} moved {'into' if r['other'] > 0 else 'out of'} it by other "
+                     "entries (no sales invoice, receipt, return or credit note)")
+            said = f"{said}; {moved}" if said else f"agrees with the ageing, but {moved}"
+        if said is None:
             agree += 1
+            credits += credit
             continue
-        if theirs is not None and abs(mine - theirs) <= FILS:
-            agree += 1
-            continue
-        if theirs is not None and mine < 0 and abs(-mine - theirs) <= FILS:
-            agree += 1
-            credits += 1
-            continue
-        to_check.append({"account": r["account"], "ledger": mine, "ageing": theirs,
-                         "said": "not in the ageing" if theirs is None else "differs"})
+        to_check.append({"account": r["account"], "ledger": mine, "ageing": theirs, "said": said})
     for a, v in ar_now.items():
         if _fold(a) not in seen and abs(v) > FILS:
             to_check.append({"account": a, "ledger": None, "ageing": v, "said": "not in the Ledger export"})
@@ -972,8 +1042,10 @@ def sales_block(invoicing: dict | None, invoicing_note: str | None, statement: d
         st = DIFFERS
     elif collection is None or collection.get("status") != PROVEN:
         st = COLLECTION_NOT_PROVEN
-    elif invoicing is None or statement is None or returns is None:
-        st = None                          # the collection is proven, a part beside it was not worked out
+    elif invoicing is None or invoicing.get("status") is None or statement is None or returns is None:
+        # the collection is proven, and a part beside it was not worked out, or the invoicing was not set beside
+        # the files here (it stands on the load's own verify): never PROVEN without its second side
+        st = None
     else:
         st = PROVEN
     return {"status": st, "invoicing": invoicing, "statement": statement, "collection": collection, "returns": returns,
@@ -981,11 +1053,14 @@ def sales_block(invoicing: dict | None, invoicing_note: str | None, statement: d
                       "returns": returns_note}, "lines": lines}
 
 
-def no_export_part(month: str, why: str) -> dict:
+def no_export_part(month: str, why: str, named: bool = False) -> dict:
+    """The collection without an export: why there is none, and what to do (`named`: a file was named and refused)."""
     last = mdl.month_bounds(month)[1]
-    return {"status": COLLECTION_NOT_PROVEN, "file": None, "why": why, "lines": [
-        f"Collection: COLLECTION NOT PROVEN: {why}. Put Focus's Ledger report (all accounts, as on "
-        f"{fmt.day_long(last)}) in the next drop folder."]}
+    todo = (f"Name Focus's Ledger report (all accounts) as on {fmt.day_long(last)} or later" if named else
+            f"Put Focus's Ledger report (all accounts, as on {fmt.day_long(last)}) in the next drop folder, or name the "
+            "file with --ledger-file")
+    return {"status": COLLECTION_NOT_PROVEN, "file": None, "why": why, "named": named, "lines": [
+        f"Collection: COLLECTION NOT PROVEN: {why}. {todo}."]}
 
 
 # ── 4: purchases ──────────────────────────────────────────────────────────────
@@ -1110,13 +1185,19 @@ def receipt_row(voucher: str, v: dict, codes: dict | None, pos: dict, files: dic
         shared, both = len(set(leads) & pos[po]["codes"]), len(set(leads) | pos[po]["codes"])
         row["notes"].append(f"its order {po} is matched by its model codes, not by its number: the two share {shared} of "
                             f"their {both} codes")
-    row["differs"] = any(row["flags"].get(f) for f in DIFF_FLAGS)
+    # the order's flags are a difference only once every paper is there: while one is missing (a cost line not
+    # loaded reads as "short" on the order, for one) they are a note, and the paper is the thing to do
+    row["flagged"] = any(row["flags"].get(f) for f in DIFF_FLAGS)
     if row["actions"]:
         row["status"] = PAPERS_MISSING
-    elif row["differs"]:
+        if row["flagged"]:
+            said = [f"{FLAG_WORDS[f]}: {_listed(row['flags'][f])}" for f in DIFF_FLAGS if row["flags"].get(f)]
+            row["notes"].append(f"the Orders page reads {'; '.join(said)}: not judged while a paper is missing")
+    elif row["flagged"]:
         row["status"] = DIFFERS
     else:
         row["status"] = PROVEN
+    row["differs"] = row["status"] == DIFFERS
     return row
 
 
@@ -1145,8 +1226,9 @@ def purchases_rows(rows, codes: dict | None, first: date, last: date, po_rows, f
 
 
 def purchases_block(rows: list[dict], elsewhere: int, first: date, last: date, notes: list[str] | None = None) -> dict:
-    """4. The receipts put together (see the module note)."""
-    if any(r["differs"] for r in rows):
+    """4. The receipts put together (see the module note): DIFFERS only from a row that reads DIFFERS (every paper
+    there, a flag up); a row missing a paper is PAPERS MISSING whatever its order reads."""
+    if any(r["status"] == DIFFERS for r in rows):
         st = DIFFERS
     elif any(r["status"] == PAPERS_MISSING for r in rows):
         st = PAPERS_MISSING
@@ -1157,7 +1239,7 @@ def purchases_block(rows: list[dict], elsewhere: int, first: date, last: date, n
               "invoice": sum(1 for r in rows if r["invoice"]),
               "cost_lines": sum(r["cost_lines"] for r in rows) if known else None,
               "lines": sum(r["lines"] for r in rows), "papers_missing": sum(1 for r in rows if r["status"] == PAPERS_MISSING),
-              "differs": sum(1 for r in rows if r["differs"]), "elsewhere": elsewhere}
+              "differs": sum(1 for r in rows if r["status"] == DIFFERS), "elsewhere": elsewhere}
     span = f"{fmt.day_long(first)} to {fmt.day_long(last)}"
     lines: list[str] = []
     if not rows:
@@ -1175,7 +1257,7 @@ def purchases_block(rows: list[dict], elsewhere: int, first: date, last: date, n
         for r in rows:
             if r["actions"]:
                 lines.append(f"  To do, {r['receipt']}: " + "; ".join(r["actions"]) + ".")
-            if r["differs"]:
+            if r["status"] == DIFFERS:
                 said = [f"{FLAG_WORDS[f]}: {_listed(r['flags'][f])}" for f in DIFF_FLAGS if r["flags"].get(f)]
                 lines.append(f"  To check, {r['receipt']} against its order {r['po']}: " + "; ".join(said) + ".")
             for n in r["notes"]:
@@ -1273,9 +1355,10 @@ def month_blocks(month: str, source: Source | None = None) -> dict:
         if books_answer is not None:
             books, view_why = _attempt(lambda: books_view(books_answer, rules), "the books-only figures", warnings)
             books_note = books_note if books is not None else view_why
-        blocks["vans"] = vans_block(results, stores or [], books, books_note, rules, month, as_of)
-        if stores is None:
-            blocks["vans"]["lines"].insert(0, f"The stores on the books: {why_s}; only the counted ones are listed.")
+        blocks["vans"] = vans_block(results, stores, books, books_note, rules, month, as_of)
+        if stores is None:                 # the block reads not worked out: a store nobody counted may be missing
+            blocks["vans"]["lines"].insert(0, f"The stores on the books: {why_s}; only the counted ones are listed, so "
+                                              "the block is not worked out.")
 
     # 3: sales and receivables
     blocks["sales"] = _sales(source, month, first, last, reach, rows, accessory, first_sale, warnings)
@@ -1316,7 +1399,7 @@ def _sales(source, month: str, first: date, last: date, reach: date, rows, acces
     except Exception as exc:  # noqa: BLE001  (a file there that cannot be read: its kind, never its text)
         export, why_file = None, f"the Ledger export could not be read ({type(exc).__name__})"
     if export is None:
-        collection = no_export_part(month, why_file)
+        collection = no_export_part(month, why_file, named=bool(getattr(source, "ledger_file", None)))
 
         def estimate():
             prices, _why = _attempt(lambda: source.month_prices(first, reach), "the month's prices", warnings)
@@ -1371,7 +1454,8 @@ def run(args, month: str | None, source: Source | None = None) -> dict:
     Exit 0; 2 when a block could not be worked out; 1 (one sentence) for a month that cannot be answered."""
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {"month": month}, "files": [],
            "warnings": []}
-    source = source or Source(getattr(args, "ledger", "auto") or "auto")
+    # --ledger chooses where the STOCK ledger is read; --ledger-file names the month-end Ledger export (accounts)
+    source = source or Source(getattr(args, "ledger", "auto") or "auto", getattr(args, "ledger_file", None))
     try:
         if month is None:
             _first_sale, last_sale = source.sales_span()

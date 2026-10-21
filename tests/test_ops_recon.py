@@ -268,12 +268,15 @@ POSTINGS = [
     (date(2026, 9, 10), "RCTV : 50", [(CASH_AC, 110, 0), (CUST_A, 0, 110, REP1)]),
     (date(2026, 9, 12), "SRV : 7", [(RETURNS_AC, 100, 0), (VAT_AC, 10, 0), (CUST_B, 0, 110, REP2)]),
     (date(2026, 9, 14), "CN : 3", [(SALES_AC, 20, 0), (CUST_C, 0, 20)]),
-    (date(2026, 9, 20), "JV : 1", [(CUST_D, 5, 0), (CASH_AC, 0, 5)]),
-    (date(2026, 9, 25), "RCTV : 51", [(CASH_AC, 38, 0), (CUST_D, 0, 38, REP1)]),
+    (date(2026, 9, 25), "RCTV : 51", [(CASH_AC, 33, 0), (CUST_D, 0, 33, REP1)]),
     (date(2026, 10, 1), "SI : 110", [(CUST_A, 77, 0, REP1), (SALES_AC, 0, 70), (VAT_AC, 0, 7)]),
 ]
 # per account at the end of 30 Sep: A 110 + 220 - 110 = 220; B 44 + 55 - 110 = -11 (a credit); C 88 - 20 = 68;
-# D 33 + 5 - 38 = 0. Totals: 275 + 275 - 148 - 110 - 20 + 5 = 277.
+# D 33 - 33 = 0 (paid off). Totals: 275 + 275 - 143 - 110 - 20 = 277.
+# A journal moving Customer D (5 in, so its receipt is 38): the identity has no term for it, so D is to check.
+JOURNAL = [p for p in POSTINGS if p[1] != "RCTV : 51"] + [
+    (date(2026, 9, 20), "JV : 1", [(CUST_D, 5, 0), (CASH_AC, 0, 5)]),
+    (date(2026, 9, 25), "RCTV : 51", [(CASH_AC, 38, 0), (CUST_D, 0, 38, REP1)])]
 AR_EXACT = {CUST_A: Decimal("220"), CUST_B: Decimal("11"), CUST_C: Decimal("68")}
 AR_NAMES = {le.fold(a) for a in (CUST_A, CUST_B, CUST_C, CUST_D, CUST_Z)}
 
@@ -372,7 +375,7 @@ class Fake(rb.Source):
     """recon_blocks.Source answered from the world; `fail` {method name: exception} makes a read fail."""
 
     def __init__(self, **kw):
-        super().__init__("auto")
+        super().__init__("auto", kw.pop("ledger_file", None))
         self.book_rows = kw.pop("rows", ROWS)
         self.results = kw.pop("results", {})
         self.books = kw.pop("books", NOT_THERE)
@@ -619,6 +622,33 @@ def _():
         assert "Signed counts" in text and "DIFFERS (to check)" in text and COUNTER not in text and CHECKER not in text
 
 
+@test("vans: not worked out (never PROVEN) when the stores on the books cannot be worked out")
+def _():
+    with data_root():
+        only_a = {VAN_A: result(VAN_A, "van", {"A": 23})}
+        known = blocks(results=only_a)["blocks"]["vans"]
+        assert known["status"] == rb.BOOKS_ONLY and [r["label"] for r in known["rows"]] == ["Van A", "Van B", OUTLET]
+        assert rb.vans_block(only_a, None, None, None, rules(), MONTH, LAST)["status"] is None
+        real = rb.stores_on_books
+
+        def boom(*_a, **_k):
+            raise RuntimeError("the store names could not be read")
+
+        rb.stores_on_books = boom
+        try:
+            m = blocks(results=only_a)
+        finally:
+            rb.stores_on_books = real
+        v = m["blocks"]["vans"]
+        assert v["status"] is None and m["statuses"]["vans"] is None, v["status"]
+        assert [(r["label"], r["status"]) for r in v["rows"]] == [("Van A", rb.PROVEN)]
+        assert v["lines"][0].startswith("The stores on the books: not worked out this time (the stores could not be "
+                                        "read: RuntimeError); only the counted ones are listed, so the block is not "
+                                        "worked out."), v["lines"][0]
+        none = rb.vans_block({}, None, None, None, rules(), MONTH, LAST)
+        assert none["status"] is None and "could not be worked out" in all_lines(none)
+
+
 @test("vans: BOOKS ONLY without a signed count (none, Checked by empty, a book side that waits, no line counted)")
 def _():
     with data_root():
@@ -771,17 +801,43 @@ def _():
     assert (a["opening"], a["si"], a["rctv"], a["closing"]) == (110, 220, 110, 220)
     assert (bb["opening"], bb["si"], bb["srv"], bb["closing"]) == (44, 55, 110, -11)
     assert (c["opening"], c["cn"], c["closing"]) == (88, 20, 68)
-    assert (dd["opening"], dd["other"], dd["rctv"], dd["closing"]) == (33, 5, 38, 0)
+    assert (dd["opening"], dd["other"], dd["rctv"], dd["closing"]) == (33, 0, 33, 0)
     assert all(r["rolled"] == 0 for r in part["rows"])
     t = part["totals"]
-    assert (t["opening"], t["si"], t["rctv"], t["srv"], t["cn"], t["other"], t["closing"]) == (275, 275, 148, 110, 20,
-                                                                                              5, 277)
-    assert t["opening"] + t["si"] - t["rctv"] - t["srv"] - t["cn"] + t["other"] == t["closing"]
+    assert (t["opening"], t["si"], t["rctv"], t["srv"], t["cn"], t["other"], t["closing"]) == (275, 275, 143, 110, 20,
+                                                                                              0, 277)
+    assert t["opening"] + t["si"] - t["rctv"] - t["srv"] - t["cn"] == t["closing"]
     assert part["status"] == rb.PROVEN and part["agree"] == 4 and part["credits"] == 1 and not part["to_check"]
     text = "\n".join(part["lines"])
-    assert ("opening BHD 275.000 + sales invoices BHD 275.000 - receipts BHD 148.000 - returns BHD 110.000 - credit "
-            "notes BHD 20.000 + other BHD 5.000 = closing BHD 277.000") in text, text
+    assert ("opening BHD 275.000 + sales invoices BHD 275.000 - receipts BHD 143.000 - returns BHD 110.000 - credit "
+            "notes BHD 20.000 + other BHD 0.000 = closing BHD 277.000") in text, text
     assert "as on 30 September 2026: 4 of the 4 accounts agree (1 of them a credit balance" in text, text
+
+
+@test("collection: an account another entry moved (a journal, a payment) is to check, though it meets the ageing")
+def _():
+    part = rb.collection_part(export_of(JOURNAL), "x", FIRST, LAST, [LAST], lambda d: dict(AR_EXACT), AR_NAMES)
+    dd = next(r for r in part["rows"] if r["account"] == CUST_D)
+    assert (dd["opening"], dd["other"], dd["rctv"], dd["closing"], dd["rolled"]) == (33, 5, 38, 0, 0)
+    assert part["totals"]["other"] == 5 and part["status"] == rb.DIFFERS and part["agree"] == 3
+    assert part["to_check"] == [{"account": CUST_D, "ledger": Decimal(0), "ageing": None, "said": (
+        "agrees with the ageing, but BHD 5.000 moved into it by other entries (no sales invoice, receipt, return or "
+        "credit note)")}]
+    text = "\n".join(part["lines"])
+    assert "+ other BHD 5.000 = closing BHD 277.000" in text and "1 to check:" in text, text
+    off = rb.collection_part(export_of(JOURNAL), "x", FIRST, LAST, [LAST],
+                             lambda d: dict(AR_EXACT, **{CUST_D: Decimal(4)}), AR_NAMES)
+    said = next(x["said"] for x in off["to_check"] if x["account"] == CUST_D)
+    assert said.startswith("differs; BHD 5.000 moved into it by other entries"), said
+    out = POSTINGS + [(date(2026, 9, 21), "JV : 2", [(CASH_AC, 3, 0), (CUST_C, 0, 3)])]       # a write-off out of it
+    p3 = rb.collection_part(export_of(out), "x", FIRST, LAST, [LAST],
+                            lambda d: dict(AR_EXACT, **{CUST_C: Decimal(65)}), AR_NAMES)
+    assert [x["said"] for x in p3["to_check"]] == [
+        "agrees with the ageing, but BHD 3.000 moved out of it by other entries (no sales invoice, receipt, return or "
+        "credit note)"]
+    with data_root():
+        s = blocks(export=export_of(JOURNAL), ar={LAST: dict(AR_EXACT)}, statement=statement("300.000"))
+        assert s["statuses"]["sales"] == rb.DIFFERS
 
 
 @test("collection: the closing against the ageing: a difference, one the ageing lacks, one the export lacks")
@@ -877,6 +933,22 @@ def _():
         assert s["returns"]["basis"] == "export" and not s["returns"]["changed"]
 
 
+@test("sales block: never PROVEN when the invoicing was not set beside the files (it stands on the load's own verify)")
+def _():
+    with data_root():
+        good = dict(export=export_of(), ar={LAST: dict(AR_EXACT)}, statement=statement("300.000"))
+        for kw in (dict(files=(None, None, None), load={}),             # no loaded set, no load on record
+                   dict(files=(None, None, None)),                      # no loaded set, the load's verify on record
+                   dict(daybook=(D, [r for r in DAYBOOK[1] if r["day"] >= date(2026, 9, 10)]))):   # starts late
+            m = blocks(**dict(good, **kw))
+            s = m["blocks"]["sales"]
+            assert s["collection"]["status"] == rb.PROVEN and s["invoicing"]["basis"] == "load_verify", kw
+            assert s["status"] is None and m["statuses"]["sales"] is None, (kw, s["status"])
+            assert "not set beside the files this time" in all_lines(s)
+        res = run(**dict(good, files=(None, None, None)))
+        assert res["exit"] == 2 and "3. SALES AND RECEIVABLES: NOT WORKED OUT" in res["text"]
+
+
 @test("sales block: DIFFERS for the invoicing, for an account, for a tier the returns would change")
 def _():
     with data_root():
@@ -938,6 +1010,68 @@ def _():
         assert s["collection"]["totals"]["closing"] == 277 and s["status"] == rb.PROVEN
         blob = json.dumps(m, default=str)
         assert "paid by" not in blob and not NINE.search(blob)
+
+
+@test("--ledger-file: a Ledger export named anywhere is read; one that is not a Ledger, or ends early, is refused")
+def _():
+    with data_root() as root:
+        elsewhere = write_ledger(root / "exports" / "Ledger of September.xlsx")      # no dated drop folder
+        export, why = rb.Source(ledger_file=str(elsewhere)).ledger_export(MONTH)
+        assert export is not None and export.as_on == LAST and why == "the file named, the Ledger as on 2026-09-30"
+        later = write_ledger(root / "Downloads" / "October Ledger.xlsx", as_on=date(2026, 11, 12))
+        export, why = rb.Source(ledger_file=f'"{later}"').ledger_export(MONTH)    # quoted as a shell may hand it
+        assert export is not None and "it is read up to the month's last day, 2026-09-30" in why, why
+        export, _why = rb.Source(ledger_file="Downloads/October Ledger.xlsx").ledger_export(MONTH)   # the data root's
+        assert export is not None
+        early = write_ledger(root / "Early.xlsx", as_on=date(2026, 9, 25))
+        export, why = rb.Source(ledger_file=str(early)).ledger_export(MONTH)
+        assert export is None and "is as on 2026-09-25, before the month ends (2026-09-30)" in why, why
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.active.append([None, None, None, "[As on date 30/09/2026]"])
+        wb.active.append(["Date", "Voucher", "Customer Account", "Item", "Quantity"])     # a day book, not the Ledger
+        wb.save(root / "Sales_day_book_x.xlsx")
+        export, why = rb.Source(ledger_file=str(root / "Sales_day_book_x.xlsx")).ledger_export(MONTH)
+        assert export is None and why.startswith("the file named, Sales_day_book_x.xlsx, is not a Focus Ledger "
+                                                 "export"), why
+        (root / "notes.txt").write_text("not a workbook", encoding="utf-8")
+        export, why = rb.Source(ledger_file=str(root / "notes.txt")).ledger_export(MONTH)
+        assert export is None and "could not be opened as a workbook" in why, why
+        export, why = rb.Source(ledger_file=str(root / "missing.xlsx")).ledger_export(MONTH)
+        assert export is None and why == "no such file: missing.xlsx"
+        # through the month: the named file is the export; a refused one says what to do
+        s = blocks(export="real", ledger_file=str(elsewhere), ar={LAST: dict(AR_EXACT)},
+                   statement=statement("300.000"))["blocks"]["sales"]
+        assert s["collection"]["status"] == rb.PROVEN and s["status"] == rb.PROVEN, s["lines"]
+        no = blocks(export="real", ledger_file=str(early))["blocks"]["sales"]
+        assert no["status"] == rb.COLLECTION_NOT_PROVEN and no["collection"]["named"]
+        assert "Name Focus's Ledger report (all accounts) as on 30 September 2026 or later." in all_lines(no)
+        assert "or name the file with --ledger-file" in all_lines(blocks()["blocks"]["sales"])
+
+
+@test("--ledger-file reaches the Source from the command's args (recon passes it on as args.ledger_file)")
+def _():
+    with data_root() as root:
+        path = write_ledger(root / "exports" / "Ledger.xlsx")
+        made = []
+        saved = rb.Source
+        rows = statement("300.000")               # worked out before the stand-in takes the Source's name
+
+        def source(prefer="auto", ledger_file=None):
+            made.append((prefer, ledger_file))
+            return Fake(export="real", ledger_file=ledger_file, ar={LAST: dict(AR_EXACT)}, statement=rows)
+
+        rb.Source = source
+        try:
+            args = Args(MONTH)
+            args.ledger_file = str(path)
+            res = rb.run(args, MONTH)
+            plain = rb.run(Args(MONTH), MONTH)                        # an older recon passes no ledger_file at all
+        finally:
+            rb.Source = saved
+        assert made == [("auto", str(path)), ("auto", None)], made
+        assert res["flags"]["statuses"]["sales"] == rb.PROVEN and "the Ledger export Ledger.xlsx" in res["text"]
+        assert plain["flags"]["statuses"]["sales"] == rb.COLLECTION_NOT_PROVEN
 
 
 # ── 4: purchases ──────────────────────────────────────────────────────────────
@@ -1036,10 +1170,27 @@ def _():
     text = all_lines(bad)
     assert ("To check, MRN:T-26-09-1 against its order T-26-09-1: received short of the order: HG3; received over the "
             "order: CA1; supplier price more than 5% above the order: HG3.") in text, text
-    # a paper missing beside a difference: the row asks for the paper first, the block still reads DIFFERS
+    # a paper missing beside the order's flags: the paper first, the flags a note; never a difference at block level
     both = purchases(details=details, mrn=MRN_ROWS[:3])
     one = next(r for r in both["rows"] if r["receipt"] == "MRN:T-26-09-1")
-    assert one["status"] == rb.PAPERS_MISSING and one["differs"] and both["status"] == rb.DIFFERS
+    assert one["status"] == rb.PAPERS_MISSING and one["flagged"] and not one["differs"]
+    assert both["status"] == rb.PAPERS_MISSING and both["totals"]["differs"] == 0
+    assert ("the Orders page reads received short of the order: HG3; received over the order: CA1; supplier price more "
+            "than 5% above the order: HG3: not judged while a paper is missing") in one["notes"], one["notes"]
+    assert "To check" not in all_lines(both)
+
+
+@test("purchases: a variant's cost line not loaded makes its order read 'short': a missing paper, never a difference")
+def _():
+    mrn = [r for r in MRN_ROWS if r["code"] != "DS1 BL"]
+    details = dict(DETAILS, **{"T-26-09-1": detail(("CA1", ()), ("HG3", ()), ("DS1", ("short",)))})
+    p = purchases(mrn=mrn, details=details)
+    one = next(r for r in p["rows"] if r["receipt"] == "MRN:T-26-09-1")
+    assert one["status"] == rb.PAPERS_MISSING and one["flagged"] and not one["differs"]
+    assert one["actions"] == ["landed costs are loaded for 3 of its 4 lines: load the rest from its MRN XML"]
+    assert p["status"] == rb.PAPERS_MISSING and p["totals"]["differs"] == 0 and p["totals"]["papers_missing"] == 2
+    text = all_lines(p)
+    assert "To check" not in text and "received short of the order: DS1: not judged while a paper is missing" in text
 
 
 @test("purchases: PROVEN with no receipt in the month (nothing is due); a read that fails stands the block aside")
@@ -1193,7 +1344,7 @@ def _():
 def _():
     with data_root() as root:
         saved = rb.Source
-        rb.Source = lambda prefer="auto": Fake()
+        rb.Source = lambda prefer="auto", ledger_file=None: Fake()
         try:
             res = recon.run(Args(MONTH))
             assert res["exit"] == 0 and res["text"].startswith("RECONCILIATIONS  September 2026"), res["text"][:80]
