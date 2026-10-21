@@ -15,8 +15,8 @@
     file        the headline, and a new workbook even when the day's one exists (the next free name)
     <code>      one item: its Focus item code (a model code several items share lists them)
 
-THE BASIS. The main store is config 'warehouses.main' (the Focus "Accessories Warehouse"); vans and
-outlets come later (vans_beside() is the hook, empty until /yq-moves pairs the transfers). An item
+THE BASIS. The main store is config 'warehouses.main' (the Focus "Accessories Warehouse"); the order
+position also counts the stock beside it (the vans, the outlets, between them: below). An item
 is an accessory when it has ever moved in the main store, less config 'items.not_accessories'
 (scripts.ops.items.accessory_items): SIM packs never move there, so SIM is out by the rule, never by
 a word in a name. Every figure is read from the stock ledger (scripts.ops.ledger.for_audit: the
@@ -53,9 +53,17 @@ main-store balance is set beside the snapshot item by item, and a difference is 
     items above the top of the KPI band (or with no sale in the window); the same on the last day of
     last month, with today's costs. New arrivals = items first received in the RATE_DAYS days to the
     day: their rate is too short to judge, so they are a band of their own.
-  * Order list: an item that sold in the window is listed when (on hand + on order) ÷ its rate is
-    below the lead time + the low end of the KPI band; the quantity brings it to the lead time + the
-    top of the band, less what is on order, in whole units. Goods on order are promise lines of the
+  * Order list: an item that sold in the window is listed when its position (on hand, never below
+    nought, + beside + on order) ÷ its rate is below the lead time + the low end of the KPI band; the
+    quantity brings it to the lead time + the top of the band, less the position, in whole units.
+    Beside = the stock beside the main store that config 'stock.position_stores' names (the plan's
+    default: all three, the owner's choice of 21-Oct-2026; an empty list counts the main store only):
+    the vans' and the outlets' stock (scripts.ops.position: each store never below nought, a van less
+    its working minimum, config 'stock.van_floor_days') and the transfers between them still inside
+    their deadline (pairing in grace); one past it is not counted (it is on the action list). Damage,
+    samples and SIM stay out. Stock between stores is never "on the way" (that is supplier orders), a
+    screen never names a van, and the rate, cover, the fast movers and the ageing stay the main
+    store's figures. Goods on order are promise lines of the
     KPI log (business_data/ops/kpi_log.jsonl, kind 'promise': one per item from a proforma or a
     packing list), each deducted until a receipt of that item is dated after it; while none is
     logged the list says "goods on order not deducted". No purchase order is drafted.
@@ -106,8 +114,8 @@ from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
-from scripts.ops import (config, fmt, items, ledger, paths, stock_damage, stock_orders, stock_plan, stock_review,
-                         stock_season, stockflow)
+from scripts.ops import (config, fmt, items, ledger, pairing, paths, position, stock_damage, stock_orders, stock_plan,
+                         stock_review, stock_season, stockflow)
 
 from app import metrics  # noqa: E402
 
@@ -115,6 +123,8 @@ COMMAND = "stock"
 VIEW_WORDS = {"reorder": "reorder", "ageing": "ageing", "aging": "ageing", "damage": "damage", "file": "file"}
 CLEAR_DAYS_DEFAULT = 90        # the plan's default while config.json has no 'stock.clear_target_days' (his 20-Oct rule)
 EVERY_DAYS_DEFAULT = 30        # ... and no 'stock.order_every_days': he orders about monthly (20-Oct-2026)
+POSITION_STORES_DEFAULT = position.POSITION_KINDS   # ... and no 'stock.position_stores': all sellable stock (21-Oct)
+VAN_FLOOR_DEFAULT = 0          # ... and no 'stock.van_floor_days': no van keeps a working minimum back (21-Oct-2026)
 WINDOW_MAX_DAYS = 365          # a join or fill window never reaches past a year (the workbook caps it the same)
 RAISE_PARTS = False            # tests set it: a part of the screen that fails raises instead of standing aside
 RATE_DAYS = 90                 # the window of an item's daily rate
@@ -302,6 +312,8 @@ class Settings:
     supplier_lead: dict = field(default_factory=dict)      # supplier -> its lead time where none can be measured
     season_lift: dict = field(default_factory=dict)        # month 1-12 -> a lift that stands in for last year's
     pack_sizes: dict = field(default_factory=dict)         # item code (upper) -> units in a carton
+    position_stores: tuple = POSITION_STORES_DEFAULT       # what the order position counts beside the main store
+    floor_days: int = VAN_FLOOR_DEFAULT                    # the days of its own sales a van keeps back, not counted
 
 
 def settings() -> Settings:
@@ -355,6 +367,9 @@ def settings() -> Settings:
             raise config.ConfigMissing("config: every entry of 'stock.pack_sizes' is an item code and a whole number of "
                                        "units, 1 or more")
         packs[code_key(k)] = v
+    # the order position beside the main store (config checks the words and the days; [] is the main store only)
+    beside = optional("stock.position_stores", list(POSITION_STORES_DEFAULT))
+    floor = optional("stock.van_floor_days", VAN_FLOOR_DEFAULT)
     return Settings(lead_default=int(lead), fast_n=int(fast), low=int(band[0]), high=int(band[1]),
                     display=display, defaults_used=tuple(used), clear_days=int(clear),
                     damage=str(config.get("warehouses.damage") or "").strip(),
@@ -362,7 +377,8 @@ def settings() -> Settings:
                     suppliers=suppliers, supplier_aliases=aliases, every_days=int(every),
                     supplier_every=days_by_supplier("stock.supplier_every_days", 0),
                     supplier_lead=days_by_supplier("stock.supplier_lead_days", 1),
-                    season_lift=dict(config.get("stock.season_lift")), pack_sizes=packs)
+                    season_lift=dict(config.get("stock.season_lift")), pack_sizes=packs,
+                    position_stores=tuple(p for p in position.POSITION_KINDS if p in beside), floor_days=int(floor))
 
 
 # ── the reads ─────────────────────────────────────────────────────────────────
@@ -771,14 +787,166 @@ def apply_promises(model_items: list[Item], promises: list[dict] | None) -> dict
     return {"logged": logged, "counted": counted, "unmatched": unmatched, "log": True}
 
 
-# ── vans and outlets (later) ──────────────────────────────────────────────────
+# ── the stock beside the main store: the vans, the outlets, between them ─────
+
+# What the screens say when the stock beside the main store could not be worked out (the order list then counts the
+# main store only), and the words for each part of the position.
+BESIDE_FAILED = "Vans and outlets could not be counted this time: the order list counts the main store only."
+BESIDE_WORDS = {"vans": "the vans", "outlets": "the outlets", "transit": "the stock between stores"}
+KIND_OF_PART = {"vans": "vans", "outlets": "outlets", "transit": "between stores"}
+
+
+def position_facts(rows, model_items: dict, d: date, cfg: Settings, warnings: list) -> dict:
+    """facts["position"]: what the order position counts beside the main store (scripts.ops.position), for the
+    items the order list can hold (a display item counts nothing there):
+        {"stores": the parts config names, "floor_days": int,
+         "items": {ledger name: {"vans", "outlets", "transit", "counted", "clamped": how many vans or outlets
+                   were read as nought}}, only the items with some stock beside the main store,
+         "totals": {"vans", "outlets", "transit", "counted",
+                    "vans_n", "outlets_n": the vans, the outlets that hold some,
+                    "stores_n": those of them whose part is counted,
+                    "cost_bhd": the counted units at the item's cost, "uncosted": counted units without one},
+         "error": None, or the type of the failure: then nothing is counted beside the main store}
+    The stores are config's (the main store, the damage store, the stores never counted, the aliases); the units
+    are as on d, from these rows (the whole ledger to d, or build's cut). A failure adds one warning and counts
+    nothing (RAISE_PARTS: it raises instead)."""
+    totals = {"vans": ZERO, "outlets": ZERO, "transit": ZERO, "counted": ZERO, "vans_n": 0, "outlets_n": 0,
+              "stores_n": 0, "cost_bhd": ZERO, "uncosted": ZERO}
+    out = {"stores": list(cfg.position_stores), "floor_days": cfg.floor_days, "items": {}, "totals": totals,
+           "error": None}
+    plannable = [name for name, it in model_items.items() if not it.display]
+    try:
+        stores = pairing.StoreRules(config.get("warehouses.main"), cfg.damage or None, cfg.not_counted,
+                                    config.get("warehouses.aliases"))
+        got = position.position_beside_main(rows, list(model_items), d, store_rules=stores,
+                                            stores=cfg.position_stores, floor_days=cfg.floor_days)
+        held = position.stores_beside_main(rows, plannable, d, store_rules=stores, floor_days=cfg.floor_days)
+    except Exception as exc:  # noqa: BLE001  (the order list then counts the main store only, and says so)
+        if RAISE_PARTS:
+            raise
+        warnings.append(f"the stock beside the main store could not be worked out: {type(exc).__name__}: {exc}")
+        out["error"] = type(exc).__name__
+        return out
+    value = ZERO
+    for name in plannable:
+        row = got[name]
+        if not any(row[p] for p in position.POSITION_KINDS) and not row["clamped"]:
+            continue
+        out["items"][name] = {"vans": row["vans"], "outlets": row["outlets"], "transit": row["transit"],
+                              "counted": row["counted"], "clamped": len(row["clamped"])}
+        for key in position.POSITION_KINDS + ("counted",):
+            totals[key] += row[key]
+        cost = model_items[name].cost
+        if cost is None:
+            totals["uncosted"] += row["counted"]
+        else:
+            value += row["counted"] * cost
+    totals["cost_bhd"] = fmt.q3(value)
+    for part in ("vans", "outlets"):
+        totals[f"{part}_n"] = sum(1 for s in held.values() if s["kind"] == part)
+    totals["stores_n"] = sum(totals[f"{p}_n"] for p in ("vans", "outlets") if p in cfg.position_stores)
+    return out
+
 
 def vans_beside(model) -> list[dict]:
-    """The stock held beside the main store, one column each: vans and the two outlets. Empty until
-    /yq-moves pairs the transfers (an issue and its receipt are two vouchers with independent numbers;
-    only paired can the units between them be told apart from the vans' own). Each entry will be
-    {name, items, units, cost_bhd}; the headline prints them on the line it now spends on saying so."""
-    return []
+    """The stock held beside the main store, one entry per kind and never a store's name (a van is named after
+    its salesman): [{"kind": "vans" | "outlets" | "between stores", "stores": how many vans or outlets hold some
+    (None between stores), "units", "cost_bhd": its units with a cost at the item's cost, "uncosted": its units
+    without one, "counted": whether the order position counts it}], from facts["position"]. [] without a model,
+    or when the stock beside the main store could not be worked out."""
+    vo = (model.facts.get("position") if model is not None else None) or {}
+    if not vo or vo.get("error"):
+        return []
+    cost = {it.ledger_name: it.cost for it in model.items}
+    t = vo["totals"]
+    out = []
+    for part in position.POSITION_KINDS:
+        value = uncosted = ZERO
+        for name, row in vo["items"].items():
+            if not row[part]:
+                continue
+            if cost.get(name) is None:
+                uncosted += row[part]
+            else:
+                value += row[part] * cost[name]
+        out.append({"kind": KIND_OF_PART[part], "stores": t.get(f"{part}_n"), "units": t[part],
+                    "cost_bhd": fmt.q3(value), "uncosted": uncosted, "counted": part in vo["stores"]})
+    return out
+
+
+def _counted_words(vo: dict) -> str:
+    """What the order position counts beside the main store, in words: 'the vans, the outlets and ...'."""
+    named = [BESIDE_WORDS[p] for p in position.POSITION_KINDS if p in (vo.get("stores") or ())]
+    return ", ".join(named[:-1]) + " and " + named[-1] if len(named) > 1 else "".join(named)
+
+
+def counts_beside(model) -> bool:
+    """The order position counts some stock beside the main store: a part is named and nothing failed."""
+    vo = model.facts.get("position") or {}
+    return bool(vo) and not vo.get("error") and bool(vo.get("stores"))
+
+
+def beside_line(model) -> str:
+    """The headline's line on the stock beside the main store: the units in the vans, in the outlets and between
+    stores, each with its value, and what the order list counts of them."""
+    vo = model.facts.get("position") or {}
+    if not vo or vo.get("error"):
+        return "  " + BESIDE_FAILED
+    parts = []
+    for k in vans_beside(model):
+        money = ([f"BHD {fmt.bhd(k['cost_bhd'])}"] if k["cost_bhd"] else []) + (
+            [f"{fmt.units(k['uncosted'])} without a cost"] if k["uncosted"] else [])
+        where = (f"in {_plural(k['stores'], 'van' if k['kind'] == 'vans' else 'outlet')}"
+                 if k["stores"] is not None else "between stores")
+        if k["units"]:
+            parts.append(f"{fmt.units(k['units'])} units {where}" + (f" ({', '.join(money)})" if money else ""))
+        else:
+            parts.append({"vans": "nothing in the vans", "outlets": "nothing in the outlets",
+                          "between stores": "nothing between stores"}[k["kind"]])
+    if not vo["stores"]:
+        tail = "not counted in the order list (config 'stock.position_stores' is empty)"
+    elif len(vo["stores"]) == len(position.POSITION_KINDS):
+        tail = "the order list counts them"
+    else:
+        tail = f"the order list counts {_counted_words(vo)} only"
+    if vo["floor_days"] and "vans" in vo["stores"]:
+        tail += (f"; each van keeps {_plural(vo['floor_days'], 'day')} of its own sales back (config "
+                 "'stock.van_floor_days')")
+    return f"  Vans and outlets: {', '.join(parts)}; {tail}."
+
+
+def beside_note(model) -> str:
+    """The one line under an order table with a Vans column: 'Vans = the item's units in the vans and the outlets
+    and between stores ...', for the parts counted."""
+    stores = model.facts["position"]["stores"]
+    places = " and ".join(w for p, w in (("vans", "the vans"), ("outlets", "the outlets")) if p in stores)
+    held = " and ".join(([f"in {places}"] if places else []) + (["between stores"] if "transit" in stores else []))
+    return (f"  Vans = the item's units {held} (each store never below nought), counted with its main-store stock in "
+            "Cover and Order")
+
+
+def item_beside_lines(model, it) -> list[str]:
+    """/yq-stock <code>: one line on the item's stock beside the main store (none for a display item)."""
+    vo = model.facts.get("position") or {}
+    if it.display:
+        return []
+    if not vo or vo.get("error"):
+        return ["  " + BESIDE_FAILED]
+    row = vo["items"].get(it.ledger_name) or {}
+    nought = ""
+    if row.get("clamped"):
+        stores = _plural(row["clamped"], "van or outlet", "vans or outlets")
+        nought = (f"; {stores} below nought in the ledger, read as nought, to check" if not vo["floor_days"] else
+                  f"; {stores} read as nought (below nought, or within a van's working minimum)")
+    where = [f"{fmt.units(row[p])} {('in ' + BESIDE_WORDS[p]) if p != 'transit' else 'between stores'}"
+             for p in position.POSITION_KINDS if row.get(p)]
+    if not where:
+        return [f"  Vans and outlets: none of it beside the main store{nought}."]
+    if not vo["stores"]:
+        tail = "not counted in the order list (config 'stock.position_stores' is empty)"
+    else:
+        tail = f"{fmt.units(row['counted'])} counted in its order position"
+    return [f"  Vans and outlets: {', '.join(where)}; {tail}{nought}."]
 
 
 # ── building it all ───────────────────────────────────────────────────────────
@@ -1008,6 +1176,10 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
     # the stores beside the main store, the damage store and the sellers, read once: the order rule (a longer history
     # for an item out of stock most of the window) and the parts after the build read them
     fl = stockflow.flows(rows, model_items, cfg.damage, cfg.not_counted, d)
+    # the order position counts the stock beside the main store too: the vans, the outlets and the stock between
+    # them inside its deadline (the owner, 21-Oct-2026: all sellable stock); the rate stays the main store's
+    beside = position_facts(rows, model_items, d, cfg, warnings)
+    counted_of = {name: row["counted"] for name, row in beside["items"].items()}
     # each item's supplier first: its lead time and its rhythm are the supplier's (the owner, 20-Oct-2026)
     supplier_of = stock_plan.suppliers_of(plannable, cfg, inp.catalog, inp.po_vendor)
     measured = measure_lead_times(inp.invoices, receipt_codes(rows))
@@ -1116,7 +1288,8 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
                 used, basis = longer["rate"], f"longer history from {longer['first'].isoformat()}"
         supplier = supplier_of.get(it.ledger_name, (stock_plan.OTHER, "none"))[0]
         rule = rule_of(supplier)
-        have = max(it.on_hand, ZERO) + it.on_order
+        held = counted_of.get(it.ledger_name, ZERO)    # the vans, the outlets and between stores, as counted
+        have = max(it.on_hand, ZERO) + held + it.on_order
         # the workbook works the same rule out again from the rate to six decimals (stock_plan's one rounding rule),
         # so the screen and the file agree to the unit at a whole-number boundary
         rate6 = stock_plan.round6(used)
@@ -1127,7 +1300,7 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
         if pack and pack > 1 and qty > 0:                # whole cartons
             qty = (qty / pack).to_integral_value(rounding=ROUND_CEILING) * pack
         order.append({"item": it, "rate": r, "cover": have / used, "qty": qty, "rate6": rate6, "rate_basis": basis,
-                      "supplier": supplier, "position": have, "trig_days": rule["trig_days"],
+                      "supplier": supplier, "position": have, "beside": held, "trig_days": rule["trig_days"],
                       "fill_days": rule["fill_days"], "pack": pack,
                       "cost_bhd": fmt.q3(qty * it.cost) if it.cost is not None else None})
     order.sort(key=lambda x: (x["cover"], -(x["cost_bhd"] or ZERO), x["item"].name))
@@ -1252,7 +1425,7 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
     head["portal_uncosted_items"] = int(pc.get("items_uncosted") or 0) if pc else None
     head["display_items"] = len(display_held)
     head["display_units"] = sum((it.on_hand for it in display_held), ZERO)
-    head["vans"] = vans_beside(None)
+    head["vans"] = []                                  # vans_beside(model), once the model stands
     if not compared:
         # as on another day than the snapshot's: the portal's figures are of today's stock, so none stands here
         head.update(items=None, units=None, sell_bhd=None, found=False, other_warehouses=None, uncosted_sell_bhd=None,
@@ -1265,7 +1438,7 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
         "kpi_cover": {"now": kpi_now, "last_month_end": e, "last": kpi_last, "low": cfg.low, "high": cfg.high},
         "bands": bands, "last_receipt": last_mrn,
         "lead": lead, "trigger_days": trigger, "fill_days": fill, "order": order, "on_order": on_order,
-        "on_the_way": on_order, "leads": leads, "supplier_rules": rules,
+        "on_the_way": on_order, "leads": leads, "supplier_rules": rules, "position": beside,
         "season": {"lifts": lifts, "warn": held_down, "applied": season_on},
         "fast": {"n": cfg.fast_n, "rank_first": rank_first, "rank_last": rank_last, "partial": rank_partial,
                  "last_partial": last_partial, "now": avail_now, "last": avail_last, "list": fast_now,
@@ -1284,6 +1457,7 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
                           "cost_words": cost_words(held_basis)[0].replace("at ", "at today's ", 1)}
     model = Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
                   facts=facts, notes=notes, warnings=warnings, flows=fl, ledger_note=inp.ledger_note)
+    head["vans"] = vans_beside(model)
     facts["damage"] = _part(model, "damage", lambda: stock_damage.damage_facts(model, fl))
     facts["review"] = _part(model, "review", lambda: stock_review.review_facts(model, fl, price_cuts))
     facts["plan"] = _part(model, "plan", lambda: stock_plan.plan_facts(model, fl, inp.catalog, inp.po_vendor))
@@ -1415,6 +1589,11 @@ def _rate_cell(x: dict) -> str:
     return rate_text(x["rate"].rate, x["rate"].floored)
 
 
+def _vans_cell(x: dict) -> str:
+    """An order row's Vans: the units counted beside the main store in its position (blank for none)."""
+    return fmt.units(x["beside"]) if x.get("beside") else ""
+
+
 LONGER_NOTE = (f"  ~ out of stock most of the last {RATE_DAYS} days: the rate of a longer history (back to the first "
                f"window holding {RATE_MIN_DAYS} days in stock, up to a year)")
 
@@ -1478,7 +1657,7 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
     if h["display_items"]:
         lines.append(f"  Display items: {_plural(h['display_items'], 'item')}, {fmt.units(h['display_units'])} units, "
                      "left out of cover, the order list and the ageing.")
-    lines.append("  Vans and outlets: not counted here yet (they come with /yq-moves, once transfers are paired).")
+    lines.append(beside_line(model))
 
     k = f["kpi_cover"]
     now, last = k["now"], k["last"]
@@ -1517,10 +1696,15 @@ def headline_lines(model: Model, ledger_note: str) -> list[str]:
         lines.append(f"  {_plural(len(order), 'item')} below {f['trigger_days']} days of cover; ordered up to "
                      f"{f['fill_days']} days: {fmt.units(units)} units, BHD {fmt.bhd(value)} {label} ({basis})")
         top = order[:HEADLINE_ROWS]
-        rows = [[short(x["item"].name, 36), x["item"].code or "", fmt.units(x["item"].on_hand),
-                 _rate_cell(x), days_text(x["cover"]), fmt.units(x["qty"]),
-                 _cost_cell(x["cost_bhd"])] for x in top]
-        lines += _indent(fmt.grid(["Item", "Code", "On hand", "A day", "Cover", "Order", "At cost"], rows, "llrrrrr"))
+        vans = counts_beside(model)                    # a Vans column when the position counts stock beside it
+        rows = [[short(x["item"].name, 36), x["item"].code or "", fmt.units(x["item"].on_hand)]
+                + ([_vans_cell(x)] if vans else [])
+                + [_rate_cell(x), days_text(x["cover"]), fmt.units(x["qty"]), _cost_cell(x["cost_bhd"])] for x in top]
+        lines += _indent(fmt.grid(["Item", "Code", "On hand"] + (["Vans"] if vans else []) + ["A day", "Cover", "Order",
+                                                                                            "At cost"],
+                                  rows, "llr" + ("r" if vans else "") + "rrrr"))
+        if vans:
+            lines.append(beside_note(model))
         if any(x["rate"].floored and _rate_cell(x).endswith("*") for x in top):
             lines.append(FLOOR_NOTE)
         if any(_rate_cell(x).endswith("~") for x in top):
@@ -1581,23 +1765,30 @@ def reorder_lines(model: Model, ledger_note: str) -> list[str]:
     if oo["unmatched"]:
         lines.append(f"  {_plural(oo['unmatched'], 'promise line')} of the KPI log "
                      f"{'matches' if oo['unmatched'] == 1 else 'match'} no item, to check.")
+    if (f.get("position") or {}).get("error"):
+        lines.append("  " + BESIDE_FAILED)
     order = f["order"]
     if not order:
         lines.append(f"  No item is below {f['trigger_days']} days of cover.")
     else:
         rows = []
         plan = f.get("plan") or {}
+        vans = counts_beside(model)                    # a Vans column when the position counts stock beside it
         for n, x in enumerate(order, 1):
             it, r = x["item"], x["rate"]
             rows.append([str(n), short(it.name, 34), it.code or "", stock_plan.supplier_of(plan, it.ledger_name),
-                         fmt.units(it.on_hand), fmt.units(it.on_order) if it.on_order else "", fmt.units(r.sold),
-                         str(r.days_in_stock), _rate_cell(x), days_text(x["cover"]),
-                         fmt.units(x["qty"]), _cost_cell(x["cost_bhd"]),
-                         _date_short(it.last_receipt, d) if it.last_receipt else "none",
-                         str(it.rank) if it.rank and it.rank <= model.cfg.fast_n else ""])
-        lines += _indent(fmt.grid(["#", "Item", "Code", "Supplier", "On hand", "On order", f"Sold {RATE_DAYS} d",
-                                   "In stock", "A day", "Cover", "Order", "At cost", "Last receipt", "Fast"], rows,
-                                  "rlllrrrrrrrrlr"))
+                         fmt.units(it.on_hand)] + ([_vans_cell(x)] if vans else [])
+                        + [fmt.units(it.on_order) if it.on_order else "", fmt.units(r.sold),
+                           str(r.days_in_stock), _rate_cell(x), days_text(x["cover"]),
+                           fmt.units(x["qty"]), _cost_cell(x["cost_bhd"]),
+                           _date_short(it.last_receipt, d) if it.last_receipt else "none",
+                           str(it.rank) if it.rank and it.rank <= model.cfg.fast_n else ""])
+        lines += _indent(fmt.grid(["#", "Item", "Code", "Supplier", "On hand"] + (["Vans"] if vans else [])
+                                  + ["On order", f"Sold {RATE_DAYS} d", "In stock", "A day", "Cover", "Order", "At cost",
+                                     "Last receipt", "Fast"], rows,
+                                  "rlllr" + ("r" if vans else "") + "rrrrrrrlr"))
+        if vans:
+            lines.append(beside_note(model))
         if any(_rate_cell(x).endswith("*") for x in order):
             lines.append(FLOOR_NOTE)
         if any(_rate_cell(x).endswith("~") for x in order):
@@ -1771,6 +1962,7 @@ def item_lines(model: Model, query: str, ledger_note: str) -> list[str]:
     sell = ("" if f["ledger_check"].get("not_compared") else
             f"BHD {fmt.bhd(it.sell_value)} at selling price in the stock balance; ")
     lines.append(f"  Main store, end of {fmt.day(d)}: {fmt.units(it.on_hand)} units; {sell}{item_cost_words(it)}")
+    lines += item_beside_lines(model, it)
     lines.append(f"  Sold in the last {RATE_DAYS} days: {fmt.units(r.sold)} units, in stock at the end of "
                  f"{r.days_in_stock} of those days: {rate_text(r.rate, r.floored)} a day; cover "
                  f"{days_text(cover_of(max(it.on_hand, ZERO), r.rate))}" + (" days" if r.rate > 0 else ""))
@@ -2020,7 +2212,8 @@ def facts_out(model: Model, view: str, query: str | None) -> dict:
         part = f.get(key) or {}
         out[key] = part if "error" in part else as_json(part)
     out["order"] = [dict(item_row(x["item"]), rate=x["rate"].rate, sold=x["rate"].sold,
-                         days_in_stock=x["rate"].days_in_stock, cover=x["cover"], qty=x["qty"], cost_bhd=x["cost_bhd"])
+                         days_in_stock=x["rate"].days_in_stock, cover=x["cover"], qty=x["qty"], cost_bhd=x["cost_bhd"],
+                         beside=x.get("beside"))
                     for x in f["order"]]
     fa = f["fast"]
     out["fast"] = {"n": fa["n"], "rank_first": fa["rank_first"], "rank_last": fa["rank_last"],

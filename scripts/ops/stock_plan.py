@@ -19,7 +19,7 @@ CONTRACT (scripts.ops.stock and the workbook rely on it)
      "order": [order row of facts["order"] + {"supplier": str}],      # by supplier, then most urgent first
      "supplier_totals": [{"supplier", "items", "units", "value", "uncosted"}],
      "all_items": [{"item": Item | None, "code", "name", "category", "supplier", "supplier_basis", "status",
-                    "main", "with_vans", "damage", "on_order", "sold_30", "sold_90", "sold_365",
+                    "main", "with_vans", "vans", "damage", "on_order", "sold_30", "sold_90", "sold_365",
                     "rate": Rate | None, "cover": Decimal | None, "value": Decimal | None,
                     "oldest_days": int | None, "last_sale", "last_receipt", "rank",
                     "active": bool | None, "hidden": bool | None, "catalog_only": bool}],
@@ -48,7 +48,10 @@ HOW IT DECIDES
   * all_items holds every model item (display items too) and every accessory code of the catalog that
     no model item has (catalog_only); main = the main store's units, with_vans = the units the sellable
     pool holds beyond them (vans, outlets, goods on the way: information only, it can be below nought
-    where the ledger returns more from a van than was issued to it), damage = the damage store's units.
+    where the ledger returns more from a van than was issued to it; the v2 file's column), vans = the
+    units the order position counts beside the main store (facts["position"]: the vans, the outlets and
+    between them, never below nought; nought for a display item, a catalog code, or nothing counted),
+    damage = the damage store's units.
     sold_30/90/365 are the units sold in that many days to the data date, never below nought (as the
     daily rate counts them). cover = the main store's units over the daily rate (None without a rate);
     value = the main store's units at the item's unit cost (None where it has none). oldest_days = the
@@ -193,6 +196,7 @@ def plan_facts(model, fl, catalog, po_vendor) -> dict:
     d = model.d
     rates = (model.facts.get("fast") or {}).get("rates") or {}
     listed = {x["item"].ledger_name for x in model.facts["order"]}
+    beside = ((model.facts.get("position") or {}).get("items")) or {}     # what the order position counts
     book = _accessories(catalog, st.code_key)
     pick = _supplier_picker(model.cfg, book, po_vendor, st)
     category_of = _category_rule()
@@ -221,6 +225,7 @@ def plan_facts(model, fl, catalog, po_vendor) -> dict:
             "supplier": name, "supplier_basis": basis, "status": _status(it, rate, cover, listed, d, st),
             "main": it.on_hand,
             "with_vans": (flow.sellable_at(d) - it.on_hand) if flow is not None else ZERO,
+            "vans": (beside.get(it.ledger_name) or {}).get("counted", ZERO),
             "damage": flow.damage_at(d) if flow is not None else ZERO,
             "on_order": it.on_order,
             "sold_30": sold[0], "sold_90": sold[1], "sold_365": sold[2],
@@ -241,7 +246,7 @@ def plan_facts(model, fl, catalog, po_vendor) -> dict:
             "item": None, "code": key, "name": _clean(cat.get("display_name")) or key,
             "category": _clean(cat.get("category")) or category_of(key) or "",
             "supplier": name, "supplier_basis": basis, "status": NOT_YET,
-            "main": ZERO, "with_vans": ZERO, "damage": ZERO, "on_order": ZERO,
+            "main": ZERO, "with_vans": ZERO, "vans": ZERO, "damage": ZERO, "on_order": ZERO,
             "sold_30": ZERO, "sold_90": ZERO, "sold_365": ZERO,
             "rate": None, "cover": None, "value": None, "oldest_days": None,
             "last_sale": None, "last_receipt": None, "rank": None,
@@ -292,7 +297,8 @@ def facts_json(facts: dict) -> dict:
         it = x["item"]
         order.append({"item": it.name, "code": it.code, "supplier": x.get("supplier"), "on_hand": it.on_hand,
                       "on_order": it.on_order, "cost": it.cost, "cost_source": it.cost_source,
-                      **_rate_cells(x["rate"]), "cover": x["cover"], "qty": x["qty"], "cost_bhd": x["cost_bhd"]})
+                      **_rate_cells(x["rate"]), "cover": x["cover"], "qty": x["qty"], "cost_bhd": x["cost_bhd"],
+                      "beside": x.get("beside")})
     every = []
     for row in facts.get("all_items") or []:
         out: dict = {}

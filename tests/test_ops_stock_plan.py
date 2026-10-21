@@ -28,6 +28,8 @@ Covered:
     the sort, the status of each item and the rule's precedence (a new arrival that has sold out, or has to be
     ordered, shows as that), the boundary of Overstock;
   * a catalog that was not read; a category the catalog lacks; goods on order;
+  * all_items' vans (the units the order position counts beside the main store) beside with_vans (the pool's own,
+    the v2 file's column), nought where nothing is counted; each order row's beside, in the JSON form too;
   * the screens and files: the Supplier column of /yq-stock reorder, the plan in stock.json, facts_json.
 """
 from __future__ import annotations
@@ -50,7 +52,8 @@ os.environ["SUPABASE_KEY"] = "ci-key"
 os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 
 from tests.test_ops_stock import (  # noqa: E402  (first: it imports scripts.ops.db first, and sets stdout to UTF-8)
-    CATALOG_ROWS, CODES, D, NAMES, L, World, data_root, model_of, run, snapshot_rows, standing_in, world)
+    CATALOG_ROWS, CODES, D, DEFAULT_POSITION, NAMES, L, World, data_root, model_of, moving, run, snapshot_rows,
+    standing_in, world)
 from scripts.ops import config, paths, stock, stock_plan  # noqa: E402
 
 stock.RAISE_PARTS = True              # a part that fails fails the test, never stands aside quietly
@@ -622,6 +625,35 @@ def _():
     empty = stock_plan.facts_json({})
     assert empty["all_items"] == [] and empty["order"] == [] and empty["statuses"] == {} and empty["built"] is True
     assert empty["catalog_read"] is False and json.dumps(stock._jsonable(empty))
+
+
+@test("all_items' vans: the units the order position counts beside the main store; with_vans stays the pool's own "
+      "(the v2 file's column); nought for a display item, a catalog code, or nothing counted")
+def _():
+    with data_root(drop=DEFAULT_POSITION):
+        m, _inp = model_of(moving())
+    plan = m.facts["plan"]
+    vans = {r["code"]: r["vans"] for r in plan["all_items"]}
+    # ITEM-B 35 in the second van; ITEM-C 5 in the outlet and 8 in grace; ITEM-N 2 received and 2 in grace; ITEM-A's
+    # van at -10 reads nought; the display item and the catalog code count nothing
+    assert vans == {"CA1": 0, "CB2": 35, "HG3": 13, "SN4": 4, "FO5": 0, "DS1": 0, "ZN9": 0}, vans
+    assert all(isinstance(v, Decimal) for v in vans.values())
+    assert {c: vans[c] for c in vans if c != "ZN9"} == {
+        CODES[k]: (m.facts["position"]["items"].get(L(k)) or {}).get("counted", 0) for k in NAMES}
+    # the pool beside the main store, information only: ITEM-C's 4 past their deadline are still in it (17 = 5 + 8 +
+    # 4), ITEM-A's van return below nought (-10); the order position counts neither
+    assert (row(plan, "HG3")["with_vans"], row(plan, "CA1")["with_vans"]) == (17, -10)
+    assert plan["order"][0]["beside"] == m.facts["order"][0]["beside"] == 35
+    js = stock_plan.facts_json(plan)
+    assert js["order"][0]["beside"] == 35 and {r["code"]: r["vans"] for r in js["all_items"]} == vans
+    # the main store only: nothing is counted beside it, every row says nought
+    with data_root():
+        m0, _inp = model_of(moving())
+    assert {r["vans"] for r in m0.facts["plan"]["all_items"]} == {0} and m0.facts["plan"]["order"][0]["beside"] == 0
+    # a model with no position at all (as a hand-made one): nought everywhere
+    bare = stock_plan.plan_facts(replace(m0, facts={k: v for k, v in m0.facts.items() if k != "position"}), m0.flows,
+                                 CATALOG_ROWS, None)
+    assert {r["vans"] for r in bare["all_items"]} == {0}
 
 
 @test("the module is pure: no client, no writer, and it imports stock only when it runs (stock imports it)")

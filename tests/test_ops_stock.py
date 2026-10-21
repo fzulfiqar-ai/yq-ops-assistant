@@ -51,6 +51,11 @@ Covered:
     as_of: the same model as the rows, price cuts and promise lines cut by hand; D is that day though
     nothing moved on it; the costs stay today's; the portal's figures and the ledger check only on the
     snapshot's own day; a day outside the ledger is one sentence);
+  * the order position beside the main store (the fixture counts the main store only; the plan's
+    default counts all three): the vans, the outlets and the transfers in grace count, a van below
+    nought reads nought, a transfer past its deadline, damage and samples never; a van's working
+    minimum; as on an earlier day; the failure path; the headline's line, the Vans column and its
+    note, one item, the facts; never a store's name, never "on the way";
   * the real loaded ledger and stock balance files, when they are on this machine (SKIP otherwise).
 """
 from __future__ import annotations
@@ -103,6 +108,8 @@ FIXTURE = {
     "stock.cover_kpi_days": [30, 45], "stock.clear_target_days": 90,
     # release 1's figures stand in every test that does not say otherwise: no rhythm, every lift 1.00
     "stock.order_every_days": 0, "stock.season_lift": {str(m): 1 for m in range(1, 13)},
+    # ... and the main store only in the order position (the tests of the vans and the outlets drop this key)
+    "stock.position_stores": [], "stock.van_floor_days": 0,
 }
 stock.RAISE_PARTS = True              # a part that fails fails the test, never stands aside quietly
 NAMES = {"A": "ITEM-A Cable Alpha", "B": "ITEM-B Charger Beta", "C": "ITEM-C Holder Gamma",
@@ -782,7 +789,11 @@ def _():
             "there)") in text
     assert "The ledger agrees with the stock balance on all 5 items (Sun 15 Mar)." in text
     assert "Display items: 1 item, 5 units, left out of cover, the order list and the ageing." in text
-    assert "Vans and outlets: not counted here yet" in text and stock.vans_beside(None) == []
+    # the fixture counts the main store only: the second van's 35 of ITEM-B (35 x 2.5) are shown and left out
+    assert ("  Vans and outlets: 35 units in 1 van (BHD 87.500), nothing in the outlets, nothing between stores; not "
+            "counted in the order list (config 'stock.position_stores' is empty).") in text, text
+    assert stock.vans_beside(None) == [] and "Vans" not in next(ln for ln in text.splitlines() if "Item" in ln
+                                                                 and "Code" in ln)
     assert "ORDER LIST  lead time 40 days, measured on the last 5 supplier invoices (config 50); goods on order not " \
            "deducted" in text
     assert "1 item below 70 days of cover; ordered up to 85 days: 65 units, BHD 162.500 at cost" in text
@@ -1255,6 +1266,209 @@ def _():
     assert item(hand, "B").cost == Decimal(2) and item(hand, "B").cost_source == "receipt"
     assert item(past, "A").cost == item(hand, "A").cost == Decimal("0.4")      # an MRN cost is today's either way
     assert past.facts["as_of"]["cost_words"] == "at today's landed cost"
+
+
+# ── the order position: the vans, the outlets and the stock between them ─────
+
+DEFAULT_POSITION = ("stock.position_stores", "stock.van_floor_days")   # dropped: the plan's defaults (all, no floor)
+OUTLET = "Causeway"                                                    # an outlet, as pairing.StoreRules.kind knows it
+
+
+def late_receipt(b: Book, item_name: str, day: date, units, frm: str, to: str, booked_on: date) -> Book:
+    """A transfer whose receive leg is booked on a later day than its issue."""
+    b.n += 1
+    b._row(item_name, day, ledger.ISSUE, frm, f"SIO:T-{b.n}", qout=units, to_wh=to)
+    b._row(item_name, booked_on, ledger.RECEIVE, to, f"STRV:T-{b.n}", qin=units)
+    return b
+
+
+def moving() -> World:
+    """The world with stock beside the main store in every part (and the snapshot as the main store then stands):
+      ITEM-C  5 to the outlet the day before D (received); 8 to the first van on D, not received yet (in grace: due
+              Mon 16 Mar); 4 to the second van on Tue 10 Mar, never received (past its deadline: not counted)
+      ITEM-N  two identical issues of 2 to the second van on D and one receipt of 2: one slot of the twins in grace
+      ITEM-A  3 to the damage store and 2 to the samples on D, neither received: never counted
+    Beside: ITEM-B 35 in the second van; ITEM-A's first van stands at -10 (a return it never held), read as 0."""
+    b = world()
+    b.move(L("C"), D - timedelta(days=1), 5, MAIN, OUTLET)
+    b.move(L("C"), D, 8, MAIN, VAN, received=False)
+    b.move(L("C"), D - timedelta(days=5), 4, MAIN, VAN_B, received=False)
+    b.move(L("N"), D, 2, MAIN, VAN_B)
+    b.move(L("N"), D, 2, MAIN, VAN_B, received=False)
+    b.to_damage(L("A"), D, 3, booked=False)
+    b.move(L("A"), D, 2, MAIN, SAMPLES, received=False)
+    return World(book=b, snapshot=snapshot_rows({"A": 389, "C": 33, "N": 32}))
+
+
+def zeros(**units) -> dict:
+    """A position row of facts["position"]["items"]: the parts given, the rest nought."""
+    row = {"vans": Decimal(0), "outlets": Decimal(0), "transit": Decimal(0), "counted": Decimal(0), "clamped": 0}
+    row.update({k: (Decimal(v) if k != "clamped" else v) for k, v in units.items()})
+    return row
+
+
+@test("the position (the plan's default, all three): the vans, the outlets and in-grace transfers count; a van below "
+      "nought reads nought; a transfer past its deadline, damage and samples never")
+def _():
+    with data_root(drop=DEFAULT_POSITION):
+        m, _inp = model_of(moving())
+        cfg = stock.settings()
+    assert cfg.position_stores == ("vans", "outlets", "transit") and cfg.floor_days == 0
+    assert {"stock.position_stores", "stock.van_floor_days"} <= set(cfg.defaults_used)
+    vo = m.facts["position"]
+    assert (vo["stores"], vo["floor_days"], vo["error"]) == (["vans", "outlets", "transit"], 0, None)
+    assert vo["items"] == {
+        L("A"): zeros(clamped=1),                                  # the first van at -10: read as 0, nothing counted
+        L("B"): zeros(vans=35, counted=35),                        # the second van's 35
+        L("C"): zeros(outlets=5, transit=8, counted=13),           # 5 in the outlet, 8 still in grace (4 past it: out)
+        L("N"): zeros(vans=2, transit=2, counted=4)}, vo["items"]  # 2 received, the twin's missing slot in grace
+    # 35 x 2.5 + 13 x 0.8 + 4 x 3.2; the second van and the outlet hold some (the first van holds nothing)
+    assert vo["totals"] == {"vans": 37, "outlets": 5, "transit": 10, "counted": 52, "vans_n": 1, "outlets_n": 1,
+                            "stores_n": 2, "cost_bhd": Decimal("110.700"), "uncosted": 0}, vo["totals"]
+    # the order position: ITEM-B 20 + 35 + nothing on order = 55 days at 1.00 a day, filled to 85: 30 (was 65)
+    (row,) = m.facts["order"]
+    assert (row["item"].code, row["beside"], row["position"], row["cover"], row["qty"]) == ("CB2", 35, 55, 55, 30), row
+    assert m.facts["plan"]["order"][0]["beside"] == 35
+    # the rate, the days in stock, KPI 1 cover and the ageing stay the main store's
+    r = m.facts["fast"]["rates"][L("B")]
+    assert (r.sold, r.days_in_stock, r.rate) == (45, 45, 1) and m.facts["ageing"]["main_units"] == 389 + 20 + 33 + 32 + 5
+    assert stock.vans_beside(m) == m.facts["headline"]["vans"] == [
+        {"kind": "vans", "stores": 1, "units": 37, "cost_bhd": Decimal("93.900"), "uncosted": 0, "counted": True},
+        {"kind": "outlets", "stores": 1, "units": 5, "cost_bhd": Decimal("4.000"), "uncosted": 0, "counted": True},
+        {"kind": "between stores", "stores": None, "units": 10, "cost_bhd": Decimal("12.800"), "uncosted": 0,
+         "counted": True}]
+    # the main store only ([]): the same units are shown, nothing is counted, ITEM-B orders its 65 again
+    with data_root():
+        m0, _inp = model_of(moving())
+    assert m0.facts["position"]["stores"] == [] and m0.facts["position"]["totals"]["counted"] == 0
+    assert m0.facts["position"]["items"][L("B")] == zeros(vans=35)
+    assert [(x["item"].code, x["beside"], x["qty"]) for x in m0.facts["order"]] == [("CB2", 0, 65)]
+    assert [k["counted"] for k in stock.vans_beside(m0)] == [False] * 3
+
+
+@test("the position on the screens: the headline's line and a Vans column with its note, the reorder view, one item; "
+      "never a van's name, never 'on the way'")
+def _():
+    with data_root(drop=DEFAULT_POSITION) as root:
+        head = run(moving())["text"]
+        reorder = run(moving(), "reorder")["text"]
+        items = {code: run(moving(), code)["text"] for code in ("CB2", "HG3", "CA1", "SN4", "FO5", "DS1")}
+        facts = json.loads((root / "exports" / "ops" / D.isoformat() / "stock.json").read_text(encoding="utf-8"))
+    assert ("  Vans and outlets: 37 units in 1 van (BHD 93.900), 5 units in 1 outlet (BHD 4.000), 10 units between "
+            "stores (BHD 12.800); the order list counts them.") in head, head
+    lines = head.splitlines()
+    at = lines.index(next(ln for ln in lines if ln.split()[:2] == ["Item", "Code"]))
+    note = ("  Vans = the item's units in the vans and the outlets and between stores (each store never below "
+            "nought), counted with its main-store stock in Cover and Order")
+    assert lines[at].split() == ["Item", "Code", "On", "hand", "Vans", "A", "day", "Cover", "Order", "At", "cost"]
+    assert lines[at + 1].split() == ["ITEM-B", "Charger", "Beta", "CB2", "20", "35", "1.00", "55", "30", "75.000"]
+    assert lines[at + 2] == note and note in reorder
+    header = next(ln for ln in reorder.splitlines() if "Supplier" in ln and "Vans" in ln)
+    assert header.index("On hand") < header.index("Vans") < header.index("On order")
+    assert items["CB2"].splitlines()[2] == "  Vans and outlets: 35 in the vans; 35 counted in its order position."
+    assert "  Vans and outlets: 5 in the outlets, 8 between stores; 13 counted in its order position." in items["HG3"]
+    assert ("  Vans and outlets: none of it beside the main store; 1 van or outlet below nought in the ledger, read as "
+            "nought, to check.") in items["CA1"]
+    assert "  Vans and outlets: 2 in the vans, 2 between stores; 4 counted in its order position." in items["SN4"]
+    assert "  Vans and outlets: none of it beside the main store." in items["FO5"]
+    assert "Vans and outlets" not in items["DS1"]                       # a display item is never in the position
+    # the facts beside the screen: the position, each order row's units beside the main store, no store's name
+    assert facts["position"]["stores"] == ["vans", "outlets", "transit"] and facts["order"][0]["beside"] == "35"
+    assert facts["position"]["totals"]["counted"] == "52" and facts["plan"]["order"][0]["beside"] == "35"
+    shown = (json.dumps(facts["position"]) + json.dumps(facts["headline"]["vans"]) + head + reorder
+             + "".join(items.values()))
+    for name in (VAN, VAN_B, OUTLET):                 # a van is named after its salesman: never a store's name
+        assert name.casefold() not in shown.casefold(), name
+    for text in [head, reorder] + list(items.values()):
+        assert "on the way" not in "\n".join(ln for ln in text.splitlines() if "Vans" in ln or "between" in ln)
+        for line in text.splitlines():
+            fmt.careful(line)
+    # some parts only: the words say which; the order counts those only
+    with data_root({"stock.position_stores": ["vans"]}):
+        m, _inp = model_of(moving())
+        text = stock.headline_lines(m, "n")
+    assert m.facts["position"]["stores"] == ["vans"] and m.facts["position"]["totals"]["counted"] == 37
+    assert m.facts["position"]["totals"]["stores_n"] == 1 and m.facts["order"][0]["beside"] == 35
+    assert any(ln.endswith("; the order list counts the vans only.") for ln in text), text
+    assert "  Vans = the item's units in the vans (each store never below nought), counted with its main-store stock " \
+           "in Cover and Order" in text
+    with data_root({"stock.position_stores": ["transit", "outlets"]}):
+        m, _inp = model_of(moving())
+        text = stock.headline_lines(m, "n")
+    assert m.facts["position"]["stores"] == ["outlets", "transit"] and m.facts["position"]["totals"]["stores_n"] == 1
+    assert [x["beside"] for x in m.facts["order"]] == [0] and m.facts["order"][0]["qty"] == 65
+    assert any(ln.endswith("; the order list counts the outlets and the stock between stores only.") for ln in text)
+
+
+@test("a van's working minimum: ceil(days x its own sales over 90 days / 90) is kept back, the vans only; below it the "
+      "van reads nought")
+def _():
+    b = world()
+    b.move(L("B"), D, 10, MAIN, VAN)                  # the first van holds 10 of ITEM-B and sold 45 in the 90 days
+    b.move(L("C"), D, 5, MAIN, OUTLET).sale(L("C"), D, 1, wh=OUTLET)      # an outlet that sells: no floor there
+    w = World(book=b, snapshot=snapshot_rows({"B": 10, "C": 45}))
+    got = {}
+    for days in (0, 2, 30):
+        with data_root({"stock.position_stores": ["vans", "outlets", "transit"], "stock.van_floor_days": days}):
+            m, _inp = model_of(w)
+            got[days] = (m.facts["position"]["items"][L("B")], m.facts["position"]["items"][L("C")],
+                         stock.headline_lines(m, "n"))
+    # 2 days: ceil(2 x 45 / 90) = 1 kept back of the first van's 10; the second van's 35 sold nothing: none kept
+    assert got[0][0] == zeros(vans=45, counted=45) and got[2][0] == zeros(vans=44, counted=44)
+    # 30 days: ceil(30 x 45 / 90) = 15 is more than its 10: the van reads 0 (and the first van's ITEM-A stays at 0)
+    assert got[30][0] == zeros(vans=35, counted=35, clamped=1)
+    assert got[0][1] == got[30][1] == zeros(outlets=4, counted=4)                       # the outlet keeps nothing
+    assert any("; each van keeps 2 days of its own sales back (config 'stock.van_floor_days')." in ln
+               for ln in got[2][2])
+    assert not any("each van keeps" in ln for ln in got[0][2])
+
+
+@test("the position as on an earlier day (build's as_of): the vans, the outlets and the transfers as they stood then")
+def _():
+    b = world()
+    thu, sat = date(2026, 3, 12), date(2026, 3, 14)     # due on the Saturday after a Thursday's issue
+    late_receipt(b, L("C"), thu, 6, MAIN, VAN, booked_on=sat)
+    with data_root(drop=DEFAULT_POSITION):
+        with standing_in(World(book=b, snapshot=snapshot_rows({"C": 44}))):
+            cfg, inp = stock.settings(), stock.gather()
+        at = {day: stock.build(inp, cfg, as_of=day).facts["position"]["items"]
+              for day in (date(2026, 1, 31), date(2026, 2, 1), thu, sat)}
+        now = stock.build(inp, cfg).facts["position"]["items"]
+    assert L("B") not in at[date(2026, 1, 31)] and at[date(2026, 2, 1)][L("B")] == zeros(vans=35, counted=35)
+    assert at[thu][L("C")] == zeros(transit=6, counted=6)               # issued, not yet booked in: in grace
+    assert at[sat][L("C")] == now[L("C")] == zeros(vans=6, counted=6)  # booked in by the van, which has not sold it
+
+
+@test("the position that cannot be worked out counts the main store only and says so; the tests' mode raises")
+def _():
+    from scripts.ops import position as pos
+    saved = (pos.position_beside_main, stock.RAISE_PARTS)
+
+    def down(*_a, **_kw):
+        raise RuntimeError("the pairing stopped")
+
+    try:
+        pos.position_beside_main = down
+        with data_root(drop=DEFAULT_POSITION):
+            raises(RuntimeError, lambda: model_of(moving()))          # RAISE_PARTS: a part that fails fails the test
+            stock.RAISE_PARTS = False
+            m, _inp = model_of(moving())
+            head, reorder, one = (stock.headline_lines(m, "n"), stock.reorder_lines(m, "n"),
+                                  stock.item_lines(m, "CB2", "n"))
+            out = run(moving())
+    finally:
+        pos.position_beside_main, stock.RAISE_PARTS = saved
+    vo = m.facts["position"]
+    assert vo["error"] == "RuntimeError" and vo["items"] == {} and vo["totals"]["counted"] == 0
+    assert vo["stores"] == ["vans", "outlets", "transit"]
+    assert [(x["item"].code, x["beside"], x["qty"]) for x in m.facts["order"]] == [("CB2", 0, 65)]   # the main store's
+    said = "  Vans and outlets could not be counted this time: the order list counts the main store only."
+    assert said in head and said in reorder and said in one and stock.vans_beside(m) == []
+    headers = [ln.split() for ln in head + reorder if ln.split()[:2] in (["Item", "Code"], ["#", "Item"])]
+    assert len(headers) == 2 and not any("Vans" in h for h in headers)          # no Vans column
+    assert any(w.startswith("the stock beside the main store could not be worked out: RuntimeError") for w in m.warnings)
+    assert out["ok"] and said.strip() in out["text"]
+    assert any("could not be worked out" in w for w in out["warnings"])
 
 
 # ── the real files (read-only; SKIP when they are not on this machine) ────────
