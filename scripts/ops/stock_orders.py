@@ -72,14 +72,20 @@ CONTRACT (scripts.ops.stock and the /yq-stock words rely on it)
       is); no supplier or one with no letter or digit, no order date or one that is no date: refused as
       promise_lines refuses them
   lock_of(path) -> Path                   <path>.lock, beside the log
+  locked_append(path, texts) -> int
+      the one write of the KPI log, shared by every writer of it (this module's promise lines and
+      scripts.ops.kpi_log's evidence lines): the texts (each one line, already JSON) appended to path through
+      paths.append_lines, while lock_of(path) is held. Checked first, nothing made or written when one fails:
+      the place (business_data/ or exports/ of the data root, else PermissionError) and every text (a string
+      with no line break, else ValueError). A lock younger than LOCK_STALE_SECONDS raises RuntimeError(LOCK_BUSY);
+      an older one is removed and the lock tried once more. The lock is removed when the write ends, whatever
+      happened. Returns the number of texts written; no text: 0, and no lock is taken.
   append(path, lines) -> int
-      the lines appended to path (stock.kpi_log_file()), one json.dumps per line (ensure_ascii=False,
-      sort_keys=True), through paths.append_lines. Checked first, nothing made or written when one fails: the
-      place (business_data/ or exports/ of the data root, else PermissionError) and every line (exactly LINE_KEYS,
-      every value text, kind 'promise', a ref, state 'open' or a closed state, an open line's qty whole: else
-      ValueError). Written while lock_of(path) is held: a lock younger than LOCK_STALE_SECONDS raises
-      RuntimeError(LOCK_BUSY); an older one is removed and the lock tried once more. The lock is removed when the
-      write ends, whatever happened. Returns the number of lines written; no line: 0, and no lock is taken.
+      the promise lines appended to path (stock.kpi_log_file()), one json.dumps per line (ensure_ascii=False,
+      sort_keys=True), through locked_append. Checked first, nothing made or written when one fails: the place
+      (as locked_append) and every line (exactly LINE_KEYS, every value text, kind 'promise', a ref, state 'open'
+      or a closed state, an open line's qty whole: else ValueError). Returns the number of lines written; no
+      line: 0, and no lock is taken.
   fifo(items, promises, d, lead_of, late_days=LATE_DAYS) -> dict
       items       the stock Items to match (stock.build's plannable items: display items left out)
       promises    stock.read_promises() (None = no log); a closed line is passed over
@@ -98,7 +104,7 @@ CONTRACT (scripts.ops.stock and the /yq-stock words rely on it)
     Units are Decimals. Nothing is changed: the caller sets each item's on_order from "on_order".
 
 Nothing here reads the database or the network. The log and its lock are the only files written, and only by
-append().
+locked_append().
 """
 from __future__ import annotations
 
@@ -410,16 +416,23 @@ def _let_go(lock: Path) -> None:
         pass                                          # still there: stale after LOCK_STALE_SECONDS, then taken over
 
 
-def append(path, lines) -> int:
-    """Append promise lines to the log under its lock (see the module docstring). Returns the lines written."""
-    lines = list(lines or [])
-    if not lines:
+def _place(path: Path) -> None:
+    """The log and its lock go under business_data/ or exports/ of the data root, nowhere else."""
+    if not (paths.allowed_output(path) and paths.allowed_output(lock_of(path))):
+        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
+
+
+def locked_append(path, texts) -> int:
+    """Append lines of text (each one JSON line) to the KPI log while its lock is held: the one write every
+    writer of the log shares (see the module docstring). Returns the texts written."""
+    texts = list(texts or [])
+    if not texts:
         return 0
     path = Path(path)
+    _place(path)
+    if not all(isinstance(t, str) and "\n" not in t and "\r" not in t for t in texts):
+        raise ValueError("locked_append: every line is one text with no line break")
     lock = lock_of(path)
-    if not (paths.allowed_output(path) and paths.allowed_output(lock)):
-        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
-    texts = [_checked(line) for line in lines]
     path.parent.mkdir(parents=True, exist_ok=True)
     _take(lock)
     try:
@@ -427,6 +440,16 @@ def append(path, lines) -> int:
     finally:
         _let_go(lock)
     return len(texts)
+
+
+def append(path, lines) -> int:
+    """Append promise lines to the log under its lock (see the module docstring). Returns the lines written."""
+    lines = list(lines or [])
+    if not lines:
+        return 0
+    path = Path(path)
+    _place(path)
+    return locked_append(path, [_checked(line) for line in lines])
 
 
 # ── the clearing ──────────────────────────────────────────────────────────────
