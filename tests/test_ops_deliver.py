@@ -469,6 +469,81 @@ def _():
     assert actions.is_move("xfer_open|damage|2026-10") and not actions.is_move("attn|sold_out")
 
 
+# Invented names a load-check item can carry: a price scoped to a van (its salesman's name) or to a customer, the
+# stores of a stock voucher's lines, and an item named after a shop.
+VAN_SCOPE, SHOP_SCOPE = "Rep Kilo", "Shop Quasar Trading"
+LOAD_CHECK_WORDS = ("Rep Kilo", "Kilo", "Shop Quasar", "Quasar", "Store Gamma", "Rep Lima", "Lima")
+
+
+def load_check_items() -> list[dict]:
+    """Two price_scope and three voucher_changed items, made by load_check's own builders from invented rows."""
+    from scripts.ops import load_check
+    prices = load_check.price_scope_items([
+        {"sku": "PB-7", "scope": VAN_SCOPE, "start": "2026-10-04", "rate": Decimal("1.250"), "general": Decimal("1.500"),
+         "units": Decimal("8"), "below_general": True},
+        {"sku": "PB-9", "scope": SHOP_SCOPE, "start": "2026-10-05", "rate": Decimal("2.000"),
+         "general": Decimal("2.400"), "units": None, "below_general": True}])
+    item = "Charger for Shop Quasar Trading display"
+    was = (((date(2026, 10, 12), "Stock Issue Voucher", "Store Gamma", "Rep Kilo - Acc WH", Decimal(0), Decimal(4)), 1),)
+    now = (((date(2026, 10, 8), "Stock Issue Voucher", "Store Gamma", "Rep Lima - Acc WH", Decimal(0), Decimal(6)), 2),)
+    numbers = ("SIO:YQ-26-10-5", "SIO:YQ-26-10-6", "SIO:YQ-26-10-7")
+    cmp = {"changed": [(numbers[0], item)], "removed": [(numbers[1], item)], "backdated": [(numbers[2], item)],
+           "db": {(n, item): was for n in numbers}, "file": {(numbers[0], item): now, (numbers[2], item): now}}
+    vouchers = load_check.voucher_items(cmp)
+    return [dict(it, id=f"A{n}") for n, it in enumerate(prices + vouchers, 1)]
+
+
+@test("the e-mail names no van, salesman, customer or store of a load-check item: numbers, codes and dates only")
+def _():
+    from scripts.ops import load_check, sales as sales_mod
+    # every rule the register holds is either one whose detail names nobody, or one with a Why of its own
+    known = set(load_check.EVENT_RULES + load_check.STATE_RULES + actions.MOVE_RULES + (sales_mod.ATTN_RULE,))
+    assert actions.DETAIL_SAFE == ("attn", "inv_changed", "profit_held")
+    assert known - set(actions.DETAIL_SAFE) == set(actions.MOVE_RULES) | {"price_scope", "voucher_changed"}, known
+    items = load_check_items()
+    # the register keeps the names in the detail (alerts.jsonl stays on this PC): the test bites on real details
+    assert VAN_SCOPE in items[0]["detail"] and SHOP_SCOPE in items[1]["detail"] and "Rep Kilo" in items[2]["detail"]
+    d = date(2026, 10, 14)
+    acts = actions.from_register(items, d)
+    assert [a["why"] for a in acts] == [
+        "PB-7: 1.250 from Sun 04 Oct for one van or customer, the general price is 1.500; 8 units already sold at "
+        "this price",
+        "PB-9: 2.000 from Mon 05 Oct for one van or customer, the general price is 2.400; what was already sold at "
+        "this price was not looked up",
+        "SIO:YQ-26-10-5: loaded as issued 4 on Mon 12 Oct; the file has issued 6 on Thu 08 Oct x2",
+        "SIO:YQ-26-10-6: loaded as issued 4 on Mon 12 Oct; the file has nothing",
+        "SIO:YQ-26-10-7: loaded as issued 4 on Mon 12 Oct; the file has issued 6 on Thu 08 Oct x2"], \
+        [a["why"] for a in acts]
+    for a in acts:
+        for field in ("title", "why", "impact", "next_step", "owner"):
+            assert not any(w in a[field] for w in LOAD_CHECK_WORDS), (field, a[field])
+    # both parts of the e-mail, the names on and off, as ranked and with every one of them on it
+    f = facts(do_today={"open": items}, movements=dict(MOVEMENTS))
+    top, every = actions.ranked(f, d)
+    for names in (True, False):
+        for shown, more in ((top, every), (acts, len(acts))):
+            for body in (render.email_html(f, shown, more, LOAD, None, TODAY, names=names),
+                         render.email_text(f, shown, more, LOAD, None, TODAY, names=names)):
+                assert not [w for w in LOAD_CHECK_WORDS if w in body], [w for w in LOAD_CHECK_WORDS if w in body]
+    # a detail that does not read the expected way: load_check's own plain words, never a word of it
+    odd_price = {"key": "price_scope|PB-7|habcdefgh|2026-10-04", "detail": f"PB-7 for {VAN_SCOPE}: a price"}
+    assert actions.plain_why(odd_price) == "PB-7: a scoped price is below the general price from Sun 04 Oct"
+    odd_voucher = {"key": "voucher_changed|SIO:YQ-26-10-5|x", "evidence": ["SIO:YQ-26-10-5"],
+                   "detail": f"SIO:YQ-26-10-5 at {VAN_SCOPE}: moved"}
+    assert actions.plain_why(odd_voucher) == "SIO:YQ-26-10-5: differs from what was loaded"
+    # a rule no list here knows yet: its first number only
+    new = {"key": "returns_tier|hqrstuvwx", "detail": f"{VAN_SCOPE} returned 4 items", "evidence": ["CN:YQ-26-10-1"]}
+    assert actions.plain_why(new) == "CN:YQ-26-10-1: to check, in full on /yq-watch"
+    assert actions.plain_why(dict(new, evidence=[])) == "This item: to check, in full on /yq-watch"
+    # the rules whose detail names nobody keep it: a changed invoice, a held-back report, the Command Centre's items
+    safe = [{"key": "inv_changed|SI:YQ-26-10-9", "detail": "SI:YQ-26-10-9: changed between the last load and the "
+             "reports as on Wed 14 Oct", "evidence": ["SI:YQ-26-10-9"]},
+            {"key": "profit_held|2026-10-14", "detail": "its cost of sales is 6.2% short of the stock ledger's "
+             "(limit 3.0%); not loaded for 2 loads; production's report is as on Mon 28 Sep"},
+            {"key": "attn|sold_out", "detail": "Accessories sold in the last 60 days, now out in the main store"}]
+    assert [a["why"] for a in actions.from_register(safe, d)] == [it["detail"] for it in safe]
+
+
 # ── enrich ───────────────────────────────────────────────────────────────────────────────────────
 
 @test("enrich: tier 1 as the target, the push list, the shops due per rep, discounts NOT EVIDENCED")

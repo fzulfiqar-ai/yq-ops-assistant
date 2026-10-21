@@ -12,11 +12,21 @@ NO_FIGURE_BHD, so a count-only item still ranks. Every action is tagged:
   TO CHECK  something differs and the reason is not known: a question, never a conclusion
 Nothing here accuses anyone (fmt.careful guards the words). The register itself is never written.
 
-An item's Why is its detail, except for the five move rules (MOVE_RULES): their detail names the stores of a
-transfer, and a van's store is its salesman's name. The recorder keeps that detail in alerts.jsonl on this PC
-(scripts/ops/checks.py); the e-mail leaves it, so a move item's Why is the recorder's own plain fallback, numbers
-and dates only (move_why): its vouchers, its count, the month of its key and the days the detail holds, never a
-word of the detail besides those days."""
+An item's Why is its detail only for the rules whose detail names no store, salesman or customer
+(DETAIL_SAFE): the Command Centre's items keep their definition (sales.attention_found), a changed invoice its
+number, a fixed word and a day, a held-back profitability report its figures. Every other rule's Why is built
+from numbers, codes and dates only (plain_why), because its detail can name a van (a salesman), a customer or a
+store, and the e-mail leaves this PC while the register (alerts.jsonl) stays on it:
+  the five move rules (MOVE_RULES)   the recorder's own plain fallback (move_why): vouchers, count, the month of
+                                     its key, the days of its detail
+  price_scope                        the item code, the scoped and the general price, the start day and the units
+                                     sold at it; its scope ("for <a van or a customer>") never
+  voucher_changed                    the voucher, and the quantities and days of its lines as loaded and as in the
+                                     file; their stores and the item's name never
+  a rule this module does not know   its first voucher or number only
+No word of a detail besides those numbers, codes and days is ever taken, and the e-mail's customer_names
+setting (delivery.json) changes none of this: a price_scope scope can be a van as well as a customer, and the
+register cannot tell which."""
 from __future__ import annotations
 
 import re
@@ -30,9 +40,16 @@ TOP = 5
 NO_FIGURE_BHD = Decimal(50)
 # the five move rules of /yq-watch (scripts.ops.checks.MOVE_RULES; tests/test_ops_deliver.py holds the two equal)
 MOVE_RULES = ("xfer_open", "xfer_twins", "qty_diff", "xfer_elsewhere", "rcpt_orphan")
-# a day as the recorder writes it in a detail (fmt.day): the only words of a detail a move item's Why takes
+# the rules whose detail names no store, salesman or customer (the module text): their Why is their detail
+DETAIL_SAFE = ("attn", "inv_changed", "profit_held")
+# a day as the recorders write it in a detail (fmt.day), an amount (fmt.bhd) and a quantity (fmt.units): with the
+# codes of an item's key, the only parts of a detail a plain Why takes
 _DAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_MONEY = r"\d{1,3}(?:,\d{3})*\.\d{3}"
+_QTY = r"\d[\d,]*(?:\.\d+)?"
 _MONTH = re.compile(r"(\d{4})-(\d{2})")
+_LINE = re.compile(rf"\b(received|issued) ({_QTY}) on ({_DAY})|\bno quantity on ({_DAY})")
+_MORE_LINES = re.compile(r"\band (\d+) more lines\b")
 
 # key prefix -> (owner, next step, business days to do it in, effort 1 low .. 3 high). The longest
 # matching prefix wins; a key no entry names gets the DEFAULT words and is still listed.
@@ -152,9 +169,76 @@ def move_why(item: dict) -> str:
     return f"{first}: to check"
 
 
+def _price_why(item: dict) -> str:
+    """A price_scope item's Why: load_check's own words for it with its scope left out. The code and the start
+    day come from its key (price_scope|<code>|<the scope's hash>|<start>), the two prices and the units from its
+    detail, each read only where its shape is a number's; the scope is never read."""
+    parts = str(item.get("key") or "").split("|")
+    code = parts[1] if len(parts) > 1 and parts[1] else "(no code)"
+    start = fmt.as_date(parts[3]) if len(parts) > 3 else None
+    since = f" from {fmt.day(start)}" if start else ""
+    detail = str(item.get("detail") or "")
+    rate = re.match(rf"[^:]+: ({_MONEY}) from ", detail)
+    general = re.search(rf"\bthe general price is ({_MONEY})", detail)
+    if not (rate and general):
+        return f"{code}: a scoped price is below the general price{since}"
+    sold = re.search(rf"; ({_QTY}) units already sold there at this price", detail)
+    tail = (f"; {sold.group(1)} units already sold at this price" if sold else
+            "; what was already sold at this price was not looked up" if "was not looked up" in detail else "")
+    return f"{code}: {rate.group(1)}{since} for one van or customer, the general price is {general.group(1)}{tail}"
+
+
+def _lines_plain(text: str) -> str:
+    """One side of a changed voucher's detail ('received 4 on Mon 12 Oct at <store> to <store> x2; ...') as its
+    quantities, days and repeats only: 'received 4 on Mon 12 Oct x2; ...', 'nothing' when it says so, '' when
+    none reads."""
+    if text.strip().rstrip(".") == "nothing":
+        return "nothing"
+    out = []
+    for part in text.split("; "):
+        m = _LINE.search(part)
+        if m is None:
+            continue
+        times = re.search(r" x(\d+)$", part.strip())
+        out.append((f"{m.group(1)} {m.group(2)} on {m.group(3)}" if m.group(1) else f"no quantity on {m.group(4)}")
+                   + (f" x{times.group(1)}" if times else ""))
+    more = _MORE_LINES.search(text)
+    if out and more:
+        out.append(f"and {more.group(1)} more lines")
+    return "; ".join(out)
+
+
+def _voucher_why(item: dict) -> str:
+    """A voucher_changed item's Why: the voucher, and its lines as loaded and as in the file in quantities and
+    days only (load_check's own words, its stores and the item's name left out); load_check's plain fallback
+    when the detail does not read that way."""
+    parts = str(item.get("key") or "").split("|")
+    vouchers = [str(v).strip() for v in item.get("evidence") or [] if str(v or "").strip()]
+    voucher = vouchers[0] if vouchers else (parts[1] if len(parts) > 1 and parts[1] else "(no number)")
+    loaded, mark, now = str(item.get("detail") or "").partition("; the file has ")
+    if mark and ": loaded as " in loaded:
+        was, has = _lines_plain(loaded.split(": loaded as ", 1)[1]), _lines_plain(now)
+        if was and has:
+            return f"{voucher}: loaded as {was}; the file has {has}"
+    return f"{voucher}: differs from what was loaded"
+
+
+def plain_why(item: dict) -> str:
+    """The Why of an item whose rule is not DETAIL_SAFE, in numbers, codes and dates only (the module text)."""
+    rule = str(item.get("key") or "").split("|", 1)[0]
+    if rule in MOVE_RULES:
+        return move_why(item)
+    if rule == "price_scope":
+        return _price_why(item)
+    if rule == "voucher_changed":
+        return _voucher_why(item)
+    vouchers = [str(v).strip() for v in item.get("evidence") or [] if str(v or "").strip()]
+    return f"{vouchers[0] if vouchers else 'This item'}: to check, in full on /yq-watch"
+
+
 def from_register(items: list[dict], d: date) -> list[dict]:
-    """The open items of the action register (facts['do_today']['open']). A move item's Why is move_why's,
-    never its detail (the module text)."""
+    """The open items of the action register (facts['do_today']['open']). The Why is the item's detail for a
+    DETAIL_SAFE rule, plain_why's for every other (the module text)."""
     out = []
     for it in items or []:
         key = str(it.get("key") or "")
@@ -166,7 +250,7 @@ def from_register(items: list[dict], d: date) -> list[dict]:
         count = it.get("count")
         impact = (f"BHD {fmt.bhd(bhd)} involved" if bhd is not None else
                   f"{count} involved" if count not in (None, "") else "no figure on record")
-        why = move_why(it) if is_move(key) else str(it.get("detail") or "")
+        why = str(it.get("detail") or "") if key.split("|", 1)[0] in DETAIL_SAFE else plain_why(it)
         out.append(_action(tag="ACTION" if level == "ACT" else "TO CHECK", title=str(it.get("title") or key),
                            why=why, impact=impact, impact_bhd=bhd, step=step, owner=owner,
                            days=days, effort=effort, confidence=1.0 if level == "ACT" else 0.6, source="register",
