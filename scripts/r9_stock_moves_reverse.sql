@@ -13,9 +13,13 @@
 --     for yq_readonly (the AI's allowlist reads it), nothing for anon / authenticated (the 16-Sep hotfix's revoke).
 --
 -- What it CANNOT put back: the stock-ledger narration. M1 replaced the digits of every 9-digit and 15+-digit run in
--- stock_movements.narration (and in the batch importer's copies) with stars, and the database holds them nowhere
--- else; reversing the views does not bring them back. The only way back is the backup taken before M1 (see M1's
--- header): restore the column from it by hand on (voucher, item_name, row_hash). Nothing here touches a row.
+-- stock_movements.narration (and in the batch importer's copies) with stars; reversing the views does not bring the
+-- text back. The only way back to the text is the backup taken before M1 (see M1's header): restore the column from
+-- it by hand on (voucher, item_name, row_hash). Nothing here touches a row.
+-- The digits are not gone from the database, though: row_hash (64 bits of an md5 over the raw cells, the unmasked
+-- narration included) stays beside the masked text, so a masked run can be worked back from row_hash and the row's
+-- other fields by whoever reads those rows (the service role, a db_backup copy). No view shows row_hash; treat it as
+-- sensitive. M1's header says more; the real fix (a rehash and a reload) is a later release.
 
 set lock_timeout = '2s';      -- a busy view makes the file fail fast, never queue
 

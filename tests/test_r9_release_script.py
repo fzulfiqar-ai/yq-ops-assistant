@@ -474,7 +474,7 @@ def _():
     assert "Test-SameCommit $api ([string]$st.release_sha)" in m2
 
 
-@test("rollback: v_transfer_flow back, the API, the two reverses (held while the release API answers), a restore only with -RestoreTables, the gate")
+@test("rollback: v_transfer_flow back, the API, the two reverses (held while the release API answers or /health is silent), a restore only with -RestoreTables, the gate, the load note")
 def _():
     src = _src()
     rb = _region(src, "rollback")
@@ -482,7 +482,8 @@ def _():
                                    "'scripts.render_deploy', 'status'",
                                    "Warning: v_transfer_flow is not back (R1 above)",
                                    "'scripts.render_deploy', 'rollback', '--deploy', $dep, '--wait'",
-                                   "if ([string]$st.api_sha -and (Test-SameCommit $hc ([string]$st.api_sha))) {",
+                                   "$hc = Get-HealthCommit\n  $hold = Get-ReverseHold $hc ([string]$st.api_sha)",
+                                   "if ($hold) {",
                                    "The narration mask cannot be undone",
                                    "Undo-Migration 'r9_team_messages' $R9_TEAM_REV ", "Undo-Migration 'r9_stock_moves' $R9_MOVES_REV ",
                                    "if (-not $RestoreTables) {",
@@ -493,12 +494,21 @@ def _():
                                    "'scripts.db_backup', '--restore', $dir, '--tables', $tables))",
                                    "Ask-Yes ('RESTORE ",
                                    "'scripts.db_backup', '--restore', $dir, '--tables', $tables, '--yes'",
-                                   "'post-r9-rollback'", "Set-State 'rolled_back'")]
+                                   "'post-r9-rollback'", "Set-State 'rolled_back'",
+                                   "/yq-load now refuses", "Rollback finished for the pieces you said YES to.")]
     assert marks == sorted(marks), marks
-    # while /health still shows the release API, both reverses are held (it reads v_transfer_lines and team_messages)
-    held = rb[rb.index("if ([string]$st.api_sha -and (Test-SameCommit $hc ([string]$st.api_sha))) {"):]
+    # both reverses run only in the else of the hold: never while the release API may still be live
+    held = rb[rb.index("if ($hold) {"):]
     held = held[:held.index("} else {")]
-    assert "Undo-Migration" not in held and "wait until the API is back" in held
+    assert "Undo-Migration" not in held and "Say ('  ' + $hold) Yellow" in held
+    assert rb.count("Undo-Migration 'r9_team_messages'") == 1 and rb.count("Undo-Migration 'r9_stock_moves'") == 1
+    # the hold: silence first (a /health that does not answer proves nothing), then the release still live
+    hold = _function(src, "Get-ReverseHold")
+    assert hold.index("if (-not $health) {") < hold.index("if ($release -and (Test-SameCommit $health $release)) {") \
+        < hold.index("return ''")
+    assert "No /health answer: the reverses wait" in hold and "wait until the API is back" in hold
+    # after an API rollback the load refuses (main still carries the 2b engine files): said at the end of the part
+    assert "main still carries the 2b engine files" in rb
     # when migrate2 dropped v_transfer_flow and R1 did not put it back, the API rollback is preceded by a warning
     assert "if ([string]$st.migrated_r9_transfer_flow_drop -and -not $okD -and -not [string]$st.reversed_r9_transfer_flow_drop) {" in rb
     for need in ("'^dep-[A-Za-z0-9]+$'", "$st.api_previous_deploy", "-cnotmatch '^[a-z_][a-z0-9_]*(,[a-z_][a-z0-9_]*)*$'",
@@ -637,16 +647,25 @@ def _():
     assert got["AUTH"] == "Bearer " + tok_window and got["SECRETS"] == tok_window and got["SAME"] == "True", got    # window first, once
 
 
-@test("the pure helpers, run in PowerShell: what the API image is built from, moves portal's verdict, yq_backup's last line; SKIP without PowerShell")
+@test("the pure helpers, run in PowerShell: what the API image is built from, moves portal's verdict, yq_backup's last line, the rollback's hold; SKIP without PowerShell")
 def _():
     exe = _powershell()
     if not exe:
         print("        SKIP: no PowerShell on this machine (the text pins above still apply)")
         return
     src = _src()
-    fns = "\r\n".join(_function(src, n) for n in ("Select-ApiImagePaths", "Test-MovesPass", "Get-LastLine"))
+    fns = "\r\n".join(_function(src, n) for n in ("Select-ApiImagePaths", "Test-MovesPass", "Get-LastLine",
+                                                  "Test-SameCommit", "Get-ReverseHold"))
     code = ("$ErrorActionPreference = 'Stop'\r\n" + fns + "\r\n"
             "function Put([string]$k, $v) { [Console]::Out.WriteLine($k + '=' + [string]$v) }\r\n"
+            "$A = 'a' * 40\r\n"
+            # R3 waits while /health is silent or names the release; it may run once /health names another commit
+            "Put 'H1' ('[' + (Get-ReverseHold '' $A) + ']')\r\n"
+            "Put 'H2' ('[' + (Get-ReverseHold $A $A) + ']')\r\n"
+            "Put 'H3' ('[' + (Get-ReverseHold 'aaaaaaa' $A) + ']')\r\n"
+            "Put 'H4' ('[' + (Get-ReverseHold ('c' * 40) $A) + ']')\r\n"
+            "Put 'H5' ('[' + (Get-ReverseHold ('c' * 40) '') + ']')\r\n"
+            "Put 'H6' ('[' + (Get-ReverseHold '' '') + ']')\r\n"
             "Put 'API' (@(Select-ApiImagePaths @('web/src/pages/StockMovement.tsx', 'docs/STATUS.md', 'app/main.py', "
             "'scripts\\ops\\pairing.py', 'scripts/r9_release.ps1', 'scripts/ai_head/README.md', 'Dockerfile', "
             "'requirements.lock', 'requirements.txt', 'tests/test_x.py', '.github/workflows/ci.yml', '', '  ')) -join ',')\r\n"
@@ -666,6 +685,9 @@ def _():
     assert (got["P1"], got["P2"], got["P3"], got["P4"], got["P5"]) == ("True", "True", "False", "False", "False"), got
     assert got["L1"] == r"C:\x\release\2026-10-22_pre-r9.7z" and got["L2"] == r"C:\x y\a.7z" and got["L3"] == "[]", got
     assert got["L4"] == r"C:\s\u\inner", got
+    assert got["H1"].startswith("[No /health answer: the reverses wait") and got["H6"] == got["H1"], got
+    assert got["H2"].startswith("[The API still runs the release (" + "a" * 40 + ")") and got["H3"].startswith("[The API still runs"), got
+    assert (got["H4"], got["H5"]) == ("[]", "[]"), got
 
 
 @test("no secret is echoed: .env only tested and read once (GH_READ_TOKEN, never shown), every line masked; no secret in the files")
@@ -793,6 +815,15 @@ def _():
     # the protocol: release backups are encrypted by yq_backup release; CI on a private repository; Render on API only
     for need in ("python -m scripts.yq_backup release <rN>", "GH_READ_TOKEN", "confirm CI by hand", "Auto-Deploy is No"):
         assert need in md, need
+    # the review of 21-Oct: the reverses wait on a silent /health; the load refuses after an API rollback; row_hash
+    flat = " ".join(sec.split())
+    for need in ("or gives no answer at all, the script holds them",
+                 "After an API rollback `/yq-load` refuses", "`main` still carries the 2b engine files",
+                 "The mask covers the text only: `row_hash` beside it is a hash of the raw row",
+                 "No view shows `row_hash` (the AI and the portal never see it): treat it as sensitive",
+                 "a rehash and a reload"):
+        assert need in flat, need
+    assert "gone for good" not in md and "nowhere else" not in sec
 
 
 @test("MIGRATIONS.md: who owns v_transfer_lines, v_salesman_stock_recon, team_messages and v_transfer_flow; the r9 section; keepalive_ping's readers")
@@ -810,6 +841,12 @@ def _():
                  "r9_transfer_flow_drop_reverse.sql", "r9_team_messages_reverse.sql", "r9_stock_moves_reverse.sql",
                  "moves portal", "scripts\\r9_release.ps1", "audit_grants", "narration mask"):
         assert need in sec, need
+    # row_hash: made from the raw cells, so the masked numbers can be worked back from it; no view shows it
+    flat = " ".join(sec.split())
+    for need in ("**`row_hash` is sensitive.**", "the unmasked narration included", "a million candidates",
+                 "No view shows `row_hash`", "the numbers are not gone from the database", "a rehash and a reload"):
+        assert need in flat, need
+    assert "gone for good" not in sec
     assert "the one thing the keepalive workflow and the yq-keepwarm Worker (publishable key, every 10 minutes) may read" \
         in " ".join(md.split())
 
@@ -846,6 +883,12 @@ def _():
         assert "v_transfer_lines" in body["R9_MOVES"] and "v_salesman_stock_recon" in body["R9_MOVES"]
         assert "team_messages" in body["R9_TEAM"] and "team_messages" in body["R9_TEAM_REV"]
         assert "v_transfer_flow" in body["R9_DROP"] and "v_transfer_flow" in body["R9_DROP_REV"]
+        # the narration mask, said as it is: the text is masked, row_hash (made from the raw cells) is sensitive
+        for k in ("R9_MOVES", "R9_MOVES_REV"):
+            prose = " ".join(line.lstrip("- ") for line in body[k].splitlines() if line.lstrip().startswith("--"))
+            prose = " ".join(prose.split())
+            assert "gone for good" not in prose and "holds them nowhere else" not in prose, k
+            assert "row_hash" in prose and "sensitive" in prose and "a rehash and a reload" in prose, k
         for k, text in body.items():
             assert not re.search(r"^\s*(commit|end)\s*;", text, flags=re.I | re.M), f"{k}: its own COMMIT (apply_sql --rehearse refuses it)"
     # yq_backup (R1): release <label> ends with the archive, unpack <archive> --to <folder> with the folder it checked;

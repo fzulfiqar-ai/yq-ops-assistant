@@ -820,10 +820,23 @@ function Undo-Migration([string]$label, [string]$file, [string]$whenRefused) {
   return $true
 }
 
+function Get-ReverseHold([string]$health, [string]$release) {
+  # Why the team_messages and stock-moves reverses must wait, or '' when they may run: only once /health names a
+  # commit that is not the release's. Silence proves nothing: the release API may still be live, and both reverses
+  # drop what it reads.
+  if (-not $health) {
+    return 'No /health answer: the reverses wait (the API that is live may still be the release, which reads v_transfer_lines and team_messages). When /health answers again, run -Part rollback once more and answer anything but YES to the pieces already done.'
+  }
+  if ($release -and (Test-SameCommit $health $release)) {
+    return ('The API still runs the release (' + $health + '): it reads v_transfer_lines and team_messages, so both reverses wait until the API is back (R2).')
+  }
+  return ''
+}
+
 function Invoke-PartRollback {
   # Only when something is wrong after the release. Order, by who reads what: R1 v_transfer_flow back (an older API
-  # reads it) -> R2 the API back -> R3 the team_messages and stock-moves reverses (only the release API reads them)
-  # -> R4 a table restore (last resort, only with -RestoreTables, exactly as Claude gives the list) -> R5 the gate
+  # reads it) -> R2 the API back -> R3 the team_messages and stock-moves reverses (only the release API reads them;
+  # held while /health shows the release or gives no answer) -> R4 a table restore (last resort, only with -RestoreTables, exactly as Claude gives the list) -> R5 the gate
   # compare. Each piece asks YES; anything else skips that piece.
   Assert-Ready -Lenient
   $st = Get-State
@@ -867,8 +880,9 @@ function Invoke-PartRollback {
   $okT = $false
   $okS = $false
   $hc = Get-HealthCommit
-  if ([string]$st.api_sha -and (Test-SameCommit $hc ([string]$st.api_sha))) {
-    Say ('  The API still runs the release (' + $hc + '): it reads v_transfer_lines and team_messages, so both reverses wait until the API is back (R2).') Yellow
+  $hold = Get-ReverseHold $hc ([string]$st.api_sha)
+  if ($hold) {
+    Say ('  ' + $hold) Yellow
   } else {
     Say '  The narration mask cannot be undone: the stored stock narrations stay masked; these reverses put the old views back and drop the new table only.' Yellow
     $okT = Undo-Migration 'r9_team_messages' $R9_TEAM_REV 'Leave it: an older API ignores team_messages. Tell Claude.'
@@ -915,6 +929,7 @@ function Invoke-PartRollback {
     Say '  No pre-r9 snapshot to compare with: tell Claude.' Yellow
   }
   Set-State 'rolled_back' (Get-Date -Format 's')
+  Say 'If the API went back, /yq-load now refuses (a portal release is merged but not live): main still carries the 2b engine files while the API is the older one, so loads wait until Claude reverts main or the API is deployed again.' Yellow
   Say 'Rollback finished for the pieces you said YES to. Tell Claude what happened.' Green
 }
 #endregion part:rollback

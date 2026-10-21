@@ -371,7 +371,10 @@ archive, the before-snapshot, the API deploy to roll back to and how far the tra
   of the release stays the rollback point.
 - **migrate** — `r9_stock_moves`: the view `v_transfer_lines`, `v_salesman_stock_recon` rebuilt from the ledger (its
   old columns kept) and the ID numbers in the stored stock narrations masked. **The narration mask cannot be undone**:
-  the encrypted backup keeps the old text. Then `r9_team_messages`: the table behind the Copy button (no login reads it
+  the encrypted backup keeps the old text. The mask covers the text only: `row_hash` beside it is a hash of the raw
+  row, the unmasked narration included, from which a masked number can be worked back by whoever reads those rows (the
+  service role, a `db_backup` copy). No view shows `row_hash` (the AI and the portal never see it): treat it as
+  sensitive; the real fix (a rehash and a reload) is a later release. Then `r9_team_messages`: the table behind the Copy button (no login reads it
   directly; the API shows it to the admin and management logins). Each file is rehearsed (it runs and is rolled back),
   applied after a second YES, then `audit_grants` must exit 0.
 - **api** — writes down the deploy that is live (the rollback target), deploys the release commit to Render and waits
@@ -403,7 +406,8 @@ Each piece asks YES; anything else skips that piece. The order follows who reads
    must then show the earlier commit.
 3. **R3** `r9_team_messages_reverse`, then `r9_stock_moves_reverse` (the old `v_salesman_stock_recon` back,
    `v_transfer_lines` dropped), only when Claude says so and only once the API is back: while `/health` still shows the
-   release, the script holds them. The narration mask cannot be undone: the stored narrations stay masked.
+   release, or gives no answer at all, the script holds them (run the part again once `/health` answers). The
+   narration mask cannot be undone: the stored narrations stay masked.
 4. **R4** a table restore, the last resort, only with `-RestoreTables` exactly as Claude gives the list:
    `yq_backup unpack <archive> --to <scratch>` (a new folder next to the archive, outside OneDrive; its last line is
    the checked folder), then on that folder `db_backup --verify` and the restore's dry run, then YES and `--yes`. The
@@ -414,6 +418,9 @@ Each piece asks YES; anything else skips that piece. The order follows who reads
 
 The web stays: the new Stock Movement page and the Command Centre work with an older API too. Should the new portal
 itself misbehave, switch it back as "Rollback → Web" above says.
+
+After an API rollback `/yq-load` refuses ("a portal release is merged but not live"): `main` still carries the 2b
+engine files while the API is the older one, so loads wait until Claude reverts `main` or the API is deployed again.
 
 ### After the release
 

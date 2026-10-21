@@ -850,7 +850,7 @@ first (`apply_sql --rehearse`, always rolled back), applied after a YES, then `p
 
 | Order | File | When | What |
 |---|---|---|---|
-| 1 | `r9_stock_moves_migration.sql` | `-Part migrate`, before the API deploy | `v_transfer_lines` (the transfer lines the API pairs by their contents, the same code as `/yq-moves`); `v_salesman_stock_recon` rebuilt from the ledger (on hand = the ledger balance, the old columns first and in order); the narration data step: ID numbers masked in the stored stock rows and their `ingest_stage` / `ingest_replaced` copies, `row_hash` unchanged |
+| 1 | `r9_stock_moves_migration.sql` | `-Part migrate`, before the API deploy | `v_transfer_lines` (the transfer lines the API pairs by their contents, the same code as `/yq-moves`); `v_salesman_stock_recon` rebuilt from the ledger (on hand = the ledger balance, the old columns first and in order); the narration data step: ID numbers masked in the stored stock rows and their `ingest_stage` / `ingest_replaced` copies, `row_hash` unchanged (it is made from the raw cells: see below) |
 | 2 | `r9_team_messages_migration.sql` | `-Part migrate` | `team_messages`, read only by the API for the Command Centre (admin and management); RLS on, no policy, nothing granted to `anon` / `authenticated` or the read role |
 | 3 | `r9_transfer_flow_drop_migration.sql` | `-Part migrate2`: after the API deploy, once `moves portal` printed PASS and the gate compare passed | drops `v_transfer_flow`; only an older API's `/stock/flow` read it |
 
@@ -860,6 +860,15 @@ first (`apply_sql --rehearse`, always rolled back), applied after a YES, then `p
 `v_transfer_lines` dropped), since only the release API reads those. **The narration mask is not reversed**: masked
 text stays masked; the pre-release backup (`yq_backup release r9`, encrypted) keeps the old text, and a restore of the
 stock rows would bring it back, which is never wanted for ID numbers.
+
+**`row_hash` is sensitive.** The mask covers the text, not the row: `row_hash` (the first 16 hex digits, 64 bits, of an
+md5 over the raw cells, the unmasked narration included; it stays raw so every stored key matches the next load) sits
+beside the masked text in `stock_movements` and in the `ingest_stage` / `ingest_replaced` copies. Whoever can read those
+rows (the service role, a `db_backup` copy) can work a masked number back from `row_hash` and the row's other stored
+fields: a 9-digit run shows 3 digits, which leaves a million candidates. No view shows `row_hash` (`v_transfer_lines` and
+`v_stock_transfers` name their columns; the AI and the portal never see it), but the numbers are not gone from the
+database: treat `row_hash`, and every backup of these tables, as sensitive. The real fix (a rehash and a reload of the
+stored rows) is a later release.
 
 Never re-run after 2b: `stock_transfer_migration.sql` (its `drop view … cascade` silently puts the old
 `v_salesman_stock_recon` back and drops the views that depend on it) and, once the drop is applied,

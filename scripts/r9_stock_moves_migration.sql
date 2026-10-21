@@ -61,9 +61,15 @@
 --    BEFORE, the only way back: a backup taken before this file (the release's encrypted backup, or
 --      python -m scripts.db_backup --tables stock_movements --out <a folder outside OneDrive and the repo>);
 --    it holds the numbers in clear. Restore the column from it by hand on (voucher, item_name, row_hash) if it is ever
---    needed. Without it the digits are gone for good: the Focus exports still carry them, but the parser masks them
---    again on every load. Leaving this file out would not keep them either: from the 2b code on, every Stock_ledger
---    load replaces its date span with masked rows.
+--    needed. Without it the TEXT cannot be put back: the Focus exports still carry the numbers, but the parser masks
+--    them again on every load. Leaving this file out would not keep them either: from the 2b code on, every
+--    Stock_ledger load replaces its date span with masked rows.
+--    The mask covers the text, not the row: row_hash (the first 16 hex digits, 64 bits, of an md5 over the RAW cells,
+--    the unmasked narration included) stays beside the masked text in stock_movements and in the ingest_stage /
+--    ingest_replaced copies. Whoever can read those rows (the service role, a db_backup copy) can work a masked
+--    number back from row_hash and the row's other stored fields: a 9-digit run shows 3 digits, which leaves a
+--    million candidates. No view shows row_hash (v_transfer_lines and v_stock_transfers name their columns; the AI
+--    and the portal never see it): treat it as sensitive. The real fix, a rehash and a reload, is a later release.
 --
 -- Never security_invoker: run_readonly_query runs as yq_readonly, which is granted views, not the tables beneath.
 
