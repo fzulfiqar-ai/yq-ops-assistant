@@ -28,29 +28,35 @@ each step takes only legs no earlier step took:
      booked 0 to lag_max days after, and the gate holds. ELSEWHERE.
      The exchange, then: identical issues to one store still short of receipts (twins, below), one of
      them paired in step A and able to take a free receipt of the same contents in another store (the
-     gate holding), another with none able to take its receipt: another store booked in the transfer
-     meant for this one and the goods were issued again. The first is received elsewhere, the other
-     takes its receipt. The oldest set first, its earliest members first.
+     gate holding): another store booked in the transfer meant for this one and the goods were issued
+     again. That member is received elsewhere and step A's greedy runs again over the rest of the set,
+     so its receipt reaches a member that had none (through a chain of members if need be). Every such
+     (member, receipt) is ranked by the gate, and the best that leaves the set with more receipts is
+     taken; a member whose step-A pair rests on stronger evidence than the receipt elsewhere is never
+     moved. The oldest set first.
   C  other quantities: the store the issue names, booked 0 to lag_max days after, the gate holds, and
      the two share at least overlap_min of their items (Jaccard). QTY_DIFFERS, item by item.
-  S  booked in under two receipts (after the receipts of issues sent to their own store are set aside,
-     below, so those keep theirs): a step-C receipt that holds nothing beyond the issue, and a second
-     free receipt at the same store holding EXACTLY what the first lacks, the gate holding. One pair of
-     the issue and both receipts (Pair.also), RECEIVED, or LATE when the later of them is after the
-     deadline. One further receipt only: a transfer booked in under three or more receipts stays a
-     QTY_DIFFERS pair beside receipts with no issue.
+  S  booked in under two receipts: a step-C receipt that holds nothing beyond the issue, and a second
+     free receipt at the same store holding EXACTLY what the first lacks, booked the same day as the
+     first and numbered within dn_max of it, the gate holding. Every candidate is ranked together by
+     the gate, the best first. One pair of the issue and both receipts (Pair.also), RECEIVED, or LATE
+     when the later of them is after the deadline. One further receipt only: a transfer booked in under
+     three or more receipts stays a QTY_DIFFERS pair beside receipts with no issue. Step B runs first,
+     so it can take a second receipt that S would have joined (no case on the real ledgers: accepted).
   The gate holds on any of: the same narration (not blank); numbers at most dn_max apart within one
   series and month; booked within quick_lag days. B and C rank the candidates (C by the share of items
   first; then the narration before the number before the date alone, the distance, the lag, the
   issue's and the receipt's order) and take the best first.
   An issue sent to its own store is set aside (legs_from_rows), and so is the free receipt that books its
   contents in at that store when the gate holds (the nearest number, then the nearest day): never a
-  receipt with no issue.
+  receipt with no issue. This runs right after step A, so no weaker step (B, the exchange, C, S) can
+  take that receipt first.
   Twins: identical issues to one store that step A cannot tell apart (they reach the same receipts,
-  directly or through one another), one or more of them still without a receipt after the three steps.
-  They are ONE open item, "x of N identical issues have no receipt", every number named, never which
-  one; the pairs among them are marked ambiguous. The set is in grace only while every one of its
-  issues is.
+  directly or through one another), one or more of them still without a receipt after the steps. They
+  are ONE open item, "x of N identical issues have no receipt", every number named, never which one;
+  the pairs among them are marked ambiguous. The set is in grace only while every member that could be
+  a missing one is: one with no receipt, one holding a step-A receipt such a member could have taken,
+  and so on (a member no such chain reaches is proven received), and its deadline is theirs.
   The rest: an issue with no receipt is IN_GRACE while within_grace() holds (on or before its deadline;
   to the damage store, before it, as /yq-stock damage counts), then NOT_RECEIVED; a receipt with no
   issue is an ORPHAN. Each names up to three legs of the same contents that no step could take (outside
@@ -524,8 +530,8 @@ class Pair:
     twins     the numbers of the identical issues this one could not be told apart from (step A), when
               there are two or more of them; ambiguous: some of those have no receipt, so which receipt
               belongs to which of them is not known
-    also      step S: the further receipt (Legs, in order) that booked in what `receipt` lacks; lag, dn
-              and basis stay those of the first receipt"""
+    also      step S: the further receipt (Legs, in order) that booked in what `receipt` lacks. The lag (and
+              the lateness) is the later receipt's; dn and basis stay those of the first receipt"""
     issue: Leg
     receipt: Leg
     outcome: str
@@ -552,9 +558,10 @@ class Open:
     which have no receipt, every one of them named in `issues` (which ones are missing is not known).
 
     outcome   IN_GRACE while within_grace() holds on the data date (for a set: for every one of its
-              issues, since which of them have no receipt is not known), then NOT_RECEIVED (one issue) or
-              TWINS (a set)
-    deadline  when the receipt is due (deadline()); for a set, the earliest deadline of its issues
+              issues that could be a missing one, since which of them have no receipt is not known), then
+              NOT_RECEIVED (one issue) or TWINS (a set)
+    deadline  when the receipt is due (deadline()); for a set, the earliest deadline of the issues that
+              could be a missing one
     possible  up to three receipts of the same contents, in any store, booked from possible_lag_min to
               lag_max days after the issue (for a set: after one of its issues, the smallest such lag
               counting), that no step could take: by lag, then order
@@ -699,8 +706,9 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
     rrank = {leg.no: n for n, leg in enumerate(receipts)}
     issue_of = {leg.no: leg for leg in issues}
     match: dict[str, tuple[Leg, str]] = {}        # issue number -> (its receipt, the step)
-    took: set[str] = set()                         # receipt numbers already paired
+    took: set[str] = set()                         # receipt numbers taken: paired, or set aside with an own-store issue
     twins_of: dict[str, tuple] = {}                # issue number -> the issue numbers of its twin set
+    reach_of: dict[str, list[Leg]] = {}            # issue number -> the receipts in its step-A window, in order
 
     # A: the same signature, received where it was sent, the earliest free receipt in the window
     by_dest: dict[tuple, list[Leg]] = {}
@@ -712,6 +720,7 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
     for key, group in groups.items():
         cands = by_dest.get(key, ())
         reach = {i.no: [r for r in cands if 0 <= (r.day - i.day).days <= rules.lag_max] for i in group}
+        reach_of.update(reach)
         for i in group:
             for r in reach[i.no]:                  # the receipts in their order: the first free is the earliest
                 if r.no not in took:
@@ -721,6 +730,34 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
         for members in _twin_sets(group, reach):
             for no in members:
                 twins_of[no] = members
+
+    # a receipt that books in, at that store, what an issue sent to its own store holds: set aside with that issue
+    # (the gate holding, the nearest number first, then the nearest day), never left as a receipt with no issue.
+    # Right after step A, so that no weaker step (B, the exchange, C, S) takes it first.
+    mirrors: dict[str, Aside] = {}                 # receipt number -> its Aside
+    partner_of: dict[str, str] = {}                # the issue's number -> the receipt's
+    free_at: dict[tuple, list[Leg]] = {}
+    for r in receipts:
+        if r.no not in took:
+            free_at.setdefault((r.lines, r.wh), []).append(r)
+    for a in legs.aside:
+        if a.kind != "issue" or a.reason != OWN_STORE or not a.lines or a.day is None:
+            continue
+        best = None
+        for r in free_at.get((a.lines, a.wh), ()):
+            if r.no in took:
+                continue
+            lag, dn, _same, basis = _relation(a.voucher, a.day, a.narr, r, rules)
+            if 0 <= lag <= rules.lag_max and basis:
+                key = (dn is None, 0 if dn is None else dn, lag, rrank[r.no])
+                if best is None or key < best[0]:
+                    best = (key, r)
+        if best is not None:
+            r = best[1]
+            mirrors[r.no] = Aside(r.no, "receipt", MIRRORS_OWN, r.day, r.wh, None, lines=r.lines, narr=r.narr,
+                                  partner=a.voucher)
+            partner_of[a.voucher] = r.no
+            took.add(r.no)
 
     def gate(i: Leg, r: Leg) -> tuple | None:
         """The rank of a candidate when it is in the window and the gate holds, else None."""
@@ -752,34 +789,63 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
     take(edges, "B")
 
     # the exchange: a twin set still short of receipts, one of whose step-A members has a free receipt of the
-    # same contents in another store that the gate lets it take, while a member with none could take that
-    # member's receipt (another store booked in a transfer meant for this one and the goods were issued again):
-    # the member is received elsewhere and the other takes its receipt. The oldest set first, its earliest
-    # members first, until the set has no such exchange left.
+    # same contents in another store that the gate lets it take (another store booked in a transfer meant for this
+    # one and the goods were issued again): that member is received elsewhere, and step A's greedy runs again over
+    # the rest of the set, so its receipt goes to a member that had none (through a chain of them if need be). Every
+    # (member, receipt elsewhere) is ranked by the gate and the best that leaves the set with more receipts is
+    # taken; a member whose step-A pair rests on stronger evidence than the receipt elsewhere is never moved. The
+    # oldest set first, until it has no such exchange left.
+    def strength(i: Leg, r: Leg) -> int:
+        """The rank of the best evidence between an issue and its receipt (GATE_RANK; the contents alone last)."""
+        basis = _between(i, r, rules)[3]
+        return GATE_RANK[basis[0]] if basis else len(GATE_RANK)
+
+    def regreedy(members: tuple, moved: str) -> dict:
+        """Step A's greedy again over the set's members but `moved` and those another step paired, on the
+        receipts of their windows that are free or held in step A by the set (`moved`'s too): {issue number:
+        its receipt}."""
+        held = {match[no][0].no for no in members if no in match and match[no][1] == "A"}
+        given: dict[str, Leg] = {}
+        used: set[str] = set()
+        for no in members:
+            if no == moved or (no in match and match[no][1] != "A"):
+                continue
+            for r in reach_of[no]:
+                if r.no not in used and (r.no not in took or r.no in held):
+                    given[no] = r
+                    used.add(r.no)
+                    break
+        return given
+
     def exchange(members: tuple) -> bool:
-        waiting = [issue_of[no] for no in members if no not in match]
-        if not waiting:
+        if all(no in match for no in members):
             return False
+        paired = sum(1 for no in members if no in match)
+        options = []
         for no in members:
             got = match.get(no)
             if got is None or got[1] != "A":
                 continue
-            m, kept = issue_of[no], got[0]
-            takers = [u for u in waiting if 0 <= (kept.day - u.day).days <= rules.lag_max]
-            if not takers:
-                continue
-            best = None
+            m = issue_of[no]
             for r in free_by_sig.get(m.lines, ()):
                 if r.no in took or r.wh == m.to:
                     continue
                 key = gate(m, r)
-                if key is not None and (best is None or key < best[0]):
-                    best = (key, r)
-            if best is None:
-                continue
-            match[m.no] = (best[1], "B")
-            took.add(best[1].no)
-            match[takers[0].no] = (kept, "A")
+                if key is not None and strength(m, got[0]) >= key[0]:   # never against stronger evidence
+                    options.append((key, m, r))
+        for _key, m, r in sorted(options, key=lambda o: o[0]):
+            given = regreedy(members, m.no)
+            elsewhere = sum(1 for no in members if no != m.no and no in match and match[no][1] != "A")
+            if 1 + elsewhere + len(given) <= paired:
+                continue                           # the set would be no better off
+            for no in members:                     # every step-A receipt of the set is given out again
+                if no in match and match[no][1] == "A":
+                    took.discard(match.pop(no)[0].no)
+            match[m.no] = (r, "B")
+            took.add(r.no)
+            for no, got_r in given.items():
+                match[no] = (got_r, "A")
+                took.add(got_r.no)
             return True
         return False
 
@@ -806,36 +872,16 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
                 edges.append(((-overlap,) + key, i, r))
     take(edges, "C")
 
-    # a receipt that books in, at that store, what an issue sent to its own store holds: set aside with that issue
-    # (the gate holding, the nearest number first, then the nearest day), never left as a receipt with no issue
-    mirrors: dict[str, Aside] = {}                 # receipt number -> its Aside
-    partner_of: dict[str, str] = {}                # the issue's number -> the receipt's
-    free_at: dict[tuple, list[Leg]] = {}
+    # S: booked in under two receipts. A step-C receipt that holds nothing beyond the issue, and a second free
+    # receipt at the same store that holds EXACTLY what the first lacks, booked the same day as the first and
+    # numbered within dn_max of it, the gate holding: one pair of the three. Every candidate of every step-C pair
+    # is ranked together by the gate's key, the best first (as B and C take theirs); one further receipt only.
+    also_of: dict[str, tuple] = {}                 # issue number -> its further receipts
+    free_at = {}
     for r in receipts:
         if r.no not in took:
             free_at.setdefault((r.lines, r.wh), []).append(r)
-    for a in legs.aside:
-        if a.kind != "issue" or a.reason != OWN_STORE or not a.lines or a.day is None:
-            continue
-        best = None
-        for r in free_at.get((a.lines, a.wh), ()):
-            if r.no in mirrors:
-                continue
-            lag, dn, _same, basis = _relation(a.voucher, a.day, a.narr, r, rules)
-            if 0 <= lag <= rules.lag_max and basis:
-                key = (dn is None, 0 if dn is None else dn, lag, rrank[r.no])
-                if best is None or key < best[0]:
-                    best = (key, r)
-        if best is not None:
-            r = best[1]
-            mirrors[r.no] = Aside(r.no, "receipt", MIRRORS_OWN, r.day, r.wh, None, lines=r.lines, narr=r.narr,
-                                  partner=a.voucher)
-            partner_of[a.voucher] = r.no
-
-    # S: booked in under two receipts. A step-C receipt that holds nothing beyond the issue, and a second free
-    # receipt at the same store that holds EXACTLY what the first lacks, the gate holding (the best by its key):
-    # one pair of the three. The issues in their order; one further receipt only.
-    also_of: dict[str, tuple] = {}                 # issue number -> its further receipts
+    edges = []
     for i in issues:
         got = match.get(i.no)
         if got is None or got[1] != "C":
@@ -848,17 +894,18 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
                                if units > booked.get(item, ZERO)))
         if not lacking:
             continue
-        best = None
         for r in free_at.get((lacking, first_r.wh), ()):
-            if r.no in took or r.no in mirrors:
-                continue
+            near = number_distance(first_r.no, r.no)
+            if r.day != first_r.day or near is None or near > rules.dn_max:
+                continue                           # not the rest of the same booking-in
             key = gate(i, r)
-            if key is not None and (best is None or key < best[0]):
-                best = (key, r)
-        if best is not None:
-            match[i.no] = (first_r, "S")
-            took.add(best[1].no)
-            also_of[i.no] = (best[1],)
+            if key is not None:
+                edges.append((key, i, r))
+    for _key, i, r in sorted(edges, key=lambda e: e[0]):
+        if i.no not in also_of and r.no not in took:
+            match[i.no] = (match[i.no][0], "S")
+            took.add(r.no)
+            also_of[i.no] = (r,)
 
     # the twin sets that still miss a receipt; the pairs among them are ambiguous
     short = {members for members in twins_of.values() if any(no not in match for no in members)}
@@ -871,8 +918,9 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
         lag, dn, same, basis = _between(i, r, rules)
         diffs: tuple = ()
         also = also_of.get(i.no, ())
-        if step in ("A", "S"):                     # S: on time only when the later of its receipts is
+        if step in ("A", "S"):                     # S: by the later of its receipts, its lag and its lateness
             booked_on = max([r.day] + [x.day for x in also])
+            lag = (booked_on - i.day).days
             outcome = LATE if booked_on > deadline(i.day, i.to_kind, rules) else RECEIVED
         elif step == "B":
             outcome = ELSEWHERE
@@ -906,12 +954,24 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
         if members in told:
             continue
         told.add(members)
-        # which members have no receipt is never claimed: the set is in grace only while every one of them is
+        # which members have no receipt is never claimed: the set is in grace only while every member that could
+        # be a missing one is - one with no receipt, one holding a step-A receipt such a member could have taken,
+        # and so on. A member no such chain reaches is proven received and has no say.
         in_set = tuple(issue_of[no] for no in members)
-        inside = all(within_grace(leg.day, leg.to_kind, data_date, rules) for leg in in_set)
+        holder = {match[no][0].no: no for no in members if no in match and match[no][1] == "A"}
+        could = [no for no in members if no not in match]
+        seen = set(could)
+        while could:
+            for r in reach_of[could.pop()]:
+                other = holder.get(r.no)
+                if other is not None and other not in seen:
+                    seen.add(other)
+                    could.append(other)
+        suspects = [leg for leg in in_set if leg.no in seen]
+        inside = all(within_grace(leg.day, leg.to_kind, data_date, rules) for leg in suspects)
         opens.append(Open(issues=in_set, missing=sum(1 for leg in in_set if leg.no not in match),
                           outcome=IN_GRACE if inside else TWINS,
-                          deadline=min(deadline(leg.day, leg.to_kind, rules) for leg in in_set),
+                          deadline=min(deadline(leg.day, leg.to_kind, rules) for leg in suspects),
                           possible=_possible(in_set, left_r, rrank, rules, True), twins=members))
 
     left_i: dict[tuple, list[Leg]] = {}

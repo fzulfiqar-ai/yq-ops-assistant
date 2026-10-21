@@ -23,17 +23,21 @@ Covered:
     free receipt, the window's two ends, the most pairs); step B through each of the gate's three ways,
     its refusals and its ranking, back at the source; step C at an overlap of exactly one half and
     below, its gate, its ranking, the quantities item by item; step S (an issue booked in under two
-    receipts, the second exactly what the first lacks: one pair, late by the later receipt; less, more,
-    another store, the gate refusing, an excess on the first: no split; two candidates: the gate's best;
-    shuffled rows); twins of two and of three (one open item,
-    every number named, the pairs ambiguous; in grace only while every issue of the set is; no twins
-    without a receipt; twins all received); the exchange after B (a store that booked in another's
-    transfer and issued it again: received elsewhere and received; refused by the gate; a set of three;
-    the oldest set first); an issue sent to its own store and the receipt set aside with it (the nearest
-    number; at another store, or refused by the gate, an orphan); the damage store's grace held to
-    /yq-stock damage's on the same rows; the rest (in grace on the deadline, not received after it, the
-    possible matches and their window, orphans before the ledger); the counts add up to the legs; by_issue
-    and by_receipt name every leg once; shuffled rows and a second run give an equal Result;
+    receipts, the second exactly what the first lacks, the same day and numbered next to the first: one
+    pair, late by its receipts, its lag theirs; less, more, another store, another day, a far number,
+    another transfer's receipt, the gate refusing, an excess on the first: no split; every candidate
+    ranked together; step B taking it first, accepted; shuffled rows); twins of two and of three (one open
+    item,
+    every number named, the pairs ambiguous; in grace only while every issue of the set that could be the
+    missing one is, a member proven received having no say; no twins without a receipt; twins all
+    received); the exchange after B (a store that booked in another's transfer and issued it again:
+    received elsewhere and received; refused by the gate; a set of three; the oldest set first; the best
+    evidence chosen, never against a stronger step-A link; a chain of members); an issue sent to its own
+    store and the receipt set aside with it, before step B can take it (the nearest number; at another
+    store, or refused by the gate, an orphan); the damage store's grace held to /yq-stock damage's on the
+    same rows; the rest (in grace on the deadline, not received after it, the possible matches and their
+    window, orphans before the ledger); the counts add up to the legs; by_issue and by_receipt name every
+    leg once; shuffled rows and a second run give an equal Result; a seeded fuzz of all of these;
   * summarise: the whole span equals counts(); a window of issue dates; a store out, in and either way;
     a receipt with no issue and a voucher set aside counted where they belong; its refusals;
   * pairing.py imports nothing but the allowed standard library modules, reads no file and no clock;
@@ -559,14 +563,30 @@ def _():
                   + receipt(2, MON, VAN_A, [(CHARGER, 5)]))
     (p,) = run(whole_item, data_date=at(9))[1].pairs
     assert p.step == "S" and p.receipt.no == num("r", 1) and [x.no for x in p.also] == [num("r", 2)]
-    # not exactly what is lacking, at another store, or refused by the gate: other quantities and a receipt with no issue
+    # not exactly what is lacking, at another store, not the rest of the same booking-in (another day, or numbered
+    # far from the first receipt): other quantities and a receipt with no issue
     for second, why in ((receipt(2, MON, VAN_A, [(CHARGER, 1)]), "less than what is lacking"),
                         (receipt(2, MON, VAN_A, [(CHARGER, 2), (BANK, 1)]), "more than what is lacking"),
                         (receipt(2, MON, VAN_B, [(CHARGER, 2)]), "at another store"),
-                        (receipt(50, THU, VAN_A, [(CHARGER, 2)]), "three days on, the numbers far apart")):
+                        (receipt(2, TUE, VAN_A, [(CHARGER, 2)]), "the next day, though the gate holds"),
+                        (receipt(30, MON, VAN_A, [(CHARGER, 2)]), "the same day, numbered far from the first")):
         _legs, res = run(base + second, data_date=at(9))
         assert [(q.step, q.outcome) for q in res.pairs] == [("C", "qty_differs")], why
         assert [o.receipt.lines for o in res.orphans] == [receipt_lines(second)], why
+    # another transfer's own receipt (its issue set aside: two narrations) is never joined to this one
+    stray = base + [mv(MON, num("i", 70), CHARGER, MAIN, 1, VAN_A, narr=ZEBRA),
+                    mv(MON, num("i", 70), CHARGER, MAIN, 1, VAN_A, narr=WALRUS)] + receipt(70, MON, VAN_A, [(CHARGER, 2)])
+    _legs, res = run(stray, data_date=at(9))
+    assert [q.step for q in res.pairs] == ["C"] and [o.receipt.no for o in res.orphans] == [num("r", 70)]
+    assert [a.voucher for a in res.aside] == [num("i", 70)]
+    # the rest of the booking-in, refused by the gate (no narration, numbers far from the issue, three days on)
+    later = (issue(1, SUN, VAN_A, [(CABLE, 10), (CHARGER, 5)], narr=ZEBRA)
+             + receipt(20, WED, VAN_A, [(CABLE, 10), (CHARGER, 3)], narr=ZEBRA))
+    _legs, res = run(later + receipt(21, WED, VAN_A, [(CHARGER, 2)]), data_date=at(9))
+    assert [q.step for q in res.pairs] == ["C"] and [o.receipt.no for o in res.orphans] == [num("r", 21)]
+    # with the narration on it too: one pair, late by its receipts (Wednesday, due Monday), its lag theirs
+    p = run(later + receipt(21, WED, VAN_A, [(CHARGER, 2)], narr=ZEBRA), data_date=at(9))[1].pairs[0]
+    assert (p.step, p.outcome, p.lag, p.basis, [x.no for x in p.also]) == ("S", "late", 3, ("narration",), [num("r", 21)])
     # the first receipt holds more of an item than was sent: no split
     excess = (issue(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 5)]) + receipt(1, MON, VAN_A, [(CABLE, 11), (CHARGER, 3)])
               + receipt(2, MON, VAN_A, [(CHARGER, 2)]))
@@ -576,15 +596,29 @@ def _():
     two = base + receipt(6, MON, VAN_A, [(CHARGER, 2)]) + receipt(2, MON, VAN_A, [(CHARGER, 2)])
     _legs, res = run(two, data_date=at(9))
     assert [x.no for x in res.pairs[0].also] == [num("r", 2)] and [o.receipt.no for o in res.orphans] == [num("r", 6)]
-    # the later receipt after the deadline: late (the numbers one apart: the gate holds two days on)
-    p = run(base + receipt(2, WED, VAN_A, [(CHARGER, 2)]), data_date=at(9))[1].pairs[0]
-    assert (p.step, p.outcome, p.lag) == ("S", "late", 0)
     # the same rows in any order
     want = run(two, data_date=at(9))[1]
     for seed in range(4):
         shuffled = two[:]
         random.Random(seed).shuffle(shuffled)
         assert run(shuffled, data_date=at(9))[1] == want, seed
+
+
+@test("step S ranks every candidate of every step-C pair together: a receipt goes where the gate binds it best; step B, which runs first, may take it (accepted)")
+def _():
+    rows = (issue(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 5)]) + receipt(38, MON, VAN_A, [(CABLE, 10), (CHARGER, 3)])
+            + issue(40, MON, VAN_A, [(BUDS, 6), (CHARGER, 4)]) + receipt(39, MON, VAN_A, [(BUDS, 6), (CHARGER, 2)])
+            + receipt(41, MON, VAN_A, [(CHARGER, 2)]))      # the rest of either; one number from SIO-40, the date for SIO-1
+    _legs, res = run(rows, data_date=at(9))
+    steps = {p.issue.no: (p.step, p.receipt.no, [x.no for x in p.also]) for p in res.pairs}
+    assert steps == {num("i", 1): ("C", num("r", 38), []), num("i", 40): ("S", num("r", 39), [num("r", 41)])}, steps
+    assert res.orphans == ()
+    # accepted, as the module says: step B pairs another issue with the rest of a booking-in before S looks
+    rows = (issue(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 5)]) + receipt(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 3)])
+            + receipt(2, MON, VAN_A, [(CHARGER, 2)]) + issue(60, MON, VAN_B, [(CHARGER, 2)]))
+    _legs, res = run(rows, data_date=at(9))
+    assert {p.issue.no: (p.step, p.receipt.no) for p in res.pairs} == {num("i", 1): ("C", num("r", 1)),
+                                                                        num("i", 60): ("B", num("r", 2))}
 
 
 @test("twins: two identical issues to one store and one receipt are ONE open item naming both; the pair is ambiguous; in grace until the deadline")
@@ -627,7 +661,7 @@ def _():
     assert (c["twin_items"], c["twin_slots"], c["orphans"]) == (1, 2, 1)
 
 
-@test("twins: a set is in grace only while every issue of it is, never by the ones step A happened to leave without a receipt")
+@test("twins: a set is in grace only while every issue of it that could be the missing one is, never by the ones step A happened to leave without a receipt")
 def _():
     rows = (issue(1, SUN, VAN_A, [(CASE, 2)]) + issue(2, WED, VAN_A, [(CASE, 2)]) + receipt(1, WED, VAN_A, [(CASE, 2)]))
     _legs, res = run(rows, data_date=THU)
@@ -666,6 +700,62 @@ def _():
     _legs, res = run(rival, data_date=at(9))
     assert got(res, num("i", 1)).outcome == "elsewhere" and got(res, num("i", 5)).outcome == "received"
     assert [(o.twins, o.missing) for o in res.open] == [((num("i", 5), num("i", 6)), 1)] and res.orphans == ()
+
+
+@test("twins: a member proven received (no member without a receipt can reach its receipt) has no say in the set's grace or deadline")
+def _():
+    rows = (issue(1, SUN, VAN_A, [(CABLE, 1)]) + receipt(101, SUN, VAN_A, [(CABLE, 1)])        # only SIO-1 reaches it
+            + issue(20, TUE, VAN_A, [(CABLE, 1)]) + issue(40, TUE, VAN_A, [(CABLE, 1)])
+            + receipt(160, TUE, VAN_A, [(CABLE, 1)]))
+    _legs, res = run(rows, data_date=TUE)
+    (t,) = res.open
+    assert (t.twins, t.missing, t.outcome, t.deadline) == ((num("i", 1), num("i", 20), num("i", 40)), 1, "in_grace", WED)
+    assert got(res, num("i", 1)).receipt.no == num("r", 101)
+    later = run(rows, data_date=THU)[1].open[0]
+    assert (later.outcome, later.deadline) == ("twins", WED)
+
+
+@test("the exchange follows the evidence: the best (member, receipt elsewhere) by the gate; never against a stronger step-A link")
+def _():
+    # SIO-1's step-A receipt shares its narration; the receipt elsewhere matches it on the date only: SIO-1 keeps it
+    rows = (issue(1, SUN, VAN_A, [(CASE, 2)], narr=ZEBRA) + receipt(2, MON, VAN_A, [(CASE, 2)], narr=ZEBRA)
+            + issue(100, MON, VAN_A, [(CASE, 2)]) + receipt(500, SUN, VAN_B, [(CASE, 2)]))
+    _legs, res = run(rows, data_date=MON)
+    kept = got(res, num("i", 1))
+    assert (kept.step, kept.receipt.no, kept.basis) == ("A", num("r", 2), ("narration", "number", "date"))
+    assert [o.twins for o in res.open] == [(num("i", 1), num("i", 100))]
+    assert [o.receipt.no for o in res.orphans] == [num("r", 500)]
+    # the receipt elsewhere shares SIO-30's narration (and only the date with SIO-1): SIO-30 is the one moved
+    rows = (issue(1, SUN, VAN_A, [(CASE, 2)]) + issue(30, SUN, VAN_A, [(CASE, 2)], narr=ZEBRA)
+            + receipt(200, MON, VAN_A, [(CASE, 2)]) + receipt(250, MON, VAN_A, [(CASE, 2)])
+            + issue(60, MON, VAN_A, [(CASE, 2)]) + receipt(500, SUN, VAN_B, [(CASE, 2)], narr=ZEBRA))
+    _legs, res = run(rows, data_date=at(9))
+    moved = got(res, num("i", 30))
+    assert (moved.outcome, moved.receipt.no, moved.basis) == ("elsewhere", num("r", 500), ("narration", "date"))
+    assert {got(res, num("i", n)).receipt.no for n in (1, 60)} == {num("r", 200), num("r", 250)}
+    assert (res.open, res.orphans) == ((), ())
+
+
+@test("the exchange follows a chain: the member moved elsewhere frees a receipt that reaches the waiting member through another")
+def _():
+    rows = (issue(1, SUN, VAN_A, [(CASE, 2)]) + issue(30, MON, VAN_A, [(CASE, 2)])
+            + receipt(200, TUE, VAN_A, [(CASE, 2)]) + issue(60, WED, VAN_A, [(CASE, 2)])
+            + receipt(300, THU, VAN_A, [(CASE, 2)])
+            + receipt(500, SUN, VAN_B, [(CASE, 2)]))            # the date ties it to SIO-1 only
+    _legs, res = run(rows, data_date=at(9))
+    assert {p.issue.no: (p.step, p.receipt.no) for p in res.pairs} == {
+        num("i", 1): ("B", num("r", 500)), num("i", 30): ("A", num("r", 200)), num("i", 60): ("A", num("r", 300))}
+    assert (res.open, res.orphans) == ((), ()) and not any(p.ambiguous for p in res.pairs)
+
+
+@test("an issue sent to its own store keeps the receipt that books it in there, even when step B could take it for another issue")
+def _():
+    rows = (issue(1, SUN, VAN_A, [(BANK, 1)])                                # main store to van A, not booked in yet
+            + issue(40, SUN, VAN_B, [(BANK, 1)], frm=VAN_B) + receipt(41, SUN, VAN_B, [(BANK, 1)]))
+    _legs, res = run(rows, data_date=SUN)
+    assert res.pairs == () and res.orphans == ()
+    assert [(a.voucher, a.partner) for a in res.aside] == [(num("i", 40), num("r", 41)), (num("r", 41), num("i", 40))]
+    assert [(o.issues[0].no, o.outcome) for o in res.open] == [(num("i", 1), "in_grace")]
 
 
 @test("an issue sent to its own store: the free receipt that books it in there is set aside with it (the nearest number); at another store, or refused by the gate, it stays an orphan")
@@ -793,6 +883,40 @@ def _():
         assert again.counts() == c and again.pairs == res.pairs and again.open == res.open
     assert run(rows, data_date=SAT)[1] == res
     assert pairing.pair(legs, data_date=datetime(2026, 10, 17, 18, 0)) == res          # a time of day is set aside
+
+
+@test("fuzz (seeded small ledgers): every leg exactly once, the counts add up, summarise agrees, shuffled rows give an equal Result")
+def _():
+    stores = (MAIN, VAN_A, VAN_B, VAN_C, DAMAGE)
+    contents = ([(CASE, 2)], [(CABLE, 1)], [(CABLE, 1), (BANK, 1)], [(CABLE, 1), (BANK, 2)], [(BANK, 1)])
+    words = (None, None, ZEBRA, WALRUS)
+    for seed in range(300):
+        rnd = random.Random(seed)
+        rows, n = [], 1
+        for _ in range(rnd.randint(2, 9)):
+            frm = rnd.choice(stores[:4])
+            to = frm if rnd.random() < 0.15 else rnd.choice(stores)
+            rows += issue(n, at(rnd.randint(0, 25)), to, rnd.choice(contents), frm=frm, narr=rnd.choice(words))
+            n += rnd.randint(1, 12)
+        for _ in range(rnd.randint(1, 8)):
+            rows += receipt(n, at(rnd.randint(0, 27)), rnd.choice(stores), rnd.choice(contents), narr=rnd.choice(words))
+            n += rnd.randint(1, 12)
+        d = at(rnd.randint(10, 30))
+        legs, res = run(rows, data_date=d)
+        booked = ([p.receipt.no for p in res.pairs] + [x.no for p in res.pairs for x in p.also]
+                  + [o.receipt.no for o in res.orphans] + [a.voucher for a in res.aside if a.kind == "receipt"])
+        assert sorted(booked) == sorted(r.no for r in legs.receipts), seed
+        sent = [p.issue.no for p in res.pairs] + [i.no for o in res.open for i in o.issues
+                                                  if not isinstance(res.by_issue[i.no], pairing.Pair)]
+        assert sorted(sent) == sorted(i.no for i in legs.issues), seed
+        c = res.counts()
+        issued = sum(c[k] for k in ("received", "late", "elsewhere", "qty_differs", "in_grace", "not_received", "twin_slots"))
+        assert (issued, receipts_counted(res)) == (len(legs.issues), len(legs.receipts)), seed
+        assert pairing.summarise(res)["counts"] == c, seed
+        assert all(res.by_issue[p.issue.no] is p and res.by_receipt[p.receipt.no] is p for p in res.pairs), seed
+        shuffled = rows[:]
+        random.Random(seed + 7).shuffle(shuffled)
+        assert run(shuffled, data_date=d)[1] == res, seed
 
 
 @test("pair refuses what is not its own: other arguments, two legs of one number, a leg filed under the other kind")
