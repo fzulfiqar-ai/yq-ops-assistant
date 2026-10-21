@@ -28,7 +28,7 @@ When his words start with `prep` or `count`, follow "The count sheets" below. Ot
 
 ## The comment lines: drafted, checked, approved
 
-- The screen names a Facts file and a Commentary file. Draft all thirteen slots of the Commentary file (five highlights, five points, three notes) in words and `{key|fmt}` placeholders only, each key taken from the Facts file and each format one that fits its kind. Never type a figure, a number word or a percent sign, and never copy a value out of the Facts file.
+- The screen names a Facts file and a Commentary file. Draft all thirteen slots of the Commentary file (five highlights, five points, three notes) in words and `{key|fmt}` placeholders only, each key taken from the Facts file and each format one that fits its kind. Never type a figure, a number word or a percent sign, and never copy a value out of the Facts file. Every word of direction (rose, fell, up, down and the like) must sit beside its figure; said of a level, it is checked against that figure's own change (`<key>_change`).
 - Run exactly `python -m scripts.ops check "<file>"` with the Commentary file's name, and show him the lines as they will read, unchanged. Correct each line it refuses, in the Commentary file, and check again.
 - Only on his "approved", run the text after `FINAL: ` exactly as printed, never typing or changing its token or any other part of it. If he changes a word, edit the Commentary file and check again before he approves.
 - If the final step says a load changed the month's figures, build the month again, read every line against the new Facts file, check again and ask him again.
