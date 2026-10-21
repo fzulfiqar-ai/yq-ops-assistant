@@ -1819,8 +1819,12 @@ def order_log_lines(model: Model, verb: str, supplier: str | None, args) -> list
             raise StockInput("The file or the lines changed since the preview: nothing was logged. Run the preview "
                              "again and log what it shows.")
         n = stock_orders.append(kpi_log_file(), shown)
-        lines.append(f"  Logged: {_plural(n, 'line')} in the KPI log. From the next screen and file they count as on "
-                     "the way, until the supplier's receipts cover them.")
+        if verb == "cancel":
+            lines.append(f"  Logged: {_plural(n, 'line')} in the KPI log. From the next screen and file this order no "
+                         "longer counts as on the way.")
+        else:
+            lines.append(f"  Logged: {_plural(n, 'line')} in the KPI log. From the next screen and file they count as "
+                         "on the way, until the supplier's receipts cover them.")
         return lines
     again = [f"python -m scripts.ops stock {verb} {supplier}"]
     if getattr(args, "date", None):

@@ -1,6 +1,6 @@
 # Ops status: where the work stands (continuation record)
 
-Last verified 20-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
+Last verified 21-Oct-2026. The master plan, with the backlog, the order of work and the acceptance criteria, is in the
 owner's plans folder (its path is in Claude's project memory), not in this repository.
 
 ## Live
@@ -28,9 +28,13 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 - `/yq-month`: the monthly sales workbook in the layout of the September report (`python -m scripts.ops report month
   [YYYY-MM]`, whole months only, written as a DRAFT under `exports/reports/monthly/`). Its golden test rebuilds September
   against the reference file (local only).
-- `/yq-stock`: stock headline, order list, fast-mover availability and ageing for the main store
-  (`python -m scripts.ops stock [reorder|ageing|<code>]`); values at the landed cost from goods-received notes, the
-  pricing-sheet cost where an item has none.
+- `/yq-stock` with the Stock & Order Plan (21-Oct-2026): the screen and an editable workbook per data date under
+  `exports/reports/stock/` (the order list per supplier, every item with its status, fast movers, the ageing review
+  against the clear target with the price cuts' effect, the damage store, goods on the way, the settings and the
+  season's lifts); the order rule per supplier (measured lead time, the monthly rhythm, the season, a longer
+  history for items out most of the window, whole cartons); `ordered` / `cancel` log goods on order only after
+  the owner's yes; `team` makes the copy without costs; `/yq-load` ends by showing it. Values at the landed cost
+  from goods-received notes, the pricing-sheet cost where an item has none. Reference: `docs/OPS_SKILLS.md`.
 - The photo archive: `python -m scripts.yq_photos archive [--apply]` and `verify <archive>` (see `docs/BACKUPS.md`).
 - The daily database backup: `python -m scripts.yq_nightly`, started by the Task Scheduler task `YQ Daily Backup`
   (Sunday to Thursday, while the owner is logged on; see `docs/BACKUPS.md`).
@@ -46,12 +50,7 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- The Stock & Order Plan (approved 20-Oct-2026), release 1: `/yq-stock` makes an editable workbook per data
-  date (the order list per supplier, every item with its status, the ageing review against the clear target
-  with the price cuts' effect, the damage store) and `/yq-load` ends by showing it; the damage store and the
-  ageing review on the screens. Release 2 (before the Eid order): the order rhythm, the season, the lead time
-  per supplier, a longer history for items sold out most of the window, goods on order logged when an order is
-  placed, and a team copy without costs.
+- Nothing is being built; the next step waits for the owner's go.
 - The faster load's review follow-ups: the read-only test now refuses the loader (no deploy). The other four
   change `scripts/load_txn.py` or `scripts/refresh.py`, so they go with the next API deploy: each temporary
   table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
