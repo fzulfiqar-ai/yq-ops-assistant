@@ -18,6 +18,10 @@ value when the month before had nothing (a placeholder naming it is refused). A 
 month's whole. The digest is the sha256 of the facts alone: neither the data date nor the day the report is
 prepared is a fact, so a later load that leaves the month's figures as they were leaves the digest as it was.
 
+THE NAMING THE CHECK RELIES ON (textcheck.change_key_of): <key>_change is the change of <key>, and in a group (rep1,
+cat1, prod1, acct1, wk1) .change is the change of .net; no other fact is named so. A direction word said of a level
+figure ("fell to BHD {net|bhd0}") is checked against that figure's change.
+
 THE FACTS (M the report month, M-1 the month before; kinds in brackets)
   month, month_prev                          [month]
   net, units, invoices, avg_invoice, avg_price, accounts, reps_active
@@ -26,9 +30,9 @@ THE FACTS (M the report month, M-1 the month before; kinds in brackets)
   gross, vat                                 [bhd] M's gross (VAT included) and its VAT, from the lines
   accounts_both, accounts_cur_only, accounts_prev_only
                                              [int] the customer base block: accounts invoiced in both months, in M
-                                             only, in M-1 only; each with _net, _net_prev [bhd], _change [signed],
+                                             only, in M-1 only; each with _net, _net_prev [bhd], _net_change [signed],
                                              _share, _share_prev [pct of that month's net]
-  cash_net, cash_net_prev, cash_change, cash_share, cash_share_prev     the block's cash customers line
+  cash_net, cash_net_prev, cash_net_change, cash_share, cash_share_prev     the block's cash customers line
   wk1 .. wk5   .label [text] .net .net_prev [bhd] .share .share_prev [pct] .change [signed]
                .first_accounts .first_accounts_by .first_accounts_prev .first_accounts_prev_by [int]
                                              the Daily sheet's week blocks (1 to 7 ... 29 to month end), and the
@@ -89,7 +93,12 @@ CONTRACT (the monthly build relies on it)
          customers_note: ""}}
       An existing template is never written over: his draft survives every rebuild. Writes go through
       scripts.ops.paths.write_text (under business_data/ or exports/ of the data root only). A facts_doc of another
-      month, or whose digest does not match its facts: ValueError.
+      month, or whose digest does not match its facts: ValueError. In a code worktree with no --data-root, before
+      anything is written: WorktreeRefused (a RuntimeError, so it is no warning to a caller that lets OSError and
+      ValueError pass) carrying WORKTREE_REFUSAL, one sentence; the caller exits 1 with it.
+  worktree_refusal() -> str | None           that sentence when this run is a code worktree's with no --data-root (the
+                                             rule of stock.day_file and recon prep), else None: the build calls it
+                                             before it writes anything
   facts_path(out_dir, month), commentary_path(out_dir, month) -> Path;  template(month, facts_doc, facts_name) -> dict;
   facts_text(facts_doc) -> str (the facts file's text, valid JSON)
 """
@@ -251,13 +260,13 @@ def _cohorts(out: _Out, cells: _Cells, net, net_prev) -> None:
         out.add(key, cells.num("Dashboard", f"P{row}"), "int")
         out.add(f"{key}_net", cur, "bhd")
         out.add(f"{key}_net_prev", prev, "bhd")
-        out.add(f"{key}_change", _ratio(cur, prev), "signed")
+        out.add(f"{key}_net_change", _ratio(cur, prev), "signed")          # the change of _net, never of the count
         out.add(f"{key}_share", _share(cur, net), "pct")
         out.add(f"{key}_share_prev", _share(prev, net_prev), "pct")
     cur, prev = cells.num("Dashboard", f"R{CASH_ROW}"), cells.num("Dashboard", f"Q{CASH_ROW}")
     out.add("cash_net", cur, "bhd")
     out.add("cash_net_prev", prev, "bhd")
-    out.add("cash_change", _ratio(cur, prev), "signed")
+    out.add("cash_net_change", _ratio(cur, prev), "signed")
     out.add("cash_share", _share(cur, net), "pct")
     out.add("cash_share_prev", _share(prev, net_prev), "pct")
 
@@ -553,7 +562,24 @@ def template(month: str, facts_doc: dict, facts_name: str) -> dict:
             "facts_digest": facts_doc["digest"], "slots": {slot: "" for slot in textcheck.SLOTS}}
 
 
+class WorktreeRefused(RuntimeError):
+    """A code worktree run with no --data-root writes no facts and no template: they belong to the project folder.
+    Not an OSError or a ValueError, so a caller that lets those pass as a warning stops here (exit 1)."""
+
+
+WORKTREE_REFUSAL = ("This is a code worktree: the month's facts and the commentary template belong to the project "
+                    "folder (to try them, name another folder with --data-root).")
+
+
+def worktree_refusal() -> str | None:
+    """The sentence that refuses a code worktree's writes (stock.day_file's and recon prep's rule); None elsewhere."""
+    return WORKTREE_REFUSAL if paths.is_worktree() and not paths.root_is_set() else None
+
+
 def write_files(out_dir, month: str, facts_doc: dict) -> dict:
+    said = worktree_refusal()
+    if said:                                  # before any write: the template is written once and kept for good
+        raise WorktreeRefused(said)
     if facts_doc.get("month") != month:
         raise ValueError(f"write_files: the facts are for {facts_doc.get('month')}, not {month}")
     if textcheck.digest_of(facts_doc.get("facts")) != facts_doc.get("digest"):

@@ -33,16 +33,20 @@ with) has no rendering: a placeholder that names it is refused.
 
 A SLOT IS REFUSED, with each reason printed, when:
   * outside its placeholders it holds a figure: a digit (any script, a fraction sign or a superscript too), a % sign
-    (or one of its look-alikes), the word percent or "per cent", or a number word (NUMBER WORDS below);
+    (or one of its look-alikes), the word percent, "per cent" or "per mille", a number word or a Roman numeral (NUMBER
+    WORDS below);
   * a placeholder names no fact, or a format that does not exist or does not fit the fact's kind, or a fact with no
-    value; or a brace is not part of a placeholder;
+    value; a brace is not part of a placeholder; or two placeholders touch with nothing between them (their figures
+    would run together: "1,2341,000");
   * a highlight or a point holds no placeholder (the three notes may hold none);
-  * a direction word contradicts the change it is said of, or is said with no change at all (THE DIRECTION RULE
-    below), or a change written without its sign ({x|abs_pct0}) is said with no direction;
+  * a direction word contradicts the change it is said of, or is said with no change to check it against (THE
+    DIRECTION RULE below); a change written without its sign ({x|abs_pct0}) is said with no direction; or {x|updown}
+    reads up or down beside a figure of the same change that reads 0% ("up 0%");
   * the line as it will read holds a nine-digit run, a run of fifteen or more digits (an ID or a card number), an
     e-mail address or a phone-like number (eight digits or more, single spaces or hyphens between them);
-  * it is empty, still opens with DRAFT (the workbook's stand-in for an empty slot), holds a line break or a control
-    character, or is no text.
+  * it is empty, still opens with DRAFT (the workbook's stand-in for an empty slot), holds a line break, a control
+    character or an invisible formatting character (a soft hyphen, a zero-width space, a direction mark), or is no
+    text.
 The whole file is refused when its layout is not "commentary v1", it is for another month than the facts, a slot is
 missing or one it should not have is there, the facts file's figures no longer match its own digest (changed by
 hand), or the facts file's digest differs from the template's facts_digest (the month's figures moved after the draft
@@ -50,10 +54,13 @@ was started: read the facts again, check every line, then set facts_digest to th
 A capitalised word inside a sentence that is no word of any fact (and not BHD, VAT ...) is a note, never a refusal:
 a name should come from a placeholder.
 
-NUMBER WORDS (decided 21-Oct-2026). Refused outside a placeholder, whole words in any case: nought and zero to twenty,
-the tens (thirty ... ninety), hundred, thousand, million, billion (and plurals), half/halves/halved, quarter(s),
-double(d), twice, triple(d), treble(d), thrice, dozen(s), and the -fold words (twofold ... tenfold, hundredfold).
-A hyphen splits a word: "twenty-one" and "one-off" are refused. The edge cases:
+NUMBER WORDS (decided 21-Oct-2026, widened on review the same day). Refused outside a placeholder, whole words in any
+case and any width (full-width letters read as plain ones): nought, nil and zero to twenty, the tens (thirty ...
+ninety), hundred, thousand, million, billion (and plurals), hundredth, thousandth, millionth (and plurals),
+half/halves/halved, quarter(s), double(d), twice, triple(d), treble(d), thrice, dozen(s), couple(s), and the -fold
+words (twofold ... tenfold, hundredfold); and a Roman numeral of two letters or more in capitals (XII, IV), except
+CC, CD, CV, DC, MD and MI, read as the abbreviations they usually are. A hyphen splits a word: "twenty-one" and
+"one-off" are refused. The edge cases:
   * "one" names a figure, except in "one of" followed by the, its, his, her, their, our, your, these, those, them,
     this or that ("one of the largest accounts": a member of a group, no count), in "no one" and in "one another".
     "one account", "only one of {x|words} accounts" and "one-off" are refused: say the count with {key|words}.
@@ -63,22 +70,33 @@ A hyphen splits a word: "twenty-one" and "one-off" are refused. The edge cases:
   * "someone", "none", "phone", "alone" are other words; "no" is not a number word.
 
 THE DIRECTION RULE. In each sentence (ended by . ! or ?), every direction word is checked against the change nearest
-to it in that sentence (by words; on a tie the one after the word):
-  up:   rose rise(s) rising risen up higher grew grow(s) growing grown growth gain(s) gained gaining increase(s)
-        increased increasing climb(s) climbed climbing jump(s) jumped jumping improve(s) improved improving
-  down: fell fall(s) falling fallen down lower drop(s) dropped dropping lose loses lost losing loss decline(s)
-        declined declining decrease(s) decreased decreasing slip(s) slipped slipping slid shrink(s) shrank shrunk
-        shrinking
-  (more, less, fewer, ahead, behind, stronger and weaker are no direction words: they rank more often than they move.)
-  A change is a {key} of kind signed (its sign; zero when its figure as written reads 0%), or "from {a} to {b}" /
-  "to {b} from {a}" with a and b two facts of one kind among bhd, int and pct (an optional BHD before each; the sign
-  of b less a, zero when both read the same). A direction word refuses the slot when the sign differs (a zero change
-  takes no direction word); after not, never, no, nor, without or an n't word it refuses when the sign is the word's
-  own ("did not fall" with a fall). A direction word in a sentence that holds no change is refused too: a direction
-  is always said with the figure that proves it (decided 21-Oct-2026, stricter than "contradicts": "fell to BHD
-  {x|bhd0}" alone cannot be checked). Not a direction: a word joined by a hyphen ("lower-priced"), "up to", "made up"
-  and the like, "broken down" and the like, "down payment".
-  A {key|abs_pct0} must be the change a direction word in its sentence is checked against, or stand beside
+to it in that sentence (by words; on a tie the one after the word). The words, in every form of each verb (UP_WORDS,
+DOWN_WORDS, LEVEL_WORDS):
+  up:        up, higher; rise, grow (growth), gain, increase, climb, jump, improve (improvement), soar, surge, rebound,
+             recover (recovery), spike, expand (expansion), strengthen, boost, rally, leap; lifted, lifting
+  down:      down, lower; fall, drop, lose (loss), decline, decrease, slip, slide, shrink, dip, plunge, slump, tumble,
+             ease, soften, sink, weaken, retreat, dwindle, collapse, slow (slowdown), cut; contracted, contracting,
+             contraction (a contract is a noun)
+  unchanged: unchanged, flat, steady, stable, stagnant, stagnated (said of a change that reads 0%)
+  (more, less, fewer, ahead, behind, stronger, weaker, better and worse are no direction words: they rank more often
+  than they move; "lift" and "lifts" are the season lifts.)
+  A change is:
+    * a {key} of kind signed: its sign, zero when its figure as written reads 0%;
+    * "from {a} to {b}", "from {a} up to {b}", "from {a} down to {b}" or "to {b} from {a}", a and b two facts of one
+      kind among bhd, int and pct (an optional BHD before each): the sign of b less a, zero when both read the same;
+    * a level figure {key} of kind bhd, int or pct whose change the facts hold (change_key_of: <key>_change, or
+      <group>.change for <group>.net): that change's sign as it reads at pct0. So "fell to BHD {net|bhd0}" is checked
+      against net_change and "{rep2.name} rose to BHD {rep2.net|bhd0}" against rep2.change (decided on review,
+      21-Oct-2026); a level figure whose change has no value (nothing in the month before) carries no direction word.
+  A direction word refuses the slot when its sign differs from the change's (a change that reads 0% takes no up or
+  down word, and an unchanged word takes no moving change). Negated, by not, never, no, nor, without or an n't word
+  right before it, or with quite, really, actually, even or yet between ("did not quite fall"), it refuses when the
+  sign is the word's own. A direction word in a sentence with no change at all is refused: a direction is always said
+  with the figure that proves it. Not a direction: a word joined by a hyphen ("lower-priced"); "up to" at a sentence's
+  start or after of, for, worth, at, with, cost(s), costing or priced (a bound: "orders of up to BHD 40"); "made up",
+  "set up", "end up" and the like (picked up is a direction); "broken down", "written down" and the like; "down
+  payment"; "price cut(s)".
+  A {key|abs_pct0} must be said of a change a direction word in its sentence is checked against, or stand beside
   {key|updown}: a change written without its sign is said with its direction.
 
 CONTRACT (scripts.ops.workbook.facts and the build's final step rely on it)
@@ -90,6 +108,7 @@ CONTRACT (scripts.ops.workbook.facts and the build's final step rely on it)
       is not small letters, digits, _ and . (starting with a letter), an unknown kind, a value of the wrong type:
       ValueError.
   render_value(value, kind, fmt) -> str      one rendering (ValueError: no value, or a format that does not fit)
+  change_key_of(key, facts) -> str | None    the change fact of a level figure (THE DIRECTION RULE)
   digest_of(facts) -> 'sha256:<hex>'          the sha256 of the canonical JSON of the facts mapping (keys sorted)
   token_for(commentary_bytes, facts_digest) -> str
       12 letters a to p (hex digit 0 -> a ... f -> p): the first twelve hex digits of the sha256 of the canonical JSON
@@ -160,16 +179,19 @@ MONTH_KEY = re.compile(r"[0-9]{4}-(?:0[1-9]|1[0-2])")
 _BRACES = re.compile(r"\{([^{}]*)\}")
 _PLACEHOLDER = re.compile(r"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)(?:\|([A-Za-z0-9_]+))?")
 # a word (letters of any script, joined by a hyphen or an apostrophe), a sentence end, a colon
-_TOKEN = re.compile(r"(?P<word>[^\W\d_]+(?:[-'\u2019][^\W\d_]+)*)|(?P<end>[.!?]+)|(?P<colon>:)")
+_TOKEN = re.compile(r"(?P<word>[^\W\d_]+(?:[-'\N{RIGHT SINGLE QUOTATION MARK}][^\W\d_]+)*)"
+                    r"|(?P<end>[.!?]+)|(?P<colon>:)")
 _LETTERS = re.compile(r"[^\W\d_]+")
 
 # figures typed in words or signs
-PERCENT_SIGNS = "%\uff05\u066a\u2030\u2031\ufe6a"      # % and its look-alikes (full width, Arabic, per mille ...)
+PERCENT_SIGNS = ("%\N{FULLWIDTH PERCENT SIGN}\N{ARABIC PERCENT SIGN}\N{PER MILLE SIGN}\N{PER TEN THOUSAND SIGN}"
+                 "\N{SMALL PERCENT SIGN}")     # % and its look-alikes (full width, Arabic, per mille ...)
 NUMBER_WORDS = frozenset((
-    "zero nought two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+    "zero nought nil two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
     "seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred hundreds thousand "
-    "thousands million millions billion billions half halves halved halving quarter quarters quartered double doubled "
-    "doubles doubling twice triple tripled triples tripling treble trebled trebles thrice dozen dozens").split())
+    "thousands million millions billion billions hundredth hundredths thousandth thousandths millionth millionths half "
+    "halves halved halving quarter quarters quartered double doubled doubles doubling twice triple tripled triples "
+    "tripling treble trebled trebles thrice dozen dozens couple couples").split())
 _FOLD = re.compile(r"(?:two|three|four|five|six|seven|eight|nine|ten|twenty|hundred|thousand)fold")
 FRACTION_ORDINALS = frozenset(("third thirds fourth fourths fifth fifths sixth sixths seventh sevenths eighth eighths "
                                "ninth ninths tenth tenths").split())
@@ -177,26 +199,39 @@ ORDINALS = FRACTION_ORDINALS | frozenset((
     "first second eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth "
     "twentieth thirtieth").split())
 ONE_OF_NEXT = frozenset("the its his her their our your these those them this that".split())
-PERCENT_WORDS = frozenset(("percent", "pct"))
+PERCENT_WORDS = frozenset(("percent", "pct", "permille"))
+# a Roman numeral in capitals, two letters or more; the few that are usually abbreviations are let through
+_ROMAN = re.compile(r"M{0,4}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})")
+ROMAN_ALLOWED = frozenset(("CC", "CD", "CV", "DC", "MD", "MI"))
 
-# the direction rule
+# the direction rule: every form of each verb, and the nouns that say a direction
 UP_WORDS = frozenset((
-    "rose rise rises rising risen up higher grew grow grows growing grown growth gain gains gained gaining increase "
+    "up higher rise rises rising risen rose grow grows growing grown grew growth gain gains gained gaining increase "
     "increases increased increasing climb climbs climbed climbing jump jumps jumped jumping improve improves improved "
-    "improving").split())
+    "improving improvement soar soars soared soaring surge surges surged surging rebound rebounds rebounded rebounding "
+    "recover recovers recovered recovering recovery spike spikes spiked spiking expand expands expanded expanding "
+    "expansion strengthen strengthens strengthened strengthening boost boosts boosted boosting rally rallies rallied "
+    "rallying leap leaps leapt leaped leaping lifted lifting").split())
 DOWN_WORDS = frozenset((
-    "fell fall falls falling fallen down lower drop drops dropped dropping lose loses lost losing loss decline declines "
-    "declined declining decrease decreases decreased decreasing slip slips slipped slipping slid shrink shrinks shrank "
-    "shrunk shrinking").split())
+    "down lower fall falls falling fallen fell drop drops dropped dropping lose loses losing lost loss losses decline "
+    "declines declined declining decrease decreases decreased decreasing slip slips slipped slipping slide slides "
+    "sliding slid shrink shrinks shrank shrunk shrinking dip dips dipped dipping plunge plunges plunged plunging slump "
+    "slumps slumped slumping tumble tumbles tumbled tumbling ease eases eased easing soften softens softened softening "
+    "sink sinks sank sunk sinking contracted contracting contraction weaken weakens weakened weakening retreat retreats "
+    "retreated retreating dwindle dwindles dwindled dwindling collapse collapses collapsed collapsing slow slows slowed "
+    "slowing slowdown cut cuts cutting").split())
+LEVEL_WORDS = frozenset("unchanged flat steady stable stagnant stagnated".split())     # said of a change that reads 0%
 NOT_UP_AFTER = frozenset((                      # "<word> up" that names no direction ("made up", "set up" ...)
-    "made make makes making set sets setting pick picks picked picking follow follows followed following back backed "
-    "sum sums summed summing end ends ended ending show shows showed showing turn turns turned open opens opened sign "
-    "signs signed build builds built take takes took taken line lined top topped stock stocked round rounded clean "
-    "cleaned catch caught mix mixed add added keep kept").split())
+    "made make makes making set sets setting follow follows followed following back backed sum sums summed summing "
+    "end ends ended ending show shows showed showing turn turns turned open opens opened sign signs signed take takes "
+    "took taken line lined top topped stock stocked round rounded clean cleaned catch caught mix mixed add added keep "
+    "kept").split())
+BOUND_UP_TO_AFTER = frozenset("of for worth at with cost costs costing priced".split())    # "orders of up to BHD 40"
 NOT_DOWN_AFTER = frozenset((                    # "broken down by salesman", "written down" ...
     "break breaks broke broken breaking write writes wrote written writing mark marks marked let shut settle settled "
     "calm").split())
 NEGATORS = frozenset("not never no nor without".split())
+SOFTENERS = frozenset("quite really actually even yet".split())    # "did not quite fall" is still "not ... fall"
 # capitalised words that are no fact and need no note
 COMMON_CAPITALS = frozenset("BHD VAT KPI KPIs ERP SKU SKUs YQ Focus".split())
 
@@ -442,9 +477,9 @@ class _Tok:
 class _Change:
     start: int                        # token positions in the sentence (a pair spans several)
     end: int
-    sign: int                         # +1, 0, -1 as the line will read
+    sign: int | None                  # +1, 0, -1 as the line will read; None: a level figure whose change has no value
     label: str
-    ph: _Ph | None = None             # the signed placeholder (None for a from-to pair)
+    key: str | None = None            # the change fact: a signed placeholder's key, or a level figure's change
 
 
 @dataclass
@@ -528,15 +563,16 @@ def _typed_figures(typed: str, reasons: list[str]) -> None:
 def _number_words(toks: list[_Tok], reasons: list[str]) -> None:
     """The number words of NUMBER WORDS (module docstring), with their edge cases."""
     found: list[str] = []
-    # a word joined by hyphens is split here: 'twenty-one', 'one-off'
-    parts: list[tuple[str, int]] = []           # (part folded, token index) for every word part, in order
-    for i, t in enumerate(toks):
+    # a word joined by hyphens is split here ('twenty-one', 'one-off'), each part read in its plain width (NFKC:
+    # full-width letters are their plain letters)
+    parts: list[tuple[str, str]] = []           # (part folded, part as written) for every word part, in order
+    for t in toks:
         if t.kind == "word":
-            for p in re.split(r"[-'\u2019]", t.text):
-                parts.append((p.casefold(), i))
+            for p in re.split(r"[-'\N{RIGHT SINGLE QUOTATION MARK}]", unicodedata.normalize("NFKC", t.text)):
+                parts.append((p.casefold(), p))
         else:
-            parts.append(("", i))               # a placeholder or a sign ends a run of words
-    for k, (w, _i) in enumerate(parts):
+            parts.append(("", ""))              # a placeholder or a sign ends a run of words
+    for k, (w, written) in enumerate(parts):
         if not w:
             continue
         prev = parts[k - 1][0] if k > 0 else ""
@@ -548,34 +584,52 @@ def _number_words(toks: list[_Tok], reasons: list[str]) -> None:
             found.append("one")
         elif w in NUMBER_WORDS or _FOLD.fullmatch(w):
             found.append(w)
-        elif w in PERCENT_WORDS or (w == "cent" and prev == "per"):
-            reasons.append(f'"{"per cent" if w == "cent" else w}" typed outside a placeholder: a share or a change '
-                           "comes from a placeholder ({key|pct0} ...)")
+        elif w in PERCENT_WORDS or (w in ("cent", "mille") and prev == "per"):
+            reasons.append(f'"{"per " + w if w in ("cent", "mille") else w}" typed outside a placeholder: a share or a '
+                           "change comes from a placeholder ({key|pct0} ...)")
         elif w in ORDINALS and nxt == "of":
             reasons.append(f'"{w} of" types a share or a date: write it with a placeholder')
         elif w in FRACTION_ORDINALS and prev in ("a", "an"):
             reasons.append(f'"{prev} {w}" types a share: write it with a placeholder ({{key|pct0}})')
+        elif len(written) >= 2 and written.isupper() and _ROMAN.fullmatch(written) and written not in ROMAN_ALLOWED:
+            reasons.append(f'"{written}" reads as a Roman numeral: name the figure with a placeholder')
     if found:
         reasons.append("a number word typed outside a placeholder (" + ", ".join(f'"{w}"' for w in found[:3])
                        + "): say the count with {key|words} or {key|Words}")
 
 
+def _negates(w: str | None) -> bool:
+    return bool(w) and (w in NEGATORS or w.endswith(("n't", "n\N{RIGHT SINGLE QUOTATION MARK}t")))
+
+
+def _negator(toks: list[_Tok], i: int) -> str | None:
+    """The words that negate the direction word at position i: a negator right before it, or one with quite, really,
+    actually, even or yet between ("did not quite fall"); None when nothing negates it."""
+    if _negates(_word(toks, i - 1)):
+        return toks[i - 1].text
+    if _word(toks, i - 1) in SOFTENERS and _negates(_word(toks, i - 2)):
+        return f"{toks[i - 2].text} {toks[i - 1].text}"
+    return None
+
+
 def _direction(toks: list[_Tok], i: int) -> tuple[int, str | None] | None:
-    """(+1 or -1, the negating word or None) for a direction word at position i; None when the word names no
-    direction there."""
+    """(+1 up, -1 down or 0 unchanged, the negating words or None) for a direction word at position i; None when the
+    word names no direction there."""
     w = _word(toks, i)
     if w is None:
         return None
-    pol = 1 if w in UP_WORDS else -1 if w in DOWN_WORDS else 0
-    if not pol:
+    pol = 1 if w in UP_WORDS else -1 if w in DOWN_WORDS else 0 if w in LEVEL_WORDS else None
+    if pol is None:
         return None
     prev, nxt = _word(toks, i - 1), _word(toks, i + 1)
-    if w == "up" and (prev in NOT_UP_AFTER or nxt == "to"):
-        return None
+    start = i == 0 or toks[i - 1].kind == "colon"
+    if w == "up" and (prev in NOT_UP_AFTER or (nxt == "to" and (start or prev in BOUND_UP_TO_AFTER))):
+        return None                             # "made up", "set up"; "orders of up to BHD 40" (a bound)
     if w == "down" and (prev in NOT_DOWN_AFTER or nxt in ("payment", "payments")):
         return None
-    negated = bool(prev) and (prev in NEGATORS or prev.endswith(("n't", "n\u2019t")))
-    return pol, (toks[i - 1].text if negated else None)
+    if w in ("cut", "cuts", "cutting") and prev in ("price", "prices"):
+        return None                             # the price cuts: a noun here, not a figure that moved
+    return pol, _negator(toks, i)
 
 
 def _as_float(v) -> float | None:
@@ -603,19 +657,58 @@ def _num_ph_after(sent: list[_Tok], i: int) -> int | None:
     return None
 
 
-def _changes(sent: list[_Tok]) -> list[_Change]:
+def change_key_of(key: str, facts: dict) -> str | None:
+    """The change fact of a level figure, by the facts' own naming (scripts.ops.workbook.facts): <key>_change, or
+    <group>.change for <group>.net ('net' -> 'net_change', 'rep2.net' -> 'rep2.change'); None for a figure of the month
+    before, for a change itself, and for a figure the facts hold no change of."""
+    if key.endswith(("_prev", "_change", ".change")):
+        return None
+    for cand in (f"{key}_change", f"{key[:-4]}.change" if key.endswith(".net") else ""):
+        fact = facts.get(cand)
+        if isinstance(fact, dict) and fact.get("kind") == "signed":
+            return cand
+    return None
+
+
+def _level_change(i: int, ph: _Ph, facts: dict) -> _Change | None:
+    """The change of the level figure at position i, as its change fact reads at pct0 (None: the facts hold none)."""
+    ck = change_key_of(ph.key, facts)
+    if ck is None:
+        return None
+    fact = facts[ck]
+    read, v = fact["shown"].get("pct0"), _as_float(fact.get("value"))
+    if v is None or read is None:
+        return _Change(i, i, None, f"{ph.raw}, whose change {ck} has no value this month", ck)
+    sign = 0 if not re.sub(r"[^0-9]", "", read).strip("0") else (1 if v > 0 else -1)
+    return _Change(i, i, sign, f"{ph.raw}, whose change {ck} reads {read}", ck)
+
+
+def _changes(sent: list[_Tok], facts: dict) -> list[_Change]:
+    """What a direction word in the sentence can be checked against: each signed placeholder, each level figure whose
+    change the facts hold, and each from-to pair."""
     out: list[_Change] = []
     for i, t in enumerate(sent):
-        if t.kind == "ph" and t.ph.ok and t.ph.kind == "signed":
-            out.append(_Change(i, i, _shown_sign(t.ph), t.ph.raw, t.ph))
+        if t.kind != "ph" or not t.ph.ok:
+            continue
+        if t.ph.kind == "signed":
+            out.append(_Change(i, i, _shown_sign(t.ph), t.ph.raw, t.ph.key))
+        elif t.ph.kind in ("bhd", "int", "pct"):
+            level = _level_change(i, t.ph, facts)
+            if level is not None:
+                out.append(level)
     for i in range(len(sent)):
         first = _word(sent, i)
         if first not in ("from", "to"):
             continue
         a = _num_ph_after(sent, i)
-        if a is None or _word(sent, a + 1) != ("to" if first == "from" else "from"):
+        if a is None:
             continue
-        b = _num_ph_after(sent, a + 1)
+        j = a + 1
+        if first == "from" and _word(sent, j) in ("up", "down"):          # "from {a} up to {b}"
+            j += 1
+        if _word(sent, j) != ("to" if first == "from" else "from"):
+            continue
+        b = _num_ph_after(sent, j)
         if b is None or sent[a].ph.kind != sent[b].ph.kind:
             continue
         old, new = (sent[a].ph, sent[b].ph) if first == "from" else (sent[b].ph, sent[a].ph)
@@ -649,35 +742,45 @@ def _sentences(toks: list[_Tok]) -> list[list[_Tok]]:
     return out
 
 
-def _direction_rule(toks: list[_Tok], reasons: list[str]) -> None:
+def _direction_rule(toks: list[_Tok], facts: dict, reasons: list[str]) -> None:
     for sent in _sentences(toks):
-        changes = _changes(sent)
-        matched: set[int] = set()
+        changes = _changes(sent, facts)
+        matched: set[str] = set()               # the change facts a direction word of the sentence was checked against
         for i, t in enumerate(sent):
             said = _direction(sent, i)
             if said is None:
                 continue
             pol, negator = said
-            if not changes:
-                word = f"{negator} {t.text}" if negator else t.text
+            word = f"{negator} {t.text}" if negator else t.text
+            c = _nearest(changes, i)
+            if c is None:
                 reasons.append(f'"{word}" says a direction, but its sentence holds no change to check it against: say '
                                "the change with a placeholder ({key_change|abs_pct0}, or from {a} to {b})")
                 continue
-            c = _nearest(changes, i)
-            if c.ph is not None:
-                matched.add(id(c.ph))
-            wrong = (c.sign == pol) if negator else (c.sign != pol)
-            if wrong:
+            if c.key:
+                matched.add(c.key)
+            if c.sign is None:
+                reasons.append(f'"{word}" is said of {c.label} (nothing in the month before to compare with): no '
+                               "direction can be checked, so leave the direction word out")
+                continue
+            if (c.sign == pol) if negator else (c.sign != pol):
                 what = "is unchanged as written" if c.sign == 0 else "went up" if c.sign > 0 else "went down"
-                word = f"{negator} {t.text}" if negator else t.text
                 reasons.append(f'"{word}" contradicts {c.label}, which {what}: the direction word must agree with '
                                "the figure")
         updown = {t.ph.key for t in sent if t.kind == "ph" and t.ph.ok and t.ph.fmt == "updown"}
         for t in sent:
-            if (t.kind == "ph" and t.ph.ok and t.ph.fmt == "abs_pct0" and id(t.ph) not in matched
-                    and t.ph.key not in updown):
+            if t.kind != "ph" or not t.ph.ok:
+                continue
+            if t.ph.fmt == "abs_pct0" and t.ph.key not in matched and t.ph.key not in updown:
                 reasons.append(f"{t.ph.raw} drops the change's sign and nothing in its sentence says the direction: "
                                f"add a direction word (rose, fell, up, down ...) or {{{t.ph.key}|updown}}")
+            if t.ph.fmt == "updown" and t.ph.text in ("up", "down"):
+                zero = next((u.ph for u in sent if u.kind == "ph" and u.ph.ok and u.ph.key == t.ph.key
+                             and u.ph.fmt in ("pct0", "pct1", "abs_pct0") and _shown_sign(u.ph) == 0), None)
+                if zero is not None:
+                    reasons.append(f'{t.ph.raw} reads "{t.ph.text}" beside {zero.raw}, which reads {zero.text}: a '
+                                   f"change that reads 0% takes no direction (write {{{t.ph.key}|pct1}}, or say it was "
+                                   "unchanged)")
 
 
 def _capitals(toks: list[_Tok], known: set[str], slot: str, notes: dict) -> None:
@@ -722,12 +825,21 @@ def _check_slot(slot: str, text, facts: dict, known: set[str], notes: dict) -> t
         reasons.append("it still reads DRAFT, the build's stand-in: write the line itself")
     if any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in text):
         reasons.append("a line break or a control character: a slot is one line")
+    hidden = next((ch for ch in text if unicodedata.category(ch) == "Cf"), None)
+    if hidden is not None:
+        reasons.append(f"an invisible character (U+{ord(hidden):04X} {unicodedata.name(hidden, 'a format character')}"
+                       "): type the line plainly")
     toks: list[_Tok] = []
     typed_parts: list[str] = []
     out_parts: list[str] = []
     placeholders = 0
     pos = 0
+    before = None                               # the placeholder just before, when nothing stands between them
     for m in _BRACES.finditer(text):
+        if before is not None and m.start() == pos:
+            reasons.append(f"two placeholders with nothing between them ({before}{m.group(0)}): their figures would "
+                           "run together; put a word or a space between them")
+        before = m.group(0)
         typed_parts.append(text[pos:m.start()])
         toks += _tokens(text[pos:m.start()])
         out_parts.append(text[pos:m.start()])
@@ -747,7 +859,7 @@ def _check_slot(slot: str, text, facts: dict, known: set[str], notes: dict) -> t
     if slot in NEEDS_PLACEHOLDER and not placeholders:
         reasons.append("no placeholder: a highlight or a point names at least one of the month's figures, as "
                        "{key|format}")
-    _direction_rule(toks, reasons)
+    _direction_rule(toks, facts, reasons)
     rendered = " ".join("".join(out_parts).split())
     _rendered_ids(rendered, reasons)
     _capitals(toks, known, slot, notes)

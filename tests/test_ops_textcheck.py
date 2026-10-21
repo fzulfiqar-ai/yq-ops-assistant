@@ -24,10 +24,18 @@ Covered:
     its change, an unsigned change said with no direction, a nine-digit or fifteen-digit run, an e-mail, a
     phone-like number, a brace, a line break, an empty or non-text slot; the file: the layout, the month, a
     missing or extra slot, the facts changed by hand, the figures moved since the draft;
-  * the direction rule both ways: the nearest change, from-to pairs (either order, the same figure as written),
-    zero, negation, "up to", "made up", hyphenated words, two sentences, a direction word with no change at all;
+  * the direction rule both ways: the nearest change, from-to pairs (either order, "from {a} up to {b}", the same
+    figure as written), zero, negation (and "not quite"), "up to" as a bound, "made up", "picked up", "price cuts",
+    hyphenated words, two sentences, a direction word with no change at all; the review's verbs in their forms
+    (soared, dipped, surged, plunged, eased, rebounded ...), the unchanged words (flat, steady ...); a word said of a
+    level figure checked against that figure's own change (net -> net_change, rep2.net -> rep2.change), refused when
+    that change has no value; "{x|updown} {x|abs_pct0}" reading "up 0%";
+  * the naming the check relies on: every <key>_change is the change of <key>, a group's .change its .net's;
   * the number words and their edge cases: "one of the", "no one", "one another", "one account", "one-off",
     "twenty-one", "a third", "the third week", "fifth of", "first of all", -fold, the words that only look alike;
+    hundredth, thousandth, couple, nil, per mille, Roman numerals in capitals (MD, CD ... let through), full-width
+    letters; invisible characters (a zero-width space, a soft hyphen, a direction mark); two placeholders touching;
+  * a code worktree with no --data-root: write_files refuses in one sentence before any write;
   * capitalised words that are no fact: a note above FINAL, never a refusal;
   * the command: FINAL as the last line with the token of the file's bytes and the digest, --json, exit 2 with no
     FINAL on a refusal, exit 1 for a file that cannot be read, nothing written; render_slots for the final build,
@@ -280,8 +288,11 @@ def _():
 def _():
     assert (value("accounts_both"), value("accounts_cur_only"), value("accounts_prev_only")) == (1, 2, 1)
     assert (value("accounts_both_net"), value("accounts_both_net_prev")) == (90, 40)       # Shop Alpha
-    assert value("accounts_cur_only_net") == 60 and value("accounts_cur_only_change") is None     # nothing before
-    assert value("accounts_prev_only_net_prev") == 25 and value("accounts_prev_only_change") == -1
+    assert value("accounts_cur_only_net") == 60 and value("accounts_cur_only_net_change") is None  # nothing before
+    assert value("accounts_prev_only_net_prev") == 25 and value("accounts_prev_only_net_change") == -1
+    assert close(value("accounts_both_net_change"), 1.25) and value("cash_net_change") == 1          # 90 on 40; 20 on 10
+    for gone in ("accounts_both_change", "accounts_cur_only_change", "accounts_prev_only_change", "cash_change"):
+        assert gone not in facts_doc()["facts"], gone          # <key>_change is the change of <key>: never of a count
     assert (value("cash_net"), value("cash_net_prev")) == (20, 10) and close(value("cash_share"), 20 / 170)
     assert [value(f"wk{k}.net") for k in range(1, 6)] == [110, 10, 0, 0, 50]
     assert [value(f"wk{k}.net_prev") for k in range(1, 6)] == [50, 25, 0, 0, 0]
@@ -368,6 +379,24 @@ def _():
     assert "month" in str(exc)
 
 
+@test("facts: the naming the check relies on: <key>_change is the change of <key>; a group's .change is its .net's")
+def _():
+    f = facts_doc()["facts"]
+    for key, fact in f.items():                       # every change is named after the figure it is the change of
+        if key.endswith("_change"):
+            assert fact["kind"] == "signed" and key[:-len("_change")] in f, key
+        elif key.endswith(".change"):
+            assert fact["kind"] == "signed" and key[:-len("change")] + "net" in f, key
+    find = tc.change_key_of
+    assert (find("net", f), find("units", f), find("cash_net", f), find("net_ex_bulk", f)) == \
+        ("net_change", "units_change", "cash_net_change", "net_ex_bulk_change")
+    assert (find("accounts_both_net", f), find("rep1.net", f), find("wk2.net", f), find("acct4.net", f)) == \
+        ("accounts_both_net_change", "rep1.change", "wk2.change", "acct4.change")
+    for none in ("accounts_both", "units_prev", "net_change", "rep1.change", "best_day_net", "rep1.units", "bulk_net",
+                 "wk1.share", "nothing"):
+        assert find(none, f) is None, none           # a count's, a month before's, a change's own, or none at all
+
+
 @test("facts: the digest is the facts' alone (the data date is not one); a figure moved moves it")
 def _():
     a, b = month_doc(), month_doc(data_date="2026-04-20")
@@ -422,6 +451,34 @@ def _():
         outside = Path(tempfile.gettempdir()) / "yq-textcheck-never"
         raises(PermissionError, lambda: fa.write_files(outside, MONTH, doc))
         assert not outside.exists()
+
+
+@test("files: a code worktree with no --data-root writes no facts and no template: one sentence, before any write")
+def _():
+    doc = facts_doc()
+    never = Path(tempfile.gettempdir()) / "yq-textcheck-worktree-never"
+    saved = (paths.is_worktree, paths._override)
+    try:
+        paths.is_worktree = lambda: True
+        paths._override = None                    # as a run from a worktree finds the main folder by itself
+        assert fa.worktree_refusal() == fa.WORKTREE_REFUSAL
+        exc = raises(fa.WorktreeRefused, lambda: fa.write_files(never, MONTH, doc))
+        assert str(exc) == fa.WORKTREE_REFUSAL and "\n" not in str(exc) and "code worktree" in str(exc)
+        assert not isinstance(exc, (OSError, ValueError))         # no caller lets it pass as a warning
+        assert not never.exists()
+        raises(fa.WorktreeRefused, lambda: fa.write_files(never, "2026-02", doc))     # refused before anything else
+        paths.is_worktree = lambda: False         # the project folder itself (or a clone): no refusal
+        assert fa.worktree_refusal() is None
+    finally:
+        paths.is_worktree, paths._override = saved
+    with data_root():                             # --data-root names another folder: the files are written there
+        saved_wt = paths.is_worktree
+        paths.is_worktree = lambda: True
+        try:
+            assert fa.worktree_refusal() is None
+            assert fa.write_files(paths.exports_dir(DATA_DATE), MONTH, doc)["template_written"]
+        finally:
+            paths.is_worktree = saved_wt
 
 
 # ── the renderings ─────────────────────────────────────────────────────────────────────────────
@@ -501,12 +558,12 @@ def _():
     refused_for("Net sales were BHD 170 in {month|month}.", 'a figure typed outside a placeholder ("170")')
     refused_for("Net sales were BHD {net|bhd0} in March 2026.", '"2026"')
     refused_for("Net sales rose {net_change|abs_pct0}% to BHD {net|bhd0}.", 'a "%" typed outside a placeholder')
-    refused_for("Net sales rose {net_change|abs_pct0} \uff05.", "typed outside a placeholder")      # full-width %
-    refused_for("Net sales of BHD {net|bhd0} were up \u0663 times.", "a figure typed")               # an Arabic-Indic 3
-    refused_for("Net sales of BHD {net|bhd0} were up \u00bd again.", "a figure typed")               # a fraction sign
-    refused_for("Net sales rose {net_change|abs_pct0} \u2030.", "typed outside a placeholder")      # per mille
-    passes("Net sales didn\u2019t fall: {net_change|pct0}.")                     # a curly apostrophe negates too
-    refused_for("Net sales didn\u2019t rise: {net_change|pct0}.", "contradicts")
+    refused_for("Net sales rose {net_change|abs_pct0} \N{FULLWIDTH PERCENT SIGN}.", "typed outside a placeholder")      # full-width %
+    refused_for("Net sales of BHD {net|bhd0} were up \N{ARABIC-INDIC DIGIT THREE} times.", "a figure typed")               # an Arabic-Indic 3
+    refused_for("Net sales of BHD {net|bhd0} were up \N{VULGAR FRACTION ONE HALF} again.", "a figure typed")               # a fraction sign
+    refused_for("Net sales rose {net_change|abs_pct0} \N{PER MILLE SIGN}.", "typed outside a placeholder")      # per mille
+    passes("Net sales didn\N{RIGHT SINGLE QUOTATION MARK}t fall: {net_change|pct0}.")                     # a curly apostrophe negates too
+    refused_for("Net sales didn\N{RIGHT SINGLE QUOTATION MARK}t rise: {net_change|pct0}.", "contradicts")
     refused_for("Net sales rose {net_change|abs_pct0} percent.", '"percent" typed outside a placeholder')
     refused_for("Net sales rose {net_change|abs_pct0} per cent.", '"per cent" typed outside a placeholder')
 
@@ -613,7 +670,11 @@ def _():
     # a change that reads 0% takes no direction word, whatever its sign
     doc = with_facts({"tiny": (0.004, "signed")})
     refused_for("Sales rose {tiny|abs_pct0}.", "unchanged as written", fdoc=doc)
-    passes("Sales were {tiny|updown} {tiny|abs_pct0}.", fdoc=doc)
+    refused_for("Sales were {tiny|updown} {tiny|abs_pct0}.", '{tiny|updown} reads "up" beside {tiny|abs_pct0}, which '
+                                                               "reads 0%", fdoc=doc)                   # "up 0%"
+    passes("Sales were {tiny|updown}, {tiny|pct1}.", fdoc=doc)                                    # "up, +0.4%"
+    passes("Sales were {net_change|updown} {net_change|abs_pct0}.")                             # "up 127%"
+    passes("Cables were {cat3.change|updown}, {cat3.change|pct0}.")                             # "unchanged, 0%"
 
 
 @test("direction: each word is checked against the change nearest to it; a word with no change in its sentence is refused")
@@ -628,8 +689,10 @@ def _():
     # a direction is said with the figure that proves it: the change of sentence one does not reach sentence two
     refused_for("Net sales rose {net_change|abs_pct0}. The days after the first week fell.",
                 '"fell" says a direction, but its sentence holds no change to check it against')
-    refused_for("{rep2.name} fell to BHD {rep2.net|bhd0}.", '"fell" says a direction')
-    refused_for("Sales did not fall, at BHD {net|bhd0}.", '"not fall" says a direction')
+    refused_for("Sales did not rise, on {invoices|int} invoices at BHD {best_day_net|bhd0} on the best day.",
+                '"not rise" contradicts {invoices|int}, whose change invoices_change reads +67%')   # the nearest with a change
+    passes("Sales did not fall, on {invoices|int} invoices at BHD {best_day_net|bhd0} on the best day.")
+    refused_for("The best day did not fall short at BHD {best_day_net|bhd0}.", '"not fall" says a direction')
     passes("{rep2.name} reached BHD {rep2.net|bhd0}, {rep2.change|pct0} on {month_prev|month}.")    # no direction word
 
 
@@ -644,7 +707,13 @@ def _():
     refused_for("Cables rose from BHD {cat3.net_prev|bhd0} to BHD {cat3.net|bhd0}.", "unchanged as written")
     passes("Shares moved from {wk1.share_prev|pct0} to {wk1.share|pct0} in the first week, as sales grew "
            "{net_change|abs_pct0}.")
-    refused_for("Units rose from {units_prev|int} to BHD {net|bhd0}.", "holds no change")    # two kinds: no pair
+    refused_for("Units rose from {units_prev|int} to BHD {best_day_net|bhd0}.", "holds no change")   # two kinds: no pair
+    # from {a} up to {b}, from {a} down to {b}: a pair, and its up or down is checked against it
+    passes("Invoices went from {invoices_prev|int} up to {invoices|int}.")
+    refused_for("Invoices went from {invoices_prev|int} down to {invoices|int}.", '"down" contradicts from '
+                                                                                  "{invoices_prev|int} to {invoices|int}")
+    refused_for("Sales without bulk went from BHD {net_ex_bulk_prev|bhd0} up to BHD {net_ex_bulk|bhd0}.",
+                '"up" contradicts')
 
 
 @test("direction: negation, phrasal words and hyphenated words; an unsigned change needs its direction")
@@ -663,6 +732,61 @@ def _():
     refused_for("Net sales rose {net_change|abs_pct0} and units {units_change|abs_pct0}.", "{units_change|abs_pct0} drops")
     passes("Net sales were {net_change|updown} {net_change|abs_pct0}.")
     passes("Net sales changed by {net_change|pct0}.")                                    # the sign is in the figure
+    # negated through quite, really, actually, even or yet; "much" is a degree, not a negation
+    refused_for("Net sales did not quite rise: {net_change|pct0}.", '"not quite rise" contradicts')
+    passes("Net sales did not quite fall: {net_change|pct0}.")
+    passes("Sales without bulk orders were not much lower: {net_ex_bulk_change|pct0}.")
+
+
+UP_VERBS = ("soared", "soars", "surged", "surging", "rebounded", "recovered", "spiked", "expanded", "strengthened",
+            "boosted", "rallied", "leapt", "lifted", "improved", "picked up", "edged up", "shot up", "built up")
+DOWN_VERBS = ("dipped", "dips", "plunged", "plunging", "slumped", "tumbled", "eased", "softened", "sank", "contracted",
+              "weakened", "retreated", "dwindled", "collapsed", "slowed", "were cut", "ticked down", "slid")
+
+
+@test("direction: the review's verbs in their forms, both ways; picked up; the unchanged words; price cuts")
+def _():
+    for verb in UP_VERBS:
+        passes(f"Net sales {verb} {{net_change|abs_pct0}}.")                                  # +127%
+        refused_for(f"Sales without bulk orders {verb} {{net_ex_bulk_change|abs_pct0}}.", "contradicts")    # -14%
+    for verb in DOWN_VERBS:
+        passes(f"Sales without bulk orders {verb} {{net_ex_bulk_change|abs_pct0}}.")
+        refused_for(f"Net sales {verb} {{net_change|abs_pct0}}.", "contradicts")
+    refused_for("Net sales dipped {net_change|pct0}.", '"dipped" contradicts {net_change|pct0}, which went up')   # +127%
+    for word in ("flat", "steady", "stable", "unchanged", "stagnant"):
+        passes(f"Cables were {word} at {{cat3.change|pct0}}.")                                # 0%
+        refused_for(f"Net sales were {word} at {{net_change|pct0}}.", f'"{word}" contradicts {{net_change|pct0}}, '
+                                                                      "which went up")
+    refused_for("Cables were not flat: {cat3.change|pct0}.", '"not flat" contradicts')
+    passes("The price cuts helped: net sales rose {net_change|abs_pct0}.")                    # a noun, no direction
+    passes("Up to BHD {bulk_threshold|bhd0} an order is small, and net sales rose {net_change|abs_pct0}.")   # a bound
+    passes("Net sales picked up to BHD {net|bhd0}.")                                          # +127%: up, to a level
+    refused_for("Sales without bulk orders picked up to BHD {net_ex_bulk|bhd0}.", '"up" contradicts {net_ex_bulk|bhd0}')
+
+
+@test("direction: a word said of a level figure is checked against that figure's own change in the facts")
+def _():
+    passes("Net sales rose to BHD {net|bhd0}.")
+    refused_for("Net sales fell to BHD {net|bhd0}.", '"fell" contradicts {net|bhd0}, whose change net_change reads '
+                                                     "+127%, which went up")
+    passes("Sales without bulk orders fell to BHD {net_ex_bulk|bhd0}.")                       # -14%
+    passes("{rep1.name} grew to BHD {rep1.net|bhd0}.")                                        # rep1.change +150%
+    refused_for("{rep2.name} fell to BHD {rep2.net|bhd0}.", '"fell" contradicts {rep2.net|bhd0}, whose change '
+                                                            "rep2.change reads +100%")
+    passes("{wk2.label} slipped to BHD {wk2.net|bhd0}.")                                      # wk2.change -60%
+    refused_for("Cables rose to BHD {cat3.net|bhd0}.", "unchanged as written")               # cat3.change 0%
+    refused_for("{acct2.name} rose to BHD {acct2.net|bhd0}.", "nothing in the month before to compare with")
+    refused_for("The best day rose to BHD {best_day_net|bhd0}.", "holds no change")           # no change in the facts
+    refused_for("Invoices fell to {invoices|words}.", '"fell" contradicts {invoices|words}')  # a count has one too
+    passes("{accounts_both|Words} account grew to BHD {accounts_both_net|bhd0}.")           # the cohort's net: +125%
+    refused_for("{accounts_prev_only|Words} account grew to BHD {accounts_prev_only_net|bhd0}.", '"grew" contradicts')
+    # the nearest change decides, a level figure's as much as a written one
+    passes("Net sales rose {net_change|abs_pct0}, while sales without bulk orders fell to BHD {net_ex_bulk|bhd0}.")
+    got = reasons("Net sales fell {net_change|abs_pct0}, while sales without bulk orders rose to BHD "
+                  "{net_ex_bulk|bhd0}.")
+    assert len([x for x in got if "contradicts" in x]) == 2, got
+    # a direction word checked through the level figure counts for the unsigned change of the same key
+    passes("Net sales rose to BHD {net|bhd0}, {net_change|abs_pct0} on {month_prev|month}.")
 
 
 # ── the number words ───────────────────────────────────────────────────────────────────────────
@@ -694,6 +818,40 @@ def _():
     passes("The first invoice came on {first_invoice_day|day}, BHD {net|bhd0} in all.")
     passes("The third week brought BHD {wk3.net|bhd0}; the second invoice came later.")
     refused_for("The second half brought BHD {wk5.net|bhd0}.", '"half"')
+
+
+def full_width(text: str) -> str:
+    """The text in full-width letters (U+FF21 ...), as a keyboard in that mode types it."""
+    return "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in text)
+
+
+@test("number words: hundredths, couples, nil, per mille, Roman numerals and full-width letters; invisible characters")
+def _():
+    for word in ("hundredth", "thousandth", "millionths", "couple", "nil"):
+        refused_for(f"The {word} account bought BHD {{net|bhd0}}.", f'"{word}"')
+    refused_for("Returns were {net|bhd0} per mille of sales.", '"per mille" typed outside a placeholder')
+    refused_for("Returns were {net|bhd0} permille of sales.", '"permille" typed outside a placeholder')
+    for numeral in ("XII", "IV", "MMXXVI", "XL"):
+        refused_for(f"Sales were {numeral} times BHD {{net|bhd0}}.", f'"{numeral}" reads as a Roman numeral')
+    for fine in ("MD", "CD", "MI", "Mix", "Civil", "VAT", "I"):                     # abbreviations, words, a pronoun
+        passes(f"Sales {fine} said were BHD {{net|bhd0}}.")
+    refused_for(f"{full_width('Twenty')} accounts bought BHD {{net|bhd0}}.", '"twenty"')
+    refused_for(f"Sales were {full_width('XII')} times BHD {{net|bhd0}}.", '"XII" reads as a Roman numeral')
+    refused_for("Sales of BHD {net|bhd0} came on tw\N{ZERO WIDTH SPACE}elve days.",
+                "an invisible character (U+200B ZERO WIDTH SPACE)")
+    refused_for("Sales of BHD {net|bhd0} came with ten\N{SOFT HYPHEN}thousand units.", "U+00AD SOFT HYPHEN")
+    refused_for("Sales of BHD {net|bhd0}\N{LEFT-TO-RIGHT MARK} came in.", "an invisible character")
+
+
+@test("placeholders: two that touch, with nothing between them, are refused; a space or a word between them passes")
+def _():
+    refused_for("{units|int}{units_prev|int} units were sold for BHD {net|bhd0}.",
+                "two placeholders with nothing between them ({units|int}{units_prev|int}): their figures would run "
+                "together")
+    refused_for("Net sales were BHD {net|bhd0}{net_prev|bhd0}.", "two placeholders with nothing between them")
+    passes("Units were {units|int} against {units_prev|int}, for BHD {net|bhd0}.")
+    passes("Net sales were {net_change|updown} {net_change|abs_pct0}.")                     # a space between
+    passes("{rep1.name}: BHD {rep1.net|bhd0}.")
 
 
 @test("capitals: a capitalised word that is no fact is a note, never a refusal; names of facts and BHD pass")
