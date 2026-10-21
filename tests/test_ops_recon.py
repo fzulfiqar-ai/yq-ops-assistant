@@ -672,18 +672,25 @@ def _():
 def _():
     with data_root():
         name = rb.MOVES_MODULE
-        raises(rb.NotYet, lambda: rb.Source().books_only(LAST))
-        seen = []
-        fake = types.ModuleType(name)
-        fake.books_only = lambda as_of, held_days=99: seen.append((as_of, held_days)) or {VAN_A: {"units": 1, "bhd": 1}}
-        sys.modules[name] = fake
+        missing = object()
+        saved = sys.modules.get(name, missing)            # /yq-moves itself may be there (release A): kept aside
+        sys.modules[name] = None                          # not built: importing it raises ModuleNotFoundError
         try:
+            raises(rb.NotYet, lambda: rb.Source().books_only(LAST))
+            seen = []
+            fake = types.ModuleType(name)
+            fake.books_only = lambda as_of, held_days=99: seen.append((as_of, held_days)) or {VAN_A: {"units": 1,
+                                                                                                       "bhd": 1}}
+            sys.modules[name] = fake
             assert rb.Source().books_only(LAST) == {VAN_A: {"units": 1, "bhd": 1}}
             assert seen == [(LAST, 30)]
             del fake.books_only
             assert "no books_only yet" in str(raises(rb.NotYet, lambda: rb.Source().books_only(LAST)))
         finally:
-            del sys.modules[name]
+            if saved is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = saved
 
 
 # ── 3: sales and receivables ──────────────────────────────────────────────────

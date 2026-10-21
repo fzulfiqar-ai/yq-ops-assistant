@@ -292,20 +292,19 @@ def _():
 @test("the month view: one line (exit 1) until scripts.ops.recon_blocks exists, then handed run(args, month)")
 def _():
     with data_root():
-        res = recon.run(Args("2026-10"))
-        assert res["exit"] == 1 and res["text"] == recon.NO_BLOCKS and not res["ok"], res
-        assert recon.run(Args())["text"] == recon.NO_BLOCKS
+        with absent(recon.BLOCKS_MODULE):                      # the month-end release not there: one line
+            res = recon.run(Args("2026-10"))
+            assert res["exit"] == 1 and res["text"] == recon.NO_BLOCKS and not res["ok"], res
+            assert recon.run(Args())["text"] == recon.NO_BLOCKS
         seen = []
         fake = types.ModuleType(recon.BLOCKS_MODULE)
         fake.run = lambda args, month: seen.append(month) or {"ok": True, "text": "blocks", "exit": 0}
-        sys.modules[recon.BLOCKS_MODULE] = fake
-        try:
+        with absent(recon.BLOCKS_MODULE):                      # put back as it was, whatever stood there
+            sys.modules[recon.BLOCKS_MODULE] = fake
             assert recon.run(Args("2026-10"))["text"] == "blocks" and recon.run(Args())["text"] == "blocks"
-        finally:
-            del sys.modules[recon.BLOCKS_MODULE]
         assert seen == ["2026-10", None]
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with absent(recon.BLOCKS_MODULE), redirect_stdout(buf):
             code = cli.main(["recon", "2026-10", "--data-root", str(paths.data_root())])
         assert code == 1 and buf.getvalue().strip() == recon.NO_BLOCKS
 
