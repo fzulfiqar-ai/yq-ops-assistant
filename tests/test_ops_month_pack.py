@@ -39,8 +39,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
 import traceback
 import types
 import zipfile
@@ -50,7 +52,7 @@ from xml.etree import ElementTree as ET
 
 from tests.test_ops_report import (  # noqa: E402  (first: it pins the environment, imports scripts.ops.db first)
     ITEMS, LAST_LOAD, MONTH, VAN_A, FakeSource, data_root, line, raises, world_rows)
-from scripts.ops import config, kpi, kpi_log, textcheck  # noqa: E402
+from scripts.ops import config, kpi, kpi_log, paths, textcheck  # noqa: E402
 from scripts.ops.workbook import book as bk  # noqa: E402
 from scripts.ops.workbook import build, golden, sheets_core as sc, sheets_kpi  # noqa: E402
 from scripts.ops.workbook import formula as fx  # noqa: E402
@@ -680,6 +682,42 @@ def _():
         assert final(month2, given2, token2)["exit"] == 0                    # and with the right words it is built
 
 
+@test("a code worktree with no --data-root writes nothing: the DRAFT and the final step refused before any read")
+def _():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        saved = (paths.is_worktree, paths._override, os.environ.get("YQ_MAIN_CHECKOUT"))
+        # were the guard to fail, the writes would land in tmp (YQ_MAIN_CHECKOUT), never in a project folder
+        paths.is_worktree, os.environ["YQ_MAIN_CHECKOUT"] = (lambda: True), tmp
+        paths.set_data_root(None)
+        try:
+            src = PackSource()
+            draft = build.run(Args(), source=src)
+            approved = build.run(Args(commentary=str(Path(tmp) / "x.commentary.json"), token="a" * 12), source=src)
+            assert build.worktree_refusal("x") is not None
+            paths.set_data_root(tmp)                                         # --data-root names the folder: no refusal
+            assert build.worktree_refusal("x") is None
+        finally:
+            paths.is_worktree, paths._override = saved[0], saved[1]
+            if saved[2] is None:
+                os.environ.pop("YQ_MAIN_CHECKOUT", None)
+            else:
+                os.environ["YQ_MAIN_CHECKOUT"] = saved[2]
+        for out, what in ((draft, "the monthly workbook, the files beside it and its build record"),
+                          (approved, "the final workbook and its record")):
+            assert out["exit"] == 1 and not out["ok"] and out["files"] == [], out
+            assert out["text"] == (f"This is a code worktree: {what} belong to the project folder (to try it, name "
+                                   "another folder with --data-root)."), out["text"]
+        assert src.calls == [] and src.kpi_months == []                     # refused before anything is read
+        assert not list(Path(tmp).rglob("*"))                                # and nothing written anywhere
+    with data_root(last_load=LAST_LOAD), stand_ins():                        # a named data root: the same checkout builds
+        saved_wt = paths.is_worktree
+        paths.is_worktree = lambda: True
+        try:
+            assert build.run(Args(), source=PackSource())["exit"] == 0
+        finally:
+            paths.is_worktree = saved_wt
+
+
 # ── the due day and the bulk threshold ─────────────────────────────────────────────────────────
 
 @test("the due day: working day five of the next month (Sunday to Thursday), as KPI 7 counts it; config moves it")
@@ -724,7 +762,6 @@ def main() -> int:
             print(f"FAIL  {name}")
             traceback.print_exc()
             failed += 1
-    from scripts.ops import paths
     paths.set_data_root(None)
     config.use(None)
     print(f"\n{passed} passed, {failed} failed")

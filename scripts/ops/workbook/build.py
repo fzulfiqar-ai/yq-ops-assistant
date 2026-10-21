@@ -48,7 +48,8 @@ config name table); the pack's parts, each through its module. Writes: the workb
 exports/reports/monthly/ (never over an existing file: a second build of a month gets the next free name) and,
 under exports/ops/<data date>/, the record of the build (report-month-<M>.json for a DRAFT; for a final
 report-month-<M>.final.json, never written over: another final takes .final-2.json), the facts and the template.
-Nothing else.
+Nothing else. From a code worktree nothing is read or written unless --data-root names the folder to work in (one
+sentence, exit 1: worktree_refusal), so its code never puts a workbook or a record in the project folder.
 """
 from __future__ import annotations
 
@@ -156,6 +157,17 @@ def parse_spec(words: list[str]) -> tuple[str, str | date | None]:
     if rest:
         mdl.month_bounds(rest[0])           # raises ValueError in one sentence
     return "month", rest[0] if rest else None
+
+
+def worktree_refusal(what: str) -> str | None:
+    """One sentence when this checkout is a code worktree and no --data-root names the folder to write in
+    (YQ_MAIN_CHECKOUT alone does not): a worktree's code never writes the owner's workbooks, the files beside them
+    or their build records into the project folder, the rule of /yq-stock's day file and the count sheets. None
+    otherwise. `what` names what would have been written ('the final workbook and its record')."""
+    if paths.is_worktree() and not paths.root_is_set():
+        return (f"This is a code worktree: {what} belong to the project folder (to try it, name another folder with "
+                "--data-root).")
+    return None
 
 
 def final_args(args, kind: str, month: str | None) -> tuple[Path, str] | None:
@@ -591,6 +603,12 @@ def run(args, source: Source | None = None) -> dict:
         if importlib.util.find_spec(WEEK_MODULE) is None:
             return dict(out, ok=False, text="The weekly report (/yq-week) arrives in a later phase.", exit=1)
         return importlib.import_module(WEEK_MODULE).run(args, month)
+    # a code worktree never writes the owner's monthly files (the workbook, the facts and the template beside it,
+    # the final record KPI 7 reads) into the project folder: refused before anything is read
+    refusal = worktree_refusal("the monthly workbook, the files beside it and its build record" if final is None
+                               else "the final workbook and its record")
+    if refusal:
+        return dict(out, ok=False, text=refusal, exit=1)
     source = source or Source()
     anchors = source.anchors()
     data_to = fmt.as_date(anchors.get("focus_to"))
