@@ -394,7 +394,8 @@ class Inputs:
     mrn: dict | None = None                # code -> {cost, effective_date, doc_no, id}: mrn_costs(); None = not read
     sheet: dict | None = None              # code -> {cost, id}: sheet_costs(); None = not read
     invoices: list[dict] | None = None     # supplier_prices lines
-    promises: list[dict] | None = None     # KPI-log promise lines; None when the log is not there
+    promises: list[dict] | None = None     # KPI-log promise lines, the newest of each ref; None when the log is not there
+    promise_log: list | None = None        # every promise line with its ref, in the order written (build's as_of)
     catalog: list[dict] | None = None      # catalog_items: every item of the item master; None = not read
     po_vendor: dict | None = None          # code -> the vendor of its newest purchase order; None = not read
     price_cuts: list[dict] | None = None   # v_price_change, the cuts: {code, item_name, changed_on, was, now}
@@ -406,21 +407,43 @@ def kpi_log_file():
     return paths.ops_dir() / "kpi_log.jsonl"
 
 
-def read_promises() -> list[dict] | None:
-    """The promise lines of the KPI log (goods on order), the newest line of each ref; None when the
-    log does not exist. A line that cannot be read is passed over."""
+def _promise_ref(row: dict, n: int) -> str:
+    """The ref a promise line is kept under: its ref, else its id, else its place in the log (stock_orders keys
+    the same way)."""
+    return str(row.get("ref") or row.get("id") or f"line {n}")
+
+
+def read_promise_log() -> list[tuple[str, dict]] | None:
+    """Every promise line of the KPI log in the order written, each with its ref: the history an earlier
+    day's goods on order are read from (build's as_of); None when the log does not exist. A line that
+    cannot be read is passed over."""
     f = kpi_log_file()
     if not f.is_file():
         return None
-    newest: dict[str, dict] = {}
+    out: list[tuple[str, dict]] = []
     for n, line in enumerate(f.read_text(encoding="utf-8").splitlines()):
         try:
             row = json.loads(line)
         except ValueError:
             continue
         if isinstance(row, dict) and row.get("kind") == "promise":
-            newest[str(row.get("ref") or row.get("id") or f"line {n}")] = row
+            out.append((_promise_ref(row, n), row))
+    return out
+
+
+def newest_promises(log) -> list[dict]:
+    """The newest line of each ref of a promise log (read_promise_log): the state of every order today."""
+    newest: dict[str, dict] = {}
+    for ref, row in log:
+        newest[ref] = row
     return list(newest.values())
+
+
+def read_promises() -> list[dict] | None:
+    """The promise lines of the KPI log (goods on order), the newest line of each ref; None when the
+    log does not exist. A line that cannot be read is passed over."""
+    log = read_promise_log()
+    return None if log is None else newest_promises(log)
 
 
 def code_key(code) -> str:
@@ -517,7 +540,7 @@ def gather(prefer: str = "auto") -> Inputs:
         ("the supplier invoices (lead time)", "invoices", lambda: db.rpc(SUPPLIER_SQL)),
         (COST_WORDS["mrn"], "mrn", None),
         (COST_WORDS["sheet"], "sheet", None),
-        ("the KPI log (goods on order)", "promises", read_promises),
+        ("the KPI log (goods on order)", "promise_log", read_promise_log),
         ("the catalog (catalog_items)", "catalog", lambda: db.rpc(CATALOG_SQL)),
         ("the purchase orders (an item's supplier)", "po_vendor", lambda: po_vendors(db.rpc(PO_VENDOR_SQL))),
         ("the price book's changes (price cuts)", "price_cuts", lambda: db.rpc(PRICE_CUT_SQL)),
@@ -531,6 +554,8 @@ def gather(prefer: str = "auto") -> Inputs:
             setattr(inp, name, read())
         except Exception as exc:  # noqa: BLE001  (one part of the screen, never the screen)
             inp.unread.append(f"{words} ({type(exc).__name__})")
+    # the KPI log is read once: its history (an earlier day's goods on order) and the newest line of each ref (today's)
+    inp.promises = None if inp.promise_log is None else newest_promises(inp.promise_log)
     return inp
 
 
@@ -1094,11 +1119,31 @@ def _dated_until(rows, day: date, *keys) -> list[dict] | None:
     return out
 
 
+def promises_on(log, day: date) -> list[dict] | None:
+    """The KPI log's goods on order as they stood at the end of `day` (build's as_of), from its history `log`
+    ([(ref, line)] in the order written: read_promise_log). Per ref, the newest line logged on or before the day
+    (logged_at; a line with no logging time takes its order date); when every line of a ref was logged later,
+    its first line. Then only the lines dated (event_date, else logged_at) on or before the day: an order placed
+    later was not on order yet. So an order open that day counts, though it was cancelled or corrected since
+    (a cancelled or corrected line keeps its order's date). None stays None (no KPI log)."""
+    if log is None:
+        return None
+    first: dict[str, dict] = {}
+    then: dict[str, dict] = {}
+    for ref, row in log:
+        first.setdefault(ref, row)
+        logged = fmt.as_date(row.get("logged_at")) or fmt.as_date(row.get("event_date"))
+        if logged is not None and logged <= day:
+            then[ref] = row
+    return _dated_until([then.get(ref, row) for ref, row in first.items()], day, "event_date", "logged_at")
+
+
 def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
     """The stock Model at the end of the ledger's last day (D), or, with `as_of` (a date or 'YYYY-MM-DD' from the
     ledger's first day to its last), at the end of that day: the ledger rows are cut at date <= as_of, the price
-    cuts at changed_on <= as_of and the KPI log's promise lines at (event_date, else logged_at) <= as_of, and D is
-    as_of even when nothing moved that day. The costs stay today's (the MRN landed costs and the pricing sheet as
+    cuts at changed_on <= as_of, the KPI log's goods on order are each order's line as logged by then
+    (promises_on: an order cancelled or corrected since counts as it stood), and D is as_of even when nothing
+    moved that day. The costs stay today's (the MRN landed costs and the pricing sheet as
     read, the receipt rate of the whole ledger's newest receipt), and facts["as_of"] says so: {date, ledger_to,
     snapshot_as_of, compared, not_compared, cost_words ("at today's landed cost")}. The portal's figures and the
     ledger set beside the snapshot are compared only when the snapshot is as on as_of too; otherwise they are None
@@ -1112,7 +1157,12 @@ def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
         raise StockInput("No stock ledger is loaded: there is no stock to plan.")
     notes: list[str] = []
     warnings = list(inp.warnings)
-    promises = inp.promises if cut is None else _dated_until(inp.promises, cut, "event_date", "logged_at")
+    if cut is None:
+        promises = inp.promises
+    else:                                   # the log's history; inputs made by hand may hold its newest lines only
+        log = inp.promise_log if inp.promise_log is not None or inp.promises is None else [
+            (_promise_ref(r, n), r) for n, r in enumerate(inp.promises) if isinstance(r, dict)]
+        promises = promises_on(log, cut)
     price_cuts = inp.price_cuts if cut is None else _dated_until(inp.price_cuts, cut, "changed_on")
 
     model_items, _bridge, main_snap = accessory_table(rows, inp.price_book, inp.snapshot)
@@ -1491,6 +1541,8 @@ def _footer(model: Model, inp_note: str) -> list[str]:
     if cut:
         lines.append(f"As on {fmt.day(cut['date'])}: the ledger is cut at the end of that day (it runs to "
                      f"{fmt.day(cut['ledger_to'])}), and every unit is valued {cut['cost_words']}.")
+        lines.append("The price cuts are each item's latest change in the price book, so a cut replaced since that day "
+                     "is not shown; each item's supplier is today's (the purchase orders, the catalog).")
     lines += _defaults_line(model)
     for part in model.facts["unread"]:
         lines.append(f"Not read this time: {part}.")

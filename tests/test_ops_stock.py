@@ -1213,6 +1213,9 @@ def _():
     note = ("As on Sat 28 Feb: the ledger is cut at the end of that day (it runs to Sun 15 Mar), and every unit is "
             "valued at today's landed cost.")
     assert note in head and note in item_b and note in ageing
+    also = ("The price cuts are each item's latest change in the price book, so a cut replaced since that day is not "
+            "shown; each item's supplier is today's (the purchase orders, the catalog).")
+    assert head[head.index(note) + 1] == also and also in item_b and also in ageing
     for line in head + item_b + ageing:
         fmt.careful(line)
     # with a stock balance as on 28 Feb (made by hand from the ledger), everything is set beside it, as on that day
@@ -1266,6 +1269,39 @@ def _():
     assert item(hand, "B").cost == Decimal(2) and item(hand, "B").cost_source == "receipt"
     assert item(past, "A").cost == item(hand, "A").cost == Decimal("0.4")      # an MRN cost is today's either way
     assert past.facts["as_of"]["cost_words"] == "at today's landed cost"
+
+
+@test("as on a day: an order counts as it was logged by then, though cancelled or corrected since; one placed later "
+      "does not; one placed by then and logged later does")
+def _():
+    from scripts.ops import stock_orders as so
+    opened = so.promise_lines("VFAN", "2026-03-01", [("CB2", "30")], "typed", "2026-03-01T10:00:00")
+    fixed = so.promise_lines("VFAN", "2026-03-01", [("CB2", "50")], "typed", "2026-03-05T10:00:00")   # corrected
+    cancelled = so.cancel_lines(fixed, "VFAN", "2026-03-01", "2026-03-14T09:00:00")    # keeps the order's date
+    later = so.promise_lines("VFAN", "2026-03-08", [("CA1", "40")], "typed", "2026-03-12T10:00:00")  # logged after
+    ahead = so.promise_lines("VFAN", "2026-03-11", [("SN4", "20")], "typed", "2026-03-11T10:00:00")
+    assert cancelled[0]["event_date"] == "2026-03-01" and cancelled[0]["state"] == so.CANCELLED
+    days = (date(2026, 3, 3), date(2026, 3, 10), date(2026, 3, 13), date(2026, 3, 14))
+    with data_root():
+        so.append(stock.kpi_log_file(), opened + fixed + cancelled + later + ahead)
+        with standing_in(World()):
+            cfg, inp = stock.settings(), stock.gather()
+
+        def on_order(i, day=None) -> dict:
+            m = stock.build(i, cfg) if day is None else stock.build(i, cfg, as_of=day)
+            return {it.code: it.on_order for it in m.items if it.on_order}
+
+        on = {day: on_order(inp, day) for day in days}
+        today = on_order(inp)
+        newest_only = on_order(replace(inp, promise_log=None), date(2026, 3, 10))
+    assert len(inp.promise_log) == 5 and [r["ref"] for r in inp.promises] == [
+        "vfan:2026-03-01:CB2", "vfan:2026-03-08:CA1", "vfan:2026-03-11:SN4"]       # today's: the newest of each ref
+    assert on[days[0]] == {"CB2": 30}                         # as first logged; CA1's and SN4's orders not yet placed
+    assert on[days[1]] == {"CB2": 50, "CA1": 40}              # corrected on 5 Mar; CA1 placed on 8 Mar (logged later)
+    assert on[days[2]] == {"CB2": 50, "CA1": 40, "SN4": 20}   # the cancellation of 14 Mar is not logged yet
+    assert on[days[3]] == today == {"CA1": 40, "SN4": 20}    # cancelled
+    # inputs made by hand with the newest lines only know no history: the cancellation stands as it is today
+    assert newest_only == {"CA1": 40}
 
 
 # ── the order position: the vans, the outlets and the stock between them ─────
