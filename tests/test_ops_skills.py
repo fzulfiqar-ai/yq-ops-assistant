@@ -112,7 +112,7 @@ OWNER_ONLY = {"yq-load"}
 SKILL_COMMAND = {"yq-load": "python -m scripts.ops brief", "yq-brief": "python -m scripts.ops brief",
                  "yq-month": "python -m scripts.ops report month", "yq-stock": "python -m scripts.ops stock",
                  "yq-moves": "python -m scripts.ops moves", "yq-watch": "python -m scripts.ops watch",
-                 "yq-week": "python -m scripts.ops report week"}
+                 "yq-week": "python -m scripts.ops report week", "yq-kpi": "python -m scripts.ops kpi"}
 SHADOWS = ("weekly-review", "monthly-review")       # the commands a same-named skill would hide
 DESCRIPTION_CAP = 1536                              # Claude Code cuts description + when_to_use here
 MAX_LINES = 70                                      # a SKILL.md stays under this many lines
@@ -492,7 +492,7 @@ def _():
 
 MY_FILES = (".claude/skills/yq-load/SKILL.md", ".claude/skills/yq-brief/SKILL.md", ".claude/skills/yq-month/SKILL.md",
             ".claude/skills/yq-stock/SKILL.md", ".claude/skills/yq-moves/SKILL.md", ".claude/skills/yq-watch/SKILL.md",
-            ".claude/skills/yq-week/SKILL.md", "CLAUDE.md", "docs/OPS_SKILLS.md",
+            ".claude/skills/yq-week/SKILL.md", ".claude/skills/yq-kpi/SKILL.md", "CLAUDE.md", "docs/OPS_SKILLS.md",
             "docs/FOCUS_EXPORT.md", ".gitignore", "requirements-dev.txt", "tests/test_ops_skills.py")
 
 
@@ -1073,6 +1073,66 @@ def _():
     assert "No sheet shows a book quantity, not even in a hidden cell" in defs
     places = flat(page_part(5))
     assert "`counts/` holds what each count prep listed" in places and "| `exports/reports/counts/` |" in page
+
+
+CHECK_FILE = OPS / "textcheck.py"                        # the comment lines' check: read as text too
+MONTHLY_REVIEW = ROOT / ".claude" / "commands" / "monthly-review.md"
+
+
+@test("the month-end pack's words: the build, the check and its FINAL line, the review it follows, the page")
+def _():
+    src, check_src = read(REPORT_FILE), read(CHECK_FILE)
+    _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-month" / "SKILL.md").read_bytes())
+    assert {"Bash(python -m scripts.ops check *)", "PowerShell(python -m scripts.ops check *)"} <= set(fm["allowed-tools"])
+    # the DRAFT names its two files; the check prints the lines and, only when all pass, FINAL with the final step
+    for said, in_skill in (('said.append(f"Facts: {files[\'facts\']}")', "names a Facts file"),
+                           ('said.append(f"Commentary: {files[\'commentary\']} ("', "and a Commentary file"),
+                           ('"Month-end sheets: "', "`Month-end sheets` line"),
+                           ("a load changed the month's figures: run /yq-month again",
+                            "says a load changed the month's figures"),
+                           (" - DRAFT\" if draft", "The DRAFT stays beside the final workbook")):
+        assert said in src, f"the monthly report no longer says: {said}"
+        assert in_skill in body, f"the skill does not act on: {in_skill}"
+    final = 'final = f\'python -m scripts.ops report month {month} --commentary "{path}" --token {token}\''
+    assert final in check_src and '[f"FINAL: {final}"]' in check_src, "the FINAL line is no longer the final step"
+    assert "As they will read:" in check_src and "No FINAL line; nothing is written." in check_src
+    assert "run the text after `FINAL: ` exactly as printed" in body and "show him the lines as they will read" in body
+    from scripts.ops import textcheck                     # standard library only: no portal, no database
+    assert len(textcheck.SLOTS) == 13 and "Draft all thirteen slots" in body
+    assert {"bhd0", "pct0", "updown", "words"} <= set(textcheck.FORMATS) and "`{key|fmt}`" in body
+    # the final step is a report command: the skill's own report entry covers it, and it types no token
+    assert any(rule_matches(t, "python -m scripts.ops report month 2026-09 --commentary \"x.json\" --token abcdefghijkl")
+               for t in fm["allowed-tools"] if t.startswith("Bash("))
+    assert "--token" not in body and "--commentary" not in body
+    # the monthly review: the command file as it stands, the month as its argument, its own stop and its own write
+    review = read(MONTHLY_REVIEW)
+    rfm = yaml.safe_load(FRONT.match(review).group(1))
+    assert rfm["argument-hint"].startswith("YYYY-MM"), rfm
+    assert "python -m scripts.ai_head.pack --monthly $ARGUMENTS --verify" in review
+    assert "If `ready` is false," in review and "load with `--commit` only after he answers" in review
+    assert "(B2B Accessories, ex-VAT)" in review and "B2B accessories while the workbook counts all accessories" in body
+    for module in sorted(set(re.findall(r"python -m (scripts\.[\w.]+)", review))):
+        assert module not in body, f"the skill spells the review's command {module}"
+    assert not re.findall(r"\b[Ss]teps?\s+\d+", body), "the skill names steps: the review's are its own"
+    # the reconciliations on their own: the command's words for its statuses
+    blocks = read(OPS / "recon_blocks.py")
+    for status_ in ("PROVEN", "DIFFERS", "NOT COUNTED", "BOOKS ONLY", "COLLECTION NOT PROVEN", "PAPERS MISSING"):
+        assert f'"{status_}"' in blocks and f"**{status_}**" in read(PAGE), status_
+    # the page: the /yq-kpi rows, the pack's sheets, the comment lines, the scorecard, the plan rows, the log
+    page, defs = read(PAGE), flat(page_part(4))
+    assert "| `/yq-kpi` or `/yq-kpi <YYYY-MM>` |" in page and "`/yq-kpi log ...`" in page
+    for needle in ("**The five sheets** between Daily and Data carry totals only",
+                   "The final file is the one KPI 7 counts as prepared",
+                   "A row reads MET only with the evidence it rests on named under it",
+                   "**The 90-day plan's rows** come from `kpi.plan_targets` in `config.json`",
+                   "**The KPI log** (`business_data/ops/kpi_log.jsonl`)",
+                   "under the same lock as `/yq-stock ordered`", "A missing paper is **PAPERS MISSING**: an action"):
+        assert needle in defs, f"section 4 does not say: {needle}"
+    kpi_consts = module_constants(OPS / "kpi.py")
+    assert kpi_consts["MONTHLY_DUE_DEFAULT"] == 5 and "due by working day five of the next month" in defs
+    assert set(kpi_consts["AREAS"]) == {1, 2, 3, 4, 5, 7} and "(areas one to five and seven)" in defs
+    assert {"kpi.plan_targets", "kpi.monthly_due_working_day"} <= set(config.KEYS)
+    assert "`/yq-kpi" in read(ROOT / "CLAUDE.md") and "yq-kpi" in skill_folders()
 
 
 @test("the /yq-week rules check bites: a rule turned round or dropped is caught")
@@ -1818,9 +1878,29 @@ MUST_CONTAIN = {
         "to /yq-load", "Change nothing yourself",
         # a part month: said, and never built another way
         "If it says the month is not whole yet", "never build a part month another way",
-        # the DRAFT: the comment lines are not his to fill in, and the file is not touched or sent
+        # the DRAFT: the comment lines never go into the workbook by hand, and the file is not touched or sent
         "The file it names is a DRAFT", "the ten comment lines (five Highlights, five Points to note)",
-        "Never write them yourself", "never open, change, move or delete the file", "never send it anywhere",
+        "are placeholders until he approves them", "Never write them into the workbook yourself",
+        "never open, change, move or delete the file", "never send it anywhere",
+        "Relay a sheet the `Month-end sheets` line calls not worked out this time as the line says it",
+        # the comment lines: placeholders from the facts only, checked, then the FINAL line on his word alone
+        "Draft all thirteen slots of the Commentary file", "`{key|fmt}` placeholders only",
+        "each key taken from the Facts file", "Never type a figure, a number word or a percent sign",
+        "never copy a value out of the Facts file",
+        "Run exactly `python -m scripts.ops check \"<file>\"` with the Commentary file's name",
+        "show him the lines as they will read, unchanged", "Correct each line it refuses",
+        "Only on his \"approved\", run the text after `FINAL: ` exactly as printed",
+        "never typing or changing its token or any other part of it",
+        "If the final step says a load changed the month's figures, build the month again",
+        "read every line against the new Facts file, check again and ask him again",
+        "The DRAFT stays beside the final workbook. Never open, move or send either",
+        # then the monthly review, as its command file says; the reconciliations on their own
+        "read `.claude/commands/monthly-review.md` and follow it unchanged for the same month",
+        "It stops by itself when the month is not ready", "its commands are not pre-approved here and ask as usual",
+        "its only write comes after his answers",
+        "the review counts B2B accessories while the workbook counts all accessories",
+        "run exactly `python -m scripts.ops recon YYYY-MM` for that month",
+        "a missing paper is an action, never a difference", "For his KPI scorecard",
         "If a line starts `CHECKS TO LOOK AT`", "the workbook should not go out until that is explained",
         "A line that starts `Note:` is for him", "the first is never overwritten",
         "Never accuse anyone", "to check", "If he asks for the weekly workbook or the weekly review, use /yq-week",
@@ -1860,6 +1940,25 @@ MUST_CONTAIN = {
         "If its pack fails, show the error and stop: the workbook and its build record stand as they are",
         "Say once that the review counts B2B accessories while the workbook counts all accessories (B2B and the two "
         "outlets)",
+    ],
+    "yq-kpi": [
+        "python -m scripts.ops kpi $ARGUMENTS", "python -m scripts.ops status", "600000", "no pipe",
+        "Add no word or option he did not ask for", "Run nothing else that loads, writes or deploys",
+        "Show the screen unchanged, in a code block", "type no number yourself",
+        "never change a status or call a row met, late or missed in words of your own",
+        "If the output opens with LOAD INTERRUPTED or LAST LOAD FAILED, say so first, in plain words, and point him "
+        "to /yq-load", "Change nothing yourself", "at most three lines", "no number that is not on the screen",
+        # MET rests on named evidence; nothing on file is NOT EVIDENCED, never a guess
+        "A row is MET only with the evidence named under it on the screen",
+        "NOT EVIDENCED means nothing on file shows either way", "Never accuse anyone", "to check",
+        # the log: only what he said, previewed, written on his yes by the printed line, token untouched
+        "Preview it first: `python -m scripts.ops kpi log <kind> --field value ...`", "Give only what he said",
+        "Never invent a date, an amount, a quantity, a supplier or a check he did not name",
+        "ask him for it", "Put no phone number, ID number, e-mail address or person's name in any field",
+        "Show the preview unchanged, in a code block, and ask him in one sentence whether to log it",
+        "Run its last line exactly as printed, only after he says yes", "never type or change its token yourself",
+        "If it says the line changed, run the preview again",
+        "a report can be logged as sent only once it was built",
     ],
     "yq-stock": [
         "python -m scripts.ops stock $ARGUMENTS", "600000", "no pipe", "Add a word only when he asked for it",
@@ -1990,7 +2089,15 @@ def _():
         assert problems_rules("yq-brief", brief.replace(old, new)), f"not caught: {old!r} -> {new!r}"
     month = read(SKILLS / "yq-month" / "SKILL.md")
     for old, new in (("never build a part month another way", "build it from what is there"),
-                     ("Never write them yourself", "Write them from the screen"),
+                     ("Never write them into the workbook yourself", "Write them into the workbook from the screen"),
+                     # the comment lines: a typed figure, the FINAL line on Claude's own word, a token typed by hand
+                     ("Never type a figure, a number word or a percent sign", "Type the figures from the Facts file"),
+                     ("Only on his \"approved\", run the text after `FINAL: `", "Run the text after `FINAL: `"),
+                     ("never typing or changing its token or any other part of it", "typing its token if it fails"),
+                     ("read every line against the new Facts file, check again and ask him again",
+                      "keep the lines he approved"),
+                     ("follow it unchanged for the same month", "follow the parts that fit"),
+                     ("its only write comes after his answers", "it writes as it goes"),
                      ("never send it anywhere", "send it to him"),
                      ("the workbook should not go out until that is explained", "it can go out"),
                      ("Show the output unchanged", "Sum it up"), ("$ARGUMENTS", "2026-09"),

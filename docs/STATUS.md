@@ -27,7 +27,16 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
     salesmen's names, and the warehouses are named after salesmen.
 - `/yq-month`: the monthly sales workbook in the layout of the September report (`python -m scripts.ops report month
   [YYYY-MM]`, whole months only, written as a DRAFT under `exports/reports/monthly/`). Its golden test rebuilds September
-  against the reference file (local only).
+  against the reference file (local only), the reference's sheets in their order.
+- The month-end pack (21-Oct-2026): `/yq-month` adds Stock (as on the month's last day), Movements, Reconciliation,
+  KPI and KPI log between Daily and Data, totals only. The DRAFT writes the month's facts and, once, the
+  commentary template; Claude drafts the ten comment lines and three notes with placeholders only,
+  `python -m scripts.ops check` refuses any typed figure and prints the FINAL line, and only the owner's
+  "approved" runs it (refused when a load moved the month's sales figures; the DRAFT stays); then
+  `/monthly-review` for the same month. `recon <YYYY-MM>`: the four reconciliations (main store and vans from the
+  counts, sales and receivables with the month's Ledger export, purchases' papers). `/yq-kpi`: the KPI scorecard
+  with the 90-day plan's rows, and the KPI log written only after his yes (`scripts/ops/kpi.py`, `kpi_log.py`,
+  `recon_blocks.py`, `ledger_export.py`, `textcheck.py`, `workbook/facts.py`).
 - `/yq-week` (21-Oct-2026): the weekly sales workbook for a whole Sunday-to-Saturday week (`python -m scripts.ops
   report week [YYYY-MM-DD]`, the last full week by default, under `exports/reports/weekly/`): eleven sheets, every
   tile in four windows (the week, the four weeks before, the same days last month, the month to date against the
@@ -78,9 +87,8 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- Built on their own branches, released in this order (the plan of 21-Oct-2026): the month-end pack (the Stock,
-  Movements, Reconciliation, KPI and KPI log sheets, the ten comment lines with their approval step, the four
-  reconciliations, `/yq-kpi`), then the phase 2b release.
+- Built on their own branches, released next (the plan of 21-Oct-2026): the phase 2b release.
+- The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
 - The faster load's review follow-ups are built and go with the phase 2b release's API deploy: each temporary
   table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
   loader's own words up, so that a load that rolled back is journalled as writing nothing; and the refresh
@@ -88,18 +96,24 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Not built (the engine prints "not built yet")
 
-`recon <YYYY-MM>` (the four month-end reconciliations; `recon prep` and `recon count` are live), `kpi` and `check`
-(a drafted text against the computed figures) are not on `main` yet: they are built and wait for their releases
-(above). The specification is the approved ops-skills plan of 8-Oct-2026 (the sections from
-/yq-week to /yq-kpi, and "Build order").
+Every command the engine lists is built. The specification was the approved ops-skills plan of 8-Oct-2026 (the
+sections from /yq-week to /yq-kpi, and "Build order").
 
 ## Order of work (each step needs the owner's go)
 
-The month-end pack, the phase 2b release (the Stock Moves page by contents, van stock
+The phase 2b release (the Stock Moves page by contents, van stock
 from the ledger, the narration mask, the four load follow-ups, the team-message Copy button), then Market Intel
 phases 3 and 4 once the rep reports are enough.
 
 ## Open items
+
+- The AI weekly and monthly reviews have not run on this PC yet: from a code worktree their pack finds no database
+  login (it reads only its own checkout's `.env`), so the first `/yq-week` in the project folder is their first run.
+- KPI 1a and 1b are worked out for the month of the stock ledger's last day and the month before it only (an older
+  month reads NOT EVIDENCED); `stock.build(as_of=)` could serve any month. KPI 5a counts sales with returns not
+  deducted; the month's Ledger export (`ledger_export`) could net them. Both change the KPI rows and their tests.
+- `/yq-watch`'s "Not checked yet" line still says both checks come with the month-end release: the returns against
+  last month's kickback tier are now in the sales reconciliation (`recon`), and sold below cost is not built.
 
 - The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release (the page says
   so). It pairs issues and receipts by voucher number, and van stock comes from a snapshot of the main store only. Use
