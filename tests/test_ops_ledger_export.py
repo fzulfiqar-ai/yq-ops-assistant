@@ -22,8 +22,16 @@ Covered:
   * movements: a cumulative file filtered by date (September and November stay out of October), per account
     and kind, every kind kept; windows that are wrong or run past the as-on date are refused;
   * balance: the running balance at the end of a day (two rows on one day, before the first row, an Opening
-    Balance row carried, a credit balance, a name spelt another way, an account that is not there, a blank
-    Balance cell, a day past the as-on date); opening + movements = closing for every customer;
+    Balance row carried, a credit balance, a name spelt another way, an account that is not there, a day past
+    the as-on date); opening + movements = closing for every customer;
+  * balance, blank cells: the real export leaves the Balance off some credit legs (the payment inside a cash
+    sale, a run of receipts, an account's last row). The balance is worked forward from the last stated one,
+    back from the next one for an account's first rows, and None only for an account that states none;
+    blanking cells changes no balance on any account on any day; a stated balance is never replaced;
+  * balance, no sign: the real export prints a magnitude and leaves a nought blank. balance() is signed (a
+    credit balance negative), the sign taken from the rows, an opening balance above the first row found from
+    the figures; written three ways (signed, as the export prints it, and with credit legs blank as well) every
+    account gives the same balance on every day; when nothing ties the figures to the rows they stay as printed;
   * customer_legs: the accounts the caller passes, matched by name however spelt, with or without a window;
   * returns_ex_vat_by_salesman and returns_by_voucher: a return's VAT from its own legs, else by rate; the
     salesman from any leg; no salesman last; windows;
@@ -32,8 +40,10 @@ Covered:
     files and sub-folders left alone; a file that cannot be opened; the newest of two with one as-on; a named
     file overrides the search and not the as-on rule; the year's end;
   * the real export, when YQ_OPS_LEDGER_SAMPLE names one (SKIP otherwise): the header labels, the as-on date
-    and the voucher prefixes are what the reader expects; aggregate counts are printed, never a name, an
-    account, a voucher number or an amount.
+    and the voucher prefixes are what the reader expects, and every run of blank Balance cells worked forward
+    lands on the next stated balance; aggregate counts are printed (the blank cells, the balances printed
+    without a sign, and for each month the customer accounts whose opening + movements close on balance()),
+    never a name, an account, a voucher number or an amount.
 """
 from __future__ import annotations
 
@@ -46,7 +56,7 @@ import tempfile
 import time
 import traceback
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -80,10 +90,12 @@ HEADER = ["Date", "Voucher", "Account", "Debit", "Credit", "Balance", "Currency"
           "Narration"]
 
 CUST_A, CUST_B, CUST_C = "Customer A", "Customer B", "Customer C"
+CUST_D, CUST_E, CUST_F = "Customer D", "Customer E", "Customer F"
 SALES, RETURNS, VAT, TAXCTL = "Sales Accessories", "Sales Returns", "Output VAT", "Tax Control"
 CASH, BANK, SUPPLIER = "Cash in Hand", "Main Bank", "Supplier One"
 REP1, REP2 = "Rep One", "Rep Two"
 ORDER = [CUST_A, CUST_B, CUST_C, SALES, RETURNS, VAT, TAXCTL, CASH, BANK, SUPPLIER]
+ORDER_ALL = ORDER + [CUST_D, CUST_E, CUST_F]
 AS_ON = date(2026, 11, 3)
 
 _narrations = itertools.count()
@@ -138,6 +150,32 @@ ROW_KEYS = {"account", "date", "voucher", "prefix", "kind", "counter", "debit", 
 
 SMALL = [post(d(10, 5), "SI : 1", [(CUST_A, 11, 0, REP1), (SALES, 0, 11)])]
 
+# What the real export does: a credit leg can show no Balance, the payment inside a cash sale being the usual one
+# (the sale debits the customer and the payment credits it, in one voucher; the report prints the balance after the
+# debit and leaves it off the credit). The writer's `blank` rule below leaves the credit legs without one.
+RUNS = [
+    # D: two cash sales, a run of two receipts, a sale on credit, and a last receipt: the account's last row
+    # shows no balance either
+    post(d(10, 3), "SI : 201", [(CUST_D, 110, 0, REP1), (CUST_D, 0, 110, REP1), (SALES, 0, 100), (VAT, 0, 10),
+                                (CASH, 110, 0)], "Cash"),
+    post(d(10, 4), "SI : 202", [(CUST_D, 55, 0, REP1), (CUST_D, 0, 55, REP1), (SALES, 0, 50), (VAT, 0, 5),
+                                (CASH, 55, 0)], "Cash"),
+    post(d(10, 5), "RCTV : 61", [(CASH, 20, 0), (CUST_D, 0, 20, REP1)], "Cash"),
+    post(d(10, 5), "RCTV : 62", [(CASH, 30, 0), (CUST_D, 0, 30, REP1)], "Cash"),
+    post(d(10, 6), "SI : 203", [(CUST_D, 110, 0, REP1), (SALES, 0, 100), (VAT, 0, 10)], "Credit"),
+    post(d(10, 7), "RCTV : 63", [(CASH, 60, 0), (CUST_D, 0, 60, REP1)], "Cash"),
+    # E: its first row is a receipt, then a sale
+    post(d(10, 3), "RCTV : 64", [(CASH, 20, 0), (CUST_E, 0, 20, REP2)], "Cash"),
+    post(d(10, 4), "SI : 204", [(CUST_E, 120, 0, REP2), (SALES, 0, 109), (VAT, 0, 11)], "Credit"),
+    # F: one receipt, and nothing else
+    post(d(10, 5), "RCTV : 65", [(CASH, 5, 0), (CUST_F, 0, 5, REP2)], "Cash"),
+]
+
+
+def blank_credits(account, voucher, debit, credit) -> bool:
+    """The writer's `blank` rule: every credit leg shows no Balance."""
+    return credit > 0
+
 
 def test(name):
     def deco(fn):
@@ -156,12 +194,15 @@ def raises(kind, fn) -> Exception:
 
 def write_ledger(path: Path, postings, *, as_on: str = "03/11/2026", opening: dict | None = None,
                  header: list[str] | None = None, title_line: str | None = None, lead: list | None = None,
-                 grand: tuple | None = None, order: list[str] | None = None, balances: bool = True) -> None:
+                 grand: tuple | None = None, order: list[str] | None = None, balances: bool = True,
+                 blank=None, magnitude: bool = False) -> None:
     """A Ledger workbook as Focus exports it: the title block (company, 'Ledger', the as-on line), the header
     row, then per account its name, an optional Opening Balance row, its rows in date order with a running
     balance and a Sub Total; a Grand Total closes the sheet. The Account column of a row names the other side
     of its voucher. `lead` rows stand above the first account; `balances=False` leaves the Balance cells
-    blank."""
+    blank; `blank(account, voucher, debit, credit)` leaves the Balance cell of the rows it says yes to empty
+    (the running balance goes on without them, as in the real export); `magnitude=True` prints the balance as
+    the real export does, without its sign, and leaves it empty when it is nought."""
     from openpyxl import Workbook
 
     legs_of: dict[str, list[tuple]] = {}
@@ -169,7 +210,7 @@ def write_ledger(path: Path, postings, *, as_on: str = "03/11/2026", opening: di
         for k, leg in enumerate(legs):
             account, debit, credit = leg[0], leg[1], leg[2]
             salesman = leg[3] if len(leg) > 3 else None
-            counter = next((o[0] for j, o in enumerate(legs) if j != k), None)
+            counter = next((o[0] for j, o in enumerate(legs) if j != k and o[0] != account), None)
             legs_of.setdefault(account, []).append((when, n, k, voucher, counter, debit, credit, salesman, mode, text))
     wb = Workbook()
     ws = wb.active
@@ -182,6 +223,13 @@ def write_ledger(path: Path, postings, *, as_on: str = "03/11/2026", opening: di
     ws.append(list(HEADER) if header is None else header)
     for row in lead or []:
         ws.append(row)
+
+    def printed(value):
+        """What the report prints for a balance: the figure, its magnitude, or nothing for nought."""
+        if not magnitude:
+            return value
+        return abs(value) if value else None
+
     total_debit = total_credit = 0
     for account in order or ORDER:
         if account not in legs_of:
@@ -190,15 +238,15 @@ def write_ledger(path: Path, postings, *, as_on: str = "03/11/2026", opening: di
         balance = (opening or {}).get(account, 0)
         if balance:
             ws.append(["Opening Balance", None, None, balance if balance > 0 else None,
-                       -balance if balance < 0 else None, balance if balances else None])
+                       -balance if balance < 0 else None, printed(balance) if balances else None])
         sub_debit = sub_credit = 0
         for when, _n, _k, voucher, counter, debit, credit, salesman, mode, text in sorted(
                 legs_of[account], key=lambda t: (t[0], t[1], t[2])):
             balance += debit - credit
             sub_debit += debit
             sub_credit += credit
-            ws.append([when, voucher, counter, debit or None, credit or None, balance if balances else None, "BHD",
-                       mode, salesman, text])
+            shown = printed(balance) if balances and not (blank and blank(account, voucher, debit, credit)) else None
+            ws.append([when, voucher, counter, debit or None, credit or None, shown, "BHD", mode, salesman, text])
         ws.append(["Sub Total", None, None, sub_debit, sub_credit, balance if balances else None])
         total_debit += sub_debit
         total_credit += sub_credit
@@ -574,7 +622,7 @@ def _():
             == Decimal(110)
 
 
-@test("balance: a blank Balance cell is not stated (None), before the first row as well")
+@test("balance: an account none of whose rows states a Balance has none (None), before the first row as well")
 def _():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "Ledger_blank.xlsx"
@@ -583,6 +631,207 @@ def _():
         assert le.balance(e, CUST_A, date(2026, 10, 31)) is None
         assert le.balance(e, CUST_A, date(2026, 9, 1)) is None
         assert le.balance(e, "Nobody", date(2026, 10, 31)) is None
+
+
+def run_rows(blank=blank_credits, postings=None, order=None):
+    """The invented Ledger of RUNS (with the credit legs showing no Balance, unless `blank` says otherwise),
+    written and read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "Ledger_runs.xlsx"
+        write_ledger(path, RUNS if postings is None else postings, order=order or ORDER_ALL, blank=blank)
+        return le.read(path)
+
+
+def blank_runs(legs: list[dict]) -> tuple[int, int]:
+    """(the runs of rows that show no Balance and are closed by a row that does, how many of those runs the
+    balance worked forward from the last stated one reaches: the stated balance of the row that closes it).
+    A run before the first stated balance, and one that ends the account, are not counted: nothing closes them."""
+    runs = reached = 0
+    last = None                       # the last stated balance
+    since = Decimal(0)                # debit less credit of the rows after it
+    blanks = 0
+    for r in legs:
+        net = r["debit"] - r["credit"]
+        if r["balance"] is None:
+            if last is not None:
+                since += net
+                blanks += 1
+            continue
+        if blanks:
+            runs += 1
+            reached += last + since + net == r["balance"]
+        last, since, blanks = r["balance"], Decimal(0), 0
+    return runs, reached
+
+
+@test("balance: a blank Balance (a credit leg: the payment inside a cash sale, a run of receipts, a last row) is "
+      "worked forward from the last stated one")
+def _():
+    e = run_rows()
+    d_rows = e.by_account()[le.fold(CUST_D)]
+    # the shape of the real export: the sale's debit states its balance, its credit leg (the last row of the
+    # voucher) does not; two receipts in a row show none; the account's last row shows none
+    assert [(r["voucher"], r["debit"] or r["credit"], r["balance"]) for r in d_rows] == [
+        ("SI : 201", 110, Decimal(110)), ("SI : 201", 110, None),
+        ("SI : 202", 55, Decimal(55)), ("SI : 202", 55, None),
+        ("RCTV : 61", 20, None), ("RCTV : 62", 30, None),
+        ("SI : 203", 110, Decimal(60)), ("RCTV : 63", 60, None)]
+    assert d_rows[-1]["balance"] is None, "the account's latest row shows no balance"
+    day = lambda *a: date(2026, *a)                                    # noqa: E731
+    want = {(10, 2): 0, (10, 3): 0, (10, 4): 0, (10, 5): -50, (10, 6): 60, (10, 7): 0, (11, 3): 0}
+    for (m, dom), figure in want.items():
+        assert le.balance(e, CUST_D, day(m, dom)) == Decimal(figure), (m, dom)
+    assert isinstance(le.balance(e, CUST_D, day(10, 3)), Decimal)
+    # the blank rows are not guesses: working forward through a cash sale's payment and through the run of
+    # receipts lands on the stated balance of the row that closes each run (see blank_runs)
+    assert blank_runs(d_rows) == (2, 2), "every run of blank rows closed by a stated balance lands on it"
+    assert le.balance(e, "  customer  D ", day(10, 5)) == Decimal(-50)
+
+    # an account whose first row shows no balance: worked back from the first row that does
+    e_rows = e.by_account()[le.fold(CUST_E)]
+    assert [r["balance"] for r in e_rows] == [None, Decimal(100)]
+    assert le.balance(e, CUST_E, day(10, 3)) == Decimal(-20), "worked back from the next stated balance"
+    assert le.balance(e, CUST_E, day(10, 4)) == Decimal(100)
+    assert le.balance(e, CUST_E, day(10, 1)) == Decimal(0), "before its first row: what that row opened with"
+    assert blank_runs(e_rows) == (0, 0), "a run no stated balance comes before cannot be worked forward"
+
+    # an account that states no balance at all has none, which is the only time balance() says None
+    f_rows = e.by_account()[le.fold(CUST_F)]
+    assert [r["balance"] for r in f_rows] == [None]
+    assert le.balance(e, CUST_F, day(10, 5)) is None and le.balance(e, CUST_F, day(10, 1)) is None
+
+
+@test("balance: leaving cells blank changes no balance, on any account on any day, unless no row states one")
+def _():
+    postings = POSTINGS + RUNS
+    with tempfile.TemporaryDirectory() as tmp:
+        plain, gappy = Path(tmp) / "Ledger_plain.xlsx", Path(tmp) / "Ledger_gappy.xlsx"
+        write_ledger(plain, postings, opening=OPENING, order=ORDER_ALL)
+        write_ledger(gappy, postings, opening=OPENING, order=ORDER_ALL, blank=blank_credits)
+        full, part = le.read(plain), le.read(gappy)
+    assert all(r["balance"] is not None for r in full.rows)
+    assert sum(1 for r in part.rows if r["balance"] is None) == sum(1 for r in full.rows if r["credit"] > 0) > 25
+    none_at_all = {a for a in part.accounts if all(r["balance"] is None for r in part.by_account()[le.fold(a)])}
+    assert none_at_all == {CUST_C, CUST_F}, none_at_all
+    assert part.accounts == full.accounts and len(part.accounts) == 13
+    checked, day = 0, date(2026, 9, 1)
+    while day <= AS_ON:
+        for account in full.accounts:
+            want = None if account in none_at_all else le.balance(full, account, day)
+            assert le.balance(part, account, day) == want, (account, day.isoformat())
+            checked += 1
+        day += timedelta(days=1)
+    assert checked == 13 * 64
+    # the same, row by row: every run of blank rows that a stated balance closes is reached by working forward
+    # (Customer A's receipt, returns and credit note before its last sale; the Output VAT account's sales credits
+    # before a return, twice; Customer D's two)
+    runs = reached = 0
+    for rows in part.by_account().values():
+        n, ok = blank_runs(rows)
+        runs, reached = runs + n, reached + ok
+    assert (runs, reached) == (5, 5), (runs, reached)
+
+
+def read_variant(postings, **kw):
+    """`postings` written as a Ledger with the given writer options, and read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "Ledger_variant.xlsx"
+        write_ledger(path, postings, order=ORDER_ALL, **kw)
+        return le.read(path)
+
+
+def every_day(first=date(2026, 9, 1), last=AS_ON):
+    day = first
+    while day <= last:
+        yield day
+        day += timedelta(days=1)
+
+
+@test("balance: the real export prints a magnitude (never a sign, a zero left blank): a credit balance comes "
+      "out negative, every blank is the worked-out nought, an opening balance above the first row is found")
+def _():
+    postings = POSTINGS + RUNS
+    for opening, label in ((None, "no opening balance, as in the real export"), (OPENING, "Customer B opens at 40")):
+        signed = read_variant(postings, opening=opening)                                  # signed figures
+        printed = read_variant(postings, opening=opening, magnitude=True)                # as the real export prints
+        gappy = read_variant(postings, opening=opening, magnitude=True, blank=blank_credits)   # credit legs blank too
+        assert all(r["balance"] >= 0 for r in printed.rows if r["balance"] is not None), "no sign, as in the export"
+        assert any(r["balance"] is not None and r["balance"] < 0 for r in signed.rows)
+        assert any(r["balance"] is None for r in printed.rows), "a nought is left blank"
+        # every account on every day: the same figure whichever way the report prints it
+        none_at_all = {a for a in gappy.accounts
+                       if all(r["balance"] is None for r in gappy.by_account()[le.fold(a)])}
+        assert none_at_all == {CUST_C, CUST_F}, none_at_all
+        checked = 0
+        for account in signed.accounts:
+            for day in every_day():
+                want = le.balance(signed, account, day)
+                assert le.balance(printed, account, day) == want, (label, account, day.isoformat())
+                assert le.balance(gappy, account, day) == (None if account in none_at_all else want), \
+                    (label, account, day.isoformat())
+                checked += 1
+        assert checked == 13 * 64
+        # a few by name: a customer in credit is negative, a sale account (a credit nature) too, a debtor positive
+        assert le.balance(printed, CUST_C, date(2026, 10, 31)) == Decimal(-33), "its one row is a return"
+        assert le.balance(printed, CUST_F, date(2026, 10, 31)) == Decimal(-5)
+        assert le.balance(printed, CUST_A, date(2026, 10, 31)) == Decimal(110)
+        assert le.balance(printed, SALES, date(2026, 10, 31)) < 0 and le.balance(printed, CASH, date(2026, 10, 31)) > 0
+        assert le.balance(printed, CUST_E, date(2026, 10, 3)) == Decimal(-20), "in credit before its first sale"
+        assert le.balance(printed, CUST_E, date(2026, 10, 4)) == Decimal(100)
+        # the size of a printed figure is the report's own: only its sign is restored, only a blank is filled
+        for rows in printed.by_account().values():
+            for stated, figure in zip(rows, le.running_balances(rows)):
+                assert stated["balance"] is None or abs(figure) == stated["balance"]
+    # Customer B's opening balance is a row the reader leaves out: -4 after its first return, printed as 4. The sign
+    # and the opening come from the later figures, which only the right opening makes equal the rows' totals.
+    printed = read_variant(postings, opening=OPENING, magnitude=True)
+    assert le.balance(printed, CUST_B, date(2026, 10, 31)) == Decimal(-4)
+    assert le.balance(printed, CUST_B, date(2026, 9, 1)) == Decimal(40), "before its first row: the opening it carried"
+
+
+@test("running_balances: a stated balance is kept, a blank one is worked from the last stated, leading blanks "
+      "from the next, none at all gives None")
+def _():
+    def row(debit, credit, balance):
+        return {"debit": Decimal(debit), "credit": Decimal(credit),
+                "balance": None if balance is None else Decimal(balance)}
+
+    rows = [row(0, 20, None), row(120, 0, 100), row(0, 30, None), row(0, 10, None), row(50, 0, 110), row(0, 5, 999)]
+    # -20 worked back from 100; 100 stated; 70 and 60 worked forward; 110 stated; 999 stated, though 105 follows
+    assert le.running_balances(rows) == [Decimal(-20), Decimal(100), Decimal(70), Decimal(60), Decimal(110),
+                                         Decimal(999)]
+    assert le.running_balances([row(0, 5, None), row(7, 0, None)]) == [None, None]
+    assert le.running_balances([]) == []
+    assert le.running_balances([row(3, 0, None), row(0, 1, 9), row(0, 2, None)]) == \
+        [Decimal(10), Decimal(9), Decimal(7)], "the first row's balance is the next stated one less the movements"
+    figures = le.running_balances(rows)
+    assert all(isinstance(x, Decimal) for x in figures)
+
+    # a balance printed without its sign gets it from the rows (nothing is owed before the first row)
+    # (the last stated figure, 40, is the report's own: the rows add up to 0, and its size is kept)
+    printed = [row(0, 30, 30), row(100, 0, 70), row(0, 150, 80), row(0, 20, None), row(100, 0, 40)]
+    assert le.running_balances(printed) == [Decimal(-30), Decimal(70), Decimal(-80), Decimal(-100), Decimal(40)]
+    # an opening balance above the first row: 40 owed, a return of 44 puts it 4 in credit, printed as 4
+    assert le.running_balances([row(0, 44, 4), row(55, 0, 51), row(0, 55, None)]) == \
+        [Decimal(-4), Decimal(51), Decimal(-4)]
+    # a negative stated cell means the report prints its signs: taken as printed, whatever the rows say
+    assert le.running_balances([row(0, 30, -30), row(100, 0, 70)]) == [Decimal(-30), Decimal(70)]
+    # nothing ties the printed figures to the rows (no opening explains them): they stay as printed
+    assert le.running_balances([row(10, 0, 500), row(10, 0, 3), row(0, 5, 77)]) == \
+        [Decimal(500), Decimal(3), Decimal(77)]
+    # ... and a minority that a (credit) opening does tie to them is not enough to give the whole account a sign:
+    # two of four figures fit an opening of 90 in credit, the other two fit nothing
+    assert le.running_balances([row(0, 10, 100), row(0, 5, 105), row(0, 5, 1), row(0, 5, 2)]) == \
+        [Decimal(100), Decimal(105), Decimal(1), Decimal(2)]
+    # a printed negative means the report prints its signs: taken as printed, though the other figures match the rows
+    assert le.running_balances([row(0, 30, -30), row(100, 0, 70), row(10, 0, 80), row(10, 0, 90)]) == \
+        [Decimal(-30), Decimal(70), Decimal(80), Decimal(90)]
+    # a figure that fits both a debit from nought and a credit under a larger opening is read as the debit
+    assert le.running_balances([row(20, 0, 20)]) == [Decimal(20)]
+    # a single stated figure: the rows explain it from nought, so it is a credit balance; a figure they cannot
+    # explain from nought is read as a debit balance (an opening of 9009 less the 9 returned)
+    assert le.running_balances([row(0, 9, 9)]) == [Decimal(-9)]
+    assert le.running_balances([row(0, 9, 9000)]) == [Decimal(9000)]
 
 
 # -- customer_legs ------------------------------------------------------------
@@ -895,6 +1144,102 @@ def counts(export) -> dict:
     }
 
 
+CUSTOMER_ROWS = 1000                  # an account of more rows than this is not a customer in the real-file counts
+
+
+def month_end_before(day: date) -> date:
+    return date(day.year, day.month, 1) - timedelta(days=1)
+
+
+def balance_counts(export) -> tuple[dict, tuple[int, int]]:
+    """How the report's Balance column behaves, as counts: ({label: figure}, (runs of blank rows a stated balance
+    closes, how many of them the balance worked forward reaches)). The blank cells, the missing sign, and the
+    roll-forward a reconciliation does with balance(), month by month. Numbers only."""
+    accounts = export.by_account()
+    rows = export.rows
+    blank_rows = [r for r in rows if r["balance"] is None]
+    runs = reached = 0
+    for legs in accounts.values():
+        n, ok = blank_runs(legs)
+        runs, reached = runs + n, reached + ok
+    stated_somewhere = [legs for legs in accounts.values() if any(r["balance"] is not None for r in legs)]
+    out = {
+        "rows with no Balance": f"{len(blank_rows)} of {len(rows)} (credit legs: "
+                                f"{sum(1 for r in blank_rows if r['credit'] > 0 and r['debit'] == 0)}, "
+                                f"debit legs: {sum(1 for r in blank_rows if r['debit'] > 0 and r['credit'] == 0)})",
+        "accounts whose last row shows no Balance":
+            f"{sum(1 for legs in accounts.values() if legs[-1]['balance'] is None)} of {len(accounts)}",
+        "accounts that state no Balance at all": len(accounts) - len(stated_somewhere),
+        "accounts whose first rows show none before a stated one": sum(1 for legs in stated_somewhere
+                                                                      if legs[0]["balance"] is None),
+        "runs of blank rows closed by a stated Balance": runs,
+        "runs the forward balance reaches (equals the stated one)": f"{reached} of {runs}",
+    }
+    for label, day in (("as on", export.as_on), ("at the month end before", month_end_before(export.as_on))):
+        month_first = date(day.year, day.month, 1)
+        with_row = raw_blank = unstated = 0
+        debited = debited_raw = debited_unstated = 0
+        for legs in accounts.values():
+            latest = None
+            for i, r in enumerate(legs):
+                if r["date"] <= day and (latest is None or r["date"] >= legs[latest]["date"]):
+                    latest = i
+            if latest is None:
+                continue
+            with_row += 1
+            is_raw_blank = legs[latest]["balance"] is None
+            is_none = le.balance(export, legs[0]["account"], day) is None
+            raw_blank += is_raw_blank
+            unstated += is_none
+            if any(r["kind"] == "sale" and r["debit"] > 0 and month_first <= r["date"] <= day for r in legs):
+                debited += 1
+                debited_raw += is_raw_blank
+                debited_unstated += is_none
+        out[f"{label} {day.isoformat()}: accounts with a row / latest row blank / balance() None"] = \
+            f"{with_row} / {raw_blank} / {unstated}"
+        out[f"{label} {day.isoformat()}: accounts a sales invoice debited that month, the same three"] = \
+            f"{debited} / {debited_raw} / {debited_unstated}"
+    # the sign: the report prints a magnitude, balance() gives the signed figure
+    negatives = sum(1 for r in rows if r["balance"] is not None and r["balance"] < 0)
+    restored_accounts = restored_rows = 0
+    for legs in accounts.values():
+        given = [(r["balance"], b) for r, b in zip(legs, le.running_balances(legs)) if r["balance"] is not None]
+        flipped = sum(1 for printed, b in given if b != printed)
+        restored_rows += flipped
+        restored_accounts += bool(flipped)
+    out["printed balances below nought (a report that prints its signs)"] = negatives
+    out["balances given a minus sign from the rows: accounts / rows"] = f"{restored_accounts} / {restored_rows}"
+    # what the reconciliation does with it: opening + movements = closing for the accounts a sales invoice debited
+    # in each month of the file. The accounts of up to CUSTOMER_ROWS rows are the customers; the few with thousands
+    # of rows (cash sales, up to hundreds of rows a day) are counted apart, their printed balances do not follow
+    # the file's row order.
+    month_first = date(export.first_date.year, export.first_date.month, 1)
+    while month_first <= export.as_on:
+        month_next = date(month_first.year + (month_first.month == 12), month_first.month % 12 + 1, 1)
+        last = min(month_next - timedelta(days=1), export.as_on)
+        eve = month_first - timedelta(days=1)
+        moves = le.movements(export, month_first, last)
+        debited = [legs for legs in accounts.values()
+                   if any(r["kind"] == "sale" and r["debit"] > 0 and month_first <= r["date"] <= last for r in legs)]
+        small = [legs for legs in debited if len(legs) <= CUSTOMER_ROWS]
+        in_credit = off_fils = off_five = unknown = 0
+        for legs in small:
+            account = legs[0]["account"]
+            opening, closing = le.balance(export, account, eve), le.balance(export, account, last)
+            if opening is None or closing is None:
+                unknown += 1
+                continue
+            gap = abs(opening + sum((m.net for m in moves.get(account, {}).values()), Decimal(0)) - closing)
+            off_fils += gap > Decimal("0.001")
+            off_five += gap > Decimal("0.05")
+            in_credit += closing < 0
+        out[f"{month_first:%Y-%m}: customer accounts / in credit at the close / no balance / opening + movements != "
+            f"closing by over 0.001 BHD / by over 0.05 BHD / bigger accounts apart"] = \
+            f"{len(small)} / {in_credit} / {unknown} / {off_fils} / {off_five} / {len(debited) - len(small)}"
+        month_first = month_next
+    return out, (runs, reached)
+
+
 @test("the real export (SKIP unless YQ_OPS_LEDGER_SAMPLE names one): header, as-on date and prefixes are as expected")
 def _():
     sample = os.environ.get("YQ_OPS_LEDGER_SAMPLE", "").strip()
@@ -920,10 +1265,13 @@ def _():
     assert with_prefix >= 0.99 * len(export.rows), f"rows whose voucher does not begin 'PREFIX :': {without}"
 
     c = counts(export)
+    blanks, (runs, reached) = balance_counts(export)
     print(f"    read in {took:.1f}s; as on {export.as_on.isoformat()}, entries {export.first_date.isoformat()} to "
           f"{export.last_date.isoformat()}")
-    for key, value in c.items():
+    for key, value in {**c, **blanks}.items():
         print(f"    {key}: {value}")
+    # balance() rests on this: a blank Balance worked forward from the last stated one lands on the next stated one
+    assert reached == runs, f"the forward balance reaches the next stated one in {reached} of {runs} runs of blank rows"
     print("    voucher prefixes: " + ", ".join(f"{p or '(none)'} {n}" for p, n in sorted(export.prefixes.items())))
     print("    unknown prefixes: " + ("; ".join(export.unknown) if export.unknown else "none"))
     for note in export.notes:

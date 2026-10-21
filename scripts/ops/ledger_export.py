@@ -26,21 +26,30 @@ A ROW is one leg of one voucher, a small dict:
     kind          kind_of(voucher): sale, receipt, return, credit_note, payment, journal or other
     counter       the report's own "Account" column: the other side of the voucher, as the report shows it
     debit, credit Decimal, BHD to the fils; a blank cell is 0
-    balance       Decimal, the running balance after the row exactly as the report states it; None when the
-                  cell states none
+    balance       Decimal, the running balance after the row exactly as the report prints it: on the real export a
+                  magnitude, never negative; None when the cell is blank (the report leaves it off some credit
+                  legs). balance() gives the signed figure, with the blanks worked out
     currency, payment_mode, salesman
                   as written; a payment mode of '0' or 'Payment Mode' (noise in the export) is None
 There is no narration and no row hash. Rows stay in file order. An account's rows stand together, and the helpers
 take them to be in date order, as the report writes them (the real-file check prints how many pairs are).
 
-WHAT THE HELPERS ASSUME (so a caller can say it). The Balance column is the account's running balance and moves
-by debit less credit, a debit balance being positive (what a customer owes). balance() reads it and movements()
-sums the same rows, so for one account
+WHAT THE HELPERS ASSUME (so a caller can say it). The Balance column is the account's running balance, which
+moves by debit less credit, and balance() gives it signed: a debit balance positive (what a customer owes), a
+credit balance negative. balance() and movements() read the same rows, so for one account
     balance(first - 1 day) + debits - credits (the window's movements, every kind) = balance(last)
 and "opening + SI - RCTV - SRV - CN = closing" is that line with the kinds spelt out (any PV, JV or other
-movement is the difference). tests/test_ops_ledger_export.py, run with YQ_OPS_LEDGER_SAMPLE naming a real
-export, prints how many rows follow that rule. A report that stops before the days asked for cannot answer:
-the helpers refuse a day after the as-on date instead of answering from a part of the month.
+movement is the difference).
+The real export prints the column in two ways a caller must not take at face value. (1) A blank cell on some
+credit legs (the payment inside a cash sale, mostly the last row of its voucher): the balance is exactly nought
+there, and balance() works it out as the last stated balance plus the debit less the credit of the rows after
+it, in the file's own order. (2) No sign: the figure is a magnitude, so a customer in credit looks like one in
+debit; balance() takes the sign from the rows' running total (running_balances says when). It says None only
+for an account no row of which states a balance.
+tests/test_ops_ledger_export.py, run with YQ_OPS_LEDGER_SAMPLE naming a real export, prints the counts that show
+both: the blank rows, the accounts whose last row is blank, the runs of blank rows and how many the forward
+balance reaches, the accounts printed as magnitudes. A report that stops before the days asked for cannot
+answer: the helpers refuse a day after the as-on date instead of answering from a part of the month.
 """
 from __future__ import annotations
 
@@ -56,6 +65,9 @@ from scripts.ops.workbook import model as mdl
 
 SEARCH_DAYS = 10                   # find() looks in drop folders dated from the month's last day to this many days on
 ZERO = Decimal(0)
+# BHD. How far a printed balance may sit from the account's opening plus the sum of its rows for running_balances to
+# take its sign from that sum. Rounding in the report moves a balance by fils; a wrong opening moves it by a figure.
+SIGN_TOLERANCE = Decimal("0.5")
 # Bahrain's VAT rate. The portal's own ex-VAT fallback is the same: gross / 1.1 (glossary, scripts/seed_memory.py).
 VAT_RATE = Decimal("0.10")
 
@@ -421,32 +433,86 @@ def movements(export: Export, first, last) -> dict[str, dict[str, Movement]]:
     return {account: {kind: Movement(*v) for kind, v in kinds.items()} for account, kinds in sums.items()}
 
 
-def balance(export: Export, account, day) -> Decimal | None:
-    """The account's balance at the end of `day`, as the report's running Balance column states it (a debit
-    balance is taken as positive). It is the balance of the last row dated `day` or earlier, the later row of
-    the file for two on one day. Before the account's first row it is what the first row opened with (its
-    balance less its debit plus its credit), which carries an opening balance the report wrote above it.
+def running_balances(legs: list[dict]) -> list[Decimal | None]:
+    """The signed balance after each of one account's rows, in the file's order (balance() reads its answer
+    here). A debit balance is positive, a credit balance negative. It works out what the report's Balance cells
+    leave open, in two ways.
 
-    None when the export does not state it: no such account (name matched with fold), or the row's Balance
-    cell is blank. ValueError for a day after the export's as-on date."""
+    A blank cell. The report leaves the Balance off some credit legs (the payment inside a cash sale is the
+    usual one, often the last row of its voucher); on the real export every such balance is exactly nought. A
+    blank row takes the balance after the row before it, plus its debit, less its credit: the last stated
+    balance worked forward through every row since. A blank row with no stated balance before it (the first
+    rows of an account) is worked back from the first stated balance after it. An account no row of which
+    states a balance gives None throughout.
+
+    No sign. The real export prints a balance as a magnitude, never negative: a customer in credit shows the
+    figure of one in debit. When no stated balance of the account is negative, the sign of each comes from the
+    rows: the balance after a row is the opening balance plus the running total of debit less credit since the
+    account's first row. The real export has no opening balance (its first row opens the account), so that is
+    nought; a report that does write one above the first row (which the reader leaves out) is found the same
+    way, as whichever of the two openings the first stated figure allows makes the magnitudes equal the rows'
+    totals. The sign is used when that explains most of the stated balances (to within SIGN_TOLERANCE); when
+    nothing does, the stated balances stay as they are.
+
+    The size of a stated balance is never replaced: only a blank is filled, and a magnitude gets its sign."""
+    out: list[Decimal | None] = [None] * len(legs)
+    stated = [i for i, r in enumerate(legs) if r["balance"] is not None]
+    if not stated:
+        return out
+    totals: list[Decimal] = []
+    run = ZERO
+    for r in legs:
+        run += r["debit"] - r["credit"]
+        totals.append(run)
+    opening = ZERO
+    unsigned = not any(legs[i]["balance"] < 0 for i in stated)
+    if unsigned:
+        first = stated[0]
+        best = -1
+        for candidate in (ZERO, legs[first]["balance"] - totals[first], -legs[first]["balance"] - totals[first]):
+            near = sum(1 for i in stated if abs(abs(candidate + totals[i]) - legs[i]["balance"]) <= SIGN_TOLERANCE)
+            if near > best:                      # nought wins a tie: it is listed first
+                best, opening = near, candidate
+        unsigned = best * 2 > len(stated)
+    for i in stated:
+        out[i] = -legs[i]["balance"] if unsigned and opening + totals[i] < 0 else legs[i]["balance"]
+    for i in range(stated[0] + 1, len(legs)):
+        if out[i] is None:
+            out[i] = out[i - 1] + legs[i]["debit"] - legs[i]["credit"]
+    for i in range(stated[0] - 1, -1, -1):
+        out[i] = out[i + 1] - (legs[i + 1]["debit"] - legs[i + 1]["credit"])
+    return out
+
+
+def balance(export: Export, account, day) -> Decimal | None:
+    """The account's signed balance at the end of `day` (a debit balance positive, what a customer owes; a
+    credit balance negative), from the report's running Balance column. It is the balance after the last row
+    dated `day` or earlier, the later row of the file for two on one day. A blank Balance cell is worked out
+    from the stated ones and a balance printed without its sign gets it from the rows: see running_balances.
+    Before the account's first row it is what the first row opened with (the balance after it, less its debit,
+    plus its credit), which carries an opening balance the report wrote above it.
+
+    None only when the export cannot give it: no such account (name matched with fold), or no row of the
+    account states a balance. ValueError for a day after the export's as-on date."""
     d = _as_day(day, "balance")
     _check_day(export, d)
     legs = export.by_account().get(fold(account))
     if not legs:
         return None
     latest = None
-    for r in legs:
-        if r["date"] <= d and (latest is None or r["date"] >= latest["date"]):
-            latest = r
+    for i, r in enumerate(legs):
+        if r["date"] <= d and (latest is None or r["date"] >= legs[latest]["date"]):
+            latest = i
+    after = running_balances(legs)
     if latest is not None:
-        return latest["balance"]
-    earliest = legs[0]
-    for r in legs:
-        if r["date"] < earliest["date"]:
-            earliest = r
-    if earliest["balance"] is None:
+        return after[latest]
+    earliest = 0
+    for i, r in enumerate(legs):
+        if r["date"] < legs[earliest]["date"]:
+            earliest = i
+    if after[earliest] is None:
         return None
-    return earliest["balance"] - earliest["debit"] + earliest["credit"]
+    return after[earliest] - legs[earliest]["debit"] + legs[earliest]["credit"]
 
 
 def customer_legs(export: Export, accounts, first=None, last=None) -> dict[str, list[dict]]:
