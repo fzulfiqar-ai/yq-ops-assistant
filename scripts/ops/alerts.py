@@ -292,8 +292,7 @@ def _short(text: str, width: int = WHAT_WIDTH) -> str:
 def render(items: list[dict], limit: int | None = None) -> str:
     """The items as a fixed-width block: id, level, who, what, by, evidence, BHD. A long 'what' is
     cut at WHAT_WIDTH characters so one item cannot widen the whole list. When `limit` leaves items
-    out, the last line counts them, "(+3 more open)", and points nowhere: no command lists the whole
-    register yet, and a line must not send a reader to one that is not built."""
+    out, the last line counts them, "(+3 more open: /yq-watch)": /yq-watch lists the whole register."""
     shown = items[:limit] if limit else items
     if not shown:
         return "Nothing open."
@@ -304,4 +303,4 @@ def render(items: list[dict], limit: int | None = None) -> str:
                      fmt.bhd(r.get("bhd")) if r.get("bhd") is not None else ""])
     text = fmt.grid(["ID", "Level", "Who", "What", "By", "Evidence", "BHD"], rows, "lllllll"[:6] + "r")
     more = len(items) - len(shown)
-    return text + (f"\n(+{more} more open)" if more > 0 else "")
+    return text + (f"\n(+{more} more open: /yq-watch)" if more > 0 else "")

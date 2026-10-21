@@ -12,7 +12,9 @@
 - `/yq-load [ddmmyy]`: check a drop folder, ask, load, verify, brief, then the e-mail and the day's stock file. Owner only.
 - `/yq-brief [window] [rep:<name>]`: sales brief and what to do today; `/yq-brief team` prints the team message for him to copy. Asked whether the data is up to date or what is waiting, it runs `python -m scripts.ops status` (read-only).
 - `/yq-month [YYYY-MM]`: the monthly sales workbook (the layout of his September one) for a whole month, under `exports/reports/monthly/`; its comment lines stay DRAFT for now.
-- `/yq-stock [reorder|ageing|damage|file|<code>]`: the main store's stock and cover, what to order per supplier, the fast movers in stock, ageing and how the old and price-cut items sell, the damage store; the day's editable Stock & Order Plan workbook under `exports/reports/stock/` (once per data date); one item by its code (read-only).
+- `/yq-stock [reorder|ageing|damage|file|<code>]`: the main store's stock and cover, what to order per supplier (counting the vans and outlets), the fast movers in stock, ageing and how the old and price-cut items sell, the damage store; the day's editable Stock & Order Plan workbook under `exports/reports/stock/` (once per data date); one item by its code (read-only).
+- `/yq-moves [7d|mtd|YYYY-MM|A..B] [rep:<name>]`: transfers between the main store and the vans and outlets, paired by what the two vouchers hold; each van's and outlet's stock from opening to closing with its check; what is to check in BHD (read-only).
+- `/yq-watch [all|<id>|explain <id> <words>|done <id> [words]|replay]`: the action list after each load: transfers to check as ACT or CHECK with their BHD, the load check's and the Command Centre's items read-only; explain or done only on his words.
 - More skills arrive in later phases and are listed here once they exist.
 
 ## Standing rules

@@ -35,6 +35,23 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   history for items out most of the window, whole cartons); `ordered` / `cancel` log goods on order only after
   the owner's yes; `team` makes the copy without costs; `/yq-load` ends by showing it. Values at the landed cost
   from goods-received notes, the pricing-sheet cost where an item has none. Reference: `docs/OPS_SKILLS.md`.
+- `/yq-moves` (21-Oct-2026): every transfer between the main store and the vans and outlets paired by what its
+  two vouchers hold (`scripts/ops/pairing.py`, the one module the portal shares in the phase 2b release), each
+  van's and outlet's stock from opening to closing with its check, and what is to check in BHD at landed cost;
+  accessories only (`scripts/ops/moves.py`).
+- The order list counts the vans, the outlets and stock moving between them beside the main store
+  (`scripts/ops/position.py`, `stock.position_stores`); the Stock & Order Plan file is layout v3 ("Vans and
+  outlets"), and v1 and v2 files still read for `ordered` and `team`.
+- `/yq-watch` (21-Oct-2026): the action list after each load (`scripts/ops/checks.py`): the transfer items, ACT
+  or CHECK with their BHD, recorded once per ledger before the brief; the load check's and the Command Centre's
+  items read-only; explain and done on the owner's words. The brief gains a MOVEMENTS line and the e-mail a
+  Transfers paragraph.
+- The portal's Stock Movement page says that its Pending and van figures are not reliable yet (W1), until the
+  phase 2b release.
+- Release backups: `python -m scripts.yq_backup release <label>` seals an encrypted backup outside OneDrive, and
+  `unpack` opens one for a rollback (R1, `docs/BACKUPS.md`).
+- The keep-alive Worker reads Supabase every ten minutes and alerts by Telegram once it is deployed (the code
+  part of making the repository private; the owner's steps are kept outside the repository).
 - The photo archive: `python -m scripts.yq_photos archive [--apply]` and `verify <archive>` (see `docs/BACKUPS.md`).
 - The daily database backup: `python -m scripts.yq_nightly`, started by the Task Scheduler task `YQ Daily Backup`
   (Sunday to Thursday, while the owner is logged on; see `docs/BACKUPS.md`).
@@ -50,37 +67,37 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- Nothing is being built; the next step waits for the owner's go.
-- The faster load's review follow-ups: the read-only test now refuses the loader (no deploy). The other four
-  change `scripts/load_txn.py` or `scripts/refresh.py`, so they go with the next API deploy: each temporary
+- Built on their own branches, released in this order (the plan of 21-Oct-2026): `/yq-week` (the weekly pack
+  with the AI review), the count sheets (`/yq-month prep` and `count`), the month-end pack (the Stock,
+  Movements, Reconciliation, KPI and KPI log sheets, the ten comment lines with their approval step, the four
+  reconciliations, `/yq-kpi`), then the phase 2b release.
+- The faster load's review follow-ups are built and go with the phase 2b release's API deploy: each temporary
   table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
-  loader's own words up, so that a load that rolled back is journalled as writing nothing (today it reads
-  LAST LOAD FAILED, the careful reading, and the next /yq-load replaces it as before); and the refresh time
-  recorded without the commit's hold.
+  loader's own words up, so that a load that rolled back is journalled as writing nothing; and the refresh
+  time recorded without the commit's hold.
 
 ## Not built (the engine prints "not built yet")
 
-`watch`, `moves`, `recon`, `kpi`, the weekly workbook (`report week`) and `check` (a drafted text against the computed
-figures). The specification is the approved ops-skills plan of 8-Oct-2026 (the sections from /yq-watch to /yq-kpi, and
-"Build order"). Phase 2 groundwork exists: `scripts/ops/ledger.py` (the stock ledger as whole vouchers, the narration
-reduced to a hash) and `scripts/ops/items.py` (the item-name bridge), covered by `tests/test_ops_moves.py`; `/yq-stock`
-leaves a hook for the van columns that `/yq-moves` will fill.
+`recon`, `kpi`, the weekly workbook (`report week`) and `check` (a drafted text against the computed figures) are
+not on `main` yet: they are built and wait for their releases (above). The specification is the approved ops-skills
+plan of 8-Oct-2026 (the sections from /yq-week to /yq-kpi, and "Build order").
 
 ## Order of work (each step needs the owner's go)
 
-`/yq-moves` and `/yq-watch`, the phase 2b release (Stock Moves views and engine speed), P3b
-(`/yq-week`, the Stock and Movements sheets, the monthly comment lines), P4 (reconciliations and `/yq-kpi`), then Market
-Intel phases 3 and 4.
+`/yq-week`, the count sheets, the month-end pack, the phase 2b release (the Stock Moves page by contents, van stock
+from the ledger, the narration mask, the four load follow-ups, the team-message Copy button), then Market Intel
+phases 3 and 4 once the rep reports are enough.
 
 ## Open items
 
-- The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release. It pairs issues
-  and receipts by voucher number, and van stock comes from a snapshot of the main store only. Use `/yq-moves` once it is
-  built.
+- The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release (the page says
+  so). It pairs issues and receipts by voucher number, and van stock comes from a snapshot of the main store only. Use
+  `/yq-moves` meanwhile.
 - Profitability is held back at every load until Focus posts the cost of sales again.
 - `/yq-stock`, answered by the owner on 20-Oct-2026: the measured lead time wins (per supplier once it can be
-  measured); goods on order are logged when he says an order is placed; the order list counts the main store
-  only until `/yq-moves`; items out of stock most of the window take a longer history; the sales team is the
+  measured); goods on order are logged when he says an order is placed; the order list counts the vans and
+  the outlets beside the main store (his choice of 21-Oct-2026: all sellable stock, transfers inside their
+  deadline included); items out of stock most of the window take a longer history; the sales team is the
   only lever on old stock. Still open: which items are display stands (the catalog's hidden items are the
   candidates).
 

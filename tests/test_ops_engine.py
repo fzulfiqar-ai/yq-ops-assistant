@@ -495,7 +495,7 @@ def _():
         order = [r["key"] for r in alerts.open_items()]
         assert order == ["r|3", "r|2", "r|1", "r|4"], order
         text = alerts.render(alerts.open_items(), limit=2)
-        assert text.splitlines()[0].startswith("ID") and "(+2 more open)" in text
+        assert text.splitlines()[0].startswith("ID") and "(+2 more open: /yq-watch)" in text
         assert "50.000" in text and alerts.render([]) == "Nothing open."
         assert status.register_counts() == {"ACT": 2, "CHECK": 3}
 

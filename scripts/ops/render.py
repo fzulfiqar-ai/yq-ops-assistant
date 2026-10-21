@@ -28,7 +28,6 @@ NOT_EVIDENCED = "NOT EVIDENCED"
 # what is never in the reports, said once in the e-mail so nobody reads its absence as nought
 NEVER_IN_THE_REPORTS = (
     ("Visits, calls, quotations and leads", "no system records them yet"),
-    ("Stock in the vans", "the stock report is loaded for the main store only"),
     ("Value of returns", "only the month-end ledger carries it, and it is not loaded"),
 )
 # a team message must not carry these: money owed, the reps' pay, or a word that singles a rep out
@@ -402,8 +401,8 @@ def _team_section(facts: dict) -> tuple[list[list], list[str]]:
                      fmt.bhd(r.get("needed_per_business_day_bhd")) if r.get("needed_per_business_day_bhd") else "-",
                      _rep_next(r, silent_after, pace_share)])
     sold_out = (facts.get("stock") or {}).get("sold_out_with_demand") or 0
-    notes = [f"Before judging a decline: {sold_out} items that sold in the last 60 days are sold out in the main store, "
-             f"and the stock in the vans is {NOT_EVIDENCED}. Ask about stock before anything else.",
+    notes = [f"Before judging a decline: {sold_out} items that sold in the last 60 days are sold out in the main store; "
+             "each van's own stock is on /yq-moves. Ask about stock before anything else.",
              "Change = month to date against the same business days last month. Target = his first tier "
              "(kickback figures are left out of this e-mail)."]
     return rows, notes

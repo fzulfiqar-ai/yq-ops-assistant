@@ -318,8 +318,9 @@ def _notes(ws: Sheet, plan: dict, sub: str, made: datetime) -> None:
     r = tr + 2
     ws.text(r, 0, "This file", "subhead")
     r += 1
-    held = ("the main store, the vans and the outlets" if plan.get("layout") == POSITION_LAYOUT
-            else "the main store")
+    # a v3 plan counts the stores its settings name beside the main store: say so without naming which
+    held = ("the main store and the stores counted beside it (its Vans and outlets column)"
+            if plan.get("layout") == POSITION_LAYOUT else "the main store")
     entries = (
         ("What it is", "The team copy of his Stock & Order Plan: his order list with his quantities and comments (the "
                        "Order sheet) and the items to push (the Push list)."),

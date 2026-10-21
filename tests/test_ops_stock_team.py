@@ -673,7 +673,8 @@ def _():
       "v3 one, also worked out again after an edit); the Notes sentence names the vans and the outlets for v3 only; "
       "no leak, BHD or store name")
 def _():
-    said = {V1: "the main store.", V2: "the main store.", V3: "the main store, the vans and the outlets."}
+    said = {V1: "the main store.", V2: "the main store.",
+            V3: "the main store and the stores counted beside it (its Vans and outlets column)."}
     with data_root() as root:
         for tag, (qty, cover) in CB2_BY_LAYOUT.items():
             for edited in (False, True):

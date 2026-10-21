@@ -16,6 +16,8 @@ changes the live database except the load, and the load asks you every time. Fin
 | `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
 | `/yq-month` or `/yq-month <YYYY-MM>` | Once a month is whole: after the first load of the next month. With no month it takes the last whole month. | Your monthly Sales Report workbook, laid out like your September one (Dashboard, Salesmen, Categories, Products, Customers, Daily, Data, Notes), in `exports/reports/monthly/`, and a short screen of what it checked. Its ten comment lines are marked DRAFT until a later phase adds the step where you approve them. |
 | `/yq-stock`, `/yq-stock reorder`, `/yq-stock ageing`, `/yq-stock damage`, `/yq-stock file` or `/yq-stock <code>` | When you plan an order (it also runs at the end of every `/yq-load`). Or ask in plain words: what should I order, what is running out, how many days of stock do I hold, which stock is old, did the price cut work, how much stock is damaged. | The main store's stock as the portal shows it and at cost, the days of cover against KPI 1, the order list (what to order and how much, and the lead time it rests on), how often the fast movers were in stock, the ageing and how the old and price-cut items are selling, and the damage store, each in short. On its first line, the day's **Stock & Order Plan** workbook (`exports/reports/stock/`, one per data date). `reorder` shows the whole order list with each item's supplier, the supplier invoices the lead time is measured on and the fast movers with their sales ranking; `ageing` the ageing table and its review; `damage` the damage store in full; `file` a new workbook even when today's exists; `team` the team copy of your newest workbook (no cost or value); `ordered <supplier>` when you have placed an order (it shows the lines and logs them only after your yes) and `cancel <supplier>` to undo one; an item's code that one item. No purchase order is drafted and nothing is sent to a supplier (section 4 says how each figure is worked out). |
+| `/yq-moves`, `/yq-moves mtd`, `/yq-moves <YYYY-MM>` or `/yq-moves rep:<name>` | When you want to see what went to the vans and outlets and came back, what was not received, or how one van's or outlet's stock moved. | Every transfer between the main store and the vans and outlets, paired by what its two vouchers hold (never by their numbers), with what became of it; each van's and outlet's stock from its opening to its closing, with a check that must read nought; the main store's line; and what is to check, in BHD at landed cost (section 4). The last seven days unless you name a window; `rep:<name>` shows one van or outlet with its own transfers. |
+| `/yq-watch`, `/yq-watch all` or `/yq-watch <id>` | After a load, or whenever you want the whole action list. To close an item, say in plain words: *A12 is explained: …* or *A12 is done*. | The action list: each transfer to check, ACT or CHECK, with its BHD at cost; beside it, read-only, the load check's and the Command Centre's open items. `all` adds the older items counted once at the first run; an item's id shows it in full; `explain` and `done` take your own words. The brief's DO TODAY shows the most pressing of the same list (section 4). |
 | Ask in plain words: *where do things stand?* | Before you start, or when something looks stuck. | Five lines: the data dates and the last load; this folder against the live site; the load lock; reports waiting; open items on the action list. (Claude runs `python -m scripts.ops status`.) |
 
 `/yq-brief` on its own is the whole morning screen. Name a window (`day`, `3d`, `7d`, `week`,
@@ -56,8 +58,8 @@ placed, with what is still due. `/yq-stock team` makes a team copy next to it, b
 typed in your file: your quantities and comments and a Team comment column, without any cost, value,
 budget or salesman's name. Claude never opens, changes or sends a file: share the one you choose.
 
-The rest of the routine (the weekly workbook, the movement checks, the full action list, the KPI
-scorecard) follows in later phases. This table gets a row for each one when it exists. After a new
+The rest of the routine (the weekly workbook and the KPI scorecard) follows in later phases. This
+table gets a row for each one when it exists. After a new
 command is added, type `/reload-skills` (or restart Claude Code) so it appears.
 
 `/yq-load` is yours alone: Claude does not start it by itself. If you ask Claude in plain words to
@@ -305,7 +307,7 @@ one of two lines, and the load check says the same in its own words:
   gains its warnings in a later phase.
 - **Do today.** At most five open items of the action list, the most pressing first; when more are
   open, the screen says how many. The Command Centre's attention items are put on that list by the
-  brief. The full list, and marking an item done or explained, come with a later command. An item
+  brief. The full list, and marking an item done or explained, are `/yq-watch`. An item
   you have explained then stays off the list until it has grown by more than a quarter, has become
   more pressing, or names a voucher or an invoice that was not there when you explained it.
 - **The e-mail after a load.** The brief's own figures, worked out once for the chat and the e-mail
@@ -323,9 +325,9 @@ one of two lines, and the load check says the same in its own words:
   worth, how sure that is, how soon it is due and how much work it is set the order. *ACTION* is what
   the figures say; *TO CHECK* means something differs and the reason is not known: a question, never a
   finding.
-- **NOT EVIDENCED.** A figure the portal holds no data for (shop visits, calls, quotations, the stock
-  in the vans, and discounts for as long as Focus exports none) reads *NOT EVIDENCED*. It is never
-  guessed.
+- **NOT EVIDENCED.** A figure the portal holds no data for (shop visits, calls, quotations, and
+  discounts for as long as Focus exports none) reads *NOT EVIDENCED*. It is never guessed. The stock
+  in the vans is no longer one of them: `/yq-moves` reads each van's own balance from the stock ledger.
 - **The team message.** Written for the salesmen's group: the month so far as a share of your KPI
   step and what is still needed per working day (never a sales total), items in stock to push,
   today's priorities and the end-of-day ask. Salesmen are named only to praise them, never beside a
@@ -340,7 +342,7 @@ one of two lines, and the load check says the same in its own words:
   name. The headline's items, units and selling value are the portal's own figures (the Inventory
   page's read of the newest stock balance). The stock ledger's balance of the main store is set
   beside them item by item, and an item where the two differ is listed *to check*. The vans and the
-  two outlets come with the movement audit, in a later phase.
+  two outlets are on `/yq-moves`, store by store; the order list counts their stock (below).
 - **At landed cost** is the real landed cost of the item's code from the goods-received notes (the
   MRN, uploaded on the Orders page): the same receipt the portal costs from, its latest receipt (and
   of two on one date, the later entry). Only where a code has no MRN landed cost does the pricing
@@ -363,7 +365,8 @@ one of two lines, and the load check says the same in its own words:
   band, inside it, above it up to 90 days, up to 180, up to a year, over a year, and no sale in the
   last 90 days.
 - **The order list.** An item that sold in the last 90 days is listed when its demand reaches its
-  stock in the main store plus the goods on the way within its supplier's lead time, plus the days to
+  stock (the main store, the vans and the outlets, and stock moving between them while still inside
+  its deadline) plus the goods on the way within its supplier's lead time, plus the days to
   the next order (your rhythm, `stock.order_every_days`: monthly), plus the low end of your KPI band;
   the quantity brings it to the lead time, plus the rhythm, plus the top of the band, in whole units
   (whole cartons where `stock.pack_sizes` knows the carton). The demand is the item's daily rate, each
@@ -423,16 +426,65 @@ one of two lines, and the load check says the same in its own words:
   booked: claiming from the supplier, writing off, repairing or selling as B-grade is your decision.
 - **Suppliers.** An item's supplier is `stock.suppliers` in `config.json` when it names the code, else
   the catalog's brand, else the vendor of its newest purchase order on the Orders page, else Other;
-  `stock.supplier_aliases` joins two spellings of one supplier. The order list counts the main store
-  only (your choice) until the movement audit counts the vans; the workbook shows the
-  units with the vans beside it, for information.
+  `stock.supplier_aliases` joins two spellings of one supplier.
+- **Vans and outlets in the order list** (your choice). The stock that counts is the
+  main store's, plus each van's and each outlet's own stock-ledger balance (never below nought, store
+  by store), plus stock moving between them that is still inside its deadline; the damage store, the
+  samples, the SIM stores and the other not-counted stores are left out, and a transfer past its
+  deadline is not counted (it is on the action list). The daily rate, the cover, the fast movers and
+  the ageing stay main-store figures. The workbook's Order sheet shows this as its "Vans and outlets"
+  column (layout v3); `stock.position_stores` names what counts (an empty list counts the main store
+  only, as before) and `stock.van_floor_days` keeps that many days of a van's own sales on the van.
+  Stock moving between stores is never called "on the way": that name stays for supplier orders.
 - **Your settings** for this command in `config.json`: `stock.lead_time_days`, `stock.cover_kpi_days`
   (your KPI band, low and high), `stock.fast_movers`, `stock.display_items` (display and
   packaging, left out of cover, the order list and the ageing), `stock.clear_target_days` (your clear
   target), `warehouses.damage` (the damage store), `stock.suppliers` / `stock.supplier_aliases`,
   `stock.order_every_days` (your rhythm) and per supplier `stock.supplier_every_days` /
-  `stock.supplier_lead_days`, `stock.season_lift` and `stock.pack_sizes`. While one of the four newer
+  `stock.supplier_lead_days`, `stock.season_lift`, `stock.pack_sizes`, `stock.position_stores` and
+  `stock.van_floor_days`. While one of the four newer
   keys with a plan value is missing, the plan's value stands in and the screen names the key.
+
+### Transfers (`/yq-moves`)
+
+- **What is paired.** Every Stock Issue Voucher is paired with the Stock Receive Voucher that holds the
+  same items and quantities at the store it was sent to, received that day or within three weeks; the two
+  voucher numbers are never used to pair them, because Focus numbers the two legs independently. A
+  receipt with the same contents at another store pairs as *received in another store* when its number is
+  close to the issue's (eight apart or less in the same series and month), the narrations match, or it came
+  the same or the next day. A receipt holding most of the issue's items at the right store pairs as *other
+  quantities*, line by line. Several identical issues to one store with fewer receipts make one item that
+  lists them all and never says which one is missing. What is left is *not received yet* (inside its
+  deadline), *not received* (past it) or *a receipt with no issue*. Accessories only: an item never held
+  in the main store (the SIM items) is left out.
+- **Deadlines.** A transfer is due by the store's next working day (Saturday to Thursday); one to the
+  damage store has seven days, as `/yq-stock damage` counts it.
+- **Each store's table.** For each van and outlet, and a line for the main store: the opening stock, what
+  it received on its own receipts, what went back to the main store, to damage and to others (by the store
+  that actually received it), what is not received yet or not received, what it sold, customer returns,
+  counts, the closing stock, and a check that must read nought; the same in BHD at landed cost on
+  `/yq-stock`'s basis (units without a cost are counted apart, never valued at nought). The sold share is
+  what it sold out of its opening stock plus what it received. Friday vouchers, back-dated numbers, round
+  trips, re-issues and month-end returns are counted, never listed as items.
+- **Per-store figures** are printed only when the stock ledger file is proved equal to production's (or
+  read from it); otherwise the screen says why and still shows the transfers.
+
+### The action list (`/yq-watch`)
+
+- **The transfer items** are recorded after each load, before the brief, so the e-mail and DO TODAY carry
+  them: not received after the deadline, sent to the damage store and not booked in (one line a month),
+  other quantities, received in another store, identical transfers not all received, and receipts with no
+  issue. Each is *CHECK*, or *ACT* when it is long past its deadline or large, with its BHD at landed cost.
+- **The floor and the ACT thresholds** are worked out once from the transfers of the last ninety days and
+  shown once (`replay` shows them again); `watch.floor_bhd`, `watch.act_bhd` and `watch.act_days` in
+  `config.json` win. Items under the floor are counted, not listed.
+- **The baseline.** On a rule's first run, what it finds already in the data is counted once, not listed.
+- **The load check's and the Command Centre's items** are shown beside them, read-only; their BHD is worked
+  out on the screen.
+- **Explained and done** happen only on your words. An explained item stays off until it has grown by more
+  than a quarter, become more pressing, or names a voucher that was not there.
+- **Not checked yet:** sales below cost, and returns against last month's kickback tier; both come with
+  the month-end release.
 
 ## 5. Where things are kept
 
@@ -443,7 +495,7 @@ public.
 | Folder | What is in it |
 |---|---|
 | `Uplaods/<ddmmyy>/` | Your drop folders. The commands only read them; they never change a file in them. |
-| `business_data/ops/` | The commands' own notes: `config.json` (limits and KPI steps you can change), `state.json` (last load, last brief), `LOCK` (exists only while a load runs, or when one was cut off), `alerts.jsonl` (the action list), `delivery.json` (who gets the e-mail, and whether it is on), `backup.json` (the day backups began to be encrypted), `drills.jsonl` (each restore drill and its result) and `loads/<run>/` (for each check: what you were shown, `go.cmd`, a journal of the steps once it loads, and `delivery.jsonl`, what became of its e-mail). `kpi_log.jsonl` holds the orders you said were placed (the goods on the way), written only by `/yq-stock ordered` or `cancel` after your yes. Later commands add `explained.json` and `golden/`. |
+| `business_data/ops/` | The commands' own notes: `config.json` (limits and KPI steps you can change), `state.json` (last load, last brief), `LOCK` (exists only while a load runs, or when one was cut off), `alerts.jsonl` (the action list), `delivery.json` (who gets the e-mail, and whether it is on), `backup.json` (the day backups began to be encrypted), `drills.jsonl` (each restore drill and its result) and `loads/<run>/` (for each check: what you were shown, `go.cmd`, a journal of the steps once it loads, and `delivery.jsonl`, what became of its e-mail). `kpi_log.jsonl` holds the orders you said were placed (the goods on the way), written only by `/yq-stock ordered` or `cancel` after your yes. `explained.json` holds what you explained or marked done on `/yq-watch`; `golden/` holds the expected figures some tests compare with. |
 | `business_data/staging/<run>/` | The copies a load works from. The copies of a check that a newer check of the same folder retired, and a loaded set that a newer load of the same day replaced, are in `superseded/`. |
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
 | `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
@@ -463,8 +515,8 @@ public.
 - They do not run by themselves on a schedule, store briefs in the portal, draft purchase orders or
   make PDFs.
 - The portal's Stock moves page still pairs issues and receipts by voucher number, so its Pending and
-  van figures are not to be used until that page is fixed (phase 2b). The movement check of a later
-  phase is built on the stock ledger instead.
+  van figures are not to be used until that page is fixed (phase 2b); the page says so itself.
+  `/yq-moves` pairs them by what the vouchers hold, from the stock ledger.
 
 ## 7. For the developer
 

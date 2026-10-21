@@ -266,8 +266,10 @@ def _():
     for part in ("Daily Sales &amp; Operations Brief", "Thursday 15 October 2026", "load " + RUN, "In short",
                  "Monthly target", "BHD " + M("10,000"), "Charger Z 20W", "Rep Alpha", "Shop Riverside Mart",
                  "Profitability report held back", "Receivables BHD " + M("5,000"), "Discounts: NOT EVIDENCED",
-                 "Stock in the vans", "Open in WhatsApp", "https://wa.me/?text=", "What to do", "Verify"):
+                 "Value of returns", "Open in WhatsApp", "https://wa.me/?text=", "What to do", "Verify"):
         assert part in html, part
+    # the vans' stock is on /yq-moves (the stock ledger, store by store): no longer a figure the reports lack
+    assert "Stock in the vans" not in html
     assert "kickback" not in html.lower().replace("kickback figures are left out", ""), "no kickback figure"
     assert "No invoice yet this month: Rep Delta" in html
     assert "<script" not in html and "<img" not in html, "an e-mail carries no script and no image"

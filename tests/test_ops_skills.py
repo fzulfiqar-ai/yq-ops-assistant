@@ -110,7 +110,8 @@ OWNER_ONLY = {"yq-load"}
 # the command each skill is for, one entry per skill (a new skill names its own here: the check of its
 # allowed-tools asks for it); the load skill also runs the brief, which that check has always asked of it
 SKILL_COMMAND = {"yq-load": "python -m scripts.ops brief", "yq-brief": "python -m scripts.ops brief",
-                 "yq-month": "python -m scripts.ops report month", "yq-stock": "python -m scripts.ops stock"}
+                 "yq-month": "python -m scripts.ops report month", "yq-stock": "python -m scripts.ops stock",
+                 "yq-moves": "python -m scripts.ops moves", "yq-watch": "python -m scripts.ops watch"}
 SHADOWS = ("weekly-review", "monthly-review")       # the commands a same-named skill would hide
 DESCRIPTION_CAP = 1536                              # Claude Code cuts description + when_to_use here
 MAX_LINES = 70                                      # a SKILL.md stays under this many lines
@@ -489,7 +490,8 @@ def _():
 
 
 MY_FILES = (".claude/skills/yq-load/SKILL.md", ".claude/skills/yq-brief/SKILL.md", ".claude/skills/yq-month/SKILL.md",
-            ".claude/skills/yq-stock/SKILL.md", "CLAUDE.md", "docs/OPS_SKILLS.md",
+            ".claude/skills/yq-stock/SKILL.md", ".claude/skills/yq-moves/SKILL.md", ".claude/skills/yq-watch/SKILL.md",
+            "CLAUDE.md", "docs/OPS_SKILLS.md",
             "docs/FOCUS_EXPORT.md", ".gitignore", "requirements-dev.txt", "tests/test_ops_skills.py")
 
 
@@ -917,9 +919,9 @@ def _():
     # the action list's own rule for an item he has explained (scripts/ops/alerts.py), and where its full list is
     assert alerts.REOPEN_GROWTH * 4 == 1 and "until it has grown by more than a quarter" in defs
     assert "has become more pressing, or names a voucher or an invoice that was not there" in defs
-    assert "more open)" in read(OPS / "alerts.py") and "when more are open, the screen says how many" in defs
-    assert "The full list, and marking an item done or explained, come with a later command" in defs
-    assert "yq-watch" not in skill_folders(), "the action-list skill exists now: section 4 still says it comes later"
+    assert "more open: /yq-watch)" in read(OPS / "alerts.py") and "when more are open, the screen says how many" in defs
+    assert "The full list, and marking an item done or explained, are `/yq-watch`" in defs
+    assert "yq-watch" in skill_folders(), "section 4 sends him to /yq-watch: its skill folder must exist"
     # ... and so are the words of a line
     for reading in consts["READINGS"].values():                            # inside, above, below the normal range
         assert reading.endswith(" the normal range") and f"*{reading.split()[0]}*" in defs, reading
@@ -1685,7 +1687,7 @@ MUST_CONTAIN = {
         "to /yq-load", "Change nothing yourself",
         "at most three lines", "no number that is not on the screen", "Never accuse anyone", "to check",
         "two lines (the data date and what is waiting)", "run it again with `again` added",
-        "say that it arrives in a later phase",
+        "are /yq-watch: when he asks for either, use that skill",
         # the team message: his to copy, shown as it was made, never sent from here
         "`team` on its own for the team message", "in one code block of its own, unchanged, and add nothing",
         "Never send it anywhere yourself",
@@ -1719,7 +1721,8 @@ MUST_CONTAIN = {
         "its quantities do not yet allow for goods already on their way",
         "Never present an estimate as a fact", "A rate marked with a star rests on few days in stock",
         "keep those words when you repeat a figure",
-        "Never accuse anyone", "to check", "it comes with the movement audit, in a later phase",
+        "Never accuse anyone", "to check",
+        "the order list counts the vans, the outlets and stock moving between them beside the main store",
         # the new words, the day's workbook (his to edit and share), the owner's only lever, nobody named
         "`damage` for the damage store in full", "`file` for a new workbook even though today's exists",
         "The FILE line names the day's Stock & Order Plan workbook",
@@ -1731,6 +1734,31 @@ MUST_CONTAIN = {
         "Run that last line exactly as printed, only after he says yes", "never type or change its token yourself",
         "If it says the file or the lines changed, run the preview again", "Nothing is ever sent to a supplier",
         "`team` makes the team copy (no cost or value)", "never send it yourself",
+    ],
+    "yq-moves": [
+        "python -m scripts.ops moves $ARGUMENTS", "600000", "no pipe", "Add a word only when he asked for it",
+        "Run nothing else that loads, writes or deploys", "Show the screen unchanged, in a code block",
+        "type no number yourself",
+        "If the output opens with LOAD INTERRUPTED or LAST LOAD FAILED, say so first, in plain words, and point him "
+        "to /yq-load", "Change nothing yourself",
+        "at most three lines", "no number that is not on the screen", "Never accuse anyone", "to check",
+        # every store's check reads nought, or the program is at fault, never the store
+        "Every store's check must read 0", "a fault of the program, not of the store",
+        # pairs by what the vouchers hold; the portal page's figures are not to be used yet
+        "Pairs are made by what the two vouchers hold, never by their numbers",
+        "its Pending and van Gap figures are not reliable yet",
+        "are counts to read, never items to check", "point him to /yq-watch",
+    ],
+    "yq-watch": [
+        "python -m scripts.ops watch $ARGUMENTS", "600000", "no pipe", "Add a word only when he asked for it",
+        "Run nothing else that loads, writes or deploys", "Show the screen unchanged, in a code block",
+        "type no number yourself",
+        "If the output opens with LOAD INTERRUPTED or LAST LOAD FAILED, say so first, in plain words, and point him "
+        "to /yq-load", "Change nothing yourself", "at most three lines", "no number that is not on the screen",
+        # explain and done change the list: only on his own words, only the item he named
+        "run them only on his own words, never on your own judgement", "Never explain or close an item he did not name",
+        "grows by more than a quarter, becomes more pressing, or names a voucher that was not there",
+        "are read-only here", "Never accuse anyone", "to check", "change nothing yourself",
     ],
 }
 
