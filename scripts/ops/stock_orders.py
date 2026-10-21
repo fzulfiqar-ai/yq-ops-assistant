@@ -422,12 +422,21 @@ def _place(path: Path) -> None:
         raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
 
 
+def _not_from_a_worktree() -> None:
+    """A code worktree finds the project folder's data by itself: its unfinished code never writes the owner's
+    KPI log (the rule of stock.day_file); --data-root names another folder to try it in."""
+    if paths.is_worktree() and not paths.root_is_set():
+        raise PermissionError("Nothing was logged: this is a code worktree, and the KPI log belongs to the project "
+                              "folder (to try it, name another folder with --data-root).")
+
+
 def locked_append(path, texts) -> int:
     """Append lines of text (each one JSON line) to the KPI log while its lock is held: the one write every
     writer of the log shares (see the module docstring). Returns the texts written."""
     texts = list(texts or [])
     if not texts:
         return 0
+    _not_from_a_worktree()
     path = Path(path)
     _place(path)
     if not all(isinstance(t, str) and "\n" not in t and "\r" not in t for t in texts):
@@ -447,6 +456,7 @@ def append(path, lines) -> int:
     lines = list(lines or [])
     if not lines:
         return 0
+    _not_from_a_worktree()
     path = Path(path)
     _place(path)
     return locked_append(path, [_checked(line) for line in lines])

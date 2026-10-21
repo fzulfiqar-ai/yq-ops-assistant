@@ -2208,6 +2208,9 @@ def order_log_lines(model: Model, verb: str, supplier: str | None, args) -> list
         if commit != token:
             raise StockInput("The file or the lines changed since the preview: nothing was logged. Run the preview "
                              "again and log what it shows.")
+        if paths.is_worktree() and not paths.root_is_set():
+            raise StockInput("Nothing was logged: this is a code worktree, and the KPI log belongs to the project "
+                             "folder (to try it, name another folder with --data-root).")
         n = stock_orders.append(kpi_log_file(), shown)
         if verb == "cancel":
             lines.append(f"  Logged: {_plural(n, 'line')} in the KPI log. From the next screen and file this order no "

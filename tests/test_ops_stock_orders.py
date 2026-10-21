@@ -297,6 +297,22 @@ def _():
         assert so.append(log, [dict(good, state="cancelled", qty="")]) == 1    # a cancel line keeps an unread quantity
 
 
+@test("append: from a code worktree with no data root named, the project folder's KPI log is never written")
+def _():
+    with data_root():
+        line = lines_of("VFAN", day(1), [("CB2", 1)])
+        log = stock.kpi_log_file()
+        saved_worktree, saved_root = paths.is_worktree, paths._override
+        paths.is_worktree, paths._override = (lambda: True), None
+        try:
+            for write in (lambda: so.append(log, line), lambda: so.locked_append(log, ['{"kind": "report"}'])):
+                assert "code worktree" in str(raises(PermissionError, write))
+        finally:
+            paths.is_worktree, paths._override = saved_worktree, saved_root
+        assert not log.exists() and not so.lock_of(log).exists()
+        assert so.append(log, line) == 1                     # with the data root named, the same write goes through
+
+
 @test("append: a fresh lock refuses in one sentence, a stale one is taken over once, the lock is always let go")
 def _():
     with data_root():
