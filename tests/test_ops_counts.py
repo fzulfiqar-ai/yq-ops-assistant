@@ -43,7 +43,7 @@ import traceback
 import types
 import zipfile
 from contextlib import redirect_stdout
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -58,7 +58,7 @@ os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 from tests.test_ops_stock import (  # noqa: E402
     D, LONG, MAIN, NAMES, NINE, VAN, VAN_B, Book as Moves, L, World, data_root, standing_in, world)
 from scripts.ops import __main__ as cli  # noqa: E402
-from scripts.ops import counts, paths, recon, stock  # noqa: E402
+from scripts.ops import counts, ledger, pairing, paths, recon, stock  # noqa: E402
 from scripts.ops.workbook import count_book  # noqa: E402
 
 import openpyxl  # noqa: E402
@@ -190,7 +190,19 @@ def prep_run(w: World | None = None, *spec, day: date = PREP_DAY) -> dict:
         return recon.run(Args("prep", *spec, date_=day.isoformat()))
 
 
-def count_run(path, w: World | None = None, costs=COSTS, today_: date = date(2026, 3, 16), fail=None) -> dict:
+EXPORTED = date(2026, 3, 16)          # the set was exported on the morning after D: D is a complete day
+
+
+def exported_on(day: date | None) -> None:
+    """The loaded set's folder, named for its export day as a load publishes it (business_data/Focus ERP <date>):
+    what recon.export_day reads for a ledger read from the file. None: no folder, nothing on record."""
+    if day is not None:
+        (paths.data_root() / "business_data" / f"Focus ERP {day.isoformat()}").mkdir(parents=True, exist_ok=True)
+
+
+def count_run(path, w: World | None = None, costs=COSTS, today_: date = date(2026, 3, 16), fail=None,
+              exported: date | None = EXPORTED) -> dict:
+    exported_on(exported)
     with standing_in(w or World(book=count_world())), on_day(today_), seam(costs, fail):
         return recon.run(Args("count", *([] if path is None else [str(path)])))
 
@@ -309,6 +321,35 @@ def _():
         assert code == 1 and buf.getvalue().strip() == recon.NO_BLOCKS
 
 
+@test("--ledger-file: the month-end Ledger export handed on as args.ledger_file (absent: None); --ledger is unchanged")
+def _():
+    import argparse
+    from contextlib import redirect_stderr
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-root")
+    parser.add_argument("--json", action="store_true")
+    recon.add_arguments(parser)
+    plain = parser.parse_intermixed_args(["2026-10"])
+    assert plain.ledger_file is None and plain.ledger == "auto" and plain.spec == ["2026-10"]
+    named = parser.parse_intermixed_args(["2026-10", "--ledger-file", r"C:\Drops\Ledger Oct 2026.xlsx", "--ledger", "db"])
+    assert named.ledger_file == r"C:\Drops\Ledger Oct 2026.xlsx" and named.ledger == "db" and named.spec == ["2026-10"]
+    with redirect_stderr(io.StringIO()):                     # --ledger stays the stock ledger's choice: a path is refused
+        raises(SystemExit, lambda: parser.parse_intermixed_args(["2026-10", "--ledger", r"C:\Drops\Ledger.xlsx"]))
+    # through the entry point, to the reconciliations' run(args, month)
+    seen = []
+    fake = types.ModuleType(recon.BLOCKS_MODULE)
+    fake.run = lambda args, month: seen.append((month, args.ledger_file, args.ledger)) or {"ok": True, "text": "",
+                                                                                           "exit": 0}
+    with data_root(), absent(recon.BLOCKS_MODULE):
+        sys.modules[recon.BLOCKS_MODULE] = fake
+        root = str(paths.data_root())
+        with redirect_stdout(io.StringIO()):
+            assert cli.main(["recon", "2026-10", "--ledger-file", "Ledger Oct.xlsx", "--data-root", root]) == 0
+            assert cli.main(["recon", "2026-10", "--data-root", root]) == 0
+    assert seen == [("2026-10", "Ledger Oct.xlsx", "auto"), ("2026-10", None, "auto")], seen
+
+
 # ── what a sheet lists ────────────────────────────────────────────────────────
 
 @test("prep lists: a van or outlet holds the item at the end of D or moved it in the 30 days; full a year; no sheet without")
@@ -326,8 +367,20 @@ def _():
         assert all(ln.item == NAMES[k] for s in p.sheets for ln in s.lines for k in NAMES if ln.ledger == L(k))
         full = plan_of(kind="full")
         assert codes_of(full, VAN) == ["CA1", "CB2", "FO5", "SN4"]           # ITEM-F moved in September: in a year
-        assert codes_of(full, MAIN) == ["CA1", "CB2", "DS1", "HG3", "SN4"]   # every item held (ITEM-F stands at nought)
-        assert full.main_parts == {counts.WHY_HELD: 5}
+        # the main store too: every item held or moved there in the year, ITEM-F (at nought since September) as well,
+        # all under one reason, so nothing on record tells which of them the books hold at nought
+        assert codes_of(full, MAIN) == ["CA1", "CB2", "DS1", "FO5", "HG3", "SN4"]
+        assert full.main_parts == {counts.WHY_FULL: 6}
+        assert {ln.why for s in full.sheets if s.kind == "main" for ln in s.lines} == {(counts.WHY_FULL,)}
+        # the year is the 365 days to D: 16 Mar 2025 is in it, 15 Mar 2025 is not (both items sold out that day)
+        aged = count_world()
+        aged.receipt("OLD-1 Old Thing OT1", date(2025, 3, 15), 5, 5, "MRN:T-25-03-5")
+        aged.sale("OLD-1 Old Thing OT1", date(2025, 3, 15), 5, wh=MAIN)
+        aged.receipt("EDGE-1 Edge Thing ET1", date(2025, 3, 16), 5, 5, "MRN:T-25-03-6")
+        aged.sale("EDGE-1 Edge Thing ET1", date(2025, 3, 16), 5, wh=MAIN)
+        year = plan_of(rows=aged.rows, kind="full", p=picks(World(book=aged)))
+        main_items = [ln.ledger for s in year.sheets if s.kind == "main" for ln in s.lines]
+        assert "EDGE-1 Edge Thing ET1" in main_items and "OLD-1 Old Thing OT1" not in main_items, main_items
         # the SIM pack moves only in its own store: no accessory, no sheet, and the store is no van or outlet
         assert all(ln.ledger != "SIM-01 Starter Pack SP9" for s in p.sheets for ln in s.lines)
         # a van that holds nothing and moved nothing in the 30 days: no sheet, named
@@ -581,13 +634,19 @@ def _():
         assert "2 of 3 +1 added" in text and "10.400" in text and "12.500" in text
         assert NOTE_WORDS not in text and COUNTER not in text and NAMES["A"] not in text and "FO5" not in text
         assert "Not counted yet (nothing typed): Causeway, Main store." in text
-        # the item differences only in exports/ops/<D>/, without a note or a name
-        diff = (paths.exports_dir(D) / "recon-count.txt").read_text(encoding="utf-8")
-        facts = (paths.exports_dir(D) / "recon-count.json").read_text(encoding="utf-8")
+        # the item differences only in exports/ops/<D>/, named after the file read, without a note or a name
+        diff = (paths.exports_dir(D) / "recon-count-a.txt").read_text(encoding="utf-8")
+        facts = (paths.exports_dir(D) / "recon-count-a.json").read_text(encoding="utf-8")
         assert "FO5" in diff and "added" in diff and "+10" in diff and "-5" in diff
         for out in (diff, facts):
             assert NOTE_WORDS not in out and COUNTER not in out and "Checker Person" not in out
         assert all(paths.allowed_output(Path(f)) for f in res["files"])
+        # another file read on the same data date keeps its own pair: the first one's stays as it was
+        other = fill(src, root / "typed" / "YQ Count Sheets 2026-03-15 cycle (2).xlsx", OUTLET, got={"HG3": SECRET[0]})
+        assert count_run(other)["ok"]
+        assert (paths.exports_dir(D) / "recon-count-a.txt").read_text(encoding="utf-8") == diff
+        assert (paths.exports_dir(D) / "recon-count-yq-count-sheets-2026-03-15-cycle-2.txt").is_file()
+        assert recon._file_stem("  Odd: name!.XLSX") == "odd-name" and recon._file_stem("!!.xlsx") == "file"
         # read again: the newest read replaces the store's result
         again = count_run(typed)
         assert again["ok"]
@@ -677,10 +736,95 @@ def _():
         assert res["ok"] and res["flags"]["waits"] == 1, res
         a = json.loads(counts.result_file("2026-03", prep_id, "van-a-acc-wh").read_text(encoding="utf-8"))
         assert a["book"] == "waits" and a["waits_for"] == "2026-03-16" and a["rows"][0]["book"] is None
-        assert a["waits_words"] == "the book side waits for a load with data to 16 March 2026"
+        words = ("the book side waits for a load with data to 16 March 2026 (the loaded ledger is complete to 15 March "
+                 "2026)")
+        assert a["waits_words"] == words and a["ledger_complete_to"] == "2026-03-15"
         assert a["totals"]["short_units"] is None and a["rows"][0]["counted"] == 0
-        assert "Van A - Acc WH: the book side waits for a load with data to 16 March 2026." in res["text"]
-        assert "waits" in res["text"]
+        assert f"Van A - Acc WH: {words}." in res["text"]
+
+
+def thursday_rows(afternoon: bool) -> list[dict]:
+    """The review's case: Van Alpha received 10 on Wed 28 Oct and sold 3 on Thursday morning; with `afternoon`, the
+    4 it sold on Thursday afternoon too (in a set exported on Friday morning, not in Thursday's)."""
+    m = Moves()
+    m.move("Cable Zed ZZ901", date(2026, 10, 28), 10, "Main Store WH", "Van Alpha - Acc WH")
+    m.sale("Cable Zed ZZ901", date(2026, 10, 29), 3, wh="Van Alpha - Acc WH")
+    if afternoon:
+        m.sale("Cable Zed ZZ901", date(2026, 10, 29), 4, wh="Van Alpha - Acc WH")
+    return m.rows
+
+
+def thursday_sheet(count_day: date) -> dict:
+    return {"count_date": count_day, "store": "Van Alpha - Acc WH", "prep_id": "2026-10-27-cycle-abcdef",
+            "prep_kind": "cycle", "prep_date": date(2026, 10, 27), "kind": "van", "slug": "van-alpha-acc-wh",
+            "sheet": "Van Alpha", "counted_by": "x", "checked_by": None, "sheet_notes": [], "added": [],
+            "lines": [{"code": "ZZ901", "item": "Cable Zed", "ledger": "Cable Zed ZZ901", "counted": 3, "note": None,
+                       "row": 10, "added": False}]}
+
+
+@test("the book side stands only on a complete day: the export day is a part day (the review's case), both sides")
+def _():
+    with data_root():
+        rules = pairing.StoreRules(main="Main Store WH")
+        costs = {"Cable Zed ZZ901": Decimal("1.250")}
+        fri = thursday_sheet(date(2026, 10, 30))                             # counted 3 on Friday: book of Thursday
+        for exported in (date(2026, 10, 29), None):                          # Thursday's own set, or no export on record
+            books = counts.Books(thursday_rows(afternoon=False), rules, exported)
+            assert books.last == date(2026, 10, 29) and books.complete == date(2026, 10, 28)
+            r = counts.compare(fri, books, costs, {})
+            assert r["book"] == "waits" and r["rows"][0]["book"] is None and r["rows"][0]["diff"] is None, r
+            assert r["totals"]["short_units"] is None and r["totals"]["short_bhd"] is None
+            assert r["waits_words"] == ("the book side waits for a load with data to 29 October 2026 (the loaded "
+                                        "ledger is complete to 28 October 2026)")
+        # Friday morning's set holds all of Thursday: book 10 - 3 - 4 = 3, counted 3, no difference
+        r = counts.compare(fri, counts.Books(thursday_rows(afternoon=True), rules, date(2026, 10, 30)), costs, {})
+        assert r["book"] == "ready" and (r["rows"][0]["book"], r["rows"][0]["diff"], r["rows"][0]["bhd"]) == \
+            ("3", "0", "0.000")
+        assert r["totals"]["short_units"] == "0" and r["ledger_complete_to"] == "2026-10-29"
+        # counted on Thursday itself, from Thursday's set: the book of Wednesday stands (10); the count day's sale is
+        # named, and that day is not complete
+        thu = counts.compare(thursday_sheet(date(2026, 10, 29)),
+                             counts.Books(thursday_rows(afternoon=False), rules, date(2026, 10, 29)), costs, {})
+        assert thu["book"] == "ready" and thu["rows"][0]["book"] == "10" and thu["rows"][0]["diff"] == "-7"
+        assert len(thu["rows"][0]["count_day_vouchers"]) == 1 and not thu["count_day_loaded"]
+    # the last complete day: the day before the export; with none on record (or one before the last day) the day
+    # before the last day; an export days after the last day makes the days between complete (nothing moved)
+    last = date(2026, 10, 29)
+    for exported, complete in ((last, date(2026, 10, 28)), (date(2026, 10, 30), last), (None, date(2026, 10, 28)),
+                               (date(2026, 10, 27), date(2026, 10, 28)), (date(2026, 11, 1), date(2026, 10, 31))):
+        assert counts.last_complete(last, exported) == complete, (exported, complete)
+    assert counts.last_complete(None, last) is None
+
+
+@test("the export day: the folder the file was read from, else the last load on record; the command waits on a part day")
+def _():
+    with data_root() as root:
+        led = ledger.Ledger(rows=[], source="Stock_ledger_test.xlsx", first_date=None, last_date=D, origin="file")
+        assert recon.export_day(led) is None                                 # no folder, nothing on record
+        exported_on(D)
+        assert recon.export_day(led) == D
+        exported_on(D + timedelta(days=1))                                   # the newest folder is the loaded one
+        assert recon.export_day(led) == D + timedelta(days=1)
+        (root / "business_data" / "Focus ERP 2026-03-16").rmdir()
+        (root / "business_data" / "Focus ERP 2026-03-15").rmdir()
+        exported_on(D - timedelta(days=2))                                   # a folder before the ledger's last day
+        assert recon.export_day(led) is None
+        db_led = ledger.Ledger(rows=[], source="stock_movements", first_date=None, last_date=D, origin="database")
+        assert recon.export_day(db_led) is None
+        paths.write_text(paths.state_file(), json.dumps({"last_load": {"run": "160326_0915", "published": None}}))
+        assert recon.export_day(db_led) == D + timedelta(days=1)             # the drop's day
+        paths.write_text(paths.state_file(), json.dumps({"last_load": {"run": "160326_0915",
+                                                                       "published": "Focus ERP 2026-03-15"}}))
+        assert recon.export_day(db_led) == D                                 # the published set's as-on day
+    for exported in (D, None):                                               # D is a part day: a count on D + 1 waits
+        with data_root() as root:
+            src, prep_id = made(root)
+            typed = fill(src, root / "typed" / "p.xlsx", "Van A", got={"CA1": 0})
+            res = count_run(typed, exported=exported)
+            a = json.loads(counts.result_file("2026-03", prep_id, "van-a-acc-wh").read_text(encoding="utf-8"))
+            assert res["ok"] and a["book"] == "waits" and a["ledger_complete_to"] == "2026-03-14", a
+            assert a["ledger_exported"] == (None if exported is None else D.isoformat())
+            assert "the loaded ledger is complete to 14 March 2026" in res["text"]
 
 
 @test("vouchers in that store on the count day are named as a possible cause; a day not loaded says so")
@@ -698,13 +842,13 @@ def _():
         assert all(v.startswith(("STRV:", "SI:")) for v in moved["CA1"])
         assert a["totals"]["moved_on_count_day"] == 2
         assert "Van A - Acc WH: 2 items moved in that store on the count day" in res["text"]
-        diff = (paths.exports_dir(D) / "recon-count.txt").read_text(encoding="utf-8")
+        diff = (paths.exports_dir(D) / "recon-count-v.txt").read_text(encoding="utf-8")
         assert moved["CA1"][0] in diff
         # counted on the day after the ledger's last day: the book side stands, that day's vouchers are not known
         late = fill(src, root / "typed" / "v2.xlsx", "Van B", day=date(2026, 3, 16), got={"CB2": 35})
         res = count_run(late)
-        assert ("The count day is not in the loaded ledger yet, so its vouchers are not checked: Van B - Acc WH."
-                in res["text"]), res["text"]
+        assert ("The count day is not complete in the loaded ledger yet, so its vouchers are not all checked: Van B - "
+                "Acc WH." in res["text"]), res["text"]
 
 
 @test("BHD: through /yq-stock's cost seam; dropped with one note when the seam is missing or fails; no cost apart")

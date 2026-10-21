@@ -176,7 +176,8 @@ def _notes(ws: Sheet, prep: counts.Prep, titles: list[str]) -> None:
     window = f"the {full} days" if prep.kind == "full" else f"the {held} days"
     parts = prep.main_parts
     if prep.kind == "full":
-        main = "Every accessory the main store holds (a ledger balance other than nought)"
+        main = (f"Every accessory the main store holds at the end of {fmt.day_long(prep.data_date)}, or moved there in "
+                f"{window} to it")
     else:
         bits = [f"The {parts.get(counts.WHY_FAST, 0)} fast movers of /yq-stock",
                 f"the {parts.get(counts.WHY_VALUE, 0)} highest-value items (units on hand at landed cost)"]

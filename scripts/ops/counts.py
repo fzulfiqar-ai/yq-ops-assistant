@@ -15,8 +15,9 @@ WHAT A SHEET LISTS (plan(); D is the stock ledger's last day)
     sellers by units over the twelve full months before the month), the TOP_VALUE highest-value items (units on
     hand at the end of D x the unit cost /yq-stock values them at; an item with no cost is not ranked, and
     counted in a note), and every item on a movement exception of the month when the caller can give them (until
-    /yq-moves gives them they are left out, and one note line says so). Full: every item whose main-store balance
-    is not nought.
+    /yq-moves gives them they are left out, and one note line says so). Full: the vans' rule, every accessory held
+    there at the end of D or moved there in the FULL_DAYS days to it, at nought on the books too (an item on the
+    shelf that the books hold at nought is found that way, not only through an added row).
   * Accessories only: the items /yq-stock plans (ever moved in the main store, less config 'items.not_accessories').
     An item held or moved in a van or an outlet that never moved in the main store is on no sheet; a note counts
     them. Rows are in the order of their code.
@@ -44,9 +45,13 @@ THE READ-BACK (check(), then compare())
 
 THE BOOK SIDE (compare())
   ledger.balances(rows, as_of = count date - 1)[(store, item)]: the stock at the end of the day before the count.
-  When the ledger stops before that day the result is kept with book None and "the book side waits for a load with
-  data to <day>". Vouchers in that store on the count day are named as a possible cause of a difference (when the
-  ledger holds that day). Differences are counted - book, in units and, with a unit cost, BHD to the fils.
+  That day must be COMPLETE in the ledger read (last_complete): a set is exported in the morning, so its export day
+  is a part day (the vouchers of its afternoon are not in it), and the last complete day is the one before the
+  export day; with no export day on record, the one before the ledger's last day. Until a load brings that day
+  whole, the result is kept with book None and "the book side waits for a load with data to <day>". Vouchers in
+  that store on the count day are named as a possible cause of a difference, as many as the ledger holds
+  (count_day_loaded: all of them, the count day being complete). Differences are counted - book, in units and,
+  with a unit cost, BHD to the fils.
 
 THE FILES (under business_data/ops/counts/, git-ignored)
   <prep id>/prep.json                      what prep listed (prep_json): per store its rows (code, item, ledger
@@ -77,7 +82,8 @@ TOP_VALUE = 20                          # the main store's cycle list: the highe
 ADD_ROWS = 10                           # empty rows under the list, for an item found that is not listed
 DATE_RANGE_DAYS = 365                   # a Count date is accepted from the prep date to a year after
 SHEET_KINDS = ("van", "outlet")         # the stores that get a sheet of their own (and the main store's list)
-WHY_FAST, WHY_VALUE, WHY_EXCEPTION, WHY_HELD = "fast mover", "high value", "movement exception", "held"
+WHY_FAST, WHY_VALUE, WHY_EXCEPTION = "fast mover", "high value", "movement exception"
+WHY_FULL = "held or moved in the year"  # prep full: the main store's one reason (never which are at nought)
 # The labels of a sheet's top block, as the workbook writes them and the read-back finds them (count_book's own).
 L_STORE, L_PREPARED, L_DATE, L_BY, L_CHECKED = TOP_LABELS = ("Store", "Prepared on", "Count date", "Counted by",
                                                              "Checked by")
@@ -304,8 +310,11 @@ def plan(rows, rules: pairing.StoreRules, picks: StockPicks, kind: str, prep_dat
     if mains:
         store = mains[0]
         if kind == "full":
-            chosen = {led: (WHY_HELD,) for led in sorted(held.get(store, set()) & accessories)}
-            main_parts[WHY_HELD] = len(chosen)
+            # every accessory held there or moved there in the year, at nought on the books too (one reason for all:
+            # which of them the books hold at nought is a book figure, and the sheets are blind)
+            listed = held.get(store, set()) | moved.get(store, set())
+            chosen = {led: (WHY_FULL,) for led in sorted(listed & accessories)}
+            main_parts[WHY_FULL] = len(chosen)
         else:
             why: dict[str, list] = {}
             fast = [led for led in picks.fast if led in accessories]
@@ -606,13 +615,29 @@ def _sheet_problems(s, prep: dict, entry: dict, listed: dict, today_: date):
 
 # ── the book side ─────────────────────────────────────────────────────────────
 
-class Books:
-    """The ledger's balances on the days asked for, each worked out once, and each store's movements on a day."""
+def last_complete(last: date | None, exported: date | None) -> date | None:
+    """The ledger's last COMPLETE day. A set is exported in the morning, so the day it was exported on is a part day:
+    the days before it are over, it is not. With the export day known (and not before the ledger's last day), the
+    day before it; otherwise the day before the ledger's last day (that day may be the export day itself). None for
+    an empty ledger."""
+    if last is None:
+        return None
+    if exported is not None and exported >= last:
+        return exported - timedelta(days=1)
+    return last - timedelta(days=1)
 
-    def __init__(self, rows, rules: pairing.StoreRules):
+
+class Books:
+    """The ledger's balances on the days asked for, each worked out once, and each store's movements on a day.
+    `exported` is the day the set was exported (recon.export_day), None when nothing says: it decides the last
+    complete day (last_complete), which the book side must reach."""
+
+    def __init__(self, rows, rules: pairing.StoreRules, exported: date | None = None):
         self.rows = rows if isinstance(rows, (list, tuple)) else list(rows)
         self.rules = rules
         self.last = ledger.last_date(self.rows)
+        self.exported = exported
+        self.complete = last_complete(self.last, exported)
         self._at: dict[date, dict] = {}
         self._keys: dict[str, str] | None = None
 
@@ -651,11 +676,13 @@ def compare(sheet: dict, books: Books, costs: dict | None, meta: dict) -> dict:
     what to keep about the file and the ledger read: {file, sha256, saved_at, read_at, ledger_source, ledger_note}."""
     count_day: date = sheet["count_date"]
     book_day = count_day - timedelta(days=1)
-    ready = books.last is not None and books.last >= book_day
-    day_loaded = books.last is not None and books.last >= count_day
+    # the book side stands only on a complete day: never on the export day (a part day), never past the ledger
+    ready = books.complete is not None and books.complete >= book_day
+    day_loaded = books.complete is not None and books.complete >= count_day      # every voucher of the count day
     key = books.store_key(sheet["store"])
     bal = books.at(book_day) if ready else {}
-    moves = books.moves_on(sheet["store"], count_day) if day_loaded else {}
+    seen_day = books.last is not None and books.last >= count_day                  # some of them, at least
+    moves = books.moves_on(sheet["store"], count_day) if seen_day else {}
     rows_out: list[dict] = []
     short = over = short_bhd = over_bhd = ZERO
     uncosted = 0
@@ -691,7 +718,10 @@ def compare(sheet: dict, books: Books, costs: dict | None, meta: dict) -> dict:
         "sheet": sheet["sheet"], "count_date": count_day, "book_day": book_day, "month": book_day.strftime("%Y-%m"),
         "counted_by": sheet["counted_by"], "checked_by": sheet["checked_by"],
         "book": "ready" if ready else "waits", "waits_for": waits,
-        "waits_words": (f"the book side waits for a load with data to {fmt.day_long(book_day)}" if waits else None),
+        "waits_words": (f"the book side waits for a load with data to {fmt.day_long(book_day)}"
+                        + (f" (the loaded ledger is complete to {fmt.day_long(books.complete)})" if books.complete
+                           else "") if waits else None),
+        "ledger_complete_to": books.complete, "ledger_exported": books.exported,
         "count_day_loaded": day_loaded, "costed": costs is not None,
         "totals": totals, "rows": rows_out, "sheet_notes": sheet["sheet_notes"], **meta,
     })

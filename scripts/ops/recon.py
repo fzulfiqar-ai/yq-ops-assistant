@@ -6,17 +6,21 @@
                   " (2)" ... when it exists: never over a file), and what it lists in
                   business_data/ops/counts/<prep id>/prep.json. --date YYYY-MM-DD: the prep date (default today,
                   Bahrain); it may not be before the stock ledger's last day.
-    prep full     the same with every item: a van or an outlet lists what it held or moved in a year, the main store
-                  every item it holds (once a quarter)
+    prep full     the same with every item: every store lists what it holds or moved there in a year, at nought on
+                  the books too (once a quarter)
     count [<file>]  a copy with the counts typed in, read back (the file as saved, or its name in
                   exports/reports/counts; with none, the newest there): checked, set beside the books (the ledger at
-                  the end of the day before the Count date), valued at landed cost, and kept per store in
+                  the end of the day before the Count date, once that day is complete in the ledger read: a set's
+                  export day is a part day, see export_day), valued at landed cost, and kept per store in
                   business_data/ops/counts/<YYYY-MM>/<prep id>/<store>.json. The screen gives each store's totals
                   (lines counted, units short and over, BHD); the item differences go to exports/ops/<data date>/
-                  only, and the Notes typed on the sheets are never printed. A file with a problem keeps nothing:
-                  each problem is one sentence, to fix in the file before reading it again.
+                  only (recon-count-<the typed file's name>.txt and .json, one pair per file read);
+                  the Notes typed on the sheets are never printed. A file with a problem keeps nothing: each problem
+                  is one sentence, to fix in the file before reading it again.
     [YYYY-MM]     the four month-end reconciliations: they come with the month-end release (scripts.ops.recon_blocks,
-                  handed run(args, month) once it exists; until then one line, exit 1)
+                  handed run(args, month) once it exists; until then one line, exit 1). --ledger-file PATH names the
+                  month's Focus Ledger export (args.ledger_file; absent, None: the drop folders are searched); it is
+                  not --ledger, which says where the STOCK ledger is read
 
 Reads: the stock ledger (ledger.for_audit: the loaded file when it equals what production holds, else the database;
 --ledger file | db to choose); for prep, /yq-stock's own model (scripts.ops.stock gather and build: the accessories,
@@ -58,6 +62,9 @@ def add_arguments(parser) -> None:
                         help="prep: the prep date (default today, Bahrain)")
     parser.add_argument("--ledger", choices=ledger.PREFER, default="auto",
                         help="where the stock ledger is read: auto (the file when it equals production), file, db")
+    parser.add_argument("--ledger-file", default=None, metavar="PATH",
+                        help="recon YYYY-MM: the month-end Focus Ledger export to read (absent: the reconciliations "
+                             "look for it in the drop folders); args.ledger_file to scripts.ops.recon_blocks")
 
 
 def parse_spec(words) -> tuple[str, str | None]:
@@ -203,7 +210,8 @@ def prep_lines(prep: counts.Prep, titles: list[str], target: Path, ledger_note: 
     if by_kind["main"]:
         parts = prep.main_parts
         if prep.kind == "full":
-            lines.append(f"  Main store: every accessory it holds, {fmt.units(n['main'])} lines.")
+            lines.append(f"  Main store: every accessory it holds at the end of {fmt.day_long(prep.data_date)}, or moved "
+                         f"there in the {window} days to it: {counts.plural(n['main'], 'line')}.")
         else:
             bits = [f"the {parts.get(counts.WHY_FAST, 0)} fast movers",
                     f"the {parts.get(counts.WHY_VALUE, 0)} highest-value items (units on hand at landed cost)"]
@@ -298,6 +306,44 @@ def unit_costs(rows) -> tuple[dict | None, str | None]:
     return costs, note
 
 
+FOLDER_DAY = re.compile(r"Focus ERP ([0-9]{4}-[0-9]{2}-[0-9]{2})")
+
+
+def _folder_day(name) -> date | None:
+    m = FOLDER_DAY.fullmatch(counts.clean(name))
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+
+
+def export_day(led) -> date | None:
+    """The day the stock ledger read was exported, as far as anything on record says (as sales.export_day): for the
+    file, the 'Focus ERP <date>' folder it was read from (a set is published under its reports' own as-on date, the
+    day they were exported); for the database, the folder the last load on record published, else the day its drop
+    folder is named for. None when nothing says, or when what it says is before the ledger's last day (the data then
+    came another way): the book side then takes the ledger's last day as a part day."""
+    day = None
+    if led.origin in ("file", "cache"):
+        folder = ledger.loaded_folder()
+        day = _folder_day(folder.name) if folder is not None else None
+    else:
+        last = status.read_state().get("last_load")
+        if isinstance(last, dict):
+            day = _folder_day(last.get("published")) or paths.drop_date(str(last.get("run") or "")[:6])
+    if day is None or led.last_date is None or day < led.last_date:
+        return None
+    return day
+
+
+def _file_stem(name: str) -> str:
+    """The typed file's own name as a part of a file name: 'YQ Count Sheets 2026-10-27 cycle (2).xlsx' ->
+    'yq-count-sheets-2026-10-27-cycle-2'."""
+    return re.sub(r"[^a-z0-9]+", "-", Path(name).stem.lower()).strip("-")[:60].strip("-") or "file"
+
+
 def resolve_file(text: str | None) -> Path:
     folder = paths.reports_dir("counts")
     if not text:
@@ -359,7 +405,7 @@ def count_lines(read, checked: counts.Checked, results: list[dict], ledger_note:
             lines.append(f"  {_short(r['store'])}: {counts.plural(t['uncosted_differences'], 'difference')} with no "
                          "cost: their BHD is left out.")
     if not_loaded:
-        lines.append("  The count day is not in the loaded ledger yet, so its vouchers are not checked: "
+        lines.append("  The count day is not complete in the loaded ledger yet, so its vouchers are not all checked: "
                      + ", ".join(not_loaded) + ".")
     if cost_note:
         lines.append(f"  {cost_note}")
@@ -432,7 +478,7 @@ def count_view(args, file_text: str | None) -> dict:
     led, info = ledger.for_audit(getattr(args, "ledger", "auto") or "auto")
     if led.cache_note:
         out["warnings"].append(led.cache_note)
-    books = counts.Books(led.rows, counts.store_rules())
+    books = counts.Books(led.rows, counts.store_rules(), export_day(led))
     costs, cost_note = unit_costs(led.rows)
     read_at = datetime.now(status.BAHRAIN).replace(microsecond=0).isoformat()
     meta = {"file": read.name, "sha256": read.sha256, "saved_at": read.saved_at, "read_at": read_at,
@@ -449,7 +495,8 @@ def count_view(args, file_text: str | None) -> dict:
         {k: v for k, v in r.items() if k not in ("counted_by", "checked_by", "sheet_notes", "rows")}
         | {"rows": [{k: v for k, v in x.items() if k != "note"} for x in r["rows"]]} for r in results],
         "untouched": checked.untouched}
-    saved = _save(d, "recon-count", diff_text, facts)
+    # one pair of files per typed file read (the next file read on the same data date never replaces it)
+    saved = _save(d, f"recon-count-{_file_stem(read.name)}", diff_text, facts)
     kept = ", ".join(sorted(kept_dirs)) + f" ({len(results)} {'store' if len(results) == 1 else 'stores'})"
     lines = count_lines(read, checked, results, info["note"], cost_note, _shown(Path(saved[0])), kept)
     text = "\n".join(_guarded(ln).rstrip() for ln in lines)
