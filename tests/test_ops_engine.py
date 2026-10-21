@@ -309,6 +309,59 @@ def _():
     assert not any(p.startswith(("scripts/yq_", "scripts/ops/")) for p in engine), sorted(engine)
 
 
+def throwaway_repo(folder: Path, files: dict[str, bytes]) -> tuple:
+    """A throwaway repository whose HEAD, index and working tree hold `files`, and a `tree(changes)` that writes
+    the tree of `files` with `changes` applied (in an index file of its own: the repository's index stays as HEAD
+    has it). Plumbing only: the commit object is written by hash-object (no `git commit`, nothing is signed)."""
+    import subprocess
+
+    def git(*args, data: bytes | None = None, index: Path | None = None) -> str:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}   # no GIT_DIR can point elsewhere
+        if index:
+            env["GIT_INDEX_FILE"] = str(index)
+        return subprocess.run(["git", "-C", str(folder), *args], input=data, capture_output=True, check=True,
+                              env=env).stdout.decode("utf-8").strip()
+    git("init", "-q")
+
+    def tree(changes: dict[str, bytes] | None = None) -> str:
+        own = folder / ".git" / "throwaway-tree-index"
+        git("read-tree", "--empty", index=own)
+        for path, body in dict(files, **(changes or {})).items():
+            blob = git("hash-object", "-w", "--stdin", data=body)
+            git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", index=own)
+        return git("write-tree", index=own)
+    start = tree()
+    who = b"Invented Tester <tester@example.invalid> 1700000000 +0000"
+    commit = git("hash-object", "-t", "commit", "-w", "--stdin",
+                 data=b"tree " + start.encode() + b"\nauthor " + who + b"\ncommitter " + who + b"\n\nthrowaway\n")
+    git("update-ref", "HEAD", commit)
+    git("read-tree", "--reset", "-u", commit)        # the index and the working tree as HEAD has them
+    return start, tree
+
+
+@test("the pairing module is an engine file inside scripts/ops, committed or local; no other scripts/ops file is")
+def _():
+    assert gitinfo.ENGINE_FILES_IN_OPS == ("scripts/ops/pairing.py",)
+    assert ":(exclude)scripts/ops" in gitinfo.ENGINE_PATHS      # the rest of the folder stays out
+    files = {"scripts/loader.py": b"x = 1\n", "scripts/ops/pairing.py": b"p = 1\n", "scripts/ops/brief.py": b"y = 1\n",
+             "scripts/yq_send.py": b"z = 1\n", "docs/a.md": b"one\n"}
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        folder = Path(tmp)
+        start, tree = throwaway_repo(folder, files)
+        for changes, engine in (({"scripts/ops/pairing.py": b"p = 2\n"}, ["scripts/ops/pairing.py"]),
+                                ({"scripts/ops/brief.py": b"y = 2\n", "scripts/yq_send.py": b"z = 2\n",
+                                  "docs/a.md": b"two\n"}, []),
+                                ({"scripts/loader.py": b"x = 2\n", "scripts/ops/pairing.py": b"p = 2\n"},
+                                 ["scripts/loader.py", "scripts/ops/pairing.py"])):
+            assert gitinfo.engine_committed_diff(folder, start, tree(changes)) == engine, (changes, engine)
+            assert gitinfo.engine_local_changes(folder) == []
+            for path, body in changes.items():
+                (folder / path).write_bytes(body)
+            assert gitinfo.engine_local_changes(folder) == engine, (changes, engine)
+            for path, body in files.items():                 # back to HEAD for the next case
+                (folder / path).write_bytes(body)
+
+
 # ── status ────────────────────────────────────────────────────────────────────
 
 def write_lock(pid: int, beat: datetime, step: str = "refresh") -> None:
@@ -406,6 +459,19 @@ def _():
     assert all(p.endswith(("/", ".py", ".md", ".yml", ".txt", ".cmd", "-", "_", ".gitignore", ".env.example"))
                for p in selftest.ALLOWED_PATHS)
     assert not any(p.startswith(("web", "app/")) for p in selftest.ALLOWED_PATHS)
+    # phase 2b: the load fixes, the narration mask, the team message's writer, the r9 files, their docs
+    for p in ("scripts/refresh.py", "scripts/ingest.py", "scripts/yq_team_post.py", "scripts/r9_", "tests/test_r9_",
+              "tests/test_r7b_security.py", "docs/RELEASE.md", "docs/MIGRATIONS.md"):
+        assert p in selftest.ALLOWED_PATHS, p
+
+    def allowed(rel: str) -> bool:                   # the very test repo_clean makes of each staged file
+        return any(rel == p or rel.startswith(p) for p in selftest.ALLOWED_PATHS)
+    for rel in ("scripts/r9_stock_moves_migration.sql", "scripts/r9_stock_moves_reverse.sql", "scripts/r9_release.ps1",
+                "tests/test_r9_transfers.py", "scripts/yq_team_post.py", "tests/test_ops_team_post.py"):
+        assert allowed(rel), rel
+    for rel in ("app/main.py", "app/command_api.py", "app/transfer_audit.py", "web/src/pages/CommandCentre.tsx",
+                "web/src/pages/StockMovement.tsx", "scripts/r8_release.ps1", "tests/test_r1_security.py"):
+        assert not allowed(rel), rel                 # app/ and web/ are never on the list: their commit is apart
 
 
 @test("the write guard self-check passes in-process")

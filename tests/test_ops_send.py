@@ -582,10 +582,11 @@ def _():
             assert got == said, (kind, look, made, mode, last, got)
 
 
-def engine_trees(folder: Path) -> tuple[str, str, str]:
-    """Three git trees in a throwaway repository (plumbing only: no commit, no hook, no signature): a start, the
+def engine_trees(folder: Path) -> tuple[str, str, str, str]:
+    """Four git trees in a throwaway repository (plumbing only: no commit, no hook, no signature): a start, the
     start with a doc, a skills module and the sender changed (no engine file: scripts/ops/gitinfo.py ENGINE_PATHS),
-    and the start with the loader changed."""
+    the start with the loader changed, and the start with the pairing module changed (the one file of scripts/ops
+    the API runs: gitinfo.ENGINE_FILES_IN_OPS)."""
     def git(*args, data=None):
         return subprocess.run(["git", "-C", str(folder), *args], input=data, capture_output=True, text=True,
                               check=True).stdout.strip()
@@ -596,23 +597,27 @@ def engine_trees(folder: Path) -> tuple[str, str, str]:
         for path, body in files.items():
             git("update-index", "--add", "--cacheinfo", f"100644,{git('hash-object', '-w', '--stdin', data=body)},{path}")
         return git("write-tree")
-    start = {"scripts/loader.py": "x = 1\n", "docs/a.md": "one\n", "scripts/ops/brief.py": "y = 1\n"}
+    start = {"scripts/loader.py": "x = 1\n", "docs/a.md": "one\n", "scripts/ops/brief.py": "y = 1\n",
+             "scripts/ops/pairing.py": "p = 1\n"}
     return (tree(start),
             tree(dict(start, **{"docs/a.md": "two\n", "scripts/ops/brief.py": "y = 2\n", "scripts/yq_send.py": "z\n"})),
-            tree(dict(start, **{"scripts/loader.py": "x = 2\n"})))
+            tree(dict(start, **{"scripts/loader.py": "x = 2\n"})),
+            tree(dict(start, **{"scripts/ops/pairing.py": "p = 2\n"})))
 
 
-@test("the programs are the engine files and the options as the box reads them: a docs commit or 'skip' is the same")
+@test("the programs are the engine files (the pairing module among them) and the options as the box reads them: "
+      "a docs commit or 'skip' is the same")
 def _():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        start, docs, loader = engine_trees(Path(tmp))
+        start, docs, loader, pairing = engine_trees(Path(tmp))
         assert ys.same_programs(start, docs, Path(tmp)) and not ys.same_programs(start, loader, Path(tmp))
+        assert not ys.same_programs(start, pairing, Path(tmp)), "the pairing module ships with the API"
         assert not ys.same_programs(start, "--output=x", Path(tmp)), "only a commit id is handed to git"
         assert not ys.same_programs("a" * 40, "c" * 40), "commits git does not know are other programs"
         real = ys.GIT_ROOT
         ys.GIT_ROOT = Path(tmp)
         try:
-            for head, goes in ((docs, False), (loader, True)):
+            for head, goes in ((docs, False), (loader, True), (pairing, True)):
                 with data_root():
                     settings()
                     loaded(RUN, head=start)

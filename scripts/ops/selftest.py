@@ -32,6 +32,10 @@ ALLOWED_PATHS = (
     "docs/STATUS.md", "docs/BACKUPS.md", "docs/ROADMAP.md", "docs/CLAUDE.md", "docs/MARKET_INTEL.md",
     "docs/MARKET_INTEL_RELEASE.md", ".env.example",
     "scripts/verify_numbers.py",        # load speed, release 2: verify reads through one read-only session
+    # phase 2b (release E): the load fixes, the narration mask, the team message's writer, the r9 migrations with
+    # their reverses and release script and the tests that pin them, the release and migration docs
+    "scripts/refresh.py", "scripts/ingest.py", "scripts/yq_team_post.py", "scripts/r9_", "tests/test_r9_",
+    "tests/test_r7b_security.py", "docs/RELEASE.md", "docs/MIGRATIONS.md",
 )
 # Names that are places or system words, already public in this repository: never treated as a leak.
 GENERIC_NAMES = {

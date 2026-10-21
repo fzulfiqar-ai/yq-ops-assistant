@@ -8,7 +8,9 @@ imports subprocess, os.system or os.popen).
 and scripts/ and the two requirement files the API image is built from. SQL migration files, docs
 and the ops skills themselves do not ship with an API deploy, so they never block a load. Nor do
 the owner-side programs scripts/yq_*.py (the load's writer, the brief's sender, the secrets and
-backup tools): nothing in the API runs them.
+backup tools): nothing in the API runs them. One file of scripts/ops does ship with it and run
+there (ENGINE_FILES_IN_OPS: the transfer pairing that /stock/flow runs). An exclude in a pathspec
+list cannot be undone for one path inside it, so each engine question asks git twice, once per list.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ ENGINE_PATHS = (
     ":(glob)app/**/*.py", ":(glob)scripts/**/*.py", "requirements.txt", "requirements.lock",
     ":(exclude)scripts/ops", ":(exclude,glob)scripts/yq_*.py",
 )
+ENGINE_FILES_IN_OPS = ("scripts/ops/pairing.py",)      # the one file inside scripts/ops that the API runs
 
 
 def _git(root, verb: str, *args: str) -> subprocess.CompletedProcess:
@@ -62,14 +65,22 @@ def is_ancestor(root, older: str, newer: str = "HEAD") -> bool:
     return _git(root, "merge-base", "--is-ancestor", older, newer).returncode == 0
 
 
+def _engine_diff(root, *revs: str) -> list[str]:
+    """`git diff --name-only <revs>` on ENGINE_PATHS and, a second time, on ENGINE_FILES_IN_OPS (the
+    exclude of scripts/ops in the first list would drop them): the two answers merged, sorted, no repeats."""
+    found = set(_lines(_git(root, "diff", "--name-only", *revs, "--", *ENGINE_PATHS)))
+    found.update(_lines(_git(root, "diff", "--name-only", *revs, "--", *ENGINE_FILES_IN_OPS)))
+    return sorted(found)
+
+
 def engine_committed_diff(root, live: str, newer: str = "HEAD") -> list[str]:
     """Engine files that differ between the live commit and `newer` (committed work only)."""
-    return _lines(_git(root, "diff", "--name-only", live, newer, "--", *ENGINE_PATHS))
+    return _engine_diff(root, live, newer)
 
 
 def engine_local_changes(root) -> list[str]:
     """Tracked engine files changed in this folder and not committed (staged or not)."""
-    return _lines(_git(root, "diff", "--name-only", "HEAD", "--", *ENGINE_PATHS))
+    return _engine_diff(root, "HEAD")
 
 
 def untracked(root, path: str = "scripts") -> list[str]:

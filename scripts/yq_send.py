@@ -339,19 +339,24 @@ def data_set(run: str) -> dict | None:
 
 def same_programs(a: str, b: str, root: Path | None = None) -> bool:
     """Did two checks load with the same engine: the same commit, or two commits whose engine files do not differ
-    (scripts/ops/gitinfo.py ENGINE_PATHS: the loader, the app, the requirements; a commit of docs, of the skills'
-    modules, of the web pages or of the tests changes nothing that is loaded)? Where git cannot tell (a commit it
-    does not know, a head with changes not committed) they count as different: the e-mail then goes."""
+    (scripts/ops/gitinfo.py ENGINE_PATHS: the loader, the app, the requirements; and ENGINE_FILES_IN_OPS, the one
+    file of the skills' modules the API runs, asked of git apart because the first list excludes their folder; a
+    commit of docs, of the other skills' modules, of the web pages or of the tests changes nothing that is loaded)?
+    Where git cannot tell (a commit it does not know, a head with changes not committed) they count as different:
+    the e-mail then goes."""
     if a == b:
         return True
     if not (_COMMIT.fullmatch(a or "") and _COMMIT.fullmatch(b or "")):
         return False
-    try:
-        cp = subprocess.run(["git", "-C", str(root or GIT_ROOT), "diff", "--quiet", a, b, "--", *gitinfo.ENGINE_PATHS],
-                            shell=False, capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return cp.returncode == 0
+    for spec in (gitinfo.ENGINE_PATHS, gitinfo.ENGINE_FILES_IN_OPS):
+        try:
+            cp = subprocess.run(["git", "-C", str(root or GIT_ROOT), "diff", "--quiet", a, b, "--", *spec],
+                                shell=False, capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if cp.returncode != 0:
+            return False
+    return True
 
 
 def _in_time_order(run: str) -> str:
