@@ -12,7 +12,8 @@ and the portal's Stock Moves page both call this module, so they apply one rule:
   dec, narr_key   held equal to scripts.ops.ledger's own (_dec, _narr_key): a leg shaped from the export
                   and a leg shaped here (from the database, in the portal) compare equal
   parse_number, number_distance   a voucher number as a key that sorts, and how far apart two numbers are
-  deadline      the day by which an issue's receipt is due
+  deadline, within_grace   the day by which an issue's receipt is due; whether an issue with none is still
+                in grace on the data date
   legs_from_rows  ledger rows -> whole vouchers (Leg), the ones that cannot be paired set aside (Aside)
   pair          the legs -> what became of every issue and every receipt (Result)
   summarise     a Result read over a window of issue dates, for one store or all
@@ -25,19 +26,29 @@ each step takes only legs no earlier step took:
      RECEIVED, or LATE when the receipt is booked after the issue's deadline.
   B  received elsewhere: the same signature in another store (back in the issuing store as well),
      booked 0 to lag_max days after, and the gate holds. ELSEWHERE.
+     The exchange, then: identical issues to one store still short of receipts (twins, below), one of
+     them paired in step A and able to take a free receipt of the same contents in another store (the
+     gate holding), another with none able to take its receipt: another store booked in the transfer
+     meant for this one and the goods were issued again. The first is received elsewhere, the other
+     takes its receipt. The oldest set first, its earliest members first.
   C  other quantities: the store the issue names, booked 0 to lag_max days after, the gate holds, and
      the two share at least overlap_min of their items (Jaccard). QTY_DIFFERS, item by item.
   The gate holds on any of: the same narration (not blank); numbers at most dn_max apart within one
   series and month; booked within quick_lag days. B and C rank the candidates (C by the share of items
   first; then the narration before the number before the date alone, the distance, the lag, the
   issue's and the receipt's order) and take the best first.
+  An issue sent to its own store is set aside (legs_from_rows), and so is the free receipt that books its
+  contents in at that store when the gate holds (the nearest number, then the nearest day): never a
+  receipt with no issue.
   Twins: identical issues to one store that step A cannot tell apart (they reach the same receipts,
   directly or through one another), one or more of them still without a receipt after the three steps.
   They are ONE open item, "x of N identical issues have no receipt", every number named, never which
-  one; the pairs among them are marked ambiguous.
-  The rest: an issue with no receipt is IN_GRACE while the data date is on or before its deadline, then
-  NOT_RECEIVED; a receipt with no issue is an ORPHAN. Each names up to three legs of the same contents
-  that no step could take (outside the lag, or the gate refused them) as possible matches.
+  one; the pairs among them are marked ambiguous. The set is in grace only while every one of its
+  issues is.
+  The rest: an issue with no receipt is IN_GRACE while within_grace() holds (on or before its deadline;
+  to the damage store, before it, as /yq-stock damage counts), then NOT_RECEIVED; a receipt with no
+  issue is an ORPHAN. Each names up to three legs of the same contents that no step could take (outside
+  the lag, or the gate refused them) as possible matches.
 Every choice is made in a total order (day, number, then the leg's order), so the same rows in any order
 give the same Result.
 
@@ -49,7 +60,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
@@ -217,7 +228,8 @@ def deadline(issue_day: date, dest_kind: str, rules: Rules | None = None) -> dat
     """The day by which the receipt of an issue sent on `issue_day` is due: the first working day strictly
     after it (rules.grace_working_days of them; the weekend and the holidays skipped, so a Thursday's and a
     Friday's issue are due on the Saturday); to the damage store, the issue day plus
-    rules.damage_grace_days, as /yq-stock damage counts them."""
+    rules.damage_grace_days, as /yq-stock damage counts them. A receipt booked after it is late; whether
+    an issue with no receipt is still in grace is within_grace()."""
     rules = rules or Rules()
     if isinstance(issue_day, datetime):
         issue_day = issue_day.date()
@@ -234,6 +246,18 @@ def deadline(issue_day: date, dest_kind: str, rules: Rules | None = None) -> dat
     return day
 
 
+def within_grace(issue_day: date, dest_kind: str | None, data_date: date, rules: Rules | None = None) -> bool:
+    """Is an issue sent on `issue_day` with no receipt still in grace when the data runs to `data_date`?
+    To a store that works the calendar, while data_date is on or before its deadline (a Thursday's issue is
+    still in grace on the Saturday). To the damage store, only while data_date is BEFORE it: /yq-stock
+    damage lists a unit sent up to D - damage_grace_days and not booked by D as not booked
+    (scripts.ops.stock_damage), and the two say the same of every issue."""
+    due = deadline(issue_day, dest_kind, rules)
+    if isinstance(data_date, datetime):
+        data_date = data_date.date()
+    return data_date < due if dest_kind == "damage" else data_date <= due
+
+
 # ── the legs: whole vouchers, as the pairing reads them ───────────────────────
 
 LEG_KIND = {ISSUE: "issue", RECEIVE: "receipt"}      # the voucher type -> Leg.kind
@@ -248,6 +272,8 @@ NO_DESTINATION = "names no destination"    # an issue that says nowhere
 OWN_STORE = "sent to its own store"        # an issue to the store it leaves
 PART_SCOPE = "partly out of scope"         # some of its items are in scope, some are not
 MIXED_FIELDS = ("type", "date", "store", "destination", "narration")
+# A receipt set aside by pair(): it books in, at that store, what an issue sent to its own store holds
+MIRRORS_OWN = "its issue was sent to its own store"
 
 
 def _day_of(x) -> date:
@@ -302,14 +328,19 @@ class Leg:
 
 @dataclass(frozen=True)
 class Aside:
-    """A voucher that is not paired, and why (one of the reasons above). day, wh and to as on its first
-    line (canon), so a window or a store can still find it."""
+    """A voucher that is not paired, and why (one of the reasons above). day, wh, to and narr as on its
+    first line (canon; to: issues only), so a window or a store can still find it; lines as a Leg holds
+    them (every line of the voucher summed per item, nothing-lines left out). partner: the other leg it is
+    set aside with (an issue sent to its own store and the receipt that books it in there), else None."""
     voucher: str
     kind: str
     reason: str
     day: date | None = None
     wh: str = ""
     to: str | None = None
+    lines: tuple = ()
+    narr: str | None = None
+    partner: str | None = None
 
 
 @dataclass(frozen=True)
@@ -434,7 +465,8 @@ def legs_from_rows(rows, *, stores: StoreRules, scope: Collection[str] | None) -
         else:
             reason = None
         if reason is not None:
-            aside.append(Aside(number, kind, reason, head[0], wh, to or None))
+            aside.append(Aside(number, kind, reason, head[0], wh, to or None, lines=tuple(sorted(moved.items())),
+                               narr=head[10] or None))
             continue
         built.append((kind, head[0], number, wh, to, tuple(sorted(moved.items())), value, unvalued,
                       head[10] or None, stores.kind(head[5]) if kind == "issue" else None))
@@ -509,9 +541,10 @@ class Open:
     """Issues with no receipt. One issue, or a set of twins: identical issues to one store, `missing` of
     which have no receipt, every one of them named in `issues` (which ones are missing is not known).
 
-    outcome   IN_GRACE while data_date is on or before the deadline, then NOT_RECEIVED (one issue) or
+    outcome   IN_GRACE while within_grace() holds on the data date (for a set: for every one of its
+              issues, since which of them have no receipt is not known), then NOT_RECEIVED (one issue) or
               TWINS (a set)
-    deadline  when the receipt is due (deadline()); for a set, the earliest deadline of the missing ones
+    deadline  when the receipt is due (deadline()); for a set, the earliest deadline of its issues
     possible  up to three receipts of the same contents, in any store, booked from possible_lag_min to
               lag_max days after the issue (for a set: after one of its issues, the smallest such lag
               counting), that no step could take: by lag, then order
@@ -542,8 +575,10 @@ class Orphan:
 
 @dataclass(frozen=True)
 class Result:
-    """Everything pair() worked out. by_issue: {issue number: its Pair or its Open}, every issue once;
-    by_receipt: {receipt number: its Pair or its Orphan}, every receipt once."""
+    """Everything pair() worked out. aside: the vouchers legs_from_rows set aside, with the receipts pair()
+    set aside beside them (MIRRORS_OWN, each naming its issue as partner), by day and number.
+    by_issue: {issue number: its Pair or its Open}, every issue once; by_receipt: {receipt number: its
+    Pair, its Orphan, or its Aside}, every receipt once."""
     data_date: date
     rules: Rules
     legs: Legs = field(repr=False)
@@ -558,7 +593,8 @@ class Result:
     def counts(self) -> dict:
         """{received, late, elsewhere, qty_differs, in_grace, not_received, twin_items, twin_slots,
         orphans, aside}. Issues: received + late + elsewhere + qty_differs + in_grace + not_received +
-        twin_slots. Receipts: received + late + elsewhere + qty_differs + orphans."""
+        twin_slots. Receipts: received + late + elsewhere + qty_differs + orphans + the receipts set aside
+        by pair() (MIRRORS_OWN). aside counts every voucher set aside, of either kind."""
         out = dict.fromkeys(COUNT_KEYS, 0)
         for p in self.pairs:
             out[p.outcome] += 1
@@ -573,14 +609,19 @@ class Result:
         return out
 
 
-def _between(i: Leg, r: Leg, rules: Rules) -> tuple[int, int | None, bool, tuple]:
-    """(lag, dn, same narration, basis) of an issue and a receipt."""
-    lag = (r.day - i.day).days
-    dn = number_distance(i.no, r.no)
-    same = bool(i.narr) and i.narr == r.narr
+def _relation(no: str, day: date, narr: str | None, r: Leg, rules: Rules) -> tuple[int, int | None, bool, tuple]:
+    """(lag, dn, same narration, basis) of an issue (its number, day and narration) and a receipt."""
+    lag = (r.day - day).days
+    dn = number_distance(no, r.no)
+    same = bool(narr) and narr == r.narr
     held = {"narration": same, "number": dn is not None and dn <= rules.dn_max,
             "date": 0 <= lag <= rules.quick_lag}
     return lag, dn, same, tuple(word for word in BASES if held[word])
+
+
+def _between(i: Leg, r: Leg, rules: Rules) -> tuple[int, int | None, bool, tuple]:
+    """(lag, dn, same narration, basis) of an issue and a receipt."""
+    return _relation(i.no, i.day, i.narr, r, rules)
 
 
 def _twin_sets(group: list, reach: Mapping) -> list[tuple]:
@@ -698,6 +739,43 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
                     edges.append((key, i, r))
     take(edges, "B")
 
+    # the exchange: a twin set still short of receipts, one of whose step-A members has a free receipt of the
+    # same contents in another store that the gate lets it take, while a member with none could take that
+    # member's receipt (another store booked in a transfer meant for this one and the goods were issued again):
+    # the member is received elsewhere and the other takes its receipt. The oldest set first, its earliest
+    # members first, until the set has no such exchange left.
+    def exchange(members: tuple) -> bool:
+        waiting = [issue_of[no] for no in members if no not in match]
+        if not waiting:
+            return False
+        for no in members:
+            got = match.get(no)
+            if got is None or got[1] != "A":
+                continue
+            m, kept = issue_of[no], got[0]
+            takers = [u for u in waiting if 0 <= (kept.day - u.day).days <= rules.lag_max]
+            if not takers:
+                continue
+            best = None
+            for r in free_by_sig.get(m.lines, ()):
+                if r.no in took or r.wh == m.to:
+                    continue
+                key = gate(m, r)
+                if key is not None and (best is None or key < best[0]):
+                    best = (key, r)
+            if best is None:
+                continue
+            match[m.no] = (best[1], "B")
+            took.add(best[1].no)
+            match[takers[0].no] = (kept, "A")
+            return True
+        return False
+
+    short_sets = {members for members in twins_of.values() if any(no not in match for no in members)}
+    for members in sorted(short_sets, key=lambda members: irank[members[0]]):
+        while exchange(members):
+            pass
+
     # C: other quantities, booked in where it was sent
     free_by_wh: dict[str, list[Leg]] = {}
     for r in receipts:
@@ -715,6 +793,32 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
             if overlap >= rules.overlap_min:
                 edges.append(((-overlap,) + key, i, r))
     take(edges, "C")
+
+    # a receipt that books in, at that store, what an issue sent to its own store holds: set aside with that issue
+    # (the gate holding, the nearest number first, then the nearest day), never left as a receipt with no issue
+    mirrors: dict[str, Aside] = {}                 # receipt number -> its Aside
+    partner_of: dict[str, str] = {}                # the issue's number -> the receipt's
+    free_at: dict[tuple, list[Leg]] = {}
+    for r in receipts:
+        if r.no not in took:
+            free_at.setdefault((r.lines, r.wh), []).append(r)
+    for a in legs.aside:
+        if a.kind != "issue" or a.reason != OWN_STORE or not a.lines or a.day is None:
+            continue
+        best = None
+        for r in free_at.get((a.lines, a.wh), ()):
+            if r.no in mirrors:
+                continue
+            lag, dn, _same, basis = _relation(a.voucher, a.day, a.narr, r, rules)
+            if 0 <= lag <= rules.lag_max and basis:
+                key = (dn is None, 0 if dn is None else dn, lag, rrank[r.no])
+                if best is None or key < best[0]:
+                    best = (key, r)
+        if best is not None:
+            r = best[1]
+            mirrors[r.no] = Aside(r.no, "receipt", MIRRORS_OWN, r.day, r.wh, None, lines=r.lines, narr=r.narr,
+                                  partner=a.voucher)
+            partner_of[a.voucher] = r.no
 
     # the twin sets that still miss a receipt; the pairs among them are ambiguous
     short = {members for members in twins_of.values() if any(no not in match for no in members)}
@@ -742,7 +846,7 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
     # the rest: the issues with no receipt, the receipts with no issue
     left_r: dict[tuple, list[Leg]] = {}
     for r in receipts:
-        if r.no not in took:
+        if r.no not in took and r.no not in mirrors:
             left_r.setdefault(r.lines, []).append(r)
     opens: list[Open] = []
     told: set[tuple] = set()
@@ -751,18 +855,21 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
             continue
         members = twins_of.get(i.no)
         if members is None:
-            due = deadline(i.day, i.to_kind, rules)
-            opens.append(Open(issues=(i,), missing=1, outcome=IN_GRACE if data_date <= due else NOT_RECEIVED,
-                              deadline=due, possible=_possible((i,), left_r, rrank, rules, True)))
+            inside = within_grace(i.day, i.to_kind, data_date, rules)
+            opens.append(Open(issues=(i,), missing=1, outcome=IN_GRACE if inside else NOT_RECEIVED,
+                              deadline=deadline(i.day, i.to_kind, rules),
+                              possible=_possible((i,), left_r, rrank, rules, True)))
             continue
         if members in told:
             continue
         told.add(members)
+        # which members have no receipt is never claimed: the set is in grace only while every one of them is
         in_set = tuple(issue_of[no] for no in members)
-        missing = [leg for leg in in_set if leg.no not in match]
-        due = min(deadline(leg.day, leg.to_kind, rules) for leg in missing)
-        opens.append(Open(issues=in_set, missing=len(missing), outcome=IN_GRACE if data_date <= due else TWINS,
-                          deadline=due, possible=_possible(in_set, left_r, rrank, rules, True), twins=members))
+        inside = all(within_grace(leg.day, leg.to_kind, data_date, rules) for leg in in_set)
+        opens.append(Open(issues=in_set, missing=sum(1 for leg in in_set if leg.no not in match),
+                          outcome=IN_GRACE if inside else TWINS,
+                          deadline=min(deadline(leg.day, leg.to_kind, rules) for leg in in_set),
+                          possible=_possible(in_set, left_r, rrank, rules, True), twins=members))
 
     left_i: dict[tuple, list[Leg]] = {}
     for i in issues:
@@ -772,7 +879,10 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
     first = legs.first if legs.first is not None else (min(days) if days else None)
     orphans = tuple(Orphan(receipt=r, possible=_possible((r,), left_i, irank, rules, False),
                            before_ledger=first is not None and (r.day - first).days < rules.lag_max)
-                    for r in receipts if r.no not in took)
+                    for r in receipts if r.no not in took and r.no not in mirrors)
+    aside = [replace(a, partner=partner_of[a.voucher]) if a.voucher in partner_of else a for a in legs.aside]
+    aside = tuple(sorted(aside + list(mirrors.values()),
+                         key=lambda a: (a.day is None, a.day or date.min, parse_number(a.voucher))))
 
     by_issue: dict[str, object] = {p.issue.no: p for p in pairs}
     for o in opens:
@@ -781,8 +891,9 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
                 by_issue[leg.no] = o
     by_receipt: dict[str, object] = {p.receipt.no: p for p in pairs}
     by_receipt.update((o.receipt.no, o) for o in orphans)
+    by_receipt.update(mirrors)
     return Result(data_date=data_date, rules=rules, legs=legs, pairs=tuple(pairs), open=tuple(opens),
-                  orphans=orphans, aside=tuple(legs.aside), out_of_scope=legs.out_of_scope,
+                  orphans=orphans, aside=aside, out_of_scope=legs.out_of_scope,
                   by_issue={i.no: by_issue[i.no] for i in issues},
                   by_receipt={r.no: by_receipt[r.no] for r in receipts})
 
