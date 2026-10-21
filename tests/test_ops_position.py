@@ -13,8 +13,9 @@ Covered:
     samples, a SIM store and any other store never; equal to ledger.balances store by store;
   * between stores: an issue still in grace counts until its deadline (a Thursday's until the Saturday), then not;
     to the main store, a van or an outlet only; the missing slots of identical issues; a receipt booked after d
-    leaves its issue in grace at d; a voucher partly out of scope is set aside and counts nowhere; a pairing
-    passed in gives the same answer, one as on another day or of another kind is refused;
+    leaves its issue in grace at d; a voucher that also holds SIM is paired on its accessory lines, as /yq-moves
+    pairs it (in grace its accessory units count; booked in, they are the van's); a pairing passed in gives the
+    same answer, one as on another day or of another kind is refused;
   * a van's working minimum: ceil(days x its own sales over the 90 days to d / 90), sales before the window and an
     outlet's never; below it the van reads nought;
   * the parts counted, in any order; the refusals; every item asked for answered, in its order, once;
@@ -189,8 +190,7 @@ def _():
     assert held(b.rows, SAT)[BANK] == row(transit=7, clamped=["van b - acc wh"])
 
 
-@test("between stores: the missing slots of identical issues count; a receipt booked after d leaves its issue in grace; "
-      "a voucher partly out of scope counts nowhere")
+@test("between stores: the missing slots of identical issues count; a receipt booked after d leaves its issue in grace")
 def _():
     b = Rows()
     for _ in range(3):
@@ -201,15 +201,36 @@ def _():
     c = Rows().move(CHARGER, SAT, 6, MAIN, VAN_B, booked_on=SAT + timedelta(days=1))
     assert held(c.rows, SAT)[CHARGER] == row(transit=6)                   # as on Saturday: booked in on the Sunday
     assert held(c.rows, SAT + timedelta(days=1))[CHARGER] == row(vans=6)
+
+
+def accessory_legs(rows):
+    """The legs as /yq-moves makes them: the accessory lines first, then every voucher on them (scope None)."""
+    return pairing.legs_from_rows([r for r in rows if r["item"] in ITEMS], stores=STORES, scope=None)
+
+
+@test("a voucher that also holds SIM is paired on its accessory lines, as /yq-moves pairs it: in grace its accessory "
+      "units count between stores, booked in they are the van's")
+def _():
     mixed = Rows().lines(SAT, MAIN, VAN_A, [(BANK, 5), (SIM, 9)], received=False)
-    assert held(mixed.rows, SAT)[BANK] == row()                           # set aside by the pairing: not counted
+    assert held(mixed.rows, SAT)[BANK] == row(transit=5)                  # in grace: the 5 accessories count
+    assert held(mixed.rows, SAT + timedelta(days=1))[BANK] == row(transit=5)   # due on the Sunday: still in grace
+    assert held(mixed.rows, SAT + timedelta(days=2))[BANK] == row()       # past its deadline: on the action list
+    booked = Rows().lines(SAT, MAIN, VAN_A, [(BANK, 5), (SIM, 9)])
+    assert held(booked.rows, SAT)[BANK] == row(vans=5)                    # booked in with its SIM line: the van's
+    part = Rows().lines(SAT, MAIN, VAN_A, [(BANK, 5), (SIM, 9)], received=False)
+    part._row(BANK, SAT, ledger.RECEIVE, VAN_A, "STRV:T-26-10-1", qin=5)  # booked in on the accessory line only
+    assert held(part.rows, SAT)[BANK] == row(vans=5)
+    # the pairing /yq-moves hands in gives the same answer; it holds the issue on its accessory line alone
+    res = pairing.pair(accessory_legs(mixed.rows), data_date=SAT)
+    assert held(mixed.rows, SAT, result=res) == held(mixed.rows, SAT)
+    assert [o.issues[0].lines for o in res.open] == [((BANK, Decimal(5)),)] and res.aside == ()
 
 
 @test("a pairing passed in gives the same answer; one as on another day, or not a pairing at all, is refused")
 def _():
     b = Rows()
     b.move(CHARGER, THU, 10, MAIN, VAN_A, received=False).move(CABLE, THU, 3, MAIN, VAN_B)
-    legs = pairing.legs_from_rows(b.rows, stores=STORES, scope=ITEMS)
+    legs = accessory_legs(b.rows)
     res = pairing.pair(legs, data_date=FRI)
     assert held(b.rows, FRI, result=res) == held(b.rows, FRI)
     exc = raises(ValueError, lambda: held(b.rows, SAT, result=res))

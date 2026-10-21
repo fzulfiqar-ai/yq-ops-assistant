@@ -10,15 +10,16 @@ CONTRACT (scripts.ops.stock relies on it; scripts.ops.moves hands it on)
   position_beside_main(rows, items, d, *, store_rules, stores=POSITION_KINDS, floor_days=0, rules=None,
                        result=None) -> {ledger item: {"vans", "outlets", "transit", "counted", "clamped"}}
       rows         the stock ledger (scripts.ops.ledger movements); only the rows dated up to d are read
-      items        the ledger names of the accessories (scripts.ops.items.accessory_items), every one of them: a
-                   transfer that holds an item outside them is set aside by the pairing, and its units then count
-                   nowhere between stores
+      items        the ledger names of the accessories (scripts.ops.items.accessory_items), every one of them: the
+                   transfers are paired on their lines of these items alone (a voucher that also holds SIM is
+                   paired on its accessory lines, as /yq-moves and the portal pair it)
       d            the day the position is as on: the ledger's last day, or an earlier one (stock.build's as_of)
       store_rules  pairing.StoreRules: the main store, the damage store, the stores never counted, the aliases
       stores       the parts counted, of POSITION_KINDS ('vans', 'outlets', 'transit'); () counts none
       floor_days   a van's working minimum in days of its own sales (config 'stock.van_floor_days'), 0 or more
-      rules        pairing.Rules (None: the plan's); result: pair() of these rows at d when the caller has it
-                   (None: worked out here; one as on another day is refused)
+      rules        pairing.Rules (None: the plan's); result: pair() at d of these rows' lines of `items`
+                   (legs_from_rows with scope None, as /yq-moves makes it) when the caller has it (None: worked
+                   out here; one as on another day is refused)
     Every item of `items` has an entry, in their order (Decimal units):
       vans      the vans' stock of it at the end of d, each van never below nought, less its floor
       outlets   the outlets' (StoreRules.kind 'outlet') the same way, with no floor
@@ -138,10 +139,11 @@ def position_beside_main(rows, items, d, *, store_rules, stores=POSITION_KINDS, 
         if nought:
             out[item]["clamped"].append(store)
 
-    # between stores: what pairing has still in grace at d, sent where it counts
+    # between stores: what pairing has still in grace at d, sent where it counts. The accessory lines first, then
+    # every voucher on them (scope None), as /yq-moves pairs them: a voucher that also holds SIM counts its accessories
     if result is None:
-        upto = [r for r in rows if _day(r["date"]) <= day]
-        legs = pairing.legs_from_rows(upto, stores=store_rules, scope=wanted)
+        upto = [r for r in rows if r["item"] in wanted and _day(r["date"]) <= day]
+        legs = pairing.legs_from_rows(upto, stores=store_rules, scope=None)
         result = pairing.pair(legs, data_date=day, rules=rules if rules is not None else pairing.Rules())
     elif not isinstance(result, pairing.Result):
         raise TypeError("position: result is what pairing.pair gives")
