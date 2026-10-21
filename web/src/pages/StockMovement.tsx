@@ -31,6 +31,15 @@ interface Van {
   shortage_qty: number
   shortage_value_bhd: number
   unexplained_qty: number
+  // From the stock ledger (phase 2b); absent while the API still reads the main store's snapshot
+  received_qty?: number
+  customer_returns_qty?: number
+  pending_qty?: number
+  not_received_qty?: number
+  qty_differs_vouchers?: number
+  elsewhere_vouchers?: number
+  warehouse_name?: string
+  store_kind?: string
 }
 
 interface DailyDay {
@@ -214,25 +223,52 @@ function DailyMovement() {
   )
 }
 
+// received / partial / pending: the older API (pairs by voucher number); the rest: pairing by contents (phase 2b)
+type FlowStatus = 'received' | 'partial' | 'pending' | 'late' | 'elsewhere' | 'qty_differs' | 'in_grace' | 'not_received' | 'twins'
 interface FlowRow {
   issued_on: string; voucher_no: string; item_name: string
   from_warehouse: string; to_warehouse: string | null
   issued_qty: number; issued_value_bhd: number
   received_qty: number; received_by: string | null; received_on: string | null
-  status: 'received' | 'partial' | 'pending'
+  status: FlowStatus
+  receipt_no?: string | null; basis?: string | null
 }
 interface FlowData {
   warehouse: string; direction: 'out' | 'in'; days: number
   rows: FlowRow[]; count: number
-  summary: Record<string, { legs: number; qty: number }>
+  summary: Record<string, { legs: number; qty: number; vouchers?: number }>
   partners: { name: string; qty: number }[]
+  basis?: string; as_of?: string; shown?: number
 }
 
-const FLOW_STATUS: Record<FlowRow['status'], string> = {
+const FLOW_STATUS: Record<FlowStatus, string> = {
   received: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+  late: 'bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300',
+  elsewhere: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+  qty_differs: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+  in_grace: 'bg-slate-100 text-slate-700 dark:bg-slate-500/15 dark:text-slate-300',
+  not_received: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+  twins: 'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
   partial: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
   pending: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
 }
+const FLOW_LABEL: Record<FlowStatus, string> = {
+  received: 'received',
+  late: 'received late',
+  elsewhere: 'received in another store',
+  qty_differs: 'other quantities',
+  in_grace: 'not received yet',
+  not_received: 'not received',
+  twins: 'identical transfers, fewer receipts',
+  partial: 'partial',
+  pending: 'pending',
+}
+const CONTENT_ORDER: FlowStatus[] = ['received', 'late', 'elsewhere', 'qty_differs', 'in_grace', 'not_received', 'twins']
+const statusChip = (v: unknown) => (
+  <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', FLOW_STATUS[v as FlowStatus])}>
+    {FLOW_LABEL[v as FlowStatus] ?? String(v)}
+  </span>
+)
 
 const FLOW_COLS: Column<FlowRow>[] = [
   { key: 'issued_on', label: 'Issued' },
@@ -242,14 +278,21 @@ const FLOW_COLS: Column<FlowRow>[] = [
   { key: 'to_warehouse', label: 'To', render: (v, r) => String(r.received_by || v || '—') },
   { key: 'issued_qty', label: 'Issued', align: 'right', render: (v) => num(Number(v)) },
   { key: 'received_qty', label: 'Received', align: 'right', render: (v) => num(Number(v)) },
-  {
-    key: 'status', label: 'Status',
-    render: (v) => (
-      <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', FLOW_STATUS[v as FlowRow['status']])}>
-        {String(v)}
-      </span>
-    ),
-  },
+  { key: 'status', label: 'Status', render: statusChip },
+]
+// Paired by contents (phase 2b): the receipt that matched, where it was booked, and on what basis
+const FLOW_COLS_CONTENTS: Column<FlowRow>[] = [
+  { key: 'issued_on', label: 'Issued' },
+  { key: 'voucher_no', label: 'Voucher' },
+  { key: 'item_name', label: 'Item' },
+  { key: 'from_warehouse', label: 'From' },
+  { key: 'to_warehouse', label: 'To', render: (v) => String(v || '—') },
+  { key: 'received_by', label: 'Received at', render: (v) => String(v || '—') },
+  { key: 'receipt_no', label: 'Receipt', render: (v) => String(v || '—') },
+  { key: 'issued_qty', label: 'Issued', align: 'right', render: (v) => num(Number(v)) },
+  { key: 'received_qty', label: 'Received', align: 'right', render: (v) => num(Number(v)) },
+  { key: 'status', label: 'Status', render: statusChip },
+  { key: 'basis', label: 'Basis', render: (v) => String(v || '—') },
 ]
 
 /** Issue → Receive tracking for the main warehouse (the storekeeper's paper trail):
@@ -262,6 +305,8 @@ function WarehouseFlow() {
     queryFn: () => apiGet<FlowData>(`/stock/flow?direction=${direction}&days=${days}`),
   })
   const s = data?.summary || {}
+  const contents = data?.basis === 'contents'
+  const order: FlowStatus[] = contents ? CONTENT_ORDER : ['received', 'partial', 'pending']
   return (
     <div className="mt-8">
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -288,11 +333,16 @@ function WarehouseFlow() {
         </div>
       </div>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-[12.5px]">
-        {(['received', 'partial', 'pending'] as const).map((st) => s[st] && (
+        {order.map((st) => s[st] && (
           <span key={st} className={cn('rounded-full px-2.5 py-1 font-medium', FLOW_STATUS[st])}>
-            {st} · {num(s[st].qty)} units ({s[st].legs} lines)
+            {FLOW_LABEL[st]} · {num(s[st].qty)} units ({s[st].legs} lines)
           </span>
         ))}
+        {contents && s.orphans && s.orphans.legs > 0 && (
+          <span className="rounded-full border px-2.5 py-1 font-medium text-muted-foreground">
+            receipts with no issue · {num(s.orphans.qty)} units ({s.orphans.legs} lines)
+          </span>
+        )}
         {(data?.partners || []).slice(0, 6).map((p) => (
           <span key={p.name} className="rounded-full border bg-secondary/40 px-2.5 py-1 text-muted-foreground">
             {direction === 'out' ? '→' : '←'} {p.name} <b className="text-foreground tabular-nums">{num(p.qty)}</b>
@@ -302,12 +352,13 @@ function WarehouseFlow() {
       {isLoading ? (
         <Skeleton className="h-64" />
       ) : (
-        <DataTable rows={data?.rows || []} cols={FLOW_COLS} exportName="stock-flow"
+        <DataTable rows={data?.rows || []} cols={contents ? FLOW_COLS_CONTENTS : FLOW_COLS} exportName="stock-flow"
           empty="No issue vouchers in this window." />
       )}
       <p className="mt-2 text-xs text-muted-foreground">
-        Pending and Partial here come from matching voucher numbers, which Focus does not keep the same on
-        the two legs (see the notice at the top).
+        {contents
+          ? 'Each Stock Issue is paired with the Stock Receive that holds the same items and quantities at the store it was sent to, within 21 days; the voucher numbers are never used, because Focus numbers the two legs independently.'
+          : 'Pending and Partial here come from matching voucher numbers, which Focus does not keep the same on the two legs (see the notice at the top).'}
       </p>
     </div>
   )
@@ -325,6 +376,14 @@ const COLS: Column<Transfer>[] = [
 function VanCard({ v }: { v: Van }) {
   const hasShortage = (v.shortage_value_bhd || 0) > 0
   const gap = Math.max(v.unexplained_qty || 0, 0)
+  // With the stock ledger behind the view (phase 2b) the card shows the van's own ledger figures
+  const ledger = v.received_qty !== undefined
+  const toCheck = v.not_received_qty ?? 0
+  const cells: [string, number, boolean][] = ledger
+    ? [['Received', v.received_qty ?? 0, false], ['Sold', v.sold_qty, false], ['Sent out', v.transferred_out_qty, false],
+       ['On hand', v.on_hand_qty, false], ['To check', toCheck, toCheck > 0]]
+    : [['Issued in', v.transferred_in_qty, false], ['Sold', v.sold_qty, false], ['On hand', v.on_hand_qty, false],
+       ['Gap', gap, gap > 0]]
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
       <Card className={cn('p-4', hasShortage && 'border-rose-300 dark:border-rose-500/40')}>
@@ -343,16 +402,10 @@ function VanCard({ v }: { v: Van }) {
             </span>
           )}
         </div>
-        <div className="mt-3 grid grid-cols-4 gap-2 border-t pt-3 text-center">
-          {[
-            ['Issued in', v.transferred_in_qty],
-            ['Sold', v.sold_qty],
-            ['On hand', v.on_hand_qty],
-            ['Gap', gap],
-          ].map(([label, val]) => (
-            <div key={String(label)}>
-              <div className={cn('font-display text-base font-bold tabular-nums',
-                label === 'Gap' && Number(val) > 0 && 'text-amber-600')}>{num(Number(val))}</div>
+        <div className={cn('mt-3 grid gap-2 border-t pt-3 text-center', ledger ? 'grid-cols-5' : 'grid-cols-4')}>
+          {cells.map(([label, val, warn]) => (
+            <div key={label}>
+              <div className={cn('font-display text-base font-bold tabular-nums', warn && 'text-amber-600')}>{num(Number(val))}</div>
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
             </div>
           ))}
@@ -376,26 +429,31 @@ export default function StockMovement() {
   const vans = useMemo(() => (recon.data?.vans || []).filter((v) => v.is_van), [recon.data])
   const other = useMemo(() => (recon.data?.vans || []).filter((v) => !v.is_van), [recon.data])
   const totalShort = vans.reduce((s, v) => s + (v.shortage_value_bhd || 0), 0)
+  // The phase 2b API answers with the stock ledger's figures; until then the interim notice stays
+  const ledgerRecon = useMemo(() => (recon.data?.vans || []).some((v) => v.received_qty !== undefined), [recon.data])
+  const showNotice = !recon.isLoading && !ledgerRecon
 
   return (
     <div>
       <PageHeader title="Stock Movement" subtitle="Daily movement, warehouse → van transfers, and whether each route's stock adds up" />
 
       {/* Interim notice (W1): Pending / Partial / van Gap are not reliable until the matching is corrected */}
-      <div role="status" className="mb-6 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
-        <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
-        <div className="min-w-0">
-          <p className="font-bold">Being corrected</p>
-          <p className="mt-0.5">
-            Two parts of this page are not reliable yet. Issue → Receive tracking pairs a Stock Issue with a
-            Stock Receive by voucher number, but Focus numbers the two independently, so many transfers that
-            arrived show as Pending or Partial. The van cards take On hand from the main store's stock file,
-            which holds no van, so every van reads 0 and its Gap is not a real figure. Please do not act on
-            Pending, Partial or Gap until this notice is removed. The daily movement chart and the Transfers
-            table are correct.
-          </p>
+      {showNotice && (
+        <div role="status" className="mb-6 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <div className="min-w-0">
+            <p className="font-bold">Being corrected</p>
+            <p className="mt-0.5">
+              Two parts of this page are not reliable yet. Issue → Receive tracking pairs a Stock Issue with a
+              Stock Receive by voucher number, but Focus numbers the two independently, so many transfers that
+              arrived show as Pending or Partial. The van cards take On hand from the main store's stock file,
+              which holds no van, so every van reads 0 and its Gap is not a real figure. Please do not act on
+              Pending, Partial or Gap until this notice is removed. The daily movement chart and the Transfers
+              table are correct.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Daily movement dashboard (storekeeper performance, month by month) */}
       <DailyMovement />
@@ -421,8 +479,9 @@ export default function StockMovement() {
         </div>
       )}
       <p className="mt-2 text-xs text-muted-foreground">
-        On hand comes from the main store's stock file, which holds no van: every van reads 0 and Gap is not
-        meaningful (see the notice at the top). Short = shortages counted and booked in Focus.
+        {ledgerRecon
+          ? "On hand is the stock ledger's balance of the van; To check = units issued to it and not received after the deadline; Short = shortages counted and booked in Focus."
+          : "On hand comes from the main store's stock file, which holds no van: every van reads 0 and Gap is not meaningful (see the notice at the top). Short = shortages counted and booked in Focus."}
       </p>
 
       {other.length > 0 && (

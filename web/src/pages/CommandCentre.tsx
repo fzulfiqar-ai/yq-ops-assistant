@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Info, Loader2, RefreshCw,
+  AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Copy, Info, Loader2, RefreshCw,
 } from 'lucide-react'
 import {
   Bar as ChartBar, Cell, ComposedChart, ReferenceArea, ReferenceLine, ResponsiveContainer, Tooltip, usePlotArea, XAxis,
@@ -1327,6 +1327,57 @@ function MerchantsPanel({ ov, me }: { ov: Overview; me: Me | null }) {
   )
 }
 
+/** The salesmen's team message of the last load (X1): stored after the load's e-mail, copied from here. */
+interface TeamMessage { run: string; data_date: string; text: string; created_at: string }
+
+function TeamMessageCard({ me }: { me: Me | null }) {
+  const [copied, setCopied] = useState(false)
+  const q = useQuery({
+    queryKey: ['command', 'team-message'],
+    queryFn: () => apiGet<TeamMessage | ''>('/command/team-message'),
+    staleTime: 60_000,
+    retry: false,
+  })
+  if (q.isError) return null // an API from before the copy button, or no access: show nothing
+  // 204 (nothing stored yet) arrives as an empty body
+  const msg = q.data && typeof q.data === 'object' ? q.data : null
+  async function copy() {
+    if (!msg) return
+    try {
+      await navigator.clipboard.writeText(msg.text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // the browser refused the clipboard: the text stays on screen to select by hand
+    }
+  }
+  return (
+    <Panel id="cc-team-message" title="Team message" me={me}>
+      {q.isLoading ? (
+        <Skeleton className="mt-3 h-24" />
+      ) : msg ? (
+        <>
+          <p className="mt-1 text-xs text-muted-foreground">
+            The message for the salesmen's group, from the load with sales to {msg.data_date}.
+          </p>
+          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-xl border bg-secondary/30 p-3 font-sans text-[12.5px]">
+            {msg.text}
+          </pre>
+          <button type="button" onClick={copy}
+            className="mt-2 inline-flex items-center gap-1.5 self-start rounded-lg border px-3 py-1 text-[12.5px] font-semibold transition hover:bg-accent/50">
+            {copied ? <CheckCircle2 size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </>
+      ) : (
+        <p className="mt-2 text-sm text-muted-foreground">
+          No team message stored yet — it is saved after each load's e-mail.
+        </p>
+      )}
+    </Panel>
+  )
+}
+
 function FirstScreen({ ov, me }: { ov: Overview; me: Me | null }) {
   // a tile with no points draws no chart; an API from before the daily tile sends the weekly one alone
   const charted = (t?: Tile) => (t?.series?.length ? t : undefined)
@@ -1351,6 +1402,7 @@ function FirstScreen({ ov, me }: { ov: Overview; me: Me | null }) {
         <ProductsPanel ov={ov} me={me} />
         <MerchantsPanel ov={ov} me={me} />
       </div>
+      <TeamMessageCard me={me} />
     </div>
   )
 }
