@@ -540,22 +540,29 @@ def _():
 
 MATCHER = r"([A-Za-z]{2,4})[ -]?([0-9]{4})[ -]?([0-9]{4})"   # r7_focus_links_migration.sql tier 1 / 2
 
+# The sample set every spelling of the mask is held to: the parser (below) and each SQL twin (the mask-twin test).
+NARRATION_SAMPLES = {
+    "CPR 900000123": "CPR ******123",
+    "id:900000456/ph 33000111": "id:******456/ph 33000111",
+    "card 4000000000000002 ok": "card ************002 ok",
+    "acct 400000000000000000009": "acct ************009",
+    "900000123": "******123",
+    "a900000123b": "a******123b",
+    "ten 1234567890 fourteen 12345678901234": "ten 1234567890 fourteen 12345678901234",
+    "SI-YQ-26-09-119 inv 00012345": "SI-YQ-26-09-119 inv 00012345",
+    "YQ-2609-0019, YQ 2609 0020, YQ26090021": "YQ-2609-0019, YQ 2609 0020, YQ26090021",
+    "cpr٩٠٠٠٠٠١٢٣": "cpr٩٠٠٠٠٠١٢٣",          # Arabic-Indic digits: Postgres [0-9] would not mask them either
+}
+# Every file that spells the mask in SQL: the v_sales view, and the data steps that mask stored narration (the Sales
+# Day Book in r7, the stock ledger in r9 release 2b).
+MASK_SQL_FILES = ("r7_narration_mask_migration.sql", "r7_narration_mask_data_migration.sql",
+                  "r9_stock_moves_migration.sql")
+
 
 @test("narration: 9-digit and 15+-digit runs keep their last 3; idempotent; other numbers and order numbers untouched")
 def _():
     from scripts.ingest import mask_personal_ids as mask
-    cases = {
-        "CPR 900000123": "CPR ******123",
-        "id:900000456/ph 33000111": "id:******456/ph 33000111",
-        "card 4000000000000002 ok": "card ************002 ok",
-        "acct 400000000000000000009": "acct ************009",
-        "900000123": "******123",
-        "a900000123b": "a******123b",
-        "ten 1234567890 fourteen 12345678901234": "ten 1234567890 fourteen 12345678901234",
-        "SI-YQ-26-09-119 inv 00012345": "SI-YQ-26-09-119 inv 00012345",
-        "YQ-2609-0019, YQ 2609 0020, YQ26090021": "YQ-2609-0019, YQ 2609 0020, YQ26090021",
-        "cpr٩٠٠٠٠٠١٢٣": "cpr٩٠٠٠٠٠١٢٣",          # Arabic-Indic digits: Postgres [0-9] would not mask them either
-    }
+    cases = NARRATION_SAMPLES
     for raw, want in cases.items():
         assert mask(raw) == want, (raw, mask(raw))
         assert mask(mask(raw)) == mask(raw), ("idempotent", raw)
@@ -618,7 +625,7 @@ def _():
     tail = lambda s: re.search(r"\bfrom order_lines ol.*?;", s, re.S).group(0)  # noqa: E731
     assert " ".join(tail(mig).split()) == " ".join(tail(base).split()) == " ".join(tail(rev).split())
     # the SQL spelling of the two patterns is the parser's, replacement stars included
-    for f in ("r7_narration_mask_migration.sql", "r7_narration_mask_data_migration.sql"):
+    for f in MASK_SQL_FILES:
         s = _sql(f)
         assert f"'{ingest.PERSONAL_ID_LONG.pattern}', '{ingest.MASK_LONG}\\1', 'g'" in s, f
         assert f"'{ingest.PERSONAL_ID_CPR.pattern}', '{ingest.MASK_CPR}\\1', 'g'" in s, f
@@ -636,6 +643,33 @@ def _():
     assert "raise exception" in _sql("r7_narration_mask_data_reverse.sql"), "the data reverse never pretends"
     assert "db_backup --tables order_lines" in _sql("r7_narration_mask_data_migration.sql")
     assert "r7_narration_mask_migration.sql" in (ROOT / "docs/MIGRATIONS.md").read_text(encoding="utf-8")
+
+
+_SQL_TWIN = re.compile(
+    r"regexp_replace\(\s*regexp_replace\(\s*(?P<src>[^,]+?),\s*'(?P<p1>[^']*)',\s*'(?P<r1>[^']*)',\s*'g'\s*\),\s*"
+    r"'(?P<p2>[^']*)',\s*'(?P<r2>[^']*)',\s*'g'\s*\)")
+
+
+@test("narration twin: every SQL spelling of the mask (v_sales, the r7 and r9 data steps) equals mask_personal_ids on the sample set")
+def _():
+    from scripts.ingest import mask_personal_ids as mask
+    for f in MASK_SQL_FILES:
+        code = "\n".join(ln.split("--", 1)[0] for ln in _sql(f).splitlines())       # the statements only
+        twins = list(_SQL_TWIN.finditer(code))
+        # v_sales spells it once; a data step four times (its UPDATE's SET and its no-op guard, the two copy tables)
+        assert len(twins) == (1 if f == "r7_narration_mask_migration.sql" else 4), (f, len(twins))
+        assert "~ '[0-9]{9}'" in code, f"{f}: the guard that skips narrations without a 9-digit stretch"
+        for t in twins:
+            # the SQL expression run with Python's engine: the same patterns (lookarounds, [0-9], {n,}) and the same
+            # \1 back-reference; the guard first, as the SQL has it (it never changes a result, only skips work)
+            def twin(text, t=t):
+                if not text or not re.search("[0-9]{9}", text):
+                    return text
+                return re.sub(t["p2"], t["r2"], re.sub(t["p1"], t["r1"], text))
+            for raw, want in NARRATION_SAMPLES.items():
+                assert twin(raw) == mask(raw) == want, (f, t["src"].strip(), raw, twin(raw))
+                assert twin(twin(raw)) == twin(raw), (f, "idempotent", raw)
+            assert twin(None) is None and twin("") == ""
 
 
 # ── 7. the storekeeper ───────────────────────────────────────────────────────────

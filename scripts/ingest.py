@@ -331,7 +331,7 @@ def parse_stock(grid: pd.DataFrame, src: str) -> list[dict]:
                 "avg_rate_bhd": norm_num(r[10]),
                 "warehouse_name": txt(r[11]) if len(r) > 11 else None,
                 "to_warehouse_name": txt(r[12]) if len(r) > 12 else None,
-                "narration": txt(r[13]) if len(r) > 13 else None,
+                "narration": mask_personal_ids(txt(r[13])) if len(r) > 13 else None,
                 "voucher_type": (txt(r[14]) if len(r) > 14 else None)
                                 or _voucher_prefix(txt(r[1])),
                 "row_hash": row_hash(vals),
