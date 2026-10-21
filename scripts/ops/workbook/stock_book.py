@@ -29,10 +29,16 @@ CONTRACT (scripts.ops.stock relies on it)
       Release 2's facts when scripts.ops.stock gave them (facts["season"] with its "lifts" and
       facts["supplier_rules"]), else None: the file is then release 1's cell for cell, but for the figures stamp
       (a hidden row) and the Ageing sheet's guarded paces (below).
+  position(model) -> dict | None
+      The order position's facts (facts["position"], below) when release 2's facts are there and the position
+      counts at least one store beside the main store (its "stores" name one of POSITION_STORES, no "error"),
+      else None: nothing is counted beside the main store and the file is release 2's (or 1's) cell for cell.
+  layout_tag(model) -> str               the tag the model's file gets (release2(), position())
   The layout tag sits in Notes!B5 (TAG_SHEET, TAG_CELL): LAYOUT_TAG "stock-plan v1" without release 2's facts,
-  LAYOUT_TAG_V2 "stock-plan v2" with them. The file is read back by it (where the owner's quantities and
-  comments are): keep the Order sheet's header texts and the rows to add an item as they are. The figures stamp
-  sits in Notes!B6 (STAMP_CELL), its row hidden (height 0), in both layouts.
+  LAYOUT_TAG_V2 "stock-plan v2" with them, LAYOUT_TAG_V3 "stock-plan v3" with them and the position. The file is
+  read back by it (where the owner's quantities and comments are): keep the Order sheet's header texts and the
+  rows to add an item as they are. The figures stamp sits in Notes!B6 (STAMP_CELL), its row hidden (height 0), in
+  every layout.
 
 RELEASE 2 (layout "stock-plan v2", the owner's decisions of 20-Oct-2026): the order rhythm (an order to a supplier
 about once a month), the season (a lift per calendar month) and goods on the way. An item joins when its demand
@@ -62,9 +68,21 @@ low end of the KPI band, each day's demand being the rate x the lift of that day
   Supplier cell typed over never shows #N/A. The columns Rate basis (U) and Carton (V) come after Comment; nothing
   before them moves. All items: Supplier from (W, the row's "supplier_basis"; blank without it).
   On the way (after Order): the logged lines still due, by supplier; one plain line when nothing is logged.
-  Ageing (both layouts): Before / Since a week as the screen guards them: "not in stock before" (in stock on fewer
+  Ageing (every layout): Before / Since a week as the screen guards them: "not in stock before" (in stock on fewer
   than 30 of the 90 days before the cut), "too few before" (no pace to compare), "too soon" (a cut too recent);
   a cut batch's Change in the same words; never a multiple read off a pace that says nothing.
+
+LAYOUT V3 ("stock-plan v3", the owner's decision of 21-Oct-2026: all sellable stock): release 2's file, with the
+vans, the outlets and stock moving between them counted in the order position beside the main store.
+  facts["position"]  {"stores": ['vans' | 'outlets' | 'transit'], "floor_days": int, "items": {ledger name:
+                     {"vans", "outlets", "transit", "counted"}}, "totals": {"vans", "outlets", "transit", "counted",
+                     "stores_n", "cost_bhd", "uncosted"}, "error": str | None} (units as Decimal)
+  order rows         + "beside": the item's counted units; the position is max(on_hand, 0) + beside + on_order
+  all_items rows     + "vans": the item's counted units (either, when missing: the position's own count of it)
+  Order: G is "Vans and outlets" (the row's beside, never below nought) and the position is MAX(F,0)+G+H in Joins,
+  Suggested and Cover days (= the position / A day). All items: G is "Vans and outlets" (the row's vans). The
+  Summary gains one line for them, the notes say how they are counted, and the figures stamp holds the position.
+  Without a store named, or with an error, nothing is counted beside the main store: the file is v2's cell for cell.
 
 THE SHEETS (in this order; every table cell has a thin grid border, typed-in cells are yellow)
   Summary      the file, the stock (portal items and units, at selling price, at landed cost), KPI 1 cover,
@@ -80,9 +98,11 @@ THE SHEETS (in this order; every table cell has a thin grid border, typed-in cel
                on Notes (INDEX/MATCH), so they equal the screen to the unit; Final = Your qty, else
                Suggested; Value = Final x landed cost to the fils (the screen's rounding). Frozen below the
                item header, a filter on the item table. Release 2: the season days and Rate basis, Carton.
+               v3: Vans and outlets (G) in the position.
   On the way   (release 2 only) the orders he logged that are still due, by supplier (stock_orders.fifo).
   All items    plan["all_items"] (model.items when the plan is missing), with the item's landed cost (the
-               add rows look it up); Status coloured. With vans never below nought (information only).
+               add rows look it up); Status coloured. With vans never below nought (information only); v3:
+               Vans and outlets, counted in the order position.
   Fast movers  facts["fast"]["list"] with the days available this month (stock.available_days).
   Ageing       the review rows (with the three stores that sold most: the owner's own file), the cut
                batches, the six month ends; a yellow column for his action.
@@ -116,7 +136,10 @@ TITLE = "YQ Bahrain — Stock & Order Plan"
 STEM = "YQ Stock and Order Plan {d}"
 LAYOUT_TAG = "stock-plan v1"                  # release 1's layout (no release-2 facts)
 LAYOUT_TAG_V2 = "stock-plan v2"               # the rhythm, the season and goods on the way
-LAYOUT_TAGS = (LAYOUT_TAG, LAYOUT_TAG_V2)
+LAYOUT_TAG_V3 = "stock-plan v3"               # release 2's, with the vans and the outlets in the order position
+LAYOUT_TAGS = (LAYOUT_TAG, LAYOUT_TAG_V2, LAYOUT_TAG_V3)
+VANS_HEAD = "Vans and outlets"                # v3: column G of the Order and All items sheets
+POSITION_STORES = ("vans", "outlets", "transit")   # what the position may count beside the main store (config's)
 TAG_SHEET, TAG_CELL = "Notes", "B5"
 STAMP_CELL = "B6"                             # the figures stamp (Notes, in a hidden row): day_file reads it back
 TEAM_MARK = " - Team"                         # readback.TEAM_MARK: a team copy's name holds it (never the day's file)
@@ -380,6 +403,110 @@ def _longer(x: dict) -> bool:
     return str(x.get("rate_basis") or "").startswith("longer")
 
 
+# ── the order position beside the main store (layout v3) ──────────────────────
+
+def position(model) -> dict | None:
+    """facts["position"] (see the module docstring) when release 2's facts are there and it counts at least one
+    store beside the main store; else None, and the file is release 2's (or release 1's) cell for cell."""
+    if release2(model) is None:
+        return None
+    vo = (getattr(model, "facts", None) or {}).get("position")
+    if not isinstance(vo, dict) or vo.get("error"):
+        return None
+    stores = vo.get("stores")
+    if not isinstance(stores, (list, tuple)) or not any(s in POSITION_STORES for s in stores):
+        return None
+    return vo
+
+
+def _tag(r2: dict | None, vo: dict | None) -> str:
+    if r2 is None:
+        return LAYOUT_TAG
+    return LAYOUT_TAG_V3 if vo is not None else LAYOUT_TAG_V2
+
+
+def layout_tag(model) -> str:
+    """The layout tag the model's file gets: v1 without release 2's facts, v3 with them and the position, else v2."""
+    return _tag(release2(model), position(model))
+
+
+def _counted_of(vo: dict, it) -> Decimal | None:
+    """The units the position counts for an item (its "items" entry), None when it names none."""
+    if it is None:
+        return None
+    row = (vo.get("items") or {}).get(it.ledger_name)
+    return row.get("counted") if isinstance(row, dict) else None
+
+
+def _beside(x: dict, vo: dict) -> Decimal:
+    """An Order row's Vans and outlets: its "beside" (else the position's count of the item), never below nought."""
+    v = x.get("beside")
+    if v is None:
+        v = _counted_of(vo, x["item"])
+    return _vans(v) if v is not None else ZERO
+
+
+def _held(row: dict, vo: dict) -> Decimal | None:
+    """An All items row's Vans and outlets: its "vans" (else the position's count of the item, nought when it names
+    none), never below nought; None (a blank) for a catalog row with no item of the ledger behind it."""
+    v = row.get("vans")
+    if v is None and row.get("item") is not None:
+        v = _counted_of(vo, row["item"]) or ZERO
+    return _vans(v)
+
+
+def _held_words(vo: dict) -> str:
+    """What the position counts beside the main store, in words, for the stores it names."""
+    stores = vo.get("stores") or ()
+    places = " and ".join(words for s, words in (("vans", "the vans"), ("outlets", "the outlets")) if s in stores)
+    parts = [f"the units in {places} (each store never below nought)"] if places else []
+    if "transit" in stores:
+        parts.append("stock moving between the stores inside its deadline")
+    return ", and ".join(parts)
+
+
+def _position_words(vo: dict | None, column: bool = False) -> str:
+    """The order position in words: Main stock + On the way, with Vans and outlets between them in v3."""
+    if vo is None:
+        return "Main stock + On the way"
+    return f"Main stock + {VANS_HEAD}{f' (column {_L(O_VANS)})' if column else ''} + On the way"
+
+
+def _position_notes(vo: dict) -> str:
+    """The Notes sheet's entry for Vans and outlets (v3)."""
+    stores = vo.get("stores") or ()
+    words = (f"{VANS_HEAD} (column {_L(O_VANS)} of the Order and All items sheets) = {_held_words(vo)}, from the stock "
+             f"ledger as on the data date. The order list counts them in the position: Main stock (never below "
+             f"nought) + {VANS_HEAD} + On the way. Damage, SIM and samples are left out.")
+    if "transit" in stores:
+        words += (" Stock issued from one store to another counts until its deadline; a transfer past its deadline is "
+                  "not counted: it is on the action list instead.")
+    words += (" Stock moving between stores is never called on the way: On the way stays the goods of the orders you "
+              "logged with a supplier.")
+    floor = _safe(lambda: int(vo.get("floor_days") or 0), 0)
+    if floor > 0 and "vans" in stores:
+        words += (f" Each van keeps back {_plural(floor, 'day')} of its own sales as its working minimum (config "
+                  "'stock.van_floor_days'): that much of its stock is not counted.")
+    return words
+
+
+def _position_summary(vo: dict) -> str:
+    """The Summary's note on its Vans and outlets line: the units by kind of store, and their value."""
+    t = vo.get("totals") if isinstance(vo.get("totals"), dict) else {}
+    stores = vo.get("stores") or ()
+    parts = [f"{fmt.units(t[key])} {words}" for key, words in (("vans", "in the vans"), ("outlets", "in the outlets"),
+                                                                ("transit", "moving between the stores"))
+             if key in stores and t.get(key) is not None]
+    text = f"Counted in the order position (column {_L(O_VANS)} of the Order sheet)"
+    if parts:
+        text += ": " + (", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0])
+    if t.get("cost_bhd") is not None:
+        text += f"; BHD {fmt.bhd(t['cost_bhd'])} at landed cost"
+        if t.get("uncosted"):
+            text += f", {fmt.units(t['uncosted'])} units without a cost counted, not valued"
+    return text + "."
+
+
 # ── the figures stamp ─────────────────────────────────────────────────────────
 
 def _canon(x) -> str | None:
@@ -397,12 +524,19 @@ def _canon(x) -> str | None:
 
 def _digest(model) -> str:
     r2 = release2(model)
+    vo = position(model)
     lines, _from_plan = order_lines(model)
     rows, _rows_from_plan = all_rows(model)
-    data: dict = {"layout": LAYOUT_TAG_V2 if r2 is not None else LAYOUT_TAG, "d": model.d.isoformat(), "order": [
+    data: dict = {"layout": _tag(r2, vo), "d": model.d.isoformat(), "order": [
         [x["supplier"], x["item"].code or x["item"].ledger_name, _canon(x["qty"]),
          _canon(max(x["item"].on_hand, ZERO) + x["item"].on_order), _canon(x["rate6"]), _canon(x["item"].cost),
          _pack(x.get("pack")), x.get("rate_basis") or ""] for x in lines]}
+    if vo is not None:                  # v3: the position counts the vans and the outlets (Order column G)
+        for entry, x in zip(data["order"], lines):
+            beside = _beside(x, vo)
+            entry[3] = _canon(max(x["item"].on_hand, ZERO) + beside + x["item"].on_order)
+            entry.append(_canon(beside))
+        data["position"] = [[s for s in POSITION_STORES if s in vo["stores"]], _canon(vo.get("floor_days"))]
     if r2 is None:
         f = model.facts
         data["rule"] = [_canon(f["lead"]["days"]), _canon(f.get("trigger_days")), _canon(f.get("fill_days"))]
@@ -423,7 +557,8 @@ def _digest(model) -> str:
 def figures_digest(model) -> str | None:
     """The figures stamp: 16 hexadecimal digits of the sha256 of what the Order sheet rests on (the layout, the
     data date, every order row's supplier, code, quantity, position, rate, landed cost, carton and rate basis, the
-    settings of every supplier the file names, and in release 2 the lifts and the goods on the way). A same-date
+    settings of every supplier the file names, in release 2 the lifts and the goods on the way, and in v3 each
+    row's Vans and outlets in its position and beside it, the stores counted and the van floor). A same-date
     reload, an order logged or a cost loaded later moves it; the owner's typing never does (it is not in the
     model). None when the facts are not what the contract says (stock.RAISE_PARTS: it raises)."""
     return _safe(lambda: _digest(model), None)
@@ -470,9 +605,10 @@ def _pack(value) -> int:
 
 def order_lines(model) -> tuple[list[dict], bool]:
     """(lines, from the plan): the order list as the Order sheet holds it, one dict per row: supplier, item,
-    rate, rate6, cover, qty, cost_bhd, rate_basis, pack. The plan's rows (by supplier) when the plan was worked
-    out and holds every row of facts["order"]; else facts["order"] as it is, every row under supplier Other
-    (release 2: under the supplier the row names, whose rule its quantity rests on)."""
+    rate, rate6, cover, qty, cost_bhd, rate_basis, pack, beside (v3: the units counted beside the main store). The
+    plan's rows (by supplier) when the plan was worked out and holds every row of facts["order"]; else
+    facts["order"] as it is, every row under supplier Other (release 2: under the supplier the row names, whose rule
+    its quantity rests on)."""
     base = model.facts.get("order") or []
     plan, _why = _part(model, "plan")
     rows = None
@@ -491,7 +627,7 @@ def order_lines(model) -> tuple[list[dict], bool]:
         out.append({"supplier": " ".join(str(x.get("supplier") or OTHER).split()) or OTHER, "item": x["item"],
                     "rate": x["rate"], "rate6": Decimal(r6) if r6 is not None else _round6(x["rate"].rate),
                     "cover": x.get("cover"), "qty": Decimal(x["qty"]), "cost_bhd": x.get("cost_bhd"),
-                    "rate_basis": x.get("rate_basis"), "pack": x.get("pack")})
+                    "rate_basis": x.get("rate_basis"), "pack": x.get("pack"), "beside": x.get("beside")})
     return out, from_plan
 
 
@@ -580,7 +716,8 @@ def build_book(model, made: datetime | None = None) -> Book:
         from scripts.ops import status
         made = datetime.now(status.BAHRAIN)
     r2 = release2(model)
-    tag = LAYOUT_TAG_V2 if r2 is not None else LAYOUT_TAG
+    vo = position(model)                      # v3: the vans and the outlets in the order position
+    tag = _tag(r2, vo)
     book = Book()
     for name in ("cf_red", "cf_amber", "cf_green", "cf_grey"):
         book.dxf(name)
@@ -595,14 +732,14 @@ def build_book(model, made: datetime | None = None) -> Book:
     lay = OrderLayout(suppliers, len(lines))
     set_rows = _settings_rows(suppliers)
     all_span = (ALL_HEAD + 1, ALL_HEAD + max(len(rows), 1))
-    _summary(sheets["Summary"], model, lay, lines, made, r2)
-    _order(sheets["Order"], model, lay, lines, rows, set_rows, all_span, from_plan, r2)
+    _summary(sheets["Summary"], model, lay, lines, made, r2, vo)
+    _order(sheets["Order"], model, lay, lines, rows, set_rows, all_span, from_plan, r2, vo)
     if r2 is not None:
         ws = sheets["On the way"]
         _title(ws, model, "The orders you logged (/yq-stock ordered) whose goods are still due, by supplier, until "
                           "the main store's receipts cover them.")
         _guarded(lambda sheet, m: _on_the_way(sheet, m, r2), ws, model, "Goods on the way")
-    _all_items(sheets["All items"], model, rows, rows_from_plan, r2)
+    _all_items(sheets["All items"], model, rows, rows_from_plan, r2, vo)
     _fast(sheets["Fast movers"], model, lines)
     ws = sheets["Ageing"]
     _title(ws, model, "Old, unsold and price-cut items: their pace, how soon they clear, and what the sales team "
@@ -613,7 +750,7 @@ def build_book(model, made: datetime | None = None) -> Book:
                       "sent but never booked in.")
     _guarded(_damage, ws, model, "The damage figures")
     stamp = figures_digest(model) or ""
-    season = _notes(sheets["Notes"], model, suppliers, set_rows, rows, r2, stamp)
+    season = _notes(sheets["Notes"], model, suppliers, set_rows, rows, r2, stamp, vo)
     book.controls = {"order": {"rows": list(lay.rows), "suppliers": dict(lay.block_rows), "total": lay.total,
                                "head": lay.head, "add": (lay.add_first, lay.add_last)},
                      "settings": dict(set_rows), "all_items": all_span, "stamp": stamp}
@@ -626,7 +763,8 @@ def build_book(model, made: datetime | None = None) -> Book:
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: datetime, r2: dict | None = None) -> None:
+def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: datetime, r2: dict | None = None,
+             vo: dict | None = None) -> None:
     st = _stock()
     f, cfg = model.facts, model.cfg
     ws.col(0, 0, 44)
@@ -671,8 +809,8 @@ def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: dateti
         line("Layout", LAYOUT_TAG, note="Release 2 reads the file back by this tag: keep the sheets and columns "
                                         "where they are.")
     else:
-        line("Layout", LAYOUT_TAG_V2, note="/yq-stock ordered reads your quantities back by this tag: keep the sheets "
-                                           "and columns where they are.")
+        line("Layout", _tag(r2, vo), note="/yq-stock ordered reads your quantities back by this tag: keep the sheets "
+                                          "and columns where they are.")
 
     h = f["headline"]
     section(f"Stock in the main store ({_main_name()})")
@@ -746,6 +884,9 @@ def _summary(ws: Sheet, model, lay: OrderLayout, lines: list[dict], made: dateti
              f"The lead time + order every + {star['high']}, the top of your KPI band.")
         line("Season", "on" if r2["applied"] else "off", note=_season_words(r2))
         line("Goods on the way", _way_words(r2.get("on_the_way")))
+        if vo is not None:
+            totals = vo.get("totals") if isinstance(vo.get("totals"), dict) else {}
+            line(f"{VANS_HEAD}, units", totals.get("counted"), "g_int", _position_summary(vo))
     r += 1
     _head(ws, r, 0, [("Supplier", False), ("Items", True), ("Units", True), ("Value, BHD", True)], None)
     r += 1
@@ -865,7 +1006,7 @@ def _damage_this(damage: dict):
 # ── Order ─────────────────────────────────────────────────────────────────────
 
 def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dict], set_rows: dict,
-           all_span: tuple[int, int], from_plan: bool, r2: dict | None = None) -> None:
+           all_span: tuple[int, int], from_plan: bool, r2: dict | None = None, vo: dict | None = None) -> None:
     st = _stock()
     f, cfg = model.facts, model.cfg
     widths = {O_SUPPLIER: 14, O_CODE: 11, O_ITEM: 44, O_CATEGORY: 16, O_FAST: 9, O_MAIN: 11, O_VANS: 11, O_WAY: 11,
@@ -917,8 +1058,8 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
     ws.text(lay.head - 1, 0, "Order list: type your quantity and a comment in the yellow cells; add an item in the "
                              "yellow Code cells under it", "subhead")
     labels = [("Supplier", False), ("Code", False), ("Item", False), ("Category", False),
-              ("Fast", False), ("Main stock", True), ("With vans", True), ("On the way", True),
-              ("Sold 90 d", True), ("A day", True), ("*", False), ("Cover days", True),
+              ("Fast", False), ("Main stock", True), ("With vans" if vo is None else VANS_HEAD, True),
+              ("On the way", True), ("Sold 90 d", True), ("A day", True), ("*", False), ("Cover days", True),
               ("Joins", False), ("Suggested", True), ("Your qty", True), ("Final", True),
               ("Landed cost", True), ("Value, BHD", True), ("Last receipt", True), ("Comment", False)]
     if r2 is not None:
@@ -933,7 +1074,7 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
     fill_at = f"Notes!${_L(fill_col)}${s1}:${_L(fill_col)}${s2}"
     by_item = {row["item"].ledger_name: row for row in rows if row.get("item") is not None}
     F, H, J, M, N, O, P, Q = (_L(c) for c in (O_MAIN, O_WAY, O_RATE, O_JOINS, O_SUGGESTED, O_YOURS, O_FINAL, O_COST))
-    V = _L(O_CARTON)
+    G, V = _L(O_VANS), _L(O_CARTON)
     for x, r in zip(lines, lay.rows):
         it, rate = x["item"], x["rate"]
         n = r + 1
@@ -941,19 +1082,23 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
         match = f"MATCH({esc(f'${_L(O_SUPPLIER)}{n}')},{names},0)"
         if r2 is not None:                    # a supplier Notes does not name takes the rule of any other supplier
             match = f"IFERROR({match},{s2 - s1 + 1})"
-        pos = f"MAX({F}{n},0)+{H}{n}"
+        # the position: Main stock (never below nought) + On the way; v3 counts Vans and outlets (G) beside them
+        pos = f"MAX({F}{n},0)+{H}{n}" if vo is None else f"MAX({F}{n},0)+{G}{n}+{H}{n}"
         ws.text(r, O_SUPPLIER, x["supplier"], "g_text")
         _put(ws, r, O_CODE, it.code, "g_text")
         ws.text(r, O_ITEM, it.name, "g_text")
         _put(ws, r, O_CATEGORY, info.get("category") or _category(it.code), "g_text")
         _put(ws, r, O_FAST, STAR if it.rank and it.rank <= cfg.fast_n else None, "g_text")
         _put(ws, r, O_MAIN, it.on_hand, "g_int")
-        if info:
-            vans = info.get("with_vans")
+        if vo is not None:
+            _put(ws, r, O_VANS, _beside(x, vo), "g_int")
         else:
-            flow = _flow_of(model, it)
-            vans = (flow.sellable_at(model.d) - it.on_hand) if flow is not None else None
-        _put(ws, r, O_VANS, _vans(vans), "g_int")
+            if info:
+                vans = info.get("with_vans")
+            else:
+                flow = _flow_of(model, it)
+                vans = (flow.sellable_at(model.d) - it.on_hand) if flow is not None else None
+            _put(ws, r, O_VANS, _vans(vans), "g_int")
         _put(ws, r, O_WAY, it.on_order, "g_int")
         _put(ws, r, O_SOLD, rate.sold, "g_int")
         ws.put(r, O_RATE, float(x["rate6"]), "g_dec2")
@@ -961,7 +1106,10 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
             _put(ws, r, O_STAR, "*" if rate.floored else None, "g_text")
         else:
             _put(ws, r, O_STAR, "~" if _longer(x) else ("*" if rate.floored else None), "g_text")
-        _put(ws, r, O_COVER, x["cover"], "g_int")
+        if vo is not None:                    # the position over the rate the row rests on (A day)
+            ws.formula(r, O_COVER, f'IF({J}{n}>0,({pos})/{J}{n},"")', "g_int")
+        else:
+            _put(ws, r, O_COVER, x["cover"], "g_int")
         if r2 is None:
             ws.formula(r, O_JOINS, f"AND({J}{n}>0,ROUND({pos}-{J}{n}*INDEX({joins_at},{match}),6)<0)", "g_text")
             ws.formula(r, O_SUGGESTED, f"IF({M}{n},ROUNDUP(ROUND({J}{n}*INDEX({fill_at},{match})-({pos}),6),0),0)",
@@ -1027,7 +1175,7 @@ def _order(ws: Sheet, model, lay: OrderLayout, lines: list[dict], rows: list[dic
 
     if r2 is not None:
         r = lay.add_last + 2
-        for text in _order_notes_v2(model, r2, lines, from_plan):
+        for text in _order_notes_v2(model, r2, lines, from_plan, vo):
             ws.text(r, 0, text, "note")
             r += 1
         ws.page.update({"freeze": (lay.head + 1, 0), "autofilter": f"A{lay.head + 1}:{_L(last_col)}{lay.add_last + 1}",
@@ -1074,8 +1222,8 @@ def rule_formulas(rate: str, pos: str, join_days: str, fill_days: str, joins: st
             f"IF({joins},IF({carton}>1,ROUNDUP({units}/{carton},0)*{carton},{units}),0)")
 
 
-def _order_notes_v2(model, r2: dict, lines: list[dict], from_plan: bool) -> list[str]:
-    """The rule in plain words under the Order sheet's table (release 2)."""
+def _order_notes_v2(model, r2: dict, lines: list[dict], from_plan: bool, vo: dict | None = None) -> list[str]:
+    """The rule in plain words under the Order sheet's table (release 2; v3 with the vans and the outlets)."""
     st = _stock()
     star = _rule_of(model, r2, stock_season.OTHER)
     lift = ", each day at its month's lift," if r2["applied"] else ""
@@ -1083,10 +1231,10 @@ def _order_notes_v2(model, r2: dict, lines: list[dict], from_plan: bool) -> list
     notes = []
     if not lines:
         notes.append("Nothing joins the order list today: no item's demand over its supplier's Join below days reaches "
-                     "its Main stock + On the way.")
+                     f"its {_position_words(vo)}.")
     notes += [
         f"The order list: an item that sold in the last {st.RATE_DAYS} days joins when its demand over its supplier's "
-        f"Join below days{lift} reaches Main stock + On the way; Suggested tops it up to the demand of its Fill to "
+        f"Join below days{lift} reaches {_position_words(vo)}; Suggested tops it up to the demand of its Fill to "
         "days, from its rate (A day), rounded up to a whole unit" + (
             ", then to whole cartons (Carton, config 'stock.pack_sizes')" if cartons else "") + ".",
         f"{ANY_SUPPLIER} (Notes) joins at lead time + order every + {star['low']} = {star['trig_days']} days and is "
@@ -1094,6 +1242,11 @@ def _order_notes_v2(model, r2: dict, lines: list[dict], from_plan: bool) -> list
         "on the Notes sheet.",
         "On the way = the goods of the orders you logged (/yq-stock ordered), until the main store's receipts of the "
         "item dated after the order cover them: the On the way sheet lists them.",
+    ]
+    if vo is not None:
+        notes.append(f"{VANS_HEAD} = {_held_words(vo)}, counted in the position (the Notes sheet says how); stock "
+                     "moving between stores is never called on the way.")
+    notes += [
         "Lead days, Order every and the lifts are on the Notes sheet, per supplier: change one there and the season "
         "days, Joins, Suggested and Final follow (this file only). Your qty replaces Suggested; the supplier totals "
         "add up Final and Value.",
@@ -1201,7 +1354,8 @@ def _orders():
 
 # ── All items ─────────────────────────────────────────────────────────────────
 
-def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool, r2: dict | None = None) -> None:
+def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool, r2: dict | None = None,
+               vo: dict | None = None) -> None:
     widths = {A_SUPPLIER: 14, A_CODE: 11, A_ITEM: 44, A_CATEGORY: 16, A_STATUS: 18, A_MAIN: 10, A_VANS: 10,
               A_DAMAGE: 9, A_WAY: 10, A_SOLD30: 9, A_SOLD90: 9, A_SOLD365: 9, A_RATE: 9, A_COVER: 9, A_COST: 11,
               A_VALUE: 12, A_OLDEST: 9, A_LAST_SALE: 12, A_LAST_RECEIPT: 12, A_RANK: 8, A_ACTIVE: 8, A_HIDDEN: 8}
@@ -1219,8 +1373,8 @@ def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool, r2: dict | N
         ws.text(3, 0, f"The order plan was {why or NOT_WORKED}: the items of the stock ledger, with no supplier and "
                       "no status.", "note")
     labels = [("Supplier", False), ("Code", False), ("Item", False), ("Category", False),
-              ("Status", False), ("Main stock", True), ("With vans", True), ("Damage", True),
-              ("On the way", True), ("Sold 30 d", True), ("Sold 90 d", True), ("Sold 12 m", True),
+              ("Status", False), ("Main stock", True), ("With vans" if vo is None else VANS_HEAD, True),
+              ("Damage", True), ("On the way", True), ("Sold 30 d", True), ("Sold 90 d", True), ("Sold 12 m", True),
               ("A day", True), ("Cover", True), ("Landed cost", True), ("Value at cost", True),
               ("Oldest (days)", True), ("Last sale", True), ("Last receipt", True), ("Fast rank", True),
               ("Active", False), ("Hidden", False)]
@@ -1234,7 +1388,8 @@ def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool, r2: dict | N
         cells = ((A_SUPPLIER, row.get("supplier"), "g_text"), (A_CODE, row.get("code"), "g_text"),
                  (A_ITEM, row.get("name"), "g_text"), (A_CATEGORY, row.get("category"), "g_text"),
                  (A_STATUS, row.get("status"), "g_text"), (A_MAIN, row.get("main"), "g_int"),
-                 (A_VANS, _vans(row.get("with_vans")), "g_int"), (A_DAMAGE, row.get("damage"), "g_int"),
+                 (A_VANS, _vans(row.get("with_vans")) if vo is None else _held(row, vo), "g_int"),
+                 (A_DAMAGE, row.get("damage"), "g_int"),
                  (A_WAY, row.get("on_order"), "g_int"), (A_SOLD30, row.get("sold_30"), "g_int"),
                  (A_SOLD90, row.get("sold_90"), "g_int"), (A_SOLD365, row.get("sold_365"), "g_int"),
                  (A_RATE, rate.rate if rate is not None and rate.rate > 0 else None, "g_dec2"),
@@ -1252,8 +1407,12 @@ def _all_items(ws: Sheet, model, rows: list[dict], from_plan: bool, r2: dict | N
     status = f"{_L(A_STATUS)}{ALL_HEAD + 2}:{_L(A_STATUS)}{last + 1}"
     for word, name in STATUS_STYLES:
         ws.cond(status, {"type": "cell", "criteria": "equal to", "value": f'"{word}"', "format": name})
-    ws.text(last + 2, 0, "With vans: information only (the vans, the outlets and goods on their way, from the stock "
-                         "ledger); the order list counts the main store only.", "note")
+    if vo is None:
+        ws.text(last + 2, 0, "With vans: information only (the vans, the outlets and goods on their way, from the "
+                             "stock ledger); the order list counts the main store only.", "note")
+    else:
+        ws.text(last + 2, 0, f"{VANS_HEAD}, counted in the order position: {_held_words(vo)}; damage, SIM and samples "
+                             "left out (the Notes sheet says how).", "note")
     if r2 is not None:
         ws.text(last + 3, 0, "Supplier from: where the item's supplier comes from: config ('stock.suppliers'), its "
                              "newest purchase order, the catalog's brand, or none (Other).", "note")
@@ -1577,7 +1736,7 @@ def _damage(ws: Sheet, model) -> None:
 # ── Notes ─────────────────────────────────────────────────────────────────────
 
 def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[dict],
-           r2: dict | None = None, stamp: str = "") -> dict | None:
+           r2: dict | None = None, stamp: str = "", vo: dict | None = None) -> dict | None:
     """The Notes sheet. Release 2: where its season tables are (book.controls["season"]); else None."""
     st = _stock()
     f, cfg = model.facts, model.cfg
@@ -1593,7 +1752,7 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
     _title(ws, model, "How every figure is worked out, the settings per supplier, and what is estimated.")
     tr, tc = fx.parse_cell(TAG_CELL)
     ws.text(tr, tc - 1, "Layout of this file", "g_text")
-    ws.text(tr, tc, LAYOUT_TAG if r2 is None else LAYOUT_TAG_V2, "g_text")
+    ws.text(tr, tc, _tag(r2, vo), "g_text")
     sr, sc = fx.parse_cell(STAMP_CELL)              # the figures stamp, in a row kept hidden (height 0)
     ws.text(sr, sc - 1, "Figures stamp (a new file is made when they change)", "g_text")
     ws.text(sr, sc, stamp, "g_text")
@@ -1635,7 +1794,8 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
                                    f"on which the main store held the item at the day's end, never fewer than "
                                    f"{st.RATE_MIN_DAYS}. The Order sheet holds it to six decimals, as the screen works "
                                    f"the order out, so the two agree to the unit."),
-        ("Cover days", "Main stock + On the way / the daily rate (Main stock below nought counts as nought)."),
+        ("Cover days", f"{_position_words(vo, column=True)} / the daily rate (Main stock below nought counts as "
+                       "nought)."),
         ("Order list", f"An item that sold in the last {st.RATE_DAYS} days joins when Main stock + On the way is below "
                        f"Join below days of its daily rate; Suggested brings it to Fill to days, rounded up to a whole "
                        f"unit. On the way = goods on order logged in the KPI log (one promise line per item), until a "
@@ -1647,7 +1807,7 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
         ("Add an item", "Type its code in a yellow Code cell under the order list and your quantity beside it: the "
                         "item, its supplier, category, main stock and landed cost come from the All items sheet "
                         "(\"code not found\" when it is not there)."),
-        ("With vans", vans_words),
+        ("With vans", vans_words) if vo is None else (VANS_HEAD, _position_notes(vo)),
         ("Lead time", f"{lead['days']} days, {lead_words[0].lower() + lead_words[1:]}"),
         ("Fast movers", f"The {cfg.fast_n} best sellers by units over the {st.RANK_MONTHS} full months before this "
                         f"month (display items out). Days available = the days this month on which the main store's "
@@ -1675,7 +1835,7 @@ def _notes(ws: Sheet, model, suppliers: list[str], set_rows: dict, rows: list[di
         ("Lead time", "One lead time for every supplier until release 2 measures each one."),
     ]
     if r2 is not None:
-        how, estimated = _how_v2(model, r2, how, estimated)
+        how, estimated = _how_v2(model, r2, how, estimated, vo)
     block("How each figure is worked out", how)
     block("What is estimated", estimated)
     unread = f.get("unread") or []
@@ -1900,9 +2060,9 @@ def _settings_v2(ws: Sheet, model, suppliers: list[str], set_rows: dict, r2: dic
                "rules": {key: (rule["trig_days"], rule["fill_days"]) for key, rule in rules.items()}}
 
 
-def _how_v2(model, r2: dict, how: list, estimated: list) -> tuple[list, list]:
-    """Release 2's words in the Notes blocks: the order list with the rhythm, the season and goods on the way, the
-    longer history, the lead time per supplier."""
+def _how_v2(model, r2: dict, how: list, estimated: list, vo: dict | None = None) -> tuple[list, list]:
+    """Release 2's words in the Notes blocks: the order list with the rhythm, the season and goods on the way (v3:
+    with the vans and the outlets), the longer history, the lead time per supplier."""
     st = _stock()
     lead = model.facts["lead"]
     late = getattr(_orders(), "LATE_DAYS", None)
@@ -1915,10 +2075,10 @@ def _how_v2(model, r2: dict, how: list, estimated: list) -> tuple[list, list]:
             f"holds the rate to six decimals, as the screen works the order out, so the two agree to the unit."),
         "Order list": (
             f"An item that sold in the last {st.RATE_DAYS} days joins when its demand over its supplier's Join below "
-            f"days reaches Main stock + On the way; Suggested tops it up to the demand of the Fill to days, rounded up "
-            f"to a whole unit (to whole cartons where config 'stock.pack_sizes' gives the units in a carton). The "
-            f"demand of a day = the daily rate x the lift of that day's month: the Order sheet reads the Join and Fill "
-            f"season days. No purchase order is drafted."),
+            f"days reaches {_position_words(vo, column=True)}; Suggested tops it up to the demand of the Fill to days, "
+            f"rounded up to a whole unit (to whole cartons where config 'stock.pack_sizes' gives the units in a "
+            f"carton). The demand of a day = the daily rate x the lift of that day's month: the Order sheet reads the "
+            f"Join and Fill season days. No purchase order is drafted."),
         "Lead time": (
             f"Per supplier (the settings above): the median of its newest ten supplier invoices matched to a receipt "
             f"when it has at least three; else config 'stock.supplier_lead_days'; else every supplier's measured lead "

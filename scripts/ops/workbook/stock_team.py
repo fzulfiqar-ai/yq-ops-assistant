@@ -8,14 +8,16 @@ the three title rows, the grid formats, a frozen header and a filter.
 
 THE SHEETS
   Order      his order list and the items he added by code, in his file's order: Supplier, Code, Item, Category,
-             Main stock, On the way, Sold 90 d, Cover days, Suggested, His quantity (his final: what he typed,
-             else the suggestion), His comment, and a yellow Team comment for the team's reply. No landed cost,
-             value, budget, minimum order, margin or price.
+             Main stock, Vans and outlets (units: his file's column of that header, a v3 plan's; blank for a v1 or
+             v2 plan), On the way, Sold 90 d, Cover days, Suggested, His quantity (his final: what he typed, else
+             the suggestion), His comment, and a yellow Team comment for the team's reply. No landed cost, value,
+             budget, minimum order, margin, price or store name.
   Push list  his Ageing sheet's review, row by row: Item, Code, Status, Sellable, A week, Push a week, Action.
              No value, and no Sold most by (the sellers' names). One line when his file holds no review.
   Notes      what the team copy is, the data date, the file it was made from; costs and values are left out;
-             reply with your comments in the Team comment column. Its layout tag (Notes!B5) is TEAM_TAG, which
-             readback refuses as a plan: a team copy is never read back as his order.
+             reply with your comments in the Team comment column; what Suggested rests on (a v3 plan: the stock in
+             the main store, the vans and the outlets). Its layout tag (Notes!B5) is TEAM_TAG, which readback
+             refuses as a plan: a team copy is never read back as his order.
 
 NOT MADE (one sentence in "error", nothing written): a file readback refuses; a plan with a problem (a quantity
 that is not a whole number would show the suggestion as his); a comment of his that names money (BHD, BD, fils,
@@ -60,15 +62,18 @@ HEAD_FORMATS = ("g_head", "g_head_r")
 MONEY = re.compile(r"\b(?:BHD|BD|fils|dinars?)\b|(?<![\w.])\d+\.\d{3}(?!\d)", re.I)
 REVIEW_STYLES = (("Not moving", "cf_red"), ("Slow", "cf_amber"), ("On track", "cf_green"), ("Cleared", "cf_grey"))
 NUMBER_FORMATS = ("g_int", "g_dec2")
+VANS_HEAD = "Vans and outlets"             # stock_book.VANS_HEAD: a v3 plan's column G (a v1 or v2 plan has none)
+POSITION_LAYOUT = "stock-plan v3"          # stock_book.LAYOUT_TAG_V3: Suggested counts the vans and the outlets
 
 # The Order sheet: (header, right-aligned, width, format, where the value comes from): "row:<key>" is a key of
-# readback's row; any other text is a column of his item table, found by its header.
+# readback's row; any other text is a column of his item table, found by its header (blank when his file has none).
 ORDER_COLUMNS = (
     ("Supplier", False, 14, "g_text", "row:supplier"),
     ("Code", False, 11, "g_text", "row:code"),
     ("Item", False, 44, "g_text", "row:item"),
     ("Category", False, 16, "g_text", "Category"),
     ("Main stock", True, 11, "g_int", "Main stock"),
+    (VANS_HEAD, True, 11, "g_int", VANS_HEAD),
     ("On the way", True, 11, "g_int", "On the way"),
     ("Sold 90 d", True, 11, "g_int", "Sold 90 d"),
     ("Cover days", True, 9, "g_int", "Cover days"),
@@ -89,6 +94,11 @@ AGEING_SHEET = "Ageing"
 def team_name(plan_path) -> str:
     name = Path(plan_path).name
     return (name[: -len(".xlsx")] if name.lower().endswith(".xlsx") else name) + readback.TEAM_MARK
+
+
+def _column_width(header: str) -> float:
+    """The width of the Order sheet's column of that header (ORDER_COLUMNS)."""
+    return next(col[2] for col in ORDER_COLUMNS if col[0] == header)
 
 
 def target_path(folder: Path, base: str) -> Path:
@@ -240,7 +250,7 @@ def _order(ws: Sheet, book: readback.PlanBook, plan: dict, sub: str) -> None:
                 at = cols.get(readback.fold(source))
                 value = book.value_or(readback.ORDER_SHEET, row["row"], at) if at else None
             _put(ws, r, c, value, fmt_name)
-        h = _height(row.get("comment"), ORDER_COLUMNS[10][2])
+        h = _height(row.get("comment"), _column_width("His comment"))
         if h:
             ws.row(r, h)
     if not rows:
@@ -308,6 +318,8 @@ def _notes(ws: Sheet, plan: dict, sub: str, made: datetime) -> None:
     r = tr + 2
     ws.text(r, 0, "This file", "subhead")
     r += 1
+    held = ("the main store, the vans and the outlets" if plan.get("layout") == POSITION_LAYOUT
+            else "the main store")
     entries = (
         ("What it is", "The team copy of his Stock & Order Plan: his order list with his quantities and comments (the "
                        "Order sheet) and the items to push (the Push list)."),
@@ -316,7 +328,7 @@ def _notes(ws: Sheet, plan: dict, sub: str, made: datetime) -> None:
         ("Made at", f"{made.strftime('%a %d %b %Y, %H:%M')} (Bahrain)"),
         ("Left out", "Costs and values are left out; reply with your comments in the Team comment column."),
         ("His quantity", "What he will order: the quantity he typed in his file, else the plan's suggestion. Suggested "
-                         "is worked out from each item's sales a day and its stock in the main store."),
+                         f"is worked out from each item's sales a day and its stock in {held}."),
         ("Push a week", "What the sales team must sell of an item each week to clear it within the clear target; A "
                         "week is what it sells a week now."),
     )

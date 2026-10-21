@@ -26,14 +26,19 @@ Covered:
   * newest_plan: the data date, then the copy number; team copies, lock and temporary files, other names
     passed over;
   * open_in_excel; a file held by another program (read through a copy, else one sentence); PlanFileError for a
-    tag unknown or missing, a team copy, no workbook, a folder, a missing file, no item table; v1 and v2 read;
-    the header found by its texts (another row, other columns, a note under the table);
+    tag unknown or missing, a team copy, no workbook, a folder, a missing file, no item table; v1, v2 and v3 read,
+    each as stock_book makes it (its quantities typed in too); the header found by its texts (another row, other
+    columns, a note under the table);
   * team_file: "<plan> - Team.xlsx" beside it with his quantities and comments, the push list and the notes;
     no cost, value, BHD, seller or long digit run anywhere (leaks() empty); a second copy " (2)", never over a
     file, his plan untouched, only exports/ written; refused in one sentence with nothing written (a problem,
     money in a comment, a plan outside exports/, no workbook, XlsxWriter missing);
   * leaks() lists every header naming a cost, a value, money or a person, in a book and in a file;
-  * readback's names agree with stock_book's (the file name, the tag's cell, the layout, "code not found").
+  * the team copy of each layout: Vans and outlets read by its header (blank for a v1 or v2 plan, the plan's units
+    for a v3 one, worked out again after an edit), the Notes sentence on what Suggested rests on, no leak and no
+    store name;
+  * readback's names agree with stock_book's (the file name, the tag's cell, the layouts, "code not found", the
+    Vans and outlets header).
 """
 from __future__ import annotations
 
@@ -55,7 +60,8 @@ os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 # The stock suite's stand-ins. Importing it also sets stdout to UTF-8 (so this file does not) and imports
 # scripts.ops.db first, as every command does.
 from tests.test_ops_stock import (  # noqa: E402
-    D, LONG, NAMES, NINE, VAN, VAN_B, World, data_root, run)
+    D, LONG, NAMES, NINE, VAN, VAN_B, World, data_root, model_of, run)
+from tests import test_ops_stock_book as tb  # noqa: E402  (its facts of each layout: v1, with_r2, with_v3)
 from scripts.ops import config, paths, stock  # noqa: E402
 from scripts.ops.workbook import book as bk  # noqa: E402
 from scripts.ops.workbook import readback  # noqa: E402
@@ -70,11 +76,16 @@ TEAM = FILE.replace(".xlsx", " - Team.xlsx")
 YELLOW = "FFFFF2CC"
 PEOPLE = ("Van A", "Van B", VAN, VAN_B)
 KEYS = {"path", "sha256", "layout", "data_date", "rows", "problems", "open_in_excel", "saved_at"}
-ORDER_HEADER = ["Supplier", "Code", "Item", "Category", "Main stock", "On the way", "Sold 90 d", "Cover days",
-                "Suggested", "His quantity", "His comment", "Team comment"]
+ORDER_HEADER = ["Supplier", "Code", "Item", "Category", "Main stock", "Vans and outlets", "On the way", "Sold 90 d",
+                "Cover days", "Suggested", "His quantity", "His comment", "Team comment"]
 PUSH_HEADER = ["Item", "Code", "Status", "Sellable", "A week", "Push a week", "Action"]
-BOOK_TAGS = tuple(getattr(sb, "LAYOUT_TAGS", (sb.LAYOUT_TAG,)))     # the tags stock_book writes (v1, v2)
+BOOK_TAGS = tuple(getattr(sb, "LAYOUT_TAGS", (sb.LAYOUT_TAG,)))     # the tags stock_book writes (v1, v2, v3)
+V1, V2, V3 = "stock-plan v1", "stock-plan v2", "stock-plan v3"
+# CB2 in the plan of each layout (layout_bytes): Suggested and Cover days. v1: release 1's rule (85 - 20); v2: the
+# rhythm and the season (129.90 - 20); v3: the same with the second van's 35 in the position (129.90 - 55)
+CB2_BY_LAYOUT = {V1: (65, 20), V2: (110, 20), V3: (75, 55)}
 _PLAN: dict = {}
+_LAYOUT_FILES: dict = {}
 
 
 def test(name):
@@ -101,6 +112,20 @@ def plan_bytes() -> bytes:
             out = run(World())
             _PLAN["bytes"] = Path(out["flags"]["file"]).read_bytes()
     return _PLAN["bytes"]
+
+
+def layout_bytes(tag: str) -> bytes:
+    """A plan of that layout as stock_book makes it for the stock suite's world (each made once): the model with
+    release 1's facts (v1), release 2's (v2) or release 2's and the order position (v3), as the workbook suite sets
+    them (tests.test_ops_stock_book: v1, with_r2, with_v3)."""
+    if tag not in _LAYOUT_FILES:
+        with data_root():
+            m, _inp = model_of()
+            {V1: tb.v1, V2: tb.with_r2, V3: tb.with_v3}[tag](m)
+            res = sb.day_file(m)
+            assert res["made"] and res["error"] is None and res["controls"] == [], (tag, res)
+            _LAYOUT_FILES[tag] = Path(res["path"]).read_bytes()
+    return _LAYOUT_FILES[tag]
 
 
 def folder(root: Path) -> Path:
@@ -371,12 +396,12 @@ def _():
 
 
 @test("PlanFileError, one sentence each: a tag unknown or missing, a team copy, no workbook, a folder, a missing "
-      "file, no item table; v1 and v2 are read")
+      "file, no item table; v1, v2 and v3 are read")
 def _():
     words = {}
     with data_root() as root:
         p = placed(root)
-        for tag in ("stock-plan v1", "stock-plan v2"):
+        for tag in ("stock-plan v1", "stock-plan v2", "stock-plan v3"):
             p.write_bytes(plan_bytes())
             edit(p, notes={"B5": tag})
             plan = readback.read_plan(p)
@@ -399,9 +424,9 @@ def _():
     assert issubclass(readback.PlanFileError, ValueError)
     assert words == {
         "unknown": f"{FILE} is not a Stock & Order Plan this engine reads: its layout tag (Notes!B5) is "
-                   "'stock-plan v9', not stock-plan v1 or stock-plan v2.",
+                   "'stock-plan v9', not stock-plan v1, stock-plan v2 or stock-plan v3.",
         "missing": f"{FILE} is not a Stock & Order Plan this engine reads: its layout tag (Notes!B5) is missing, not "
-                   "stock-plan v1 or stock-plan v2.",
+                   "stock-plan v1, stock-plan v2 or stock-plan v3.",
         "team": f"{FILE} is a team copy (no costs, his quantities as values): read your own plan file instead.",
         "no table": f"{FILE} has no order list this engine reads: the Order sheet's item table (its header Supplier, "
                     "Code, Item, Suggested, Your qty, Final, Comment) is not found.",
@@ -454,8 +479,8 @@ def team_edits(p: Path) -> None:
 def _():
     his = opened(plan_bytes(), data_only=True)
     head, col = layout(opened(plan_bytes())["Order"])
-    cb2 = [his["Order"][f"{col[h]}{head + 1}"].value for h in ("Category", "Main stock", "On the way", "Sold 90 d",
-                                                                 "Cover days")]
+    cb2 = [his["Order"][f"{col[h]}{head + 1}"].value if h in col else None      # a v2 plan has no Vans and outlets
+           for h in ("Category", "Main stock", "Vans and outlets", "On the way", "Sold 90 d", "Cover days")]
     ag = his["Ageing"]
     ag_head = next(r for r in range(1, 40) if ag[f"A{r}"].value == "Item" and ag[f"C{r}"].value == "Status")
     ag_col = {ag.cell(ag_head, c).value: c for c in range(1, ag.max_column + 1) if ag.cell(ag_head, c).value}
@@ -485,16 +510,17 @@ def _():
                                                                             f"{FILE}, saved "), ws["A2"].value
     assert ws["A4"].value == "His quantities by supplier: VFAN 110 units (2 items); WEKOME 12 units (1 item).", \
         ws["A4"].value
-    assert row_values(ws, 5, 13) == ORDER_HEADER + [None]
-    assert row_values(ws, 6, 12) == ["VFAN", "CB2", NAMES["B"], *cb2, 65, 100, "Call VFAN first", None], \
-        row_values(ws, 6, 12)
+    assert row_values(ws, 5, 14) == ORDER_HEADER + [None]
+    assert row_values(ws, 6, 13) == ["VFAN", "CB2", NAMES["B"], *cb2, 65, 100, "Call VFAN first", None], \
+        row_values(ws, 6, 13)
     assert cb2[:2] == ["Chargers", 20]
-    assert row_values(ws, 7, 12) == ["WEKOME", "zn9", "ZZ-NEW Speaker Upcoming", "Speakers", 0, None, None, None, 0, 12,
-                                     "New model, sample first", None], row_values(ws, 7, 12)
-    assert row_values(ws, 8, 12) == ["VFAN", "CA1", NAMES["A"], "Cables", 394, None, None, None, 0, 10, None, None]
+    assert row_values(ws, 7, 13) == ["WEKOME", "zn9", "ZZ-NEW Speaker Upcoming", "Speakers", 0, None, None, None, None,
+                                     0, 12, "New model, sample first", None], row_values(ws, 7, 13)
+    assert row_values(ws, 8, 13) == ["VFAN", "CA1", NAMES["A"], "Cables", 394, None, None, None, None, 0, 10, None,
+                                     None]
     assert ws["A9"].value is None
-    assert all(ws[f"L{r}"].fill.fgColor.rgb == YELLOW for r in (6, 7, 8)) and ws["J6"].fill.fgColor.rgb != YELLOW
-    assert ws.freeze_panes == "A6" and ws.auto_filter.ref == "A5:L8", (ws.freeze_panes, ws.auto_filter.ref)
+    assert all(ws[f"M{r}"].fill.fgColor.rgb == YELLOW for r in (6, 7, 8)) and ws["K6"].fill.fgColor.rgb != YELLOW
+    assert ws.freeze_panes == "A6" and ws.auto_filter.ref == "A5:M8", (ws.freeze_panes, ws.auto_filter.ref)
     push = wb["Push list"]
     assert row_values(push, 5, 8) == PUSH_HEADER + [None]
     assert [row_values(push, 6 + k, 7) for k in range(len(review))] == review and push.cell(6 + len(review), 1).value \
@@ -626,11 +652,65 @@ def _():
     assert stock_team.leaks(team) == [] and [ws.name for ws in team.sheets] == list(stock_team.SHEETS)
 
 
-@test("readback's names agree with stock_book's: the file name, the tag's cell, the layout, 'code not found'")
+@test("read_plan reads every layout stock_book makes, v1, v2 and v3: the tag, CB2's row and its final (v3 counts the "
+      "second van's 35: 75), then his quantities typed in")
+def _():
+    with data_root() as root:
+        for tag, (qty, _cover) in CB2_BY_LAYOUT.items():
+            p = placed(root, data=layout_bytes(tag))
+            plan = readback.read_plan(p)
+            assert plan["layout"] == tag and plan["problems"] == [], (tag, plan["problems"])
+            assert [(x["code"], x["supplier"], x["suggested"], x["final"], x["added"]) for x in plan["rows"]] == [
+                ("CB2", "VFAN", qty, qty, False)], (tag, plan["rows"])
+            assert readback.final_lines(plan, "VFAN") == [("CB2", qty)], tag
+            edit(p, (1, "Your qty", 30), (2, "Code", "CA1"), (2, "Your qty", 10))
+            plan = readback.read_plan(p)
+            assert plan["problems"] == [] and readback.final_lines(plan, "VFAN") == [("CB2", 30), ("CA1", 10)], tag
+            assert plan["rows"][0]["suggested"] == qty, (tag, plan["rows"][0])     # worked out again, unsaved
+
+
+@test("the team copy of each layout: Vans and outlets by its header (blank for a v1 or v2 plan, the plan's 35 for a "
+      "v3 one, also worked out again after an edit); the Notes sentence names the vans and the outlets for v3 only; "
+      "no leak, BHD or store name")
+def _():
+    said = {V1: "the main store.", V2: "the main store.", V3: "the main store, the vans and the outlets."}
+    with data_root() as root:
+        for tag, (qty, cover) in CB2_BY_LAYOUT.items():
+            for edited in (False, True):
+                p = placed(root, data=layout_bytes(tag))
+                if edited:                                     # saved by openpyxl: no formula keeps a value
+                    edit(p, (1, "Your qty", 100))
+                res = stock_team.team_file(p)
+                assert res["made"] and res["error"] is None, (tag, res)
+                path = Path(res["path"])
+                ws = opened(path)["Order"]
+                cells = values(path)
+                found = stock_team.leaks(path)
+                assert row_values(ws, 5, 13) == ORDER_HEADER, (tag, row_values(ws, 5, 13))
+                row = dict(zip(ORDER_HEADER, row_values(ws, 6, 13)))
+                got = (row["Code"], row["Main stock"], row["Suggested"], row["Cover days"])
+                assert got == ("CB2", 20, qty, cover), (tag, edited, row)
+                assert row["Vans and outlets"] == (35 if tag == V3 else None), (tag, edited, row)
+                assert row["His quantity"] == (100 if edited else qty), (tag, edited, row)
+                sentence = next(v for v in cells["Notes"].values() if str(v).startswith("What he will order"))
+                assert sentence.endswith("Suggested is worked out from each item's sales a day and its stock in "
+                                         + said[tag]), (tag, sentence)
+                assert found == [], (tag, found)
+                for sheet, at in cells.items():
+                    for ref, v in at.items():
+                        text = str(v)
+                        assert "BHD" not in text and not any(who in text for who in PEOPLE), (tag, sheet, ref, text)
+                path.unlink()
+
+
+@test("readback's names agree with stock_book's: the file name, the tag's cell, the layouts, 'code not found', the "
+      "Vans and outlets header and the layout that counts it")
 def _():
     assert sb.STEM.format(d=D.isoformat()) + ".xlsx" == FILE and FILE.startswith(readback.STEM + " ")
     assert (sb.TAG_SHEET, sb.TAG_CELL) == (readback.TAG_SHEET, readback.TAG_CELL)
     assert set(BOOK_TAGS) <= set(readback.LAYOUTS) and stock_team.TEAM_TAG not in readback.LAYOUTS
+    assert readback.LAYOUTS == sb.LAYOUT_TAGS == (V1, V2, V3)
+    assert (stock_team.VANS_HEAD, stock_team.POSITION_LAYOUT) == (sb.VANS_HEAD, sb.LAYOUT_TAG_V3)
     assert stock_team.TEAM_TAG.startswith(readback.TEAM_TAG_START) and stock_team.team_name(FILE) == TEAM[:-5]
     ws = opened(plan_bytes())["Order"]
     head, col = layout(ws)

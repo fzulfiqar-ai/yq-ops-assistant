@@ -10,9 +10,10 @@ HOW THE FILE IS READ
     another program holds (PermissionError) is copied first, to a temporary name under exports/ of the data root,
     and the copy is read and removed. Excel leaves a file it has open readable: what is read is then its last
     save, and open_in_excel says so (Excel's "~$<name>" owner file is beside it).
-  * The layout tag in Notes!B5 names the layout: stock-plan v1 and v2 are read. Another tag, or none, is refused
-    in one sentence (PlanFileError), and so is a team copy (stock_team gives it its own tag): a team copy is
-    never read as his plan.
+  * The layout tag in Notes!B5 names the layout: stock-plan v1, v2 and v3 are read (v3 heads the Order sheet's
+    column G "Vans and outlets"; nothing read here rests on it). Another tag, or none, is refused in one sentence
+    (PlanFileError), and so is a team copy (stock_team gives it its own tag): a team copy is never read as his
+    plan.
   * The Order sheet's item table is found by its header texts (Supplier, Code, Item, Suggested, Your qty, Final,
     Comment), never by fixed letters. Its rows run from the header to the last row of its filter (to the end of
     the sheet when the filter is gone); empty rows and the notes under the table (text in its first column
@@ -40,7 +41,8 @@ THE RULE FOR A ROW
 CONTRACT (scripts.ops.stock and scripts.ops.workbook.stock_team rely on it)
   PlanFileError(ValueError)   the file cannot be read as his plan: one sentence ending in a full stop, the file's
                               name in it
-  LAYOUTS                     ("stock-plan v1", "stock-plan v2"), the tags read, in TAG_SHEET!TAG_CELL (Notes!B5)
+  LAYOUTS                     ("stock-plan v1", "stock-plan v2", "stock-plan v3"), the tags read, in
+                              TAG_SHEET!TAG_CELL (Notes!B5)
   TEAM_MARK                   " - Team": a team copy's name holds it, and newest_plan passes such a file over
   newest_plan(folder) -> Path | None
       The newest "YQ Stock and Order Plan <YYYY-MM-DD>*.xlsx" in folder: the latest data date in the name, then
@@ -83,7 +85,7 @@ from scripts.ops import paths
 from scripts.ops.workbook import book as bk
 from scripts.ops.workbook import formula as fx
 
-LAYOUTS = ("stock-plan v1", "stock-plan v2")
+LAYOUTS = ("stock-plan v1", "stock-plan v2", "stock-plan v3")      # stock_book.LAYOUT_TAGS
 TEAM_TAG_START = "stock-plan team"          # stock_team.TEAM_TAG starts so
 TAG_SHEET, TAG_CELL = "Notes", "B5"
 STEM = "YQ Stock and Order Plan"
@@ -332,8 +334,9 @@ class PlanBook:
                                 "file instead.")
         if tag not in LAYOUTS:
             said = f"is {tag!r}" if tag else "is missing"
+            either = LAYOUTS[0] if len(LAYOUTS) == 1 else ", ".join(LAYOUTS[:-1]) + " or " + LAYOUTS[-1]
             raise PlanFileError(f"{name} is not a Stock & Order Plan this engine reads: its layout tag ({TAG_SHEET}!"
-                                f"{TAG_CELL}) {said}, not {' or '.join(LAYOUTS)}.")
+                                f"{TAG_CELL}) {said}, not {either}.")
         return tag
 
     def _order_table(self) -> tuple[int, dict, int]:

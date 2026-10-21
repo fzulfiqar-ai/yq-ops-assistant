@@ -43,7 +43,13 @@ Covered:
     loaded later or a file with no stamp make the next free name with a line; team copies are never the day's
     file; the latest copy is the one named and compared;
   * the Ageing sheet's guarded paces, All items' Supplier from, the Summary's release-2 lines, and the
-    command's own file with nothing to check.
+    command's own file with nothing to check;
+  * layout v3 (the order position's facts set by with_v3 as scripts.ops.stock gives them, every order row worked
+    out again with the counted units): the tag, G headed Vans and outlets on Order and All items, the position
+    MAX(F,0)+G+H in Joins, Suggested and Cover days, Suggested equal to stock_season's (controls() empty) and moving
+    when G is typed over; the figures stamp holds the position; no store named, one the position does not know or
+    an error gives v2's file exactly (and release 1's facts v1's); the Summary's line, the words per store counted
+    and the van floor; the saved file read back as v3.
 """
 from __future__ import annotations
 
@@ -179,12 +185,13 @@ WAY = [way("CB2", "VFAN", date(2026, 3, 1), 30, 10),                  # 20 still
 
 
 def with_r2(m, lifts: dict | None = None, rules: dict | None = None, lines=(), warn=(12,), packs: dict | None = None,
-            longer: dict | None = None, leads: dict | None = None):
+            longer: dict | None = None, leads: dict | None = None, beside: dict | None = None):
     """Release 2's facts on a model of model_of(): the season, each supplier's rule (leads: facts["leads"], the
     measured or configured lead time of a supplier the rules do not name), the goods on the way (each matched
     line's units due on its item, as stock.build sets them), and every order row worked out again by
     stock_season: joins, the quantity, whole cartons where packs names the code; longer = {code: (rate, first day)}
-    for a longer history. A row that no longer joins leaves the list, as on the screen."""
+    for a longer history; beside = {ledger name: units} counted beside the main store (with_v3: each row's
+    "beside", in its position). A row that no longer joins leaves the list, as on the screen."""
     v1(m)
     lifts = lifts_of() if lifts is None else lifts
     rules = dict(RULES if rules is None else rules)
@@ -210,15 +217,19 @@ def with_r2(m, lifts: dict | None = None, rules: dict | None = None, lines=(), w
         rate6, basis = x["rate6"], "90 days"
         if longer and it.code in longer:
             rate6, basis = stock.stock_plan.round6(longer[it.code][0]), f"longer history from {longer[it.code][1]}"
-        position = max(it.on_hand, Decimal(0)) + it.on_order
+        held = (beside or {}).get(it.ledger_name, Decimal(0))
+        position = max(it.on_hand, Decimal(0)) + held + it.on_order
         if not stock_season.joins(position, rate6, m.d, r["trig_days"], lifts):
             return None
         qty = stock_season.suggested(position, rate6, m.d, r["fill_days"], lifts)
         pack = (packs or {}).get(it.code)
         if pack and pack > 1 and qty > 0:
             qty = (qty / pack).to_integral_value(rounding=ROUND_CEILING) * pack
-        return dict(x, qty=qty, rate6=rate6, rate_basis=basis, pack=pack,
-                    cost_bhd=fmt.q3(qty * it.cost) if it.cost is not None else None)
+        out = dict(x, qty=qty, rate6=rate6, rate_basis=basis, pack=pack,
+                   cost_bhd=fmt.q3(qty * it.cost) if it.cost is not None else None)
+        if beside is not None:
+            out.update(beside=held, position=position)
+        return out
 
     m.facts["order"] = [y for y in map(again, m.facts["order"]) if y is not None]
     plan["order"] = [y for y in map(again, plan["order"]) if y is not None]
@@ -231,6 +242,65 @@ def built2(w: World | None = None, **r2):
         m, _inp = model_of(w)
         with_r2(m, **r2)
         return m, sb.build_book(m, MADE)
+
+
+# ── layout v3: the vans and the outlets in the order position ─────────────────
+# The position's facts as scripts.ops.stock gives them (facts["position"]), set by with_v3 on top of release 2's;
+# every order row is worked out again on max(main, 0) + beside + on the way, as the screen does.
+STORES = ("vans", "outlets", "transit")
+HELD = {"CB2": (35, 0, 0)}           # the second van's 35 of ITEM-B (with_vans in the plan): (vans, outlets, transit)
+
+
+def with_v3(m, held: dict | None = None, stores=STORES, floor_days: int = 0, error: str | None = None, **r2):
+    """Release 2's facts (with_r2, its keywords) and the order position: held = {code: (vans, outlets, transit)}
+    units, of which the stores named count; facts["position"] with its items and totals (the world's two vans:
+    stores_n 2; the counted units at the item's landed cost); each order row's "beside" and each All items row's
+    "vans" = the item's counted units. stores [] or an error: nothing is counted (every beside 0, no item)."""
+    counting = [] if error else [s for s in STORES if s in stores]
+    costs = {it.ledger_name: it.cost for it in m.items}
+    items: dict = {}
+    totals = {k: Decimal(0) for k in STORES + ("counted", "cost_bhd", "uncosted")}
+    for code, units in (HELD if held is None else held).items():
+        name = L(next(k for k, c in CODES.items() if c == code))
+        row = {k: Decimal(u) if k in counting else Decimal(0) for k, u in zip(STORES, units)}
+        row["counted"] = sum((row[k] for k in STORES), Decimal(0))
+        if not counting:
+            continue
+        items[name] = row
+        for k in STORES + ("counted",):
+            totals[k] += row[k]
+        if costs.get(name) is None:
+            totals["uncosted"] += row["counted"]
+        else:
+            totals["cost_bhd"] += fmt.q3(row["counted"] * costs[name])
+    m.facts["position"] = {"stores": list(stores), "floor_days": floor_days, "items": items,
+                           "totals": dict(totals, stores_n=2 if "vans" in counting else 0), "error": error}
+    with_r2(m, beside={name: row["counted"] for name, row in items.items()}, **r2)
+    for row in m.facts["plan"]["all_items"]:
+        it = row.get("item")
+        row["vans"] = items[it.ledger_name]["counted"] if it is not None and it.ledger_name in items else Decimal(0)
+    return m
+
+
+def built3(w: World | None = None, **kw):
+    """(model, book): a v3 workbook in memory (with_v3's facts), not evaluated."""
+    with data_root():
+        m, _inp = model_of(w)
+        with_v3(m, **kw)
+        return m, sb.build_book(m, MADE)
+
+
+def snapshot(book) -> list:
+    """Everything a built book holds, evaluated: its names, properties, controls (the figures stamp too) and
+    styles; each sheet in order with every cell (kind, value, formula, format), widths, heights, merges, rules,
+    checks and page."""
+    book.evaluate()
+    out = [book.names, book.properties, book.controls, book.dxf_styles]
+    for ws in book.sheets:
+        cells = {k: (c.kind, repr(c.value), c.formula, c.fmt) for k, c in ws.cells.items()}
+        out.append((ws.name, ws.tab_color, cells, ws.cols, ws.rows, ws.default_row, ws.merges, ws.conds,
+                    ws.validations, ws.page, ws.hidden_cols, ws.sparklines, ws.charts))
+    return out
 
 
 def month_count(day: date, n: int) -> list[int]:
@@ -1194,13 +1264,14 @@ def _():
         assert "Held down by stock-outs: Dec" in note
 
 
-@test("the command's own file has nothing to check, whichever release its facts are; with release 2's it is v2")
+@test("the command's own file has nothing to check, whichever release its facts are; with release 2's it is v2 (v3 "
+      "when the position counts a store)")
 def _():
     with data_root():
         out = run(World(book=damage_world(), cuts=CUTS))
         path = Path(out["flags"]["file"])
         m, _inp = model_of(World(book=damage_world(), cuts=CUTS))
-        tag = sb.LAYOUT_TAG_V2 if sb.release2(m) is not None else sb.LAYOUT_TAG
+        tag = sb.layout_tag(m)
         compared, stamp = sb.read_stamp(path)
         import openpyxl
         wb = openpyxl.load_workbook(path, read_only=True)
@@ -1210,7 +1281,225 @@ def _():
             wb.close()
     assert "To check in the file" not in out["text"], out["text"][:600]
     assert got == tag and compared and stamp == sb.figures_digest(m)
-    assert names == list(sb.SHEETS_V2 if tag == sb.LAYOUT_TAG_V2 else sb.SHEETS)
+    assert tag == (sb.LAYOUT_TAG if sb.release2(m) is None else
+                   sb.LAYOUT_TAG_V3 if sb.position(m) is not None else sb.LAYOUT_TAG_V2)
+    assert names == list(sb.SHEETS if tag == sb.LAYOUT_TAG else sb.SHEETS_V2)
+
+
+# ── layout v3: the vans and the outlets in the order position ─────────────────
+
+R3_HEADERS = R1_HEADERS[:sb.O_VANS] + ["Vans and outlets"] + R1_HEADERS[sb.O_VANS + 1:]
+
+
+@test("v3: the tag, eight sheets, G headed Vans and outlets on Order and All items; Joins, Suggested and Cover days "
+      "rest on MAX(F12,0)+G12+H12; Suggested is stock_season's with the van's 35 (75 = 129.90 - 55), controls() empty")
+def _():
+    m, book = built3()
+    assert sb.position(m) is not None and sb.layout_tag(m) == sb.LAYOUT_TAG_V3 == "stock-plan v3"
+    assert sb.LAYOUT_TAGS == ("stock-plan v1", "stock-plan v2", "stock-plan v3") and sb.VANS_HEAD == "Vans and outlets"
+    assert [ws.name for ws in book.sheets] == list(sb.SHEETS_V2) and value(book, "Notes", 4, 1) == "stock-plan v3"
+    assert order_head(book) == R3_HEADERS + ["Rate basis", "Carton"], order_head(book)
+    assert R3_HEADERS[:6] == R1_HEADERS[:6] and R3_HEADERS[7:] == R1_HEADERS[7:]     # only G is new
+    assert value(book, "All items", sb.ALL_HEAD, sb.A_VANS) == "Vans and outlets"
+    assert book.evaluate() == [] and sb.controls(book, m) == []
+    x = m.facts["order"][0]
+    want = stock_season.suggested(Decimal(20 + 35), x["rate6"], D, 115, m.facts["season"]["lifts"])
+    r = book.controls["order"]["rows"][0]
+    assert r + 1 == 12 and x["beside"] == 35
+    assert [value(book, "Order", r, c) for c in (sb.O_MAIN, sb.O_VANS, sb.O_WAY)] == [20, 35, 0]
+    assert value(book, "Order", r, sb.O_SUGGESTED) == int(want) == int(x["qty"]) == 75
+    assert value(book, "Order", r, sb.O_VALUE) == 187.5 and value(book, "Order", r, sb.O_COVER) == 55   # 55 / 1.0
+    cells = book.get("Order").cells
+    assert cells[(r, sb.O_JOINS)].formula.startswith(
+        "AND(J12>0,ROUND(ROUND(MAX(F12,0)+G12+H12-J12*INDEX(Notes!$H$9:$H$11,IFERROR(MATCH(")
+    f = cells[(r, sb.O_SUGGESTED)].formula
+    assert f.startswith("IF(M12,IF(V12>1,") and "ROUND(ROUND(J12*INDEX(Notes!$I$9:$I$11," in f, f
+    assert "-(MAX(F12,0)+G12+H12),8),6),0),0)" in f, f
+    assert cells[(r, sb.O_COVER)].formula == 'IF(J12>0,(MAX(F12,0)+G12+H12)/J12,"")'
+    vf = book.controls["order"]["suppliers"]["vfan"]
+    assert [value(book, "Order", vf, c) for c in (sb.B_ITEMS, sb.B_UNITS, sb.B_VALUE)] == [1, 75, 187.5]
+    assert value(book, "Order", book.controls["order"]["add"][0], sb.O_VANS) is None    # an added item: blank
+    first, last = book.controls["all_items"]
+    got = {value(book, "All items", rr, sb.A_CODE): value(book, "All items", rr, sb.A_VANS)
+           for rr in range(first, last + 1)}
+    assert got["CB2"] == 35 and {v for k, v in got.items() if k != "CB2"} == {0}, got   # CA1's -10 is no count
+
+
+@test("v3: Vans and outlets typed over moves Suggested and Cover days as stock_season works them out (G is in the "
+      "position); controls() names the difference")
+def _():
+    lifts = lifts_of()
+    for g, qty in ((0, 110), (60, 50), (120, 0)):
+        m, book = built3()
+        r = book.controls["order"]["rows"][0]
+        book.get("Order").put(r, sb.O_VANS, g, "g_int")
+        checks = sb.controls(book, m)
+        rate6 = m.facts["order"][0]["rate6"]
+        position = Decimal(20 + g)
+        joins = stock_season.joins(position, rate6, D, 100, lifts)
+        want = stock_season.suggested(position, rate6, D, 115, lifts) if joins else 0
+        assert value(book, "Order", r, sb.O_SUGGESTED) == int(want) == qty, (g, value(book, "Order", r, sb.O_SUGGESTED))
+        assert value(book, "Order", r, sb.O_JOINS) is joins and value(book, "Order", r, sb.O_COVER) == 20 + g
+        assert checks[0] == f"Order sheet: CB2 suggests {qty} in the file, 75 on the screen", checks
+        assert f"Order sheet: VFAN units {qty} in the file, 75 on the screen" in checks, checks
+
+
+@test("v3: an order row without its beside and an All items row without its vans take the position's own count of "
+      "the item (its items entry); one it does not name counts nought")
+def _():
+    with data_root():
+        m, _inp = model_of()
+        with_v3(m)
+        for x in m.facts["order"] + m.facts["plan"]["order"]:
+            del x["beside"]
+        for row in m.facts["plan"]["all_items"]:
+            del row["vans"]
+        book = sb.build_book(m, MADE)
+    assert sb.controls(book, m) == []
+    r = book.controls["order"]["rows"][0]
+    assert value(book, "Order", r, sb.O_VANS) == 35 and value(book, "Order", r, sb.O_SUGGESTED) == 75
+    first, last = book.controls["all_items"]
+    got = {value(book, "All items", rr, sb.A_CODE): value(book, "All items", rr, sb.A_VANS)
+           for rr in range(first, last + 1)}
+    assert got["CB2"] == 35 and got["ZN9"] is None and {got[k] for k in got if k not in ("CB2", "ZN9")} == {0}, got
+
+
+@test("v3: the figures stamp holds the position: v3's differs from v2's and moves with the units counted, the stores "
+      "counted and the van floor; the same facts (the stores in any order) give the same stamp")
+def _():
+    def digest(v3: bool = True, **kw) -> str:
+        with data_root():
+            m, _inp = model_of()
+            return sb.figures_digest(with_v3(m, **kw) if v3 else with_r2(m))
+
+    d3 = digest()
+    assert re.fullmatch(r"[0-9a-f]{16}", d3) and digest() == d3
+    assert digest(stores=["transit", "vans", "outlets"]) == d3
+    assert digest(v3=False) != d3
+    for kw in ({"held": {"CB2": (36, 0, 0)}}, {"floor_days": 2}, {"stores": ["vans"]}, {"stores": ["vans", "outlets"]}):
+        assert digest(**kw) != d3, kw
+    with data_root():
+        m, _inp = model_of()
+        with_v3(m)
+    m.facts["order"][0]["beside"] = m.facts["plan"]["order"][0]["beside"] = Decimal(34)    # the Order sheet's G
+    assert sb.figures_digest(m) != d3
+
+
+@test("v3: no store named (or none the position knows), or an error, gives exactly v2's file: every cell, rule, check "
+      "and the figures stamp; with release 1's facts the position changes nothing")
+def _():
+    m2, b2 = built2()
+    want = snapshot(b2)
+    for kw in ({"stores": []}, {"stores": ["samples"]}, {"error": "the stock ledger could not be read (KeyError)"}):
+        m, book = built3(**kw)
+        assert sb.position(m) is None and sb.layout_tag(m) == sb.LAYOUT_TAG_V2, kw
+        assert all(x["beside"] == 0 for x in m.facts["order"]), kw
+        assert snapshot(book) == want, kw
+        assert sb.figures_digest(m) == sb.figures_digest(m2), kw
+    m1, b1 = built()
+    with data_root():
+        m, _inp = model_of()
+        v1(m)
+        m.facts["position"] = {"stores": list(STORES), "floor_days": 0, "error": None, "totals": {},
+                               "items": {L("B"): {"vans": Decimal(35), "outlets": Decimal(0), "transit": Decimal(0),
+                                                  "counted": Decimal(35)}}}
+        for x in m.facts["order"] + m.facts["plan"]["order"]:
+            x["beside"] = Decimal(35)
+        book = sb.build_book(m, MADE)
+    assert sb.position(m) is None and sb.layout_tag(m) == sb.LAYOUT_TAG and snapshot(book) == snapshot(b1)
+    assert sb.figures_digest(m) == sb.figures_digest(m1)
+
+
+@test("v3: the Summary's line for the vans and the outlets; the words on Notes, under the order list and on All items "
+      "(counted in the position, never below nought, damage, SIM and samples left out, a transfer past its deadline "
+      "on the action list, never on the way) follow the stores counted; no van or person is named")
+def _():
+    m, book = built3()
+    assert book.evaluate() == []
+
+    def at(sheet: str, label: str, c: int = 1):
+        return value(book, sheet, row_of(book, sheet, 0, label), c)
+
+    assert at("Summary", "Layout") == "stock-plan v3" and at("Summary", "Vans and outlets, units") == 35
+    assert at("Summary", "Vans and outlets, units", 2) == (
+        "Counted in the order position (column G of the Order sheet): 35 in the vans, 0 in the outlets and 0 moving "
+        "between the stores; BHD 87.500 at landed cost.")
+    held = ("the units in the vans and the outlets (each store never below nought), and stock moving between the "
+            "stores inside its deadline")
+    assert at("Notes", "Vans and outlets") == (
+        f"Vans and outlets (column G of the Order and All items sheets) = {held}, from the stock ledger as on the data "
+        "date. The order list counts them in the position: Main stock (never below nought) + Vans and outlets + On the "
+        "way. Damage, SIM and samples are left out. Stock issued from one store to another counts until its deadline; "
+        "a transfer past its deadline is not counted: it is on the action list instead. Stock moving between stores is "
+        "never called on the way: On the way stays the goods of the orders you logged with a supplier.")
+    assert at("Notes", "Cover days") == ("Main stock + Vans and outlets (column G) + On the way / the daily rate (Main "
+                                         "stock below nought counts as nought).")
+    order_list = at("Notes", "Order list")
+    assert "reaches Main stock + Vans and outlets (column G) + On the way; Suggested tops it up" in order_list
+    words = [str(c.value) for c in book.get("Notes").cells.values() if isinstance(c.value, str)]
+    assert not [w for w in words if "With vans" in w or "until the movement audit" in w], words
+    after = book.controls["order"]["add"][1]
+    under = [str(value(book, "Order", rr, 0)) for rr in range(after + 2, after + 14)]
+    assert any("reaches Main stock + Vans and outlets + On the way; Suggested tops it up" in t for t in under), under
+    assert (f"Vans and outlets = {held}, counted in the position (the Notes sheet says how); stock moving between "
+            "stores is never called on the way.") in under, under
+    last = book.controls["all_items"][1]
+    assert value(book, "All items", last + 2, 0) == (f"Vans and outlets, counted in the order position: {held}; "
+                                                     "damage, SIM and samples left out (the Notes sheet says how).")
+    for name in ("Order", "All items", "Summary", "Notes"):
+        for cell in book.get(name).cells.values():
+            assert not any(who in str(cell.value or "") for who in PEOPLE), (name, cell.value)
+    # only the vans counted, a floor of three days: the words follow the settings
+    m, book = built3(stores=["vans"], floor_days=3)
+    assert book.evaluate() == [] and sb.controls(book, m) == []
+    entry = at("Notes", "Vans and outlets")
+    assert entry.startswith("Vans and outlets (column G of the Order and All items sheets) = the units in the vans "
+                            "(each store never below nought), from the stock ledger as on the data date."), entry
+    assert "deadline" not in entry and entry.endswith(
+        "Each van keeps back 3 days of its own sales as its working minimum (config 'stock.van_floor_days'): that much "
+        "of its stock is not counted."), entry
+    assert at("Summary", "Vans and outlets, units", 2) == (
+        "Counted in the order position (column G of the Order sheet): 35 in the vans; BHD 87.500 at landed cost.")
+    m, book = built3(stores=["outlets", "transit"], held={"CB2": (35, 4, 2)})
+    assert value(book, "Order", book.controls["order"]["rows"][0], sb.O_VANS) == 6 and sb.controls(book, m) == []
+    assert at("Summary", "Vans and outlets, units", 2) == (
+        "Counted in the order position (column G of the Order sheet): 4 in the outlets and 2 moving between the "
+        "stores; BHD 15.000 at landed cost.")
+
+
+@test("v3: the saved file (openpyxl): the tag in B5, the stamp in B6, Vans and outlets in G and the position in the "
+      "formulas, every formula cached with no error value; read back as v3, CB2 suggesting 55 (75 held, 20 on the way)")
+def _():
+    from scripts.ops.workbook import readback
+    with data_root():
+        m, _inp = model_of()
+        with_v3(m, lines=WAY)
+        res = sb.day_file(m)
+        assert res["made"] and res["controls"] == [], res
+        path = Path(res["path"])
+        wb, vb = opened(path)
+        with zipfile.ZipFile(path) as z:
+            xml = [z.read(n).decode("utf-8") for n in z.namelist() if n.startswith("xl/worksheets/sheet")]
+        plan = readback.read_plan(path)
+        assert sb.read_stamp(path) == (True, sb.figures_digest(m))
+    assert wb.sheetnames == list(sb.SHEETS_V2) and wb["Notes"]["B5"].value == "stock-plan v3"
+    assert wb["Notes"]["B6"].value == sb.figures_digest(m) and wb["Notes"].row_dimensions[6].hidden
+    order, values = wb["Order"], vb["Order"]
+    head = next(r for r in range(1, 40) if order[f"A{r}"].value == "Supplier" and order[f"B{r}"].value == "Code")
+    n = head + 1
+    assert [order.cell(head, c).value for c in range(1, 23)] == R3_HEADERS + ["Rate basis", "Carton"]
+    assert (order[f"F{n}"].value, order[f"G{n}"].value, order[f"H{n}"].value) == (20, 35, 20)
+    assert order[f"M{n}"].value.startswith(f"=AND(J{n}>0,ROUND(ROUND(MAX(F{n},0)+G{n}+H{n}-J{n}*INDEX(")
+    assert order[f"L{n}"].value == f'=IF(J{n}>0,(MAX(F{n},0)+G{n}+H{n})/J{n},"")'
+    assert (values[f"N{n}"].value, values[f"L{n}"].value, values[f"M{n}"].value) == (55, 75, True)   # 129.90 - 75
+    assert wb["All items"]["G5"].value == "Vans and outlets"
+    for text in xml:
+        for cell in re.findall(r"<c [^>]*>(.*?)</c>", text):
+            if "<f>" in cell:
+                assert "<v>" in cell and not re.search(r"<v>#(N/A|VALUE!|REF!|DIV/0!|NUM!)</v>", cell), cell[:120]
+    assert plan["layout"] == "stock-plan v3" and plan["problems"] == []
+    assert [(x["code"], x["suggested"], x["final"]) for x in plan["rows"]] == [("CB2", 55, 55)]
+    assert readback.final_lines(plan, "VFAN") == [("CB2", 55)]
 
 
 def main() -> int:
