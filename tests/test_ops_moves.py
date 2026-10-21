@@ -1,4 +1,4 @@
-"""Ops engine: the stock ledger and the item name bridge, the base the movement audit stands on.
+"""Ops engine: the stock ledger and the item name bridge, and the movement audit built on them (/yq-moves).
 
     python -m tests.test_ops_moves
 
@@ -31,7 +31,23 @@ Covered:
   * the real 7-Oct ledger, when it is on this machine (SKIP otherwise); its golden figures stand
     for one export and are set aside when the folder is published again from another.
 
-The pairing of issue and receipt vouchers (the movement audit itself) adds its tests to this file.
+The movement audit (scripts.ops.moves), on an invented ledger of rows shaped as the ledger shapes
+them, with every outcome of a transfer in one week (received, late, elsewhere, other quantities,
+twins, not received yet, not received, the damage store's week, a receipt with no issue, a voucher
+set aside), sales, returns, counts, a supplier receipt in an outlet and SIM stock; the reads behind
+the cost (snapshot, price book, MRN landed costs, pricing sheet) and the ledger's source answered by
+stand-ins:
+  * the words (windows, rep:, again/top refused) and the van or outlet a typed name means;
+  * every store's check is nought in units and in BHD, and a movement put in no column shows "to
+    check"; the split by the store that actually booked a transfer in; issued_to beside received;
+  * shares, behaviour counts (Friday vouchers, back-dated numbers, round trips, re-issues, month-end
+    returns), the valuation at /yq-stock's basis (MRN, sheet, receipt rate, none counted apart);
+  * the items to check: kinds, fields, BHD, order (no cost last), the store asked for;
+  * per-store figures held back without parity, the closing lines, no 9- or 15-digit runs;
+  * the API other commands build on: audit(None) with every exception, sha, memo reuse,
+    period_table (by kind), store_balances, books_only, brief_facts, exception_items, the order
+    position re-exported once it is there; the command through the entry point; the hidden golden
+    build on a fixture.
 """
 from __future__ import annotations
 
@@ -59,7 +75,8 @@ os.environ["SUPABASE_KEY"] = "ci-key"
 os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
 
 from scripts.ops import db  # noqa: E402  (first, as every command does)
-from scripts.ops import config, fmt, items, ledger, paths, status  # noqa: E402
+from scripts.ops import __main__ as cli  # noqa: E402
+from scripts.ops import config, fmt, items, ledger, moves, pairing, paths, status, stock  # noqa: E402
 
 TESTS: list[tuple[str, object]] = []
 
@@ -1595,6 +1612,722 @@ def _():
                 assert sum(series[-1] for series in month.values()) == Decimal(str(golden["main_units"]))
                 checked += f" and the main store, its 30-day series in {t4 - t3:.2f}s"
         print(f"    {basis} ({checked}); workbook {t1 - t0:.1f}s, cached {t2 - t1:.2f}s")
+
+
+# ── the movement audit (scripts.ops.moves) ────────────────────────────────────
+# An invented ledger, as scripts.ops.ledger shapes its rows: three vans, an outlet, the main store, the damage store
+# and a van's SIM store. The week of D (Wed 11 Mar to Tue 17 Mar 2026) holds every outcome of a transfer.
+
+VA, VB, VC = "Van A - Acc WH", "Van B - Acc WH", "Van C - Acc WH"
+SHOP, DMG, SMP, SIMWH, SIMWH_B = "Causeway", "Damage Store", "Samples Store", "Van A - SIM WH", "Van B - SIM WH"
+MV_FIXTURE = {"warehouses.main": MAIN, "warehouses.aliases": {}, "warehouses.not_counted": [DMG, SMP],
+              "warehouses.damage": DMG, "items.bridge_exceptions": {}, "items.not_accessories": []}
+STOCK_NAMES = {"cable": "ITEM-11 Cable Eleven", "charger": "ITEM-12 Charger Twelve", "bank": "ITEM-13 Power Bank",
+               "nocost": "ITEM-14 Holder Fourteen"}
+ITEM_CODES = {"cable": "C11", "charger": "C12", "bank": "C13", "nocost": "C14"}
+M_CABLE, M_CHARGER, M_BANK, M_NOCOST = (f"{STOCK_NAMES[k]} {ITEM_CODES[k]}" for k in ("cable", "charger", "bank", "nocost"))
+M_SIM = "SIM-01 Starter Pack SP1"
+M_ODD = "ZZ-99 Odd Thing ZZ9"                   # moves in the main store; neither the price book nor the stock knows it
+D_MV = date(2026, 3, 17)                        # the ledger's last day, a Tuesday
+SHA_MV = "sha256:" + "ab" * 32
+
+
+def mday(month: int, dom: int) -> date:
+    return date(2026, month, dom)
+
+
+def mrow(day, voucher, vtype, wh, item, q_in=0, q_out=0, value=0, to=None) -> dict:
+    v = Decimal(str(value))
+    return {"item": item, "date": day, "voucher": voucher, "vtype": vtype, "wh": wh, "to_wh": to,
+            "qty_in": Decimal(q_in), "qty_out": Decimal(q_out), "value_in": v if q_in else Decimal(0),
+            "value_out": v if q_out else Decimal(0), "narr": None}
+
+
+def sio(n: int, day: date, frm: str, to: str, lines) -> list[dict]:
+    return [mrow(day, f"SIO:T-26-{day.month:02d}-{n}", ledger.ISSUE, frm, item, q_out=u, value=u, to=to)
+            for item, u in lines]
+
+
+def strv(n: int, day: date, wh: str, lines) -> list[dict]:
+    return [mrow(day, f"STRV:T-26-{day.month:02d}-{n}", ledger.RECEIVE, wh, item, q_in=u) for item, u in lines]
+
+
+def mv_rows(charger_value=400, extra=()) -> list[dict]:
+    rows = []
+    rows += [mrow(mday(2, 1), "MRN:T-26-02-1", ledger.SUPPLIER_RECEIPT, MAIN, M_CABLE, q_in=500, value=250),
+             mrow(mday(2, 1), "MRN:T-26-02-1", ledger.SUPPLIER_RECEIPT, MAIN, M_CHARGER, q_in=200, value=charger_value),
+             mrow(mday(2, 1), "MRN:T-26-02-1", ledger.SUPPLIER_RECEIPT, MAIN, M_BANK, q_in=100, value=300),
+             mrow(mday(2, 2), "ExcStk:T-26-02-1", ledger.COUNT_OVER, MAIN, M_NOCOST, q_in=20),
+             mrow(mday(2, 2), "MRN:T-26-02-2", ledger.SUPPLIER_RECEIPT, SIMWH, M_SIM, q_in=100, value=100)]
+    rows += sio(1, mday(2, 3), MAIN, VA, [(M_CABLE, 50), (M_CHARGER, 10)])
+    rows += strv(1, mday(2, 3), VA, [(M_CABLE, 50), (M_CHARGER, 10)])
+    rows += sio(2, mday(2, 3), MAIN, VB, [(M_CABLE, 30)]) + strv(2, mday(2, 3), VB, [(M_CABLE, 30)])
+    rows += sio(3, mday(2, 4), MAIN, SHOP, [(M_BANK, 10), (M_NOCOST, 5)])
+    rows += strv(3, mday(2, 4), SHOP, [(M_BANK, 10), (M_NOCOST, 5)])
+    rows += [mrow(mday(2, 10), "SI:T-26-02-1", ledger.SALE, VA, M_CABLE, q_out=5, value=5)]
+    rows += sio(4, mday(2, 26), VA, MAIN, [(M_CABLE, 4)]) + strv(4, mday(2, 26), MAIN, [(M_CABLE, 4)])
+    rows += sio(5, mday(2, 27), SIMWH, SIMWH_B, [(M_SIM, 20)]) + strv(5, mday(2, 27), SIMWH_B, [(M_SIM, 20)])
+    rows += sio(9, mday(3, 5), MAIN, DMG, [(M_CABLE, 2)])                         # never booked in by the damage store
+    rows += sio(10, mday(3, 11), MAIN, VA, [(M_CABLE, 20)]) + sio(11, mday(3, 11), MAIN, VB, [(M_CHARGER, 6)])
+    rows += strv(10, mday(3, 12), VA, [(M_CABLE, 20)])                             # SIO 10, by its deadline
+    rows += sio(12, mday(3, 12), VA, MAIN, [(M_CABLE, 3)]) + strv(11, mday(3, 12), VB, [(M_CABLE, 3)])    # at Van B
+    rows += sio(13, mday(3, 12), VA, MAIN, [(M_CHARGER, 2)]) + strv(12, mday(3, 12), MAIN, [(M_CHARGER, 2)])
+    rows += sio(14, mday(3, 13), VB, DMG, [(M_CABLE, 1)]) + strv(13, mday(3, 13), DMG, [(M_CABLE, 1)])    # a Friday
+    rows += sio(15, mday(3, 14), MAIN, VC, [(M_BANK, 4)])                          # never received
+    rows += strv(14, mday(3, 14), VB, [(M_CHARGER, 6)])                            # SIO 11, after its deadline
+    rows += sio(22, mday(3, 14), VB, MAIN, [(M_CABLE, 2)]) + strv(15, mday(3, 14), MAIN, [(M_CABLE, 2)])  # back-dated
+    rows += sio(16, mday(3, 15), MAIN, VA, [(M_CABLE, 5)]) + sio(17, mday(3, 15), MAIN, VA, [(M_CABLE, 5)])
+    rows += strv(16, mday(3, 15), VA, [(M_CABLE, 5)])                              # one receipt for the two
+    rows += sio(18, mday(3, 15), MAIN, DMG, [(M_NOCOST, 2)])                       # inside the damage store's week
+    rows += sio(19, mday(3, 16), MAIN, VC, [(M_CHARGER, 3)])                       # inside its deadline
+    rows += sio(20, mday(3, 16), MAIN, SHOP, [(M_BANK, 6), (M_CABLE, 2)])
+    rows += strv(17, mday(3, 16), SHOP, [(M_BANK, 5), (M_CABLE, 2)])               # other quantities
+    rows += sio(21, mday(3, 16), VA, VA, [(M_CHARGER, 1)]) + strv(18, mday(3, 16), VA, [(M_CHARGER, 1)])   # own store
+    rows += strv(19, mday(3, 17), VB, [(M_CHARGER, 7)])                            # no issue
+    rows += sio(23, mday(3, 16), SIMWH, SIMWH_B, [(M_SIM, 5)])                     # SIM: out of scope
+    rows += [mrow(mday(3, 13), "SI:T-26-03-1", ledger.SALE, VA, M_CABLE, q_out=6, value=6),
+             mrow(mday(3, 14), "SI:T-26-03-2", ledger.SALE, SHOP, M_BANK, q_out=2, value=2),
+             mrow(mday(3, 16), "SI:T-26-03-3", ledger.SALE, VB, M_CABLE, q_out=4, value=4),
+             mrow(mday(3, 16), "SRV:T-26-03-1", ledger.SALES_RETURN, VB, M_CABLE, q_in=1, value=1),
+             mrow(mday(3, 15), "ShoStk:T-26-03-1", ledger.COUNT_SHORT, VA, M_CHARGER, q_out=1),
+             mrow(mday(3, 15), "ExcStk:T-26-03-1", ledger.COUNT_OVER, VB, M_CABLE, q_in=2),
+             mrow(mday(3, 16), "MRN:T-26-03-5", ledger.SUPPLIER_RECEIPT, SHOP, M_BANK, q_in=3, value=9),
+             mrow(mday(3, 16), "SI:T-26-03-4", ledger.SALE, SIMWH, M_SIM, q_out=9, value=9)]
+    return rows + list(extra)
+
+
+class MoveWorld:
+    """The reads of the movement audit, answered from the invented world: the ledger and its source, the stock
+    snapshot, the price book, the MRN landed costs and the pricing sheet. Every statement must be a read."""
+
+    def __init__(self, rows=None, parity_ok=True, source="file", sha=SHA_MV, sheet=None, snapshot_fails=False):
+        self.rows = mv_rows() if rows is None else rows
+        self.parity_ok, self.source, self.sha = parity_ok, source, sha
+        self.sheet = [(5, "C12", "1.75")] if sheet is None else sheet
+        self.snapshot_fails = snapshot_fails
+        self.sql: list[str] = []
+        self.asked: list[str] = []          # the prefer of each for_audit
+
+    def rpc(self, sql):
+        db.check_sql(sql)
+        self.sql.append(sql)
+        if sql == stock.SNAPSHOT_SQL:
+            if self.snapshot_fails:
+                raise RuntimeError("no network")
+            return [{"item_name": STOCK_NAMES[k], "warehouse_name": MAIN, "net_qty": "1", "value_bhd": "1",
+                     "as_of_date": D_MV.isoformat()} for k in STOCK_NAMES]
+        if sql == stock.PRICE_BOOK_SQL:
+            return [{"sku_code": ITEM_CODES[k], "item_name": STOCK_NAMES[k]} for k in STOCK_NAMES]
+        if sql == stock.MRN_SQL:
+            return [{"id": 1, "code": "C11", "cost": "0.4", "effective_date": "2026-02-01", "doc_no": "T-26-02-1"}]
+        raise AssertionError(f"a statement the stand-in does not know: {sql[:70]}")
+
+    def session(self, **_kw):
+        world_ = self
+
+        class Session:
+            def q(self, sql, params=None):
+                db.check_sql(sql)
+                world_.sql.append(sql)
+                assert sql == stock.SHEET_SQL, sql[:70]
+                return [{"id": i, "code": c, "cost": v} for i, c, v in world_.sheet]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Session()
+
+    def ledger_(self) -> ledger.Ledger:
+        rows = self.rows
+        return ledger.Ledger(rows=rows, source="Stock_ledger_test.xlsx", first_date=ledger.first_date(rows),
+                             last_date=ledger.last_date(rows), sha=None if self.source == "database" else self.sha,
+                             origin="database" if self.source == "database" else "cache")
+
+    def for_audit(self, prefer="auto"):
+        self.asked.append(prefer)
+        led = self.ledger_()
+        if self.source == "database":
+            return led, {"source": "database", "parity": None, "note": "The stock ledger is read from the portal's "
+                                                                       "database, as asked: the file was not opened."}
+        if prefer == "file" or not self.parity_ok:
+            return led, {"source": "file", "parity": None, "note": "The stock ledger is read from the file "
+                         "Stock_ledger_test.xlsx, as asked: it was not compared with the portal."}
+        return led, {"source": "file", "parity": {"ok": True}, "note": "The stock ledger is read from the file "
+                     "Stock_ledger_test.xlsx: it agrees with what the portal holds."}
+
+
+class moves_world:
+    """The stand-ins, the movement fixture's config and a temporary data root, for a with-block; the audit's memo is
+    emptied going in and coming out."""
+
+    def __init__(self, world: MoveWorld | None = None, cfg: dict | None = None):
+        self.world = world or MoveWorld()
+        self.cfg = dict(MV_FIXTURE, **(cfg or {}))
+
+    def __enter__(self) -> MoveWorld:
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self._tmp.name).resolve()
+        paths.set_data_root(self.root)
+        config.use(self.cfg)
+        moves.forget()
+        self.saved = (db.rpc, db.session, ledger.for_audit)
+        db.rpc, db.session, ledger.for_audit = self.world.rpc, self.world.session, self.world.for_audit
+        return self.world
+
+    def __exit__(self, *exc):
+        db.rpc, db.session, ledger.for_audit = self.saved
+        moves.forget()
+        paths.set_data_root(None)
+        config.use(None)
+        self._tmp.cleanup()
+        return False
+
+
+def by_store(a) -> dict:
+    return {r.store: r for r in a.stores}
+
+
+class MvArgs:
+    def __init__(self, *spec, ledger_="auto", golden=False):
+        self.spec, self.ledger, self.golden_build, self.json, self.data_root = list(spec), ledger_, golden, False, None
+
+
+@test("moves words: a window and rep:<name> in any order, the default 7 days; 'again' and 'top:' refused in one sentence")
+def _():
+    assert moves.parse_words([]) == (None, None)
+    assert moves.parse_words(["mtd"]) == ("mtd", None) and moves.parse_words(["2026-03"]) == ("2026-03", None)
+    assert moves.parse_words(["2026-03-01..2026-03-10"]) == ("2026-03-01..2026-03-10", None)
+    assert moves.parse_words(["rep:Van", "A", "mtd"]) == ("mtd", "Van A") == moves.parse_words(["mtd", "rep:Van A"])
+    for words in (["again"], ["top:3"], ["7d", "again"], ["rep:Van A", "top:5"]):
+        exc = raises(moves.MovesInput, lambda w=words: moves.parse_words(w))
+        assert str(exc) == moves.REFUSED_WORDS and "\n" not in str(exc), words
+    assert "window" in str(raises(moves.MovesInput, lambda: moves.parse_words(["sideways"])))
+    assert moves.DEFAULT_WINDOW == "7d"
+    start = mday(2, 1)
+    for window, (first, last, title) in {"7d": (mday(3, 11), D_MV, "Last 7 days"), "3d": (mday(3, 15), D_MV, "Last 3 days"),
+                                         "1d": (D_MV, D_MV, "Latest day"), "mtd": (mday(3, 1), D_MV, "Month to date"),
+                                         "2026-02": (start, mday(2, 28), "February 2026"),
+                                         None: (start, D_MV, "The whole ledger")}.items():
+        w = moves.resolve(window, D_MV, start)
+        assert (w["first"], w["last"], w["title"]) == (first, last, title), (window, w)
+    clipped = moves.resolve(("2026-01-20", date(2026, 3, 31)), D_MV, start)
+    assert (clipped["first"], clipped["last"]) == (start, D_MV) and len(clipped["notes"]) == 2, clipped
+    assert any("starts on" in n for n in clipped["notes"]) and any("stops there" in n for n in clipped["notes"])
+    for window, said in (("2026-04", "No stock movement is loaded for April 2026 yet"),
+                         ("2026-01", "the window ends before it"), ("0d", "one day or more"),
+                         (("2026-03-01",), "two days")):
+        exc = raises(moves.MovesInput, lambda w=window: moves.resolve(w, D_MV, start))
+        assert said in str(exc) and "sales" not in str(exc).lower(), (window, str(exc))
+
+
+@test("moves rep: a salesman's name (any case, its start) means his van; an outlet by its name; SIM and the main store are no answer")
+def _():
+    with moves_world():
+        base = moves.audit("7d").base
+        for typed, store in (("van a", VA), ("Van B", VB), ("VAN C - ACC WH", VC), ("causeway", SHOP), ("caus", SHOP)):
+            assert base.name_of(moves.resolve_store(typed, base)) == store, typed
+        exc = raises(moves.MovesInput, lambda: moves.resolve_store("Van", base))
+        assert str(exc).startswith("More than one van or outlet fits 'Van'") and "salesman" not in str(exc)
+        exc = raises(moves.MovesInput, lambda: moves.resolve_store("Main", base))
+        assert str(exc).startswith("No van or outlet fits 'Main'. Vans and outlets in the stock ledger: ")
+        assert SIMWH not in str(exc) and "SIM" not in str(exc) and MAIN not in str(exc)
+        a = moves.audit("7d", rep="van b")
+        assert a.rep == VB and [r.store for r in a.stores] == [VB] and a.totals.store == VB
+        assert moves.audit("7d", rep="Van B") is a, "the memo knows the store, however it was typed"
+
+
+@test("moves: every van's and outlet's check is nought in units and in BHD, the main store's too; SIM is out")
+def _():
+    with moves_world():
+        a = moves.audit("7d")
+        rows = by_store(a)
+        assert list(rows) == [VA, VB, VC, SHOP], list(rows)            # vans by name, then the outlets
+        assert all(r.balanced for r in a.stores + [a.main]) and not a.unbalanced
+        want = {   # opening, received, issued_to, back_to_main, to_damage, to_other, not_received_yet, not_received,
+                   # sold, customer_returns, counts, other, closing
+            VA: (51, 26, 30, 2, 0, 3, 0, 1, 6, 0, -1, 0, 64),
+            VB: (30, 16, 6, 2, 1, 0, 0, 0, 4, 1, 2, 0, 42),
+            VC: (0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            SHOP: (15, 7, 8, 0, 0, 0, 0, 0, 2, 0, 0, 3, 23),
+            MAIN: (717, 4, 7, 0, 0, 39, 5, 9, 0, 0, 0, 0, 668)}
+        keys = [k for k in moves.MOVE_KEYS if k != "check"]
+        for store, figures in want.items():
+            row = a.main if store == MAIN else rows[store]
+            got = tuple(int(row.units[k]) for k in keys)
+            assert got == figures, (store, dict(zip(keys, got)))
+            assert row.units["check"] == 0 and row.bhd["check"] == 0 and row.uncosted["check"] == 0, store
+        assert all(M_SIM not in r.items for r in a.stores + [a.main]), "SIM never enters a figure"
+        legs = a.base.legs
+        assert SIMWH not in rows and SIMWH_B not in rows and legs.out_of_scope == 0, "the rows are cut to accessories first"
+        assert all(M_SIM not in leg.items for leg in legs.issues + legs.receipts)
+        assert "SIO:T-26-02-5" not in a.result.by_issue and "SIO:T-26-03-23" not in a.result.by_issue
+        # issued_to is what other stores sent to it; received is its own receive legs
+        assert rows[VA].units["issued_to"] == 20 + 5 + 5 and rows[VA].units["received"] == 20 + 5 + 1
+        # every row balances on the whole ledger and on any window as well
+        for window in (None, "mtd", "2026-02", "3d", "2026-03-12..2026-03-15"):
+            w = moves.audit(window)
+            assert all(r.balanced for r in w.stores + [w.main]), window
+
+
+@test("moves: a store's issues leave by the kind of store that actually booked them in; open and set-aside issues are not received")
+def _():
+    with moves_world():
+        a = moves.audit("7d")
+        rows = by_store(a)
+        va = rows[VA]
+        assert va.units["back_to_main"] == 2, "SIO 13 was booked in by the main store"
+        assert va.units["to_other"] == 3, "SIO 12 was sent to the main store and booked in by Van B: not back to main"
+        assert va.units["not_received"] == 1, "the voucher sent to its own store is set aside: it cannot be paired"
+        assert rows[VB].units["to_damage"] == 1 and rows[VB].units["back_to_main"] == 2
+        main = a.main
+        assert (main.units["to_other"], main.units["not_received"], main.units["not_received_yet"]) == (39, 9, 5)
+        bucket = a.base.bucket
+        assert bucket["SIO:T-26-03-12"] == "to_other" and bucket["SIO:T-26-03-13"] == "back_to_main"
+        assert bucket["SIO:T-26-03-14"] == "to_damage" and bucket["SIO:T-26-03-15"] == "not_received"
+        assert bucket["SIO:T-26-03-17"] == "not_received" and bucket["SIO:T-26-03-16"] == "to_other"     # the twins
+        assert bucket["SIO:T-26-03-18"] == bucket["SIO:T-26-03-19"] == "not_received_yet"
+        assert bucket["SIO:T-26-03-21"] == "not_received" and bucket["SIO:T-26-03-9"] == "not_received"
+        # a movement put in no column shows: the check is not nought, and the screen says it is to check
+        real = moves._row
+
+        def dropped(base, store, buckets):
+            if base.name_of(store) == VA:
+                buckets = {k: v for k, v in buckets.items() if k != "sold"}
+            return real(base, store, buckets)
+        moves.forget()
+        moves._row = dropped
+        try:
+            broken = moves.audit("7d")
+        finally:
+            moves._row = real
+            moves.forget()
+        assert by_store(broken)[VA].units["check"] == -6 and broken.unbalanced == [VA]
+        text = "\n".join(moves.screen_lines(broken))
+        assert "-6 to check" in text and "The check is not 0 for Van A: a movement fell in no column or in two" in text
+
+
+@test("moves shares: sold and sent back over opening plus received; n/a with nothing to divide by")
+def _():
+    with moves_world():
+        rows = by_store(moves.audit("7d"))
+        s = rows[VA].shares()
+        assert s == {"sold": Decimal(6) / Decimal(77), "back": Decimal(2) / Decimal(77)}, s
+        assert rows[VC].shares() == {"sold": None, "back": None}
+        assert rows[SHOP].shares()["back"] == 0
+        table = "\n".join(moves.behaviour_table([rows[VA], rows[VC]]))
+        assert "7.8%" in table and "2.6%" in table and "n/a" in table
+
+
+def behaviour_rows() -> list[dict]:
+    """A small February: a round trip and a re-issue within a week, one more return two weeks on (no trip), a
+    Friday return at the month end, a voucher numbered after a later-dated one."""
+    rows = [mrow(mday(2, 1), "MRN:T-26-02-1", ledger.SUPPLIER_RECEIPT, MAIN, M_CABLE, q_in=100, value=40)]
+    rows += sio(1, mday(2, 2), MAIN, VA, [(M_CABLE, 10)]) + strv(1, mday(2, 2), VA, [(M_CABLE, 10)])     # a Monday
+    rows += sio(2, mday(2, 4), VA, MAIN, [(M_CABLE, 10)]) + strv(2, mday(2, 4), MAIN, [(M_CABLE, 10)])   # sent back
+    rows += sio(3, mday(2, 5), MAIN, VA, [(M_CABLE, 10)]) + strv(3, mday(2, 5), VA, [(M_CABLE, 10)])     # and again
+    rows += sio(4, mday(2, 19), VA, MAIN, [(M_CABLE, 10)]) + strv(4, mday(2, 19), MAIN, [(M_CABLE, 10)])  # 14 days on
+    rows += sio(5, mday(2, 27), VA, MAIN, [(M_CABLE, 2)]) + strv(5, mday(2, 28), MAIN, [(M_CABLE, 2)])    # a Friday
+    rows += sio(6, mday(2, 18), MAIN, VA, [(M_CABLE, 1)]) + strv(6, mday(2, 18), VA, [(M_CABLE, 1)])      # back-dated
+    assert [r["date"].weekday() for r in rows if r["vtype"] == ledger.ISSUE].count(4) == 1, "one Friday voucher"
+    return rows
+
+
+@test("moves behaviour: Friday vouchers, back-dated numbers, round trips and re-issues within 7 days, month-end returns")
+def _():
+    with moves_world(MoveWorld(rows=behaviour_rows())):
+        a = moves.audit("2026-02")
+        va, main = by_store(a)[VA], a.main
+        assert va.behaviour == {"friday": 1, "backdated": 1, "round_trips": 1, "reissued": 1, "month_end_back": 1}, \
+            va.behaviour
+        assert main.behaviour["backdated"] == 1 and main.behaviour["friday"] == 0, main.behaviour
+        assert main.behaviour["round_trips"] == 1 and main.behaviour["reissued"] == 1      # the same pairs, its side
+        assert a.base.backdated == {"SIO:T-26-02-6", "STRV:T-26-02-6"}
+        assert all(r.balanced for r in a.stores + [a.main])
+        early = by_store(moves.audit("2026-02-01..2026-02-10"))[VA]
+        assert (early.behaviour["round_trips"], early.behaviour["month_end_back"], early.behaviour["friday"]) == (1, 0, 0)
+        late = by_store(moves.audit("2026-02-15..2026-02-28"))[VA]
+        assert late.behaviour["round_trips"] == late.behaviour["reissued"] == 0, "two weeks apart is no round trip"
+        text = "\n".join(moves.screen_lines(a))
+        assert "Round trips" in text and "never an item to check" in " ".join(text.split())
+        assert a.exceptions == [] or all(e["kind"] in moves.EXCEPTION_KINDS for e in a.exceptions)
+
+
+@test("moves valuation: /yq-stock's basis (MRN, then the sheet, then the receipt rate), held to six decimals; no cost is counted apart")
+def _():
+    with moves_world():
+        a = moves.audit("7d")
+        assert a.costs == {M_CABLE: Decimal("0.4"), M_CHARGER: Decimal("1.75"), M_BANK: Decimal(3), M_NOCOST: None}
+        sources = {name: it.cost_source for name, it in a.base.table.items()}
+        assert sources == {M_CABLE: "mrn", M_CHARGER: "sheet", M_BANK: "receipt", M_NOCOST: None}, sources
+        assert a.cost_label == "at landed cost"
+        assert a.cost_basis == ("MRN; the pricing sheet where no MRN: 1 item; the latest receipt rate where neither: "
+                                "1 item; 1 item without a cost"), a.cost_basis
+        assert all(c is None or c.as_tuple().exponent >= -6 for c in a.costs.values())
+        assert moves._cost6(Decimal(1) / Decimal(3)) == Decimal("0.333333")
+        rows = by_store(a)
+        vb = rows[VB].bhd
+        assert vb["opening"] == Decimal("12.0") and vb["received"] == Decimal("1.2") + Decimal("10.5") + Decimal("12.25")
+        shop = rows[SHOP]
+        assert shop.uncosted["opening"] == 5 and shop.uncosted_units == 5 and shop.bhd["opening"] == 30
+        assert a.main.uncosted["opening"] == 15 and a.main.uncosted["not_received_yet"] == 2
+        assert a.main.bhd["opening"] == Decimal("771.3") and a.main.bhd["check"] == 0
+        assert "never in BHD" in "\n".join(moves.screen_lines(a))
+    with moves_world(MoveWorld(snapshot_fails=True)):                         # no snapshot: the costs that can be had
+        a = moves.audit("7d")
+        assert any("snapshot" in u for u in a.unread) and a.unmapped == []
+        assert a.costs[M_BANK] == 3 and a.costs[M_CABLE] == Decimal("0.5"), "no codes: the receipt rates stand in"
+        assert all(r.balanced for r in a.stores + [a.main])
+        assert "Not read this time: the stock balance snapshot" in "\n".join(moves.screen_lines(a))
+
+
+@test("moves to check: every kind with its fields; BHD per kind; largest first, then date and number; no cost last")
+def _():
+    with moves_world():
+        a = moves.audit("2026-03")
+        got = [(e["kind"], e["issues"][0] if e["issues"] else e["receipt"], e["bhd"]) for e in a.exceptions]
+        assert got == [("orphan", "STRV:T-26-03-19", Decimal("12.250")), ("not_received", "SIO:T-26-03-15", Decimal("12.000")),
+                       ("qty_differs", "SIO:T-26-03-20", Decimal("3.000")), ("twins", "SIO:T-26-03-16", Decimal("2.000")),
+                       ("orphan", "STRV:T-26-03-18", Decimal("1.750")), ("elsewhere", "SIO:T-26-03-12", Decimal("1.200")),
+                       ("damage_not_booked", "SIO:T-26-03-9", Decimal("0.800"))], got
+        ex = {e["kind"] + "|" + (e["issues"][0] if e["issues"] else e["receipt"]): e for e in a.exceptions}
+        keys = {"kind", "issues", "receipt", "from", "to", "received_at", "date", "deadline", "lag", "lines", "units",
+                "bhd", "uncosted", "basis", "possible"}
+        assert all(keys <= set(e) for e in a.exceptions)
+        twins = ex["twins|SIO:T-26-03-16"]
+        assert (twins["missing"], twins["of"], twins["open"], twins["issues"]) == (1, 2, 1, ["SIO:T-26-03-16", "SIO:T-26-03-17"])
+        assert (twins["units"], twins["from"], twins["to"], twins["deadline"]) == (5, MAIN, VA, mday(3, 16))
+        qty = ex["qty_differs|SIO:T-26-03-20"]
+        assert qty["lines"] == [{"item": M_BANK, "units": 1, "issued": 6, "received": 5}] and qty["units"] == 1
+        assert (qty["receipt"], qty["received_at"], qty["lag"]) == ("STRV:T-26-03-17", SHOP, 0)
+        assert qty["basis"] == ["number", "date"]
+        away = ex["elsewhere|SIO:T-26-03-12"]
+        assert (away["from"], away["to"], away["received_at"], away["receipt"]) == (VA, MAIN, VB, "STRV:T-26-03-11")
+        assert away["lines"] == [{"item": M_CABLE, "units": 3}] and away["deadline"] == mday(3, 14)
+        gone = ex["not_received|SIO:T-26-03-15"]
+        assert (gone["deadline"], gone["receipt"], gone["possible"], gone["to"]) == (mday(3, 15), None, [], VC)
+        damage = ex["damage_not_booked|SIO:T-26-03-9"]
+        assert (damage["to"], damage["deadline"], damage["date"]) == (DMG, mday(3, 12), mday(3, 5))
+        lone = ex["orphan|STRV:T-26-03-19"]
+        assert (lone["issues"], lone["from"], lone["received_at"], lone["before_ledger"]) == ([], None, VB, False)
+        assert all(e["date"] >= mday(3, 1) for e in a.exceptions)
+        assert moves.exceptions(a) == a.exceptions, "one builder: the same list every time"
+        week = moves.audit("7d")
+        assert [e["kind"] for e in week.exceptions].count("damage_not_booked") == 0, "dated 5 Mar: outside the week"
+        assert len(week.exceptions) == 6
+        mine = moves.audit("2026-03", rep="van b").exceptions
+        assert [(e["kind"], e["receipt"]) for e in mine] == [("orphan", "STRV:T-26-03-19"),
+                                                            ("elsewhere", "STRV:T-26-03-11")], mine
+    # an item with no cost: its exceptions carry no BHD and come last, by date and number
+    with moves_world(MoveWorld(rows=mv_rows(charger_value=0), sheet=[])):
+        a = moves.audit("2026-03")
+        assert [e["receipt"] for e in a.exceptions[-2:]] == ["STRV:T-26-03-18", "STRV:T-26-03-19"]
+        assert all(e["bhd"] is None and e["uncosted"] for e in a.exceptions[-2:])
+        lines = moves.to_check_lines(a)
+        assert "2 with no cost on file, last" in lines[0] and any(ln.strip().startswith("no cost") for ln in lines)
+        assert [x["kind"] for x in moves.exceptions_by_kind(a.exceptions)] == [
+            "not_received", "damage_not_booked", "twins", "qty_differs", "elsewhere", "orphan"]
+        orphans = moves.exceptions_by_kind(a.exceptions)[-1]
+        assert orphans == {"kind": "orphan", "count": 2, "units": 8, "bhd": None, "uncosted": 8}, orphans
+
+
+@test("moves: the figures per store are printed only from the database or a file that passed parity; the transfers still are")
+def _():
+    for world, ok in ((MoveWorld(), True), (MoveWorld(source="database"), True), (MoveWorld(parity_ok=False), False)):
+        with moves_world(world):
+            a = moves.audit("7d")
+            assert a.source["per_store_ok"] is ok and (a.source["why"] is None) == ok
+            text = "\n".join(moves._guarded(ln) for ln in moves.screen_lines(a))
+            assert ("VANS AND OUTLETS" in text) == ok and ("MAIN STORE" in text) == ok
+            assert ("Per-store figures not printed: the stock ledger file Stock_ledger_test.xlsx was read as it is and "
+                    "not compared with the portal" in " ".join(text.split())) == (not ok)
+            assert "TRANSFERS" in text and "TO CHECK" in text and a.exceptions, "the transfers and the items still stand"
+            facts = a.facts()
+            assert (facts["stores"] == []) == (not ok) and (facts["main"] is None) == (not ok)
+            assert moves.brief_facts(7)["per_store_ok"] is ok
+            if ok:
+                assert moves.period_table(mday(3, 11), D_MV)["per_store_ok"] is True
+            else:
+                exc = raises(moves.MovesInput, lambda: moves.period_table(mday(3, 11), D_MV))
+                assert "not compared with the portal" in str(exc)
+                raises(moves.MovesInput, lambda: moves.store_balances(D_MV))
+                raises(moves.MovesInput, lambda: moves.books_only(D_MV))
+                assert "not compared" in moves.brief_facts(7)["note"]
+    with moves_world() as w:                                                  # 'file' asked: not compared, held back
+        assert moves.audit("7d", prefer="file").source["per_store_ok"] is False and w.asked[-1] == "file"
+
+
+@test("moves screen: the heading names the window, the ledger's day and its source; the closing lines; careful words; no long digit runs")
+def _():
+    with moves_world():
+        for window, rep in (("7d", None), ("mtd", None), (None, None), ("7d", "van a"), ("2026-03", "causeway")):
+            a = moves.audit(window, rep=rep)
+            lines = [moves._guarded(ln) for ln in moves.screen_lines(a)]
+            text = "\n".join(lines)
+            assert lines[0].startswith("MOVES  ") and "the stock ledger runs to Tue 17 Mar" in " ".join(text.split())
+            assert "it agrees with what the portal holds" in text
+            assert lines[-2:] == [moves.PORTAL_LINE, moves.NOT_MEASURED], lines[-2:]
+            assert lines[-2] == ("The portal's Stock Movement page still pairs by voucher number: ignore its Pending and "
+                                 "van Gap figures.")
+            assert lines[-1] == "Not measured: the time from a Stock Request to its issue (Focus exports no request vouchers)."
+            assert "never by the voucher number" in " ".join(text.split())
+            assert all(fmt.careful(ln) == ln for ln in lines)
+            blob = text + json.dumps(sales_json(a.facts()))
+            assert not NINE.search(blob) and not LONG.search(blob), window
+            assert all(len(ln) <= 150 for ln in lines), max(len(ln) for ln in lines)
+            if rep:
+                assert "ITS TRANSFERS" in text and "VANS AND OUTLETS" not in text and "THE STORE" in text
+        week = "\n".join(moves.screen_lines(moves.audit("7d")))
+        assert "TO CHECK  6 items, BHD 32.200 at landed cost, largest first" in week
+        assert "Sent to it" in week and "SET ASIDE  1 voucher" in week
+        assert "From the main store to the vans and outlets 51 units (BHD 58.550 at landed cost); back to it from them " \
+               "7; to the damage store 3." in " ".join(week.split())
+        mine = "\n".join(moves.screen_lines(moves.audit("7d", rep="van a")))
+        assert "SIO:T-26-03-10" in mine and "received" in mine and "TRANSFERS  " in mine
+
+
+def sales_json(facts: dict) -> dict:
+    """The facts as the saved copy holds them (sales.save_screen's own JSON rule)."""
+    from scripts.ops import sales
+    return sales._jsonable(facts)
+
+
+@test("moves API: audit(None) holds every exception of the whole ledger; sha is the file's or db:<day>; exception_items by date")
+def _():
+    with moves_world() as w:
+        whole, week = moves.audit(None), moves.audit("7d")
+        assert whole.window["first"] == mday(2, 1) and whole.window["last"] == D_MV
+        assert len(whole.exceptions) == 7 and len(week.exceptions) == 6
+        assert {e["issues"][0] for e in whole.exceptions if e["issues"]} >= {"SIO:T-26-03-9"}
+        assert whole.sha == SHA_MV == week.sha
+        assert moves.exception_items("2026-03-01", "2026-03-17") == {M_CABLE, M_CHARGER, M_BANK}
+        assert moves.exception_items(D_MV, D_MV) == {M_CHARGER} and moves.exception_items("2026-02-01", "2026-02-28") == set()
+        assert whole.exception_items(mday(3, 5), mday(3, 5)) == {M_CABLE}
+        assert isinstance(whole.result, pairing.Result) and whole.rows is w.rows and isinstance(whole.rules, pairing.Rules)
+        assert whole.store_rules.kind(VA) == "van" and whole.store(VB.upper()).store == VB
+    with moves_world(MoveWorld(source="database")):
+        a = moves.audit(None)
+        assert a.sha == "db:2026-03-17" and a.source["source"] == "database" and a.source["per_store_ok"] is True
+
+
+@test("moves memo: one pairing and one set of cost reads per ledger; the same audit for the same window and store; a new ledger anew")
+def _():
+    calls = {"pair": 0, "costs": 0}
+    real_pair, real_costs = pairing.pair, stock.cost_reads
+
+    def counted_pair(*a, **kw):
+        calls["pair"] += 1
+        return real_pair(*a, **kw)
+
+    def counted_costs():
+        calls["costs"] += 1
+        return real_costs()
+    pairing.pair, stock.cost_reads = counted_pair, counted_costs
+    try:
+        with moves_world() as w:
+            first = moves.audit("7d")
+            assert moves.audit("7d") is first and moves.audit("7d", prefer="auto") is first
+            assert calls == {"pair": 1, "costs": 1}
+            month = moves.audit("mtd")
+            assert month is not first and calls == {"pair": 1, "costs": 1}, "another window, the same ledger"
+            assert moves.audit(None) is moves.audit(None) and moves.brief_facts(7)["to_check_count"] == 6
+            assert calls == {"pair": 1, "costs": 1}
+            w.sha = "sha256:" + "cd" * 32                                     # another export of the folder
+            again = moves.audit("7d")
+            assert again is not first and calls == {"pair": 2, "costs": 2} and again.sha == w.sha
+            moves.forget()
+            moves.audit("7d")
+            assert calls == {"pair": 3, "costs": 3}
+    finally:
+        pairing.pair, stock.cost_reads = real_pair, real_costs
+
+
+@test("moves period_table: the Movements sheet's table (every key, BHD exact, checks nought), the exceptions by kind; balances and books")
+def _():
+    with moves_world():
+        t = moves.period_table("2026-03-11", "2026-03-17")
+        assert (t["first"], t["last"]) == (mday(3, 11), D_MV) and t["basis"].startswith("at landed cost (MRN")
+        assert [s["store"] for s in t["stores"]] == [VA, VB, VC, SHOP] and [s["kind"] for s in t["stores"]] == [
+            "van", "van", "van", "outlet"]
+        for s in t["stores"] + [t["main"], t["totals"]]:
+            assert set(s["units"]) == set(s["bhd"]) == set(moves.MOVE_KEYS)
+            plus = sum((s["bhd"][k] for k in moves.CHECK_PLUS), Decimal(0))
+            minus = sum((s["bhd"][k] for k in moves.CHECK_MINUS), Decimal(0)) + s["bhd"]["closing"]
+            assert plus - minus == 0, s["store"]                              # the sheet's own check, exactly nought
+        assert t["totals"]["units"]["closing"] == 64 + 42 + 0 + 23 and t["totals"]["uncosted_units"] == 5
+        assert t["counts"]["counts"]["received"] == 5 and t["counts"]["issues"]["vouchers"] == 12
+        assert [(x["kind"], x["count"], x["units"], x["bhd"]) for x in t["exceptions"]] == [
+            ("not_received", 1, 4, Decimal("12.000")), ("twins", 1, 5, Decimal("2.000")),
+            ("qty_differs", 1, 1, Decimal("3.000")), ("elsewhere", 1, 3, Decimal("1.200")),
+            ("orphan", 2, 8, Decimal("14.000"))], t["exceptions"]
+        held = moves.store_balances(D_MV)
+        assert held == {SHOP: {M_BANK: 16, M_CABLE: 2, M_NOCOST: 5}, VA: {M_CABLE: 57, M_CHARGER: 7},
+                        VB: {M_CABLE: 29, M_CHARGER: 13}}, held
+        assert moves.store_balances(D_MV, kinds=("main",)) == {MAIN: {M_BANK: 80, M_CABLE: 392, M_CHARGER: 183,
+                                                                      M_NOCOST: 13}}
+        assert moves.store_balances("2026-03-10")[VA] == {M_CABLE: 41, M_CHARGER: 10}
+        books = moves.books_only(D_MV, held_days=30)
+        assert set(books) == {VA, VB, SHOP} and books[VA] == {M_CABLE: 57, M_CHARGER: 7}
+        early = moves.books_only("2026-02-03", held_days=1)
+        assert early == {VA: {M_CABLE: 50, M_CHARGER: 10}, VB: {M_CABLE: 30}}, early
+        for bad in ("2026-03-18", "2026-01-31"):
+            raises(moves.MovesInput, lambda b=bad: moves.store_balances(b))
+
+
+@test("moves brief_facts: the brief's MOVEMENTS figures of the last 7 days, as plain values")
+def _():
+    with moves_world():
+        f = moves.brief_facts(7)
+        assert f == {"first": "2026-03-11", "last": "2026-03-17", "ledger_to": "2026-03-17", "to_stores_units": 51,
+                     "to_stores_bhd": "58.550", "back_units": 7, "damage_units": 3, "not_received_units": 9,
+                     "not_received_bhd": "14.000", "to_check_count": 6, "to_check_bhd": "32.200", "per_store_ok": True,
+                     "note": None}, f
+        assert json.loads(json.dumps(f)) == f
+        assert moves.brief_facts(3)["first"] == "2026-03-15"
+        raises(ValueError, lambda: moves.brief_facts(0))
+
+
+@test("moves: the order position is re-exported once scripts.ops.position is there, and only then")
+def _():
+    import importlib.util
+    there = importlib.util.find_spec("scripts.ops.position") is not None
+    assert hasattr(moves, "position_beside_main") == there
+    if there:
+        from scripts.ops import position
+        assert moves.position_beside_main is position.position_beside_main
+
+
+@test("moves command: the screen through the entry point, its copies by window and store, a word refused in one sentence")
+def _():
+    from contextlib import redirect_stdout
+    with moves_world():
+        root = paths.data_root()
+        for argv, stem in ((["moves"], "moves"), (["moves", "mtd", "rep:van", "a"], "moves-mtd-rep-van-a"),
+                           (["moves", "2026-03-01..2026-03-17"], "moves-2026-03-01-to-2026-03-17")):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = cli.main(argv + ["--data-root", str(root)])
+            out = buf.getvalue()
+            assert code == 0 and out.startswith("MOVES  "), (argv, out[:200])
+            folder = root / "exports" / "ops" / "2026-03-17"
+            assert (folder / f"{stem}.txt").is_file() and (folder / f"{stem}.json").is_file(), sorted(folder.iterdir())
+            facts = json.loads((folder / f"{stem}.json").read_text(encoding="utf-8"))
+            assert facts["command"] == "moves" and facts["data_date"] == "2026-03-17"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cli.main(["moves", "again", "--data-root", str(root)])
+        assert code == 1 and buf.getvalue().strip() == moves.REFUSED_WORDS
+        res = moves.run(MvArgs())
+        assert res["ok"] and res["flags"]["to_check"] == 6 and res["flags"]["per_store_ok"] is True
+        assert res["flags"]["unbalanced"] == 0 and res["data_date"] == "2026-03-17"
+        assert moves.run(MvArgs("rep:Nobody"))["exit"] == 1
+        help_text = io.StringIO()
+        with redirect_stdout(help_text):
+            try:
+                cli.main(["moves", "--help"])
+            except SystemExit:
+                pass
+        assert "--golden-build" not in help_text.getvalue() and "--ledger" in help_text.getvalue()
+
+
+@test("moves golden build (hidden): every exception and the first 50 clean pairs by hash, the review text with both legs; never from a worktree without a root")
+def _():
+    import hashlib
+    rows = [mrow(mday(1, 2), "MRN:T-26-01-1", ledger.SUPPLIER_RECEIPT, MAIN, M_BANK, q_in=100, value=300)]
+    for n in range(1, 61):                                                    # sixty clean January transfers
+        day = mday(1, 2) + timedelta(days=n // 3)
+        rows += sio(n, day, MAIN, VB, [(M_BANK, 1)]) + strv(n, day, VB, [(M_BANK, 1)])
+    with moves_world(MoveWorld(rows=rows + mv_rows())) as w:
+        root = paths.data_root()
+        folder = root / "business_data" / "Focus ERP 2026-03-17"
+        folder.mkdir(parents=True)
+        paths.write_text(paths.golden_dir() / "pairing.json", json.dumps({"folder": folder.name}))
+        real_load = ledger.load
+        loaded: list[str] = []
+
+        def load(path=None, use_cache=True):
+            loaded.append(Path(path).name)
+            return w.ledger_()
+        ledger.load = load
+        try:
+            res = moves.run(MvArgs(golden=True))
+            assert loaded == [folder.name] and w.asked == [], "the folder golden/pairing.json names, read as it is"
+            pairs = moves.audit(None, prefer=str(folder)).result.pairs
+        finally:
+            ledger.load = real_load
+        assert res["ok"], res
+        doc = json.loads((paths.golden_dir() / "pairs_accessories.json").read_text(encoding="utf-8"))
+        assert doc["folder"] == folder.name and doc["sha256"] == SHA_MV and doc["data_date"] == "2026-03-17"
+        assert len(doc["exceptions"]) == 7 and doc["exceptions_by_kind"]["orphan"] == 2
+        assert res["flags"]["exceptions"] == doc["exceptions_by_kind"] and res["flags"]["clean"] == moves.GOLDEN_CLEAN
+        clean = doc["clean"]
+        chosen = sorted(hashlib.sha256(p.issue.no.encode("utf-8")).hexdigest() for p in pairs
+                        if p.step == "A" and not p.ambiguous)[:moves.GOLDEN_CLEAN]
+        assert len(clean) == moves.GOLDEN_CLEAN and [c["sha256_of_issue"] for c in clean] == ["sha256:" + h for h in chosen]
+        assert all(c["issue_leg"]["lines"] and c["receipt_leg"]["lines"] for c in clean)
+        assert all(c["issue_legs"] for c in doc["exceptions"] if c["kind"] != "orphan")
+        review = (root / "exports" / "ops" / "2026-03-17" / "moves-golden-review.txt").read_text(encoding="utf-8")
+        assert review.startswith("GOLDEN REVIEW  ") and "SAMPLE  20 cases" in review and "CASES  " in review
+        legs = sum(len(c["issue_legs"]) for c in doc["exceptions"])
+        assert review.count("      issue    ") == legs + len(clean), (review.count("      issue    "), legs)
+        assert review.count("      receipt  ") == len(doc["exceptions"]) + len(clean)
+        assert not NINE.search(review) and not LONG.search(review)
+        assert res["text"].startswith("GOLDEN  " + folder.name)
+        # never from a code worktree that names no data root: the list belongs to the project folder
+        saved = (paths.is_worktree, paths._override)
+        try:
+            paths.is_worktree, paths._override = (lambda: True), None
+            refused = moves.golden_build(MvArgs(golden=True))
+        finally:
+            paths.is_worktree, paths._override = saved
+        assert refused["exit"] == 1 and "code worktree" in refused["text"]
+
+
+@test("moves: a transfer that also holds SIM is paired on its accessory lines, as the portal pairs them (never set aside)")
+def _():
+    mixed = (sio(24, mday(3, 16), VA, VB, [(M_CABLE, 2), (M_SIM, 3)])
+             + strv(20, mday(3, 17), VB, [(M_CABLE, 2), (M_SIM, 3)]))
+    with moves_world(MoveWorld(rows=mv_rows(extra=mixed))):
+        a = moves.audit("7d")
+        got = a.result.by_issue["SIO:T-26-03-24"]
+        assert isinstance(got, pairing.Pair) and got.receipt.no == "STRV:T-26-03-20" and got.outcome == "received"
+        assert got.issue.lines == ((M_CABLE, Decimal(2)),) and got.receipt.lines == ((M_CABLE, Decimal(2)),)
+        assert not [x for x in a.result.aside if x.voucher in ("SIO:T-26-03-24", "STRV:T-26-03-20")]
+        assert a.base.bucket["SIO:T-26-03-24"] == "to_other"
+        rows = by_store(a)
+        assert rows[VA].units["to_other"] == 3 + 2 and rows[VB].units["received"] == 16 + 2
+        assert all(r.balanced for r in a.stores + [a.main])
+        # the portal's way, by hand: the accessory lines of the rows, every voucher kept (scope None)
+        cut = [r for r in a.rows if r["item"] in a.base.scope]
+        portal = pairing.pair(pairing.legs_from_rows(cut, stores=moves.store_rules(), scope=None), data_date=a.d)
+        assert portal.counts() == a.result.counts() and portal.by_issue.keys() == a.result.by_issue.keys()
+
+
+@test("moves: identical issues from two senders are one item that names both; each sender's view holds it")
+def _():
+    twins = (sio(25, mday(3, 12), MAIN, VA, [(M_BANK, 2)]) + sio(26, mday(3, 12), VB, VA, [(M_BANK, 2)])
+             + strv(21, mday(3, 17), VA, [(M_BANK, 2)]))
+    with moves_world(MoveWorld(rows=mv_rows(extra=twins))):
+        found = [e for e in moves.audit("7d").exceptions if e["kind"] == "twins" and "SIO:T-26-03-25" in e["issues"]]
+        assert len(found) == 1 and found[0]["from"] == f"{MAIN} and {VB}" and found[0]["to"] == VA, found
+        assert (found[0]["missing"], found[0]["of"]) == (1, 2)
+        for rep in ("van b", "van a"):
+            assert any("SIO:T-26-03-25" in e["issues"] for e in moves.audit("7d", rep=rep).exceptions), rep
+        assert not any("SIO:T-26-03-25" in e["issues"] for e in moves.audit("7d", rep="van c").exceptions)
+        assert all(r.balanced for r in moves.audit("7d").stores)
+
+
+@test("moves: an accessory the bridge cannot place stays in every figure and is listed apart (UNMAPPED)")
+def _():
+    odd = [mrow(mday(2, 2), "ExcStk:T-26-02-2", ledger.COUNT_OVER, MAIN, M_ODD, q_in=3)]
+    with moves_world(MoveWorld(rows=mv_rows(extra=odd))):
+        a = moves.audit("7d")
+        assert a.unmapped == [M_ODD] and M_ODD in a.base.scope and a.costs[M_ODD] is None
+        assert a.main.units["opening"] == 717 + 3 and a.main.balanced
+        text = " ".join("\n".join(moves.screen_lines(a)).split())
+        assert "UNMAPPED 1 accessory the item bridge cannot place" in text and M_ODD in text
 
 
 def main() -> int:
