@@ -6,13 +6,20 @@ customers and lines) is worked out from the list lengths in Layout; every figure
 Data sheet, evaluated by book.py so the file carries its values.
 
 Words: the Highlights, the Points to note and three notes beside the tables are commentary (Commentary):
-until the approval step of a later phase writes them they read DRAFT. Every other sentence is generated
+until the approval step writes them (build.py's final step) they read DRAFT. Every other sentence is generated
 here from the data and the rule in force (the footnotes, the Notes sheet's basis of preparation).
+
+The month-end pack: build(..., extra=[(name, tab colour, builder)]) puts more sheets between Daily and Data, in
+that order. Each builder(ws) draws its sheet once the eight are written and returns what it found (book.controls
+["extra"][name]); a builder that raises, or a sheet whose formulas cannot be worked out, leaves that sheet one line,
+"<what>: not worked out this time (<why>)." (not_worked), and the rest of the workbook as it is. A rule on an extra
+sheet may name a conditional style of style.DXF_EXTRA: the book registers it, so the eight sheets' file never
+grows a style of its own. The Notes sheet's "About this workbook" then says which sheets are the pack's.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 
 from scripts.ops.workbook import categories as cats
@@ -28,6 +35,9 @@ WEEK_BLOCKS = (("1 to 7", 1, 7), ("8 to 14", 8, 14), ("15 to 21", 15, 21), ("22 
                ("29 to month end", 29, 31))
 DAYS = 31                                    # rows of the Daily sheet (one of two months in a row has 31 days)
 DRAFT = "DRAFT"
+CORE_SHEETS = ("Dashboard", "Salesmen", "Categories", "Products", "Customers", "Daily", "Data", "Notes")
+NOT_WORKED = "not worked out this time"      # a pack sheet whose part could not be worked out reads this, and why
+MONTH_NAMES_ROW = 57                         # the Notes sheet's month names (the named cells CurShort ... below it)
 
 
 def footer(sheet: str | None) -> str:
@@ -167,10 +177,13 @@ class Facts:
     prepared_on: date
     prepared_by: str = ""
     outlets: tuple = ("Causeway", "YQ Roadshow")
+    bulk_invoice_bhd: float | None = None   # the pack: an invoice of this net value or more is a bulk order
+    bulk_default: bool = False              # ... the approved plan's default (config report.bulk_invoice_bhd not set)
 
 
-def build(model: mdl.Model, facts: Facts, commentary: Commentary | None = None) -> Book:
+def build(model: mdl.Model, facts: Facts, commentary: Commentary | None = None, extra=()) -> Book:
     commentary = commentary or Commentary()
+    extra = _checked_extra(extra)
     lay = Layout(model)
     book = Book()
     p = model.period
@@ -185,6 +198,7 @@ def build(model: mdl.Model, facts: Facts, commentary: Commentary | None = None) 
     prod = book.sheet("Products")
     cust = book.sheet("Customers")
     daily = book.sheet("Daily")
+    added = [(book.sheet(name, tab_color=tab), builder) for name, tab, builder in extra]     # between Daily and Data
     data = book.sheet("Data", tab_color=style.MUTED)
     notes = book.sheet("Notes", tab_color=style.MUTED)
 
@@ -196,10 +210,76 @@ def build(model: mdl.Model, facts: Facts, commentary: Commentary | None = None) 
     _customers(cust, model, lay, commentary)
     _daily(daily, model)
     _data(data, model, lay)
-    book.controls = _notes(notes, model, lay, facts)
+    book.controls = _notes(notes, model, lay, facts, pack=[ws.name for ws, _b in added])
     book.commentary = {"Dashboard": [f"B{15 + i}" for i in range(5)] + [f"K{15 + i}" for i in range(5)] + ["K54", "B73"],
                        "Customers": [f"B{ex(lay.cust_total) + 2}"]}
+    if added:
+        book.controls["extra"] = {ws.name: _extra(book, ws, builder) for ws, builder in added}
+        _register_styles(book, [ws for ws, _b in added])
     return book
+
+
+# ── the month-end pack's sheets ────────────────────────────────────────────────────────────────
+
+def _checked_extra(extra) -> list[tuple]:
+    """[(name, tab colour, builder)]: a name Excel takes, not one of the eight, each once."""
+    out = [tuple(x) for x in (extra or ())]
+    seen = {n.casefold() for n in CORE_SHEETS}
+    for x in out:
+        if len(x) != 3 or not callable(x[2]):
+            raise ValueError("an extra sheet is (name, tab colour, builder), the builder called with the sheet")
+        name = x[0]
+        if (not isinstance(name, str) or not name.strip() or len(name) > 31 or any(ch in name for ch in "[]:*?/\\")
+                or name != name.strip()):
+            raise ValueError(f"{name!r} is not a sheet name Excel takes")
+        if name.casefold() in seen:
+            raise ValueError(f"the workbook already has a sheet named {name!r}")
+        seen.add(name.casefold())
+    return out
+
+
+def clear_sheet(ws: Sheet) -> None:
+    """Everything a builder wrote on ws goes (its name and tab colour stay)."""
+    fresh = Sheet(ws.name, tab_color=ws.tab_color)
+    for f in fields(Sheet):
+        setattr(ws, f.name, getattr(fresh, f.name))
+
+
+def not_worked(ws: Sheet, what: str, why) -> dict:
+    """The sheet of a part that could not be worked out: one line, '<what>: not worked out this time (<why>).'"""
+    clear_sheet(ws)
+    why = " ".join(str(why or "").split()).rstrip(".")
+    state = f"{NOT_WORKED} ({why})" if why else NOT_WORKED
+    ws.col(0, 0, 100)
+    ws.text(0, 0, f"{what}: {state}.", "sheet_sub")
+    _page(ws, landscape=True, fit=(1, 0))
+    return {"state": state, "error": why or NOT_WORKED}
+
+
+def _extra(book: Book, ws: Sheet, builder) -> object:
+    """builder(ws), then its formulas worked out; any failure leaves the sheet its one line."""
+    try:
+        found = builder(ws)
+        for (r, c), cell in sorted(ws.cells.items()):
+            if cell.kind == "f":
+                book.value(ws.name, r, c)
+        return found
+    except Exception as exc:  # noqa: BLE001  (one part never stops the workbook: its sheet says so)
+        for cache in ("_dense", "_frontier"):       # the book keeps a column's values once read: forget this sheet's
+            held = getattr(book, cache, None)
+            if isinstance(held, dict):
+                for key in [k for k in held if k[0] == ws.name]:
+                    del held[key]
+        return not_worked(ws, f"The {ws.name} sheet", type(exc).__name__)
+
+
+def _register_styles(book: Book, sheets: list[Sheet]) -> None:
+    """The conditional styles of style.DXF_EXTRA the extra sheets' rules name, registered in the order first named."""
+    for ws in sheets:
+        for _ref, options in ws.conds:
+            name = options.get("format")
+            if name in style.DXF_EXTRA and name not in book.dxf_styles:
+                book.dxf(name)
 
 
 def _names(book: Book, lay: Layout) -> None:
@@ -972,7 +1052,33 @@ def _data(ws: Sheet, model: mdl.Model, lay: Layout) -> None:
 
 # ── Notes ──────────────────────────────────────────────────────────────────────────────────────
 
-def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> dict:
+def about_lines(model: mdl.Model, facts: Facts, pack=()) -> list[str]:
+    """The Notes sheet's "About this workbook", four lines (the Sep file's rows): the pack's say which sheets are
+    its own and, with the bulk threshold its comment lines' facts use, what a bulk order is."""
+    p = model.period
+    pack = list(pack)
+    first = "Figures on every sheet are worked out from the Data sheet with formulas."
+    if pack:
+        names = _join(pack)
+        first = (f"Figures on the sales sheets (Dashboard to Daily) are worked out from the Data sheet with formulas. "
+                 f"The {names} sheet{'s hold' if len(pack) != 1 else ' holds'} totals worked out when the file was "
+                 "built, from the sources each one names; they do not change if the Data sheet changes.")
+    said = "The commentary and footnotes on the Dashboard are written text. They do not change if the data changes."
+    if pack and facts.bulk_invoice_bhd is not None:
+        x = float(facts.bulk_invoice_bhd)
+        amount = f"{x:,.0f}" if x.is_integer() else f"{x:,.3f}"
+        said += (f" In the facts the comment lines are written from, a bulk order is an invoice of BHD {amount} or "
+                 "more, excluding VAT" + (": the approved plan's default, as config report.bulk_invoice_bhd is not "
+                                          "set." if facts.bulk_default else " (config report.bulk_invoice_bhd)."))
+    return [first,
+            "The salesman, product and customer lists are fixed for this report. Products and Customers can be "
+            "sorted or filtered; the Dashboard picks its top ten by rank, so it is not affected.",
+            said,
+            f"This file covers {p.prev_long if p.prev_start.year != p.start.year else mdl.MONTHS[p.prev_start.month - 1]}"
+            f" and {p.long} only. Next month's report will be a new file."]
+
+
+def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts, pack=()) -> dict:
     p = model.period
     ws.default_row = 18
     ws.col(0, 0, 2.28515625)
@@ -1011,12 +1117,7 @@ def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> dict:
         ws.row(r, para_height(text))
     about_head = 13 + len(basis) + 1
     ws.text(about_head, 1, "About this workbook", "subhead")
-    about = ("Figures on every sheet are worked out from the Data sheet with formulas.",
-             "The salesman, product and customer lists are fixed for this report. Products and Customers can be "
-             "sorted or filtered; the Dashboard picks its top ten by rank, so it is not affected.",
-             "The commentary and footnotes on the Dashboard are written text. They do not change if the data changes.",
-             f"This file covers {p.prev_long if p.prev_start.year != p.start.year else mdl.MONTHS[p.prev_start.month - 1]}"
-             f" and {p.long} only. Next month's report will be a new file.")
+    about = about_lines(model, facts, pack)
     for k, text in enumerate(about):
         r = about_head + 1 + k
         ws.merge(r, 1, r, 7, f"{k + 1}.  {text}", "para")
@@ -1037,8 +1138,10 @@ def _notes(ws: Sheet, model: mdl.Model, lay: Layout, facts: Facts) -> dict:
         ws.merge(r, 2, r, 7, meaning, "td")
     # the control totals start where the Sep file has them when the basis has its eleven paragraphs
     ctl = max(defs_head + 1 + len(defs) + 1, 40)
+    if ctl + 15 >= MONTH_NAMES_ROW:            # their last row (ctl + 15) must stay above the month names
+        raise ValueError("the Notes sheet's control totals would run into its month names: fewer lines above them")
     ws.text(ctl, 1, "Control totals", "subhead")
-    ws.text(57, 1, "Month names used in the headings", "subhead")
+    ws.text(MONTH_NAMES_ROW, 1, "Month names used in the headings", "subhead")
     months = ("CHOOSE(MONTH(CurMonth),\"Jan\",\"Feb\",\"Mar\",\"Apr\",\"May\",\"Jun\",\"Jul\",\"Aug\",\"Sep\",\"Oct\","
               "\"Nov\",\"Dec\")")
     full = ("\"January\",\"February\",\"March\",\"April\",\"May\",\"June\",\"July\",\"August\",\"September\","

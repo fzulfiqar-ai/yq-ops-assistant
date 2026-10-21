@@ -1,42 +1,69 @@
 """python -m scripts.ops report month [YYYY-MM] [--prepared-on YYYY-MM-DD] [--prepared-by NAME] [--compare FILE]
+       python -m scripts.ops report month YYYY-MM --commentary FILE --token T        (the final step)
 
-    month [YYYY-MM]   the monthly management sales report (the eight sheets of the Sep 2026 workbook) for a
-                      whole month; with no month, the last whole month before the data date
+    month [YYYY-MM]   the monthly management sales report for a whole month (with no month, the last whole month
+                      before the data date): the month-end pack, the eight sheets of the Sep 2026 workbook and five
+                      more between Daily and Data, totals only: Stock (the main store at the end of the month's last
+                      day), Movements (the vans and outlets over the month), Reconciliation, KPI and KPI log
     week [YYYY-MM-DD] the weekly report (/yq-week) for the week ending that Saturday, by default the last full
                       week; a day that is not a Saturday is refused. It is handed to scripts.ops.workbook.week
                       once that module exists; until then the command says it arrives in a later phase
     --prepared-on     the date on "Prepared ..." (default: today in Bahrain)
     --prepared-by     the name on "Prepared by ..." (default: config report.prepared_by, else none)
-    --compare FILE    after the build, compare the new workbook with FILE, sheet by sheet (the golden test:
-                      every sheet but Notes; the commentary cells, still DRAFT, set aside)
+    --compare FILE    after the build, compare the new workbook with FILE, sheet by sheet (the golden test: the
+                      reference's sheets but Notes, in the reference's order, each sheet with its own counts of
+                      rules and charts; the sheets the pack adds are named; the commentary cells set aside)
+    --commentary FILE --token T
+                      the final step, run as the FINAL line of `python -m scripts.ops check` prints it. The month's
+                      figures are worked out again: when a load has changed them, or the token is not this file's,
+                      nothing is built (one sentence). Otherwise the final workbook with the approved lines, named
+                      without DRAFT (the DRAFT stays), and its record report-month-<M>.final.json
 
 It runs only on a WHOLE month, the plan's rule (scripts.ai_head.pack.monthly_ready): a load finished on or
 after the first day of the next month, and Focus data reaching within two days of the month's last day.
 The time of the last load is the one state.json records; with none on record, the newest successful
 upload the database records stands in.
 
+THE COMMENT LINES. Five Highlights, five Points to note and three notes beside the tables read DRAFT in the DRAFT
+build, which writes beside its record the month's facts (report-month-<M>.facts.json, every build) and, only when
+there is none yet, the commentary template (report-month-<M>.commentary.json): scripts.ops.workbook.facts. The lines
+are written in the template with placeholders only, never a typed figure; `python -m scripts.ops check <file>` checks
+them and prints the FINAL line. In the facts, a bulk order is an invoice of config report.bulk_invoice_bhd or more
+(BHD, excluding VAT), else of the approved plan's default (BULK_DEFAULT_BHD); the Notes sheet says which. The facts'
+digest covers the month's sales figures only (no stock, movement, reconciliation or KPI figure, which move with
+every load and every logged line), so the final step is refused only when the sales figures moved.
+
+THE PACK'S SHEETS are read through their own modules, each imported only when its sheet is drawn:
+scripts.ops.workbook.sheets_extra (Stock, Movements), scripts.ops.recon_blocks with
+scripts.ops.workbook.sheets_recon (Reconciliation), the KPI package (scripts.ops.kpi, scripts.ops.kpi_log,
+scripts.ops.workbook.sheets_kpi; the KPI sheet's Status cells coloured by status). A module not there yet, or a part
+that fails, leaves its sheet one line ("... not worked out this time (...)") and the workbook stands; the screen
+names it, and the build record keeps each sheet's state and the ageing part KPI 1c looks for.
+
 Reads, all read-only: the month's and the month before's lines from v_sales (division not SIM and not
 Devices, every line, the zero-value ones too); the same months' totals in a separate statement (the
 Notes sheet's control against the database); the Upcoming cards' categories (shop_upcoming_items, through
 the read-only session: an item code the category rule does not know takes its card's category through the
-config name table). Writes: the workbook under exports/reports/monthly/ (never over an existing file:
-a second build of a month gets the next free name) and a small record of the build under
-exports/ops/<data date>/. Nothing else.
-
-The ten comment lines (five Highlights, five Points to note) and three notes beside the tables are DRAFT
-placeholders until the approval step of a later phase writes them; the file name says DRAFT meanwhile.
+config name table); the pack's parts, each through its module. Writes: the workbook under
+exports/reports/monthly/ (never over an existing file: a second build of a month gets the next free name) and,
+under exports/ops/<data date>/, the record of the build (report-month-<M>.json for a DRAFT; for a final
+report-month-<M>.final.json, never written over: another final takes .final-2.json), the facts and the template.
+Nothing else.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import json
 import re
-from datetime import date, timedelta
+from collections.abc import Mapping
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
-from scripts.ops import config, fmt, paths, status
-from scripts.ops.workbook import book as bk, formula as fx, golden, model as mdl, sheets_core
+from scripts.ops import config, fmt, paths, status, textcheck
+from scripts.ops.workbook import book as bk, facts as fa, formula as fx, golden, model as mdl, sheets_core, style
 
 COMMAND = "report"
 REPORT_NAME = "YQ Bahrain - Mobile Accessories Sales Report - {label}"
@@ -61,9 +88,35 @@ ANCHOR_SQL = ("SELECT (SELECT MAX(sale_date) FROM v_sales)::text AS focus_to, "
               "(SELECT MAX(loaded_at) FROM v_agent_data_trust WHERE source = 'focus_upload')::text AS uploaded_at")
 UPCOMING_SQL = "SELECT model_code, category FROM shop_upcoming_items WHERE category IS NOT NULL"
 
+# The month-end pack: each part read through its own module, imported only when its sheet is drawn.
+EXTRA_MODULE = "scripts.ops.workbook.sheets_extra"          # Stock and Movements (the weekly workbook's too)
+RECON_MODULE = "scripts.ops.recon_blocks"                   # the month's reconciliations ...
+RECON_SHEET_MODULE = "scripts.ops.workbook.sheets_recon"    # ... and their sheet
+KPI_MODULE, KPI_LOG_MODULE = "scripts.ops.kpi", "scripts.ops.kpi_log"
+KPI_SHEET_MODULE = "scripts.ops.workbook.sheets_kpi"
+# the five sheets in their order, and what each one's line names when its part cannot be worked out
+PACK = (("Stock", "The stock figures"), ("Movements", "The movements of the vans and outlets"),
+        ("Reconciliation", "The reconciliations"), ("KPI", "The KPI scorecard"), ("KPI log", "The KPI log"))
+NOT_BUILT = "not built yet"
+# the KPI sheet's Status cells by status (scripts.ops.kpi.STATUSES), in the conditional styles of style.DXF_EXTRA
+STATUS_STYLES = (("MET", "cf_green"), ("NOT MET", "cf_red"), ("NOT EVIDENCED", "cf_amber"), ("NOTHING DUE", "cf_grey"))
+BULK_DEFAULT_BHD = 200        # the approved plan's bulk order: an invoice of this net value or more (BHD, ex-VAT)
+TOKEN = re.compile(f"[{textcheck.TOKEN_LETTERS}]{{{textcheck.TOKEN_LEN}}}")
+DRAFT_WORDS = (
+    "DRAFT: the ten comment lines (five Highlights, five Points to note) and three notes beside the tables "
+    "are placeholders until they are approved. They are written in the commentary file below with placeholders "
+    "only and checked with python -m scripts.ops check; the FINAL line it prints builds the final workbook, and "
+    "this DRAFT stays.")
+FINAL_WORDS = ("FINAL: the ten comment lines (five Highlights, five Points to note) and three notes beside the tables "
+               "are the approved ones, from {name}; the DRAFT stays as it was.")
+
 
 class ReportInput(ValueError):
     """The words typed cannot be read: said in one sentence, before anything is read."""
+
+
+class PartMissing(LookupError):
+    """A part of the month-end pack whose module is not there yet: a later release brings it."""
 
 
 def add_arguments(parser) -> None:
@@ -71,6 +124,8 @@ def add_arguments(parser) -> None:
     parser.add_argument("--prepared-on", help="the date on the report (YYYY-MM-DD; default today)")
     parser.add_argument("--prepared-by", help="the name on the report (default: config report.prepared_by)")
     parser.add_argument("--compare", help="a reference workbook to compare the new one with (the golden test)")
+    parser.add_argument("--commentary", help="the final step: the commentary file the FINAL line of check names")
+    parser.add_argument("--token", help="the final step: the token the FINAL line of check printed")
 
 
 def parse_spec(words: list[str]) -> tuple[str, str | date | None]:
@@ -103,6 +158,24 @@ def parse_spec(words: list[str]) -> tuple[str, str | date | None]:
     return "month", rest[0] if rest else None
 
 
+def final_args(args, kind: str, month: str | None) -> tuple[Path, str] | None:
+    """(the commentary file, the token) of the final step, or None for a DRAFT build; ReportInput in one sentence."""
+    given, token = getattr(args, "commentary", None), getattr(args, "token", None)
+    if not given and not token:
+        return None
+    if kind != "month":
+        raise ReportInput("--commentary and --token belong to the monthly report's final step, the FINAL line that "
+                          "python -m scripts.ops check prints")
+    if not given or not token or month is None:
+        raise ReportInput("the final step takes its month, --commentary and --token together: run the FINAL line that "
+                          "python -m scripts.ops check printed, as it is")
+    token = str(token).strip()
+    if not TOKEN.fullmatch(token):
+        raise ReportInput("a token is the twelve letters at the end of the FINAL line that python -m scripts.ops "
+                          "check printed")
+    return Path(str(given).strip()).expanduser(), token
+
+
 def default_month(data_to: date) -> str:
     """The last whole month before the data date's own month."""
     first = data_to.replace(day=1)
@@ -112,8 +185,19 @@ def default_month(data_to: date) -> str:
 
 # ── reads (all read-only) ──────────────────────────────────────────────────────────────────────
 
+def part_module(name: str):
+    """The module of a part of the pack, imported now; PartMissing when it is not there yet."""
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == name or name.startswith(exc.name + ".")):
+            raise PartMissing(name) from None
+        raise
+
+
 class Source:
-    """Where the report's data comes from: production, read-only. Tests hand build_month a stand-in."""
+    """Where the report's data comes from: production, read-only. Tests hand build_month a stand-in. The pack's five
+    parts are read through their own modules (each imported only now; PartMissing when one is not there yet)."""
 
     def anchors(self) -> dict:
         rows = db.rpc(ANCHOR_SQL)
@@ -130,6 +214,26 @@ class Source:
         with db.session() as s:
             return {str(r["model_code"]).strip(): str(r["category"]).strip() for r in s.q(UPCOMING_SQL)
                     if r.get("model_code") and r.get("category")}
+
+    # -- the month-end pack's parts
+    def stock_totals(self, as_of: date) -> dict:
+        """The Stock sheet's totals: the main store at the end of `as_of` (the month's last day), costs today's."""
+        return part_module(EXTRA_MODULE).stock_totals(as_of=as_of)
+
+    def moves_totals(self, first: date, last: date) -> dict:
+        """The Movements sheet's totals: the vans and the outlets from `first` to `last`."""
+        return part_module(EXTRA_MODULE).moves_totals(first=first, last=last)
+
+    def recon_blocks(self, month: str) -> dict:
+        return part_module(RECON_MODULE).month_blocks(month)
+
+    def kpi_card(self, month: str) -> dict:
+        """The KPI scorecard of the month (it writes nothing)."""
+        return part_module(KPI_MODULE).scorecard(month)
+
+    def kpi_lines(self, month: str) -> list:
+        """The KPI log's lines whose event day falls in the month."""
+        return part_module(KPI_LOG_MODULE).month_lines(month)
 
 
 def ready(month: str, data_to: date | None, loaded_at) -> dict:
@@ -154,6 +258,45 @@ def last_load_time(state: dict, anchors: dict):
     return max(found, key=lambda x: (fmt.as_date(x[0]) or date.min, x[0]))
 
 
+def setting(key: str, default):
+    """(config.get(key), False), or (the approved plan's default, True) while config.json does not hold the key. A key
+    it holds with a wrong value stops the command in one sentence (config.ConfigMissing), as every key does."""
+    try:
+        return config.get(key), False
+    except config.ConfigMissing:
+        try:
+            held = config.load()
+        except config.ConfigMissing:
+            held = {}
+        if key in held:
+            raise
+        return default, True
+
+
+def bulk_threshold() -> tuple[float, bool]:
+    """(the bulk order's least net value in BHD, whether the approved plan's default stands in)."""
+    value, default = setting("report.bulk_invoice_bhd", BULK_DEFAULT_BHD)
+    return float(value), default
+
+
+def due_date(month: str) -> date:
+    """The day the month's final report is due, as KPI 7 counts it: working day 'kpi.monthly_due_working_day' (the
+    plan's 5) of the month after, the working days 'kpi.working_days' (the plan's Sunday to Thursday)."""
+    kpi = part_module(KPI_MODULE)
+    nth, _default = setting("kpi.monthly_due_working_day", kpi.MONTHLY_DUE_DEFAULT)
+    names, _default = setting("kpi.working_days", list(kpi.WORKING_DAYS_DEFAULT))
+    working = {config.weekday(w) for w in names}
+    if not working or int(nth) < 1:
+        raise ValueError("no working day to count the due day by")
+    d, seen = mdl.Period.month(month).end + timedelta(days=1), 0
+    while True:
+        if d.weekday() in working:
+            seen += 1
+            if seen == int(nth):
+                return d
+        d += timedelta(days=1)
+
+
 # ── the build ──────────────────────────────────────────────────────────────────────────────────
 
 def target_path(period: mdl.Period, draft: bool):
@@ -165,6 +308,17 @@ def target_path(period: mdl.Period, draft: bool):
         if not bk.exists(p):
             return p
     raise FileExistsError(f"ninety-nine copies of {base} already exist in {folder}")
+
+
+def final_record_path(data_to: date, month: str) -> Path:
+    """report-month-<M>.final.json under exports/ops/<data date>/, or the next free .final-2.json ...: the record of a
+    final build is never written over (a later DRAFT writes report-month-<M>.json)."""
+    folder = paths.exports_dir(data_to)
+    for k in range(1, 100):
+        p = folder / f"report-month-{month}.final{'' if k == 1 else f'-{k}'}.json"
+        if not p.exists():
+            return p
+    raise FileExistsError(f"ninety-nine final records of {month} already exist in {folder}")
 
 
 def control_values(book) -> dict:
@@ -183,9 +337,9 @@ def control_values(book) -> dict:
             "narration": at(where["narration"]) if where.get("narration") else None}
 
 
-def build_month(month: str, source: Source, *, prepared_on: date, prepared_by: str = "",
-                category_names: dict | None = None, commentary: sheets_core.Commentary | None = None):
-    """-> (book, model, facts). Reads through `source`; writes nothing."""
+def read_month(month: str, source: Source, category_names: dict | None = None) -> tuple[mdl.Model, dict]:
+    """(the model, the v_sales month totals) of the month and the month before; nothing is written. ReportInput when
+    neither month has an accessory sale."""
     period = mdl.Period.month(month)
     rows = source.lines(period.prev_start, period.end)
     totals = source.totals(period.prev_start, period.start, period.end)
@@ -200,16 +354,150 @@ def build_month(month: str, source: Source, *, prepared_on: date, prepared_by: s
                           "to report.")
     if upcoming_note:
         model.warnings.append(upcoming_note)
-    facts = sheets_core.Facts(totals=totals, prepared_on=prepared_on, prepared_by=prepared_by)
-    book = sheets_core.build(model, facts, commentary)
+    return model, totals
+
+
+def _evaluated(book, model: mdl.Model):
     errors = book.evaluate()
     if errors:
-        model.warnings.append(f"{len(errors)} formula(s) came out as an error value: " + "; ".join(errors[:3]))
-    return book, model, facts
+        note = f"{len(errors)} formula(s) came out as an error value: " + "; ".join(errors[:3])
+        if note not in model.warnings:
+            model.warnings.append(note)
+    return book
 
+
+def build_month(month: str, source: Source, *, prepared_on: date, prepared_by: str = "",
+                category_names: dict | None = None, commentary: sheets_core.Commentary | None = None, read=None):
+    """-> (book, model, facts): the eight sheets of the Sep 2026 workbook. Reads through `source` (or takes
+    `read`, read_month's answer); writes nothing."""
+    model, totals = read or read_month(month, source, category_names)
+    facts = sheets_core.Facts(totals=totals, prepared_on=prepared_on, prepared_by=prepared_by)
+    return _evaluated(sheets_core.build(model, facts, commentary), model), model, facts
+
+
+def build_month_pack(month: str, source: Source, *, prepared_on: date, prepared_by: str = "",
+                     category_names: dict | None = None, commentary: sheets_core.Commentary | None = None,
+                     bulk_invoice_bhd: float | None = None, bulk_default: bool = False, read=None):
+    """-> (book, model, facts): the month-end pack, the eight sheets with the five of PACK between Daily and Data
+    (each sheet's state and what it found in book.controls["extra"]). Reads through `source` (or takes `read`,
+    read_month's answer); writes nothing."""
+    model, totals = read or read_month(month, source, category_names)
+    facts = sheets_core.Facts(totals=totals, prepared_on=prepared_on, prepared_by=prepared_by,
+                              bulk_invoice_bhd=bulk_invoice_bhd, bulk_default=bulk_default)
+    book = sheets_core.build(model, facts, commentary, extra=pack_sheets(source, model.period))
+    return _evaluated(book, model), model, facts
+
+
+# ── the pack's five sheets ─────────────────────────────────────────────────────────────────────
+
+def guarded(what: str, draw):
+    """A builder for sheets_core.build: draw(ws), or the sheet's one line when its module is not there yet or its
+    part fails (said by the error's type alone: another module's words may name a voucher or a shop)."""
+    def builder(ws):
+        try:
+            return draw(ws)
+        except PartMissing:
+            why = NOT_BUILT
+        except Exception as exc:  # noqa: BLE001  (one part never stops the workbook: its sheet says so)
+            why = type(exc).__name__
+        return sheets_core.not_worked(ws, what, why)
+    return builder
+
+
+def part_state(totals) -> str:
+    """'ok', or 'not worked out this time (why)' for totals that carry an error of their own (the part's sheet
+    then reads its own one line)."""
+    err = totals.get("error") if isinstance(totals, Mapping) else None
+    if not err:
+        return "ok"
+    why = " ".join(str(err).split()).rstrip(".")
+    return why if why.startswith(sheets_core.NOT_WORKED) else f"{sheets_core.NOT_WORKED} ({why})"
+
+
+def ageing_part(totals) -> dict | None:
+    """The build record's ageing part, which KPI 1c looks for: the Stock sheet's ageing at the month's end, with the
+    items the ageing review has the sales team push (Not moving and Slow); None when the Stock sheet has none."""
+    if not isinstance(totals, Mapping) or totals.get("error") or not isinstance(totals.get("ageing"), Mapping):
+        return None
+    as_of = fmt.as_date(totals.get("as_of"))
+    part = {"sheet": "Stock", "as_of": as_of.isoformat() if as_of else None}
+    review = totals.get("review")
+    counts = review.get("counts") if isinstance(review, Mapping) else None
+    if isinstance(counts, Mapping):
+        from scripts.ops.stock_review import NOT_MOVING, SLOW
+        part["items_with_action"] = sum(int(fmt.dec(counts.get(s))) for s in (NOT_MOVING, SLOW))
+    return part
+
+
+def status_rules(ws, where: Mapping) -> None:
+    """The KPI sheet's Status cells coloured by status: the scorecard's rows and the 90-day plan's (the rows and the
+    status column sheets_kpi.kpi_sheet returns)."""
+    col = where["status_col"]
+    spans = [(where["first_row"], where["last_row"])] + ([tuple(where["plan"])] if where.get("plan") else [])
+    ref = " ".join(f"{bk.a1(r1, col)}:{bk.a1(r2, col)}" for r1, r2 in spans)
+    for status_, style_name in STATUS_STYLES:
+        ws.cond(ref, {"type": "cell", "criteria": "equal to", "value": f'"{status_}"', "format": style_name})
+
+
+def pack_sheets(source: Source, period: mdl.Period) -> list[tuple]:
+    """[(name, tab colour, builder)] for sheets_core.build: the five sheets of PACK, each drawn from its own part."""
+    month = period.key
+
+    def stock(ws):
+        totals = source.stock_totals(period.end)
+        refs = part_module(EXTRA_MODULE).stock_sheet(ws, totals, f"Stock at the end of {period.long}")
+        return {"state": part_state(totals), "refs": refs, "ageing": ageing_part(totals)}
+
+    def movements(ws):
+        totals = source.moves_totals(period.start, period.end)
+        refs = part_module(EXTRA_MODULE).movements_sheet(ws, totals, f"Stock movements, {period.long}")
+        return {"state": part_state(totals), "refs": refs}
+
+    def reconciliation(ws):
+        blocks = source.recon_blocks(month)
+        refs = part_module(RECON_SHEET_MODULE).recon_sheet(ws, blocks)
+        return {"state": part_state(blocks), "refs": refs}
+
+    def kpi(ws):
+        card = source.kpi_card(month)
+        where = part_module(KPI_SHEET_MODULE).kpi_sheet(ws, card)
+        status_rules(ws, where)
+        return {"state": "ok", "refs": where}
+
+    def kpi_log(ws):
+        lines = source.kpi_lines(month)
+        where = part_module(KPI_SHEET_MODULE).kpi_log_sheet(ws, lines, title=f"KPI log - {period.long}")
+        return {"state": "ok", "refs": where}
+
+    draws = {"Stock": stock, "Movements": movements, "Reconciliation": reconciliation, "KPI": kpi, "KPI log": kpi_log}
+    return [(name, style.PALE, guarded(what, draws[name])) for name, what in PACK]
+
+
+def pack_parts(book) -> dict:
+    """The build record's parts: the ageing part (KPI 1c) and each pack sheet's state, by name."""
+    extra = book.controls.get("extra") or {}
+    stock = extra.get("Stock") if isinstance(extra.get("Stock"), Mapping) else {}
+    return {"ageing": stock.get("ageing"),
+            "sheets": {name: (r.get("state") or "ok") if isinstance(r, Mapping) else "ok" for name, r in extra.items()}}
+
+
+def _and(words: list[str]) -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def pack_line(parts: dict) -> str:
+    sheets = parts.get("sheets") or {}
+    done = [name for name, state in sheets.items() if state == "ok"]
+    rest = [f"{name}: {state}" for name, state in sheets.items() if state != "ok"]
+    return ("Month-end sheets: " + (f"{_and(done)} worked out" if done else "none worked out")
+            + ("; " + "; ".join(rest) if rest else "") + ".")
+
+
+# ── the screen and the files ───────────────────────────────────────────────────────────────────
 
 def report_text(model: mdl.Model, book, path, checks: dict, data_to: date | None, loaded: str,
-                compare_lines: list[str] | None) -> tuple[list[str], bool]:
+                compare_lines: list[str] | None, said: list[str] | None = None,
+                notes: list[str] | None = None) -> tuple[list[str], bool]:
     p = model.period
     lines: list[str] = []
     ok = True
@@ -239,9 +527,8 @@ def report_text(model: mdl.Model, book, path, checks: dict, data_to: date | None
                                                                if other else "")
                  + (f"; {len(model.not_counted)} item(s) with no value in the day book left out of the counts"
                     if model.not_counted else "") + ".")
-    lines.append("DRAFT: the ten comment lines (five Highlights, five Points to note) and three notes beside the tables "
-                 "are placeholders; the approval step arrives in a later phase.")
-    for w in model.warnings:
+    lines.extend(said if said is not None else [DRAFT_WORDS])
+    for w in list(model.warnings) + list(notes or []):
         lines.append(f"Note: {w}.")
     if compare_lines is not None:
         lines.append("")
@@ -250,11 +537,52 @@ def report_text(model: mdl.Model, book, path, checks: dict, data_to: date | None
     return lines, ok
 
 
+def _now() -> str:
+    return datetime.now(status.BAHRAIN).isoformat(timespec="seconds")
+
+
+def _save(book, path) -> None:
+    if not paths.allowed_output(path):                # the workbook goes under exports/ of the data root, nowhere else
+        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
+    book.save(path)
+
+
+def _compare(args, path, book, flags: dict) -> list[str] | None:
+    """The golden compare after the save; a reference that cannot be read is said, never a stop (the record of the
+    build is written after it)."""
+    if not getattr(args, "compare", None):
+        return None
+    try:
+        res = golden.compare(path, args.compare, set_aside=book.commentary)     # the reference's sheets but Notes
+    except Exception as exc:  # noqa: BLE001  (a file that is no workbook, or none at that path)
+        flags["golden_ok"] = False
+        return [f"the reference workbook could not be read ({type(exc).__name__})"]
+    flags["golden_ok"] = res.ok
+    return golden.summary(res)
+
+
+def _bulk_notes(bulk: float, bulk_default: bool) -> list[str]:
+    if not bulk_default:
+        return []
+    amount = f"{bulk:,.0f}" if float(bulk).is_integer() else f"{bulk:,.3f}"
+    return [f"a bulk order, in the facts, is an invoice of BHD {amount} or more excluding VAT: the approved plan's "
+            "default, as config report.bulk_invoice_bhd is not set"]
+
+
+def _write_record(target: Path, record: dict, out: dict) -> Path | None:
+    try:
+        return paths.write_text(target, json.dumps(record, indent=1, default=str) + "\n")
+    except OSError as exc:
+        out["warnings"].append(f"the build record was not written ({type(exc).__name__})")
+        return None
+
+
 def run(args, source: Source | None = None) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
     try:
         kind, month = parse_spec(getattr(args, "spec", None))
         prepared_on = date.fromisoformat(args.prepared_on) if getattr(args, "prepared_on", None) else status.today_bahrain()
+        final = final_args(args, kind, month)
     except (ReportInput, ValueError) as exc:
         return dict(out, ok=False, text=str(exc), exit=1)
     if kind == "week":
@@ -282,35 +610,124 @@ def run(args, source: Source | None = None) -> dict:
                 f" and the data reaches {fmt.day_long(gate['focus_as_of'])}.")
         return dict(out, ok=False, text=text, flags={"ready": False, "month": month}, exit=2)
     prepared_by = args.prepared_by if getattr(args, "prepared_by", None) is not None else config.get("report.prepared_by")
-    names = config.get("report.category_names")
+    bulk, bulk_default = bulk_threshold()
+    ctx = {"month": month, "data_to": data_to, "prepared_on": prepared_on, "prepared_by": prepared_by,
+           "names": config.get("report.category_names"), "bulk": bulk, "bulk_default": bulk_default,
+           "loaded": f"loaded {str(loaded_at)[:16].replace('T', ' ')}" if loaded_at else "no load time on record"}
+    if final is not None:
+        return _final(out, args, source, final, **ctx)
+    return _draft(out, args, source, **ctx)
+
+
+def _draft(out: dict, args, source: Source, *, month, data_to, prepared_on, prepared_by, names, bulk, bulk_default,
+           loaded) -> dict:
+    """The DRAFT build: the pack with DRAFT comment lines, the facts and (once) the template, the record."""
     try:
-        book, model, _facts = build_month(month, source, prepared_on=prepared_on, prepared_by=prepared_by,
-                                          category_names=names)
+        book, model, facts = build_month_pack(month, source, prepared_on=prepared_on, prepared_by=prepared_by,
+                                              category_names=names, bulk_invoice_bhd=bulk, bulk_default=bulk_default)
     except ReportInput as exc:
         return dict(out, ok=False, text=str(exc), flags={"ready": True, "month": month}, exit=2)
     path = target_path(model.period, draft=True)
-    if not paths.allowed_output(path):                # the workbook goes under exports/ of the data root, nowhere else
-        raise PermissionError(f"scripts/ops writes only under business_data/ and exports/: {path}")
-    book.save(path)
+    _save(book, path)
+    built_at = _now()
     checks = control_values(book)
-    compare_lines = None
     flags = {"ready": True, "month": month, "draft": True, "lines": len(model.lines)}
-    if getattr(args, "compare", None):
-        res = golden.compare(path, args.compare, sheets=[s.name for s in book.sheets if s.name != "Notes"],
-                             set_aside=book.commentary)
-        compare_lines = golden.summary(res)
-        flags["golden_ok"] = res.ok
-    loaded = f"loaded {str(loaded_at)[:16].replace('T', ' ')}" if loaded_at else "no load time on record"
-    text_lines, ok = report_text(model, book, path, checks, data_to, loaded, compare_lines)
-    record = {"month": month, "data_date": data_to.isoformat(), "file": str(path), "built_on": prepared_on.isoformat(),
-              "draft": True, "checks_ok": ok, "lines": len(model.lines),
-              "golden_ok": flags.get("golden_ok")}
+    compare_lines = _compare(args, path, book, flags)
+    doc = files = None
     try:
-        rec = paths.write_text(paths.exports_dir(data_to) / f"report-month-{month}.json",
-                               json.dumps(record, indent=1) + "\n")
-        out["files"].append(str(rec))
-    except OSError as exc:
-        out["warnings"].append(f"the build record was not written ({type(exc).__name__})")
-    out["files"].insert(0, str(path))
+        doc = fa.month_facts(book, model, facts, bulk_invoice_bhd=bulk, data_date=data_to)
+        files = fa.write_files(paths.exports_dir(data_to), month, doc)
+    except (OSError, ValueError) as exc:
+        out["warnings"].append(f"the month's facts were not written ({type(exc).__name__}): the comment lines cannot "
+                               "be drafted this time")
+    parts = pack_parts(book)
+    said = [pack_line(parts), DRAFT_WORDS]
+    if files:
+        said.append(f"Facts: {files['facts']}")
+        said.append(f"Commentary: {files['commentary']} ("
+                    + ("the template, written now" if files["template_written"]
+                       else "kept as it was: a draft is never written over") + ")")
+    text_lines, ok = report_text(model, book, path, checks, data_to, loaded, compare_lines, said,
+                                 _bulk_notes(bulk, bulk_default))
+    record = {"kind": "month", "month": month, "data_date": data_to.isoformat(), "file": str(path),
+              "built_on": prepared_on.isoformat(), "built_at": built_at, "draft": True, "final": False,
+              "checks_ok": ok, "lines": len(model.lines), "golden_ok": flags.get("golden_ok"),
+              "facts_digest": doc["digest"] if files else None, "bulk_invoice_bhd": bulk,
+              "bulk_default": bulk_default, "parts": parts}
+    rec = _write_record(paths.exports_dir(data_to) / f"report-month-{month}.json", record, out)
+    out["files"] = [str(path)] + ([str(rec)] if rec else []) + (
+        [str(files["facts"]), str(files["commentary"])] if files else [])
+    flags.update(parts=parts["sheets"], facts=str(files["facts"]) if files else None,
+                 commentary=str(files["commentary"]) if files else None,
+                 template_written=files["template_written"] if files else None)
     return dict(out, ok=ok, text="\n".join(text_lines), flags=flags, exit=0 if ok else 2)
 
+
+def _final(out: dict, args, source: Source, final: tuple[Path, str], *, month, data_to, prepared_on, prepared_by,
+           names, bulk, bulk_default, loaded) -> dict:
+    """The final step: the month's facts worked out again, the commentary checked against them through its token,
+    then the pack with the approved lines, saved without DRAFT in its name, and its own record."""
+    given, token = final
+    flags = {"ready": True, "month": month, "draft": False, "final": True}
+    try:
+        doc, raw = textcheck.read_commentary(given)
+    except textcheck.CommentaryUnreadable as exc:
+        return dict(out, ok=False, text=str(exc), flags=flags, exit=1)
+    if doc.get("month") != month:
+        return dict(out, ok=False, flags=flags, exit=1,
+                    text=f"The commentary file is for {str(doc.get('month'))[:10]}, not {month}: run the FINAL line that "
+                         "python -m scripts.ops check printed, as it is.")
+    approved_at = _now()
+    try:
+        read = read_month(month, source, names)
+        core, model, core_facts = build_month(month, source, prepared_on=prepared_on, prepared_by=prepared_by,
+                                              read=read)
+    except ReportInput as exc:
+        return dict(out, ok=False, text=str(exc), flags=flags, exit=2)
+    try:
+        fresh = fa.month_facts(core, model, core_facts, bulk_invoice_bhd=bulk, data_date=data_to)
+    except ValueError as exc:
+        return dict(out, ok=False, flags=dict(flags, refused="facts"), exit=2,
+                    text=f"The final workbook is not built, as the month's facts could not be worked out again "
+                         f"({type(exc).__name__}).")
+    if doc.get("facts_digest") != fresh["digest"]:
+        return dict(out, ok=False, flags=dict(flags, refused="figures"), exit=2,
+                    text="The final workbook is not built, as a load changed the month's figures: run /yq-month again.")
+    if textcheck.token_for(raw, fresh["digest"]) != token:
+        return dict(out, ok=False, flags=dict(flags, refused="token"), exit=2,
+                    text="The final workbook is not built, as the token is not this commentary file's: run "
+                         "python -m scripts.ops check on it again and use the FINAL line it prints.")
+    try:
+        rendered = textcheck.render_slots(doc, fresh)
+    except textcheck.CommentaryRefused:
+        return dict(out, ok=False, flags=dict(flags, refused="lines"), exit=2,
+                    text="The final workbook is not built, as the comment lines no longer pass the check: run "
+                         "python -m scripts.ops check on the file again.")
+    commentary = sheets_core.Commentary(**textcheck.commentary_fields(rendered))
+    try:
+        due = due_date(month).isoformat()
+    except Exception as exc:  # noqa: BLE001  (the record says when it was due; KPI 7 works it out on its own too)
+        due = None
+        out["warnings"].append(f"the due day was not worked out ({type(exc).__name__})")
+    book, model, _facts = build_month_pack(month, source, prepared_on=prepared_on, prepared_by=prepared_by,
+                                           commentary=commentary, bulk_invoice_bhd=bulk, bulk_default=bulk_default,
+                                           read=read)
+    path = target_path(model.period, draft=False)
+    _save(book, path)
+    built_at = _now()
+    checks = control_values(book)
+    compare_lines = _compare(args, path, book, flags)
+    parts = pack_parts(book)
+    said = [pack_line(parts), FINAL_WORDS.format(name=Path(given).name)]
+    text_lines, ok = report_text(model, book, path, checks, data_to, loaded, compare_lines, said,
+                                 _bulk_notes(bulk, bulk_default))
+    record = {"kind": "month", "month": month, "data_date": data_to.isoformat(), "file": str(path),
+              "built_on": prepared_on.isoformat(), "built_at": built_at, "draft": False, "final": True,
+              "approved_at": approved_at, "facts_digest": fresh["digest"], "commentary": str(given),
+              "commentary_sha": "sha256:" + hashlib.sha256(raw).hexdigest(), "due_date": due, "checks_ok": ok,
+              "lines": len(model.lines), "golden_ok": flags.get("golden_ok"), "bulk_invoice_bhd": bulk,
+              "bulk_default": bulk_default, "parts": parts}
+    rec = _write_record(final_record_path(data_to, month), record, out)
+    out["files"] = [str(path)] + ([str(rec)] if rec else [])
+    flags.update(lines=len(model.lines), parts=parts["sheets"], due_date=due)
+    return dict(out, ok=ok, text="\n".join(text_lines), flags=flags, exit=0 if ok else 2)

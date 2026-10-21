@@ -199,6 +199,30 @@ class FakeSource(build.Source):
             raise RuntimeError("no session")
         return dict(UPCOMING)
 
+    # the month-end pack's five parts (build.run builds the pack): not read in this suite, so each of their sheets
+    # reads its one line; tests/test_ops_month_pack.py draws them
+    def _part(self, name: str):
+        self.calls.append(name)
+        raise LookupError("not read in this suite")
+
+    def stock_totals(self, as_of):
+        return self._part("stock")
+
+    def moves_totals(self, first, last):
+        return self._part("moves")
+
+    def recon_blocks(self, month):
+        return self._part("recon")
+
+    def kpi_card(self, month):
+        return self._part("kpi")
+
+    def kpi_lines(self, month):
+        return self._part("kpi_log")
+
+
+PACK_READS = ["kpi", "kpi_log", "moves", "recon", "stock"]
+
 
 def built(rows=None, names=NAMES, prepared_by: str = ""):
     return build.build_month(MONTH, FakeSource(rows), prepared_on=date(2026, 4, 8), prepared_by=prepared_by,
@@ -891,7 +915,8 @@ def _():
         assert text.startswith("Monthly sales report, March 2026, against February 2026")
         assert "Checks: the Data sheet equals v_sales in both months" in text and "DRAFT: the ten comment lines" in text
         assert not LONG_RUN.search(text)
-        assert sorted(set(src.calls)) == ["anchors", "lines", "totals", "upcoming"]
+        assert sorted(set(src.calls) - set(PACK_READS)) == ["anchors", "lines", "totals", "upcoming"]
+        assert sorted(set(src.calls) & set(PACK_READS)) == PACK_READS        # the pack's parts, through the source
         again = build.run(Args(), source=FakeSource())
         assert Path(again["files"][0]).name.endswith("DRAFT (2).xlsx")      # the first file is kept
 

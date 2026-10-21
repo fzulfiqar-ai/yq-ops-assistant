@@ -4,12 +4,15 @@ Read straight from the two files' XML (no spreadsheet program, no third-party re
 
   * per sheet, every cell that holds a value or a formula: the formula text exactly, the kind of value
     (text, number, logical, error) and the value itself (numbers to 1e-9, relative to their size);
-  * the sheet names and their order; each sheet's print area, autofilter and frozen pane;
-  * the counts of the rules and pictures: cell-value rules, data bars, colour scales, sparklines and
-    charts, as the XML carries them.
+  * the sheet names and their order: the reference's sheets must appear in the built file in the same
+    order, and the sheets the built file adds (the month-end pack's Stock, Movements, Reconciliation, KPI
+    and KPI log, between Daily and Data) are named; each sheet's print area, autofilter and frozen pane;
+  * per compared sheet, the counts of its rules and pictures: cell-value rules, data bars, colour scales,
+    sparklines and charts, as the XML carries them (an added sheet's own rules never meet the reference's).
 
-Cells can be set aside by reference (the commentary, which the approval step writes later) and the
-report says how many were. Nothing is changed in either file.
+The sheets compared are the ones named, else the reference's sheets but Notes (the build's own settings and
+controls, which carry the day it was prepared). Cells can be set aside by reference (the commentary, which
+the approval step writes) and the report says how many were. Nothing is changed in either file.
 """
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ M = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 X14 = "{http://schemas.microsoft.com/office/spreadsheetml/2009/9/main}"
 TOLERANCE = 1e-9
+SKIPPED = ("Notes",)                   # left out of a comparison unless it is named
+COUNTS = ("cell_rules", "data_bars", "color_scales", "sparklines", "charts")
 
 
 @dataclass
@@ -155,10 +160,12 @@ class SheetResult:
     missing: list = field(default_factory=list)       # in the reference only
     extra: list = field(default_factory=list)         # in the built file only
     parts: list = field(default_factory=list)         # print area / filter / pane differences
+    counts: dict = field(default_factory=dict)        # what -> (built, reference): this sheet's own rules and pictures
 
     @property
     def ok(self) -> bool:
-        return not (self.formula or self.kind or self.value or self.missing or self.extra or self.parts)
+        return (not (self.formula or self.kind or self.value or self.missing or self.extra or self.parts)
+                and all(a == b for a, b in self.counts.values()))
 
 
 @dataclass
@@ -166,20 +173,32 @@ class Result:
     sheets: list[SheetResult]
     names_ok: bool
     names_note: str
-    counts: dict                                      # what -> (built, reference)
+    counts: dict                                      # what -> (built, reference), added up over the compared sheets
+    added: list = field(default_factory=list)         # the built file's sheets the reference does not have
 
     @property
     def ok(self) -> bool:
         return self.names_ok and all(s.ok for s in self.sheets) and all(a == b for a, b in self.counts.values())
 
 
+def sheet_order(built: list[str], reference: list[str]) -> tuple[bool, str, list[str]]:
+    """(the reference's sheets appear in the built file in the same order, the words for it, the sheets added)."""
+    added = [n for n in built if n not in reference]
+    if built == reference:
+        return True, "same sheets in the same order", added
+    rest = iter(built)
+    if all(name in rest for name in reference):           # an ordered subsequence: each found after the one before
+        return True, (f"the reference's {len(reference)} sheets in the same order, and {len(added)} added: "
+                      + ", ".join(added)), added
+    return False, f"built {built} against {reference}", added
+
+
 def compare(built, reference, sheets: list[str] | None = None, set_aside: dict | None = None) -> Result:
     a, b = read_book(built), read_book(reference)
     set_aside = {k: set(v) for k, v in (set_aside or {}).items()}
     names_a, names_b = [s.name for s in a.sheets], [s.name for s in b.sheets]
-    names_ok = names_a == names_b
-    note = "same sheets in the same order" if names_ok else f"built {names_a} against {names_b}"
-    wanted = sheets or names_b
+    names_ok, note, added = sheet_order(names_a, names_b)
+    wanted = list(sheets) if sheets is not None else [n for n in names_b if n not in SKIPPED]
     results: list[SheetResult] = []
     for name in wanted:
         sa, sb = a.sheet(name), b.sheet(name)
@@ -188,6 +207,7 @@ def compare(built, reference, sheets: list[str] | None = None, set_aside: dict |
             res.parts.append("sheet missing in the " + ("built file" if sa is None else "reference"))
             results.append(res)
             continue
+        res.counts = {what: (getattr(sa, what), getattr(sb, what)) for what in COUNTS}
         aside = set_aside.get(name, set())
         for ref in sorted(set(sa.cells) | set(sb.cells), key=_ref_key):
             if ref in aside:
@@ -218,10 +238,9 @@ def compare(built, reference, sheets: list[str] | None = None, set_aside: dict |
         if pa != pb:
             res.parts.append(f"pane {pa or 'none'} against {pb or 'none'}")
         results.append(res)
-    counts = {}
-    for what in ("cell_rules", "data_bars", "color_scales", "sparklines", "charts"):
-        counts[what] = (sum(getattr(s, what) for s in a.sheets), sum(getattr(s, what) for s in b.sheets))
-    return Result(results, names_ok, note, counts)
+    counts = {what: (sum(s.counts[what][0] for s in results if s.counts),
+                     sum(s.counts[what][1] for s in results if s.counts)) for what in COUNTS}
+    return Result(results, names_ok, note, counts, added)
 
 
 def _ref_key(ref: str):
@@ -250,6 +269,8 @@ def summary(res: Result, examples: int = 3) -> list[str]:
             if items:
                 refs = ", ".join((x[0] if isinstance(x, tuple) else x) for x in items[:examples])
                 bits.append(f"{len(items)} {label} ({refs}{', ...' if len(items) > examples else ''})")
+        bits += [f"{COUNT_WORDS[k]} {a} (reference {b})" for k, (a, b) in s.counts.items() if a != b]
         out.append(head + ": " + "; ".join(bits + s.parts))
-    out.append("Counts: " + "; ".join(f"{COUNT_WORDS[k]} {a} (reference {b})" for k, (a, b) in res.counts.items()))
+    out.append("Counts, sheet by sheet on the compared sheets: "
+               + "; ".join(f"{COUNT_WORDS[k]} {a} (reference {b})" for k, (a, b) in res.counts.items()))
     return out
