@@ -3,7 +3,7 @@
 Every command that finds something to do or to check records it here, so the brief, the watch
 screen and the weekly workbook show the same items under the same ids.
 
-  * An item's KEY is its rule plus a Focus number: 'xfer_open|SIO:YQ-26-01-5', 'qty_diff|SIO:..|<item>',
+  * An item's KEY is its rule plus a Focus number: 'xfer_open|SIO:YQ-26-01-5', 'qty_diff|SIO:YQ-26-01-5',
     'inv_changed|<invoice>'. An item with no voucher is keyed on rule + item code (+ a date). A van or
     a rep never appears in a key by name: use ref_hash(). Row ids of the database are never used
     (the loader rewrites them on every load).
@@ -210,12 +210,34 @@ def record(rule: str, found: list[dict], data_date: str | None, baseline: bool =
     return counts
 
 
-def open_items(include_baseline: bool = False) -> list[dict]:
-    """Open items, most pressing first: ACT before CHECK, then the larger BHD, then the older."""
+def _below(row: dict, floor, floor_rules) -> bool:
+    """True when `row` is an item of floor_rules valued below the floor. An item with no BHD is never below."""
+    if floor is None or row.get("rule") not in floor_rules or row.get("bhd") in (None, ""):
+        return False
+    try:
+        return Decimal(str(row["bhd"])) < Decimal(str(floor))
+    except ArithmeticError:
+        return False
+
+
+def open_items(include_baseline: bool = False, *, floor=None, floor_rules=()) -> list[dict]:
+    """Open items, most pressing first: ACT before CHECK, then the larger BHD, then the older. With a floor,
+    the items of `floor_rules` valued below it are folded under it, left out of the list (under_floor
+    counts them); an item with no BHD, and an item of any other rule, is never folded."""
     rows = [r for r in current().values() if r.get("state") == "open"
-            and (include_baseline or not r.get("baseline"))]
+            and (include_baseline or not r.get("baseline")) and not _below(r, floor, floor_rules)]
     return sorted(rows, key=lambda r: (_LEVEL_RANK.get(r.get("level"), 9), -Decimal(str(r.get("bhd") or 0)),
                                        str(r.get("first_seen") or "")))
+
+
+def under_floor(floor, floor_rules) -> dict[str, int]:
+    """{rule: how many open items open_items folds under the floor}, rules with none left out. The baseline
+    is not counted here: it is counted once, as the baseline."""
+    out: dict[str, int] = {}
+    for r in current().values():
+        if r.get("state") == "open" and not r.get("baseline") and _below(r, floor, floor_rules):
+            out[r["rule"]] = out.get(r["rule"], 0) + 1
+    return dict(sorted(out.items()))
 
 
 def baseline_summary() -> list[dict]:
