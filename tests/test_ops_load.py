@@ -1301,7 +1301,7 @@ def _():
       "shows its words and ends FAILED")
 def _():
     stopped = "050126_0900"
-    words = "LOAD STOPPED at refresh and rolled back: nothing was written to the database."
+    words = "LOAD STOPPED at refresh and rolled back: nothing of this load was written to the database."
     with data_root() as root:
         make_drop(root)
         # the rows the writer (scripts/yq_load_go.py) leaves when the loader said its one transaction rolled back

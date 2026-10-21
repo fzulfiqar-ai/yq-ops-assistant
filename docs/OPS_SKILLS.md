@@ -732,7 +732,8 @@ public.
   older loader. `tests/test_ops_load_txn.py` holds the parity replay (set `YQ_LOCAL_PG_LOAD_TXN` to a
   scratch PostgreSQL on this PC, and `YQ_LOAD_TXN_DROPS` to real drop folders to replay them as well).
   `scripts/refresh.py` passes the loader's own words up: a load whose transaction rolled back, or whose
-  session never opened, closes `LOAD STOPPED at refresh and rolled back: nothing was written to the database.`
+  session never opened, closes
+  `LOAD STOPPED at refresh and rolled back: nothing of this load was written to the database.`
   (no LAST LOAD FAILED, no e-mail), unless an earlier attempt of the run may have written; a commit that got
   no answer keeps the careful reading. The refresh time on record leaves out the commit's hold
   (`commit_hold_s`). The loader takes the batch importer's lock as it opens, under the 30 s lock timeout,

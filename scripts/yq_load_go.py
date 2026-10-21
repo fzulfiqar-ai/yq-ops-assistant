@@ -2540,7 +2540,7 @@ class Job:
         elif not self.written and self.rolled_back:
             # the loader's one transaction rolled back (its own words, passed up by the refresh) and no earlier
             # attempt of this run may have written: nothing of this load is there, so no LAST LOAD FAILED follows
-            text = f"{pre}LOAD STOPPED at {step} and rolled back: nothing was written to the database."
+            text = f"{pre}LOAD STOPPED at {step} and rolled back: nothing of this load was written to the database."
             nxt = "Type /yq-load to check again."
         elif not self.written:
             text = f"{pre}LOAD STOPPED at {step}. Nothing was written to the database."
@@ -2896,8 +2896,8 @@ class Job:
                     why = str((res or {}).get("error") or "") or ("the load program gave no result" + _why(child))
                     first = "The load stage failed: the identical load runs once more."
                     if self.rolled_back:
-                        first = ("The load stage stopped and rolled back, so nothing was written: the identical load "
-                                 "runs once more.")
+                        first = ("The load stage stopped and rolled back, so nothing of this load was written: the "
+                                 "identical load runs once more.")
                 if attempt == 1:
                     self.j("step_failed", step="refresh", attempt=1, stops=False, seconds=self.seconds(), loaded=loaded,
                            text=first, why=_sentence(why), rolled_back=self.rolled_back or None,

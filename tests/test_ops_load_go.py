@@ -4673,7 +4673,7 @@ def _():
 # ── the load follow-ups of the 2b release (21-Oct-2026) ──────────────────────────────────────────
 
 ROLLED_LINE = "  !! one transaction ROLLED BACK (RuntimeError: the stock_balance insert failed): nothing of this load was written"
-STOPPED = "LOAD STOPPED at refresh and rolled back: nothing was written to the database."
+STOPPED = "LOAD STOPPED at refresh and rolled back: nothing of this load was written to the database."
 HELD_PART = "LOAD FAILED at refresh. The database holds this load, or part of it."
 
 
@@ -4707,8 +4707,8 @@ def _():
         assert h.go() == 0 and h.work() == 1
         assert h.runner.labels() == ["backup", "pre_gate", "refresh", "refresh"], "run a third time, or delivered"
         first = h.rows("step_failed", "refresh")[0]
-        assert first["text"] == ("The load stage stopped and rolled back, so nothing was written: the identical load runs "
-                                 "once more.") and first["rolled_back"] is True and first["stops"] is False
+        assert first["text"] == ("The load stage stopped and rolled back, so nothing of this load was written: the "
+                                 "identical load runs once more.") and first["rolled_back"] is True and first["stops"] is False
         closing = h.rows()[-1]
         assert closing["event"] == "failed" and closing["result"] == "failed" and closing["step"] == "refresh"
         assert closing["written"] is False and closing["rolled_back"] is True and closing["text"] == STOPPED

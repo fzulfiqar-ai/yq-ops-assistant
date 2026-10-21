@@ -97,7 +97,7 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   - the ID numbers in the stored stock narrations are masked (the data step; `row_hash` unchanged);
   - the four load follow-ups: each temporary table dropped once applied; the batch importer's lock taken as the
     loader opens; `refresh.py` passing the loader's own words up, so that a load that rolled back closes
-    "stopped and rolled back", nothing written; the refresh time recorded without the commit's hold;
+    "stopped and rolled back", nothing of that load written; the refresh time recorded without the commit's hold;
   - X1: `scripts/yq_team_post.py` stores each load's team message in `team_messages` after the delivery step,
     and the Command Centre shows it with a Copy button (`GET /command/team-message`, admin and management).
   The engine files change with it, so from the push until `-Part api` has finished `/yq-load` refuses: the run
