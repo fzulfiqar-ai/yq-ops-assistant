@@ -96,11 +96,15 @@ TEAM_MESSAGE_FIELDS = ("run", "data_date", "text", "created_at")
 
 def latest_team_message() -> dict | None:
     """The newest stored team message, {run, data_date, text, created_at} (ISO text as PostgREST writes it), or None
-    when none is stored. One select through the service-role client, retried once on a dropped connection."""
+    when none is stored: the one on the latest data date, and of that date the one first posted latest. Never by
+    created_at alone (a run's FIRST post time): an older load's message stored after a newer one's, posted by hand
+    later, would pass for the newest. One select through the service-role client, retried once on a dropped
+    connection."""
     from app.database import get_client
     from app.db_read import retry_read
     rows = retry_read(lambda: get_client().table("team_messages").select(",".join(TEAM_MESSAGE_FIELDS))
-                      .order("created_at", desc=True).limit(1).execute(), what="team message").data or []
+                      .order("data_date", desc=True).order("created_at", desc=True).limit(1).execute(),
+                      what="team message").data or []
     if not rows:
         return None
     return {k: rows[0].get(k) for k in TEAM_MESSAGE_FIELDS}

@@ -198,6 +198,16 @@ async def _watch_data_loads() -> None:
     datastamp.watch()
 
 
+@app.on_event("startup")
+async def _prewarm_stock_moves() -> None:
+    """Pair the stock ledger's transfers once after boot (Render only), like _prewarm_reports: the first Stock
+    Movement visit after a deploy or a restart is then a cache hit. app/transfer_audit.py prewarm() starts a
+    background thread that waits PREWARM_AFTER_BOOT_S first — never work on the event loop. After each data load
+    the same build runs again by itself (transfer_audit.invalidate)."""
+    from app import transfer_audit
+    transfer_audit.prewarm(transfer_audit.PREWARM_AFTER_BOOT_S)
+
+
 @app.get("/health")
 @limiter.limit(settings.rate_limit)
 async def health(request: Request) -> dict:

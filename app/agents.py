@@ -689,21 +689,24 @@ def fraud_scan() -> dict:
 # ── Salesman stock reconciliation (fraud + ops) ───────────────────────────────
 
 def salesman_stock_recon() -> dict:
-    """Reconcile stock ISSUED to each salesman's van warehouse against what they SOLD,
-    sent back, and still HOLD. Focus's own 'Shortages in Stock' counts are the HARD leakage
-    signal (BHD); a large 'unexplained' gap (issued − returned − sold − on-hand) is a SOFT one
-    to investigate. Built on the Stock Issue/Receive vouchers Focus records per transfer."""
+    """Reconcile each salesman's van stock from the stock ledger (v_salesman_stock_recon; from
+    release 2b its on hand is the ledger's own balance). Focus's own 'Shortages in Stock' counts
+    are the HARD leakage signal (BHD). Beside it: stock ISSUED to a van and not yet booked in
+    there (pending_qty = issued to it − its own Stock Receive units), which is stock between
+    stores, not a loss; /yq-watch lists the transfers past their deadline. unexplained_qty is
+    never read: on the ledger it equals pending − customer returns − excess + shortage, so it
+    would report stock on the way as leakage and count the shortages twice."""
     # Hard signal: Focus's own physical-count shortages, any warehouse (incl. the central store).
     shortages = _q(
         "SELECT salesman, shortage_qty, shortage_value_bhd FROM v_salesman_stock_recon "
         "WHERE shortage_value_bhd > 0 ORDER BY shortage_value_bhd DESC LIMIT 20"
     )
     short_total = sum(_f(r, "shortage_value_bhd") for r in shortages)
-    # Soft signal: stock issued to a salesman's VAN that isn't sold, returned, or on hand.
-    leakage = _q(
-        "SELECT salesman, transferred_in_qty, transferred_in_value_bhd, sold_qty, on_hand_qty, "
-        "unexplained_qty FROM v_salesman_stock_recon "
-        "WHERE is_van AND unexplained_qty > 0 ORDER BY unexplained_qty DESC LIMIT 20"
+    # Stock issued to a salesman's VAN and not yet booked in there: between stores, not lost.
+    pending = _q(
+        "SELECT salesman, transferred_in_qty, transferred_in_value_bhd, received_qty, pending_qty "
+        "FROM v_salesman_stock_recon "
+        "WHERE is_van AND pending_qty > 0 ORDER BY pending_qty DESC LIMIT 20"
     )
     # Fraud route: good stock written off as 'damaged' (moved into a Damage warehouse).
     damaged = _q(
@@ -720,21 +723,23 @@ def salesman_stock_recon() -> dict:
     if shortages:
         parts.append(f"BHD {short_total:,.2f} of counted stock shortages across "
                      f"{len(shortages)} warehouse(s) — biggest: {shortages[0].get('salesman', '-')}")
-    if leakage:
-        parts.append(f"{len(leakage)} salesman van(s) with unexplained stock gaps to review "
-                     f"(top: {leakage[0].get('salesman', '-')}, {_f(leakage[0],'unexplained_qty'):,.0f} units)")
+    if pending:
+        parts.append(f"{len(pending)} salesman van(s) with stock issued, not yet booked in "
+                     f"(top: {pending[0].get('salesman', '-')}, {_f(pending[0], 'pending_qty'):,.0f} units; "
+                     "the transfers past their deadline are listed by /yq-watch)")
     if dmg_val > 0:
         parts.append(f"BHD {dmg_val:,.2f} of stock written to damage")
     summary = ("Stock reconciliation: " + "; ".join(parts) + "."
-               if parts else "Stock reconciliation: no shortages or unexplained gaps — vans reconcile cleanly.")
+               if parts else "Stock reconciliation: no counted shortages and no stock issued to a van waiting to be "
+                             "booked in — vans reconcile cleanly.")
     return {
         "shortage_count": len(shortages),
         "shortage_value_bhd": short_total,
-        "leakage_count": len(leakage),
+        "pending_count": len(pending),
         "damaged_value_bhd": dmg_val,
         "summary": summary,
         "shortages": shortages,
-        "salesman_leakage": leakage,
+        "vans_pending": pending,
         "damaged_to_warehouses": damaged,
         "recent_transfers": recent_transfers,
     }
@@ -1700,7 +1705,7 @@ AGENTS: dict[str, AgentSpec] = {
     "inventory_aging": AgentSpec("inventory_aging", "On-hand stock idle by days since last sale", inventory_aging),
     "salesman_performance": AgentSpec("salesman_performance", "Per-salesman value+volume + B2C/B2B", salesman_performance),
     "purchase_insights": AgentSpec("purchase_insights", "Purchasing: what to reorder, cost vs last receipt, PO cost comparison across orders + what's on order", purchase_insights),
-    "salesman_stock_recon": AgentSpec("salesman_stock_recon", "Reconcile stock issued to each salesman vs sold/returned/on-hand; flags shortages & leakage", salesman_stock_recon),
+    "salesman_stock_recon": AgentSpec("salesman_stock_recon", "Reconcile each salesman's van stock from the stock ledger; flags counted shortages and stock issued but not yet booked in", salesman_stock_recon),
     "trend": AgentSpec("trend", "Rising vs fading products (momentum) + revenue trend", trend_scan, category="growth"),
     "marketing": AgentSpec("marketing", "Promo ideas: high-margin to push, slow stock to clear, bundles", marketing, category="growth"),
     "catalog_watch": AgentSpec("catalog_watch", "What changed: new SKUs, selling-price & purchase-cost changes", catalog_watch),

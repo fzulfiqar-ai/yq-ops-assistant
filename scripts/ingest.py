@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import sys
 import warnings
 from datetime import date, datetime
@@ -24,6 +23,8 @@ import pandas as pd
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:        # `python scripts/ingest.py` as well as `-m scripts.ingest`: scripts.text_mask
+    sys.path.insert(0, str(ROOT))
 SRC_DIR = ROOT / "business_data" / "Focus ERP Data"
 OUT_DIR = ROOT / "data" / "clean"
 
@@ -202,17 +203,11 @@ def txt(v) -> str | None:
 # these two patterns lives in scripts/r7_narration_mask_migration.sql (v_sales.narration) and
 # scripts/r7_narration_mask_data_migration.sql; tests/test_r7b_security.py holds them equal.
 # [0-9], never \d: Python's \d also matches Arabic-Indic digits, Postgres's [0-9] does not.
-PERSONAL_ID_LONG = re.compile(r"(?<![0-9])[0-9]{12,}([0-9]{3})(?![0-9])")
-PERSONAL_ID_CPR = re.compile(r"(?<![0-9])[0-9]{6}([0-9]{3})(?![0-9])")
-MASK_LONG, MASK_CPR = "*" * 12, "*" * 6
-
-
-def mask_personal_ids(text: str | None) -> str | None:
-    """Narration with every 9-digit run and every run of 15+ digits masked (last 3 kept)."""
-    if not text:
-        return text
-    text = PERSONAL_ID_LONG.sub(lambda m: MASK_LONG + m.group(1), text)
-    return PERSONAL_ID_CPR.sub(lambda m: MASK_CPR + m.group(1), text)
+# The patterns and the mask live in scripts/text_mask.py (standard library only, release 2b: the API
+# masks with them without importing pandas) and are re-exported here unchanged.
+from scripts.text_mask import (  # noqa: E402,F401  (re-exported: every caller keeps `ingest.<name>`)
+    MASK_CPR, MASK_LONG, PERSONAL_ID_CPR, PERSONAL_ID_LONG, mask_personal_ids,
+)
 
 
 def is_total(first_cell) -> bool:

@@ -26,17 +26,24 @@ Covered (app/transfer_audit.py, GET /stock/flow, GET /stock/recon, GET /command/
     its own store that nothing booked back in is not received there past its deadline, as /yq-moves reads it); None,
     the rows still there, when the pairing cannot be worked out;
   * the read: pages of consecutive days of at most PAGE_LINES rows (a day never split, one larger day alone), each
-    asked for by its date range only, every row read once; today's volume in five pages; the ledger's last date from
-    the plan, or from its own query when no transfer is there; a page that holds other rows than the plan counted is
-    answered once and never kept;
+    asked for by its date range only, every row read once; the plan put in date order however the RPC returns it;
+    today's volume in five pages; the ledger's last date from the plan, or from its own query when no transfer is
+    there; a page that holds other rows than the plan counted is answered once and never kept;
   * the cache: one read for many calls; invalidate() and app.datastamp.drop_process_caches() drop it; requests
-    arriving together build once (the lock); a build that began before a drop is answered once and never kept; a
-    failed build is told at once to the requests that waited for it and read again after the hold or a load; a
-    request gives up after LOCK_WAIT_S; the look for a load comes first; importing the module (app/datastamp.py does)
-    loads neither pandas nor the pairing;
+    arriving together build once (the lock); a build that began before a drop is answered once and never kept, and
+    a drop that arrives while a build stores its snapshot still drops it (one state lock); a failed build is told at
+    once to the requests that waited for it and read again after the hold or a load; a request gives up after
+    LOCK_WAIT_S; the look for a load comes first; importing the module (app/datastamp.py does) loads neither pandas
+    nor the pairing, and building a snapshot loads the pairing and the mask, never pandas; the background build on the
+    API only (RENDER), after boot and after each load noticed;
+  * the mask (scripts/text_mask.py): standard library only, re-exported by scripts/ingest.py as the very same objects
+    (the SQL twin checks read them there), its rule unchanged, and the loader still runs as `python scripts/ingest.py`;
   * GET /command/team-message: admin and management 200 with {run, data_date, text, created_at}, 204 with no body
     when none is stored, 403 for every other login, 401 without one, 503 without a word of the message or the error
-    when the read fails; the read = the newest row of team_messages through the service client;
+    when the read fails; the read = the row of team_messages on the latest data date, the latest posted of that date,
+    through the service client (the real SDK's query string checked on a mock transport);
+  * the van-stock agent (app/agents.py salesman_stock_recon): stock issued to a van and not yet booked in is said so,
+    never as leakage; counted shortages stay the hard signal; unexplained_qty is never read;
   * the schema text of v_salesman_stock_recon (app/ai.py) and the glossary line (scripts/seed_memory.py) say on hand
     is the stock ledger's balance and name the new columns.
 """
@@ -65,6 +72,7 @@ sys.path.insert(0, str(ROOT))
 os.environ["SUPABASE_URL"] = "https://ci.invalid"
 os.environ["SUPABASE_KEY"] = "ci-key"
 os.environ["DATABASE_URL"] = "postgresql://ci:ci@ci.invalid:5432/ci"
+os.environ.pop("RENDER", None)          # no background build here, but in the tests that ask for one
 
 import warnings  # noqa: E402
 warnings.filterwarnings("ignore")
@@ -652,6 +660,35 @@ def _():
     assert "v_stock_daily_movement" in ta.PLAN_SQL and "$1::date AND $2::date" in ta.TRANSFER_LINES_SQL
 
 
+class _Unordered(FakeRPC):
+    """The read RPC handing the plan back newest first: json_agg is not bound to keep the order of what it wraps."""
+
+    def q(self, sql: str) -> list[dict]:
+        got = super().q(sql)
+        return list(reversed(got)) if sql == ta.PLAN_SQL else got
+
+
+@test("read_lines: the plan is put in date order here, however the RPC hands it back; the pages stay consecutive and whole")
+def _():
+    rows: list[dict] = []
+    for n in range(20):
+        day = SUN - timedelta(days=19 - n)
+        rows += issued(500 + n, day, MAIN, VAN_A, [(CABLE, n + 1), (CHARGER, 1)], month=day.month, series="U")
+    view = view_rows(rows)
+    backwards, ordered = _Unordered(view, SAT.isoformat()), FakeRPC(view, SAT.isoformat())
+    assert [p["day"] for p in backwards.q(ta.PLAN_SQL)] == sorted({r["date"] for r in view}, reverse=True)
+    backwards.calls.clear()
+    with _Patched((ta, "PAGE_LINES", 6)):
+        got, data_date, pages, settled = ta.read_lines(backwards.q, backwards.qp)
+        want = ta.read_lines(ordered.q, ordered.qp)
+    assert settled and data_date == SAT and pages == want[2] == 7
+    asked = sorted(backwards.pages())
+    assert asked == sorted(ordered.pages()) and all(lo <= hi for lo, hi, _n in asked)
+    for (_a, hi, _n), (lo, _b, _m) in zip(asked, asked[1:]):
+        assert hi < lo, "the pages never overlap"
+    assert sorted(json.dumps(r, sort_keys=True) for r in got) == sorted(json.dumps(r, sort_keys=True) for r in view)
+
+
 # ── the cache ─────────────────────────────────────────────────────────────────
 
 @test("current(): one read for many calls; invalidate() and datastamp.drop_process_caches() drop it; the look for a load comes first")
@@ -715,6 +752,41 @@ def _():
         assert rpc.plans() == 2, "the next request reads again"
 
 
+@test("current(): the check-and-store and invalidate() take one state lock: a drop that comes while a build stores its snapshot still drops it")
+def _():
+    with _Fresh():
+        gen = ta._state["gen"]
+        with ta._state_lock:
+            t = threading.Thread(target=ta.invalidate)
+            t.start()
+            time.sleep(0.2)
+            assert t.is_alive() and ta._state["gen"] == gen, "invalidate() waits for the state lock"
+        t.join(20)
+        assert not t.is_alive() and ta._state["gen"] == gen + 1
+    # The build reaches its store with the state lock held (taken in its read: a plain Lock may be released by any
+    # thread), and a drop arrives then. Whichever of the two gets the lock first, the snapshot is never kept.
+    read_back = threading.Event()
+
+    def read_then_hold():
+        ta._state_lock.acquire()
+        read_back.set()
+        return view_rows(ledger_rows()), SAT, 1, True
+    got: list = []
+    with _Fresh():
+        build = threading.Thread(target=lambda: got.append(ta.current(read=read_then_hold)))
+        build.start()
+        assert read_back.wait(20)
+        drop = threading.Thread(target=ta.invalidate)
+        drop.start()
+        time.sleep(0.2)
+        assert not got and drop.is_alive(), "both wait for the state lock"
+        ta._state_lock.release()
+        build.join(20)
+        drop.join(20)
+        assert got and got[0].result is not None, "the request is answered"
+        assert ta._state["snap"] is None, "and the snapshot from before the load is not kept"
+
+
 @test("current(): a failed build is Unavailable, told at once to the requests that waited; read again after the hold or a load; a request gives up after LOCK_WAIT_S")
 def _():
     calls: list[int] = []
@@ -753,12 +825,135 @@ def _():
             "assert 'PORTAL_STORES' not in vars(t); "
             "print(sorted(m for m in ('pandas', 'scripts.ops.pairing', 'scripts.ingest', 'app.ai', 'openai') if m in sys.modules)); "
             "s = t.PORTAL_STORES; assert s is t.PORTAL_STORES is t.portal_stores(); print('pairing' if 'scripts.ops.pairing' in sys.modules else '-')")
-    env = dict(os.environ, SUPABASE_URL="https://ci.invalid", SUPABASE_KEY="ci-key",
-               DATABASE_URL="postgresql://ci:ci@ci.invalid:5432/ci", PYTHONUTF8="1")
-    r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env, capture_output=True, text=True,
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=_child_env(), capture_output=True, text=True,
                        encoding="utf-8", timeout=180)
     assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
     assert r.stdout.split("\n")[:2] == ["[]", "pairing"], r.stdout[-300:]
+
+
+def _child_env() -> dict:
+    """A child process's environment: the stand-in credentials, and no RENDER (no background build)."""
+    env = {k: v for k, v in os.environ.items() if k != "RENDER"}
+    env.update(SUPABASE_URL="https://ci.invalid", SUPABASE_KEY="ci-key",
+               DATABASE_URL="postgresql://ci:ci@ci.invalid:5432/ci", PYTHONUTF8="1")
+    return env
+
+
+@test("building a snapshot, and answering a request from it, loads the pairing and the mask but never pandas (subprocess, no network)")
+def _():
+    code = ("import sys; import app.transfer_audit as t; "
+            "rows = [{'voucher': 'SIO:T-26-10-1', 'vtype': 'Stock Issue Voucher', 'date': '2026-10-11', "
+            "'wh': 'Accessories Warehouse', 'to_wh': 'Van A - Acc WH', 'item': 'ITEM-01 Cable', 'qty_in': None, "
+            "'qty_out': 2.0, 'value_in': None, 'value_out': 0.5, 'narration': 'sent to ' + '12345' + '6789'}, "
+            "{'voucher': 'STRV:T-26-10-1', 'vtype': 'Stock Receive Voucher', 'date': '2026-10-12', "
+            "'wh': 'Van A - Acc WH', 'to_wh': None, 'item': 'ITEM-01 Cable', 'qty_in': 2.0, 'qty_out': 0.0, "
+            "'value_in': 0.0, 'value_out': None, 'narration': None}]; "
+            "s = t.current(read=lambda: (rows, '2026-10-17', 1, True)); "
+            "f = t.flow(s, days=7); assert f['summary']['received']['vouchers'] == 1, f['summary']; "
+            "t.recon([{'salesman': 'Van A - Acc WH', 'warehouse_name': 'Van A - Acc WH'}], s); "
+            "print(sorted(m for m in ('pandas', 'numpy', 'openpyxl', 'scripts.ingest', 'app.ai', 'openai') "
+            "if m in sys.modules)); "
+            "print(sorted(m for m in ('scripts.text_mask', 'scripts.ops.pairing') if m in sys.modules))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=_child_env(), capture_output=True, text=True,
+                       encoding="utf-8", timeout=180)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
+    assert r.stdout.split("\n")[:2] == ["[]", "['scripts.ops.pairing', 'scripts.text_mask']"], r.stdout[-300:]
+
+
+# ── the mask ──────────────────────────────────────────────────────────────────
+
+@test("text_mask: standard library only; scripts/ingest.py re-exports the very same objects; the rule is unchanged")
+def _():
+    from scripts import ingest, text_mask
+    for name in ("PERSONAL_ID_LONG", "PERSONAL_ID_CPR", "MASK_LONG", "MASK_CPR", "mask_personal_ids"):
+        assert getattr(ingest, name) is getattr(text_mask, name), f"ingest.{name} is text_mask.{name}"
+    tree = ast.parse((ROOT / "scripts" / "text_mask.py").read_text(encoding="utf-8"))
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    assert imported == {"__future__", "re"}, imported
+    mask = text_mask.mask_personal_ids
+    card = "4" + "0" * 14 + "2"                         # invented digit runs, built at run time
+    assert mask("CPR " + ID_A) == "CPR ******789" and mask("card " + card) == "card ************002"
+    assert mask(ID_A + card) == "************002", "one run of 25 digits"
+    for kept in ("order YQ-2610-0019", "YQ 2610 0019", "YQ26100019", "SIO:T-26-10-123", "12345678", ""):
+        assert mask(kept) == kept, kept
+    assert mask(None) is None and mask(mask("x " + ID_B)) == mask("x " + ID_B), "masking twice changes nothing"
+    assert mask("١" * 9) == "١" * 9, "[0-9] only, as Postgres reads it"
+
+
+@test("the loader still runs as a script (`python scripts/ingest.py`): it finds scripts.text_mask from its own folder")
+def _():
+    import tempfile
+    code = ("import runpy, sys; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+            "sys.path.insert(0, sys.argv[1] + '/scripts'); "
+            "g = runpy.run_path(sys.argv[1] + '/scripts/ingest.py', run_name='as_a_script'); "
+            "print(g['mask_personal_ids']('id ' + '12345' + '6789'))")
+    with tempfile.TemporaryDirectory() as away:                 # not the repository: only the script's own path
+        r = subprocess.run([sys.executable, "-c", code, str(ROOT)], cwd=away, env=_child_env(), capture_output=True,
+                           text=True, encoding="utf-8", timeout=180)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
+    assert r.stdout.strip().splitlines()[-1] == "id ******789", r.stdout[-300:]
+
+
+# ── the background build ──────────────────────────────────────────────────────
+
+class _Env:
+    """os.environ[name] set (or removed, value None) for the length of the block."""
+
+    def __init__(self, name: str, value: str | None):
+        self.name, self.value = name, value
+
+    def __enter__(self):
+        self.was = os.environ.get(self.name)
+        if self.value is None:
+            os.environ.pop(self.name, None)
+        else:
+            os.environ[self.name] = self.value
+        return self
+
+    def __exit__(self, *exc):
+        if self.was is None:
+            os.environ.pop(self.name, None)
+        else:
+            os.environ[self.name] = self.was
+        return False
+
+
+@test("prewarm: off without RENDER (no thread, nothing read); on the API it builds the snapshot in the background")
+def _():
+    rpc = FakeRPC(view_rows(ledger_rows()), SAT.isoformat())
+    with _Fresh(), _rpc(rpc):
+        for value in (None, "", "false", "0", "no"):
+            with _Env("RENDER", value):
+                assert ta.prewarm(0) is None, value
+        assert rpc.plans() == 0 and ta._state["snap"] is None, "scripts and suites never read in the background"
+        with _Env("RENDER", "true"):
+            thread = ta.prewarm(0)
+            assert thread is not None and thread.daemon and thread.name == "prewarm-stock-moves"
+            thread.join(20)
+        assert rpc.plans() == 1 and ta._state["snap"] is not None and ta._state["snap"].data_date == SAT
+        assert ta.current() is ta._state["snap"] and rpc.plans() == 1, "the first visit is a cache hit"
+    broken = FakeRPC([], None, fail=RuntimeError("canceling statement due to statement timeout"))
+    with _Fresh(), _rpc(broken), _Env("RENDER", "true"):
+        thread = ta.prewarm(0)
+        thread.join(20)
+        assert not thread.is_alive() and ta._state["snap"] is None, "a failed background build raises into nothing"
+
+
+@test("prewarm: a load noticed starts the background build PREWARM_AFTER_LOAD_S later; boot starts it PREWARM_AFTER_BOOT_S later")
+def _():
+    import asyncio
+    import app.main as m
+    asked: list = []
+    with _Fresh(), _Patched((ta, "prewarm", lambda delay=ta.PREWARM_AFTER_BOOT_S: asked.append(delay))):
+        ta.invalidate()
+        from app import datastamp
+        datastamp.drop_process_caches()
+        assert asked == [ta.PREWARM_AFTER_LOAD_S, ta.PREWARM_AFTER_LOAD_S], asked
+        assert m._prewarm_stock_moves in m.app.router.on_startup, "registered with @app.on_event('startup')"
+        asyncio.run(m._prewarm_stock_moves())
+        assert asked[-1] == ta.PREWARM_AFTER_BOOT_S
+    assert 0 < ta.PREWARM_AFTER_LOAD_S < ta.PREWARM_AFTER_BOOT_S <= 60
 
 
 # ── the endpoints ─────────────────────────────────────────────────────────────
@@ -876,7 +1071,10 @@ def _():
             assert r.status_code == 200 and r.json() == MESSAGE, (who, r.status_code, r.text)
         assert "team_messages" in fake.names
         assert ("select", ("run,data_date,text,created_at",), {}) in table.calls
-        assert ("order", ("created_at",), {"desc": True}) in table.calls and ("limit", (1,), {}) in table.calls
+        orders = [c for c in table.calls if c[0] == "order"]
+        assert orders[:2] == [("order", ("data_date",), {"desc": True}), ("order", ("created_at",), {"desc": True})], \
+            "the latest data date first, then the latest posted of that date (never created_at alone)"
+        assert ("limit", (1,), {}) in table.calls
         for who in ("member", "salesman", "storekeeper", "mover"):
             assert client.get("/command/team-message", headers=_as(who)).status_code == 403, who
         assert client.get("/command/team-message").status_code == 401
@@ -885,6 +1083,34 @@ def _():
         assert r.status_code == 204 and r.content == b"", (r.status_code, r.content)
         # management is read-only: nothing but the read is open to it here
         assert client.post("/command/team-message", headers=_as("management")).status_code in (403, 405)
+
+
+@test("team message: the real SDK asks for the latest data date first, then the latest posted of it (an older load's message stored later is not the newest)")
+def _():
+    import httpx
+    from supabase import create_client
+    from supabase.lib.client_options import SyncClientOptions
+    from app import command_api, database
+    seen: list = []
+    # two rows as the table could hold them: the older run's message was first stored by hand, after the newer run's
+    # (created_at keeps that first post time), so by created_at alone the older one would pass for the newest. The
+    # database orders; the stand-in answers by the first key the order names
+    newer = dict(MESSAGE, run="run-201026-1", data_date="2026-10-20", created_at="2026-10-21T04:55:12+00:00")
+    older = dict(MESSAGE, run="run-191026-1", data_date="2026-10-19", created_at="2026-10-21T09:30:00+00:00")
+
+    def handler(request):
+        seen.append(request)
+        first = request.url.params.get("order", "").split(",")[0]
+        rows = sorted([newer, older], key=lambda r: r[first.split(".")[0]], reverse=first.endswith(".desc"))
+        return httpx.Response(200, content=json.dumps(rows[:1]).encode(), headers={"content-type": "application/json"})
+    client = create_client("https://ci.invalid", "aaa.bbb.ccc",
+                           options=SyncClientOptions(httpx_client=httpx.Client(transport=httpx.MockTransport(handler))))
+    with _Patched((database, "get_client", lambda: client)):
+        got = command_api.latest_team_message()
+    assert got == {k: newer[k] for k in command_api.TEAM_MESSAGE_FIELDS}, got
+    assert len(seen) == 1 and seen[0].method == "GET" and seen[0].url.path == "/rest/v1/team_messages"
+    assert dict(seen[0].url.params) == {"select": "run,data_date,text,created_at",
+                                        "order": "data_date.desc,created_at.desc", "limit": "1"}, dict(seen[0].url.params)
 
 
 @test("GET /command/team-message: a failed read is a 503 that carries no word of the message or of the error")
@@ -910,6 +1136,60 @@ def _():
 
 
 # ── the words ─────────────────────────────────────────────────────────────────
+
+# ── the van-stock agent ───────────────────────────────────────────────────────
+
+def _agent_world(rows: list[dict]):
+    """app.agents' read RPC on invented v_salesman_stock_recon rows: each of the agent's queries answered as the view
+    would (the WHERE it names, applied to the rows); every SQL it sends is recorded. SIM filtering off."""
+    from app import agents
+    seen: list[str] = []
+    picks = {"pending": ("salesman", "transferred_in_qty", "transferred_in_value_bhd", "received_qty", "pending_qty"),
+             "short": ("salesman", "shortage_qty", "shortage_value_bhd")}
+
+    def sql(text: str) -> list[dict]:
+        seen.append(text)
+        if "FROM v_salesman_stock_recon" not in text:
+            return []                                    # the damage moves and recent transfers: none here
+        if "WHERE shortage_value_bhd > 0" in text:
+            return [{k: r[k] for k in picks["short"]} for r in rows if r["shortage_value_bhd"] > 0]
+        if "WHERE is_van AND pending_qty > 0" in text:
+            return [{k: r[k] for k in picks["pending"]} for r in rows if r["is_van"] and r["pending_qty"] > 0]
+        raise AssertionError(f"a query of the view the agent should not send: {text[:120]}")
+    return seen, _Patched((agents, "exec_sql", sql), (agents, "_sim_excluded", lambda: False))
+
+
+@test("salesman_stock_recon (agent): stock issued to a van and not yet booked in is said so, never leakage; counted shortages stay the hard signal; unexplained_qty is never read")
+def _():
+    from app import agents
+    van = dict(recon_row(VAN_A, "van"), pending_qty=5, shortage_qty=0, shortage_value_bhd=0, unexplained_qty=5)
+    seen, patch = _agent_world([van])
+    with patch:
+        out = agents.salesman_stock_recon()
+    assert out["pending_count"] == 1 and [v["salesman"] for v in out["vans_pending"]] == [VAN_A]
+    assert out["vans_pending"][0]["pending_qty"] == 5
+    assert out["shortage_count"] == 0 and out["shortage_value_bhd"] == 0 and out["shortages"] == []
+    assert "1 salesman van(s) with stock issued, not yet booked in" in out["summary"], out["summary"]
+    assert "5 units" in out["summary"] and "/yq-watch" in out["summary"], out["summary"]
+    assert "leak" not in out["summary"].lower() and "unexplained" not in out["summary"].lower(), out["summary"]
+    assert not any("leakage" in key for key in out), sorted(out)
+    assert not any("unexplained_qty" in text for text in seen), "the agent never reads unexplained_qty"
+    # nothing waiting and nothing short: the clean words
+    van.update(pending_qty=0)
+    seen, patch = _agent_world([van])
+    with patch:
+        clean = agents.salesman_stock_recon()
+    assert clean["pending_count"] == 0 and clean["vans_pending"] == [] and "reconcile cleanly" in clean["summary"]
+    # a counted shortage is the hard signal, as before
+    van.update(shortage_qty=2, shortage_value_bhd=1.5)
+    seen, patch = _agent_world([van])
+    with patch:
+        short = agents.salesman_stock_recon()
+    assert short["shortage_count"] == 1 and short["shortage_value_bhd"] == 1.5 and short["pending_count"] == 0
+    assert "BHD 1.50 of counted stock shortages across 1 warehouse(s)" in short["summary"], short["summary"]
+    spec = agents.AGENTS["salesman_stock_recon"]
+    assert "leakage" not in spec.description and "not yet booked in" in spec.description
+
 
 NEW_COLUMNS = ("warehouse_name", "store_kind", "received_qty", "customer_returns_qty", "excess_qty", "pending_qty",
                "items_held", "first_move", "last_move")

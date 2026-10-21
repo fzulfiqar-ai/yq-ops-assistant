@@ -11,9 +11,11 @@ Stock Issue and Stock Receive Voucher lines of the accessory items (v_transfer_l
                       the other spellings, so no alias is needed and the owner's config is never read here
   pairs_from_rows()   the view's rows -> pairing.Result, shaped as scripts/ops/ledger.py shapes the database's rows for
                       /yq-moves: every number through pairing.dec, the narration through the loader's own
-                      mask_personal_ids and reduced to its hash by pairing.narr_key
+                      mask_personal_ids (scripts/text_mask.py: no pandas) and reduced to its hash by pairing.narr_key
   current()           the Snapshot of the loaded ledger: read once, paired once, kept until invalidate(), which
                       app/datastamp.py drop_process_caches() calls on every data load. Two requests never pair at once
+  prewarm()           on the API (RENDER), the snapshot built in the background after boot and after each load is
+                      noticed, so the first Stock Movement visit is a cache hit
   flow()              GET /stock/flow: the issues of a window, one row per issue line, newest first, at most ROW_CAP of
                       them shown; the summary, the counts and the partners over every one of them
   recon()             GET /stock/recon: v_salesman_stock_recon's rows, each with what the pairing found for its store
@@ -30,11 +32,12 @@ words are never kept in the Snapshot, logged or returned.
 
 IMPORTS. scripts.* is imported inside the functions that use it, as everywhere in app/ (PORTAL_STORES is built on its
 first use): importing this module, which app/datastamp.py does on every load it notices, loads neither pandas nor
-the pairing.
+the pairing; building a snapshot loads the pairing and the mask (standard library both), never pandas.
 """
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import Counter
@@ -53,6 +56,8 @@ PAGE_LINES = 6000              # the most view rows one read asks for: a day is 
 PAGE_WORKERS = 3               # pages read side by side
 LOCK_WAIT_S = 60.0             # how long a request waits for the build under way before it gives up (503)
 FAIL_HOLD_S = 20.0             # a failed build is told at once, for this long, to the requests that waited for it
+PREWARM_AFTER_LOAD_S = 5.0     # the background build waits this long after a load is noticed (the load has committed)
+PREWARM_AFTER_BOOT_S = 30.0    # and this long after boot (past the boot health check; the reports' prewarm starts at 20 s)
 ZERO = Decimal(0)
 
 UNAVAILABLE = ("Stock moves cannot be worked out right now: the stock ledger's transfers could not be read. "
@@ -120,12 +125,13 @@ def shape(rows, mask=None) -> list[dict]:
     """v_transfer_lines rows -> ledger rows as scripts/ops/ledger.py makes them (item, date, voucher, vtype, wh, to_wh,
     qty_in, qty_out, value_in, value_out, narr): the same function of the same cells as ledger._shape on
     stock_movements' columns, so a leg made here equals the leg /yq-moves makes from the database. Every number through
-    pairing.dec; the narration of the two transfer types through `mask` (None: the loader's mask_personal_ids) and
-    pairing.narr_key, so only its hash is left. A cell's figure and a narration's hash are worked out once."""
+    pairing.dec; the narration of the two transfer types through `mask` (None: the loader's mask_personal_ids, from
+    scripts/text_mask.py, which scripts.ingest re-exports: no pandas) and pairing.narr_key, so only its hash is left. A
+    cell's figure and a narration's hash are worked out once."""
     from scripts.ops import pairing
     if mask is None:
-        from scripts import ingest           # pandas: imported only when the ledger is really read
-        mask = ingest.mask_personal_ids
+        from scripts.text_mask import mask_personal_ids
+        mask = mask_personal_ids
     narrated = (pairing.ISSUE, pairing.RECEIVE)
     numbers: dict = {}
     hashes: dict = {}
@@ -272,7 +278,8 @@ def read_lines(query=None, query_params=None) -> tuple[list[dict], date | None, 
     """(rows, data date, pages, settled): every row of v_transfer_lines and the day the stock ledger runs to, through
     the read RPC (app.db_read: query = exec_sql, query_params = exec_sql_params). One small query of the rows per day
     first (PLAN_SQL), then the pages (TRANSFER_LINES_SQL, $1..$2 a page's first and last day), side by side.
-    settled: every page held the rows the plan counted for it."""
+    settled: every page held the rows the plan counted for it. The plan is put in date order here: json_agg is not
+    bound to keep the order of the query it wraps."""
     if query is None or query_params is None:
         from app import db_read
         query = query or db_read.exec_sql
@@ -283,7 +290,7 @@ def read_lines(query=None, query_params=None) -> tuple[list[dict], date | None, 
     else:
         data_date = (query(DATA_DATE_SQL) or [{}])[0].get("data_date")
     data_date = _day(data_date) if data_date else None
-    pages = plan_pages([(_day(p["day"]), int(p["lines"])) for p in plan])
+    pages = plan_pages(sorted((_day(p["day"]), int(p["lines"])) for p in plan))
 
     def one(page: tuple) -> list[dict]:
         first, last, _held = page
@@ -301,6 +308,8 @@ def read_lines(query=None, query_params=None) -> tuple[list[dict], date | None, 
 # ── the cache: one snapshot per data load ─────────────────────────────────────
 
 _lock = threading.Lock()     # held while a snapshot is built: a second request waits for it and takes its result
+_state_lock = threading.Lock()   # around every change of _state, never held for long: a build's check-and-store and
+                                 # invalidate() are one or the other, so a drop can never land between the two
 _state: dict = {"snap": None, "gen": 0, "failed": None}     # failed: (monotonic time, gen) of the last failed build
 
 
@@ -321,11 +330,10 @@ def current(read=None) -> Snapshot:
         log.warning("stock moves: still being worked out after %.0f s; this request gives up", LOCK_WAIT_S)
         raise Unavailable(UNAVAILABLE)
     try:
-        snap = _state["snap"]
+        with _state_lock:
+            snap, gen, failed = _state["snap"], _state["gen"], _state["failed"]
         if snap is not None:
             return snap
-        gen = _state["gen"]
-        failed = _state["failed"]
         if failed is not None and failed[1] == gen and time.monotonic() - failed[0] < FAIL_HOLD_S:
             raise Unavailable(UNAVAILABLE)
         began = time.monotonic()
@@ -333,14 +341,17 @@ def current(read=None) -> Snapshot:
             rows, data_date, pages, settled = (read or read_lines)()
             snap = snapshot(rows, data_date, pages=pages, seconds=time.monotonic() - began, settled=settled)
         except Exception as exc:  # noqa: BLE001 -- told to the page as Unavailable, the kind and words logged
-            _state["failed"] = (time.monotonic(), gen)
+            with _state_lock:
+                if gen == _state["gen"]:             # a load since: its own build owes nothing to this failure
+                    _state["failed"] = (time.monotonic(), gen)
             log.warning("stock moves: the ledger's transfers could not be read or paired (%s: %s)",
                         type(exc).__name__, str(exc)[:200])
             raise Unavailable(UNAVAILABLE) from exc
-        kept = gen == _state["gen"] and snap.settled
-        if kept:
-            _state["snap"] = snap
-            _state["failed"] = None
+        with _state_lock:                            # the check and the store, in one step against invalidate()
+            kept = gen == _state["gen"] and snap.settled
+            if kept:
+                _state["snap"] = snap
+                _state["failed"] = None
         result = snap.result
         log.info("stock moves: %d transfer lines in %d page(s), %d issues and %d receipts, read and paired in %.1f s, "
                  "ledger to %s%s", snap.lines, snap.pages, len(result.legs.issues) if result is not None else 0,
@@ -354,10 +365,40 @@ def current(read=None) -> Snapshot:
 def invalidate() -> None:
     """Drop the snapshot: the next request reads and pairs the ledger again. app/datastamp.py drop_process_caches()
     calls it on every data load this process notices (and so does app.ai.flush_cache, after an upload through the
-    API). A build under way is answered once and never kept."""
-    _state["gen"] += 1
-    _state["snap"] = None
-    _state["failed"] = None
+    API). A build under way is answered once and never kept. On the API the new snapshot is then built in the
+    background (prewarm), PREWARM_AFTER_LOAD_S later."""
+    with _state_lock:
+        _state["gen"] += 1
+        _state["snap"] = None
+        _state["failed"] = None
+    prewarm(PREWARM_AFTER_LOAD_S)
+
+
+def prewarm(delay: float = PREWARM_AFTER_BOOT_S) -> threading.Thread | None:
+    """Build the snapshot on a background thread, `delay` seconds from now, so the first Stock Movement visit after a
+    boot or a load is a cache hit (like app/main.py _prewarm_reports). On the API only (RENDER set, as Render sets it):
+    scripts, crons and the test suites never read in the background, and None is returned. A build that fails is
+    logged by current(); the first visit tries again. The thread, else."""
+    render = str(os.environ.get("RENDER") or "").strip().lower()
+    if render in ("", "0", "false", "no"):
+        return None
+
+    def run() -> None:
+        time.sleep(max(0.0, delay))
+        try:
+            current()
+        except Unavailable:
+            pass                                     # current() logged why
+        except Exception as e:  # noqa: BLE001 -- a background build never raises into nothing
+            log.warning("stock moves: the background build failed (%s)", type(e).__name__)
+
+    try:
+        thread = threading.Thread(target=run, name="prewarm-stock-moves", daemon=True)
+        thread.start()
+    except RuntimeError as e:                        # no thread to be had (interpreter shutting down): the visit builds
+        log.warning("stock moves: no background build (%s)", e)
+        return None
+    return thread
 
 
 # ── GET /stock/flow ───────────────────────────────────────────────────────────
