@@ -333,7 +333,7 @@ function WarehouseFlow() {
         </div>
       </div>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-[12.5px]">
-        {order.map((st) => s[st] && (
+        {order.map((st) => s[st] && s[st].legs > 0 && (
           <span key={st} className={cn('rounded-full px-2.5 py-1 font-medium', FLOW_STATUS[st])}>
             {FLOW_LABEL[st]} · {num(s[st].qty)} units ({s[st].legs} lines)
           </span>
