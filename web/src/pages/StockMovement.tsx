@@ -10,6 +10,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DataTable, type Column } from '@/components/DataTable'
+import { LoadError } from '@/components/LoadError'
 
 interface Transfer {
   transfer_date: string
@@ -31,11 +32,12 @@ interface Van {
   shortage_qty: number
   shortage_value_bhd: number
   unexplained_qty: number
-  // From the stock ledger (phase 2b); absent while the API still reads the main store's snapshot
-  received_qty?: number
+  // From the stock ledger (phase 2b); absent while the API still reads the main store's snapshot, null when the
+  // 2b API could not work the pairing out this time
+  received_qty?: number | null
   customer_returns_qty?: number
   pending_qty?: number
-  not_received_qty?: number
+  not_received_qty?: number | null
   qty_differs_vouchers?: number
   elsewhere_vouchers?: number
   warehouse_name?: string
@@ -300,7 +302,7 @@ const FLOW_COLS_CONTENTS: Column<FlowRow>[] = [
 function WarehouseFlow() {
   const [direction, setDirection] = useState<'out' | 'in'>('out')
   const [days, setDays] = useState(30)
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['stock-flow', direction, days],
     queryFn: () => apiGet<FlowData>(`/stock/flow?direction=${direction}&days=${days}`),
   })
@@ -343,6 +345,11 @@ function WarehouseFlow() {
             receipts with no issue · {num(s.orphans.qty)} units ({s.orphans.legs} lines)
           </span>
         )}
+        {contents && s.aside && (s.aside.vouchers ?? s.aside.legs) > 0 && (
+          <span className="rounded-full border px-2.5 py-1 font-medium text-muted-foreground">
+            set aside · {num(s.aside.vouchers ?? s.aside.legs)} vouchers
+          </span>
+        )}
         {(data?.partners || []).slice(0, 6).map((p) => (
           <span key={p.name} className="rounded-full border bg-secondary/40 px-2.5 py-1 text-muted-foreground">
             {direction === 'out' ? '→' : '←'} {p.name} <b className="text-foreground tabular-nums">{num(p.qty)}</b>
@@ -351,13 +358,20 @@ function WarehouseFlow() {
       </div>
       {isLoading ? (
         <Skeleton className="h-64" />
+      ) : isError ? (
+        <LoadError error={error} onRetry={() => refetch()} isRetrying={isFetching} fallback="Could not load the transfers." />
       ) : (
         <DataTable rows={data?.rows || []} cols={contents ? FLOW_COLS_CONTENTS : FLOW_COLS} exportName="stock-flow"
           empty="No issue vouchers in this window." />
       )}
+      {!isError && data && data.shown !== undefined && data.shown < data.count && (
+        <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+          The table shows the newest {num(data.shown)} of {num(data.count)} lines; the counts above cover all of them.
+        </p>
+      )}
       <p className="mt-2 text-xs text-muted-foreground">
         {contents
-          ? 'Each Stock Issue is paired with the Stock Receive that holds the same items and quantities at the store it was sent to, within 21 days; the voucher numbers are never used, because Focus numbers the two legs independently.'
+          ? 'Each Stock Issue is paired with the Stock Receive that holds the same items and quantities at the store it was sent to, within 21 days. Focus numbers the two legs independently, so a voucher number never makes a pair by itself; it only helps to tell close candidates apart.'
           : 'Pending and Partial here come from matching voucher numbers, which Focus does not keep the same on the two legs (see the notice at the top).'}
       </p>
     </div>
@@ -373,15 +387,15 @@ const COLS: Column<Transfer>[] = [
   { key: 'value_bhd', label: 'Value', align: 'right', money: true },
 ]
 
-function VanCard({ v }: { v: Van }) {
+function VanCard({ v, ledger }: { v: Van; ledger: boolean }) {
   const hasShortage = (v.shortage_value_bhd || 0) > 0
   const gap = Math.max(v.unexplained_qty || 0, 0)
-  // With the stock ledger behind the view (phase 2b) the card shows the van's own ledger figures
-  const ledger = v.received_qty !== undefined
-  const toCheck = v.not_received_qty ?? 0
-  const cells: [string, number, boolean][] = ledger
-    ? [['Received', v.received_qty ?? 0, false], ['Sold', v.sold_qty, false], ['Sent out', v.transferred_out_qty, false],
-       ['On hand', v.on_hand_qty, false], ['To check', toCheck, toCheck > 0]]
+  // ledger: the phase 2b API answered (the page knows it from the recon's as_of), so the card shows the van's own
+  // ledger figures; a figure the API could not work out this time (null) reads as a dash, never as nought
+  const toCheck = v.not_received_qty ?? null
+  const cells: [string, number | null, boolean][] = ledger
+    ? [['Received', v.received_qty ?? null, false], ['Sold', v.sold_qty, false], ['Sent out', v.transferred_out_qty, false],
+       ['On hand', v.on_hand_qty, false], ['To check', toCheck, (toCheck ?? 0) > 0]]
     : [['Issued in', v.transferred_in_qty, false], ['Sold', v.sold_qty, false], ['On hand', v.on_hand_qty, false],
        ['Gap', gap, gap > 0]]
   return (
@@ -405,7 +419,9 @@ function VanCard({ v }: { v: Van }) {
         <div className={cn('mt-3 grid gap-2 border-t pt-3 text-center', ledger ? 'grid-cols-5' : 'grid-cols-4')}>
           {cells.map(([label, val, warn]) => (
             <div key={label}>
-              <div className={cn('font-display text-base font-bold tabular-nums', warn && 'text-amber-600')}>{num(Number(val))}</div>
+              <div className={cn('font-display text-base font-bold tabular-nums', warn && 'text-amber-600')}>
+                {val === null ? '—' : num(Number(val))}
+              </div>
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
             </div>
           ))}
@@ -423,14 +439,15 @@ export default function StockMovement() {
   })
   const recon = useQuery({
     queryKey: ['stock-recon'],
-    queryFn: () => apiGet<{ vans: Van[] }>('/stock/recon'),
+    queryFn: () => apiGet<{ vans: Van[]; as_of?: string | null }>('/stock/recon'),
   })
 
   const vans = useMemo(() => (recon.data?.vans || []).filter((v) => v.is_van), [recon.data])
   const other = useMemo(() => (recon.data?.vans || []).filter((v) => !v.is_van), [recon.data])
   const totalShort = vans.reduce((s, v) => s + (v.shortage_value_bhd || 0), 0)
-  // The phase 2b API answers with the stock ledger's figures; until then the interim notice stays
-  const ledgerRecon = useMemo(() => (recon.data?.vans || []).some((v) => v.received_qty !== undefined), [recon.data])
+  // Only the phase 2b API's recon carries as_of: the view's new columns alone (an older API over the 2b view, as
+  // after a rollback of the API) never hide the interim notice
+  const ledgerRecon = useMemo(() => !!recon.data && 'as_of' in recon.data, [recon.data])
   const showNotice = !recon.isLoading && !ledgerRecon
 
   return (
@@ -473,9 +490,12 @@ export default function StockMovement() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {[0, 1, 2].map((i) => <Skeleton key={i} className="h-32" />)}
         </div>
+      ) : recon.isError ? (
+        <LoadError error={recon.error} onRetry={() => recon.refetch()} isRetrying={recon.isFetching}
+          fallback="Could not load the van reconciliation." />
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {vans.map((v) => <VanCard key={v.salesman} v={v} />)}
+          {vans.map((v) => <VanCard key={v.salesman} v={v} ledger={ledgerRecon} />)}
         </div>
       )}
       <p className="mt-2 text-xs text-muted-foreground">
@@ -490,7 +510,7 @@ export default function StockMovement() {
             Other locations (hub, damage, SIM, modern trade…) — {other.length}
           </summary>
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {other.map((v) => <VanCard key={v.salesman} v={v} />)}
+            {other.map((v) => <VanCard key={v.salesman} v={v} ledger={ledgerRecon} />)}
           </div>
         </details>
       )}
