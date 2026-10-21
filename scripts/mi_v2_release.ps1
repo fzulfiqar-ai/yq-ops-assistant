@@ -53,7 +53,7 @@ try { $utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEnco
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 
 $ROOT    = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$REPO    = 'fzulfiqar-ai/yq-ops-assistant'     # the public GitHub repository: CI is read without a key
+$REPO    = 'fzulfiqar-ai/yq-ops-assistant'     # the GitHub repository: CI is read without a key while it is public, with GH_READ_TOKEN once it is private
 $API     = 'https://api.yqmarketplace.com'
 $MARKET  = 'https://yqmarketplace.com'
 $PORTAL  = 'https://ops.yqmarketplace.com'
@@ -78,6 +78,7 @@ $script:HEAD = ''
 $script:GitCode = 0
 $script:LastOutput = @()
 $script:Secrets = @()
+$script:GhHeaders = $null
 
 #region helpers
 function Hide-Secret([string]$s) {
@@ -209,9 +210,31 @@ function Test-SameCommit([string]$a, [string]$b) {
   return ($a.Substring(0, $n).ToLower() -eq $b.Substring(0, $n).ToLower())
 }
 
+function Get-GhHeaders {
+  # The headers of every call to api.github.com. While the repository is public GitHub is read without a key (60
+  # calls an hour per PC is plenty for one release) and this returns no header at all. Once it is private, the
+  # read-only token in GH_READ_TOKEN (fine-grained, this repository only: Actions read, Metadata read) goes out as
+  # a Bearer header. It is taken from this PowerShell window's environment, else from the .env of this folder. The
+  # value is never shown or logged (the masker is told it) and goes to api.github.com only, never to our own sites.
+  if ($null -ne $script:GhHeaders) { return $script:GhHeaders }
+  $tok = ([string]$env:GH_READ_TOKEN).Trim()
+  if (-not $tok -and (Test-Path -LiteralPath $ENVFILE -PathType Leaf)) {
+    foreach ($line in [System.IO.File]::ReadAllLines($ENVFILE)) {
+      if ($line -match '^\s*GH_READ_TOKEN\s*=\s*(.*)$') { $tok = $Matches[1].Trim().Trim('"').Trim("'") }
+    }
+  }
+  $h = @{}
+  if ($tok) {
+    $script:Secrets += $tok
+    $h['Authorization'] = ('Bearer ' + $tok)
+  }
+  $script:GhHeaders = $h
+  return $h
+}
+
 function Get-GhJson([string]$path) {
-  # the public GitHub API (no key; 60 calls an hour per PC is plenty for one release)
-  try { return (Invoke-RestMethod -UseBasicParsing -Uri ('https://api.github.com/repos/' + $REPO + $path) -UserAgent $UA -TimeoutSec 30) } catch { return $null }
+  # the GitHub API: no key while the repository is public, the GH_READ_TOKEN header once it is private
+  try { return (Invoke-RestMethod -UseBasicParsing -Uri ('https://api.github.com/repos/' + $REPO + $path) -Headers (Get-GhHeaders) -UserAgent $UA -TimeoutSec 30) } catch { return $null }
 }
 
 function Get-Runs([string]$sha) {
@@ -235,7 +258,7 @@ function Show-Run($run) {
 function Test-CfDeploySteps($run) {
   # cf-deploy can end "success" having deployed nothing (its secrets missing): both deploy steps must have run
   $j = $null
-  try { $j = Invoke-RestMethod -UseBasicParsing -Uri ([string]$run.jobs_url) -UserAgent $UA -TimeoutSec 30 } catch { return 'the jobs of the cf-deploy run could not be read' }
+  try { $j = Invoke-RestMethod -UseBasicParsing -Uri ([string]$run.jobs_url) -Headers (Get-GhHeaders) -UserAgent $UA -TimeoutSec 30 } catch { return 'the jobs of the cf-deploy run could not be read' }
   $mStep = 'missing'
   $pStep = 'missing'
   foreach ($job in @($j.jobs)) {
@@ -442,7 +465,7 @@ function Invoke-PartCheck {
   Step 'GitHub: ci must be green for this commit'
   $w = Get-Runs $script:HEAD
   if ($null -eq $w) {
-    Say ('  GitHub could not be read (no internet, or the repository is private now). Open https://github.com/' + $REPO + '/actions and look at the "ci" run of commit ' + $script:HEAD.Substring(0, 7) + '.') Yellow
+    Say ('  GitHub could not be read (no internet, or the repository is private and GH_READ_TOKEN is missing or has expired). Open https://github.com/' + $REPO + '/actions and look at the "ci" run of commit ' + $script:HEAD.Substring(0, 7) + '.') Yellow
     $a = Read-Host 'Type YES if ci shows a green tick for that commit'
     if (([string]$a).Trim() -ne 'YES') { Stop-Part 2 'Stopped: ci was not confirmed.' }
     Add-LogLine 'ci confirmed by hand'

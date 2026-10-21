@@ -110,6 +110,12 @@ Then sign in to the portal.
 
 - **Sleeps after 15 min idle**, ~50 s cold start. The "Waking the server…" screen
   is built for this and now escalates honestly if the wait is real downtime.
+- **Kept awake by a Cloudflare Worker, not by GitHub.** `yq-keepwarm` (`web/workers/keepwarm.js`; its config and
+  secrets are listed in `web/wrangler.keepwarm.jsonc`) calls `/health` every 10 minutes around the clock, so the
+  container normally never reaches the 15-minute idle line. On the same tick it reads the Supabase `keepalive_ping`
+  table with the publishable key, so the free database project never reaches its 7-day pause; a failed read alerts
+  by Telegram (at most once every 6 hours: open the Supabase dashboard and Resume the project). The GitHub
+  `keepalive.yml` job stays as a backstop until the repository is made private.
 - **0.1 CPU.** Reports and chat are fine. ffmpeg reel rendering will be slow —
   treat marketing video as a batch job, not something to wait on.
 - **512 MB RAM.** Do not reinstate `streamlit`/`plotly` in `requirements.txt`; use

@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -966,7 +967,7 @@ def _jsonc(path: Path) -> dict:
     return json.loads(text)
 
 
-@test("worker: keepwarm cron config + script match the plan (health every 10 min around the clock, scheduler every 15 min)")
+@test("worker: keepwarm cron config + script match the plan (health + Supabase read every 10 min around the clock, scheduler every 15 min)")
 def _():
     web = ROOT / "web"
     cfg = _jsonc(web / "wrangler.keepwarm.jsonc")
@@ -974,18 +975,193 @@ def _():
     assert cfg["triggers"]["crons"] == ["*/10 * * * *", "*/15 * * * *"], cfg["triggers"]
     assert cfg["vars"]["API_URL"] == "https://api.yqmarketplace.com"
     assert cfg["vars"]["SCHEDULER_PATHS"].split(",")[0] == "/scheduler/shop-jobs"
-    assert "AGENT_API_KEY" not in json.dumps(cfg["vars"]), "the key is a Worker secret, never a plain var"
+    for secret in ("AGENT_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        assert secret not in json.dumps(cfg["vars"]), f"{secret} is a Worker secret, never a plain var"
+    jsonc = (web / "wrangler.keepwarm.jsonc").read_text(encoding="utf-8")
+    for secret in ("AGENT_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        assert f"secret put {secret} -c wrangler.keepwarm.jsonc" in jsonc, f"the deploy notes list the {secret} secret"
     js = (web / cfg["main"]).read_text(encoding="utf-8")
     for needle in ("'*/10 * * * *'", "'*/15 * * * *'", "env.AGENT_API_KEY", "'X-Agent-Key'", "/health",
-                   "async scheduled(event, env, ctx)", "AbortSignal.timeout"):
+                   "async scheduled(event, env, ctx)", "AbortSignal.timeout",
+                   # C1: the database leg and its Telegram alert
+                   "env.SUPABASE_URL", "env.SUPABASE_ANON_KEY", "/rest/v1/keepalive_ping?select=id&limit=1",
+                   "keepalive_ping -> HTTP", "https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage",
+                   "env.TELEGRAM_CHAT_ID", "event.scheduledTime"):
         assert needle in js, needle
     assert "console.log(JSON" not in js and "res.text()" not in js, "never log the response body (order numbers, shop names)"
+    assert "env.SUPABASE_KEY" not in js and "SERVICE_ROLE" not in js.upper(), "the Worker holds the publishable key only"
+    assert not re.search(r"^(let|var)\s", js, re.M) and "caches." not in js and not re.search(r"env\.(KV|STATE|DB|R2|D1)\b", js), \
+        "the alert rule keeps no state: no mutable module variable, no cache, no storage binding"
+    for ln in js.splitlines():
+        if "console." in ln:
+            assert not re.search(r"env\.(TELEGRAM_BOT_TOKEN|SUPABASE_ANON_KEY|AGENT_API_KEY)|\$\{key\}|api\.telegram\.org", ln), \
+                "no log line carries a key, or the Telegram URL (it holds the bot token): " + ln.strip()
     node = shutil.which("node")
     if not node:
         print("   SKIP node --check (node not on PATH)")
         return
     r = subprocess.run([node, "--check", str(web / cfg["main"])], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# The Worker itself, run under node with a fake fetch and a recording console (no network, no wrangler). It plays the
+# scenarios from KEEPWARM_SCENARIOS and prints one RESULT line: per scenario the requests made (kind, url, method,
+# headers, body) and every console line with its level. The assertions are in the test below.
+KEEPWARM_HARNESS = r"""
+import { pathToFileURL } from 'node:url'
+import { readFileSync } from 'node:fs'
+
+const worker = (await import(pathToFileURL(process.env.KEEPWARM_MJS).href)).default
+const { base, scenarios } = JSON.parse(readFileSync(process.env.KEEPWARM_SCENARIOS, 'utf8'))
+const real = { log: console.log, warn: console.warn, error: console.error }
+const out = []
+for (const sc of scenarios) {
+  const calls = []
+  const logs = []
+  console.log = (...a) => logs.push(['log', a.join(' ')])
+  console.warn = (...a) => logs.push(['warn', a.join(' ')])
+  console.error = (...a) => logs.push(['error', a.join(' ')])
+  const env = { ...base, ...(sc.env || {}) }
+  for (const k of sc.drop || []) delete env[k]
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url)
+    const kind = u.startsWith('https://api.telegram.org/') ? 'telegram'
+      : u.includes('/rest/v1/keepalive_ping') ? 'supabase'
+      : u === `${env.API_URL}/health` ? 'health' : 'scheduler'
+    calls.push({ kind, url: u, method: init.method || 'GET', headers: init.headers || {}, body: init.body || null, signal: Boolean(init.signal) })
+    const fail = kind === 'supabase' ? sc.supabase : kind === 'telegram' ? sc.telegram : undefined
+    if (fail === 'throw') throw new TypeError('fetch failed')
+    if (fail === 'timeout') { const e = new Error('timed out'); e.name = 'TimeoutError'; throw e }
+    const body = kind === 'supabase' ? [{ id: 1, marker: 'ROWDATA' }]
+      : kind === 'telegram' ? { ok: true, result: { marker: 'TGBODY' } } : { status: 'ok' }
+    return new Response(JSON.stringify(body), { status: typeof fail === 'number' ? fail : 200 })
+  }
+  const waits = []
+  await worker.scheduled({ cron: sc.cron || '*/10 * * * *', scheduledTime: Date.parse(sc.at) }, env, { waitUntil: (p) => waits.push(p) })
+  const settled = await Promise.allSettled(waits)
+  out.push({ name: sc.name, calls, logs, rejected: settled.filter((s) => s.status === 'rejected').length })
+}
+Object.assign(console, real)
+process.stdout.write('RESULT ' + JSON.stringify(out) + '\n', () => process.exit(0))
+"""
+
+
+@test("worker: the 10-minute tick reads Supabase with the anon key; a failed read alerts Telegram at most once per 6 hours, with no state (node, fake fetch)")
+def _():
+    node = shutil.which("node")
+    if not node:
+        print("   SKIP keepwarm behaviour (node not on PATH)")
+        return
+    anon, bot, chat, agent = "anon-test-key-0001", "bot-test-token-0002", "-100123", "agent-test-key-0003"   # invented
+    base = {"API_URL": "https://api.example.invalid", "SUPABASE_URL": "https://projectref.supabase.invalid/",
+            "SUPABASE_ANON_KEY": anon, "TELEGRAM_BOT_TOKEN": bot, "TELEGRAM_CHAT_ID": chat, "AGENT_API_KEY": agent,
+            "SCHEDULER_PATHS": "/scheduler/shop-jobs"}
+    day = "2026-10-21T"
+    scenarios = [
+        {"name": "ok", "at": day + "10:20:00Z", "supabase": 200},
+        {"name": "partial", "at": day + "10:30:00Z", "supabase": 206},
+        {"name": "rejected, outside the window", "at": day + "12:10:00Z", "supabase": 401},
+        {"name": "503 in the window", "at": day + "12:00:00Z", "supabase": 503},
+        {"name": "404 in the window", "at": day + "00:05:00Z", "supabase": 404},
+        {"name": "no answer in the window", "at": day + "18:05:00Z", "supabase": "throw"},
+        {"name": "timeout in the window", "at": day + "00:00:00Z", "supabase": "timeout"},
+        {"name": "telegram refuses", "at": day + "06:00:00Z", "supabase": "throw", "telegram": 400},
+        {"name": "telegram unreachable", "at": day + "06:09:59Z", "supabase": "throw", "telegram": "throw"},
+        {"name": "no supabase url", "at": day + "12:00:00Z", "supabase": "throw", "drop": ["SUPABASE_URL"]},
+        {"name": "no anon key", "at": day + "12:00:00Z", "supabase": "throw", "drop": ["SUPABASE_ANON_KEY"]},
+        {"name": "no telegram secrets", "at": day + "12:00:00Z", "supabase": "throw", "drop": ["TELEGRAM_BOT_TOKEN"]},
+        {"name": "scheduler tick", "cron": "*/15 * * * *", "at": day + "12:00:00Z", "supabase": "throw"},
+        {"name": "health leg throws", "at": day + "10:20:00Z", "supabase": 200, "env": {"API_URL": "not a url"}},
+    ]
+    may_alert = ("00:00:00", "00:09:59", "06:00:00", "12:05:00", "18:00:00")      # the first 10 minutes of hour 0, 6, 12, 18
+    may_not = ("00:10:00", "03:00:00", "05:50:00", "06:10:00", "09:00:00", "11:50:00", "13:00:00", "17:50:00", "23:50:00")
+    scenarios += [{"name": "tick " + t, "at": day + t + "Z", "supabase": "throw"} for t in may_alert + may_not]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "keepwarm.mjs").write_text((ROOT / "web" / "workers" / "keepwarm.js").read_text(encoding="utf-8"), encoding="utf-8")
+        (tmp / "harness.mjs").write_text(KEEPWARM_HARNESS, encoding="utf-8")
+        (tmp / "scenarios.json").write_text(json.dumps({"base": base, "scenarios": scenarios}), encoding="utf-8")
+        env = {**os.environ, "KEEPWARM_MJS": str(tmp / "keepwarm.mjs"), "KEEPWARM_SCENARIOS": str(tmp / "scenarios.json")}
+        proc = subprocess.run([node, str(tmp / "harness.mjs")], env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+    results = json.loads(next(ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT "))[len("RESULT "):])
+    res = {r["name"]: r for r in results}
+    assert len(res) == len(scenarios), "every scenario ran"
+
+    def kinds(r):
+        return [c["kind"] for c in r["calls"]]
+
+    def lines(r, level):
+        return [t for lv, t in r["logs"] if lv == level]
+
+    def sent(r):
+        """The Telegram request of a scenario: (url, parsed JSON body, headers)."""
+        tg = [c for c in r["calls"] if c["kind"] == "telegram"]
+        assert len(tg) == 1 and tg[0]["method"] == "POST", tg
+        return tg[0]["url"], json.loads(tg[0]["body"]), tg[0]["headers"]
+
+    # 1. the read itself: after /health, GET, the exact URL (no double slash), both headers, a timeout, nothing logged but the status
+    r = res["ok"]
+    assert kinds(r) == ["health", "supabase"], kinds(r)
+    sb = r["calls"][1]
+    assert sb["url"] == "https://projectref.supabase.invalid/rest/v1/keepalive_ping?select=id&limit=1", sb["url"]
+    assert sb["method"] == "GET" and sb["signal"] is True and sb["body"] is None, sb
+    assert sb["headers"] == {"apikey": anon, "Authorization": "Bearer " + anon}, sb["headers"]
+    assert "keepalive_ping -> HTTP 200" in lines(r, "log") and not lines(r, "error") and not lines(r, "warn"), r["logs"]
+    assert kinds(res["partial"]) == ["health", "supabase"] and "keepalive_ping -> HTTP 206" in lines(res["partial"], "log")
+    assert not lines(res["partial"], "error"), "206 counts as awake"
+
+    # 2. a failed read: an error line on every tick; Telegram only in the window
+    r = res["rejected, outside the window"]
+    assert kinds(r) == ["health", "supabase"], "12:10 is past the first 10 minutes of hour 12: logged only"
+    assert len(lines(r, "error")) == 1 and lines(r, "error")[0].startswith("keepalive_ping -> HTTP 401 (") and "SUPABASE_ANON_KEY" in lines(r, "error")[0]
+    r = res["503 in the window"]
+    assert kinds(r) == ["health", "supabase", "telegram"], kinds(r)
+    url, body, headers = sent(r)
+    assert url == f"https://api.telegram.org/bot{bot}/sendMessage" and headers == {"content-type": "application/json"}, (url, headers)
+    assert body["chat_id"] == chat and "parse_mode" not in body, body                  # short plain text to the configured chat
+    text = body["text"]
+    assert len(text) < 400 and "Supabase" in text and "HTTP 503" in text and "Resume project" in text and "dashboard" in text, text
+    assert anon not in text and bot not in text
+    assert lines(r, "error")[0].startswith("keepalive_ping -> HTTP 503 (") and "telegram alert -> HTTP 200" in lines(r, "log"), r["logs"]
+    assert "scripts/hotfix_view_grants_migration.sql" in sent(res["404 in the window"])[1]["text"]
+    assert "HTTP 000" in sent(res["no answer in the window"])[1]["text"] and "paused" in sent(res["no answer in the window"])[1]["text"]
+    assert "keepalive_ping -> HTTP 000 (" in lines(res["no answer in the window"], "error")[0]
+    assert "no answer in 30s" in lines(res["timeout in the window"], "error")[0] and "telegram" in kinds(res["timeout in the window"])
+
+    # 3. the alert never breaks the tick and logs only a status or an error's name
+    r = res["telegram refuses"]
+    assert "telegram alert -> HTTP 400" in lines(r, "error") and r["rejected"] == 0, r["logs"]
+    r = res["telegram unreachable"]
+    assert "telegram alert failed: TypeError" in lines(r, "error") and r["rejected"] == 0, r["logs"]
+
+    # 4. the window: first 10 minutes of UTC hour 0, 6, 12, 18; no state, so every tick of it alerts
+    for t in may_alert:
+        assert kinds(res["tick " + t])[-1] == "telegram", ("should alert", t)
+    for t in may_not:
+        assert "telegram" not in kinds(res["tick " + t]), ("must not alert", t)
+        assert lines(res["tick " + t], "error"), ("still logged", t)
+
+    # 5. missing secrets
+    for name in ("no supabase url", "no anon key"):
+        r = res[name]
+        assert kinds(r) == ["health"], (name, kinds(r))
+        err = lines(r, "error")
+        assert len(err) == 1 and "secret put SUPABASE_URL -c wrangler.keepwarm.jsonc" in err[0] \
+            and "secret put SUPABASE_ANON_KEY -c wrangler.keepwarm.jsonc" in err[0], (name, err)
+    r = res["no telegram secrets"]
+    assert kinds(r) == ["health", "supabase"] and len(lines(r, "warn")) == 1 and "TELEGRAM_BOT_TOKEN" in lines(r, "warn")[0], r
+    assert lines(r, "error")[0].startswith("keepalive_ping -> HTTP 000")
+
+    # 6. the other triggers: the scheduler tick never touches Supabase or Telegram; a broken API leg does not skip the database leg
+    assert kinds(res["scheduler tick"]) == ["scheduler"], kinds(res["scheduler tick"])
+    r = res["health leg throws"]
+    assert kinds(r) == ["supabase"] and r["rejected"] == 1 and "keepalive_ping -> HTTP 200" in lines(r, "log"), r
+
+    # 7. nothing secret or private is ever logged: not a key, the bot token, the Telegram URL, nor any response body
+    blob = "\n".join(t for r in results for _, t in r["logs"])
+    for secret in (anon, bot, agent, "ROWDATA", "TGBODY", "api.telegram.org", "/bot"):
+        assert secret not in blob, secret
 
 
 def main() -> int:

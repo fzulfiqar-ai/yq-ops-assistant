@@ -20,11 +20,13 @@ Pinned:
     that must create 0; the thumbnail backfill's dry run before its --apply; the importer's own words the script reads;
   * a code worktree is refused before anything else (before the log folder exists), and so is a folder whose .git is
     not a folder or that lacks business_data or the drop folder;
-  * no secret is echoed: .env is only tested (Test-Path, Select-String -Quiet) and read in one place, for the Cloudflare
-    keys of a web rollback, which are never printed; every screen and log line passes the masker, whose patterns are
-    run here on invented secrets;
-  * the guards: branch main, level with origin/main, CI green through the public GitHub API, the load LOCK absent and
-    never deleted; nothing pushes, forces the r8m reverse, restores over newer rows or loads Focus files;
+  * no secret is echoed: .env is only tested (Test-Path, Select-String -Quiet) and read in two places, for the
+    Cloudflare keys of a web rollback and for GH_READ_TOKEN (the GitHub read token, C1), which are never printed; every
+    screen and log line passes the masker, whose patterns are run here on invented secrets;
+  * the guards: branch main, level with origin/main, CI green through the GitHub API (no key while the repository is
+    public; once it is private the GH_READ_TOKEN Bearer header, on the two GitHub calls alone, run here in PowerShell
+    when one is on the PATH), the load LOCK absent and never deleted; nothing pushes, forces the r8m reverse, restores
+    over newer rows or loads Focus files;
   * Windows PowerShell 5.1: ASCII only, param first, no &&, ||, ??, ?. or ternary, no "$name:" inside a double-quoted
     string, no parameter that only PowerShell 7 knows;
   * the API part polls /health until it reports the release commit; the web part reads the cf-deploy run (both deploy
@@ -34,12 +36,14 @@ Pinned:
 """
 from __future__ import annotations
 
+import base64
 import io
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -461,7 +465,7 @@ def _():
     assert "$PSScriptRoot" in re.search(r"^\$ROOT\s*=\s*(.+)$", src, flags=re.M).group(1), "the script's own folder"
 
 
-@test("guards: branch main, level with origin/main, clean tracked files, CI green via the public GitHub API, LOCK absent, never deleted")
+@test("guards: branch main, level with origin/main, clean tracked files, CI green via the GitHub API, LOCK absent, never deleted")
 def _():
     src = _src()
     ready = _function(src, "Assert-Ready")
@@ -473,6 +477,15 @@ def _():
     assert re.search(r"^\$LOCK\s*=\s*Join-Path \$ROOT 'business_data\\ops\\LOCK'$", src, flags=re.M)
     assert "'/actions/runs?head_sha=' + $sha" in _function(src, "Get-Runs")
     assert "'https://api.github.com/repos/' + $REPO" in _function(src, "Get-GhJson")
+    # C1: once the repository is private, both GitHub calls carry the read token; a public one needs none
+    gh = _function(src, "Get-GhHeaders")
+    for need in ("$env:GH_READ_TOKEN", "'Bearer '", "$h['Authorization']", "$script:Secrets += $tok", "return $script:GhHeaders"):
+        assert need in gh, need
+    hits = [ln for _, ln in _code(src) if re.search(r"Invoke-(RestMethod|WebRequest)", ln) and ("api.github.com" in ln or "jobs_url" in ln)]
+    assert len(hits) == 2 and all("-Headers (Get-GhHeaders)" in ln for ln in hits), hits
+    for _, ln in _code(src):
+        if "(Get-GhHeaders)" in ln:
+            assert "api.github.com" in ln or "jobs_url" in ln, "the token goes to GitHub alone, never to our own sites: " + ln.strip()
     check = _region(src, "check")
     for need in ("Find-Run $w 'ci'", "[string]$ci.status -ne 'completed'", "[string]$ci.conclusion -ne 'success'",
                  "'DATABASE_URL'", "'RENDER_API_KEY'", "'SUPABASE_URL'", "'SUPABASE_KEY'", "$R8M, $R8M_REV, $R8N, $R8N_REV",
@@ -487,7 +500,7 @@ def _():
         assert bad not in raw, bad
 
 
-@test("no secret is echoed: .env only tested, read once for the Cloudflare keys (never shown), every line masked")
+@test("no secret is echoed: .env only tested, read for the Cloudflare keys and GH_READ_TOKEN (never shown), every line masked")
 def _():
     src = _src()
     code = _code(src)
@@ -497,11 +510,15 @@ def _():
         assert ("Test-Path -LiteralPath $ENVFILE" in line
                 or re.search(r"Select-String -LiteralPath \$ENVFILE .*-Quiet", line)
                 or "[System.IO.File]::ReadAllLines($ENVFILE)" in line), f"line {no}: .env used another way: {line.strip()}"
-    assert src.count("ReadAllLines($ENVFILE)") == 1
+    assert src.count("ReadAllLines($ENVFILE)") == 2, "the Cloudflare keys of a web rollback, and GH_READ_TOKEN (C1)"
     keys = _function(src, "Use-CloudflareKeys")
     assert "ReadAllLines($ENVFILE)" in keys and "$script:Secrets += $tok" in keys
     for out in ("Say ", "Write-Host", "Write-Output", "Add-LogLine", "Write-Verbose", "Set-Content", "Add-Content"):
         assert out not in keys, out
+    gh = _function(src, "Get-GhHeaders")
+    assert "ReadAllLines($ENVFILE)" in gh and "$script:Secrets += $tok" in gh and "GH_READ_TOKEN" in gh
+    for out in ("Say ", "Write-Host", "Write-Output", "Add-LogLine", "Write-Verbose", "Set-Content", "Add-Content"):
+        assert out not in gh, out
     for bad in ("Get-Content $ENVFILE", "Get-Content -LiteralPath $ENVFILE", "Get-Content .env", "type .env", "cat .env"):
         assert bad not in src, bad
     for no, line in code:
@@ -517,6 +534,51 @@ def _():
         text = _read(path)
         for shape in SECRET_SHAPES:
             assert not re.search(shape, text), (path.name, shape)
+
+
+@test("the GitHub read token (C1): no header while GH_READ_TOKEN is empty, a Bearer header from the window or else from .env, known to the masker; SKIP without PowerShell")
+def _():
+    exe = shutil.which("powershell") or shutil.which("pwsh")
+    if not exe:
+        print("        SKIP: no PowerShell on this machine (the text pins above still apply)")
+        return
+    # Only Get-GhHeaders is run, in a throw-away PowerShell: nothing else of the release script, no network.
+    code = ("$ErrorActionPreference = 'Stop'\r\n$ProgressPreference = 'SilentlyContinue'\r\n"
+            "$ENVFILE = $env:YQ_T_ENVFILE\r\n$script:Secrets = @()\r\n$script:GhHeaders = $null\r\n"
+            + _function(_src(), "Get-GhHeaders") + "\r\n"
+            "$h = Get-GhHeaders\r\n"
+            "[Console]::Out.WriteLine('KEYS=' + ((@($h.Keys) | Sort-Object) -join ','))\r\n"
+            "[Console]::Out.WriteLine('AUTH=' + [string]$h['Authorization'])\r\n"
+            "[Console]::Out.WriteLine('SECRETS=' + (@($script:Secrets) -join '|'))\r\n"
+            "[Console]::Out.WriteLine('SAME=' + [object]::ReferenceEquals($h, (Get-GhHeaders)))\r\n")
+    encoded = base64.b64encode(code.encode("utf-16-le")).decode("ascii")
+
+    def run(window, env_lines):
+        """(the variable of the PowerShell window or None, the lines of a .env or None for no .env) -> what the function did."""
+        with tempfile.TemporaryDirectory() as tmp:
+            envfile = Path(tmp) / ".env"
+            if env_lines is not None:
+                envfile.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if k != "GH_READ_TOKEN"}
+            env["YQ_T_ENVFILE"] = str(envfile)
+            if window is not None:
+                env["GH_READ_TOKEN"] = window
+            out = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], env=env,
+                                 capture_output=True, text=True, timeout=180)
+        assert out.returncode == 0, (out.stdout + out.stderr)[-1500:]
+        return dict(ln.split("=", 1) for ln in out.stdout.splitlines() if "=" in ln)
+
+    tok_window, tok_file = "tok-window-0123456789", "tok-file-0123456789"      # invented
+    for window, lines in ((None, None), ("   ", None), (None, ["# a comment", "DATABASE_URL=x", "GH_READ_TOKEN_OTHER=" + tok_file]),
+                          (None, ["GH_READ_TOKEN="])):
+        got = run(window, lines)
+        assert got["KEYS"] == "" and got["AUTH"] == "" and got["SECRETS"] == "", (window, lines, got)    # a public repository: no header
+    got = run(tok_window, None)
+    assert got["KEYS"] == "Authorization" and got["AUTH"] == "Bearer " + tok_window and got["SECRETS"] == tok_window, got
+    got = run(None, ["OTHER=1", '  GH_READ_TOKEN = "' + tok_file + '"  ', "LAST=2"])
+    assert got["AUTH"] == "Bearer " + tok_file and got["SECRETS"] == tok_file, got      # quotes and spaces are stripped
+    got = run(tok_window, ["GH_READ_TOKEN=" + tok_file])
+    assert got["AUTH"] == "Bearer " + tok_window and got["SECRETS"] == tok_window and got["SAME"] == "True", got    # the window first, built once
 
 
 @test("the masker hides a database password, a JWT, Render / Supabase / GitHub / OpenAI keys and key=value pairs; plain lines pass")

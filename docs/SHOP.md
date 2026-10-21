@@ -325,10 +325,16 @@ starting only at 3.35 s, and the API answering in ~1.4 s even when awake. What c
 - **Still true:** Render free sleeps after 15 minutes idle (~50 s wake). `.github/workflows/keepalive.yml` says
   `*/10`, but measured 21–24 Sep 2026 GitHub fires it with a median gap of ~201 min, so it never kept the API warm
   in business hours (a cold `/public/market` took 12.4 s). Since 24-Sep the keep-warm is the Cloudflare Worker cron
-  (`web/wrangler.keepwarm.jsonc` + `web/workers/keepwarm.js`, Workers Free): `GET /health` every 10 min from
-  06:00 to 22:59 Bahrain and the scheduler paths every 15 min. `keepalive.yml` stays as the Supabase 7-day-pause
-  backstop; `shop-cron.yml` keeps only its manual trigger (schedule commented out — re-enable only if the Worker
-  is removed). Only a paid instance removes cold starts entirely.
+  (`web/wrangler.keepwarm.jsonc` + `web/workers/keepwarm.js`, Workers Free): `GET /health` every 10 min around the
+  clock (since 28-Sep) and the scheduler paths every 15 min. On the same 10-minute tick the Worker reads Supabase
+  (`GET /rest/v1/keepalive_ping?select=id&limit=1` with the publishable key; 200/206 = awake; the log carries only
+  `keepalive_ping -> HTTP <status>`), which is what keeps the free project from its 7-day pause. A failed read is
+  logged on every tick and sent to Telegram at most once every 6 hours, with no stored state: only the tick in the
+  first 10 minutes of UTC hour 0, 6, 12 or 18 may send it, so a new outage can take up to 6 hours to reach Telegram
+  (Resume the project from the Supabase dashboard). Worker secrets: `AGENT_API_KEY`, `SUPABASE_URL`,
+  `SUPABASE_ANON_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. `keepalive.yml` stays as a backstop until the
+  repository is made private; `shop-cron.yml` keeps only its manual trigger (schedule commented out — re-enable
+  only if the Worker is removed). Only a paid instance removes cold starts entirely.
 - **Render free-hours budget.** The Worker's `*/15` scheduler trigger runs around the clock, so the free Render
   service is awake ~24/7: about **720–744 of the 750 free instance-hours** per workspace per month. That fits only
   while `yq-ops-assistant` is the workspace's only free web service (verified 24-Sep-2026); a second free service

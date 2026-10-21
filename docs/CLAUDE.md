@@ -18,8 +18,11 @@ and demonstrate capability to management.
   `.github/workflows/cf-deploy.yml` after CI passes or by `python -m scripts.deploy_cf`; Vercel only redirects the old
   addresses. The **Streamlit** dashboard (`dashboard/ui.py`) is the local dashboard; its libraries are in
   `requirements-dev.txt`, not in the API image.
-- **Scheduling** — the `yq-keepwarm` **Cloudflare Worker** (cron triggers) keeps the API warm and calls its scheduler
-  endpoints. **n8n** (workflows in `n8n_workflows/`) is not hosted at present (docs/DEPLOY_RENDER.md).
+- **Scheduling** — the `yq-keepwarm` **Cloudflare Worker** (cron triggers) keeps the API warm, calls its scheduler
+  endpoints and, every 10 minutes, reads Supabase's `keepalive_ping` with the publishable key so the free project never
+  pauses (a failed read alerts by Telegram, at most once every 6 hours). `.github/workflows/keepalive.yml` stays as a
+  backstop until the repository is made private. **n8n** (workflows in `n8n_workflows/`) is not hosted at present
+  (docs/DEPLOY_RENDER.md).
 
 ## AI (NO Anthropic, NO paid APIs)
 All model calls go through `app/llm_router.py` — a rotation of ~10 **FREE** providers:
