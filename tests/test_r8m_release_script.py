@@ -10,10 +10,13 @@ PowerShell is on the PATH (powershell.exe on the owner's PC, pwsh on GitHub's ru
 Pinned:
   * every part exists (check, backup, migrate, api, web, import, verify, rollback): the ValidateSet, one region and one
     function per part, the dispatch; the header and the runbook give the release order;
-  * every production command (apply_sql, the backup, the Render deploy and rollback, the importer's and the thumbnail
-    backfill's --apply, the wrangler switch, the restore with --yes) sits after a YES question with no other production
-    command in between; the question reads "Type YES to continue", and anything but YES stops a forward part;
+  * every production command (apply_sql, yq_backup release, the Render deploy and rollback, the importer's and the
+    thumbnail backfill's --apply, the wrangler switch, the restore with --yes) sits after a YES question with no other
+    production command in between; the question reads "Type YES to continue", and anything but YES stops a forward part;
   * every program the script runs is checked by its exit code (the first failure stops the part);
+  * the backup is yq_backup release mi-v2 (mi-v2-2 ... on a later attempt; exit 2 = refused; its last line is the
+    archive, which must exist), never a plain db_backup under business_data; the first backup stays the rollback point;
+    a table restore unpacks that archive (yq_backup unpack, its last line the folder it checked) before the restore;
   * the migration order: r8m, then r8n, and the rollback r8n, then r8m; --rehearse before each apply; audit_grants right
     after each apply; apply_sql nowhere else;
   * the importer: its dry run first (the r8m columns required), the trial (--limit 5), the full run, then a second run
@@ -80,7 +83,7 @@ RELEASE_ORDER = PARTS[:-1]          # the rollback runs only when something is w
 # in between. A rehearsal counts: it runs on production, even though it always rolls back.
 PROD = {
     "apply_sql": re.compile(r"'scripts\.apply_sql'"),
-    "backup": re.compile(r"'scripts\.db_backup',\s*'--all'"),
+    "backup": re.compile(r"'scripts\.yq_backup',\s*'release'"),
     "restore": re.compile(r"'scripts\.db_backup',\s*'--restore'.*'--yes'"),
     "render deploy": re.compile(r"'scripts\.render_deploy',\s*'deploy'"),
     "render rollback": re.compile(r"'scripts\.render_deploy',\s*'rollback'"),
@@ -265,15 +268,23 @@ def _():
 @test("every program the script runs is checked by its exit code; nothing starts a program around the two runners")
 def _():
     src = _src()
+    code = _code(src)
     calls = 0
-    for no, line in _code(src):
+    for idx, (no, line) in enumerate(code):
         if line.startswith("function ") or "return (Invoke-Native 'python'" in line:
             continue
         for _m in re.finditer(r"\((Invoke-Py|Invoke-Native) ", line):
             calls += 1
-            assert re.search(r"\(\((Invoke-Py|Invoke-Native) .*\) -ne 0\)", line), f"line {no}: unchecked: {line.strip()}"
+            if re.search(r"\(\((Invoke-Py|Invoke-Native) .*\) -ne 0\)", line):
+                continue
+            # the one program whose exit 2 means something of its own (yq_backup: refused) is kept, then read twice
+            m = re.match(r"\s*\$(\w+) = \((Invoke-Py|Invoke-Native) .*\)$", line)
+            assert m, f"line {no}: unchecked: {line.strip()}"
+            var = m.group(1)
+            assert code[idx + 1][1].strip().startswith(f"if (${var} -eq 2) {{ Stop-Part 2 "), f"line {no}: exit 2"
+            assert code[idx + 2][1].strip().startswith(f"if (${var} -ne 0) {{ Fail "), f"line {no}: any other exit"
         bare = _strip_strings(line)
-        assert not re.search(r"(^|[\s;(&])(python|py|npx|wrangler|psql|curl)(\.exe)?\b", bare), \
+        assert not re.search(r"(^|[\s;(&])(python|py|npx|wrangler|psql|curl|7z)(\.exe)?\b", bare), \
             f"line {no}: a program started outside Invoke-Py / Invoke-Native"
     assert calls >= 30, calls
     native = _function(src, "Invoke-Native")
@@ -316,6 +327,8 @@ def _():
         outside = outside.replace(_function(src, name), "")
     assert "scripts.apply_sql" not in "\n".join(ln for _, ln in _code(outside))
     assert "Stop-Part 2 'There is no backup of this release yet" in mig, "no migration without the backup"
+    assert "[string](Get-State).backup_archive" in mig and "Test-Path -LiteralPath $arc -PathType Leaf" in mig, \
+        "the backup a migration needs is the encrypted archive -Part backup wrote down"
 
 
 @test("import: the dry run first (r8m required), the trial of 5, everything, a second run that must create 0; thumbnails dry run first")
@@ -407,32 +420,62 @@ def _():
     assert "Test-SameCommit $hc $script:HEAD" in v
     for need in ("Lists", "Spotted", "Cases", "Supplier reports", "Library", "release test"):
         assert need in v, need
+
+
+@test("backup: yq_backup release mi-v2 (mi-v2-2 ... on a later attempt) behind one YES (exit 2 = refused), its last line the archive, the gate snapshot, the first backup kept")
+def _():
+    src = _src()
     b = _region(src, "backup")
-    for need in ("'scripts.db_backup', '--all', '--out', $rel", "'scripts.db_backup', '--verify', $rel",
-                 "'scripts.prod_gate', 'snapshot', '--label', 'pre-mi-v2'", "'business_data\\backups\\' + $DAY + '_pre-mi-v2'",
-                 "Get-Date -Format 'HHmmss'", "Set-State 'backup_dir' $rel", "Set-State 'gate_pre'"):
-        assert need in b, need
-    assert b.index("'--all', '--out'") < b.index("'--verify'") < b.index("'snapshot'")
+    marks = [b.index(s) for s in ("if ([string]$st.backup_runs -match '^\\d+$') { $runs = [int]$st.backup_runs + 1 }",
+                                  "$label = 'mi-v2'", "if ($runs -gt 1) { $label = 'mi-v2-' + $runs }",
+                                  "Confirm-Step ", "Set-State 'backup_runs' $runs",
+                                  "$code = (Invoke-Py @('-m', 'scripts.yq_backup', 'release', $label))",
+                                  "if ($code -eq 2) { Stop-Part 2 ", "if ($code -ne 0) { Fail ",
+                                  "$arc = Get-LastLine $script:LastOutput",
+                                  "-not (Test-Path -LiteralPath $arc -PathType Leaf)) { Fail ",
+                                  "'scripts.prod_gate', 'snapshot', '--label', 'pre-mi-v2'",
+                                  "Set-State 'release_sha' $script:HEAD")]
+    assert marks == sorted(marks), marks
+    # the attempt is counted after the YES, before yq_backup runs: a run refused or stopped half-way never blocks
+    # the next one
+    assert "run -Part backup again (the next run takes a new label)" in b
     # the first backup and before-snapshot of the release stay the rollback point; a later run is only "the latest"
     keep = b.index("if (-not $hasFirst) {")
-    assert keep < b.index("Set-State 'backup_dir' $rel") and keep < b.index("Set-State 'gate_pre'")
-    assert "Set-State 'backup_latest' $rel" in b
+    assert keep < b.index("Set-State 'backup_archive' $arc") and keep < b.index("Set-State 'gate_pre'")
+    assert "Set-State 'backup_latest' $arc" in b and "$kept = [string]$st.backup_archive" in b
+    # release backups are encrypted (R1): no plain db_backup --all under business_data any more
+    assert "'--all'" not in src and "business_data\\backups" not in src
+    # the labels are ones yq_backup takes: lower-case letters and digits, single hyphens between them
+    from scripts import yq_backup
+    assert yq_backup.label_refusal("mi-v2") is None and yq_backup.label_refusal("mi-v2-12") is None
+    assert "'scripts\\yq_backup.py'" in _region(src, "check"), "the check finds the backup's own program"
 
 
-@test("rollback: web, the API, the reverses (r8n, r8m), the restore (dry run first, never over newer rows), a gate compare")
+@test("rollback: web, the API, the reverses (r8n, r8m), the restore (the archive unpacked and checked, dry run first, never over newer rows), a gate compare")
 def _():
     src = _src()
     rb = _region(src, "rollback")
     marks = [rb.index(s) for s in ("'versions', 'list'", "'versions', 'deploy'", "'scripts.render_deploy', 'rollback'",
                                    "Undo-Migration 'r8n'", "Undo-Migration 'r8m'",
-                                   "'scripts.db_backup', '--restore', $bk, '--tables', $tables))",
-                                   "'--tables', $tables, '--yes'", "'post-mi-v2-rollback'")]
+                                   "$arc = [string]$st.backup_archive",
+                                   "'scripts.yq_backup', 'unpack', $arc, '--to', $scratch",
+                                   "$dir = Get-LastLine $script:LastOutput",
+                                   "(Join-Path $dir 'manifest.json') -PathType Leaf)) { Fail ",
+                                   "'scripts.db_backup', '--verify', $dir",
+                                   "'scripts.db_backup', '--restore', $dir, '--tables', $tables))",
+                                   "Ask-Yes ('RESTORE ",
+                                   "'scripts.db_backup', '--restore', $dir, '--tables', $tables, '--yes'",
+                                   "'post-mi-v2-rollback'")]
     assert marks == sorted(marks), marks
     assert rb.index("wrangler.portal.jsonc") < rb.index("wrangler.market.jsonc"), "the portal first"
     for need in ("Use-CloudflareKeys", "($id + '@100%')", "'^dep-[A-Za-z0-9]+$'", "$st.api_previous_deploy",
                  "-cnotmatch '^[a-z_][a-z0-9_]*(,[a-z_][a-z0-9_]*)*$'",
-                 "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'"):
+                 "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'",
+                 "Split-Path -Parent $arc", "'_unpacked_'", "Test-Path -LiteralPath $arc -PathType Leaf"):
         assert need in rb, need
+    # the unpacked copy goes next to the archive, in the backup store, where yq_backup accepts it (never OneDrive or
+    # the project folder); the table list is checked before anything is unpacked
+    assert rb.index("-cnotmatch '^[a-z_][a-z0-9_]*(,[a-z_][a-z0-9_]*)*$'") < rb.index("'scripts.yq_backup', 'unpack'")
     undo = _function(src, "Undo-Migration")
     assert "return $false" in undo and "refused" in undo
     relmd = _read(ROOT / "docs" / "RELEASE.md")
@@ -581,6 +624,30 @@ def _():
     assert got["AUTH"] == "Bearer " + tok_window and got["SECRETS"] == tok_window and got["SAME"] == "True", got    # the window first, built once
 
 
+@test("Get-LastLine, run in PowerShell: the last line that is not blank, trimmed and unquoted (yq_backup's archive, unpack's folder); SKIP without PowerShell")
+def _():
+    exe = shutil.which("powershell") or shutil.which("pwsh")
+    if not exe:
+        print("        SKIP: no PowerShell on this machine (the text pins above still apply)")
+        return
+    # Only Get-LastLine is run, in a throw-away PowerShell, on invented lines: nothing else of the release script.
+    code = ("$ErrorActionPreference = 'Stop'\r\n" + _function(_src(), "Get-LastLine") + "\r\n"
+            "function Put([string]$k, $v) { [Console]::Out.WriteLine($k + '=' + [string]$v) }\r\n"
+            "Put 'L1' (Get-LastLine @('Release backup 2026-10-22_pre-mi-v2: every table', "
+            "'C:\\x\\release\\2026-10-22_pre-mi-v2.7z', '', '   '))\r\n"
+            "Put 'L2' (Get-LastLine @('  \"C:\\x y\\a.7z\"  '))\r\n"
+            "Put 'L3' ('[' + (Get-LastLine @()) + ']')\r\n"
+            "Put 'L4' (Get-LastLine @('  The restore: python -m scripts.db_backup --restore C:\\s\\u\\inner --tables "
+            "<t1,t2,...>', 'C:\\s\\u\\inner'))\r\n")
+    encoded = base64.b64encode(code.encode("utf-16-le")).decode("ascii")
+    out = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], capture_output=True,
+                         text=True, timeout=180)
+    assert out.returncode == 0, (out.stdout + out.stderr)[-1500:]
+    got = dict(ln.split("=", 1) for ln in out.stdout.splitlines() if "=" in ln)
+    assert got["L1"] == r"C:\x\release\2026-10-22_pre-mi-v2.7z" and got["L2"] == r"C:\x y\a.7z", got
+    assert got["L3"] == "[]" and got["L4"] == r"C:\s\u\inner", got
+
+
 @test("the masker hides a database password, a JWT, Render / Supabase / GitHub / OpenAI keys and key=value pairs; plain lines pass")
 def _():
     mask = _masker(_src())
@@ -643,8 +710,10 @@ def _():
     for need in ("Add-LogLine ('RUN  ' + $exe", "Add-LogLine ('EXIT ' + $code)", "Add-LogLine ('  ' + $line)"):
         assert need in native, need
     assert "Add-Content -LiteralPath $LOG" in _function(src, "Add-LogLine")
-    for key in ("release_sha", "backup_dir", "gate_pre", "api_previous_deploy", "api_previous_commit"):
+    for key in ("release_sha", "backup_archive", "backup_latest", "backup_runs", "gate_pre", "api_previous_deploy",
+                "api_previous_commit"):
         assert f"Set-State '{key}'" in src, key
+    assert "Set-State 'backup_dir'" not in src, "the plain backup folder is gone (R1): the state names the archive"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

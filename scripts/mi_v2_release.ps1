@@ -22,11 +22,16 @@
 # and anything else stops the part there (in the rollback: skips that piece). The first failure stops the part
 # and says what failed. Everything shown on screen also goes to business_data\releases\<date>_mi_v2.log; anything
 # that looks like a password, key or token is masked first, and no secret is ever printed.
-# business_data\releases\mi_v2_state.json keeps what a later part needs: the backup folder, the gate snapshot
-# and the API deploy that was live before the release (the rollback target).
+# business_data\releases\mi_v2_state.json keeps what a later part needs: the encrypted backup (its archive), the
+# gate snapshot and the API deploy that was live before the release (the rollback target).
 #
-# It never pushes to GitHub, never changes a Render or Cloudflare setting, never deletes the load lock and never
-# forces the r8m reverse (that switch is a decision for Claude and the owner, docs\MIGRATIONS.md, Release R8m).
+# The backup is  python -m scripts.yq_backup release mi-v2  (a later attempt: mi-v2-2, mi-v2-3 ...): every table,
+# checked, encrypted and read back under %LOCALAPPDATA%\yq-backups\release (never under business_data, never in
+# OneDrive), the plain copy deleted; its last line is the archive. A table restore unpacks it outside OneDrive first
+# (yq_backup unpack, whose last line is the folder it checked).
+#
+# It never pushes to GitHub, never changes a Render or Cloudflare setting, never deletes the load lock or a backup and
+# never forces the r8m reverse (that switch is a decision for Claude and the owner, docs\MIGRATIONS.md, Release R8m).
 #
 # Exit codes: 0 done, 1 failed (stop and tell Claude), 2 stopped (no YES, or something to do first).
 
@@ -65,7 +70,6 @@ $STATE   = Join-Path $RELDIR 'mi_v2_state.json'
 $ENVFILE = Join-Path $ROOT '.env'
 $LOCK    = Join-Path $ROOT 'business_data\ops\LOCK'
 $GATES   = Join-Path $ROOT 'business_data\gates'
-$BACKUPS = Join-Path $ROOT 'business_data\backups'
 # The two migrations, applied in this order: r8m (needs r7b_market_intel, live since 28-Sep-2026), then r8n
 # (needs r7b_market_intel and r7b_ai_head, live since R7d). r8n reads no r8m object, so either order would
 # work; r8m goes first as docs\MIGRATIONS.md lists it, and the rollback reverses r8n first, then r8m.
@@ -208,6 +212,16 @@ function Test-SameCommit([string]$a, [string]$b) {
   $n = [Math]::Min($a.Length, $b.Length)
   if ($n -lt 7) { return $false }
   return ($a.Substring(0, $n).ToLower() -eq $b.Substring(0, $n).ToLower())
+}
+
+function Get-LastLine([string[]]$lines) {
+  # the last line that is not blank, trimmed and without surrounding quotes ('' when there is none): yq_backup
+  # release ends with the path of its archive, yq_backup unpack with the folder it checked
+  for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+    $t = ([string]$lines[$i]).Trim().Trim('"').Trim("'").Trim()
+    if ($t) { return $t }
+  }
+  return ''
 }
 
 function Get-GhHeaders {
@@ -434,8 +448,8 @@ function Invoke-PartCheck {
 
   Step 'the release files are here'
   foreach ($f in @($R8M, $R8M_REV, $R8N, $R8N_REV, 'scripts\market_intel_import.py', 'scripts\market_intel_thumbs.py',
-                   'scripts\apply_sql.py', 'scripts\audit_grants.py', 'scripts\db_backup.py', 'scripts\prod_gate.py',
-                   'scripts\render_deploy.py')) {
+                   'scripts\apply_sql.py', 'scripts\audit_grants.py', 'scripts\db_backup.py', 'scripts\yq_backup.py',
+                   'scripts\prod_gate.py', 'scripts\render_deploy.py')) {
     [void](Invoke-Git @('ls-files', '--error-unmatch', ($f -replace '\\', '/')))
     if ($script:GitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $ROOT $f) -PathType Leaf)) {
       Stop-Part 2 ($f + ' is not in this folder: is the release merged into main and pulled? Tell Claude.')
@@ -461,6 +475,7 @@ function Invoke-PartCheck {
 
   Step 'python'
   if ((Invoke-Py @('--version')) -ne 0) { Fail 'python --version' }
+  Say '  -Part backup needs the backup password and 7-Zip, as the pre-load backups do; yq_backup says so if one is missing.'
 
   Step 'GitHub: ci must be green for this commit'
   $w = Get-Runs $script:HEAD
@@ -490,29 +505,39 @@ function Invoke-PartCheck {
 
 #region part:backup
 function Invoke-PartBackup {
-  # Reads production only. About 5 minutes.
+  # Reads production only. About 5-10 minutes, one YES.
   Assert-Ready -NewTrain
+  $st = Get-State
   # The FIRST backup and before-snapshot of this release stay the rollback point: a later run (the same commit
   # again, or a fix pushed after a partial release) is recorded as the latest and never replaces them.
-  $kept = [string](Get-State).backup_dir
-  $hasFirst = $kept -and (Test-Path -LiteralPath (Join-Path $ROOT $kept))
-  $rel = 'business_data\backups\' + $DAY + '_pre-mi-v2'
-  if (Test-Path -LiteralPath (Join-Path $ROOT $rel)) { $rel = $rel + '_' + (Get-Date -Format 'HHmmss') }   # never overwrite a backup
+  $kept = [string]$st.backup_archive
+  $hasFirst = $kept -and (Test-Path -LiteralPath $kept -PathType Leaf)
   if ($hasFirst) { Say ('  The first backup of this release (' + $kept + ') stays the rollback point; this one is recorded as the latest.') Yellow }
 
-  Step 'backup of every table + the before-snapshot (gate)'
-  Confirm-Step ('Back up every table of the live database to ' + $rel + ' and take the gate snapshot pre-mi-v2. It only READS production (about 5 minutes).')
-  if ((Invoke-Py @('-m', 'scripts.db_backup', '--all', '--out', $rel)) -ne 0) { Fail 'db_backup (internet? a paused Supabase project?)' }
-  if ((Invoke-Py @('-m', 'scripts.db_backup', '--verify', $rel)) -ne 0) { Fail 'the backup does not match its manifest: run -Part backup again' }
+  # Each attempt takes a label of its own (mi-v2, then mi-v2-2, mi-v2-3 ...): yq_backup refuses a second backup of one
+  # label on one day, and a run that stopped half-way leaves its folder behind. The attempt is counted once it starts.
+  $runs = 1
+  if ([string]$st.backup_runs -match '^\d+$') { $runs = [int]$st.backup_runs + 1 }
+  $label = 'mi-v2'
+  if ($runs -gt 1) { $label = 'mi-v2-' + $runs }
+
+  Step ('backup of every table, encrypted outside OneDrive (yq_backup release ' + $label + '), + the before-snapshot (gate)')
+  Confirm-Step ('Back up every table of the live database (python -m scripts.yq_backup release ' + $label + ': checked, encrypted, read back, the plain copy deleted; outside OneDrive) and take the gate snapshot pre-mi-v2. It only READS production (about 5-10 minutes).')
+  Set-State 'backup_runs' $runs
+  $code = (Invoke-Py @('-m', 'scripts.yq_backup', 'release', $label))
+  if ($code -eq 2) { Stop-Part 2 'yq_backup refused (its reason is above): nothing was made. If it says this backup is already there, run -Part backup again (the next run takes a new label); otherwise tell Claude.' }
+  if ($code -ne 0) { Fail ('yq_backup release ' + $label + ' did not finish (its last line says what is left plain: ' + (Get-LastLine $script:LastOutput) + ')') }
+  $arc = Get-LastLine $script:LastOutput
+  if (-not $arc -or -not (Test-Path -LiteralPath $arc -PathType Leaf)) { Fail ('yq_backup did not end with the path of its archive (its last line: ' + $arc + ')') }
   if ((Invoke-Py @('-m', 'scripts.prod_gate', 'snapshot', '--label', 'pre-mi-v2')) -ne 0) { Fail 'gate snapshot pre-mi-v2 (it exits 1 when foreign-key orphans exist)' }
   $g = Get-Newest $GATES '*_pre-mi-v2.json'
   Set-State 'release_sha' $script:HEAD
-  Set-State 'backup_latest' $rel
+  Set-State 'backup_latest' $arc
   if (-not $hasFirst) {
-    Set-State 'backup_dir' $rel
+    Set-State 'backup_archive' $arc
     if ($g) { Set-State 'gate_pre' ('business_data\gates\' + $g.Name) }
   }
-  Say ('Backup done: ' + $rel + '. Next: -Part migrate') Green
+  Say ('Backup done: ' + $arc + '. Next: -Part migrate') Green
 }
 #endregion part:backup
 
@@ -531,9 +556,9 @@ function Invoke-Migration([string]$label, [string]$file) {
 function Invoke-PartMigrate {
   # About 3 minutes, four YES.
   Assert-Ready
-  $bk = [string](Get-State).backup_dir
-  if (-not $bk -or -not (Test-Path -LiteralPath (Join-Path $ROOT $bk))) { Stop-Part 2 'There is no backup of this release yet: run -Part backup first.' }
-  Say ('  backup of this release: ' + $bk)
+  $arc = [string](Get-State).backup_archive
+  if (-not $arc -or -not (Test-Path -LiteralPath $arc -PathType Leaf)) { Stop-Part 2 'There is no backup of this release yet: run -Part backup first.' }
+  Say ('  backup of this release: ' + $arc)
   Invoke-Migration 'r8m' $R8M
   Invoke-Migration 'r8n' $R8N
   Say 'Both migrations are applied and the grant audit is clean. Next: -Part api' Green
@@ -824,16 +849,12 @@ function Invoke-PartRollback {
   $okM = Undo-Migration 'r8m' $R8M_REV 'r8m refuses while it holds data (the lists, cases, reports, the capture times of the imported finds, the photo thumbnails): that is its protection. Leave it; the old API and pages ignore it. Dropping it anyway is a decision for Claude (docs\MIGRATIONS.md, Release R8m).'
   Add-LogLine ('reverses: r8n ' + $okN + ', r8m ' + $okM)
 
-  Step 'R4. last resort, only with Claude: restore tables from the backup taken before the release'
-  $bk = [string]$st.backup_dir
-  if (-not $bk) {
-    $d = Get-Newest $BACKUPS '*_pre-mi-v2*' -Directory
-    if ($d) { $bk = 'business_data\backups\' + $d.Name }
-  }
-  if (-not $bk) {
-    Say '  No pre-mi-v2 backup folder was found: nothing to restore from.' Yellow
+  Step 'R4. last resort, only with Claude: restore tables from the encrypted backup taken before the release'
+  $arc = [string]$st.backup_archive
+  if (-not $arc -or -not (Test-Path -LiteralPath $arc -PathType Leaf)) {
+    Say '  The state names no encrypted backup of this release, or the file is gone: nothing to restore from here. An older plain backup is restored with Claude (docs\BACKUPS.md, Restoring).' Yellow
   } else {
-    Say ('  backup: ' + $bk)
+    Say ('  backup: ' + $arc)
     Say '  The restore refuses by itself when live rows are newer than the backup (orders or sightings since the release): it never deletes them.'
     $tables = ([string](Read-Host 'Tables to restore, comma-separated, exactly as Claude gave them (or Enter to skip)')).Trim()
     Add-LogLine ('tables typed for the restore: ' + $tables)
@@ -842,10 +863,18 @@ function Invoke-PartRollback {
     } elseif ($tables -cnotmatch '^[a-z_][a-z0-9_]*(,[a-z_][a-z0-9_]*)*$') {
       Fail ('not a table list: ' + $tables)
     } else {
-      if ((Invoke-Py @('-m', 'scripts.db_backup', '--verify', $bk)) -ne 0) { Fail 'the backup does not match its manifest' }
-      if ((Invoke-Py @('-m', 'scripts.db_backup', '--restore', $bk, '--tables', $tables)) -ne 0) { Fail 'the restore dry run refused (above); nothing was changed' }
-      if (Ask-Yes ('RESTORE ' + $tables + ' from ' + $bk + ': one transaction, those tables get the rows of the backup.')) {
-        if ((Invoke-Py @('-m', 'scripts.db_backup', '--restore', $bk, '--tables', $tables, '--yes')) -ne 0) { Fail 'the restore (rolled back as a whole on any mismatch)' }
+      # a new folder next to the archive, in the backup store: yq_backup refuses one in OneDrive or the project folder
+      $scratch = Join-Path (Split-Path -Parent $arc) ([IO.Path]::GetFileNameWithoutExtension($arc) + '_unpacked_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+      Say ('  unpacked to: ' + $scratch + ' (outside OneDrive; it holds the backup unencrypted: Claude deletes it once the restore is done)')
+      if ((Invoke-Py @('-m', 'scripts.yq_backup', 'unpack', $arc, '--to', $scratch)) -ne 0) { Fail 'yq_backup unpack (its last line says what is left): nothing was restored' }
+      # unpack prints the checked folder (the one that holds manifest.json) as its last line
+      $dir = Get-LastLine $script:LastOutput
+      if (-not $dir -or -not (Test-Path -LiteralPath (Join-Path $dir 'manifest.json') -PathType Leaf)) { Fail ('yq_backup unpack did not end with the folder of the backup (its last line: ' + $dir + ')') }
+      if ((Invoke-Py @('-m', 'scripts.db_backup', '--verify', $dir)) -ne 0) { Fail 'the unpacked backup does not match its manifest' }
+      if ((Invoke-Py @('-m', 'scripts.db_backup', '--restore', $dir, '--tables', $tables)) -ne 0) { Fail 'the restore dry run refused (above); nothing was changed' }
+      if (Ask-Yes ('RESTORE ' + $tables + ' from the backup taken before the release: one transaction, those tables get the rows of the backup.')) {
+        if ((Invoke-Py @('-m', 'scripts.db_backup', '--restore', $dir, '--tables', $tables, '--yes')) -ne 0) { Fail 'the restore (rolled back as a whole on any mismatch)' }
+        Set-State 'restored_tables' $tables
       } else {
         Say '  No restore.' Yellow
       }
