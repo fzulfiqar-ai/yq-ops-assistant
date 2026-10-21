@@ -36,7 +36,8 @@ where such a tail would also read as a long number to the scan for card numbers.
 PRIVACY. The narration column of the ledger holds customers' personal ID numbers on Sales Invoice
 rows. Narration is therefore read ONLY on Stock Issue Voucher and Stock Receive Voucher rows (the
 two legs of a transfer, where it helps to pair them), passed through the loader's own mask
-(scripts.ingest.mask_personal_ids), folded (spaces collapsed, lower case) and reduced to a short
+(scripts.text_mask.mask_personal_ids, which scripts.ingest re-exports; standard library only, so the
+database path needs no pandas), folded (spaces collapsed, lower case) and reduced to a short
 hash in letters. Two legs typed with the same words get the same hash, and that is all it tells:
 the mask comes first, so even a number typed into a transfer narration is hashed as its masked
 form. The words themselves are never stored in a row, never cached and never printed, and the
@@ -80,10 +81,11 @@ NARR_LEN = 12
 HASH_LETTERS = frozenset(loadplan.letters_only("0123456789abcdef"))   # all a narration hash can hold
 ZERO = Decimal(0)
 
-# The code that turns a workbook into rows: the loader's reader, parser and mask, and this module.
-# A cache is bound to their bytes (see _code_key), so a change in either can never serve old rows.
+# The code that turns a workbook into rows: the loader's reader and parser, its mask (its own module
+# from release 2b) and this module. A cache is bound to their bytes (see _code_key), so a change in
+# any of them can never serve old rows.
 _HERE = Path(__file__).resolve()
-CODE_SOURCES = (_HERE.parents[1] / "ingest.py", _HERE)
+CODE_SOURCES = (_HERE.parents[1] / "ingest.py", _HERE.parents[1] / "text_mask.py", _HERE)
 
 # One statement, aggregated in SQL (never rows): one line per voucher type and warehouse, about a
 # hundred of them. Sums and counts travel as text so no float gets between the database and the
@@ -270,6 +272,7 @@ def _parse(path: Path) -> list[dict]:
     error. A workbook that opens and is laid out differently still stops at the parser, with its
     own words on the header."""
     from scripts import ingest               # pandas: imported only when a workbook is really read
+    from scripts.text_mask import mask_personal_ids
 
     try:
         grid = ingest.read_grid(path)
@@ -279,7 +282,7 @@ def _parse(path: Path) -> list[dict]:
         raise _cannot_open(path, exc) from None
     raw = ingest.parse_stock(grid, path.name)
     del grid
-    return _shape(raw, ingest.mask_personal_ids)
+    return _shape(raw, mask_personal_ids)
 
 
 # ── the cache: shaped rows only, never a narration ────────────────────────────
@@ -455,11 +458,11 @@ def from_db() -> Ledger:
     the file is missing, cannot be opened or is not what production holds (for_audit makes that
     choice). Shaped and hashed the same way, its numbers held to the same three decimals."""
     from scripts.ops import db               # first: before anything that could import app.*
-    from scripts import ingest
+    from scripts.text_mask import mask_personal_ids    # the loader's mask, without pandas
 
     with db.session() as s:
         raw = s.q(DB_SQL, (sorted(NARRATED),))
-    rows = _shape(raw, ingest.mask_personal_ids)
+    rows = _shape(raw, mask_personal_ids)
     return Ledger(rows=rows, source="stock_movements", first_date=first_date(rows),
                   last_date=last_date(rows), sha=None, origin="database")
 

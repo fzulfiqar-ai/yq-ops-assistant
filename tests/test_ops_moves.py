@@ -609,10 +609,12 @@ def _():
             ingest.read_grid = real_read
 
 
-@test("ledger cache: it belongs to the code that shaped its rows: a changed parser or ledger module is never served old rows")
+@test("ledger cache: it belongs to the code that shaped its rows: a changed parser, mask or ledger module is never served old rows")
 def _():
-    assert [p.name for p in ledger.CODE_SOURCES] == ["ingest.py", "ledger.py"]
+    # the parser, the narration mask (its own module from release 2b, which ingest re-exports) and this module
+    assert [p.name for p in ledger.CODE_SOURCES] == ["ingest.py", "text_mask.py", "ledger.py"]
     assert all(p.is_file() for p in ledger.CODE_SOURCES) and ledger.CODE_SOURCES[0].parent.name == "scripts"
+    assert ledger.CODE_SOURCES[1].parent == ledger.CODE_SOURCES[0].parent, "scripts/text_mask.py, beside the parser"
     key = ledger._code_key()
     assert key == ledger._code_key() and len(key) == 32 and set(key) <= ledger.HASH_LETTERS
 
