@@ -16,8 +16,9 @@ Covered:
   * the psycopg session is read-only before its first statement, asserted, closed when it is not;
   * check_sql refuses anything that is not one SELECT / WITH / SHOW;
   * the package itself (AST): who may import a client, a driver or subprocess; forbidden modules
-    (the one transaction's client scripts.load_txn among them, in every spelling) and calls;
-    scripts/ops/gitinfo.py runs only `git -C <root> <allowed verb>` with no shell.
+    (the one transaction's client scripts.load_txn among them, in every spelling, and the team
+    message's writer scripts.yq_team_post) and calls; scripts/ops/gitinfo.py runs only
+    `git -C <root> <allowed verb>` with no shell.
 """
 from __future__ import annotations
 
@@ -299,7 +300,7 @@ FORBIDDEN_IMPORTS = (
     "app.outreach", "app.social_publish", "app.llm_router", "app.shop_notify", "scripts.refresh", "scripts.load_txn",
     "scripts.apply_sql", "scripts.apply_migration", "scripts.render_deploy", "scripts.deploy_render",
     "scripts.deploy_cf", "scripts.deploy_web", "scripts.send_digest", "scripts.yq_load_go",
-    "scripts.yq_send", "scripts.yq_secrets", "scripts.yq_backup", "scripts.yq_nightly",
+    "scripts.yq_send", "scripts.yq_secrets", "scripts.yq_backup", "scripts.yq_nightly", "scripts.yq_team_post",
     "requests", "smtplib", "socket", "ftplib", "telnetlib",
 )
 # scripts.load_supabase holds the loader AND its pure guards: only these names may be imported.
@@ -432,17 +433,21 @@ def _():
             assert "yq_load_go" not in module and "yq_load_go" not in names, f.name
 
 
-@test("the sender and the secret stores stay outside the package: no module of it reads a secret or sends")
+@test("the sender, the secret stores and the team message's writer stay outside the package: none of it reads a "
+      "secret, sends or writes")
 def _():
-    for name in ("yq_send.py", "yq_secrets.py", "yq_backup.py", "yq_nightly.py"):
+    for name in ("yq_send.py", "yq_secrets.py", "yq_backup.py", "yq_nightly.py", "yq_team_post.py"):
         assert not (OPS / name).exists(), name
+    for source in ("import scripts.yq_team_post", "from scripts import yq_team_post",
+                   "from scripts.yq_team_post import main"):           # the writer of team_messages, in every spelling
+        assert forbidden_imports(ast.parse(source), "x.py"), source
     for f in package_files():
         text = f.read_text(encoding="utf-8")
         for word in ("CredRead", "winreg", "api.resend.com", "YQ_RESEND_API_KEY", "YQ_BACKUP_PASSWORD"):
             assert word not in text, f"{f.name} names {word}: secrets and sending live in scripts/yq_*.py"
         for module, names in imports_of(ast.parse(text)):
             assert not any(m in module or m in names
-                           for m in ("yq_send", "yq_secrets", "yq_backup", "yq_nightly")), f.name
+                           for m in ("yq_send", "yq_secrets", "yq_backup", "yq_nightly", "yq_team_post")), f.name
 
 
 def main() -> int:
