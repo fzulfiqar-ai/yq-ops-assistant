@@ -34,6 +34,11 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   KPI step), three comment lines as formulas, the Actions sheet (counts only) and the Stock and Movements sheets it
   shares with the month-end pack (totals only); a build record with the due day for KPI 7. The skill then follows
   `/weekly-review` for the same Saturday; its Top 5 is written to the portal only after the owner's answers.
+- The count sheets (21-Oct-2026): `/yq-month prep` (`python -m scripts.ops recon prep [full]`) makes one workbook of
+  blind sheets under `exports/reports/counts/` (each van and outlet, the main store's cycle list: the fast movers,
+  the twenty highest-value items and the month's movement exceptions; `full` every item), and `/yq-month count
+  <file>` reads a counted copy back against the stock ledger at the end of the day before the count, in units
+  and BHD at landed cost; results kept in `business_data/ops/counts/` (`scripts/ops/recon.py`, `counts.py`).
 - `/yq-stock` with the Stock & Order Plan (21-Oct-2026): the screen and an editable workbook per data date under
   `exports/reports/stock/` (the order list per supplier, every item with its status, fast movers, the ageing review
   against the clear target with the price cuts' effect, the damage store, goods on the way, the settings and the
@@ -73,9 +78,9 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- Built on their own branches, released in this order (the plan of 21-Oct-2026): the count sheets (`/yq-month
-  prep` and `count`), the month-end pack (the Stock, Movements, Reconciliation, KPI and KPI log sheets, the ten
-  comment lines with their approval step, the four reconciliations, `/yq-kpi`), then the phase 2b release.
+- Built on their own branches, released in this order (the plan of 21-Oct-2026): the month-end pack (the Stock,
+  Movements, Reconciliation, KPI and KPI log sheets, the ten comment lines with their approval step, the four
+  reconciliations, `/yq-kpi`), then the phase 2b release.
 - The faster load's review follow-ups are built and go with the phase 2b release's API deploy: each temporary
   table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
   loader's own words up, so that a load that rolled back is journalled as writing nothing; and the refresh
@@ -83,13 +88,14 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## Not built (the engine prints "not built yet")
 
-`recon`, `kpi` and `check` (a drafted text against the computed figures) are not on `main` yet: they are built and
-wait for their releases (above). The specification is the approved ops-skills plan of 8-Oct-2026 (the sections from
+`recon <YYYY-MM>` (the four month-end reconciliations; `recon prep` and `recon count` are live), `kpi` and `check`
+(a drafted text against the computed figures) are not on `main` yet: they are built and wait for their releases
+(above). The specification is the approved ops-skills plan of 8-Oct-2026 (the sections from
 /yq-week to /yq-kpi, and "Build order").
 
 ## Order of work (each step needs the owner's go)
 
-The count sheets, the month-end pack, the phase 2b release (the Stock Moves page by contents, van stock
+The month-end pack, the phase 2b release (the Stock Moves page by contents, van stock
 from the ledger, the narration mask, the four load follow-ups, the team-message Copy button), then Market Intel
 phases 3 and 4 once the rep reports are enough.
 

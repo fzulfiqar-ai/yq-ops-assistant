@@ -957,7 +957,7 @@ def _():
 def _():
     src = read(REPORT_FILE)
     _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-month" / "SKILL.md").read_bytes())
-    assert fm["argument-hint"] == "[YYYY-MM]" and "a month is written `YYYY-MM`" in body
+    assert fm["argument-hint"] == "[YYYY-MM] | prep [full] | count <file>" and "a month is written `YYYY-MM`" in body
     usage = (ast.get_docstring(ast.parse(src)) or "").splitlines()[0]
     assert usage.startswith("python -m scripts.ops report month [YYYY-MM]"), usage
     for said, in_skill in (("the month is not whole yet", "the month is not whole yet"),
@@ -1035,6 +1035,44 @@ def _():
     assert module_constants(WEEK_FILE)["DUE_DEFAULT"] == "Sunday" and "**Due on Sunday.**" in defs
     assert "counts B2B accessories only, the two outlets left out" in defs
     assert "a second build of a week gets the next free name too" in flat(page_part(5))
+
+
+RECON_FILE = OPS / "recon.py"                            # the count sheets' command: read as text too
+
+
+@test("the words of /yq-month prep and count are the ones the count sheets' command prints, and the page has them")
+def _():
+    src, counts_src = read(RECON_FILE), read(OPS / "counts.py")
+    _problems, fm, _block, body, _text = parse_skill((SKILLS / "yq-month" / "SKILL.md").read_bytes())
+    usage = (ast.get_docstring(ast.parse(src)) or "").splitlines()[0]
+    assert usage.startswith("python -m scripts.ops recon [prep [full] | count [<file>] | YYYY-MM]"), usage
+    assert {"Bash(python -m scripts.ops recon *)", "PowerShell(python -m scripts.ops recon *)"} <= set(fm["allowed-tools"])
+    for said, in_skill in (('"COUNT SHEETS  ', "names one workbook of blind sheets"),
+                           ("Blind: no sheet shows a book quantity", "The sheets are blind"),
+                           ('"COUNTS NOT READ  ', "`COUNTS NOT READ` means nothing was kept"),
+                           ("nothing was kept. Fix these in the file, save it, and read it again",
+                            "he fixes the file, saves it and asks again"),
+                           ("No count-sheet workbook is in exports/reports/counts",
+                            "the newest workbook in `exports/reports/counts`"),
+                           ('if more == ["full"]', "`python -m scripts.ops recon prep full`"),
+                           ("the Notes typed on the sheets are never printed", "Never repeat a Note typed on a sheet")):
+        assert said in src, f"the count sheets' command no longer says: {said}"
+        assert in_skill in body, f"the skill does not act on: {in_skill}"
+    assert "the book side waits for a load with data to" in counts_src and "waits for a load" in body
+    assert 'return paths.ops_dir() / "counts"' in counts_src                 # kept in business_data/ops/counts/
+    assert '"counts"' in read(OPS / "paths.py")                             # exports/reports/counts/ is a reports folder
+    # the page: the two rows, the definitions with the program's own counts, and the two places
+    page = read(PAGE)
+    assert "| `/yq-month prep` or `/yq-month prep full` |" in page and "| `/yq-month count <file>` |" in page
+    defs, consts = flat(page_part(4)), module_constants(OPS / "counts.py")
+    assert consts["TOP_VALUE"] == 20 and "the twenty highest-value items (units on hand at landed cost)" in defs
+    assert consts["HELD_DAYS"] == 30 and "or moved there in the thirty days to it" in defs
+    assert consts["FULL_DAYS"] == 365 and "(`full`: in a year)" in defs
+    assert consts["ADD_ROWS"] == 10 and "Ten empty rows under each list" in defs
+    assert "**The book side** is the stock ledger's balance at the end of the day before the Count date" in defs
+    assert "No sheet shows a book quantity, not even in a hidden cell" in defs
+    places = flat(page_part(5))
+    assert "`counts/` holds what each count prep listed" in places and "| `exports/reports/counts/` |" in page
 
 
 @test("the /yq-week rules check bites: a rule turned round or dropped is caught")
@@ -1786,6 +1824,17 @@ MUST_CONTAIN = {
         "If a line starts `CHECKS TO LOOK AT`", "the workbook should not go out until that is explained",
         "A line that starts `Note:` is for him", "the first is never overwritten",
         "Never accuse anyone", "to check", "If he asks for the weekly workbook or the weekly review, use /yq-week",
+        # the count sheets: the two commands exactly, full only on his word, the file never touched, blind
+        "When his words start with `prep` or `count`, follow \"The count sheets\" below",
+        "run exactly `python -m scripts.ops recon prep`", "`python -m scripts.ops recon prep full`",
+        "only when he asks for a full or quarterly count", "he prints them and counts",
+        "Never open, change, move or delete the file", "never state, look up or work out a book quantity",
+        "run exactly `python -m scripts.ops recon count \"<file>\"`", "with the file's name as he gives it",
+        "run `python -m scripts.ops recon count` alone", "the newest workbook in `exports/reports/counts`",
+        # a file refused keeps nothing; a book side that waits; nothing typed on a sheet repeated; nobody blamed
+        "`COUNTS NOT READ` means nothing was kept", "he fixes the file, saves it and asks again",
+        "is worked out when he asks again after the next load",
+        "Never repeat a Note typed on a sheet, or who counted or checked it", "A difference is \"to check\"",
     ],
     "yq-week": [
         "python -m scripts.ops report week $ARGUMENTS", "python -m scripts.ops status", "600000", "no pipe",
@@ -1944,7 +1993,13 @@ def _():
                      ("Never write them yourself", "Write them from the screen"),
                      ("never send it anywhere", "send it to him"),
                      ("the workbook should not go out until that is explained", "it can go out"),
-                     ("Show the output unchanged", "Sum it up"), ("$ARGUMENTS", "2026-09")):
+                     ("Show the output unchanged", "Sum it up"), ("$ARGUMENTS", "2026-09"),
+                     # the count sheets: full on his word only, the file untouched, blind, nothing kept, nobody blamed
+                     ("only when he asks for a full or quarterly count", "when it seems due"),
+                     ("Never open, change, move or delete the file", "Tidy the file"),
+                     ("never state, look up or work out a book quantity", "say what the books hold"),
+                     ("`COUNTS NOT READ` means nothing was kept", "`COUNTS NOT READ` means some were kept"),
+                     ("Never repeat a Note typed on a sheet, or who counted or checked it", "Quote the Notes")):
         assert old in month, old
         assert problems_rules("yq-month", month.replace(old, new)), f"not caught: {old!r} -> {new!r}"
 

@@ -16,6 +16,8 @@ changes the live database except the load, and the load asks you every time. Fin
 | `/yq-brief` | Any morning. Or ask in plain words: how were sales yesterday, how is a salesman doing, what needs me today. | Sales for the latest day, the last 3 days, the last 7 days, the last full week and the month, the pace against your KPI step, accounts and salesmen to look at, sold-out items that are still in demand, and up to five things to do today. The first brief after a load is the one the load made: the same figures as your e-mail. |
 | `/yq-week` or `/yq-week <YYYY-MM-DD>` | Every Sunday, once the week to Saturday is loaded (your 90-day plan has the weekly report due on Sunday). With no date it takes the last full week; a date must be the Saturday the week ends on. | Your weekly sales workbook to forward, in `exports/reports/weekly/` (Dashboard, Salesmen, Categories, Products, Customers, Daily, Stock, Movements, Actions, Data, Notes), every tile in four windows (section 4), and a short screen of what it checked. Then Claude follows the AI weekly review (`/weekly-review`) for the same week: its report, and its Top 5 actions for your approval; nothing is stored until you answer. |
 | `/yq-month` or `/yq-month <YYYY-MM>` | Once a month is whole: after the first load of the next month. With no month it takes the last whole month. | Your monthly Sales Report workbook, laid out like your September one (Dashboard, Salesmen, Categories, Products, Customers, Daily, Data, Notes), in `exports/reports/monthly/`, and a short screen of what it checked. Its ten comment lines are marked DRAFT until a later phase adds the step where you approve them. |
+| `/yq-month prep` or `/yq-month prep full` | A few days before a month ends, for the month-end count; `full` once a quarter, for a count of every item. | One workbook of blind count sheets in `exports/reports/counts/`: a sheet for each van and each outlet and the main store's cycle list (section 4), with yellow cells for the Count date, who counted and who checked. Print it, count, and type the counts into the same file. No sheet shows what the books hold. |
+| `/yq-month count <file>` | When the counts are typed in and the file is saved. With no file it reads the newest one in `exports/reports/counts/`. | Each store's counted lines beside the books, the units short and over and their BHD at landed cost; the item differences go to `exports/ops/<data-date>/`. A file with a problem is not read at all: each problem is one line, to fix in the file before you ask again. |
 | `/yq-stock`, `/yq-stock reorder`, `/yq-stock ageing`, `/yq-stock damage`, `/yq-stock file` or `/yq-stock <code>` | When you plan an order (it also runs at the end of every `/yq-load`). Or ask in plain words: what should I order, what is running out, how many days of stock do I hold, which stock is old, did the price cut work, how much stock is damaged. | The main store's stock as the portal shows it and at cost, the days of cover against KPI 1, the order list (what to order and how much, and the lead time it rests on), how often the fast movers were in stock, the ageing and how the old and price-cut items are selling, and the damage store, each in short. On its first line, the day's **Stock & Order Plan** workbook (`exports/reports/stock/`, one per data date). `reorder` shows the whole order list with each item's supplier, the supplier invoices the lead time is measured on and the fast movers with their sales ranking; `ageing` the ageing table and its review; `damage` the damage store in full; `file` a new workbook even when today's exists; `team` the team copy of your newest workbook (no cost or value); `ordered <supplier>` when you have placed an order (it shows the lines and logs them only after your yes) and `cancel <supplier>` to undo one; an item's code that one item. No purchase order is drafted and nothing is sent to a supplier (section 4 says how each figure is worked out). |
 | `/yq-moves`, `/yq-moves mtd`, `/yq-moves <YYYY-MM>` or `/yq-moves rep:<name>` | When you want to see what went to the vans and outlets and came back, what was not received, or how one van's or outlet's stock moved. | Every transfer between the main store and the vans and outlets, paired by what its two vouchers hold (never by their numbers), with what became of it; each van's and outlet's stock from its opening to its closing, with a check that must read nought; the main store's line; and what is to check, in BHD at landed cost (section 4). The last seven days unless you name a window; `rep:<name>` shows one van or outlet with its own transfers. |
 | `/yq-watch`, `/yq-watch all` or `/yq-watch <id>` | After a load, or whenever you want the whole action list. To close an item, say in plain words: *A12 is explained: …* or *A12 is done*. | The action list: each transfer to check, ACT or CHECK, with its BHD at cost; beside it, read-only, the load check's and the Command Centre's open items. `all` adds the older items counted once at the first run; an item's id shows it in full; `explain` and `done` take your own words. The brief's DO TODAY shows the most pressing of the same list (section 4). |
@@ -527,20 +529,43 @@ one of two lines, and the load check says the same in its own words:
   read-only pack and counts B2B accessories only, the two outlets left out, so its sales figures are lower
   than the workbook's. Its Top 5 actions reach the portal's AI insights only after your answers.
 
+### The count sheets (`/yq-month prep`, `/yq-month count`)
+
+- **Blind.** No sheet shows a book quantity, not even in a hidden cell, and neither does the record kept of
+  what was listed: the books are looked at only when a counted copy is read back.
+- **What a sheet lists.** A van or an outlet: every accessory it holds at the end of the stock ledger's last
+  day, or moved there in the thirty days to it (`full`: in a year). The main store's **cycle list**: the
+  fast movers, the twenty highest-value items (units on hand at landed cost) and every item on a movement
+  exception of the month as `/yq-moves` finds them, each once (`full`: every item it holds). A store that
+  held and moved nothing gets no sheet. Ten empty rows under each list take an item found that is not on it.
+- **Reading a copy back.** Each sheet carries a hidden tag and a checksum of its list. A copy is refused,
+  one line per problem and nothing kept, when a tag or the checksum does not match (a listed row deleted),
+  a code is on two rows, the Count date is missing, in the future or before the sheets were made, Counted
+  by is empty, or a count is a formula, text, below nought or not whole. A sheet with nothing typed is not
+  counted yet.
+- **The book side** is the stock ledger's balance at the end of the day before the Count date. When the
+  loaded ledger stops before that day, the store waits for a load and is worked out when you ask again
+  after it. Vouchers in that store on the count day are named as a possible cause of a difference.
+  Differences are the count less the book, in units and, at landed cost, in BHD: each is to check.
+- **Kept on this PC.** What a prep listed and each store's result are kept in `business_data/ops/counts/`
+  (the newest read of a store wins), the item differences in `exports/ops/<data-date>/`. The Notes typed
+  on a sheet and the names of who counted and checked are never printed.
+
 ## 5. Where things are kept
 
-Everything in the first six rows sits in the project folder. None of it is in git: `.gitignore` covers
+Everything in the table but its last row sits in the project folder. None of it is in git: `.gitignore` covers
 `business_data/`, `exports/` and the drop folders (`/Uplaods/`, `/Uploads/`), and the repository is
 public.
 
 | Folder | What is in it |
 |---|---|
 | `Uplaods/<ddmmyy>/` | Your drop folders. The commands only read them; they never change a file in them. |
-| `business_data/ops/` | The commands' own notes: `config.json` (limits and KPI steps you can change), `state.json` (last load, last brief), `LOCK` (exists only while a load runs, or when one was cut off), `alerts.jsonl` (the action list), `delivery.json` (who gets the e-mail, and whether it is on), `backup.json` (the day backups began to be encrypted), `drills.jsonl` (each restore drill and its result) and `loads/<run>/` (for each check: what you were shown, `go.cmd`, a journal of the steps once it loads, and `delivery.jsonl`, what became of its e-mail). `kpi_log.jsonl` holds the orders you said were placed (the goods on the way), written only by `/yq-stock ordered` or `cancel` after your yes. `explained.json` holds what you explained or marked done on `/yq-watch`; `golden/` holds the expected figures some tests compare with. |
+| `business_data/ops/` | The commands' own notes: `config.json` (limits and KPI steps you can change), `state.json` (last load, last brief), `LOCK` (exists only while a load runs, or when one was cut off), `alerts.jsonl` (the action list), `delivery.json` (who gets the e-mail, and whether it is on), `backup.json` (the day backups began to be encrypted), `drills.jsonl` (each restore drill and its result) and `loads/<run>/` (for each check: what you were shown, `go.cmd`, a journal of the steps once it loads, and `delivery.jsonl`, what became of its e-mail). `kpi_log.jsonl` holds the orders you said were placed (the goods on the way), written only by `/yq-stock ordered` or `cancel` after your yes. `explained.json` holds what you explained or marked done on `/yq-watch`; `counts/` holds what each count prep listed and each store's counted result (`/yq-month count`); `golden/` holds the expected figures some tests compare with. |
 | `business_data/staging/<run>/` | The copies a load works from. The copies of a check that a newer check of the same folder retired, and a loaded set that a newer load of the same day replaced, are in `superseded/`. |
 | `business_data/Focus ERP <YYYY-MM-DD>/` | The set that is loaded now (the verify tool reads the newest). |
 | `exports/ops/<data-date>/` | A text and a JSON copy of what each command printed for that data date, and in `delivery/<run>/` what each load delivered: `email.html` and `email.txt` (the e-mail as sent), `whatsapp.txt` (the team message), `whatsapp.html` (the same in a box you can change, with a copy button and one that opens WhatsApp) and `manifest.json` (a checksum of each, checked again before the e-mail goes). They carry customer and salesman names, which is one more reason they stay out of git. |
 | `exports/reports/stock/` | The Stock & Order Plan workbooks from `/yq-stock` (and the end of each `/yq-load`): one per data date, `YQ Stock and Order Plan <YYYY-MM-DD>.xlsx`, never overwritten; `/yq-stock file` adds the next free name. |
+| `exports/reports/counts/` | The count sheets from `/yq-month prep`: `YQ Count Sheets <YYYY-MM-DD> cycle.xlsx` (or `full`), never overwritten; a second prep gets the next free name. You type the counts into the file itself; `/yq-month count` reads it back. |
 | `exports/reports/monthly/` and `exports/reports/weekly/` | The workbooks: the monthly one from `/yq-month` (named for its month, with `DRAFT` while its comment lines wait for you; a second build of a month gets the next free name), the weekly one from `/yq-week` (named for the Saturday its week ends on; a second build of a week gets the next free name too). Each build also leaves a short record in `exports/ops/<data-date>/`; a week's says the day it was due and whether it was built on time. |
 | `%LOCALAPPDATA%\yq-backups` | Backups, including the one taken before each load, in `legacy\` the older backups that sat in OneDrive, encrypted, and in `photos\` the encrypted copy of the Market Intel photos. Outside OneDrive (see `docs/BACKUPS.md`). |
 
@@ -548,7 +573,8 @@ public.
 
 - Time from a Stock Request to the Stock Issue: Focus exports no request vouchers.
 - Who entered a voucher, and when: Focus exports no user or time on a voucher.
-- Anything about counted stock, until someone counts it.
+- Anything about counted stock until someone counts it: the count sheets (`/yq-month prep`) are how a count
+  comes back.
 - They send one thing: the e-mail after a load, to the addresses in `business_data/ops/delivery.json`.
   They post nothing to WhatsApp. WhatsApp's own business service posts only to small groups (up to 8
   people) and only for a verified business account, and a program that drives WhatsApp Web breaks
