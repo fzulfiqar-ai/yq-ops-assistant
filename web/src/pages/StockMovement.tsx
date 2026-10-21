@@ -306,9 +306,8 @@ function WarehouseFlow() {
           empty="No issue vouchers in this window." />
       )}
       <p className="mt-2 text-xs text-muted-foreground">
-        Flow: storekeeper punches a <b>Stock Issue Voucher</b> → the destination converts it to a{' '}
-        <b>Stock Receive Voucher</b> (same voucher number). <b>Pending</b> = issued but no receive
-        punched yet — chase the receiver.
+        Pending and Partial here come from matching voucher numbers, which Focus does not keep the same on
+        the two legs (see the notice at the top).
       </p>
     </div>
   )
@@ -382,6 +381,22 @@ export default function StockMovement() {
     <div>
       <PageHeader title="Stock Movement" subtitle="Daily movement, warehouse → van transfers, and whether each route's stock adds up" />
 
+      {/* Interim notice (W1): Pending / Partial / van Gap are not reliable until the matching is corrected */}
+      <div role="status" className="mb-6 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+        <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
+        <div className="min-w-0">
+          <p className="font-bold">Being corrected</p>
+          <p className="mt-0.5">
+            Two parts of this page are not reliable yet. Issue → Receive tracking pairs a Stock Issue with a
+            Stock Receive by voucher number, but Focus numbers the two independently, so many transfers that
+            arrived show as Pending or Partial. The van cards take On hand from the main store's stock file,
+            which holds no van, so every van reads 0 and its Gap is not a real figure. Please do not act on
+            Pending, Partial or Gap until this notice is removed. The daily movement chart and the Transfers
+            table are correct.
+          </p>
+        </div>
+      </div>
+
       {/* Daily movement dashboard (storekeeper performance, month by month) */}
       <DailyMovement />
 
@@ -406,8 +421,8 @@ export default function StockMovement() {
         </div>
       )}
       <p className="mt-2 text-xs text-muted-foreground">
-        Issued in − sold − on hand = gap. “Short” = physical-count shortages booked in Focus (hard signal);
-        a gap can also include opening stock from before the data window.
+        On hand comes from the main store's stock file, which holds no van: every van reads 0 and Gap is not
+        meaningful (see the notice at the top). Short = shortages counted and booked in Focus.
       </p>
 
       {other.length > 0 && (
