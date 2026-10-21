@@ -103,17 +103,17 @@ def _():
     d = datetime(2026, 9, 24)
     g = _grid([["", "", "", "YQ Bahrain W.L.L"], ["", "", "", "Summary sales register"], ["", "", "", "[As on date 24/09/2026]"],
                list(EXPECTED_HEADERS["orders"]),                         # header on row 3, not 5
-               [d, "SI : 1", "Shop A", 12.5, "Karrar", "Cash", "Sales"],
+               [d, "SI : 1", "Shop A", 12.5, "Rep A", "Cash", "Sales"],
                ["Grand Total", None, None, 12.5],
-               [d, "SI : 2", "Shop B", 7.25, "Ahmed", "Credit", "Sales"]])
+               [d, "SI : 2", "Shop B", 7.25, "Rep C", "Credit", "Sales"]])
     od = parse_orders(g, "f")
     assert [o["invoice_no"] for o in od] == ["SI : 1", "SI : 2"] and od[0]["order_date"] == "2026-09-24" and od[1]["gross_bhd"] == 7.25
     g = _grid(_title("Sales day book") + [list(EXPECTED_HEADERS["order_lines"]),
-                                          [d, "SI : 1", "Shop A", "X01 Cable", 3, 1.1, 3.3, None, 3.0, 0.3, 3.3, None, "Karrar"],
-                                          [d, "SI : 1", "Shop A", "T02 Airpod", 1, 2.95, 2.95, None, 2.68, 0.27, 2.95, None, "Karrar"],
+                                          [d, "SI : 1", "Shop A", "X01 Cable", 3, 1.1, 3.3, None, 3.0, 0.3, 3.3, None, "Rep A"],
+                                          [d, "SI : 1", "Shop A", "T02 Airpod", 1, 2.95, 2.95, None, 2.68, 0.27, 2.95, None, "Rep A"],
                                           ["Total", None, None, None, 4]])
     ol = parse_order_lines(g, "f")
-    assert [(r["invoice_no"], r["line_no"], r["warehouse_name"]) for r in ol] == [("SI : 1", 1, "Karrar"), ("SI : 1", 2, "Karrar")]
+    assert [(r["invoice_no"], r["line_no"], r["warehouse_name"]) for r in ol] == [("SI : 1", 1, "Rep A"), ("SI : 1", 2, "Rep A")]
     g = _grid(_title("Product Profitability Report") + [list(EXPECTED_HEADERS["product_profitability"]) + ["Base Link doc. number"],
                                                         ["UK03 20W Charger (USB + Type-C Port) (VFAN)", 439.8, None, 439.8, 483.2, 43.4, 980.03, None, 43.4, 980.03, 12],
                                                         ["Grand Total", 439.8]])
@@ -153,7 +153,7 @@ def _():
         ws = wb.active
         for row in [["", "", "", "YQ Bahrain W.L.L"], ["", "", "", "Summary sales register"], [], ["", "", "", "[As on date 24/09/2026]"], [],
                     ["Date", "Invoice No", "Customer", "Gross", "Salesman", "Payment Mode", "Sales Account Name"],
-                    ["2026-09-24", "SI : 1", "Shop A", 1.0, "Karrar", "Cash", "Sales"]]:
+                    ["2026-09-24", "SI : 1", "Shop A", 1.0, "Rep A", "Cash", "Sales"]]:
             ws.append(row)
         wb.save(src / "Summary_sales_register1_YQ_Bahrain_W_L_L.xlsx")
         old_out, old_argv = ingest.OUT_DIR, sys.argv
@@ -467,9 +467,9 @@ def _():
 def _():
     from scripts import load_supabase as ls
     prev = [{"id": i, "item_name": f"I{i}", "warehouse_name": w, "net_qty": 1, "total_value_bhd": 1, "as_of_date": "2026-09-21"}
-            for i, w in enumerate(["Accessories Warehouse", "Karrar", "Devadas"])]
+            for i, w in enumerate(["Accessories Warehouse", "Rep A", "Rep B"])]
     same_day = [{"id": 90, "item_name": "OLD", "warehouse_name": "Accessories Warehouse", "net_qty": 5, "total_value_bhd": 5, "as_of_date": "2026-09-24"},
-                {"id": 91, "item_name": "VAN", "warehouse_name": "Karrar", "net_qty": 7, "total_value_bhd": 7, "as_of_date": "2026-09-24"}]
+                {"id": 91, "item_name": "VAN", "warehouse_name": "Rep A", "net_qty": 7, "total_value_bhd": 7, "as_of_date": "2026-09-24"}]
     db = {"stock_balance": prev + same_day, "audit_log": []}
     sb = pd.DataFrame([{"item_name": "UK12", "warehouse_name": "Accessories Warehouse", "net_qty": "182", "selling_rate_bhd": "4",
                         "total_value_bhd": "728", "as_of_date": "2026-09-24", "source_file": "f"},
@@ -479,7 +479,7 @@ def _():
     assert res["pairs"] == [("2026-09-24", "Accessories Warehouse")] and len(res["warnings"]) == 1
     assert "covers 1 warehouse(s), the previous one 3" in res["warnings"][0]
     today = [r for r in db["stock_balance"] if r["as_of_date"] == "2026-09-24"]
-    assert {(r["item_name"], r["warehouse_name"]) for r in today} == {("UK12", "Accessories Warehouse"), ("VAN", "Karrar")}
+    assert {(r["item_name"], r["warehouse_name"]) for r in today} == {("UK12", "Accessories Warehouse"), ("VAN", "Rep A")}
     assert next(r for r in today if r["item_name"] == "UK12")["net_qty"] == 200          # aggregated, OLD replaced, VAN kept
     assert len([r for r in db["stock_balance"] if r["as_of_date"] == "2026-09-21"]) == 3   # earlier snapshot untouched
     assert db["audit_log"][0]["event"] == "stock_balance.partial_snapshot" and db["audit_log"][0]["detail"]["previous_as_of"] == "2026-09-21"
@@ -493,12 +493,12 @@ def _():
 @test("verify: group_sums / compare_groups / evaluate_checks -- 0.005 BHD absolute, row counts, notes")
 def _():
     from scripts.verify_numbers import compare_groups, evaluate_checks, group_sums
-    rows = [{"line_date": "2026-09-24", "warehouse_name": "Karrar", "gross_bhd": 1.234},
-            {"line_date": "2026-09-24", "warehouse_name": "Karrar", "gross_bhd": 2.0},
+    rows = [{"line_date": "2026-09-24", "warehouse_name": "Rep A", "gross_bhd": 1.234},
+            {"line_date": "2026-09-24", "warehouse_name": "Rep A", "gross_bhd": 2.0},
             {"line_date": "2026-09-23", "warehouse_name": None, "gross_bhd": "3.5"}]
     fd = group_sums(rows, lambda r: str(r["line_date"])[:10], "gross_bhd")
     assert fd == {"2026-09-24": (3.234, 2), "2026-09-23": (3.5, 1)}, fd
-    assert group_sums(rows, "warehouse_name", "gross_bhd") == {"Karrar": (3.234, 2), "(none)": (3.5, 1)}
+    assert group_sums(rows, "warehouse_name", "gross_bhd") == {"Rep A": (3.234, 2), "(none)": (3.5, 1)}
     c = compare_groups(fd, {"2026-09-24": (3.238, 2), "2026-09-23": (3.5, 2)})
     assert c["max_diff"] == 0.004 and c["mismatched"] == [] and c["count_mismatched"] == [("2026-09-23", 1, 2)]
     assert c["file_rows"] == 3 and c["db_rows"] == 4
@@ -512,11 +512,11 @@ def _():
 @test("verify: the sales detail checks pass on a faithful DB and fail on a 0.02 BHD day, a line-count gap, a salesman gap")
 def _():
     from scripts import verify_numbers as vn
-    ol = [{"line_date": "2026-09-23", "warehouse_name": "Karrar", "gross_bhd": 10.0},
-          {"line_date": "2026-09-24", "warehouse_name": "Karrar", "gross_bhd": 1.5},
-          {"line_date": "2026-09-24", "warehouse_name": "Ahmed", "gross_bhd": 2.5}]
+    ol = [{"line_date": "2026-09-23", "warehouse_name": "Rep A", "gross_bhd": 10.0},
+          {"line_date": "2026-09-24", "warehouse_name": "Rep A", "gross_bhd": 1.5},
+          {"line_date": "2026-09-24", "warehouse_name": "Rep C", "gross_bhd": 2.5}]
     od = [{"order_date": "2026-09-23", "gross_bhd": 10.0}, {"order_date": "2026-09-24", "gross_bhd": 4.0}]
-    faithful = {"day": {"2026-09-23": (10.0, 1), "2026-09-24": (4.0, 2)}, "sm": {"Karrar": (11.5, 2), "Ahmed": (2.5, 1)},
+    faithful = {"day": {"2026-09-23": (10.0, 1), "2026-09-24": (4.0, 2)}, "sm": {"Rep A": (11.5, 2), "Rep C": (2.5, 1)},
                 "inv": {"2026-09-23": (10.0, 1), "2026-09-24": (4.0, 1)}}
     calls: list[str] = []
 
@@ -536,14 +536,14 @@ def _():
         assert ok and len(rows) == 5, [(r["metric"], r["passed"]) for r in rows]
         assert rows[0]["metric"].startswith("Sales per day: max |file - DB| BHD (2 days)") and rows[1]["report"] == 3.0 == rows[1]["db"]
         assert "gross_bhd" in calls[0] and "salesman_raw" in calls[1] and "FROM orders" in calls[2]
-        state = {"day": {"2026-09-23": (10.02, 1), "2026-09-24": (4.0, 3)}, "sm": {"Karrar": (11.5, 2), "Ahmed": (2.51, 1)},
+        state = {"day": {"2026-09-23": (10.02, 1), "2026-09-24": (4.0, 3)}, "sm": {"Rep A": (11.5, 2), "Rep C": (2.51, 1)},
                  "inv": faithful["inv"]}
         checks = []
         vn._sales_detail_checks(ol, od, checks)
         ok, rows = vn.evaluate_checks(checks)
         assert not ok and [r["passed"] for r in rows] == [False, False, False, True, True], [(r["metric"], r["passed"]) for r in rows]
         assert "2026-09-23: file 10.0 vs DB 10.02" in rows[0]["note"] and "2026-09-24: file 2 vs DB 3" in rows[1]["note"]
-        assert "Ahmed: file 2.5 vs DB 2.51" in rows[2]["note"]
+        assert "Rep C: file 2.5 vs DB 2.51" in rows[2]["note"]
         checks = []
         vn._sales_detail_checks(ol, None, checks)              # register not uploaded: only the day-book family
         assert len(checks) == 3
@@ -589,7 +589,7 @@ def _():
             db_read.exec_sql_params = lambda sql, params: (_ for _ in ()).throw(RuntimeError("permission denied for table stock_balance"))
             db = {"stock_balance": [{"id": 1, "as_of_date": "2026-07-08", "warehouse_name": "W1", "total_value_bhd": 5},
                                     {"id": 2, "as_of_date": "2026-09-24", "warehouse_name": "Accessories Warehouse", "total_value_bhd": 1},
-                                    {"id": 3, "as_of_date": "2026-09-24", "warehouse_name": "Karrar", "total_value_bhd": 9}]}
+                                    {"id": 3, "as_of_date": "2026-09-24", "warehouse_name": "Rep A", "total_value_bhd": 9}]}
             vn.get_client = lambda: _FakeDB(db)
             checks = []
             vn._stock_snapshot_checks(sb, Path(d), checks)
@@ -646,9 +646,9 @@ def _():
     xml = b"""<Root><Transaction><Header><DocNo>YQ-26-09-2</DocNo><Date>132778260</Date></Header>
       <HeaderExtra><IdNamePair><Name>PONo</Name><Tag>PO:YQ-26-09-2</Tag></IdNamePair></HeaderExtra>
       <BodyData>
-        <TransBody><Sales><ProdCode>C18</ProdCode><Quantity>640</Quantity><StockValue>362.196</StockValue><Gross>281.6</Gross></Sales></TransBody>
-        <TransBody><Sales><ProdCode>C18</ProdCode><Quantity>640</Quantity><StockValue>362.196</StockValue><Gross>281.6</Gross></Sales></TransBody>
-        <TransBody><Sales><ProdCode>BE05</ProdCode><Quantity>3000</Quantity><StockValue>4024.546</StockValue><Gross>3129</Gross></Sales></TransBody>
+        <TransBody><Sales><ProdCode>C18</ProdCode><Quantity>600</Quantity><StockValue>300.5</StockValue><Gross>240</Gross></Sales></TransBody>
+        <TransBody><Sales><ProdCode>C18</ProdCode><Quantity>600</Quantity><StockValue>300.5</StockValue><Gross>240</Gross></Sales></TransBody>
+        <TransBody><Sales><ProdCode>BE05</ProdCode><Quantity>200</Quantity><StockValue>150.25</StockValue><Gross>120</Gross></Sales></TransBody>
       </BodyData></Transaction></Root>"""
     rows = parse_mrn_bytes(xml)
     assert [r["code"] for r in rows] == ["C18", "C18", "BE05"]
@@ -661,15 +661,15 @@ def _():
 @test("mrn: duplicate lines fold to one per (doc, SKU) with a quantity-weighted unit cost (Decimal, 4 dp)")
 def _():
     from scripts.ingest_mrn import fold_duplicate_lines
-    rows = [{"code": "Big Product Display", "landed": 7.5014, "product": 6.909, "qty": 5, "doc_no": "YQ-25-11-1", "eff": "2025-11-10"},
-            {"code": "big product display", "landed": 0.0128, "product": 0.012, "qty": 5, "doc_no": "YQ-25-11-1", "eff": "2025-11-10"},
-            {"code": "T02", "landed": 1.8588, "product": 1.712, "qty": 1172, "doc_no": "YQ-25-11-1", "eff": "2025-11-10"},
-            {"code": "C18", "landed": 0.5659, "product": 0.44, "qty": 640, "doc_no": "YQ-26-09-2", "eff": "2026-09-20"},
-            {"code": "C18", "landed": 0.5659, "product": 0.44, "qty": 640, "doc_no": "YQ-26-09-2", "eff": "2026-09-20"}]
+    rows = [{"code": "Big Product Display", "landed": 6.0009, "product": 5.5, "qty": 5, "doc_no": "YQ-25-11-1", "eff": "2025-11-10"},
+            {"code": "big product display", "landed": 0.0, "product": 0.002, "qty": 5, "doc_no": "YQ-25-11-1", "eff": "2025-11-10"},
+            {"code": "T02", "landed": 1.5, "product": 1.25, "qty": 1000, "doc_no": "YQ-25-11-1", "eff": "2025-11-10"},
+            {"code": "C18", "landed": 0.5, "product": 0.4, "qty": 600, "doc_no": "YQ-26-09-2", "eff": "2026-09-20"},
+            {"code": "C18", "landed": 0.5, "product": 0.4, "qty": 600, "doc_no": "YQ-26-09-2", "eff": "2026-09-20"}]
     out = fold_duplicate_lines(rows)
-    assert [(r["code"], r["qty"], r["lines"]) for r in out] == [("Big Product Display", 10.0, 2), ("T02", 1172.0, 1), ("C18", 1280.0, 2)]
-    assert out[0]["landed"] == 3.7571 and out[0]["product"] == 3.4605        # (37.507 + 0.064) / 10, ROUND_HALF_UP
-    assert out[2]["landed"] == 0.5659 and out[1]["landed"] == 1.8588
+    assert [(r["code"], r["qty"], r["lines"]) for r in out] == [("Big Product Display", 10.0, 2), ("T02", 1000.0, 1), ("C18", 1200.0, 2)]
+    assert out[0]["landed"] == 3.0005 and out[0]["product"] == 2.751        # 30.0045 / 10 = 3.00045, ROUND_HALF_UP (half-even: 3.0004)
+    assert out[2]["landed"] == 0.5 and out[1]["landed"] == 1.5
     assert fold_duplicate_lines([]) == []
 
 
@@ -781,20 +781,20 @@ def _():
     ws.append(["#", "Item Code", "Item Description", "ERP Item ID", "Qty", "Purchase Rate (BHD)", "Purchase Value (BHD)", "Freight (BHD)",
                "Customs (BHD)", "Misc (BHD)", "Vendor Freight (BHD)", "Total Charges (BHD)", "Landing Cost Total (BHD)",
                "Landing Cost / Unit (BHD)", "Loading % on Purchase"])
-    ws.append([1, "BE05", "BE05 NeckBand", 80, 600, 1.013, 607.8, 51.17, 0.948, 0, 0, 52.118, 659.918, 1.09986333333333, 0.0857])
-    ws.append([2, "Big Product Display", "Big Product Display", 152, 5, 6.909, 34.545, 2.908, 0.054, 0, 0, 2.962, 37.507, 7.5014, 0.0857])
-    ws.append([3, "Big Product Display", "Big Product Display", 152, 5, 0.012, 0.06, 0.004, 0, 0, 0, 0.004, 0.064, 0.0128, 0.0667])
-    ws.append([4, "UK03 C", "UK03 20W Charger + Type-C Cable", 31, 384, 0.676, 259.584, 21.854, 0.405, 0, 0, 22.259, 281.843, 0.733966145833333, 0.0857])
-    ws.append(["TOTAL", "", "", "", 994, "", 901.989])
+    ws.append([1, "BE05", "BE05 NeckBand", 11, 600, 1.0, 600.0, 50.0, 1.0, 0, 0, 51.0, 651.0, 1.085, 0.085])
+    ws.append([2, "Big Product Display", "Big Product Display", 12, 5, 6.0, 30.0, 2.5, 0.05, 0, 0, 2.55, 32.55, 6.51, 0.085])
+    ws.append([3, "Big Product Display", "Big Product Display", 12, 5, 0.01, 0.05, 0.004, 0, 0, 0, 0.004, 0.054, 0.0108, 0.08])
+    ws.append([4, "UK03 C", "UK03 20W Charger + Type-C Cable", 13, 384, 0.5, 192.0, 16.0, 0.3, 0, 0, 16.3, 208.3, 0.542447916666667, 0.085])
+    ws.append(["TOTAL", "", "", "", 994, "", 822.05])
     ws.append(["Reconciliation against the ERP file"])
-    ws.append(["Landing cost calculated above", "", "", "", "", "", 12696.408])
+    ws.append(["Landing cost calculated above", "", "", "", "", "", 891.9])
     wb.create_sheet("Summary")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "YQ_MRN_Landing_Cost_Analysis (2).xlsx"
         wb.save(p)
         rows = parse_workbook_sheet(p, "YQ-25-11-1")
         assert [(r["code"], r["qty"]) for r in rows] == [("BE05", 600.0), ("Big Product Display", 5.0), ("Big Product Display", 5.0), ("UK03 C", 384.0)]
-        assert rows[0]["landed"] == 1.09986333333333 and rows[0]["product"] == 1.013 and rows[0]["doc_no"] == "YQ-25-11-1"
+        assert rows[0]["landed"] == 1.085 and rows[0]["product"] == 1.0 and rows[0]["doc_no"] == "YQ-25-11-1"
         assert rows[0]["eff"] == "2025-11-01" and rows[0]["eff_source"] == "month"
         try:
             parse_workbook_sheet(p, "Summary")
