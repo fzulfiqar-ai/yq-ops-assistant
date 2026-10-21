@@ -29,19 +29,23 @@ Covered:
     backup it refuses and touches nothing; an archive that does not read back is removed and the plain
     copy kept; a plain copy that cannot be deleted is reported (never claimed) and the exit code says so;
   * release (the backup before a release): a label that is not lower-case letters and digits with single
-    hyphens between them, no backup password or no 7-Zip, or that release's folder or .7z already there is
-    refused before anything (exit 2: nothing made, nothing touched, no backup started); the backup child is
+    hyphens between them, no backup password or no 7-Zip, a backup store (YQ_BACKUP_DIR) inside the project
+    or the code folder or a relative one, or that release's folder or .7z already there is refused before
+    anything (exit 2: nothing made, nothing touched, no backup started); the backup child is
     `scripts.db_backup --all --out <store>\\release\\<day>_pre-<label>` with no password in its environment
     (nor in the check's); the folder is checked, sealed while it is still there and only then deleted, and
     the archive's path is the last line; a backup that does not complete (it fails, is stopped, Ctrl+C) is
     removed, never left plain; one that does not match its manifest, lists no table, or cannot be sealed (7-Zip
     does not start, the archive does not read back) is kept and named, with no archive or .partial left; a
-    plain folder that cannot be deleted is reported, never claimed; one row in drills.jsonl, no secret in it;
+    plain folder that cannot be deleted is reported, never claimed; a stop (Ctrl+C, or an error nobody
+    expected) in any stage is raised again after a last line that says what is left plain and what to do with
+    it; one row in drills.jsonl each time, no secret in it;
   * unpack (a rollback's first step): only into a new or empty folder (by default a new one in the backup
-    store), never inside OneDrive or the project folder, and never for what is not a backup archive or for a
-    .7z without the password and 7-Zip (exit 2, nothing written); the files are checked against their
-    manifest and the folder holding manifest.json is the last line; a damaged archive, a wrong password, files
-    that do not match or no manifest leave nothing behind (exit 1); with 7-Zip, release then unpack gives back
+    store, refused like release's store), never inside OneDrive or the project folder, and never for what is
+    not a backup archive or for a .7z without the password and 7-Zip (exit 2, nothing written); the files are
+    checked against their manifest and the folder holding manifest.json is the last line; a damaged archive,
+    a wrong password, files that do not match, no manifest or a stop (Ctrl+C) leave nothing behind (exit 1, or
+    the stop raised again), and what cannot be removed is named; with 7-Zip, release then unpack gives back
     every file byte for byte;
   * the snapshot (scripts/db_backup.py, on a stand-in connection over invented tables): the columns of every
     table come from one catalog query and every count and max from one statement, before one COPY per table,
@@ -147,8 +151,9 @@ OLD = time.time() - 30 * 86400       # the date of an old backup
 
 
 class pack_world:
-    """A data root and a backup store of their own, the test password (or none), 7-Zip as found here (or a
-    stand-in name, or none), and the waits of the delete set to nothing."""
+    """A temporary folder holding a data root of its own (`project`) and, beside it, a backup store (`store`): never
+    inside the project folder, as %LOCALAPPDATA%\\yq-backups is not. The test password (or none), 7-Zip as found here
+    (or a stand-in name, or none), and the waits of the delete set to nothing. Yields the temporary folder."""
 
     def __init__(self, password: str | None = PW, exe: str | None = "found"):
         self.password, self.exe = password, exe
@@ -156,6 +161,7 @@ class pack_world:
     def __enter__(self) -> Path:
         self._root = data_root()
         root = self._root.__enter__()
+        paths.set_data_root(root / "project")
         self._real = (yq_secrets.backup_password, yb.find_7z, yb.backup_root, yb.DELETE_WAIT_S)
         pw, exe = self.password, self.exe
         yq_secrets.backup_password = lambda env=None: (pw, "process_environment") if pw else (None, None)
@@ -934,7 +940,8 @@ def _():
 
 
 @test("release: a backup that does not complete (it fails, it is stopped, Ctrl+C) is removed, never left plain: "
-      "exit 1, the last line says so with the child's reason (no address in it), one row; the label can run again")
+      "exit 1 (Ctrl+C: raised again), the last line says so with the reason (no address in it) and names what could "
+      "not be deleted, one row; the label can run again")
 def _():
     def failing(out: Path):
         out.mkdir(parents=True, exist_ok=True)
@@ -967,15 +974,36 @@ def _():
     def interrupted(out: Path):
         plain_backup(out)
         raise KeyboardInterrupt
-    w = release_world(child=interrupted)
-    with w as root:
-        try:
-            yb.release("r9", say=[].append, today=DAY)
-        except KeyboardInterrupt:
-            pass
-        else:
-            raise AssertionError("Ctrl+C was swallowed")
-        assert not release_paths(root)[0].exists(), "a stopped backup is never left plain"
+
+    def denied(p):
+        raise PermissionError(13, "Access is denied")
+    for held in (False, True):                                  # the second time, what it wrote cannot be deleted
+        with release_world(child=interrupted) as root:
+            folder = release_paths(root)[0]
+            real_once = yb._delete_once
+            if held:
+                yb._delete_once = denied
+            said = []
+            try:
+                yb.release("r9", say=said.append, today=DAY)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("Ctrl+C was swallowed")
+            finally:
+                yb._delete_once = real_once
+            if held:
+                assert sorted(p.name for p in folder.iterdir()) == ["manifest.json", "orders.csv"]
+                assert said[-1] == ("RELEASE BACKUP NOT DONE: it was stopped (Ctrl+C). What it wrote could NOT all be "
+                                    "removed (2 of its files are still there (manifest.json, orders.csv)): delete "
+                                    f"{folder} by hand, it holds part of the backup unencrypted."), said
+            else:
+                assert not folder.exists(), "a stopped backup is never left plain"
+                assert said[-1] == ("RELEASE BACKUP NOT DONE: it was stopped (Ctrl+C). What it wrote was removed: "
+                                    "nothing is left plain."), said
+            [row] = rows_written()
+            assert (row["result"], row["stage"], row["why"], row.get("left")) == (
+                "stopped", "backup", "it was stopped (Ctrl+C)", 2 if held else None), row
 
 
 @test("release: a backup that completed but does not match its manifest (by the check after it, or by its own), or "
@@ -1045,6 +1073,75 @@ def _():
                                    "(7-Zip test failed (exit 2)). The plain folder"), said
 
 
+@test("release: stopped (Ctrl+C, or an error nobody expected) while it checks, seals or deletes: raised again, after a "
+      "last line that says what is left plain and what to do with it, and a row with the stage and the reason")
+def _():
+    def stop(*_a, **_k):
+        raise KeyboardInterrupt
+
+    def bug(*_a, **_k):
+        raise TypeError("an invented bug")
+    kept = ("The plain folder {folder} is kept (unencrypted, outside OneDrive): python -m scripts.yq_backup pack "
+            "{folder} --apply checks it against its manifest, encrypts it and then deletes it.")
+    for stage, name, fake, exc, why in (("check", "verify_folder", stop, KeyboardInterrupt, "it was stopped (Ctrl+C)"),
+                                        ("seal", "seal", stop, KeyboardInterrupt, "it was stopped (Ctrl+C)"),
+                                        ("seal", "seal", bug, TypeError, "it stopped on an unexpected TypeError"),
+                                        ("delete", "_delete_once", stop, KeyboardInterrupt, "it was stopped (Ctrl+C)")):
+        with release_world() as root, stand_in_seal():
+            folder, archive = release_paths(root)
+            real = getattr(yb, name)
+            setattr(yb, name, fake)
+            said: list[str] = []
+            try:
+                yb.release("r9", say=said.append, today=DAY)
+            except exc:
+                pass
+            else:
+                raise AssertionError(f"{stage}: the stop was swallowed")
+            finally:
+                setattr(yb, name, real)
+            assert sorted(p.name for p in folder.iterdir()) == ["manifest.json", "orders.csv"], "the plain folder stays"
+            if stage == "delete":
+                end = (f"The encrypted copy {archive} is made and read back, but the plain folder could NOT all be "
+                       "deleted (2 of its files are still there (manifest.json, orders.csv)): delete "
+                       f"{folder} by hand.")
+                assert archive.is_file(), said
+            else:
+                end = kept.format(folder=folder)
+                assert not list(folder.parent.glob("*.7z*")), "no archive and no .partial"
+            assert said[-1] == f"RELEASE BACKUP NOT DONE: {why}. {end}", said
+            [row] = rows_written()
+            assert (row["result"], row["stage"], row["why"], row["deleted"]) == ("stopped", stage, why, False), row
+
+
+@test("release: a backup store (YQ_BACKUP_DIR) inside the project folder or the code folder, or a relative one read "
+      "from the code folder, is refused before anything (exit 2): no plain copy where OneDrive or git sees it")
+def _():
+    w = release_world()
+    with w as root:
+        patched, real_root = yb.backup_root, w._real[2]       # the real rule (scripts.nightly_backup: YQ_BACKUP_DIR)
+        project, code_store = paths.data_root(), ROOT / "yq-backups-never-made"
+        project.mkdir(parents=True, exist_ok=True)
+        before, cwd = snapshot(root), os.getcwd()
+        yb.backup_root = real_root
+        in_code = "is inside the code folder, a public repository"
+        try:
+            for store, where in ((project / "yq-backups", "is inside the project folder, which the daily OneDrive"),
+                                 (code_store, in_code), (Path("relative-store"), in_code)):
+                os.environ["YQ_BACKUP_DIR"] = str(store)
+                os.chdir(ROOT)                                # a relative store is read from the folder this runs in
+                said: list[str] = []
+                assert yb.release("r9", say=said.append, today=DAY) == 2, said
+                assert len(said) == 1 and said[0].startswith("Refused, nothing was made: ") and where in said[0], said
+                assert said[0].endswith(f"{yb.STORE_FIX}."), said
+        finally:
+            os.environ["YQ_BACKUP_DIR"] = STORE
+            os.chdir(cwd)
+            yb.backup_root = patched
+        assert snapshot(root) == before and not w.calls and not rows_written(), "nothing started, made or written"
+        assert not code_store.exists() and not (ROOT / "relative-store").exists()
+
+
 @test("release: a plain folder that cannot be deleted after the seal (Access is denied) is reported, never claimed: "
       "exit 1, the archive stays, the row says so")
 def _():
@@ -1085,7 +1182,7 @@ def _():
         for archive, to, words in ((z, full, "is not empty: name a new folder, or an empty one"),
                                    (z, a_file, "is a file, not a folder"),
                                    (z, tmp / "OneDrive - YQ" / "restore", "is inside a synced folder (OneDrive)"),
-                                   (z, root / "business_data" / "restore", "is inside the project folder"),
+                                   (z, paths.data_root() / "business_data" / "restore", "is inside the project folder"),
                                    (z, code, "is inside the code folder, a public repository"),
                                    (tmp / "in" / "missing.7z", None, "is not a backup archive on this PC"),
                                    (a_file, None, "is not a backup archive on this PC"),
@@ -1093,6 +1190,15 @@ def _():
             said: list[str] = []
             assert yb.unpack_backup(archive, to, say=said.append) == 2, (archive, to, said)
             assert len(said) == 1 and said[0].startswith("Refused, nothing was written: ") and words in said[0], said
+        patched = yb.backup_root
+        yb.backup_root = lambda: paths.data_root() / "yq-backups"      # its own folder: a store inside the project
+        try:
+            said = []
+            assert yb.unpack_backup(z, None, say=said.append) == 2, said
+        finally:
+            yb.backup_root = patched
+        assert len(said) == 1 and "is inside the project folder" in said[0], said
+        assert said[0].endswith(f"{yb.STORE_FIX}."), said
         assert (snapshot(root), snapshot(tmp)) == before and not code.exists() and not rows_written()
     for password, exe, missing in ((None, MISSING_7Z, "no backup password"), (PW, None, "7-Zip is not installed")):
         with pack_world(password=password, exe=exe) as root:
@@ -1160,6 +1266,48 @@ def _():
         assert yb.unpack_backup(wrong, None, say=said.append) == 1, said
         assert [p.name for p in (root / "store").iterdir() if p.name.startswith("unpack_")] == [made.parent.name], \
             "the new folder of the failed unpack is removed again"
+
+
+@test("unpack: stopped (Ctrl+C) while it checks the copy: raised again, after the copy is removed (a named empty "
+      "folder is left as it was) or named when it cannot be, in a last line and a row")
+def _():
+    def stop(*_a, **_k):
+        raise KeyboardInterrupt
+
+    def denied(p):
+        raise PermissionError(13, "Access is denied")
+    with pack_world(exe=None) as root, tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        z = plain_zip(tmp / "in" / f"{DAY}_pre-r9.zip")
+        for to, held in ((tmp / "restore", False), (None, False), (tmp / "restore-held", True)):
+            if to is not None:
+                to.mkdir()                                     # an empty folder, named with --to
+            real_verify, real_once = yb.verify_folder, yb._delete_once
+            yb.verify_folder = stop
+            if held:
+                yb._delete_once = denied
+            said: list[str] = []
+            try:
+                yb.unpack_backup(z, to, say=said.append)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("Ctrl+C was swallowed")
+            finally:
+                yb.verify_folder, yb._delete_once = real_verify, real_once
+            row = rows_written()[-1]
+            assert (row["kind"], row["result"], row["why"]) == ("unpack", "stopped", "it was stopped (Ctrl+C)"), row
+            if held:
+                assert said[-1].startswith("UNPACK FAILED: it was stopped (Ctrl+C). The unpacked copy could NOT all be "
+                                           "removed (2 of its files are still there (manifest.json, orders.csv)): "
+                                           "delete "), said
+                assert said[-1].endswith(" by hand, it holds the backup unencrypted.") and row["left"] == 2, said
+            else:
+                assert said[-1] == "UNPACK FAILED: it was stopped (Ctrl+C). The unpacked copy was removed.", said
+                if to is not None:
+                    assert to.is_dir() and not any(to.iterdir()), "the named empty folder is left as it was"
+                else:
+                    assert not [p for p in (root / "store").iterdir() if p.name.startswith("unpack_")], "its folder too"
 
 
 @test("release then unpack, with 7-Zip (SKIP without): the archive reads back only with the password and hides the "

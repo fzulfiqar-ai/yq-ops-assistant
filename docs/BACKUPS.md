@@ -149,13 +149,16 @@ the release in lower-case letters and digits with single hyphens between them (`
    `pack` does: made as `.7z.partial`, read back with the password and every file counted, and only then renamed;
 4. deletes the plain folder, and prints the archive's path as its last line.
 
-It refuses, with nothing made, without the backup password or 7-Zip (a release backup is never plain), and when that
-folder or its `.7z` is already there: a second backup of a release on the same day takes another label, such as `r9-2`.
-A backup that does not complete (a lost connection, a stop) is removed, since it is not a backup. One whose files do not
-match their manifest is kept for a look; one that could not be packed is kept too, a whole backup, which
-`pack <folder> --apply` encrypts later. A row with `"kind": "release"` goes to `business_data/ops/drills.jsonl`. Exit
-code: 0 only the encrypted copy is left; 1 it did not finish (its last line says what is left plain); 2 refused,
-nothing was made.
+It refuses, with nothing made, without the backup password or 7-Zip (a release backup is never plain), when the backup
+store is or leads inside OneDrive, the code folder or the project folder (`YQ_BACKUP_DIR`; a relative one is read from
+the folder it runs in), and when that folder or its `.7z` is already there: a second backup of a release on the same
+day takes another label, such as `r9-2`. A backup that does not complete (a lost connection, a stop) is removed, since
+it is not a backup. One whose files do not match their manifest is kept for a look; one that could not be packed, or
+that a stop (Ctrl+C) cut off while it was checked or packed, is kept too, a whole backup, which `pack <folder> --apply`
+checks, encrypts and then deletes. Whatever happens once the backup has begun, its last line says what is left plain and
+what to do with it, and a row with `"kind": "release"` goes to `business_data/ops/drills.jsonl` (a stop is then passed
+on, as Ctrl+C always is). Exit code: 0 only the encrypted copy is left; 1 it did not finish (its last line says what is
+left plain); 2 refused, nothing was made.
 
 A release script runs it once, after its own YES, stops unless the exit code is 0, and keeps the last line (the archive)
 for its rollback part. The archive can be checked at any time with `python -m scripts.yq_backup drill --archive <file>`.
@@ -169,9 +172,10 @@ python -m scripts.db_backup --restore <folder> --tables <t1,t2,…> --yes    # o
 ```
 
 `unpack` reads the archive back with the password, unpacks it into a new, empty folder (by default a new
-`unpack_<date>_<time>_1` folder in the backup store; a folder named with `--to` must be new or empty, and outside
-OneDrive and the project folder), checks every file against its manifest and prints the folder that holds
-`manifest.json` as its last line. A copy that does not unpack whole, or does not match its manifest, is removed again.
+`unpack_<date>_<time>_1` folder in the backup store, refused as `release` refuses the store; a folder named with `--to`
+must be new or empty, and outside OneDrive and the project folder), checks every file against its manifest and prints
+the folder that holds `manifest.json` as its last line. A copy that does not unpack whole, does not match its manifest,
+or whose unpack is stopped (Ctrl+C) is removed again, and the last line says so (or names what could not be removed).
 A plain `.zip` backup is unpacked the same way, without the password. The folder holds the backup unencrypted: delete
 it once the restore is done. A row with `"kind": "unpack"` goes to `drills.jsonl`. Exit code: 0 unpacked and checked;
 1 it did not unpack whole (its last line says what is left); 2 refused, nothing was written.
