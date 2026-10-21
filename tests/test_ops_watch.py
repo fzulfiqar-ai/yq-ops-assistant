@@ -300,6 +300,14 @@ def _():
         items, notes = checks.found_items([exc("damage_not_booked", issues=[sio(48)], to=DAMAGE, day=D - timedelta(7),
                                                deadline=D)], D, {}, None)
         assert [it["evidence"] for it in items["xfer_open"]] == [[sio(48)]] and not notes, (items["xfer_open"], notes)
+        # ... and so is a set of identical issues the audit says went there (to_kind); with no to_kind, the old rule
+        to_damage = exc("twins", issues=[sio(49), sio(50)], to=DAMAGE, day=D - timedelta(7), deadline=D, open_=1)
+        for given, listed in ((dict(to_damage, to_kind="damage"), True), (to_damage, False),
+                              (dict(to_damage, to=VAN_A, to_kind="van"), False),
+                              (dict(not_received(51, deadline=D), to_kind="van"), False),
+                              (dict(not_received(52, deadline=D), to_kind="damage"), True)):
+            items, notes = checks.found_items([given], D, {}, None)
+            assert bool(items["xfer_twins"] or items["xfer_open"]) is listed and not notes, given
         # the same exception as an object, one number alone where a list is expected, lines as mappings
         shaped = SimpleNamespace(**dict(not_received(45), issues=sio(45), lines=[{"item": ITEM_1, "units": 3}]))
         lone = dict(exc("orphan", receipt=strv(46), received_at=VAN_B), possible=sio(47))
@@ -326,6 +334,77 @@ def _():
         assert jan["level"] == "ACT", "the older issue is more than the working days past its deadline"
         assert "Issued to Damage Store in January 2026" in jan["detail"] and f"from {VAN_A}" in jan["detail"]
         assert jan["title"] == checks.TITLES["damage"] and len(keys_of("xfer_open")) == 2
+
+
+def damage(n: int, day: date, bhd: str = "2") -> dict:
+    return exc("damage_not_booked", issues=[sio(n)], to=DAMAGE, day=day, deadline=day + timedelta(7), bhd=bhd)
+
+
+@test("an older item that names a new voucher is listed like a new one: the damage store's month, a set of twins")
+def _():
+    month = "xfer_open|damage|2026-01"
+    twins = "xfer_twins|" + sio(7)
+    with data_root(LIMITS):
+        found = [damage(30, date(2026, 1, 2)), damage(31, date(2026, 1, 5)),
+                 exc("twins", issues=[sio(7), sio(8), sio(9)], open_=1, deadline=date(2026, 1, 13), bhd="4.500")]
+        first = checks.record_moves(make_audit(found), D.isoformat())["counts"]      # the rules' first run
+        assert (first["xfer_open"]["baseline"], first["xfer_twins"]["baseline"]) == (1, 1), first
+        assert alerts.open_items() == [] and [b["count"] for b in alerts.baseline_summary()] == [1, 1]
+        ids = {month: alerts.find(month)["id"], twins: alerts.find(twins)["id"]}
+        # one of the month's issues is booked in and the set is valued anew: nothing named that was not, still older
+        changed = [damage(31, date(2026, 1, 5)),
+                   exc("twins", issues=[sio(7), sio(8), sio(9)], open_=1, deadline=date(2026, 1, 13), bhd="5")]
+        c = checks.record_moves(make_audit(changed), D.isoformat())["counts"]
+        assert (c["xfer_open"]["same"], c["xfer_open"]["new"], c["xfer_twins"]["same"], c["xfer_twins"]["new"]) == \
+            (1, 0, 1, 0), c
+        assert alerts.find(month)["baseline"] and alerts.find(month)["evidence"] == [sio(31)]
+        assert alerts.open_items() == [], "still counted once, not listed"
+        # a later issue of the same month is not booked in, and a fourth identical issue joins the set: listed now
+        grown = [damage(31, date(2026, 1, 5)), damage(32, date(2026, 1, 8)),
+                 exc("twins", issues=[sio(7), sio(8), sio(9), sio(10)], open_=2, deadline=date(2026, 1, 13), bhd="9")]
+        c = checks.record_moves(make_audit(grown), D.isoformat())["counts"]
+        assert (c["xfer_open"]["new"], c["xfer_twins"]["new"]) == (1, 1), c
+        for key, evidence in ((month, [sio(31), sio(32)]), (twins, [sio(7), sio(8), sio(9), sio(10)])):
+            r = alerts.find(key)
+            assert (r["baseline"], r["state"], r["id"], r["evidence"]) == (False, "open", ids[key], evidence), r
+        assert [r["key"] for r in alerts.open_items()] == [twins, month], "DO TODAY and the e-mail read this list"
+        assert alerts.baseline_summary() == []
+        assert "2 of 4 identical issues" in alerts.find(twins)["detail"]
+        # and it stays listed: the next run that finds it as it is counts it as before
+        c = checks.record_moves(make_audit(grown), D.isoformat())["counts"]
+        assert (c["xfer_open"]["same"], c["xfer_twins"]["same"]) == (1, 1) and len(alerts.open_items()) == 2
+    # the register's rule itself, for any rule: an older item that changes without a new number stays older
+    with data_root():
+        def item(evidence, bhd):
+            return {"key": "r|1", "level": "CHECK", "title": "Something to check", "detail": "d", "bhd": bhd,
+                    "evidence": evidence}
+        assert alerts.record("r", [item(["V1", "V2"], "4")], D.isoformat())["baseline"] == 1
+        assert alerts.record("r", [item(["V2"], "9")], D.isoformat())["same"] == 1 and alerts.open_items() == []
+        assert alerts.record("r", [item(["V2", "V3"], "9")], D.isoformat())["new"] == 1
+        assert [r["key"] for r in alerts.open_items()] == ["r|1"]
+        alerts.record("r", [], D.isoformat())
+        assert alerts.record("r", [item(["V2"], "9")], D.isoformat())["new"] == 1, "back after it cleared: news"
+        assert alerts.find("r|1")["baseline"] is False
+
+
+@test("the stores as the audit read them (store_rules), and unit costs held to six decimals as /yq-moves holds them")
+def _():
+    with data_root(LIMITS):
+        own = pairing.StoreRules(main="Other Main", damage="Other Damage")
+        audit = make_audit()
+        audit.store_rules = own
+        audit.stores = [SimpleNamespace(store=VAN_A, kind="van")]          # the audit's table of vans and outlets
+        assert checks._stores(audit) is own
+        assert checks._stores(make_audit()).kind(DAMAGE) == "damage", "no store_rules: config.json's stores"
+        # 3 units at 0.333333 is 0.999999: one rounding, of the total, gives the fils /yq-moves shows
+        costs = {ITEM_1: Decimal("0.333333"), ITEM_2: SimpleNamespace(cost=Decimal("1.2345678"))}
+        assert checks._cost(costs, ITEM_1) == Decimal("0.333333") and checks._cost(costs, ITEM_2) == Decimal("1.234568")
+        assert checks._value([(ITEM_1, 3)], costs) == Decimal("1.000")
+        index = checks.LedgerIndex([row(D, sio(3), ledger.ISSUE, MAIN, ITEM_1, to_wh=VAN_A, qty_out=3),
+                                    row(D, "SI:9", ledger.SALE, VAN_A, ITEM_1, qty_out=6)], costs)
+        assert index.shown({"rule": "voucher_changed", "key": f"voucher_changed|{sio(3)}|{ITEM_1}"})[:2] == \
+            ("1.000", Decimal("1.000"))
+        assert index.shown({"rule": "inv_changed", "key": "inv_changed|SI : 9"})[:2] == ("2.000", Decimal("2.000"))
 
 
 # ── the first screen ──────────────────────────────────────────────────────────

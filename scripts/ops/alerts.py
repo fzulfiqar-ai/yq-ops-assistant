@@ -10,7 +10,8 @@ screen and the weekly workbook show the same items under the same ids.
   * alerts.jsonl is append-only: one line per change of an item (open, cleared, explained, done).
     The current state of a key is its last line.
   * The first time a rule runs, everything it finds is the BASELINE: counted once, not listed day
-    after day. Only what appears later is new.
+    after day. Only what appears later is new, and so is an older item once it names a voucher or
+    an invoice it did not name before.
   * An item he explains is kept in explained.json by its key and stays off the list.
 """
 from __future__ import annotations
@@ -136,11 +137,15 @@ def record(rule: str, found: list[dict], data_date: str | None, baseline: bool =
     bhd, count, evidence[list of voucher or invoice numbers]}.
 
     baseline=True       the rule's FIRST run is a baseline (counted once, not listed). Pass False for
-                        a rule whose first finds must be listed (a fixed-word key, an event).
+                        a rule whose first finds must be listed (a fixed-word key, an event). A baseline
+                        item that later names a voucher or an invoice it did not name is listed from
+                        then on, like a new item; one that changes in any other way stays counted once.
     clear_missing=True  items of this rule that were open and are no longer found are marked
                         cleared. Pass False for an EVENT rule (an invoice changed at this load): the
                         item stays open until he marks it done or explained.
-    Returns counts {new, same, cleared, baseline, explained}."""
+    Returns counts {new, same, cleared, baseline, explained}: 'new' is an item the list now shows
+    (found for the first time, changed, or an older item that names a new voucher); an older item
+    that changed and stays counted once is 'same'."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = _read_lines()
     state: dict[str, dict] = {r["key"]: r for r in lines if r.get("key")}
@@ -176,6 +181,11 @@ def record(rule: str, found: list[dict], data_date: str | None, baseline: bool =
         if prev and prev.get("state") == "done" and prev.get("facts") == _facts(item):
             counts["same"] += 1
             continue
+        # an older item (the baseline) stays counted once while it is what was there: once it names a voucher or an
+        # invoice it did not name (a new issue in the damage store's month, a new member of a set of identical
+        # issues) it is listed like any new item, the explained rule's own test (_still_explained)
+        kept = bool(prev and prev.get("baseline") and prev.get("state") == "open"
+                    and not set(item.get("evidence") or []) - set(prev.get("evidence") or []))
         row = {
             "at": now, "key": key, "rule": rule, "state": "open", "level": item["level"],
             "title": item.get("title"), "detail": item.get("detail"), "who": item.get("who"),
@@ -185,14 +195,15 @@ def record(rule: str, found: list[dict], data_date: str | None, baseline: bool =
             "id": prev.get("id") if prev else f"A{next_id}",
             "first_seen": prev.get("first_seen") if prev else now,
             # a key that comes back after it was cleared or explained is news, never baseline
-            "baseline": bool(as_baseline) if not prev else (bool(prev.get("baseline"))
-                                                            and prev.get("state") == "open"),
+            "baseline": bool(as_baseline) if not prev else kept,
         }
         if key in reopened:
             row["reopened"] = True
         if not prev:
             next_id += 1
-        counts["baseline" if (as_baseline and not prev) else "new"] += 1
+            counts["baseline" if as_baseline else "new"] += 1
+        else:
+            counts["same" if kept else "new"] += 1        # "new" is always an item the list now shows
         out.append(row)
     if clear_missing:
         for key, prev in state.items():

@@ -27,17 +27,22 @@ a Focus number, never on a name:
                                                      never in the evidence: a new guess is no new voucher)
 Every item is CHECK; it reads ACT at watch.act_bhd and above, and (the kinds that wait for a receipt: not
 received, the damage store's month, twins) when it is more than watch.act_days working days past its
-deadline. Such an issue is listed only once its deadline is behind the ledger's last day: one still inside
-it is not late, whatever the audit hands over. A title holds no count and no age and a detail no age, so an item does not change while it stays
-what it is (the register compares level, title, detail, BHD and evidence); 'who' and 'due' stay empty: the
-e-mail's playbook names the owner by the rule. A store is named in the detail only (alerts.jsonl is a local
-file). Of twins the audit's `open` (how many of the N have no receipt) is the item's count.
+deadline. Such an issue is listed only once it is out of grace, as pairing.within_grace reads it: the day
+after its deadline, or to the damage store the deadline day itself; one still inside it is not late,
+whatever the audit hands over. A title holds no count and no age and a detail no age, so an item does not
+change while it stays what it is (the register compares level, title, detail, BHD and evidence); 'who' and
+'due' stay empty: the e-mail's playbook names the owner by the rule. A store is named in the detail only
+(alerts.jsonl is a local file). Of twins the audit's `open` (how many of the N have no receipt) is the item's
+count.
 
 ONE RECORDER. record_moves is the one place that records these rules (tests/test_ops_watch.py walks the
 package for another): it records EVERY rule on every run, an empty list when nothing is found, because the
 register marks a rule's open items cleared when a run no longer finds them. A second recorder would clear
-the first one's items. The load check's rules (inv_changed, voucher_changed, price_scope, profit_held) and
-the Command Centre's (attn) are never recorded here: this screen shows them read-only.
+the first one's items. Each rule's first run is its baseline (counted once, not listed); an older item that
+later names a voucher it did not name (a new issue in the damage store's month, a new member of a set of
+identical issues) is listed from then on, like a new one (alerts.record). The load check's rules
+(inv_changed, voucher_changed, price_scope, profit_held) and the Command Centre's (attn) are never recorded
+here: this screen shows them read-only.
 
 ONCE PER LEDGER. ensure_recorded() records the movement rules once per stock ledger: the sha256 of the
 ledger file, or 'db:<last day>' when the audit read the portal's database, kept in state.json under
@@ -78,7 +83,7 @@ import importlib
 import re
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from scripts.ops import alerts, config, fmt, ledger, loadplan, pairing, status
 
@@ -97,6 +102,7 @@ LATE_RECEIPTS_MAX = 13        # act_days: at most this many receipts came later 
 FLOOR_RANK = 66               # floor_bhd: the BHD of this item, counted from the largest
 ACT_PERCENTILE = 90           # act_bhd: this percentile of the same figures
 LINES_SHOWN = 3               # a voucher's lines named in a detail
+COST_DP = Decimal("0.000001")  # a unit's cost held to six decimals, as the movement audit holds it (moves.COST_DP)
 STATE_RECORDED = "moves_recorded"
 STATE_DEFAULTS = "watch_defaults"
 STATE_SHOWN = "watch_baseline_shown"
@@ -302,7 +308,9 @@ def _level(bhd: Decimal | None, late: int | None, limits: Mapping) -> str:
 
 
 def _cost(costs, item: str) -> Decimal | None:
-    """One ledger item's cost per unit: the audit's Item (.cost_bhd, else stock's .cost), a mapping or a number."""
+    """One ledger item's cost per unit, held to six decimals as the movement audit holds it (moves._cost6): only a
+    total is rounded to the fils, never a unit's cost, so a figure here is the one /yq-moves shows. The audit
+    gives a number; an Item (.cost_bhd, else stock's .cost) or a mapping is read the same way."""
     c = (costs or {}).get(item)
     if c is None:
         return None
@@ -312,7 +320,13 @@ def _cost(costs, item: str) -> Decimal | None:
         value = _get(c, "cost_bhd")
         if value is None:
             value = _get(c, "cost")
-    return _bhd(value)
+    if value is None:
+        return None
+    try:
+        unit = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return unit.quantize(COST_DP, rounding=ROUND_HALF_UP) if unit.is_finite() else None
 
 
 def _value(lines, costs) -> Decimal | None:
@@ -343,11 +357,14 @@ def _issues(exc: Mapping) -> list[str]:
 def _in_grace(exc: Mapping, d) -> bool:
     """An issue still inside its deadline is not late yet: never 'not received after its deadline', whatever the
     audit hands over. Read as pairing.within_grace reads it: to the damage store while the ledger's last day is
-    before the deadline (/yq-stock damage lists it on that day), to any other store while it is on or before it."""
+    before the deadline (/yq-stock damage lists it on that day), to any other store while it is on or before it.
+    The damage store is the audit's to_kind 'damage' (a set of identical issues sent there too), or, where the
+    audit names no to_kind, a damage_not_booked issue."""
     due, day = fmt.as_date(exc.get("deadline")), fmt.as_date(d)
     if due is None or day is None:
         return False
-    return day < due if exc.get("kind") == "damage_not_booked" else day <= due
+    damage = exc.get("to_kind") == "damage" or exc.get("kind") == "damage_not_booked"
+    return day < due if damage else day <= due
 
 
 def _late(exc: Mapping, d, rules) -> int | None:
@@ -510,7 +527,9 @@ def found_items(exceptions, d, limits: Mapping | None = None,
 # ── the thresholds and the 90-day replay ──────────────────────────────────────
 
 def _stores(audit) -> pairing.StoreRules:
-    s = _get(audit, "stores")
+    """The stores as the audit read them (Audit.store_rules; Audit.stores is its table of vans and outlets), else
+    as config.json names them."""
+    s = _get(audit, "store_rules")
     if isinstance(s, pairing.StoreRules):
         return s
     return pairing.StoreRules(main=config.get("warehouses.main"), damage=config.get("warehouses.damage") or None,
