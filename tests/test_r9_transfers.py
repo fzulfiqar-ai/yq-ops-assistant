@@ -15,14 +15,16 @@ Covered (app/transfer_audit.py, GET /stock/flow, GET /stock/recon, GET /command/
     read RPC sends them (floats, nulls) give the same legs as the database's Decimals; a narration's ID-shaped number
     is hashed in its masked form (unmasked, the pair is lost); a spelling that differs in case and spaces is one store;
   * GET /stock/flow: one row per issue line, newest first, with its status (received, late, elsewhere, qty_differs,
-    in_grace, not_received, twins), the receipt it was paired with and what the pairing rests on; the summary
+    in_grace, not_received, twins), the receipt it was paired with (both receipts of a transfer booked in under two,
+    and what the two booked in together) and what the pairing rests on; the summary
     ({legs, qty, vouchers} per status, orphans and aside), the counts and the partners over EVERY issue of the
     window (the store that actually received); the 800 cap on the rows only; the window = `days` ending on the stock
     ledger's last date (any voucher type, not the last transfer's), both ends included; direction in; an empty
     ledger; a blank store; 503 when the ledger cannot be read; the feature gate;
   * GET /stock/recon: the view's rows, in its order, each with not_received_qty, qty_differs_vouchers and
-    elsewhere_vouchers for its store (matched through the canon; 0 where the pairing found nothing); None, the rows
-    still there, when the pairing cannot be worked out;
+    elsewhere_vouchers for its store (matched through the canon; 0 where the pairing found nothing; an issue sent to
+    its own store that nothing booked back in is not received there past its deadline, as /yq-moves reads it); None,
+    the rows still there, when the pairing cannot be worked out;
   * the read: pages of consecutive days of at most PAGE_LINES rows (a day never split, one larger day alone), each
     asked for by its date range only, every row read once; today's volume in five pages; the ledger's last date from
     the plan, or from its own query when no transfer is there; a page that holds other rows than the plan counted is
@@ -462,6 +464,40 @@ def _():
     assert ta.flow(world_snapshot(), days=7, direction="sideways")["direction"] == "out", "anything else is out, as before"
 
 
+@test("flow: an issue booked in under two receipts (pairing step S) is received on each of its lines, both receipt numbers named, what the two booked in together")
+def _():
+    from scripts.ops import pairing
+    # Van B books SIO 20 in under two receipts on the Monday, numbered next to each other, the second holding exactly
+    # what the first lacks (items no other open issue to Van B holds, so no other step can take either receipt)
+    split = (issued(20, MON, MAIN, VAN_B, [(CABLE, 3), (BUDS, 2)])
+             + booked(70, MON, VAN_B, [(CABLE, 3)]) + booked(71, MON, VAN_B, [(BUDS, 2)]))
+    snap = ta.snapshot(view_rows(ledger_rows() + split), SAT.isoformat())
+    got = snap.result.by_issue[sio(20)]
+    assert isinstance(got, pairing.Pair) and got.step == "S" and got.outcome == "received", got
+    assert {got.receipt.no, *(x.no for x in got.also)} == {strv(70), strv(71)} and len(got.also) == 1
+    both = " + ".join([got.receipt.no] + [x.no for x in got.also])
+    f = ta.flow(snap, days=7)
+    rows = [(r["item_name"], r["issued_qty"], r["received_qty"], r["received_by"], r["received_on"], r["receipt_no"],
+             r["status"]) for r in f["rows"] if r["voucher_no"] == sio(20)]
+    assert rows == [(CABLE, 3, 3, VAN_B, "2026-10-12", both, "received"),
+                    (BUDS, 2, 2, VAN_B, "2026-10-12", both, "received")], rows
+    assert {r["basis"] for r in f["rows"] if r["voucher_no"] == sio(20)} == {ta._basis(got, pairing)}
+    # one issue, counted once, as received; neither receipt counts as a receipt with no issue
+    plain = ta.flow(world_snapshot(), days=7)
+    assert f["counts"]["received"] == plain["counts"]["received"] + 1 and f["counts"]["orphans"] == 0
+    assert f["counts"]["issued_vouchers"] == plain["counts"]["issued_vouchers"] + 1
+    assert f["summary"]["received"] == {"legs": plain["summary"]["received"]["legs"] + 2,
+                                        "qty": plain["summary"]["received"]["qty"] + 5,
+                                        "vouchers": plain["summary"]["received"]["vouchers"] + 1}
+    # the summary is pairing.summarise's, unchanged; the store's figures hold nothing to check for it
+    told = pairing.summarise(snap.result, first=SUN, last=SAT, store=MAIN, direction="out")
+    assert {k: v for k, v in f["counts"].items() if k in pairing.COUNT_KEYS} == told["counts"]
+    assert ta.store_figures(snap) == ta.store_figures(world_snapshot())
+    sent_in = ta.flow(snap, days=7, direction="in", warehouse=VAN_B)
+    assert {r["receipt_no"] for r in sent_in["rows"] if r["voucher_no"] == sio(20)} == {both}
+    assert sent_in["counts"]["orphans"] == 0
+
+
 @test("flow: the window is `days` ending on the ledger's last date, both ends included; clamped to 1..365")
 def _():
     snap = world_snapshot()
@@ -528,10 +564,28 @@ def _():
         assert list(got)[:len(RECON_COLUMNS)] == list(RECON_COLUMNS)
     figures = {r["salesman"]: tuple(r[k] for k in ta.RECON_KEYS) for r in out["vans"]}
     # Van A: the issue due Thursday (1) and the old one (2); its elsewhere voucher. Van B: the issue due Monday (3)
-    # and the missing twin (1); its voucher of other quantities. The issue in grace counts nowhere.
-    assert figures == {VAN_A: (3, 0, 1), VAN_B: (4, 1, 0), OUTLET: (0, 0, 0), MAIN: (0, 0, 0), DAMAGE: (0, 0, 0)}, figures
+    # and the missing twin (1); its voucher of other quantities. The main store: its issue to itself that nothing
+    # booked back in, past its deadline (1), as /yq-moves reads it. The issue in grace counts nowhere.
+    assert figures == {VAN_A: (3, 0, 1), VAN_B: (4, 1, 0), OUTLET: (0, 0, 0), MAIN: (1, 0, 0), DAMAGE: (0, 0, 0)}, figures
     by_store = ta.store_figures(world_snapshot())
     assert by_store["van a - acc wh"] == {"not_received_qty": Decimal(3), "qty_differs_vouchers": 0, "elsewhere_vouchers": 1}
+
+
+@test("store figures: an issue sent to its own store and booked back in by nothing is not received there past its deadline; its mirror, or grace, counts nothing")
+def _():
+    own = (issued(30, MON, VAN_A, VAN_A, [(BANK, 1)]) + booked(80, MON, VAN_A, [(BANK, 1)])     # booked back in there
+           + issued(31, THU, VAN_B, VAN_B, [(BUDS, 1)]))                                        # due Saturday: in grace
+    snap = ta.snapshot(view_rows(ledger_rows() + own), SAT.isoformat())
+    aside = {a.voucher: a for a in snap.result.aside}
+    assert (aside[sio(30)].partner, aside[strv(80)].partner, aside[sio(31)].partner) == (strv(80), sio(30), None)
+    assert ta.store_figures(snap) == ta.store_figures(world_snapshot()), "the mirror pair and the issue in grace count nothing"
+    assert ta.store_figures(world_snapshot())["accessories warehouse"] == {
+        "not_received_qty": Decimal(1), "qty_differs_vouchers": 0, "elsewhere_vouchers": 0}, "SIO 9, due on the Monday"
+    # on the Saturday after, past its deadline, the issue in grace is not received too
+    later = ta.snapshot(view_rows(ledger_rows() + own), (SAT + timedelta(days=7)).isoformat())
+    assert ta.store_figures(later)["van b - acc wh"]["not_received_qty"] == \
+        ta.store_figures(ta.snapshot(view_rows(ledger_rows()), (SAT + timedelta(days=7)).isoformat()))[
+            "van b - acc wh"]["not_received_qty"] + 1
 
 
 @test("recon: without the pairing the rows still come, the three figures None")

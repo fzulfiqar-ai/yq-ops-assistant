@@ -401,7 +401,9 @@ def flow(snap: Snapshot, *, days: int = 30, direction: str = "out", warehouse: s
         {warehouse, direction, days, as_of, basis: "contents",
          rows:     one per issue line, newest first, at most `cap` of them: {issued_on, voucher_no, item_name,
                    from_warehouse, to_warehouse, issued_qty, issued_value_bhd, received_qty, received_by, received_on,
-                   receipt_no, status (STATUSES), basis (_basis)}; received_*: the receipt paired with the issue
+                   receipt_no, status (STATUSES), basis (_basis)}; received_*: the receipt paired with the issue. An
+                   issue booked in under two receipts (pairing step S: Pair.also) names both, "STRV a + STRV b", and
+                   its received_qty is what the two booked in together (the same store, the same day)
          count:    the issue lines of the window; shown: the rows given (count capped)
          summary:  {status: {legs, qty, vouchers}} for STATUSES, orphans and aside, over EVERY issue of the window
                    (pairing.summarise; aside as the vouchers' rows hold them)
@@ -437,13 +439,19 @@ def flow(snap: Snapshot, *, days: int = 30, direction: str = "out", warehouse: s
     partners: dict[str, Decimal] = {}
     for i in reversed(picked):                      # the legs are in order of day, then number: newest first
         got = result.by_issue[i.no]
-        receipt = got.receipt if isinstance(got, pairing.Pair) else None
+        receipts = (got.receipt, *got.also) if isinstance(got, pairing.Pair) else ()   # step S: two receipts
+        receipt = receipts[0] if receipts else None
         count += len(i.lines)
         partner = ((receipt.wh if receipt is not None else i.to) if direction == "out" else i.wh)
         partners[partner] = partners.get(partner, ZERO) + i.units
         if len(rows) >= cap:                        # counted above; only the rows shown are written out
             continue
-        booked = dict(receipt.lines) if receipt is not None else {}
+        booked: dict[str, Decimal] = {}
+        for r in receipts:                          # what the receipts booked in, together
+            for item, units in r.lines:
+                booked[item] = booked.get(item, ZERO) + units
+        receipt_no = " + ".join(r.no for r in receipts) if receipts else None
+        received_on = max(r.day for r in receipts).isoformat() if receipts else None
         basis = _basis(got, pairing)
         for item, units in i.lines[:cap - len(rows)]:   # by item
             rows.append({
@@ -456,8 +464,8 @@ def flow(snap: Snapshot, *, days: int = 30, direction: str = "out", warehouse: s
                 "issued_value_bhd": _num(snap.values.get((i.no, item), ZERO)),
                 "received_qty": _num(booked.get(item, ZERO)),
                 "received_by": shown_as(receipt.wh) if receipt is not None else None,
-                "received_on": receipt.day.isoformat() if receipt is not None else None,
-                "receipt_no": receipt.no if receipt is not None else None,
+                "received_on": received_on,
+                "receipt_no": receipt_no,
                 "status": got.outcome,
                 "basis": basis,
             })
@@ -495,8 +503,9 @@ def flow(snap: Snapshot, *, days: int = 30, direction: str = "out", warehouse: s
 def store_figures(snap: Snapshot) -> dict[str, dict]:
     """{store (canon): {not_received_qty, qty_differs_vouchers, elsewhere_vouchers}} over every issue the ledger holds,
     each counted for the store the issue names: the units sent there with no receipt after their deadline (for a set
-    of identical issues, its missing ones), the vouchers it booked in with other quantities, and the vouchers another
-    store booked in instead. Units in grace are not counted."""
+    of identical issues, its missing ones; and an issue sent to its own store that nothing booked back in there, which
+    the pairing sets aside, past its deadline: /yq-moves' own reading), the vouchers it booked in with other
+    quantities, and the vouchers another store booked in instead. Units in grace are not counted."""
     from scripts.ops import pairing
     figures: dict[str, dict] = {}
     result = snap.result
@@ -514,6 +523,12 @@ def store_figures(snap: Snapshot) -> dict[str, dict]:
             of(p.issue.to)["qty_differs_vouchers"] += 1
         elif p.outcome == pairing.ELSEWHERE:
             of(p.issue.to)["elsewhere_vouchers"] += 1
+    stores = portal_stores()
+    for a in result.aside:                          # sent to its own store, and nothing booked it back in there
+        if a.kind != "issue" or a.reason != pairing.OWN_STORE or a.partner or a.day is None or not a.lines:
+            continue
+        if not pairing.within_grace(a.day, stores.kind(a.wh), result.data_date, result.rules):
+            of(a.wh)["not_received_qty"] += sum((units for _item, units in a.lines), ZERO)
     return figures
 
 
