@@ -165,7 +165,10 @@ FIELD = 160                         # no sentence of the journal is longer (`loa
 BACKUP_TIMEOUT_S, GATE_TIMEOUT_S, RECONCILE_TIMEOUT_S = 1800, 900, 1800      # read-only steps only
 DELIVER_TIMEOUT_S, SEND_TIMEOUT_S = 300, 180    # after the load: the brief and its e-mail (deliver_after)
 # ... then its team message for the Command Centre (X1, team_post_after): started only when this checkout holds it
-TEAM_POST_MODULE, TEAM_POST_FILE, TEAM_POST_TIMEOUT_S = "scripts.yq_team_post", "scripts/yq_team_post.py", 60
+# (it may take 15 s to connect and 15 s for its statement). Its outcome is its last line that starts TEAM_POST_MARK:
+# `TEAM_POST: stored`, `TEAM_POST: skipped (<why>)` or `TEAM_POST: failed (<why>)`, kept as it is
+TEAM_POST_MODULE, TEAM_POST_FILE, TEAM_POST_TIMEOUT_S = "scripts.yq_team_post", "scripts/yq_team_post.py", 90
+TEAM_POST_MARK = "TEAM_POST:"
 SEND_LINE = "python -m scripts.yq_send --run {run}"     # the line that sends a load's e-mail again (reloads nothing)
 # a brief the deliver command REFUSED (exit 2 with these words: the database no longer holds this load as it left it,
 # scripts/ops/deliver.py stale_reason): a retry would be refused the same way, so none is offered
@@ -2647,7 +2650,8 @@ class Job:
     def team_post_after(self) -> None:
         """X1, after the e-mail step of a load whose brief was made: its team message for the Command Centre
         (python -m scripts.yq_team_post), and only when this checkout holds that program. TEAM_POST_TIMEOUT_S
-        at most; what became of it is one row of the run's delivery journal (event team_post). Whatever it does
+        at most; what became of it is one row of the run's delivery journal (event team_post): the program's
+        own last TEAM_POST_MARK line as it is, or one in the same words when it gave none. Whatever it does
         (it fails, runs out of time, is not there) changes nothing of the load, its journal, its lock, its
         e-mail or the exit code: the `Delivery:` line is written before it starts."""
         run, d = self.run, self.deps
@@ -2660,11 +2664,14 @@ class Job:
         try:
             child = d.runner("team_post", [sys.executable, "-X", "utf8", "-m", TEAM_POST_MODULE, "--run", run],
                              TEAM_POST_TIMEOUT_S)
-            _delivery_row(run, "team_post", code=child.code, timed_out=child.timed_out or None,
-                          text=_short(f"Team message: python -m {TEAM_POST_MODULE} ended{_why(child)}.", FIELD))
+            said = next((ln.strip() for ln in reversed(child.text.splitlines())
+                         if ln.strip().startswith(TEAM_POST_MARK)), "")
+            if not said:
+                said = f"{TEAM_POST_MARK} failed (python -m {TEAM_POST_MODULE} gave no answer{_why(child)})"
+            _delivery_row(run, "team_post", code=child.code, timed_out=child.timed_out or None, text=said)
         except Exception as exc:  # noqa: BLE001  (the load and its e-mail are done: this never reaches them)
-            _delivery_row(run, "team_post", text=f"Team message: python -m {TEAM_POST_MODULE} could not be run (an "
-                                                 f"unexpected error: {type(exc).__name__}).")
+            _delivery_row(run, "team_post", text=f"{TEAM_POST_MARK} failed (python -m {TEAM_POST_MODULE} could not be "
+                                                 f"run: {type(exc).__name__})")
         finally:
             if awake:
                 d.keep_awake(False)

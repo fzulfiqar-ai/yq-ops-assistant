@@ -561,7 +561,9 @@ def preflight(dev: bool, deps: Deps) -> dict:
             raise Stop(text[0].upper() + text[1:] + ".")
         out["live"] = live
         parts.append(f"same programs as the live site ({live[:8]})")
-        extra = [p for p in deps.untracked() if not p.startswith("scripts/ops/")]
+        # scripts/ops is no engine path, but for the files gitinfo names as engine files there (release E's pairing)
+        engine_in_ops = tuple(getattr(gitinfo, "ENGINE_FILES_IN_OPS", None) or ())
+        extra = [p for p in deps.untracked() if not p.startswith("scripts/ops/") or p in engine_in_ops]
         if extra:
             out["notes"].append("Files under scripts/ that git does not track (they do not stop a load): "
                                 + listed(extra, 6) + ".")

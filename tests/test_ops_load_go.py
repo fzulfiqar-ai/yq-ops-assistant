@@ -337,7 +337,7 @@ class Runner:
         return yq.Child(0, "compare a.json -> b.json\n  delta: orders: 10 -> 12 (+2)\n\nPASS: 0 failure(s), 1 explained delta(s)\n")
 
     def ok_team_post(self, argv) -> yq.Child:
-        return yq.Child(0, "Team message: posted for the Command Centre.\n")
+        return yq.Child(0, "connected\nTEAM_POST: stored\n")
 
 
 class Harness:
@@ -4833,21 +4833,28 @@ def _():
         assert seen == {"lock": False, "last": "finished", "delivery": ["queued", "ended"]}, seen
         assert h.runner.labels()[-3:] == ["deliver", "send", "team_post"]
         assert h.runner.argv("team_post")[1:] == ["-X", "utf8", "-m", "scripts.yq_team_post", "--run", RUN]
-        assert {c[0]: c[2] for c in h.runner.calls}["team_post"] == yq.TEAM_POST_TIMEOUT_S == 60
+        assert {c[0]: c[2] for c in h.runner.calls}["team_post"] == yq.TEAM_POST_TIMEOUT_S == 90
         rows = loadplan.delivery_read(RUN)
         assert [r["event"] for r in rows] == ["queued", "ended", "team_post"] and rows[1]["text"] == said
-        assert rows[2]["text"] == ("Team message: python -m scripts.yq_team_post ended (exit code 0; its last line: Team "
-                                   "message: posted for the Command Centre.)."), rows[2]
-        assert rows[2]["code"] == 0 and "timed_out" not in rows[2] and loadplan.run_result(RUN) == "FINISHED"
+        assert rows[2]["text"] == "TEAM_POST: stored" and rows[2]["code"] == 0 and "timed_out" not in rows[2], rows[2]
+        assert loadplan.run_result(RUN) == "FINISHED"
     with data_root() as root:                    # not in this checkout: nothing started, nothing written about it
         h = delivered(root, program=False)
         assert h.load() == 0 and h.runner.labels()[-2:] == ["deliver", "send"]
         assert [r["event"] for r in loadplan.delivery_read(RUN)] == ["queued", "ended"]
-    for answer, words in ((yq.Child(1, "Traceback\nRuntimeError: no such table\n"),
-                           "(exit code 1; its last line: RuntimeError: no such table)."),
-                          (yq.Child(1, "", timed_out=True), "(exit code 1; it ran out of time)."),
-                          ("raise", "could not be run (an unexpected error: OSError).")):
-        with data_root() as root:                # it fails, runs out of time or cannot start: the load and its e-mail stand
+    post = "TEAM_POST: failed (python -m scripts.yq_team_post "
+    for answer, words in (
+            # its own last TEAM_POST line, as it is: skipped (the last such line counts) or failed
+            (yq.Child(0, "TEAM_POST: skipped (an earlier line)\nnoise\nTEAM_POST: skipped (the message held a name)\n\n"),
+             "TEAM_POST: skipped (the message held a name)"),
+            (yq.Child(1, "Traceback\nTEAM_POST: failed (the database did not answer)\n"),
+             "TEAM_POST: failed (the database did not answer)"),
+            # no such line (it crashed, ran out of time, or could not be started): one in the same words
+            (yq.Child(1, "Traceback\nRuntimeError: no such table\n"),
+             post + "gave no answer (exit code 1; its last line: RuntimeError: no such table))"),
+            (yq.Child(1, "", timed_out=True), post + "gave no answer (exit code 1; it ran out of time))"),
+            ("raise", post + "could not be run: OSError)")):
+        with data_root() as root:                # whatever it says or does, the load and its e-mail stand
             h = delivered(root)
             if answer == "raise":
                 def boom():
@@ -4858,8 +4865,8 @@ def _():
             assert h.load() == 0, words
             rows = loadplan.delivery_read(RUN)
             assert [r["event"] for r in rows] == ["queued", "ended", "team_post"] and rows[1]["text"] == said, rows
-            assert rows[2]["text"].startswith("Team message: python -m scripts.yq_team_post ") and rows[2]["text"].endswith(
-                words), rows[2]["text"]
+            assert rows[2]["text"] == words, rows[2]["text"]
+            assert rows[2].get("timed_out") is (True if answer != "raise" and answer.timed_out else None), rows[2]
             assert loadplan.run_result(RUN) == "FINISHED" and loadplan.journal_read(RUN)[-1]["event"] == "finished"
             assert not paths.lock_file().exists() and status.read_state()["last_load"]["run"] == RUN
     for deliver in (yq.Child(1, "Traceback\nKeyError: x\n"), yq.Child(2, "Delivery of run x: NOT prepared: stale.\n")):

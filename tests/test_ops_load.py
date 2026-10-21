@@ -22,7 +22,8 @@ Covered:
     one older report in a current folder, a report whose rows end before production's;
   * what the check read is still there when it ends: a report saved again while it ran, a report
     changed between its verdict and its copy, a database another load moved;
-  * preflight: a code worktree, the folder against the live site, the two database addresses, the
+  * preflight: a code worktree, the folder against the live site (files git does not track are named,
+    scripts/ops left out but for the engine files gitinfo names there), the two database addresses, the
     lock (running; interrupted: the cut-off load's own GO line is handed over as the last line, with
     the place of its go.cmd on the line before; the dead lock of a rehearsal and a lock that is no
     lock at all do not stop the check; a lock that cannot be read does), and a load that failed
@@ -1320,6 +1321,31 @@ def _():
         assert lines[-1] == "FAILED at refresh" and said["exit"] == 2 and said["result"] == "failed"
         assert any(words in ln and ln.endswith("Type /yq-load to check again.") for ln in lines), lines
         assert "may hold part" not in said["text"], said["text"]
+
+
+@test("the note on files git does not track leaves scripts/ops out, but for a file gitinfo names as an engine file there")
+def _():
+    from scripts.ops import gitinfo
+    files = ["scripts/ops/load_check.py", "scripts/ops/pairing.py", "scripts/my_notes.py"]
+    head = "Files under scripts/ that git does not track (they do not stop a load): "
+    missing = object()
+    had = getattr(gitinfo, "ENGINE_FILES_IN_OPS", missing)
+    try:
+        with data_root():
+            if had is not missing:
+                del gitinfo.ENGINE_FILES_IN_OPS              # as on main before the 2b release: no such list at all
+            assert lc.preflight(False, FakeDeps(untracked=lambda: files))["notes"] == [head + "scripts/my_notes.py."]
+            gitinfo.ENGINE_FILES_IN_OPS = ()
+            assert lc.preflight(False, FakeDeps(untracked=lambda: files))["notes"] == [head + "scripts/my_notes.py."]
+            gitinfo.ENGINE_FILES_IN_OPS = ("scripts/ops/pairing.py",)       # release E: the pairing the API runs too
+            assert lc.preflight(False, FakeDeps(untracked=lambda: files))["notes"] == [
+                head + "scripts/ops/pairing.py, scripts/my_notes.py."]
+    finally:
+        if had is missing:
+            if hasattr(gitinfo, "ENGINE_FILES_IN_OPS"):
+                del gitinfo.ENGINE_FILES_IN_OPS
+        else:
+            gitinfo.ENGINE_FILES_IN_OPS = had
 
 
 # ── the folder ────────────────────────────────────────────────────────────────
