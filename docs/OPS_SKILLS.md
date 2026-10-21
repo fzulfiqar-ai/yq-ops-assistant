@@ -494,6 +494,9 @@ one of two lines, and the load check says the same in its own words:
   trips, re-issues and month-end returns are counted, never listed as items.
 - **Per-store figures** are printed only when the stock ledger file is proved equal to production's (or
   read from it); otherwise the screen says why and still shows the transfers.
+- **The portal.** Since the phase 2b release the portal's Stock Movement page pairs the transfers with the
+  same code, over the ledger's transfer lines of the accessories, and each van card takes its stock from the
+  ledger: for the same window it shows the same pairs as `/yq-moves`.
 
 ### The action list (`/yq-watch`)
 
@@ -645,9 +648,6 @@ public.
   its rules and can get the number banned: the team message is sent by you (section 4).
 - They do not run by themselves on a schedule, store briefs in the portal, draft purchase orders or
   make PDFs.
-- The portal's Stock moves page still pairs issues and receipts by voucher number, so its Pending and
-  van figures are not to be used until that page is fixed (phase 2b); the page says so itself.
-  `/yq-moves` pairs them by what the vouchers hold, from the stock ledger.
 
 ## 7. For the developer
 
@@ -729,10 +729,12 @@ public.
   loader and its window back together, with no deploy; the portal's Data page upload still uses the
   older loader. `tests/test_ops_load_txn.py` holds the parity replay (set `YQ_LOCAL_PG_LOAD_TXN` to a
   scratch PostgreSQL on this PC, and `YQ_LOAD_TXN_DROPS` to real drop folders to replay them as well).
-  Until `scripts/refresh.py` passes the loader's own words up (the next API deploy), a one-transaction
-  load that failed and rolled back is still journalled as failed after it had begun to write (LAST LOAD
-  FAILED), and the refresh time still includes the commit's hold. Both readings are the careful ones,
-  and the next /yq-load replaces such a load as before. `tests/test_ops_readonly.py` refuses any import
+  `scripts/refresh.py` passes the loader's own words up: a load whose transaction rolled back, or whose
+  session never opened, closes `LOAD STOPPED at refresh and rolled back: nothing was written to the database.`
+  (no LAST LOAD FAILED, no e-mail), unless an earlier attempt of the run may have written; a commit that got
+  no answer keeps the careful reading. The refresh time on record leaves out the commit's hold
+  (`commit_hold_s`). The loader takes the batch importer's lock as it opens, under the 30 s lock timeout,
+  and drops each upsert's temporary table once applied. `tests/test_ops_readonly.py` refuses any import
   of `scripts.load_txn` in `scripts/ops`.
 - **After the load** (`Job.deliver_after` in `scripts/yq_load_go.py`): once the closing row is in the
   journal and the lock is gone, the worker runs `python -m scripts.ops deliver --run <run>` (the brief,
@@ -748,12 +750,15 @@ public.
   `No retry is needed: a newer load (run <run>) has its own e-mail.`
   A line that starts `No retry:` says why that load's brief can no longer be sent (another load is on
   record as the last one); there is nothing to run.
+  After a brief that was made, when `scripts/yq_team_post.py` is in the checkout, the worker runs
+  `python -m scripts.yq_team_post --run <run>` (90 s at most) and writes its last `TEAM_POST:` line as a
+  `team_post` row in `delivery.jsonl`; nothing of it changes the load or its e-mail.
   `scripts/yq_send.py` is the one program that sends: exit code 0 sent or nothing to send, 1 not sent
   (recorded, with its retry), 2 refused (that load's e-mail went already, to any list of addresses, and
   `--resend` asks at the Windows box first; or it is not that load's own brief any more). `--test`
   sends to the test address only and never counts as sent. `scripts/ops` imports none of `scripts/yq_send.py`,
-  `scripts/yq_secrets.py` and `scripts/yq_backup.py` (`tests/test_ops_readonly.py`), and the engine
-  paths that decide a deploy leave out every `scripts/yq_*.py`.
+  `scripts/yq_secrets.py`, `scripts/yq_backup.py` and `scripts/yq_team_post.py` (`tests/test_ops_readonly.py`),
+  and the engine paths that decide a deploy leave out every `scripts/yq_*.py`.
 - **One e-mail for each data set.** The full management e-mail of a data set goes once. When a load's
   Focus files, options, expected effect and loader programs are the same as those of the last e-mail
   sent, the delivery step sends nothing and writes
@@ -784,6 +789,16 @@ public.
   encrypted archive with its manifest in `%LOCALAPPDATA%\yq-backups\photos\`; `verify <archive>` is its
   restore drill. An `--apply` run that starts the download leaves a row with `"kind": "photos"` in
   `drills.jsonl`. `docs/BACKUPS.md` says more.
+- **The portal's pairing** (release 2b): `app/transfer_audit.py` runs `scripts/ops/pairing.py` over the view
+  `v_transfer_lines` for the Stock Movement page, so that module is the one file of `scripts/ops` the API runs:
+  `gitinfo.ENGINE_FILES_IN_OPS` counts it as an engine file (a change to it on `main` makes the next load
+  refuse until the API is deployed, as for any engine file). `python -m scripts.ops moves portal` is the
+  release's proof, never a word of a skill: it reads the view through the read-only session, pairs its rows
+  with the API's own function and compares every voucher and every count with `/yq-moves`' own pairing, for
+  the last 7 days and the whole ledger. One line reads PASS (exit code 0), or FAIL with the first twenty
+  vouchers that differ under it (exit code 1); before the view exists it says it is not checked yet (exit
+  code 2).
+  `scripts/r9_release.ps1 -Part verify` runs it (`docs/RELEASE.md`, Release 2b).
 - **Adding a skill:** a new folder with the same rules, one row in section 1, one line in
   `CLAUDE.md`, its command in `SKILL_COMMAND` of `tests/test_ops_skills.py`, then
   `python -m tests.test_ops_skills` and `python -m tests.test_ops_readonly`.

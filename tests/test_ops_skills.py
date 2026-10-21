@@ -1842,6 +1842,8 @@ MUST_CONTAIN = {
         "FINISHED, FAILED, INTERRUPTED or NOT STARTED", "Show only the new lines each time",
         "if a line says that something needs a look, tell him which",
         "the data is loaded: name the metric the script names and do not go again",
+        # a one-transaction load that rolled back wrote nothing (the loader's own words, passed up by the refresh)
+        "If they say the load stopped and rolled back, nothing was written: say so; /yq-load checks the folder again",
         "typing /yq-load resumes it", "NOT STARTED: the load did not begin", "no deploy is needed",
         # after a finished load: the stock screen makes the day's workbook; its failure is never the load's
         "Then run `python -m scripts.ops stock` and show its screen in a code block of its own",
@@ -1997,9 +1999,9 @@ MUST_CONTAIN = {
         "at most three lines", "no number that is not on the screen", "Never accuse anyone", "to check",
         # every store's check reads nought, or the program is at fault, never the store
         "Every store's check must read 0", "a fault of the program, not of the store",
-        # pairs by what the vouchers hold; the portal page's figures are not to be used yet
+        # pairs by what the vouchers hold; since 2b the portal page pairs them with the same code
         "Pairs are made by what the two vouchers hold, never by their numbers",
-        "its Pending and van Gap figures are not reliable yet",
+        "since the phase 2b release it pairs the transfers with the same code, so the same window shows the same pairs",
         "are counts to read, never items to check", "point him to /yq-watch",
     ],
     "yq-watch": [

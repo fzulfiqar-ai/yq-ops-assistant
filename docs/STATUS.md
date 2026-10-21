@@ -67,7 +67,7 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
   items read-only; explain and done on the owner's words. The brief gains a MOVEMENTS line and the e-mail a
   Transfers paragraph.
 - The portal's Stock Movement page says that its Pending and van figures are not reliable yet (W1), until the
-  phase 2b release.
+  phase 2b release is live (ready, below).
 - Release backups: `python -m scripts.yq_backup release <label>` seals an encrypted backup outside OneDrive, and
   `unpack` opens one for a rollback (R1, `docs/BACKUPS.md`).
 - The keep-alive Worker reads Supabase every ten minutes and alerts by Telegram once it is deployed (the code
@@ -87,12 +87,24 @@ owner's plans folder (its path is in Claude's project memory), not in this repos
 
 ## In progress
 
-- Built on their own branches, released next (the plan of 21-Oct-2026): the phase 2b release.
+- The phase 2b release (release E of the plan of 21-Oct-2026) is built and tested, ready for the owner's run of
+  `scripts\r9_release.ps1` (`docs/RELEASE.md`, Release 2b: check, backup, migrate, api, web, verify, migrate2):
+  - the portal's Stock Movement page pairs the transfers by their contents with `scripts/ops/pairing.py`, the
+    code of `/yq-moves`, over the new view `v_transfer_lines` (`app/transfer_audit.py`; a transfer booked in
+    under two receipts names both), each van card takes its stock from the ledger (`v_salesman_stock_recon`
+    rebuilt, its old columns kept), and the W1 notice goes by itself; `v_transfer_flow` is dropped once
+    `python -m scripts.ops moves portal` (`scripts/ops/moves_portal.py`) has read PASS;
+  - the ID numbers in the stored stock narrations are masked (the data step; `row_hash` unchanged);
+  - the four load follow-ups: each temporary table dropped once applied; the batch importer's lock taken as the
+    loader opens; `refresh.py` passing the loader's own words up, so that a load that rolled back closes
+    "stopped and rolled back", nothing written; the refresh time recorded without the commit's hold;
+  - X1: `scripts/yq_team_post.py` stores each load's team message in `team_messages` after the delivery step,
+    and the Command Centre shows it with a Copy button (`GET /command/team-message`, admin and management).
+  The engine files change with it, so from the push until `-Part api` has finished `/yq-load` refuses: the run
+  starts after a morning load. The web goes live after the API: the release commit carries no `web/` change;
+  the web commit follows once `-Part api` has finished. Before the push: `npm run lint` and `npm run build` in
+  `web/` on the web commit.
 - The month-end pack's first real run is on the first November load (with the October Ledger export in the drop).
-- The faster load's review follow-ups are built and go with the phase 2b release's API deploy: each temporary
-  table dropped once applied; the batch importer's lock inside the transaction; `refresh.py` passing the
-  loader's own words up, so that a load that rolled back is journalled as writing nothing; and the refresh
-  time recorded without the commit's hold.
 
 ## Not built (the engine prints "not built yet")
 
@@ -101,9 +113,9 @@ sections from /yq-week to /yq-kpi, and "Build order").
 
 ## Order of work (each step needs the owner's go)
 
-The phase 2b release (the Stock Moves page by contents, van stock
-from the ledger, the narration mask, the four load follow-ups, the team-message Copy button), then Market Intel
-phases 3 and 4 once the rep reports are enough.
+The phase 2b release, by the owner's run of `scripts\r9_release.ps1` (the Stock Moves page by contents, van
+stock from the ledger, the narration mask, the four load follow-ups, the team-message Copy button), then Market
+Intel phases 3 and 4 once the rep reports are enough.
 
 ## Open items
 
@@ -115,9 +127,13 @@ phases 3 and 4 once the rep reports are enough.
 - `/yq-watch`'s "Not checked yet" line still says both checks come with the month-end release: the returns against
   last month's kickback tier are now in the sales reconciliation (`recon`), and sold below cost is not built.
 
-- The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release (the page says
-  so). It pairs issues and receipts by voucher number, and van stock comes from a snapshot of the main store only. Use
-  `/yq-moves` meanwhile.
+- The portal's Stock Moves page: its Pending and van figures are not reliable until the phase 2b release is live (the
+  page says so). It pairs issues and receipts by voucher number, and van stock comes from a snapshot of the main store
+  only. Use `/yq-moves` meanwhile.
+- After the phase 2b release: the first load's team message in the Command Centre is the proof of X1 (the
+  release's own checks cannot see it before a load); `/yq-moves` and the page read the same pairs for the same
+  window. Not in 2b (the owner's decision): X3, the two staff addresses still in tracked files, and D11, the
+  Market Intel grant. The portal's Data page upload still uses the older loader.
 - Profitability is held back at every load until Focus posts the cost of sales again.
 - `/yq-stock`, answered by the owner on 20-Oct-2026: the measured lead time wins (per supplier once it can be
   measured); goods on order are logged when he says an order is placed; the order list counts the vans and
@@ -140,7 +156,8 @@ phases 3 and 4 once the rep reports are enough.
 - Run `python -m scripts.ops selftest --repo-clean` before every commit, and commit by path: no names, numbers, prices or
   totals in anything committed.
 - A change to an engine file on `main` (`gitinfo.ENGINE_PATHS`: the `app` and `scripts` Python files outside
-  `scripts/ops` and `scripts/yq_*.py`, and the requirements files) makes the next load refuse until the API is deployed.
+  `scripts/ops` and `scripts/yq_*.py`, and the requirements files; and `scripts/ops/pairing.py`, the one file of
+  `scripts/ops` the API runs, `gitinfo.ENGINE_FILES_IN_OPS`) makes the next load refuse until the API is deployed.
 - `scripts/views.sql` is generated: edit the `*_migration.sql` file, and run `python -m scripts.audit_grants` after any
   migration.
 - A load's e-mail goes once for each data set. `load status` keeps small offset marks in the run's folder, so follow a
