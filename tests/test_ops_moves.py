@@ -2229,8 +2229,8 @@ def _():
             assert lines[0].startswith("MOVES  ") and "the stock ledger runs to Tue 17 Mar" in " ".join(text.split())
             assert "it agrees with what the portal holds" in text
             assert lines[-2:] == [moves.PORTAL_LINE, moves.NOT_MEASURED], lines[-2:]
-            assert lines[-2] == ("The portal's Stock Movement page still pairs by voucher number: ignore its Pending and "
-                                 "van Gap figures.")
+            assert lines[-2] == ("The portal's Stock Movement page pairs the transfers with this same code since release 2b: "
+                                 "the same pairs for the same window.")
             assert lines[-1] == "Not measured: the time from a Stock Request to its issue (Focus exports no request vouchers)."
             assert "never by the voucher number" in " ".join(text.split())
             assert all(fmt.careful(ln) == ln for ln in lines)
@@ -2507,6 +2507,232 @@ def _():
         assert a.main.units["opening"] == 717 + 3 and a.main.balanced
         text = " ".join("\n".join(moves.screen_lines(a)).split())
         assert "UNMAPPED 1 accessory the item bridge cannot place" in text and M_ODD in text
+
+
+# ── moves portal: the portal's pairing against /yq-moves' own (the release check of phase 2b) ──────────────────────
+# The fixture again, the main and damage stores under the public names the portal's store rules know
+# (app/transfer_audit.py MAIN_STORE, DAMAGE_STORE); the view v_transfer_lines is made from the same rows as the view
+# makes it (the two transfer types of the items that ever moved in the main store), its narration as typed. Two
+# narrations differ only in an ID-shaped number, so they are one narration once masked.
+
+P_MAIN, P_DMG = "Accessories Warehouse", "Accessories Damage Warehouse"
+P_FIXTURE = {"warehouses.main": P_MAIN, "warehouses.damage": P_DMG, "warehouses.not_counted": [P_DMG, SMP]}
+P_NARRATED = {"SIO:T-26-03-12": "back to the store, slip " + ID_A, "STRV:T-26-03-11": "back to the store, slip " + ID_B}
+
+
+def public(rows) -> list[dict]:
+    """The movement fixture with the main and the damage store under their public names; the narrations of
+    P_NARRATED hashed as the ledger hashes them (the loader's mask first)."""
+    from scripts import ingest
+    rename = {MAIN: P_MAIN, DMG: P_DMG}
+    out = []
+    for r in rows:
+        r = dict(r, wh=rename.get(r["wh"], r["wh"]), to_wh=rename.get(r["to_wh"], r["to_wh"]))
+        if r["voucher"] in P_NARRATED and r["vtype"] in (ledger.ISSUE, ledger.RECEIVE):
+            r["narr"] = pairing.narr_key(P_NARRATED[r["voucher"]], ingest.mask_personal_ids)
+        out.append(r)
+    return out
+
+
+def view_rows(rows) -> list[dict]:
+    """v_transfer_lines of these ledger rows, as the view holds them and the session returns them: the two transfer
+    types of the items that ever moved in the main store, the date as text (the API casts it), the narration typed."""
+    canon = pairing.StoreRules(main=P_MAIN).canon
+    held = {r["item"] for r in rows if canon(r["wh"]) == canon(P_MAIN)}
+    return [{"voucher": r["voucher"], "vtype": r["vtype"], "date": r["date"].isoformat(), "wh": r["wh"],
+             "to_wh": r["to_wh"], "item": r["item"], "qty_in": r["qty_in"], "qty_out": r["qty_out"],
+             "value_in": r["value_in"], "value_out": r["value_out"], "narration": P_NARRATED.get(r["voucher"])}
+            for r in rows if r["vtype"] in (ledger.ISSUE, ledger.RECEIVE) and r["item"] in held]
+
+
+class PortalWorld(MoveWorld):
+    """MoveWorld with the portal's view beside it: the read-only session also answers the view's presence, the API's
+    data date and the view's rows (view, else view_rows of the ledger). Every statement must be a read."""
+
+    def __init__(self, rows=None, view=None, present=True, portal_day=D_MV, **kw):
+        super().__init__(rows=public(mv_rows()) if rows is None else rows, **kw)
+        self.view = view_rows(self.rows) if view is None else view
+        self.present, self.portal_day = present, portal_day
+
+    def rpc(self, sql):
+        got = super().rpc(sql)
+        if sql == stock.SNAPSHOT_SQL:                # the snapshot's main store under its public name too
+            got = [dict(r, warehouse_name=P_MAIN) for r in got]
+        return got
+
+    def session(self, **_kw):
+        world_ = self
+        from app import transfer_audit as ta
+        from scripts.ops import moves_portal
+
+        class Session:
+            def q(self, sql, params=None):
+                db.check_sql(sql)
+                world_.sql.append(sql)
+                if sql == moves_portal.PRESENT_SQL:
+                    return [{"found": "v_transfer_lines" if world_.present else None}]
+                if sql == ta.DATA_DATE_SQL:
+                    return [{"data_date": world_.portal_day.isoformat() if world_.portal_day else None}]
+                if sql == moves_portal.LINES_SQL:
+                    return [dict(r) for r in world_.view]
+                assert sql == stock.SHEET_SQL, sql[:70]
+                return [{"id": i, "code": c, "cost": v} for i, c, v in world_.sheet]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Session()
+
+
+def verdicts(text: str) -> tuple[list[str], list[str]]:
+    """(the lines with the word PASS, the lines with the word FAIL), read as scripts/r9_release.ps1 reads them."""
+    lines = text.splitlines()
+    return ([ln for ln in lines if re.search(r"\bPASS\b", ln)], [ln for ln in lines if re.search(r"\bFAIL\b", ln)])
+
+
+SPLIT = (sio(28, mday(3, 16), P_MAIN, VB, [(M_BANK, 2), (M_NOCOST, 1)])
+         + strv(20, mday(3, 16), VB, [(M_BANK, 2)]) + strv(21, mday(3, 16), VB, [(M_NOCOST, 1)]))
+
+
+@test("moves portal: the portal's pairing of v_transfer_lines is /yq-moves' own: one PASS line, no FAIL, exit 0, both windows")
+def _():
+    from contextlib import redirect_stdout
+    from app import transfer_audit as ta
+    from scripts.ops import moves_portal
+    with moves_world(PortalWorld(rows=public(mv_rows(extra=SPLIT))), cfg=P_FIXTURE) as w:
+        root = paths.data_root()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cli.main(["moves", "portal", "--data-root", str(root)])
+        out = buf.getvalue()
+        passed, failed = verdicts(out)
+        assert code == 0 and passed == [moves_portal.PASSED] and not failed, out
+        flat = " ".join(out.split())
+        assert out.startswith("MOVES PORTAL  ") and flat.count("every voucher and every count the same") == 2, out
+        assert "Last 7 days (Wed 11 Mar to Tue 17 Mar)" in flat and "The whole ledger (Sun 01 Feb to Tue 17 Mar)" in flat
+        # the cases that ride on the rule, the same on both sides: a split pair, an own-store issue and its mirror, the
+        # damage store's week, identical issues, a receipt with no issue, a pair at another store held by a narration
+        # that only the mask makes one
+        portal, mine = ta.pairs_from_rows(w.view, D_MV), moves.audit(None).result
+        split = portal.by_issue["SIO:T-26-03-28"]
+        assert split.step == "S" and {split.receipt.no, *(x.no for x in split.also)} == {"STRV:T-26-03-20",
+                                                                                      "STRV:T-26-03-21"}
+        assert portal.by_issue["SIO:T-26-03-12"].basis == ("narration", "number", "date") == \
+            mine.by_issue["SIO:T-26-03-12"].basis
+        assert portal.by_issue["SIO:T-26-03-18"].outcome == pairing.IN_GRACE, "the damage store's week"
+        assert portal.counts() == mine.counts()
+        # what was read: the view's presence, the API's data date, the rows (each a read); nothing was written
+        mine_sql = [s for s in w.sql if s in (moves_portal.PRESENT_SQL, ta.DATA_DATE_SQL, moves_portal.LINES_SQL)]
+        assert mine_sql == [moves_portal.PRESENT_SQL, ta.DATA_DATE_SQL, moves_portal.LINES_SQL], mine_sql
+        assert w.asked and set(w.asked) == {"auto"}, "the ledger as /yq-moves reads it"
+        assert not (root / "exports").exists(), "no copy of the screen, no record"
+        res = moves.run(MvArgs("portal"))
+        assert res["exit"] == 0 and res["ok"] and res["data_date"] == "2026-03-17", res
+        assert res["flags"]["verdict"] == "PASS" and res["flags"]["vouchers_differ"] == 0 and res["flags"]["lines"] > 0
+        assert all(fmt.careful(ln) == ln for ln in res["text"].splitlines())
+        # --ledger is /yq-moves' own option
+        moves_portal.run(MvArgs("portal", ledger_="db"))
+        assert w.asked[-1] == "db"
+
+
+@test("moves portal: before migration M1 the view is not there: not checked yet, exit 2, neither PASS nor FAIL, nothing more read")
+def _():
+    from contextlib import redirect_stdout
+    from scripts.ops import moves_portal
+    with moves_world(PortalWorld(present=False), cfg=P_FIXTURE) as w:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cli.main(["moves", "portal", "--data-root", str(paths.data_root())])
+        out = buf.getvalue()
+        passed, failed = verdicts(out)
+        assert code == 2 and moves_portal.NOT_YET in out and not passed and not failed, out
+        assert "not checked yet: v_transfer_lines is not in the database" in out
+        assert w.sql == [moves_portal.PRESENT_SQL] and w.asked == [], (w.sql, w.asked)
+        res = moves.run(MvArgs("PORTAL"))
+        assert res["exit"] == 2 and not res["ok"] and res["flags"]["verdict"] == "not checked"
+
+
+@test("moves portal: a voucher the portal pairs otherwise is a FAIL that names it, with the counts that differ; the first 20, then how many more")
+def _():
+    from scripts.ops import moves_portal
+    rows = public(mv_rows())
+    # the portal's rows lack STRV 10 (SIO 10's receipt): /yq-moves has the pair, the portal an issue past its deadline
+    with moves_world(PortalWorld(rows=rows, view=[r for r in view_rows(rows) if r["voucher"] != "STRV:T-26-03-10"]),
+                     cfg=P_FIXTURE):
+        res = moves.run(MvArgs("portal"))
+        text = res["text"]
+        passed, failed = verdicts(text)
+        assert res["exit"] == 1 and not res["ok"] and not passed and len(failed) == 1, text
+        assert failed[0].startswith("moves portal: FAIL - 2 vouchers and ") and "(the vouchers below)" in failed[0]
+        assert ("  SIO:T-26-03-10: the portal: not received after the deadline; /yq-moves: received (STRV:T-26-03-10)"
+                in text.splitlines()), text
+        assert "  STRV:T-26-03-10: the portal: no such voucher; /yq-moves: booked in for SIO:T-26-03-10" in text.splitlines()
+        flat = " ".join(text.split())
+        assert "the counts differ (the portal's against /yq-moves'): received 4 against 5, lines 4 against 5" in flat, flat
+        assert res["flags"]["vouchers_differ"] == 2 and res["flags"]["counts_differ"] > 0
+    # the same issue, its lines otherwise on the portal's side: named for what differs
+    other = [dict(r, qty_out=r["qty_out"] + 1) if r["voucher"] == "SIO:T-26-03-15" else r for r in view_rows(rows)]
+    with moves_world(PortalWorld(rows=rows, view=other), cfg=P_FIXTURE):
+        text = moves.run(MvArgs("portal"))["text"]
+        assert "  SIO:T-26-03-15: not received after the deadline on both sides; what differs: its lines" in text.splitlines()
+    # twenty-five issues the ledger does not hold: the first twenty listed by date and number, then how many more
+    extra = [{"voucher": f"SIO:T-26-03-{n}", "vtype": ledger.ISSUE, "date": "2026-03-17", "wh": P_MAIN, "to_wh": VA,
+              "item": M_CABLE, "qty_in": 0, "qty_out": n, "value_in": 0, "value_out": n, "narration": None}
+             for n in range(100, 125)]
+    with moves_world(PortalWorld(rows=rows, view=view_rows(rows) + extra), cfg=P_FIXTURE):
+        text = moves.run(MvArgs("portal"))["text"]
+        listed = [ln for ln in text.splitlines() if ln.startswith("  SIO:T-26-03-1")]
+        assert [ln.split(":")[1] for ln in listed[:1]] == ["T-26-03-100"] and len(listed) == moves_portal.SHOWN, listed
+        assert text.splitlines()[-1] == "  and 5 more." and "25 vouchers" in text
+
+
+@test("moves portal: the portal's ledger on another day is a FAIL that says so; an empty view differs in every voucher")
+def _():
+    from scripts.ops import moves_portal
+    with moves_world(PortalWorld(portal_day=D_MV - timedelta(days=1)), cfg=P_FIXTURE):
+        res = moves.run(MvArgs("portal"))
+        passed, failed = verdicts(res["text"])
+        assert res["exit"] == 1 and not passed and failed[0].startswith("moves portal: FAIL - the ledger's last day")
+        assert "The portal's stock ledger runs to Mon 16 Mar, /yq-moves' to Tue 17 Mar" in " ".join(res["text"].split())
+    with moves_world(PortalWorld(view=[]), cfg=P_FIXTURE):
+        res = moves.run(MvArgs("portal"))
+        assert res["exit"] == 1 and res["flags"]["lines"] == 0 and res["flags"]["vouchers_differ"] > moves_portal.SHOWN
+        assert "the portal: no such voucher" in res["text"]
+
+
+@test("moves portal: the API's read and the API's function; every statement a read; app imported only when it runs; 'portal' alone")
+def _():
+    import ast
+    from app import transfer_audit as ta
+    from scripts.ops import moves_portal
+    head, sep, _tail = ta.TRANSFER_LINES_SQL.partition(" WHERE ")
+    assert sep and moves_portal.LINES_SQL == head, "the API's own columns, every day at once"
+    for sql in (moves_portal.PRESENT_SQL, moves_portal.LINES_SQL, ta.DATA_DATE_SQL):
+        db.check_sql(sql)
+    tree = ast.parse((ROOT / "scripts" / "ops" / "moves_portal.py").read_text(encoding="utf-8"))
+    top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert not [n for n in top if (getattr(n, "module", None) or "").startswith("app")
+                or any(a.name.startswith("app") for a in getattr(n, "names", []))], "app is imported only when it runs"
+    assert moves_portal.WORD == moves.PORTAL_WORD == "portal"
+    with moves_world(PortalWorld(), cfg=P_FIXTURE) as w:
+        res = moves.run(MvArgs("portal", "7d"))
+        assert res["exit"] == 1 and moves_portal.PRESENT_SQL not in w.sql, "with another word it is no portal check"
+    # fates: every voucher once (issues, receipts, the vouchers set aside); one side against itself differs in nothing
+    with moves_world(PortalWorld(rows=public(mv_rows(extra=SPLIT))), cfg=P_FIXTURE):
+        a = moves.audit(None)
+        f = moves_portal.fates(a.result, a.window["first"], a.window["last"])
+        legs = a.result.legs
+        assert set(f) == {x.no for x in legs.issues} | {x.no for x in legs.receipts} | {x.voucher for x in a.result.aside}
+        split = a.result.by_issue["SIO:T-26-03-28"]
+        assert f["SIO:T-26-03-28"][1][1] == (split.receipt.no, *(x.no for x in split.also))
+        assert set(f["SIO:T-26-03-28"][1][1]) == {"STRV:T-26-03-20", "STRV:T-26-03-21"}
+        assert f["STRV:T-26-03-21"][1][:2] == ("paired", ("SIO:T-26-03-28",))
+        assert moves_portal.differences(f, f) == []
+        told = pairing.summarise(a.result, first=a.window["first"], last=a.window["last"])
+        assert moves_portal.count_differences(told, told) == []
 
 
 def main() -> int:

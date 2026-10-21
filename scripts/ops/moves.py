@@ -7,6 +7,8 @@
                 its days to the ledger's last day at the latest (sales.resolve_window, D = the ledger's last day)
     rep:<name>  one van or outlet (a salesman's name, or the outlet's): its row, its transfers of the window with
                 what became of each and on what basis, and its items to check
+    portal      (alone; the release check of phase 2b, no word of the skill) the proof that the portal pairs the
+                transfers exactly as this command does: scripts/ops/moves_portal.py, one verdict line, PASS or FAIL
     'again' and 'top:' are the brief's words: refused here in one sentence.
 
 THE BASIS. Accessories only: an item that has ever moved in the main store (config 'warehouses.main'), less config
@@ -151,7 +153,9 @@ WAITING = ("not_received", "damage_not_booked", "twins")       # the kinds that 
 
 PAIRED_BY = ("Pairs are made by what the two vouchers hold (items, units, the store, the days between them), never by "
              "the voucher number.")
-PORTAL_LINE = "The portal's Stock Movement page still pairs by voucher number: ignore its Pending and van Gap figures."
+PORTAL_LINE = ("The portal's Stock Movement page pairs the transfers with this same code since release 2b: the same "
+               "pairs for the same window.")
+PORTAL_WORD = "portal"         # `moves portal`: the release check (scripts/ops/moves_portal.py)
 NOT_MEASURED = "Not measured: the time from a Stock Request to its issue (Focus exports no request vouchers)."
 REFUSED_WORDS = ("/yq-moves takes a window and rep:<name> only: 'again' and 'top:' are words of /yq-brief.")
 BASIS_WORDS = {"narration": "the same narration", "number": "numbers close", "date": "booked within a day"}
@@ -1478,6 +1482,9 @@ def run(args) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
     if getattr(args, "golden_build", False):
         return golden_build(args)
+    if [str(w).strip().lower() for w in getattr(args, "spec", None) or []] == [PORTAL_WORD]:
+        from scripts.ops import moves_portal     # the release check: the portal's pairing against this one
+        return moves_portal.run(args)
     try:
         window, typed_rep = parse_words(getattr(args, "spec", None))
         a = audit(window or DEFAULT_WINDOW, rep=typed_rep, prefer=getattr(args, "ledger", None) or "auto")
