@@ -14,17 +14,25 @@ Three deployables, three tools:
 | Portal (`web/dist`) | Cloudflare Worker `yq-bahrain-ops` at ops.yqmarketplace.com | same | same |
 | Database | Supabase Postgres | `scripts/apply_sql <file> --rehearse`, then apply | `<file>_reverse.sql`, or a guarded `db_backup --restore` |
 
+**CI, and a private repository (C1).** Render deploys only through `render_deploy` (its Auto-Deploy is No: a push never
+deploys the API). The release scripts read CI through the GitHub API: without a key while the repository is public;
+while it is private, with `GH_READ_TOKEN` (the main folder's `.env`, or the PowerShell window's environment), and
+without that token they ask you to confirm CI by hand on github.com.
+
 **A push to `main` that touches `web/**` deploys the web at push time.** `.github/workflows/cf-deploy.yml`
 builds both bundles and runs `wrangler deploy` for both Workers (`workers/market.js` included) the
-moment the merge lands — before any step below, and before the API. Two ways to keep the train in order:
+moment the merge lands — before any step below, and before the API. Three ways to keep the train in order:
 
 - deploy the API first, from the release branch: `render_deploy deploy --commit <sha>` takes any
   commit, so steps 1–3 can run before the merge, and the merge then deploys the web onto the new API; or
+- push the release in two commits: the release commit without any `web/**` change first (the API is
+  deployed from it), then the web commit once the API is live. Release 2b does it this way (below), so
+  its web goes live after the API; or
 - merge, and accept the window (minutes) in which the new web talks to the old API. R6 is tolerant of
   it: the Worker computes the same `W/"sha1[:24]"` ETag against an API without one, and a missing 1024
   rendition falls back to 512.
 
-Either way the version bookkeeping in step 4 starts AFTER the push: `versions list` shows the cf-deploy
+Whichever way, the version bookkeeping in step 4 starts AFTER the push: `versions list` shows the cf-deploy
 upload as the newest version, and "the version live before this train" is the one before it. The
 versioned path below is still what a release train uses for the switch itself, so it is explicit and
 reversible; `wrangler deploy` leaves no version to roll back to but the previous upload (see "Rollback").
@@ -40,13 +48,20 @@ Nothing below prints a secret.
 ### 1. Backup and gate
 
 ```
-python -m scripts.db_backup --all                       # one REPEATABLE READ snapshot, every public table
+python -m scripts.yq_backup release <rN>                  # every public table: verified, encrypted, read back
 python -m scripts.prod_gate snapshot --label before-<rN>   # business_data/gates/<ts>_before-<rN>.json
 ```
 
-`db_backup` writes CSV + `manifest.json` under `business_data/backups/` (gitignored). Keep the folder
-name — the rollback needs it. `prod_gate` fingerprints every pre-existing order, line, event, merchant,
-salesman and target; the compare in step 5 is against this file.
+Release backups are encrypted by themselves (R1, 21-Oct-2026). `release` backs up every table (the same
+`db_backup --all` REPEATABLE READ snapshot) into `%LOCALAPPDATA%\yq-backups\release\<date>_pre-<rN>` (never under
+`business_data/`, never in OneDrive), checks it, encrypts it into `<date>_pre-<rN>.7z` (the backup password, 7-Zip
+AES-256), reads it back, deletes the plain folder and prints the archive's path as its last line (exit 0 only then).
+Keep that path: the rollback needs it. Exit 1: it did not finish, and its last line says what plain copy is left.
+Exit 2: refused, nothing made (no backup password or 7-Zip, a bad label, or that day's backup of the label already
+there: run it again with another label, such as `<rN>-2`). A plain `db_backup --all` folder under `business_data/backups/`
+would sit in the daily OneDrive copy with merchant phones and trade prices: not for releases any more. `prod_gate`
+fingerprints every pre-existing order, line, event, merchant, salesman and target; the compare in step 5 is against
+this file.
 
 ### 2. Migrations (only when the release has any)
 
@@ -272,12 +287,16 @@ set; if a release also needed a new env var, remove it in the dashboard, one key
 1. **Migrations:** run the release's `scripts/<name>_reverse.sql` files in reverse order, through
    `apply_sql` (rehearse first). Data corrections in this codebase are flags (`is_test`, `voided`,
    `status`), so they reverse by UPDATE, never by deleting rows.
-2. **A table restore** is the last resort and goes only through the guarded restore:
+2. **A table restore** is the last resort and goes only through the guarded restore. A release backup is an
+   encrypted archive (step 1). Unpack first: `python -m scripts.yq_backup unpack <archive>` (or `--to <folder>`, a
+   new or empty folder outside OneDrive and the project folder) prints the checked folder as its last line; run
+   `--verify` and `--restore` on that folder, then delete it (it holds the backup unencrypted):
 
    ```
-   python -m scripts.db_backup --verify business_data/backups/<folder>                           # re-parse the CSVs against the manifest
-   python -m scripts.db_backup --restore business_data/backups/<folder> --tables <t1,t2,…>        # DRY RUN: prints the plan
-   python -m scripts.db_backup --restore business_data/backups/<folder> --tables <t1,t2,…> --yes  # one transaction
+   python -m scripts.yq_backup unpack <archive> [--to <folder>]             # last line: the checked folder
+   python -m scripts.db_backup --verify <folder>                            # re-parse the CSVs against the manifest
+   python -m scripts.db_backup --restore <folder> --tables <t1,t2,…>        # DRY RUN: prints the plan
+   python -m scripts.db_backup --restore <folder> --tables <t1,t2,…> --yes  # one transaction
    ```
 
    The guards refuse a restore that would cascade into a table outside `--tables`, that would
@@ -293,6 +312,112 @@ set; if a release also needed a new env var, remove it in the dashboard, one key
 - Checkout and the `/:slug` rep links keep their URLs; `/c/:token` stays a redirect to the marketplace.
 - No env var is edited by a script. No table is dropped.
 - A rollback is itself a train: it gets a gate snapshot and a compare.
+
+---
+
+## Release 2b (r9): the release script, part by part
+
+*For the owner. What goes live: the portal's Stock Movement page pairs the transfers by their contents (the same code
+as `/yq-moves`) and takes each van's stock from the ledger; ID numbers in the stored stock narrations are masked; the
+four load fixes; the team message with its Copy button in the Command Centre. The script is `scripts\r9_release.ps1`.
+Claude prepared it; you run it, one part at a time, in PowerShell in the project folder, on `main`, after
+`git pull --ff-only`. It refuses to run from a code worktree (`.claude\worktrees\...`), which would reach production
+through the project folder's `.env`.*
+
+**When.** After a morning load, at a quiet hour, never during a Focus load. The release changes engine files, so from
+the push until `-Part api` has finished `/yq-load` refuses: go from `-Part backup` to `-Part api` in one sitting.
+
+**The web goes live after the API: two pushes.** Claude pushes the release commit (the database files, the API, the
+engine; no `web/**` change) and tells you; you run check, backup, migrate and api. Then Claude pushes the web commit;
+you run `git pull --ff-only`, then web, verify and migrate2. From the web part on, the script accepts that later commit
+as long as nothing the API is built from (`app\`, the code under `scripts\`, the requirements, the `Dockerfile`)
+changed since the release commit; otherwise it stops and says so.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part check
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part backup
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part migrate
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part api
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part web
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part verify
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part migrate2
+```
+
+| Part | What it does | Time | Writes to production | Your YES |
+|---|---|---|---|---|
+| check | folder, branch, the release files, the key names, GitHub ci, what is live | 1 min | no | none |
+| backup | `python -m scripts.yq_backup release r9`, then the before-snapshot (gate) | 5-10 min | no (reads) | 1 |
+| migrate | `r9_stock_moves`, then `r9_team_messages`: rehearse, apply, grant audit | about 3 min | yes | 4 |
+| api | the Render deploy of the release commit; `/health` must show it | 5-10 min | yes | 1 |
+| web | the cf-deploy run of the web commit is green and the live builds carry it | 1-15 min | no (GitHub did it) | none |
+| verify | `moves portal` must print PASS; the after-snapshot compared with the backup's | about 3 min | no | none |
+| migrate2 | `r9_transfer_flow_drop`: rehearse, apply, grant audit | about 2 min | yes | 2 |
+
+Before every step that writes to production (or runs on it) the script shows `PRODUCTION STEP: ...` and asks
+**Type YES to continue**; anything else stops the part before that step. Exit codes: 0 done, 1 failed (stop and tell
+Claude), 2 stopped (no YES, or something to do first; the message says what). The screen also goes to
+`business_data\releases\<date>_r9.log`, secrets masked; `business_data\releases\r9_state.json` keeps the backup
+archive, the before-snapshot, the API deploy to roll back to and how far the train got.
+
+- **check** — branch `main`, level with GitHub, no changed tracked file, no load lock, `.env` (the key names, never the
+  values; `GH_READ_TOKEN` once the repository is private), the release files, `ci` green for this commit, what is live.
+- **backup** — release backups are now encrypted by `yq_backup release` (step 1 above): every table goes to
+  `%LOCALAPPDATA%\yq-backups\release\<date>_pre-r9`, is checked against its manifest, encrypted with the backup
+  password and read back, and the plain copy is deleted: never under `business_data`, never in OneDrive. Its last line,
+  the archive, goes into the state. The first attempt is labelled `r9`, a later one `r9-2`, `r9-3` ... (yq_backup
+  refuses a second backup of one label on one day). Exit 1: it did not finish, its last line says what plain copy is
+  left: tell Claude. Exit 2: refused, nothing made: if it says the backup is already there, run the part again,
+  otherwise tell Claude; nothing of the release starts without the backup. When the part runs again, the first backup
+  of the release stays the rollback point.
+- **migrate** — `r9_stock_moves`: the view `v_transfer_lines`, `v_salesman_stock_recon` rebuilt from the ledger (its
+  old columns kept) and the ID numbers in the stored stock narrations masked. **The narration mask cannot be undone**:
+  the encrypted backup keeps the old text. Then `r9_team_messages`: the admin-only table behind the Copy button. Each
+  file is rehearsed (it runs and is rolled back), applied after a second YES, then `audit_grants` must exit 0.
+- **api** — writes down the deploy that is live (the rollback target), deploys the release commit to Render and waits
+  until `/health` reports it. Then tell Claude: Claude pushes the web commit.
+- **web** — reads only. The cf-deploy run of the web commit (or the last one, when nothing under `web/` changed since)
+  must be green with both deploy steps run, its build must be of the release commit or a later one, and the live
+  marketplace and portal must carry that build id. When the portal's build id cannot be found, it asks you to look at
+  ops.yqmarketplace.com/stock: the amber "Being corrected" notice must be gone.
+- **verify** — reads only. `/health` on the release; `python -m scripts.ops moves portal` must print PASS (the portal
+  pairs the transfers exactly as `/yq-moves` does for the same window); the gate snapshot after the release, compared
+  with the one taken at the backup (an unexplained change to an order, line or total is the stop rule, step 6). Then
+  three checks of your own in the portal, listed on the screen.
+- **migrate2** — only once verify passed for the API that is live, and only while `/health` still shows the release
+  (an older API reads `v_transfer_flow`): drops the old view.
+
+### If something is wrong: the 2b rollback
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part rollback
+powershell -ExecutionPolicy Bypass -File scripts\r9_release.ps1 -Part rollback -RestoreTables <t1,t2>
+```
+
+Each piece asks YES; anything else skips that piece. The order follows who reads what:
+
+1. **R1** `r9_transfer_flow_drop_reverse` puts `v_transfer_flow` back, before the API goes back (an older API reads it).
+2. **R2** the API back to the deploy `-Part api` wrote down (`render_deploy rollback --deploy <id> --wait`); `/health`
+   must then show the earlier commit.
+3. **R3** `r9_team_messages_reverse`, then `r9_stock_moves_reverse` (the old `v_salesman_stock_recon` back,
+   `v_transfer_lines` dropped), only when Claude says so and only once the API is back: while `/health` still shows the
+   release, the script holds them. The narration mask cannot be undone: the stored narrations stay masked.
+4. **R4** a table restore, the last resort, only with `-RestoreTables` exactly as Claude gives the list:
+   `yq_backup unpack <archive> --to <scratch>` (a new folder next to the archive, outside OneDrive; its last line is
+   the checked folder), then on that folder `db_backup --verify` and the restore's dry run, then YES and `--yes`. The
+   guarded restore refuses over live rows newer than the backup. The backup predates the mask: restoring
+   `stock_movements` would bring the unmasked narrations back. Claude deletes the unpacked folder afterwards (it holds
+   the backup unencrypted).
+5. **R5** a gate snapshot after the rollback, compared with the one taken at the backup.
+
+The web stays: the new Stock Movement page and the Command Centre work with an older API too. Should the new portal
+itself misbehave, switch it back as "Rollback → Web" above says.
+
+### After the release
+
+- `/yq-load` as usual; after it the Command Centre shows that load's team message, with its Copy button.
+- `/yq-moves` and the portal's Stock Movement page show the same pairs for the same window.
+- Tell Claude the release is done: `docs/STATUS.md` and the notes are updated, and the unpacked folder of a restore, if
+  one was made, is deleted.
 
 ---
 

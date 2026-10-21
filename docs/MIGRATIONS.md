@@ -46,6 +46,10 @@ canonical versions, so `CREATE OR REPLACE VIEW` succeeds with no error at all.
 | `v_catalog_stock_rows`, `v_catalog_stock`, `v_shop_unpriced_stock`, `v_catalog_velocity`, `v_catalog_pairs`, `v_catalog_cost`, `v_shop_order_lines_agent` | `shop_migration.sql` (15-Sep-2026) | not in the baseline — YQ Shop views (stock status per catalog code, velocity, co-purchases, landed cost, PII-free order views) |
 | `v_shop_focus_recon`, `v_shop_focus_candidates` | `r7_focus_links_migration.sql` (R7a; before that the recon was `r3_pipeline_migration.sql`) | not in the baseline. Re-running the R3 file after R7a **fails loudly** (it would drop 4 appended columns) — never force it |
 | `v_shop_search_terms`, `v_shop_rail_perf` | `r7d_analytics_views_migration.sql` (R7d, 27-Sep-2026; before that `marketplace_migration.sql` 9c / 9d) | not in the baseline. Re-running the marketplace file after R7d: `v_shop_search_terms` **silently** goes back to counting every keystroke (same five columns); `v_shop_rail_perf` **fails loudly** (it would drop 4 appended columns) — never force it |
+| `v_transfer_lines` | `r9_stock_moves_migration.sql` (release 2b) | not in the baseline — the Stock Issue / Stock Receive lines the API pairs by their contents with `scripts/ops/pairing.py`, the same code as `/yq-moves`; granted to the read role only, not on the AI allowlist |
+| `v_salesman_stock_recon` | `r9_stock_moves_migration.sql` (release 2b: rebuilt from the ledger, the old columns first and in order, new ones appended; before that `stock_transfer_migration.sql`) | not in the baseline. Re-running `stock_transfer_migration.sql` after 2b **silently** puts the old definition back (on hand from the stock file, which holds no van; the `ilike '%sim%'` trap), and its `drop view … cascade` takes the dependent views with it — never do it |
+| `team_messages` (table) | `r9_team_messages_migration.sql` (release 2b) | not a view: the team message of each load (data date, text, sha256), admin-only — RLS on, no policy, nothing granted to `anon` / `authenticated` |
+| `v_transfer_flow` | dropped by `r9_transfer_flow_drop_migration.sql` (release 2b, after `moves portal` PASS); `r9_transfer_flow_drop_reverse.sql` recreates it (before that `daily_ops2_migration.sql`) | not in the baseline. Re-running `daily_ops2_migration.sql` after the drop quietly brings the view back — put it back only through the drop's reverse |
 
 ### The guard protects the file, not the statements
 
@@ -145,8 +149,8 @@ SELECT grant, so the assistant's read path is unchanged; revokes all privileges 
 sequence from `anon`/`authenticated`; revokes EXECUTE on `match_kb` from PUBLIC and grants it to
 `service_role` (the API calls it with the service key); drops the seven stale blanket `*_read` policies for
 `authenticated`; alters `postgres`'s default privileges so future objects are not auto-granted; creates
-`keepalive_ping` (RLS on, no policy, SELECT for anon) as the one thing the keepalive workflow may read; and
-ends with a `DO` block that raises if anything is still exposed.
+`keepalive_ping` (RLS on, no policy, SELECT for anon) as the one thing the keepalive workflow and the yq-keepwarm
+Worker (publishable key, every 10 minutes) may read; and ends with a `DO` block that raises if anything is still exposed.
 
 **Rules from now on.**
 - Never grant `anon`/`authenticated` anything in `public`. The SPA uses Supabase for auth only; all data goes
@@ -245,9 +249,11 @@ for a `YQ-26-09-2` SKU before and after.
 
 ## Backup, restore and the preservation gate (24-Sep-2026)
 
-Before **every** production change: `python -m scripts.db_backup --all --out business_data/backups/<date>_<label>`
-(every public table inside ONE read-only REPEATABLE READ transaction, UTC timestamps, manifest with columns and
-max id / created_at, re-verified on write) and `python -m scripts.prod_gate snapshot --label <label>`. After the
+Before **every** production change: `python -m scripts.yq_backup release <label>` (the same `db_backup --all`
+snapshot: every public table inside ONE read-only REPEATABLE READ transaction, UTC timestamps, manifest with columns
+and max id / created_at, re-verified on write; sealed into `release\<date>_pre-<label>.7z` in the backup store, outside
+OneDrive, its path the last line printed) and `python -m scripts.prod_gate snapshot --label <label>`. To restore, unpack
+it first (`python -m scripts.yq_backup unpack <archive>`); `db_backup --restore` takes the folder it prints. After the
 change: a second gate snapshot and `python -m scripts.prod_gate compare A.json B.json`, which fails if any
 pre-existing order, line, event, merchant, salesman link, target or audit row disappeared or changed without an
 explaining event. Rehearse every migration first as `BEGIN; SET LOCAL lock_timeout='2s'; <file>; <checks>; ROLLBACK;`.
@@ -834,3 +840,30 @@ TABLE while R8n's view reads the Market Intel tables: reverse R8n (and R8m) firs
 
 Tests: `python -m tests.test_r8n_ai_market_signals` (in CI: the text pins; the replay SKIPs without
 `YQ_LOCAL_PG_R8N`, a loopback address only).
+
+## Release 2b (r9, built 21-Oct-2026, not applied): stock moves by contents, the team message, `v_transfer_flow` retired
+
+Three files, each with its `_reverse.sql` beside it. They are applied only by the release script
+`scripts\r9_release.ps1`, from the MAIN project folder (never from a worktree): each file is rehearsed on production
+first (`apply_sql --rehearse`, always rolled back), applied after a YES, then `python -m scripts.audit_grants` must exit
+0. The runbook is `docs/RELEASE.md` § Release 2b; the contents are in each file's own header.
+
+| Order | File | When | What |
+|---|---|---|---|
+| 1 | `r9_stock_moves_migration.sql` | `-Part migrate`, before the API deploy | `v_transfer_lines` (the transfer lines the API pairs by their contents, the same code as `/yq-moves`); `v_salesman_stock_recon` rebuilt from the ledger (on hand = the ledger balance, the old columns first and in order); the narration data step: ID numbers masked in the stored stock rows and their `ingest_stage` / `ingest_replaced` copies, `row_hash` unchanged |
+| 2 | `r9_team_messages_migration.sql` | `-Part migrate` | `team_messages`, admin-only (RLS on, no policy, nothing granted to `anon` / `authenticated`) |
+| 3 | `r9_transfer_flow_drop_migration.sql` | `-Part migrate2`: after the API deploy, once `moves portal` printed PASS and the gate compare passed | drops `v_transfer_flow`; only an older API's `/stock/flow` read it |
+
+**Reverse** — the release script's rollback, in this order, by who reads what: `r9_transfer_flow_drop_reverse.sql`
+(recreates `v_transfer_flow`) BEFORE the API goes back, since an older API reads it; then, once the older API is live,
+`r9_team_messages_reverse.sql` and `r9_stock_moves_reverse.sql` (the old `v_salesman_stock_recon` back,
+`v_transfer_lines` dropped), since only the release API reads those. **The narration mask is not reversed**: masked
+text stays masked; the pre-release backup (`yq_backup release r9`, encrypted) keeps the old text, and a restore of the
+stock rows would bring it back, which is never wanted for ID numbers.
+
+Never re-run after 2b: `stock_transfer_migration.sql` (its `drop view … cascade` silently puts the old
+`v_salesman_stock_recon` back and drops the views that depend on it) and, once the drop is applied,
+`daily_ops2_migration.sql` (it brings `v_transfer_flow` back). The r9 files own these objects now (table above).
+
+Tests: `python -m tests.test_r9_release_script` pins the release script's order, its YES questions, the rehearse /
+apply / audit sequence and the rollback order, as text.
