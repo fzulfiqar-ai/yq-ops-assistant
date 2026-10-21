@@ -496,9 +496,11 @@ class Fake(rb.Source):
 
 
 class data_root:
-    """A temporary data root with the config fixture."""
+    """A temporary data root with the config fixture. One opened inside another (BOOKS_VIEW() in a test's own) puts
+    the outer one back when it closes, so a config read after it never falls through to the project folder's."""
 
     def __enter__(self) -> Path:
+        self._outer = paths._override               # noqa: SLF001  (the root a test opened around this one, or None)
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self._tmp.name).resolve()
         paths.set_data_root(self.root)
@@ -507,7 +509,7 @@ class data_root:
         return self.root
 
     def __exit__(self, *exc):
-        paths.set_data_root(None)
+        paths.set_data_root(self._outer)
         config.use(None)
         for _ in range(20):
             try:
@@ -853,14 +855,15 @@ def _():
 @test("returns: without the export, an estimate from returned units; nothing judged on it")
 def _():
     acc = {L(k) for k in NAMES}
-    r = rb.returns_estimate(ROWS, acc, FIRST, LAST, PRICES)
+    with data_root():                                 # the item bridge reads config: the fixture's, never a real one
+        r = rb.returns_estimate(ROWS, acc, FIRST, LAST, PRICES)
+        unpriced = rb.returns_estimate(ROWS, acc, FIRST, LAST, None)
     assert (r["units"], r["vouchers"], r["value"], r["unpriced"]) == (Decimal(7), 3, Decimal("13.500"), Decimal(2))
     said = r["lines"][0]
     assert said.startswith("Returns: net of returns is an estimate from returned units: 7 units came back on 3 Sales "
                            "Return vouchers"), said
     assert "about BHD 13.500 ex-VAT" in said and "2 units of items not sold in the month not priced" in said
     assert "no kickback tier is judged on an estimate" in said
-    unpriced = rb.returns_estimate(ROWS, acc, FIRST, LAST, None)
     assert unpriced["value"] is None and "their price: not worked out this time" in unpriced["lines"][0]
 
 
