@@ -161,12 +161,13 @@ def _source(audit) -> dict:
 
 
 def _number_of(x) -> str | None:
-    """A voucher number: the text itself, or the `number` (else `voucher`) of a leg."""
+    """A voucher number: the text itself, or the `number` (else `no`, the pairing's own leg, else `voucher`) of a
+    leg."""
     if x is None:
         return None
     if isinstance(x, str):
         return x.strip() or None
-    for name in ("number", "voucher"):
+    for name in ("number", "no", "voucher"):
         v = _get(x, name)
         if isinstance(v, str) and v.strip():
             return v.strip()
@@ -522,26 +523,28 @@ def _rules(audit) -> pairing.Rules:
     return r if isinstance(r, pairing.Rules) else pairing.Rules()
 
 
-def _pair_numbers(result) -> tuple[list[tuple[str, str]], int]:
-    """(issue number, receipt number) of every pair of the pairing result, and how many pairs named no
-    number. A pair names its issue and its receipt (`issue`, `receipt`: a leg with `number`, or the number
-    itself), or is the two of them in that order."""
+def _pair_numbers(result) -> tuple[list[tuple[str, tuple[str, ...]]], int]:
+    """(issue number, (receipt number, ...)) of every pair of the pairing result, and how many pairs named no
+    number. A pair names its issue and its receipt (`issue`, `receipt`: a leg with `number` or `no`, or the
+    number itself) and the further receipts it was booked in under (`also`: the pairing's step S), or is the
+    two of them in that order."""
     pairs = _get(result, "pairs")
     if isinstance(pairs, Mapping):
         pairs = list(pairs.values())
-    out: set[tuple[str, str]] = set()
+    out: set[tuple[str, tuple[str, ...]]] = set()
     unread = 0
     for p in pairs or []:
+        more = ()
         if isinstance(p, (tuple, list)) and len(p) >= 2:
             a, b = p[0], p[1]
         else:
-            a, b = _get(p, "issue"), _get(p, "receipt")
+            a, b, more = _get(p, "issue"), _get(p, "receipt"), _get(p, "also") or ()
         i, r = _number_of(a), _number_of(b)
         if i and r:
-            out.add((i, r))
+            out.add((i, (r,) + tuple(n for n in (_number_of(x) for x in more) if n)))
         else:
             unread += 1
-    return sorted(out, key=lambda t: (pairing.parse_number(t[0]), pairing.parse_number(t[1]))), unread
+    return sorted(out, key=lambda t: (pairing.parse_number(t[0]), pairing.parse_number(t[1][0]))), unread
 
 
 def _act_days(late: list[int]) -> int:
@@ -575,12 +578,14 @@ def replay_defaults(result, costs, d, *, rows=(), exceptions=(), stores: pairing
     numbers, unread = _pair_numbers(result)
     late: list[int] = []
     late_items: list[tuple[str, Decimal | None]] = []
-    for issue_no, receipt_no in numbers:
-        i, r = issues.get(issue_no), receipts.get(receipt_no)
-        if i is None or r is None or not first <= i["date"] <= d:
+    for issue_no, receipt_nos in numbers:
+        i = issues.get(issue_no)
+        got = [receipts[n] for n in receipt_nos if n in receipts]
+        if i is None or not got or not first <= i["date"] <= d:
             continue
         kind = stores.kind(i["to_wh"]) if stores is not None else "other"
-        days = working_days_after(pairing.deadline(i["date"], kind, rules), r["date"], rules)
+        booked = max(r["date"] for r in got)     # booked in under two receipts (step S): in when the later one is
+        days = working_days_after(pairing.deadline(i["date"], kind, rules), booked, rules)
         late.append(days)
         if days > 0:                          # open on the register from its deadline to its receipt
             late_items.append((issue_no, _value(i["lines"], costs)))

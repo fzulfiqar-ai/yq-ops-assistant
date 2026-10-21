@@ -501,6 +501,26 @@ def _():
         assert checks._act_days([9] * 13) == 0 and checks._act_days([9] * 14) == 9
 
 
+@test("the replay reads the pairing's own legs (`no`), and an issue booked in under two receipts by the later one")
+def _():
+    with data_root():
+        rows, pairs = replay_world()
+        stores = checks._stores(None)
+        res = checks.replay_defaults(SimpleNamespace(pairs=pairs), COSTS, D, rows=rows, exceptions=[], stores=stores)
+        legs = [SimpleNamespace(issue=SimpleNamespace(no=sio(n)), receipt=SimpleNamespace(no=strv(n)), also=())
+                for n in range(100, 100 + len(LATENESS))]
+        got = checks.replay_defaults(SimpleNamespace(pairs=legs), COSTS, D, rows=rows, exceptions=[], stores=stores)
+        assert got["basis"]["pairs_unread"] == 0 and got["basis"]["receipts"] == res["basis"]["receipts"] == 20, got
+        assert got["act_days"] == res["act_days"] == 1
+        # SIO 100 was booked in on time and again five working days late (step S): it counts as five days late
+        late_rows = rows + [row(RECEIVED[5], strv(150), ledger.RECEIVE, VAN_A, ITEM_3, qty_in=1)]
+        legs[0] = SimpleNamespace(issue=SimpleNamespace(no=sio(100)), receipt=SimpleNamespace(no=strv(100)),
+                                  also=(SimpleNamespace(no=strv(150)),))
+        split = checks.replay_defaults(SimpleNamespace(pairs=legs), COSTS, D, rows=late_rows, exceptions=[],
+                                       stores=stores)
+        assert split["basis"]["receipts"] == 20 and split["basis"]["later"] == res["basis"]["later"] + 1, split
+
+
 @test("the replay counts a late transfer once: valued at cost, unless an exception already stands for it")
 def _():
     with data_root():
