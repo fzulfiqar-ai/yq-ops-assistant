@@ -91,10 +91,11 @@ What can go wrong:
 
 ### backup (about 5 minutes, reads production, 1 YES)
 
-Copies every table to `business_data\backups\<date>_pre-mi-v2` (a second run never overwrites it: it adds the time to
-the new folder's name, and the first backup stays the rollback point), checks the copy against its manifest, and takes
-the gate snapshot `pre-mi-v2`: every order, line, customer, salesman and target, fingerprinted for the compare at the
-end.
+Runs `python -m scripts.yq_backup release mi-v2`: every table is copied, checked against its manifest and sealed
+encrypted into `%LOCALAPPDATA%\yq-backups\release\<date>_pre-mi-v2.7z` (never under `business_data`, never in OneDrive;
+a second run is named `mi-v2-2`, and the first archive stays the rollback point). The script keeps the archive's name as
+`backup_archive` and takes the gate snapshot `pre-mi-v2`: every order, line, customer, salesman and target, fingerprinted
+for the compare at the end.
 
 What can go wrong: no internet, or the Supabase project paused (its dashboard says so; Resume it, the data is safe);
 run backup again. "FK orphans": tell Claude.
@@ -218,8 +219,8 @@ Then tell Claude what happened.
    sightings reach it now, cited as `[MI-<id>]`.
 6. **The first supplier report**, at the start of next month: build the draft, approve it, download it and send it by
    hand (it is never e-mailed automatically).
-7. Keep `business_data\releases\<date>_mi_v2.log` and the backup of the release, the folder `<date>_pre-mi-v2`. The script
-   writes that folder under `business_data\backups\`; move it to `%LOCALAPPDATA%\yq-backups\release\<date>_pre-mi-v2`
-   (see `docs/BACKUPS.md`), where the backup of the 14-Oct-2026 release is kept. The script's own restore piece looks only
-   under `business_data\backups\`, so from the moved folder a restore is done with Claude:
-   `python -m scripts.db_backup --verify <folder>`, then `--restore`.
+7. Keep `business_data\releases\<date>_mi_v2.log` and the archive the script names as `backup_archive`
+   (`%LOCALAPPDATA%\yq-backups\release\<date>_pre-mi-v2.7z`, see `docs/BACKUPS.md`); there is nothing to move. The
+   script's rollback part unpacks that archive beside itself, then verifies and restores from the folder it prints. The
+   14-Oct-2026 release was backed up the old way, as a plain folder: a restore from that one is done with Claude
+   (`python -m scripts.db_backup --verify <folder>`, then `--restore`).
