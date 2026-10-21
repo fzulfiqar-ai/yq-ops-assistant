@@ -2169,11 +2169,28 @@ def _():
                                                                       M_NOCOST: 13}}
         assert moves.store_balances("2026-03-10")[VA] == {M_CABLE: 41, M_CHARGER: 10}
         books = moves.books_only(D_MV, held_days=30)
-        assert set(books) == {VA, VB, SHOP} and books[VA] == {M_CABLE: 57, M_CHARGER: 7}
+        assert [b["store"] for b in books] == [VA, VB, SHOP], books              # vans, then the outlets
+        assert all(set(b) == {"store", "units", "bhd", "uncosted", "held_over"} for b in books)
+        va, vb, shop = books
+        assert (va["units"], va["bhd"], va["uncosted"], va["held_over"]) == (64, Decimal("35.050"), 0, []), va
+        assert (vb["units"], vb["bhd"], vb["held_over"]) == (42, Decimal("34.350"), []), vb   # sold or received lately
+        assert (shop["units"], shop["bhd"], shop["uncosted"]) == (23, Decimal("48.800"), 5), shop
+        # held there, never sold there, last received on 4 Feb: 41 days to D
+        assert shop["held_over"] == [{"item": STOCK_NAMES["nocost"], "code": "C14", "units": 5, "last_sale": None,
+                                      "days": 41}], shop["held_over"]
+        assert all(set(x) == {"item", "code", "units", "last_sale", "days"} for b in books for x in b["held_over"])
+        assert moves.books_only(D_MV, held_days=60)[2]["held_over"] == [], "received inside the 60 days"
         early = moves.books_only("2026-02-03", held_days=1)
-        assert early == {VA: {M_CABLE: 50, M_CHARGER: 10}, VB: {M_CABLE: 30}}, early
+        assert [(b["store"], b["units"], b["bhd"], b["held_over"]) for b in early] == [
+            (VA, 60, Decimal("37.500"), []), (VB, 30, Decimal("12.000"), [])], early
         for bad in ("2026-03-18", "2026-01-31"):
             raises(moves.MovesInput, lambda b=bad: moves.store_balances(b))
+            raises(moves.MovesInput, lambda b=bad: moves.books_only(b))
+    # a store whose stock has no cost at all is not valued at nought: bhd None, its units counted apart
+    with moves_world(MoveWorld(rows=[r for r in mv_rows() if r["item"] == M_NOCOST])):
+        (shop,) = [b for b in moves.books_only("2026-03-15") if b["store"] == SHOP]
+        assert (shop["units"], shop["bhd"], shop["uncosted"]) == (5, None, 5), shop
+        assert [(x["code"], x["days"]) for x in shop["held_over"]] == [("C14", 39)]
 
 
 @test("moves brief_facts: the brief's MOVEMENTS figures of the last 7 days, as plain values")

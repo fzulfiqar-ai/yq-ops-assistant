@@ -72,7 +72,8 @@ for the last kind), dated by its issue (the receipt), in the audit's window:
 THE API (other commands build on it; nothing here writes but run()'s copies of the screen and the hidden golden):
   audit(window=None, *, rep=None, prefer="auto") -> Audit   window None: the whole ledger (every exception of it)
   period_table(first, last)       the per-store table of a period (the shared Movements sheet)
-  store_balances(as_of, kinds)    {store: {item: units}} at the end of a day; books_only(as_of, held_days)
+  store_balances(as_of, kinds)    {store: {item: units}} at the end of a day
+  books_only(as_of, held_days)    [{store, units, bhd, uncosted, held_over}]: the book side of an uncounted store
   brief_facts(days=7)             the brief's MOVEMENTS line; exception_items(first, last): the items on an exception
   exceptions(audit)               the single builder of the items to check
 Audits are memoised in the process per (ledger sha, or 'db:' + its last day; the window; the store): the pairing,
@@ -1043,25 +1044,70 @@ def store_balances(as_of, kinds=TABLE_KINDS) -> dict[str, dict[str, Decimal]]:
     return dict(sorted(out.items()))
 
 
-def books_only(as_of, held_days: int = 30) -> dict[str, dict[str, Decimal]]:
-    """The book side of a store nobody counted: {van or outlet: {item: units on the books at the end of `as_of`}}
-    over the accessories it held then or moved in the `held_days` days to it (an item at nought kept with 0)."""
+def books_only(as_of, held_days: int = 30) -> list[dict]:
+    """The book side of a store nobody counted (the month-end reconciliation): one entry per van and outlet that held
+    an accessory at the end of `as_of` or moved one in the `held_days` days to it, vans then outlets, by name:
+        {store, units, bhd, uncosted, held_over: [{item, code, units, last_sale, days}]}
+    units: on the books at the end of `as_of`; bhd: those of them with a cost at landed cost (/yq-stock's basis, to
+    the fils; None when the store holds units and not one of them has a cost); uncosted: the units with no cost.
+    held_over: the items it holds above nought that it has not sold in the `held_days` days to `as_of` and last
+    received there `held_days` days ago or more (a Stock Receive Voucher or a supplier receipt; none on file counts
+    as old): item and code as /yq-stock names them, units, last_sale (None: never sold there) and days (since that
+    sale, else since that receipt; None with neither), the longest first."""
     base, source = _current()
     _require_per_store(source)
     day = _day_in(base, as_of)
-    since = day - timedelta(days=max(int(held_days), 1) - 1)
+    n = max(int(held_days), 1)
+    since = day - timedelta(days=n - 1)
     held = _canon_balances(base, day)
-    moved: dict[str, set] = {}
+    moved: set = set()
+    last_sale: dict[tuple, date] = {}
+    last_in: dict[tuple, date] = {}
     for r in base.acc_rows:
-        if since <= r["date"] <= day:
-            moved.setdefault(base.canon_of(r["wh"]), set()).add(r["item"])
-    out: dict[str, dict[str, Decimal]] = {}
-    for store in set(held) | set(moved):
-        if base.stores.kind(store) not in TABLE_KINDS:
+        when = r["date"]
+        if when > day:
             continue
-        names = set(held.get(store, {})) | moved.get(store, set())
-        out[base.name_of(store)] = {item: held.get(store, {}).get(item, ZERO) for item in sorted(names)}
-    return dict(sorted(out.items()))
+        store = base.canon_of(r["wh"])
+        if when >= since:
+            moved.add(store)
+        key = (store, r["item"])
+        if r["vtype"] == ledger.SALE and r["qty_out"] > 0:
+            if key not in last_sale or when > last_sale[key]:
+                last_sale[key] = when
+        elif r["vtype"] in (ledger.RECEIVE, ledger.SUPPLIER_RECEIPT) and r["qty_in"] > 0:
+            if key not in last_in or when > last_in[key]:
+                last_in[key] = when
+    out: list[tuple] = []
+    for store in set(held) | moved:
+        kind = base.stores.kind(store)
+        if kind not in TABLE_KINDS:
+            continue
+        mine = held.get(store, {})
+        value, priced, uncosted = ZERO, False, ZERO
+        over = []
+        for item, units in sorted(mine.items()):
+            cost = base.costs.get(item)
+            if cost is None:
+                uncosted += units
+            else:
+                value += units * cost
+                priced = True
+            if units <= 0:
+                continue
+            sold, got_in = last_sale.get((store, item)), last_in.get((store, item))
+            if (sold is not None and sold >= since) or (got_in is not None and (day - got_in).days < n):
+                continue
+            it = base.table.get(item)
+            mark = sold or got_in
+            over.append({"item": it.name if it is not None else item, "code": it.code if it is not None else None,
+                         "units": units, "last_sale": sold, "days": (day - mark).days if mark is not None else None})
+        over.sort(key=lambda x: (x["days"] is None, -(x["days"] or 0), -x["units"], x["item"]))
+        units = sum(mine.values(), ZERO)
+        bhd = fmt.q3(value) if priced or not units else None
+        name = base.name_of(store)
+        out.append(((TABLE_KINDS.index(kind), name.casefold(), name),
+                    {"store": name, "units": units, "bhd": bhd, "uncosted": uncosted, "held_over": over}))
+    return [entry for _key, entry in sorted(out, key=lambda t: t[0])]
 
 
 def brief_facts(days: int = 7) -> dict:
