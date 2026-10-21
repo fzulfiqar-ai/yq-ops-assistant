@@ -33,6 +33,12 @@ each step takes only legs no earlier step took:
      takes its receipt. The oldest set first, its earliest members first.
   C  other quantities: the store the issue names, booked 0 to lag_max days after, the gate holds, and
      the two share at least overlap_min of their items (Jaccard). QTY_DIFFERS, item by item.
+  S  booked in under two receipts (after the receipts of issues sent to their own store are set aside,
+     below, so those keep theirs): a step-C receipt that holds nothing beyond the issue, and a second
+     free receipt at the same store holding EXACTLY what the first lacks, the gate holding. One pair of
+     the issue and both receipts (Pair.also), RECEIVED, or LATE when the later of them is after the
+     deadline. One further receipt only: a transfer booked in under three or more receipts stays a
+     QTY_DIFFERS pair beside receipts with no issue.
   The gate holds on any of: the same narration (not blank); numbers at most dn_max apart within one
   series and month; booked within quick_lag days. B and C rank the candidates (C by the share of items
   first; then the narration before the number before the date alone, the distance, the lag, the
@@ -508,7 +514,8 @@ DIRECTIONS = ("out", "in", "any")           # summarise: issues from the store, 
 class Pair:
     """An issue and the receipt it was paired with.
 
-    outcome   RECEIVED or LATE (step A), ELSEWHERE (B), QTY_DIFFERS (C)
+    outcome   RECEIVED or LATE (step A, and step S by the later of its receipts), ELSEWHERE (B),
+              QTY_DIFFERS (C)
     lag       days from the issue to the receipt; dn: how far apart the numbers are (None: no distance)
     basis     what held between the two, of BASES: the same narration, numbers within dn_max, booked
               within quick_lag days. Step A pairs on the contents, so its basis can be empty
@@ -516,7 +523,9 @@ class Pair:
     diffs     step C: ((item, issued, received), ...) over every item of either leg, by item
     twins     the numbers of the identical issues this one could not be told apart from (step A), when
               there are two or more of them; ambiguous: some of those have no receipt, so which receipt
-              belongs to which of them is not known"""
+              belongs to which of them is not known
+    also      step S: the further receipt (Legs, in order) that booked in what `receipt` lacks; lag, dn
+              and basis stay those of the first receipt"""
     issue: Leg
     receipt: Leg
     outcome: str
@@ -529,6 +538,7 @@ class Pair:
     diffs: tuple = ()
     ambiguous: bool = False
     twins: tuple = ()
+    also: tuple = ()
 
     @property
     def back_at_source(self) -> bool:
@@ -578,7 +588,7 @@ class Result:
     """Everything pair() worked out. aside: the vouchers legs_from_rows set aside, with the receipts pair()
     set aside beside them (MIRRORS_OWN, each naming its issue as partner), by day and number.
     by_issue: {issue number: its Pair or its Open}, every issue once; by_receipt: {receipt number: its
-    Pair, its Orphan, or its Aside}, every receipt once."""
+    Pair (the further receipt of a step-S pair too), its Orphan, or its Aside}, every receipt once."""
     data_date: date
     rules: Rules
     legs: Legs = field(repr=False)
@@ -594,7 +604,9 @@ class Result:
         """{received, late, elsewhere, qty_differs, in_grace, not_received, twin_items, twin_slots,
         orphans, aside}. Issues: received + late + elsewhere + qty_differs + in_grace + not_received +
         twin_slots. Receipts: received + late + elsewhere + qty_differs + orphans + the receipts set aside
-        by pair() (MIRRORS_OWN). aside counts every voucher set aside, of either kind."""
+        by pair() (MIRRORS_OWN) + the further receipts of the step-S pairs (Pair.also): a pair booked in
+        under two receipts counts once, as received or late. aside counts every voucher set aside, of
+        either kind."""
         out = dict.fromkeys(COUNT_KEYS, 0)
         for p in self.pairs:
             out[p.outcome] += 1
@@ -820,6 +832,34 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
                                   partner=a.voucher)
             partner_of[a.voucher] = r.no
 
+    # S: booked in under two receipts. A step-C receipt that holds nothing beyond the issue, and a second free
+    # receipt at the same store that holds EXACTLY what the first lacks, the gate holding (the best by its key):
+    # one pair of the three. The issues in their order; one further receipt only.
+    also_of: dict[str, tuple] = {}                 # issue number -> its further receipts
+    for i in issues:
+        got = match.get(i.no)
+        if got is None or got[1] != "C":
+            continue
+        first_r = got[0]
+        sent, booked = dict(i.lines), dict(first_r.lines)
+        if any(units > sent.get(item, ZERO) for item, units in booked.items()):
+            continue                               # the first receipt holds more of an item than was sent
+        lacking = tuple(sorted((item, units - booked.get(item, ZERO)) for item, units in sent.items()
+                               if units > booked.get(item, ZERO)))
+        if not lacking:
+            continue
+        best = None
+        for r in free_at.get((lacking, first_r.wh), ()):
+            if r.no in took or r.no in mirrors:
+                continue
+            key = gate(i, r)
+            if key is not None and (best is None or key < best[0]):
+                best = (key, r)
+        if best is not None:
+            match[i.no] = (first_r, "S")
+            took.add(best[1].no)
+            also_of[i.no] = (best[1],)
+
     # the twin sets that still miss a receipt; the pairs among them are ambiguous
     short = {members for members in twins_of.values() if any(no not in match for no in members)}
     pairs: list[Pair] = []
@@ -830,8 +870,10 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
         r, step = got
         lag, dn, same, basis = _between(i, r, rules)
         diffs: tuple = ()
-        if step == "A":
-            outcome = LATE if r.day > deadline(i.day, i.to_kind, rules) else RECEIVED
+        also = also_of.get(i.no, ())
+        if step in ("A", "S"):                     # S: on time only when the later of its receipts is
+            booked_on = max([r.day] + [x.day for x in also])
+            outcome = LATE if booked_on > deadline(i.day, i.to_kind, rules) else RECEIVED
         elif step == "B":
             outcome = ELSEWHERE
         else:
@@ -841,7 +883,8 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
                           for item in sorted(set(sent) | set(booked)))
         members = twins_of.get(i.no, ())
         pairs.append(Pair(issue=i, receipt=r, outcome=outcome, step=step, lag=lag, dn=dn, same_narr=same,
-                          basis=basis, received_at=r.wh, diffs=diffs, ambiguous=members in short, twins=members))
+                          basis=basis, received_at=r.wh, diffs=diffs, ambiguous=members in short, twins=members,
+                          also=also))
 
     # the rest: the issues with no receipt, the receipts with no issue
     left_r: dict[tuple, list[Leg]] = {}
@@ -890,6 +933,7 @@ def pair(legs: Legs, *, data_date, rules: Rules = Rules()) -> Result:
             if leg.no not in match:
                 by_issue[leg.no] = o
     by_receipt: dict[str, object] = {p.receipt.no: p for p in pairs}
+    by_receipt.update((x.no, p) for p in pairs for x in p.also)
     by_receipt.update((o.receipt.no, o) for o in orphans)
     by_receipt.update(mirrors)
     return Result(data_date=data_date, rules=rules, legs=legs, pairs=tuple(pairs), open=tuple(opens),

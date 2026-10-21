@@ -22,7 +22,10 @@ Covered:
   * pair: step A (received, late across Thursday and Friday and the damage store's week, the earliest
     free receipt, the window's two ends, the most pairs); step B through each of the gate's three ways,
     its refusals and its ranking, back at the source; step C at an overlap of exactly one half and
-    below, its gate, its ranking, the quantities item by item; twins of two and of three (one open item,
+    below, its gate, its ranking, the quantities item by item; step S (an issue booked in under two
+    receipts, the second exactly what the first lacks: one pair, late by the later receipt; less, more,
+    another store, the gate refusing, an excess on the first: no split; two candidates: the gate's best;
+    shuffled rows); twins of two and of three (one open item,
     every number named, the pairs ambiguous; in grace only while every issue of the set is; no twins
     without a receipt; twins all received); the exchange after B (a store that booked in another's
     transfer and issued it again: received elsewhere and received; refused by the gate; a set of three;
@@ -37,8 +40,9 @@ Covered:
   * the seam: the later releases' config keys are optional and checked once present; the count
     sheets' folder;
   * the real 7-Oct ledger (SKIP without it or golden/pairing.json): the counts, every exception, the cases
-    the exchange reproduces, and the one cause, recorded voucher by voucher, that accounts for each
-    difference left from the 8-Oct measurement; the real config's aliases all joined by canon alone.
+    the exchange reproduces, and the two causes (an issue sent to its own store, a transfer booked in under
+    two receipts), recorded voucher by voucher, that account for each difference left from the 8-Oct
+    measurement; the real config's aliases all joined by canon alone.
 """
 from __future__ import annotations
 
@@ -303,6 +307,14 @@ def got(result, number):
     return result.by_issue[number] if number.startswith("SIO") else result.by_receipt[number]
 
 
+def receipts_counted(result) -> int:
+    """The receipts a Result accounts for, as Result.counts() says they add up: one per pair, the further receipts
+    of the step-S pairs, the orphans, and the receipts pair() set aside."""
+    c = result.counts()
+    return (c["received"] + c["late"] + c["elsewhere"] + c["qty_differs"] + c["orphans"]
+            + sum(len(p.also) for p in result.pairs) + sum(a.kind == "receipt" for a in result.aside))
+
+
 @test("legs_from_rows: whole vouchers as ledger.vouchers groups them (lines, value, unvalued units, narration), stores through canon, in order of day then number")
 def _():
     sale = mv(at(-3), "SI:SI-T-26-10-1", CABLE, VAN_B, 0, vtype=ledger.SALE, q_in=0, q_out=2)
@@ -523,6 +535,58 @@ def _():
     assert num("i", 110) not in {p.issue.no for p in stricter.pairs}
 
 
+def receipt_lines(rows) -> tuple:
+    """The lines of the one receipt in `rows`, as a Leg holds them."""
+    return tuple(sorted((r["item"], r["qty_in"]) for r in rows))
+
+
+@test("step S: an issue booked in under two receipts, the second holding exactly what the first lacks, is ONE pair (received, or late by the later receipt); anything else stays as before")
+def _():
+    base = issue(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 5)]) + receipt(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 3)])
+    split = base + receipt(2, MON, VAN_A, [(CHARGER, 2)])
+    legs, res = run(split, data_date=at(9))
+    (p,) = res.pairs
+    assert (p.outcome, p.step, p.receipt.no, [x.no for x in p.also], p.diffs, p.received_at) == \
+        ("received", "S", num("r", 1), [num("r", 2)], (), "van a - acc wh")
+    assert (p.lag, p.dn, p.basis) == (0, 0, ("number", "date"))           # as between the issue and its first receipt
+    assert res.by_receipt[num("r", 1)] is res.by_receipt[num("r", 2)] is p and res.orphans == ()
+    c = res.counts()
+    assert (c["received"], c["qty_differs"], c["orphans"]) == (1, 0, 0)
+    assert receipts_counted(res) == len(legs.receipts) == 2
+    assert pairing.summarise(res)["counts"] == c
+    # an item the first receipt left out altogether is lacking too
+    whole_item = (issue(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 5)]) + receipt(1, MON, VAN_A, [(CABLE, 10)])
+                  + receipt(2, MON, VAN_A, [(CHARGER, 5)]))
+    (p,) = run(whole_item, data_date=at(9))[1].pairs
+    assert p.step == "S" and p.receipt.no == num("r", 1) and [x.no for x in p.also] == [num("r", 2)]
+    # not exactly what is lacking, at another store, or refused by the gate: other quantities and a receipt with no issue
+    for second, why in ((receipt(2, MON, VAN_A, [(CHARGER, 1)]), "less than what is lacking"),
+                        (receipt(2, MON, VAN_A, [(CHARGER, 2), (BANK, 1)]), "more than what is lacking"),
+                        (receipt(2, MON, VAN_B, [(CHARGER, 2)]), "at another store"),
+                        (receipt(50, THU, VAN_A, [(CHARGER, 2)]), "three days on, the numbers far apart")):
+        _legs, res = run(base + second, data_date=at(9))
+        assert [(q.step, q.outcome) for q in res.pairs] == [("C", "qty_differs")], why
+        assert [o.receipt.lines for o in res.orphans] == [receipt_lines(second)], why
+    # the first receipt holds more of an item than was sent: no split
+    excess = (issue(1, MON, VAN_A, [(CABLE, 10), (CHARGER, 5)]) + receipt(1, MON, VAN_A, [(CABLE, 11), (CHARGER, 3)])
+              + receipt(2, MON, VAN_A, [(CHARGER, 2)]))
+    _legs, res = run(excess, data_date=at(9))
+    assert [q.step for q in res.pairs] == ["C"] and [o.receipt.no for o in res.orphans] == [num("r", 2)]
+    # two candidates: the best by the gate's key (the nearer number); the other stays a receipt with no issue
+    two = base + receipt(6, MON, VAN_A, [(CHARGER, 2)]) + receipt(2, MON, VAN_A, [(CHARGER, 2)])
+    _legs, res = run(two, data_date=at(9))
+    assert [x.no for x in res.pairs[0].also] == [num("r", 2)] and [o.receipt.no for o in res.orphans] == [num("r", 6)]
+    # the later receipt after the deadline: late (the numbers one apart: the gate holds two days on)
+    p = run(base + receipt(2, WED, VAN_A, [(CHARGER, 2)]), data_date=at(9))[1].pairs[0]
+    assert (p.step, p.outcome, p.lag) == ("S", "late", 0)
+    # the same rows in any order
+    want = run(two, data_date=at(9))[1]
+    for seed in range(4):
+        shuffled = two[:]
+        random.Random(seed).shuffle(shuffled)
+        assert run(shuffled, data_date=at(9))[1] == want, seed
+
+
 @test("twins: two identical issues to one store and one receipt are ONE open item naming both; the pair is ambiguous; in grace until the deadline")
 def _():
     rows = (issue(1, SUN, VAN_A, [(CABLE, 2)]) + issue(2, SUN, VAN_A, [(CABLE, 2)]) + receipt(1, MON, VAN_A, [(CABLE, 2)])
@@ -623,9 +687,7 @@ def _():
     assert [a.partner for a in legs.aside] == [None, None, None]              # the legs themselves are not changed
     c = res.counts()
     assert (c["aside"], c["orphans"]) == (4, 3)
-    booked = c["received"] + c["late"] + c["elsewhere"] + c["qty_differs"] + c["orphans"] + \
-        sum(a.kind == "receipt" for a in res.aside)
-    assert booked == len(legs.receipts) == 4
+    assert receipts_counted(res) == len(legs.receipts) == 4
     assert pairing.summarise(res, store=VAN_A, direction="in")["counts"]["aside"] == 2   # the issue, and its receipt there
     assert pairing.summarise(res, store=VAN_A, direction="out")["counts"]["aside"] == 1
     assert pairing.summarise(res, store=VAN_A, direction="in")["counts"]["orphans"] == 1
@@ -716,8 +778,7 @@ def _():
                  "twin_items": 1, "twin_slots": 1, "orphans": 1, "aside": 2}, c
     assert tuple(c) == pairing.COUNT_KEYS
     issued = sum(c[k] for k in ("received", "late", "elsewhere", "qty_differs", "in_grace", "not_received", "twin_slots"))
-    booked = sum(c[k] for k in ("received", "late", "elsewhere", "qty_differs", "orphans"))
-    assert (issued, booked) == (len(legs.issues), len(legs.receipts)) == (8, 6)
+    assert (issued, receipts_counted(res)) == (len(legs.issues), len(legs.receipts)) == (8, 6)
     assert list(res.by_issue) == [i.no for i in legs.issues] and list(res.by_receipt) == [r.no for r in legs.receipts]
     assert all(isinstance(v, (pairing.Pair, pairing.Open)) for v in res.by_issue.values())
     assert all(isinstance(v, (pairing.Pair, pairing.Orphan)) for v in res.by_receipt.values())
@@ -790,7 +851,7 @@ def _():
 REAL_ROOT = paths.data_root()          # the main checkout above a worktree, or YQ_MAIN_CHECKOUT
 
 
-@test("real 7-Oct ledger (SKIP without it or golden/pairing.json): the counts, every exception, the exchange's cases, and the one cause left of the differences from the 8-Oct measurement")
+@test("real 7-Oct ledger (SKIP without it or golden/pairing.json): the counts, every exception, the exchange's cases, and the two causes left of the differences from the 8-Oct measurement")
 def _():
     golden_file = REAL_ROOT / "business_data" / "ops" / "golden" / "pairing.json"
     config_file = REAL_ROOT / "business_data" / "ops" / "config.json"
@@ -798,7 +859,7 @@ def _():
         print("  SKIP: no golden/pairing.json (or no config.json) under the data root")
         return
     golden = json.loads(golden_file.read_text(encoding="utf-8"))
-    assert golden.get("version") == 2, "golden/pairing.json was written for the pairing before the review: rebuild it"
+    assert golden.get("version") == 3, "golden/pairing.json was written for an earlier pairing (before step S): rebuild it"
     book = ledger.find_file(REAL_ROOT / "business_data" / golden["folder"])
     if book is None:
         print(f"  SKIP: no Stock_ledger file in {golden['folder']} on this machine")
@@ -844,10 +905,8 @@ def _():
     assert [{"voucher": a.voucher, "kind": a.kind, "reason": a.reason, "partner": a.partner}
             for a in res.aside] == ex["aside"]
     rules = res.rules
-    booked = c["received"] + c["late"] + c["elsewhere"] + c["qty_differs"] + c["orphans"] + \
-        sum(a.kind == "receipt" for a in res.aside)
-    assert booked == len(legs.receipts)
-    # the one cause left: an issue sent to its own store is set aside, and so is the receipt that books it in there
+    assert receipts_counted(res) == len(legs.receipts)
+    # cause 1: an issue sent to its own store is set aside, and so is the receipt that books it in there
     own = golden["differences"]["own_store"]["cases"]
     aside = {a.voucher: a for a in res.aside}
     whole: dict = {}
@@ -873,14 +932,27 @@ def _():
         assert isinstance(again, pairing.Pair) and (again.step, again.receipt.no) == ("A", case["receipt"]), case
         assert first.twins == again.twins and {first.issue.no, again.issue.no} <= set(first.twins), case
         assert again.receipt.wh == first.issue.to != first.receipt.wh, case
-    # the one cause accounts for every difference left from the 8-Oct measurement
+    # cause 2: booked in under two receipts at the destination, the second exactly what the first lacks (step S)
+    splits = golden["differences"]["split_receipts"]["cases"]
+    assert sorted(p.issue.no for p in res.pairs if p.step == "S") == sorted(case["issue"] for case in splits)
+    for case in splits:
+        p = res.by_issue[case["issue"]]
+        assert isinstance(p, pairing.Pair) and (p.step, p.outcome, p.receipt.no) == ("S", case["outcome"], case["receipt"])
+        assert [x.no for x in p.also] == [case["also"]] and res.by_receipt[case["also"]] is p, case
+        both: dict = {}
+        for leg in (p.receipt,) + p.also:
+            assert leg.wh == p.issue.to, case
+            for item, units in leg.lines:
+                both[item] = both.get(item, Decimal(0)) + units
+        assert tuple(sorted(both.items())) == p.issue.lines and p.diffs == (), case     # together, exactly the issue
+    # the two causes account for every difference left from the 8-Oct measurement
     m = golden["measured_8_oct"]
     own_a = sum(case["measured_as"] == "A" for case in own)
     own_b = len(own) - own_a
-    assert c["received"] + c["late"] + own_a == m["received_or_late"]
-    assert c["elsewhere"] + own_b == m["elsewhere"] and c["qty_differs"] == m["qty_differs"]
+    assert c["received"] + c["late"] - len(splits) + own_a == m["received_or_late"]
+    assert c["elsewhere"] + own_b == m["elsewhere"] and c["qty_differs"] + len(splits) == m["qty_differs"]
     assert c["in_grace"] + c["not_received"] + c["twin_slots"] == m["unmatched"]
-    assert c["orphans"] - own_b == m["orphans"] and c["aside"] - len(own) - own_a == m["aside"]
+    assert c["orphans"] - own_b + len(splits) == m["orphans"] and c["aside"] - len(own) - own_a == m["aside"]
     assert (vouchers[0], vouchers[1]) == (m["issues"], m["receipts"])
     # the whole span read through summarise is counts(); each issue counts once, by the store that sent it
     assert pairing.summarise(res)["counts"] == c
@@ -888,8 +960,8 @@ def _():
     assert sum(pairing.summarise(res, store=s)["issues"]["vouchers"] for s in senders) == len(legs.issues)
     assert all((p.received_at == p.issue.to) == (p.step != "B") for p in res.pairs)
     assert took < 10, f"legs and pairing took {took:.1f}s"
-    print(f"    golden present ({len(own)} sent to their own store, {len(again_cases)} reproduced by the exchange; "
-          f"pairing {took:.1f}s)")
+    print(f"    golden present ({len(own)} sent to their own store, {len(splits)} booked in under two receipts, "
+          f"{len(again_cases)} reproduced by the exchange; pairing {took:.1f}s)")
 
 
 @test("real config (SKIP without it): StoreRules.canon alone, with no aliases, joins every spelling config 'warehouses.aliases' names")
