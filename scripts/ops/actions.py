@@ -44,6 +44,12 @@ PLAYBOOK = {
     "voucher_changed": ("Accounts", "Check why these stock vouchers changed or were entered with an earlier date",
                         3, 2),
     "price_scope": ("You", "Decide on the price book's prices for one van or one customer", 5, 2),
+    # the five move rules of /yq-watch (scripts.ops.checks.MOVE_RULES): what the stock ledger's transfers show
+    "xfer_open": ("Storekeeper, with the receiving store", "Post the Stock Receive Voucher or reverse the issue", 1, 1),
+    "xfer_twins": ("Storekeeper", "Find which identical transfer was received", 2, 1),
+    "qty_diff": ("Storekeeper, with the van", "Count the transfer's items and correct the wrong voucher", 2, 2),
+    "xfer_elsewhere": ("Storekeeper", "Correct the receipt or the issue to the store the goods are in", 3, 1),
+    "rcpt_orphan": ("Storekeeper", "Find the issue for each receipt or reverse it", 3, 1),
 }
 DEFAULT = ("You", "Look into it", 3, 2)
 

@@ -14,16 +14,22 @@ Covered:
   * the privacy check refuses a customer or shop name, a word about money owed or the reps' pay, a rep
     named beside an amount or beside a word that singles him out; it passes the message the brief makes;
   * the e-mail: subject with the day and the data date, NOT EVIDENCED where a figure is missing (no target,
-    discounts, the stock in the vans), the rep cards (kickback figures never), names switched off;
+    discounts, the stock in the vans), the rep cards (kickback figures never), names switched off; the
+    Transfers paragraph under Exceptions from the brief's movements alone (NOT EVIDENCED when they were not
+    read); the count of the actions it has no room for points to /yq-watch;
   * the wa.me link carries the text exactly (percent-encoded UTF-8);
   * actions: the playbook by key, ACTION and TO CHECK, at most five ranked by effect, urgency and effort,
-    a due date on a business day, an item whose words the guard refuses is withheld, never dropped;
+    a due date on a business day, an item whose words the guard refuses is withheld, never dropped; the
+    five move rules go to the storekeeper, each with its next step and its days;
   * enrich: the rep table from the attainment rows (tier 1 only), the push list (rising, in stock for two
     weeks), the shops due a re-order counted per rep by the portal's own name rule, discounts NOT EVIDENCED
     while the export carries none;
   * deliver: full, look, failed and none from the load's closing row; files and manifest with each
-    sha256; the brief saved and stamped, and shown once in the chat (brief_unshown); a preview records
-    nothing; a team message the check refuses is not written, and the e-mail goes without it;
+    sha256; the brief saved and stamped, and shown once in the chat (brief_unshown); the move rules
+    recorded once, before the brief, in a full delivery only (never in a preview, never in a refused
+    one), and a recording that did not happen, raised or had no module is one line and never stops the
+    delivery; a preview records nothing; a team message the check refuses is not written, and the
+    e-mail goes without it;
   * /yq-brief team prints the last load's team message, or says when there is none.
 """
 from __future__ import annotations
@@ -35,6 +41,7 @@ import os
 import sys
 import tempfile
 import traceback
+import types
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -272,6 +279,49 @@ def _():
     assert "Target: NOT EVIDENCED" in nostep and "Team message" not in nostep
 
 
+MOVEMENTS = {   # the brief's facts['movements'] (sales.movements_section), invented: BHD at landed cost
+    "read": True, "days": 7, "first": "2026-10-08", "last": "2026-10-14", "ledger_to": "2026-10-14",
+    "basis": "at landed cost", "per_store_ok": True, "note": None, "to_stores_units": "340", "back_units": "12",
+    "damage_units": "3", "not_received_units": "6", "to_check_count": "4", "to_stores_bhd": "850.500",
+    "not_received_bhd": "15.250", "to_check_bhd": "40.000"}
+TRANSFERS = ("Transfers in the last 7 days to Wed 14 Oct (BHD at landed cost): 340 units went to the vans and outlets "
+             "(BHD 850.500), 12 came back to the main store and 3 went to damage. Not received after the deadline: 6 "
+             "units (BHD 15.250). To check: 4 (BHD 40.000), listed by /yq-moves.")
+
+
+@test("the e-mail: a Transfers paragraph under Exceptions, from the brief's movements alone; NOT EVIDENCED unread")
+def _():
+    f = facts(movements=dict(MOVEMENTS))
+    top, every = actions.ranked(f, date(2026, 10, 14))
+    html = render.email_html(f, top, every, LOAD, None, TODAY)
+    assert TRANSFERS in html, html
+    assert html.index(">Exceptions</h2>") < html.index(TRANSFERS) < html.index(">What to do</h2>")
+    # moves' note and the figures store by store come after the sentence
+    f = facts(movements=dict(MOVEMENTS, note="ledger file one day behind", per_store_ok=False))
+    assert (TRANSFERS + " ledger file one day behind. The figures store by store need a look (/yq-moves).") in \
+        render.email_html(f, top, every, LOAD, None, TODAY)
+    # it works nothing out: a figure the brief did not get is NOT EVIDENCED, never a nought, and the rest stand
+    f = facts(movements=dict(MOVEMENTS, to_stores_bhd=None, damage_units=None))
+    html = render.email_html(f, top, every, LOAD, None, TODAY)
+    assert "340 units went to the vans and outlets (NOT EVIDENCED)" in html
+    assert "and NOT EVIDENCED went to damage" in html and "To check: 4 (BHD 40.000), listed by /yq-moves." in html
+    # not read, or no movements in the facts at all: said so, as the e-mail says of any figure it lacks
+    for mv in ({"read": False}, None, "junk"):
+        f = facts() if mv is None else facts(movements=mv)
+        html = render.email_html(f, top, every, LOAD, None, TODAY)
+        assert "Transfers: NOT EVIDENCED (not read this time)." in html and "listed by /yq-moves" not in html, mv
+    # the count of the actions the e-mail has no room for points to the full list, in both parts
+    assert every > len(top)
+    f = facts(movements=dict(MOVEMENTS))
+    assert f">{every - len(top)} more on the action list (/yq-watch).</p>" in render.email_html(f, top, every, LOAD,
+                                                                                                None, TODAY)
+    assert f"({every - len(top)} more on the action list: /yq-watch)" in render.email_text(f, top, every, LOAD, None,
+                                                                                           TODAY).splitlines()
+    # the transfers are the owner's: the team message never carries them, and still passes the privacy check
+    team = render.team_text(f, TODAY)
+    assert "Transfer" not in team and "/yq-moves" not in team and render.privacy_problems(team, f) == []
+
+
 @test("the notes for a load that needs a look or failed carry no figure")
 def _():
     for kind in ("look", "failed"):
@@ -302,6 +352,44 @@ def _():
     assert odd[0]["title"].startswith("(this item's wording is withheld"), "withheld, never dropped"
     assert enrich.nth_business_day(date(2026, 10, 16), 0) == date(2026, 10, 18)   # Friday -> Sunday
     assert enrich.nth_business_day(date(2026, 10, 15), 1) == date(2026, 10, 18)   # Thursday + 1 -> Sunday
+
+
+@test("actions: the five move rules go to the storekeeper, each with its next step, its days and its effort")
+def _():
+    rows = {   # rule -> (owner, next step, business days, effort): the approved plan's rows
+        "xfer_open": ("Storekeeper, with the receiving store", "Post the Stock Receive Voucher or reverse the issue",
+                      1, 1),
+        "xfer_twins": ("Storekeeper", "Find which identical transfer was received", 2, 1),
+        "qty_diff": ("Storekeeper, with the van", "Count the transfer's items and correct the wrong voucher", 2, 2),
+        "xfer_elsewhere": ("Storekeeper", "Correct the receipt or the issue to the store the goods are in", 3, 1),
+        "rcpt_orphan": ("Storekeeper", "Find the issue for each receipt or reverse it", 3, 1),
+    }
+    try:                                    # the recorder's own list of its rules, once it is there
+        from scripts.ops import checks
+        rules = tuple(checks.MOVE_RULES)
+    except ImportError:
+        rules = ("xfer_open", "xfer_twins", "qty_diff", "xfer_elsewhere", "rcpt_orphan")     # its contract's five
+    assert set(rules) == set(rows), rules
+    for rule, want in rows.items():
+        assert actions.PLAYBOOK[rule] == want, rule
+        fmt.careful(want[1])
+    # by the key the recorder gives (the damage store's month line included), never the DEFAULT words
+    for key in ("xfer_open|SIO:YQ-26-10-5", "xfer_open|damage|2026-10", "xfer_twins|SIO:YQ-26-10-7",
+                "qty_diff|SIO:YQ-26-10-8", "xfer_elsewhere|SIO:YQ-26-10-9", "rcpt_orphan|STRV:YQ-26-10-3"):
+        assert actions.playbook(key) == rows[key.split("|")[0]], key
+    d = date(2026, 10, 11)                  # a Sunday: counted from Monday, one business day on is Tuesday
+    items = [{"id": "A7", "key": "xfer_open|SIO:YQ-26-10-5", "level": "CHECK", "title": "Transfer not received after "
+              "the deadline", "detail": "A Stock Issue Voucher with no receipt", "bhd": "12.500", "count": None,
+              "who": None},
+             {"id": "A8", "key": "rcpt_orphan|STRV:YQ-26-10-3", "level": "ACT", "title": "Receipt with no issue",
+              "detail": "", "bhd": None, "count": 1, "who": None}]
+    late, orphan = actions.from_register(items, d)
+    assert (late["owner"], late["next_step"], late["tag"], late["due"]) == (
+        "Storekeeper, with the receiving store", "Post the Stock Receive Voucher or reverse the issue", "TO CHECK",
+        "2026-10-13")
+    assert late["impact"] == "BHD 12.500 involved" and late["why"] == "A Stock Issue Voucher with no receipt"
+    assert (orphan["owner"], orphan["tag"], orphan["due"], orphan["impact"]) == ("Storekeeper", "ACTION", "2026-10-15",
+                                                                                 "1 involved")
 
 
 # ── enrich ───────────────────────────────────────────────────────────────────────────────────────
@@ -347,16 +435,63 @@ def args(**kw):
 
 
 class FakeBrief:
-    """sales.full_screen without a database: the invented facts, and the patch a whole brief stamps."""
+    """sales.full_screen without a database: the invented facts, and the patch a whole brief stamps. Each call
+    is also put on `order`, when one is given (the list the move rules' stand-in writes to as well)."""
 
-    def __init__(self):
+    def __init__(self, order: list | None = None):
         self.calls = []
+        self.order = order if order is not None else []
 
     def __call__(self, *, record=True, enrich=False):
         self.calls.append({"record": record, "enrich": enrich})
+        self.order.append(("brief", record))
         patch = {"last_brief_data_date": "2026-10-14", "last_brief_load_run": RUN} if record else {}
         return {"d": date(2026, 10, 14), "text": "YQ ACCESSORIES BRIEF - invented\nline two", "facts": facts(),
                 "warnings": [], "patch": patch}
+
+
+_ABSENT = object()
+
+
+class checks_standing_in:
+    """scripts.ops.checks as the delivery calls it, by its contract (another package's module, whether it is there
+    or not): ensure_recorded() answers `answer` (raises it when it is an exception); `missing` makes the module one
+    that cannot be imported at all. Each call is put on `order`. The module that was there comes back after."""
+
+    def __init__(self, answer=None, missing: bool = False, order: list | None = None):
+        self.answer = {"ok": True, "why": "recorded for this ledger"} if answer is None else answer
+        self.missing = missing
+        self.order = order if order is not None else []
+
+    def ensure_recorded(self, record: bool = True):
+        self.order.append(("ensure_recorded", record))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return dict(self.answer) if isinstance(self.answer, dict) else self.answer
+
+    def __enter__(self):
+        package = sys.modules["scripts.ops"]
+        self.saved = (sys.modules.get("scripts.ops.checks", _ABSENT), package.__dict__.pop("checks", _ABSENT))
+        if self.missing:
+            sys.modules["scripts.ops.checks"] = None        # an import of it fails, as for a module that is not there
+        else:
+            module = types.ModuleType("scripts.ops.checks")
+            module.ensure_recorded = self.ensure_recorded
+            module.MOVE_RULES = ("xfer_open", "xfer_twins", "qty_diff", "xfer_elsewhere", "rcpt_orphan")
+            sys.modules["scripts.ops.checks"] = package.checks = module
+        return self
+
+    def __exit__(self, *exc):
+        package = sys.modules["scripts.ops"]
+        module, attr = self.saved
+        if module is _ABSENT:
+            sys.modules.pop("scripts.ops.checks", None)
+        else:
+            sys.modules["scripts.ops.checks"] = module
+        package.__dict__.pop("checks", None)
+        if attr is not _ABSENT:
+            package.checks = attr
+        return False
 
 
 @test("deliver: the kind comes from the load's closing row")
@@ -372,14 +507,18 @@ def _():
 @test("deliver: files and manifest with each sha256; the brief saved, stamped and shown once in the chat")
 def _():
     real = sales.full_screen
-    fake = FakeBrief()
+    order: list = []
+    fake = FakeBrief(order)
     sales.full_screen = fake
     try:
-        with data_root():
+        with data_root(), checks_standing_in(order=order):
             status.write_state({"last_load": {"run": RUN}})
             closed(RUN, "finished", result="ok", text="LOAD FINISHED.")
             res = deliver.run(args())
             assert res["ok"] and res["flags"]["kind"] == "full" and fake.calls == [{"record": True, "enrich": True}]
+            # the move rules recorded once, and before the brief is made: the brief lists what this ledger shows
+            assert order == [("ensure_recorded", True), ("brief", True)], order
+            assert "Transfer checks" not in res["text"] and res["warnings"] == []
             folder = paths.exports_dir(date(2026, 10, 14)) / "delivery" / RUN
             man = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
             assert man["kind"] == "full" and man["team_text"] is True and set(man["files"]) == {"html", "text", "whatsapp", "page"}
@@ -405,8 +544,11 @@ def _():
     from scripts import yq_load_go, yq_send     # they read the refusal by its word, and the kind by the same rule
     assert yq_send.LOOK_STEPS == deliver.LOOK_STEPS
     real, real_newest = sales.full_screen, deliver.newest_ingest_run
-    fake = FakeBrief()
+    order: list = []
+    fake = FakeBrief(order)
     sales.full_screen = fake
+    checks = checks_standing_in(order=order)
+    checks.__enter__()
     try:
         for setup, said in ((lambda: status.write_state({"last_load": {"run": "161026_0900"}}),
                              "the last load on record is run 161026_0900, not this one"),
@@ -429,8 +571,11 @@ def _():
                 packs = [r for r in loadplan.delivery_read(RUN) if r["event"] == "pack"]
                 assert [r["kind"] for r in packs] == ["refused"] and said in packs[0]["why"], packs   # the sender reads why
                 assert fake.calls == [] and not (paths.exports_dir(date(2026, 10, 14)) / "delivery" / RUN).exists()
+                assert order == [], "a refused delivery records nothing, the move rules neither"
                 assert deliver.run(args(preview=True))["ok"], "a preview is no delivery: it is always made"
+                assert order == [("brief", False)], order
                 fake.calls.clear()
+                order.clear()
         with data_root():                                   # its own rows are the newest: the brief is made
             closed(RUN, "finished", result="ok", text="LOAD FINISHED.")
             status.write_state({"last_load": {"run": RUN}})
@@ -438,24 +583,70 @@ def _():
             deliver.newest_ingest_run = lambda: 7
             assert deliver.run(args())["flags"]["kind"] == "full"
             assert deliver.own_last_ingest_run(RUN) == 7
+            assert order == [("ensure_recorded", True), ("brief", True)], order
     finally:
+        checks.__exit__(None, None, None)
         sales.full_screen, deliver.newest_ingest_run = real, real_newest
 
 
 @test("deliver --preview records nothing: no register, no state, no row in the delivery journal")
 def _():
     real = sales.full_screen
-    fake = FakeBrief()
+    order: list = []
+    fake = FakeBrief(order)
     sales.full_screen = fake
     try:
-        with data_root():
+        with data_root(), checks_standing_in(order=order):
             status.write_state({"last_load": {"run": RUN}})
             closed(RUN, "finished", result="ok", text="LOAD FINISHED.")
             before = status.read_state()
             res = deliver.run(args(preview=True))
             assert res["ok"] and fake.calls == [{"record": False, "enrich": True}]
+            assert order == [("brief", False)], "the move rules are never recorded by a preview"
             assert status.read_state() == before and loadplan.delivery_read(RUN) == []
             assert (paths.exports_dir(date(2026, 10, 14)) / "delivery" / (RUN + "-preview") / "email.html").is_file()
+    finally:
+        sales.full_screen = real
+
+
+@test("deliver: a recording of the move rules that did not happen, raised or had no module is one line, never a stop")
+def _():
+    real = sales.full_screen
+    cases = (
+        (checks_standing_in({"ok": False, "why": "the ledger is not proven yet"}),
+         "Transfer checks: not recorded this time (the ledger is not proven yet); the brief lists the transfer "
+         "items as they stood."),
+        (checks_standing_in({"ok": False}), "Transfer checks: not recorded this time (no reason given); the brief "
+                                            "lists the transfer items as they stood."),
+        (checks_standing_in(RuntimeError("the register is held")),
+         "Transfer checks: not recorded this time (RuntimeError: the register is held); the brief lists the transfer "
+         "items as they stood."),
+        (checks_standing_in(["not", "an answer"]), "Transfer checks: not recorded this time (no answer); the brief "
+                                                   "lists the transfer items as they stood."),
+        (checks_standing_in(missing=True), "Transfer checks: not recorded this time (ModuleNotFoundError: "),
+        # a reason in words the brief never uses: the line goes without it
+        (checks_standing_in({"ok": False, "why": "a leak in the ledger"}),
+         "Transfer checks: not recorded this time; the brief lists the transfer items as they stood."),
+    )
+    try:
+        for stand, said in cases:
+            order: list = []
+            stand.order = order
+            fake = FakeBrief(order)
+            sales.full_screen = fake
+            with data_root(), stand:
+                status.write_state({"last_load": {"run": RUN}})
+                closed(RUN, "finished", result="ok", text="LOAD FINISHED.")
+                res = deliver.run(args())
+                assert res["ok"] and res["flags"]["kind"] == "full" and fake.calls == [{"record": True, "enrich": True}]
+                notes = [ln for ln in res["text"].splitlines() if ln.startswith("Transfer checks")]
+                assert len(notes) == 1 and notes[0].startswith(said), (notes, said)
+                fmt.careful(notes[0])
+                folder = paths.exports_dir(date(2026, 10, 14)) / "delivery" / RUN
+                assert (folder / "email.html").is_file() and (folder / "whatsapp.txt").is_file(), "the e-mail is made"
+                assert [r["kind"] for r in loadplan.delivery_read(RUN) if r["event"] == "pack"] == ["full"]
+                assert status.read_state()["brief_unshown"]["run"] == RUN
+                assert order[-1] == ("brief", True) and order.count(("brief", True)) == 1, order
     finally:
         sales.full_screen = real
 

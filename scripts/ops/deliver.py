@@ -1,6 +1,10 @@
 """python -m scripts.ops deliver [--run <run>] [--preview]
 
 After a load (the load's worker runs it once the load has closed: scripts/yq_load_go.py):
+  * first, the five move rules of /yq-watch recorded for this ledger (scripts.ops.checks.ensure_recorded,
+    once per ledger), so the brief and the e-mail list the transfers the new ledger shows to check. One
+    that did not happen is one line of this command's screen and never stops the delivery: the brief then
+    lists the transfer items as they stood, and says so;
   * the full brief, worked out ONCE exactly as /yq-brief works it out (sales.full_screen), saved as
     exports/ops/<D>/brief.txt and .json, the action register recorded and the brief stamped as read,
     just as a /yq-brief would; the first plain /yq-brief after it shows this very brief (state
@@ -19,8 +23,8 @@ What is made depends on how the load closed (its journal's closing row):
   none    nothing (it stopped before it wrote anything, or it is not closed)
 
 --preview writes the files into delivery/<run>-preview/ and records nothing at all: not the action
-register, not the state, not the delivery journal. Nothing is ever sent from here: scripts/yq_send.py
-sends, and only what this command wrote (it never works a figure out itself).
+register (the move rules neither), not the state, not the delivery journal. Nothing is ever sent from
+here: scripts/yq_send.py sends, and only what this command wrote (it never works a figure out itself).
 """
 from __future__ import annotations
 
@@ -135,6 +139,28 @@ def stale_reason(run: str, state: dict) -> str | None:
     return None
 
 
+def record_moves() -> str | None:
+    """The move rules of the action list recorded for this ledger, before the brief is made
+    (scripts.ops.checks.ensure_recorded: once per ledger, and it never raises). None when that went well;
+    else the one line the delivery adds. Nothing here stops the delivery: the module is imported here, so
+    that one that cannot be imported, or that raises after all, is that line too."""
+    try:
+        from scripts.ops import checks
+        got = checks.ensure_recorded()
+    except Exception as exc:  # noqa: BLE001  (one line, never the delivery)
+        why = f"{type(exc).__name__}: {str(exc)[:120]}"
+    else:
+        if isinstance(got, dict) and got.get("ok"):
+            return None
+        why = str(got.get("why") or "no reason given") if isinstance(got, dict) else "no answer"
+    said = (f"Transfer checks: not recorded this time ({' '.join(why.split())}); the brief lists the transfer items "
+            "as they stood.")
+    try:
+        return fmt.careful(said)
+    except ValueError:              # a word the brief never uses, in the reason: the line without it
+        return "Transfer checks: not recorded this time; the brief lists the transfer items as they stood."
+
+
 def run(args) -> dict:
     out = {"ok": True, "command": COMMAND, "data_date": None, "text": "", "flags": {}, "files": [], "warnings": []}
     state = status.read_state()
@@ -161,7 +187,12 @@ def run(args) -> dict:
                              "this load's, so nothing is sent for it.")
 
     files: dict[str, str] = {}
+    notes: list[str] = []
     if kind == "full":
+        if not preview:                          # the move rules first, so the brief lists what this ledger shows
+            said = record_moves()
+            if said:
+                notes.append(said)
         from scripts.ops import sales            # the whole brief engine: loaded only for a full delivery
         screen = sales.full_screen(record=not preview, enrich=True)
         d, facts = screen["d"], screen["facts"]
@@ -208,6 +239,7 @@ def run(args) -> dict:
             status.write_state(patch)
         lines.append("Team message: " + ("ready (whatsapp.txt, whatsapp.html)" if not problems
                                          else "NOT made: " + "; ".join(problems)))
+        lines += notes
         out["warnings"] = list(screen["warnings"] or [])
     if not preview:
         loadplan.delivery_append(name, "pack", kind=kind, manifest=str(mpath), subject=subject,

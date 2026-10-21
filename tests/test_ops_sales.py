@@ -8,7 +8,10 @@ scripts.ops.db is imported first. db.rpc and db.rpc_params are replaced by a sta
 every statement the brief sends from an in-memory list of invented sale lines (two vans, a few
 shops, round amounts), and the Command Centre call by a canned payload in its real shape. One test
 runs the whole command through the guarded client against an in-memory transport instead, with the
-real app.metrics.overview. Every folder is a temporary one.
+real app.metrics.overview. scripts.ops.moves and scripts.ops.checks (other packages' modules: their own
+suites test them) are stand-ins by their contracts in every test, whether or not the modules are
+there: brief_facts answers invented transfers, ensure_recorded an answer chosen by the test. Every
+folder is a temporary one.
 
 The steady world: from Wed 1 Oct 2025, on every business day (Sunday to Thursday), Van A sells
 20.000 to Shop 1 and Van B sells 10.000 to Shop 2. So a business day is 30.000 and a full week is
@@ -44,20 +47,31 @@ Covered:
     with the Command Centre's own rule for a silent rep (more than N business days), and a line
     to check if the two counts ever differ; rep:<name>;
   * DO TODAY: attention items on the register by tone, never a baseline, with their count and
-    money, at most five listed, the older-items line; evidence is order numbers of waiting orders
-    only, never a name, every one kept and two shown; the row that reads the profitability report
-    says its basis, the report's date and since when it was held back; nothing recorded or
-    cleared when a source of the list did not answer, and that brief does not count as read;
-    rule 'attn' is recorded in one place only; an explained item stays off while it is what he
-    explained and comes back when it is clearly larger (count or money) or names a new order; a
-    done item rests until its facts change;
+    money, at most five listed, the older-items line (pointing to /yq-watch all); evidence is order
+    numbers of waiting orders only, never a name, every one kept and two shown; the row that reads
+    the profitability report says its basis, the report's date and since when it was held back;
+    nothing recorded or cleared when a source of the list did not answer, and that brief does not
+    count as read; rule 'attn' is recorded in one place only; an explained item stays off while it
+    is what he explained and comes back when it is clearly larger (count or money) or names a new
+    order; a done item rests until its facts change;
+  * MOVEMENTS: the stock ledger's last seven days in one sentence on three lines just before DO
+    TODAY, BHD at landed cost, read once and only by the company brief, the facts kept; moves' note
+    and the figures store by store; a moves failure, or no moves module, is one line and one warning,
+    never the brief;
+  * the move rules: recorded once per brief before DO TODAY is listed (what they record is listed),
+    with record=False in a preview, which says nothing; a recording that did not happen, or no checks
+    module, is one line and one warning;
+  * the floor: config watch.floor_bhd, else state.json watch_defaults.floor_bhd, else none; it leaves
+    the move rules' small items off DO TODAY and one line counts them; no rules, no floor; a value in
+    config that is no amount stops the command in the config reader's sentence;
   * two lines when there is no new data; files only under exports/ and business_data/; the state;
     money to the fils; the wording guard; no long digit run; the statements themselves; the
     brief still prints under the banner of a load that failed;
   * no pointer to a command that is not built: what the brief, the register's lines, the e-mail, the
     notes and the skill tell a reader to type is a command or a skill that exists (the commands
-    scripts/ops/__main__.py lists, the skills in .claude/skills), and what is left over when the
-    register has more open items than a line holds is a count, never a pointer.
+    scripts/ops/__main__.py lists, the skills in .claude/skills); /yq-watch and /yq-moves, which this
+    release builds in other packages, may be named while their commands are not built here, and
+    must be on disk once they are; the full list and what a list leaves out point to /yq-watch.
 """
 from __future__ import annotations
 
@@ -69,6 +83,7 @@ import re
 import sys
 import tempfile
 import traceback
+import types
 from contextlib import redirect_stdout
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -368,6 +383,142 @@ def loaded(run: str, data_date: date | None, **more) -> dict:
     return dict(out, **more)
 
 
+# ── the stock ledger's transfers and the move rules, as the brief calls them ────────────────────
+# scripts.ops.moves (/yq-moves) and scripts.ops.checks (/yq-watch) are other packages' modules. The brief calls
+# moves.brief_facts and checks.ensure_recorded by their contracts, and every test here answers them with these
+# stand-ins, whether the modules are there or not.
+
+MOVE_RULES = ("xfer_open", "xfer_twins", "qty_diff", "xfer_elsewhere", "rcpt_orphan")     # the contract's five
+_ABSENT = object()
+
+
+def move_facts(**over) -> dict:
+    """What moves.brief_facts(days=7) answers, in its contract's shape: the stock ledger's seven days to Tue 20 Jan
+    (invented figures, BHD at landed cost)."""
+    facts = {"first": "2026-01-14", "last": "2026-01-20", "ledger_to": "2026-01-20", "to_stores_units": 120,
+             "to_stores_bhd": "300.000", "back_units": 5, "damage_units": 2, "not_received_units": 3,
+             "not_received_bhd": "7.500", "to_check_count": 2, "to_check_bhd": "10.000", "per_store_ok": True,
+             "note": None}
+    facts.update(over)
+    return facts
+
+
+MOVEMENTS_LINES = [
+    "MOVEMENTS last 7 days to Tue 20 Jan: to the vans and outlets 120 units (BHD 300.000 at landed cost),",
+    "          back to the main store 5, to damage 2; not received after the deadline 3 (BHD 7.500);",
+    "          to check 2 (BHD 10.000): /yq-moves"]
+
+
+class moves_standing_in:
+    """scripts.ops.moves and scripts.ops.checks for the length of a with-block, by their contracts:
+    brief_facts(days) answers `facts` (raises it when it is an exception); ensure_recorded(record) answers
+    `recorded` (raises it when it is one) after running `on_record`, when it is given and record is True, as
+    the recorder would write; MOVE_RULES is the contract's five. `missing` names the modules that cannot be
+    imported at all. Every call is kept in `calls`, in order. The modules that were there come back after."""
+
+    def __init__(self, facts=None, recorded=None, on_record=None, missing=()):
+        self.facts = move_facts() if facts is None else facts
+        self.recorded = {"ok": True, "why": "recorded for this ledger"} if recorded is None else recorded
+        self.on_record, self.missing = on_record, set(missing)
+        self.calls: list[tuple[str, object]] = []
+
+    def brief_facts(self, days: int = 7):
+        self.calls.append(("brief_facts", days))
+        if isinstance(self.facts, Exception):
+            raise self.facts
+        return json.loads(json.dumps(self.facts))            # a fresh copy each time, as plain JSON
+
+    def ensure_recorded(self, record: bool = True):
+        self.calls.append(("ensure_recorded", record))
+        if isinstance(self.recorded, Exception):
+            raise self.recorded
+        if record and self.on_record is not None:
+            self.on_record()
+        return json.loads(json.dumps(self.recorded))
+
+    def names(self) -> list[str]:
+        return [name for name, _arg in self.calls]
+
+    def __enter__(self):
+        package = sys.modules["scripts.ops"]
+        self.saved = {}
+        for name in ("moves", "checks"):
+            full = f"scripts.ops.{name}"
+            self.saved[name] = (sys.modules.get(full, _ABSENT), package.__dict__.get(name, _ABSENT))
+            package.__dict__.pop(name, None)
+            if name in self.missing:
+                sys.modules[full] = None                     # an import of it fails, as for a module that is not there
+                continue
+            module = types.ModuleType(full)
+            if name == "moves":
+                module.brief_facts = self.brief_facts
+            else:
+                module.ensure_recorded, module.MOVE_RULES = self.ensure_recorded, MOVE_RULES
+            sys.modules[full] = module
+            setattr(package, name, module)
+        return self
+
+    def __exit__(self, *exc):
+        package = sys.modules["scripts.ops"]
+        for name, (module, attr) in self.saved.items():
+            full = f"scripts.ops.{name}"
+            if module is _ABSENT:
+                sys.modules.pop(full, None)
+            else:
+                sys.modules[full] = module
+            if attr is _ABSENT:
+                package.__dict__.pop(name, None)
+            else:
+                setattr(package, name, attr)
+        return False
+
+
+class floor_standing_in:
+    """alerts.open_items(include_baseline, *, floor, floor_rules) and alerts.under_floor(floor, floor_rules) by
+    their contract, over the real register (the register's own suite tests the real ones): an open item of one
+    of the rules, valued below the floor, is left off the list and counted under its rule. Every call is kept."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    @staticmethod
+    def _small(row: dict, floor, rules) -> bool:
+        return row.get("rule") in rules and Decimal(str(row.get("bhd") or 0)) < Decimal(str(floor))
+
+    def open_items(self, include_baseline: bool = False, *, floor=None, floor_rules=()):
+        self.calls.append(("open_items", floor, tuple(floor_rules)))
+        rows = self.real_open(include_baseline)
+        return rows if floor is None else [r for r in rows if not self._small(r, floor, floor_rules)]
+
+    def under_floor(self, floor, floor_rules):
+        self.calls.append(("under_floor", floor, tuple(floor_rules)))
+        out: dict[str, int] = {}
+        for row in self.real_open(False):
+            if self._small(row, floor, floor_rules):
+                out[row["rule"]] = out.get(row["rule"], 0) + 1
+        return out
+
+    def __enter__(self):
+        self.real_open, self.real_under = alerts.open_items, alerts.__dict__.get("under_floor", _ABSENT)
+        alerts.open_items, alerts.under_floor = self.open_items, self.under_floor
+        return self
+
+    def __exit__(self, *exc):
+        alerts.open_items = self.real_open
+        if self.real_under is _ABSENT:
+            del alerts.under_floor
+        else:
+            alerts.under_floor = self.real_under
+        return False
+
+
+def more_open(n: int) -> str:
+    """The register's own last line when n more items are open than a list shows: "(+n more open...)". Its words
+    are scripts.ops.alerts' (its suite pins them); a screen here only keeps the line, and keeps it last."""
+    rows = [{"id": f"A{k}", "level": "CHECK", "title": "x"} for k in range(n + 1)]
+    return alerts.render(rows, limit=1).splitlines()[-1]
+
+
 # ── running the command ─────────────────────────────────────────────────────────────────────────
 
 class data_root:
@@ -400,10 +551,13 @@ class Args:
 
 
 class standing_in:
-    """db.rpc / db.rpc_params answered by the world, the Command Centre call by a canned payload."""
+    """db.rpc / db.rpc_params answered by the world, the Command Centre call by a canned payload, and
+    scripts.ops.moves / checks by their stand-ins (`moves`, a moves_standing_in; a fresh default one unless
+    one is given)."""
 
-    def __init__(self, world: World, overview=None):
+    def __init__(self, world: World, overview=None, moves: moves_standing_in | None = None):
         self.world, self.overview, self.overview_calls = world, overview, 0
+        self.moves = moves if moves is not None else moves_standing_in()
 
     def _overview(self) -> dict:
         self.overview_calls += 1
@@ -414,15 +568,18 @@ class standing_in:
     def __enter__(self):
         self.saved = (db.rpc, db.rpc_params, sales.read_overview)
         db.rpc, db.rpc_params, sales.read_overview = self.world.rpc, self.world.rpc_params, self._overview
+        self.moves.__enter__()
         return self
 
     def __exit__(self, *exc):
+        self.moves.__exit__(*exc)
         db.rpc, db.rpc_params, sales.read_overview = self.saved
         return False
 
 
-def brief(world: World, *spec: str, overview=None, again: bool = False, top: int = 10) -> dict:
-    with standing_in(world, overview):
+def brief(world: World, *spec: str, overview=None, again: bool = False, top: int = 10,
+          moves: moves_standing_in | None = None) -> dict:
+    with standing_in(world, overview, moves):
         return sales.run(Args(spec, again, top))
 
 
@@ -573,6 +730,8 @@ def _():
         with standing_in(world) as st:
             sales.run(Args())
             assert st.overview_calls == 1
+            # the stock ledger's seven days once, then the move rules once, before DO TODAY is listed
+            assert st.moves.calls == [("brief_facts", 7), ("ensure_recorded", True)], st.moves.calls
         names = world.names()
         assert sorted(names) == ["anchor", "dim", "lapsed", "sales", "targets", "top", "trend"], sorted(names)
         params = dict(world.calls)
@@ -1397,7 +1556,7 @@ def _():
         world.sale(date(2025, 12, 10), VAN_B, "Shop 6", "ITEM-01 Cable", 60)
         with standing_in(world) as st:
             out = sales.run(Args(["rep:Van A"]))
-            assert st.overview_calls == 0
+            assert st.overview_calls == 0 and st.moves.calls == [], "movements and the move rules are company lines"
         text = out["text"]
         # his 30 days: 22 business days x 20, plus the 40 of 6 Jan, over 22
         assert cells(text, "Latest day") == ["Latest day", "Tue 20 Jan", "20.000", "1", "30-day average business day 21.818"]
@@ -1408,7 +1567,8 @@ def _():
             "ACCOUNTS  1 of his accounts that bought last month has not bought this month (BHD 25.000 last month)"
         assert "Shop 6" not in text and "Pace:" not in text and "DO TODAY" not in text.replace("and DO TODAY are", "")
         assert text.splitlines()[-1] == \
-            "Pace, reps, stock and DO TODAY are company lines: /yq-brief without rep: shows them."
+            "Pace, reps, stock, movements and DO TODAY are company lines: /yq-brief without rep: shows them."
+        assert "MOVEMENTS" not in text
         assert "last_brief_data_date" not in status.read_state() and not alerts.alerts_file().exists()
         assert Path(out["files"][0]).name == "brief-rep-van-a.txt"
         # a name with no Latin letter still gets a plain file name (its hash, as a register key would)
@@ -1488,7 +1648,7 @@ def _():
         # the row that reads the profitability report carries a star; its basis is the line under the table
         assert block[3].split(None, 2) == ["A3", "ACT", "1 item selling below cost *"], block[3]
         assert block[6] == "* A3: Focus cost of sales, profitability report of Wed 21 Jan"
-        assert block[7] == "(+2 more open)" and len(block) == 8
+        assert block[7] == more_open(2) and len(block) == 8, "the register's count of the rest stays last"
         assert max(len(ln) for ln in block) <= 120, "the table stays inside the window"
         assert out["flags"] == {"open": {"ACT": 3, "CHECK": 4},
                                 "recorded": {"new": 7, "same": 0, "cleared": 0, "baseline": 0, "explained": 0}}
@@ -1515,7 +1675,8 @@ def _():
         alerts.record("xfer_open", old, "2026-01-19")                  # that rule's first run: its baseline
         items = seven_items()[:2]
         text = brief(World(), overview=command_centre(attention=items))["text"]
-        assert text.splitlines()[-1] == "2 older items counted once, not listed"
+        # a count, and where every one of them is listed: the full list's own word for them
+        assert text.splitlines()[-1] == "2 older items counted once: /yq-watch all lists them"
         assert "SIO:X-26-01-1" not in text, "a baseline item is counted, not listed"
         assert len(alerts.open_items()) == 2
         # the Command Centre answered in part: the list is left as it stood and the screen says so
@@ -1545,7 +1706,7 @@ def _():
         assert state["brief_targets_shown"] == "2026-01-20", "the four figures were on that screen: shown once is shown"
         # the next plain /yq-brief: the whole screen, with the reps, the stock and the attention list this time
         out = brief(world, overview=command_centre(attention=seven_items()))
-        assert out["text"].startswith("YQ ACCESSORIES BRIEF - data to Tue 20 Jan") and "(+2 more open)" in out["text"]
+        assert out["text"].startswith("YQ ACCESSORIES BRIEF - data to Tue 20 Jan") and more_open(2) in out["text"]
         assert out["flags"]["recorded"]["new"] == 7 and status.read_state()["last_brief_data_date"] == "2026-01-20"
         assert len(brief(world, overview=command_centre(attention=seven_items()))["text"].splitlines()) == 2
     with data_root():
@@ -1671,7 +1832,7 @@ def _():
         # the row is not among the five listed: no line under the table for a row that is not on it
         many = [attn(f"k{n}", "alert", f"item {n}", 100.0 - n) for n in range(5)] + items[:1]
         text = brief(World(), overview=command_centre(attention=many, margin_report_date="2026-01-12"))["text"]
-        assert today(text)[-1] == "(+1 more open)" and "*" not in "".join(today(text))
+        assert today(text)[-1] == more_open(1) and "*" not in "".join(today(text))
         assert alerts.current()["attn|below_cost"]["title"].endswith("older than the data to Tue 20 Jan)")
     # only a title that ends with the words this module adds is taken apart
     whole = "1 item selling below cost (Focus cost of sales, profitability report of Mon 12 Jan)"
@@ -1838,6 +1999,192 @@ def _():
         assert "last_brief_data_date" not in status.read_state() and not paths.exports_dir().exists()
 
 
+# ── MOVEMENTS, the move rules, the floor ────────────────────────────────────────────────────────
+
+@test("MOVEMENTS: the stock ledger's last seven days in one sentence just before DO TODAY, BHD at landed cost")
+def _():
+    with data_root():
+        st = moves_standing_in()
+        out = brief(World(), moves=st)
+        text, rows = out["text"], out["text"].splitlines()
+        at = rows.index(MOVEMENTS_LINES[0])
+        assert rows[at:at + 3] == MOVEMENTS_LINES, rows[at:at + 4]
+        assert rows.index(line(text, "STOCK")) < at and rows[at - 1] == "" and rows[at + 3:at + 5] == ["", "DO TODAY"]
+        # one sentence, cut where each part stays inside the window
+        assert " ".join(r.strip() for r in MOVEMENTS_LINES) == (
+            "MOVEMENTS last 7 days to Tue 20 Jan: to the vans and outlets 120 units (BHD 300.000 at landed cost), "
+            "back to the main store 5, to damage 2; not received after the deadline 3 (BHD 7.500); to check 2 "
+            "(BHD 10.000): /yq-moves")
+        assert max(len(r) for r in rows) <= 120 and out["warnings"] == []
+        assert st.calls == [("brief_facts", 7), ("ensure_recorded", True)], "read once, then the rules recorded once"
+        facts = json.loads(Path(out["files"][1]).read_text(encoding="utf-8"))
+        assert facts["movements"] == {
+            "read": True, "days": 7, "first": "2026-01-14", "last": "2026-01-20", "ledger_to": "2026-01-20",
+            "basis": "at landed cost", "per_store_ok": True, "note": None, "to_stores_units": "120",
+            "back_units": "5", "damage_units": "2", "not_received_units": "3", "to_check_count": "2",
+            "to_stores_bhd": "300.000", "not_received_bhd": "7.500", "to_check_bhd": "10.000"}, facts["movements"]
+        assert facts["do_today"]["moves_recorded"] == {"ok": True, "why": "recorded for this ledger"}
+        # a window and one salesman read no ledger and record nothing: the line is the company brief's
+        for spec in (("mtd",), ("rep:Van A",), ("7d", "rep:Van B")):
+            other = moves_standing_in()
+            assert "MOVEMENTS" not in brief(World(), *spec, moves=other)["text"] and other.calls == [], spec
+    with data_root():
+        # moves' own note under the sentence (the wording guard and the phone mask as on every line), the figures
+        # store by store when they need a look, and a figure moves did not give is said so, never a nought
+        nine = "36" + "5" * 7                                          # invented; built here, never spelt out
+        st = moves_standing_in(move_facts(note=f"ledger file one day behind, no leakage meant; call {nine}",
+                                          per_store_ok=False, to_stores_bhd=None, damage_units=None))
+        rows = brief(World(), moves=st)["text"].splitlines()
+        at = rows.index(line("\n".join(rows), "MOVEMENTS"))
+        assert rows[at] == ("MOVEMENTS last 7 days to Tue 20 Jan: to the vans and outlets 120 units "
+                            "(cost not worked out),")
+        assert rows[at + 1].startswith("          back to the main store 5, to damage n/a; not received"), rows[at + 1]
+        assert rows[at + 3:at + 5] == ["          ledger file one day behind, no ------- meant; call [number]",
+                                       "          the figures store by store need a look too"], rows[at:at + 6]
+    with data_root():
+        # no window from moves: the ledger's own last day, with its year when it is not the data's
+        st = moves_standing_in(move_facts(first=None, last=None, ledger_to="2025-12-31"))
+        assert line(brief(World(), moves=st)["text"], "MOVEMENTS").startswith(
+            "MOVEMENTS last 7 days to Wed 31 Dec 2025: to the vans and outlets 120 units")
+
+
+@test("MOVEMENTS not read this time: a moves failure, or no moves module, costs that line and one warning")
+def _():
+    for stand, said in ((moves_standing_in(RuntimeError("the ledger cache could not be read")),
+                         "the movements could not be read: RuntimeError: the ledger cache could not be read"),
+                        (moves_standing_in(["not", "its facts"]), "the movements could not be read: TypeError: "),
+                        (moves_standing_in(missing={"moves"}),
+                         "the movements could not be read: ModuleNotFoundError: ")):
+        with data_root():
+            out = brief(World(), overview=command_centre(attention=seven_items()[:1]), moves=stand)
+            text = out["text"]
+            assert out["ok"] is True and line(text, "MOVEMENTS") == "MOVEMENTS not read this time"
+            assert len(out["warnings"]) == 1 and out["warnings"][0].startswith(said), out["warnings"]
+            assert cells(text, "Month to date")[2] == "420.000" and out["flags"]["recorded"]["new"] == 1
+            assert text.split("DO TODAY\n")[1].splitlines()[0].split()[:3] == ["ID", "Level", "Who"]
+            assert json.loads(Path(out["files"][1]).read_text(encoding="utf-8"))["movements"] == {"read": False}
+            assert status.read_state()["last_brief_data_date"] == "2026-01-20", "the rest of the screen was whole"
+    with data_root():
+        # the e-mail made from such a brief: the Transfers paragraph says it was not read, and the e-mail is made
+        mail = the_email(World(), command_centre(), moves_standing_in(missing={"moves", "checks"}))
+        assert "Transfers: NOT EVIDENCED (not read this time)." in mail["html"]
+        assert [w for w in mail["facts"]["warnings"] if w.startswith("the movements could not be read")]
+        assert "transfer checks" not in mail["html"], "a preview says nothing of a recording it did not ask for"
+
+
+@test("the move rules are recorded once per brief before DO TODAY is listed; a preview asks with record=False")
+def _():
+    found = [{"key": "xfer_open|SIO:X-26-01-9", "level": "CHECK", "title": "Transfer not received after the deadline",
+              "detail": "A Stock Issue Voucher with no receipt", "bhd": "12", "evidence": ["SIO:X-26-01-9"]}]
+
+    def recorder() -> None:
+        alerts.record("xfer_open", found, "2026-01-20", baseline=False)
+    with data_root():
+        # what the recording puts on the register is on this very screen: it ran before the list was read
+        st = moves_standing_in(on_record=recorder)
+        out = brief(World(), overview=command_centre(attention=seven_items()[:1]), moves=st)
+        block = out["text"].split("DO TODAY\n")[1].splitlines()
+        assert "Transfer not received after the deadline" in block[2] and "SIO:X-26-01-9" in block[2], block
+        assert st.calls.count(("ensure_recorded", True)) == 1 and out["warnings"] == []
+    with data_root():
+        # a preview asks with record=False: nothing is recorded and nothing is said, the answer is kept in the facts
+        st = moves_standing_in(on_record=recorder, recorded={"ok": False, "why": "a preview records nothing"})
+        with standing_in(World(), command_centre(attention=seven_items()[:1]), st):
+            shown = sales.full_screen(record=False)
+        assert st.calls == [("brief_facts", 7), ("ensure_recorded", False)] and not alerts.alerts_file().exists()
+        assert "transfer checks" not in shown["text"] and shown["warnings"] == []
+        assert shown["facts"]["do_today"]["moves_recorded"] == {"ok": False, "why": "a preview records nothing"}
+    # a recording that did not happen, raised, or had no module to run: one line, one warning, the brief stands
+    for stand, why in ((moves_standing_in(recorded={"ok": False, "why": "the ledger is not proven yet"}),
+                        "the ledger is not proven yet"),
+                       (moves_standing_in(recorded={"ok": False}), "no reason given"),
+                       (moves_standing_in(recorded=RuntimeError("the register is held")),
+                        "RuntimeError: the register is held"),
+                       (moves_standing_in(missing={"checks"}), "ModuleNotFoundError: ")):
+        with data_root():
+            out = brief(World(), overview=command_centre(attention=seven_items()[:1]), moves=stand)
+            block = out["text"].split("DO TODAY\n")[1].splitlines()
+            assert block[0] == "(the transfer checks were not recorded this time: their items below are as they stood)"
+            assert block[1].split()[:3] == ["ID", "Level", "Who"] and out["flags"]["recorded"]["new"] == 1, block
+            assert len(out["warnings"]) == 1, out["warnings"]
+            assert out["warnings"][0].startswith("the transfer checks were not recorded this time: " + why)
+            assert line(out["text"], "MOVEMENTS") == MOVEMENTS_LINES[0], "the ledger's line is another read"
+            kept = json.loads(Path(out["files"][1]).read_text(encoding="utf-8"))["do_today"]["moves_recorded"]
+            assert kept["ok"] is False and kept["why"].startswith(why), kept
+            fmt.careful(out["text"])
+
+
+def move_item(rule: str, ref: str, bhd: str) -> dict:
+    """A move rule's item, in the register's shape (the five rules record such items: scripts/ops/checks.py)."""
+    return {"key": f"{rule}|{ref}", "level": "CHECK", "title": "Transfer to check", "detail": "", "bhd": bhd,
+            "evidence": [ref]}
+
+
+@test("DO TODAY applies the floor to the move rules: config first, then the replay's figure; the small ones are counted")
+def _():
+    def setup() -> None:
+        alerts.record("xfer_open", [move_item("xfer_open", f"SIO:X-26-01-{n}", b) for n, b in ((1, "1"), (2, "2"),
+                                                                                               (3, "30"))],
+                      "2026-01-20", baseline=False)
+        alerts.record("qty_diff", [move_item("qty_diff", "SIO:X-26-01-4", "4")], "2026-01-20", baseline=False)
+    sold = [attn("sold_out", "warn", "1 item sold out with demand", 1.0, count=1)]       # not a move rule: listed
+
+    def today(text: str) -> list[str]:
+        return text.split("DO TODAY\n")[1].splitlines()
+    with data_root({"watch.floor_bhd": 5}):
+        setup()
+        with floor_standing_in() as fl:
+            out = brief(World(), overview=command_centre(attention=sold))
+        rows = today(out["text"])
+        assert [ln.split()[0] for ln in rows[1:3]] == ["A3", "A5"] and len(rows) == 4, rows
+        assert "SIO:X-26-01-3" in rows[1] and "1 item sold out with demand" in rows[2], "small money, no move rule"
+        assert rows[3] == "3 small transfer items under BHD 5.000 counted, not listed"
+        assert fl.calls == [("open_items", Decimal("5"), MOVE_RULES), ("under_floor", Decimal("5"), MOVE_RULES)]
+        kept = json.loads(Path(out["files"][1]).read_text(encoding="utf-8"))["do_today"]
+        assert kept["floor"] == {"bhd": "5.000", "rules": list(MOVE_RULES), "under": {"xfer_open": 2, "qty_diff": 1}}
+        assert [r["id"] for r in kept["open"]] == ["A3", "A5"], "the e-mail ranks what the screen lists"
+        fmt.careful(out["text"])
+    with data_root():
+        # no floor in config.json: the figure /yq-watch's replay left in state.json
+        setup()
+        status.write_state({"watch_defaults": {"floor_bhd": "2.5", "act_bhd": "50", "act_days": 3}})
+        with floor_standing_in() as fl:
+            text = brief(World(), overview=command_centre(attention=sold))["text"]
+        assert today(text)[-1] == "2 small transfer items under BHD 2.500 counted, not listed"
+        assert fl.calls[0] == ("open_items", Decimal("2.5"), MOVE_RULES)
+    with data_root({"watch.floor_bhd": 3}):
+        # both: config.json wins
+        setup()
+        status.write_state({"watch_defaults": {"floor_bhd": "50"}})
+        with floor_standing_in():
+            assert today(brief(World(), overview=command_centre(attention=sold))["text"])[-1] == \
+                "2 small transfer items under BHD 3.000 counted, not listed"
+    with data_root():
+        # no floor anywhere, or a figure in state.json that is no amount: every open item is listed, nothing counted
+        setup()
+        for kept in (None, {"floor_bhd": "five"}, {"floor_bhd": -1}, {"floor_bhd": True}, "5", {"act_bhd": "50"}):
+            status.write_state({"watch_defaults": kept})
+            with floor_standing_in() as fl:
+                text = brief(World(), overview=command_centre(attention=sold), again=True)["text"]
+            assert fl.calls == [("open_items", None, ())], (kept, fl.calls)
+            assert "small transfer item" not in text and all(f"SIO:X-26-01-{n}" in text for n in (1, 2, 3, 4)), kept
+    with data_root({"watch.floor_bhd": 5}):
+        # no move rules to apply it to (the checks module is not there): nothing is left out
+        setup()
+        with floor_standing_in() as fl:
+            no_rules = moves_standing_in(missing={"checks"})
+            text = brief(World(), overview=command_centre(attention=sold), moves=no_rules)["text"]
+        assert fl.calls == [("open_items", None, ())] and "small transfer item" not in text
+        assert all(f"SIO:X-26-01-{n}" in text for n in (1, 2, 3, 4))
+    with data_root({"watch.floor_bhd": -1}):
+        # a floor in config.json that is no amount stops the full brief in the config reader's sentence, before any
+        # read or write; a window and one salesman read no floor
+        exc = raises(config.ConfigMissing, lambda: brief(World()))
+        assert "'watch.floor_bhd' must be an amount in BHD, nought or more" in str(exc), str(exc)
+        assert not paths.exports_dir().exists() and not alerts.alerts_file().exists()
+        assert brief(World(), "rep:Van A")["ok"] is True and brief(World(), "mtd")["ok"] is True
+
+
 # ── no new data, files, state ───────────────────────────────────────────────────────────────────
 
 @test("no new data since the last brief: two lines only, unless 'again'")
@@ -1851,6 +2198,7 @@ def _():
         with standing_in(world) as st:
             out = sales.run(Args())
             assert st.overview_calls == 0 and world.names() == ["anchor"], "one small read, nothing else"
+            assert st.moves.calls == [], "no ledger read and no recording for the two lines"
         assert out["text"].splitlines() == [
             "Data to Tue 20 Jan (loaded Wed 21 Jan 09:10): nothing new since the last brief. "
             "For the same brief again: /yq-brief again",
@@ -2166,7 +2514,7 @@ def _():
             status.interrupted_banner = kept
 
 
-# ── no pointer to a command that is not built ───────────────────────────────────────────────────
+# ── no pointer to a command that is not built; the full list is /yq-watch ───────────────────────
 
 ENRICHED = {                     # what scripts/ops/enrich.py adds for the e-mail, in its shape (invented rows)
     "team": [{"salesman": VAN_A, "name": "Van A", "mtd_bhd": "280.000", "change_pct": 5.0, "invoices": 14, "shops": 1,
@@ -2199,10 +2547,10 @@ def older_items(n: int) -> list[dict]:
              "detail": "", "bhd": "5", "evidence": [f"SIO:X-26-01-{k}"]} for k in range(1, n + 1)]
 
 
-def the_email(world: World, overview: dict) -> dict:
+def the_email(world: World, overview: dict, moves: moves_standing_in | None = None) -> dict:
     """The management e-mail of the invented world, as the delivery makes it: the brief's own facts (a preview,
     so the register stays as it is), the ranked actions, the team text; both parts of it, and what went in."""
-    with standing_in(world, overview):
+    with standing_in(world, overview, moves):
         shown = sales.full_screen(record=False)
     facts = dict(shown["facts"], enriched=json.loads(json.dumps(ENRICHED)))
     top, every = actions.ranked(facts, shown["d"])
@@ -2229,6 +2577,18 @@ def skills_on_disk() -> set[str]:
     return {p.parent.name for p in (ROOT / ".claude" / "skills").glob("yq-*/SKILL.md")}
 
 
+# The commands this release builds beside the brief, in other packages, each with the skill it comes with: the
+# brief, the register and the e-mail point at them from now on. While a command is not built here its skill may
+# be named already; once the command is built its skill must be on disk too, so the allowance ends by itself
+# when the release comes together.
+IN_THIS_RELEASE = {"yq-watch": "watch", "yq-moves": "moves"}
+
+
+def pointable_skills(built: list[str]) -> set[str]:
+    """The skills a text may name: the ones on disk, and those of IN_THIS_RELEASE whose command is not built yet."""
+    return skills_on_disk() | {skill for skill, command in IN_THIS_RELEASE.items() if command not in built}
+
+
 def dead_pointers(text: str, built: list[str], gone: list[str], skills: set[str]) -> list[str]:
     """Where `text` sends a reader to something that is not there: a /yq-<word> that is no skill, a
     `scripts.ops <word>` line for a command that is not built, or "the <command> command" for one that is not."""
@@ -2239,47 +2599,53 @@ def dead_pointers(text: str, built: list[str], gone: list[str], skills: set[str]
     return found
 
 
-@test("the full list is not built: the register and the e-mail say how many more there are and point nowhere")
+@test("the full list is /yq-watch: what the register, DO TODAY and the e-mail leave out is counted, and points there")
 def _():
     with data_root():
         brief(World(), overview=command_centre(attention=seven_items()))
         items = alerts.open_items()
         assert len(items) == 7
+        # the register's own count of the rest: a count, and at most the full list's name beside it (alerts.py words it)
         cut = alerts.render(items, limit=3).splitlines()
-        assert cut[-1] == "(+4 more open)" and sum(1 for ln in cut if ln.startswith("A")) == 3, cut
+        assert re.fullmatch(r"\(\+4 more open(?:: /yq-watch)?\)", cut[-1]), cut
+        assert sum(1 for ln in cut if ln.startswith("A")) == 3, cut
         for whole in (alerts.render(items).splitlines(), alerts.render(items, limit=7).splitlines()):
             assert not whole[-1].startswith("(+"), "a list that fits says nothing of the rest"
-        assert alerts.render(items, limit=6).splitlines()[-1] == "(+1 more open)"
+        assert alerts.render(items, limit=6).splitlines()[-1] == more_open(1)
         assert alerts.render([]) == "Nothing open."
-        # the e-mail: the five that rank first, and a count of the others
+        # the e-mail: the five that rank first, and a count of the others with the full list's name
         mail = the_email(World(), command_centre(attention=seven_items()))
         assert len(mail["top"]) == actions.TOP and mail["every"] - len(mail["top"]) >= 2
         n = mail["every"] - len(mail["top"])
-        assert f"({n} more on the action list)" in mail["text"].splitlines(), mail["text"]
-        assert f">{n} more on the action list.</p>" in mail["html"]
+        assert f"({n} more on the action list: /yq-watch)" in mail["text"].splitlines(), mail["text"]
+        assert f">{n} more on the action list (/yq-watch).</p>" in mail["html"]
         for body in (mail["text"], mail["html"]):
-            assert "Claude Code)" not in body and "action list:" not in body, "the count points nowhere"
+            assert "Claude Code)" not in body and body.count("/yq-watch") == 1, "one pointer, beside the count"
         shown = render.email_text(mail["facts"], mail["top"], len(mail["top"]), LOAD_ROW, None, MADE_ON)
-        assert "more on the action list" not in shown, "nothing is left over when every action is on the e-mail"
+        assert "more on the action list" not in shown and "/yq-watch" not in shown, "nothing left over: no pointer"
         assert "Nothing is open on the action list." in render.email_text(mail["facts"], [], 0, LOAD_ROW, None, MADE_ON)
     with data_root():
-        # the older items (another rule's first finds) are a count too: one is "item", not "items"
+        # the older items (another rule's first finds) are a count too, one is "item", and /yq-watch all lists them
         alerts.record("xfer_open", older_items(1), "2026-01-19")
         text = brief(World(), overview=command_centre(attention=seven_items()[:2]))["text"]
-        assert text.splitlines()[-1] == "1 older item counted once, not listed" and "more open" not in text
+        assert text.splitlines()[-1] == "1 older item counted once: /yq-watch all lists them" and "more open" not in text
         assert "SIO:X-26-01-1" not in text, "a baseline item is counted, not listed"
-    # the skill no longer waits for a screen to name a command that is not built, and says what to tell him instead
+    # the skill: the full list and marking an item done or explained are /yq-watch; nothing waits for a later phase
     skill = (ROOT / ".claude" / "skills" / "yq-brief" / "SKILL.md").read_text(encoding="utf-8")
     assert "If the screen names a command that is not built yet" not in skill
-    assert "say that it arrives in a later phase" in skill and "/yq-watch" not in skill
+    assert "arrives in a later phase" not in skill
+    assert "The full action list, and marking an item done or explained, are /yq-watch" in skill
 
 
 @test("nothing a person reads points at a command that is not built: brief, register, e-mail, notes, skill")
 def _():
     built, gone = commands_by_state()
-    skills = skills_on_disk()
+    skills = pointable_skills(built)
     assert {"status", "brief", "load", "deliver"} <= set(built) and not set(built) & set(gone), (built, gone)
-    assert {"yq-brief", "yq-load"} <= skills, skills
+    assert {"yq-brief", "yq-load"} <= skills_on_disk(), skills_on_disk()
+    for skill, command in IN_THIS_RELEASE.items():      # once its command is built, a skill named here is on disk
+        assert command in cli.COMMANDS, command
+        assert command not in built or skill in skills_on_disk(), f"'{command}' is built: /{skill} must be there too"
     for name in gone:                                   # __main__ itself reports it, and runs nothing
         code, said = run_cli([name])
         assert code == 1 and said.strip() == f"'{name}' is not built yet.", (name, code, said)
@@ -2303,6 +2669,8 @@ def _():
                                 sold_out=[{"item": "ITEM-08 Thing", "qty_60": 4, "net_60_bhd": 16.5}])
         texts["the full brief"] = brief(world, overview=centre)["text"]
         assert "(+2 more" in texts["the full brief"] and "older items counted once" in texts["the full brief"]
+        for pointer in ("/yq-watch all lists them", "): /yq-moves"):          # the two this release adds
+            assert pointer in texts["the full brief"], pointer
         texts["the brief, nothing new"] = brief(world)["text"]             # two lines: the data date, what is waiting
         assert len(texts["the brief, nothing new"].splitlines()) == 2
         for spec in (("mtd",), ("7d", "rep:Van A"), ("rep:Van A",), ("fortnight",), ("2026-13",), ("again",)):
@@ -2314,6 +2682,7 @@ def _():
         mail = the_email(world, centre)
         texts["the e-mail"], texts["the e-mail, plain text"] = mail["html"], mail["text"]
         assert mail["every"] > len(mail["top"]), "the line that says how many more is among them"
+        assert "listed by /yq-moves" in mail["html"], "the Transfers paragraph is among them"
         texts["the e-mail, nothing open"] = (render.email_html(mail["facts"], [], 0, LOAD_ROW, None, MADE_ON)
                                              + render.email_text(mail["facts"], [], 0, LOAD_ROW, None, MADE_ON))
         texts["the e-mail, no names"] = render.email_html(mail["facts"], mail["top"], mail["every"], LOAD_ROW,
@@ -2376,7 +2745,8 @@ def portal_answer(world: World, sql: str, params: list | None, van_b_last: str =
 
 def through_the_guard(world: World, **portal) -> tuple[dict, list[str], list[tuple[str, list | None]]]:
     """sales.run on the guarded client over an in-memory transport, with the real app.metrics.overview:
-    the world answers the brief's own statements, portal_answer the rest of the Command Centre's.
+    the world answers the brief's own statements, portal_answer the rest of the Command Centre's (the stock
+    ledger's transfers and the move rules are their stand-ins, as everywhere here).
     Returns (the result, the requests seen, the statements sent)."""
     seen: list[str] = []
     statements: list[tuple[str, list | None]] = []
@@ -2398,7 +2768,8 @@ def through_the_guard(world: World, **portal) -> tuple[dict, list[str], list[tup
     metrics.invalidate()
     db.install(inner=httpx.MockTransport(handler), url="https://ci.invalid", key="ci-key")
     try:
-        out = sales.run(Args())
+        with moves_standing_in():
+            out = sales.run(Args())
     finally:
         db.uninstall()
     return out, seen, statements

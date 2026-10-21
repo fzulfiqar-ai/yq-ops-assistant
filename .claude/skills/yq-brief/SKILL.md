@@ -18,7 +18,7 @@ Run exactly `python -m scripts.ops brief $ARGUMENTS`: it starts with `python`, w
 3. After the block, write at most three lines of your own, in plain words, that use no number that is not on the screen: which item to do first and why.
 4. Never accuse anyone. An item is "to check": say what differs, never who is to blame.
 5. When there is no new data the screen is two lines (the data date and what is waiting): show them and add nothing. If he wants the full brief anyway, run it again with `again` added.
-6. If he asks for the full action list, or to mark an item done or explained, say that it arrives in a later phase: DO TODAY lists the five most pressing and counts the rest.
+6. The full action list, and marking an item done or explained, are /yq-watch: when he asks for either, use that skill. DO TODAY lists the five most pressing and counts the rest.
 7. With `team` the screen is the team message the last load made, for him to copy into the salesmen's group: show the text under its first line in one code block of its own, unchanged, and add nothing. Never send it anywhere yourself.
 
 If he only asks whether the data is up to date or what is waiting, run `python -m scripts.ops status` instead and show it the same way.

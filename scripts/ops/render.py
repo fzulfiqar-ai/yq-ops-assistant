@@ -9,7 +9,9 @@
 Pure: nothing is read, written or sent here. Every figure comes from the facts (sales.full_brief,
 enrich.build, actions.ranked); nothing is computed here but sums of those figures and percentages for
 display. A missing figure prints NOT EVIDENCED and says why. The e-mail uses inline styles and tables
-only (what Outlook and Gmail both show), no image and no script.
+only (what Outlook and Gmail both show), no image and no script. Its Exceptions carry the transfers of
+the brief's MOVEMENTS line (facts['movements'], BHD at landed cost); the count of the actions it has
+no room for points to /yq-watch, the full action list.
 """
 from __future__ import annotations
 
@@ -536,7 +538,7 @@ def email_html(facts: dict, actions: list[dict], more: int, load: dict, team: st
                 f'Why: {esc(a["why"] or "-")}<br>Expected effect: {esc(a["impact"])}<br>'
                 f'Next step: {esc(a["next_step"])} · Who: {esc(a["owner"])} · By: {esc(a["due_text"])}</div>')
         if more > len(actions):
-            parts.append(_p(f"{more - len(actions)} more on the action list.", muted=True))     # a count, no pointer
+            parts.append(_p(f"{more - len(actions)} more on the action list (/yq-watch).", muted=True))
         parts.append(_p("ACTION = what the figures say. TO CHECK = something differs and the reason is not known: "
                         "a question, never a conclusion.", muted=True))
     else:
@@ -589,6 +591,7 @@ def _exceptions(facts: dict, load: dict, names: bool) -> list[str]:
     if orders and orders.get("orders"):
         out.append(_p(f"Marketplace orders waiting: {orders['orders']} ({money(orders.get('bhd'))}), the oldest "
                       f"{orders.get('oldest_hours')} hours old."))
+    out.append(_transfers(facts))
     disc = en.get("discounts") or {}
     if disc.get("evidenced"):
         out.append(_p(f"Discounts this month: {money(disc.get('bhd'))} on {disc.get('lines')} lines "
@@ -600,6 +603,31 @@ def _exceptions(facts: dict, load: dict, names: bool) -> list[str]:
     for w in en.get("not_read") or []:
         out.append(_p(f"Not read this time: {w}.", muted=True))
     return out
+
+
+def _units(x) -> str:
+    return fmt.units(x) if x not in (None, "") else NOT_EVIDENCED
+
+
+def _transfers(facts: dict) -> str:
+    """The Transfers paragraph: the stock ledger's transfers of the brief's MOVEMENTS line, as the brief keeps
+    them (facts['movements'], from moves.brief_facts), BHD at landed cost. Nothing is worked out here."""
+    mv = facts.get("movements")
+    if not isinstance(mv, dict) or not mv.get("read"):
+        return _p(f"Transfers: {NOT_EVIDENCED} (not read this time).", muted=True)
+    upto = mv.get("last") or mv.get("ledger_to")
+    text = (f"Transfers in the last {_plural(mv.get('days') or 7, 'day')}" + (f" to {_day(upto)}" if upto else "")
+            + f" (BHD {mv.get('basis') or 'at landed cost'}): {_units(mv.get('to_stores_units'))} units went to the "
+            f"vans and outlets ({money(mv.get('to_stores_bhd'))}), {_units(mv.get('back_units'))} came back to the "
+            f"main store and {_units(mv.get('damage_units'))} went to damage. Not received after the deadline: "
+            f"{_units(mv.get('not_received_units'))} units ({money(mv.get('not_received_bhd'))}). To check: "
+            f"{_units(mv.get('to_check_count'))} ({money(mv.get('to_check_bhd'))}), listed by /yq-moves.")
+    note = " ".join(str(mv.get("note") or "").split())
+    if note:
+        text += " " + note + ("" if note.endswith(".") else ".")
+    if mv.get("per_store_ok") is False:
+        text += " The figures store by store need a look (/yq-moves)."
+    return _p(text)
 
 
 def _load_rows(facts: dict, load: dict) -> list[list]:
@@ -643,7 +671,7 @@ def email_text(facts: dict, actions: list[dict], more: int, load: dict, team: st
     if not actions:
         out.append("Nothing is open on the action list.")
     elif more > len(actions):
-        out.append(f"({more - len(actions)} more on the action list)")
+        out.append(f"({more - len(actions)} more on the action list: /yq-watch)")
     due = (facts.get("enriched") or {}).get("shops_due") or {}
     if due.get("due"):
         out += ["", f"SHOPS DUE A RE-ORDER: {due['due']}"]

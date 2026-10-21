@@ -52,7 +52,11 @@ once the portal has it), one SALES_SQL with every window, one DIM_SQL (salesman,
 the weekly totals (TREND_SQL, anchored on the Saturday that ends the last full week, so all 13
 weeks are full), and the small reads: the largest invoices, the accounts that have not come back,
 the target figures, the loaded sale day before a part day, and the salesman names when rep: is
-typed. A read that fails costs its own line, never the screen; only the sales read is required.
+typed. Beside them, the stock ledger's transfers of its last seven days (scripts.ops.moves.brief_facts,
+memoised per ledger) for the MOVEMENTS line, BHD at landed cost, the /yq-stock basis and not the sales
+one, as the line says. A read that fails costs its own line, never the screen; only the sales read
+is required. moves and checks are imported when they are first asked for, so that a module that
+cannot be imported, or one that fails, costs one line ("not read this time") and never the brief.
 
 DO TODAY is the action register (scripts.ops.alerts). The Command Centre's attention list is put on
 it first, under 'attn|<its key>'. Those keys are a fixed handful of standing conditions, not old
@@ -72,6 +76,13 @@ on record and a report older than the data date, "older than the data to <D>". T
 those words at the end of the item's title. Its own list cuts a long title short, so a screen that
 shows the item takes them off with basis_apart and prints them by themselves, as this one does: a
 star on the row and one line under the table.
+The transfers to check are on the register too: before DO TODAY is listed, the five move rules of
+/yq-watch are recorded for this ledger (scripts.ops.checks.ensure_recorded: once per ledger, never
+raising; a preview records nothing). A recording that did not happen is one line, and the transfer
+items are then listed as they stood. A transfer item valued below the floor (config watch.floor_bhd
+when it is set, else the figure /yq-watch's replay left in state.json, watch_defaults.floor_bhd) is
+not listed: one line counts those. The full list, and marking an item done or explained, are
+/yq-watch, and the line that counts the older items points there.
 sales.record_attention is the one place that records rule 'attn' (tests/test_ops_sales.py walks
 the package for another): a rule's items that are not found again are marked cleared, so a second
 recorder with a list of its own would clear these on every run.
@@ -81,8 +92,8 @@ Customer and salesman names appear on the screen and under exports/ops/<data dat
 nowhere else: the register keeps an item's definition and, for waiting orders alone, their order
 numbers (taken by their shape, never by guess), never a name, in a key or anywhere else. The counts
 in this file are the plan's definitions and the room on one screen (30 days, four and twelve weeks,
-five business days, three names, five items, two order numbers on a row); the owner's thresholds
-are read from config.json.
+five business days, three names, five items, two order numbers on a row, the seven days of the
+MOVEMENTS line); the owner's thresholds are read from config.json.
 """
 from __future__ import annotations
 
@@ -132,6 +143,10 @@ EVIDENCE_SHOWN = 2                    # order numbers printed on a DO TODAY row 
 # only because it could not be worked out, so the register is not touched.
 ATTENTION_SOURCES = ("anchor", "orders", "match", "salesmen", "reps", "attainment", "receivables", "ar_owner",
                      "stock", "movers", "margin_totals", "below_cost")
+MOVES_DAYS = 7                        # the MOVEMENTS line: the stock ledger's last seven days (/yq-moves' own default)
+MOVES_BASIS = "at landed cost"        # what its BHD rests on: the /yq-stock basis, not the sales one
+FLOOR_KEY = "watch.floor_bhd"         # a transfer item valued below this stays off DO TODAY (/yq-watch lists it)
+LABEL = " " * 10                      # a section's lines after its first, under the text after its label
 
 _MONTH = re.compile(r"^(\d{4})-(\d{1,2})$")
 _RANGE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})\.\.(\d{4})-(\d{1,2})-(\d{1,2})$")
@@ -1024,15 +1039,132 @@ def stock_section(tile: dict | None, have_overview: bool) -> tuple[dict, list[st
     return facts, lines
 
 
+# ── the stock ledger's transfers, and the move rules of the action list ───────────────────────────
+
+MOVE_UNITS = ("to_stores_units", "back_units", "damage_units", "not_received_units", "to_check_count")
+MOVE_BHD = ("to_stores_bhd", "not_received_bhd", "to_check_bhd")
+
+
+def read_moves(days: int = MOVES_DAYS) -> dict:
+    """The stock ledger's transfers of its last `days` days, as scripts.ops.moves.brief_facts gives them
+    (memoised per ledger): {first, last, ledger_to, to_stores_units, to_stores_bhd, back_units,
+    damage_units, not_received_units, not_received_bhd, to_check_count, to_check_bhd, per_store_ok, note}.
+    The module is imported here, when it is first asked for: one that cannot be imported raises as one
+    that fails does, and either costs the MOVEMENTS line alone."""
+    from scripts.ops import moves
+    got = moves.brief_facts(days=days)
+    if not isinstance(got, dict):
+        raise TypeError(f"moves.brief_facts gave {type(got).__name__}, not its facts")
+    return got
+
+
+def _moved(x) -> str:
+    """Units (or a count) of the MOVEMENTS line; 'n/a' when moves gave none (never a nought for a blank)."""
+    v = _number(x)
+    return fmt.units(v) if v is not None else "n/a"
+
+
+def _moved_bhd(x, basis: str = "") -> str:
+    v = _number(x)
+    return f"BHD {fmt.bhd(v)}{basis}" if v is not None else "cost not worked out"
+
+
+def movements_section(got: dict | None, d: date) -> tuple[dict, list[str]]:
+    """MOVEMENTS: the stock ledger's transfers of its last seven days (read_moves), BHD at landed cost (the
+    /yq-stock basis, which the line names): what the main store sent to the vans and the outlets, what came
+    back to it, what went to the damage store; the units not received after their deadline; and what is to
+    check, which /yq-moves lists. One sentence on three lines, each inside the window. Under it, moves' own
+    note when it gives one, and a line when the figures store by store need a look. `got` None: the facts
+    were not read (the warning says why) and the line says so."""
+    if got is None:
+        return {"read": False}, ["MOVEMENTS not read this time"]
+    first, last, ledger_to = (fmt.as_date(got.get(k)) for k in ("first", "last", "ledger_to"))
+    upto = last or ledger_to
+    days = (last - first).days + 1 if first and last and last >= first else MOVES_DAYS
+    head = f"MOVEMENTS last {_plural(days, 'day')}" + (f" to {_day(upto, d)}" if upto else "")
+    lines = [f"{head}: to the vans and outlets {_moved(got.get('to_stores_units'))} units "
+             f"({_moved_bhd(got.get('to_stores_bhd'), ' ' + MOVES_BASIS)}),",
+             f"{LABEL}back to the main store {_moved(got.get('back_units'))}, "
+             f"to damage {_moved(got.get('damage_units'))}; "
+             f"not received after the deadline {_moved(got.get('not_received_units'))} "
+             f"({_moved_bhd(got.get('not_received_bhd'))});",
+             f"{LABEL}to check {_moved(got.get('to_check_count'))} ({_moved_bhd(got.get('to_check_bhd'))}): /yq-moves"]
+    note = _guarded(_clean(got.get("note")))
+    if note:
+        lines.append(LABEL + note)
+    per_store = got.get("per_store_ok")
+    if per_store is False:
+        lines.append(LABEL + "the figures store by store need a look too")
+    facts: dict = {"read": True, "days": days, "first": first.isoformat() if first else None,
+                   "last": last.isoformat() if last else None,
+                   "ledger_to": ledger_to.isoformat() if ledger_to else None, "basis": MOVES_BASIS,
+                   "per_store_ok": per_store if isinstance(per_store, bool) else None, "note": note or None}
+    for key in MOVE_UNITS:
+        facts[key] = _number(got.get(key))
+    for key in MOVE_BHD:
+        v = _number(got.get(key))
+        facts[key] = fmt.q3(v) if v is not None else None
+    return facts, lines
+
+
+def record_moves(record: bool = True) -> tuple[dict | None, str | None]:
+    """The five move rules of /yq-watch recorded for this ledger before DO TODAY is listed
+    (scripts.ops.checks.ensure_recorded: once per ledger, and it never raises; record=False, a preview,
+    records nothing). Returns (its answer, None when it gave none; why it did not record, None when it
+    did). The module is imported here, when it is first asked for: one that cannot be imported, or that
+    raises after all, is a reason like any other, never a failed brief."""
+    try:
+        from scripts.ops import checks
+        got = checks.ensure_recorded(record=record)
+    except Exception as exc:  # noqa: BLE001  (one line on the screen, never the brief)
+        return None, f"{type(exc).__name__}: {str(exc)[:120]}"
+    if not isinstance(got, dict):
+        return None, f"it gave {type(got).__name__}, not its answer"
+    return got, (None if got.get("ok") else _clean(got.get("why")) or "no reason given")
+
+
+def move_rules() -> tuple[str, ...]:
+    """The names of the five move rules (scripts.ops.checks.MOVE_RULES), the rules the floor applies to;
+    () when the module cannot be imported, and the floor then leaves nothing out."""
+    try:
+        from scripts.ops import checks
+        return tuple(str(r) for r in checks.MOVE_RULES)
+    except Exception:  # noqa: BLE001  (no rules: DO TODAY lists every open item)
+        return ()
+
+
+def watch_floor(state: dict) -> Decimal | None:
+    """The floor below which a transfer item stays off DO TODAY (/yq-watch lists it): config
+    watch.floor_bhd when it is set, else the figure /yq-watch's replay of the last 90 days left in
+    state.json (watch_defaults.floor_bhd), else none. A value in config.json is the owner's: the config
+    reader checks it and stops the command in one sentence that names the key when it is no amount. A
+    figure in state.json that is no amount is no floor."""
+    try:
+        cfg = config.load()
+    except config.ConfigMissing:
+        cfg = {}
+    if FLOOR_KEY in cfg:
+        return config.number(FLOOR_KEY)
+    kept = state.get("watch_defaults")
+    v = _number(kept.get("floor_bhd")) if isinstance(kept, dict) else None
+    return v if v is not None and v >= 0 else None
+
+
 def today_section(attention: list[dict] | None, unavailable: list[str], data_date: str, warnings: list[str],
-                  profit: str | None = None, record: bool = True) -> tuple[dict, list[str]]:
+                  profit: str | None = None, record: bool = True, *, floor: Decimal | None = None,
+                  floor_rules: tuple = (), moves_problem: str | None = None) -> tuple[dict, list[str]]:
     """DO TODAY: the attention list goes on the register, then at most five open items.
 
     The register is updated only when the list is whole. When a source the list is worked out from
     did not answer (ATTENTION_SOURCES), an item may be missing only because it could not be worked
     out, and recording would mark it cleared: the register is left as it stood and facts['recorded']
     stays None (the brief then does not count as read). A source the list never reads, the customer
-    table for one, costs its own tile and nothing here."""
+    table for one, costs its own tile and nothing here.
+
+    The move rules were recorded just before (record_moves); `moves_problem` is why they were not, said
+    in one line: their items are then listed as they stood. `floor` leaves the items of `floor_rules`
+    (the move rules) valued below it off the list (alerts.open_items), and one line counts them
+    (alerts.under_floor); with no floor, or no rules, nothing is left out."""
     recorded: dict | None = None
     lines = ["DO TODAY"]
     needed = [name for name in unavailable if name in ATTENTION_SOURCES]
@@ -1047,7 +1179,11 @@ def today_section(attention: list[dict] | None, unavailable: list[str], data_dat
         recorded = record_attention(attention, data_date, profit)
     if other:
         warnings.append("the Command Centre could not read: " + ", ".join(other) + " (the action list does not use it)")
-    items = alerts.open_items()
+    if moves_problem is not None:
+        warnings.append(f"the transfer checks were not recorded this time: {moves_problem}")
+        lines.append("(the transfer checks were not recorded this time: their items below are as they stood)")
+    floored = floor is not None and bool(floor_rules)
+    items = alerts.open_items(floor=floor, floor_rules=tuple(floor_rules)) if floored else alerts.open_items()
     # the table has room for two order numbers a row (the register keeps every one); the row that reads the
     # profitability report gets a star in the table, its basis and dates on a line under it
     table: list[dict] = []
@@ -1059,14 +1195,23 @@ def today_section(attention: list[dict] | None, unavailable: list[str], data_dat
         if basis is not None and n < DO_TODAY:
             under.append(f"* {row.get('id')}: {basis}")
     rendered = alerts.render(table, limit=DO_TODAY).splitlines()
-    more = [rendered.pop()] if under and rendered[-1].startswith("(+") else []     # "(+2 more open)" stays last
+    more = [rendered.pop()] if under and rendered[-1].startswith("(+") else []     # "(+2 more open...)" stays last
     lines += rendered + under + more
+    small: dict[str, int] = {}
+    if floored:      # the transfer items under the floor: counted here, listed by /yq-watch
+        for rule, n in (alerts.under_floor(floor, tuple(floor_rules)) or {}).items():
+            if _count(n):
+                small[str(rule)] = _count(n)
+        if small:
+            lines.append(f"{_plural(sum(small.values()), 'small transfer item')} under BHD {fmt.bhd(floor)} "
+                         "counted, not listed")
     older = sum(int(b["count"]) for b in alerts.baseline_summary())
-    if older:       # a count and no pointer: no command lists the register yet (nor the older items)
-        lines.append(f"{_plural(older, 'older item')} counted once, not listed")
+    if older:       # another rule's first finds: counted once here, every one of them on /yq-watch all
+        lines.append(f"{_plural(older, 'older item')} counted once: /yq-watch all lists them")
     facts = {"recorded": recorded, "open": [{k: r.get(k) for k in ("id", "key", "level", "title", "detail", "bhd",
                                                                  "count", "evidence", "first_seen")} for r in items],
-             "older_items": older, "not_answered": needed + other}
+             "older_items": older, "not_answered": needed + other,
+             "floor": ({"bhd": fmt.q3(floor), "rules": list(floor_rules), "under": small} if floored else None)}
     return facts, lines
 
 
@@ -1107,8 +1252,10 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     """The one-screen brief. Returns (lines, facts, warnings, state patch). `latest` is the latest
     full sale day: D, or on a part day the loaded sale day before it. `exported` is the day the
     reports were exported, when anything says (export_day). record=False (a delivery preview) leaves
-    the action register as it stands; enrich=True (the delivery) adds facts['enriched'] for the
-    e-mail (scripts/ops/enrich.py), and changes no line of the screen."""
+    the action register as it stands, the move rules included; enrich=True (the delivery) adds
+    facts['enriched'] for the e-mail (scripts/ops/enrich.py), and changes no line of the screen.
+    The company brief reads the stock ledger's transfers beside the sales (facts['movements'], the
+    MOVEMENTS line) and records the move rules before DO TODAY (facts['do_today']['moves_recorded'])."""
     warnings: list[str] = []
     full_to = full_until(d, latest, exported)            # the last complete calendar day
     sat = full_week_end(full_to)                         # ... and the Saturday that ends the last complete week
@@ -1136,6 +1283,7 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     share_min = config.number("brief.rep_share_min")
     silent_days = int(config.get("brief.silent_business_days"))
     bulk_from = config.number("brief.bulk_invoice_bhd")
+    floor = None if rep else watch_floor(state)          # DO TODAY is a company line: one salesman reads no floor
 
     jobs = {
         "top": lambda: db.rpc_params(TOP_INVOICE_SQL, [top_wins, rep or ""]),
@@ -1153,6 +1301,7 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
             "targets": lambda: db.rpc_params(TARGETS_SQL, [d.strftime("%Y-%m"), metrics.add_months(d, -12).isoformat(),
                                                            cur.start.isoformat()]),
             "overview": read_overview,
+            "moves": read_moves,                         # the stock ledger, beside the database reads
         })
     got = _gather(jobs)
     core = "dim" if rep else "sales"
@@ -1222,7 +1371,7 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     lines += [""] + acc_l
 
     if rep:
-        lines += ["", "Pace, reps, stock and DO TODAY are company lines: /yq-brief without rep: shows them."]
+        lines += ["", "Pace, reps, stock, movements and DO TODAY are company lines: /yq-brief without rep: shows them."]
         return lines, facts, warnings, patch
 
     reps_f, reps_l = reps_section(_tile(payload, "team.reps") if payload else None, (overview or {}).get("active") or {},
@@ -1234,11 +1383,21 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     facts["stock"] = stock_f
     lines += [""] + stock_l
 
+    moves_f, moves_l = movements_section(_rows(got, "moves", warnings, "the movements"), d)
+    facts["movements"] = moves_f
+    lines += [""] + moves_l
+
+    # the move rules on the register for this ledger before it is listed (a preview records nothing, and says nothing)
+    answer, not_recorded = record_moves(record)
     profit = profit_basis(fmt.as_date((overview or {}).get("margin_report_date")), d, state)
     attention = _attention(payload) if payload else None
     today_f, today_l = today_section(attention, list((payload or {}).get("unavailable") or []), d.isoformat(),
-                                     warnings, profit, record=record)
-    facts["do_today"] = dict(today_f, profit_basis=profit)
+                                     warnings, profit, record=record, floor=floor,
+                                     floor_rules=move_rules() if floor is not None else (),
+                                     moves_problem=not_recorded if record else None)
+    facts["do_today"] = dict(today_f, profit_basis=profit,
+                             moves_recorded={"ok": not_recorded is None,
+                                             "why": not_recorded or _clean((answer or {}).get("why")) or None})
     lines += [""] + today_l
     if enrich:
         from scripts.ops import enrich as enrich_mod
