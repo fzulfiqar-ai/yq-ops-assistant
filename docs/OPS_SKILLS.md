@@ -453,7 +453,10 @@ one of two lines, and the load check says the same in its own words:
   receipt with the same contents at another store pairs as *received in another store* when its number is
   close to the issue's (eight apart or less in the same series and month), the narrations match, or it came
   the same or the next day. A receipt holding most of the issue's items at the right store pairs as *other
-  quantities*, line by line. Several identical issues to one store with fewer receipts make one item that
+  quantities*, line by line. An issue booked in under two receipts on the same day at that store, the
+  second holding exactly what the first lacks, is one transfer received. An issue sent to its own store is
+  set aside with the receipt that books it back in there; one that nothing books back in is *not received*
+  once its deadline has passed. Several identical issues to one store with fewer receipts make one item that
   lists them all and never says which one is missing. What is left is *not received yet* (inside its
   deadline), *not received* (past it) or *a receipt with no issue*. Accessories only: an item never held
   in the main store (the SIM items) is left out.
@@ -479,6 +482,7 @@ one of two lines, and the load check says the same in its own words:
   shown once (`replay` shows them again); `watch.floor_bhd`, `watch.act_bhd` and `watch.act_days` in
   `config.json` win. Items under the floor are counted, not listed.
 - **The baseline.** On a rule's first run, what it finds already in the data is counted once, not listed.
+  Such an item is listed like a new one as soon as it names a voucher it did not name before.
 - **The load check's and the Command Centre's items** are shown beside them, read-only; their BHD is worked
   out on the screen.
 - **Explained and done** happen only on your words. An explained item stays off until it has grown by more
