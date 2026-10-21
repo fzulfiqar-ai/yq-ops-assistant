@@ -46,6 +46,11 @@ Covered:
   * one item, a model code that several items share, an unknown code;
   * the whole command: files under exports/ only, a failed read costs its own part, the wording
     guard, no long digit run, every statement a read;
+  * the cost seam (cost_reads, accessory_table, apply_costs: gather's reads, the model's items and
+    unit costs, the failed reads named in their place) and the model as on an earlier day (build's
+    as_of: the same model as the rows, price cuts and promise lines cut by hand; D is that day though
+    nothing moved on it; the costs stay today's; the portal's figures and the ledger check only on the
+    snapshot's own day; a day outside the ledger is one sentence);
   * the real loaded ledger and stock balance files, when they are on this machine (SKIP otherwise).
 """
 from __future__ import annotations
@@ -58,6 +63,7 @@ import sys
 import tempfile
 import time
 import traceback
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -1029,6 +1035,228 @@ def _():
         assert stock.file_lines(res)[0].startswith("FILE  not made this time: this is a code worktree")
 
 
+# ── the cost seam, and the model as on an earlier day ────────────────────────
+
+def facts_of(m) -> dict:
+    """A model's facts as the day's JSON file holds them (stock.facts_out), through JSON and back."""
+    return json.loads(json.dumps(stock.facts_out(m, "headline", None)))
+
+
+# What a model as on another day than the snapshot's leaves out: the portal's figures and the ledger check.
+PORTAL_KEYS = ("items", "units", "sell_bhd", "found", "other_warehouses", "uncosted_sell_bhd", "portal_cost_bhd",
+               "portal_uncosted_items", "not_compared")
+
+
+def beside_the_snapshot_out(facts: dict) -> dict:
+    """The facts less the day's marker, the ledger check and the portal's figures of the headline."""
+    out = {k: v for k, v in facts.items() if k not in ("as_of", "ledger_check")}
+    out["headline"] = {k: v for k, v in facts["headline"].items() if k not in PORTAL_KEYS}
+    return out
+
+
+def cut_by_hand(inp, day: date):
+    """The inputs as they stood at the end of `day`, cut by hand: the ledger rows, the price cuts and the KPI log's
+    promise lines (by their order date, else the day they were logged) dated up to it."""
+    iso = day.isoformat()
+    return replace(inp, rows=[r for r in inp.rows if r["date"] <= day],
+                   price_cuts=None if inp.price_cuts is None else [c for c in inp.price_cuts if c["changed_on"] <= iso],
+                   promises=None if inp.promises is None else
+                   [p for p in inp.promises if (p.get("event_date") or p["logged_at"][:10]) <= iso])
+
+
+# The KPI log of these tests: a line ordered before 28 Feb, one after it (both before D), one with no order date.
+LOG_LINES = [
+    {"kind": "promise", "ref": "vfan:2026-02-10:CB2", "supplier": "VFAN", "item_code": "CB2", "qty": "30",
+     "event_date": "2026-02-10", "logged_at": "2026-02-10T10:00:00", "state": "open", "source": "typed"},
+    {"kind": "promise", "ref": "vfan:2026-03-05:CA1", "supplier": "VFAN", "item_code": "CA1", "qty": "40",
+     "event_date": "2026-03-05", "logged_at": "2026-03-05T10:00:00", "state": "open", "source": "typed"},
+    {"kind": "promise", "ref": "p-undated", "item_code": "HG3", "qty": "5", "logged_at": "2026-02-01T09:00:00"},
+]
+# Two price cuts: ITEM-A's before 28 Feb, ITEM-C's after it.
+CUT_ROWS = [("CA1", NAMES["A"], "2026-01-20", "1.0", "0.8"), ("HG3", NAMES["C"], "2026-03-02", "2", "1.5")]
+
+
+@test("the cost seam: cost_reads is gather's four reads; accessory_table and apply_costs give the model's items and costs")
+def _():
+    w = World()
+    with data_root():
+        with standing_in(w):
+            costs = stock.cost_reads()
+            inp = stock.gather()
+        m = stock.build(inp, stock.settings())
+        table, bridge, main_snap = stock.accessory_table(inp.rows, inp.price_book, inp.snapshot)
+        bare = list(stock.accessory_table(inp.rows, inp.price_book, inp.snapshot)[0].values())
+        in_main = [r for r in inp.snapshot if ledger.is_main(r["warehouse_name"])]
+        known = bridge.get(L("A"))
+    assert set(costs) == {"price_book", "snapshot", "mrn", "sheet", "unread"} and costs["unread"] == []
+    assert (costs["price_book"], costs["snapshot"], costs["mrn"], costs["sheet"]) == (inp.price_book, inp.snapshot,
+                                                                                     inp.mrn, inp.sheet)
+    assert costs["mrn"]["CA1"]["cost"] == Decimal("0.4") and costs["sheet"]["DS1"]["cost"] == Decimal("10.0")
+    assert w.pg == [stock.SHEET_SQL] * 2                     # the pricing sheet on the read-only session, both times
+    # every accessory by its ledger name, with the model's code, name, sales and receipts; the rest is build()'s
+    assert list(table) == [it.ledger_name for it in m.items] == sorted(table)
+    assert main_snap == in_main and len(main_snap) == 5 and known == NAMES["A"]
+    for it in m.items:
+        t = table[it.ledger_name]
+        assert (t.code, t.name, t.sales, t.last_sale, t.receipts) == (it.code, it.name, it.sales, it.last_sale,
+                                                                      it.receipts), it.ledger_name
+        assert not t.display and t.cost is None and t.series == [] and t.on_hand == 0
+    assert item(m, "DISP").display                           # the display flag is set by build()
+    stock.apply_costs(table, inp.mrn, inp.sheet)
+    assert {n: (t.cost, t.cost_source, t.cost_ref) for n, t in table.items()} == {
+        it.ledger_name: (it.cost, it.cost_source, it.cost_ref) for it in m.items}
+    # the Items themselves will do; with nothing read, each takes its newest receipt's rate (ITEM-A 100 / 200)
+    stock.apply_costs(bare, None, None)
+    assert {it.code: (it.cost_source, it.cost) for it in bare} == {
+        "CA1": ("receipt", Decimal("0.5")), "CB2": ("receipt", Decimal("2.5")), "HG3": ("receipt", Decimal("0.8")),
+        "SN4": ("receipt", Decimal(3)), "FO5": ("receipt", Decimal("1.5")), "DS1": ("receipt", Decimal(10))}
+    # a cost read that fails is None and named in gather()'s words; the snapshot is required
+    with data_root():
+        with standing_in(World(fail={stock.MRN_SQL: RuntimeError("down")})):
+            costs = stock.cost_reads()
+        with standing_in(World(fail={stock.SNAPSHOT_SQL: RuntimeError("down")})):
+            raises(RuntimeError, stock.cost_reads)
+        down = (metrics.STOCK_SQL, stock.PRICE_BOOK_SQL, stock.SUPPLIER_SQL, stock.MRN_SQL, stock.SHEET_SQL,
+                stock.PRICE_CUT_SQL)
+        with standing_in(World(fail={sql: RuntimeError("down") for sql in down})):
+            inp = stock.gather()
+    assert costs["mrn"] is None and costs["unread"] == ["the MRN landed costs (mrn_landed_costs) (RuntimeError)"]
+    assert costs["price_book"] and costs["sheet"] and costs["snapshot"]
+    # gather() names each failed read in its own place among the others, as before the cost reads moved
+    assert inp.unread == [f"{words} (RuntimeError)" for words in (
+        "the portal's figure at cost", "the price book (item codes)", "the supplier invoices (lead time)",
+        "the MRN landed costs (mrn_landed_costs)", "the pricing sheet (purchase_costs)",
+        "the price book's changes (price cuts)")], inp.unread
+    assert (inp.price_book, inp.mrn, inp.sheet, inp.price_cuts) == (None, None, None, None) and inp.snapshot
+
+
+@test("as on a day: as_of None is today's model; the ledger's last day, the snapshot's own, adds only its marker")
+def _():
+    with data_root():
+        with standing_in(World()):
+            cfg, inp = stock.settings(), stock.gather()
+        today, none = stock.build(inp, cfg), stock.build(inp, cfg, as_of=None)
+        last, typed = stock.build(inp, cfg, as_of=D), stock.build(inp, cfg, as_of=D.isoformat())
+        screens = [(view(none, "n"), view(today, "n")) for view in (stock.headline_lines, stock.reorder_lines,
+                                                                     stock.ageing_lines, stock.damage_view_lines)]
+        head = stock.headline_lines(last, "n")
+    assert facts_of(none) == facts_of(today) and "as_of" not in today.facts and all(a == b for a, b in screens)
+    got = facts_of(last)
+    marker = got.pop("as_of")
+    assert got == facts_of(today), "cut at its own last day, the ledger is today's model"
+    assert marker == {"date": D.isoformat(), "ledger_to": D.isoformat(), "snapshot_as_of": D.isoformat(),
+                      "compared": True, "not_compared": None, "cost_words": "at today's landed cost"}, marker
+    assert facts_of(typed) == facts_of(last)                 # a day as text is the same day
+    assert head[0] == ("STOCK  main store, Main Store: as on Sun 15 Mar, the ledger cut at the end of that day (it runs "
+                       "to Sun 15 Mar); stock balance as on Sun 15 Mar"), head[0]
+    assert "  5 items, 505 units, BHD 815.000 at selling price (the portal's figures)" in head
+    assert head[2].startswith("  At today's landed cost BHD 412.800 (MRN;"), head[2]
+    assert "  The ledger agrees with the stock balance on all 5 items (Sun 15 Mar)." in head
+    assert ("As on Sun 15 Mar: the ledger is cut at the end of that day (it runs to Sun 15 Mar), and every unit is "
+            "valued at today's landed cost.") in head
+
+
+@test("as on a day in the past: the model of the rows, price cuts and promise lines cut by hand; the portal set aside")
+def _():
+    feb = date(2026, 2, 28)
+    with data_root():
+        paths.write_text(stock.kpi_log_file(), "\n".join(json.dumps(x) for x in LOG_LINES) + "\n")
+        with standing_in(World(cuts=CUT_ROWS)):
+            cfg, inp = stock.settings(), stock.gather()
+        today, past, hand = stock.build(inp, cfg), stock.build(inp, cfg, as_of=feb), stock.build(cut_by_hand(inp, feb), cfg)
+        head, item_b = stock.headline_lines(past, "n"), stock.item_lines(past, "CB2", "n")
+        ageing = stock.ageing_lines(past, "n")
+    assert past.d == hand.d == feb and past.facts["data_date"] == feb
+    assert beside_the_snapshot_out(facts_of(past)) == beside_the_snapshot_out(facts_of(hand))
+    # 28 Feb by hand: A 1200 - 2 a day for 393 days = 414; B 100 - 30 - 35 = 35; ITEM-N arrives on 1 Mar
+    assert [item(past, k).on_hand for k in ("A", "B", "C", "DISP")] == [414, 35, 50, 5]
+    assert L("N") not in {it.ledger_name for it in past.items} and L("N") in {it.ledger_name for it in today.items}
+    # the promise line ordered on 5 Mar is not yet on order; the undated one is counted by the day it was logged
+    oo, oo_now = past.facts["on_order"], today.facts["on_order"]
+    assert (oo["logged"], oo["counted"], oo["unmatched"]) == (2, 1, 1) and (oo_now["logged"], oo_now["counted"]) == (3, 2)
+    assert (item(past, "B").on_order, item(past, "A").on_order, item(today, "A").on_order) == (30, 0, 40)
+    # ITEM-C's cut of 2 Mar is not yet made: neither used nor waiting
+    cut_of = {r["item"].code: r["cut"] for r in past.facts["review"]["rows"]}
+    cut_now = {r["item"].code: r["cut"] for r in today.facts["review"]["rows"]}
+    assert cut_of["CA1"]["date"] == date(2026, 1, 20) and cut_of["HG3"] is None and cut_now["HG3"]["date"] == date(2026, 3, 2)
+    assert past.facts["review"]["cuts_later"] == 0
+    # the snapshot is as on 15 Mar: the portal's figures and the ledger check are not set beside 28 Feb
+    words = "not compared: the snapshot is not as on Sat 28 Feb"
+    assert past.facts["as_of"] == {"date": feb, "ledger_to": D, "snapshot_as_of": D, "compared": False,
+                                   "not_compared": words, "cost_words": "at today's landed cost"}
+    h, chk = past.facts["headline"], past.facts["ledger_check"]
+    assert [h[k] for k in PORTAL_KEYS] == [None, None, None, False, None, None, None, None, words], h
+    assert (chk["agree"], chk["differ"], chk["compared_on"], chk["unknown_snapshot_items"], chk["not_compared"]) == (
+        None, [], None, [], words)
+    # 414 x 0.4 + 35 x 2.5 + 50 x 0.8 + 5 x 10, at today's costs
+    assert h["cost_bhd"] == hand.facts["headline"]["cost_bhd"] == Decimal("343.100")
+    assert head[0] == ("STOCK  main store, Main Store: as on Sat 28 Feb, the ledger cut at the end of that day (it runs "
+                       "to Sun 15 Mar); stock balance as on Sun 15 Mar"), head[0]
+    assert head[1] == f"  The portal's figures and the ledger check: {words}.", head[1]
+    assert head[2].startswith("  At today's landed cost BHD 343.100 (MRN;"), head[2]
+    for said in ("The ledger agrees", "The ledger differs", "The portal at cost", "The portal's figure at cost",
+                 "at selling price", "match no accessory"):
+        assert not any(said in ln for ln in head + item_b), said
+    assert item_b[1] == ("  Main store, end of Sat 28 Feb: 35 units; at cost BHD 87.500 (the latest receipt rate 2.500 a "
+                         "unit: neither an MRN landed cost nor a pricing-sheet cost for CB2)"), item_b[1]
+    note = ("As on Sat 28 Feb: the ledger is cut at the end of that day (it runs to Sun 15 Mar), and every unit is "
+            "valued at today's landed cost.")
+    assert note in head and note in item_b and note in ageing
+    for line in head + item_b + ageing:
+        fmt.careful(line)
+    # with a stock balance as on 28 Feb (made by hand from the ledger), everything is set beside it, as on that day
+    snap = [dict(r, as_of_date=feb.isoformat()) for r in snapshot_rows({"A": 414, "B": 35, "N": 0})]
+    with data_root():
+        paths.write_text(stock.kpi_log_file(), "\n".join(json.dumps(x) for x in LOG_LINES) + "\n")
+        with standing_in(World(cuts=CUT_ROWS, snapshot=snap)):
+            cfg, inp = stock.settings(), stock.gather()
+        past, hand = stock.build(inp, cfg, as_of=feb), stock.build(cut_by_hand(inp, feb), cfg)
+        head = stock.headline_lines(past, "n")
+    got = facts_of(past)
+    assert got.pop("as_of")["compared"] is True and got == facts_of(hand)
+    chk = past.facts["ledger_check"]
+    assert (chk["agree"], chk["differ"], chk["compared_on"]) == (4, [], feb) and "not_compared" not in chk
+    assert "  4 items, 504 units, BHD 694.000 at selling price (the portal's figures)" in head, head[:3]   # 414+175+100+5
+    assert "  The ledger agrees with the stock balance on all 4 items (Sat 28 Feb)." in head
+
+
+@test("as on a day nothing moved: D is that day; a unit keeps today's cost; a day outside the ledger is one sentence")
+def _():
+    fri = date(2026, 2, 20)                                  # a Friday: in this world nothing moves on it
+    b = world()
+    b.rows = [r for r in b.rows if r["date"] != fri]
+    with data_root():
+        with standing_in(World(book=b)):
+            cfg, inp = stock.settings(), stock.gather()
+        m, typed = stock.build(inp, cfg, as_of=fri), stock.build(inp, cfg, as_of=fri.isoformat())
+    assert ledger.last_date([r for r in inp.rows if r["date"] <= fri]) == fri - timedelta(days=1)
+    assert m.d == fri and m.facts["data_date"] == fri and facts_of(typed) == facts_of(m)
+    a = item(m, "A")
+    # 1200 - 2 a day from 1 Feb 2025 to 19 Feb 2026 (384 days) = 432, on the Thursday and on the Friday
+    assert len(a.series) == (fri - m.series_start).days + 1 and a.on_hand == a.series[-2] == 432
+    r = m.facts["fast"]["rates"][L("A")]
+    assert (r.sold, r.days_in_stock) == (178, 90)            # the 90 days to the Friday, which sold nothing
+    # costs stay today's: before ITEM-B's receipt of 30 Jan (2.50 a unit) the ledger knows only June's (60 / 30)
+    jan = date(2026, 1, 20)
+    with data_root():
+        with standing_in(World()):
+            cfg, inp = stock.settings(), stock.gather()
+        past, hand = stock.build(inp, cfg, as_of=jan), stock.build(cut_by_hand(inp, jan), cfg)
+        for day, said in ((D + timedelta(days=1), "The stock ledger runs to 15 March 2026: it cannot show the stock as "
+                                                  "on 16 March 2026."),
+                          (date(2025, 1, 31), "The stock ledger starts on 1 February 2025: it cannot show the stock as "
+                                              "on 31 January 2025."),
+                          ("31-01-2026", "The date is written YYYY-MM-DD: '31-01-2026' is not one.")):
+            exc = raises(stock.StockInput, lambda day=day: stock.build(inp, cfg, as_of=day))
+            assert str(exc) == said, str(exc)
+        exc = raises(stock.StockInput, lambda: stock.build(replace(inp, rows=[]), cfg, as_of=D))
+        assert "No stock ledger is loaded" in str(exc)
+    assert (item(past, "B").cost_source, item(past, "B").cost) == ("receipt", Decimal("2.5"))
+    assert item(hand, "B").cost == Decimal(2) and item(hand, "B").cost_source == "receipt"
+    assert item(past, "A").cost == item(hand, "A").cost == Decimal("0.4")      # an MRN cost is today's either way
+    assert past.facts["as_of"]["cost_words"] == "at today's landed cost"
+
+
 # ── the real files (read-only; SKIP when they are not on this machine) ────────
 
 @test("real files (SKIP without a loaded folder): ledger = stock balance on every item, the ageing adds up, the list holds")
@@ -1069,8 +1297,20 @@ def _():
         text = "\n".join(stock.headline_lines(m, inp.ledger_note) + stock.reorder_lines(m, inp.ledger_note)
                          + stock.ageing_lines(m, inp.ledger_note))
         assert not NINE.search(text) and not LONG.search(text)
+        # as on the last day of last month (a month-end sheet): its ageing adds up to the ledger's own balance there
+        end = stock.month_start(m.d) - timedelta(days=1)
+        t2 = time.perf_counter()
+        past = stock.build(inp, stock.settings(), as_of=end)
+        t3 = time.perf_counter()
+        names = {it.ledger_name for it in past.items}
+        held = sum((max(v, Decimal(0)) for (wh, name), v in ledger.balances(led.rows, as_of=end).items()
+                    if name in names and ledger.is_main(wh)), Decimal(0))
+        ag = past.facts["ageing"]
+        assert past.d == end and ag["units"] + ag["display_units"] == ag["main_units"] == held, (ag["main_units"], held)
+        assert names <= {it.ledger_name for it in m.items} and past.facts["as_of"]["compared"] == (m.stock_as_of == end)
         print(f"    {len(m.items)} accessory items, {chk['agree']} agree with the stock balance, "
-              f"{len(f['order'])} on the order list, ageing adds up; {t1 - t0:.1f}s")
+              f"{len(f['order'])} on the order list, ageing adds up; {t1 - t0:.1f}s; as on {end}: "
+              f"{len(past.items)} items, ageing adds up; {t3 - t2:.1f}s")
 
 
 def main() -> int:

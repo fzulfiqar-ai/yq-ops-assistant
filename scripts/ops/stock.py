@@ -77,6 +77,14 @@ main-store balance is set beside the snapshot item by item, and a difference is 
     equal the portal, and are left out of cover, the order list, the fast movers and the ageing (the
     ageing table names them on a row of their own, so that it still adds up to the main store).
 
+THE SEAM. A unit is valued in three steps that build() and gather() take and scripts.ops.moves takes
+too, so both commands value on one basis: cost_reads() (the price book, the snapshot, the MRN landed
+costs, the pricing sheet), accessory_table() (the accessories with their codes, sales and receipts)
+and apply_costs() (each item's unit cost, the basis above). build(inp, cfg, as_of) is the model at the
+end of an earlier day of the ledger, for the sheets of a closed week or month: the rows, the price
+cuts and the promise lines cut at that day, the costs today's and said so, and the portal's figures
+set beside it only when the snapshot is as on that day too.
+
 Reads, all through scripts.ops.db: the ledger (above), the newest stock_balance snapshot, the
 portal's warehouse read, the Command Centre's stock rows, the price book (selling_prices: code and
 name only), supplier_prices, and purchase_costs on the read-only session. A read that fails costs
@@ -452,27 +460,57 @@ def po_vendors(rows) -> dict[str, str]:
     return out
 
 
+# The reads beside the snapshot that a unit's cost rests on (cost_reads()), each with the words that name it when it
+# fails: the price book gives an item its code, the code its MRN landed cost or its pricing-sheet cost.
+COST_READS = (
+    ("the price book (item codes)", "price_book", lambda: db.rpc(PRICE_BOOK_SQL)),
+    ("the MRN landed costs (mrn_landed_costs)", "mrn", lambda: mrn_costs(db.rpc(MRN_SQL))),
+    ("the pricing sheet (purchase_costs)", "sheet", read_sheet),
+)
+COST_WORDS = {name: words for words, name, _read in COST_READS}
+
+
+def cost_reads() -> dict:
+    """{price_book, snapshot, mrn, sheet, unread}: the four reads a unit's cost on /yq-stock's basis rests on
+    (accessory_table() and apply_costs() take them), with gather()'s statements and gather()'s words for a read
+    that fails. The snapshot is required, as in gather(): a failure raises. Any other read that fails is None and
+    named in `unread` ("<its words> (<the error's type>)"), in the order of COST_READS."""
+    out = {"snapshot": db.rpc(SNAPSHOT_SQL), "unread": []}
+    for words, name, read in COST_READS:
+        try:
+            out[name] = read()
+        except Exception as exc:  # noqa: BLE001  (one part of the screen, never the screen)
+            out[name] = None
+            out["unread"].append(f"{words} ({type(exc).__name__})")
+    return out
+
+
 def gather(prefer: str = "auto") -> Inputs:
     """Every read the command makes. The ledger and the snapshot are required; any other read that
-    fails is named in `unread` and costs its own part of the screen."""
+    fails is named in `unread` and costs its own part of the screen. The reads a unit's cost rests on
+    are cost_reads()' own; a failed one is named in its place among the others."""
     led, info = ledger.for_audit(prefer)
     warnings = [led.cache_note] if led.cache_note else []
-    snapshot = db.rpc(SNAPSHOT_SQL)
     portal = db.rpc(PORTAL_WAREHOUSE_SQL)
-    inp = Inputs(rows=led.rows, ledger_note=info["note"], snapshot=snapshot, portal_warehouses=portal,
+    costs = cost_reads()                    # the snapshot first, right after the portal's read of the same table
+    inp = Inputs(rows=led.rows, ledger_note=info["note"], snapshot=costs["snapshot"], portal_warehouses=portal,
                  warnings=warnings)
     parts = (
         ("the portal's figure at cost", "portal_cost", lambda: metrics.stock_cost_summary(db.rpc(metrics.STOCK_SQL))),
-        ("the price book (item codes)", "price_book", lambda: db.rpc(PRICE_BOOK_SQL)),
+        (COST_WORDS["price_book"], "price_book", None),
         ("the supplier invoices (lead time)", "invoices", lambda: db.rpc(SUPPLIER_SQL)),
-        ("the MRN landed costs (mrn_landed_costs)", "mrn", lambda: mrn_costs(db.rpc(MRN_SQL))),
-        ("the pricing sheet (purchase_costs)", "sheet", read_sheet),
+        (COST_WORDS["mrn"], "mrn", None),
+        (COST_WORDS["sheet"], "sheet", None),
         ("the KPI log (goods on order)", "promises", read_promises),
         ("the catalog (catalog_items)", "catalog", lambda: db.rpc(CATALOG_SQL)),
         ("the purchase orders (an item's supplier)", "po_vendor", lambda: po_vendors(db.rpc(PO_VENDOR_SQL))),
         ("the price book's changes (price cuts)", "price_cuts", lambda: db.rpc(PRICE_CUT_SQL)),
     )
     for words, name, read in parts:
+        if read is None:                   # read by cost_reads(): its answer, and its failure named in this place
+            setattr(inp, name, costs[name])
+            inp.unread += [u for u in costs["unread"] if u.startswith(f"{words} (")]
+            continue
         try:
             setattr(inp, name, read())
         except Exception as exc:  # noqa: BLE001  (one part of the screen, never the screen)
@@ -785,32 +823,32 @@ def _code_and_name(ledger_name: str, book: dict, stock_bridge: items.Bridge) -> 
     return None, ledger_name
 
 
-def build(inp: Inputs, cfg: Settings) -> Model:
-    rows = inp.rows
-    d = ledger.last_date(rows)
-    if d is None:
-        raise StockInput("No stock ledger is loaded: there is no stock to plan.")
-    notes: list[str] = []
-    warnings = list(inp.warnings)
-
+def accessory_table(rows, price_book, snapshot) -> tuple[dict[str, Item], items.Bridge, list[dict]]:
+    """({ledger name: Item}, the stock bridge, the snapshot's main-store rows): the accessories of these ledger rows
+    as /yq-stock counts them, before build() works anything out on them. An item is an accessory when it has ever
+    moved in the main store (items.accessory_items, through the bridge of the snapshot's main-store names and the
+    price book's); each Item holds its code and name (the price book's, else the bridge's), its sales in every
+    warehouse (units a day, the last sale) and its supplier receipts into the main store, oldest first; nothing
+    else (the display flag, the day series, the costs and the rest are build()'s). The items go in the order of
+    their ledger names.
+        rows        the stock ledger: the whole of it, or cut at a day (never a window that starts late)
+        price_book  {sku_code, item_name} rows, or None (not read)
+        snapshot    stock_balance rows of every warehouse (the main store's are kept), or []
+    scripts.ops.moves values its units with this and apply_costs(), so the two value on exactly one basis."""
     # the price book: the ledger names an item "<stock name> <code>"
     book: dict[str, tuple[str, str]] = {}
-    for r in inp.price_book or []:
+    for r in price_book or []:
         code, name = str(r.get("sku_code") or "").strip(), str(r.get("item_name") or "").strip()
         if code and name:
             book.setdefault(fold(f"{name} {code}"), (code, name))
-    main_snap = [r for r in inp.snapshot if ledger.is_main(r.get("warehouse_name"))]
-    stock_as_of = max((fmt.as_date(r.get("as_of_date")) for r in inp.snapshot if r.get("as_of_date")), default=None)
+    main_snap = [r for r in snapshot if ledger.is_main(r.get("warehouse_name"))]
     stock_bridge = items.Bridge([r.get("item_name") for r in main_snap] + [name for _c, name in book.values()])
     acc = items.accessory_items(rows, bridge=stock_bridge)
 
     model_items: dict[str, Item] = {}
     for ledger_name in sorted(acc):
         code, name = _code_and_name(ledger_name, book, stock_bridge)
-        it = Item(ledger_name=ledger_name, name=name, code=code)
-        it.display = bool(cfg.display) and (fold(code) in cfg.display or fold(name) in cfg.display
-                                            or fold(ledger_name) in cfg.display)
-        model_items[ledger_name] = it
+        model_items[ledger_name] = Item(ledger_name=ledger_name, name=name, code=code)
 
     # one pass: sales in every warehouse, receipts into the main store
     main_names: dict[str, bool] = {}
@@ -834,6 +872,86 @@ def build(inp: Inputs, cfg: Settings) -> Model:
                 slot[1] += r["value_in"]
     for name, by_voucher in receipts.items():
         model_items[name].receipts = [(day, voucher, u, v) for (day, voucher), (u, v) in sorted(by_voucher.items())]
+    return model_items, stock_bridge, main_snap
+
+
+def apply_costs(model_items, mrn, sheet) -> None:
+    """Each item's unit cost on /yq-stock's basis: cost, cost_source and cost_ref set (see THE BASIS: the code's MRN
+    landed cost, else the pricing sheet, else the latest main-store receipt rate; an item with none keeps None and
+    is counted apart, never valued at nought). model_items: {ledger name: Item} (accessory_table) or the Items;
+    mrn and sheet as gather() reads them (mrn_costs, sheet_costs), None when not read."""
+    mrn, sheet = mrn or {}, sheet or {}
+    for it in model_items.values() if isinstance(model_items, dict) else model_items:
+        key = code_key(it.code)
+        if key and key in mrn:
+            it.cost, it.cost_source, it.cost_ref = mrn[key]["cost"], "mrn", mrn[key]
+        elif key and key in sheet:
+            it.cost, it.cost_source = sheet[key]["cost"], "sheet"
+        else:
+            rr = receipt_rate(it)
+            if rr is not None:
+                it.cost, it.cost_source = rr, "receipt"
+
+
+def _cut_at(rows, as_of) -> tuple[date, list[dict]]:
+    """(the day, the ledger's rows dated up to and including it), for build(as_of=...): a day from the ledger's
+    first to its last, a day on which nothing moved included. One plain sentence for any other."""
+    day = fmt.as_date(as_of)
+    if day is None:
+        raise StockInput(f"The date is written YYYY-MM-DD: {as_of!r} is not one.")
+    first, last = ledger.first_date(rows), ledger.last_date(rows)
+    if last is None:
+        raise StockInput("No stock ledger is loaded: there is no stock to plan.")
+    if day > last:
+        raise StockInput(f"The stock ledger runs to {fmt.day_long(last)}: it cannot show the stock as on "
+                         f"{fmt.day_long(day)}.")
+    if day < first:
+        raise StockInput(f"The stock ledger starts on {fmt.day_long(first)}: it cannot show the stock as on "
+                         f"{fmt.day_long(day)}.")
+    return day, [r for r in rows if r["date"] <= day]
+
+
+def _dated_until(rows, day: date, *keys) -> list[dict] | None:
+    """The rows dated on or before `day`, a row's date being the first of `keys` that reads as one (a row with none
+    is left out); None stays None (a read that failed, or no KPI log)."""
+    if rows is None:
+        return None
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        when = next((x for x in (fmt.as_date(r.get(k)) for k in keys) if x is not None), None)
+        if when is not None and when <= day:
+            out.append(r)
+    return out
+
+
+def build(inp: Inputs, cfg: Settings, as_of=None) -> Model:
+    """The stock Model at the end of the ledger's last day (D), or, with `as_of` (a date or 'YYYY-MM-DD' from the
+    ledger's first day to its last), at the end of that day: the ledger rows are cut at date <= as_of, the price
+    cuts at changed_on <= as_of and the KPI log's promise lines at (event_date, else logged_at) <= as_of, and D is
+    as_of even when nothing moved that day. The costs stay today's (the MRN landed costs and the pricing sheet as
+    read, the receipt rate of the whole ledger's newest receipt), and facts["as_of"] says so: {date, ledger_to,
+    snapshot_as_of, compared, not_compared, cost_words ("at today's landed cost")}. The portal's figures and the
+    ledger set beside the snapshot are compared only when the snapshot is as on as_of too; otherwise they are None
+    and headline / ledger_check carry not_compared ("not compared: the snapshot is not as on <day>"). With as_of
+    None nothing of this applies: the model, its facts and every screen are those of today."""
+    rows, cut = inp.rows, None
+    if as_of is not None:
+        cut, rows = _cut_at(rows, as_of)
+    d = cut if cut is not None else ledger.last_date(rows)
+    if d is None:
+        raise StockInput("No stock ledger is loaded: there is no stock to plan.")
+    notes: list[str] = []
+    warnings = list(inp.warnings)
+    promises = inp.promises if cut is None else _dated_until(inp.promises, cut, "event_date", "logged_at")
+    price_cuts = inp.price_cuts if cut is None else _dated_until(inp.price_cuts, cut, "changed_on")
+
+    model_items, _bridge, main_snap = accessory_table(rows, inp.price_book, inp.snapshot)
+    stock_as_of = max((fmt.as_date(r.get("as_of_date")) for r in inp.snapshot if r.get("as_of_date")), default=None)
+    for it in model_items.values():
+        it.display = bool(cfg.display) and (fold(it.code) in cfg.display or fold(it.name) in cfg.display
+                                            or fold(it.ledger_name) in cfg.display)
 
     # main-store day-end units from the series start (the RATE_DAYS before last month's end) to D
     m1 = month_start(d)
@@ -844,13 +962,16 @@ def build(inp: Inputs, cfg: Settings) -> Model:
         it.series = series.get(name, [])
         it.on_hand = it.series[-1] if it.series else ZERO
 
-    # the snapshot's selling value, and the ledger set beside it item by item
+    # the snapshot's selling value, and the ledger set beside it item by item; as on another day than the
+    # snapshot's, neither (they would set today's stock beside that day's)
+    compared = cut is None or stock_as_of == cut
+    not_compared = None if compared else f"not compared: the snapshot is not as on {fmt.day(cut)}"
     by_name: dict[str, Item] = {}
     for it in model_items.values():
         by_name.setdefault(fold(it.name), it)
     snap_units: dict[str, Decimal] = {}
     unknown_snap = []
-    for r in main_snap:
+    for r in main_snap if compared else ():
         key = fold(r.get("item_name"))
         snap_units[key] = snap_units.get(key, ZERO) + fmt.dec(r.get("net_qty"))
         it = by_name.get(key)
@@ -858,9 +979,9 @@ def build(inp: Inputs, cfg: Settings) -> Model:
             unknown_snap.append(str(r.get("item_name") or ""))
         else:
             it.sell_value += fmt.dec(r.get("value_bhd"))
-    compare_day = min(d, stock_as_of) if stock_as_of else d
+    compare_day = (min(d, stock_as_of) if stock_as_of else d) if compared else None
     agree, differ = 0, []
-    for it in model_items.values():
+    for it in model_items.values() if compared else ():
         snap = snap_units.get(fold(it.name), ZERO)
         mine = day_value(it, start, compare_day)
         if snap == 0 and mine == 0:
@@ -872,17 +993,16 @@ def build(inp: Inputs, cfg: Settings) -> Model:
     negative = [it.name for it in model_items.values() if it.on_hand < 0]
 
     # costs: the code's MRN landed cost, else the pricing sheet, else the latest receipt rate (the owner, 15-Oct-2026)
-    mrn, sheet = inp.mrn or {}, inp.sheet or {}
-    for it in model_items.values():
-        key = code_key(it.code)
-        if key and key in mrn:
-            it.cost, it.cost_source, it.cost_ref = mrn[key]["cost"], "mrn", mrn[key]
-        elif key and key in sheet:
-            it.cost, it.cost_source = sheet[key]["cost"], "sheet"
-        else:
-            rr = receipt_rate(it)
-            if rr is not None:
-                it.cost, it.cost_source = rr, "receipt"
+    if cut is None:
+        apply_costs(model_items, inp.mrn, inp.sheet)
+    else:
+        # as on a day a unit keeps today's cost: the receipt rate too is the newest receipt's of the whole ledger
+        today = accessory_table(inp.rows, inp.price_book, inp.snapshot)[0]
+        apply_costs(today, inp.mrn, inp.sheet)
+        for name, it in model_items.items():
+            now = today.get(name)
+            if now is not None:
+                it.cost, it.cost_source, it.cost_ref = now.cost, now.cost_source, now.cost_ref
 
     plannable = [it for it in model_items.values() if not it.display]
     # the stores beside the main store, the damage store and the sellers, read once: the order rule (a longer history
@@ -900,7 +1020,7 @@ def build(inp: Inputs, cfg: Settings) -> Model:
         return (leads.get(supplier) or leads[stock_season.OTHER])["days"]
 
     # goods on order: the KPI log's promise lines, each item's later supplier receipts paying the oldest line first
-    on_order = stock_orders.fifo(plannable, inp.promises, d, lead_of)
+    on_order = stock_orders.fifo(plannable, promises, d, lead_of)
     for it in plannable:
         it.on_order = on_order["on_order"].get(it.ledger_name, ZERO)
     if inp.mrn is None:
@@ -1133,6 +1253,10 @@ def build(inp: Inputs, cfg: Settings) -> Model:
     head["display_items"] = len(display_held)
     head["display_units"] = sum((it.on_hand for it in display_held), ZERO)
     head["vans"] = vans_beside(None)
+    if not compared:
+        # as on another day than the snapshot's: the portal's figures are of today's stock, so none stands here
+        head.update(items=None, units=None, sell_bhd=None, found=False, other_warehouses=None, uncosted_sell_bhd=None,
+                    portal_cost_bhd=None, portal_uncosted_items=None, not_compared=not_compared)
 
     facts = {
         "data_date": d, "stock_as_of": stock_as_of, "headline": head,
@@ -1152,10 +1276,16 @@ def build(inp: Inputs, cfg: Settings) -> Model:
         "defaults_used": list(cfg.defaults_used), "unread": list(inp.unread),
         "cost_basis": basis_counts(model_items.values()),
     }
+    if cut is not None:
+        if not compared:
+            facts["ledger_check"].update(agree=None, not_compared=not_compared)
+        facts["as_of"] = {"date": cut, "ledger_to": ledger.last_date(inp.rows), "snapshot_as_of": stock_as_of,
+                          "compared": compared, "not_compared": not_compared,
+                          "cost_words": cost_words(held_basis)[0].replace("at ", "at today's ", 1)}
     model = Model(d=d, stock_as_of=stock_as_of, cfg=cfg, items=list(model_items.values()), series_start=start,
                   facts=facts, notes=notes, warnings=warnings, flows=fl, ledger_note=inp.ledger_note)
     facts["damage"] = _part(model, "damage", lambda: stock_damage.damage_facts(model, fl))
-    facts["review"] = _part(model, "review", lambda: stock_review.review_facts(model, fl, inp.price_cuts))
+    facts["review"] = _part(model, "review", lambda: stock_review.review_facts(model, fl, price_cuts))
     facts["plan"] = _part(model, "plan", lambda: stock_plan.plan_facts(model, fl, inp.catalog, inp.po_vendor))
     return model
 
@@ -1183,6 +1313,10 @@ def _defaults_line(model: Model) -> list[str]:
 
 def _footer(model: Model, inp_note: str) -> list[str]:
     lines = [""] + list(BASIS_LINES) + [inp_note]
+    cut = model.facts.get("as_of")
+    if cut:
+        lines.append(f"As on {fmt.day(cut['date'])}: the ledger is cut at the end of that day (it runs to "
+                     f"{fmt.day(cut['ledger_to'])}), and every unit is valued {cut['cost_words']}.")
     lines += _defaults_line(model)
     for part in model.facts["unread"]:
         lines.append(f"Not read this time: {part}.")
@@ -1296,34 +1430,44 @@ def _lead_words(model: Model) -> str:
 def headline_lines(model: Model, ledger_note: str) -> list[str]:
     f, d = model.facts, model.d
     h = f["headline"]
-    lines = [f"STOCK  main store, {config.get('warehouses.main')}: stock as on {fmt.day(model.stock_as_of)}, "
-             f"ledger to {fmt.day(d)}"]
-    if h["found"]:
+    cut = f.get("as_of")                    # as on a day (build's as_of): the ledger cut there, today's costs
+    if cut:
+        lines = [f"STOCK  main store, {config.get('warehouses.main')}: as on {fmt.day(d)}, the ledger cut at the end of "
+                 f"that day (it runs to {fmt.day(cut['ledger_to'])}); stock balance as on {fmt.day(model.stock_as_of)}"]
+    else:
+        lines = [f"STOCK  main store, {config.get('warehouses.main')}: stock as on {fmt.day(model.stock_as_of)}, "
+                 f"ledger to {fmt.day(d)}"]
+    if h.get("not_compared"):
+        lines.append(f"  The portal's figures and the ledger check: {h['not_compared']}.")
+    elif h["found"]:
         lines.append(f"  {_plural(h['items'], 'item')}, {fmt.units(h['units'])} units, BHD {fmt.bhd(h['sell_bhd'])} "
                      "at selling price (the portal's figures)")
     else:
         lines.append("  The portal holds no stock of the main store in its newest snapshot.")
     label, basis = cost_words({"mrn": h["cost_mrn_items"], "sheet": h["cost_sheet_items"],
                                "receipt": h["cost_receipt_items"], "none": h["uncosted_items"]}, h["uncosted_sell_bhd"])
+    if cut:
+        label = label.replace("at ", "at today's ", 1)
     lines.append(f"  {label[0].upper() + label[1:]} BHD {fmt.bhd(h['cost_bhd'])} ({basis})")
-    if h["portal_cost_bhd"] is None:
-        lines.append("  The portal's figure at cost was not read this time.")
-    elif h["portal_cost_bhd"] == h["cost_bhd"]:
-        lines.append("  The portal's figure at cost is the same.")
-    else:
-        extra = (f"; {_plural(h['portal_uncosted_items'], 'item')} without a cost there" if h["portal_uncosted_items"]
-                 else "")
-        lines.append(f"  The portal at cost: BHD {fmt.bhd(h['portal_cost_bhd'])} (Focus average cost, else the latest "
-                     f"landed cost{extra})")
-    if h["other_warehouses"]:
-        lines.append(f"  The portal's snapshot holds {_plural(h['other_warehouses'], 'other warehouse')} too: its "
-                     "figure at cost counts them, the line above it does not.")
+    if not h.get("not_compared"):
+        if h["portal_cost_bhd"] is None:
+            lines.append("  The portal's figure at cost was not read this time.")
+        elif h["portal_cost_bhd"] == h["cost_bhd"]:
+            lines.append("  The portal's figure at cost is the same.")
+        else:
+            extra = (f"; {_plural(h['portal_uncosted_items'], 'item')} without a cost there"
+                     if h["portal_uncosted_items"] else "")
+            lines.append(f"  The portal at cost: BHD {fmt.bhd(h['portal_cost_bhd'])} (Focus average cost, else the "
+                         f"latest landed cost{extra})")
+        if h["other_warehouses"]:
+            lines.append(f"  The portal's snapshot holds {_plural(h['other_warehouses'], 'other warehouse')} too: its "
+                         "figure at cost counts them, the line above it does not.")
     chk = f["ledger_check"]
     if chk["differ"]:
         names = ", ".join(short(x["item"], 28) for x in chk["differ"][:3])
         lines.append(f"  The ledger differs from the stock balance on {_plural(len(chk['differ']), 'item')}, to check: "
                      f"{names}" + (" ..." if len(chk["differ"]) > 3 else ""))
-    else:
+    elif not chk.get("not_compared"):       # not compared: said with the portal's figures above
         lines.append(f"  The ledger agrees with the stock balance on all {_plural(chk['agree'], 'item')} "
                      f"({fmt.day(chk['compared_on'])}).")
     if chk["unknown_snapshot_items"]:
@@ -1623,8 +1767,10 @@ def item_lines(model: Model, query: str, ledger_note: str) -> list[str]:
     rates = f["fast"]["rates"]
     r = rates.get(it.ledger_name) or rate_at(it, model.series_start, d)
     lines = [f"ITEM  {it.code or '(no code)'}: {it.name}" + ("  (a display item)" if it.display else "")]
-    lines.append(f"  Main store, end of {fmt.day(d)}: {fmt.units(it.on_hand)} units; BHD {fmt.bhd(it.sell_value)} at "
-                 f"selling price in the stock balance; {item_cost_words(it)}")
+    # as on another day than the snapshot's, the stock balance's selling value is not that day's: it is left out
+    sell = ("" if f["ledger_check"].get("not_compared") else
+            f"BHD {fmt.bhd(it.sell_value)} at selling price in the stock balance; ")
+    lines.append(f"  Main store, end of {fmt.day(d)}: {fmt.units(it.on_hand)} units; {sell}{item_cost_words(it)}")
     lines.append(f"  Sold in the last {RATE_DAYS} days: {fmt.units(r.sold)} units, in stock at the end of "
                  f"{r.days_in_stock} of those days: {rate_text(r.rate, r.floored)} a day; cover "
                  f"{days_text(cover_of(max(it.on_hand, ZERO), r.rate))}" + (" days" if r.rate > 0 else ""))
