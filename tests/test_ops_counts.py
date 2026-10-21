@@ -160,6 +160,28 @@ class seam:
         return False
 
 
+class absent:
+    """A module of the package marked missing in sys.modules for the length of a with-block: importing it raises
+    ModuleNotFoundError that names it, as before it was built; what stood there before is put back after. The pins
+    of a hook's not-built-yet words keep holding once the module it hands over to is there."""
+    MISSING = object()
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __enter__(self):
+        self.saved = sys.modules.get(self.name, self.MISSING)
+        sys.modules[self.name] = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is self.MISSING:
+            sys.modules.pop(self.name, None)
+        else:
+            sys.modules[self.name] = self.saved
+        return False
+
+
 COSTS = {L("A"): Decimal("0.4"), L("B"): Decimal("2.5"), L("F"): Decimal("1.4")}   # ITEM-N has none
 
 
@@ -374,7 +396,7 @@ def _():
 
 @test("the workbook: the sheets in order, the top block and its yellow inputs, the hidden tag row, the rows, the print setup")
 def _():
-    with data_root() as root:
+    with data_root() as root, absent(recon.MOVES_MODULE):     # /yq-moves not there: its note on the Notes sheet
         res = prep_run()
         assert res["ok"] and res["exit"] if "exit" in res else res["ok"], res
         path = the_file(res)
@@ -482,7 +504,8 @@ def _():
 @test("the prep command: its screen, its files under exports/ and business_data/, the dates it refuses, a worktree")
 def _():
     with data_root() as root:
-        res = prep_run()
+        with absent(recon.MOVES_MODULE):                        # /yq-moves not there: one note line, the rest stands
+            res = prep_run()
         text = res["text"]
         assert text.startswith("COUNT SHEETS  exports") and "Blind: no sheet shows a book quantity" in text
         assert "4 sheets, 12 lines to count (vans 5, outlets 1, the main store 6)" in text, text
@@ -492,6 +515,10 @@ def _():
         files = [Path(f) for f in res["files"]]
         assert all(paths.allowed_output(f) for f in files) and len(files) == 4
         assert (paths.exports_dir(D) / "recon-prep.txt").read_text(encoding="utf-8").strip() == text
+        # with /yq-moves there, the month's movement exceptions are asked for (none in this world): no note line
+        moved = prep_run()["text"]
+        assert recon.NO_MOVES not in moved and "items on a movement exception of the month" in moved, moved
+        assert "4 sheets, 12 lines to count (vans 5, outlets 1, the main store 6)" in moved, moved
         # a prep date before the ledger's last day, and one that is not a date
         with standing_in(World(book=count_world())):
             early = recon.run(Args("prep", date_="2026-03-14"))
