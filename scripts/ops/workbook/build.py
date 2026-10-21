@@ -2,7 +2,9 @@
 
     month [YYYY-MM]   the monthly management sales report (the eight sheets of the Sep 2026 workbook) for a
                       whole month; with no month, the last whole month before the data date
-    week              the weekly report arrives in a later phase (/yq-week)
+    week [YYYY-MM-DD] the weekly report (/yq-week) for the week ending that Saturday, by default the last full
+                      week; a day that is not a Saturday is refused. It is handed to scripts.ops.workbook.week
+                      once that module exists; until then the command says it arrives in a later phase
     --prepared-on     the date on "Prepared ..." (default: today in Bahrain)
     --prepared-by     the name on "Prepared by ..." (default: config report.prepared_by, else none)
     --compare FILE    after the build, compare the new workbook with FILE, sheet by sheet (the golden test:
@@ -26,7 +28,10 @@ placeholders until the approval step of a later phase writes them; the file name
 """
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
+import re
 from datetime import date, timedelta
 
 from scripts.ops import db  # first: it blanks the side channels before any app import
@@ -35,6 +40,9 @@ from scripts.ops.workbook import book as bk, formula as fx, golden, model as mdl
 
 COMMAND = "report"
 REPORT_NAME = "YQ Bahrain - Mobile Accessories Sales Report - {label}"
+# The weekly workbook's own module: `report week` is handed to its run(args, saturday) once it exists.
+WEEK_MODULE = "scripts.ops.workbook.week"
+ISO_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 BASIS_SQL = "v.division NOT IN ('SIM', 'Devices')"
 LINES_SQL = (
     "SELECT v.line_id, v.invoice_no, v.line_no, v.sale_date::text AS sale_date, v.customer_account, "
@@ -59,13 +67,14 @@ class ReportInput(ValueError):
 
 
 def add_arguments(parser) -> None:
-    parser.add_argument("spec", nargs="*", metavar="word", help="month [YYYY-MM]; week arrives in a later phase")
+    parser.add_argument("spec", nargs="*", metavar="word", help="month [YYYY-MM], or week [YYYY-MM-DD] (a Saturday)")
     parser.add_argument("--prepared-on", help="the date on the report (YYYY-MM-DD; default today)")
     parser.add_argument("--prepared-by", help="the name on the report (default: config report.prepared_by)")
     parser.add_argument("--compare", help="a reference workbook to compare the new one with (the golden test)")
 
 
-def parse_spec(words: list[str]) -> tuple[str, str | None]:
+def parse_spec(words: list[str]) -> tuple[str, str | date | None]:
+    """-> ('month', 'YYYY-MM' or None) or ('week', the Saturday as a date, or None for the default week)."""
     words = [w.strip().lower() for raw in (words or []) for w in str(raw).split() if w.strip()]
     if not words:
         return "month", None
@@ -74,7 +83,19 @@ def parse_spec(words: list[str]) -> tuple[str, str | None]:
         raise ReportInput("say which report: `report month` (or `report month 2026-09`); the weekly one comes later")
     rest = words[1:]
     if kind == "week":
-        return "week", rest[0] if rest else None
+        if len(rest) > 1:
+            raise ReportInput("one week only, named by the Saturday it ends on, written YYYY-MM-DD (for example "
+                              "2026-10-17)")
+        if not rest:
+            return "week", None
+        try:
+            day = date.fromisoformat(rest[0]) if ISO_DAY.fullmatch(rest[0]) else None
+        except ValueError:
+            day = None
+        if day is None:
+            raise ReportInput("a week is named by the Saturday it ends on, written YYYY-MM-DD (for example 2026-10-17)")
+        mdl.Period.week(day)                # raises ValueError in one sentence for a day that is not a Saturday
+        return "week", day
     if len(rest) > 1:
         raise ReportInput("one month only, written YYYY-MM (for example 2026-09)")
     if rest:
@@ -237,7 +258,11 @@ def run(args, source: Source | None = None) -> dict:
     except (ReportInput, ValueError) as exc:
         return dict(out, ok=False, text=str(exc), exit=1)
     if kind == "week":
-        return dict(out, ok=False, text="The weekly report (/yq-week) arrives in a later phase.", exit=1)
+        # the weekly workbook's module takes it from here: run(args, saturday), where the Saturday (parse_spec's
+        # second part for a week) is a date already checked to be one, or None for the default week
+        if importlib.util.find_spec(WEEK_MODULE) is None:
+            return dict(out, ok=False, text="The weekly report (/yq-week) arrives in a later phase.", exit=1)
+        return importlib.import_module(WEEK_MODULE).run(args, month)
     source = source or Source()
     anchors = source.anchors()
     data_to = fmt.as_date(anchors.get("focus_to"))

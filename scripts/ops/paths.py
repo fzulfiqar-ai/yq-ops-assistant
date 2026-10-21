@@ -89,9 +89,10 @@ def exports_dir(data_date: date | str | None = None) -> Path:
 
 
 def reports_dir(kind: str) -> Path:
-    """exports/reports/weekly, monthly or stock (the workbooks he forwards)."""
-    if kind not in ("weekly", "monthly", "stock"):
-        raise ValueError("reports_dir: kind is 'weekly', 'monthly' or 'stock'")
+    """exports/reports/weekly, monthly or stock (the workbooks he forwards), or counts (the count sheets
+    he prints and types the counts into)."""
+    if kind not in ("weekly", "monthly", "stock", "counts"):
+        raise ValueError("reports_dir: kind is 'weekly', 'monthly', 'stock' or 'counts'")
     return data_root() / "exports" / "reports" / kind
 
 

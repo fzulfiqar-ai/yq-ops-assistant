@@ -447,7 +447,13 @@ def _():
         raises(config.ConfigMissing, stock.settings)                      # the lead time is never defaulted
     # the optional keys with no default in config.py are these three (the empty tables and texts are the others)
     assert config.OPTIONAL - set(config.DEFAULTS) == {"stock.fast_movers", "stock.cover_kpi_days",
-                                                      "stock.clear_target_days", "stock.order_every_days"}
+                                                      "stock.clear_target_days", "stock.order_every_days",
+                                                      "stock.position_stores", "stock.van_floor_days",
+                                                      "watch.floor_bhd", "watch.act_bhd", "watch.act_days",
+                                                      "report.bulk_invoice_bhd", "kpi.weekly_due_weekday",
+                                                      "kpi.monthly_due_working_day", "kpi.working_days",
+                                                      "kpi.fast_mover_availability_min", "kpi.new_skus_band",
+                                                      "kpi.major_purchase_bhd", "kpi.shop_min_bhd"}
     assert set(config.DEFAULTS) <= config.OPTIONAL <= set(config.KEYS)
     with data_root(drop=("stock.clear_target_days", "warehouses.damage")):
         cfg = stock.settings()

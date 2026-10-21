@@ -60,6 +60,11 @@ FIXTURE = {
     "stock.suppliers": {}, "stock.supplier_aliases": {}, "warehouses.damage": "",
     "stock.order_every_days": 30, "stock.supplier_every_days": {}, "stock.supplier_lead_days": {},
     "stock.season_lift": {}, "stock.pack_sizes": {},
+    "watch.floor_bhd": 10, "watch.act_bhd": 100, "watch.act_days": 3, "stock.position_stores": [],
+    "stock.van_floor_days": 0, "report.bulk_invoice_bhd": 100, "kpi.weekly_due_weekday": "Sunday",
+    "kpi.monthly_due_working_day": 5, "kpi.working_days": ["Sunday"], "kpi.fast_mover_availability_min": 0.5,
+    "kpi.new_skus_band": [1, 2], "kpi.major_purchase_bhd": 100, "kpi.shop_min_bhd": 10,
+    "kpi.supplier_register": "", "kpi.plan_targets": {},
 }
 
 

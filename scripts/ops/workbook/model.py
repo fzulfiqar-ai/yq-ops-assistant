@@ -1,8 +1,10 @@
 """The period model and the report's data: the day-book lines of two periods, tidied, with their lists.
 
 PERIOD. A month report covers the report month and the month before it (the comparison month). The
-weekly report (a later phase) is the same model with a week, its own key column and labels; only the
-month is built now (Period.week raises until then).
+weekly report (/yq-week) is the same model with a week: Period.week names the week by the Saturday it
+ends on (Sunday to Saturday) and adds its other comparison windows, the same seven days one month back
+and the month to date; the lines are then read from the first day any window reaches (data_first).
+Its own key column, sheets and labels arrive with the weekly workbook.
 
 DATA RULES (the plan's, the Sep 2026 file's):
   * the lines are v_sales, division not SIM and not Devices; zero-value lines stay (they are the
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from scripts.ops.workbook import categories as cats
 
@@ -33,6 +35,8 @@ MASKED_ID = re.compile(r"\*{6,}\d{3}")               # what the v_sales mask lea
 TRAILING_NUMBER = re.compile(r"(\d+)\s*$")
 MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
           "November", "December")
+DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")    # as date.weekday() counts
+SATURDAY = 5
 
 
 def month_bounds(ym: str) -> tuple[date, date]:
@@ -45,13 +49,28 @@ def month_bounds(ym: str) -> tuple[date, date]:
     return first, nxt - timedelta(days=1)
 
 
+def edate(d: date, months: int) -> date:
+    """Excel's EDATE: the same day of the month `months` months on (back, when negative), held to that
+    month's last day (the 31st of March one month back is the last day of February)."""
+    n = d.year * 12 + d.month - 1 + months
+    y, m0 = divmod(n, 12)
+    last = (date(y + (m0 == 11), (m0 + 1) % 12 + 1, 1) - timedelta(days=1)).day
+    return date(y, m0 + 1, min(d.day, last))
+
+
 @dataclass(frozen=True)
 class Period:
-    kind: str                # 'month' ('week' arrives with /yq-week)
+    kind: str                # 'month' or 'week'
     start: date
     end: date
     prev_start: date
     prev_end: date
+    # A week's other two windows and the first day any window reaches; None for a month, whose lines are
+    # read from prev_start as they always were.
+    lm_start: date | None = None      # the same seven days one month back: EDATE of the week's Sunday
+    lm_end: date | None = None
+    mtd_start: date | None = None     # the month to date: the first of the Saturday's month, to the Saturday
+    data_first: date | None = None    # min(prev_start, lm_start, mtd_start)
 
     @staticmethod
     def month(ym: str) -> "Period":
@@ -60,12 +79,29 @@ class Period:
         return Period("month", start, end, prev_end.replace(day=1), prev_end)
 
     @staticmethod
-    def week(_week_end: date) -> "Period":
-        raise NotImplementedError("the weekly workbook (/yq-week) arrives in a later phase")
+    def week(sat: date) -> "Period":
+        """The week that ends on the Saturday `sat` (Sunday to Saturday), against the four weeks before it
+        (prev), the same seven days one month back (lm) and the month to date (mtd). ValueError, in one
+        sentence, for a day that is not a Saturday."""
+        if isinstance(sat, datetime):
+            sat = sat.date()
+        if not isinstance(sat, date):
+            raise ValueError(f"a week is named by the Saturday it ends on, a date, not {sat!r}")
+        if sat.weekday() != SATURDAY:
+            ends = sat + timedelta(days=(SATURDAY - sat.weekday()) % 7)
+            raise ValueError(f"a week is named by the Saturday it ends on: {sat.isoformat()} is a "
+                             f"{DAYS[sat.weekday()]}, and the week that holds it ends on {ends.isoformat()}")
+        start = sat - timedelta(days=6)
+        prev_start = start - timedelta(days=28)
+        lm_start = edate(start, -1)
+        mtd_start = sat.replace(day=1)
+        return Period("week", start, sat, prev_start, start - timedelta(days=1), lm_start=lm_start,
+                      lm_end=lm_start + timedelta(days=6), mtd_start=mtd_start,
+                      data_first=min(prev_start, lm_start, mtd_start))
 
     @property
     def key(self) -> str:
-        return f"{self.start:%Y-%m}"
+        return self.end.isoformat() if self.kind == "week" else f"{self.start:%Y-%m}"
 
     @property
     def short(self) -> str:
@@ -77,6 +113,9 @@ class Period:
 
     @property
     def label(self) -> str:
+        """'Mar 2026'; a week: 'w/e 17 Oct 2026'."""
+        if self.kind == "week":
+            return f"w/e {self.end.day} {MONTHS[self.end.month - 1][:3]} {self.end.year}"
         return f"{self.short} {self.start.year}"
 
     @property
@@ -85,6 +124,9 @@ class Period:
 
     @property
     def long(self) -> str:
+        """'March 2026'; a week: 'the week ending 17 October 2026'."""
+        if self.kind == "week":
+            return f"the week ending {self.end.day} {MONTHS[self.end.month - 1]} {self.end.year}"
         return f"{MONTHS[self.start.month - 1]} {self.start.year}"
 
     @property
@@ -102,6 +144,14 @@ class Period:
 
     def in_cur(self, d: date) -> bool:
         return self.start <= d <= self.end
+
+    def in_lm(self, d: date) -> bool:
+        """In the same seven days one month back (a week only; never for a month)."""
+        return self.lm_start is not None and self.lm_start <= d <= self.lm_end
+
+    def in_mtd(self, d: date) -> bool:
+        """In the month to date (a week only: the first of the Saturday's month to the Saturday)."""
+        return self.mtd_start is not None and self.mtd_start <= d <= self.end
 
 
 @dataclass
@@ -262,7 +312,8 @@ def build(period: Period, rows: list[dict], *, category_names: dict | None = Non
           upcoming: dict | None = None) -> Model:
     names = dict(category_names or {})
     upcoming = {str(k).strip().casefold(): v for k, v in (upcoming or {}).items()}
-    lines = [ln for ln in tidy(rows) if period.prev_start <= ln.sale_date <= period.end]
+    first = period.data_first or period.prev_start          # a week reads every window's lines; a month its two
+    lines = [ln for ln in tidy(rows) if first <= ln.sale_date <= period.end]
     empty = [label for label, key in (("Discount", "discount_bhd"), ("VAT Amount", "vat_amount_bhd"))
              if rows and all(r.get(key) in (None, "") for r in rows)]
     warnings: list[str] = []
@@ -288,7 +339,7 @@ def build(period: Period, rows: list[dict], *, category_names: dict | None = Non
             it.cur_net += ln.net
             it.cur_qty += ln.qty
             it.cur_units += ln.qty if counted else 0
-        else:
+        elif period.in_prev(ln.sale_date):      # a month's line is in one of its two; a week's may be in neither
             it.prev_net += ln.net
             it.prev_qty += ln.qty
             it.prev_units += ln.qty if counted else 0

@@ -30,8 +30,11 @@ Covered:
     validations, a hidden column, a book's own conditional-format styles, the grid and input formats,
     freeze panes and a filter, a ROUNDUP formula with its cached value; refused when a rule names a
     style nobody registered; and the monthly file carrying none of them;
+  * the week as a period: the Saturday it ends on, its four windows (month-crossing, the 31st, the year's
+    end), its lines read from the first day a window reaches;
   * the command: the whole-month gate (not ready: nothing written), the week and a bad month refused
-    in one sentence, a month with no sales refused, the build record, the text;
+    in one sentence (a day that is not a Saturday too), the week handed to its own module once that
+    exists, a month with no sales refused, the build record, the text;
   * the real September file, when it is on this machine AND YQ_OPS_GOLDEN=1 is set (SKIP otherwise):
     September 2026 rebuilt from production through the read-only engine in a child process and
     compared with the reference on every sheet but Notes.
@@ -47,7 +50,7 @@ import sys
 import tempfile
 import traceback
 import zipfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -409,7 +412,59 @@ def _():
     assert mdl.dashboard_label("X01", "Short") == "X01 Short"
     raises(ValueError, lambda: mdl.month_bounds("2026-13"))
     raises(ValueError, lambda: mdl.month_bounds("Sep 2026"))
-    raises(NotImplementedError, lambda: mdl.Period.week(date(2026, 3, 7)))
+
+
+@test("period: a week ends on a Saturday, against the four weeks before, the same days a month back and the month to date")
+def _():
+    # the Saturday -> the week, the four weeks before, the same seven days one month back, the month to date,
+    # and the first day read: the four windows on every tile of the weekly workbook
+    cases = {
+        "2026-10-17": ("2026-10-11", "2026-10-17", "2026-09-13", "2026-10-10", "2026-09-11", "2026-09-17",
+                       "2026-10-01", "2026-09-11"),                              # a week inside a month
+        "2026-10-03": ("2026-09-27", "2026-10-03", "2026-08-30", "2026-09-26", "2026-08-27", "2026-09-02",
+                       "2026-10-01", "2026-08-27"),                              # a week across two months
+        "2026-10-31": ("2026-10-25", "2026-10-31", "2026-09-27", "2026-10-24", "2026-09-25", "2026-10-01",
+                       "2026-10-01", "2026-09-25"),                              # a Saturday on the 31st
+        "2026-06-06": ("2026-05-31", "2026-06-06", "2026-05-03", "2026-05-30", "2026-04-30", "2026-05-06",
+                       "2026-06-01", "2026-04-30"),                              # Sunday the 31st: April has 30
+        "2026-04-04": ("2026-03-29", "2026-04-04", "2026-03-01", "2026-03-28", "2026-02-28", "2026-03-06",
+                       "2026-04-01", "2026-02-28"),                              # one month back is February's end
+        "2027-01-02": ("2026-12-27", "2027-01-02", "2026-11-29", "2026-12-26", "2026-11-27", "2026-12-03",
+                       "2027-01-01", "2026-11-27"),                              # the year's end
+    }
+    for sat, want in cases.items():
+        p = mdl.Period.week(date.fromisoformat(sat))
+        got = (p.start, p.end, p.prev_start, p.prev_end, p.lm_start, p.lm_end, p.mtd_start, p.data_first)
+        assert got == tuple(date.fromisoformat(d) for d in want), (sat, got)
+        assert p.kind == "week" and p.key == sat and (p.end - p.start).days == 6 == (p.lm_end - p.lm_start).days
+    assert mdl.edate(date(2026, 3, 31), -1) == date(2026, 2, 28) and mdl.edate(date(2028, 3, 30), -1) == date(2028, 2, 29)
+    assert mdl.edate(date(2026, 1, 15), -1) == date(2025, 12, 15) and mdl.edate(date(2026, 12, 31), 2) == date(2027, 2, 28)
+    w = mdl.Period.week(date(2026, 10, 17))
+    assert (w.label, w.long) == ("w/e 17 Oct 2026", "the week ending 17 October 2026")
+    assert mdl.Period.week(date(2027, 1, 2)).label == "w/e 2 Jan 2027"
+    assert mdl.Period.week(datetime(2026, 10, 17, 9, 30)) == w
+    d = date.fromisoformat
+    assert w.in_cur(d("2026-10-11")) and not w.in_cur(d("2026-10-10")) and w.in_prev(d("2026-10-10"))
+    assert not w.in_prev(d("2026-09-12")) and w.in_lm(d("2026-09-11")) and not w.in_lm(d("2026-09-18"))
+    assert w.in_mtd(d("2026-10-01")) and not w.in_mtd(d("2026-09-30")) and not w.in_mtd(d("2026-10-18"))
+    for day, ends in (("2026-10-16", "2026-10-17"), ("2026-10-18", "2026-10-24")):
+        said = str(raises(ValueError, lambda x=day: mdl.Period.week(d(x))))
+        assert said.endswith(f"{day} is a {mdl.DAYS[d(day).weekday()]}, and the week that holds it ends on {ends}"), said
+    raises(ValueError, lambda: mdl.Period.week("2026-10-17"))
+    # a month is what it always was: no week window, its lines read from the month before
+    m = mdl.Period.month(MONTH)
+    assert (m.lm_start, m.lm_end, m.mtd_start, m.data_first) == (None, None, None, None)
+    assert (m.key, m.label, m.long) == ("2026-03", "Mar 2026", "March 2026") and not m.in_lm(date(2026, 3, 5))
+    # the week's lines: every window's, and none beyond; an item's comparison is the four weeks before only
+    item = ITEMS["X01"]
+    rows = [line(d("2026-09-10"), 1, 1, "Shop One", item, 1, 1.1, VAN_A),      # before every window: not read
+            line(d("2026-09-11"), 2, 1, "Shop One", item, 2, 1.1, VAN_A),      # the same days last month only
+            line(d("2026-09-20"), 3, 1, "Shop Two", item, 3, 1.1, VAN_B),      # the four weeks before
+            line(d("2026-10-12"), 4, 1, "Shop One", item, 4, 1.1, VAN_A),      # the week
+            line(d("2026-10-18"), 5, 1, "Shop One", item, 5, 1.1, VAN_A)]      # after the week: not read
+    model = mdl.build(w, rows)
+    assert [ln.sale_date for ln in model.lines] == [d("2026-09-11"), d("2026-09-20"), d("2026-10-12")]
+    assert (model.items[item].cur_qty, model.items[item].prev_qty) == (4, 3)
 
 
 # ── the eight sheets ───────────────────────────────────────────────────────────────────────────
@@ -857,9 +912,18 @@ def _():
 
 @test("command: the week, a bad month and a month with no sales are refused in one sentence")
 def _():
+    import importlib.util
     with data_root(last_load=LAST_LOAD):
-        out = build.run(Args(spec=("week",)), source=FakeSource())
-        assert out["exit"] == 1 and "later phase" in out["text"]
+        if importlib.util.find_spec(build.WEEK_MODULE) is None:          # until the weekly workbook's module exists
+            for words in (("week",), ("week", "2026-03-28")):
+                out = build.run(Args(spec=words), source=FakeSource())
+                assert out["exit"] == 1 and "later phase" in out["text"]
+        for words, said in ((("week", "2026-03-27"), "2026-03-27 is a Friday, and the week that holds it ends on "
+                                                     "2026-03-28"),
+                            (("week", "28-03-2026"), "written YYYY-MM-DD"), (("week", "2026-02-30"), "written YYYY-MM-DD"),
+                            (("week", "2026-03-28", "2026-04-04"), "one week only")):
+            out = build.run(Args(spec=words), source=FakeSource())
+            assert out["exit"] == 1 and said in out["text"] and "\n" not in out["text"], out["text"]
         out = build.run(Args(spec=("month", "2026-13")), source=FakeSource())
         assert out["exit"] == 1 and "YYYY-MM" in out["text"]
         out = build.run(Args(spec=("monthly",)), source=FakeSource())
@@ -867,7 +931,35 @@ def _():
         out = build.run(Args(spec=("month", "2026-01")), source=FakeSource())
         assert out["exit"] == 2 and "nothing to report" in out["text"], out["text"]
     assert build.parse_spec([]) == ("month", None) and build.parse_spec(["month 2026-03"]) == ("month", "2026-03")
+    assert build.parse_spec(["week"]) == ("week", None) and build.parse_spec(["WEEK", "2026-03-28"]) == \
+        ("week", date(2026, 3, 28))
     assert build.default_month(date(2026, 4, 7)) == "2026-03" and build.default_month(date(2026, 1, 3)) == "2025-12"
+
+
+@test("command: report week is handed to the weekly workbook's module once it exists, the Saturday as a date")
+def _():
+    import importlib.machinery
+    import types
+    seen = []
+    stand_in = types.ModuleType(build.WEEK_MODULE)
+    stand_in.__spec__ = importlib.machinery.ModuleSpec(build.WEEK_MODULE, None)
+    stand_in.run = lambda args, saturday: seen.append(saturday) or {"ok": True, "exit": 0, "text": "built"}
+    saved = sys.modules.get(build.WEEK_MODULE)
+    sys.modules[build.WEEK_MODULE] = stand_in
+    try:
+        with data_root(last_load=LAST_LOAD):
+            src = FakeSource()
+            assert build.run(Args(spec=("week", "2026-03-28")), source=src) == {"ok": True, "exit": 0, "text": "built"}
+            assert build.run(Args(spec=("week",)), source=src)["text"] == "built"
+            out = build.run(Args(spec=("week", "2026-03-27")), source=src)          # not a Saturday: refused first
+            assert out["exit"] == 1 and "Saturday" in out["text"]
+            assert src.calls == [], src.calls                     # the week reads through its own module, not this one
+    finally:
+        if saved is None:
+            sys.modules.pop(build.WEEK_MODULE, None)
+        else:
+            sys.modules[build.WEEK_MODULE] = saved
+    assert seen == [date(2026, 3, 28), None], seen
 
 
 @test("command: names a spreadsheet reads as one (capitals) or as a pattern are said, and the controls catch the sum")
