@@ -10,6 +10,9 @@
       the header chip: Focus data date and whether the marketplace answered; the invoice links
       (match_rate: delivered orders whose Focus invoice link a person ACCEPTED, "confirmed x of y" —
       a suggestion awaiting acceptance does not count) only for admin and management
+  GET /command/team-message                                         (admin + management)
+      the newest load's team message for the Copy button (X1, release 2b): {run, data_date, text,
+      created_at}; 204 before the first one is stored. Nothing is sent from here
 
 Every figure comes from app/metrics.py (the metric dictionary): marketplace money ex-VAT, units the
 shop asked for, the company target read as ex-VAT Accessories on business days. The routes only
@@ -83,6 +86,26 @@ def scope_attention(payload: dict, allowed: frozenset[str] | None) -> dict:
     return {**payload, "items": scope_items(payload.get("items"), allowed)}
 
 
+# ── the team message (X1) ──────────────────────────────────────────────────────
+# After a load's delivery step, scripts/yq_team_post.py stores the team message /yq-brief team prints (one row per load
+# run, upserted on run; created_at stays the first post's time) in team_messages (r9_team_messages_migration.sql). It
+# names the salesmen with their figures, so the table has RLS on and no policy and is granted to nobody: the API reads
+# it with the service-role client, never through the read-only RPC.
+TEAM_MESSAGE_FIELDS = ("run", "data_date", "text", "created_at")
+
+
+def latest_team_message() -> dict | None:
+    """The newest stored team message, {run, data_date, text, created_at} (ISO text as PostgREST writes it), or None
+    when none is stored. One select through the service-role client, retried once on a dropped connection."""
+    from app.database import get_client
+    from app.db_read import retry_read
+    rows = retry_read(lambda: get_client().table("team_messages").select(",".join(TEAM_MESSAGE_FIELDS))
+                      .order("created_at", desc=True).limit(1).execute(), what="team message").data or []
+    if not rows:
+        return None
+    return {k: rows[0].get(k) for k in TEAM_MESSAGE_FIELDS}
+
+
 def register(app) -> None:
     from fastapi import Depends, HTTPException
 
@@ -114,3 +137,19 @@ def register(app) -> None:
     def data_freshness_chip(user: CurrentUser = Depends(get_current_user)) -> dict:
         """The portal header's data-freshness chip ("Focus data to 24 Sep · Marketplace live")."""
         return metrics.freshness(show_match=user.role in metrics.COMMAND_ROLES)
+
+    @app.get("/command/team-message")
+    def command_team_message(user: CurrentUser = Depends(get_current_user)):
+        """The newest load's team message for the Command Centre's Copy button: {run, data_date, text, created_at}.
+        204 (no body) before the first one is stored; 503 when it cannot be read (the reason is logged, never a word
+        of the message). No return annotation: a 204 is a bare Response."""
+        _require_command(user)
+        from fastapi import Response
+        try:
+            msg = latest_team_message()
+        except Exception as e:  # noqa: BLE001 -- the kind only: the error can quote what was asked for
+            log.warning("team message not read (%s)", type(e).__name__)
+            raise HTTPException(status_code=503, detail="The team message could not be read. Try again in a minute.")
+        if msg is None:
+            return Response(status_code=204)
+        return msg

@@ -186,6 +186,9 @@ EXPECTED_GATES = {
     # and an accept moves an order to Delivered)
     ("GET", "/shop/focus/candidates"): ["admin"],
     ("POST", "/shop/orders/{order_id}/focus-link"): ["admin"],
+    # X1 (release 2b): the team message names the salesmen with their figures; the role check (admin and management,
+    # app.command_api._require_command) sits in the route, like the Command Centre's own routes
+    ("GET", "/command/team-message"): ["user"],
 }
 
 

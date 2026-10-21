@@ -1,9 +1,10 @@
 """The newest data load this process has seen (release R8).
 
 The portal and the marketplace answer from in-process caches (app/reports.py, app/metrics.py,
-app/shop.py). An upload through the Data page drops them itself (app.ai.flush_cache). The same
-refresh engine run anywhere else (a developer's PC, a cron) used to go unnoticed here: on
-7-Oct-2026 the Dashboard showed September for half an hour after October was loaded.
+app/shop.py, app/transfer_audit.py). An upload through the Data page drops them itself
+(app.ai.flush_cache). The same refresh engine run anywhere else (a developer's PC, a cron) used
+to go unnoticed here: on 7-Oct-2026 the Dashboard showed September for half an hour after October
+was loaded.
 
 Every load ends by writing an ingest_runs row: scripts/load_supabase.py once the tables are in,
 scripts/refresh.py at the very end, the batch importer on commit. So the highest ingest_runs.id
@@ -157,3 +158,8 @@ def drop_process_caches() -> None:
         invalidate()
     except Exception as e:  # noqa: BLE001
         log.warning("shop context not dropped: %s", e)
+    try:  # the Stock Moves pairing (GET /stock/flow, /stock/recon), worked out once per load from the stock ledger
+        from app.transfer_audit import invalidate as invalidate_transfers
+        invalidate_transfers()
+    except Exception as e:  # noqa: BLE001
+        log.warning("stock moves pairing not dropped: %s", e)

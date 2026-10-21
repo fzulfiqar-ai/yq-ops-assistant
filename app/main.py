@@ -1323,12 +1323,20 @@ def divisions(_user: CurrentUser = Depends(require_feature("Inventory"))) -> dic
 
 @app.get("/stock/recon")
 def stock_recon(_user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
-    """Per-van reconciliation: transferred in vs sold vs on-hand, with shortage flags."""
+    """Per store, from the stock ledger (v_salesman_stock_recon, release 2b): issued to it, received, sold, customer
+    returns, counts, and on hand = the ledger's balance, with shortage flags; each row with what the pairing by contents
+    found for its store (app/transfer_audit.py): not_received_qty, qty_differs_vouchers, elsewhere_vouchers. When the
+    pairing cannot be worked out the rows still come, those three None and as_of None."""
+    from app import transfer_audit
     from app.db_read import exec_sql
     rows = exec_sql(
         "SELECT * FROM v_salesman_stock_recon "
         "ORDER BY is_van DESC, shortage_value_bhd DESC NULLS LAST, salesman") or []
-    return {"vans": rows, "count": len(rows)}
+    try:
+        snap = transfer_audit.current()
+    except transfer_audit.Unavailable:
+        snap = None                                  # current() logged why; the van cards stand without it
+    return transfer_audit.recon(rows, snap)
 
 
 @app.get("/stock/daily")
@@ -1413,37 +1421,20 @@ def stock_daily(month: str | None = None, warehouse: str | None = None,
 def stock_flow(warehouse: str = "Accessories Warehouse", direction: str = "out",
                days: int = 30,
                _user: CurrentUser = Depends(require_feature("Stock Movement"))) -> dict:
-    """Issue → Receive tracking for one warehouse (owner's flow: storekeeper punches a
-    Stock Issue Voucher, the destination converts it to a Stock Receive Voucher — the
-    two legs share the voucher number). direction=out: what left this warehouse and
-    whether it was received; direction=in: what others issued TO this warehouse."""
-    from app.db_read import exec_sql_params
-    days = max(1, min(days, 365))
-    side = ("i.from_warehouse ILIKE '%' || $1 || '%'" if direction != "in"
-            else "(i.to_warehouse ILIKE '%' || $1 || '%' OR i.received_by ILIKE '%' || $1 || '%')")
-    rows = exec_sql_params(
-        "WITH i AS (SELECT * FROM v_transfer_flow), "
-        "mx AS (SELECT MAX(issued_on) AS d FROM v_transfer_flow) "
-        f"SELECT i.issued_on::text AS issued_on, i.voucher_no, i.item_name, "
-        "i.from_warehouse, i.to_warehouse, i.issued_qty, i.issued_value_bhd, "
-        "COALESCE(i.received_qty, 0) AS received_qty, i.received_by, "
-        "i.received_on::text AS received_on, i.status "
-        f"FROM i, mx WHERE {side} AND i.issued_on >= mx.d - $2::int "
-        "ORDER BY i.issued_on DESC, i.voucher_no, i.item_name LIMIT 800",
-        [warehouse, days]) or []
-    summary: dict[str, dict] = {}
-    for r in rows:
-        s = summary.setdefault(r["status"], {"legs": 0, "qty": 0.0})
-        s["legs"] += 1
-        s["qty"] += float(r.get("issued_qty") or 0)
-    partners: dict[str, float] = {}
-    for r in rows:
-        key = (r.get("to_warehouse") if direction != "in" else r.get("from_warehouse")) or "—"
-        partners[key] = partners.get(key, 0.0) + float(r.get("issued_qty") or 0)
-    top_partners = sorted(partners.items(), key=lambda kv: -kv[1])[:8]
-    return {"warehouse": warehouse, "direction": "in" if direction == "in" else "out",
-            "days": days, "rows": rows, "count": len(rows), "summary": summary,
-            "partners": [{"name": k, "qty": round(v, 1)} for k, v in top_partners]}
+    """Issue → Receive for one store, paired by contents (release 2b, app/transfer_audit.py): every Stock Issue
+    Voucher of the `days` days ending on the stock ledger's last date (both included), each paired with the Stock
+    Receive Voucher that holds the same goods by the very code /yq-moves runs (scripts/ops/pairing.py), never by the
+    voucher number, which Focus does not keep the same on the two legs. direction=out: what left this store, partners
+    by the store that actually received it; direction=in: what was sent to it, partners by the sender. One row per
+    issue line, newest first, at most 800 shown (`shown` of `count`); the summary, counts and partners cover every
+    issue of the window. The pairing is worked out once per data load. 503 when the stock ledger cannot be read."""
+    from fastapi import HTTPException
+    from app import transfer_audit
+    try:
+        snap = transfer_audit.current()
+    except transfer_audit.Unavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return transfer_audit.flow(snap, days=days, direction=direction, warehouse=warehouse)
 
 
 # ── Catalog / Item Master ─────────────────────────────────────────────────────

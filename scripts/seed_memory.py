@@ -51,8 +51,13 @@ GLOSSARY: list[str] = [
 
     "Stock-transfer flow in Focus: Stock Request Voucher -> Stock Issue Voucher (issues from a "
     "warehouse to a destination) -> Stock Receive Voucher -> Stock Transfer (a request is "
-    "optional). v_stock_transfers exposes from->to moves; v_salesman_stock_recon reconciles stock "
-    "issued to each salesman vs sold + on-hand and flags counted shortages and stock-to-damage.",
+    "optional). v_stock_transfers exposes from->to moves; v_salesman_stock_recon reconciles, per store "
+    "from the stock ledger (accessory items only), stock issued to it vs received, sold, sent back and "
+    "on hand, and flags counted shortages. Its on_hand_qty is the stock ledger's balance (received "
+    "minus issued), not the stock snapshot (stock value and company stock totals still come from "
+    "v_current_stock); besides the old columns it has warehouse_name, store_kind, received_qty, "
+    "customer_returns_qty, excess_qty, pending_qty (issued to the store minus received by it), "
+    "items_held, first_move and last_move.",
 
     "Product categories come from Focus's own item-groups in the Multi_level_stock_movement report "
     "(Cable, Charger, Power Bank, Headphones, Wireless HFs, Car Charger, Car Accessories, Wireless "

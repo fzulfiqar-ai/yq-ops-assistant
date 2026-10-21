@@ -113,12 +113,20 @@ v_stock_transfers     INTERNAL inter-warehouse stock transfers (Stock Issue Vouc
   received from vendor / MRN" use v_purchase_history instead.
   transfer_date, voucher, item_name, from_warehouse, to_warehouse, qty, value_bhd
 
-v_salesman_stock_recon  Per-salesman stock reconciliation: stock ISSUED to each van warehouse
-  vs SOLD / returned / still on hand, plus Focus 'Shortages in Stock'. Use for "stock shortages
-  by salesman", "is any salesman losing/leaking stock", "shrinkage", "unaccounted stock".
-  salesman, transferred_in_qty, transferred_in_value_bhd, transferred_out_qty, sold_qty,
+v_salesman_stock_recon  Per-store stock reconciliation from the STOCK LEDGER (accessory items only,
+  one row per van / outlet / store): stock ISSUED to it vs received, SOLD, sent back and still on
+  hand, plus Focus 'Shortages in Stock'. on_hand_qty = the stock ledger's balance (received minus
+  issued), not the stock snapshot (stock VALUE: v_current_stock). Use for "stock shortages by
+  salesman", "is any salesman losing/leaking stock", "shrinkage", "unaccounted stock", "issued
+  but not received yet".
+  salesman[the store name as the ledger writes it; vans end ' - Acc WH'], warehouse_type, is_van,
+  transferred_in_qty, transferred_in_value_bhd, transferred_out_qty, sold_qty,
   on_hand_qty, shortage_qty, shortage_value_bhd[HARD leakage signal, BHD],
-  unexplained_qty[issued - returned - sold - on-hand; SOFT signal]
+  unexplained_qty[issued - returned - sold - on-hand; SOFT signal],
+  warehouse_name[= salesman], store_kind('main'|'damage'|'sim'|'van'|'outlet'|'modern_trade'|
+  'facility'|'other'), received_qty[its own Stock Receive units], customer_returns_qty,
+  excess_qty[Focus 'Excesses in Stocks'], pending_qty[issued to it - received by it],
+  items_held[items with a ledger balance above 0], first_move, last_move
 
 v_po_price_history    Per-item PURCHASE-ORDER history — every PO line for an item, newest first. Use
   for "what did we pay/order item X for across orders", "F15 order/price history", "price we paid over
