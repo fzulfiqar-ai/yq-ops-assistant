@@ -13,10 +13,12 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import time
 from datetime import date
 from pathlib import Path
 
 CODE_ROOT = Path(__file__).resolve().parents[2]
+REPLACE_TRIES, REPLACE_WAIT_S = 40, 0.05       # _replace: about two seconds in all
 DROP_FOLDERS = ("Uplaods", "Uploads")          # the owner's folder is spelt 'Uplaods'; both are read
 _DDMMYY = re.compile(r"^(\d{2})(\d{2})(\d{2})$")
 
@@ -154,6 +156,19 @@ def allowed_output(path) -> bool:
     return _allowed_output(Path(path))
 
 
+def _replace(src, dst) -> None:
+    """os.replace, tried again for about two seconds while Windows refuses it (PermissionError: a reader in
+    another process, or a virus scanner, holds the target for a moment); any other error at once."""
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == REPLACE_TRIES - 1:
+                raise
+            time.sleep(REPLACE_WAIT_S)
+
+
 def copy_file(src, dst) -> Path:
     """Copy one file (bytes and times) to a place under business_data/ or exports/ of the data
     root: to a temp name first, then moved into place. The source is never changed."""
@@ -165,7 +180,7 @@ def copy_file(src, dst) -> Path:
     tmp = dst.with_name(dst.name + ".copying")
     try:
         shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
+        _replace(tmp, dst)
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -196,7 +211,7 @@ def write_text(path: Path, text: str) -> Path:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)

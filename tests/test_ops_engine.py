@@ -146,6 +146,34 @@ def _():
         raises(ValueError, lambda: paths.reports_dir("daily"))
 
 
+@test("a file Windows holds for a moment is written once it lets go; one it never lets go is an error, no temp file left")
+def _():
+    with data_root():
+        target = paths.ops_dir() / "state.json"
+        real_replace, real_sleep, calls = os.replace, paths.time.sleep, []
+
+        def busy(times):
+            def fake(src, dst):
+                calls.append(dst)
+                if len(calls) <= times:
+                    raise PermissionError(13, "Access is denied")
+                real_replace(src, dst)
+            return fake
+
+        paths.time.sleep = lambda _s: None
+        try:
+            paths.os.replace = busy(3)
+            paths.write_text(target, "{}\n")
+            assert target.read_text(encoding="utf-8") == "{}\n" and len(calls) == 4, calls
+            calls.clear()
+            paths.os.replace = busy(10 ** 6)
+            raises(PermissionError, lambda: paths.write_text(target, "[]\n"))
+            assert len(calls) == paths.REPLACE_TRIES and target.read_text(encoding="utf-8") == "{}\n"
+            assert not [p for p in target.parent.iterdir() if p.name.endswith(".tmp")], "a temp file was left"
+        finally:
+            paths.os.replace, paths.time.sleep = real_replace, real_sleep
+
+
 @test("the stock workbooks have their folder; any other kind of report is still refused")
 def _():
     with data_root() as root:
