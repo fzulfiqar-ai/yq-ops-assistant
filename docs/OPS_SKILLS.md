@@ -510,15 +510,17 @@ one of two lines, and the load check says the same in its own words:
   out on the screen.
 - **Explained and done** happen only on your words. An explained item stays off until it has grown by more
   than a quarter, become more pressing, or names a voucher that was not there.
-- **Not checked yet:** sales below cost, and returns against last month's kickback tier; both come with
-  the month-end release.
+- **Not checked yet:** sales below cost (it waits for the profitability report). Returns against last
+  month's kickback tier are checked by the month-end reconciliation (`/yq-month`, with the month's Ledger
+  export).
 
 ### The weekly workbook (`/yq-week`)
 
 - **The week** runs Sunday to Saturday and is named by its Saturday. It is built only when its Saturday
   is a complete day of the data (the last complete week, above); with no date it is the last full week,
-  the one `/yq-brief last-week` shows. The basis is the monthly workbook's: all accessories, B2B and the
-  two outlets, ex-VAT, the zero-value lines kept and left out of the counts.
+  the one `/yq-brief last-week` shows. The basis is the brief's: all accessories, B2B and the two outlets,
+  ex-VAT; the giveaway lines are on the Data sheet but in no units, invoices or accounts. (The monthly
+  workbook keeps your September report's way and counts them.)
 - **Four windows.** Every tile sets the week beside three others: the four weeks before, divided by four
   (an average week); the same seven days one month back; and the month to date (the first of the
   Saturday's month to the Saturday) against your KPI step, with what is still needed per working day to
@@ -537,7 +539,7 @@ one of two lines, and the load check says the same in its own words:
 - **Due on Sunday.** Your 90-day plan has the weekly report due on the Sunday after its week
   (`kpi.weekly_due_weekday` in `config.json` names another day). Each build leaves a record in
   `exports/ops/<data-date>/` with the day it was due and whether it was built on time: the evidence
-  KPI 7 counts.
+  KPI 7 counts. A second build of the same week keeps the first record and adds its own beside it.
 - **The AI weekly review** that follows is `/weekly-review`, as its command file says. It builds its own
   read-only pack and counts B2B accessories only, the two outlets left out, so its sales figures are lower
   than the workbook's. Its Top 5 actions reach the portal's AI insights only after your answers.
@@ -549,7 +551,8 @@ one of two lines, and the load check says the same in its own words:
 - **What a sheet lists.** A van or an outlet: every accessory it holds at the end of the stock ledger's last
   day, or moved there in the thirty days to it (`full`: in a year). The main store's **cycle list**: the
   fast movers, the twenty highest-value items (units on hand at landed cost) and every item on a movement
-  exception of the month as `/yq-moves` finds them, each once (`full`: every item it holds). A store that
+  exception of the month as `/yq-moves` finds them, each once (`full`: every item it holds or moved there
+  in a year, at nought too). A store that
   held and moved nothing gets no sheet. Ten empty rows under each list take an item found that is not on it.
 - **Reading a copy back.** Each sheet carries a hidden tag and a checksum of its list. A copy is refused,
   one line per problem and nothing kept, when a tag or the checksum does not match (a listed row deleted),
@@ -587,11 +590,15 @@ one of two lines, and the load check says the same in its own words:
      the kickback statement; and, with the month's Ledger export, each customer account's opening, plus
      its invoices, less its receipts, returns and credit notes, equal to its closing and set beside the
      receivables ageing, with the month's returns set against each salesman's statement and the tiers
-     they would change listed to check. Without the export it reads **COLLECTION NOT PROVEN**.
+     they would change listed to check. An account moved by a journal, a payment or a write-off is listed
+     to check even when it agrees. Without the export it reads **COLLECTION NOT PROVEN**; an export saved
+     anywhere else can be named (`recon <month> --ledger-file "<file>"`).
   4. *Purchases*: every supplier receipt of the month with its purchase order, MRN XML and supplier
      invoice on file or not, its cost lines found of all, and the order's flags (short, over, not
      received, not ordered, a cost above or below the order). A missing paper is **PAPERS MISSING**: an
-     action, never a difference.
+     action, never a difference; the order's flags are notes until the paper is there.
+  A block whose second side could not be read (the invoicing not set beside the files, or the stores on the
+  books not worked out) reads *not worked out*, never PROVEN.
 - **The KPI scorecard** (`/yq-kpi`, and the KPI sheet): one row per KPI of your KPI sheet (areas one to
   five and seven), each **MET**, **NOT MET**, **NOT EVIDENCED** or **NOTHING DUE**, the header counting
   each. A row reads MET only with the evidence it rests on named under it; nothing on file either way is

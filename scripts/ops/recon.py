@@ -216,7 +216,9 @@ def prep_lines(prep: counts.Prep, titles: list[str], target: Path, ledger_note: 
             bits = [f"the {parts.get(counts.WHY_FAST, 0)} fast movers",
                     f"the {parts.get(counts.WHY_VALUE, 0)} highest-value items (units on hand at landed cost)"]
             if counts.WHY_EXCEPTION in parts:
-                bits.append(f"the {parts[counts.WHY_EXCEPTION]} items on a movement exception of the month")
+                k = parts[counts.WHY_EXCEPTION]
+                bits.append(f"the {counts.plural(k, 'item')} on a movement exception of the month" if k
+                            else "no items on a movement exception of the month")
             both = sum(1 for s in by_kind["main"] for ln in s.lines if len(ln.why) > 1)
             lines.append(f"  Main store: {', '.join(bits[:-1])} and {bits[-1]}, each once: {fmt.units(n['main'])} lines"
                          + (f" ({both} of them for more than one reason)." if both else "."))

@@ -750,17 +750,17 @@ def _():
             assert "the file differs from what the portal holds" in text
 
 
-@test("the line on the two rules still to come names the profitability report's state")
+@test("the line on the rule still to come names the profitability report's state, and where the returns are checked")
 def _():
     with data_root(LIMITS), standing_in(World()):
         code, text = watch()
         assert checks.hooks_line() in text.splitlines()
-        assert ("Not checked yet: sold below cost (it needs the profitability report) and sales returns against "
-                "last month's kickback tier (with the month-end Ledger export); both come with the month-end "
-                "release.") in text
+        assert ("Not checked yet: sold below cost (it needs the profitability report). Sales returns against last "
+                "month's kickback tier are checked by the month-end reconciliation (/yq-month, with the month's "
+                "Ledger export).") in text
         status.write_state({"last_load": {"run": "190126_0800", "profit_held_since": "2026-01-13"}})
         assert checks.hooks_line().startswith("Not checked yet: sold below cost (the profitability report is held "
-                                              "back since Tue 13 Jan) and sales returns")
+                                              "back since Tue 13 Jan). Sales returns")
 
 
 # ── once per ledger ───────────────────────────────────────────────────────────

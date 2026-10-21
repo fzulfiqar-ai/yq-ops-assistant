@@ -959,7 +959,7 @@ def _():
         fake.exception_items = lambda first, last: [L("B")]
         with data_root():
             res = prep_run()
-            assert "the 1 items on a movement exception of the month" in res["text"], res["text"]
+            assert "the 1 item on a movement exception of the month" in res["text"], res["text"]
     finally:
         if saved is None:
             sys.modules.pop(recon.MOVES_MODULE, None)

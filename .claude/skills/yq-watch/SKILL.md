@@ -20,4 +20,4 @@ Run exactly `python -m scripts.ops watch $ARGUMENTS`: it starts with `python`, w
 7. The first screen shows the BASELINE (what each rule found already in the data on its first run: counted once, not listed) and the THRESHOLDS once; `replay` shows the thresholds again. A value he sets in the settings wins over the worked-out one: if he wants one changed, say which setting the screen names, and change nothing yourself.
 8. If the screen says the movements were not recorded this time, say why in the screen's words: the list below it is the one that stood before.
 9. Never accuse anyone. Every item is "to check": say what differs, never who is to blame, and never name a salesman or a van beyond what the screen shows. Draft no message to a storekeeper or a salesman unless he asks for one.
-- The line `Not checked yet` names the two checks that come with the month-end release: repeat it if he asks whether those are covered.
+- The line `Not checked yet` names the check still to come (sold below cost) and where the returns against the kickback tier are checked (the month-end reconciliation): repeat it if he asks whether those are covered.

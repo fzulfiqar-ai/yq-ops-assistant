@@ -36,7 +36,7 @@ When his words start with `prep` or `count`, follow "The count sheets" below. Ot
 
 Then read `.claude/commands/monthly-review.md` and follow it unchanged for the same month, from its first step to its last, with that month (`YYYY-MM`) as its argument. It stops by itself when the month is not ready; its commands are not pre-approved here and ask as usual; its only write comes after his answers. Say once that the review counts B2B accessories while the workbook counts all accessories (B2B and the two outlets).
 
-If he asks how a month reconciles (the stock, the sales and receivables, the purchases), run exactly `python -m scripts.ops recon YYYY-MM` for that month and show it unchanged: a difference is "to check", and a missing paper is an action, never a difference.
+If he asks how a month reconciles (the stock, the sales and receivables, the purchases), run exactly `python -m scripts.ops recon YYYY-MM` for that month and show it unchanged: a difference is "to check", and a missing paper is an action, never a difference. If he names the month's Focus Ledger export file, add it: `python -m scripts.ops recon YYYY-MM --ledger-file "<path>"`.
 
 ## The count sheets: prep and count
 

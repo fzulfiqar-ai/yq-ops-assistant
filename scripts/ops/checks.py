@@ -129,8 +129,8 @@ RULE_WORDS = {
     "profit_held": "the profitability report held back",
     "attn": "the Command Centre's items",
 }
-HOOKS = ("Not checked yet: sold below cost ({profit}) and sales returns against last month's kickback tier "
-         "(with the month-end Ledger export); both come with the month-end release.")
+HOOKS = ("Not checked yet: sold below cost ({profit}). Sales returns against last month's kickback tier are "
+         "checked by the month-end reconciliation (/yq-month, with the month's Ledger export).")
 HOW_TO = ("To explain an item: /yq-watch explain <id> <your words> (it then stays off the list while it is what "
           "you explained). When one is done: /yq-watch done <id>. One item in full: /yq-watch <id>.")
 USAGE = ("Type /yq-watch, /yq-watch all, /yq-watch <id>, /yq-watch explain <id> <your words>, "
@@ -928,8 +928,8 @@ def _profit_words() -> str:
 
 
 def hooks_line() -> str:
-    """The two rules that come with the month-end release, named so that nobody takes their silence for a
-    clean bill."""
+    """The rule still to come (sold below cost) and where the returns against the kickback tier are checked,
+    named so that nobody takes the list's silence for a clean bill."""
     return fmt.careful(HOOKS.format(profit=_profit_words()))
 
 
