@@ -116,8 +116,8 @@ def extra_module(seen: dict, fail: dict) -> types.ModuleType:
         seen["moves"] = (table, first, last)
         if "moves_totals" in fail:
             raise fail["moves_totals"]
-        return {"first": first, "last": last, "basis": "at cost", "stores": [{"store": "Van A", "kind": "van"}],
-                "total": {}, "exceptions": None, "unbalanced": 0, "note": None, "error": None}
+        return {"first": first, "last": last, "basis": "at cost", "rows": [], "total": {}, "exceptions": None,
+                "unbalanced": 0, "note": None, "error": None}      # totals only: no row names a store
 
     def stock_sheet(ws, totals, heading):
         seen["stock_heading"] = heading
