@@ -1999,9 +1999,10 @@ MUST_CONTAIN = {
         "at most three lines", "no number that is not on the screen", "Never accuse anyone", "to check",
         # every store's check reads nought, or the program is at fault, never the store
         "Every store's check must read 0", "a fault of the program, not of the store",
-        # pairs by what the vouchers hold; since 2b the portal page pairs them with the same code
+        # pairs by what the vouchers hold; from 2b the portal page pairs them with the same code, unless its notice shows
         "Pairs are made by what the two vouchers hold, never by their numbers",
-        "since the phase 2b release it pairs the transfers with the same code, so the same window shows the same pairs",
+        "from the phase 2b release it pairs the transfers with the same code, so the same window shows the same pairs",
+        "if the page shows its \"Being corrected\" notice, it does not yet",
         "are counts to read, never items to check", "point him to /yq-watch",
     ],
     "yq-watch": [

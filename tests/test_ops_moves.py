@@ -2229,8 +2229,8 @@ def _():
             assert lines[0].startswith("MOVES  ") and "the stock ledger runs to Tue 17 Mar" in " ".join(text.split())
             assert "it agrees with what the portal holds" in text
             assert lines[-2:] == [moves.PORTAL_LINE, moves.NOT_MEASURED], lines[-2:]
-            assert lines[-2] == ("The portal's Stock Movement page pairs the transfers with this same code since release 2b: "
-                                 "the same pairs for the same window.")
+            assert lines[-2] == ("From release 2b the portal's Stock Movement page pairs with this same code; while it does "
+                                 "not, the page says so at the top.")
             assert lines[-1] == "Not measured: the time from a Stock Request to its issue (Focus exports no request vouchers)."
             assert "never by the voucher number" in " ".join(text.split())
             assert all(fmt.careful(ln) == ln for ln in lines)

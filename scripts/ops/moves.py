@@ -153,8 +153,8 @@ WAITING = ("not_received", "damage_not_booked", "twins")       # the kinds that 
 
 PAIRED_BY = ("Pairs are made by what the two vouchers hold (items, units, the store, the days between them), never by "
              "the voucher number.")
-PORTAL_LINE = ("The portal's Stock Movement page pairs the transfers with this same code since release 2b: the same "
-               "pairs for the same window.")
+PORTAL_LINE = ("From release 2b the portal's Stock Movement page pairs with this same code; while it does not, the "
+               "page says so at the top.")
 PORTAL_WORD = "portal"         # `moves portal`: the release check (scripts/ops/moves_portal.py)
 NOT_MEASURED = "Not measured: the time from a Stock Request to its issue (Focus exports no request vouchers)."
 REFUSED_WORDS = ("/yq-moves takes a window and rep:<name> only: 'again' and 'top:' are words of /yq-brief.")
