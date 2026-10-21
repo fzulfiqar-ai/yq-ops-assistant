@@ -1,10 +1,17 @@
 """python -m scripts.ops deliver [--run <run>] [--preview]
 
 After a load (the load's worker runs it once the load has closed: scripts/yq_load_go.py):
-  * first, the five move rules of /yq-watch recorded for this ledger (scripts.ops.checks.ensure_recorded,
-    once per ledger), so the brief and the e-mail list the transfers the new ledger shows to check. One
-    that did not happen is one line of this command's screen and never stops the delivery: the brief then
-    lists the transfer items as they stood, and says so;
+  * first, the MOVEMENT STEP (moves_step), in a process of its own with its own time budget
+    (MOVES_TIMEOUT_S, inside the worker's DELIVER_TIMEOUT_S for the whole delivery): the five move rules of
+    /yq-watch recorded for this ledger (scripts.ops.checks.ensure_recorded, once per ledger; never by a
+    preview), so the brief and the e-mail list the transfers the new ledger shows to check, and the facts of
+    the brief's MOVEMENTS line (scripts.ops.moves.brief_facts). Both read the stock ledger and the costs; on
+    a slow database they are the delivery's longest wait, so they get their own clock. A step that fails, or
+    takes longer and is stopped, is one line of this command's screen and never stops the delivery: the
+    brief, which takes the step's answer over and redoes none of it, then says the MOVEMENTS were not read
+    and lists the transfer items as they stood. The step's process is this interpreter running this
+    module's own _moves_child (multiprocessing, spawn): never a shell or another program (scripts/ops
+    imports no subprocess, tests/test_ops_readonly.py);
   * the full brief, worked out ONCE exactly as /yq-brief works it out (sales.full_screen), saved as
     exports/ops/<D>/brief.txt and .json, the action register recorded and the brief stamped as read,
     just as a /yq-brief would; the first plain /yq-brief after it shows this very brief (state
@@ -30,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import datetime
 
 from scripts.ops import db  # noqa: F401  (first: it blanks the side channels before any app import)
@@ -38,6 +46,10 @@ from scripts.ops import fmt, loadplan, paths, render, status
 
 COMMAND = "deliver"
 LOOK_STEPS = ("reconcile", "post_gate")      # a load whose check of these needs a look sends no figure
+# the movement step's own budget, in seconds: a cold ledger read and the database's parity and cost reads take
+# about 20 s; it leaves the brief and the e-mail most of the worker's 300 s (yq_load_go.DELIVER_TIMEOUT_S)
+MOVES_TIMEOUT_S = 90
+PREVIEW_RECORDS_NOTHING = "a preview records nothing"
 
 
 def add_arguments(parser) -> None:
@@ -139,22 +151,93 @@ def stale_reason(run: str, state: dict) -> str | None:
     return None
 
 
-def record_moves() -> str | None:
-    """The move rules of the action list recorded for this ledger, before the brief is made
-    (scripts.ops.checks.ensure_recorded: once per ledger, and it never raises). None when that went well;
-    else the one line the delivery adds. Nothing here stops the delivery: the module is imported here, so
-    that one that cannot be imported, or that raises after all, is that line too."""
+def _moves_child(conn, root: str, record: bool, days: int) -> None:
+    """The movement step itself, run in its own process by moves_step: the move rules recorded for this ledger
+    (`record`; sales.record_moves, which asks checks.ensure_recorded) and the MOVEMENTS facts (sales.read_moves,
+    moves.brief_facts), sent back on `conn` as one answer {facts, facts_why, recorded, recorded_why}. A part that
+    fails is its reason in the answer; nothing here raises, and the answer is sent once."""
+    out = {"facts": None, "facts_why": None, "recorded": None,
+           "recorded_why": None if record else PREVIEW_RECORDS_NOTHING}
     try:
-        from scripts.ops import checks
-        got = checks.ensure_recorded()
-    except Exception as exc:  # noqa: BLE001  (one line, never the delivery)
-        why = f"{type(exc).__name__}: {str(exc)[:120]}"
-    else:
-        if isinstance(got, dict) and got.get("ok"):
-            return None
-        why = str(got.get("why") or "no reason given") if isinstance(got, dict) else "no answer"
-    said = (f"Transfer checks: not recorded this time ({' '.join(why.split())}); the brief lists the transfer items "
-            "as they stood.")
+        try:
+            paths.set_data_root(root)           # the parent's data root: a process of its own does not inherit it
+            from scripts.ops import sales
+        except Exception as exc:  # noqa: BLE001  (a reason in the answer, never a stop)
+            out["facts_why"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            if record:
+                out["recorded_why"] = out["facts_why"]
+            return
+        if record:
+            out["recorded"], out["recorded_why"] = sales.record_moves(True)
+        try:
+            out["facts"] = sales.read_moves(days)
+        except Exception as exc:  # noqa: BLE001  (a reason in the answer, never a stop)
+            out["facts_why"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+    finally:
+        try:
+            conn.send(out)
+        finally:
+            conn.close()
+
+
+def _failed_step(why: str, record: bool) -> dict:
+    return {"facts": None, "facts_why": why, "recorded": None,
+            "recorded_why": why if record else PREVIEW_RECORDS_NOTHING}
+
+
+def moves_step(record: bool, days: int = 7, *, timeout: float | None = None, target=None) -> dict:
+    """The movement step (the module text) in a process of its own: this interpreter, spawned, running `target`
+    (_moves_child) with the same environment, the same data root and the same folder, given `timeout` seconds
+    (MOVES_TIMEOUT_S) to answer. Returns {facts, facts_why, recorded, recorded_why, seconds}: the child's answer,
+    or, when it did not start, gave no answer or ran out of time (it is then stopped), the reason in its place.
+    It never raises: the brief and the e-mail are made whatever it answers."""
+    import multiprocessing
+    budget = MOVES_TIMEOUT_S if timeout is None else timeout
+    began = time.monotonic()
+    answer: dict | None = None
+    why = None
+    child = None
+    try:
+        ctx = multiprocessing.get_context("spawn")
+        receive, send = ctx.Pipe(duplex=False)
+        child = ctx.Process(target=target or _moves_child, name="yq-delivery-movement-step", daemon=True,
+                            args=(send, str(paths.data_root()), bool(record), int(days)))
+        child.start()
+        send.close()                            # the child holds its own end: its end of it is seen when it stops
+        try:
+            if receive.poll(budget):
+                got = receive.recv()
+                answer = got if isinstance(got, dict) else None
+                why = None if answer is not None else "the movement step gave no answer"
+            else:
+                why = f"the movement step took longer than {budget:g} s and was stopped"
+        except (EOFError, OSError):
+            why = "the movement step ended without an answer"
+        finally:
+            receive.close()
+    except Exception as exc:  # noqa: BLE001  (the delivery goes on)
+        why = f"the movement step could not run ({type(exc).__name__})"
+    finally:
+        if child is not None and child.pid is not None:
+            child.join(5 if answer is not None else 0)
+            if child.is_alive():
+                child.terminate()
+                child.join(5)
+    out = dict(answer) if answer is not None else _failed_step(why or "the movement step gave no answer", record)
+    out["seconds"] = round(time.monotonic() - began, 1)
+    return out
+
+
+def moves_note(step: dict, preview: bool) -> str | None:
+    """The one line the delivery adds when the movement step did not record the move rules (never for a
+    preview, which records nothing); None when it did."""
+    if preview:
+        return None
+    answer = step.get("recorded")
+    if isinstance(answer, dict) and answer.get("ok"):
+        return None
+    why = " ".join(str(step.get("recorded_why") or (answer or {}).get("why") or "no reason given").split())
+    said = f"Transfer checks: not recorded this time ({why}); the brief lists the transfer items as they stood."
     try:
         return fmt.careful(said)
     except ValueError:              # a word the brief never uses, in the reason: the line without it
@@ -189,12 +272,13 @@ def run(args) -> dict:
     files: dict[str, str] = {}
     notes: list[str] = []
     if kind == "full":
-        if not preview:                          # the move rules first, so the brief lists what this ledger shows
-            said = record_moves()
-            if said:
-                notes.append(said)
         from scripts.ops import sales            # the whole brief engine: loaded only for a full delivery
-        screen = sales.full_screen(record=not preview, enrich=True)
+        # the movement step first, on its own clock: the brief then lists what this ledger shows and redoes none of it
+        step = moves_step(not preview, sales.MOVES_DAYS)
+        said = moves_note(step, preview)
+        if said:
+            notes.append(said)
+        screen = sales.full_screen(record=not preview, enrich=True, moves=step)
         d, facts = screen["d"], screen["facts"]
         top, every = actions_mod.ranked(facts, d)
         team = render.team_text(facts, made_on)

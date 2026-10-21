@@ -79,9 +79,12 @@ star on the row and one line under the table.
 The transfers to check are on the register too: before DO TODAY is listed, the five move rules of
 /yq-watch are recorded for this ledger (scripts.ops.checks.ensure_recorded: once per ledger, never
 raising; a preview records nothing). A recording that did not happen is one line, and the transfer
-items are then listed as they stood. A transfer item valued below the floor (config watch.floor_bhd
-when it is set, else the figure /yq-watch's replay left in state.json, watch_defaults.floor_bhd) is
-not listed: one line counts those. The full list, and marking an item done or explained, are
+items are then listed as they stood. In the delivery both the recording and the MOVEMENTS read are
+done before the brief, in a process of their own with its own time budget (deliver.moves_step); the
+brief takes that answer over and redoes neither (handed_moves). A transfer item valued below the
+floor (config watch.floor_bhd when it is set, else the figure /yq-watch's replay left in state.json,
+watch_defaults.floor_bhd) is not listed: one line counts those; a floor in config.json that is no
+amount is one warning, and no floor. The full list, and marking an item done or explained, are
 /yq-watch, and the line that counts the older items points there.
 sales.record_attention is the one place that records rule 'attn' (tests/test_ops_sales.py walks
 the package for another): a rule's items that are not found again are marked cleared, so a second
@@ -146,6 +149,8 @@ ATTENTION_SOURCES = ("anchor", "orders", "match", "salesmen", "reps", "attainmen
 MOVES_DAYS = 7                        # the MOVEMENTS line: the stock ledger's last seven days (/yq-moves' own default)
 MOVES_BASIS = "at landed cost"        # what its BHD rests on: the /yq-stock basis, not the sales one
 FLOOR_KEY = "watch.floor_bhd"         # a transfer item valued below this stays off DO TODAY (/yq-watch lists it)
+FLOOR_UNREAD = ("config.json watch.floor_bhd is not an amount in BHD, nought or more: no floor this time, every open "
+                "item is listed")
 LABEL = " " * 10                      # a section's lines after its first, under the text after its label
 
 _MONTH = re.compile(r"^(\d{4})-(\d{1,2})$")
@@ -1133,21 +1138,40 @@ def move_rules() -> tuple[str, ...]:
         return ()
 
 
-def watch_floor(state: dict) -> Decimal | None:
-    """The floor below which a transfer item stays off DO TODAY (/yq-watch lists it): config
-    watch.floor_bhd when it is set, else the figure /yq-watch's replay of the last 90 days left in
-    state.json (watch_defaults.floor_bhd), else none. A value in config.json is the owner's: the config
-    reader checks it and stops the command in one sentence that names the key when it is no amount. A
-    figure in state.json that is no amount is no floor."""
+def watch_floor(state: dict) -> tuple[Decimal | None, str | None]:
+    """(the floor below which a transfer item stays off DO TODAY, why there is none this time). The floor is
+    config watch.floor_bhd when it is set, else the figure /yq-watch's replay of the last 90 days left in
+    state.json (watch_defaults.floor_bhd), else none. A value in config.json that the config reader refuses
+    (no amount, or below nought) is no floor this time, and the reason is one warning line: the brief and
+    the delivery go on, every open item listed. A figure in state.json that is no amount is no floor."""
     try:
         cfg = config.load()
     except config.ConfigMissing:
         cfg = {}
     if FLOOR_KEY in cfg:
-        return config.number(FLOOR_KEY)
+        try:
+            return config.number(FLOOR_KEY), None
+        except (config.ConfigMissing, ArithmeticError, ValueError):
+            return None, FLOOR_UNREAD
     kept = state.get("watch_defaults")
     v = _number(kept.get("floor_bhd")) if isinstance(kept, dict) else None
-    return v if v is not None and v >= 0 else None
+    return (v if v is not None and v >= 0 else None), None
+
+
+def handed_moves(moves, warnings: list[str]) -> tuple[dict | None, dict | None, str | None]:
+    """The delivery's own movement step (deliver.moves_step: a process of its own, with its own time budget,
+    that recorded the move rules and read the MOVEMENTS facts), as the brief takes it over: (the facts, or
+    None; the recording's answer, or None; why the rules were not recorded, None when they were). Nothing of
+    it is redone here: a part the step did not give is the warning and the line its own failure would be."""
+    step = moves if isinstance(moves, dict) else {}
+    facts = step.get("facts")
+    if not isinstance(facts, dict):
+        warnings.append(f"the movements could not be read: {_clean(step.get('facts_why')) or 'no answer'}")
+        facts = None
+    answer = step.get("recorded") if isinstance(step.get("recorded"), dict) else None
+    if answer is not None and answer.get("ok"):
+        return facts, answer, None
+    return facts, answer, (_clean(step.get("recorded_why")) or _clean((answer or {}).get("why")) or "no reason given")
 
 
 def today_section(attention: list[dict] | None, unavailable: list[str], data_date: str, warnings: list[str],
@@ -1247,15 +1271,17 @@ def _header(d: date, state: dict, rep: str | None, middle: str | None = None) ->
 
 
 def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
-               exported: date | None = None, *, record: bool = True,
-               enrich: bool = False) -> tuple[list[str], dict, list[str], dict]:
+               exported: date | None = None, *, record: bool = True, enrich: bool = False,
+               moves: dict | None = None) -> tuple[list[str], dict, list[str], dict]:
     """The one-screen brief. Returns (lines, facts, warnings, state patch). `latest` is the latest
     full sale day: D, or on a part day the loaded sale day before it. `exported` is the day the
     reports were exported, when anything says (export_day). record=False (a delivery preview) leaves
     the action register as it stands, the move rules included; enrich=True (the delivery) adds
     facts['enriched'] for the e-mail (scripts/ops/enrich.py), and changes no line of the screen.
     The company brief reads the stock ledger's transfers beside the sales (facts['movements'], the
-    MOVEMENTS line) and records the move rules before DO TODAY (facts['do_today']['moves_recorded'])."""
+    MOVEMENTS line) and records the move rules before DO TODAY (facts['do_today']['moves_recorded']).
+    `moves` is the delivery's own movement step (deliver.moves_step), which did both already in a process
+    of its own: the brief then takes its answer over (handed_moves) and redoes neither."""
     warnings: list[str] = []
     full_to = full_until(d, latest, exported)            # the last complete calendar day
     sat = full_week_end(full_to)                         # ... and the Saturday that ends the last complete week
@@ -1283,7 +1309,9 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     share_min = config.number("brief.rep_share_min")
     silent_days = int(config.get("brief.silent_business_days"))
     bulk_from = config.number("brief.bulk_invoice_bhd")
-    floor = None if rep else watch_floor(state)          # DO TODAY is a company line: one salesman reads no floor
+    floor, floor_unread = (None, None) if rep else watch_floor(state)    # DO TODAY is a company line
+    if floor_unread:
+        warnings.append(floor_unread)
 
     jobs = {
         "top": lambda: db.rpc_params(TOP_INVOICE_SQL, [top_wins, rep or ""]),
@@ -1301,8 +1329,9 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
             "targets": lambda: db.rpc_params(TARGETS_SQL, [d.strftime("%Y-%m"), metrics.add_months(d, -12).isoformat(),
                                                            cur.start.isoformat()]),
             "overview": read_overview,
-            "moves": read_moves,                         # the stock ledger, beside the database reads
         })
+        if moves is None:                                # the stock ledger, beside the database reads
+            jobs["moves"] = read_moves
     got = _gather(jobs)
     core = "dim" if rep else "sales"
     if isinstance(got.get(core), Exception):
@@ -1383,12 +1412,17 @@ def full_brief(d: date, latest: date, part: bool, state: dict, rep: str | None,
     facts["stock"] = stock_f
     lines += [""] + stock_l
 
-    moves_f, moves_l = movements_section(_rows(got, "moves", warnings, "the movements"), d)
+    if moves is None:
+        # the ledger was read beside the sales; the move rules go on the register for this ledger before it is
+        # listed (a preview records nothing, and says nothing)
+        moved = _rows(got, "moves", warnings, "the movements")
+        answer, not_recorded = record_moves(record)
+    else:                        # the delivery's movement step did both, in its own process and time budget
+        moved, answer, not_recorded = handed_moves(moves, warnings)
+    moves_f, moves_l = movements_section(moved, d)
     facts["movements"] = moves_f
     lines += [""] + moves_l
 
-    # the move rules on the register for this ledger before it is listed (a preview records nothing, and says nothing)
-    answer, not_recorded = record_moves(record)
     profit = profit_basis(fmt.as_date((overview or {}).get("margin_report_date")), d, state)
     attention = _attention(payload) if payload else None
     today_f, today_l = today_section(attention, list((payload or {}).get("unavailable") or []), d.isoformat(),
@@ -1573,17 +1607,19 @@ def save_screen(d: date, stem: str, text: str, facts: dict) -> list:
             paths.write_text(folder / f"{stem}.json", json.dumps(_jsonable(facts), indent=1, ensure_ascii=False) + "\n")]
 
 
-def full_screen(*, record: bool = True, enrich: bool = False) -> dict:
+def full_screen(*, record: bool = True, enrich: bool = False, moves: dict | None = None) -> dict:
     """The full brief exactly as /yq-brief works it out, for the delivery (scripts/ops/deliver.py):
     {d, text, facts, warnings, patch}. Nothing is written here; the caller saves the screen and the
-    state patch (record=False, a preview, records nothing and stamps nothing)."""
+    state patch (record=False, a preview, records nothing and stamps nothing). `moves`: the delivery's
+    own movement step (deliver.moves_step), taken over as it is (full_brief)."""
     anchors = status.anchors()
     d = fmt.as_date(anchors.get("focus_to"))
     if d is None:
         raise BriefInput("No sales are loaded yet: there is nothing to brief.")
     state = status.read_state()
     exported, part, latest = latest_full_day(d, anchors, state)
-    lines, facts, warnings, patch = full_brief(d, latest, part, state, None, exported, record=record, enrich=enrich)
+    lines, facts, warnings, patch = full_brief(d, latest, part, state, None, exported, record=record, enrich=enrich,
+                                               moves=moves)
     facts["warnings"] = warnings
     return {"d": d, "text": "\n".join(_guarded(ln).rstrip() for ln in lines), "facts": facts,
             "warnings": warnings, "patch": patch}

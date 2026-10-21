@@ -10,9 +10,16 @@ Rank = expected effect in BHD x confidence x urgency / effort. An item with no m
 NO_FIGURE_BHD, so a count-only item still ranks. Every action is tagged:
   ACTION    the figures say it (facts from the reports)
   TO CHECK  something differs and the reason is not known: a question, never a conclusion
-Nothing here accuses anyone (fmt.careful guards the words). The register itself is never written."""
+Nothing here accuses anyone (fmt.careful guards the words). The register itself is never written.
+
+An item's Why is its detail, except for the five move rules (MOVE_RULES): their detail names the stores of a
+transfer, and a van's store is its salesman's name. The recorder keeps that detail in alerts.jsonl on this PC
+(scripts/ops/checks.py); the e-mail leaves it, so a move item's Why is the recorder's own plain fallback, numbers
+and dates only (move_why): its vouchers, its count, the month of its key and the days the detail holds, never a
+word of the detail besides those days."""
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -21,6 +28,11 @@ from scripts.ops.enrich import nth_business_day
 
 TOP = 5
 NO_FIGURE_BHD = Decimal(50)
+# the five move rules of /yq-watch (scripts.ops.checks.MOVE_RULES; tests/test_ops_deliver.py holds the two equal)
+MOVE_RULES = ("xfer_open", "xfer_twins", "qty_diff", "xfer_elsewhere", "rcpt_orphan")
+# a day as the recorder writes it in a detail (fmt.day): the only words of a detail a move item's Why takes
+_DAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_MONTH = re.compile(r"(\d{4})-(\d{2})")
 
 # key prefix -> (owner, next step, business days to do it in, effort 1 low .. 3 high). The longest
 # matching prefix wins; a key no entry names gets the DEFAULT words and is still listed.
@@ -95,8 +107,54 @@ def _action(*, tag: str, title: str, why: str, impact: str, impact_bhd: Decimal 
             "score": float(round(weight, 3))}
 
 
+def is_move(key: str) -> bool:
+    """True for an item of one of the five move rules (its key's first part)."""
+    return str(key or "").split("|", 1)[0] in MOVE_RULES
+
+
+def _day_after(word: str, text: str) -> str | None:
+    m = re.search(rf"\b{word} ({_DAY})\b", text)
+    return m.group(1) if m else None
+
+
+def move_why(item: dict) -> str:
+    """A move item's Why in numbers and dates only, in the words of the recorder's own plain fallback
+    (scripts/ops/checks.py): built from its key, its vouchers (Focus numbers), its count and the days its
+    detail holds. No other word of the detail is ever taken: the detail names the stores, and a van's store
+    is its salesman's name."""
+    parts = str(item.get("key") or "").split("|")
+    rule = parts[0]
+    vouchers = [str(v).strip() for v in item.get("evidence") or [] if str(v or "").strip()]
+    first = vouchers[0] if vouchers else (parts[1] if len(parts) > 1 and parts[1] != "damage" else "(no number)")
+    other = vouchers[1] if len(vouchers) > 1 else None
+    detail = str(item.get("detail") or "")
+    if rule == "xfer_open" and len(parts) > 2 and parts[1] == "damage":
+        m = _MONTH.fullmatch(parts[2])
+        month = date(int(m.group(1)), int(m.group(2)), 1).strftime("%B %Y") if m and 1 <= int(m.group(2)) <= 12 else ""
+        return (f"Issued{' in ' + month if month else ''} and not booked in by the deadline: "
+                + (", ".join(vouchers) or "no number on record"))
+    if rule == "xfer_open":
+        issued, due = _day_after("issued", detail), _day_after("due", detail)
+        when = ", ".join(w for w in (f"issued {issued}" if issued else "", f"due {due}" if due else "") if w)
+        return f"{first}: {when}; no receipt found" if when else f"{first}: no receipt found by its deadline"
+    if rule == "xfer_twins":
+        n = len(vouchers)
+        x = item.get("count")
+        x = x if isinstance(x, int) and not isinstance(x, bool) and 0 < x <= n else None
+        return (f"{x} of {n}" if x else f"Not every one of {n}") + " identical issues: " + ", ".join(vouchers)
+    if rule == "qty_diff":
+        return first + (f", received under {other}" if other else "") + ": other quantities"
+    if rule == "xfer_elsewhere":
+        return f"{first}: received in another store" + (f" under {other}" if other else "")
+    if rule == "rcpt_orphan":
+        received = _day_after("received", detail)
+        return first + (f", received {received}" if received else "") + ": no issue found"
+    return f"{first}: to check"
+
+
 def from_register(items: list[dict], d: date) -> list[dict]:
-    """The open items of the action register (facts['do_today']['open'])."""
+    """The open items of the action register (facts['do_today']['open']). A move item's Why is move_why's,
+    never its detail (the module text)."""
     out = []
     for it in items or []:
         key = str(it.get("key") or "")
@@ -108,8 +166,9 @@ def from_register(items: list[dict], d: date) -> list[dict]:
         count = it.get("count")
         impact = (f"BHD {fmt.bhd(bhd)} involved" if bhd is not None else
                   f"{count} involved" if count not in (None, "") else "no figure on record")
+        why = move_why(it) if is_move(key) else str(it.get("detail") or "")
         out.append(_action(tag="ACTION" if level == "ACT" else "TO CHECK", title=str(it.get("title") or key),
-                           why=str(it.get("detail") or ""), impact=impact, impact_bhd=bhd, step=step, owner=owner,
+                           why=why, impact=impact, impact_bhd=bhd, step=step, owner=owner,
                            days=days, effort=effort, confidence=1.0 if level == "ACT" else 0.6, source="register",
                            d=d, ref=str(it.get("id") or "") or None))
     return out

@@ -2176,13 +2176,69 @@ def _():
             text = brief(World(), overview=command_centre(attention=sold), moves=no_rules)["text"]
         assert fl.calls == [("open_items", None, ())] and "small transfer item" not in text
         assert all(f"SIO:X-26-01-{n}" in text for n in (1, 2, 3, 4))
-    with data_root({"watch.floor_bhd": -1}):
-        # a floor in config.json that is no amount stops the full brief in the config reader's sentence, before any
-        # read or write; a window and one salesman read no floor
-        exc = raises(config.ConfigMissing, lambda: brief(World()))
-        assert "'watch.floor_bhd' must be an amount in BHD, nought or more" in str(exc), str(exc)
-        assert not paths.exports_dir().exists() and not alerts.alerts_file().exists()
-        assert brief(World(), "rep:Van A")["ok"] is True and brief(World(), "mtd")["ok"] is True
+    for bad in (-1, "5", float("inf"), [5]):
+        with data_root({"watch.floor_bhd": bad}):
+            # a floor in config.json that is no amount is no floor this time, and one warning says so: the brief (and so
+            # the delivery) goes on with every open item listed; the replay's figure does not stand in for his
+            setup()
+            status.write_state({"watch_defaults": {"floor_bhd": "50"}})
+            with floor_standing_in() as fl:
+                out = brief(World(), overview=command_centre(attention=sold))
+            assert out["ok"] is True and fl.calls == [("open_items", None, ())], (bad, fl.calls)
+            assert out["warnings"] == [sales.FLOOR_UNREAD], (bad, out["warnings"])
+            assert "small transfer item" not in out["text"] and all(f"SIO:X-26-01-{n}" in out["text"] for n in (1, 2, 3, 4))
+            fmt.careful(sales.FLOOR_UNREAD)
+            assert brief(World(), "rep:Van A")["ok"] is True and brief(World(), "mtd")["warnings"] == [], \
+                "a window and one salesman read no floor"
+    with data_root():
+        assert sales.watch_floor({}) == (None, None) and sales.FLOOR_KEY == "watch.floor_bhd"
+
+
+@test("the delivery's movement step is taken over: the brief redoes none of it, and a step that ran out of time is said")
+def _():
+    step = {"facts": move_facts(), "facts_why": None, "recorded": {"ok": True, "recorded": True, "why": None},
+            "recorded_why": None, "seconds": 4.2}
+    with data_root():
+        # the step's facts and its recording: the brief reads no ledger and records no rule in this process
+        stand = moves_standing_in()
+        with standing_in(World(), command_centre(attention=seven_items()[:1]), stand):
+            shown = sales.full_screen(record=True, moves=step)
+        assert stand.calls == [], "the delivery's own movement step did both"
+        rows = shown["text"].splitlines()
+        assert rows[rows.index(MOVEMENTS_LINES[0]):][:3] == MOVEMENTS_LINES and shown["warnings"] == []
+        assert "transfer checks" not in shown["text"]
+        assert shown["facts"]["do_today"]["moves_recorded"] == {"ok": True, "why": None}
+        assert shown["facts"]["movements"]["to_check_count"] == Decimal(2)
+    stopped = "the movement step took longer than 90 s and was stopped"
+    timed_out = {"facts": None, "facts_why": stopped, "recorded": None, "recorded_why": stopped, "seconds": 90.0}
+    with data_root():
+        # it ran out of time: the MOVEMENTS line and the move rules each say so in their one line; the rest stands
+        stand = moves_standing_in()
+        with standing_in(World(), command_centre(attention=seven_items()[:1]), stand):
+            shown = sales.full_screen(record=True, moves=timed_out)
+        assert stand.calls == [], "nothing is redone in this process, not even the slow part"
+        text = shown["text"]
+        assert line(text, "MOVEMENTS") == "MOVEMENTS not read this time"
+        assert text.split("DO TODAY\n")[1].splitlines()[0] == \
+            "(the transfer checks were not recorded this time: their items below are as they stood)"
+        assert shown["warnings"] == [f"the movements could not be read: {stopped}",
+                                     f"the transfer checks were not recorded this time: {stopped}"], shown["warnings"]
+        assert cells(text, "Month to date")[2] == "420.000" and shown["patch"].get("last_brief_data_date") == "2026-01-20"
+        assert shown["facts"]["do_today"]["moves_recorded"] == {"ok": False, "why": stopped}
+    with data_root():
+        # a preview's step records nothing and says nothing of it; the facts it read are on the line
+        preview = dict(step, recorded=None, recorded_why="a preview records nothing")
+        with standing_in(World(), command_centre(), moves_standing_in()) as st:
+            shown = sales.full_screen(record=False, moves=preview)
+        assert st.moves.calls == [] and "transfer checks" not in shown["text"] and shown["warnings"] == []
+        assert line(shown["text"], "MOVEMENTS") == MOVEMENTS_LINES[0]
+    with data_root():
+        # whatever the step hands over, the brief is made: an empty answer, or one in no shape the brief knows
+        for junk in ({}, {"facts": ["not", "facts"]}, "junk"):
+            with standing_in(World(), command_centre(), moves_standing_in()):
+                shown = sales.full_screen(record=True, moves=junk)
+            assert line(shown["text"], "MOVEMENTS") == "MOVEMENTS not read this time", junk
+            assert shown["warnings"][0].startswith("the movements could not be read: "), (junk, shown["warnings"])
 
 
 # ── no new data, files, state ───────────────────────────────────────────────────────────────────
