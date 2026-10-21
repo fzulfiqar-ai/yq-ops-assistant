@@ -34,12 +34,13 @@ EACH STORE (each van and outlet, and the main store), in units and in BHD, for t
                     screen, beside received where the two differ; no part of the check)
   back_to_main / to_damage / to_other   its issues, by the kind of store that ACTUALLY booked them in (the pairing:
                     a transfer received elsewhere counts where it was received, not where it was sent)
-  not_received_yet  its issues with no receipt yet, inside their deadline
+  not_received_yet  its issues with no receipt yet, inside their deadline (pairing.within_grace)
   not_received      its issues with no receipt after the deadline, the identical issues left without one, and the
-                    issues the pairing set aside (they cannot be paired) - but an issue sent to its own store whose
-                    receipt booked it back in there (its mirror, set aside with it: pairing.MIRRORS_OWN) leaves by
-                    the store's own kind, as any issue booked back in at its source; its mirror is received
-                    there, so the two move nothing. Set-aside vouchers are never items to check.
+                    other issues the pairing set aside (they cannot be paired). An issue sent to its own store is
+                    one of these two by its own deadline when nothing booked it back in there; when its receipt did
+                    (its mirror, set aside with it: pairing.MIRRORS_OWN), the pair moves nothing and leaves every
+                    figure when both fall in the window (alone in one, the issue is not received yet and the mirror
+                    received).
   sold              Sales Invoice units out less in; customer_returns: Sales Return units in less out
   counts            Excesses in Stocks less Shortages in Stock; other: any other voucher type (a supplier receipt
                     in a van, ...)
@@ -63,15 +64,17 @@ from stock.cost_words(stock.basis_counts(...)).
 
 TO CHECK: exceptions(audit), the single builder (/yq-watch records from it). One exception per issue (per receipt
 for the last kind), dated by its issue (the receipt), in the audit's window:
-  not_received        an issue with no receipt after its deadline (the first working day after it)
+  not_received        an issue with no receipt after its deadline (the first working day after it); an issue sent to
+                      its own store that nothing booked back in there too (set_aside names why)
   damage_not_booked   an issue to the damage store not booked in there within its 7 days
   twins               identical issues to one store, fewer receipts: one item, "x of N", every number named and
                       never which one (missing = x, of = N; `open` repeats missing for the action list)
   qty_differs         received where it was sent, with other quantities: the lines that differ
   elsewhere           the same contents booked in by another store
   orphan              a receipt no issue was found for (before_ledger: its issue may be older than the ledger)
-  {kind, issues, receipt, from, to, received_at, date, deadline, lag, lines [{item, units}], units, bhd, uncosted,
-   basis, possible}: BHD = the lines x cost (qty_differs: the units that differ; twins: missing x one issue's
+  {kind, issues, receipt, from, to, to_kind, received_at, date, deadline, lag, lines [{item, units}], units, bhd,
+   uncosted, basis, possible}; to_kind = StoreRules.kind of the destination ('damage' for the damage store; an
+   orphan's store). BHD = the lines x cost (qty_differs: the units that differ; twins: missing x one issue's
   lines); sorted by BHD, largest first, then by date and number; an exception with no cost at all comes last.
 
 THE API (other commands build on it; nothing here writes but run()'s copies of the screen and the hidden golden):
@@ -364,6 +367,7 @@ class _Base:
     names: dict                    # canon -> the store's name as the ledger spells it
     bucket: dict                   # issue number -> the column its units leave the store by
     backdated: frozenset           # transfer voucher numbers dated before one their series numbered earlier
+    mirror_day: dict = field(default_factory=dict)   # an own-store issue and its mirror receipt -> its partner's day
     _canon: dict = field(default_factory=dict, repr=False)
 
     def canon_of(self, spelt) -> str:
@@ -497,18 +501,24 @@ def _base_for(led: ledger.Ledger) -> _Base:
             bucket[number] = "back_to_main" if kind == "main" else "to_damage" if kind == "damage" else "to_other"
         else:
             bucket[number] = "not_received_yet" if got_.outcome == pairing.IN_GRACE else "not_received"
+    by_voucher = {a.voucher: a for a in result.aside}
+    mirror_day: dict[str, date] = {}           # an own-store issue and its mirror receipt: each one's partner's day
     for a in result.aside:
+        if a.partner and a.partner in by_voucher and by_voucher[a.partner].day is not None:
+            mirror_day[a.voucher] = by_voucher[a.partner].day
         if a.kind != "issue":
             continue
-        if a.partner:                  # sent to its own store and booked back in there (its mirror receipt, set aside
-            kind = stores.kind(a.wh)   # with it): it leaves like any issue booked back in at its source
-            bucket.setdefault(a.voucher, "back_to_main" if kind == "main" else "to_damage" if kind == "damage"
-                              else "to_other")
+        if a.partner:                  # booked back in there by its mirror: the pair moves nothing (_period leaves both
+            bucket.setdefault(a.voucher, "not_received_yet")   # out); alone in a window, it is booked back in later
+        elif a.reason == pairing.OWN_STORE:     # sent to its own store and nothing booked it back in: its deadline
+            inside = pairing.within_grace(a.day, stores.kind(a.wh), d, result.rules) if a.day is not None else False
+            bucket.setdefault(a.voucher, "not_received_yet" if inside else "not_received")
         else:
             bucket.setdefault(a.voucher, "not_received")
     base = _Base(key=key, led=led, rows=rows, acc_rows=acc_rows, d=d, first=start, stores=stores, rules=result.rules,
                  scope=scope, table=table, costs=costs, unread=unread, bridge_read=bridge_read, unmapped=unmapped,
-                 legs=legs, result=result, names=names, bucket=bucket, backdated=_backdated(rows))
+                 legs=legs, result=result, names=names, bucket=bucket, backdated=_backdated(rows),
+                 mirror_day=mirror_day)
     forget()                       # one ledger at a time: a new one leaves nothing of the old one behind
     _BASES[key] = base
     return base
@@ -675,6 +685,9 @@ def _period(base: _Base, first: date, last: date) -> dict[str, StoreRow]:
         day = r["date"]
         if day < first or day > last:
             continue
+        partner_day = base.mirror_day.get(r["voucher"])
+        if partner_day is not None and first <= partner_day <= last:
+            continue                                   # an own-store issue and its mirror, both inside: nothing moved
         item, vtype = r["item"], r["vtype"]
         moved = r["qty_in"] - r["qty_out"]
         store = canon(r["wh"])
@@ -869,7 +882,7 @@ def exceptions(audit: Audit) -> list[dict]:
             bhd, unc = base.value(i.lines)
             out.append(_exception(base, "elsewhere", issues=[i.no], receipt=r.no, frm=i.wh, to=i.to,
                                   received_at=p.received_at, day=i.day, deadline=due, lag=p.lag, lines=_lines(i.lines),
-                                  units=i.units, bhd=bhd, uncosted=unc, basis=p.basis))
+                                  units=i.units, bhd=bhd, uncosted=unc, basis=p.basis, to_kind=i.to_kind))
             continue
         differ = [(item, sent, booked) for item, sent, booked in p.diffs if sent != booked]
         gap = [(item, abs(sent - booked)) for item, sent, booked in differ]
@@ -878,7 +891,8 @@ def exceptions(audit: Audit) -> list[dict]:
                               received_at=p.received_at, day=i.day, deadline=due, lag=p.lag,
                               lines=[{"item": item, "units": abs(sent - booked), "issued": sent, "received": booked}
                                      for item, sent, booked in differ],
-                              units=sum((u for _item, u in gap), ZERO), bhd=bhd, uncosted=unc, basis=p.basis))
+                              units=sum((u for _item, u in gap), ZERO), bhd=bhd, uncosted=unc, basis=p.basis,
+                              to_kind=i.to_kind))
     for o in base.result.open:
         if o.outcome == pairing.IN_GRACE:
             continue                                   # not late yet: "not received yet", never an item to check
@@ -895,13 +909,27 @@ def exceptions(audit: Audit) -> list[dict]:
                                   to=head.to, received_at=None, day=day, deadline=o.deadline, lag=None,
                                   lines=_lines(head.lines), units=o.missing * head.units,
                                   bhd=None if one is None else o.missing * one, uncosted=o.missing * unc1,
-                                  possible=possible, missing=o.missing, of=len(o.issues), open=o.missing))
+                                  possible=possible, missing=o.missing, of=len(o.issues), open=o.missing,
+                                  to_kind=head.to_kind))
             continue
         bhd, unc = base.value(head.lines)
         kind = "damage_not_booked" if head.to_kind == "damage" else "not_received"
         out.append(_exception(base, kind, issues=[head.no], receipt=None, frm=head.wh, to=head.to, received_at=None,
                               day=head.day, deadline=o.deadline, lag=None, lines=_lines(head.lines),
-                              units=head.units, bhd=bhd, uncosted=unc, possible=possible))
+                              units=head.units, bhd=bhd, uncosted=unc, possible=possible, to_kind=head.to_kind))
+    # an issue sent to its own store that nothing booked back in there: it lowered the store's books, so once past
+    # its deadline it is not received like any issue (the pairing sets it aside: it has no destination to pair at)
+    for x in base.result.aside:
+        if x.kind != "issue" or x.reason != pairing.OWN_STORE or x.partner or x.day is None or not x.lines:
+            continue
+        at = base.stores.kind(x.wh)
+        if pairing.within_grace(x.day, at, base.d, rules) or not wanted(x.day, x.wh):
+            continue
+        bhd, unc = base.value(x.lines)
+        out.append(_exception(base, "not_received", issues=[x.voucher], receipt=None, frm=x.wh, to=x.to or x.wh,
+                              received_at=None, day=x.day, deadline=pairing.deadline(x.day, at, rules), lag=None,
+                              lines=_lines(x.lines), units=sum((u for _item, u in x.lines), ZERO), bhd=bhd,
+                              uncosted=unc, to_kind=at, set_aside=x.reason))
     for o in base.result.orphans:
         r = o.receipt
         if not wanted(r.day, r.wh):
@@ -909,7 +937,8 @@ def exceptions(audit: Audit) -> list[dict]:
         bhd, unc = base.value(r.lines)
         out.append(_exception(base, "orphan", issues=[], receipt=r.no, frm=None, to=None, received_at=r.wh,
                               day=r.day, deadline=None, lag=None, lines=_lines(r.lines), units=r.units, bhd=bhd,
-                              uncosted=unc, possible=[i.no for i in o.possible], before_ledger=o.before_ledger))
+                              uncosted=unc, possible=[i.no for i in o.possible], before_ledger=o.before_ledger,
+                              to_kind=base.stores.kind(r.wh)))
     out.sort(key=_order)
     return out
 
@@ -980,7 +1009,14 @@ def _store_moves(a: Audit) -> list[dict]:
                 listed.update((receipt,) + also)
     for x in base.result.aside:                        # vouchers set aside: an own-store move on one line, its mirror named
         if x.kind == "issue" and x.day is not None and first <= x.day <= last and store in (x.wh, x.to):
-            words = f"set aside: {x.reason}" + ("; booked back in there" if x.partner else "")   # its Receipt column
+            words = f"set aside: {x.reason}"
+            if x.partner:                              # its mirror: in the Receipt column
+                words += "; booked back in there"
+            elif x.reason == pairing.OWN_STORE and x.lines:    # nothing booked it back in there (From and To show
+                at = base.stores.kind(x.wh)                     # one store): an issue's words, as TO CHECK reads it
+                due = _day(pairing.deadline(x.day, at, base.rules), base.d)
+                words = (f"not received yet (due {due})" if pairing.within_grace(x.day, at, base.d, base.rules)
+                         else f"not received after its deadline ({due}), to check")
             out.append({"date": x.day, "number": x.voucher, "from": base.name_of(x.wh), "to": base.name_of(x.to),
                         "units": sum((u for _item, u in x.lines), ZERO), "outcome": words, "receipt": x.partner,
                         "also": [], "basis": ""})
@@ -1259,7 +1295,7 @@ def _transfer_lines(a: Audit) -> list[str]:
     if c["orphans"]:
         more.append(f"{_plural(c['orphans'], 'receipt')} with no issue found")
     if c["aside"]:
-        more.append(f"{_plural(c['aside'], 'voucher')} set aside (they cannot be paired)")
+        more.append(f"{_plural(c['aside'], 'voucher')} set aside (each named under SET ASIDE)")
     if more:
         lines += _para("Besides: " + "; ".join(more) + ".", "  ")
     m = a.movements
@@ -1276,7 +1312,8 @@ def _exception_text(e: dict, d: date, stores: pairing.StoreRules | None = None) 
     kind, day = e["kind"], _day(e["date"], d)
     route = f"{store_word(e['from'], stores)} to {store_word(e['to'], stores)}"
     if kind == "not_received":
-        text = f"{e['issues'][0]} {day}, {route}: not received after its deadline ({_day(e['deadline'], d)})"
+        own = " (sent to its own store)" if e.get("set_aside") else ""
+        text = f"{e['issues'][0]} {day}, {route}{own}: not received after its deadline ({_day(e['deadline'], d)})"
     elif kind == "damage_not_booked":
         text = (f"{e['issues'][0]} {day}, {route}: not booked in by the damage store by its deadline "
                 f"({_day(e['deadline'], d)})")
@@ -1388,9 +1425,9 @@ def screen_lines(a: Audit) -> list[str]:
     if a.aside:
         shown = ", ".join(aside_words(x, d) for x in a.aside[:ASIDE_SHOWN])
         more = f" (+{len(a.aside) - ASIDE_SHOWN} more)" if len(a.aside) > ASIDE_SHOWN else ""
-        lines += [""] + _para(f"SET ASIDE  {_plural(len(a.aside), 'voucher')} of the window could not be paired (an "
-                              f"issue among them that nothing booked in counts as not received): {shown}{more}",
-                              rest="  ")
+        lines += [""] + _para(f"SET ASIDE  {_plural(len(a.aside), 'voucher')} of the window outside the ordinary "
+                              f"pairing (an issue sent to its own store and booked back in there moves nothing; one "
+                              f"nothing booked in is not received after its deadline): {shown}{more}", rest="  ")
     if a.unmapped and a.rep is None:
         names = ", ".join(_short(n, 34) for n in a.unmapped[:UNMAPPED_SHOWN])
         more = f" (+{len(a.unmapped) - UNMAPPED_SHOWN} more)" if len(a.unmapped) > UNMAPPED_SHOWN else ""
@@ -1484,7 +1521,9 @@ def _hash(text: str) -> str:
 
 
 def _leg_json(base: _Base, leg) -> dict:
-    return {"number": leg.no, "date": leg.day, "store": base.name_of(leg.wh), "to": base.name_of(leg.to),
+    """A leg as the golden list records it; or a voucher set aside (an issue sent to its own store), the same way."""
+    number = leg.voucher if isinstance(leg, pairing.Aside) else leg.no
+    return {"number": number, "date": leg.day, "store": base.name_of(leg.wh), "to": base.name_of(leg.to),
             "lines": _lines(leg.lines), "narration_hash": leg.narr}
 
 
@@ -1503,6 +1542,7 @@ def _golden_cases(a: Audit) -> tuple[list[dict], list[dict], list[dict]]:
     the day and number of its issue)."""
     base = a.base
     issue_of = {i.no: i for i in base.legs.issues}
+    issue_of.update((x.voucher, x) for x in base.result.aside if x.kind == "issue" and x.voucher not in issue_of)
     receipt_of = {r.no: r for r in base.legs.receipts}
     cases = []
     for e in a.exceptions:

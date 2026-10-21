@@ -1848,7 +1848,7 @@ def _():
         assert all(r.balanced for r in a.stores + [a.main]) and not a.unbalanced
         want = {   # opening, received, issued_to, back_to_main, to_damage, to_other, not_received_yet, not_received,
                    # sold, customer_returns, counts, other, closing
-            VA: (51, 26, 30, 2, 0, 4, 0, 0, 6, 0, -1, 0, 64),     # SIO 21, sent to itself and booked back in: to others
+            VA: (51, 25, 30, 2, 0, 3, 0, 0, 6, 0, -1, 0, 64),     # SIO 21 and its mirror STRV 18 move nothing
             VB: (30, 16, 6, 2, 1, 0, 0, 0, 4, 1, 2, 0, 42),
             VC: (0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             SHOP: (15, 7, 8, 0, 0, 0, 0, 0, 2, 0, 0, 3, 23),
@@ -1865,7 +1865,7 @@ def _():
         assert all(M_SIM not in leg.items for leg in legs.issues + legs.receipts)
         assert "SIO:T-26-02-5" not in a.result.by_issue and "SIO:T-26-03-23" not in a.result.by_issue
         # issued_to is what other stores sent to it; received is its own receive legs
-        assert rows[VA].units["issued_to"] == 20 + 5 + 5 and rows[VA].units["received"] == 20 + 5 + 1
+        assert rows[VA].units["issued_to"] == 20 + 5 + 5 and rows[VA].units["received"] == 20 + 5   # STRV 18: a mirror
         # every row balances on the whole ledger and on any window as well
         for window in (None, "mtd", "2026-02", "3d", "2026-03-12..2026-03-15"):
             w = moves.audit(window)
@@ -1879,9 +1879,9 @@ def _():
         rows = by_store(a)
         va = rows[VA]
         assert va.units["back_to_main"] == 2, "SIO 13 was booked in by the main store"
-        assert va.units["to_other"] == 3 + 1, ("SIO 12 was sent to the main store and booked in by Van B: not back to "
-                                               "main; SIO 21, sent to Van A itself, was booked back in there")
-        assert va.units["not_received"] == 0 and va.units["received"] == 26, "its mirror STRV 18 is received there"
+        assert va.units["to_other"] == 3, "SIO 12 was sent to the main store and booked in by Van B: not back to main"
+        assert (va.units["not_received"], va.units["received"]) == (0, 25), \
+            "SIO 21, sent to Van A itself, and STRV 18 that booked it back in there, both in the window: nothing moved"
         mirror = a.result.by_receipt["STRV:T-26-03-18"]
         assert isinstance(mirror, pairing.Aside) and mirror.partner == "SIO:T-26-03-21"
         assert mirror.reason == pairing.MIRRORS_OWN and mirror.kind == "receipt"
@@ -1893,7 +1893,8 @@ def _():
         assert bucket["SIO:T-26-03-14"] == "to_damage" and bucket["SIO:T-26-03-15"] == "not_received"
         assert bucket["SIO:T-26-03-17"] == "not_received" and bucket["SIO:T-26-03-16"] == "to_other"     # the twins
         assert bucket["SIO:T-26-03-18"] == bucket["SIO:T-26-03-19"] == "not_received_yet"
-        assert bucket["SIO:T-26-03-21"] == "to_other" and bucket["SIO:T-26-03-9"] == "not_received"
+        assert bucket["SIO:T-26-03-21"] == "not_received_yet" and bucket["SIO:T-26-03-9"] == "not_received"
+        assert a.base.mirror_day == {"SIO:T-26-03-21": mday(3, 16), "STRV:T-26-03-18": mday(3, 16)}
         # a movement put in no column shows: the check is not nought, and the screen says it is to check
         real = moves._row
 
@@ -1913,21 +1914,37 @@ def _():
         assert "-6 to check" in text and "The check is not 0 for Van A: a movement fell in no column or in two" in text
 
 
-@test("moves: set-aside vouchers are never items to check; an own-store issue nothing booked back in counts as not received")
+@test("moves: an own-store issue nothing booked back in is not received yet, then an item to check (xfer_open); its mirror's are never")
 def _():
-    lone = sio(27, mday(3, 16), VB, VB, [(M_CABLE, 1)])                    # sent to its own store, no receipt
-    with moves_world(MoveWorld(rows=mv_rows(extra=lone))):
+    from scripts.ops import checks
+    lone = (sio(27, mday(3, 16), VB, VB, [(M_CABLE, 1)])                  # Monday: due Tuesday, the ledger's last day
+            + sio(29, mday(3, 12), VB, VB, [(M_CABLE, 2)]))               # Thursday: due Saturday, past by Tuesday
+    with moves_world(MoveWorld(rows=mv_rows(extra=lone))) as w:
         a = moves.audit("7d")
-        x = next(x for x in a.result.aside if x.voucher == "SIO:T-26-03-27")
-        assert (x.reason, x.partner) == (pairing.OWN_STORE, None)
-        assert a.base.bucket["SIO:T-26-03-27"] == "not_received"
+        for no in ("SIO:T-26-03-27", "SIO:T-26-03-29"):
+            x = next(x for x in a.result.aside if x.voucher == no)
+            assert (x.reason, x.partner) == (pairing.OWN_STORE, None), no
+        assert a.base.bucket["SIO:T-26-03-27"] == "not_received_yet" and a.base.bucket["SIO:T-26-03-29"] == "not_received"
         vb = by_store(a)[VB]
-        assert vb.units["not_received"] == 1 and vb.units["closing"] == 41 and vb.balanced
+        assert (vb.units["not_received_yet"], vb.units["not_received"], vb.units["closing"]) == (1, 2, 39) and vb.balanced
+        mine = [e for e in a.exceptions if e["issues"] == ["SIO:T-26-03-29"]]
+        assert len(mine) == 1, a.exceptions
+        e = mine[0]
+        assert (e["kind"], e["from"], e["to"], e["to_kind"], e["set_aside"]) == ("not_received", VB, VB, "van",
+                                                                                pairing.OWN_STORE)
+        assert (e["bhd"], e["units"], e["deadline"], e["receipt"]) == (Decimal("0.800"), 2, mday(3, 14), None)
         numbers = {n for e in a.exceptions for n in e["issues"] + [e["receipt"]]}
-        assert not numbers & {"SIO:T-26-03-27", "SIO:T-26-03-21", "STRV:T-26-03-18"}, "set aside: never to check"
-        assert a.transfers["counts"]["aside"] == 3 and a.transfers["counts"]["orphans"] == 1
+        assert not numbers & {"SIO:T-26-03-27", "SIO:T-26-03-21", "STRV:T-26-03-18"}, "inside its deadline; a mirror pair"
+        # the watch records it under its own rule, keyed on the issue, with the issue as its evidence
+        found, notes = checks.found_items(a.exceptions, a.d, {}, a.rules)
+        item = next(i for i in found["xfer_open"] if i["key"] == "xfer_open|SIO:T-26-03-29")
+        assert item["evidence"] == ["SIO:T-26-03-29"] and item["bhd"] == Decimal("0.800") and not notes
+        assert moves.brief_facts(7)["not_received_units"] == 9 + 2 and moves.brief_facts(7)["to_check_count"] == 6
         text = " ".join("\n".join(moves.screen_lines(a)).split())
-        assert "SET ASIDE 3 vouchers of the window could not be paired" in text
+        assert ("SIO:T-26-03-29 Thu 12 Mar, Van B to Van B (sent to its own store): not received after its deadline "
+                "(Sat 14 Mar)") in text
+        assert "SET ASIDE 4 vouchers of the window outside the ordinary pairing" in text and "cannot be paired" not in text
+        assert "4 vouchers set aside (each named under SET ASIDE)" in text
         assert "SIO:T-26-03-27 Mon 16 Mar (sent to its own store)" in text
         assert "SIO:T-26-03-21 Mon 16 Mar (sent to its own store; booked back in there under STRV:T-26-03-18)" in text
         assert "STRV:T-26-03-18 Mon 16 Mar (books in SIO:T-26-03-21, sent to its own store)" in text
@@ -1935,14 +1952,76 @@ def _():
         own = [m for m in mine.store_moves if m["number"] in ("SIO:T-26-03-21", "STRV:T-26-03-18")]
         assert [(m["number"], m["receipt"]) for m in own] == [("SIO:T-26-03-21", "STRV:T-26-03-18")], own
         assert own[0]["outcome"] == "set aside: sent to its own store; booked back in there"
+        # Van B's list says what became of each in an issue's words, as TO CHECK reads it (From and To: Van B)
+        theirs = moves.audit("7d", rep="van b")
+        words = {m["number"]: (m["from"], m["to"], m["outcome"]) for m in theirs.store_moves
+                 if m["number"] in ("SIO:T-26-03-27", "SIO:T-26-03-29")}
+        assert words == {"SIO:T-26-03-27": (VB, VB, "not received yet (due Tue 17 Mar)"),
+                         "SIO:T-26-03-29": (VB, VB, "not received after its deadline (Sat 14 Mar), to check")}, words
+        lines = moves.screen_lines(theirs)
+        assert all(len(ln) <= 150 for ln in lines) and all(fmt.careful(ln) == ln for ln in lines)
+        # the golden list keeps the issue as the case's evidence, and the review text names it
+        root = paths.data_root()
+        folder = root / "business_data" / "Focus ERP 2026-03-17"
+        folder.mkdir(parents=True)
+        real_load = ledger.load
+        ledger.load = lambda path=None, use_cache=True: w.ledger_()
+        try:
+            res = moves.run(MvArgs(golden=True, ledger_=str(folder)))
+        finally:
+            ledger.load = real_load
+        assert res["ok"], res
+        doc = json.loads((paths.golden_dir() / "pairs_accessories.json").read_text(encoding="utf-8"))
+        (case,) = [c for c in doc["exceptions"] if c["issues"] == ["SIO:T-26-03-29"]]
+        (leg,) = case["issue_legs"]
+        assert (leg["number"], leg["store"], leg["to"], case["receipt_leg"]) == ("SIO:T-26-03-29", VB, VB, None), case
+        assert (case["to_kind"], case["set_aside"]) == ("van", pairing.OWN_STORE)
+        review = (root / "exports" / "ops" / "2026-03-17" / "moves-golden-review.txt").read_text(encoding="utf-8")
+        assert f"      issue    SIO:T-26-03-29 Thu 12 Mar, {VB} to {VB}: " in review
+
+
+@test("moves: a mirror pair moves nothing: neither leg in a figure when both are in the window, each by itself when one is")
+def _():
+    pairs = (sio(30, mday(3, 14), VB, VB, [(M_CABLE, 1)]) + strv(25, mday(3, 15), VB, [(M_CABLE, 1)])   # a day apart
+             + sio(31, mday(3, 13), MAIN, MAIN, [(M_CABLE, 2)]) + strv(26, mday(3, 13), MAIN, [(M_CABLE, 2)]))
+    with moves_world(MoveWorld(rows=mv_rows(extra=pairs))):
+        a = moves.audit("7d")
+        assert {x.voucher: x.partner for x in a.result.aside if x.voucher in ("STRV:T-26-03-25", "STRV:T-26-03-26")} \
+            == {"STRV:T-26-03-25": "SIO:T-26-03-30", "STRV:T-26-03-26": "SIO:T-26-03-31"}
+        vb = by_store(a)[VB]
+        assert (vb.units["received"], vb.units["not_received_yet"], vb.units["to_other"]) == (16, 0, 0) and vb.balanced
+        assert (a.main.units["received"], a.main.units["back_to_main"]) == (4, 0) and a.main.balanced, "no To main"
+        assert vb.shares() == {"sold": Decimal(4) / Decimal(46), "back": Decimal(2) / Decimal(46)}, "as without the pair"
+        alone = by_store(moves.audit("2026-03-14..2026-03-14"))[VB]        # the issue inside, its mirror after
+        assert alone.units["not_received_yet"] == 1 and alone.balanced
+        after = by_store(moves.audit("2026-03-15..2026-03-17"))[VB]        # the mirror inside, its issue before
+        assert after.units["received"] == 3 + 6 + 7 - 9 + 1 and after.balanced, after.units
+        assert all(r.balanced for w in (None, "mtd", "7d", "3d") for r in moves.audit(w).stores + [moves.audit(w).main])
+        assert not [e for e in a.exceptions if set(e["issues"]) & {"SIO:T-26-03-30", "SIO:T-26-03-31"}]
+
+
+@test("moves: every item to check names the kind of its destination (to_kind): a set of twins sent to the damage store reads damage")
+def _():
+    twins_to_damage = (sio(7, mday(3, 3), MAIN, DMG, [(M_BANK, 1)]) + sio(8, mday(3, 3), MAIN, DMG, [(M_BANK, 1)])
+                       + strv(9, mday(3, 4), DMG, [(M_BANK, 1)]))
+    with moves_world(MoveWorld(rows=mv_rows(extra=twins_to_damage))):
+        a = moves.audit("2026-03")
+        assert all("to_kind" in e for e in a.exceptions)
+        kinds = {(e["kind"], e["issues"][0] if e["issues"] else e["receipt"]): e["to_kind"] for e in a.exceptions}
+        assert kinds[("twins", "SIO:T-26-03-7")] == "damage" and kinds[("twins", "SIO:T-26-03-16")] == "van"
+        assert kinds[("damage_not_booked", "SIO:T-26-03-9")] == "damage" and kinds[("not_received", "SIO:T-26-03-15")] == "van"
+        assert kinds[("elsewhere", "SIO:T-26-03-12")] == "main" and kinds[("qty_differs", "SIO:T-26-03-20")] == "outlet"
+        assert kinds[("orphan", "STRV:T-26-03-19")] == "van"
+        damage = next(e for e in a.exceptions if e["kind"] == "twins" and e["to_kind"] == "damage")
+        assert (damage["missing"], damage["of"], damage["to"], damage["deadline"]) == (1, 2, DMG, mday(3, 10))
 
 
 @test("moves: an issue booked in under two receipts (pairing step S) is one pair: both on its line, no item to check, checks 0")
 def _():
-    # SIO 28 sends a bank and a holder to Van B; Van B books them in under two receipts, the second holding exactly
-    # what the first lacks (the gate holds on the numbers: 7 and 8 apart)
+    # SIO 28 sends a bank and a holder to Van B; Van B books them in under two receipts the same day, numbered next
+    # to each other, the second holding exactly what the first lacks (the gate holds on the numbers: 7 and 8 apart)
     split = (sio(28, mday(3, 16), MAIN, VB, [(M_BANK, 2), (M_NOCOST, 1)])
-             + strv(20, mday(3, 16), VB, [(M_BANK, 2)]) + strv(21, mday(3, 17), VB, [(M_NOCOST, 1)]))
+             + strv(20, mday(3, 16), VB, [(M_BANK, 2)]) + strv(21, mday(3, 16), VB, [(M_NOCOST, 1)]))
     with moves_world(MoveWorld(rows=mv_rows(extra=split))) as w:
         a = moves.audit("7d")
         p = a.result.by_issue["SIO:T-26-03-28"]
@@ -1990,12 +2069,12 @@ def _():
 def _():
     with moves_world():
         rows = by_store(moves.audit("7d"))
-        s = rows[VA].shares()
-        assert s == {"sold": Decimal(6) / Decimal(77), "back": Decimal(2) / Decimal(77)}, s
+        s = rows[VA].shares()                          # 51 opening + 25 received (the own-store pair moves nothing)
+        assert s == {"sold": Decimal(6) / Decimal(76), "back": Decimal(2) / Decimal(76)}, s
         assert rows[VC].shares() == {"sold": None, "back": None}
         assert rows[SHOP].shares()["back"] == 0
         table = "\n".join(moves.behaviour_table([rows[VA], rows[VC]]))
-        assert "7.8%" in table and "2.6%" in table and "n/a" in table
+        assert "7.9%" in table and "2.6%" in table and "n/a" in table
 
 
 def behaviour_rows() -> list[dict]:
@@ -2397,7 +2476,7 @@ def _():
         assert not [x for x in a.result.aside if x.voucher in ("SIO:T-26-03-24", "STRV:T-26-03-20")]
         assert a.base.bucket["SIO:T-26-03-24"] == "to_other"
         rows = by_store(a)
-        assert rows[VA].units["to_other"] == 3 + 1 + 2 and rows[VB].units["received"] == 16 + 2
+        assert rows[VA].units["to_other"] == 3 + 2 and rows[VB].units["received"] == 16 + 2
         assert all(r.balanced for r in a.stores + [a.main])
         # the portal's way, by hand: the accessory lines of the rows, every voucher kept (scope None)
         cut = [r for r in a.rows if r["item"] in a.base.scope]
