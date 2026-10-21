@@ -356,7 +356,9 @@ one of two lines, and the load check says the same in its own words:
   today's priorities and the end-of-day ask. Salesmen are named only to praise them, never beside a
   figure. It never holds a customer's or a shop's name, money owed, a tier, a commission or a
   salesman's own figure: a message that would is not made, and the e-mail says why. You send it yourself: copy it from
-  `/yq-brief team`, or press *Open in WhatsApp* in the e-mail, choose the group and send.
+  `/yq-brief team`, or press *Open in WhatsApp* in the e-mail, choose the group and send. From the phase 2b
+  release on, the same message also waits in the portal's Command Centre after each load, with a Copy button
+  (the admin and management logins); nothing is sent from there.
 
 ### Stock (`/yq-stock`)
 
