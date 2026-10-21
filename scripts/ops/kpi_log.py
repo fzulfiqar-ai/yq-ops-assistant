@@ -52,9 +52,12 @@ THE RULES
     KINDS; a field the kind does not take, or one it needs left out; a state or a check type the kind does not have;
     a date that is not written YYYY-MM-DD; an event or closing date after today; a quantity that is not a whole
     number, an amount that is not a number of BHD with at most three decimals; in any text, a run of eight or more
-    digits (a phone or an ID number), an e-mail address, a character the command line cannot carry safely
-    (" ` $ and the backslash), a word the wording guard (fmt.careful) refuses, more than its length allows; a
-    report logged as sent that no build record shows was built, or on a day before it was built.
+    digits with single spaces or hyphens between them (a phone or an ID number; an ISO date, an order number and an
+    MRN number pass: id_like), an e-mail address, a character the command line cannot carry safely (" ` $ and the
+    backslash), a word the wording guard (fmt.careful) refuses, more than its length allows; a report logged as sent
+    that no build record shows was built (a monthly report: its final file, never a DRAFT), or on a day before it was
+    built; a --commit from a code worktree (.claude/worktrees) without --data-root, before anything is written: the
+    log belongs to the project folder (the rule of stock.day_file).
   * The token: 12 letters a to p from the sha256 of the line as it would be written, its id and its logging time
     aside. The preview prints the commit line with every field written out (the event date too), so a yes on a
     later day logs the same line; a field that changed between the preview and the yes gives another token, and
@@ -69,6 +72,7 @@ CONTRACT (scripts.ops.kpi and the month workbook rely on it)
   started(lines) -> date | None       the day of the first line logged (by its logging time)
   month_lines(month, lines=None)      the lines whose event date falls in the month 'YYYY-MM' (every kind)
   purchase_key(text) -> str           an MRN number or an order's name as a ref holds it
+  id_like(text) -> bool               the text holds what could be a phone or an ID number (refused in every field)
   read_fields(kind, given, today) -> dict  the fields of a line, checked and written one way (refused as above)
   make_line(kind, fields, logged_at, ref=None) -> dict      the line itself (KEYS); ref only for a report
   token(line) -> str; plan(lines, line) -> "write" | "unchanged"
@@ -109,6 +113,11 @@ TOKEN_LETTERS = stock_orders.TOKEN_LETTERS
 # a run of eight or more digits, single spaces allowed between them (app.ai_insights' phone pattern): a phone number,
 # or an ID number; an order number (YQ-2609-0019) or a date (2026-10-21) survives it
 ID_LIKE = re.compile(r"\+?\d(?: ?\d){7,}")
+# ... and the same run with single hyphens between its digits too (3344-5566, 880-512-345), unless it is the tail of a
+# number that a hyphen joins to what is before it (the order number YQ-2609-0019, the MRN number T-26-02-1); a date
+# written YYYY-MM-DD is set aside first (id_like)
+ID_JOINED = re.compile(r"(?<![0-9-])\+?\d(?:[ -]?\d){7,}")
+DATE_IN_TEXT = re.compile(r"(?<![0-9-])[0-9]{4}-[0-9]{2}-[0-9]{2}(?![0-9-])")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 UNSAFE = frozenset('"`$\\')                          # what a double-quoted value cannot carry in Bash and PowerShell
 BARE = re.compile(r"[A-Za-z0-9_./:-]+")              # a value the commit line may write without quotes
@@ -190,6 +199,13 @@ def purchase_key(text) -> str:
     return stock_orders.slug(PREFIX.sub("", " ".join(str(text or "").split()))).upper()
 
 
+def id_like(text) -> bool:
+    """True when the text holds what could be a phone or an ID number: eight digits or more in one run, single spaces
+    or hyphens between them (ID_LIKE, ID_JOINED). An ISO date and an order or MRN number pass."""
+    plain = DATE_IN_TEXT.sub(" ", str(text or ""))
+    return bool(ID_LIKE.search(plain) or ID_JOINED.search(plain))
+
+
 def _kind(name) -> Kind:
     kind = KINDS.get(str(name or "").strip().lower())
     if kind is None or kind.name == "report":
@@ -212,7 +228,7 @@ def _text(value, field: str, limit: int) -> str:
     if UNSAFE & set(text):
         raise LogInput(f"{what} holds a character the command line cannot carry safely (\" ` $ or a backslash): "
                        "write it without.")
-    if ID_LIKE.search(text):
+    if id_like(text):
         raise LogInput(f"{what} holds a run of eight or more digits (a phone or an ID number?): the log keeps none.")
     if EMAIL.search(text):
         raise LogInput(f"{what} holds an e-mail address: the log keeps none.")
@@ -553,7 +569,8 @@ def _help() -> list[str]:
 
 def _sent(words: list[str], given: dict, today: date) -> tuple[str, dict]:
     """(the report's ref, its fields) for `sent weekly <saturday>` / `sent monthly <YYYY-MM>`, refused when no build
-    record shows the report was built, or when it is said to have gone out before that."""
+    record shows the report was built (a monthly report: its final file, never a DRAFT, the rule KPI 7 counts by), or
+    when it is said to have gone out before that."""
     if len(words) != 2 or words[0].lower() not in (WEEKLY, MONTHLY):
         raise LogInput("Say which report was sent: kpi log sent weekly <saturday> (YYYY-MM-DD) or kpi log sent "
                        "monthly <YYYY-MM>.")
@@ -577,6 +594,11 @@ def _sent(words: list[str], given: dict, today: date) -> tuple[str, dict]:
     if not recs:
         raise LogInput(f"No build record shows that {what} was built: {builder}, and only a built report is logged as "
                        "sent.")
+    if which == MONTHLY:
+        recs = [r for r in recs if r.get("draft") is False]
+        if not recs:
+            raise LogInput(f"Only a DRAFT of {what} was built: a monthly report is logged as sent once its final file is "
+                           "made (on the approval of its comment lines), never a DRAFT.")
     fields = read_fields("report", given, today)
     built = min((r["_built"] for r in recs if r["_built"] is not None), default=None)
     sent_on = date.fromisoformat(fields["event_date"])
@@ -629,6 +651,11 @@ def _run(args, words: list[str], out: dict) -> list[str]:
         raise LogInput("--token goes with --commit: run the line the preview printed, as it was printed.")
     if commit and not tok:
         raise LogInput("A line is logged with the token its preview printed: run the preview first, without --commit.")
+    if commit and paths.is_worktree() and not paths.root_is_set():
+        # a code worktree reads the main folder's data; its unfinished code never writes the owner's log (the rule of
+        # stock.day_file): a line would land in the project folder's KPI log
+        raise LogInput("Nothing was logged: this is a code worktree, and the KPI log belongs to the project folder (to "
+                       "try it, name another folder with --data-root).")
     moment = _now()
     today = moment.date()
     if words[0].lower() == "sent":

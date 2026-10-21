@@ -291,6 +291,10 @@ def _():
             (("candidate",), {"ref": "-x"}, "cannot start with '-'"),
             (("candidate",), {"ref": "x", "note": "called " + "3912" + " 3456"}, "a run of eight or more digits"),
             (("candidate",), {"ref": "x", "note": "ID " + "8" * 9}, "a run of eight or more digits"),
+            (("candidate",), {"ref": "x", "note": "call " + "3344" + "-" + "5566"}, "a run of eight or more digits"),
+            (("candidate",), {"ref": "x", "note": "ID " + "880-512" + "-345"}, "a run of eight or more digits"),
+            (("candidate",), {"ref": "x", "note": "+" + "973-3912" + "-3456"}, "a run of eight or more digits"),
+            (("candidate",), {"ref": "Q" + "880-512" + "-345"}, "a run of eight or more digits"),
             (("candidate",), {"ref": "x", "note": "mail " + "a" + "@" + "b.example"}, "an e-mail address"),
             (("candidate",), {"ref": "x", "note": 'say "yes"'}, "cannot carry safely"),
             (("candidate",), {"ref": "x", "note": "cost $5"}, "cannot carry safely"),
@@ -306,6 +310,13 @@ def _():
             assert needle in text, (words, fields, text)
         assert not kpi_log.log_file().exists()
         assert log("receipt_check", ref="T-1", qty="0", check_types="quantity")["ok"]      # nought units is a count
+        # an ISO date, an order number and an MRN number are no phone or ID number, hyphens or not
+        for fine in ("order YQ-2609-0019 of 2026-10-21", "MRN:YQ-26-09-2 and T-26-02-1", "from 2026-10-21 2026-10-25",
+                     "2,400 units in 12 cartons"):
+            assert not kpi_log.id_like(fine), fine
+            assert log("candidate", ref="x", note=fine)["ok"], fine
+        for bad in ("3344" + "-5566", "880-512" + "-345", "880 512" + " 345", "2026-10-21" + "-5566", "x" + "33445566"):
+            assert kpi_log.id_like(bad), bad
 
 
 @test("`sent` is refused without a build record, for a day that is no Saturday, or before the report was built")
@@ -325,10 +336,17 @@ def _():
                                                                               event_date="2026-03-14")
         line = logged("sent", "weekly", "2026-03-14")
         assert line["ref"] == "report:weekly:2026-03-14" and line["state"] == "sent" and line["kind"] == "report"
+        # a monthly report goes out as its final file: a DRAFT alone is never logged as sent (KPI 7 counts the same way)
+        text = refused("sent", "monthly", FEB)
+        assert text == ("Only a DRAFT of the monthly report of 2026-02 was built: a monthly report is logged as sent once "
+                        "its final file is made (on the approval of its comment lines), never a DRAFT."), text
+        record("month", FEB, "2026-03-06T10:00:00+03:00", folder="2026-03-16", draft=False)
+        assert "was built on 2026-03-06: it cannot have been sent on 2026-03-05" in refused(
+            "sent", "monthly", FEB, event_date="2026-03-05")                   # by the final's day, not the DRAFT's
         assert logged("sent", "monthly", FEB, note="to management")["ref"] == "report:monthly:2026-02"
         # a record of another period beside it is never taken for this one
         paths.write_text(paths.exports_dir("2026-03-15") / "report-month-2026-1.json", json.dumps({"month": "2026-01"}))
-        assert [r["month"] for r in kpi_log.records("month", FEB)] == [FEB]
+        assert [(r["month"], r["draft"]) for r in kpi_log.records("month", FEB)] == [(FEB, True), (FEB, False)]
         assert kpi_log.records("month", "2026-10") == []
 
 
@@ -366,6 +384,37 @@ def _():
         raises(ValueError, lambda: stock_orders.locked_append(kpi_log.log_file(), [{"kind": "x"}]))
         raises(PermissionError, lambda: stock_orders.locked_append(paths.data_root() / "kpi_log.jsonl", ["{}"]))
         assert not lock.exists() and len(kpi_log.read_lines()) == 4
+
+
+@test("a commit from a code worktree without --data-root is refused before anything is written; a preview still shows")
+def _():
+    with data_root():
+        prev = log("candidate", ref="x", check_types="price")
+        tok = prev["flags"]["token"]
+        saved = (paths.is_worktree, paths.root_is_set)
+        appended: list = []
+        real_append = stock_orders.locked_append
+        paths.is_worktree, paths.root_is_set = (lambda: True), (lambda: False)     # the main folder's data, unnamed
+        stock_orders.locked_append = lambda *a, **kw: appended.append(a) or 0
+        try:
+            text = refused("candidate", ref="x", check_types="price", event_date="2026-03-16", state="open",
+                           commit=True, token=tok)
+            assert text == ("Nothing was logged: this is a code worktree, and the KPI log belongs to the project folder "
+                            "(to try it, name another folder with --data-root)."), text
+            assert "Once he says yes" in log("candidate", ref="x", check_types="price")["text"]    # read-only: allowed
+            paths.is_worktree = lambda: False                                    # the project folder itself: logged
+            assert log("candidate", ref="x", check_types="price", event_date="2026-03-16", state="open", commit=True,
+                       token=tok)["ok"] and len(appended) == 1
+        finally:
+            paths.is_worktree, paths.root_is_set = saved
+            stock_orders.locked_append = real_append
+        assert not kpi_log.log_file().exists()
+        paths.is_worktree, paths.root_is_set = (lambda: True), saved[1]          # a worktree with --data-root named
+        try:
+            assert paths.root_is_set() and log("candidate", ref="x", check_types="price", event_date="2026-03-16",
+                                               state="open", commit=True, token=tok)["flags"]["logged"] == 1
+        finally:
+            paths.is_worktree = saved[0]
 
 
 # ── the scorecard, row by row ─────────────────────────────────────────────────
@@ -443,6 +492,9 @@ def _():
         row = kpi.row_new_items(ctx_of(FEB), unread)
         assert row["status"] == kpi.NOT_EVIDENCED and "Market Intel (the portal) could not be read (RuntimeError)" in \
             row["evidence"], row
+        no_log = kpi.row_new_items(ctx_of(FEB), src_of(market=market, finds=finds, upcoming=upcoming,
+                                                       log=OSError("held")))
+        assert no_log["status"] == kpi.NOT_EVIDENCED and "the KPI log could not be read (OSError)" in no_log["evidence"]
     with data_root(cfg({"kpi.new_skus_band": [5, 10]})):
         assert kpi.row_new_items(ctx_of(FEB), src_of(market=market))["status"] == kpi.NOT_MET     # 2: below
     with data_root(cfg({"kpi.new_skus_band": [0, 1]})):
@@ -454,6 +506,12 @@ def _():
 def _():
     with data_root(cfg()):
         parts = stock_world()
+        # the orders and the candidates are the log's own lines: with no log there is no knowing that nothing was due
+        row = kpi.row_checked(ctx_of(MAR), src_of(parts))
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == [kpi.NO_LOG_YET], row
+        row = kpi.row_checked(ctx_of(MAR), src_of(parts, log=OSError("held by another program")))
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == ["the KPI log could not be read (OSError)"], row
+        logged("quote", ref="T-26-01-1", supplier="VFAN", event_date="2026-01-05")       # a log, with nothing ordered
         assert kpi.row_checked(ctx_of(MAR), src_of(parts))["status"] == kpi.NOTHING_DUE
         log_at = lambda when: setattr(kpi_log, "CLOCK", lambda: when)   # noqa: E731
         try:
@@ -566,8 +624,18 @@ def _():
     po = [{"item_code": "CA1", "vendor": "VFAN", "last_ordered": "2026-02-10", "rate_now": "0.5", "rate_prev": "0.4"},
           {"item_code": "CB2", "vendor": "vfan", "last_ordered": "2026-02-10", "rate_now": "2", "rate_prev": "2"}]
     with data_root(cfg({"stock.supplier_aliases": {"VFAN Trading": "VFAN"}})):
+        # the orders placed and the terms are the log's own lines: no log, or one unread, is no proof nothing was due
+        row = kpi.row_terms(ctx_of(FEB), src_of())
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == [kpi.NO_LOG_YET], row
+        row = kpi.row_terms(ctx_of(FEB), src_of(log=OSError("held")))
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == ["the KPI log could not be read (OSError)"], row
+        unread = kpi.row_terms(ctx_of(FEB), src_of(po=po, log=OSError("held")))
+        assert unread["status"] == kpi.NOT_EVIDENCED and "the KPI log could not be read (OSError)" in unread["evidence"]
+        logged("candidate", ref="lamp", event_date="2026-01-20")                 # a log, with no order in February
         assert kpi.row_terms(ctx_of(FEB), src_of())["status"] == kpi.NOTHING_DUE
-        assert kpi.row_terms(ctx_of(FEB), src_of(po=RuntimeError("x")))["status"] == kpi.NOT_EVIDENCED
+        row = kpi.row_terms(ctx_of(FEB), src_of(po=RuntimeError("x")))
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == [
+            "the purchase orders' prices (v_po_cost_change) could not be read (RuntimeError)"], row
         row = kpi.row_terms(ctx_of(FEB), src_of(po=po))
         assert row["status"] == kpi.NOT_EVIDENCED and "VFAN: no terms line on file" in row["evidence"], row
         assert "price against the last order: 1 dearer, 0 cheaper, 1 the same (2 codes ordered in February 2026)" in \
@@ -624,8 +692,16 @@ def _():
 @test("4b damage and claims: settled by the due day MET, late or overdue NOT MET, damage with no claim NOT EVIDENCED")
 def _():
     with data_root(cfg()):
-        assert kpi.row_damage(ctx_of(FEB), src_of(stock_world()))["status"] == kpi.NOTHING_DUE      # nothing went
+        plain = stock_world()
+        row = kpi.row_damage(ctx_of(FEB), src_of(plain))                # nothing went, but no log to show no claim
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == [kpi.NO_LOG_YET], row
+        row = kpi.row_damage(ctx_of(FEB), src_of(plain, log=OSError("held")))
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == ["the KPI log could not be read (OSError)"]
+        logged("candidate", ref="lamp", event_date="2026-01-20")
+        assert kpi.row_damage(ctx_of(FEB), src_of(plain))["status"] == kpi.NOTHING_DUE    # none went, none was due
         parts = stock_world(more_world())
+        unread = kpi.row_damage(ctx_of(FEB), src_of(parts, log=OSError("held")))
+        assert unread["status"] == kpi.NOT_EVIDENCED and "the KPI log could not be read (OSError)" in unread["evidence"]
         row = kpi.row_damage(ctx_of(FEB), src_of(parts))
         assert row["status"] == kpi.NOT_EVIDENCED and row["value"] == 3, row
         assert "3 units went to the damage store in February 2026 and no claim is logged" in row["evidence"]
@@ -645,6 +721,41 @@ def _():
         logged("claim", ref="no due", supplier="VFAN", event_date="2026-01-12")
         assert kpi.row_damage(ctx_of(JAN), src_of(parts))["status"] == kpi.NOT_EVIDENCED
         assert kpi.row_damage(ctx_of(JAN), src_of())["status"] == kpi.NOT_EVIDENCED
+
+
+@test("4b with the damage units not known is NOT EVIDENCED, never NOTHING DUE: no store set up, figures failed or short")
+def _():
+    with data_root(cfg({"warehouses.damage": ""})):
+        logged("candidate", ref="lamp", event_date="2026-01-20")             # a log: it is not the reason here
+        row = kpi.row_damage(ctx_of(FEB), src_of(stock_world()))
+        assert row["status"] == kpi.NOT_EVIDENCED, row
+        assert row["evidence"] == ["the damage store is not set up (config 'warehouses.damage')"], row
+        assert row["actual"] == "damage units not worked out; no claim due" and row["value"] is None
+    with data_root(cfg()):
+        logged("candidate", ref="lamp", event_date="2026-01-20")
+        model, inp = stock_world()
+        model.facts["damage"] = {"error": "ValueError"}
+        row = kpi.row_damage(ctx_of(FEB), src_of((model, inp)))
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == ["the damage figures could not be worked out"]
+        row = kpi.row_damage(ctx_of("2025-01"), src_of(stock_world()))     # before the twelve months the store shows
+        assert row["status"] == kpi.NOT_EVIDENCED and row["evidence"] == ["the damage figures do not reach January 2025"]
+        logged("claim", ref="old", supplier="VFAN", due_date="2025-01-20", event_date="2025-01-05")
+        logged("claim", ref="old", supplier="VFAN", state="closed", event_date="2025-01-18")
+        row = kpi.row_damage(ctx_of("2025-01"), src_of(stock_world()))     # a claim on file is judged all the same
+        assert row["status"] == kpi.MET and row["evidence"][-1] == "the damage figures do not reach January 2025", row
+
+
+@test("the header says when the KPI log could not be read, and the rows that rest on it read NOT EVIDENCED")
+def _():
+    with data_root(cfg()):
+        logged("candidate", ref="lamp", event_date="2026-01-20")
+        card = kpi.scorecard(FEB, sources=src_of(stock_world(), log=OSError("held")))
+        assert card["log"]["marker"] == ("The KPI log could not be read (OSError): the rows that rest on it read NOT "
+                                         "EVIDENCED this time."), card["log"]
+        rows = {r["key"]: r["status"] for r in card["rows"]}
+        assert rows["2b"] == rows["3b"] == rows["4b"] == kpi.NOT_EVIDENCED, rows
+        assert "the KPI log (OSError)" in card["unread"] and kpi.render(card)[2].startswith("  The KPI log could not")
+        every_met_named(card)
 
 
 @test("5a sales: against the KPI step; NOTHING DUE below it while the month is not over; growth and last year beside")

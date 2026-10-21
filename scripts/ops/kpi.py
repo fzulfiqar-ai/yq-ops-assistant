@@ -9,7 +9,9 @@ the sheet has no area 6), each with one status:
     NOTHING DUE    nothing fell due in the month, or the KPI has no target (its figures are shown)
 The header counts each status. The month the KPI log started is marked "log started <day>". Then the 90-day plan's
 rows for the month (config 'kpi.plan_targets'), each target set beside its actual where a source holds one. A status
-is never MET without named evidence: _row() turns a MET with nothing named into NOT EVIDENCED.
+is never MET without named evidence: _row() turns a MET with nothing named into NOT EVIDENCED. A row that rests on the
+KPI log (2b, 3b, 4b's claims) reads NOTHING DUE only when the log was read and holds lines: with no log yet, or one
+that could not be read, it reads NOT EVIDENCED (_log_gap), as the header says.
 
 THE ROWS (the approved plan's table; M = the month; D = the data date: the last loaded sale day)
   1a Stock cover          the aggregate cover of /yq-stock's KPI 1 (the main store's stock at landed cost over the
@@ -25,12 +27,13 @@ THE ROWS (the approved plan's table; M = the month; D = the data date: the last 
                           researching, opportunity or approved in M; product finds reviewed or promoted (by their last
                           change); Upcoming cards created; candidates first logged. An item two sources name by one
                           code counts once. MET inside 'kpi.new_skus_band' (the plan's 5 to 10), NOT MET outside it;
-                          NOT EVIDENCED while a source that could change that is unread
+                          NOT EVIDENCED while a source that could change that is unread (the KPI log among them)
   2b Checked before ordering   each new item ordered in M (a candidate logged 'ordered', or an order placed for a
                           code the main store had not received before that day, a candidate's or another) with all
                           four checks (price, quality, demand, competitor) logged by the order day, judged on the day
                           each check was LOGGED. A candidate short of one: NOT MET; a new code with no candidate line,
-                          or an order before the log started: NOT EVIDENCED; nothing new ordered: NOTHING DUE
+                          or an order before the log started: NOT EVIDENCED; nothing new ordered: NOTHING DUE (the
+                          orders are the log's own lines: with no log, or one unread, NOT EVIDENCED)
   2c Launches             the items first received in the 90 days to M's end: units received, units sold in their first
                           30 and 60 days (counts until a successful launch is defined: NOTHING DUE)
   3a Quotations           each main-store supplier receipt of M valued above 'kpi.major_purchase_bhd' (its value as the
@@ -41,13 +44,16 @@ THE ROWS (the approved plan's table; M = the month; D = the data date: the last 
                           such file)
   3b Cost, terms, warranty  every supplier ordered from in M (orders placed, purchase orders on the Orders page) with a
                           terms line on file by M's end (never NOT MET: a missing line is NOT EVIDENCED); each code's
-                          price against its last order beside it (v_po_cost_change)
+                          price against its last order beside it (v_po_cost_change). No supplier ordered from: NOTHING
+                          DUE only when both the purchase orders and the log were read (and the log holds lines)
   3c Timely delivery      each receipt of M against the delivery day promised for it (a quote or terms line for its MRN
                           with a due date); its lead time from the supplier invoice beside it
   4a Incoming check       each receipt of M: the units counted in its check line against the units received, with
                           quantity, quality and packaging each recorded
   4b Damage and claims    the units sent to the damage store in M; each claim due in M (or raised in M with no due date)
-                          settled by its due day. Units sent to damage and no claim logged: NOT EVIDENCED
+                          settled by its due day. Units sent to damage and no claim logged: NOT EVIDENCED; so are units
+                          not known (no ledger, the damage store not set up, its figures not worked out or not reaching
+                          M) and a log that is missing or unread; NOTHING DUE only when none went and none was due
   5a Monthly sales        M's accessories sales (v_sales: SIM and devices out, giveaways out, ex-VAT, returns not
                           deducted) against the KPI step in force ('sales.kpi_steps'); the three months to M against the
                           three before; the same month last year when the data has it. A month not over is NOTHING DUE
@@ -413,6 +419,18 @@ def _stock_parts(src: Sources):
     return got if isinstance(got, dict) and got.get("model") is not None else None
 
 
+NO_LOG_YET = "the KPI log has no line yet: nothing on file can show that nothing fell due"
+
+
+def _log_gap(src: Sources) -> str | None:
+    """Why a row that rests on the KPI log cannot say NOTHING DUE: the log could not be read, or it holds no line yet
+    (the header says so too). None when the log was read and holds lines."""
+    lines = src.get("log")
+    if src.unread("log"):
+        return src.words("log")
+    return NO_LOG_YET if not lines else None
+
+
 def _which_month(model, ctx: Ctx) -> str | None:
     """'now' when the month holds the ledger's last day, 'last' when it is the month before that one, else None: the
     two months the stock engine works its KPI 1 figures out for."""
@@ -589,6 +607,8 @@ def row_new_items(ctx: Ctx, src: Sources) -> dict:
                 add(part, _identity(r.get("code"), f"find:{r.get('id')}"))
             elif part == "upcoming" and str(r.get("status") or "") != "withdrawn" and _in_month(ctx, r.get("created_on")):
                 add(part, _identity(r.get("code") or r.get("model_code"), f"up:{_code(r.get('model_code'))}"))
+    if src.get("log") is None and src.unread("log"):
+        unread.append("log")                              # the candidates could not be read: a source unread
     for ref, rows in kpi_log.of_ref(src.get("log"), "candidate").items():
         days = [fmt.as_date(r.get("event_date")) for r in rows]
         days = [x for x in days if x is not None]
@@ -697,6 +717,9 @@ def row_checked(ctx: Ctx, src: Sources) -> dict:
     status_ = _worst(states)
     n = len(ordered) + len(no_line)
     if status_ is None:
+        gap = _log_gap(src)                               # the orders and the candidates are the log's own lines
+        if gap:
+            return _row(key, name, target, NOT_EVIDENCED, "not judged", [gap], SRC_LOG)
         return _row(key, name, target, NOTHING_DUE, "no new item was ordered",
                     [f"no candidate was ordered and no new code was ordered in {ctx.label}"], SRC_LOG)
     met = states.count(MET)
@@ -856,14 +879,18 @@ def row_terms(ctx: Ctx, src: Sources) -> dict:
             slug = _supplier_slug(t.get("supplier"), aliases)
             if day is not None and day <= ctx.last and slug:
                 terms[slug] = t
+    gap = _log_gap(src)                                   # the orders placed and the terms are the log's own lines
     if not suppliers:
-        if po is None:
-            return _row(key, name, target, NOT_EVIDENCED, "not judged", [src.words("po")], source)
+        if po is None or gap:
+            return _row(key, name, target, NOT_EVIDENCED, "not judged",
+                        [w for w in (src.words("po") if po is None else None, gap) if w], source)
         return _row(key, name, target, NOTHING_DUE, "no supplier ordered from",
                     [f"no order placed and no purchase order dated in {ctx.label}"], source)
     have = sorted(s for s in suppliers if s in terms)
     evidence = [f"{suppliers[s]}: terms logged on {ctx.day(terms[s]['event_date'])} ({terms[s]['ref']})" for s in have]
     evidence += [f"{suppliers[s]}: no terms line on file" for s in sorted(suppliers) if s not in terms]
+    if src.unread("log"):
+        evidence.append(src.words("log"))
     if po is None:
         evidence.append(src.words("po"))
     elif po:
@@ -1008,11 +1035,17 @@ def row_damage(ctx: Ctx, src: Sources) -> dict:
         evidence.append(damage_words)
     status_ = _worst(states)
     if status_ is None:
+        gap = _log_gap(src)                               # the claims are the log's own lines
         if sent is not None and sent > 0:
             status_ = NOT_EVIDENCED
             evidence.append(f"{fmt.units(sent)} units went to the damage store in {ctx.label} and no claim is logged")
-        elif sent is None and got is None:
+            if gap and src.unread("log"):
+                evidence.append(gap)
+        elif sent is None:                                # the damage units are not known: their words are above
             status_ = NOT_EVIDENCED
+        elif gap:
+            status_ = NOT_EVIDENCED
+            evidence.append(gap)
         else:
             status_ = NOTHING_DUE
     met = states.count(MET)
@@ -1358,7 +1391,10 @@ def scorecard(month: str | None = None, prefer: str = "auto", sources: Sources |
     ctx = Ctx(month=month, first=first, last=last, d=d, today=today, whole=whole, partial=not whole,
               log_started=started, notes=notes)
     src.first, src.last = first, last
-    if not lines or started is None:
+    if src.unread("log"):
+        marker = (f"The KPI log could not be read ({src.why['log']}): the rows that rest on it read NOT EVIDENCED this "
+                  "time.")
+    elif not lines or started is None:
         marker = "The KPI log has no line yet: the rows that rest on it read NOT EVIDENCED until a sentence is logged."
     elif first <= started <= last:
         marker = f"log started {ctx.day(started)}"
