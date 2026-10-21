@@ -451,7 +451,7 @@ def parse_pricebook(grid: pd.DataFrame, src: str, price_book: str) -> list[dict]
 
 
 def _clean_wh(name: str | None) -> str | None:
-    """Focus repeats the warehouse name ('Devadas Devadas'); collapse the doubling."""
+    """Focus repeats the warehouse name ('<store> <store>'); collapse the doubling."""
     if not name:
         return None
     words = name.split()
@@ -553,8 +553,8 @@ _AR_OVER90_COLS = (9, 10, 11, 12, 13)
 def parse_receivables_totals(grid: pd.DataFrame, src: str) -> dict | None:
     """Focus's OWN 'Grand Total' line of the ageing report, kept beside the per-account rows.
 
-    Measured 24-Sep-2026: the rows sum to BHD 9,078.860 while Focus's Grand Total is 8,633.840;
-    on 21-Sep 9,998.380 vs 9,474.590. The export shows every balance as a positive number, so
+    Measured 24-Sep-2026 (invented figures, the gap of about 5 % is real): the rows sum to BHD 10,500 while
+    Focus's Grand Total is 10,000; on 21-Sep 11,000 vs 10,450. The export shows every balance as a positive number, so
     customer CREDITS (money we owe them) load as money owed to us and the row sum overstates the
     book. No sign is guessed here: the report's own total is stored (ar_ageing_totals) and the
     Receivables page shows both figures with the gap flagged for accounts to explain.

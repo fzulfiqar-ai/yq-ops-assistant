@@ -18,8 +18,8 @@ Covered:
     the store kinds are StoreRules.kind's five rules on the folded name, in its order, then the old view's
     modern_trade / facility rules, and never a test for "sim" inside a name: the CASE itself is read out of the file
     and run in Python on sample names, against fixed answers and against scripts/ops/pairing.py StoreRules.kind when
-    that module is there; salesman is the name without ' - Acc WH' (the file's own regex, run in Python); the data
-    step is r7_narration_mask_data_migration.sql's verbatim on stock_movements and the stock copies of the batch
+    that module is there; salesman keeps its old meaning, the store name exactly as the ledger and v_sales spell it
+    (never a suffix strip), equal to the appended warehouse_name; the data step is r7_narration_mask_data_migration.sql's verbatim on stock_movements and the stock copies of the batch
     importer, and never writes row_hash; the self-check's column lists are the ones pinned here;
   * the reverses mirror their migrations: M1's drops v_transfer_lines and is stock_transfer_migration.sql's statement
     verbatim with plain grants, and says the narration cannot come back; M2's is daily_ops2_migration.sql's
@@ -258,16 +258,6 @@ def sql_kind(name: str) -> str:
     return otherwise
 
 
-def sql_salesman(name: str) -> str:
-    stmt = _norm(_stmt(M1, "create or replace view v_salesman_stock_recon as"))
-    m = re.search(r"case when k\.store_kind = 'van' then btrim\(regexp_replace\(k\.wh, '([^']*)', '', 'i'\)\) "
-                  r"else k\.wh end as salesman", stmt)
-    assert m, "the salesman expression moved: re-read this test"
-    if sql_kind(name) != "van":
-        return name
-    return re.sub(m.group(1), "", name, count=1, flags=re.I).strip(" ")
-
-
 # Names as a ledger could spell them (all invented apart from the stores the repository already names). The
 # answers are the contract: StoreRules.kind's five, the old view's two, else other.
 KIND_SAMPLES = {
@@ -293,9 +283,6 @@ KIND_SAMPLES = {
     "Expo Stand Demo": "other",
     "Van D-Acc WH": "other",                         # not the ' - Acc WH' suffix
 }
-SALESMAN_SAMPLES = {"Van A - Acc WH": "Van A", "Rep Simba - Acc WH": "Rep Simba", "VAN B  -  ACC  WH": "VAN B",
-                    "Van C - Acc WH 2-1": "Van C", "Van Q - SIM WH": "Van Q - SIM WH", "Causeway": "Causeway",
-                    "Accessories Warehouse": "Accessories Warehouse"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -490,10 +477,17 @@ def _():
         assert rules.canon(name) == _fold(name), (name, rules.canon(name), _fold(name))
 
 
-@test("salesman: the store name without ' - Acc WH', for vans only (the file's own regex, run in Python)")
+@test("salesman: its old meaning, the store name exactly as the ledger and v_sales spell it (' - Acc WH' kept), = warehouse_name")
 def _():
-    for name, want in SALESMAN_SAMPLES.items():
-        assert sql_salesman(name) == want, (name, sql_salesman(name), want)
+    # the old view took it from v_sales.salesman_resolved, which spells a van as the ledger does: never stripped
+    old = _norm(_stmt(OLD_RECON, "create view v_salesman_stock_recon as")).lower()
+    assert "select distinct salesman_resolved as wh from v_sales" in old and "s.wh as salesman" in old
+    stmt = _stmt(M1, "create or replace view v_salesman_stock_recon as")
+    expr = {_alias(i): re.sub(r"\s+as\s+\w+$", "", i) for i in _final_select_items(stmt)}
+    assert expr["salesman"] == expr["warehouse_name"] == "k.wh", (expr["salesman"], expr["warehouse_name"])
+    code = _norm(_strip(_text(M1))).lower()
+    assert "regexp_replace(k.wh" not in code and "acc\\s+wh" not in code, "no suffix strip anywhere"
+    assert "or salesman is distinct from warehouse_name) then" in _norm(_do_blocks(M1)[-1]), "the self-check holds it"
 
 
 @test("data step: r7_narration_mask_data_migration.sql's mask verbatim, on stock_movements and the stock copies; row_hash never written")
@@ -735,8 +729,8 @@ FIGURES = ("salesman", "store_kind", "warehouse_type", "is_van", "transferred_in
 # worked by hand from SEED (accessory items only: the starter pack never moved in the main store)
 WANT = {
     MAIN: (MAIN, "main", "hub", False, 5, 2.5, 56, 5, 0, 0, 0, 0, 0, 1, 90, -141, 2, D(1), D(9)),
-    VAN: ("Van A", "van", "van", True, 30, 15, 5, 30, 0, 12, 2, 1, 0.5, 0, 14, -1, 1, D(2), D(6)),
-    SIMBA: ("Rep Simba", "van", "van", True, 10, 20, 0, 0, 10, 0, 0, 0, 0, 0, 0, 10, 0, D(5), D(5)),
+    VAN: (VAN, "van", "van", True, 30, 15, 5, 30, 0, 12, 2, 1, 0.5, 0, 14, -1, 1, D(2), D(6)),
+    SIMBA: (SIMBA, "van", "van", True, 10, 20, 0, 0, 10, 0, 0, 0, 0, 0, 0, 10, 0, D(5), D(5)),
     OUTLET: (OUTLET, "outlet", "van", True, 5, 10, 0, 5, 0, 2, 0, 0, 0, 0, 3, 0, 1, D(6), D(7)),
     DMG: (DMG, "damage", "damage", False, 3, 1.5, 0, 3, 0, 0, 0, 0, 0, 0, 3, 0, 1, D(7), D(7)),
     SIMVAN: (SIMVAN, "sim", "sim", False, 1, 2, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, D(8), D(8)),

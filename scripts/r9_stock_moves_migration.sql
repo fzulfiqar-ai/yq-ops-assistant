@@ -34,9 +34,12 @@
 --    'Accessories Warehouse'; damage = 'Accessories Damage Warehouse'; sim = a name ending ' - SIM WH', or the SIM
 --    Warehouse itself; van = a name ending ' - Acc WH'; outlet = Causeway or YQ Roadshow. Then the old view's own two
 --    rules: modern_trade ('multi market') and facility (sample, giveaway, inventory, warehouse); else other. Never a
---    test for the letters "sim" anywhere in a name. salesman = the store name without ' - Acc WH'. warehouse_type
---    keeps the old words (main -> hub; an outlet, or a store no rule names, -> van, as the old view called every
---    seller; the rest as store_kind) and is_van = (warehouse_type = 'van'), as before.
+--    test for the letters "sim" anywhere in a name. salesman keeps its old meaning: the store name exactly as the
+--    ledger writes it, ' - Acc WH' included, which is how v_sales.salesman_resolved spells a van (the old view took
+--    it from there; the agents, the AI's schema and the portal read it, and some match it against v_sales);
+--    warehouse_name, appended, holds the same name. warehouse_type keeps the old words (main -> hub; an outlet, or a
+--    store no rule names, -> van, as the old view called every seller; the rest as store_kind) and is_van =
+--    (warehouse_type = 'van'), as before.
 --    The eleven old columns come first with their names, order and types (CREATE OR REPLACE VIEW refuses anything
 --    else); nine are appended: warehouse_name, store_kind, received_qty, customer_returns_qty, excess_qty,
 --    pending_qty, items_held, first_move, last_move. Readers: app/agents.py (the stock-recon and returns agents read
@@ -184,9 +187,7 @@ held as (                 -- the items the store holds: a ledger balance above n
   group by b.wh
 )
 select
-  case when k.store_kind = 'van'
-       then btrim(regexp_replace(k.wh, '\s+-\s+acc\s+wh(\s+[0-9]+-[0-9]+)?\s*$', '', 'i'))
-       else k.wh end                                                   as salesman,
+  k.wh                                                                 as salesman,
   case k.store_kind
     when 'main'   then 'hub'
     when 'outlet' then 'van'
@@ -221,6 +222,8 @@ order by shortage_value_bhd desc, unexplained_qty desc, warehouse_name;
 
 comment on view v_salesman_stock_recon is
   'Per store, from the stock ledger alone (accessory items): issued to it, received, back out, sold, returns, counts, on hand (the ledger balance), pending, the old unexplained gap. Old 11 columns first; store kinds pinned to scripts/ops/pairing.py StoreRules.kind (r9_stock_moves_migration.sql).';
+comment on column v_salesman_stock_recon.salesman is
+  'The store name exactly as the ledger writes it (vans with their " - Acc WH"), the way v_sales.salesman_resolved spells it: the old meaning, kept. Equal to warehouse_name.';
 comment on column v_salesman_stock_recon.on_hand_qty is
   'The ledger balance at the store: received minus issued over every voucher type, accessory items only. Never the stock_balance snapshot.';
 comment on column v_salesman_stock_recon.store_kind is
@@ -305,9 +308,9 @@ begin
               where warehouse_type not in ('hub', 'damage', 'sim', 'modern_trade', 'facility', 'van')
                  or store_kind not in ('main', 'damage', 'sim', 'van', 'outlet', 'modern_trade', 'facility', 'other')
                  or is_van is distinct from (warehouse_type = 'van')
-                 or warehouse_name is null or salesman is null
-                 or (store_kind = 'van' and salesman like '% - Acc WH')) then
-    raise exception 'r9_stock_moves: a store with a kind or a warehouse_type outside the agreed words';
+                 or warehouse_name is null
+                 or salesman is distinct from warehouse_name) then
+    raise exception 'r9_stock_moves: a store with a kind or a warehouse_type outside the agreed words, or a salesman that is not its store name';
   end if;
   if (select count(*) <> count(distinct warehouse_name) from v_salesman_stock_recon) then
     raise exception 'r9_stock_moves: v_salesman_stock_recon has two rows for one store';
